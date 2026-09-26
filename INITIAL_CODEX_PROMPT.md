@@ -20,7 +20,7 @@ Then execute Stage 0 from `PLAN.md`:
    - H09 compatible reference;
    - previous optimized compiler;
    - fast native-frame prototype.
-   H10/3A is a negative historical control. Its report/benchmarks are included, but exact source is not in this package; rerun it only if the companion H10 source archive is supplied.
+   H10/3A is a negative historical control. A retained negative-evidence summary includes its benchmark/test figures and exact source/archive identities, but the exact source is not in this package; rerun it only if the companion H10 source archive is supplied. Do not reconstruct H10 from the summary.
 6. Validate every output before timing. For original and adjusted MYGA, reproduce the complete seven-policy calculation workload and secondary public report/output checks defined by the retained harness/evidence.
 7. Rerun contemporaneous native-Windows MYGA benchmarks with raw trials. Compare controls within this Windows campaign; do not pool Linux and Windows absolute timings.
 8. Specifically test the first promotion candidate: pristine upstream vs upstream + minimum helper support. Determine whether helpers still provide a material benefit on Windows and identify the smallest generic compiler prerequisite, if any, required by them.
