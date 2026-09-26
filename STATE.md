@@ -12,6 +12,8 @@ No H07/H08/H09/H10 compiler mechanism is accepted merely because it is later in 
 
 Status: **candidate, not promoted**. Native-Windows CI/correctness/performance reproduction is required, followed by user approval.
 
+Linux pre-migration full-suite receipt on the exact helper compiler source: **171 untouched upstream tests passed, 7 upstream skips; 2 helper supplement tests passed** (173 passed / 7 skipped total). This is supporting evidence only; Windows must rerun it.
+
 Historical same-host Linux result:
 
 - upstream + minimum helpers: ~2.642 ms/policy adjusted-MYGA calculation;
@@ -30,7 +32,7 @@ Use the raw control evidence under `project_refs/min_helpers/`; do not compare t
 
 Ignored `project_refs/` carries the fast prototype and previous optimized compiler sources, H09 exact cache map/harness/evidence, models and frozen dependency sources.
 
-H10/3A source is not bundled, but its negative performance/correctness evidence and exact archive hashes are retained under `project_refs/h10/`.
+H10/3A source is not bundled, but its negative performance/correctness evidence and exact archive hashes are retained under `project_refs/h10/`. **The H10 exact source archive is not included because the Project Library copy could not be exported as raw bytes in this migration session. Do not reconstruct it from prose.** If the exact archive is later copied into the Windows workspace, rerun it as the agreed negative control.
 
 ## Operating rule
 

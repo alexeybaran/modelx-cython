@@ -16,3 +16,7 @@ Key branches:
 - `reference/h08-compatible-core` — prior compatible-core reference.
 
 Large donor/model/evidence material is in ignored `project_refs/`; it is available to Codex but is not part of compiler Git history.
+
+## Linux pre-migration evidence
+
+The exact minimal-helper control completed the full local suite: 171 untouched upstream tests passed with 7 original skips, plus 2 helper tests passed. Native Windows must reproduce the relevant gates before promotion. H10/3A exact source is not bundled; only its negative evidence/archive identity is retained.

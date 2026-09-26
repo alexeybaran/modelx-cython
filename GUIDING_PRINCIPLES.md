@@ -1,5 +1,7 @@
 # Modelx-Cython Development — Guiding Principles
 
+**Status: canonical for the Desktop Codex migration, based on the user-approved upstream-first/evidence-gated operating model.**
+
 These are the governing rules for this project. Read them before `TARGET_ARCHITECTURE.md` and `PLAN.md`.
 
 ## Goal

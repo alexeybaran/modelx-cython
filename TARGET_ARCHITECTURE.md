@@ -1,5 +1,7 @@
 # Target Architecture
 
+**Status: rewritten for the upstream-first Desktop Codex direction. It supersedes the architecture document from the earlier H09/H10 handovers.**
+
 This document records durable architectural boundaries, not a predetermined implementation roadmap. The exact mechanism should be chosen by experiments and promotion gates in `PLAN.md`.
 
 ## 1. Structural base

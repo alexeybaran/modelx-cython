@@ -165,3 +165,7 @@ Keep the main Codex thread responsible for the active Goal/experiment. Use side 
 - Plan + long-horizon project files: https://developers.openai.com/blog/run-long-horizon-tasks-with-codex
 - Plan vs Goal / side chats: https://developers.openai.com/blog/mastering-codex-remote-for-engineering
 - `AGENTS.md` behavior: https://developers.openai.com/api/docs/guides/latest-model
+
+## 11. Git remotes after Stage 0
+
+Start with the packaged **local repository only**, as requested. Do not make GitHub connectivity part of the first Windows reproduction. After Stage 0 is stable, add your fork as `origin` and `fumitoh/modelx-cython` as `upstream`, fetch both, and verify that the bundled pristine baseline corresponds to the intended upstream source before preparing any eventual PR. Keep project-only governance/evidence commits separate from compiler changes so an upstream PR can be constructed from the minimal promoted compiler delta rather than the whole project-history branch.
