@@ -4,7 +4,7 @@ Read `AGENTS.md`, `GUIDING_PRINCIPLES.md`, `TARGET_ARCHITECTURE.md`, `PLAN.md`, 
 
 This is the first native-Windows verification of a modelx-cython performance project that previously ran on Linux. **Do not change compiler core or promote any branch in this task.** Treat all non-upstream implementations as experiments/references until their benefit is reproduced locally.
 
-Use Plan mode first. Your plan must preserve the benchmark workload and distinguish environment/portability repairs from compiler optimization.
+If no project Goal is active, set the durable Goal from `CODEX_GOAL.md`. Then use Plan mode first. Your plan must preserve the benchmark workload and distinguish environment/portability repairs from compiler optimization.
 
 Then execute Stage 0 from `PLAN.md`:
 
