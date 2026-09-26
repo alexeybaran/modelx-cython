@@ -18,6 +18,7 @@ transformer queries to emit Cython pure-Python-mode annotations and
 .pxd declarations.
 """
 import numbers
+import enum
 # This library is free software: you can redistribute it and/or
 # modify it under the terms of the GNU Lesser General Public
 # License as published by the Free Software Foundation version 3.
@@ -378,7 +379,8 @@ class CombinedCellsInfo(LexicalCellsInfo):
         integral.
         """
         assert self.has_args() and self.has_typeinfo()
-        return issubclass(self._rt.arg_types[arg], numbers.Integral)
+        typ = self._rt.arg_types[arg]
+        return issubclass(typ, numbers.Integral) and not issubclass(typ, enum.Enum)
 
     @cached_property
     def is_int_args(self):

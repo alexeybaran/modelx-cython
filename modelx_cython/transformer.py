@@ -218,6 +218,8 @@ class PXDGenerator:
         # cimports for child spaces
         parent = ".".join(self.module.fqname.split(".")[:-1])
         stmts = []
+        if getattr(self.module, "helper_enabled", False):
+            stmts.append(f"from {self.package} cimport _mx_curves, _mx_helpers\n")
         for child in self.module.sub_modules:
             stmts.append(f"from cython.cimports.{parent} import {child}\n")
 
@@ -278,6 +280,11 @@ class PXDGenerator:
                 rettype = cells.get_rettype_expr(c_style=True)
                 decl_stmts.append(f"cdef {rettype} {VAR_PREF + cells.name}\n")
                 decl_stmts.append(f"cdef {CY_BOOL_T} {HAS_PREF + cells.name}\n")
+
+        for attr in ("enum_info", "helper_info"):
+            info = getattr(cls_info, attr, None)
+            if info:
+                decl_stmts.extend(f"cdef {tp} {name}\n" for name, tp in info.declarations())
 
         return "".join(decl_stmts)
 
@@ -508,10 +515,14 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
         See :mod:`modelx_cython.powers`; the node is returned unchanged
         when no operand pair can be typed.
         """
-        return rewrite_powers(
+        node = rewrite_powers(
             node, self._resolver, self._cells_kinds, self._ref_kinds,
             cls_info.fqname, cells,
         )
+        from modelx_cython.experimental_helpers import rewrite
+        node = rewrite(node, cls_info, cells)
+        from modelx_cython.enum_bindings import rewrite as bind_enums
+        return bind_enums(node, cls_info)
 
     @property   # cannot use cached_property in Transformer
     def transformed(self):
@@ -529,6 +540,11 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
         # cimports for child spaces
         parent = ".".join(self.module.fqname.split(".")[:-1])
         stmts = []
+        if getattr(self.module, "helper_enabled", False):
+            stmts.append(cst.parse_statement(
+                f"from cython.cimports.{self.package} import _mx_curves, _mx_helpers"))
+            stmts.append(cst.parse_statement(
+                f"from {self.package} import _mx_helpers as _mx_helper_preparation"))
         for child in self.module.sub_modules:
             stmts.append(cst.parse_statement(
                 f"from cython.cimports.{parent} import {child}",
@@ -620,6 +636,13 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
                             config=self._module_node.config_for_parsing,
                         )
                     )
+
+            for attr in ("enum_info", "helper_info"):
+                info = getattr(cls_info, attr, None)
+                if info:
+                    decl_stmts.extend(
+                        cst.parse_statement(f"{name}: {tp}")
+                        for name, tp in info.declarations())
 
             is_first = True
             for ref in self.module.classes[cls_name].refs.values():
@@ -886,6 +909,10 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
                 decl_stmt = decl_stmt.with_changes(leading_lines=(cst.EmptyLine(),))
                 stmts = list(cst.ensure_type(updated_node.body, cst.IndentedBlock).body)
                 stmts.insert(0, decl_stmt)
+                for attr in ("enum_info", "helper_info"):
+                    info = getattr(cls_info, attr, None)
+                    if info:
+                        stmts.extend(cst.parse_statement(line) for line in info.copy())
                 indented_block = updated_node.body.with_changes(body=stmts)
 
                 return updated_node.with_changes(
@@ -893,7 +920,17 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
                 )
 
             elif meth_name[: len(GLOBAL_PREF)] == GLOBAL_PREF:
-                # other _mx_ methods
+                # Initialize optional prepared helper bindings after ordinary refs.
+                if meth_name == MX_ASSIGN_REFS:
+                    stmts = list(cst.ensure_type(updated_node.body, cst.IndentedBlock).body)
+                    changed = False
+                    for attr in ("enum_info", "helper_info"):
+                        info = getattr(cls_info, attr, None)
+                        if info:
+                            stmts.extend(cst.parse_statement(line) for line in info.initialize())
+                            changed = True
+                    if changed:
+                        return updated_node.with_changes(body=updated_node.body.with_changes(body=stmts))
                 return updated_node
 
             elif meth_name == "__call__":

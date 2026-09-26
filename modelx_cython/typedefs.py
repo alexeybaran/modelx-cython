@@ -70,6 +70,11 @@ def normalize_type(typ: type) -> type:
     ``bool`` is a subclass of ``int``, so with the opposite order
     booleans would normalize to integers.
     """
+    # IntEnum is numerically integral but its identity/name remains observable
+    # by Python formulas and helpers. Do not erase it at a Cell boundary.
+    if issubclass(typ, enum.Enum):
+        return object
+
     if issubclass(typ, bool):
         return bool
 
@@ -109,6 +114,8 @@ def get_type_expr(typ, c_style=False):
         other non-numeric types yield ``"object"``, regardless of
         *c_style*.
     """
+    if issubclass(typ, enum.Enum):
+        return "object"
     if issubclass(typ, bool):
         if c_style:
             return CY_BOOL_T

@@ -39,6 +39,7 @@ import sys
 import pathlib
 import random
 import numbers
+import enum
 import itertools
 from dataclasses import dataclass
 from contextlib import contextmanager
@@ -157,6 +158,8 @@ class RuntimeCellsInfo:     # TODO: Create base class RuntimeBaseMemberInfo
         self.module = traces[0].func.__module__
         self.arg_types = {}
         self.max_args = {}
+        self.trace_count = len(traces)
+        self.sample_value = traces[0].ret_val if len(traces[0].arg_vals) == 1 else None
         self._init_arg_types(traces)
         self.ret_type = self._init_ret_type(traces)
 
@@ -180,7 +183,7 @@ class RuntimeCellsInfo:     # TODO: Create base class RuntimeBaseMemberInfo
             for arg, val in itertools.islice(
                 trace.arg_vals.items(), 1, None
             ):  # remove self
-                tp = type(val)
+                tp = bool if isinstance(val, np.bool_) else type(val)
                 types = arg_type_val.setdefault(arg, {})
                 if tp not in types:
                     types[tp] = val
@@ -196,9 +199,18 @@ class RuntimeCellsInfo:     # TODO: Create base class RuntimeBaseMemberInfo
                     if issubclass(tp, numbers.Integral):
                         self.max_args[arg] = val
                     break
+            elif any(issubclass(tp, enum.Enum) for tp in type_val):
+                self.arg_types[arg] = object
+
             elif all(issubclass(tp, numbers.Integral) for tp in type_val.keys()):
                 self.arg_types[arg] = numbers.Integral
                 self.max_args[arg] = max(v for v in type_val.values())
+
+            elif all(issubclass(tp, numbers.Real)
+                     and not issubclass(tp, numbers.Integral) for tp in type_val):
+                # Python/NumPy float variants share the existing C double ABI.
+                # Int/float mixtures deliberately keep the upstream object path.
+                self.arg_types[arg] = numbers.Real
 
             elif all(issubclass(tp, str) for tp in type_val.keys()):
                 self.arg_types[arg] = str
@@ -233,7 +245,7 @@ class RuntimeCellsInfo:     # TODO: Create base class RuntimeBaseMemberInfo
                     val.dtype.type, is_array=True, ndim=val.ndim
                 )
             else:
-                tp = ReturnTypeInfo(type(val))
+                tp = ReturnTypeInfo(bool if isinstance(val, np.bool_) else type(val))
 
             if has_last:
                 if last_tp == tp:
@@ -270,7 +282,10 @@ class RuntimeCellsInfo:     # TODO: Create base class RuntimeBaseMemberInfo
 
                 elif not last_tp.is_array and not tp.is_array:
 
-                    if issubclass(last_tp.value_type, numbers.Integral) and issubclass(tp.value_type, numbers.Integral):
+                    if (issubclass(last_tp.value_type, enum.Enum)
+                            or issubclass(tp.value_type, enum.Enum)):
+                        last_tp.value_type = object
+                    elif issubclass(last_tp.value_type, numbers.Integral) and issubclass(tp.value_type, numbers.Integral):
                         last_tp.value_type = numbers.Integral
                     elif issubclass(last_tp.value_type, numbers.Real) and issubclass(tp.value_type, numbers.Real):
                         last_tp.value_type = numbers.Real
@@ -319,6 +334,7 @@ class RuntimeValueInfo:
     def __init__(self, value, mx_class=''):
         """Record the type of ``value`` and an optional class name."""
         self.type_ = type(value)
+        self.value = value  # optional helper binding identity, not serialized
         self.mx_class = mx_class
 
     @classmethod

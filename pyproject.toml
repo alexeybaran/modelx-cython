@@ -75,3 +75,6 @@ attr = "modelx_cython.__version__"
 [tool.setuptools.packages.find]
 include = ["modelx_cython*"]
 exclude = ["doc", "temp*", "modelx_cython.tests*", "samples"]
+
+[tool.setuptools.package-data]
+modelx_cython = ["experimental_runtime/*.pxd"]

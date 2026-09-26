@@ -36,6 +36,7 @@ import shutil
 import runpy
 import ast
 import argparse
+import json
 import dataclasses
 import logging
 import subprocess
@@ -348,6 +349,19 @@ def main_handler(args: argparse.Namespace, stdout: IO[str], stderr: IO[str]) -> 
         module_infos = {u.module_info.fqname: u.module_info for u in units}
         resolver = build_resolver(module_infos)
         cells_kinds, ref_kinds = build_kind_maps(module_infos)
+
+        if d.get("bind_enum_members", True):
+            from modelx_cython.enum_bindings import configure as configure_enum_bindings
+            configure_enum_bindings(units)
+
+        if d.get("experimental_helpers", False):
+            from modelx_cython.experimental_helpers import configure, emit_runtime
+            configure(units)
+            modules.extend(emit_runtime(model_path, units))
+            helper_inventory = [row for u in units for cls in u.module_info.classes.values()
+                                for row in cls.helper_info.inventory]
+            (model_path / "_mx_helper_inventory.json").write_text(
+                json.dumps({"schema": 1, "calls": helper_inventory}, indent=2), encoding="utf-8")
 
         # Phase 3: transform and write out
         for u in units:
