@@ -361,6 +361,16 @@ def main_handler(args: argparse.Namespace, stdout: IO[str], stderr: IO[str]) -> 
 
             u.abs_src_path.write_text(trans.transformed.code, encoding="utf-8")
             u.abs_pxd_path.write_text(pxd.code, encoding="utf-8")
+            from modelx_cython.numeric_cache import transform as cache_transform
+            cache_py, cache_pxd = cache_transform(
+                u.abs_src_path.read_text(encoding="utf-8"), pxd.code, u.module_info,
+                u.abs_src_path.with_name("_mx_numeric_cache.pxd"))
+            u.abs_src_path.write_text(cache_py, encoding="utf-8")
+            u.abs_pxd_path.write_text(cache_pxd, encoding="utf-8")
+            if u.abs_src_path.with_name("_mx_numeric_cache.py").exists():
+                modules.append(u.rel_src_path.with_name("_mx_numeric_cache.py"))
+
+
             u.abs_init_path.write_text("from . cimport _mx_classes", encoding="utf-8")
             modules.append(u.rel_src_path)
 
