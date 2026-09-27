@@ -380,6 +380,30 @@ def main_handler(args: argparse.Namespace, stdout: IO[str], stderr: IO[str]) -> 
                 u.abs_src_path.write_text(e4_py, encoding="utf-8")
                 u.abs_pxd_path.write_text(e4_pxd, encoding="utf-8")
 
+            # Qualified native execution; explicit zero retains diagnostic comparison paths.
+            import os as _connected_os
+            if _connected_os.environ.get("MX_CY_CONNECTED_NATIVE", "1") == "1":
+                from modelx_cython.object_key_cache import transform as index_transform
+                index_py, index_pxd = index_transform(
+                    u.abs_src_path.read_text(encoding="utf-8"),
+                    u.abs_pxd_path.read_text(encoding="utf-8"), u.module_info,
+                    u.abs_src_path.with_suffix(".object-index.json"))
+                u.abs_src_path.write_text(index_py, encoding="utf-8")
+                u.abs_pxd_path.write_text(index_pxd, encoding="utf-8")
+                if u.abs_src_path.with_name("_mx_object_index.py").exists():
+                    modules.append(u.rel_src_path.with_name("_mx_object_index.py"))
+
+            # Native execution beneath ordinary Space/Cell entry points.
+            import os as _native_os
+            if _native_os.environ.get("MX_CY_INTEGRATED_NATIVE", "1") == "1":
+                from modelx_cython.integrated_native import transform as native_transform
+                native_py, native_pxd = native_transform(
+                    u.abs_src_path.read_text(encoding="utf-8"),
+                    u.abs_pxd_path.read_text(encoding="utf-8"), u.module_info,
+                    u.abs_src_path.with_suffix(".native.json"))
+                u.abs_src_path.write_text(native_py, encoding="utf-8")
+                u.abs_pxd_path.write_text(native_pxd, encoding="utf-8")
+
             u.abs_init_path.write_text("from . cimport _mx_classes", encoding="utf-8")
             modules.append(u.rel_src_path)
 

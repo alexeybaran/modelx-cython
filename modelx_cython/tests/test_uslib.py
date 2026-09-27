@@ -1,3 +1,4 @@
+from modelx_cython.tests.native_assertions import has_expression
 import sys
 import os
 import subprocess
@@ -73,14 +74,12 @@ def test_mx2cy_with_uslib(sample_dir, model):
     src = (translated / "_mx_classes.py").read_text(encoding="utf-8")
 
     # every fractional power is rewritten, over all three operand shapes
-    assert ("_mx_sys._mx_pow((1 + self.crediting_rate_ann(t)), (1 / 12))"
-            in src)                                     # cells call
-    assert "_mx_sys._mx_pow((1 + self.guar_rate_ann), (1 / 12))" in src  # ref
-    assert "_mx_sys._mx_pow((1 - self.mort_rate(t)), (1 / 12))" in src
+    assert has_expression(src, "_mx_sys._mx_pow((1 + self.crediting_rate_ann(t)), (1 / 12))")                                     # cells call
+    assert has_expression(src, "_mx_sys._mx_pow((1 + self.guar_rate_ann), (1 / 12))")  # ref
+    assert has_expression(src, "_mx_sys._mx_pow((1 - self.mort_rate(t)), (1 / 12))")
     # an integer exponent never reaches the complex path, so it is left
     # exactly as modelx exported it
-    assert ("return (1 + self.inflation_rate) ** (self.policy_year(t) - 1)"
-            in src)
+    assert has_expression(src, "(1 + self.inflation_rate) ** (self.policy_year(t) - 1)")
     # nothing is left for Cython to evaluate on double complex
     c_src = (translated / "_mx_classes.c").read_text(encoding="utf-8")
     assert "__Pyx_c_pow_double" not in c_src
