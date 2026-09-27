@@ -396,7 +396,7 @@ def test_fractional_power(sample_dir, model):
     pxd = (work_dir / (model + "_nomx_cy") / "_mx_classes.pxd").read_text()
     assert "cdef double[11] _v_mth_rate\n" in pxd
     assert "cdef double[11] _v_mth_q\n" in pxd
-    assert "cdef double _f_int_pow(_c_Space1 self, long long t)\n" in pxd
+    assert "cdef double _f_int_pow(_c_Space1 self, long long t) except? -1\n" in pxd
 
     # only the two floating-exponent powers are rewritten
     src = (work_dir / (model + "_nomx_cy") / "_mx_classes.py").read_text(
