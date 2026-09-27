@@ -1,3 +1,4 @@
+from modelx_cython.tests.native_assertions import has_expression, has_numeric_array
 import logging
 import sys
 import os
@@ -314,7 +315,7 @@ def test_varying_integral_arg_types(sample_dir, model):
         env=env
     ).returncode == 0
 
-    assert "cdef long long[3] _v_foo" in (work_dir / (model + "_nomx_cy") / "_mx_classes.pxd").read_text()
+    assert has_numeric_array((work_dir / (model + "_nomx_cy") / "_mx_classes.pxd").read_text(), "long long", "_v_foo", 3)
 
 
 @pytest.mark.parametrize("sample_dir, model, spec", [["deep_recursion", "DeepRecursion", ""],
@@ -394,16 +395,16 @@ def test_fractional_power(sample_dir, model):
     # the complex path in the first place, and int_pow's operands are both
     # C integers, which is what makes it integral arithmetic
     pxd = (work_dir / (model + "_nomx_cy") / "_mx_classes.pxd").read_text()
-    assert "cdef double[11] _v_mth_rate\n" in pxd
-    assert "cdef double[11] _v_mth_q\n" in pxd
+    assert has_numeric_array(pxd, "double", "_v_mth_rate", 11)
+    assert has_numeric_array(pxd, "double", "_v_mth_q", 11)
     assert "cdef double _f_int_pow(_c_Space1 self, long long t) except? -1\n" in pxd
 
     # only the two floating-exponent powers are rewritten
     src = (work_dir / (model + "_nomx_cy") / "_mx_classes.py").read_text(
         encoding="utf-8")
-    assert "_mx_sys._mx_pow((1 + self.ann_rate(t)), (1 / 12))" in src
-    assert "_mx_sys._mx_pow((1 - self.ann_q(t)), (1 / 12))" in src
-    assert "return 2 ** -t" in src
+    assert has_expression(src, "_mx_sys._mx_pow((1 + self.ann_rate(t)), (1 / 12))")
+    assert has_expression(src, "_mx_sys._mx_pow((1 - self.ann_q(t)), (1 / 12))")
+    assert has_expression(src, "2 ** -t")
     # uncached_rate has no _f_ method, so its public method carries the
     # formula and goes through the transformer's other rewrite site
     assert "def uncached_rate(" in src
