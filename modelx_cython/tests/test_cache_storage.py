@@ -40,7 +40,7 @@ def test_cache_storage_behavior(tmp_path):
     if '_mx_values' in pxd:
         assert 'self._mx_values._v_array_leaf[t]' in src
         assert 'self._has_array_leaf[t]' in src
-    (tmp_path/'override.pyx').write_text("from model_cy._mx_classes cimport _c_S\ncdef class Private(_c_S):\n cdef double _f_leaf(self, double x):\n  return 40.0\ncdef class Public(_c_S):\n cpdef double leaf(self, double x):\n  return 50.0\n")
+    (tmp_path/'override.pyx').write_text("from model_cy._mx_classes cimport _c_S\ncdef class Private(_c_S):\n cdef double _f_leaf(self, double x) except? -1:\n  return 40.0\ncdef class Public(_c_S):\n cpdef double leaf(self, double x) except? -1:\n  return 50.0\n")
     (tmp_path/'override_setup.py').write_text("from setuptools import setup\nfrom Cython.Build import cythonize\nsetup(ext_modules=cythonize('override.pyx'))\n")
     run([sys.executable,'override_setup.py','build_ext','--inplace'],'override-build')
     (tmp_path/'verify.py').write_text("""import gc, math

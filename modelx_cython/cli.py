@@ -371,6 +371,15 @@ def main_handler(args: argparse.Namespace, stdout: IO[str], stderr: IO[str]) -> 
                 modules.append(u.rel_src_path.with_name("_mx_numeric_cache.py"))
 
 
+            from modelx_cython.checked_exceptions import transform as e4_transform
+            import ast as e4_ast
+            e4_src = u.abs_src_path.read_text(encoding="utf-8")
+            e4_tree = e4_ast.parse(e4_src)
+            if any(isinstance(c, e4_ast.ClassDef) and any(isinstance(f, e4_ast.FunctionDef) and not f.name.startswith('__') and f.returns is not None and e4_ast.unparse(f.returns) in ('_mx_cy.double', '_mx_cy.longlong') and any(e4_ast.unparse(d) in ('_mx_cy.ccall', '_mx_cy.cfunc') for d in f.decorator_list) for f in c.body) for c in e4_tree.body):
+                e4_py, e4_pxd, _ = e4_transform(e4_src, u.abs_pxd_path.read_text(encoding="utf-8"))
+                u.abs_src_path.write_text(e4_py, encoding="utf-8")
+                u.abs_pxd_path.write_text(e4_pxd, encoding="utf-8")
+
             u.abs_init_path.write_text("from . cimport _mx_classes", encoding="utf-8")
             modules.append(u.rel_src_path)
 
