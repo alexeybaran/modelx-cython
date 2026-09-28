@@ -56,6 +56,18 @@ def test_range_domain_uses_native_numeric_traversal(tmp_path):
     assert (tmp_path / 'range.json').exists()
 
 
+def test_unrelated_object_cell_does_not_exclude_numeric_collection(tmp_path):
+    source = SOURCE.replace(
+        '    def depth(self) -> _mx_cy.longlong:\n',
+        '    def sex(self) -> object:\n        return "F"\n'
+        '    def depth(self) -> _mx_cy.longlong:\n')
+    output, declarations = transform(source, DECLARATIONS, tmp_path / 'object.json')
+    assert output != source
+    assert 'def sex(self) -> object:' in output
+    assert 'cdef double _mx_collect_value' in declarations
+    assert (tmp_path / 'object.json').exists()
+
+
 def test_other_output_shapes_and_integer_sum_keep_existing_route(tmp_path):
     variations = (
         SOURCE.replace('"sum"', '"individual"'),
