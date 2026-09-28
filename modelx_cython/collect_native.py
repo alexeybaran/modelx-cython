@@ -77,8 +77,19 @@ def _collect_contract(cls):
             and len(call.args) == 5 and ast.unparse(call.args[0]) == 'self'
             and isinstance(call.args[2], ast.Constant)
             and type(call.args[2].value) is str
-            and isinstance(call.args[3], ast.Tuple) and not call.args[3].elts
-            and isinstance(call.args[4], ast.Tuple) and not call.args[4].elts):
+            and isinstance(call.args[3], ast.Tuple)
+            and isinstance(call.args[4], ast.Tuple)
+            and len(call.args[3].elts) == len(call.args[4].elts)
+            and all(_string(name) is not None and _string(name) != call.args[2].value
+                    for name in call.args[3].elts)):
+        return None
+    # The exported traversal binds these names as keywords. The native
+    # traversal calls the generated binder positionally, so the two routes
+    # agree only when the declared parameter order is identical.
+    assign = _method(cls, '_mx_assign_params')
+    expected = [call.args[2].value] + [_string(name) for name in call.args[3].elts]
+    if (assign is None or [arg.arg for arg in assign.args.args[1:]] != expected
+            or len(expected) != len(set(expected))):
         return None
     # The first native route handles one generated dynamic Space without
     # nested Spaces. Nested/outer dynamic roots retain full exported traversal.
@@ -96,7 +107,8 @@ def _collect_contract(cls):
             and isinstance(node.value, ast.Dict) and not node.value.keys
             for node in initializer.body)):
         return None
-    return output_name, expression, leaf_type, call.args[1], call.args[2].value
+    return (output_name, expression, leaf_type, call.args[1],
+            call.args[2].value, call.args[4])
 
 
 def transform(source, declarations, receipt_path):
@@ -108,7 +120,7 @@ def transform(source, declarations, receipt_path):
         contract = _collect_contract(cls)
         if contract is None:
             continue
-        output_name, expression, leaf_type, domain, parameter = contract
+        output_name, expression, leaf_type, domain, parameter, extra_args = contract
         if not re.search(r'^cdef class ' + re.escape(cls.name) + r'\(', declarations, re.M):
             continue
         if not _method(cls, '_mx_collect_attach') or not _method(cls, '_mx_collect_release'):
@@ -137,6 +149,7 @@ def _mx_collect_value(self) -> _mx_cy.double:
         domain_text = ast.unparse(domain)
         native = '''
 _mx_domain = %s
+_mx_extra_args = %s
 if type(self) is not %s or self._mx_roots or type(_mx_domain) not in (list, tuple, range):
     return %s
 for _mx_x in _mx_domain:
@@ -151,7 +164,7 @@ _mx_total = 0.0
 for _mx_coordinate in _mx_coords:
     _mx_root = %s(self)
     _mx_root._mx_copy_refs(self, self)
-    self._mx_assign_params(_mx_root, _mx_coordinate)
+    self._mx_assign_params(_mx_root, _mx_coordinate, *_mx_extra_args)
     _mx_root._mx_roots.append(_mx_root)
     _mx_root._mx_collect_attach(_mx_scratch, self)
     _mx_value = _mx_root._mx_collect_value()
@@ -164,7 +177,7 @@ for _mx_coordinate in _mx_coords:
         _mx_total += _mx_value
     _mx_root._mx_collect_release(_mx_scratch, self)
 return _mx_sys.CollectResult({'sum': _mx_sys.CollectResult({%r: _mx_total})})
-''' % (domain_text, cls.name, fallback, fallback, fallback, cls.name,
+''' % (domain_text, ast.unparse(extra_args), cls.name, fallback, fallback, fallback, cls.name,
        output_name, output_name)
         old_collect.body = ast.parse(native).body
         cls.body.remove(value_method)

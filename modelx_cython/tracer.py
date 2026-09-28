@@ -749,6 +749,21 @@ class MxCallTraceLogger(CallTraceLogger):
         for space in model._mx_spaces.values():
             self._walk_space(space, {})
 
+    def _record_space_params(self, key, params):
+        current_params = self.param_info.get(key)
+        if not current_params or len(current_params) < len(params):
+            self.param_info[key] = params.copy()
+        elif len(current_params) == len(params):
+            # A sentinel default and an explicit coordinate may have
+            # different types. Conservative object storage preserves both.
+            for name, observed in params.items():
+                current = current_params[name]
+                if (current.type_ is not observed.type_
+                        or current.mx_class != observed.mx_class):
+                    current.type_ = object
+                    current.mx_class = ''
+                    current.value = None
+
     def _walk_space(self, top_space, params):
         """Recursively record itemspace parameter values as
         :class:`RuntimeParamInfo` in ``param_info``, keyed by space
@@ -757,9 +772,7 @@ class MxCallTraceLogger(CallTraceLogger):
 
             if params:
                 key = space.__class__.__module__ + "." + space.__class__.__name__
-                val = self.param_info.get(key, None)
-                if (not val) or len(val) < len(params):
-                    self.param_info[key] = params
+                self._record_space_params(key, params)
 
             if hasattr(space, "__call__"):
                 space_name = space.__class__.__name__[len(SPACE_PREF):]

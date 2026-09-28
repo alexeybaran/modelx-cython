@@ -4,8 +4,10 @@ import numpy as np
 import pytest
 
 from modelx_cython.tracer import (
+    MxCallTraceLogger,
     ReturnTypeInfo,
     RuntimeCellsInfo,
+    RuntimeParamInfo,
     RuntimeValueInfo,
     instance_attrs,
 )
@@ -18,6 +20,22 @@ def foo(self, i):
 
 def make_trace(ret_val, i):
     return CallTrace(foo, {"self": None, "i": i}, ret_val=ret_val)
+
+
+def test_mixed_itemspace_parameter_types_use_object_storage():
+    logger = MxCallTraceLogger("Model")
+    logger._record_space_params("Model.Projection", {
+        "point_id": RuntimeParamInfo(1),
+        "scenario": RuntimeParamInfo(-1),
+    })
+    logger._record_space_params("Model.Projection", {
+        "point_id": RuntimeParamInfo(2),
+        "scenario": RuntimeParamInfo("stress"),
+    })
+    params = logger.param_info["Model.Projection"]
+    assert params["point_id"].type_ is int
+    assert params["scenario"].type_ is object
+    assert params["scenario"].value is None
 
 
 @pytest.mark.parametrize("ret_vals", [

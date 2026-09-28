@@ -56,6 +56,41 @@ def test_range_domain_uses_native_numeric_traversal(tmp_path):
     assert (tmp_path / 'range.json').exists()
 
 
+def test_secondary_projection_parameter_is_bound_for_each_policy(tmp_path):
+    source = SOURCE.replace(
+        'def _mx_assign_params(space, idx):',
+        'def _mx_assign_params(space, idx, scenario):').replace(
+        'def collect(self) -> object:',
+        'def collect(self, scenario=-1) -> object:').replace(
+        "self.policy_ids, 'idx', (), ()",
+        "self.policy_ids, 'idx', ('scenario',), (scenario,)")
+    output, declarations = transform(source, DECLARATIONS, tmp_path / 'scenario.json')
+    assert '_mx_extra_args = (scenario,)' in output
+    assert 'self._mx_assign_params(_mx_root, _mx_coordinate, *_mx_extra_args)' in output
+    assert '_mx_sys.collect_from_space' in output
+    assert 'cdef double _mx_collect_value' in declarations
+
+
+def test_invalid_secondary_parameter_contract_keeps_fallback(tmp_path):
+    source = SOURCE.replace(
+        "self.policy_ids, 'idx', (), ()",
+        "self.policy_ids, 'idx', ('idx',), (0,)")
+    output, declarations = transform(source, DECLARATIONS, tmp_path / 'invalid.json')
+    assert output == source and declarations == DECLARATIONS
+    assert not (tmp_path / 'invalid.json').exists()
+
+
+def test_reordered_secondary_parameter_keeps_keyword_binding_fallback(tmp_path):
+    source = SOURCE.replace(
+        'def _mx_assign_params(space, idx):',
+        'def _mx_assign_params(space, idx, scenario, other):').replace(
+        "self.policy_ids, 'idx', (), ()",
+        "self.policy_ids, 'idx', ('other', 'scenario'), (1, 2)")
+    output, declarations = transform(source, DECLARATIONS, tmp_path / 'reordered.json')
+    assert output == source and declarations == DECLARATIONS
+    assert not (tmp_path / 'reordered.json').exists()
+
+
 def test_unrelated_object_cell_does_not_exclude_numeric_collection(tmp_path):
     source = SOURCE.replace(
         '    def depth(self) -> _mx_cy.longlong:\n',
