@@ -428,6 +428,16 @@ def main_handler(args: argparse.Namespace, stdout: IO[str], stderr: IO[str]) -> 
                 u.abs_src_path.write_text(collect_py, encoding="utf-8")
                 u.abs_pxd_path.write_text(collect_pxd, encoding="utf-8")
 
+            # Experiment-only native traversal for one typed numeric sum leaf.
+            if _native_os.environ.get("MX_CY_COLLECT_NATIVE", "0") == "1":
+                from modelx_cython.collect_native import transform as native_collect_transform
+                collect_py, collect_pxd = native_collect_transform(
+                    u.abs_src_path.read_text(encoding="utf-8"),
+                    u.abs_pxd_path.read_text(encoding="utf-8"),
+                    u.abs_src_path.with_suffix(".collect-native.json"))
+                u.abs_src_path.write_text(collect_py, encoding="utf-8")
+                u.abs_pxd_path.write_text(collect_pxd, encoding="utf-8")
+
             u.abs_init_path.write_text("from . cimport _mx_classes", encoding="utf-8")
             modules.append(u.rel_src_path)
 
