@@ -9,6 +9,8 @@ import ast
 import hashlib
 from pathlib import Path
 
+from .collect_context_semantics import derive as derive_semantics
+
 
 _KINDS = {
     "double": "float", "float": "float",
@@ -110,4 +112,5 @@ def build_manifest(export_source, cython_source, *, space="Projection"):
                                if row["result"] not in ("float", "int", "bool")
                                or any(kind not in ("float", "int", "bool")
                                       for kind in row["arguments"].values())),
+        "semantic_boundaries": derive_semantics(formulas, seen),
     }
