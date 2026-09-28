@@ -418,6 +418,16 @@ def main_handler(args: argparse.Namespace, stdout: IO[str], stderr: IO[str]) -> 
                 u.abs_src_path.write_text(native_py, encoding="utf-8")
                 u.abs_pxd_path.write_text(native_pxd, encoding="utf-8")
 
+            # Reuse scratch cache owners only for exported collect traversals.
+            if _native_os.environ.get("MX_CY_COLLECT_REUSE", "1") == "1":
+                from modelx_cython.collect_reuse import transform as collect_transform
+                collect_py, collect_pxd = collect_transform(
+                    u.abs_src_path.read_text(encoding="utf-8"),
+                    u.abs_pxd_path.read_text(encoding="utf-8"),
+                    u.abs_src_path.with_suffix(".collect.json"))
+                u.abs_src_path.write_text(collect_py, encoding="utf-8")
+                u.abs_pxd_path.write_text(collect_pxd, encoding="utf-8")
+
             u.abs_init_path.write_text("from . cimport _mx_classes", encoding="utf-8")
             modules.append(u.rel_src_path)
 
