@@ -46,6 +46,16 @@ def test_numeric_sum_uses_one_typed_expression_and_keeps_fallback(tmp_path):
     assert (tmp_path / 'receipt.json').exists()
 
 
+def test_range_domain_uses_native_numeric_traversal(tmp_path):
+    source = SOURCE.replace('self.policy_ids', 'range(3)').replace(
+        'def _f_collect_outputs(self) -> object:\n',
+        'def _f_collect_outputs(self) -> object:\n        """Result contract."""\n')
+    output, _ = transform(source, DECLARATIONS, tmp_path / 'range.json')
+    assert 'type(_mx_domain) not in (list, tuple, range)' in output
+    assert 'Result contract.' in output
+    assert (tmp_path / 'range.json').exists()
+
+
 def test_other_output_shapes_and_integer_sum_keep_existing_route(tmp_path):
     variations = (
         SOURCE.replace('"sum"', '"individual"'),

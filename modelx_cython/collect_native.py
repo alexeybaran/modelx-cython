@@ -25,9 +25,15 @@ def _string(node):
 def _collect_contract(cls):
     collect = _method(cls, 'collect')
     formula = _method(cls, '_f_collect_outputs')
-    if collect is None or formula is None or len(formula.body) != 1:
+    if collect is None or formula is None:
         return None
-    ret = formula.body[0]
+    formula_body = formula.body
+    if (formula_body and isinstance(formula_body[0], ast.Expr)
+            and _string(formula_body[0].value) is not None):
+        formula_body = formula_body[1:]
+    if len(formula_body) != 1:
+        return None
+    ret = formula_body[0]
     if not isinstance(ret, ast.Return) or not isinstance(ret.value, ast.Dict):
         return None
     outer = ret.value
@@ -108,7 +114,10 @@ def transform(source, declarations, receipt_path):
         if not _method(cls, '_mx_collect_attach') or not _method(cls, '_mx_collect_release'):
             continue
         output_formula = _method(cls, '_f_collect_outputs')
-        output_formula.body = ast.parse(
+        docstring = (output_formula.body[:1]
+                     if isinstance(output_formula.body[0], ast.Expr)
+                     and _string(output_formula.body[0].value) is not None else [])
+        output_formula.body = docstring + ast.parse(
             'return {"sum": {' + repr(output_name) + ': self._mx_collect_value()}}').body
         value_method = ast.parse('''
 @_mx_cy.cfunc
@@ -128,7 +137,7 @@ def _mx_collect_value(self) -> _mx_cy.double:
         domain_text = ast.unparse(domain)
         native = '''
 _mx_domain = %s
-if type(self) is not %s or self._mx_roots or type(_mx_domain) not in (list, tuple):
+if type(self) is not %s or self._mx_roots or type(_mx_domain) not in (list, tuple, range):
     return %s
 for _mx_x in _mx_domain:
     if type(_mx_x) is not int or not (-(1 << 63) <= _mx_x < (1 << 63)):
