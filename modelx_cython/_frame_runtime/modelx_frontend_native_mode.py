@@ -39,8 +39,11 @@ def _collect_sum_plan(space, point, point_table):
     if isinstance(node, ast.Expr) and isinstance(node.value, ast.Lambda):
         result = node.value.body
     elif isinstance(node, ast.FunctionDef):
-        returns = [stmt for stmt in node.body if isinstance(stmt, ast.Return)]
-        if len(returns) != 1 or len(node.body) != 1:
+        body = node.body[1:] if (node.body and isinstance(node.body[0], ast.Expr)
+                                  and isinstance(node.body[0].value, ast.Constant)
+                                  and isinstance(node.body[0].value.value, str)) else node.body
+        returns = [stmt for stmt in body if isinstance(stmt, ast.Return)]
+        if len(returns) != 1 or len(body) != 1:
             raise ContractError('Frame collect needs a direct return expression')
         result = returns[0].value
     else:
@@ -97,14 +100,29 @@ def from_modelx(model, destination, *, projection='Projection', data_space='Data
         if any(p.default is inspect.Parameter.empty for p in sig_parameters[1:]):
             raise ContractError('Additional Space parameters need literal defaults')
     tables={}
+    data_program = None
+    # A declared Data reference can itself be the source policy table. In that
+    # layout the Data Cells often return position-indexed arrays, so preserve
+    # both the references and those calculated arrays as separate bindings.
+    reference_table = (data is not None and point_table is not None
+                       and point_table in data.refs and point_table not in data.cells)
+    data_references = {}
     if data is not None:
+        if reference_table:
+            for name, value in data.refs.items():
+                if isinstance(value, (pd.DataFrame, pd.Series, np.ndarray)):
+                    if name in data.cells:
+                        raise ContractError('Data reference/Cell name collision: ' + name)
+                    data_references[name] = value
+                    tables[name] = value
         for name,fn in data.cells.items():
             if fn.parameters:raise ContractError('Data readers must have no parameters')
             value=fn()
-            if isinstance(value,pd.DataFrame):tables[name]=value
-            # Existing Data-reader contract remains DataFrame-only. Materializing
-            # dependent array readers and then replacing their source table could
-            # leave stale arrays; do not silently broaden that contract.
+            if isinstance(value,pd.DataFrame) or (reference_table and isinstance(value,(pd.Series,np.ndarray))):
+                tables[name]=value
+            # Source-backed Data references are refreshed with their dependent
+            # arrays as one input revision below. The older DataFrame-Cell route
+            # keeps its existing binding contract.
     from .lookups import power as kernel_power
     modules={}; refs={}; object_references={}; intrinsic_references={}; enum_references={}
     for name,value in space.refs.items():
@@ -136,6 +154,42 @@ def from_modelx(model, destination, *, projection='Projection', data_space='Data
     else:
         point=parameters[0]
         if point_table in object_references:point_table=object_references[point_table]
+        if reference_table:
+            if not isinstance(tables.get(point_table), pd.DataFrame):
+                raise ContractError('Declared source policy reference must be a DataFrame')
+            domains = getattr(space._impl, 'collect_over_spec', None)
+            if domains is None or tuple(domains) != (point,):
+                raise ContractError('Position-indexed Data references require a declared collect domain')
+            domain_name = getattr(domains[point], 'ref_name', None)
+            if domain_name not in space.cells:
+                raise ContractError('Collection domain must name a source-preserved Cell')
+            from .data_program import prepare_data
+            data_modules = {name: value.__name__ for name, value in data.refs.items()
+                            if isinstance(value, types.ModuleType)}
+            data_program = dict(references=sorted(data_references), modules=data_modules,
+                                cells={name: fn.formula.source for name, fn in data.cells.items()},
+                                source_policy_table=point_table, domain_name=domain_name,
+                                domain_source=space.cells[domain_name].formula.source,
+                                policy_table='mxcf_policy_domain')
+            if data_program['policy_table'] in tables:
+                raise ContractError('Reserved policy-domain Data name is already used')
+            derived, domain = prepare_data(data_program, data_references)
+            for name, value in derived.items():
+                actual = tables.get(name)
+                if actual is None or type(actual) is not type(value):
+                    raise ContractError('Data source round trip changed object kind: ' + name)
+                if isinstance(value, (pd.DataFrame, pd.Series)):
+                    same = actual.equals(value)
+                else:
+                    try: np.testing.assert_array_equal(actual, value); same = True
+                    except AssertionError: same = False
+                if not same:
+                    raise ContractError('Data source round trip changed values: ' + name)
+            declared_domain = tuple(domains[point].value(space._impl))
+            if domain != declared_domain:
+                raise ContractError('Data source round trip changed collection domain')
+            tables[data_program['policy_table']] = pd.DataFrame(index=pd.Index(domain, name=point))
+            point_table = data_program['policy_table']
         if point_table is None:
             candidates=[n for n,t in tables.items() if isinstance(t,pd.DataFrame)
                         and list(t.index.names)==[point]]
@@ -191,6 +245,9 @@ def from_modelx(model, destination, *, projection='Projection', data_space='Data
               'lambda_cells_normalized':normalized,
               'space_parameters':list(parameters),
               'parameter_defaults':({p.name:p.default for p in list(space_signature.parameters.values())[1:]} if space_signature else {})}
+    if data_program is not None:
+        evidence['data_reference_tables'] = sorted(data_references)
+        evidence['policy_domain_source'] = data_program['domain_name']
     (dest/'frontend.json').write_text(json.dumps(evidence,indent=2), encoding='utf-8')
     def effective_allow_none(obj):
         while obj is not None:
@@ -203,7 +260,11 @@ def from_modelx(model, destination, *, projection='Projection', data_space='Data
         data_space=data_space,projection=projection,point_table=point_table,
         allow_none={n:effective_allow_none(c) for n,c in space.cells.items()},
         model_name=model.name,cython_objects=cython_objects)
-    spec.model.update(static_projection=static,object_references=object_references)
+    spec.model.update(static_projection=static,object_references=object_references,
+                      module_references={name: value.__name__ for name, value in modules.items()})
+    if data_program is not None:
+        spec.model['data_program'] = data_program
+        spec.model['data_reference_names'] = sorted(data_references)
     collect = _collect_sum_plan(space, point, tables[point_table]) if not static else None
     if collect is not None:
         from dataclasses import replace

@@ -38,6 +38,10 @@ class _CollectDomain:
         value = getattr(self._instance, self._source['name'])
         return value() if self._source['kind'] == 'cell' else value
 
+    @property
+    def ref_name(self):
+        return self._source['name'] if self._source['kind'] == 'cell' else None
+
 
 class _SourceSpace:
     def __init__(self, instance, info):

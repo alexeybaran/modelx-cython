@@ -16,7 +16,10 @@ import sys
 import textwrap
 from enum import IntEnum
 from .contracts import ContractError, TableKey
-from .lookups import Curve, CurveTable, power
+from .lookups import (Curve, CurveTable, IndexedFloat1, IndexedFloat2,
+                      IndexedInt1, IndexedInt2, power)
+
+_INDEXED_ARRAYS = (IndexedInt1, IndexedFloat1, IndexedInt2, IndexedFloat2)
 
 
 _TYPES = {float: 'double', int: 'long long', bool: 'bint'}
@@ -38,6 +41,8 @@ def type_info(typ):
         return {'kind': typ.__name__, 'ctype': _TYPES[typ]}
     if typ in (Curve, CurveTable):
         return {'kind': 'curve' if typ is Curve else 'curve_table', 'ctype': typ.__name__}
+    if typ in _INDEXED_ARRAYS:
+        return {'kind': 'indexed_array', 'ctype': typ.__name__}
     if inspect.isclass(typ) and issubclass(typ, IntEnum):
         values = [int(x) for x in typ]
         if values != list(range(len(values))) or len(values) != len(typ.__members__):
@@ -65,9 +70,32 @@ class FrontendRewrite(ast.NodeTransformer):
     combination is declared in ``KernelSpec.frontend`` and maps to an already typed
     physical input. Formula control flow remains untouched and is compiled by Cython.
     """
-    def __init__(self, frontend, inputs):
+    def __init__(self, frontend, inputs, *, integer_names=(), integer_cells=()):
         self.frontend = frontend or {}
         self.inputs = inputs
+        self.integer_names = set(integer_names)
+        self.integer_cells = set(integer_cells)
+
+    def _integer_index(self, node):
+        """Admit only typed integral indexing; float-to-int casts change NumPy semantics."""
+        if isinstance(node, ast.Constant):
+            return type(node.value) is int
+        if isinstance(node, ast.Name):
+            return node.id in self.integer_names
+        if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.UAdd, ast.USub)):
+            return self._integer_index(node.operand)
+        if isinstance(node, ast.BinOp) and isinstance(node.op, (
+                ast.Add, ast.Sub, ast.Mult, ast.FloorDiv, ast.Mod)):
+            return self._integer_index(node.left) and self._integer_index(node.right)
+        if isinstance(node, ast.IfExp):
+            return self._integer_index(node.body) and self._integer_index(node.orelse)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and not node.keywords:
+            name = node.func.id
+            return ((name in self.integer_cells and all(self._integer_index(a) for a in node.args))
+                    or (name in ('min', 'max') and bool(node.args)
+                        and all(self._integer_index(a) for a in node.args))
+                    or (name == 'int' and len(node.args) == 1))
+        return False
 
     @staticmethod
     def _data_table(node):
@@ -97,6 +125,21 @@ class FrontendRewrite(ast.NodeTransformer):
         return ast.copy_location(ast.Call(
             ast.Attribute(ast.Name(input_name, ast.Load()), method, ast.Load()),
             [self.visit(a) for a in args], []), source)
+
+    def visit_Subscript(self, node):
+        if isinstance(node.ctx, ast.Load):
+            table = self._data_table(node.value)
+            physical = self.frontend.get('arrays', {}).get(table)
+            if physical is not None:
+                typ = self.inputs[physical]
+                axes = 2 if typ in (IndexedInt2, IndexedFloat2) else 1
+                indices = list(node.slice.elts) if isinstance(node.slice, ast.Tuple) else [node.slice]
+                if len(indices) != axes or not all(self._integer_index(i) for i in indices):
+                    raise ContractError('Native indexed Data arrays require typed integral indices on every axis')
+                return ast.copy_location(ast.Call(
+                    ast.Attribute(ast.Name(physical, ast.Load()), 'get', ast.Load()),
+                    [self.visit(index) for index in indices], []), node)
+        return self.generic_visit(node)
 
     def visit_Call(self, node):
         helper = self._lookup_name(node.func)
@@ -264,7 +307,7 @@ def _needs_checked_formula(node, result_info, params, inputs, cells):
                 if n.func.id in {'power', 'int'}:
                     return True
             if (isinstance(n.func, ast.Attribute) and isinstance(n.func.value, ast.Name)
-                    and n.func.value.id in inputs and inputs[n.func.value.id] in (Curve, CurveTable)
+                    and n.func.value.id in inputs and inputs[n.func.value.id] in (Curve, CurveTable, *_INDEXED_ARRAYS)
                     and n.func.attr in ('at', 'get', 'previous', 'linear')):
                 return True
         if isinstance(n, ast.BinOp):
@@ -344,7 +387,14 @@ def emit(spec, *, diagnostics=False, python_cells=()):
         raise ContractError('Unknown Python calculator override')
     for k, node in raw.items():
         try:
-            parsed[k] = ast.fix_missing_locations(FrontendRewrite(spec.frontend, spec.inputs).visit(copy.deepcopy(node)))
+            index_names = {name for name, typ in spec.inputs.items() if typ is int}
+            index_names.update(p.name for p in inspect.signature(cells[k]).parameters.values()
+                               if p.annotation is int)
+            index_cells = {name for name, fn in cells.items()
+                           if inspect.signature(fn).return_annotation is int}
+            parsed[k] = ast.fix_missing_locations(FrontendRewrite(
+                spec.frontend, spec.inputs, integer_names=index_names,
+                integer_cells=index_cells).visit(copy.deepcopy(node)))
         except ContractError as exc:
             parsed[k] = node
             python_reasons[k] = str(exc)
@@ -421,8 +471,8 @@ def emit(spec, *, diagnostics=False, python_cells=()):
         fn, node = cells[name], parsed[name]
         sig = inspect.signature(fn)
         ret = type_info(sig.return_annotation)
-        if ret['kind'] in ('curve', 'curve_table'):
-            raise ContractError('Cell results must be scalar; Curve is an input type')
+        if ret['kind'] in ('curve', 'curve_table', 'indexed_array'):
+            raise ContractError('Cell results must be scalar; native arrays are input types')
         params = []
         hashed = False
         count = 1
@@ -432,8 +482,8 @@ def emit(spec, *, diagnostics=False, python_cells=()):
             if p.kind not in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD):
                 raise ContractError('Variadic and keyword-only Cell parameters are not supported')
             ti = type_info(p.annotation)
-            if ti['kind'] in ('curve', 'curve_table'):
-                raise ContractError('Bind Curve as an input, not a Cell key')
+            if ti['kind'] in ('curve', 'curve_table', 'indexed_array'):
+                raise ContractError('Bind native arrays as inputs, not Cell keys')
             lower, size = (0, len(ti['members'])) if ti['kind'] == 'enum' else (-1, spec.steps + 2)
             if ti['kind'] == 'bool':
                 lower, size = 0, 2
@@ -499,7 +549,8 @@ def emit(spec, *, diagnostics=False, python_cells=()):
     lines = ['# cython: language_level=3, infer_types=True, cdivision=False, cpow=False, overflowcheck=True',
              'import numpy as np', 'cimport cython',
              'cdef union _DoubleBits:', '    double value', '    unsigned long long bits',
-             'from ._lookups cimport Curve, CurveTable', 'from libc.math cimport pow as real_pow, floor, isfinite',
+             'from ._lookups cimport Curve, CurveTable, IndexedInt1, IndexedFloat1, IndexedInt2, IndexedFloat2',
+             'from libc.math cimport pow as real_pow, floor, isfinite',
              'from libc.math cimport ' + ', '.join(f'{x} as _math_{x}' for x in sorted(_MATH))]
     from .lookup_codegen import inline_lookup_source
     lines += [inline_lookup_source()]

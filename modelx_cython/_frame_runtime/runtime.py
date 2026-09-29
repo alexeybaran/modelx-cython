@@ -13,7 +13,11 @@ import threading
 import numpy as np
 from .contracts import ContractError
 from .data_binding import PreparedModelRows
-from .lookups import Curve, CurveTable
+from .lookups import (Curve, CurveTable, IndexedFloat1, IndexedFloat2,
+                      IndexedInt1, IndexedInt2)
+
+_INDEXED_ARRAYS = {cls.__name__: cls for cls in
+                   (IndexedInt1, IndexedFloat1, IndexedInt2, IndexedFloat2)}
 
 
 class CompiledKernel:
@@ -56,10 +60,11 @@ class CompiledKernel:
             for key, ti in infos.items():
                 v = record[key]
                 kind = ti['kind']
-                if kind in ('curve', 'curve_table'):
-                    expected_type = Curve if kind == 'curve' else CurveTable
+                if kind in ('curve', 'curve_table', 'indexed_array'):
+                    expected_type = (Curve if kind == 'curve' else CurveTable
+                                     if kind == 'curve_table' else _INDEXED_ARRAYS[ti['ctype']])
                     if type(v) is not expected_type:
-                        raise ContractError(f'{key}: expected an immutable prepared Curve')
+                        raise ContractError(f'{key}: expected an immutable prepared native input')
                     if id(v) not in shared:
                         constructor = getattr(self._lookups, expected_type.__name__) if self.manifest['lookups'] == 'native' else expected_type
                         shared[id(v)] = constructor(*v.arrays, v.labels) if kind == 'curve_table' else constructor(*v.arrays)
@@ -145,7 +150,7 @@ class CompiledKernel:
         infos = self.manifest['inputs']
         if set(changes)-set(infos):
             raise ContractError('Unknown input names')
-        if any(infos[k]['kind'] in ('curve','curve_table') for k in changes):
+        if any(infos[k]['kind'] in ('curve','curve_table','indexed_array') for k in changes):
             raise ContractError('Use bind() to replace table data')
         with self._lock:
             self._require_root()
@@ -333,15 +338,22 @@ def save_inputs(records, destination):
     for r in records:
         row = {}
         for name, value in r.items():
-            if type(value) in (Curve, CurveTable):
+            if type(value) in (Curve, CurveTable, *_INDEXED_ARRAYS.values()):
                 if id(value) not in curves:
                     i = len(curves)
                     curves[id(value)] = i
                     if type(value) is Curve:
                         arrays[f'x{i}'], arrays[f'y{i}'] = value.arrays
-                    else:
+                    elif type(value) is CurveTable:
                         arrays[f'g{i}'], arrays[f'b{i}'], arrays[f'x{i}'], arrays[f'y{i}'] = value.arrays
-                row[name] = {'curve': curves[id(value)]} if type(value) is Curve else {'curve_table': curves[id(value)], 'labels':value.labels}
+                    else:
+                        arrays[f'a{i}'] = value.arrays[0]
+                if type(value) is Curve:
+                    row[name] = {'curve': curves[id(value)]}
+                elif type(value) is CurveTable:
+                    row[name] = {'curve_table': curves[id(value)], 'labels': value.labels}
+                else:
+                    row[name] = {'indexed_array': curves[id(value)], 'type': type(value).__name__}
             elif isinstance(value, str):
                 row[name] = value
             elif isinstance(value, (bool, np.bool_)):
@@ -368,10 +380,17 @@ def load_inputs(source):
             row = {}
             for name, value in r.items():
                 if isinstance(value, dict):
-                    kind = 'curve' if 'curve' in value else 'curve_table'
+                    kind = ('indexed_array' if 'indexed_array' in value else
+                            'curve' if 'curve' in value else 'curve_table')
                     i = value[kind]
                     if i not in curves:
-                        curves[i] = Curve(arrays[f'x{i}'], arrays[f'y{i}']) if kind == 'curve' else CurveTable(arrays[f'g{i}'], arrays[f'b{i}'], arrays[f'x{i}'], arrays[f'y{i}'], value.get('labels'))
+                        if kind == 'indexed_array':
+                            cls = _INDEXED_ARRAYS.get(value.get('type'))
+                            if cls is None:
+                                raise ContractError('Unknown prepared numeric array type')
+                            curves[i] = cls(arrays[f'a{i}'])
+                        else:
+                            curves[i] = Curve(arrays[f'x{i}'], arrays[f'y{i}']) if kind == 'curve' else CurveTable(arrays[f'g{i}'], arrays[f'b{i}'], arrays[f'x{i}'], arrays[f'y{i}'], value.get('labels'))
                     value = curves[i]
                 row[name] = value
             result.append(row)

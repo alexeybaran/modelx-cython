@@ -13,6 +13,124 @@ else:
     from math import isfinite, isnan, floor, pow as real_pow, nan as _MISSING
 
 
+class IndexedInt1:
+    """Owned int64 snapshot with NumPy's ordinary one-axis index semantics."""
+    def __init__(self, values):
+        source = np.asarray(values)
+        if source.ndim != 1 or source.dtype != np.dtype('int64'):
+            raise TypeError('IndexedInt1 requires a one-dimensional int64 array')
+        self._v = np.array(source, order='C', copy=True)
+        self._n = self._v.shape[0]
+
+    @property
+    def arrays(self):
+        return (np.array(self._v, copy=True),)
+
+    def __reduce__(self):
+        return type(self), self.arrays
+
+    @cython.locals(i=cython.Py_ssize_t)
+    @cython.boundscheck(False)
+    @cython.wraparound(False)
+    @cython.initializedcheck(False)
+    def get(self, i):
+        if i < 0:
+            i += self._n
+        if i < 0 or i >= self._n:
+            raise IndexError('array index out of bounds')
+        return self._v[i]
+
+
+class IndexedFloat1:
+    """Owned float64 snapshot with NumPy's ordinary one-axis index semantics."""
+    def __init__(self, values):
+        source = np.asarray(values)
+        if source.ndim != 1 or source.dtype != np.dtype('float64'):
+            raise TypeError('IndexedFloat1 requires a one-dimensional float64 array')
+        self._v = np.array(source, order='C', copy=True)
+        self._n = self._v.shape[0]
+
+    @property
+    def arrays(self):
+        return (np.array(self._v, copy=True),)
+
+    def __reduce__(self):
+        return type(self), self.arrays
+
+    @cython.locals(i=cython.Py_ssize_t)
+    @cython.boundscheck(False)
+    @cython.wraparound(False)
+    @cython.initializedcheck(False)
+    def get(self, i):
+        if i < 0:
+            i += self._n
+        if i < 0 or i >= self._n:
+            raise IndexError('array index out of bounds')
+        return self._v[i]
+
+
+class IndexedInt2:
+    """Owned int64 snapshot with NumPy's two-axis index semantics."""
+    def __init__(self, values):
+        source = np.asarray(values)
+        if source.ndim != 2 or source.dtype != np.dtype('int64'):
+            raise TypeError('IndexedInt2 requires a two-dimensional int64 array')
+        self._v = np.array(source, order='C', copy=True)
+        self._n = self._v.shape[0]
+        self._m = self._v.shape[1]
+
+    @property
+    def arrays(self):
+        return (np.array(self._v, copy=True),)
+
+    def __reduce__(self):
+        return type(self), self.arrays
+
+    @cython.locals(i=cython.Py_ssize_t, j=cython.Py_ssize_t)
+    @cython.boundscheck(False)
+    @cython.wraparound(False)
+    @cython.initializedcheck(False)
+    def get(self, i, j):
+        if i < 0:
+            i += self._n
+        if j < 0:
+            j += self._m
+        if i < 0 or i >= self._n or j < 0 or j >= self._m:
+            raise IndexError('array index out of bounds')
+        return self._v[i, j]
+
+
+class IndexedFloat2:
+    """Owned float64 snapshot with NumPy's two-axis index semantics."""
+    def __init__(self, values):
+        source = np.asarray(values)
+        if source.ndim != 2 or source.dtype != np.dtype('float64'):
+            raise TypeError('IndexedFloat2 requires a two-dimensional float64 array')
+        self._v = np.array(source, order='C', copy=True)
+        self._n = self._v.shape[0]
+        self._m = self._v.shape[1]
+
+    @property
+    def arrays(self):
+        return (np.array(self._v, copy=True),)
+
+    def __reduce__(self):
+        return type(self), self.arrays
+
+    @cython.locals(i=cython.Py_ssize_t, j=cython.Py_ssize_t)
+    @cython.boundscheck(False)
+    @cython.wraparound(False)
+    @cython.initializedcheck(False)
+    def get(self, i, j):
+        if i < 0:
+            i += self._n
+        if j < 0:
+            j += self._m
+        if i < 0 or i >= self._n or j < 0 or j >= self._m:
+            raise IndexError('array index out of bounds')
+        return self._v[i, j]
+
+
 class Curve:
     def __init__(self, keys, values):
         x = np.array(keys, dtype=np.float64, order='C', copy=True)

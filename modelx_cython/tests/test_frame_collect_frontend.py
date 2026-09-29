@@ -33,6 +33,13 @@ def test_read_direct_cell_sum_from_modelx_declaration():
     ) == {'over': 'point_id', 'sum': ['value']}
 
 
+def test_collect_function_docstring_keeps_direct_return_contract():
+    source = 'def collect_outputs():\n    """Public result."""\n    return {"sum": {"value": value()}}'
+    assert _collect_sum_plan(_space(source), 'point_id',
+                             SimpleNamespace(index=(1, 2, 3))) == {
+                                 'over': 'point_id', 'sum': ['value']}
+
+
 @pytest.mark.parametrize('source', [
     'lambda: {"individual": {"value": value()}}',
     'lambda: {"sum": {"value": value() + 1}}',

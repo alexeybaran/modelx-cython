@@ -12,7 +12,8 @@ import json
 import types
 from .contracts import ContractError, KernelSpec, TableKey
 from .compiler import FrontendRewrite, function_ast, type_info
-from .lookups import Curve, CurveTable
+from .lookups import (Curve, CurveTable, IndexedFloat1, IndexedFloat2,
+                      IndexedInt1, IndexedInt2)
 from .python_calculator import referenced_names
 
 
@@ -80,7 +81,7 @@ def derive_spec(module, tables, *, references, space_formula, outputs, steps, le
              if isinstance(node, ast.Call) and FrontendRewrite._lookup_name(node.func)]
     if cython_objects:
         calls = []  # Python-semantic helpers use complete prepared indexes, not scalar native contracts.
-    frontend = dict(fields={}, keys={}, lookups={})
+    frontend = dict(fields={}, keys={}, lookups={}, arrays={})
     inputs, bindings, key_demands, fields, point_tables = {}, {}, {}, {}, set()
     # Plans retain original index order, so replacing a table cannot silently alter keys.
     schemas = {n: dict(index_names=list(t.index.names) if isinstance(t, (pd.DataFrame, pd.Series)) else [],
@@ -109,6 +110,29 @@ def derive_spec(module, tables, *, references, space_formula, outputs, steps, le
             raise ContractError('Inconsistent lookup contract: ' + name)
         inputs[name], bindings[name] = typ, binding
         return name
+
+    # A direct numeric Data-array read keeps the original formula's index
+    # expressions. Only the array owner and checked element access are replaced.
+    # Slices, advanced indexing and unrecognised dtypes stay on the Python path.
+    array_types = {(1, 'int64'): IndexedInt1, (1, 'float64'): IndexedFloat1,
+                   (2, 'int64'): IndexedInt2, (2, 'float64'): IndexedFloat2}
+    for tree in trees.values():
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Subscript) or not isinstance(node.ctx, ast.Load):
+                continue
+            table = FrontendRewrite._data_table(node.value)
+            value = tables.get(table)
+            if not isinstance(value, np.ndarray):
+                continue
+            typ = array_types.get((value.ndim, str(value.dtype)))
+            if typ is None:
+                continue
+            indices = list(node.slice.elts) if isinstance(node.slice, ast.Tuple) else [node.slice]
+            if len(indices) != value.ndim or any(isinstance(i, ast.Slice) for i in indices):
+                continue
+            physical = add(_name(table), typ, dict(kind='indexed_array', table=table,
+                                                   array_type=typ.__name__))
+            frontend['arrays'][table] = physical
 
     def expr_type(expr, owner):
         if isinstance(expr, ast.Name):
@@ -228,6 +252,13 @@ def derive_spec(module, tables, *, references, space_formula, outputs, steps, le
         point_table = next(iter(point_tables))
     # Declared references are model data, not inferred actuarial assumptions.
     used = set().union(*(referenced_names(f) for f in cells.values()))
+    if point in used:
+        from pandas.api.types import is_integer_dtype
+        index = tables[point_table].index
+        if is_integer_dtype(index.dtype) and all(
+                not isinstance(value, bool) and -(1 << 63) <= int(value) < (1 << 63)
+                for value in index):
+            add(point, int, dict(kind='point'))
     for name, value in {**references, **defaults}.items():
         if name not in used: continue
         domain = key_demands.get(('parameter', name))

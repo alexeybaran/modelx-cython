@@ -36,9 +36,10 @@ class CollectResult:
 
 class DataView:
     """Snapshot receiver for ordinary Python formulas using data.<table>()."""
-    def __init__(self, tables):
+    def __init__(self, tables, reference_names=()):
         object.__setattr__(self, '_tables', tables)
         object.__setattr__(self, '_prepared', {})
+        object.__setattr__(self, '_reference_names', frozenset(reference_names))
 
     def _prepare_lookup(self, name, factory=None):
         from .table_lookup import IndexedTable
@@ -50,6 +51,8 @@ class DataView:
 
     def __getattr__(self, name):
         if name in self._tables:
+            if name in self._reference_names:
+                return self._tables[name]
             def reader():
                 return self._tables[name]
             # Bind a reader once, not a new Python closure on every formula call.
@@ -67,6 +70,8 @@ class _DataSpace(DataView):
     def __init__(self, model):
         object.__setattr__(self, '_model', model)
         object.__setattr__(self, '_prepared', {})
+        object.__setattr__(self, '_reference_names',
+                           frozenset(model._plan.get('data_reference_names', ())))
 
     @property
     def _tables(self):
@@ -75,7 +80,9 @@ class _DataSpace(DataView):
 
     def __setattr__(self, name, value):
         model = self._model
-        if name.endswith('_data') and name[:-5] in model._plan['tables']:
+        if name in self._reference_names:
+            model._set_table(name, value)
+        elif name.endswith('_data') and name[:-5] in model._plan['tables']:
             model._set_table(name[:-5], value)
         else: raise AttributeError('Set tables through their <name>_data references')
 
@@ -250,7 +257,7 @@ class CompiledModel:
         self._collect_cache = {}
         self._references = {**self._plan['reference_defaults'], **dict(overrides or {})}
         if set(self._references) != set(self._plan['reference_defaults']): raise ContractError('Unknown reference')
-        self._tables = self._snapshot(tables)
+        self._tables = self._derive_tables(self._snapshot(tables))
         self._packed = pack_tables(self._plan, self._tables)
         records = prepare_inputs(self.manifest, self._tables, references=self._references,
                                  packed=self._packed, prepared=True)
@@ -266,6 +273,19 @@ class CompiledModel:
             raise ContractError('DataFrames, Series or ndarrays required')
         return {name: table.copy() if isinstance(table,np.ndarray) else table.copy(deep=True)
                 for name, table in tables.items()}
+
+    def _derive_tables(self, tables):
+        program = self._plan.get('data_program')
+        if program is None:
+            return tables
+        import pandas as pd
+        from .data_program import prepare_data
+        references = {name: tables[name] for name in program['references']}
+        derived, domain = prepare_data(program, references)
+        updated = {**tables, **self._snapshot(derived)}
+        updated[program['policy_table']] = pd.DataFrame(
+            index=pd.Index(domain, name=self._plan['point_parameter']))
+        return updated
 
     def _require_open(self):
         if self._closed: raise RuntimeError('Compiled model is closed')
@@ -283,11 +303,14 @@ class CompiledModel:
     def _bindings(self, tables, refs):
         required = set(self.manifest.get('python_references', ()))
         if not required: return None
-        data = DataView(tables)
+        import importlib
+        data = DataView(tables, self._plan.get('data_reference_names', ()))
         # Validate/preflight every prepared table before replacing live bindings.
         for name in self.manifest.get('prepared_lookup_tables',()):data._prepare_lookup(name)
         shared = {'data': data, **refs, **self._plan['parameter_defaults'],
-                  **{name: tables[table] for name,table in self._plan.get('object_references',{}).items()}}
+                  **{name: tables[table] for name,table in self._plan.get('object_references',{}).items()},
+                  **{name: importlib.import_module(module) for name, module in
+                     self._plan.get('module_references', {}).items()}}
         rows = []
         for key in tables[self._plan['point_table']].index:
             row = {**shared, self._plan['point_parameter']: key}
@@ -307,7 +330,10 @@ class CompiledModel:
     def _set_table(self, name, value):
         with self._lock:
             self._require_idle()
-            tables = {**self._tables, **self._snapshot({name: value})}
+            program = self._plan.get('data_program')
+            if program is not None and name not in program['references']:
+                raise ContractError('Replace a source Data reference, not a derived Data Cell')
+            tables = self._derive_tables({**self._tables, **self._snapshot({name: value})})
             self._commit(tables, self._references, pack_tables(self._plan, tables))
 
     def _set_reference(self, name, value):

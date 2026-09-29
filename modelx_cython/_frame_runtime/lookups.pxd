@@ -29,3 +29,27 @@ cdef class CurveTable:
     cpdef double get(self, long long group, double x, double default=*) except? -1 nogil
     cpdef double previous(self, long long group, double x, double below=*) except? -1 nogil
     cpdef double linear(self, long long group, double x) except? -1 nogil
+
+@cython.final
+cdef class IndexedInt1:
+    cdef const long long[::1] _v
+    cdef Py_ssize_t _n
+    cpdef long long get(self, Py_ssize_t i) except? 0 nogil
+
+@cython.final
+cdef class IndexedFloat1:
+    cdef const double[::1] _v
+    cdef Py_ssize_t _n
+    cpdef double get(self, Py_ssize_t i) except? -1 nogil
+
+@cython.final
+cdef class IndexedInt2:
+    cdef const long long[:, ::1] _v
+    cdef Py_ssize_t _n, _m
+    cpdef long long get(self, Py_ssize_t i, Py_ssize_t j) except? 0 nogil
+
+@cython.final
+cdef class IndexedFloat2:
+    cdef const double[:, ::1] _v
+    cdef Py_ssize_t _n, _m
+    cpdef double get(self, Py_ssize_t i, Py_ssize_t j) except? -1 nogil

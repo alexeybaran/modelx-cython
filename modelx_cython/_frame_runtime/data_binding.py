@@ -3,7 +3,8 @@ from dataclasses import dataclass
 from enum import IntEnum
 import numbers
 from .contracts import ContractError
-from .lookups import curve, curve_table
+from .lookups import (IndexedFloat1, IndexedFloat2, IndexedInt1,
+                      IndexedInt2, curve, curve_table)
 
 
 @dataclass(frozen=True)
@@ -56,6 +57,14 @@ def pack_tables(model_plan, tables):
     packed = {}
     for name, binding in model_plan['bindings'].items():
         kind = binding['kind']
+        if kind == 'indexed_array':
+            values = tables[binding['table']]
+            constructors = {'IndexedInt1': IndexedInt1, 'IndexedFloat1': IndexedFloat1,
+                            'IndexedInt2': IndexedInt2, 'IndexedFloat2': IndexedFloat2}
+            # The declared ABI, not a newly supplied array's dtype, selects the
+            # wrapper. A rebinding with a changed numeric kind fails atomically.
+            packed[name] = constructors[binding['array_type']](values)
+            continue
         if kind not in ('curve', 'curve_table'): continue
         series = tables[binding['table']][binding['column']]
         if 'fixed_group' in binding:
@@ -94,7 +103,7 @@ def prepare_inputs(manifest, tables, *, references=None, packed=None,
     for name, info in manifest['inputs'].items():
         binding = plan['bindings'][name]
         kind = binding['kind']
-        if kind in ('curve', 'curve_table'):
+        if kind in ('curve', 'curve_table', 'indexed_array'):
             continue
         if kind == 'field':
             table = tables[binding['table']]
@@ -132,7 +141,7 @@ def prepare_inputs(manifest, tables, *, references=None, packed=None,
         return rows
     fixed_names = frozenset(
         name for name, value in fixed.items()
-        if (manifest['inputs'][name]['kind'] in ('curve', 'curve_table')
+        if (manifest['inputs'][name]['kind'] in ('curve', 'curve_table', 'indexed_array')
             or (manifest['inputs'][name]['kind'] != 'table_key'
                 and type(value) in (int, float, bool, str, type(None)))))
     return PreparedModelRows(tuple(rows), fixed_names)

@@ -34,7 +34,9 @@ def to_c_frame(source, manifest):
         for name in names.split(', '):
             if name != '_records':
                 fields[name] = dtype
-    objects = {k: v for k, v in fields.items() if v in {'object', 'Curve', 'CurveTable', 'dict', 'set'}}
+    objects = {k: v for k, v in fields.items() if v in {
+        'object', 'Curve', 'CurveTable', 'IndexedInt1', 'IndexedFloat1',
+        'IndexedInt2', 'IndexedFloat2', 'dict', 'set'}}
     buffers = {k: v for k, v in fields.items() if '[::1]' in v}
     numeric = {k: v for k, v in fields.items() if k not in objects and k not in buffers}
     sizes = {name: max(1, manifest['cache_slots']) if manifest['memo'] == 'dense' else 1
