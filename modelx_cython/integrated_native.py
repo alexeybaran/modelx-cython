@@ -129,10 +129,12 @@ Those exclusions avoid changing Python integer overflow/unbound behavior.
 
 
 class Edges(ast.NodeTransformer):
-    def __init__(self, cls, selected, native_keys=None, indexed=(), compact=()):
+    def __init__(self, cls, selected, native_keys=None, indexed=(), compact=(),
+                 compact_argument='_mx_owner'):
         self.cls, self.selected = cls, selected
         self.native_keys,self.indexed=native_keys,indexed
         self.compact = compact
+        self.compact_argument = compact_argument
 
     def visit_Call(self, node):
         node = self.generic_visit(node)
@@ -142,7 +144,7 @@ class Edges(ast.NodeTransformer):
             extra=self.native_keys.extras(node.func.attr,args) if self.native_keys and node.func.attr in self.indexed else []
             if node.func.attr in self.compact:
                 direct = ast.Call(expr('_mx_ctx_hot' + self.cls + '_' + node.func.attr),
-                                  [expr('self'), *args, expr('_mx_owner')], [])
+                                  [expr('self'), *args, expr(self.compact_argument)], [])
             else:
                 direct = ast.Call(expr('_mx_n' + self.cls + '_' + node.func.attr),
                                   [expr('self'), *args, expr('True'), expr('True'), *extra], [])
@@ -237,6 +239,86 @@ if _mx_exact:
     for fn in (calc, hot):
         ast.fix_missing_locations(fn)
     return calc, hot, wrapper
+
+
+def raw_context_pair(cls_name, name, owner, arrays, public, formula, body,
+                     cached, locals_types):
+    """Diagnostic: carry raw cache pointers across connected numeric entries.
+
+    The ordinary Space still owns the cache. This deliberately does not refresh
+    pointers after an effectful callback and is not a compatible production path.
+    """
+    args = ', '.join(a.arg for a in public.args.args[1:])
+    params = ('self, ' + args + ', ') if args else 'self, '
+    ctx_type = '_mx_ctx' + cls_name
+    ctx_arg = f'_mx_cy.pointer({ctx_type})'
+    calc_name = '_mx_ctx_calc' + cls_name + '_' + name
+    hot_name = '_mx_ctx_hot' + cls_name + '_' + name
+
+    calc = copy.deepcopy(formula)
+    calc.name = calc_name
+    calc.args.args[0].annotation = expr(cls_name)
+    calc.args.args.extend([ast.arg('_mx_ctx', expr(ctx_arg)),
+                           ast.arg('_mx_exact', expr('_mx_cy.bint'))])
+    calc.decorator_list = [expr('_mx_cy.cfunc'),
+                           expr('_mx_cy.exceptval(-1, check=True)')]
+    if locals_types:
+        calc.decorator_list.append(expr('_mx_cy.locals(' + ','.join(
+            x + '=' + t for x, t in locals_types.items()) + ')'))
+    calc.body = body + [ast.Return(expr('0'))]
+
+    hot = copy.deepcopy(formula)
+    hot.name = hot_name
+    hot.args.args[0].annotation = expr(cls_name)
+    hot.args.args.append(ast.arg('_mx_ctx', expr(ctx_arg)))
+    hot.decorator_list = [expr('_mx_cy.cfunc'), expr('_mx_cy.inline'),
+                          expr('_mx_cy.exceptval(-1, check=True)'),
+                          expr('_mx_cy.locals(_mx_value=' + typed(public) + ')')]
+    if name in arrays:
+        index = public.args.args[1].arg
+        size = arrays[name][1]
+        hot_source = f'''
+if not 0 <= {index} < {size}:
+    raise IndexError('array index out of range')
+if _mx_ctx.has_{name}[{index}]:
+    return _mx_ctx.values._v_{name}[{index}]
+_mx_value = {calc_name}({params}_mx_ctx, True)
+_mx_ctx.values._v_{name}[{index}] = _mx_value
+_mx_ctx.has_{name}[{index}] = True
+return _mx_value
+'''
+    else:
+        hot_source = f'''
+if self._has_{name}:
+    return self._v_{name}
+_mx_value = {calc_name}({params}_mx_ctx, True)
+self._v_{name} = _mx_value
+self._has_{name} = True
+return _mx_value
+'''
+    hot.body = ast.parse(hot_source).body
+
+    setup = f'''
+if _mx_exact:
+    if self._mx_native is None:
+        self._mx_native = {owner}()
+    _mx_owner = self._mx_native
+    _mx_ctx.values = _mx_owner.values
+'''
+    for array_name in arrays:
+        setup += (f'    _mx_ctx.has_{array_name} = '
+                  f'_mx_cy.address(_mx_owner._has_{array_name}[0])\n')
+    setup += f'''
+    if _mx_cached:
+        return {hot_name}({params}_mx_cy.address(_mx_ctx))
+    return {calc_name}({params}_mx_cy.address(_mx_ctx), True)
+'''
+    wrapper = ast.parse(setup).body + [ast.If(expr('_mx_cached'), cached, []),
+                                       ast.Return(expr(
+                                           f'{calc_name}({params}_mx_cy.NULL, False)'))]
+    for fn in (calc, hot):
+        ast.fix_missing_locations(fn)
+    return calc, hot, wrapper, {'_mx_owner': owner, '_mx_ctx': ctx_type}
 
 
 class Storage(ast.NodeTransformer):
@@ -406,10 +488,19 @@ class {name}:
     return py, pxd
 
 
+def raw_context_declaration(cls_name, owner, arrays):
+    name = '_mx_ctx' + cls_name
+    fields = [f'cdef struct {name}:', f'    {owner}_values* values']
+    fields.extend(f'    unsigned char* has_{array_name}' for array_name in arrays)
+    return '\n'.join(fields) + '\n'
+
+
 def transform(source, declarations, module, path):
     import os
     connected = os.environ.get('MX_CY_CONNECTED_NATIVE', '1') == '1'
     compact_context = os.environ.get('MX_CY_COLLECT_COMPACT_CONTEXT', '0') == '1'
+    raw_context = os.environ.get('MX_CY_COLLECT_RAW_CONTEXT', '0') == '1'
+    compact_context = compact_context or raw_context
     if connected:
         from .connected_categories import Categories, NativeKeys, key_parameters, use_precomputed_keys, SUPPORT as CATEGORY_SUPPORT
     tree = ast.parse(source)
@@ -470,7 +561,10 @@ def transform(source, declarations, module, path):
                                    for x in ast.walk(methods['_f_' + n]))}
         owner = '_mx_store' + cls.name
         if arrays:
-            py, pxd = owner_source(owner, arrays); owners.append(py); owner_pxd.append(pxd)
+            py, pxd = owner_source(owner, arrays)
+            if raw_context:
+                pxd += '\n' + raw_context_declaration(cls.name, owner, arrays)
+            owners.append(py); owner_pxd.append(pxd)
             declarations = declarations.replace(f'cdef class {cls.name}(', f'cdef class {cls.name}(', 1)
             marker = next(line for line in declarations.splitlines() if line.startswith(f'cdef class {cls.name}('))
             declarations = declarations.replace(marker, marker + f'\n    cdef {owner} _mx_native', 1)
@@ -516,7 +610,8 @@ def transform(source, declarations, module, path):
             # NodeTransformer may return statement lists inside compound suites.
             if native_keys:native_keys.begin_formula()
             formula_body = [Edges(cls.name, selected, native_keys, indexed,
-                                  compact if n in compact else ()).visit(s)
+                                  compact if n in compact else (),
+                                  '_mx_ctx' if raw_context else '_mx_owner').visit(s)
                             for s in formula.body]
             data_reads = DataReads(references, classes)
             formula_body = [data_reads.visit(s) for s in formula_body]
@@ -557,16 +652,22 @@ def transform(source, declarations, module, path):
                 formula_body = wrapper.body
                 cached = head
                 locals_types['_mx_value'] = typed(public)
-            if locals_types:
-                fn.decorator_list.append(expr('_mx_cy.locals(' + ','.join(x+'='+t for x,t in locals_types.items()) + ')'))
             if n in compact:
-                calc, hot, wrapper = compact_pair(
-                    cls.name, n, owner, public, formula, formula_body, cached,
-                    locals_types, arrays[n][1] if n in arrays else None)
+                if raw_context:
+                    calc, hot, wrapper, wrapper_locals = raw_context_pair(
+                        cls.name, n, owner, arrays, public, formula,
+                        formula_body, cached, locals_types)
+                    locals_types.update(wrapper_locals)
+                else:
+                    calc, hot, wrapper = compact_pair(
+                        cls.name, n, owner, public, formula, formula_body, cached,
+                        locals_types, arrays[n][1] if n in arrays else None)
                 tail.extend([ast.unparse(calc) + '\n', ast.unparse(hot) + '\n'])
                 fn.body = wrapper
             else:
                 fn.body = [ast.If(expr('_mx_cached'), cached, []), *formula_body]
+            if locals_types:
+                fn.decorator_list.append(expr('_mx_cy.locals(' + ','.join(x+'='+t for x,t in locals_types.items()) + ')'))
             ast.fix_missing_locations(fn);tail.append(ast.unparse(fn)+'\n')
             for meth, usecache in ((public, True), (formula, False)):
                 # Returning through the original method preserves its signature,
