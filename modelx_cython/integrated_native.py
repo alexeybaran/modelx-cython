@@ -155,6 +155,26 @@ class Edges(ast.NodeTransformer):
         return node
 
 
+class ContextSelf(ast.NodeTransformer):
+    """Recover a Space only at operations left outside connected native edges.
+
+    The diagnostic context owns the exact receiver for the duration of one
+    policy.  Native dependency calls use the context itself; a remaining
+    object/input/helper operation crosses back to the ordinary Space there.
+    """
+
+    def __init__(self, cls):
+        self.cls = cls
+        self.bridges = 0
+
+    def visit_Name(self, node):
+        if node.id == 'self' and isinstance(node.ctx, ast.Load):
+            self.bridges += 1
+            return ast.copy_location(
+                expr(f'_mx_cy.cast({self.cls}, _mx_ctx.space)'), node)
+        return node
+
+
 class CommitReturns(ast.NodeTransformer):
     def __init__(self, commit):
         self.commit = commit
@@ -245,7 +265,8 @@ if _mx_exact:
 
 
 def raw_context_pair(cls_name, name, owner, arrays, public, formula, body,
-                     cached, locals_types, scalar_types=None):
+                     cached, locals_types, scalar_types=None,
+                     context_formula=False):
     """Diagnostic: carry raw cache pointers across connected numeric entries.
 
     The ordinary Space still owns the cache. This deliberately does not refresh
@@ -261,9 +282,16 @@ def raw_context_pair(cls_name, name, owner, arrays, public, formula, body,
 
     calc = copy.deepcopy(formula)
     calc.name = calc_name
-    calc.args.args[0].annotation = expr(cls_name)
-    calc.args.args.extend([ast.arg('_mx_ctx', expr(ctx_arg)),
-                           ast.arg('_mx_exact', expr('_mx_cy.bint'))])
+    if context_formula:
+        calc.args.args = [ast.arg('_mx_ctx', expr(ctx_arg)),
+                          *calc.args.args[1:],
+                          ast.arg('_mx_exact', expr('_mx_cy.bint'))]
+        bridge = ContextSelf(cls_name)
+        body = [bridge.visit(stmt) for stmt in body]
+    else:
+        calc.args.args[0].annotation = expr(cls_name)
+        calc.args.args.extend([ast.arg('_mx_ctx', expr(ctx_arg)),
+                               ast.arg('_mx_exact', expr('_mx_cy.bint'))])
     calc.decorator_list = [expr('_mx_cy.cfunc'),
                            expr('_mx_cy.exceptval(-1, check=True)')]
     if locals_types:
@@ -314,21 +342,29 @@ self._v_{name} = _mx_value
 self._has_{name} = True
 return _mx_value
 '''
-    if frame_entry:
+    if context_formula:
+        replacement = (f'{calc_name}(_mx_ctx, ' + (args + ', ' if args else '')
+                       + 'True)')
+        hot_source = hot_source.replace(
+            f'{calc_name}({params}_mx_ctx, True)', replacement)
+    elif frame_entry:
         receiver = f'_mx_cy.cast({cls_name}, _mx_ctx.space)'
         hot_source = hot_source.replace(
             f'{calc_name}({params}_mx_ctx, True)',
             f'{calc_name}({receiver}, ' + (args + ', ' if args else '') + '_mx_ctx, True)')
     hot.body = ast.parse(hot_source).body
 
-    setup = f'''
+    setup = ''
+    if context_formula:
+        setup += '_mx_ctx.space = _mx_cy.cast(_mx_cy.p_void, self)\n'
+    setup += f'''
 if _mx_exact:
     if self._mx_native is None:
         self._mx_native = {owner}()
     _mx_owner = self._mx_native
     _mx_ctx.values = _mx_owner.values
 '''
-    if frame_entry:
+    if frame_entry and not context_formula:
         setup += '    _mx_ctx.space = _mx_cy.cast(_mx_cy.p_void, self)\n'
     for array_name in arrays:
         setup += (f'    _mx_ctx.has_{array_name} = '
@@ -341,14 +377,21 @@ if _mx_exact:
                       f'_mx_cy.address(self._v_{scalar_name})\n')
     hot_call = (f'_mx_cy.address(_mx_ctx)' + (', ' + args if args else '')
                 if frame_entry else params + '_mx_cy.address(_mx_ctx)')
+    exact_calc = (f'{calc_name}(_mx_cy.address(_mx_ctx), '
+                  + (args + ', ' if args else '') + 'True)'
+                  if context_formula else
+                  f'{calc_name}({params}_mx_cy.address(_mx_ctx), True)')
+    fallback_calc = (f'{calc_name}(_mx_cy.address(_mx_ctx), '
+                     + (args + ', ' if args else '') + 'False)'
+                     if context_formula else
+                     f'{calc_name}({params}_mx_cy.NULL, False)')
     setup += f'''
     if _mx_cached:
         return {hot_name}({hot_call})
-    return {calc_name}({params}_mx_cy.address(_mx_ctx), True)
+    return {exact_calc}
 '''
     wrapper = ast.parse(setup).body + [ast.If(expr('_mx_cached'), cached, []),
-                                       ast.Return(expr(
-                                           f'{calc_name}({params}_mx_cy.NULL, False)'))]
+                                       ast.Return(expr(fallback_calc))]
     for fn in (calc, hot):
         ast.fix_missing_locations(fn)
     return calc, hot, wrapper, {'_mx_owner': owner, '_mx_ctx': ctx_type}
@@ -540,6 +583,8 @@ def transform(source, declarations, module, path):
     compact_context = os.environ.get('MX_CY_COLLECT_COMPACT_CONTEXT', '0') == '1'
     raw_context = os.environ.get('MX_CY_COLLECT_RAW_CONTEXT', '0') == '1'
     frame_entry = os.environ.get('MX_CY_COLLECT_FRAME_ENTRY', '0') == '1'
+    context_formula = os.environ.get('MX_CY_COLLECT_CONTEXT_FORMULAS', '0') == '1'
+    frame_entry = frame_entry or context_formula
     raw_context = raw_context or frame_entry
     compact_context = compact_context or raw_context
     if connected:
@@ -701,7 +746,8 @@ def transform(source, declarations, module, path):
                     calc, hot, wrapper, wrapper_locals = raw_context_pair(
                         cls.name, n, owner, arrays, public, formula,
                         formula_body, cached, locals_types,
-                        scalar_types if frame_entry else None)
+                        scalar_types if frame_entry else None,
+                        context_formula)
                     locals_types.update(wrapper_locals)
                 else:
                     calc, hot, wrapper = compact_pair(
