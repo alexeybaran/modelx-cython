@@ -1,8 +1,8 @@
-"""Generate a native traversal for an exact, numeric collect sum.
+"""Generate collect traversals beneath the exported Space/Cell interface.
 
-This pass changes only exported classes with one numeric sum leaf. The leaf's
-expression is moved to one typed function, used by both collect_outputs and
-the native traversal. Other collect contracts keep the exported Python path.
+The numeric scalar route keeps one typed formula expression. Other declared
+output shapes use the same compiled Cell body and a native policy traversal,
+with the exported collector's detachment and accumulation contracts.
 """
 
 import ast
@@ -111,14 +111,129 @@ def _collect_contract(cls):
             call.args[2].value, call.args[4])
 
 
+def _traversal_contract(cls):
+    """Describe the generated collect call without constraining output types."""
+    collect = _method(cls, 'collect')
+    if collect is None or _method(cls, '_f_collect_outputs') is None:
+        return None
+    if len(collect.body) != 1 or not isinstance(collect.body[0], ast.Return):
+        return None
+    call = collect.body[0].value
+    if (not isinstance(call, ast.Call) or not isinstance(call.func, ast.Attribute)
+            or ast.unparse(call.func) != '_mx_sys.collect_from_space'
+            or len(call.args) != 5 or ast.unparse(call.args[0]) != 'self'
+            or _string(call.args[2]) is None
+            or not isinstance(call.args[3], ast.Tuple)
+            or not isinstance(call.args[4], ast.Tuple)
+            or len(call.args[3].elts) != len(call.args[4].elts)):
+        return None
+    names = [_string(value) for value in call.args[3].elts]
+    if (any(name is None for name in names) or len(names) != len(set(names))
+            or call.args[2].value in names):
+        return None
+    initializer = _method(cls, '__init__')
+    if (initializer is None or not any(
+            isinstance(node, ast.Assign)
+            and any(ast.unparse(target) == 'self._mx_spaces' for target in node.targets)
+            and isinstance(node.value, ast.Dict) and not node.value.keys
+            for node in initializer.body)):
+        return None
+    return collect, call
+
+
+def _general_traversal(cls, call):
+    """Use the exported fold rules while keeping policy selection in Cython."""
+    fallback = ast.unparse(call)
+    return '''
+_mx_domain = %s
+if type(self) is not %s or self._mx_roots:
+    return %s
+if isinstance(_mx_domain, (str, bytes, set, frozenset)) or iter(_mx_domain) is _mx_domain:
+    return %s
+_mx_coords = tuple(_mx_domain)
+if not _mx_coords or len(set(_mx_coords)) != len(_mx_coords):
+    return %s
+_mx_names = %s
+_mx_args = %s
+_mx_scratch = {}
+_mx_result = None
+_mx_modes = None
+_mx_shape = None
+for _mx_coordinate in _mx_coords:
+    _mx_values = dict(zip(_mx_names, _mx_args))
+    _mx_values[%r] = _mx_coordinate
+    _mx_root = %s(self)
+    for _mx_space, _mx_template in zip(_mx_root._mx_walk(), self._mx_walk()):
+        _mx_space._mx_copy_refs(_mx_template, self)
+        self._mx_assign_params(_mx_space, **_mx_values)
+        _mx_space._mx_roots.append(_mx_root)
+        _mx_attach = getattr(_mx_space, '_mx_collect_attach', None)
+        if _mx_attach is not None:
+            _mx_attach(_mx_scratch, _mx_template)
+    try:
+        _mx_outputs = _mx_root.collect_outputs()
+        if type(_mx_outputs) is not dict or not _mx_outputs or set(_mx_outputs) - {'individual', 'sum'}:
+            raise ValueError('collect_outputs must declare individual and/or sum')
+        if _mx_modes is None:
+            _mx_modes = tuple(_mx_outputs)
+            _mx_result = {mode: None for mode in _mx_modes}
+        elif tuple(_mx_outputs) != _mx_modes:
+            raise ValueError('collect_outputs modes changed between policies')
+        for _mx_mode, _mx_items in _mx_outputs.items():
+            if type(_mx_items) is not dict or not _mx_items:
+                raise TypeError('collect_outputs sections need named values')
+            for _mx_name in _mx_items:
+                if type(_mx_name) is not str:
+                    raise TypeError('collect_outputs sections need named values')
+            _mx_items = _mx_sys._mx_collect_detach(_mx_items)
+            if _mx_mode == 'individual':
+                _mx_new_shape = {}
+                for _mx_name, _mx_item in _mx_items.items():
+                    _mx_new_shape[_mx_name] = _mx_sys._mx_collect_shape(_mx_item)
+                if _mx_shape is None:
+                    _mx_shape = _mx_new_shape
+                    _mx_result[_mx_mode] = _mx_sys.OrderedDict()
+                else:
+                    _mx_sys._mx_collect_check_shape(_mx_shape, _mx_items, (_mx_mode,))
+                _mx_result[_mx_mode][_mx_coordinate] = _mx_sys.CollectResult(_mx_items)
+            else:
+                _mx_result[_mx_mode] = _mx_sys._mx_collect_sum(_mx_result[_mx_mode], _mx_items, (_mx_mode,))
+    finally:
+        for _mx_space, _mx_template in zip(_mx_root._mx_walk(), self._mx_walk()):
+            _mx_release = getattr(_mx_space, '_mx_collect_release', None)
+            if _mx_release is not None:
+                _mx_release(_mx_scratch, _mx_template)
+_mx_final = {}
+for _mx_mode, _mx_value in _mx_result.items():
+    if _mx_mode == 'individual':
+        _mx_final[_mx_mode] = _mx_value
+    else:
+        _mx_final[_mx_mode] = _mx_sys.CollectResult(_mx_value)
+return _mx_sys.CollectResult(_mx_final)
+''' % (ast.unparse(call.args[1]), cls.name, fallback, fallback, fallback,
+       ast.unparse(call.args[3]), ast.unparse(call.args[4]),
+       call.args[2].value, cls.name)
+
+
 def transform(source, declarations, receipt_path):
     tree = ast.parse(source)
     selected = []
     for cls in tree.body:
         if not isinstance(cls, ast.ClassDef):
             continue
+        traversal = _traversal_contract(cls)
+        if traversal is None:
+            continue
         contract = _collect_contract(cls)
         if contract is None:
+            collect, call = traversal
+            if not re.search(r'^cdef class ' + re.escape(cls.name) + r'\(', declarations, re.M):
+                continue
+            collect.decorator_list.append(ast.parse(
+                '@_mx_cy.locals(_mx_root=' + cls.name + ')\ndef _mx_dummy(): pass'
+            ).body[0].decorator_list[0])
+            collect.body = ast.parse(_general_traversal(cls, call)).body
+            selected.append({'class': cls.name, 'route': 'mixed-native-traversal'})
             continue
         output_name, expression, leaf_type, domain, parameter, extra_args = contract
         if not re.search(r'^cdef class ' + re.escape(cls.name) + r'\(', declarations, re.M):
@@ -187,7 +302,7 @@ return _mx_sys.CollectResult({'sum': _mx_sys.CollectResult({%r: _mx_total})})
         declarations = declarations.replace(
             marker, marker + '\n    cdef ' + _NUMERIC[leaf_type]
             + ' _mx_collect_value(' + cls.name + ' self) except? -1', 1)
-        selected.append({'class': cls.name, 'output': output_name,
+        selected.append({'class': cls.name, 'route': 'numeric-sum', 'output': output_name,
                          'type': leaf_type, 'parameter': parameter,
                          'expression': ast.unparse(expression)})
     if not selected:

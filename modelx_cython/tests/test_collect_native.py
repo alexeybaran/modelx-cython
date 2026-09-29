@@ -80,15 +80,16 @@ def test_invalid_secondary_parameter_contract_keeps_fallback(tmp_path):
     assert not (tmp_path / 'invalid.json').exists()
 
 
-def test_reordered_secondary_parameter_keeps_keyword_binding_fallback(tmp_path):
+def test_reordered_secondary_parameter_uses_keyword_binding(tmp_path):
     source = SOURCE.replace(
         'def _mx_assign_params(space, idx):',
         'def _mx_assign_params(space, idx, scenario, other):').replace(
         "self.policy_ids, 'idx', (), ()",
         "self.policy_ids, 'idx', ('other', 'scenario'), (1, 2)")
     output, declarations = transform(source, DECLARATIONS, tmp_path / 'reordered.json')
-    assert output == source and declarations == DECLARATIONS
-    assert not (tmp_path / 'reordered.json').exists()
+    assert output != source and declarations == DECLARATIONS
+    assert 'self._mx_assign_params(_mx_space, **_mx_values)' in output
+    assert (tmp_path / 'reordered.json').exists()
 
 
 def test_unrelated_object_cell_does_not_exclude_numeric_collection(tmp_path):
@@ -103,17 +104,25 @@ def test_unrelated_object_cell_does_not_exclude_numeric_collection(tmp_path):
     assert (tmp_path / 'object.json').exists()
 
 
-def test_other_output_shapes_and_integer_sum_keep_existing_route(tmp_path):
+def test_other_output_shapes_keep_native_traversal(tmp_path):
     variations = (
         SOURCE.replace('"sum"', '"individual"'),
         SOURCE.replace('"fib": self.fib(self.depth())',
                        '"fib": self.fib(self.depth()), "other": self.fib(0)'),
         SOURCE.replace('def fib(self, n: _mx_cy.longlong) -> _mx_cy.double:',
                        'def fib(self, n: _mx_cy.longlong) -> _mx_cy.longlong:'),
-        SOURCE.replace('self._mx_spaces = {}', 'self._mx_spaces = {"Child": object()}'),
     )
     for source in variations:
         output, declarations = transform(source, DECLARATIONS, tmp_path / 'receipt.json')
-        assert output == source
+        assert output != source
         assert declarations == DECLARATIONS
-        assert not (tmp_path / 'receipt.json').exists()
+        assert '_mx_sys._mx_collect_detach' in output
+        assert (tmp_path / 'receipt.json').exists()
+
+
+def test_nested_space_keeps_existing_route(tmp_path):
+    source = SOURCE.replace('self._mx_spaces = {}',
+                            'self._mx_spaces = {"Child": object()}')
+    output, declarations = transform(source, DECLARATIONS, tmp_path / 'nested.json')
+    assert output == source and declarations == DECLARATIONS
+    assert not (tmp_path / 'nested.json').exists()
