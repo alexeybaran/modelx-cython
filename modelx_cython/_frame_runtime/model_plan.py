@@ -252,7 +252,7 @@ def derive_spec(module, tables, *, references, space_formula, outputs, steps, le
         point_table = next(iter(point_tables))
     # Declared references are model data, not inferred actuarial assumptions.
     used = set().union(*(referenced_names(f) for f in cells.values()))
-    if point in used:
+    if frontend['arrays'] and point in used:
         from pandas.api.types import is_integer_dtype
         index = tables[point_table].index
         if is_integer_dtype(index.dtype) and all(
