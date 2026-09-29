@@ -36,7 +36,7 @@ def _dtype(series):
 def derive_spec(module, tables, *, references, space_formula, outputs, steps, length,
                 scalar_outputs=(), cell_outputs=(), data_space='Data', projection='Projection',
                 allow_none=None, model_name=None, point_table=None, cython_objects=False,
-                row_references=None):
+                row_references=None, point_parameter=None, parameter_initial_values=None):
     """Build a kernel contract without author INPUTS/FRONTEND maps.
 
     Supported structure: one Data Space with zero-argument DataFrame Cells and
@@ -59,12 +59,17 @@ def derive_spec(module, tables, *, references, space_formula, outputs, steps, le
     parameters = list(signature.parameters.values())
     if not parameters or any(p.kind not in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD) for p in parameters):
         raise ContractError('A policy parameter and ordinary positional Space parameters are required')
-    if any(p.default is p.empty for p in parameters[1:]):
-        raise ContractError('Additional Space parameters need literal defaults')
-    if parameters[0].default is not inspect.Parameter.empty:
+    point = point_parameter or parameters[0].name
+    if point not in signature.parameters:
+        raise ContractError('The policy selector is not a Space parameter')
+    if signature.parameters[point].default is not inspect.Parameter.empty:
         raise ContractError('The point selector must be a required Space parameter')
-    point = parameters[0].name
-    defaults = {p.name: p.default for p in parameters[1:]}
+    initial = dict(parameter_initial_values or {})
+    required = {p.name for p in parameters if p.name != point and p.default is p.empty}
+    if set(initial) != required:
+        raise ContractError('Required non-policy Space parameters need initial values')
+    defaults = {p.name: (initial[p.name] if p.name in required else p.default)
+                for p in parameters if p.name != point}
     for value in [*references.values(), *defaults.values()]:
         try: json.dumps(value, allow_nan=False)
         except (TypeError, ValueError):
@@ -294,6 +299,7 @@ def derive_spec(module, tables, *, references, space_formula, outputs, steps, le
     inputs = dict(sorted(inputs.items()))
     plan = dict(schema='mxcf.model.v1', data_space=data_space, projection=projection,
                 point_parameter=point, point_table=point_table, parameter_defaults=defaults,
+                required_parameters=sorted(required),
                 space_parameters=[(p.name, p.kind.name) for p in parameters],
                 reference_defaults=dict(references), bindings=bindings, tables=schemas,
                 row_references=row_references, output_index='t')

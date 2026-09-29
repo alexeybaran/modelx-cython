@@ -222,11 +222,15 @@ class _ProjectionSpace:
     def __init__(self, model):
         object.__setattr__(self, '_model', model)
         defaults = model._plan['parameter_defaults']
+        required = set(model._plan.get('required_parameters', ()))
         params = [inspect.Parameter(n, getattr(inspect.Parameter, kind),
-                                  default=defaults.get(n, inspect.Parameter.empty))
+                                  default=(inspect.Parameter.empty if n in required
+                                           else defaults.get(n, inspect.Parameter.empty)))
                   for n, kind in model._plan['space_parameters']]
         object.__setattr__(self, '_signature', inspect.Signature(params))
-        object.__setattr__(self, '_collect_signature', inspect.Signature(params[1:]))
+        point = model._plan['point_parameter']
+        object.__setattr__(self, '_collect_signature',
+                           inspect.Signature(p for p in params if p.name != point))
         object.__setattr__(self, '_items', {})
 
     @property

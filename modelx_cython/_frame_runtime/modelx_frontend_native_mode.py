@@ -71,7 +71,8 @@ def _collect_sum_plan(space, point, point_table):
 
 def from_modelx(model, destination, *, projection='Projection', data_space='Data',
                 point_table=None, steps=2048, replacements=None, contracts=None, signatures=None,
-                cython_objects=True, policy_records=None, row_references=None):
+                cython_objects=True, policy_records=None, row_references=None,
+                parameter_initial_values=None):
     """Derive a self-contained build spec; destination stores source evidence only.
 
     replacements is an explicit mapping of Cell names to replacement formula source.
@@ -79,6 +80,8 @@ def from_modelx(model, destination, *, projection='Projection', data_space='Data
     contracts optionally supplies ordinary annotation dictionaries by Cell name.
     policy_records supplies prepared rows for a single independent-policy Space;
     row_references maps formula reference names to its object-valued columns.
+    parameter_initial_values supplies internal initial values for required
+    non-policy Space parameters; callers must still pass those parameters.
     Connected Space preparation is not inferred by this flat importer.
     """
     import pandas as pd
@@ -90,20 +93,29 @@ def from_modelx(model, destination, *, projection='Projection', data_space='Data
     parameters=tuple(space.parameters or ())
     if space.spaces:
         raise ContractError('Live importer requires a flat Projection Space without children')
-    # The first required Space parameter is the independent policy selector.
-    # Additional positional parameters are supported when modelx supplies literal
-    # defaults; model_plan already models them as ordinary per-item parameters.
+    # A declared collect domain identifies the independent policy selector even
+    # when it is not the first Space parameter. The public signature stays in
+    # author order; initial values only establish typed internal frame bindings.
     space_signature = inspect.signature(space.formula.func) if parameters else None
+    domains = getattr(space._impl, 'collect_over_spec', None)
+    if domains is not None and len(domains) != 1:
+        raise ContractError('Frame collect requires one policy domain')
+    point = next(iter(domains)) if domains else (parameters[0] if parameters else None)
+    initial = dict(parameter_initial_values or {})
     if parameters:
         sig_parameters = tuple(space_signature.parameters.values())
         if tuple(p.name for p in sig_parameters) != parameters:
             raise ContractError('Projection Space formula signature does not match modelx parameters')
         if any(p.kind not in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD) for p in sig_parameters):
             raise ContractError('Projection Space parameters must be ordinary positional parameters')
-        if sig_parameters[0].default is not inspect.Parameter.empty:
+        if point not in parameters:
+            raise ContractError('Collection selector is not a Space parameter')
+        if space_signature.parameters[point].default is not inspect.Parameter.empty:
             raise ContractError('The point selector must be a required Space parameter')
-        if any(p.default is inspect.Parameter.empty for p in sig_parameters[1:]):
-            raise ContractError('Additional Space parameters need literal defaults')
+        required = {p.name for p in sig_parameters
+                    if p.name != point and p.default is inspect.Parameter.empty}
+        if set(initial) != required:
+            raise ContractError('Required non-policy Space parameters need initial values')
     tables={}
     data_program = None
     # A declared Data reference can itself be the source policy table. In that
@@ -170,12 +182,10 @@ def from_modelx(model, destination, *, projection='Projection', data_space='Data
         if point_table in tables:raise ContractError('Reserved static scope Data name is already used')
         tables[point_table]=pd.DataFrame(index=pd.Index([0],name=point))
     else:
-        point=parameters[0]
         if point_table in object_references:point_table=object_references[point_table]
         if reference_table:
             if not isinstance(tables.get(point_table), pd.DataFrame):
                 raise ContractError('Declared source policy reference must be a DataFrame')
-            domains = getattr(space._impl, 'collect_over_spec', None)
             if domains is None or tuple(domains) != (point,):
                 raise ContractError('Position-indexed Data references require a declared collect domain')
             domain_name = getattr(domains[point], 'ref_name', None)
@@ -263,7 +273,10 @@ def from_modelx(model, destination, *, projection='Projection', data_space='Data
               'lambda_cells_normalized':normalized,
               'space_parameters':list(parameters),
               'row_references':row_references,
-              'parameter_defaults':({p.name:p.default for p in list(space_signature.parameters.values())[1:]} if space_signature else {})}
+              'parameter_defaults':({p.name:(initial[p.name] if p.name in initial else p.default)
+                                      for p in space_signature.parameters.values() if p.name != point}
+                                     if space_signature else {}),
+              'required_parameters':sorted(initial)}
     if data_program is not None:
         evidence['data_reference_tables'] = sorted(data_references)
         evidence['policy_domain_source'] = data_program['domain_name']
@@ -279,7 +292,8 @@ def from_modelx(model, destination, *, projection='Projection', data_space='Data
         data_space=data_space,projection=projection,point_table=point_table,
         allow_none={n:effective_allow_none(c) for n,c in space.cells.items()},
         model_name=model.name,cython_objects=cython_objects,
-        row_references=row_references)
+        row_references=row_references,point_parameter=point,
+        parameter_initial_values=initial)
     spec.model.update(static_projection=static,object_references=object_references,
                       module_references={name: value.__name__ for name, value in modules.items()})
     if data_program is not None:

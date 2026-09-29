@@ -24,17 +24,19 @@ still uses a toolkit-only scalar Cell and the retained
 formula/type specification to check performance. Neither route is an accepted
 compiler implementation or proof of general exported-package compatibility.
 
-The validated DV01/CS01 demo remains a connected-Space integration gap: it has separate
-`Actual`, `Valuation`, and `Outer` Spaces, dynamic per-policy references,
-time-indexed `sum` and `individual` results, and a nested `Actual.collect()`
-dependency. A toolkit-only seven-policy probe now compiles `Actual` through the
-frame backend using explicitly prepared policy records and ordinary exported
-Cython signatures. Its 36-month cash flows and annual states match the retained
-DV01 fixture. This does not yet compile `Valuation` and `Outer` together or
-prepare their references on each collect call. `Valuation` also has a policy
-selector in its second required Space parameter, which the flat frontend does
-not yet accept. The 105-policy DV01 timing remains an ordinary compiler result,
-not a matched frame-backend result.
+The validated DV01/CS01 demo remains a connected-Space integration gap: it has
+separate `Actual`, `Valuation`, and `Outer` Spaces, dynamic per-policy
+references, time-indexed `sum` and `individual` results, and a nested
+`Actual.collect()` dependency. Separate toolkit probes compile `Actual` and
+`Valuation` with their original Cell formulas. The collect domain now selects
+the policy parameter by name, even when another required Space parameter
+precedes it. An importer of such a Space supplies an internal initial value
+through `parameter_initial_values`; the public argument stays required.
+Prepared Valuation rows can use detached output from compiled `Actual`.
+Seven-policy and 105-policy probes match the retained DV01 fixtures across
+all three years and eight valuation scenarios per year. The 105-policy check
+is correctness validation, not a frame timing. A generated package that
+connects both frame Spaces and compiles `Outer` remains to be implemented.
 
 Windows portability edits in this snapshot are limited to UTF-8 generated
 source reads/writes and a package-local generated facade import. The toolkit

@@ -208,7 +208,7 @@ def test_importer_accepts_prepared_policy_reference_context(tmp_path):
     assert 'ScenarioInputs' not in spec.inputs
 
 
-def test_second_required_space_parameter_is_explicit_dv01_blocker(tmp_path):
+def test_second_required_space_parameter_needs_initial_binding(tmp_path):
     def valuation_formula(valuation_month, point_id, shock=-1):
         return None
     space = SimpleNamespace(
@@ -217,9 +217,57 @@ def test_second_required_space_parameter_is_explicit_dv01_blocker(tmp_path):
         _impl=SimpleNamespace(collect_over_spec={'point_id': object()}))
     source = SimpleNamespace(name='FrameValuation', Valuation=space)
     records = pd.DataFrame(index=pd.Index([1, 2], name='point_id'))
-    with pytest.raises(ContractError, match='Additional Space parameters need literal defaults'):
+    with pytest.raises(ContractError, match='Required non-policy Space parameters need initial values'):
         from_modelx(source, tmp_path / 'source', projection='Valuation',
                     policy_records=records)
+
+
+def test_collect_policy_selector_can_follow_required_space_parameter(tmp_path):
+    def valuation_formula(valuation_month, point_id, shock=-1):
+        return None
+
+    def source_cell(source):
+        return SimpleNamespace(formula=SimpleNamespace(source=source),
+                               is_cached=True, allow_none=False, parent=None)
+
+    records = pd.DataFrame({'model_point': [{'amount': 1.0}, {'amount': 2.0}]},
+                           index=pd.Index([1, 2], name='point_id'))
+    domain = SimpleNamespace(value=lambda _: (1, 2))
+    space = SimpleNamespace(
+        parameters=('valuation_month', 'point_id', 'shock'), spaces={},
+        formula=SimpleNamespace(func=valuation_formula),
+        refs={'model_point': object()},
+        cells={
+            'row_amount': source_cell(
+                "def row_amount() -> float:\n"
+                "    return float(model_point['amount'] + valuation_month + shock)\n"),
+            'collect_outputs': source_cell(
+                "lambda: {'sum': {'row_amount': row_amount()}}"),
+        },
+        _impl=SimpleNamespace(collect_over_spec={'point_id': domain}))
+    source = SimpleNamespace(name='FrameValuation', Valuation=space)
+    spec = from_modelx(source, tmp_path / 'source', projection='Valuation',
+                       policy_records=records,
+                       row_references={'model_point': 'model_point'},
+                       parameter_initial_values={'valuation_month': 0})
+    assert spec.model['point_parameter'] == 'point_id'
+    assert spec.model['required_parameters'] == ['valuation_month']
+    artifact = tmp_path / 'valuation'
+    build(spec, artifact)
+    model = CompiledModel(artifact, spec.initial_tables)
+    try:
+        with pytest.raises(TypeError):
+            model.Valuation.collect()
+        assert model.Valuation[5, 1, -1].row_amount() == 5.0
+        assert model.Valuation.collect(5).sum.row_amount == 11.0
+        assert model.Valuation.collect(5, 0).sum.row_amount == 13.0
+        assert model.Valuation.collect(5).sum.row_amount == 11.0
+        changed = records.copy(deep=True)
+        changed.at[2, 'model_point'] = {'amount': 4.0}
+        model._set_table('mxcf_policy_records', changed)
+        assert model.Valuation.collect(5).sum.row_amount == 13.0
+    finally:
+        model.close()
 
 
 def test_compiled_mixed_collect_uses_one_source_formula_and_detaches(tmp_path):
