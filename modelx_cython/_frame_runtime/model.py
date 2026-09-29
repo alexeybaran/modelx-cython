@@ -252,7 +252,8 @@ class CompiledModel:
         if set(self._references) != set(self._plan['reference_defaults']): raise ContractError('Unknown reference')
         self._tables = self._snapshot(tables)
         self._packed = pack_tables(self._plan, self._tables)
-        records = prepare_inputs(self.manifest, self._tables, references=self._references, packed=self._packed)
+        records = prepare_inputs(self.manifest, self._tables, references=self._references,
+                                 packed=self._packed, prepared=True)
         self._kernel = CompiledKernel(self.artifact, records, python_bindings=self._bindings(self._tables, self._references))
         self._positions = {key: i for i, key in enumerate(self._tables[self._plan['point_table']].index)}
         self._data, self._projection = _DataSpace(self), _ProjectionSpace(self)
@@ -295,7 +296,8 @@ class CompiledModel:
         return rows
 
     def _commit(self, tables, refs, packed):
-        records = prepare_inputs(self.manifest, tables, references=refs, packed=packed)
+        records = prepare_inputs(self.manifest, tables, references=refs,
+                                 packed=packed, prepared=True)
         self._kernel.bind(records, python_bindings=self._bindings(tables, refs))
         self._tables, self._references, self._packed = tables, refs, packed
         self._collect_cache.clear()

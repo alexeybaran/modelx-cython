@@ -1,8 +1,22 @@
 """Pack complete declared tables, without moving group selection out of formulas."""
+from dataclasses import dataclass
 from enum import IntEnum
 import numbers
 from .contracts import ContractError
 from .lookups import curve, curve_table
+
+
+@dataclass(frozen=True)
+class PreparedModelRows:
+    """Internal row set with fixed values established by ``prepare_inputs``.
+
+    Only CompiledModel constructs this marker. Public CompiledKernel.bind records
+    continue to take the complete validation path. ``fixed_names`` contains
+    values known to be identical and safe to convert once across this binding.
+    """
+
+    rows: tuple[dict, ...]
+    fixed_names: frozenset[str]
 
 
 def _enum_codes(values, members):
@@ -61,7 +75,8 @@ def pack_tables(model_plan, tables):
     return packed
 
 
-def prepare_inputs(manifest, tables, *, references=None, packed=None):
+def prepare_inputs(manifest, tables, *, references=None, packed=None,
+                   prepared=False):
     """Internal binding only. Runtime validation is authoritative for scalar values."""
     plan = manifest['model']
     refs = {**plan['reference_defaults'], **dict(references or {})}
@@ -113,4 +128,11 @@ def prepare_inputs(manifest, tables, *, references=None, packed=None):
                 elif isinstance(value, IntEnum): value = int(value)
             row[name] = value
         rows.append(row)
-    return rows
+    if not prepared:
+        return rows
+    fixed_names = frozenset(
+        name for name, value in fixed.items()
+        if (manifest['inputs'][name]['kind'] in ('curve', 'curve_table')
+            or (manifest['inputs'][name]['kind'] != 'table_key'
+                and type(value) in (int, float, bool, str, type(None)))))
+    return PreparedModelRows(tuple(rows), fixed_names)

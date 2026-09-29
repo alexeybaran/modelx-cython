@@ -12,6 +12,7 @@ import sys
 import threading
 import numpy as np
 from .contracts import ContractError
+from .data_binding import PreparedModelRows
 from .lookups import Curve, CurveTable
 
 
@@ -42,6 +43,8 @@ class CompiledKernel:
             raise RuntimeError('Cannot reset, rebind or select a root inside an active evaluation scope')
 
     def _validate(self, records):
+        if isinstance(records, PreparedModelRows):
+            return self._validate_prepared(records)
         converted = []
         shared = {}
         immutable_last = {}
@@ -80,6 +83,28 @@ class CompiledKernel:
             converted.append(tuple(row))
         if not converted:
             raise ContractError('At least one policy is required')
+        return tuple(converted)
+
+    def _validate_prepared(self, prepared):
+        """Validate model-produced fixed inputs once and varying inputs per row.
+
+        The marker is constructed only after ``prepare_inputs`` has copied the
+        same fixed values into every row. External records never use this path.
+        Build all converted rows before publishing a new native binding.
+        """
+        rows = prepared.rows
+        if not rows:
+            raise ContractError('At least one policy is required')
+        first = self._validate([rows[0]])[0]
+        infos = self.manifest['inputs']
+        varying = [(position, key, ti) for position, (key, ti) in
+                   enumerate(infos.items()) if key not in prepared.fixed_names]
+        converted = [first]
+        for record in rows[1:]:
+            values = list(first)
+            for position, key, ti in varying:
+                values[position] = self._scalar_value(key, ti, record[key], record)
+            converted.append(tuple(values))
         return tuple(converted)
 
     @staticmethod

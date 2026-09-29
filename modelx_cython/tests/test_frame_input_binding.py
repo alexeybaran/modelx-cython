@@ -3,7 +3,7 @@ import pandas as pd
 import pytest
 
 from modelx_cython._frame_runtime.contracts import ContractError
-from modelx_cython._frame_runtime.data_binding import prepare_inputs
+from modelx_cython._frame_runtime.data_binding import PreparedModelRows, prepare_inputs
 from modelx_cython._frame_runtime.runtime import CompiledKernel
 
 
@@ -88,3 +88,39 @@ def test_custom_number_is_not_memoized_across_policy_records():
     rows = kernel._validate([{'rate': value}, {'rate': value}])
     assert rows[0] != rows[1]
     assert ChangingFloat.conversions >= 2
+
+
+def test_model_prepared_rows_validate_fixed_builtins_once():
+    points = pd.DataFrame({'rate': [0.01, 0.02],
+                           'category': ['base', 'stress']},
+                          index=pd.Index([11, 12], name='point'))
+    manifest = _manifest()
+    prepared = prepare_inputs(manifest, {'points': points}, packed={}, prepared=True)
+    assert isinstance(prepared, PreparedModelRows)
+    assert prepared.fixed_names == frozenset({'shared'})
+    kernel = object.__new__(CompiledKernel)
+    kernel.manifest = manifest
+    expected = kernel._validate(list(prepared.rows))
+    assert kernel._validate(prepared) == expected
+
+
+def test_model_prepared_rows_still_convert_custom_reference_per_policy():
+    class ChangingFloat(float):
+        conversions = 0
+
+        def __float__(self):
+            type(self).conversions += 1
+            return type(self).conversions * 0.1
+
+    points = pd.DataFrame({'rate': [0.01, 0.02],
+                           'category': ['base', 'stress']},
+                          index=pd.Index([11, 12], name='point'))
+    manifest = _manifest()
+    value = ChangingFloat(0.5)
+    prepared = prepare_inputs(manifest, {'points': points},
+                              references={'shared': value}, packed={}, prepared=True)
+    assert 'shared' not in prepared.fixed_names
+    kernel = object.__new__(CompiledKernel)
+    kernel.manifest = manifest
+    converted = kernel._validate(prepared)
+    assert converted[0][-1] != converted[1][-1]
