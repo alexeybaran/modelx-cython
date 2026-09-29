@@ -42,8 +42,13 @@ def type_info(typ):
         values = [int(x) for x in typ]
         if values != list(range(len(values))) or len(values) != len(typ.__members__):
             raise ContractError('Kernel IntEnums require unique contiguous values starting at zero')
-        return {'kind': 'enum', 'ctype': 'long long', 'name': typ.__name__,
+        from .enum_binding import enum_origin
+        info = {'kind': 'enum', 'ctype': 'long long', 'name': typ.__name__,
                 'members': {k: int(v) for k, v in typ.__members__.items()}}
+        origin = enum_origin(typ)
+        if origin is not None:
+            info.update(origin)
+        return info
     raise ContractError(f'Explicit scalar/Curve type required; received {typ!r}')
 
 

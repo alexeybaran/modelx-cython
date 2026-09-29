@@ -7,6 +7,7 @@ Object values retain Python identity; compiled entries own their result caches.
 import ast
 import builtins
 import dis
+from enum import IntEnum
 import hashlib
 import inspect
 import math
@@ -59,10 +60,18 @@ def cell_dependencies(fn, cells, seen=None):
 
 def bundle_source(cells, python_cells, inputs, enums):
     """Bundle executable source and imports, not live modelx/exported objects."""
+    from .enum_binding import enum_origin
     chunks = ['# Detached raw formulas. Cell names are rebound by PythonScope.', 'from enum import IntEnum']
     for name, enum in sorted(enums.items()):
-        chunks.append('class ' + name + '(IntEnum):\n' + '\n'.join(
-            '    ' + key + ' = ' + repr(int(value)) for key, value in enum.__members__.items()))
+        origin = enum_origin(enum)
+        if origin is None:
+            chunks.append('class ' + name + '(IntEnum):\n' + '\n'.join(
+                '    ' + key + ' = ' + repr(int(value)) for key, value in enum.__members__.items()))
+        else:
+            expression = "__import__(" + repr(origin['module']) + ", fromlist=['*'])"
+            for part in origin['qualname'].split('.'):
+                expression += '.' + part
+            chunks.append(name + ' = ' + expression)
     done = set(enums) | set(inputs) | (set(cells) - set(python_cells))
     required = set()
     used_inputs = set()
@@ -126,13 +135,13 @@ def bundle_source(cells, python_cells, inputs, enums):
 class CellCodec:
     """Shared Python/native boundary; owns callable wrappers, never Cell results."""
     def __init__(self, manifest, kernel, record):
-        from enum import IntEnum
+        from .enum_binding import resolve_enum
         self.manifest, self.kernel = manifest, kernel
         self._record, self._raw_record = None, record
         infos = list(manifest['inputs'].values())
         for row in manifest['cells'].values():
             infos += [row['result']] + [p['type'] for p in row['params']]
-        self.namespace = {i['name']: IntEnum(i['name'], i['members']) for i in infos if i['kind'] == 'enum'}
+        self.namespace = {i['name']: resolve_enum(i) for i in infos if i['kind'] == 'enum'}
         self.entries = {}
 
     def entry(self, name):
@@ -247,6 +256,13 @@ class PythonScope(CellCodec):
                 raise ContractError('Python bindings cannot override inputs or Cells')
         self.namespace = {'__name__': manifest['package'] + '._python', '__builtins__': vars(builtins)}
         exec(self.program, self.namespace)
+        from .enum_binding import resolve_enum
+        for name, info in manifest.get('python_enums', {}).items():
+            actual = self.namespace[name]
+            if (not isinstance(actual, type) or not issubclass(actual, IntEnum)
+                    or {k: int(v) for k, v in actual.__members__.items()} != info['members']
+                    or ('module' in info and actual is not resolve_enum(info))):
+                raise ContractError('Public Enum contract changed: ' + name)
         self.calculators = {name: self.namespace[name] for name in manifest['python_cells']}
         self.calls = {name: 0 for name in self.calculators}
         self._record, self._raw_record = {}, ()
