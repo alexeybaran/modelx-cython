@@ -14,8 +14,15 @@ import math
 import numbers
 import textwrap
 import types
+from functools import lru_cache
 from pathlib import Path
 from .contracts import ContractError
+
+
+@lru_cache(maxsize=2048)
+def _compiled_cell_entry(source):
+    """Reuse immutable wrapper bytecode; each Cell still gets its own globals."""
+    return compile(source, '<compiled Cell entry>', 'exec')
 
 
 def _global_names(code):
@@ -170,7 +177,7 @@ class CellCodec:
             call = f"_mx_scope.decode(_mx_row['result'], {call})"
         source = 'def ' + name + '(' + ', '.join(parameters) + '):\n    return ' + call
         namespace = dict(_mx_scope=self, _mx_row=row, _mx_name=name)
-        exec(compile(source, '<compiled Cell entry>', 'exec'), namespace)
+        exec(_compiled_cell_entry(source), namespace)
         return namespace[name]
 
     def encode(self, info, value):
