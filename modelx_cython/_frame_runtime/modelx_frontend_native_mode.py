@@ -114,10 +114,12 @@ def from_modelx(model, destination, *, projection='Projection', data_space='Data
             # model_plan has first-class IntEnum domain lowering for category/key
             # helpers. Preserve the symbolic class in the detached formula module.
             enum_references[name]=value
-        elif name == 'power' and value is kernel_power:
-            # Canonical real-valued power is a compiler intrinsic. Keep the live
-            # Python binding for fallback evaluation; native lowering rewrites it
-            # to the Cython helper already emitted by compiler.py.
+        elif name == 'power' and (value is kernel_power or
+                (callable(value) and getattr(value, '__modelx_cython_intrinsic__', None)
+                 == 'real_power_v1')):
+            # A helper author can explicitly assert the canonical real-power
+            # contract. Keep the actual Python binding for fallback execution;
+            # eligible native formulas use the generated checked intrinsic.
             intrinsic_references[name]=value
         elif type(value) in (int,float,bool,str,type(None)):
             refs[name]=value
