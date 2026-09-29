@@ -79,8 +79,9 @@ def derive_spec(module, tables, *, references, space_formula, outputs, steps, le
     trees = {n: function_ast(f) for n, f in cells.items()}
     calls = [(name, node) for name, tree in trees.items() for node in ast.walk(tree)
              if isinstance(node, ast.Call) and FrontendRewrite._lookup_name(node.func)]
-    if cython_objects:
-        calls = []  # Python-semantic helpers use complete prepared indexes, not scalar native contracts.
+    # Object-valued Cells keep their checked Cython/Python-semantic bodies, but
+    # they must not disable native bindings for independent numeric helper
+    # chains in the same Space. The emitter decides eligibility per Cell.
     frontend = dict(fields={}, keys={}, lookups={}, arrays={})
     inputs, bindings, key_demands, fields, point_tables = {}, {}, {}, {}, set()
     # Plans retain original index order, so replacing a table cannot silently alter keys.
