@@ -21,6 +21,8 @@ class _SourceCell:
     def __init__(self, instance, name, info):
         self.formula = SimpleNamespace(source=info['source'])
         self.parameters = tuple(inspect.signature(getattr(instance, name)).parameters)
+        self.is_cached = info['cached']
+        self.allow_none = info['allow_none']
         self._method = getattr(instance, name)
 
     def __call__(self, *args, **kwargs):
@@ -84,7 +86,7 @@ def from_exported(package, destination, **options):
     path = Path(package)
     manifest_path = path / '_mx_formula_sources.json'
     manifest = json.loads(manifest_path.read_text(encoding='utf-8'))
-    if manifest.get('schema') != 'modelx.formula_sources.v1':
+    if manifest.get('schema') != 'modelx.formula_sources.v2':
         raise ContractError('Unsupported modelx formula-source manifest')
     for fullname, space in manifest['spaces'].items():
         for name, cell in space['cells'].items():

@@ -11,7 +11,7 @@ def test_exported_formula_hash_mismatch_fails_before_import(tmp_path):
     package = tmp_path / 'exported'
     package.mkdir()
     (package / '_mx_formula_sources.json').write_text(json.dumps({
-        'schema': 'modelx.formula_sources.v1',
+        'schema': 'modelx.formula_sources.v2',
         'model': 'Example',
         'spaces': {'Example.Projection': {'cells': {
             'value': {'source': 'lambda: 1', 'sha256': '0' * 64},

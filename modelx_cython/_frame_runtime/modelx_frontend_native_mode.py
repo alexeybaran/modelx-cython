@@ -145,6 +145,8 @@ def from_modelx(model, destination, *, projection='Projection', data_space='Data
     chunks=['# Derived from modelx formulas. Original model files are unchanged.']
     original={}; normalized=[]
     for name,fn in space.cells.items():
+        if getattr(fn, 'is_cached', True) is False:
+            raise ContractError('Frame frontend does not yet preserve uncached Cell behavior: '+name)
         text=fn.formula.source
         original[name]=hashlib.sha256(text.encode()).hexdigest()
         chosen=replacements.get(name,text)
