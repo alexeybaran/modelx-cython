@@ -446,6 +446,19 @@ def emit(spec, *, diagnostics=False, python_cells=()):
                and n.func.id in object_cells for n in ast.walk(ast.parse(expr, mode='eval'))):
             raise ContractError('Numeric outputs need a scalar Cell boundary; use cell_outputs for objects')
     python_reasons = {k: v for k, v in python_reasons.items() if k in selected}
+    def native_closure(root):
+        pending, seen = [root], set()
+        while pending:
+            name = pending.pop()
+            if name in seen:
+                continue
+            if name in python_reasons:
+                return False
+            seen.add(name)
+            pending.extend(all_dependencies[name])
+        return True
+    native_scalar_outputs = sorted(name for name in spec.scalar_outputs
+                                   if native_closure(name))
     from .power_codegen import lower_numeric_powers
     numeric_power_rewrites = {}
     for name in selected - python_reasons.keys():
@@ -774,7 +787,8 @@ def emit(spec, *, diagnostics=False, python_cells=()):
     lines += ["        if not np.isfinite(value): raise ArithmeticError('Non-finite scalar output')",
               '        return value']
     manifest = dict(schema='mxcf.scalar_kernel.v1', inputs=input_info, outputs=spec.outputs,
-                    steps=spec.steps, length=spec.length, parameters=spec.parameters, scalar_outputs=spec.scalar_outputs, output_dtype='float64', cells=all_rows, cache_slots=slot,
+                     steps=spec.steps, length=spec.length, parameters=spec.parameters, scalar_outputs=spec.scalar_outputs, output_dtype='float64', cells=all_rows, cache_slots=slot,
+                     native_scalar_outputs=native_scalar_outputs,
                     memo='dense', lookups='native', diagnostics=diagnostics, nogil_formulas=bool(native_suffix), frontend_helpers=bool(spec.frontend),
                     numeric_power_rewrites=numeric_power_rewrites,
                     limitations=['flat scalar kernel', 'explicit contiguous IntEnums', 'bounded integral cache keys',

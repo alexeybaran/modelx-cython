@@ -65,6 +65,16 @@ def augment_runtime(source, manifest):
         self._frame._python_scope = <PyObject*>scope
         self._frame._scope_valid = False
 
+    cdef void _select_native_policy(self, Py_ssize_t policy) except *:
+        self._require_idle()
+        if policy < 0 or policy >= len(self._records):
+            raise IndexError(policy)
+        # A native-only aggregate has no object Cell or Python receiver edge.
+        # Leave the object scope invalid so a later public object entry cannot
+        # observe bindings from a previously selected policy.
+        self._frame._scope_valid = False
+        self._select(self._records[policy])
+
     cdef void _select_policy(self, Py_ssize_t policy) except *:
         self._require_idle()
         if policy < 0 or policy >= len(self._records):
@@ -99,6 +109,20 @@ def augment_runtime(source, manifest):
     # Undo the replacement in the implementation of _select_policy itself.
     source = source.replace('        self._frame._scope_valid = False\n        self._select_policy(policy)',
                             '        self._frame._scope_valid = False\n        self._select(self._records[policy])')
+    native_roots = manifest.get('native_scalar_outputs', ())
+    if native_roots:
+        a = source.index('    def run_scalar(')
+        b = source.index('    def run_scalar_one(', a)
+        block = source[a:b]
+        if block.count('            self._select_policy(i)') != 1:
+            raise ValueError('Unexpected scalar traversal template')
+        native_test = ' or '.join(f'name == {name!r}' for name in native_roots)
+        block = block.replace('        cdef _Command command',
+                              '        cdef bint native_only = ' + native_test + '\n        cdef _Command command', 1)
+        block = block.replace('            self._select_policy(i)',
+                              '            if native_only:\n                self._select_native_policy(i)\n'
+                              '            else:\n                self._select_policy(i)', 1)
+        source = source[:a] + block + source[b:]
     a = source.index('    def evaluate(')
     b = source.index('    def run_scalar(', a)
     call = source[a:b].replace('def evaluate(self, Py_ssize_t policy, str cell, tuple args):',
