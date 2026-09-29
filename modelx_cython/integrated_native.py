@@ -129,9 +129,10 @@ Those exclusions avoid changing Python integer overflow/unbound behavior.
 
 
 class Edges(ast.NodeTransformer):
-    def __init__(self, cls, selected, native_keys=None, indexed=()):
+    def __init__(self, cls, selected, native_keys=None, indexed=(), compact=()):
         self.cls, self.selected = cls, selected
         self.native_keys,self.indexed=native_keys,indexed
+        self.compact = compact
 
     def visit_Call(self, node):
         node = self.generic_visit(node)
@@ -139,8 +140,12 @@ class Edges(ast.NodeTransformer):
                 and node.func.attr in self.selected and not node.keywords):
             args=copy.deepcopy(node.args)
             extra=self.native_keys.extras(node.func.attr,args) if self.native_keys and node.func.attr in self.indexed else []
-            direct = ast.Call(expr('_mx_n' + self.cls + '_' + node.func.attr),
-                              [expr('self'), *args, expr('True'), expr('True'), *extra], [])
+            if node.func.attr in self.compact:
+                direct = ast.Call(expr('_mx_ctx_hot' + self.cls + '_' + node.func.attr),
+                                  [expr('self'), *args, expr('_mx_owner')], [])
+            else:
+                direct = ast.Call(expr('_mx_n' + self.cls + '_' + node.func.attr),
+                                  [expr('self'), *args, expr('True'), expr('True'), *extra], [])
             return ast.IfExp(expr('_mx_exact'), direct, node)
         return node
 
@@ -152,6 +157,86 @@ class CommitReturns(ast.NodeTransformer):
     def visit_Return(self, node):
         return [ast.Assign([ast.Name('_mx_value', ast.Store())], node.value or expr('None')),
                 ast.If(expr('_mx_cached'), copy.deepcopy(self.commit), []), ast.Return(expr('_mx_value'))]
+
+
+def compact_pair(cls_name, name, owner, public, formula, body, cached, locals_types,
+                 array_size=None):
+    """Emit one formula body and a compact exact-receiver cache entry.
+
+    The ordinary public/private wrappers remain the compatibility boundary.
+    Native dependencies in the formula body receive the held owner, while each
+    entry rechecks ownership before reading and before committing after a call.
+    """
+    args = ', '.join(a.arg for a in public.args.args[1:])
+    params = ('self, ' + args + ', ') if args else 'self, '
+    calc_name = '_mx_ctx_calc' + cls_name + '_' + name
+    hot_name = '_mx_ctx_hot' + cls_name + '_' + name
+
+    calc = copy.deepcopy(formula)
+    calc.name = calc_name
+    calc.args.args[0].annotation = expr(cls_name)
+    calc.args.args.extend([ast.arg('_mx_owner', expr(owner)),
+                           ast.arg('_mx_exact', expr('_mx_cy.bint'))])
+    calc.decorator_list = [expr('_mx_cy.cfunc'),
+                           expr('_mx_cy.exceptval(-1, check=True)')]
+    if locals_types:
+        calc.decorator_list.append(expr('_mx_cy.locals(' + ','.join(
+            x + '=' + t for x, t in locals_types.items()) + ')'))
+    calc.body = body + [ast.Return(expr('0'))]
+
+    hot = copy.deepcopy(formula)
+    hot.name = hot_name
+    hot.args.args[0].annotation = expr(cls_name)
+    hot.args.args.append(ast.arg('_mx_owner', expr(owner)))
+    hot.decorator_list = [expr('_mx_cy.cfunc'), expr('_mx_cy.inline'),
+                          expr('_mx_cy.exceptval(-1, check=True)'),
+                          expr('_mx_cy.locals(_mx_value=' + typed(public) + ')')]
+    if array_size is not None:
+        index = public.args.args[1].arg
+        hot_source = f'''
+if not 0 <= {index} < {array_size}:
+    raise IndexError('array index out of range')
+if _mx_owner is None or self._mx_native is not _mx_owner:
+    _mx_owner = self._mx_native
+if _mx_owner is not None and _mx_owner._has_{name}[{index}]:
+    return _mx_owner.values._v_{name}[{index}]
+if _mx_owner is None:
+    _mx_owner = {owner}()
+    self._mx_native = _mx_owner
+_mx_value = {calc_name}({params}_mx_owner, True)
+if self._mx_native is not _mx_owner:
+    _mx_owner = self._mx_native
+    if _mx_owner is None:
+        _mx_owner = {owner}()
+        self._mx_native = _mx_owner
+_mx_owner.values._v_{name}[{index}] = _mx_value
+_mx_owner._has_{name}[{index}] = True
+return _mx_value
+'''
+    else:
+        hot_source = f'''
+if self._has_{name}:
+    return self._v_{name}
+_mx_value = {calc_name}({params}_mx_owner, True)
+self._v_{name} = _mx_value
+self._has_{name} = True
+return _mx_value
+'''
+    hot.body = ast.parse(hot_source).body
+
+    exact = ast.parse(f'''
+if self._mx_native is None:
+    self._mx_native = {owner}()
+if _mx_exact:
+    if _mx_cached:
+        return {hot_name}({params}self._mx_native)
+    return {calc_name}({params}self._mx_native, True)
+''').body
+    wrapper = [*exact, ast.If(expr('_mx_cached'), cached, []),
+               ast.Return(expr(f'{calc_name}({params}self._mx_native, False)'))]
+    for fn in (calc, hot):
+        ast.fix_missing_locations(fn)
+    return calc, hot, wrapper
 
 
 class Storage(ast.NodeTransformer):
@@ -324,6 +409,7 @@ class {name}:
 def transform(source, declarations, module, path):
     import os
     connected = os.environ.get('MX_CY_CONNECTED_NATIVE', '1') == '1'
+    compact_context = os.environ.get('MX_CY_COLLECT_COMPACT_CONTEXT', '0') == '1'
     if connected:
         from .connected_categories import Categories, NativeKeys, key_parameters, use_precomputed_keys, SUPPORT as CATEGORY_SUPPORT
     tree = ast.parse(source)
@@ -371,6 +457,17 @@ def transform(source, declarations, module, path):
                 m = re.fullmatch(r'(_mx_cy\.(?:double|longlong|bint))\[(\d+)\]', ast.unparse(node.annotation))
                 if m and node.target.id[3:] in selected:
                     arrays[node.target.id[3:]] = (m[1], int(m[2]))
+        compact = set()
+        if compact_context and arrays:
+            compact = {n for n in selected
+                       if (n in arrays or (len(methods[n].args.args) == 1
+                           and '_has_' + n in references
+                           and references.get('_v_' + n) in NUMERIC))
+                       and n not in indexed
+                       and all(a.annotation and ast.unparse(a.annotation) in NUMERIC
+                               for a in methods[n].args.args[1:])
+                       and not any(isinstance(x, (ast.Try, ast.TryStar, ast.With))
+                                   for x in ast.walk(methods['_f_' + n]))}
         owner = '_mx_store' + cls.name
         if arrays:
             py, pxd = owner_source(owner, arrays); owners.append(py); owner_pxd.append(pxd)
@@ -418,7 +515,9 @@ def transform(source, declarations, module, path):
             cached = [Storage(arrays, owner).visit(s) for s in cached]
             # NodeTransformer may return statement lists inside compound suites.
             if native_keys:native_keys.begin_formula()
-            formula_body = [Edges(cls.name, selected,native_keys,indexed).visit(s) for s in formula.body]
+            formula_body = [Edges(cls.name, selected, native_keys, indexed,
+                                  compact if n in compact else ()).visit(s)
+                            for s in formula.body]
             data_reads = DataReads(references, classes)
             formula_body = [data_reads.visit(s) for s in formula_body]
             formula_body = [key_codes.visit(s) for s in formula_body]
@@ -431,7 +530,7 @@ def transform(source, declarations, module, path):
             fused = (n in arrays or (len(public.args.args) == 1 and '_has_' + n in references
                                      and references.get('_v_' + n) in NUMERIC))
             fused = fused and not any(isinstance(x, (ast.Try, ast.TryStar, ast.With)) for x in ast.walk(formula))
-            if fused:
+            if fused and n not in compact:
                 if n in arrays:
                     index = public.args.args[1].arg
                     value = f'self._mx_native.values._v_{n}[{index}]'
@@ -460,7 +559,14 @@ def transform(source, declarations, module, path):
                 locals_types['_mx_value'] = typed(public)
             if locals_types:
                 fn.decorator_list.append(expr('_mx_cy.locals(' + ','.join(x+'='+t for x,t in locals_types.items()) + ')'))
-            fn.body = [ast.If(expr('_mx_cached'), cached, []), *formula_body]
+            if n in compact:
+                calc, hot, wrapper = compact_pair(
+                    cls.name, n, owner, public, formula, formula_body, cached,
+                    locals_types, arrays[n][1] if n in arrays else None)
+                tail.extend([ast.unparse(calc) + '\n', ast.unparse(hot) + '\n'])
+                fn.body = wrapper
+            else:
+                fn.body = [ast.If(expr('_mx_cached'), cached, []), *formula_body]
             ast.fix_missing_locations(fn);tail.append(ast.unparse(fn)+'\n')
             for meth, usecache in ((public, True), (formula, False)):
                 # Returning through the original method preserves its signature,
@@ -475,6 +581,7 @@ def transform(source, declarations, module, path):
                 edits.append((first, original.end_lineno, textwrap.indent(ast.unparse(meth), '    ')+'\n'))
             inventory.append({'class': cls.name, 'cell': n, 'native_indices': indices,
                               'native_storage': n in arrays, 'fused_cache_formula': fused,
+                              'compact_context_entry': n in compact,
                               'borrowed_data_reads': data_reads.changes})
         fields, functions = key_codes.emit()
         key_mapping_count=len(functions)
