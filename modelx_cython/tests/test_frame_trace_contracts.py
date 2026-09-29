@@ -3,7 +3,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from modelx_cython._frame_runtime.contracts import ContractError
+from modelx_cython._frame_runtime.contracts import ContractError, TableKey
 from modelx_cython._frame_runtime.trace_contracts import from_mx2cy_trace
 
 
@@ -41,3 +41,20 @@ def test_frame_contracts_reject_ambiguous_trace():
     manifest = {'model': 'M', 'spaces': {'M.Projection': {'cells': {'a': {}}}}}
     with pytest.raises(ContractError, match='Ambiguous'):
         from_mx2cy_trace(logger, manifest)
+
+
+def test_explicit_lookup_key_keeps_its_table_domain():
+    observed = SimpleNamespace(
+        ret_type=SimpleNamespace(is_array=False, value_type=str),
+        arg_types={})
+    logger = SimpleNamespace(cells_info={
+        'export._mx_classes._c_Projection._f_key': observed,
+        'export._mx_classes._c_Projection._f_other': observed})
+    manifest = {'model': 'M', 'spaces': {'M.Projection': {'cells': {
+        'key': {'source': "def key():\n    return lookup.key(data.rate_scenario(), scenario)"},
+        'other': {'source': "def other():\n    return lookup.key(select_table(), scenario)"},
+    }}}}
+    assert from_mx2cy_trace(logger, manifest) == {
+        'key': {'return': TableKey('rate_scenario')},
+        'other': {'return': str},
+    }

@@ -267,6 +267,8 @@ def main_handler(args: argparse.Namespace, stdout: IO[str], stderr: IO[str]) -> 
     """
 
     orig_path = pathlib.Path(args.model_path).resolve()
+    if getattr(args, "frame_collect", False):
+        return _frame_collect_handler(args, orig_path)
     work_dir = orig_path.parent
     model_name = orig_path.name + "_cy"
     model_path = work_dir / model_name
@@ -449,6 +451,43 @@ def main_handler(args: argparse.Namespace, stdout: IO[str], stderr: IO[str]) -> 
         return compile_main(work_dir, setup_file)
 
 
+def _frame_collect_handler(args: argparse.Namespace, orig_path: pathlib.Path) -> int:
+    """Build the experimental native frame from an ordinary exported model.
+
+    Keep this entry separate from the established translator.  Unsupported
+    model/collect shapes fail during source import; they never fall through to
+    a different execution or cache path after the user requested the frame.
+    The source handoff is retained beside the generated package for audit.
+    """
+    if args.translate_only or args.compile_only:
+        raise HandlerError("--frame-collect builds as one source-preserved unit")
+    if not args.no_spec:
+        raise HandlerError("--frame-collect requires --no-spec")
+    if args.setup:
+        raise HandlerError("--frame-collect generates its own setup.py")
+
+    from modelx_cython._frame_runtime.modelx_frontend_exported import from_exported
+    from modelx_cython._frame_runtime.trace_contracts import from_mx2cy_trace
+    from modelx_cython._frame_runtime.compiler import build
+
+    destination = orig_path.parent / (orig_path.name + "_cy")
+    source_dir = orig_path.parent / (orig_path.name + "_cy_sources")
+    if destination.exists() or source_dir.exists():
+        raise FileExistsError("Frame output or source directory already exists")
+    manifest_path = orig_path / "_mx_formula_sources.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    logger = run_sample(orig_path, args.sample)
+    contracts = from_mx2cy_trace(logger, manifest, space=args.frame_space)
+    spec = from_exported(
+        orig_path, source_dir, projection=args.frame_space,
+        point_table=args.frame_point_table, steps=args.frame_steps,
+        contracts=contracts)
+    if spec.model.get("collect") is None:
+        raise HandlerError("--frame-collect requires a supported collect declaration")
+    build(spec, destination)
+    return 0
+
+
 # Mapping from string names to logging levels
 LOG_LEVELS = {
     'notset': logging.NOTSET,
@@ -594,6 +633,23 @@ def main(argv: Sequence[str], stdout: IO[str], stderr: IO[str]) -> int:
         help=(
             "Path to a setup file for Cython (default: setup.py)"
         )
+    )
+
+    parser.add_argument(
+        "--frame-collect", action="store_true", default=False,
+        help="Build the experimental source-preserved native collect frame",
+    )
+    parser.add_argument(
+        "--frame-space", default="Projection",
+        help="collect-enabled Space name for --frame-collect (default: Projection)",
+    )
+    parser.add_argument(
+        "--frame-point-table", default=None,
+        help="policy table name for --frame-collect when inference is ambiguous",
+    )
+    parser.add_argument(
+        "--frame-steps", type=int, default=2048,
+        help="compiled period capacity for --frame-collect (default: 2048)",
     )
 
     task_group = parser.add_mutually_exclusive_group()
