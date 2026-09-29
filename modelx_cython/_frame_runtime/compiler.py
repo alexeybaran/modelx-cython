@@ -271,6 +271,8 @@ class BindNames(ast.NodeTransformer):
             return ast.copy_location(ast.Attribute(ast.Name('self', ast.Load()), '_cell_' + node.id, ast.Load()), node)
         if node.id in self.inputs:
             return ast.copy_location(ast.Attribute(ast.Name('self', ast.Load()), node.id, ast.Load()), node)
+        if node.id == '_power_compatible':
+            return node
         if node.id == 'power':
             return ast.copy_location(ast.Name('_power', ast.Load()), node)
         if node.id in _MATH:
@@ -304,7 +306,7 @@ def _needs_checked_formula(node, result_info, params, inputs, cells):
             if isinstance(n.func, ast.Name):
                 if n.func.id in cells:
                     continue
-                if n.func.id in {'power', 'int'}:
+                if n.func.id in {'power', '_power_compatible', 'int'}:
                     return True
             if (isinstance(n.func, ast.Attribute) and isinstance(n.func.value, ast.Name)
                     and n.func.value.id in inputs and inputs[n.func.value.id] in (Curve, CurveTable, *_INDEXED_ARRAYS)
@@ -444,6 +446,12 @@ def emit(spec, *, diagnostics=False, python_cells=()):
                and n.func.id in object_cells for n in ast.walk(ast.parse(expr, mode='eval'))):
             raise ContractError('Numeric outputs need a scalar Cell boundary; use cell_outputs for objects')
     python_reasons = {k: v for k, v in python_reasons.items() if k in selected}
+    from .power_codegen import lower_numeric_powers
+    numeric_power_rewrites = {}
+    for name in selected - python_reasons.keys():
+        parsed[name], count = lower_numeric_powers(parsed[name], cells, spec.inputs)
+        if count:
+            numeric_power_rewrites[name] = count
     mixed = bool(python_reasons)
     rows = {}
     slot = 0
@@ -558,6 +566,14 @@ def emit(spec, *, diagnostics=False, python_cells=()):
     lines += ['cdef inline double _power(double base, double exponent) except? -1 nogil:']
     for statement in power_body:
         lines += textwrap.indent(ast.unparse(statement), '    ').splitlines()
+    if numeric_power_rewrites:
+        lines += ['cdef inline double _power_compatible(double base, double exponent) except? -1 nogil:',
+                  '    cdef double result',
+                  '    if base > 0.0 and isfinite(base) and isfinite(exponent):',
+                  '        result = real_pow(base, exponent)',
+                  '        if isfinite(result):',
+                  '            return result',
+                  '    return base ** exponent']
     lines += ['cdef int _cache_error(int kind, const char* where) except -1 nogil:',
               '    with gil:', '        location = where.decode()',
               '        if kind == 0: raise IndexError("Outside declared cache bound: " + location)',
@@ -760,6 +776,7 @@ def emit(spec, *, diagnostics=False, python_cells=()):
     manifest = dict(schema='mxcf.scalar_kernel.v1', inputs=input_info, outputs=spec.outputs,
                     steps=spec.steps, length=spec.length, parameters=spec.parameters, scalar_outputs=spec.scalar_outputs, output_dtype='float64', cells=all_rows, cache_slots=slot,
                     memo='dense', lookups='native', diagnostics=diagnostics, nogil_formulas=bool(native_suffix), frontend_helpers=bool(spec.frontend),
+                    numeric_power_rewrites=numeric_power_rewrites,
                     limitations=['flat scalar kernel', 'explicit contiguous IntEnums', 'bounded integral cache keys',
                                  'continuous numeric Cell keys use compiler-owned bounded exact hash memo', 'real-valued arithmetic', 'serial independent policies', 'errors abort the evaluation epoch'])
     if object_rows:
