@@ -75,6 +75,34 @@ def test_undeclared_or_nonintegral_array_access_keeps_checked_path():
     assert ast.unparse(untouched) == "paths['premium'][t]"
 
 
+def test_non_collect_space_can_select_nonfirst_policy_parameter(tmp_path):
+    def policy_formula(period, point_id):
+        return None
+
+    def source_cell(source):
+        return SimpleNamespace(formula=SimpleNamespace(source=source),
+                               is_cached=True, allow_none=False, parent=None)
+
+    records = pd.DataFrame({'rate': [0.1, 0.2]},
+                           index=pd.Index([1, 2], name='point_id'))
+    space = SimpleNamespace(
+        parameters=('period', 'point_id'), spaces={},
+        formula=SimpleNamespace(func=policy_formula,
+                                source='def policy_formula(period, point_id): return None'),
+        refs={'rate': object()},
+        cells={'value': source_cell('def value(): return rate')},
+        _impl=SimpleNamespace(collect_over_spec=None))
+    source = SimpleNamespace(name='DirectTwoParameters', Projection=space)
+    spec = from_modelx(
+        source, tmp_path / 'source', policy_records=records,
+        point_parameter='point_id', parameter_initial_values={'period': 0},
+        row_references={'rate': 'rate'},
+        signatures={'value': {'return': 'float', 'parameters': {}}})
+    assert spec.model['point_parameter'] == 'point_id'
+    assert spec.model.get('collect') is None
+    assert spec.model['required_parameters'] == ['period']
+
+
 def test_native_row_inputs_keep_numeric_results_and_checked_rebinding(tmp_path):
     """Exercise the built Cell, object output bridge, and atomic input replacement."""
     def source_cell(source):

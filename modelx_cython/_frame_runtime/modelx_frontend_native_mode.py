@@ -71,7 +71,8 @@ def _collect_sum_plan(space, point, point_table):
 
 
 def from_modelx(model, destination, *, projection='Projection', data_space='Data',
-                point_table=None, steps=2048, replacements=None, contracts=None, signatures=None,
+                point_table=None, point_parameter=None, steps=2048,
+                replacements=None, contracts=None, signatures=None,
                 cython_objects=True, policy_records=None, row_references=None,
                 parameter_initial_values=None, object_bindings=(), typed_mapping_inputs=None,
                 native_typed_inputs=False, typed_object_inputs=None):
@@ -84,6 +85,8 @@ def from_modelx(model, destination, *, projection='Projection', data_space='Data
     row_references maps formula reference names to its object-valued columns.
     parameter_initial_values supplies internal initial values for required
     non-policy Space parameters; callers must still pass those parameters.
+    point_parameter identifies the independent policy parameter when a Space
+    has no collect declaration and the policy is not its first parameter.
     object_bindings names declared references supplied by a connected model
     at load time, rather than serialized into the generated package.
     Dynamic Space formulas are compiled from their original source with
@@ -107,7 +110,10 @@ def from_modelx(model, destination, *, projection='Projection', data_space='Data
     domains = getattr(space._impl, 'collect_over_spec', None)
     if domains is not None and len(domains) != 1:
         raise ContractError('Frame collect requires one policy domain')
-    point = next(iter(domains)) if domains else (parameters[0] if parameters else None)
+    declared_point = next(iter(domains)) if domains else None
+    if point_parameter is not None and declared_point is not None and point_parameter != declared_point:
+        raise ContractError('Explicit policy parameter differs from the collect domain')
+    point = point_parameter or declared_point or (parameters[0] if parameters else None)
     initial = dict(parameter_initial_values or {})
     if parameters:
         sig_parameters = tuple(space_signature.parameters.values())

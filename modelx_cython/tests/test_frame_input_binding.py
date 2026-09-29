@@ -1,10 +1,13 @@
 """Column binding and repeated immutable input conversion in the frame runtime."""
 import pandas as pd
 import pytest
+import threading
+from types import SimpleNamespace
 
 from modelx_cython._frame_runtime.contracts import ContractError
 from modelx_cython._frame_runtime.data_binding import PreparedModelRows, prepare_inputs
 from modelx_cython._frame_runtime.runtime import CompiledKernel
+from modelx_cython._frame_runtime import runtime
 
 
 def _manifest():
@@ -27,6 +30,47 @@ def _manifest():
             },
         },
     }
+
+
+def test_forked_item_updates_native_views_with_dynamic_row_references(monkeypatch):
+    """A non-collect Space's typed fields follow its selected scenario refs."""
+    original_paths = {'premium': [0.25, 0.5]}
+    replacement_paths = {'premium': [0.75, 1.0]}
+    kernel = object.__new__(CompiledKernel)
+    kernel.artifact = 'fixture'
+    kernel.manifest = {
+        'inputs': {
+            'paths': {'kind': 'object', 'python_type': 'dict'},
+            'mxinput_paths_premium': {'kind': 'indexed_array', 'ctype': 'IndexedFloat1'},
+            'spread': {'kind': 'float'},
+            'mxinput_spread': {'kind': 'float'},
+        },
+        'model': {
+            'bindings': {
+                'paths': {'kind': 'row_reference'},
+                'spread': {'kind': 'row_reference'},
+            },
+            'native_row_references': {
+                'mxinput_paths_premium': {'column': 'paths', 'field': 'premium'},
+                'mxinput_spread': {'column': 'spread', 'field': None},
+            },
+        },
+    }
+    kernel._records = ((original_paths, ('old',), 0.1, 0.1),)
+    kernel._lock = threading.RLock()
+    kernel._open_scope = None
+    kernel._python_scope = None
+    kernel._lookups = SimpleNamespace(IndexedFloat1=lambda array: tuple(array))
+    kernel._module = SimpleNamespace(Kernel=lambda rows: SimpleNamespace(rows=rows))
+    monkeypatch.setattr(runtime, 'ItemContext', lambda child: child._records[0])
+
+    result = kernel.fork_item(0, input_overrides={
+        'paths': replacement_paths, 'spread': 0.2})
+    assert result == (replacement_paths, (0.75, 1.0), 0.2, 0.2)
+    assert kernel._records[0][0] is original_paths
+    with pytest.raises(ContractError, match='missing numeric row field'):
+        kernel.fork_item(0, input_overrides={'paths': {'other': [1.0]}})
+    assert kernel._records[0][1] == ('old',)
 
 
 def test_aligned_columns_preserve_policy_values_and_category_codes():

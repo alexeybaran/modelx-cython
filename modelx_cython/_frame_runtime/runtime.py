@@ -383,6 +383,26 @@ class CompiledKernel:
                 raise ContractError('ItemSpace input overrides must be row references')
             for name, value in overrides.items():
                 record[name] = self._scalar_value(name, infos[name], value, record)
+            # A dynamic Space formula can replace a row's object references.
+            # Numeric views derived from those references must follow the same
+            # replacement in this independently owned ItemSpace context.
+            for name, binding in self.manifest.get('model', {}).get(
+                    'native_row_references', {}).items():
+                column = binding['column']
+                if column not in overrides:
+                    continue
+                value = overrides[column]
+                field = binding['field']
+                if field is not None:
+                    try:
+                        value = value[field]
+                    except (KeyError, IndexError, TypeError) as exc:
+                        raise ContractError(name + ': missing numeric row field') from exc
+                info = infos[name]
+                if info['kind'] == 'indexed_array':
+                    record[name] = getattr(self._lookups, info['ctype'])(value)
+                else:
+                    record[name] = self._scalar_value(name, info, value, record)
             child = object.__new__(type(self))
             for name in ('artifact', 'manifest', '_lookups', '_module'):
                 setattr(child, name, getattr(self, name))
