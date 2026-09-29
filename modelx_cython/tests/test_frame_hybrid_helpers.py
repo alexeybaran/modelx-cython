@@ -2,6 +2,7 @@
 
 from types import ModuleType, SimpleNamespace
 
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -207,6 +208,67 @@ def test_importer_accepts_prepared_policy_reference_context(tmp_path):
     assert spec.model['bindings']['model_point']['kind'] == 'row_reference'
     assert spec.initial_tables['mxcf_policy_records'].equals(points)
     assert 'ScenarioInputs' not in spec.inputs
+
+
+def test_declared_numeric_mapping_fields_keep_formula_source_and_rebind(tmp_path):
+    def source_cell(source):
+        return SimpleNamespace(formula=SimpleNamespace(source=source),
+                               is_cached=True, allow_none=False, parent=None)
+
+    def policy_formula(point_id):
+        return None
+
+    records = pd.DataFrame({
+        'model_point': [{'amount': 2.0}, {'amount': 5.0}],
+        'paths': [{'curve': np.array([0.25, 0.5], dtype=np.float64)},
+                  {'curve': np.array([0.75, 1.0], dtype=np.float64)}],
+    }, index=pd.Index([1, 2], name='point_id'))
+    domain = SimpleNamespace(value=lambda _: (1, 2))
+    space = SimpleNamespace(
+        parameters=('point_id',), spaces={},
+        formula=SimpleNamespace(func=policy_formula,
+                                source='lambda point_id: None'),
+        refs={'model_point': object(), 'paths': object()},
+        cells={
+            'amount': source_cell(
+                "def amount(t):\n"
+                "    return model_point['amount'] + paths['curve'][t]\n"),
+            'collect_outputs': source_cell(
+                "lambda: {'sum': {'amount': amount(0)}}"),
+        },
+        _impl=SimpleNamespace(collect_over_spec={'point_id': domain}))
+    source = SimpleNamespace(name='TypedFields', Projection=space)
+    spec = from_modelx(
+        source, tmp_path / 'source', policy_records=records,
+        row_references={'model_point': 'model_point', 'paths': 'paths'},
+        signatures={'amount': {'return': 'float', 'parameters': {'t': 'int'}}},
+        typed_mapping_inputs={
+            'model_point': {'amount': 'float'},
+            'paths': {'curve': 'float64_1d'},
+        })
+    artifact = tmp_path / 'artifact'
+    build(spec, artifact)
+    generated = next(artifact.glob('mxk_*/_kernel.pyx')).read_text()
+    assert "self._gil_global_model_point['amount']" in generated  # one binding
+    assert "self._gil_global_paths['curve']" in generated
+    assert "self._gil_field_model_point_amount + self._gil_field_paths_curve[t]" in generated
+    model = CompiledModel(artifact, spec.initial_tables)
+    try:
+        assert model.Projection.collect().sum.amount == 8.0
+        assert model.Projection[1].amount(1) == 2.5
+        changed = records.copy(deep=True)
+        changed.at[2, 'model_point'] = {'amount': 7.0}
+        model._set_table('mxcf_policy_records', changed)
+        assert model.Projection.collect().sum.amount == 10.0
+        invalid = changed.copy(deep=True)
+        invalid.at[2, 'paths'] = {'curve': np.array([0.75, 1.0], dtype=np.float32)}
+        model._set_table('mxcf_policy_records', invalid)
+        with pytest.raises(ValueError):
+            model.Projection.collect()
+        model._set_table('mxcf_policy_records', changed)
+        assert model.Projection.collect().sum.amount == 10.0
+    finally:
+        model.close()
 
 
 def test_second_required_space_parameter_needs_initial_binding(tmp_path):

@@ -11,6 +11,7 @@ import copy
 import inspect
 import textwrap
 from .compiler import function_ast
+from .contracts import ContractError
 from .python_calculator import _global_names
 
 
@@ -19,6 +20,7 @@ def augment(source, manifest, spec, forced_python=()):
     rows = manifest['cells']
     from .typed_memo_codegen import checked_signatures, CTYPES
     signatures = checked_signatures(spec, rows)
+    typed_fields = spec.typed_mapping_inputs or {}
     numeric = {n for n,h in signatures.items() if h['return'] in ('int','float','bool')}
     curve_cells={n for n,h in signatures.items() if h['return']=='curve'}
     bodies, globals_, tables_ = {}, set(), set()
@@ -29,6 +31,15 @@ def augment(source, manifest, spec, forced_python=()):
             continue
         bodies[name] = node
         globals_.update(_global_names(spec.cells[name].__code__) - rows.keys() - vars(builtins).keys())
+    if set(typed_fields) - globals_:
+        raise ContractError('Typed mapping input is not used by a Cython Cell formula')
+    declared = {(name, key) for name, fields in typed_fields.items() for key in fields}
+    used = {(node.value.id, node.slice.value)
+            for body in bodies.values() for node in ast.walk(body)
+            if isinstance(node, ast.Subscript) and isinstance(node.value, ast.Name)
+            and isinstance(node.slice, ast.Constant) and type(node.slice.value) is str}
+    if declared - used:
+        raise ContractError('Typed mapping field is not used by a Cython Cell formula')
 
     cython_aliases = set()
     python_power_sites = []
@@ -49,6 +60,19 @@ def augment(source, manifest, spec, forced_python=()):
             # cimport must be at module scope; Python keeps the original import.
             aliases = [a for a in node.names if a.name != 'cython']
             return ast.copy_location(ast.Import(aliases), node) if aliases else None
+
+        def visit_Subscript(self, node):
+            # A build-declared numeric mapping field is bound once at policy
+            # selection. All other subscripts keep their Python semantics.
+            if (isinstance(node.ctx, ast.Load) and isinstance(node.value, ast.Name)
+                    and node.value.id not in self.locals
+                    and isinstance(node.slice, ast.Constant)
+                    and type(node.slice.value) is str
+                    and node.slice.value in typed_fields.get(node.value.id, {})):
+                field = '_gil_field_' + node.value.id + '_' + node.slice.value
+                return ast.copy_location(ast.Attribute(
+                    ast.Name('self', ast.Load()), field, ast.Load()), node)
+            return self.generic_visit(node)
 
         def visit_BinOp(self, node):
             # Cython infers a complex C value for a floating/nonliteral power.
@@ -112,8 +136,19 @@ def augment(source, manifest, spec, forced_python=()):
     def global_type(name):
         return {int:'long long',float:'double',bool:'bint'}.get(spec.inputs.get(name),'object') if signatures else 'object'
     fields = '\n'.join('    cdef '+global_type(n)+' _gil_global_'+n for n in sorted(globals_))
+    if typed_fields:
+        fields += '\n' + '\n'.join(
+            '    cdef ' + ('double[::1]' if kind == 'float64_1d' else 'double')
+            + ' _gil_field_' + name + '_' + key
+            for name, entries in sorted(typed_fields.items())
+            for key, kind in sorted(entries.items()))
     source=source.replace('cdef class Kernel:\n', 'cdef class Kernel:\n'+fields+'\n',1)
     assignments='\n'.join(f'        self._gil_global_{n} = self._python_scope.namespace[{n!r}]' for n in sorted(globals_))
+    if typed_fields:
+        assignments += '\n' + '\n'.join(
+            f"        self._gil_field_{name}_{key} = self._gil_global_{name}[{key!r}]"
+            for name, entries in sorted(typed_fields.items())
+            for key in sorted(entries))
     source=source.replace('        self._python_scope.select(self._records[policy], policy)',
                            '        self._python_scope.select(self._records[policy], policy)\n'+assignments,1)
     methods=[]
@@ -200,6 +235,8 @@ def augment(source, manifest, spec, forced_python=()):
         source='from ._table_lookup cimport IndexedTable as _IndexedTable\n'+source
     manifest['prepared_lookup_tables']=sorted(tables_)
     manifest['cython_object_cells']=sorted(bodies)
+    if typed_fields:
+        manifest['typed_mapping_inputs'] = typed_fields
     manifest['direct_object_entries']=[n for n in sorted(objects) if rows[n]['result']['kind']=='object' and all(p['type']['kind']=='object' for p in rows[n]['params'])]
     # A persistent ItemSpace owns an unchanged input frame between explicit
     # table/reference updates. Clear every Cell once without rebinding that frame.

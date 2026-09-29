@@ -73,7 +73,7 @@ def _collect_sum_plan(space, point, point_table):
 def from_modelx(model, destination, *, projection='Projection', data_space='Data',
                 point_table=None, steps=2048, replacements=None, contracts=None, signatures=None,
                 cython_objects=True, policy_records=None, row_references=None,
-                parameter_initial_values=None, object_bindings=()):
+                parameter_initial_values=None, object_bindings=(), typed_mapping_inputs=None):
     """Derive a self-contained build spec; destination stores source evidence only.
 
     replacements is an explicit mapping of Cell names to replacement formula source.
@@ -339,4 +339,7 @@ def from_modelx(model, destination, *, projection='Projection', data_space='Data
     if signatures:
         from dataclasses import replace
         spec=replace(spec,cython_signatures=signatures)
+    if typed_mapping_inputs:
+        from dataclasses import replace
+        spec=replace(spec,typed_mapping_inputs=typed_mapping_inputs)
     return spec

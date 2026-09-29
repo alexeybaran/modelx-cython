@@ -52,6 +52,9 @@ class KernelSpec:
     initial_tables: dict | None = field(default=None, repr=False, compare=False)
     cython_objects: bool = False
     cython_signatures: dict | None = None
+    # Optional build contract for numeric fields of object-valued row references.
+    # The model's formula source and public references remain unchanged.
+    typed_mapping_inputs: dict[str, dict[str, str]] | None = None
 
     def __post_init__(self):
         if not isinstance(self.steps, int) or isinstance(self.steps, bool) or not 0 < self.steps <= 1000000:
@@ -65,6 +68,17 @@ class KernelSpec:
         for name in self.inputs:
             if not name.isidentifier() or name.startswith('_'):
                 raise ContractError('Input names must be public identifiers')
+        for name, fields in (self.typed_mapping_inputs or {}).items():
+            if self.inputs.get(name) is not object or not isinstance(fields, dict):
+                raise ContractError('Typed mapping fields require a declared object input')
+            for key, kind in fields.items():
+                if not isinstance(key, str) or not key.isidentifier() or kind not in ('float', 'float64_1d'):
+                    raise ContractError('Typed mapping fields require identifier keys and numeric kinds')
+        aliases = ['_gil_field_' + name + '_' + key
+                   for name, fields in (self.typed_mapping_inputs or {}).items()
+                   for key in fields]
+        if len(aliases) != len(set(aliases)):
+            raise ContractError('Typed mapping field names produce a generated-name collision')
 
     @property
     def cells(self):
