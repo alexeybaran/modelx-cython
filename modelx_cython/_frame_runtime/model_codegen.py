@@ -26,4 +26,26 @@ def add_model_entries(source, manifest):
     scalar = _method(source, 'run_scalar_one').replace('def run_scalar_one(self, Py_ssize_t policy, str name):',
                                                         'def call_scalar(self, str name):')
     additions.append(scalar.replace(check, '').replace(select, ''))
+    object_roots = [name for name in manifest.get('cell_outputs', ())
+                    if name in manifest.get('object_cells', ())
+                    and not manifest['cells'][name]['params']
+                    and manifest['cells'][name]['result']['kind'] == 'object']
+    if object_roots:
+        # The caller supplies its public result-detachment rule. It runs before
+        # the next policy reuses the working frame, while the formula itself is
+        # still the one generated Cython Cell body and authoritative cache.
+        lines = ['    def run_object_outputs(self, str name, object detach):',
+                 '        cdef Py_ssize_t i',
+                 '        if not callable(detach): raise TypeError("detach must be callable")',
+                 '        result = []',
+                 '        for i in range(len(self._records)):']
+        lines.append('            self._select_policy(i)' if mixed
+                     else '            self._select(self._records[i])')
+        for index, name in enumerate(object_roots):
+            lines.extend((f"            {'if' if index == 0 else 'elif'} name == {name!r}:",
+                          f'                value = self._object_cell_{name}()'))
+        lines.extend(('            else: raise KeyError(name)',
+                      '            result.append(detach(value))',
+                      '        return result'))
+        additions.append('\n'.join(lines) + '\n')
     return source.rstrip() + '\n\n' + '\n'.join(additions)

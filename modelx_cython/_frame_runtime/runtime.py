@@ -232,6 +232,22 @@ class CompiledKernel:
             self._require_root()
             return self._kernel.run_scalar(name)
 
+    def _run_object_outputs(self, name, detach):
+        """Traverse an object Cell once per policy with in-scope detachment.
+
+        This is an internal building block for the exported collect contract.
+        ``detach`` is the modelx/export rule for a completed policy output;
+        it must run before the working context advances to the next policy.
+        """
+        if (name not in self.manifest.get('cell_outputs', ())
+                or name not in self.manifest.get('object_cells', ())
+                or self.manifest['cells'][name]['params']
+                or self.manifest['cells'][name]['result']['kind'] != 'object'):
+            raise ContractError('Expected a zero-argument object Cell output')
+        with self._lock:
+            self._require_root()
+            return self._kernel.run_object_outputs(name, detach)
+
     def project_one(self, policy, table=None):
         table = table or next(iter(self.manifest['outputs']))
         if table not in self.manifest['outputs']:

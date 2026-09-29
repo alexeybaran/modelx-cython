@@ -4,7 +4,6 @@ The exporter preserves the author sources before rewriting them as Python
 methods. This adapter reads that metadata and the exported model's actual
 references/Data values; it does not reverse-engineer rewritten methods.
 """
-import hashlib
 import importlib.util
 import inspect
 import json
@@ -15,6 +14,7 @@ from uuid import uuid4
 
 from .contracts import ContractError
 from .modelx_frontend_native_mode import from_modelx
+from .source_graph import describe_source_graph
 
 
 class _SourceCell:
@@ -90,13 +90,13 @@ def from_exported(package, destination, **options):
     path = Path(package)
     manifest_path = path / '_mx_formula_sources.json'
     manifest = json.loads(manifest_path.read_text(encoding='utf-8'))
-    if manifest.get('schema') != 'modelx.formula_sources.v2':
-        raise ContractError('Unsupported modelx formula-source manifest')
-    for fullname, space in manifest['spaces'].items():
-        for name, cell in space['cells'].items():
-            digest = hashlib.sha256(cell['source'].encode('utf-8')).hexdigest()
-            if digest != cell['sha256']:
-                raise ContractError('Formula source hash mismatch: ' + fullname + '.' + name)
+    graph = describe_source_graph(manifest)
+    dest = Path(destination)
+    if dest.exists() and any(dest.iterdir()):
+        raise FileExistsError('Frame source destination must be empty')
+    dest.mkdir(parents=True, exist_ok=True)
+    (dest / 'source_graph.json').write_bytes(
+        (json.dumps(graph, indent=2) + '\n').encode('utf-8'))
     alias, exported = _load_export(path)
     try:
         if exported._name != manifest['model']:
@@ -104,13 +104,12 @@ def from_exported(package, destination, **options):
         spaces = {}
         for fullname, info in manifest['spaces'].items():
             parts = fullname.split('.')
-            if parts[0] != manifest['model']:
-                raise ContractError('Formula source Space belongs to another model')
             instance = exported
             for name in parts[1:]:
                 instance = getattr(instance, name)
             spaces[tuple(parts[1:])] = _SourceSpace(instance, info)
-        proxy = SimpleNamespace(name=manifest['model'])
+        proxy = SimpleNamespace(name=manifest['model'], source_graph=graph,
+                                spaces=spaces)
         projection = options.get('projection', 'Projection')
         data_space = options.get('data_space', 'Data')
         for name in (projection, data_space):

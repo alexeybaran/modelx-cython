@@ -3,6 +3,7 @@
 from types import ModuleType
 
 import pandas as pd
+import pytest
 
 from modelx_cython._frame_runtime.contracts import cell
 from modelx_cython._frame_runtime.compiler import emit
@@ -109,6 +110,22 @@ def test_native_scalar_selection_does_not_stale_object_receivers(tmp_path):
     try:
         assert list(model._kernel.run_scalar('point_value')) == [1., 2., 3.]
         assert list(model._kernel.run_scalar('point_object_value')) == [1., 2., 3.]
+        assert list(model._kernel.run_scalar('point_value')) == [1., 2., 3.]
+        detached = []
+        def detach(value):
+            detached.append(value['value'])
+            return dict(value)
+        assert model._kernel._run_object_outputs('point_object', detach) == [
+            {'value': 1.}, {'value': 2.}, {'value': 3.}]
+        assert detached == [1., 2., 3.]
+        def fail_on_second(value):
+            if value['value'] == 2.:
+                raise ValueError('detachment failed')
+            return dict(value)
+        with pytest.raises(ValueError, match='detachment failed'):
+            model._kernel._run_object_outputs('point_object', fail_on_second)
+        assert model._kernel._run_object_outputs('point_object', dict) == [
+            {'value': 1.}, {'value': 2.}, {'value': 3.}]
         assert list(model._kernel.run_scalar('point_value')) == [1., 2., 3.]
     finally:
         model.close()
