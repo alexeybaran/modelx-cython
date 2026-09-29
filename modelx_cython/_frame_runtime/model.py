@@ -4,6 +4,7 @@ Input replacement commits pandas and packed views together. ItemSpaces own their
 compiled caches; the facade never keeps a Python-side Cell-result cache.
 """
 from pathlib import Path
+import importlib
 import inspect
 import json
 import hashlib
@@ -369,6 +370,10 @@ class CompiledModel:
         records = prepare_inputs(self.manifest, self._tables, references=self._references,
                                  packed=self._packed, prepared=True)
         self._kernel = CompiledKernel(self.artifact, records, python_bindings=self._bindings(self._tables, self._references))
+        space_formula = self._plan.get('space_formula')
+        self._space_preparer = (importlib.import_module(
+            self.manifest['package'] + '._space_formula').prepare
+            if space_formula is not None else None)
         self._positions = {key: i for i, key in enumerate(self._tables[self._plan['point_table']].index)}
         self._data, self._projection = _DataSpace(self), _ProjectionSpace(self)
 
@@ -401,6 +406,29 @@ class CompiledModel:
         self._require_open()
         if self._active:
             raise RuntimeError('Cannot change model inputs or reset during an active Cell evaluation')
+
+    def _space_formula_refs(self, *args, bindings, **kwargs):
+        """Evaluate the source Space formula with explicit connected references.
+
+        This is an integration hook for connected model preparation, not a
+        replacement for ordinary ItemSpace construction or Cell execution.
+        """
+        if self._space_preparer is None:
+            raise ContractError('No compiled Space formula in this artifact')
+        expected = set(self._plan['space_formula']['references'])
+        if type(bindings) is not dict or set(bindings) != expected:
+            raise ContractError('Space formula bindings differ from declared references')
+        bound = self._projection._signature.bind(*args, **kwargs)
+        bound.apply_defaults()
+        with self._lock:
+            self._require_idle()
+            result = self._space_preparer(bindings, *bound.args)
+        if (type(result) is not dict or set(result) != {'refs'}
+                or type(result['refs']) is not dict
+                or any(type(name) is not str or name.startswith('_')
+                       for name in result['refs'])):
+            raise ValueError('Compiled Space formula must return a refs dictionary')
+        return result['refs']
 
     def __getattr__(self, name):
         if name == self._plan['data_space']: return self._data

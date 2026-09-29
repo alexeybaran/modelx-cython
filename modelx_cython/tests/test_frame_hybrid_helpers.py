@@ -270,6 +270,52 @@ def test_collect_policy_selector_can_follow_required_space_parameter(tmp_path):
         model.close()
 
 
+def test_compiled_source_space_formula_uses_explicit_connected_references(tmp_path):
+    def valuation_formula(valuation_month, point_id, shock=-1):
+        return None
+
+    def source_cell(source):
+        return SimpleNamespace(formula=SimpleNamespace(source=source),
+                               is_cached=True, allow_none=False, parent=None)
+
+    formula_source = (
+        'def _formula(valuation_month, point_id, shock=-1):\n'
+        '    curve = ScenarioInputs[valuation_month]\n'
+        "    return {'refs': {'curve': curve, 'value': Actual[point_id] + shock}}\n")
+    space = SimpleNamespace(
+        parameters=('valuation_month', 'point_id', 'shock'), spaces={},
+        formula=SimpleNamespace(func=valuation_formula, source=formula_source),
+        refs={'ScenarioInputs': object(), 'Actual': object()},
+        cells={
+            'row_amount': source_cell('def row_amount() -> float:\n    return 1.0\n'),
+            'collect_outputs': source_cell(
+                "lambda: {'sum': {'row_amount': row_amount()}}"),
+        },
+        _impl=SimpleNamespace(collect_over_spec={'point_id':
+            SimpleNamespace(value=lambda _: (1, 2))}))
+    source = SimpleNamespace(name='FrameValuationSource', Valuation=space)
+    records = pd.DataFrame(index=pd.Index([1, 2], name='point_id'))
+    spec = from_modelx(source, tmp_path / 'source', projection='Valuation',
+                       policy_records=records,
+                       parameter_initial_values={'valuation_month': 0},
+                       compile_space_formula=True)
+    assert spec.model['space_formula']['references'] == ['Actual', 'ScenarioInputs']
+    artifact = tmp_path / 'valuation_space_formula'
+    build(spec, artifact)
+    model = CompiledModel(artifact, spec.initial_tables)
+    try:
+        refs = model._space_formula_refs(3, 2, bindings={
+            'Actual': {1: 10, 2: 20}, 'ScenarioInputs': {3: (0.1, 0.2)}})
+        assert refs == {'curve': (0.1, 0.2), 'value': 19}
+        with pytest.raises(TypeError):
+            model._space_formula_refs(2, bindings={
+                'Actual': {}, 'ScenarioInputs': {}})
+        with pytest.raises(ContractError, match='bindings differ'):
+            model._space_formula_refs(3, 2, bindings={'Actual': {2: 20}})
+    finally:
+        model.close()
+
+
 def test_compiled_mixed_collect_uses_one_source_formula_and_detaches(tmp_path):
     module = ModuleType('frame_dv01_shaped_fixture')
     module.__file__ = __file__

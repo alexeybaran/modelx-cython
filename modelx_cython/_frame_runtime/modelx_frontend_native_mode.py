@@ -8,6 +8,7 @@ import ast
 import hashlib
 import inspect
 import json
+import symtable
 from enum import IntEnum
 from pathlib import Path
 import sys
@@ -72,7 +73,7 @@ def _collect_sum_plan(space, point, point_table):
 def from_modelx(model, destination, *, projection='Projection', data_space='Data',
                 point_table=None, steps=2048, replacements=None, contracts=None, signatures=None,
                 cython_objects=True, policy_records=None, row_references=None,
-                parameter_initial_values=None):
+                parameter_initial_values=None, compile_space_formula=False):
     """Derive a self-contained build spec; destination stores source evidence only.
 
     replacements is an explicit mapping of Cell names to replacement formula source.
@@ -82,6 +83,8 @@ def from_modelx(model, destination, *, projection='Projection', data_space='Data
     row_references maps formula reference names to its object-valued columns.
     parameter_initial_values supplies internal initial values for required
     non-policy Space parameters; callers must still pass those parameters.
+    compile_space_formula retains the original Space formula as a separate
+    Cython entry with explicit references. It does not execute it at build time.
     Connected Space preparation is not inferred by this flat importer.
     """
     import pandas as pd
@@ -296,6 +299,24 @@ def from_modelx(model, destination, *, projection='Projection', data_space='Data
         parameter_initial_values=initial)
     spec.model.update(static_projection=static,object_references=object_references,
                       module_references={name: value.__name__ for name, value in modules.items()})
+    if compile_space_formula:
+        graph = getattr(model, 'source_graph', None)
+        name = model.name + '.' + projection
+        source = (graph['spaces'][name]['formula'] if graph is not None else
+                  getattr(space.formula, 'source', None))
+        if not isinstance(source, str):
+            raise ContractError('Space formula source is required for Cython preparation')
+        scopes = symtable.symtable(source, '<space formula>', 'exec').get_children()
+        if len(scopes) != 1 or scopes[0].get_type() != 'function':
+            raise ContractError('Space formula must define one function')
+        scope = scopes[0]
+        used_refs = sorted(name for name in space.refs
+                           if name in scope.get_identifiers()
+                           and scope.lookup(name).is_global()
+                           and scope.lookup(name).is_referenced())
+        spec.model['space_formula'] = {
+            'source': source, 'sha256': hashlib.sha256(source.encode('utf-8')).hexdigest(),
+            'references': used_refs}
     if data_program is not None:
         spec.model['data_program'] = data_program
         spec.model['data_reference_names'] = sorted(data_references)

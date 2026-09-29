@@ -837,7 +837,14 @@ def build(spec, destination, *, diagnostics=False, python_cells=()):
     if spec.cython_objects:
         helper_bytes += b''.join(Path(__file__).with_name('table_lookup'+suffix).read_bytes() for suffix in ('.py','.pxd'))
     python_source = manifest.pop('python_source', '')
-    digest = hashlib.sha256(source.encode() + python_source.encode() + helper_bytes + manifest.get('model_sha256', '').encode() + json.dumps(build_flags,sort_keys=True).encode()).hexdigest()
+    space_source = ''
+    if spec.model is not None and spec.model.get('space_formula'):
+        from .space_formula_codegen import emit_space_preparer
+        space_source = emit_space_preparer(spec.model['space_formula'])
+        manifest['space_formula_source_sha256'] = hashlib.sha256(space_source.encode()).hexdigest()
+    digest = hashlib.sha256(source.encode() + python_source.encode() + space_source.encode()
+                            + helper_bytes + manifest.get('model_sha256', '').encode()
+                            + json.dumps(build_flags,sort_keys=True).encode()).hexdigest()
     package = 'mxk_' + digest[:16]
     pkg = destination / package
     pkg.mkdir()
@@ -846,6 +853,8 @@ def build(spec, destination, *, diagnostics=False, python_cells=()):
     if python_source:
         (pkg / '_python.py').write_text(python_source, encoding='utf-8', newline='\n')
         manifest['python_source_sha256'] = hashlib.sha256(python_source.encode()).hexdigest()
+    if space_source:
+        (pkg / '_space_formula.pyx').write_text(space_source, encoding='utf-8', newline='\n')
     for suffix in ('.py', '.pxd'):
         (pkg / ('_lookups' + suffix)).write_bytes(Path(__file__).with_name('lookups' + suffix).read_bytes())
     if spec.cython_objects:
@@ -865,6 +874,8 @@ setup(ext_modules=cythonize([
 """ % {'p': package}
     if spec.cython_objects:
         setup=setup.replace('setup(ext_modules=cythonize([', 'setup(ext_modules=cythonize([\n    Extension('+repr(package+'._table_lookup')+', ['+repr(package+'/_table_lookup.py')+']),')
+    if space_source:
+        setup=setup.replace('setup(ext_modules=cythonize([', 'setup(ext_modules=cythonize([\n    Extension('+repr(package+'._space_formula')+', ['+repr(package+'/_space_formula.pyx')+']),')
     (destination / 'setup.py').write_text(setup)
     with (destination / 'build.log').open('w') as log:
         result = subprocess.run([sys.executable, 'setup.py', 'build_ext', '--inplace'], cwd=destination,
