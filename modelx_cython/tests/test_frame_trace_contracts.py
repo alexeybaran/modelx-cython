@@ -58,3 +58,26 @@ def test_explicit_lookup_key_keeps_its_table_domain():
         'key': {'return': TableKey('rate_scenario')},
         'other': {'return': str},
     }
+
+
+def test_conditional_key_uses_one_domain_only_when_every_return_agrees():
+    observed = SimpleNamespace(
+        ret_type=SimpleNamespace(is_array=False, value_type=str),
+        arg_types={})
+    logger = SimpleNamespace(cells_info={
+        'export._mx_classes._c_Projection._f_scenario': observed,
+        'export._mx_classes._c_Projection._f_mixed': observed})
+    manifest = {'model': 'M', 'spaces': {'M.Projection': {'cells': {
+        'scenario': {'source': "def scenario():\n"
+                    "    if scenario_override == -1:\n"
+                    "        return lookup.key(data.rates(), default_scenario)\n"
+                    "    return lookup.key(data.rates(), scenario_override)"},
+        'mixed': {'source': "def mixed():\n"
+                 "    if flag:\n"
+                 "        return lookup.key(data.rates(), key)\n"
+                 "    return lookup.key(data.other(), key)"},
+    }}}}
+    assert from_mx2cy_trace(logger, manifest) == {
+        'scenario': {'return': TableKey('rates')},
+        'mixed': {'return': str},
+    }

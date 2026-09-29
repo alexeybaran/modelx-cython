@@ -41,23 +41,32 @@ def _direct_lookup_key_table(source):
         body = [part for part in node.body if not (isinstance(part, ast.Expr)
                 and isinstance(part.value, ast.Constant)
                 and isinstance(part.value.value, str))]
-        value = body[0].value if len(body) == 1 and isinstance(body[0], ast.Return) else None
+        if (not body or not isinstance(body[-1], ast.Return)
+                or any(isinstance(part, (ast.FunctionDef, ast.AsyncFunctionDef,
+                                         ast.Lambda, ast.ClassDef, ast.Yield, ast.YieldFrom))
+                       for statement in body for part in ast.walk(statement))):
+            return None
+        values = [part.value for statement in body for part in ast.walk(statement)
+                  if isinstance(part, ast.Return)]
     elif isinstance(node, ast.Expr) and isinstance(node.value, ast.Lambda):
-        value = node.value.body
+        values = [node.value.body]
     else:
         return None
-    if not (isinstance(value, ast.Call) and len(value.args) == 2
-            and not value.keywords and isinstance(value.func, ast.Attribute)
-            and value.func.attr == 'key' and isinstance(value.func.value, ast.Name)
-            and value.func.value.id == 'lookup'):
-        return None
-    table = value.args[0]
-    if not (isinstance(table, ast.Call) and not table.args and not table.keywords
-            and isinstance(table.func, ast.Attribute)
-            and isinstance(table.func.value, ast.Name)
-            and table.func.value.id == 'data'):
-        return None
-    return table.func.attr
+    tables = []
+    for value in values:
+        if not (isinstance(value, ast.Call) and len(value.args) == 2
+                and not value.keywords and isinstance(value.func, ast.Attribute)
+                and value.func.attr == 'key' and isinstance(value.func.value, ast.Name)
+                and value.func.value.id == 'lookup'):
+            return None
+        table = value.args[0]
+        if not (isinstance(table, ast.Call) and not table.args and not table.keywords
+                and isinstance(table.func, ast.Attribute)
+                and isinstance(table.func.value, ast.Name)
+                and table.func.value.id == 'data'):
+            return None
+        tables.append(table.func.attr)
+    return tables[0] if tables and len(set(tables)) == 1 else None
 
 
 def from_mx2cy_trace(logger, source_manifest, *, space='Projection'):
