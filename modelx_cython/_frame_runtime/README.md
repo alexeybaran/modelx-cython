@@ -24,19 +24,27 @@ still uses a toolkit-only scalar Cell and the retained
 formula/type specification to check performance. Neither route is an accepted
 compiler implementation or proof of general exported-package compatibility.
 
-The validated DV01/CS01 demo remains a connected-Space integration gap: it has
-separate `Actual`, `Valuation`, and `Outer` Spaces, dynamic per-policy
-references, time-indexed `sum` and `individual` results, and a nested
-`Actual.collect()` dependency. Separate toolkit probes compile `Actual` and
-`Valuation` with their original Cell formulas. The collect domain now selects
-the policy parameter by name, even when another required Space parameter
-precedes it. An importer of such a Space supplies an internal initial value
-through `parameter_initial_values`; the public argument stays required.
-Prepared Valuation rows can use detached output from compiled `Actual`.
-Seven-policy and 105-policy probes match the retained DV01 fixtures across
-all three years and eight valuation scenarios per year. The 105-policy check
-is correctness validation, not a frame timing. A generated package that
-connects both frame Spaces and compiles `Outer` remains to be implemented.
+The DV01/CS01 integration compiles its original `Actual`, `Valuation`, and
+`Outer` Cell formulas as separate native artifacts. `load_connected` wires
+their declared Space references in verified source-graph order;
+`assemble_connected_package` copies them into one importable package with
+source, Data, and native-binary hashes. The package shell loads and wires the
+Spaces; it does not interpret Cell formulas. The collect domain selects the
+policy parameter by name, even when another required Space parameter precedes
+it. An importer supplies that parameter's internal initial value through
+`parameter_initial_values`; the public argument stays required. Prepared
+Valuation rows can use detached output from compiled `Actual`.
+
+The seven-policy fixture and 105-policy compiled scaling check match all
+three years and eight valuation scenarios per year, including the nested
+`Actual.collect()` dependency and time-indexed `sum`/`individual` outputs.
+The package still names the exported Python `ScenarioInputs` Space and the
+rediscount helper as external providers. Building the three artifacts and
+choosing their source-specific input preparation remain separate steps; the
+standard `mx2cy --frame-collect` command still builds one Space. A paired
+single-run timing found no established calculation speed change from package
+assembly. Its 105-policy cost is a connected-calculation question, not a
+package-import optimization result.
 
 Windows portability edits in this snapshot are limited to UTF-8 generated
 source reads/writes and a package-local generated facade import. The toolkit
