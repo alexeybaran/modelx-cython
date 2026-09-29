@@ -305,7 +305,7 @@ class CompiledKernel:
             raise ContractError('Shared scope requires a mixed artifact')
         return _EvaluationScope(self, policy)
 
-    def fork_item(self, policy=0, **parameters):
+    def fork_item(self, policy=0, *, input_overrides=None, **parameters):
         """Own one ItemSpace cache, sharing immutable tables with the parent.
 
         No repacking, formula reconstruction or second Python result cache. Each
@@ -320,6 +320,14 @@ class CompiledKernel:
             infos = self.manifest['inputs']
             record = dict(zip(infos, self._records[policy]))
             for name, value in parameters.items():
+                record[name] = self._scalar_value(name, infos[name], value, record)
+            overrides = dict(input_overrides or {})
+            eligible = {name for name, binding in
+                        self.manifest.get('model', {}).get('bindings', {}).items()
+                        if binding['kind'] == 'row_reference'}
+            if set(overrides) - eligible:
+                raise ContractError('ItemSpace input overrides must be row references')
+            for name, value in overrides.items():
                 record[name] = self._scalar_value(name, infos[name], value, record)
             child = object.__new__(type(self))
             for name in ('artifact', 'manifest', '_lookups', '_module'):

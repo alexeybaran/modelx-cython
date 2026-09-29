@@ -319,12 +319,19 @@ def test_compiled_source_space_formula_uses_explicit_connected_references(tmp_pa
                 'Actual': {}, 'ScenarioInputs': {}})
         with pytest.raises(ContractError, match='bindings differ'):
             model._space_formula_refs(3, 2, bindings={'Actual': {2: 20}})
+        direct = model.Valuation[3, 1]
+        assert direct.curve == (0.1, 0.2)
+        assert direct.row_amount() == 9.0
+        direct_context = direct._context
+        assert model.Valuation[3, 1] is direct
         first = model.Valuation.collect(3)
         assert first.sum.row_amount == 28.0
         assert model.Valuation.collect(3) is first
         assert model.Valuation.collect(3, 0).sum.row_amount == 30.0
         assert model.Valuation.collect(3) is first
-        assert model.Valuation[3, 1].curve == (0.1, 0.2)
+        assert direct._context is direct_context
+        assert direct.row_amount() == 9.0
+        assert model.Valuation[3, 1, 0].row_amount() == 10.0
         with pytest.raises(KeyError):
             model.Valuation.collect(99)
         assert model.Valuation.collect(3) is first
@@ -340,6 +347,13 @@ def test_compiled_source_space_formula_uses_explicit_connected_references(tmp_pa
         model._space_bindings['Actual'] = connected['Actual']
         assert model.Valuation.collect(3, 1).sum.row_amount == 32.0
         assert model.Valuation.collect(3) is first
+        connected['Actual'][1] = 11
+        connected['ScenarioInputs'][3] = (0.3, 0.4)
+        model.reset()
+        assert model.Valuation[3, 1] is direct
+        assert direct.curve == (0.3, 0.4)
+        assert direct.row_amount() == 10.0
+        assert model.Valuation.collect(3).sum.row_amount == 29.0
     finally:
         model.close()
 

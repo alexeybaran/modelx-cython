@@ -36,7 +36,8 @@ def _dtype(series):
 def derive_spec(module, tables, *, references, space_formula, outputs, steps, length,
                 scalar_outputs=(), cell_outputs=(), data_space='Data', projection='Projection',
                 allow_none=None, model_name=None, point_table=None, cython_objects=False,
-                row_references=None, point_parameter=None, parameter_initial_values=None):
+                row_references=None, point_parameter=None, parameter_initial_values=None,
+                reference_types=None):
     """Build a kernel contract without author INPUTS/FRONTEND maps.
 
     Supported structure: one Data Space with zero-argument DataFrame Cells and
@@ -76,6 +77,10 @@ def derive_spec(module, tables, *, references, space_formula, outputs, steps, le
             raise ContractError('Manifest defaults must be JSON values; bind complex Data through Data Cells') from None
     if set(references) & set(signature.parameters):
         raise ContractError('Space parameters and references must have distinct names')
+    reference_types = dict(reference_types or {})
+    if set(reference_types) - set(references) or any(
+            value is not object for value in reference_types.values()):
+        raise ContractError('Only declared object reference types are supported')
     import numpy as np
     for table, frame in tables.items():
         allowed = (pd.DataFrame, pd.Series, np.ndarray) if cython_objects else (pd.DataFrame,)
@@ -282,7 +287,8 @@ def derive_spec(module, tables, *, references, space_formula, outputs, steps, le
     for name, value in {**references, **defaults}.items():
         if name not in used: continue
         domain = key_demands.get(('parameter', name))
-        typ = TableKey(domains[domain], value if type(value) is int and value < 0 else None) if domain else type(value)
+        typ = (TableKey(domains[domain], value if type(value) is int and value < 0 else None)
+               if domain else reference_types.get(name, type(value)))
         add(name, typ, dict(kind='parameter' if name in defaults else 'reference', name=name))
     # Domain annotations name public Data Cells, not generated storage names.
     clone = types.ModuleType(module.__name__)

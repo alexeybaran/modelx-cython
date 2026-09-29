@@ -171,15 +171,25 @@ class _DataSpace(DataView):
 
 
 class _ItemSpace:
-    def __init__(self, space, arguments):
+    def __init__(self, space, arguments, dynamic_refs=None):
         self._space, self._arguments = space, arguments
+        self._dynamic_refs = dict(dynamic_refs or {})
         self._context = None
         self._entries = {}
+
+    def _ensure_dynamic_refs(self):
+        if self._dynamic_refs is None:
+            model = self._space._model
+            self._dynamic_refs = (model._space_formula_refs(
+                bindings=model._space_bindings, **self._arguments)
+                if model._space_bindings is not None else {})
 
     def __getattr__(self, name):
         model = self._space._model
         model._require_open()
         if name in self._arguments: return self._arguments[name]
+        self._ensure_dynamic_refs()
+        if name in self._dynamic_refs: return self._dynamic_refs[name]
         if name in model._references: return model._references[name]
         if name in model._plan.get('row_references', {}):
             point = self._arguments[model._plan['point_parameter']]
@@ -205,8 +215,12 @@ class _ItemSpace:
             point = self._arguments[model._plan['point_parameter']]
             if point not in model._positions: raise KeyError(point)
             if self._context is None:
+                self._ensure_dynamic_refs()
                 params = {n: v for n, v in self._arguments.items() if n in model.manifest['parameters']}
-                self._context = model._kernel.fork_item(model._positions[point], **params)
+                row_inputs = {name: value for name, value in self._dynamic_refs.items()
+                              if name in model.manifest['inputs']}
+                self._context = model._kernel.fork_item(
+                    model._positions[point], input_overrides=row_inputs, **params)
             model._active += 1
             try:
                 result = self._context.call(name, *args, **kwargs)
@@ -255,7 +269,10 @@ class _ProjectionSpace:
             point = bound.arguments[model._plan['point_parameter']]
             if point not in model._positions: raise KeyError(point)
             key = tuple(bound.arguments.values())
-            if key not in self._items: self._items[key] = _ItemSpace(self, dict(bound.arguments))
+            if key not in self._items:
+                refs = (model._space_formula_refs(bindings=model._space_bindings,
+                        **bound.arguments) if model._space_bindings is not None else None)
+                self._items[key] = _ItemSpace(self, dict(bound.arguments), refs)
             return self._items[key]
 
     def collect(self, *args, **kwargs):
@@ -366,6 +383,10 @@ class CompiledModel:
         self._collect_cache = {}
         self._references = {**self._plan['reference_defaults'], **dict(overrides or {})}
         if set(self._references) != set(self._plan['reference_defaults']): raise ContractError('Unknown reference')
+        missing = [name for name in self._plan.get('required_object_bindings', ())
+                   if self._references[name] is None]
+        if missing:
+            raise ContractError('Missing connected object references: ' + repr(missing))
         self._tables = self._derive_tables(self._snapshot(tables))
         self._packed = pack_tables(self._plan, self._tables)
         records = prepare_inputs(self.manifest, self._tables, references=self._references,
@@ -465,7 +486,9 @@ class CompiledModel:
             for name, value in refs.items():
                 frame.at[point, columns[name]] = value
         retained = dict(self._collect_cache)
-        self._set_table(point_table, frame)
+        tables = {**self._tables, point_table: frame}
+        self._commit(tables, self._references,
+                     pack_tables(self._plan, tables), preserve_item_contexts=True)
         self._collect_cache.update(retained)
         self._connected_context_key = key
 
@@ -492,7 +515,7 @@ class CompiledModel:
             rows.append({n: row[n] for n in required})
         return rows
 
-    def _commit(self, tables, refs, packed):
+    def _commit(self, tables, refs, packed, *, preserve_item_contexts=False):
         records = prepare_inputs(self.manifest, tables, references=refs,
                                  packed=packed, prepared=True)
         self._kernel.bind(records, python_bindings=self._bindings(tables, refs))
@@ -500,7 +523,10 @@ class CompiledModel:
         self._collect_cache.clear()
         self._connected_context_key = None
         self._positions = {key: i for i, key in enumerate(tables[self._plan['point_table']].index)}
-        for item in self._projection._items.values(): item._context = None
+        if not preserve_item_contexts:
+            for item in self._projection._items.values():
+                item._context = None
+                item._dynamic_refs = None
 
     def _set_table(self, name, value):
         with self._lock:
@@ -518,7 +544,9 @@ class CompiledModel:
                 self._kernel.update_inputs(**{name: value})
             self._references = {**self._references, name: value}
             self._collect_cache.clear()
-            for item in self._projection._items.values(): item._context = None
+            for item in self._projection._items.values():
+                item._context = None
+                item._dynamic_refs = None
 
     def reset(self):
         """Clear compiled caches while retaining input packing and ItemSpace storage."""
@@ -528,7 +556,11 @@ class CompiledModel:
             self._collect_cache.clear()
             self._connected_context_key = None
             for item in self._projection._items.values():
-                if item._context is not None: item._context.reset()
+                if self._space_bindings is not None:
+                    item._context = None
+                    item._dynamic_refs = None
+                elif item._context is not None:
+                    item._context.reset()
 
     def close(self):
         with self._lock:

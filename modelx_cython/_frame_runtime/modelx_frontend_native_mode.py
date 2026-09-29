@@ -73,7 +73,7 @@ def _collect_sum_plan(space, point, point_table):
 def from_modelx(model, destination, *, projection='Projection', data_space='Data',
                 point_table=None, steps=2048, replacements=None, contracts=None, signatures=None,
                 cython_objects=True, policy_records=None, row_references=None,
-                parameter_initial_values=None):
+                parameter_initial_values=None, object_bindings=()):
     """Derive a self-contained build spec; destination stores source evidence only.
 
     replacements is an explicit mapping of Cell names to replacement formula source.
@@ -83,6 +83,8 @@ def from_modelx(model, destination, *, projection='Projection', data_space='Data
     row_references maps formula reference names to its object-valued columns.
     parameter_initial_values supplies internal initial values for required
     non-policy Space parameters; callers must still pass those parameters.
+    object_bindings names declared references supplied by a connected model
+    at load time, rather than serialized into the generated package.
     Dynamic Space formulas are compiled from their original source with
     explicit references. They are not executed at build time.
     Connected Space preparation is not inferred by this flat importer.
@@ -93,6 +95,7 @@ def from_modelx(model, destination, *, projection='Projection', data_space='Data
     space=getattr(model,projection)
     data=getattr(model,data_space,None)
     row_references=dict(row_references or {})
+    object_bindings=frozenset(object_bindings)
     parameters=tuple(space.parameters or ())
     if space.spaces:
         raise ContractError('Live importer requires a flat Projection Space without children')
@@ -153,6 +156,9 @@ def from_modelx(model, destination, *, projection='Projection', data_space='Data
         tables[point_table]=policy_records
     from .lookups import power as kernel_power
     modules={}; refs={}; object_references={}; intrinsic_references={}; enum_references={}
+    reference_types={}
+    if object_bindings - space.refs.keys():
+        raise ContractError('Unknown connected object reference')
     cell_loads = {node.id for fn in space.cells.values()
                   for node in ast.walk(ast.parse(fn.formula.source))
                   if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load)}
@@ -160,7 +166,10 @@ def from_modelx(model, destination, *, projection='Projection', data_space='Data
         if name in parameters or name in ('data','_model','_space','__builtins__'):continue
         if name in row_references:continue
         if name not in cell_loads:continue
-        if isinstance(value,types.ModuleType):modules[name]=value
+        if name in object_bindings:
+            refs[name]=None
+            reference_types[name]=object
+        elif isinstance(value,types.ModuleType):modules[name]=value
         elif inspect.isclass(value) and issubclass(value, IntEnum):
             # model_plan has first-class IntEnum domain lowering for category/key
             # helpers. Preserve the symbolic class in the detached formula module.
@@ -296,9 +305,10 @@ def from_modelx(model, destination, *, projection='Projection', data_space='Data
         allow_none={n:effective_allow_none(c) for n,c in space.cells.items()},
         model_name=model.name,cython_objects=cython_objects,
         row_references=row_references,point_parameter=point,
-        parameter_initial_values=initial)
+        parameter_initial_values=initial,reference_types=reference_types)
     spec.model.update(static_projection=static,object_references=object_references,
-                      module_references={name: value.__name__ for name, value in modules.items()})
+                      module_references={name: value.__name__ for name, value in modules.items()},
+                      required_object_bindings=sorted(reference_types))
     if space.formula is not None:
         graph = getattr(model, 'source_graph', None)
         name = model.name + '.' + projection
