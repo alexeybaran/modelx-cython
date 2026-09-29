@@ -130,11 +130,12 @@ Those exclusions avoid changing Python integer overflow/unbound behavior.
 
 class Edges(ast.NodeTransformer):
     def __init__(self, cls, selected, native_keys=None, indexed=(), compact=(),
-                 compact_argument='_mx_owner'):
+                 compact_argument='_mx_owner', compact_self=True):
         self.cls, self.selected = cls, selected
         self.native_keys,self.indexed=native_keys,indexed
         self.compact = compact
         self.compact_argument = compact_argument
+        self.compact_self = compact_self
 
     def visit_Call(self, node):
         node = self.generic_visit(node)
@@ -144,7 +145,9 @@ class Edges(ast.NodeTransformer):
             extra=self.native_keys.extras(node.func.attr,args) if self.native_keys and node.func.attr in self.indexed else []
             if node.func.attr in self.compact:
                 direct = ast.Call(expr('_mx_ctx_hot' + self.cls + '_' + node.func.attr),
-                                  [expr('self'), *args, expr(self.compact_argument)], [])
+                                  ([expr('self'), *args, expr(self.compact_argument)]
+                                   if self.compact_self else
+                                   [expr(self.compact_argument), *args]), [])
             else:
                 direct = ast.Call(expr('_mx_n' + self.cls + '_' + node.func.attr),
                                   [expr('self'), *args, expr('True'), expr('True'), *extra], [])
@@ -242,7 +245,7 @@ if _mx_exact:
 
 
 def raw_context_pair(cls_name, name, owner, arrays, public, formula, body,
-                     cached, locals_types):
+                     cached, locals_types, scalar_types=None):
     """Diagnostic: carry raw cache pointers across connected numeric entries.
 
     The ordinary Space still owns the cache. This deliberately does not refresh
@@ -250,6 +253,7 @@ def raw_context_pair(cls_name, name, owner, arrays, public, formula, body,
     """
     args = ', '.join(a.arg for a in public.args.args[1:])
     params = ('self, ' + args + ', ') if args else 'self, '
+    frame_entry = scalar_types is not None
     ctx_type = '_mx_ctx' + cls_name
     ctx_arg = f'_mx_cy.pointer({ctx_type})'
     calc_name = '_mx_ctx_calc' + cls_name + '_' + name
@@ -269,8 +273,12 @@ def raw_context_pair(cls_name, name, owner, arrays, public, formula, body,
 
     hot = copy.deepcopy(formula)
     hot.name = hot_name
-    hot.args.args[0].annotation = expr(cls_name)
-    hot.args.args.append(ast.arg('_mx_ctx', expr(ctx_arg)))
+    if frame_entry:
+        hot.args.args = [ast.arg('_mx_ctx', expr(ctx_arg)),
+                         *hot.args.args[1:]]
+    else:
+        hot.args.args[0].annotation = expr(cls_name)
+        hot.args.args.append(ast.arg('_mx_ctx', expr(ctx_arg)))
     hot.decorator_list = [expr('_mx_cy.cfunc'), expr('_mx_cy.inline'),
                           expr('_mx_cy.exceptval(-1, check=True)'),
                           expr('_mx_cy.locals(_mx_value=' + typed(public) + ')')]
@@ -288,7 +296,17 @@ _mx_ctx.has_{name}[{index}] = True
 return _mx_value
 '''
     else:
-        hot_source = f'''
+        if frame_entry:
+            hot_source = f'''
+if _mx_ctx.has_{name}[0]:
+    return _mx_ctx.value_{name}[0]
+_mx_value = {calc_name}({params}_mx_ctx, True)
+_mx_ctx.value_{name}[0] = _mx_value
+_mx_ctx.has_{name}[0] = True
+return _mx_value
+'''
+        else:
+            hot_source = f'''
 if self._has_{name}:
     return self._v_{name}
 _mx_value = {calc_name}({params}_mx_ctx, True)
@@ -296,6 +314,11 @@ self._v_{name} = _mx_value
 self._has_{name} = True
 return _mx_value
 '''
+    if frame_entry:
+        receiver = f'_mx_cy.cast({cls_name}, _mx_ctx.space)'
+        hot_source = hot_source.replace(
+            f'{calc_name}({params}_mx_ctx, True)',
+            f'{calc_name}({receiver}, ' + (args + ', ' if args else '') + '_mx_ctx, True)')
     hot.body = ast.parse(hot_source).body
 
     setup = f'''
@@ -305,12 +328,22 @@ if _mx_exact:
     _mx_owner = self._mx_native
     _mx_ctx.values = _mx_owner.values
 '''
+    if frame_entry:
+        setup += '    _mx_ctx.space = _mx_cy.cast(_mx_cy.p_void, self)\n'
     for array_name in arrays:
         setup += (f'    _mx_ctx.has_{array_name} = '
                   f'_mx_cy.address(_mx_owner._has_{array_name}[0])\n')
+    if frame_entry:
+        for scalar_name in scalar_types:
+            setup += (f'    _mx_ctx.has_{scalar_name} = '
+                      f'_mx_cy.address(self._has_{scalar_name})\n')
+            setup += (f'    _mx_ctx.value_{scalar_name} = '
+                      f'_mx_cy.address(self._v_{scalar_name})\n')
+    hot_call = (f'_mx_cy.address(_mx_ctx)' + (', ' + args if args else '')
+                if frame_entry else params + '_mx_cy.address(_mx_ctx)')
     setup += f'''
     if _mx_cached:
-        return {hot_name}({params}_mx_cy.address(_mx_ctx))
+        return {hot_name}({hot_call})
     return {calc_name}({params}_mx_cy.address(_mx_ctx), True)
 '''
     wrapper = ast.parse(setup).body + [ast.If(expr('_mx_cached'), cached, []),
@@ -488,10 +521,16 @@ class {name}:
     return py, pxd
 
 
-def raw_context_declaration(cls_name, owner, arrays):
+def raw_context_declaration(cls_name, owner, arrays, scalar_types=None):
     name = '_mx_ctx' + cls_name
     fields = [f'cdef struct {name}:', f'    {owner}_values* values']
+    if scalar_types is not None:
+        fields.append('    void* space')
     fields.extend(f'    unsigned char* has_{array_name}' for array_name in arrays)
+    if scalar_types is not None:
+        for scalar_name, scalar_type in scalar_types.items():
+            fields.append(f'    bint* has_{scalar_name}')
+            fields.append(f'    {NUMERIC[scalar_type]}* value_{scalar_name}')
     return '\n'.join(fields) + '\n'
 
 
@@ -500,6 +539,8 @@ def transform(source, declarations, module, path):
     connected = os.environ.get('MX_CY_CONNECTED_NATIVE', '1') == '1'
     compact_context = os.environ.get('MX_CY_COLLECT_COMPACT_CONTEXT', '0') == '1'
     raw_context = os.environ.get('MX_CY_COLLECT_RAW_CONTEXT', '0') == '1'
+    frame_entry = os.environ.get('MX_CY_COLLECT_FRAME_ENTRY', '0') == '1'
+    raw_context = raw_context or frame_entry
     compact_context = compact_context or raw_context
     if connected:
         from .connected_categories import Categories, NativeKeys, key_parameters, use_precomputed_keys, SUPPORT as CATEGORY_SUPPORT
@@ -559,11 +600,13 @@ def transform(source, declarations, module, path):
                                for a in methods[n].args.args[1:])
                        and not any(isinstance(x, (ast.Try, ast.TryStar, ast.With))
                                    for x in ast.walk(methods['_f_' + n]))}
+        scalar_types = {n: references['_v_' + n] for n in compact if n not in arrays}
         owner = '_mx_store' + cls.name
         if arrays:
             py, pxd = owner_source(owner, arrays)
             if raw_context:
-                pxd += '\n' + raw_context_declaration(cls.name, owner, arrays)
+                pxd += '\n' + raw_context_declaration(
+                    cls.name, owner, arrays, scalar_types if frame_entry else None)
             owners.append(py); owner_pxd.append(pxd)
             declarations = declarations.replace(f'cdef class {cls.name}(', f'cdef class {cls.name}(', 1)
             marker = next(line for line in declarations.splitlines() if line.startswith(f'cdef class {cls.name}('))
@@ -611,7 +654,8 @@ def transform(source, declarations, module, path):
             if native_keys:native_keys.begin_formula()
             formula_body = [Edges(cls.name, selected, native_keys, indexed,
                                   compact if n in compact else (),
-                                  '_mx_ctx' if raw_context else '_mx_owner').visit(s)
+                                  '_mx_ctx' if raw_context else '_mx_owner',
+                                  not frame_entry).visit(s)
                             for s in formula.body]
             data_reads = DataReads(references, classes)
             formula_body = [data_reads.visit(s) for s in formula_body]
@@ -656,7 +700,8 @@ def transform(source, declarations, module, path):
                 if raw_context:
                     calc, hot, wrapper, wrapper_locals = raw_context_pair(
                         cls.name, n, owner, arrays, public, formula,
-                        formula_body, cached, locals_types)
+                        formula_body, cached, locals_types,
+                        scalar_types if frame_entry else None)
                     locals_types.update(wrapper_locals)
                 else:
                     calc, hot, wrapper = compact_pair(
