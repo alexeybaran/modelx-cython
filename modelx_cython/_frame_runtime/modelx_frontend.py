@@ -106,7 +106,7 @@ def from_modelx(model, destination, *, projection='Projection', data_space='Data
         if not isinstance(node,ast.FunctionDef) or node.name!=name:
             raise ContractError('Formula must be a named definition or a top-level lambda: '+name)
         chunks.append(chosen)
-    path=dest/'formulas.py';path.write_text('\n\n'.join(chunks)+'\n')
+    path=dest/'formulas.py';path.write_text('\n\n'.join(chunks)+'\n', encoding='utf-8')
     module_name='_mxcf_formula_'+hashlib.sha256(path.read_bytes()).hexdigest()[:16]
     module=types.ModuleType(module_name);module.__file__=str(path)
     module.__dict__.update(modules)
@@ -115,7 +115,7 @@ def from_modelx(model, destination, *, projection='Projection', data_space='Data
     from . import lookup
     module.lookup = lookup
     # Do not bake point selectors, reference defaults or modelx objects into globals.
-    exec(compile(path.read_text(),str(path),'exec'),module.__dict__)
+    exec(compile(path.read_text(encoding='utf-8'),str(path),'exec'),module.__dict__)
     sys.modules[module_name]=module
     for name in space.cells:
         fn=module.__dict__[name]; cell(fn)
@@ -137,7 +137,7 @@ def from_modelx(model, destination, *, projection='Projection', data_space='Data
               'lambda_cells_normalized':normalized,
               'space_parameters':list(parameters),
               'parameter_defaults':({p.name:p.default for p in list(space_signature.parameters.values())[1:]} if space_signature else {})}
-    (dest/'frontend.json').write_text(json.dumps(evidence,indent=2))
+    (dest/'frontend.json').write_text(json.dumps(evidence,indent=2), encoding='utf-8')
     def effective_allow_none(obj):
         while obj is not None:
             value=getattr(obj,'allow_none',None)
