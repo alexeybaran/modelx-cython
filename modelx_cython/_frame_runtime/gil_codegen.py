@@ -22,6 +22,9 @@ def augment(source, manifest, spec, forced_python=()):
     signatures = checked_signatures(spec, rows)
     typed_fields = spec.typed_mapping_inputs or {}
     numeric = {n for n,h in signatures.items() if h['return'] in ('int','float','bool')}
+    native_numeric = {n for n in numeric
+                      if rows[n].get('calculator') == 'native'}
+    native_called = set()
     curve_cells={n for n,h in signatures.items() if h['return']=='curve'}
     bodies, globals_, tables_ = {}, set(), set()
     from .coverage import cython_fallback_reasons
@@ -119,6 +122,9 @@ def augment(source, manifest, spec, forced_python=()):
                 args = [self.visit(v) if isinstance(v, ast.AST) else ast.Constant(v) for v in bound.arguments.values()]
                 if name in curve_cells:
                     return ast.copy_location(ast.Call(ast.Attribute(ast.Name('self',ast.Load()), '_object_cell_'+name, ast.Load()), args, []), node)
+                if name in native_numeric:
+                    native_called.add(name)
+                    return ast.copy_location(ast.Call(ast.Attribute(ast.Name('self',ast.Load()), '_native_cell_'+name, ast.Load()), args, []), node)
                 if name in numeric:
                     return ast.copy_location(ast.Call(ast.Attribute(ast.Name('self',ast.Load()), '_typed_cell_'+name, ast.Load()), args, []), node)
                 if name in objects:
@@ -170,6 +176,18 @@ def augment(source, manifest, spec, forced_python=()):
         source=source.replace(f'value = self._object_fn_{name}(',f'value = self._gil_formula_{name}(')
         source=source.replace(f"            if self._python_scope.diagnostics:\n                self._python_scope.calls[{name!r}] += 1\n", '')
         rows[name]['calculator']='cython_object'
+    for name in sorted(native_called):
+        hint = signatures[name]
+        params = rows[name]['params']
+        typed = ', '.join(CTYPES[hint['parameters'][p['name']]] + ' ' + p['name']
+                          for p in params)
+        args = ', '.join(p['name'] for p in params)
+        methods.extend((
+            f"    cdef inline {CTYPES[hint['return']]} _native_cell_{name}(self"
+            + (', ' + typed if typed else '') + ') except? -1:',
+            f"        return _cell_{name}(&self._frame" + (', ' + args if args else '') + ')',
+            '',
+        ))
     manifest['curve_result_conversion'] = 'once on memo miss; one owned native Curve value'
     manifest['numeric_array_builders'] = 0
     manifest['numeric_buffer_backend'] = 'standard Cython declarations and memoryviews'
@@ -267,7 +285,9 @@ def augment(source, manifest, spec, forced_python=()):
         hot += [f'            return <{ct}>self._object_singleton_{name}',
                 f'        return self._object_compute_{name}()', '']
     source += '\n' + '\n'.join(hot) + '\n'
-    if signatures:
+    memo_signatures = {name: hint for name, hint in signatures.items()
+                       if name in objects}
+    if memo_signatures:
         from .typed_memo_codegen import augment as typed_augment
-        source=typed_augment(source,manifest,spec,signatures,bodies)
+        source=typed_augment(source,manifest,spec,memo_signatures,bodies)
     return source

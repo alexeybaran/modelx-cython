@@ -70,11 +70,15 @@ class FrontendRewrite(ast.NodeTransformer):
     combination is declared in ``KernelSpec.frontend`` and maps to an already typed
     physical input. Formula control flow remains untouched and is compiled by Cython.
     """
-    def __init__(self, frontend, inputs, *, integer_names=(), integer_cells=()):
+    def __init__(self, frontend, inputs, *, integer_names=(), integer_cells=(),
+                 global_names=()):
         self.frontend = frontend or {}
         self.inputs = inputs
         self.integer_names = set(integer_names)
         self.integer_cells = set(integer_cells)
+        self.global_names = set(global_names)
+        self.native_fields = self.frontend.get('native_mapping_fields', {})
+        self.native_direct = self.frontend.get('native_direct_inputs', {})
 
     def _integer_index(self, node):
         """Admit only typed integral indexing; float-to-int casts change NumPy semantics."""
@@ -128,6 +132,36 @@ class FrontendRewrite(ast.NodeTransformer):
 
     def visit_Subscript(self, node):
         if isinstance(node.ctx, ast.Load):
+            if (isinstance(node.value, ast.Subscript)
+                    and isinstance(node.value.value, ast.Name)
+                    and isinstance(node.value.slice, ast.Constant)
+                    and type(node.value.slice.value) is str):
+                owner = node.value.value.id
+                field = node.value.slice.value
+                physical = self.native_fields.get(owner, {}).get(field)
+                if physical is not None and owner in self.global_names:
+                    if self.inputs[physical] is not IndexedFloat1:
+                        raise ContractError('Only a declared numeric array can be indexed')
+                    if not self._integer_index(node.slice):
+                        raise ContractError('Native numeric arrays need an integral index')
+                    return ast.copy_location(ast.Call(
+                        ast.Attribute(ast.Name(physical, ast.Load()), 'get', ast.Load()),
+                        [self.visit(node.slice)], []), node)
+            if isinstance(node.value, ast.Name):
+                owner = node.value.id
+                if owner in self.global_names and isinstance(node.slice, ast.Constant):
+                    physical = self.native_fields.get(owner, {}).get(node.slice.value)
+                    if physical is not None and self.inputs[physical] is float:
+                        return ast.copy_location(ast.Name(physical, ast.Load()), node)
+                physical = self.native_direct.get(owner)
+                if physical is not None and owner in self.global_names:
+                    if self.inputs[physical] is not IndexedFloat1:
+                        raise ContractError('Only a declared numeric array can be indexed')
+                    if not self._integer_index(node.slice):
+                        raise ContractError('Native numeric arrays need an integral index')
+                    return ast.copy_location(ast.Call(
+                        ast.Attribute(ast.Name(physical, ast.Load()), 'get', ast.Load()),
+                        [self.visit(node.slice)], []), node)
             table = self._data_table(node.value)
             physical = self.frontend.get('arrays', {}).get(table)
             if physical is not None:
@@ -140,6 +174,14 @@ class FrontendRewrite(ast.NodeTransformer):
                     ast.Attribute(ast.Name(physical, ast.Load()), 'get', ast.Load()),
                     [self.visit(index) for index in indices], []), node)
         return self.generic_visit(node)
+
+    def visit_Name(self, node):
+        if (isinstance(node.ctx, ast.Load) and node.id in self.global_names
+                and node.id in self.native_direct):
+            physical = self.native_direct[node.id]
+            if self.inputs[physical] is float:
+                return ast.copy_location(ast.Name(physical, ast.Load()), node)
+        return node
 
     def visit_Call(self, node):
         helper = self._lookup_name(node.func)
@@ -394,9 +436,23 @@ def emit(spec, *, diagnostics=False, python_cells=()):
                                if p.annotation is int)
             index_cells = {name for name, fn in cells.items()
                            if inspect.signature(fn).return_annotation is int}
-            parsed[k] = ast.fix_missing_locations(FrontendRewrite(
+            rewrite = FrontendRewrite(
                 spec.frontend, spec.inputs, integer_names=index_names,
-                integer_cells=index_cells).visit(copy.deepcopy(node)))
+                integer_cells=index_cells, global_names=cells[k].__code__.co_names)
+            # This is index-type propagation, not evaluation of the formula.
+            # Cython remains responsible for its local types and arithmetic.
+            changed = True
+            while changed:
+                changed = False
+                for assignment in ast.walk(node):
+                    if (isinstance(assignment, ast.Assign)
+                            and len(assignment.targets) == 1
+                            and isinstance(assignment.targets[0], ast.Name)
+                            and rewrite._integer_index(assignment.value)
+                            and assignment.targets[0].id not in rewrite.integer_names):
+                        rewrite.integer_names.add(assignment.targets[0].id)
+                        changed = True
+            parsed[k] = ast.fix_missing_locations(rewrite.visit(copy.deepcopy(node)))
         except ContractError as exc:
             parsed[k] = node
             python_reasons[k] = str(exc)
@@ -438,8 +494,11 @@ def emit(spec, *, diagnostics=False, python_cells=()):
             python_reasons[k] = 'Python object argument/result contract'
         elif all_dependencies[k] & object_cells:
             python_reasons[k] = 'Consumes a Python-object Cell contract'
-        elif any(type_info(spec.inputs[n])['kind'] == 'object'
-                 for n in cells[k].__code__.co_names if n in spec.inputs):
+        elif any(isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load)
+                 and n.id in cells[k].__code__.co_names
+                 and n.id in spec.inputs
+                 and type_info(spec.inputs[n.id])['kind'] == 'object'
+                 for n in ast.walk(parsed[k])):
             python_reasons[k] = 'Consumes a Python-object input'
     for expr in exprs:
         if any(isinstance(n, ast.Call) and isinstance(n.func, ast.Name)

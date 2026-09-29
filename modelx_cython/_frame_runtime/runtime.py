@@ -100,15 +100,33 @@ class CompiledKernel:
         rows = prepared.rows
         if not rows:
             raise ContractError('At least one policy is required')
-        first = self._validate([rows[0]])[0]
         infos = self.manifest['inputs']
         varying = [(position, key, ti) for position, (key, ti) in
                    enumerate(infos.items()) if key not in prepared.fixed_names]
+        first_row = dict(rows[0])
+        native_varying = [(position, key, ti) for position, key, ti in varying
+                          if ti['kind'] in ('curve', 'curve_table', 'indexed_array')]
+        for _, key, ti in native_varying:
+            if ti['kind'] != 'indexed_array':
+                raise ContractError('Unexpected varying prepared curve input')
+            first_row[key] = _INDEXED_ARRAYS[ti['ctype']](first_row[key])
+        first = self._validate([first_row])[0]
         converted = [first]
+        shared_arrays = {}
         for record in rows[1:]:
             values = list(first)
             for position, key, ti in varying:
-                values[position] = self._scalar_value(key, ti, record[key], record)
+                if ti['kind'] == 'indexed_array':
+                    source = record[key]
+                    prior = shared_arrays.get(id(source))
+                    if prior is not None and prior[0] is source:
+                        values[position] = prior[1]
+                    else:
+                        wrapper = getattr(self._lookups, ti['ctype'])(source)
+                        shared_arrays[id(source)] = (source, wrapper)
+                        values[position] = wrapper
+                else:
+                    values[position] = self._scalar_value(key, ti, record[key], record)
             converted.append(tuple(values))
         return tuple(converted)
 

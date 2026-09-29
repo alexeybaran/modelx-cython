@@ -105,7 +105,7 @@ def prepare_inputs(manifest, tables, *, references=None, packed=None,
         kind = binding['kind']
         if kind in ('curve', 'curve_table', 'indexed_array'):
             continue
-        if kind in ('field', 'row_reference'):
+        if kind in ('field', 'row_reference', 'row_reference_numeric'):
             table = tables[binding['table']]
             if (table.index.is_unique and points.index.is_unique
                     and table.index.equals(points.index)):
@@ -130,6 +130,16 @@ def prepare_inputs(manifest, tables, *, references=None, packed=None,
         for name, info, binding, column in field_bindings:
             value = (column[position] if column is not None else
                      tables[binding['table']].at[point, binding['column']])
+            if binding['kind'] == 'row_reference_numeric':
+                field = binding['field']
+                if field is not None:
+                    try:
+                        value = value[field]
+                    except (KeyError, IndexError, TypeError) as exc:
+                        raise ContractError(name + ': missing numeric row field') from exc
+                # PreparedModelRows marks this as an internal binding. Its
+                # artifact-specific native wrapper is built once in runtime,
+                # avoiding a second array snapshot during validation.
             if info['kind'] == 'enum':
                 if isinstance(value, str):
                     try: value = info['members'][value.upper()]
