@@ -1,0 +1,787 @@
+"""Small, opt-in scalar-kernel emitter.
+
+It binds declared names/signatures, emits memo wrappers and bulk output loops,
+then delegates formula bodies to Cython. No pandas, category-flow, range, axis,
+or expression-type interpreter. Compilation is explicit and fail-closed.
+"""
+from pathlib import Path
+import ast
+import copy
+import hashlib
+import inspect
+import json
+import os
+import subprocess
+import sys
+import textwrap
+from enum import IntEnum
+from .contracts import ContractError, TableKey
+from .lookups import Curve, CurveTable, power
+
+
+_TYPES = {float: 'double', int: 'long long', bool: 'bint'}
+_BUILTINS = {'min', 'max', 'abs', 'int', 'float', 'bool', 'range', 'len',
+             'ValueError', 'KeyError', 'RuntimeError', 'IndexError', 'OverflowError',
+             'ArithmeticError', 'ZeroDivisionError'}
+_MATH = {'floor', 'ceil', 'sqrt', 'exp', 'log', 'log1p', 'expm1', 'fabs', 'isfinite'}
+
+
+def type_info(typ):
+    if isinstance(typ, TableKey):
+        return {"kind":"table_key", "ctype":"long long", "table":typ.table, "default":typ.default}
+    if typ is None:
+        typ = type(None)
+    if typ in (object, inspect.Signature.empty, str, bytes, tuple, list, dict, set, type(None)):
+        return {'kind': 'object', 'ctype': 'object',
+                'python_type': 'object' if typ is inspect.Signature.empty else typ.__name__}
+    if typ in _TYPES:
+        return {'kind': typ.__name__, 'ctype': _TYPES[typ]}
+    if typ in (Curve, CurveTable):
+        return {'kind': 'curve' if typ is Curve else 'curve_table', 'ctype': typ.__name__}
+    if inspect.isclass(typ) and issubclass(typ, IntEnum):
+        values = [int(x) for x in typ]
+        if values != list(range(len(values))) or len(values) != len(typ.__members__):
+            raise ContractError('Kernel IntEnums require unique contiguous values starting at zero')
+        return {'kind': 'enum', 'ctype': 'long long', 'name': typ.__name__,
+                'members': {k: int(v) for k, v in typ.__members__.items()}}
+    raise ContractError(f'Explicit scalar/Curve type required; received {typ!r}')
+
+
+def function_ast(fn):
+    node = ast.parse(textwrap.dedent(inspect.getsource(fn))).body[0]
+    node.decorator_list = []
+    return node
+
+
+class FrontendRewrite(ast.NodeTransformer):
+    """Lower the small author-facing ``lookup`` vocabulary to declared native inputs.
+
+    This is intentionally not a pandas interpreter. Every accepted table/column/helper
+    combination is declared in ``KernelSpec.frontend`` and maps to an already typed
+    physical input. Formula control flow remains untouched and is compiled by Cython.
+    """
+    def __init__(self, frontend, inputs):
+        self.frontend = frontend or {}
+        self.inputs = inputs
+
+    @staticmethod
+    def _data_table(node):
+        if (isinstance(node, ast.Call) and not node.args and not node.keywords
+                and isinstance(node.func, ast.Attribute)
+                and isinstance(node.func.value, ast.Name)
+                and node.func.value.id == 'data'):
+            return node.func.attr
+        return None
+
+    @staticmethod
+    def _literal_string(node, what):
+        if not isinstance(node, ast.Constant) or not isinstance(node.value, str):
+            raise ContractError(what + ' must be a literal string in native formulas')
+        return node.value
+
+    @staticmethod
+    def _lookup_name(node):
+        if (isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name)
+                and node.value.id == 'lookup'):
+            return node.attr
+        return None
+
+    def _physical_call(self, input_name, method, args, source):
+        if input_name not in self.inputs or self.inputs[input_name] not in (Curve, CurveTable):
+            raise ContractError(f'{source}: frontend mapping must target a Curve/CurveTable input')
+        return ast.copy_location(ast.Call(
+            ast.Attribute(ast.Name(input_name, ast.Load()), method, ast.Load()),
+            [self.visit(a) for a in args], []), source)
+
+    def visit_Call(self, node):
+        helper = self._lookup_name(node.func)
+        if helper is None:
+            return self.generic_visit(node)
+        if node.keywords:
+            raise ContractError('Native lookup helpers use positional arguments only')
+        if not node.args:
+            raise ContractError('Malformed lookup helper call')
+        table = self._data_table(node.args[0])
+        if table is None:
+            raise ContractError('Native lookup helper first argument must be data.<table>()')
+
+        if helper in ('field', 'category'):
+            if len(node.args) < 3:
+                raise ContractError(helper + ' requires table, key, column')
+            if self.frontend.get('point_parameter') and not (isinstance(node.args[1], ast.Name) and node.args[1].id == self.frontend['point_parameter']):
+                raise ContractError('Nonlocal row selection uses the Python calculator')
+            column = self._literal_string(node.args[2], 'lookup column')
+            try:
+                physical = self.frontend['fields'][table][column]
+            except KeyError as e:
+                raise ContractError(f'Undeclared model-point field lookup: {table}.{column}') from e
+            if physical not in self.inputs:
+                raise ContractError('Frontend field maps to undeclared input: ' + physical)
+            return ast.copy_location(ast.Name(physical, ast.Load()), node)
+
+        if helper == 'key':
+            if len(node.args) != 2:
+                raise ContractError('lookup.key requires table and label')
+            if table not in self.frontend.get('keys', {}):
+                raise ContractError('Undeclared table-key domain: ' + table)
+            return ast.copy_location(self.visit(node.args[1]), node)
+
+        if helper not in ('at', 'get', 'previous', 'previous_group', 'linear'):
+            raise ContractError('Unsupported native lookup helper: ' + helper)
+        column_index = 3 if helper == 'previous_group' else 2
+        if len(node.args) <= column_index:
+            raise ContractError('Malformed lookup.' + helper + ' call')
+        column = self._literal_string(node.args[column_index], 'lookup column')
+        try:
+            cfg = self.frontend['lookups'][table][column]
+        except KeyError as e:
+            raise ContractError(f'Undeclared native lookup: {helper}({table}.{column})') from e
+        if cfg.get('helper') != helper:
+            raise ContractError(f'{table}.{column}: expected lookup.{cfg.get("helper")}, got lookup.{helper}')
+
+        # A fixed literal group may lower to a dedicated Curve for maximum hot-path
+        # efficiency while the model still reads a normal MultiIndex table.
+        if 'fixed_groups' in cfg:
+            key = node.args[1]
+            if not isinstance(key, ast.Tuple) or len(key.elts) < 2:
+                raise ContractError('Fixed-group lookup requires a literal-group tuple key')
+            group = self._literal_string(key.elts[cfg.get('group_index', 0)], 'lookup group')
+            try:
+                physical = cfg['fixed_groups'][group]
+            except KeyError as e:
+                raise ContractError(f'Undeclared fixed lookup group {group!r}') from e
+            key_expr = key.elts[cfg.get('key_index', 1)]
+            extra = [node.args[3]] if helper == 'get' and len(node.args) > 3 else []
+            return self._physical_call(physical, helper, [key_expr] + extra, node)
+
+        physical = cfg['input']
+        typ = self.inputs.get(physical)
+        if helper == 'previous_group':
+            args = [node.args[1], node.args[2]]
+            if len(node.args) > 4:
+                args.append(node.args[4])
+            return self._physical_call(physical, 'previous', args, node)
+        if helper in ('at', 'get'):
+            key = node.args[1]
+            if isinstance(key, ast.Tuple):
+                order = tuple(cfg.get('tuple_order', range(len(key.elts))))
+                if sorted(order) != list(range(len(key.elts))):
+                    raise ContractError('Invalid tuple_order in frontend mapping')
+                args = [key.elts[i] for i in order]
+            else:
+                args = [key]
+            if helper == 'get' and len(node.args) > 3:
+                args.append(node.args[3])
+            expected = CurveTable if len(args) >= 2 and (helper == 'at' or len(args) >= 3) else Curve
+            if typ not in (Curve, CurveTable):
+                raise ContractError('Lookup mapping targets a non-lookup physical input')
+            return self._physical_call(physical, helper, args, node)
+        if helper == 'previous':
+            args = [node.args[1]]
+            if len(node.args) > 3:
+                args.append(node.args[3])
+            return self._physical_call(physical, 'previous', args, node)
+        if helper == 'linear':
+            return self._physical_call(physical, 'linear', [node.args[1]], node)
+        raise AssertionError(helper)
+
+
+class BindNames(ast.NodeTransformer):
+    """Only structural name binding and explicitly declared enum constants."""
+    def __init__(self, cells, inputs, enums, locals_, native_lookups=False):
+        self.cells, self.inputs, self.enums, self.locals = cells, inputs, enums, locals_
+        self.native_lookups = native_lookups
+
+    def visit_Call(self, node):
+        if (self.native_lookups and isinstance(node.func, ast.Attribute)
+                and isinstance(node.func.value, ast.Name)
+                and node.func.value.id in self.inputs and node.func.value.id not in self.locals
+                and self.inputs[node.func.value.id] in (Curve, CurveTable)
+                and node.func.attr in ('at','get','previous','linear')):
+            typ = self.inputs[node.func.value.id]
+            return ast.copy_location(ast.Call(ast.Name('_lookup_'+typ.__name__+'_'+node.func.attr, ast.Load()),
+                [self.visit(node.func.value)]+[self.visit(a) for a in node.args],
+                [ast.keyword(k.arg,self.visit(k.value)) for k in node.keywords]),node)
+        return self.generic_visit(node)
+
+    def visit_Attribute(self, node):
+        if isinstance(node.value, ast.Name) and node.value.id in self.enums and node.value.id not in self.locals:
+            enum = self.enums[node.value.id]
+            if node.attr not in enum.__members__:
+                raise ContractError('Unknown enum member: ' + ast.unparse(node))
+            return ast.copy_location(ast.Name('_E_' + node.value.id + '_' + node.attr, ast.Load()), node)
+        if isinstance(node.value, ast.Name) and node.value.id == 'math' and node.value.id not in self.locals:
+            if node.attr not in _MATH:
+                raise ContractError('Undeclared native math function: ' + node.attr)
+            return ast.copy_location(ast.Name('_math_' + node.attr, ast.Load()), node)
+        return self.generic_visit(node)
+
+    def visit_Name(self, node):
+        if not isinstance(node.ctx, ast.Load) or node.id in self.locals:
+            return node
+        if node.id in self.cells:
+            return ast.copy_location(ast.Attribute(ast.Name('self', ast.Load()), '_cell_' + node.id, ast.Load()), node)
+        if node.id in self.inputs:
+            return ast.copy_location(ast.Attribute(ast.Name('self', ast.Load()), node.id, ast.Load()), node)
+        if node.id == 'power':
+            return ast.copy_location(ast.Name('_power', ast.Load()), node)
+        if node.id in _MATH:
+            return ast.copy_location(ast.Name('_math_' + node.id, ast.Load()), node)
+        if node.id not in _BUILTINS and not node.id.startswith('_E_'):
+            raise ContractError('Undeclared kernel name: ' + node.id)
+        return node
+
+
+def _expression(source, binder):
+    n = binder.visit(ast.parse(source, mode='eval').body)
+    return ast.unparse(ast.fix_missing_locations(n))
+
+
+
+def _needs_checked_formula(node, result_info, params, inputs, cells):
+    """Whether this formula can directly create a checked Cython error state.
+
+    This is intentionally shallow. Projection-index arithmetic is bounded by
+    KernelSpec.steps; only integer-result formulas retain overflow capture. Calls to
+    other Cells own their own boundary. Division by a literal nonzero denominator is
+    native-safe and needs no Python error check.
+    """
+    integral_result = result_info['kind'] in ('int', 'enum', 'bool')
+    def literal_nonzero(expr):
+        return isinstance(expr, ast.Constant) and type(expr.value) in (int,float) and expr.value != 0
+    for n in ast.walk(node):
+        if isinstance(n, ast.Raise):
+            return True
+        if isinstance(n, ast.Call):
+            if isinstance(n.func, ast.Name):
+                if n.func.id in cells:
+                    continue
+                if n.func.id in {'power', 'int'}:
+                    return True
+            if (isinstance(n.func, ast.Attribute) and isinstance(n.func.value, ast.Name)
+                    and n.func.value.id in inputs and inputs[n.func.value.id] in (Curve, CurveTable)
+                    and n.func.attr in ('at', 'get', 'previous', 'linear')):
+                return True
+        if isinstance(n, ast.BinOp):
+            if isinstance(n.op, (ast.Div, ast.FloorDiv, ast.Mod)) and not literal_nonzero(n.right):
+                return True
+            if integral_result and isinstance(n.op, (ast.Add, ast.Sub, ast.Mult, ast.LShift, ast.RShift)):
+                return True
+        if isinstance(n, ast.AugAssign):
+            if isinstance(n.op, (ast.Div, ast.FloorDiv, ast.Mod)) and not literal_nonzero(n.value):
+                return True
+            if integral_result and isinstance(n.op, (ast.Add, ast.Sub, ast.Mult, ast.LShift, ast.RShift)):
+                return True
+        if integral_result and isinstance(n, ast.UnaryOp) and isinstance(n.op, ast.USub):
+            return True
+    return False
+
+
+def _native_rejection(node, selected, spec, enums, native_suffix):
+    try:
+        for statement in ast.walk(node):
+            if isinstance(statement, (ast.List, ast.Dict, ast.Set, ast.Subscript,
+                                      ast.Match, ast.Assert, ast.Delete)):
+                raise ContractError('Object/container operations use the Python calculator')
+            if isinstance(statement, ast.Tuple):
+                membership = any(isinstance(parent, ast.Compare) and statement in parent.comparators
+                                 and any(isinstance(op, (ast.In, ast.NotIn)) for op in parent.ops)
+                                 for parent in ast.walk(node))
+                if not membership:
+                    raise ContractError('Tuple values use the Python calculator')
+        # Cython owns control-flow/local inference; closures and first-class Cells
+        # are deliberately outside this flat scalar-kernel contract.
+        for n in ast.walk(node):
+            if isinstance(n, (ast.GeneratorExp, ast.ListComp, ast.DictComp, ast.SetComp)):
+                raise ContractError("Comprehensions use the Python calculator")
+            if isinstance(n, ast.Name) and (n.id.startswith('_mx_') or n.id == 'self'):
+                raise ContractError('Use ordinary free functions; self and the _mx_ prefix are reserved')
+            if isinstance(n, ast.arg) and n.arg.startswith('_mx_'):
+                raise ContractError('The _mx_ prefix is reserved for generated names')
+            if isinstance(n, ast.Attribute) and (isinstance(n.ctx, ast.Store) or n.attr.startswith('_')):
+                raise ContractError('Scalar formulas use read-only public helper operations')
+            if isinstance(n, ast.Subscript) and isinstance(n.ctx, ast.Store):
+                raise ContractError('Scalar formulas cannot mutate indexed storage')
+            if isinstance(n, (ast.With, ast.AsyncWith)):
+                raise ContractError('Context/GIL managers are outside the numeric kernel contract')
+            if native_suffix and isinstance(n, ast.Raise):
+                exc = n.exc
+                if (n.cause is not None or not isinstance(exc,ast.Call) or not isinstance(exc.func,ast.Name)
+                        or exc.func.id not in _BUILTINS or exc.keywords
+                        or any(not isinstance(a,ast.Constant) or type(a.value) not in (str,int,float,bool,type(None)) for a in exc.args)):
+                    raise ContractError('Native raises require a named exception and literal arguments; error paths may not call Cells')
+            if isinstance(n, (ast.Try, ast.TryStar)):
+                raise ContractError('Native kernel errors abort the evaluation epoch; use explicit lookup defaults instead of exception recovery')
+            if n is not node and isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.Yield, ast.YieldFrom)):
+                raise ContractError('Closures/generators are not admitted in native scalar kernels')
+        local = {p.arg for p in node.args.args} | {n.id for n in ast.walk(node) if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store)}
+        binder = BindNames(selected, spec.inputs, enums, local, native_lookups=True)
+        for statement in node.body:
+            binder.visit(copy.deepcopy(statement))
+    except ContractError as exc:
+        return str(exc)
+    return None
+
+
+def emit(spec, *, diagnostics=False, python_cells=()):
+    native_suffix = ' nogil'
+    cells = spec.cells
+    if any(n.startswith('_mx_') for n in cells):
+        raise ContractError('The _mx_ prefix is reserved for generated names')
+    enums = spec.enums
+    input_info = {k: type_info(v) for k, v in spec.inputs.items()}
+    for name, info in input_info.items():
+        if info['kind'] == 'table_key' and input_info.get(info['table'], {}).get('kind') != 'curve_table':
+            raise ContractError(name + ': TableKey must refer to a declared CurveTable input')
+    raw = {k: function_ast(v) for k, v in cells.items()}
+    parsed, python_reasons = {}, {}
+    if set(python_cells) - set(cells):
+        raise ContractError('Unknown Python calculator override')
+    for k, node in raw.items():
+        try:
+            parsed[k] = ast.fix_missing_locations(FrontendRewrite(spec.frontend, spec.inputs).visit(copy.deepcopy(node)))
+        except ContractError as exc:
+            parsed[k] = node
+            python_reasons[k] = str(exc)
+        if k in python_cells:
+            python_reasons[k] = 'Explicit build/test calculator override'
+        if k not in python_reasons:
+            reason = _native_rejection(parsed[k], cells, spec, enums, native_suffix)
+            if reason:
+                python_reasons[k] = reason
+
+    exprs = [spec.length] + [v for table in spec.outputs.values() for v in table.values()] + [k + '()' for k in spec.scalar_outputs]
+    roots = set(spec.cell_outputs)
+    if roots - cells.keys():
+        raise ContractError('Unknown declared Cell output')
+    for s in exprs:
+        roots |= {n.func.id for n in ast.walk(ast.parse(s, mode='eval'))
+                  if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id in cells}
+    from .python_calculator import cell_dependencies
+    all_dependencies = {name: cell_dependencies(fn, cells) for name, fn in cells.items()}
+    selected = set()
+    pending = list(roots)
+    while pending:
+        name = pending.pop()
+        if name in selected:
+            continue
+        selected.add(name)
+        pending.extend(all_dependencies[name])
+    if not selected:
+        raise ContractError('Outputs must call at least one declared Cell')
+    # Storage follows the declared boundary contract, not sampled return values.
+    # An object consumer remains Python-semantic; native ancestors can still call
+    # its scalar entry directly. No object pointer crosses the numeric C++ guard.
+    object_cells = {k for k in selected if any(
+        type_info(t)['kind'] == 'object' for t in
+        [inspect.signature(cells[k]).return_annotation] +
+        [p.annotation for p in inspect.signature(cells[k]).parameters.values()])}
+    for k in selected:
+        if k in object_cells:
+            python_reasons[k] = 'Python object argument/result contract'
+        elif all_dependencies[k] & object_cells:
+            python_reasons[k] = 'Consumes a Python-object Cell contract'
+        elif any(type_info(spec.inputs[n])['kind'] == 'object'
+                 for n in cells[k].__code__.co_names if n in spec.inputs):
+            python_reasons[k] = 'Consumes a Python-object input'
+    for expr in exprs:
+        if any(isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+               and n.func.id in object_cells for n in ast.walk(ast.parse(expr, mode='eval'))):
+            raise ContractError('Numeric outputs need a scalar Cell boundary; use cell_outputs for objects')
+    python_reasons = {k: v for k, v in python_reasons.items() if k in selected}
+    mixed = bool(python_reasons)
+    rows = {}
+    slot = 0
+    dependencies = {k: all_dependencies[k] for k in selected}
+
+    def _recursive(name):
+        pending=list(dependencies[name]); visited=set()
+        while pending:
+            dep=pending.pop()
+            if dep == name:
+                return True
+            if dep in visited:
+                continue
+            visited.add(dep); pending.extend(dependencies.get(dep, ()))
+        return False
+
+    def _hash_capacity():
+        # Exact native hash memo for continuous numeric keys. The model author does
+        # not choose this policy. A low load factor keeps probes short over the
+        # declared projection bound; filling still fails explicitly.
+        target=max(16, 4 * (spec.steps + 1))
+        return 1 << (target - 1).bit_length()
+
+    for name in sorted(selected):
+        fn, node = cells[name], parsed[name]
+        sig = inspect.signature(fn)
+        ret = type_info(sig.return_annotation)
+        if ret['kind'] in ('curve', 'curve_table'):
+            raise ContractError('Cell results must be scalar; Curve is an input type')
+        params = []
+        hashed = False
+        count = 1
+        for p in sig.parameters.values():
+            if p.name.startswith('_mx_'):
+                raise ContractError('The _mx_ prefix is reserved for generated names')
+            if p.kind not in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD):
+                raise ContractError('Variadic and keyword-only Cell parameters are not supported')
+            ti = type_info(p.annotation)
+            if ti['kind'] in ('curve', 'curve_table'):
+                raise ContractError('Bind Curve as an input, not a Cell key')
+            lower, size = (0, len(ti['members'])) if ti['kind'] == 'enum' else (-1, spec.steps + 2)
+            if ti['kind'] == 'bool':
+                lower, size = 0, 2
+            if ti['kind'] == 'float':
+                hashed = True
+            default = None
+            if p.default is not p.empty:
+                if ti['kind'] == 'object':
+                    try:
+                        default = repr(ast.literal_eval(repr(p.default)))
+                    except (ValueError, SyntaxError):
+                        raise ContractError('Object defaults must be literal constants') from None
+                elif ti['kind'] in ('enum', 'int', 'bool'):
+                    if not isinstance(p.default, (int, IntEnum)) or not lower <= int(p.default) < lower + size:
+                        raise ContractError('Default outside declared cache key domain')
+                    default = repr(int(p.default))
+                elif type(p.default) in (float, int):
+                    default = repr(float(p.default))
+                else:
+                    raise ContractError('Defaults must be scalar constants')
+            params.append(dict(name=p.name, type=ti, lower=lower, size=size, default=default))
+            if mixed:
+                params[-1]['positional_only'] = p.kind == p.POSITIONAL_ONLY
+            if not hashed:
+                count *= size
+        python_key = any(p['type']['kind'] == 'object' for p in params)
+        object_storage = name in object_cells
+        if object_storage and (python_key or hashed):
+            count = 0  # Python dictionaries grow with actual keys, not guessed bounds.
+        elif hashed:
+            count = _hash_capacity()
+        if count > 20_000_000:
+            raise ContractError('Declared cache exceeds the per-Cell allocation limit')
+        row = dict(name=name, result=ret, params=params, cached=True, hashed=hashed, last=False,
+                   recursive=name in python_reasons or _recursive(name), checked_formula=name in python_reasons or _needs_checked_formula(node, ret, params, spec.inputs, cells),
+                   offset=slot, slots=count)
+        body = [n for n in node.body if not (isinstance(n,ast.Expr) and isinstance(n.value,ast.Constant) and isinstance(n.value.value,str))]
+        direct = None
+        if len(body)==1 and isinstance(body[0],ast.Return) and isinstance(body[0].value,ast.Name):
+            field=body[0].value.id
+            if field in input_info and field not in sig.parameters and input_info[field]['ctype']==ret['ctype']:
+                direct=field
+        row['direct_input'] = None if name in python_reasons else direct
+        if mixed:
+            row['calculator'] = 'python' if name in python_reasons else 'native'
+            row['native_rejection'] = python_reasons.get(name)
+            row['dependencies'] = sorted(dependencies[name])
+        if object_storage:
+            row.update(storage='python_dict' if python_key or hashed else 'object_slots',
+                       key_abi='python' if python_key else 'native',
+                       allow_none=(spec.allow_none or {}).get(name, True),
+                       offset=0, hashed=False)
+        rows[name] = row
+        if not object_storage:
+            slot += count
+    if slot > 30_000_000:
+        raise ContractError('Declared aggregate cache exceeds the allocation limit')
+    all_rows = rows
+    object_rows = {k: r for k, r in rows.items() if k in object_cells}
+    rows = {k: r for k, r in rows.items() if k not in object_cells}
+    if sum(r['slots'] for r in object_rows.values()) > 30_000_000:
+        raise ContractError('Object slot allocation exceeds the limit')
+    lines = ['# cython: language_level=3, infer_types=True, cdivision=False, cpow=False, overflowcheck=True',
+             'import numpy as np', 'cimport cython',
+             'cdef union _DoubleBits:', '    double value', '    unsigned long long bits',
+             'from ._lookups cimport Curve, CurveTable', 'from libc.math cimport pow as real_pow, floor, isfinite',
+             'from libc.math cimport ' + ', '.join(f'{x} as _math_{x}' for x in sorted(_MATH))]
+    from .lookup_codegen import inline_lookup_source
+    lines += [inline_lookup_source()]
+    power_body = function_ast(power).body
+    lines += ['cdef inline double _power(double base, double exponent) except? -1 nogil:']
+    for statement in power_body:
+        lines += textwrap.indent(ast.unparse(statement), '    ').splitlines()
+    lines += ['cdef int _cache_error(int kind, const char* where) except -1 nogil:',
+              '    with gil:', '        location = where.decode()',
+              '        if kind == 0: raise IndexError("Outside declared cache bound: " + location)',
+              '        if kind == 1: raise RuntimeError("Cell cycle: " + location)',
+              '        if kind == 2: raise ValueError("Non-finite hash key: " + location)',
+              '        raise MemoryError("Hash memo capacity exhausted: " + location)']
+    for name, typ in enums.items():
+        type_info(typ)
+        lines += ['cdef enum:'] + [f'    _E_{name}_{k} = {int(v)}' for k, v in typ.__members__.items()]
+    lines += ['@cython.final', 'cdef class Kernel:', '    cdef object _records', '    cdef unsigned int _epoch',
+              '    cdef double[::1] _floats', '    cdef long long[::1] _ints',
+              '    cdef unsigned int[::1] _seen',
+              '    cdef unsigned long long _calls, _misses']
+    if mixed:
+        lines += ['    cdef object _python_scope']
+    for k, ti in input_info.items():
+        ct = ti['ctype']
+        lines += [f'    cdef {ct} {k}']
+    for k, r in rows.items():
+        if r['hashed']:
+            for param in r['params']:
+                dt = 'double' if param['type']['kind'] == 'float' else 'long long'
+                lines += [f"    cdef {dt}[::1] _keys_{k}_{param['name']}"]
+    allocated = max(1, slot)
+    lines += ['    def __init__(self, records):', '        self._records = records', '        self._epoch = 0',
+              f'        self._floats = np.empty({allocated}, dtype=np.float64)',
+              f'        self._ints = np.empty({allocated}, dtype=np.int64)',
+              f'        self._seen = np.zeros({allocated}, dtype=np.uint32)',
+              '        self._calls = self._misses = 0']
+    if mixed:
+        lines += ['        self._python_scope = None']
+    for k, r in rows.items():
+        if r['hashed']:
+            for param in r['params']:
+                dt = 'np.float64' if param['type']['kind'] == 'float' else 'np.int64'
+                lines += [f"        self._keys_{k}_{param['name']} = np.empty({r['slots']}, dtype={dt})"]
+    lines += ['    cdef void _advance(self) except *:',
+              '        if self._epoch >= 4294967294:',
+              '            np.asarray(self._seen).fill(0)',
+              '            self._epoch = 0', '        self._epoch += 2']
+    lines += ['    def reset(self):', '        self._advance()',
+              '    def stats(self):', f"        return {{'enabled': {diagnostics}, 'calls': self._calls, 'misses': self._misses, 'cache_slots': {slot}, 'epoch': self._epoch}}",
+              '    def replace_records(self, records):', '        self._records = records', '        self._advance()',
+              '    cdef void _select(self, tuple record) except *:']
+    for i, (k, ti) in enumerate(input_info.items()):
+        lines += [f'        self.{k} = record[{i}]']
+    lines += ['        self._advance()']
+    for name, row in rows.items():
+        params = row['params']
+        decl = ', '.join(p['type']['ctype'] + ' ' + p['name'] + ((' = ' + p['default']) if p['default'] is not None else '') for p in params)
+        tail = (', ' + decl) if decl else ''
+        calc_decl = ', '.join(p['type']['ctype'] + ' ' + p['name'] for p in params)
+        calc_tail = (', ' + calc_decl) if calc_decl else ''
+        call = ', '.join(p['name'] for p in params)
+        ret = row['result']['ctype']
+        if row['direct_input'] is not None:
+            exception = 'noexcept' if native_suffix else 'except? -1'
+            lines += [f'    cdef inline {ret} _cell_{name}(self{tail}) {exception}{native_suffix}:',
+                      f"        return self.{row['direct_input']}"]
+            continue
+        if row['cached']:
+            lines += ['    @cython.boundscheck(False)', '    @cython.wraparound(False)', '    @cython.overflowcheck(False)', '    @cython.initializedcheck(False)',
+                      f'    cdef inline {ret} _cell_{name}(self{tail}) except? -1{native_suffix}:',
+                      '        cdef Py_ssize_t _mx_key', f'        cdef {ret} _mx_value']
+            if diagnostics:
+                lines += ['        self._calls += 1']
+            if row['hashed']:
+                lines += ['        cdef unsigned long long _mx_hashcode = 1469598103934665603',
+                          '        cdef _DoubleBits _mx_bits', '        cdef Py_ssize_t _mx_probe, _mx_bucket']
+                for p in params:
+                    arg = p['name']
+                    if p['type']['kind'] == 'float':
+                        lines += [f'        if not _math_isfinite({arg}): _cache_error(2, b"{name}.{arg}")',
+                                  f'        _mx_bits.value = 0.0 if {arg} == 0.0 else {arg}',
+                                  '        _mx_hashcode = (_mx_hashcode ^ _mx_bits.bits) * <unsigned long long>1099511628211']
+                    else:
+                        lines += [f'        _mx_hashcode = (_mx_hashcode ^ <unsigned long long>{arg}) * <unsigned long long>1099511628211']
+                # Avalanche the _mx_bits before masking, so nearby doubles spread across buckets.
+                lines += ['        _mx_hashcode = (_mx_hashcode ^ (_mx_hashcode >> 30)) * <unsigned long long>13787848793156543929',
+                          '        _mx_hashcode = (_mx_hashcode ^ (_mx_hashcode >> 27)) * <unsigned long long>10723151780598845931',
+                          '        _mx_hashcode = _mx_hashcode ^ (_mx_hashcode >> 31)',
+                          f"        _mx_bucket = _mx_hashcode & {row['slots']-1}",
+                          f"        for _mx_probe in range({row['slots']}):",
+                          f"            _mx_key = {row['offset']} + _mx_bucket"]
+                if row['recursive']:
+                    lines += ['            if self._seen[_mx_key] != self._epoch and self._seen[_mx_key] != self._epoch - 1:', '                break']
+                else:
+                    lines += ['            if self._seen[_mx_key] != self._epoch:', '                break']
+                equal = ' and '.join(f"self._keys_{name}_{p['name']}[_mx_bucket] == {p['name']}" for p in params) or 'True'
+                lines += [f'            if {equal}: break',
+                          f"            _mx_bucket = (_mx_bucket + 1) & {row['slots']-1}",
+                          '        else:', f'            _cache_error(3, b"{name}")']
+            else:
+                index = '0'
+                for p in params:
+                    pnm, lower, size = p['name'], p['lower'], p['size']
+                    lines += [f'        if {pnm} < {lower} or {pnm} >= {lower + size}:',
+                              f'            _cache_error(0, b"{name}.{pnm}")']
+                    index = f'(({index}) * {size} + ({pnm} - ({lower})))'
+                lines += [f"        _mx_key = {row['offset']} + {index}"]
+            dictionary_key = '_mx_object_key' if row['hashed'] else '_mx_key'
+            store = '_floats' if row['result']['kind'] == 'float' else '_ints'
+            lines += ['        if self._seen[_mx_key] == self._epoch:', f'            return self.{store}[_mx_key]']
+            if row['recursive']:
+                lines += ['        if self._seen[_mx_key] == self._epoch - 1:', f'            _cache_error(1, b"{name}")',
+                          '        self._seen[_mx_key] = self._epoch - 1']
+            if row['hashed']:
+                for p in params:
+                    lines += [f"        self._keys_{name}_{p['name']}[_mx_bucket] = {p['name']}"]
+            if diagnostics:
+                lines += ['        self._misses += 1']
+        node = copy.deepcopy(parsed[name])
+        loc = ({'_mx_value', '_mx_key', '_mx_object_key', 'self'} if row['cached'] else set()) | {p['name'] for p in params} | {n.id for n in ast.walk(node) if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store)}
+        binder = BindNames(selected, spec.inputs, enums, loc, native_lookups=True)
+        body = []
+        if row['cached']:
+            memo_return = f'self.{store}[_mx_key] = _mx_value\nself._seen[_mx_key] = self._epoch\nreturn _mx_value'
+            lines += ['        _mx_value = self._calc_' + name + '(' + call + ')']
+            lines += textwrap.indent(memo_return, '        ').splitlines()
+            lines += [f'    cdef inline {ret} _calc_{name}(self{calc_tail}) except? -1{native_suffix}:']
+        if name in python_reasons:
+            tuple_expr = '(' + call + (',' if params else '') + ')'
+            body = ['with gil:\n    return self._python_scope.calculate(' + repr(name) + ', ' + tuple_expr + ')']
+        else:
+            for n in node.body:
+                if isinstance(n, ast.Expr) and isinstance(n.value, ast.Constant) and isinstance(n.value.value, str):
+                    continue
+                body.append(ast.unparse(ast.fix_missing_locations(binder.visit(n))))
+        if not row['cached']:
+            lines += [f'    cdef inline {ret} _cell_{name}(self{tail}) except? -1{native_suffix}:',
+                      f'        cdef {ret} _mx_value',
+                      '        _mx_value = self._calc_' + name + '(' + call + ')',
+                      '        return _mx_value',
+                      f'    cdef inline {ret} _calc_{name}(self{calc_tail}) except? -1{native_suffix}:']
+        for s in body:
+            lines += textwrap.indent(s, '        ').splitlines()
+    binder = BindNames(selected, spec.inputs, enums, {'t'}, native_lookups=True)
+    length_expr = _expression(spec.length, binder)
+    lines += ['    def evaluate(self, Py_ssize_t policy, str cell, tuple args):',
+              '        if policy < 0 or policy >= len(self._records):', '            raise IndexError(policy)',
+              '        self._select(self._records[policy])']
+    for k, r in rows.items():
+        lines += [f'        if cell == {k!r}:', f"            if len(args) != {len(r['params'])}: raise TypeError('Use canonical positional arguments')",
+                  f"            return self._cell_{k}(" + ', '.join(f'args[{i}]' for i in range(len(r['params']))) + ')']
+    lines += ["        raise KeyError(cell)"]
+    for table, cols in spec.outputs.items():
+        if not table.isidentifier() or table.startswith('_'):
+            raise ContractError('Output tables require public identifier names')
+        lines += [f'    cdef object _table_{table}(self):', '        cdef Py_ssize_t t, n',
+                  '        cdef double[:, ::1] out', f'        n = {length_expr}',
+                  f"        if n < 0 or n > {spec.steps}: raise IndexError('Output length exceeds declared bound')",
+                  f'        result = np.empty((n, {len(cols)}), dtype=np.float64)', '        out = result',
+                  '        for t in range(n):']
+        for j, expr in enumerate(cols.values()):
+            lines += [f'            out[t, {j}] = ' + _expression(expr, binder)]
+        lines += ['        return result']
+    lines += ['    def run(self, str table, bint sums):', '        cdef Py_ssize_t i',
+              '        result = []', '        for i in range(len(self._records)):',
+              '            self._select(self._records[i])']
+    for i, table in enumerate(spec.outputs):
+        lines += [f"            {'if' if i == 0 else 'elif'} table == {table!r}:", f'                out = self._table_{table}()']
+    lines += ["            else: raise KeyError(table)",
+              '            if not np.isfinite(out).all():', "                raise ArithmeticError('Non-finite kernel output')",
+              '            result.append(float(out.sum()) if sums else out)',
+              '        return np.asarray(result, dtype=np.float64) if sums else result']
+    lines += ['    def run_one(self, Py_ssize_t policy, str table):',
+              '        if policy < 0 or policy >= len(self._records): raise IndexError(policy)',
+              '        self._select(self._records[policy])']
+    for i, table in enumerate(spec.outputs):
+        lines += [f"        {'if' if i == 0 else 'elif'} table == {table!r}:", f'            out = self._table_{table}()']
+    lines += ["        else: raise KeyError(table)",
+              "        if not np.isfinite(out).all(): raise ArithmeticError('Non-finite kernel output')",
+              '        return out']
+    lines += ['    def run_scalar(self, str name):', '        cdef Py_ssize_t i',
+              '        cdef double[::1] view', '        result = np.empty(len(self._records), dtype=np.float64)',
+              '        view = result', '        for i in range(len(self._records)):',
+              '            self._select(self._records[i])']
+    if not spec.scalar_outputs:
+        lines += ["            raise KeyError(name)"]
+    for i, name in enumerate(spec.scalar_outputs):
+        if name not in rows or rows[name]['params']:
+            raise ContractError('Scalar outputs must be declared zero-argument Cells')
+        lines += [f"            {'if' if i == 0 else 'elif'} name == {name!r}:",
+                  f'                view[i] = self._cell_{name}()']
+    if spec.scalar_outputs:
+        lines += ["            else: raise KeyError(name)"]
+    lines += ["        if not np.isfinite(result).all(): raise ArithmeticError('Non-finite scalar output')",
+              '        return result',
+              '    def run_scalar_one(self, Py_ssize_t policy, str name):',
+              '        if policy < 0 or policy >= len(self._records): raise IndexError(policy)',
+              '        self._select(self._records[policy])']
+    if not spec.scalar_outputs:
+        lines += ["        raise KeyError(name)"]
+    for i, name in enumerate(spec.scalar_outputs):
+        lines += [f"        {'if' if i == 0 else 'elif'} name == {name!r}:", f'            value = self._cell_{name}()']
+    if spec.scalar_outputs:
+        lines += ["        else: raise KeyError(name)"]
+    lines += ["        if not np.isfinite(value): raise ArithmeticError('Non-finite scalar output')",
+              '        return value']
+    manifest = dict(schema='mxcf.scalar_kernel.v1', inputs=input_info, outputs=spec.outputs,
+                    steps=spec.steps, length=spec.length, parameters=spec.parameters, scalar_outputs=spec.scalar_outputs, output_dtype='float64', cells=all_rows, cache_slots=slot,
+                    memo='dense', lookups='native', diagnostics=diagnostics, nogil_formulas=bool(native_suffix), frontend_helpers=bool(spec.frontend),
+                    limitations=['flat scalar kernel', 'explicit contiguous IntEnums', 'bounded integral cache keys',
+                                 'continuous numeric Cell keys use compiler-owned bounded exact hash memo', 'real-valued arithmetic', 'serial independent policies', 'errors abort the evaluation epoch'])
+    if object_rows:
+        manifest.update(object_cells=sorted(object_rows), cell_outputs=spec.cell_outputs,
+                        object_cache_slots=sum(r['slots'] for r in object_rows.values()))
+    if mixed:
+        from .python_calculator import bundle_source
+        python_source, required, used_inputs = bundle_source(cells, python_reasons, spec.inputs, enums)
+        manifest.update(python_cells=python_reasons, python_source=python_source,
+                        python_references=required, python_inputs=used_inputs,
+                        python_enums={k: type_info(v) for k, v in enums.items()})
+    if spec.model is not None:
+        manifest['model'] = spec.model
+        manifest['model_sha256'] = hashlib.sha256(json.dumps(spec.model, sort_keys=True).encode()).hexdigest()
+    return '\n'.join(lines) + '\n', manifest
+
+
+def build(spec, destination, *, diagnostics=False, python_cells=()):
+    destination = Path(destination).resolve()
+    if destination.exists() and any(destination.iterdir()):
+        raise FileExistsError('Build destination must be empty')
+    destination.mkdir(parents=True, exist_ok=True)
+    source, manifest = emit(spec, diagnostics=diagnostics, python_cells=python_cells)
+    if spec.cython_objects:
+        manifest["cython_objects"] = True
+    from .frame_codegen import to_c_frame
+    source = to_c_frame(source, manifest)
+    if spec.cython_objects:
+        from .gil_codegen import augment
+        source = augment(source, manifest, spec, python_cells)
+    if spec.cython_objects:
+        lines=source.splitlines()
+        directives=[x for x in lines if x.startswith('# cython:')]
+        source='\n'.join(directives+[x for x in lines if not x.startswith('# cython:')])+'\n'
+    if spec.model is not None:
+        from .model_codegen import add_model_entries
+        source = add_model_entries(source, manifest)
+    from .coverage import record_formula_coverage
+    record_formula_coverage(manifest, spec, python_cells)
+    import Cython
+    build_flags = {k: os.environ.get(k, '') for k in ('CC', 'CXX', 'CFLAGS', 'CXXFLAGS', 'LDFLAGS')}
+    build_flags.update(cython=Cython.__version__, python=sys.version)
+    helper_bytes = b''.join(Path(__file__).with_name('lookups'+suffix).read_bytes() for suffix in ('.py','.pxd'))
+    if spec.cython_objects:
+        helper_bytes += b''.join(Path(__file__).with_name('table_lookup'+suffix).read_bytes() for suffix in ('.py','.pxd'))
+    python_source = manifest.pop('python_source', '')
+    digest = hashlib.sha256(source.encode() + python_source.encode() + helper_bytes + manifest.get('model_sha256', '').encode() + json.dumps(build_flags,sort_keys=True).encode()).hexdigest()
+    package = 'mxk_' + digest[:16]
+    pkg = destination / package
+    pkg.mkdir()
+    (pkg / '__init__.py').write_text('', encoding='utf-8', newline='\n')
+    (pkg / '_kernel.pyx').write_text(source, encoding='utf-8', newline='\n')
+    if python_source:
+        (pkg / '_python.py').write_text(python_source, encoding='utf-8', newline='\n')
+        manifest['python_source_sha256'] = hashlib.sha256(python_source.encode()).hexdigest()
+    for suffix in ('.py', '.pxd'):
+        (pkg / ('_lookups' + suffix)).write_bytes(Path(__file__).with_name('lookups' + suffix).read_bytes())
+    if spec.cython_objects:
+        for suffix in ('.py','.pxd'):
+            (pkg / ('_table_lookup'+suffix)).write_text(Path(__file__).with_name('table_lookup'+suffix).read_text().replace('from .lookups ', 'from ._lookups '))
+    manifest.update(package=package, artifact_signature=digest, build_flags=build_flags, source_sha256=hashlib.sha256(source.encode()).hexdigest(), python=sys.version, source_file=inspect.getsourcefile(spec.module))
+    if spec.model is not None:
+        from .package_codegen import add_public_package
+        add_public_package(destination, manifest, spec.initial_tables, spec.model_name)
+    (destination / 'manifest.json').write_text(json.dumps(manifest, indent=2))
+    setup = """from setuptools import setup, Extension
+from Cython.Build import cythonize
+setup(ext_modules=cythonize([
+    Extension('%(p)s._lookups', ['%(p)s/_lookups.py']),
+    Extension('%(p)s._kernel', ['%(p)s/_kernel.pyx'], language='c++'),
+], compiler_directives={'language_level':3,'infer_types':True}, annotate=True))
+""" % {'p': package}
+    if spec.cython_objects:
+        setup=setup.replace('setup(ext_modules=cythonize([', 'setup(ext_modules=cythonize([\n    Extension('+repr(package+'._table_lookup')+', ['+repr(package+'/_table_lookup.py')+']),')
+    (destination / 'setup.py').write_text(setup)
+    with (destination / 'build.log').open('w') as log:
+        result = subprocess.run([sys.executable, 'setup.py', 'build_ext', '--inplace'], cwd=destination,
+                                stdout=log, stderr=subprocess.STDOUT)
+    if result.returncode:
+        raise RuntimeError('Cython build failed; see ' + str(destination / 'build.log'))
+    return destination
