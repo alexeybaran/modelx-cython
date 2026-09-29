@@ -887,6 +887,9 @@ def build(spec, destination, *, diagnostics=False, python_cells=()):
     if spec.model is not None:
         from .model_codegen import add_model_entries
         source = add_model_entries(source, manifest)
+        if spec.cython_objects:
+            from .collect_map_codegen import augment as add_collect_map
+            source = add_collect_map(source, manifest, spec)
     from .coverage import record_formula_coverage
     record_formula_coverage(manifest, spec, python_cells)
     import Cython

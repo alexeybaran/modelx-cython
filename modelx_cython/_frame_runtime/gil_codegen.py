@@ -182,12 +182,29 @@ def augment(source, manifest, spec, forced_python=()):
         typed = ', '.join(CTYPES[hint['parameters'][p['name']]] + ' ' + p['name']
                           for p in params)
         args = ', '.join(p['name'] for p in params)
-        methods.extend((
-            f"    cdef inline {CTYPES[hint['return']]} _native_cell_{name}(self"
-            + (', ' + typed if typed else '') + ') except? -1:',
-            f"        return _cell_{name}(&self._frame" + (', ' + args if args else '') + ')',
-            '',
-        ))
+        methods.append(f"    cdef inline {CTYPES[hint['return']]} _native_cell_{name}(self"
+                       + (', ' + typed if typed else '') + ') except? -1:')
+        if manifest.get('native_error_abi', '').endswith('guard') or manifest.get('native_error_abi') == 'reentrant_guard_with_checked_python_miss':
+            # The native Cell ABI can throw MxAbort. A direct call from a GIL
+            # formula has no surrounding C++ guard and would terminate the
+            # process on bounds/lookup errors. Keep the same scoped guard used
+            # by public numeric entries, including legitimate -1 results.
+            # _execute was emitted before mixed/object Cells were appended to
+            # the manifest. Its identity domain contains only numeric rows.
+            identity = [key for key in rows if key not in objects].index(name)
+            methods += ['        cdef _Command command',
+                        '        command.mode = 0',
+                        f'        command.identity = {identity}']
+            for position, param in enumerate(params):
+                field = 'f' if param['type']['kind'] == 'float' else 'i'
+                methods.append(f'        command.args[{position}].{field} = {param["name"]}')
+            result_field = 'f' if hint['return'] == 'float' else 'i'
+            methods += ['        self._invoke(&command)',
+                        f'        return command.value.{result_field}']
+        else:
+            methods.append(f"        return _cell_{name}(&self._frame"
+                           + (', ' + args if args else '') + ')')
+        methods.append('')
     manifest['curve_result_conversion'] = 'once on memo miss; one owned native Curve value'
     manifest['numeric_array_builders'] = 0
     manifest['numeric_buffer_backend'] = 'standard Cython declarations and memoryviews'

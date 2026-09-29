@@ -308,12 +308,18 @@ class _ProjectionSpace:
                     model._kernel.set_parameters(**changed)
                 try:
                     if 'object_outputs' in plan:
-                        coordinates = tuple(model._tables[model._plan['point_table']].index)
-                        accumulator = _CollectAccumulator()
-                        model._kernel._run_object_outputs(
-                            plan['object_outputs'], _detach_collect_value,
-                            lambda i, value: accumulator.add(coordinates[i], value))
-                        result = accumulator.finish()
+                        keys = (model._kernel._compiled_collect_keys()
+                                if model.manifest.get('compiled_collect_map') else None)
+                        if keys is not None:
+                            output = model._kernel._run_compiled_collect_map(keys)
+                            result = CollectResult({'sum': CollectResult(output['sum'])})
+                        else:
+                            coordinates = tuple(model._tables[model._plan['point_table']].index)
+                            accumulator = _CollectAccumulator()
+                            model._kernel._run_object_outputs(
+                                plan['object_outputs'], _detach_collect_value,
+                                lambda i, value: accumulator.add(coordinates[i], value))
+                            result = accumulator.finish()
                     else:
                         sums = {}
                         for name in plan['sum']:

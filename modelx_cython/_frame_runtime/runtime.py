@@ -266,6 +266,42 @@ class CompiledKernel:
             self._require_root()
             return self._kernel.run_object_outputs(name, detach, consume)
 
+    def _compiled_collect_keys(self):
+        """Return stable exact-int map domains, or use ordinary collect traversal.
+
+        This inspects already bound references. It neither evaluates Cells nor
+        changes their inputs, and fallback preserves arbitrary Python iterables.
+        """
+        plan = self.manifest.get('compiled_collect_map')
+        if not plan or self._python_scope is None:
+            return None
+        result = {}
+        for source in plan['sources']:
+            if source in self.manifest['inputs']:
+                position = list(self.manifest['inputs']).index(source)
+                values = (record[position] for record in self._records)
+            else:
+                bindings = self._python_scope.bindings
+                if len(bindings) != len(self._records):
+                    return None
+                values = (binding.get(source) for binding in bindings)
+            first = next(values, None)
+            if (type(first) is not tuple
+                    or any(type(key) is not int or not -(1 << 63) <= key < (1 << 63)
+                           for key in first)
+                    or len(set(first)) != len(first)):
+                return None
+            for value in values:
+                if type(value) is not tuple or (value is not first and value != first):
+                    return None
+            result[source] = first
+        return result
+
+    def _run_compiled_collect_map(self, keys):
+        with self._lock:
+            self._require_root()
+            return self._kernel.run_compiled_collect_map(keys)
+
     def project_one(self, policy, table=None):
         table = table or next(iter(self.manifest['outputs']))
         if table not in self.manifest['outputs']:
