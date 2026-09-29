@@ -648,17 +648,19 @@ class ClassInfo:
 
     def _add_space_params(self):
         """Add the space's traced parameters to ``refs`` as
-        CombinedRefInfo entries.
+        CombinedRefInfo entries. Collect-only transient ItemSpaces are not
+        retained in the export's ``_mx_itemspaces`` table, so their parameters
+        also need the exported lexical declaration as an object-typed fallback.
         """
-        params = self.logger.param_info.get(self.fqname, None)
-        if params:
-            for param, rt_info in params.items():
-                self.refs[param] = CombinedRefInfo(
-                    module=self.module.fqname,
-                    cls=self.name,
-                    name=param,
-                    rt_info=rt_info
-                )
+        traced = self.logger.param_info.get(self.fqname, {})
+        names = dict.fromkeys((*self.visitor.space_params.get(self.name, ()), *traced))
+        for param in names:
+            self.refs[param] = CombinedRefInfo(
+                module=self.module.fqname,
+                cls=self.name,
+                name=param,
+                rt_info=traced.get(param)
+            )
 
     @cached_property
     def fqname(self):

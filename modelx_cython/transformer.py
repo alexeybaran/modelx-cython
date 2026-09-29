@@ -249,6 +249,8 @@ class PXDGenerator:
 
         cls_info = self.module.classes[cls_name]
         decl_stmts = []
+        if cls_name in cls_info.visitor.dict_classes:
+            decl_stmts.append('cdef dict __dict__\n')
         for cells in cls_info.cells.values():
 
             assert cells.module == self.module.fqname

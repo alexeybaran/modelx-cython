@@ -28,6 +28,7 @@ typing information used by the Cython transformer.
 """
 
 from abc import ABC, abstractmethod
+import ast
 from typing import Union, Sequence, Mapping
 
 try:
@@ -258,6 +259,21 @@ class ModuleVisitor(m.MatcherDecoratableVisitor, ParentScopeAddin):
         self.closure_funcs = {}  # {class_name: set of method names containing closures}
         self.generator_funcs = {}  # {class_name: set of method names containing yield}
         self.locked_classes = set()  # classes whose __init__ assigns self._mx_lock
+        self.space_params = {}
+        self.dict_classes = set()
+        for node in ast.parse(source).body:
+            if isinstance(node, ast.Assign):
+                for target in node.targets:
+                    if isinstance(target, ast.Name) and target.id.startswith('_v_space_params_'):
+                        self.space_params['_c_' + target.id[len('_v_space_params_'):]] = tuple(
+                            ast.literal_eval(node.value))
+            elif isinstance(node, ast.ClassDef) and node.name.startswith(SPACE_PREF):
+                for member in node.body:
+                    if (isinstance(member, ast.Assign)
+                            and any(isinstance(t, ast.Name) and t.id == '__slots__'
+                                    for t in member.targets)
+                            and '__dict__' in ast.literal_eval(member.value)):
+                        self.dict_classes.add(node.name)
         self.wrapper = cst.metadata.MetadataWrapper(cst.parse_module(source))
         self.wrapper.visit(self)
         self.kwarg_called_names = self._collect_kwarg_called_names()
