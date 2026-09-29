@@ -41,6 +41,8 @@ def _model():
     model._closed = False
     model._active = 0
     model._collect_cache = {}
+    model._space_bindings = None
+    model._connected_context_key = None
     model._kernel = _Kernel()
     model._projection = _ProjectionSpace(model)
     return model

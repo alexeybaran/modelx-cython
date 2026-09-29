@@ -191,7 +191,8 @@ def test_importer_accepts_prepared_policy_reference_context(tmp_path):
                                is_cached=True, allow_none=False, parent=None)
     space = SimpleNamespace(
         parameters=('point_id',), spaces={},
-        formula=SimpleNamespace(func=_space_formula),
+        formula=SimpleNamespace(func=_space_formula,
+                                source='lambda point_id: None'),
         refs={'model_point': {'amount': -1.0},
               'ScenarioInputs': object()},
         cells={'row_amount': source_cell(
@@ -213,7 +214,9 @@ def test_second_required_space_parameter_needs_initial_binding(tmp_path):
         return None
     space = SimpleNamespace(
         parameters=('valuation_month', 'point_id', 'shock'), spaces={},
-        formula=SimpleNamespace(func=valuation_formula), refs={}, cells={},
+        formula=SimpleNamespace(func=valuation_formula,
+                                source='lambda valuation_month, point_id, shock=-1: None'),
+        refs={}, cells={},
         _impl=SimpleNamespace(collect_over_spec={'point_id': object()}))
     source = SimpleNamespace(name='FrameValuation', Valuation=space)
     records = pd.DataFrame(index=pd.Index([1, 2], name='point_id'))
@@ -235,7 +238,8 @@ def test_collect_policy_selector_can_follow_required_space_parameter(tmp_path):
     domain = SimpleNamespace(value=lambda _: (1, 2))
     space = SimpleNamespace(
         parameters=('valuation_month', 'point_id', 'shock'), spaces={},
-        formula=SimpleNamespace(func=valuation_formula),
+        formula=SimpleNamespace(func=valuation_formula,
+                                source='lambda valuation_month, point_id, shock=-1: None'),
         refs={'model_point': object()},
         cells={
             'row_amount': source_cell(
@@ -287,31 +291,55 @@ def test_compiled_source_space_formula_uses_explicit_connected_references(tmp_pa
         formula=SimpleNamespace(func=valuation_formula, source=formula_source),
         refs={'ScenarioInputs': object(), 'Actual': object()},
         cells={
-            'row_amount': source_cell('def row_amount() -> float:\n    return 1.0\n'),
+            'row_amount': source_cell('def row_amount() -> float:\n    return float(value)\n'),
             'collect_outputs': source_cell(
                 "lambda: {'sum': {'row_amount': row_amount()}}"),
         },
         _impl=SimpleNamespace(collect_over_spec={'point_id':
             SimpleNamespace(value=lambda _: (1, 2))}))
     source = SimpleNamespace(name='FrameValuationSource', Valuation=space)
-    records = pd.DataFrame(index=pd.Index([1, 2], name='point_id'))
+    records = pd.DataFrame({'value': [0.0, 0.0], 'curve': [None, None]},
+                           index=pd.Index([1, 2], name='point_id'))
     spec = from_modelx(source, tmp_path / 'source', projection='Valuation',
                        policy_records=records,
-                       parameter_initial_values={'valuation_month': 0},
-                       compile_space_formula=True)
+                       row_references={'value': 'value', 'curve': 'curve'},
+                       parameter_initial_values={'valuation_month': 0})
     assert spec.model['space_formula']['references'] == ['Actual', 'ScenarioInputs']
     artifact = tmp_path / 'valuation_space_formula'
     build(spec, artifact)
-    model = CompiledModel(artifact, spec.initial_tables)
+    connected = {'Actual': {1: 10, 2: 20},
+                 'ScenarioInputs': {3: (0.1, 0.2)}}
+    model = CompiledModel(artifact, spec.initial_tables,
+                          space_bindings=connected)
     try:
-        refs = model._space_formula_refs(3, 2, bindings={
-            'Actual': {1: 10, 2: 20}, 'ScenarioInputs': {3: (0.1, 0.2)}})
+        refs = model._space_formula_refs(3, 2, bindings=connected)
         assert refs == {'curve': (0.1, 0.2), 'value': 19}
         with pytest.raises(TypeError):
             model._space_formula_refs(2, bindings={
                 'Actual': {}, 'ScenarioInputs': {}})
         with pytest.raises(ContractError, match='bindings differ'):
             model._space_formula_refs(3, 2, bindings={'Actual': {2: 20}})
+        first = model.Valuation.collect(3)
+        assert first.sum.row_amount == 28.0
+        assert model.Valuation.collect(3) is first
+        assert model.Valuation.collect(3, 0).sum.row_amount == 30.0
+        assert model.Valuation.collect(3) is first
+        assert model.Valuation[3, 1].curve == (0.1, 0.2)
+        with pytest.raises(KeyError):
+            model.Valuation.collect(99)
+        assert model.Valuation.collect(3) is first
+
+        class ReentrantActual:
+            def __getitem__(self, point_id):
+                model.Valuation.collect(3, 1)
+                return 0
+
+        model._space_bindings['Actual'] = ReentrantActual()
+        with pytest.raises(RuntimeError, match='active Cell evaluation'):
+            model.Valuation.collect(3, 1)
+        model._space_bindings['Actual'] = connected['Actual']
+        assert model.Valuation.collect(3, 1).sum.row_amount == 32.0
+        assert model.Valuation.collect(3) is first
     finally:
         model.close()
 

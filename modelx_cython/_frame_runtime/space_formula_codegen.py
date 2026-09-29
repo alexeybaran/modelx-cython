@@ -12,9 +12,17 @@ def emit_space_preparer(contract):
     if hashlib.sha256(source.encode('utf-8')).hexdigest() != contract['sha256']:
         raise ContractError('Space formula source hash mismatch')
     parsed = ast.parse(source)
-    if len(parsed.body) != 1 or not isinstance(parsed.body[0], ast.FunctionDef):
-        raise ContractError('Prepared Space formula must be a named function')
-    fn = parsed.body[0]
+    if len(parsed.body) != 1:
+        raise ContractError('Space formula must contain one function or lambda')
+    node = parsed.body[0]
+    if isinstance(node, ast.FunctionDef):
+        fn = node
+    elif isinstance(node, ast.Expr) and isinstance(node.value, ast.Lambda):
+        fn = ast.FunctionDef(name='prepare', args=node.value.args,
+                             body=[ast.Return(value=node.value.body)],
+                             decorator_list=[], returns=None, type_comment=None)
+    else:
+        raise ContractError('Space formula must contain one function or lambda')
     if fn.decorator_list or any(arg.arg == '_mxcf_bindings' for arg in
                                 (*fn.args.posonlyargs, *fn.args.args, *fn.args.kwonlyargs)):
         raise ContractError('Prepared Space formula has unsupported binding syntax')

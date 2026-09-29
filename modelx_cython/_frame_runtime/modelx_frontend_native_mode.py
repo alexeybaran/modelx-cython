@@ -73,7 +73,7 @@ def _collect_sum_plan(space, point, point_table):
 def from_modelx(model, destination, *, projection='Projection', data_space='Data',
                 point_table=None, steps=2048, replacements=None, contracts=None, signatures=None,
                 cython_objects=True, policy_records=None, row_references=None,
-                parameter_initial_values=None, compile_space_formula=False):
+                parameter_initial_values=None):
     """Derive a self-contained build spec; destination stores source evidence only.
 
     replacements is an explicit mapping of Cell names to replacement formula source.
@@ -83,8 +83,8 @@ def from_modelx(model, destination, *, projection='Projection', data_space='Data
     row_references maps formula reference names to its object-valued columns.
     parameter_initial_values supplies internal initial values for required
     non-policy Space parameters; callers must still pass those parameters.
-    compile_space_formula retains the original Space formula as a separate
-    Cython entry with explicit references. It does not execute it at build time.
+    Dynamic Space formulas are compiled from their original source with
+    explicit references. They are not executed at build time.
     Connected Space preparation is not inferred by this flat importer.
     """
     import pandas as pd
@@ -299,7 +299,7 @@ def from_modelx(model, destination, *, projection='Projection', data_space='Data
         parameter_initial_values=initial)
     spec.model.update(static_projection=static,object_references=object_references,
                       module_references={name: value.__name__ for name, value in modules.items()})
-    if compile_space_formula:
+    if space.formula is not None:
         graph = getattr(model, 'source_graph', None)
         name = model.name + '.' + projection
         source = (graph['spaces'][name]['formula'] if graph is not None else

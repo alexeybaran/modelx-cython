@@ -276,6 +276,7 @@ class _ProjectionSpace:
             model._require_idle()
             if key in model._collect_cache:
                 return model._collect_cache[key]
+            model._prepare_connected_context(bound.arguments, key)
             defaults = model._plan['parameter_defaults']
             changed = {name: value for name, value in bound.arguments.items()
                        if name in model.manifest['parameters'] and value != defaults[name]}
@@ -336,7 +337,7 @@ class CompiledModel:
     modelx metaprogramming or incremental dependency tracing. Untracked in-place
     DataFrame mutation is unsupported: assign a replacement Data reference.
     """
-    def __init__(self, artifact, tables, *, overrides=None):
+    def __init__(self, artifact, tables, *, overrides=None, space_bindings=None):
         self.artifact = Path(artifact).resolve()
         self.manifest = json.loads((self.artifact / 'manifest.json').read_text())
         self._plan = self.manifest.get('model', {})
@@ -374,6 +375,15 @@ class CompiledModel:
         self._space_preparer = (importlib.import_module(
             self.manifest['package'] + '._space_formula').prepare
             if space_formula is not None else None)
+        if space_bindings is not None:
+            if self._space_preparer is None:
+                raise ContractError('Connected bindings require a compiled Space formula')
+            expected = set(space_formula['references'])
+            if type(space_bindings) is not dict or set(space_bindings) != expected:
+                raise ContractError('Space formula bindings differ from declared references')
+        self._space_bindings = (dict(space_bindings) if space_bindings is not None
+                                else None)
+        self._connected_context_key = None
         self._positions = {key: i for i, key in enumerate(self._tables[self._plan['point_table']].index)}
         self._data, self._projection = _DataSpace(self), _ProjectionSpace(self)
 
@@ -422,13 +432,42 @@ class CompiledModel:
         bound.apply_defaults()
         with self._lock:
             self._require_idle()
-            result = self._space_preparer(bindings, *bound.args)
+            self._active += 1
+            try:
+                result = self._space_preparer(bindings, *bound.args)
+            finally:
+                self._active -= 1
         if (type(result) is not dict or set(result) != {'refs'}
                 or type(result['refs']) is not dict
                 or any(type(name) is not str or name.startswith('_')
                        for name in result['refs'])):
             raise ValueError('Compiled Space formula must return a refs dictionary')
         return result['refs']
+
+    def _prepare_connected_context(self, arguments, key):
+        """Prepare one complete policy domain before its native traversal."""
+        if self._space_bindings is None or self._connected_context_key == key:
+            return
+        point_name = self._plan['point_parameter']
+        point_table = self._plan['point_table']
+        columns = self._plan.get('row_references', {})
+        frame = self._tables[point_table].copy(deep=True)
+        expected = None
+        for point in frame.index:
+            args = {**arguments, point_name: point}
+            refs = self._space_formula_refs(bindings=self._space_bindings, **args)
+            if expected is None:
+                expected = frozenset(refs)
+                if not expected <= columns.keys():
+                    raise ContractError('Space formula returned references absent from prepared rows')
+            elif frozenset(refs) != expected:
+                raise ContractError('Space formula reference names vary by policy')
+            for name, value in refs.items():
+                frame.at[point, columns[name]] = value
+        retained = dict(self._collect_cache)
+        self._set_table(point_table, frame)
+        self._collect_cache.update(retained)
+        self._connected_context_key = key
 
     def __getattr__(self, name):
         if name == self._plan['data_space']: return self._data
@@ -459,6 +498,7 @@ class CompiledModel:
         self._kernel.bind(records, python_bindings=self._bindings(tables, refs))
         self._tables, self._references, self._packed = tables, refs, packed
         self._collect_cache.clear()
+        self._connected_context_key = None
         self._positions = {key: i for i, key in enumerate(tables[self._plan['point_table']].index)}
         for item in self._projection._items.values(): item._context = None
 
@@ -486,6 +526,7 @@ class CompiledModel:
             self._require_idle()
             self._kernel.reset()
             self._collect_cache.clear()
+            self._connected_context_key = None
             for item in self._projection._items.values():
                 if item._context is not None: item._context.reset()
 
