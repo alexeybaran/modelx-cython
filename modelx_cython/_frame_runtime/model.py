@@ -13,6 +13,27 @@ from .data_binding import pack_tables, prepare_inputs
 from .runtime import CompiledKernel
 
 
+class CollectResult:
+    """Attribute-style container matching the exported collect result shape."""
+
+    __slots__ = ('_fields',)
+
+    def __init__(self, fields):
+        self._fields = fields
+
+    def __getattr__(self, name):
+        try:
+            return self._fields[name]
+        except KeyError as exc:
+            raise AttributeError(name) from exc
+
+    def __dir__(self):
+        return sorted(set(super().__dir__()) | set(self._fields))
+
+    def __repr__(self):
+        return 'CollectResult(%s)' % ', '.join(self._fields)
+
+
 class DataView:
     """Snapshot receiver for ordinary Python formulas using data.<table>()."""
     def __init__(self, tables):
@@ -112,6 +133,7 @@ class _ProjectionSpace:
                                   default=defaults.get(n, inspect.Parameter.empty))
                   for n, kind in model._plan['space_parameters']]
         object.__setattr__(self, '_signature', inspect.Signature(params))
+        object.__setattr__(self, '_collect_signature', inspect.Signature(params[1:]))
         object.__setattr__(self, '_items', {})
 
     @property
@@ -137,6 +159,49 @@ class _ProjectionSpace:
             key = tuple(bound.arguments.values())
             if key not in self._items: self._items[key] = _ItemSpace(self, dict(bound.arguments))
             return self._items[key]
+
+    def collect(self, *args, **kwargs):
+        """Traverse declared scalar sums with the reusable compiled context.
+
+        This is the first frame-backend integration shape. Other collect output
+        kinds are rejected by the build contract rather than silently using a
+        different formula or cache implementation.
+        """
+        model = self._model
+        plan = model._plan.get('collect')
+        if plan is None:
+            raise TypeError('this Space has no collect declaration')
+        bound = self._collect_signature.bind(*args, **kwargs)
+        bound.apply_defaults()
+        key = tuple(bound.arguments.values())
+        with model._lock:
+            model._require_idle()
+            if key in model._collect_cache:
+                return model._collect_cache[key]
+            defaults = model._plan['parameter_defaults']
+            changed = {name: value for name, value in bound.arguments.items()
+                       if name in model.manifest['parameters'] and value != defaults[name]}
+            model._active += 1
+            try:
+                if changed:
+                    model._kernel.set_parameters(**changed)
+                try:
+                    sums = {}
+                    for name in plan['sum']:
+                        values = model._kernel.run_scalar(name)
+                        total = float(values[0])
+                        for value in values[1:]:
+                            total += float(value)
+                        sums[name] = total
+                finally:
+                    if changed:
+                        model._kernel.set_parameters(
+                            **{name: defaults[name] for name in changed})
+            finally:
+                model._active -= 1
+            result = CollectResult({'sum': CollectResult(sums)})
+            model._collect_cache[key] = result
+            return result
 
     def __getattr__(self, name):
         self._model._require_open()
@@ -173,7 +238,15 @@ class CompiledModel:
         digest = hashlib.sha256(json.dumps(self._plan, sort_keys=True).encode()).hexdigest()
         if digest != self.manifest.get('model_sha256'):
             raise ContractError('Model binding contract hash mismatch')
+        collect = self._plan.get('collect')
+        if collect is not None:
+            if (type(collect) is not dict or collect.get('over') != self._plan['point_parameter']
+                    or type(collect.get('sum')) is not list or not collect['sum']
+                    or any(type(name) is not str or name not in self.manifest['scalar_outputs']
+                           for name in collect['sum']) or len(set(collect['sum'])) != len(collect['sum'])):
+                raise ContractError('Unsupported compiled collect declaration')
         self._lock, self._closed, self._active = threading.RLock(), False, 0
+        self._collect_cache = {}
         self._references = {**self._plan['reference_defaults'], **dict(overrides or {})}
         if set(self._references) != set(self._plan['reference_defaults']): raise ContractError('Unknown reference')
         self._tables = self._snapshot(tables)
@@ -224,6 +297,7 @@ class CompiledModel:
         records = prepare_inputs(self.manifest, tables, references=refs, packed=packed)
         self._kernel.bind(records, python_bindings=self._bindings(tables, refs))
         self._tables, self._references, self._packed = tables, refs, packed
+        self._collect_cache.clear()
         self._positions = {key: i for i, key in enumerate(tables[self._plan['point_table']].index)}
         for item in self._projection._items.values(): item._context = None
 
@@ -239,6 +313,7 @@ class CompiledModel:
             if name in self.manifest['inputs']:
                 self._kernel.update_inputs(**{name: value})
             self._references = {**self._references, name: value}
+            self._collect_cache.clear()
             for item in self._projection._items.values(): item._context = None
 
     def reset(self):
@@ -246,6 +321,7 @@ class CompiledModel:
         with self._lock:
             self._require_idle()
             self._kernel.reset()
+            self._collect_cache.clear()
             for item in self._projection._items.values():
                 if item._context is not None: item._context.reset()
 
