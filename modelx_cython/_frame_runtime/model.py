@@ -8,6 +8,8 @@ import inspect
 import json
 import hashlib
 import threading
+from collections import OrderedDict
+from copy import deepcopy
 from .contracts import ContractError
 from .data_binding import pack_tables, prepare_inputs
 from .runtime import CompiledKernel
@@ -32,6 +34,86 @@ class CollectResult:
 
     def __repr__(self):
         return 'CollectResult(%s)' % ', '.join(self._fields)
+
+
+def _detach_collect_value(value):
+    """Copy outputs before a policy's working frame can be selected again."""
+    if isinstance(value, (_ItemSpace, _ProjectionSpace)):
+        raise TypeError('collect output cannot retain a live Space')
+    if type(value) is dict:
+        return {key: _detach_collect_value(item) for key, item in value.items()}
+    if type(value) in (list, tuple):
+        return type(value)(_detach_collect_value(item) for item in value)
+    return deepcopy(value)
+
+
+def _collect_shape(value):
+    return {name: _collect_shape(item) for name, item in value.items()} if type(value) is dict else None
+
+
+def _check_collect_shape(expected, value, path):
+    if expected is None:
+        if type(value) is dict:
+            raise ValueError('collect output structure changed at ' + repr(path))
+        return
+    if type(value) is not dict or tuple(value) != tuple(expected):
+        raise ValueError('collect output structure changed at ' + repr(path))
+    for name, item in value.items():
+        _check_collect_shape(expected[name], item, path + (name,))
+
+
+def _collect_add(old, new, path):
+    if type(new) is dict:
+        if old is None:
+            old = {name: None for name in new}
+        elif type(old) is not dict or tuple(old) != tuple(new):
+            raise ValueError('collect output structure changed at ' + repr(path))
+        for name, item in new.items():
+            old[name] = _collect_add(old[name], item, path + (name,))
+        return old
+    if type(old) is dict:
+        raise ValueError('collect output structure changed at ' + repr(path))
+    if old is None:
+        return new
+    try:
+        return old + new
+    except Exception as exc:
+        raise TypeError('collect sum value cannot be added at ' + repr(path)) from exc
+
+
+class _CollectAccumulator:
+    def __init__(self):
+        self.modes = None
+        self.individual_shape = None
+        self.result = None
+
+    def add(self, coordinate, value):
+        if type(value) is not dict or not value or set(value) - {'individual', 'sum'}:
+            raise ValueError('collect_outputs must declare individual and/or sum')
+        if self.modes is None:
+            self.modes = tuple(value)
+            self.result = {mode: None for mode in self.modes}
+        elif tuple(value) != self.modes:
+            raise ValueError('collect_outputs modes changed between policies')
+        for mode, items in value.items():
+            if type(items) is not dict or not items or any(type(name) is not str for name in items):
+                raise TypeError('collect_outputs sections need named values')
+            if mode == 'individual':
+                shape = {name: _collect_shape(item) for name, item in items.items()}
+                if self.individual_shape is None:
+                    self.individual_shape = shape
+                    self.result[mode] = OrderedDict()
+                else:
+                    _check_collect_shape(self.individual_shape, items, (mode,))
+                self.result[mode][coordinate] = CollectResult(items)
+            else:
+                self.result[mode] = _collect_add(self.result[mode], items, (mode,))
+
+    def finish(self):
+        if self.result is None:
+            raise ValueError('collect domain must not be empty')
+        return CollectResult({mode: value if mode == 'individual' else CollectResult(value)
+                              for mode, value in self.result.items()})
 
 
 class DataView:
@@ -98,6 +180,10 @@ class _ItemSpace:
         model._require_open()
         if name in self._arguments: return self._arguments[name]
         if name in model._references: return model._references[name]
+        if name in model._plan.get('row_references', {}):
+            point = self._arguments[model._plan['point_parameter']]
+            return model._tables[model._plan['point_table']].at[
+                point, model._plan['row_references'][name]]
         if name in model._plan.get('object_references', {}):
             return model._tables[model._plan['object_references'][name]]
         if name in model.manifest['cells'] or name in model.manifest['outputs']:
@@ -193,20 +279,28 @@ class _ProjectionSpace:
                 if changed:
                     model._kernel.set_parameters(**changed)
                 try:
-                    sums = {}
-                    for name in plan['sum']:
-                        values = model._kernel.run_scalar(name)
-                        total = float(values[0])
-                        for value in values[1:]:
-                            total += float(value)
-                        sums[name] = total
+                    if 'object_outputs' in plan:
+                        coordinates = tuple(model._tables[model._plan['point_table']].index)
+                        accumulator = _CollectAccumulator()
+                        model._kernel._run_object_outputs(
+                            plan['object_outputs'], _detach_collect_value,
+                            lambda i, value: accumulator.add(coordinates[i], value))
+                        result = accumulator.finish()
+                    else:
+                        sums = {}
+                        for name in plan['sum']:
+                            values = model._kernel.run_scalar(name)
+                            total = float(values[0])
+                            for value in values[1:]:
+                                total += float(value)
+                            sums[name] = total
+                        result = CollectResult({'sum': CollectResult(sums)})
                 finally:
                     if changed:
                         model._kernel.set_parameters(
                             **{name: defaults[name] for name in changed})
             finally:
                 model._active -= 1
-            result = CollectResult({'sum': CollectResult(sums)})
             model._collect_cache[key] = result
             return result
 
@@ -247,11 +341,20 @@ class CompiledModel:
             raise ContractError('Model binding contract hash mismatch')
         collect = self._plan.get('collect')
         if collect is not None:
-            if (type(collect) is not dict or collect.get('over') != self._plan['point_parameter']
-                    or type(collect.get('sum')) is not list or not collect['sum']
-                    or any(type(name) is not str or name not in self.manifest['scalar_outputs']
-                           or self.manifest['cells'][name]['result']['kind'] != 'float'
-                           for name in collect['sum']) or len(set(collect['sum'])) != len(collect['sum'])):
+            if type(collect) is not dict:
+                raise ContractError('Unsupported compiled collect declaration')
+            numeric = ('sum' in collect and type(collect.get('sum')) is list
+                       and bool(collect['sum'])
+                       and all(type(name) is str and name in self.manifest['scalar_outputs']
+                               and self.manifest['cells'][name]['result']['kind'] == 'float'
+                               for name in collect['sum'])
+                       and len(set(collect['sum'])) == len(collect['sum'])
+                       and set(collect) == {'over', 'sum'})
+            object_outputs = (collect.get('object_outputs') == 'collect_outputs'
+                              and set(collect) == {'over', 'object_outputs'}
+                              and collect['object_outputs'] in self.manifest.get('object_cells', ()))
+            if (collect.get('over') != self._plan['point_parameter']
+                    or not (numeric or object_outputs)):
                 raise ContractError('Unsupported compiled collect declaration')
         self._lock, self._closed, self._active = threading.RLock(), False, 0
         self._collect_cache = {}

@@ -17,11 +17,11 @@ from .model_plan import derive_spec
 
 
 def _collect_sum_plan(space, point, point_table):
-    """Read a simple numeric-sum declaration without evaluating its formula.
+    """Select the numeric sum fast path or the general object-output traversal.
 
-    This experimental frame route currently covers a full policy-table domain
-    and direct zero-argument Cell leaves. Unsupported declarations fail at
-    build time; they must never be silently compiled as a different workload.
+    Both paths traverse the full declared policy domain in its original order.
+    The general path evaluates the source-preserved collect_outputs Cell once
+    per policy and validates its result under the public collect contract.
     """
     domains = getattr(space._impl, 'collect_over_spec', None)
     if domains is None:
@@ -44,25 +44,25 @@ def _collect_sum_plan(space, point, point_table):
                                   and isinstance(node.body[0].value.value, str)) else node.body
         returns = [stmt for stmt in body if isinstance(stmt, ast.Return)]
         if len(returns) != 1 or len(body) != 1:
-            raise ContractError('Frame collect needs a direct return expression')
+            return {'over': point, 'object_outputs': 'collect_outputs'}
         result = returns[0].value
     else:
-        raise ContractError('Frame collect_outputs must be a function or lambda')
+        return {'over': point, 'object_outputs': 'collect_outputs'}
     if not isinstance(result, ast.Dict) or len(result.keys) != 1:
-        raise ContractError('Frame collect currently supports one sum section')
+        return {'over': point, 'object_outputs': 'collect_outputs'}
     mode = result.keys[0]
     values = result.values[0]
     if not isinstance(mode, ast.Constant) or mode.value != 'sum' or not isinstance(values, ast.Dict):
-        raise ContractError('Frame collect currently supports a sum dictionary')
+        return {'over': point, 'object_outputs': 'collect_outputs'}
     if not values.keys:
-        raise ContractError('Frame collect sum needs at least one Cell')
+        return {'over': point, 'object_outputs': 'collect_outputs'}
     names = []
     for key, call in zip(values.keys, values.values):
         if (not isinstance(key, ast.Constant) or type(key.value) is not str
                 or not isinstance(call, ast.Call) or not isinstance(call.func, ast.Name)
                 or call.args or call.keywords or key.value != call.func.id
                 or call.func.id not in space.cells):
-            raise ContractError('Frame collect sum leaves must be named zero-argument Cells')
+            return {'over': point, 'object_outputs': 'collect_outputs'}
         names.append(key.value)
     if len(set(names)) != len(names):
         raise ContractError('Frame collect sum contains duplicate output names')
@@ -70,18 +70,23 @@ def _collect_sum_plan(space, point, point_table):
 
 
 def from_modelx(model, destination, *, projection='Projection', data_space='Data',
-                point_table=None, steps=2048, replacements=None, contracts=None, signatures=None, cython_objects=True):
+                point_table=None, steps=2048, replacements=None, contracts=None, signatures=None,
+                cython_objects=True, policy_records=None, row_references=None):
     """Derive a self-contained build spec; destination stores source evidence only.
 
     replacements is an explicit mapping of Cell names to replacement formula source.
     It is meant for reviewing author-side adaptations, never product detection.
     contracts optionally supplies ordinary annotation dictionaries by Cell name.
+    policy_records supplies prepared rows for a single independent-policy Space;
+    row_references maps formula reference names to its object-valued columns.
+    Connected Space preparation is not inferred by this flat importer.
     """
     import pandas as pd
     dest=Path(destination).resolve();dest.mkdir(parents=True,exist_ok=True)
     import numpy as np
     space=getattr(model,projection)
     data=getattr(model,data_space,None)
+    row_references=dict(row_references or {})
     parameters=tuple(space.parameters or ())
     if space.spaces:
         raise ContractError('Live importer requires a flat Projection Space without children')
@@ -123,10 +128,23 @@ def from_modelx(model, destination, *, projection='Projection', data_space='Data
             # Source-backed Data references are refreshed with their dependent
             # arrays as one input revision below. The older DataFrame-Cell route
             # keeps its existing binding contract.
+    if policy_records is not None:
+        if not isinstance(policy_records, pd.DataFrame):
+            raise ContractError('Prepared policy records must be a DataFrame')
+        if point_table is None:
+            point_table='mxcf_policy_records'
+        if point_table in tables:
+            raise ContractError('Prepared policy records conflict with a Data table: '+point_table)
+        tables[point_table]=policy_records
     from .lookups import power as kernel_power
     modules={}; refs={}; object_references={}; intrinsic_references={}; enum_references={}
+    cell_loads = {node.id for fn in space.cells.values()
+                  for node in ast.walk(ast.parse(fn.formula.source))
+                  if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load)}
     for name,value in space.refs.items():
         if name in parameters or name in ('data','_model','_space','__builtins__'):continue
+        if name in row_references:continue
+        if name not in cell_loads:continue
         if isinstance(value,types.ModuleType):modules[name]=value
         elif inspect.isclass(value) and issubclass(value, IntEnum):
             # model_plan has first-class IntEnum domain lowering for category/key
@@ -244,6 +262,7 @@ def from_modelx(model, destination, *, projection='Projection', data_space='Data
               'enum_references':sorted(enum_references),
               'lambda_cells_normalized':normalized,
               'space_parameters':list(parameters),
+              'row_references':row_references,
               'parameter_defaults':({p.name:p.default for p in list(space_signature.parameters.values())[1:]} if space_signature else {})}
     if data_program is not None:
         evidence['data_reference_tables'] = sorted(data_references)
@@ -259,7 +278,8 @@ def from_modelx(model, destination, *, projection='Projection', data_space='Data
         outputs={},length='0',steps=steps,cell_outputs=tuple(space.cells),
         data_space=data_space,projection=projection,point_table=point_table,
         allow_none={n:effective_allow_none(c) for n,c in space.cells.items()},
-        model_name=model.name,cython_objects=cython_objects)
+        model_name=model.name,cython_objects=cython_objects,
+        row_references=row_references)
     spec.model.update(static_projection=static,object_references=object_references,
                       module_references={name: value.__name__ for name, value in modules.items()})
     if data_program is not None:
@@ -269,7 +289,8 @@ def from_modelx(model, destination, *, projection='Projection', data_space='Data
     if collect is not None:
         from dataclasses import replace
         spec.model['collect'] = collect
-        spec = replace(spec, scalar_outputs=(*spec.scalar_outputs, *collect['sum']))
+        if 'sum' in collect:
+            spec = replace(spec, scalar_outputs=(*spec.scalar_outputs, *collect['sum']))
     if signatures:
         from dataclasses import replace
         spec=replace(spec,cython_signatures=signatures)

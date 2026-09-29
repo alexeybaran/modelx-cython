@@ -35,7 +35,8 @@ def _dtype(series):
 
 def derive_spec(module, tables, *, references, space_formula, outputs, steps, length,
                 scalar_outputs=(), cell_outputs=(), data_space='Data', projection='Projection',
-                allow_none=None, model_name=None, point_table=None, cython_objects=False):
+                allow_none=None, model_name=None, point_table=None, cython_objects=False,
+                row_references=None):
     """Build a kernel contract without author INPUTS/FRONTEND maps.
 
     Supported structure: one Data Space with zero-argument DataFrame Cells and
@@ -251,8 +252,21 @@ def derive_spec(module, tables, *, references, space_formula, outputs, steps, le
         if len(point_tables) != 1:
             raise ContractError('Exactly one policy table must be identifiable from lookup.field/category')
         point_table = next(iter(point_tables))
-    # Declared references are model data, not inferred actuarial assumptions.
     used = set().union(*(referenced_names(f) for f in cells.values()))
+    row_references = dict(row_references or {})
+    if row_references and not isinstance(tables[point_table], pd.DataFrame):
+        raise ContractError('Per-policy references require a DataFrame policy table')
+    if set(row_references) & (set(references) | set(defaults) | set(cells)
+                              | {point, 'data', 'lookup'}):
+        raise ContractError('Per-policy reference names must not shadow references, parameters or Cells')
+    for name, column in row_references.items():
+        if (not isinstance(name, str) or not name.isidentifier() or name.startswith('_')
+                or not isinstance(column, str) or column not in tables[point_table].columns):
+            raise ContractError('Per-policy reference needs a named policy-table column: ' + str(name))
+        if name in used:
+            add(name, object, dict(kind='row_reference', table=point_table, column=column))
+            schemas[point_table]['columns'][column] = 'object'
+    # Declared references are model data, not inferred actuarial assumptions.
     if frontend['arrays'] and point in used:
         from pandas.api.types import is_integer_dtype
         index = tables[point_table].index
@@ -282,7 +296,7 @@ def derive_spec(module, tables, *, references, space_formula, outputs, steps, le
                 point_parameter=point, point_table=point_table, parameter_defaults=defaults,
                 space_parameters=[(p.name, p.kind.name) for p in parameters],
                 reference_defaults=dict(references), bindings=bindings, tables=schemas,
-                output_index='t')
+                row_references=row_references, output_index='t')
     frontend['point_parameter'] = point
     # Freeze the author-time Data snapshot into the build contract. The generated
     # compiled package owns this initial data exactly as an exported model package does.

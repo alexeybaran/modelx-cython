@@ -232,7 +232,7 @@ class CompiledKernel:
             self._require_root()
             return self._kernel.run_scalar(name)
 
-    def _run_object_outputs(self, name, detach):
+    def _run_object_outputs(self, name, detach, consume=None):
         """Traverse an object Cell once per policy with in-scope detachment.
 
         This is an internal building block for the exported collect contract.
@@ -246,7 +246,7 @@ class CompiledKernel:
             raise ContractError('Expected a zero-argument object Cell output')
         with self._lock:
             self._require_root()
-            return self._kernel.run_object_outputs(name, detach)
+            return self._kernel.run_object_outputs(name, detach, consume)
 
     def project_one(self, policy, table=None):
         table = table or next(iter(self.manifest['outputs']))

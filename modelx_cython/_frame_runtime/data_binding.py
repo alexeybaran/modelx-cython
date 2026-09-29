@@ -105,7 +105,7 @@ def prepare_inputs(manifest, tables, *, references=None, packed=None,
         kind = binding['kind']
         if kind in ('curve', 'curve_table', 'indexed_array'):
             continue
-        if kind == 'field':
+        if kind in ('field', 'row_reference'):
             table = tables[binding['table']]
             if (table.index.is_unique and points.index.is_unique
                     and table.index.equals(points.index)):

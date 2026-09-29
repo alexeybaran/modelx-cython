@@ -34,10 +34,12 @@ def add_model_entries(source, manifest):
         # The caller supplies its public result-detachment rule. It runs before
         # the next policy reuses the working frame, while the formula itself is
         # still the one generated Cython Cell body and authoritative cache.
-        lines = ['    def run_object_outputs(self, str name, object detach):',
+        lines = ['    def run_object_outputs(self, str name, object detach, object consume=None):',
                  '        cdef Py_ssize_t i',
                  '        if not callable(detach): raise TypeError("detach must be callable")',
-                 '        result = []',
+                 '        if consume is not None and not callable(consume):',
+                 '            raise TypeError("consume must be callable")',
+                 '        result = [] if consume is None else None',
                  '        for i in range(len(self._records)):']
         lines.append('            self._select_policy(i)' if mixed
                      else '            self._select(self._records[i])')
@@ -45,7 +47,9 @@ def add_model_entries(source, manifest):
             lines.extend((f"            {'if' if index == 0 else 'elif'} name == {name!r}:",
                           f'                value = self._object_cell_{name}()'))
         lines.extend(('            else: raise KeyError(name)',
-                      '            result.append(detach(value))',
+                      '            detached = detach(value)',
+                      '            if consume is None: result.append(detached)',
+                      '            else: consume(i, detached)',
                       '        return result'))
         additions.append('\n'.join(lines) + '\n')
     return source.rstrip() + '\n\n' + '\n'.join(additions)

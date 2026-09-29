@@ -45,9 +45,20 @@ def test_collect_function_docstring_keeps_direct_return_contract():
     'lambda: {"sum": {"value": value() + 1}}',
     'lambda: {"sum": {"renamed": value()}}',
 ])
-def test_unsupported_collect_shapes_fail_explicitly(source):
-    with pytest.raises(ContractError, match='Frame collect'):
-        _collect_sum_plan(_space(source), 'point_id', SimpleNamespace(index=(1, 2, 3)))
+def test_non_scalar_collect_declarations_keep_author_formula(source):
+    assert _collect_sum_plan(_space(source), 'point_id',
+                             SimpleNamespace(index=(1, 2, 3))) == {
+                                 'over': 'point_id', 'object_outputs': 'collect_outputs'}
+
+
+def test_dv01_shaped_mixed_time_indexed_declaration_uses_object_traversal():
+    source = '''lambda: {
+        "individual": {"state": {t: state(t) for t in snapshot_months}},
+        "sum": {"net_cf": {t: net_cf(t) for t in projection_months}},
+    }'''
+    assert _collect_sum_plan(_space(source), 'point_id',
+                             SimpleNamespace(index=(1, 2, 3))) == {
+                                 'over': 'point_id', 'object_outputs': 'collect_outputs'}
 
 
 def test_changed_domain_order_cannot_use_full_table_traversal():
