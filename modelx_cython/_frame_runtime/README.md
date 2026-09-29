@@ -13,10 +13,13 @@ independent context with the same generated Cell entries. The two routes
 therefore differ in **ownership**, not in formula or cache implementation.
 
 This package is not yet connected to the standard `mx2cy` exported-model
-pipeline or to its public `collect()` method. The current MYGA bridge uses a
+pipeline. Its experimental facade now provides `collect()` for a live modelx
+declaration consisting of numeric `sum` leaves that directly call zero-argument
+Cells over the complete policy-table domain. Other output shapes and domains
+need the general collect implementation. The MYGA bridge still uses a
 toolkit-only scalar Cell and the retained formula/type specification to check
-the transferred backend. It must not be treated as an accepted compiler
-implementation or as evidence of normal exported-package compatibility.
+performance. Neither route is an accepted compiler implementation or proof of
+normal exported-package compatibility.
 
 Windows portability edits in this snapshot are limited to UTF-8 generated
 source reads/writes and a package-local generated facade import. The toolkit

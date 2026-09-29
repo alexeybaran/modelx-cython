@@ -16,6 +16,56 @@ from .contracts import ContractError, cell
 from .model_plan import derive_spec
 
 
+def _collect_sum_plan(space, point, point_table):
+    """Read a simple numeric-sum declaration without evaluating its formula.
+
+    This experimental frame route currently covers a full policy-table domain
+    and direct zero-argument Cell leaves. Unsupported declarations fail at
+    build time; they must never be silently compiled as a different workload.
+    """
+    domains = getattr(space._impl, 'collect_over_spec', None)
+    if domains is None:
+        return None
+    if tuple(domains) != (point,) or 'collect_outputs' not in space.cells:
+        raise ContractError('Frame collect requires the policy parameter and collect_outputs')
+    domain = tuple(domains[point].value(space._impl))
+    if domain != tuple(point_table.index):
+        raise ContractError('Frame collect domain must match the policy-table index in order')
+    source = space.cells['collect_outputs'].formula.source
+    parsed = ast.parse(source).body
+    if len(parsed) != 1:
+        raise ContractError('Frame collect needs one collect_outputs formula')
+    node = parsed[0]
+    if isinstance(node, ast.Expr) and isinstance(node.value, ast.Lambda):
+        result = node.value.body
+    elif isinstance(node, ast.FunctionDef):
+        returns = [stmt for stmt in node.body if isinstance(stmt, ast.Return)]
+        if len(returns) != 1 or len(node.body) != 1:
+            raise ContractError('Frame collect needs a direct return expression')
+        result = returns[0].value
+    else:
+        raise ContractError('Frame collect_outputs must be a function or lambda')
+    if not isinstance(result, ast.Dict) or len(result.keys) != 1:
+        raise ContractError('Frame collect currently supports one sum section')
+    mode = result.keys[0]
+    values = result.values[0]
+    if not isinstance(mode, ast.Constant) or mode.value != 'sum' or not isinstance(values, ast.Dict):
+        raise ContractError('Frame collect currently supports a sum dictionary')
+    if not values.keys:
+        raise ContractError('Frame collect sum needs at least one Cell')
+    names = []
+    for key, call in zip(values.keys, values.values):
+        if (not isinstance(key, ast.Constant) or type(key.value) is not str
+                or not isinstance(call, ast.Call) or not isinstance(call.func, ast.Name)
+                or call.args or call.keywords or key.value != call.func.id
+                or call.func.id not in space.cells):
+            raise ContractError('Frame collect sum leaves must be named zero-argument Cells')
+        names.append(key.value)
+    if len(set(names)) != len(names):
+        raise ContractError('Frame collect sum contains duplicate output names')
+    return {'over': point, 'sum': names}
+
+
 def from_modelx(model, destination, *, projection='Projection', data_space='Data',
                 point_table=None, steps=2048, replacements=None, contracts=None, signatures=None, cython_objects=True):
     """Derive a self-contained build spec; destination stores source evidence only.
@@ -150,6 +200,11 @@ def from_modelx(model, destination, *, projection='Projection', data_space='Data
         allow_none={n:effective_allow_none(c) for n,c in space.cells.items()},
         model_name=model.name,cython_objects=cython_objects)
     spec.model.update(static_projection=static,object_references=object_references)
+    collect = _collect_sum_plan(space, point, tables[point_table]) if not static else None
+    if collect is not None:
+        from dataclasses import replace
+        spec.model['collect'] = collect
+        spec = replace(spec, scalar_outputs=(*spec.scalar_outputs, *collect['sum']))
     if signatures:
         from dataclasses import replace
         spec=replace(spec,cython_signatures=signatures)

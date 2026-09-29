@@ -243,6 +243,7 @@ class CompiledModel:
             if (type(collect) is not dict or collect.get('over') != self._plan['point_parameter']
                     or type(collect.get('sum')) is not list or not collect['sum']
                     or any(type(name) is not str or name not in self.manifest['scalar_outputs']
+                           or self.manifest['cells'][name]['result']['kind'] != 'float'
                            for name in collect['sum']) or len(set(collect['sum'])) != len(collect['sum'])):
                 raise ContractError('Unsupported compiled collect declaration')
         self._lock, self._closed, self._active = threading.RLock(), False, 0
