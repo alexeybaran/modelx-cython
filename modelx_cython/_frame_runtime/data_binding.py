@@ -69,25 +69,48 @@ def prepare_inputs(manifest, tables, *, references=None, packed=None):
     packed = pack_tables(plan, tables) if packed is None else packed
     points = tables[plan['point_table']]
     if not len(points): raise ContractError('At least one policy is required')
-    rows = []
-    for point in points.index:
-        row = dict(packed)
-        for name, info in manifest['inputs'].items():
-            binding = plan['bindings'][name]; kind = binding['kind']
-            if kind in ('curve', 'curve_table'): continue
-            if kind == 'field':
-                value = tables[binding['table']].at[point, binding['column']]
-                if info['kind'] == 'enum':
-                    if isinstance(value, str):
-                        try: value = info['members'][value.upper()]
-                        except KeyError: raise ContractError(name + ': unknown category') from None
-                    elif isinstance(value, IntEnum): value = int(value)
-            elif kind == 'point':
-                value = point
-            elif kind == 'parameter':
-                value = plan['parameter_defaults'][binding['name']]
+    # A policy table is normally read repeatedly for every bound scalar. Select
+    # each aligned column once, while retaining the original label lookup for
+    # other layouts (including duplicated or differently ordered indexes).
+    field_columns = {}
+    field_bindings = []
+    point_bindings = []
+    fixed = dict(packed)
+    for name, info in manifest['inputs'].items():
+        binding = plan['bindings'][name]
+        kind = binding['kind']
+        if kind in ('curve', 'curve_table'):
+            continue
+        if kind == 'field':
+            table = tables[binding['table']]
+            if (table.index.is_unique and points.index.is_unique
+                    and table.index.equals(points.index)):
+                column_key = (binding['table'], binding['column'])
+                if column_key not in field_columns:
+                    field_columns[column_key] = table[binding['column']].to_numpy(copy=False)
+                column = field_columns[column_key]
             else:
-                value = refs[binding['name']]
+                column = None
+            field_bindings.append((name, info, binding, column))
+        elif kind == 'point':
+            point_bindings.append(name)
+        elif kind == 'parameter':
+            fixed[name] = plan['parameter_defaults'][binding['name']]
+        else:
+            fixed[name] = refs[binding['name']]
+    rows = []
+    for position, point in enumerate(points.index):
+        row = fixed.copy()
+        for name in point_bindings:
+            row[name] = point
+        for name, info, binding, column in field_bindings:
+            value = (column[position] if column is not None else
+                     tables[binding['table']].at[point, binding['column']])
+            if info['kind'] == 'enum':
+                if isinstance(value, str):
+                    try: value = info['members'][value.upper()]
+                    except KeyError: raise ContractError(name + ': unknown category') from None
+                elif isinstance(value, IntEnum): value = int(value)
             row[name] = value
         rows.append(row)
     return rows

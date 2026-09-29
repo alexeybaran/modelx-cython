@@ -44,6 +44,7 @@ class CompiledKernel:
     def _validate(self, records):
         converted = []
         shared = {}
+        immutable_last = {}
         infos = self.manifest['inputs']
         for record in records:
             if set(record) != set(infos):
@@ -61,7 +62,20 @@ class CompiledKernel:
                         shared[id(v)] = constructor(*v.arrays, v.labels) if kind == 'curve_table' else constructor(*v.arrays)
                     v = shared[id(v)]
                 else:
-                    v = self._scalar_value(key, ti, v, record)
+                    # Model-level references often repeat the exact immutable
+                    # Python object across thousands of policy rows. Reuse its
+                    # checked conversion, but never memoize mutable/custom
+                    # numbers or table keys whose meaning depends on a record.
+                    if kind != 'table_key' and type(v) in (int, float, bool, str):
+                        last = immutable_last.get(key)
+                        if last is not None and last[0] is v:
+                            v = last[1]
+                        else:
+                            converted_value = self._scalar_value(key, ti, v, record)
+                            immutable_last[key] = (v, converted_value)
+                            v = converted_value
+                    else:
+                        v = self._scalar_value(key, ti, v, record)
                 row.append(v)
             converted.append(tuple(row))
         if not converted:
