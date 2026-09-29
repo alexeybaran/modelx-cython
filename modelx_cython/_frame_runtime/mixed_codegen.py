@@ -1,24 +1,28 @@
 """Mixed scalar boundary extensions over the fixed CF4 physical template.
 
 Pure-native output is untouched. Python calculators finish Cython cleanup before
-numeric code captures their error. Nested entries save/restore guard ownership
-and roll back only unfinished cache entries created since that entry's mark.
+numeric code captures their error. Unfinished entries carry the owning invocation
+depth; a failure scans and clears only entries from that invocation or its children.
 """
 import re
 
 
 def augment_frame(frame, functions, manifest):
     slots = max(1, manifest['cache_slots'])
-    frame += [f'    Py_ssize_t _busy_slots[{slots}]', f'    unsigned char _busy_hash[{slots}]',
-              '    Py_ssize_t _busy_depth', '    unsigned int _entry_depth',
+    frame += [f'    unsigned int _busy_owner[{slots}]', '    unsigned int _entry_depth',
               '    bint _scope_valid']
-    frame += ['\ncdef void _rollback(_Frame* state, Py_ssize_t mark) noexcept nogil:',
+    hash_spans = sorted((row['offset'], row['offset'] + row['slots'])
+                        for row in manifest['cells'].values()
+                        if row.get('hashed') and 'offset' in row)
+    frame += ['\ncdef inline bint _hash_slot(Py_ssize_t slot) noexcept nogil:']
+    frame += [f'    if {start} <= slot < {end}: return True'
+              for start, end in hash_spans]
+    frame += ['    return False',
+              '\ncdef void _rollback(_Frame* state, unsigned int mark) noexcept nogil:',
               '    cdef Py_ssize_t slot',
-              '    while state._busy_depth > mark:',
-              '        state._busy_depth -= 1',
-              '        slot = state._busy_slots[state._busy_depth]',
-              '        if state._seen[slot] == state._epoch - 1:',
-              '            state._seen[slot] = state._epoch - 2 if state._busy_hash[state._busy_depth] else 0']
+              f'    for slot in range({slots}):',
+              '        if state._seen[slot] == state._epoch - 1 and state._busy_owner[slot] >= mark:',
+              '            state._seen[slot] = state._epoch - 2 if _hash_slot(slot) else 0']
     result = []
     for function in functions:
         match = re.search(r'cdef inline .+? _cell_(\w+)\(', function)
@@ -34,15 +38,10 @@ def augment_frame(frame, functions, manifest):
         for line in function.splitlines():
             indent = line[:len(line) - len(line.lstrip())]
             if line.strip() == 'state._seen[_mx_key] = state._epoch - 1':
-                lines += [indent + f'if state._busy_depth >= {slots}: mx_fail(&state._guard, 4, b"active cache stack")',
-                          indent + 'state._busy_slots[state._busy_depth] = _mx_key',
-                          indent + f'state._busy_hash[state._busy_depth] = {int(row["hashed"])}',
-                          indent + 'state._busy_depth += 1']
+                lines.append(indent + 'state._busy_owner[_mx_key] = state._entry_depth')
             lines.append(line)
-            if row['recursive'] and line.strip() == 'state._seen[_mx_key] = state._epoch':
-                lines.append(indent + 'state._busy_depth -= 1')
         result.append('\n'.join(lines))
-    manifest['mixed_cache_protocol'] = 'ready/busy/tombstone; rollback by nested-entry watermark'
+    manifest['mixed_cache_protocol'] = 'ready/busy/tombstone; rollback scan by invocation depth'
     return frame, result
 
 
@@ -82,7 +81,7 @@ def augment_runtime(source, manifest):
 
     cdef void _invoke(self, _Command* command) except *:
         cdef MxGuard saved = self._frame._guard
-        cdef Py_ssize_t mark = self._frame._busy_depth
+        cdef unsigned int mark = self._frame._entry_depth + 1
         mx_guard_init(&self._frame._guard)
         self._frame._entry_depth += 1
         try:
