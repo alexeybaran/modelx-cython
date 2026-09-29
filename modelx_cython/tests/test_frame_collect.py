@@ -146,6 +146,25 @@ def test_collect_detach_rejects_retained_spaces():
         _detach_collect_value({'bad': model._projection})
 
 
+def test_collect_detach_reuses_exact_immutable_scalars_but_copies_subclasses():
+    copied = []
+
+    class TaggedFloat(float):
+        def __deepcopy__(self, memo):
+            copied.append(float(self))
+            return TaggedFloat(self)
+
+    value = {'sum': {'cash': {0: 1.25, 1: TaggedFloat(2.5)}},
+             'individual': {'state': [3.0]}}
+    detached = _detach_collect_value(value)
+    assert detached is not value
+    assert detached['sum']['cash'] is not value['sum']['cash']
+    assert detached['sum']['cash'][0] is value['sum']['cash'][0]
+    assert detached['sum']['cash'][1] is not value['sum']['cash'][1]
+    assert detached['individual']['state'] is not value['individual']['state']
+    assert copied == [2.5]
+
+
 def test_collect_object_sections_check_shape_and_keep_order():
     accumulator = _CollectAccumulator()
     accumulator.add(5, {'individual': {'state': {0: 'first'}},

@@ -41,6 +41,11 @@ def _detach_collect_value(value):
     """Copy outputs before a policy's working frame can be selected again."""
     if isinstance(value, (_ItemSpace, _ProjectionSpace)):
         raise TypeError('collect output cannot retain a live Space')
+    # Exact builtin scalars have no mutable state or attached scratch storage.
+    # deepcopy returns these very objects; avoid its per-value dispatch across
+    # large numeric result collections. Subclasses retain their copy protocol.
+    if type(value) in (type(None), bool, int, float, complex, str, bytes):
+        return value
     if type(value) is dict:
         return {key: _detach_collect_value(item) for key, item in value.items()}
     if type(value) in (list, tuple):
