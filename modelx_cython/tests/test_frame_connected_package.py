@@ -76,6 +76,27 @@ def test_connected_package_rejects_stale_source_graph(tmp_path, monkeypatch):
         connected_package.load_connected_package(destination / '__init__.py')
 
 
+def test_connected_package_can_replace_unavailable_default_provider(
+        tmp_path, monkeypatch):
+    graph, artifact = _fixture(tmp_path)
+    destination = tmp_path / 'CompiledExample'
+    connected_package.assemble_connected_package(
+        destination, graph, {'A': artifact},
+        external_imports={'helper': 'missing_provider_for_test:helper'})
+    replacement = object()
+    seen = []
+
+    def fake_load(_graph, _artifacts, *, external_bindings, tables_by_space):
+        seen.append(external_bindings)
+        return replacement
+
+    monkeypatch.setattr(connected_package, 'load_connected', fake_load)
+    result = connected_package.load_connected_package(
+        destination / '__init__.py', external_bindings={'helper': replacement})
+    assert result is replacement
+    assert seen == [{'helper': replacement}]
+
+
 def test_connected_package_does_not_replace_existing_campaign(tmp_path):
     graph, artifact = _fixture(tmp_path)
     destination = tmp_path / 'CompiledExample'

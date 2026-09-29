@@ -137,8 +137,10 @@ def load_connected_package(package_file, *, external_bindings=None,
         binary = directory / relative
         if not binary.resolve().is_relative_to(directory) or _sha(binary) != digest:
             raise ContractError('Connected native hash mismatch: ' + relative)
+    supplied = dict(external_bindings or {})
     external = {name: _provider_value(provider) for name, provider in
-                package_manifest['external_imports'].items()}
-    external.update(dict(external_bindings or {}))
+                package_manifest['external_imports'].items()
+                if name not in supplied}
+    external.update(supplied)
     return load_connected(graph, artifacts, external_bindings=external,
                           tables_by_space=tables_by_space)
