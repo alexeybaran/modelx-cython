@@ -8,6 +8,7 @@ from pathlib import Path
 import ast
 import copy
 import hashlib
+import io
 import inspect
 import json
 import os
@@ -15,6 +16,7 @@ import re
 import subprocess
 import sys
 import textwrap
+import tokenize
 from enum import IntEnum
 from .contracts import ContractError, TableKey
 from .lookups import (Curve, CurveTable, IndexedFloat1, IndexedFloat2,
@@ -279,11 +281,20 @@ class FrontendRewrite(ast.NodeTransformer):
 
 class BindNames(ast.NodeTransformer):
     """Only structural name binding and explicitly declared enum constants."""
-    def __init__(self, cells, inputs, enums, locals_, native_lookups=False):
+    def __init__(self, cells, inputs, enums, locals_, native_lookups=False,
+                 frame_native=False, frame_casts=None):
         self.cells, self.inputs, self.enums, self.locals = cells, inputs, enums, locals_
         self.native_lookups = native_lookups
+        self.frame_native = frame_native
+        self.frame_casts = frame_casts or {}
 
     def visit_Call(self, node):
+        if (self.frame_native and isinstance(node.func, ast.Name)
+                and node.func.id in self.cells and node.func.id not in self.locals):
+            return ast.copy_location(ast.Call(
+                ast.Name('_cell_' + node.func.id, ast.Load()),
+                [ast.Name('state', ast.Load()), *[self.visit(a) for a in node.args]],
+                [ast.keyword(k.arg, self.visit(k.value)) for k in node.keywords]), node)
         if (self.native_lookups and isinstance(node.func, ast.Attribute)
                 and isinstance(node.func.value, ast.Name)
                 and node.func.value.id in self.inputs and node.func.value.id not in self.locals
@@ -311,8 +322,14 @@ class BindNames(ast.NodeTransformer):
         if not isinstance(node.ctx, ast.Load) or node.id in self.locals:
             return node
         if node.id in self.cells:
+            if self.frame_native:
+                return ast.copy_location(ast.Name('_cell_' + node.id, ast.Load()), node)
             return ast.copy_location(ast.Attribute(ast.Name('self', ast.Load()), '_cell_' + node.id, ast.Load()), node)
         if node.id in self.inputs:
+            if self.frame_native:
+                if node.id in self.frame_casts:
+                    return ast.copy_location(ast.Name('__MX_FRAME_CAST_' + node.id + '__', ast.Load()), node)
+                return ast.copy_location(ast.Attribute(ast.Name('state', ast.Load()), node.id, ast.Load()), node)
             return ast.copy_location(ast.Attribute(ast.Name('self', ast.Load()), node.id, ast.Load()), node)
         if node.id == '_power_compatible':
             return node
@@ -330,6 +347,24 @@ class BindNames(ast.NodeTransformer):
 def _expression(source, binder):
     n = binder.visit(ast.parse(source, mode='eval').body)
     return ast.unparse(ast.fix_missing_locations(n))
+
+
+def _frame_cast_names(source, casts):
+    """Insert Cython casts only at generated AST names, never in formula literals."""
+    if not casts:
+        return source
+    offsets = [0]
+    for line in source.splitlines(keepends=True):
+        offsets.append(offsets[-1] + len(line))
+    changes = []
+    for token in tokenize.generate_tokens(io.StringIO(source).readline):
+        if token.type == tokenize.NAME and token.string in casts:
+            start = offsets[token.start[0] - 1] + token.start[1]
+            end = offsets[token.end[0] - 1] + token.end[1]
+            changes.append((start, end, casts[token.string]))
+    for start, end, replacement in reversed(changes):
+        source = source[:start] + replacement + source[end:]
+    return source
 
 
 
@@ -800,16 +835,18 @@ def emit(spec, *, diagnostics=False, python_cells=(), frame_parts=False):
         loc = ({'_mx_value', '_mx_key', '_mx_object_key', 'self'} if row['cached'] else set()) | {p['name'] for p in params} | {n.id for n in ast.walk(node) if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store)}
         binder = BindNames(selected, spec.inputs, enums, loc, native_lookups=True)
         body = []
+        direct_frame_calc = frame_parts and name not in python_reasons
         if row['cached']:
             memo_return = f'self.{store}[_mx_key] = _mx_value\nself._seen[_mx_key] = self._epoch\nreturn _mx_value'
             lines += ['        _mx_value = self._calc_' + name + '(' + call + ')']
             lines += textwrap.indent(memo_return, '        ').splitlines()
             calc_start = len(lines)
-            lines += [f'    cdef inline {ret} _calc_{name}(self{calc_tail}) except? -1{native_suffix}:']
+            if not direct_frame_calc:
+                lines += [f'    cdef inline {ret} _calc_{name}(self{calc_tail}) except? -1{native_suffix}:']
         if name in python_reasons:
             tuple_expr = '(' + call + (',' if params else '') + ')'
             body = ['with gil:\n    return self._python_scope.calculate(' + repr(name) + ', ' + tuple_expr + ')']
-        else:
+        elif not direct_frame_calc:
             for n in node.body:
                 if isinstance(n, ast.Expr) and isinstance(n.value, ast.Constant) and isinstance(n.value.value, str):
                     continue
@@ -818,14 +855,42 @@ def emit(spec, *, diagnostics=False, python_cells=(), frame_parts=False):
             lines += [f'    cdef inline {ret} _cell_{name}(self{tail}) except? -1{native_suffix}:',
                       f'        cdef {ret} _mx_value',
                       '        _mx_value = self._calc_' + name + '(' + call + ')',
-                      '        return _mx_value',
-                      f'    cdef inline {ret} _calc_{name}(self{calc_tail}) except? -1{native_suffix}:']
-            calc_start = len(lines) - 1
-        for s in body:
-            lines += textwrap.indent(s, '        ').splitlines()
-        if frame_parts:
+                      '        return _mx_value']
+            calc_start = len(lines)
+            if not direct_frame_calc:
+                lines += [f'    cdef inline {ret} _calc_{name}(self{calc_tail}) except? -1{native_suffix}:']
+        if direct_frame_calc:
+            object_types = {'object', 'Curve', 'CurveTable', 'IndexedInt1',
+                            'IndexedFloat1', 'IndexedInt2', 'IndexedFloat2',
+                            'dict', 'set'}
+            frame_casts = {key: info['ctype'] for key, info in input_info.items()
+                           if info['ctype'] in object_types}
+            cast_names = {'__MX_FRAME_CAST_' + key + '__':
+                          f'(<{ctype}>state.{key})'
+                          for key, ctype in frame_casts.items()}
+            frame_binder = BindNames(selected, spec.inputs, enums, loc,
+                                     native_lookups=True, frame_native=True,
+                                     frame_casts=frame_casts)
+            frame_body = []
+            for statement in node.body:
+                if (isinstance(statement, ast.Expr)
+                        and isinstance(statement.value, ast.Constant)
+                        and isinstance(statement.value.value, str)):
+                    continue
+                source = ast.unparse(ast.fix_missing_locations(
+                    frame_binder.visit(copy.deepcopy(statement))))
+                source = _frame_cast_names(source, cast_names)
+                frame_body.extend(textwrap.indent(source, '    ').splitlines())
             frame_methods.extend((tuple(lines[method_start:calc_start]),
-                                  tuple(lines[calc_start:])))
+                                  tuple([f'cdef inline {ret} _calc_{name}(_Frame* state{calc_tail}) except? -1{native_suffix}:']
+                                        + frame_body)))
+        else:
+            for s in body:
+                lines += textwrap.indent(s, '        ').splitlines()
+        if frame_parts:
+            if not direct_frame_calc:
+                frame_methods.extend((tuple(lines[method_start:calc_start]),
+                                      tuple(lines[calc_start:])))
     frame_runtime_end = len(lines) if frame_parts else None
     binder = BindNames(selected, spec.inputs, enums, {'t'}, native_lookups=True)
     length_expr = _expression(spec.length, binder)

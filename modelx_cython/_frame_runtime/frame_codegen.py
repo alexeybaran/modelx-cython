@@ -59,16 +59,27 @@ def to_c_frame(parts, manifest):
             frame.append(f'    {dtype.replace("[::1]", "")} {name}[{sizes[name]}]')
         else:
             frame.append(f'    {t} {name}')
-    functions = [('\n'.join(x[4:] for x in method)
-                  .replace('(self, ', '(_Frame* state, ', 1)
-                  .replace('(self)', '(_Frame* state)', 1))
-                 for method in parts['methods']]
+    functions = []
+    direct_formulas = set()
+    for method in parts['methods']:
+        if method[0].startswith('cdef inline ') and '(_Frame* state' in method[0]:
+            # The shared AST binder already emitted this formula against its
+            # physical frame. Do not re-parse or rewrite author formula text.
+            functions.append('\n'.join(method))
+            direct_formulas.add(len(functions) - 1)
+        else:
+            functions.append(('\n'.join(x[4:] for x in method)
+                              .replace('(self, ', '(_Frame* state, ', 1)
+                              .replace('(self)', '(_Frame* state)', 1)))
     outer = parts['runtime']
     def lower_calls(text, pointer):
         text = re.sub(r'self\.(_cell_|_calc_)(\w+)\(\)', lambda m: f'{m[1]}{m[2]}({pointer})', text)
         return re.sub(r'self\.(_cell_|_calc_)(\w+)\(', lambda m: f'{m[1]}{m[2]}({pointer}, ', text)
     lowered = []
-    for block in functions:
+    for block_index, block in enumerate(functions):
+        if block_index in direct_formulas:
+            lowered.append(block)
+            continue
         offsets = [0]
         for ln in block.splitlines(keepends=True): offsets.append(offsets[-1] + len(ln))
         literals = []

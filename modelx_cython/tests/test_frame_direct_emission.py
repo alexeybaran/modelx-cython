@@ -4,7 +4,7 @@ from types import ModuleType
 
 import pytest
 
-from modelx_cython._frame_runtime.compiler import emit
+from modelx_cython._frame_runtime.compiler import emit, _frame_cast_names
 from modelx_cython._frame_runtime.contracts import KernelSpec, cell
 from modelx_cython._frame_runtime.frame_codegen import to_c_frame
 
@@ -44,3 +44,10 @@ def test_structured_emission_preserves_generated_source(mixed, expected):
     assert old_manifest == manifest
     direct = to_c_frame(parts, manifest)
     assert hashlib.sha256(direct.encode()).hexdigest() == expected
+
+
+def test_frame_casts_do_not_change_formula_string_literals():
+    marker = '__MX_FRAME_CAST_curve__'
+    source = f"return {marker}.get(1) if flag else '{marker}'"
+    assert _frame_cast_names(source, {marker: '(<Curve>state.curve)'}) == (
+        f"return (<Curve>state.curve).get(1) if flag else '{marker}'")
