@@ -133,6 +133,9 @@ def build_package(exported, destination, *, external_imports,
             arguments = dict(options.get(name, {}))
             if 'projection' in arguments:
                 raise ContractError('Space options cannot override discovered projection')
+            declared = graph['spaces'][plan['model'] + '.' + name]['space_references']
+            arguments['object_bindings'] = tuple(dict.fromkeys(
+                (*declared, *arguments.get('object_bindings', ()))))
             spec = derive(destination / '_sources' / name,
                           projection=name, **arguments)
             artifact = destination / '_artifacts' / name

@@ -77,6 +77,10 @@ def test_original_nested_exports_reach_one_package_plan(
         model.close()
     with open_exported_source(exported) as derive:
         plan = plan_package(derive.source_graph)
+        if fixture == 'ref_space':
+            parent = derive(tmp_path / 'parent_sources', projection='Bar')
+            assert parent.model['projection'] == 'Bar'
+            assert set(parent.cells) == {'baz'}
     assert set(plan['compiled_spaces']) == spaces
     assert plan['collect_roots'] == []
     assert plan['external_spaces'] == []
@@ -220,9 +224,7 @@ def test_complete_package_wires_real_cyclic_space_references(tmp_path):
     finally:
         model.close()
     result = build_package(
-        exported, tmp_path / 'cyclic_compiled', external_imports={},
-        space_options={'First': {'object_bindings': ('Other',)},
-                       'Second': {'object_bindings': ('Other',)}})
+        exported, tmp_path / 'cyclic_compiled', external_imports={})
     graph = tmp_path / 'cyclic_compiled' / '_sources' / 'First' / 'source_graph.json'
     connected = load_connected(graph, result['artifacts'], external_bindings={})
     try:

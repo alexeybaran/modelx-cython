@@ -96,13 +96,20 @@ def from_modelx(model, destination, *, projection='Projection', data_space='Data
     import pandas as pd
     dest=Path(destination).resolve();dest.mkdir(parents=True,exist_ok=True)
     import numpy as np
-    space=getattr(model,projection)
+    path = tuple(projection.split('.'))
+    if not path or any(not name.isidentifier() for name in path):
+        raise ContractError('Projection must name an exported Space')
+    exported_spaces = getattr(model, 'spaces', {})
+    if path in exported_spaces:
+        space = exported_spaces[path]
+    else:
+        space = model
+        for name in path:
+            space = getattr(space, name)
     data=getattr(model,data_space,None)
     row_references=dict(row_references or {})
     object_bindings=frozenset(object_bindings)
     parameters=tuple(space.parameters or ())
-    if space.spaces:
-        raise ContractError('Live importer requires a flat Projection Space without children')
     # A declared collect domain identifies the independent policy selector even
     # when it is not the first Space parameter. The public signature stays in
     # author order; initial values only establish typed internal frame bindings.
