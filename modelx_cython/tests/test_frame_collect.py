@@ -39,6 +39,8 @@ def _model():
     model.manifest = {'parameters': ['scenario']}
     model._lock = threading.RLock()
     model._closed = False
+    # The fixture bypasses CompiledModel.__init__; these hand-built bindings are ready.
+    model._initialized = True
     model._active = 0
     model._collect_cache = {}
     model._space_bindings = None
