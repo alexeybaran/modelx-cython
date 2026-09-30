@@ -33,13 +33,13 @@ def test_collect_regions_include_all_roots_and_consumers_in_dependency_order():
     assert 'Unrelated' not in plan['compiled_spaces']
 
 
-def test_collect_regions_reject_missing_input_and_cycles():
+def test_collect_regions_reject_missing_input_and_plan_reference_cycles():
     with pytest.raises(ContractError, match='Unbound external Space'):
         plan_collect_regions(_graph())
     graph = _graph()
     graph['spaces']['Example.Policies']['space_references']['Report'] = 'Example.Report'
-    with pytest.raises(ContractError, match='Cyclic'):
-        plan_collect_regions(graph, external_names=('Inputs',))
+    plan = plan_collect_regions(graph, external_names=('Inputs',))
+    assert set(plan['compiled_spaces']) == {'Policies', 'Scenarios', 'Report'}
 
 
 def test_complete_package_uses_same_graph_without_collect_declarations():
@@ -157,5 +157,38 @@ def test_complete_package_compiles_ordinary_single_space(tmp_path):
         result['artifacts'], external_bindings={})
     try:
         assert connected.Projection.value() == 4.25
+    finally:
+        connected.close()
+
+
+def test_complete_package_wires_real_cyclic_space_references(tmp_path):
+    import modelx as mx
+    from modelx_cython._frame_runtime.connected_build import build_package
+    from modelx_cython._frame_runtime.connected_model import load_connected
+
+    model = mx.new_model('CyclicSpaces')
+    try:
+        first = model.new_space('First')
+        second = model.new_space('Second')
+        first.Other = second
+        second.Other = first
+        first.new_cells('value', 'lambda: Other.value()')
+        second.new_cells('value', 'lambda: 7')
+        second.new_cells('via_first', 'lambda: Other.value()')
+        exported = tmp_path / 'cyclic_export'
+        model.export(exported)
+    finally:
+        model.close()
+    result = build_package(
+        exported, tmp_path / 'cyclic_compiled', external_imports={},
+        space_options={'First': {'object_bindings': ('Other',)},
+                       'Second': {'object_bindings': ('Other',)}})
+    graph = tmp_path / 'cyclic_compiled' / '_sources' / 'First' / 'source_graph.json'
+    connected = load_connected(graph, result['artifacts'], external_bindings={})
+    try:
+        assert connected.First.value() == 7
+        assert connected.Second.via_first() == 7
+        assert connected.First.Other is connected.Second
+        assert connected.Second.Other is connected.First
     finally:
         connected.close()

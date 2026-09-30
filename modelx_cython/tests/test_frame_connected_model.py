@@ -37,14 +37,18 @@ def _fixture(tmp_path, monkeypatch):
     created = []
 
     class FakeModel:
-        def __init__(self, artifact, tables, *, overrides, space_bindings):
+        def __init__(self, artifact, tables, *, _defer_bindings):
+            assert _defer_bindings
             self.name = artifact.name
             self.tables = tables
-            self.overrides = overrides
-            self.bindings = space_bindings
+            self.overrides = self.bindings = None
             self.space = SimpleNamespace(name=self.name)
             self.closed = False
             created.append(self)
+
+        def _finish_bindings(self, *, overrides, space_bindings):
+            self.overrides = overrides
+            self.bindings = space_bindings
 
         def __getattr__(self, name):
             if name == self.name:
@@ -126,5 +130,26 @@ def test_connected_loader_cleans_up_after_late_missing_binding(tmp_path, monkeyp
         connected_model.load_connected(
             graph, artifacts, external_bindings={'C': object()},
             tables_by_space={'A': {}, 'B': {}})
-    assert [item.name for item in created] == ['B']
-    assert created[0].closed
+    assert [item.name for item in created] == ['B', 'A']
+    assert all(item.closed for item in created)
+
+
+def test_connected_loader_wires_cyclic_spaces_without_proxies(tmp_path, monkeypatch):
+    graph, artifacts, created = _fixture(tmp_path, monkeypatch)
+    graph['spaces']['Example.B']['space_references']['A'] = 'Example.A'
+    path = artifacts['B'] / 'manifest.json'
+    manifest = json.loads(path.read_text())
+    manifest['model']['space_formula']['references'] = ['C', 'A']
+    path.write_text(json.dumps(manifest))
+    model = connected_model.load_connected(
+        graph, artifacts, external_bindings={'C': object(), 'helper': object()},
+        tables_by_space={'A': {}, 'B': {}})
+    try:
+        a = next(item for item in created if item.name == 'A')
+        b = next(item for item in created if item.name == 'B')
+        assert a.bindings['B'] is b.space
+        assert b.bindings['A'] is a.space
+        assert model.A is a.space
+        assert model.B is b.space
+    finally:
+        model.close()

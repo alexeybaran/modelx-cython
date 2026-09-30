@@ -94,7 +94,9 @@ def load_connected(graph, artifacts, *, external_bindings, tables_by_space=None)
         if name in visited:
             return
         if name in visiting:
-            raise ContractError('Cyclic compiled Space references need explicit wiring')
+            # Only reference wiring cycles are allowed here. Recursive Cell
+            # evaluation remains guarded by each compiled cache entry.
+            return
         visiting.add(name)
         for ref, target in nodes[name]['space_references'].items():
             dependency = target_name(ref, target)
@@ -129,13 +131,29 @@ def load_connected(graph, artifacts, *, external_bindings, tables_by_space=None)
     models = {}
     spaces = dict(external_bindings)
     try:
+        # Construct every real Space before connecting any references. This
+        # preserves Space identity even when A refers to B and B refers to A.
         for name in order:
             artifact = artifacts[name]
             manifest = manifests[name]
             plan = manifest['model']
-            refs = {}
-            for ref, target in nodes[name]['space_references'].items():
-                refs[ref] = spaces[target_name(ref, target)]
+            if name in tables_by_space:
+                tables = tables_by_space[name]
+            else:
+                public = manifest.get('public_api', {})
+                if public.get('schema') != 'mxcf.package.v1':
+                    raise ContractError('Compiled Space has no embedded Data: ' + name)
+                path = artifact / public['tables_file']
+                if _sha(path) != public['tables_sha256']:
+                    raise ContractError('Embedded Data hash mismatch: ' + name)
+                tables = pickle.loads(path.read_bytes())
+            model = CompiledModel(artifact, tables, _defer_bindings=True)
+            models[name] = model
+            spaces[name] = getattr(model, name)
+        for name in order:
+            plan = manifests[name]['model']
+            refs = {ref: spaces[target_name(ref, target)]
+                    for ref, target in nodes[name]['space_references'].items()}
             def resolve(ref):
                 if ref in refs:
                     return refs[ref]
@@ -149,20 +167,8 @@ def load_connected(graph, artifacts, *, external_bindings, tables_by_space=None)
             space_bindings = {ref: resolve(ref) for ref in formula_refs}
             overrides = {ref: resolve(ref)
                          for ref in plan.get('required_object_bindings', ())}
-            if name in tables_by_space:
-                tables = tables_by_space[name]
-            else:
-                public = manifest.get('public_api', {})
-                if public.get('schema') != 'mxcf.package.v1':
-                    raise ContractError('Compiled Space has no embedded Data: ' + name)
-                path = artifact / public['tables_file']
-                if _sha(path) != public['tables_sha256']:
-                    raise ContractError('Embedded Data hash mismatch: ' + name)
-                tables = pickle.loads(path.read_bytes())
-            model = CompiledModel(artifact, tables, overrides=overrides,
-                                  space_bindings=space_bindings or None)
-            models[name] = model
-            spaces[name] = getattr(model, name)
+            models[name]._finish_bindings(overrides=overrides,
+                                          space_bindings=space_bindings or None)
         return ConnectedModel(model_name, models, spaces, order)
     except BaseException:
         for name in reversed(order):

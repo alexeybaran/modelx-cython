@@ -64,7 +64,9 @@ def plan_package(graph, *, external_names=(), collect_only=False):
         if name in visited:
             return
         if name in visiting:
-            raise ContractError('Cyclic collect Space dependencies')
+            # The loader constructs all Space shells before wiring references.
+            # A reference cycle is therefore distinct from recursive Cell work.
+            return
         visiting.add(name)
         for ref, target in names[name].get('space_references', {}).items():
             if target not in nodes or not target.startswith(prefix):

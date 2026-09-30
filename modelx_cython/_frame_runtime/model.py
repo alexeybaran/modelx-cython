@@ -441,7 +441,8 @@ class CompiledModel:
     modelx metaprogramming or incremental dependency tracing. Untracked in-place
     DataFrame mutation is unsupported: assign a replacement Data reference.
     """
-    def __init__(self, artifact, tables, *, overrides=None, space_bindings=None):
+    def __init__(self, artifact, tables, *, overrides=None, space_bindings=None,
+                 _defer_bindings=False):
         self.artifact = Path(artifact).resolve()
         self.manifest = json.loads((self.artifact / 'manifest.json').read_text())
         self._plan = self.manifest.get('model', {})
@@ -468,6 +469,22 @@ class CompiledModel:
                 raise ContractError('Unsupported compiled collect declaration')
         self._lock, self._closed, self._active = threading.RLock(), False, 0
         self._collect_cache = {}
+        self._initialized = False
+        self._data, self._projection = _DataSpace(self), _ProjectionSpace(self)
+        if _defer_bindings:
+            self._deferred_tables = tables
+            return
+        self._finish_bindings(tables, overrides=overrides,
+                              space_bindings=space_bindings)
+
+    def _finish_bindings(self, tables=None, *, overrides=None, space_bindings=None):
+        """Wire a constructed Space shell after all peer shells exist."""
+        if self._initialized:
+            raise ContractError('Compiled Space bindings are already initialized')
+        if tables is None:
+            tables = self._deferred_tables
+        elif hasattr(self, '_deferred_tables'):
+            raise ContractError('Deferred Space must use its original tables')
         self._references = {**self._plan['reference_defaults'], **dict(overrides or {})}
         if set(self._references) != set(self._plan['reference_defaults']): raise ContractError('Unknown reference')
         missing = [name for name in self._plan.get('required_object_bindings', ())
@@ -493,7 +510,9 @@ class CompiledModel:
                                 else None)
         self._connected_context_key = None
         self._positions = {key: i for i, key in enumerate(self._tables[self._plan['point_table']].index)}
-        self._data, self._projection = _DataSpace(self), _ProjectionSpace(self)
+        self._initialized = True
+        if hasattr(self, '_deferred_tables'):
+            del self._deferred_tables
 
     @staticmethod
     def _snapshot(tables):
@@ -519,6 +538,7 @@ class CompiledModel:
 
     def _require_open(self):
         if self._closed: raise RuntimeError('Compiled model is closed')
+        if not self._initialized: raise RuntimeError('Compiled model bindings are incomplete')
 
     def _require_idle(self):
         self._require_open()
@@ -652,6 +672,13 @@ class CompiledModel:
     def close(self):
         with self._lock:
             if self._closed: return
+            if not self._initialized:
+                self._closed = True
+                self._deferred_tables = None
+                self._kernel = None
+                self._tables = self._packed = {}
+                self._references = {}
+                return
             self.reset()
             for item in self._projection._items.values(): item._context = None
             self._closed = True
