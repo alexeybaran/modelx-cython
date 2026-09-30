@@ -42,6 +42,12 @@ def test_structured_emission_preserves_generated_source(mixed, expected):
     parts, manifest = emit(spec, frame_parts=True)
     assert source.startswith('# cython:')
     assert old_manifest == manifest
+    for name in ('value', 'total'):
+        entry = next(method for method in parts['methods']
+                     if any(line.startswith('cdef inline double _cell_' + name + '(')
+                            for line in method))
+        assert any('(_Frame* state' in line for line in entry)
+        assert all('self.' not in line for line in entry)
     direct = to_c_frame(parts, manifest)
     assert hashlib.sha256(direct.encode()).hexdigest() == expected
 

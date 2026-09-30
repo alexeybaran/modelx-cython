@@ -367,6 +367,97 @@ def _frame_cast_names(source, casts):
     return source
 
 
+def _cell_entry_lines(name, row, tail, call, native_suffix, diagnostics,
+                      *, frame_native=False, input_info=None):
+    """Emit the same cache protocol for a Space or its physical frame."""
+    receiver = 'state' if frame_native else 'self'
+    signature = ('_Frame* state' if frame_native else 'self') + tail
+    ret = row['result']['ctype']
+    def field(key):
+        return receiver + '.' + key
+    args = ('state' + (', ' + call if call else '') if frame_native else call)
+    formula = f'_calc_{name}({args})' if frame_native else f'self._calc_{name}({call})'
+    if row['direct_input'] is not None:
+        exception = 'noexcept' if native_suffix else 'except? -1'
+        value = field(row['direct_input'])
+        if frame_native and input_info is not None:
+            info = input_info.get(row['direct_input'], {})
+            if info.get('ctype') in {'object', 'Curve', 'CurveTable',
+                                     'IndexedInt1', 'IndexedFloat1',
+                                     'IndexedInt2', 'IndexedFloat2',
+                                     'dict', 'set'}:
+                value = f"(<{info['ctype']}>{value})"
+        return [f'cdef inline {ret} _cell_{name}({signature}) {exception}{native_suffix}:',
+                f'    return {value}']
+    if not row['cached']:
+        return [f'cdef inline {ret} _cell_{name}({signature}) except? -1{native_suffix}:',
+                f'    cdef {ret} _mx_value',
+                f'    _mx_value = {formula}',
+                '    return _mx_value']
+
+    params = row['params']
+    result = ['@cython.boundscheck(False)', '@cython.wraparound(False)',
+              '@cython.overflowcheck(False)', '@cython.initializedcheck(False)',
+              f'cdef inline {ret} _cell_{name}({signature}) except? -1{native_suffix}:',
+              '    cdef Py_ssize_t _mx_key', f'    cdef {ret} _mx_value']
+    if diagnostics:
+        result.append(f'    {field("_calls")} += 1')
+    if row['hashed']:
+        result += ['    cdef unsigned long long _mx_hashcode = 1469598103934665603',
+                   '    cdef _DoubleBits _mx_bits',
+                   '    cdef Py_ssize_t _mx_probe, _mx_bucket']
+        for p in params:
+            arg = p['name']
+            if p['type']['kind'] == 'float':
+                result += [f'    if not _math_isfinite({arg}): _cache_error(2, b"{name}.{arg}")',
+                           f'    _mx_bits.value = 0.0 if {arg} == 0.0 else {arg}',
+                           '    _mx_hashcode = (_mx_hashcode ^ _mx_bits.bits) * <unsigned long long>1099511628211']
+            else:
+                result.append(f'    _mx_hashcode = (_mx_hashcode ^ <unsigned long long>{arg}) * <unsigned long long>1099511628211')
+        result += ['    _mx_hashcode = (_mx_hashcode ^ (_mx_hashcode >> 30)) * <unsigned long long>13787848793156543929',
+                   '    _mx_hashcode = (_mx_hashcode ^ (_mx_hashcode >> 27)) * <unsigned long long>10723151780598845931',
+                   '    _mx_hashcode = _mx_hashcode ^ (_mx_hashcode >> 31)',
+                   f"    _mx_bucket = _mx_hashcode & {row['slots']-1}",
+                   f"    for _mx_probe in range({row['slots']}):",
+                   f"        _mx_key = {row['offset']} + _mx_bucket"]
+        if row['recursive']:
+            result += [f'        if {field("_seen")}[_mx_key] != {field("_epoch")} and {field("_seen")}[_mx_key] != {field("_epoch")} - 1:',
+                       '            break']
+        else:
+            result += [f'        if {field("_seen")}[_mx_key] != {field("_epoch")}:',
+                       '            break']
+        equal = ' and '.join(f'{field("_keys_" + name + "_" + p["name"])}[_mx_bucket] == {p["name"]}'
+                             for p in params) or 'True'
+        result += [f'        if {equal}: break',
+                   f"        _mx_bucket = (_mx_bucket + 1) & {row['slots']-1}",
+                   '    else:', f'        _cache_error(3, b"{name}")']
+    else:
+        index = '0'
+        for p in params:
+            pnm, lower, size = p['name'], p['lower'], p['size']
+            result += [f'    if {pnm} < {lower} or {pnm} >= {lower + size}:',
+                       f'        _cache_error(0, b"{name}.{pnm}")']
+            index = f'(({index}) * {size} + ({pnm} - ({lower})))'
+        result.append(f"    _mx_key = {row['offset']} + {index}")
+    store = '_floats' if row['result']['kind'] == 'float' else '_ints'
+    result += [f'    if {field("_seen")}[_mx_key] == {field("_epoch")}:',
+               f'        return {field(store)}[_mx_key]']
+    if row['recursive']:
+        result += [f'    if {field("_seen")}[_mx_key] == {field("_epoch")} - 1:',
+                   f'        _cache_error(1, b"{name}")',
+                   f'    {field("_seen")}[_mx_key] = {field("_epoch")} - 1']
+    if row['hashed']:
+        for p in params:
+            result.append(f'    {field("_keys_" + name + "_" + p["name"])}[_mx_bucket] = {p["name"]}')
+    if diagnostics:
+        result.append(f'    {field("_misses")} += 1')
+    result += [f'    _mx_value = {formula}',
+               f'    {field(store)}[_mx_key] = _mx_value',
+               f'    {field("_seen")}[_mx_key] = {field("_epoch")}',
+               '    return _mx_value']
+    return result
+
+
 
 def _needs_checked_formula(node, result_info, params, inputs, cells):
     """Whether this formula can directly create a checked Cython error state.
@@ -765,7 +856,6 @@ def emit(spec, *, diagnostics=False, python_cells=(), frame_parts=False):
     frame_runtime_start = len(lines) if frame_parts else None
     frame_methods = [] if frame_parts else None
     for name, row in rows.items():
-        method_start = len(lines)
         params = row['params']
         decl = ', '.join(p['type']['ctype'] + ' ' + p['name'] + ((' = ' + p['default']) if p['default'] is not None else '') for p in params)
         tail = (', ' + decl) if decl else ''
@@ -773,74 +863,25 @@ def emit(spec, *, diagnostics=False, python_cells=(), frame_parts=False):
         calc_tail = (', ' + calc_decl) if calc_decl else ''
         call = ', '.join(p['name'] for p in params)
         ret = row['result']['ctype']
+        entry = _cell_entry_lines(name, row, tail, call, native_suffix,
+                                  diagnostics, input_info=input_info)
+        lines.extend('    ' + line for line in entry)
+        frame_entry = (tuple(_cell_entry_lines(name, row, tail, call,
+                                               native_suffix, diagnostics,
+                                               frame_native=True,
+                                               input_info=input_info))
+                       if frame_parts else None)
         if row['direct_input'] is not None:
-            exception = 'noexcept' if native_suffix else 'except? -1'
-            lines += [f'    cdef inline {ret} _cell_{name}(self{tail}) {exception}{native_suffix}:',
-                      f"        return self.{row['direct_input']}"]
             if frame_parts:
-                frame_methods.append(tuple(lines[method_start:]))
+                frame_methods.append(frame_entry)
             continue
-        if row['cached']:
-            lines += ['    @cython.boundscheck(False)', '    @cython.wraparound(False)', '    @cython.overflowcheck(False)', '    @cython.initializedcheck(False)',
-                      f'    cdef inline {ret} _cell_{name}(self{tail}) except? -1{native_suffix}:',
-                      '        cdef Py_ssize_t _mx_key', f'        cdef {ret} _mx_value']
-            if diagnostics:
-                lines += ['        self._calls += 1']
-            if row['hashed']:
-                lines += ['        cdef unsigned long long _mx_hashcode = 1469598103934665603',
-                          '        cdef _DoubleBits _mx_bits', '        cdef Py_ssize_t _mx_probe, _mx_bucket']
-                for p in params:
-                    arg = p['name']
-                    if p['type']['kind'] == 'float':
-                        lines += [f'        if not _math_isfinite({arg}): _cache_error(2, b"{name}.{arg}")',
-                                  f'        _mx_bits.value = 0.0 if {arg} == 0.0 else {arg}',
-                                  '        _mx_hashcode = (_mx_hashcode ^ _mx_bits.bits) * <unsigned long long>1099511628211']
-                    else:
-                        lines += [f'        _mx_hashcode = (_mx_hashcode ^ <unsigned long long>{arg}) * <unsigned long long>1099511628211']
-                # Avalanche the _mx_bits before masking, so nearby doubles spread across buckets.
-                lines += ['        _mx_hashcode = (_mx_hashcode ^ (_mx_hashcode >> 30)) * <unsigned long long>13787848793156543929',
-                          '        _mx_hashcode = (_mx_hashcode ^ (_mx_hashcode >> 27)) * <unsigned long long>10723151780598845931',
-                          '        _mx_hashcode = _mx_hashcode ^ (_mx_hashcode >> 31)',
-                          f"        _mx_bucket = _mx_hashcode & {row['slots']-1}",
-                          f"        for _mx_probe in range({row['slots']}):",
-                          f"            _mx_key = {row['offset']} + _mx_bucket"]
-                if row['recursive']:
-                    lines += ['            if self._seen[_mx_key] != self._epoch and self._seen[_mx_key] != self._epoch - 1:', '                break']
-                else:
-                    lines += ['            if self._seen[_mx_key] != self._epoch:', '                break']
-                equal = ' and '.join(f"self._keys_{name}_{p['name']}[_mx_bucket] == {p['name']}" for p in params) or 'True'
-                lines += [f'            if {equal}: break',
-                          f"            _mx_bucket = (_mx_bucket + 1) & {row['slots']-1}",
-                          '        else:', f'            _cache_error(3, b"{name}")']
-            else:
-                index = '0'
-                for p in params:
-                    pnm, lower, size = p['name'], p['lower'], p['size']
-                    lines += [f'        if {pnm} < {lower} or {pnm} >= {lower + size}:',
-                              f'            _cache_error(0, b"{name}.{pnm}")']
-                    index = f'(({index}) * {size} + ({pnm} - ({lower})))'
-                lines += [f"        _mx_key = {row['offset']} + {index}"]
-            dictionary_key = '_mx_object_key' if row['hashed'] else '_mx_key'
-            store = '_floats' if row['result']['kind'] == 'float' else '_ints'
-            lines += ['        if self._seen[_mx_key] == self._epoch:', f'            return self.{store}[_mx_key]']
-            if row['recursive']:
-                lines += ['        if self._seen[_mx_key] == self._epoch - 1:', f'            _cache_error(1, b"{name}")',
-                          '        self._seen[_mx_key] = self._epoch - 1']
-            if row['hashed']:
-                for p in params:
-                    lines += [f"        self._keys_{name}_{p['name']}[_mx_bucket] = {p['name']}"]
-            if diagnostics:
-                lines += ['        self._misses += 1']
+        calc_start = len(lines)
         node = copy.deepcopy(parsed[name])
         loc = ({'_mx_value', '_mx_key', '_mx_object_key', 'self'} if row['cached'] else set()) | {p['name'] for p in params} | {n.id for n in ast.walk(node) if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store)}
         binder = BindNames(selected, spec.inputs, enums, loc, native_lookups=True)
         body = []
         direct_frame_calc = frame_parts and name not in python_reasons
         if row['cached']:
-            memo_return = f'self.{store}[_mx_key] = _mx_value\nself._seen[_mx_key] = self._epoch\nreturn _mx_value'
-            lines += ['        _mx_value = self._calc_' + name + '(' + call + ')']
-            lines += textwrap.indent(memo_return, '        ').splitlines()
-            calc_start = len(lines)
             if not direct_frame_calc:
                 lines += [f'    cdef inline {ret} _calc_{name}(self{calc_tail}) except? -1{native_suffix}:']
         if name in python_reasons:
@@ -852,11 +893,6 @@ def emit(spec, *, diagnostics=False, python_cells=(), frame_parts=False):
                     continue
                 body.append(ast.unparse(ast.fix_missing_locations(binder.visit(n))))
         if not row['cached']:
-            lines += [f'    cdef inline {ret} _cell_{name}(self{tail}) except? -1{native_suffix}:',
-                      f'        cdef {ret} _mx_value',
-                      '        _mx_value = self._calc_' + name + '(' + call + ')',
-                      '        return _mx_value']
-            calc_start = len(lines)
             if not direct_frame_calc:
                 lines += [f'    cdef inline {ret} _calc_{name}(self{calc_tail}) except? -1{native_suffix}:']
         if direct_frame_calc:
@@ -881,7 +917,7 @@ def emit(spec, *, diagnostics=False, python_cells=(), frame_parts=False):
                     frame_binder.visit(copy.deepcopy(statement))))
                 source = _frame_cast_names(source, cast_names)
                 frame_body.extend(textwrap.indent(source, '    ').splitlines())
-            frame_methods.extend((tuple(lines[method_start:calc_start]),
+            frame_methods.extend((frame_entry,
                                   tuple([f'cdef inline {ret} _calc_{name}(_Frame* state{calc_tail}) except? -1{native_suffix}:']
                                         + frame_body)))
         else:
@@ -889,7 +925,7 @@ def emit(spec, *, diagnostics=False, python_cells=(), frame_parts=False):
                 lines += textwrap.indent(s, '        ').splitlines()
         if frame_parts:
             if not direct_frame_calc:
-                frame_methods.extend((tuple(lines[method_start:calc_start]),
+                frame_methods.extend((frame_entry,
                                       tuple(lines[calc_start:])))
     frame_runtime_end = len(lines) if frame_parts else None
     binder = BindNames(selected, spec.inputs, enums, {'t'}, native_lookups=True)

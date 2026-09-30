@@ -60,13 +60,14 @@ def to_c_frame(parts, manifest):
         else:
             frame.append(f'    {t} {name}')
     functions = []
-    direct_formulas = set()
+    direct_entries = set()
     for method in parts['methods']:
-        if method[0].startswith('cdef inline ') and '(_Frame* state' in method[0]:
-            # The shared AST binder already emitted this formula against its
-            # physical frame. Do not re-parse or rewrite author formula text.
+        if any(line.startswith('cdef inline ') and '(_Frame* state' in line
+               for line in method):
+            # The emitter already chose the physical receiver for this Cell
+            # entry or formula. Do not re-parse or rewrite its source.
             functions.append('\n'.join(method))
-            direct_formulas.add(len(functions) - 1)
+            direct_entries.add(len(functions) - 1)
         else:
             functions.append(('\n'.join(x[4:] for x in method)
                               .replace('(self, ', '(_Frame* state, ', 1)
@@ -77,7 +78,7 @@ def to_c_frame(parts, manifest):
         return re.sub(r'self\.(_cell_|_calc_)(\w+)\(', lambda m: f'{m[1]}{m[2]}({pointer}, ', text)
     lowered = []
     for block_index, block in enumerate(functions):
-        if block_index in direct_formulas:
+        if block_index in direct_entries:
             lowered.append(block)
             continue
         offsets = [0]
