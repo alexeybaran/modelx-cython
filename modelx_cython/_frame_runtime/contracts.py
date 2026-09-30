@@ -20,15 +20,15 @@ class TableKey:
             raise ContractError('A missing/default key must be a negative integer sentinel')
 
 
-def cell(function=None):
+def cell(function=None, *, cached=True):
     """Mark an ordinary modelx-style Cell formula.
 
-    Caching is semantic and unconditional, as in normal modelx Cells. The compiler
-    chooses the physical memo representation from the declared signature; authors do
-    not specify cache policies.
+    Preserve the exported Cell's cache contract. The compiler chooses physical
+    memo representation for cached Cells from the declared signature.
     """
     def decorate(f):
         f.__kernel_cell__ = True
+        f.__kernel_cached__ = cached
         return f
     return decorate if function is None else decorate(function)
 

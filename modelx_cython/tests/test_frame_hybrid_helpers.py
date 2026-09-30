@@ -210,6 +210,89 @@ def test_importer_accepts_prepared_policy_reference_context(tmp_path):
     assert 'ScenarioInputs' not in spec.inputs
 
 
+def test_non_collect_space_uses_the_generated_direct_cell_entries(tmp_path):
+    def source_cell(source):
+        return SimpleNamespace(formula=SimpleNamespace(source=source),
+                               is_cached=True, allow_none=False, parent=None)
+
+    points = pd.DataFrame({'amount': [2.0, 5.0]},
+                          index=pd.Index([1, 2], name='point_id'))
+    space = SimpleNamespace(
+        parameters=('point_id',), spaces={},
+        formula=SimpleNamespace(func=_space_formula,
+                                source='lambda point_id: None'),
+        refs={}, cells={'amount': source_cell(
+            'def amount() -> float:\n    return lookup.field(data.points(), point_id, "amount")\n')},
+        _impl=SimpleNamespace(collect_over_spec=None))
+    source = SimpleNamespace(name='NoCollect', Projection=space,
+                             Data=SimpleNamespace(parameters=(), spaces={},
+                                  refs={'points': points}, cells={}))
+    spec = from_modelx(source, tmp_path / 'source',
+                       point_table='points')
+    assert spec.model.get('collect') is None
+    artifact = tmp_path / 'artifact'
+    build(spec, artifact)
+    model = CompiledModel(artifact, spec.initial_tables)
+    try:
+        assert model.Projection[1].amount() == 2.0
+        assert model.Projection[2].amount() == 5.0
+        assert model.Projection[1].amount() == 2.0
+        with pytest.raises(TypeError, match='collect'):
+            model.Projection.collect()
+    finally:
+        model.close()
+
+
+def test_uncached_object_cell_repeats_and_cached_parent_shares_its_result(tmp_path, monkeypatch):
+    import sys
+    import types
+
+    calls = []
+    tracker = types.ModuleType('mxcf_test_tracker')
+    tracker.next_value = lambda: calls.append(1) or len(calls)
+    monkeypatch.setitem(sys.modules, tracker.__name__, tracker)
+
+    def source_cell(source, cached=True):
+        return SimpleNamespace(formula=SimpleNamespace(source=source),
+                               is_cached=cached, allow_none=False, parent=None)
+
+    points = pd.DataFrame(index=pd.Index([1], name='point_id'))
+    space = SimpleNamespace(
+        parameters=('point_id',), spaces={},
+        formula=SimpleNamespace(func=_space_formula,
+                                source='lambda point_id: None'),
+        refs={'tracker': tracker},
+        cells={
+            'transient': source_cell(
+                'def transient() -> object:\n    return tracker.next_value()\n', False),
+            'fixed': source_cell(
+                'def fixed() -> object:\n    return transient()\n'),
+            'transient_numeric': source_cell(
+                'def transient_numeric() -> float:\n    return float(tracker.next_value())\n', False),
+            'fixed_numeric': source_cell(
+                'def fixed_numeric() -> float:\n    return transient_numeric()\n'),
+        }, _impl=SimpleNamespace(collect_over_spec=None))
+    source = SimpleNamespace(name='Uncached', Projection=space,
+                             Data=SimpleNamespace(parameters=(), spaces={},
+                                  refs={'points': points}, cells={}))
+    spec = from_modelx(source, tmp_path / 'source', point_table='points')
+    artifact = tmp_path / 'artifact'
+    build(spec, artifact)
+    assert spec.cells['transient'].__kernel_cached__ is False
+    model = CompiledModel(artifact, spec.initial_tables)
+    try:
+        item = model.Projection[1]
+        assert (item.transient(), item.transient()) == (1, 2)
+        assert (item.fixed(), item.fixed()) == (3, 3)
+        assert item.transient() == 4
+        assert (item.transient_numeric(), item.transient_numeric()) == (5.0, 6.0)
+        assert (item.fixed_numeric(), item.fixed_numeric()) == (7.0, 7.0)
+        model.reset()
+        assert item.fixed() == 8
+    finally:
+        model.close()
+
+
 def test_declared_numeric_mapping_fields_keep_formula_source_and_rebind(tmp_path):
     def source_cell(source):
         return SimpleNamespace(formula=SimpleNamespace(source=source),

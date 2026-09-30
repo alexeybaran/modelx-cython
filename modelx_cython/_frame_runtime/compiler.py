@@ -600,15 +600,18 @@ def emit(spec, *, diagnostics=False, python_cells=(), frame_parts=False):
                 params[-1]['positional_only'] = p.kind == p.POSITIONAL_ONLY
             if not hashed:
                 count *= size
+        cached = getattr(fn, '__kernel_cached__', True)
         python_key = any(p['type']['kind'] == 'object' for p in params)
         object_storage = name in object_cells
         if object_storage and (python_key or hashed):
             count = 0  # Python dictionaries grow with actual keys, not guessed bounds.
         elif hashed:
             count = _hash_capacity()
+        if not cached:
+            count, hashed = 0, False
         if count > 20_000_000:
             raise ContractError('Declared cache exceeds the per-Cell allocation limit')
-        row = dict(name=name, result=ret, params=params, cached=True, hashed=hashed, last=False,
+        row = dict(name=name, result=ret, params=params, cached=cached, hashed=hashed, last=False,
                    recursive=name in python_reasons or _recursive(name), checked_formula=name in python_reasons or _needs_checked_formula(node, ret, params, spec.inputs, cells),
                    offset=slot, slots=count)
         body = [n for n in node.body if not (isinstance(n,ast.Expr) and isinstance(n.value,ast.Constant) and isinstance(n.value.value,str))]
@@ -918,7 +921,8 @@ def emit(spec, *, diagnostics=False, python_cells=(), frame_parts=False):
     return '\n'.join(lines) + '\n', manifest
 
 
-def build(spec, destination, *, diagnostics=False, python_cells=()):
+def build(spec, destination, *, diagnostics=False, python_cells=(),
+          compile_native=True):
     destination = Path(destination).resolve()
     if destination.exists() and any(destination.iterdir()):
         raise FileExistsError('Build destination must be empty')
@@ -982,7 +986,6 @@ def build(spec, destination, *, diagnostics=False, python_cells=()):
     if spec.model is not None:
         from .package_codegen import add_public_package
         add_public_package(destination, manifest, spec.initial_tables, spec.model_name)
-    (destination / 'manifest.json').write_text(json.dumps(manifest, indent=2))
     setup = """from setuptools import setup, Extension
 from Cython.Build import cythonize
 setup(ext_modules=cythonize([
@@ -995,6 +998,36 @@ setup(ext_modules=cythonize([
     if space_source:
         setup=setup.replace('setup(ext_modules=cythonize([', 'setup(ext_modules=cythonize([\n    Extension('+repr(package+'._space_formula')+', ['+repr(package+'/_space_formula.pyx')+']),')
     (destination / 'setup.py').write_text(setup)
+    manifest['setup_sha256'] = hashlib.sha256((destination / 'setup.py').read_bytes()).hexdigest()
+    (destination / 'manifest.json').write_text(json.dumps(manifest, indent=2))
+    if compile_native:
+        compile_generated(destination)
+    return destination
+
+
+def compile_generated(destination):
+    """Compile a translated artifact after checking its recorded Cython sources."""
+    destination = Path(destination).resolve()
+    manifest = json.loads((destination / 'manifest.json').read_text(encoding='utf-8'))
+    package = manifest.get('package')
+    if (not isinstance(package, str) or not package.startswith('mxk_')
+            or not package[4:].isalnum()):
+        raise ContractError('Invalid generated package identity')
+    source = destination / package / '_kernel.pyx'
+    if hashlib.sha256(source.read_text(encoding='utf-8').encode()).hexdigest() != manifest.get('source_sha256'):
+        raise ContractError('Generated Cython source differs from translation receipt')
+    for name, digest in (('_python.py', manifest.get('python_source_sha256')),
+                         ('_space_formula.pyx', manifest.get('space_formula_source_sha256'))):
+        if digest is not None:
+            path = destination / package / name
+            if hashlib.sha256(path.read_text(encoding='utf-8').encode()).hexdigest() != digest:
+                raise ContractError('Generated source differs from translation receipt: ' + name)
+    if not (destination / 'setup.py').is_file():
+        raise ContractError('Translated artifact has no setup.py')
+    if ('setup_sha256' in manifest and
+            hashlib.sha256((destination / 'setup.py').read_bytes()).hexdigest()
+            != manifest['setup_sha256']):
+        raise ContractError('Generated setup.py differs from translation receipt')
     with (destination / 'build.log').open('w') as log:
         result = subprocess.run([sys.executable, 'setup.py', 'build_ext', '--inplace'], cwd=destination,
                                 stdout=log, stderr=subprocess.STDOUT)

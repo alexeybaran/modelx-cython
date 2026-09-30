@@ -459,8 +459,6 @@ def _frame_collect_handler(args: argparse.Namespace, orig_path: pathlib.Path) ->
     a different execution or cache path after the user requested the frame.
     The source handoff is retained beside the generated package for audit.
     """
-    if args.translate_only or args.compile_only:
-        raise HandlerError("--frame-collect builds as one source-preserved unit")
     if not args.no_spec:
         raise HandlerError("--frame-collect requires --no-spec")
     if args.setup:
@@ -468,23 +466,29 @@ def _frame_collect_handler(args: argparse.Namespace, orig_path: pathlib.Path) ->
 
     from modelx_cython._frame_runtime.modelx_frontend_exported import from_exported
     from modelx_cython._frame_runtime.trace_contracts import from_mx2cy_trace
-    from modelx_cython._frame_runtime.compiler import build
+    from modelx_cython._frame_runtime.compiler import build, compile_generated
 
     destination = orig_path.parent / (orig_path.name + "_cy")
     source_dir = orig_path.parent / (orig_path.name + "_cy_sources")
+    if args.compile_only:
+        compile_generated(destination)
+        return 0
     if destination.exists() or source_dir.exists():
         raise FileExistsError("Frame output or source directory already exists")
     manifest_path = orig_path / "_mx_formula_sources.json"
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest = (json.loads(manifest_path.read_text(encoding="utf-8"))
+                if manifest_path.exists() else None)
     logger = run_sample(orig_path, args.sample)
-    contracts = from_mx2cy_trace(logger, manifest, space=args.frame_space)
+    contracts = (from_mx2cy_trace(logger, manifest, space=args.frame_space)
+                 if manifest is not None else {})
     spec = from_exported(
         orig_path, source_dir, projection=args.frame_space,
         point_table=args.frame_point_table, steps=args.frame_steps,
         contracts=contracts)
-    if spec.model.get("collect") is None:
-        raise HandlerError("--frame-collect requires a supported collect declaration")
-    build(spec, destination)
+    if args.translate_only:
+        build(spec, destination, compile_native=False)
+    else:
+        build(spec, destination)
     return 0
 
 

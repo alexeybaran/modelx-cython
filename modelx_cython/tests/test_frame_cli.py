@@ -50,3 +50,65 @@ def test_frame_cli_refuses_overwrite_before_tracing(tmp_path, monkeypatch):
     monkeypatch.setattr(cli, 'run_sample', lambda *a: pytest.fail('trace ran'))
     with pytest.raises(FileExistsError, match='already exists'):
         cli._frame_collect_handler(_args(), exported)
+
+
+def test_frame_cli_builds_a_model_without_collect(tmp_path, monkeypatch):
+    exported = tmp_path / 'exported'
+    exported.mkdir()
+    (exported / '_mx_formula_sources.json').write_text(json.dumps({
+        'model': 'M', 'spaces': {'M.Projection': {'cells': {'value': {}}}},
+    }))
+    monkeypatch.setattr(cli, 'run_sample', lambda *_: object())
+    from modelx_cython._frame_runtime import trace_contracts, modelx_frontend_exported, compiler
+    monkeypatch.setattr(trace_contracts, 'from_mx2cy_trace', lambda *_a, **_k: {})
+    monkeypatch.setattr(modelx_frontend_exported, 'from_exported', lambda *_a, **_k:
+                        SimpleNamespace(model={'collect': None}))
+    built = []
+    monkeypatch.setattr(compiler, 'build', lambda spec, destination: built.append((spec, destination)))
+
+    assert cli._frame_collect_handler(_args(), exported) == 0
+    assert built[0][1] == tmp_path / 'exported_cy'
+
+
+def test_frame_cli_accepts_metadata_free_original_export(tmp_path, monkeypatch):
+    exported = tmp_path / 'exported'
+    exported.mkdir()
+    monkeypatch.setattr(cli, 'run_sample', lambda *_: object())
+    from modelx_cython._frame_runtime import trace_contracts, modelx_frontend_exported, compiler
+    monkeypatch.setattr(trace_contracts, 'from_mx2cy_trace',
+                        lambda *_a, **_k: pytest.fail('no source manifest to trace'))
+    seen = []
+    monkeypatch.setattr(modelx_frontend_exported, 'from_exported',
+                        lambda *_a, **kwargs: seen.append(kwargs) or object())
+    monkeypatch.setattr(compiler, 'build', lambda *_a: None)
+    assert cli._frame_collect_handler(_args(), exported) == 0
+    assert seen[0]['contracts'] == {}
+
+
+def test_frame_cli_translate_then_compile_without_retracing(tmp_path, monkeypatch):
+    exported = tmp_path / 'exported'
+    exported.mkdir()
+    (exported / '_mx_formula_sources.json').write_text(json.dumps({
+        'model': 'M', 'spaces': {'M.Projection': {'cells': {'value': {}}}},
+    }))
+    traced = []
+    monkeypatch.setattr(cli, 'run_sample', lambda *_: traced.append(1) or object())
+    from modelx_cython._frame_runtime import trace_contracts, modelx_frontend_exported, compiler
+    monkeypatch.setattr(trace_contracts, 'from_mx2cy_trace', lambda *_a, **_k: {})
+    monkeypatch.setattr(modelx_frontend_exported, 'from_exported',
+                        lambda *_a, **_k: object())
+    built = []
+    monkeypatch.setattr(compiler, 'build',
+                        lambda *_a, **kwargs: built.append(kwargs))
+    compiled = []
+    monkeypatch.setattr(compiler, 'compile_generated',
+                        lambda destination: compiled.append(destination))
+    args = _args()
+    args.translate_only = True
+    assert cli._frame_collect_handler(args, exported) == 0
+    assert built == [{'compile_native': False}]
+    args.translate_only = False
+    args.compile_only = True
+    assert cli._frame_collect_handler(args, exported) == 0
+    assert traced == [1]
+    assert compiled == [tmp_path / 'exported_cy']

@@ -25,6 +25,32 @@ def augment(source, manifest):
     dispatch = []
     stats = []
     for name, row in rows.items():
+        if not row['cached']:
+            params = [dict(p, name='_arg_' + str(i)) for i, p in enumerate(row['params'])]
+            signature = ', '.join(p['type']['ctype'] + ' ' + p['name'] for p in params)
+            values = ', '.join(p['name'] for p in params)
+            fields.append(f'    cdef object _object_fn_{name}')
+            bind.append(f'        self._object_fn_{name} = scope.calculators[{name!r}]')
+            body = [f'    cdef object _object_cell_{name}(self'
+                    + (', ' + signature if signature else '') + '):',
+                    f'        value = self._object_fn_{name}({values})']
+            if row.get('allow_none') is False:
+                body += ['        if value is None:',
+                         f'            raise ValueError("None is not allowed for Cell {name}")']
+            expected = row['result'].get('python_type', 'object')
+            if row['result']['kind'] == 'object' and expected != 'object':
+                typ = 'type(None)' if expected == 'NoneType' else expected
+                body += [f'        if not isinstance(value, {typ}):',
+                         f'            raise TypeError("Python object boundary requires {expected}")']
+            elif row['result']['kind'] != 'object':
+                body.append(f"        value = self._python_scope.encode({row['result']!r}, value)")
+            methods += body + ['        return value', '']
+            args = ', '.join(f'args[{i}]' for i in range(len(params)))
+            dispatch += [f'        if cell == {name!r}:',
+                         f'            if len(args) != {len(params)}: raise TypeError("Use canonical positional arguments")',
+                         f'            return self._object_cell_{name}({args})']
+            stats.append(f'{name!r}: {{"storage": "uncached", "calls": 0, "misses": 0, "hits": 0}}')
+            continue
         storage = row['storage']
         attr = '_object_' + name
         fields += [f'    cdef object _object_fn_{name}',

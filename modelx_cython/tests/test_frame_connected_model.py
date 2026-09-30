@@ -76,6 +76,26 @@ def test_connected_loader_wires_source_edges_and_closes_reverse_order(tmp_path, 
     assert all(item.closed for item in created)
 
 
+def test_connected_loader_wires_alias_to_exported_target(tmp_path, monkeypatch):
+    graph, artifacts, created = _fixture(tmp_path, monkeypatch)
+    graph['spaces']['Example.A']['space_references'] = {
+        'Alias': 'Example.B', 'C': 'Example.C'}
+    path = artifacts['A'] / 'manifest.json'
+    manifest = json.loads(path.read_text())
+    manifest['model']['space_formula']['references'] = ['Alias', 'C']
+    manifest['model']['required_object_bindings'] = ['Alias', 'helper']
+    path.write_text(json.dumps(manifest))
+    outside = SimpleNamespace(name='C')
+    model = connected_model.load_connected(
+        graph, artifacts, external_bindings={'C': outside, 'helper': object()},
+        tables_by_space={'A': {}, 'B': {}})
+    try:
+        assert created[1].bindings['Alias'] is model.B
+        assert created[1].overrides['Alias'] is model.B
+    finally:
+        model.close()
+
+
 def test_connected_loader_rejects_stale_source_and_unbound_edges(tmp_path, monkeypatch):
     graph, artifacts, created = _fixture(tmp_path, monkeypatch)
     with pytest.raises(ContractError, match='Unbound source Space'):

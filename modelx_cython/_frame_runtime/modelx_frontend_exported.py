@@ -86,10 +86,16 @@ def open_exported_source(package):
     """Load one verified export for one or several Space compilations."""
     path = Path(package)
     manifest_path = path / '_mx_formula_sources.json'
-    manifest = json.loads(manifest_path.read_text(encoding='utf-8'))
-    graph = describe_source_graph(manifest)
+    manifest = (json.loads(manifest_path.read_text(encoding='utf-8'))
+                if manifest_path.exists() else None)
+    # Verify a supplied manifest before importing executable package code.
+    graph = describe_source_graph(manifest) if manifest is not None else None
     alias, exported = _load_export(path)
     try:
+        if manifest is None:
+            from .exported_fallback import recover_source_manifest
+            manifest = recover_source_manifest(exported)
+            graph = describe_source_graph(manifest)
         if exported._name != manifest['model']:
             raise ContractError('Exported model identity differs from formula sources')
         spaces = {}
@@ -106,6 +112,9 @@ def open_exported_source(package):
             dest.mkdir(parents=True, exist_ok=True)
             (dest / 'source_graph.json').write_bytes(
                 (json.dumps(graph, indent=2) + '\n').encode('utf-8'))
+            if manifest.get('source_provenance') == 'reconstructed_export_methods':
+                (dest / 'recovered_formula_sources.json').write_text(
+                    json.dumps(manifest, indent=2) + '\n', encoding='utf-8')
             proxy = SimpleNamespace(name=manifest['model'], source_graph=graph,
                                     spaces=spaces)
             projection = options.get('projection', 'Projection')

@@ -202,10 +202,10 @@ def from_modelx(model, destination, *, projection='Projection', data_space='Data
         tables[point_table]=pd.DataFrame(index=pd.Index([0],name=point))
     else:
         if point_table in object_references:point_table=object_references[point_table]
-        if reference_table:
+        if reference_table and domains is not None:
             if not isinstance(tables.get(point_table), pd.DataFrame):
                 raise ContractError('Declared source policy reference must be a DataFrame')
-            if domains is None or tuple(domains) != (point,):
+            if tuple(domains) != (point,):
                 raise ContractError('Position-indexed Data references require a declared collect domain')
             domain_name = getattr(domains[point], 'ref_name', None)
             if domain_name not in space.cells:
@@ -248,8 +248,6 @@ def from_modelx(model, destination, *, projection='Projection', data_space='Data
     chunks=['# Derived from modelx formulas. Original model files are unchanged.']
     original={}; normalized=[]
     for name,fn in space.cells.items():
-        if getattr(fn, 'is_cached', True) is False:
-            raise ContractError('Frame frontend does not yet preserve uncached Cell behavior: '+name)
         text=fn.formula.source
         original[name]=hashlib.sha256(text.encode()).hexdigest()
         chosen=replacements.get(name,text)
@@ -273,7 +271,7 @@ def from_modelx(model, destination, *, projection='Projection', data_space='Data
     exec(compile(path.read_text(encoding='utf-8'),str(path),'exec'),module.__dict__)
     sys.modules[module_name]=module
     for name in space.cells:
-        fn=module.__dict__[name]; cell(fn)
+        fn=module.__dict__[name]; cell(fn, cached=getattr(space.cells[name], 'is_cached', True))
         fn.__mxcf_original_source__=space.cells[name].formula.source
         fn.__mxcf_syntax_normalization__='lambda_cell_to_def' if name in normalized else None
         if name in contracts:fn.__annotations__=dict(contracts[name])
@@ -284,8 +282,12 @@ def from_modelx(model, destination, *, projection='Projection', data_space='Data
         # derive_spec only inspects this signature. Passing the live modelx Space
         # formula preserves declared defaults without evaluating model logic.
         space_formula=space.formula.func
+    source_provenance = getattr(model, 'source_graph', {}).get('source_provenance',
+                                                               'author_sources')
     evidence={'model':model.name,'formula_sha256':original,'replaced_cells':sorted(replacements),
-              'model_source_unchanged':True,'point_table':point_table,'data_tables':sorted(tables),
+              'model_source_unchanged':source_provenance == 'author_sources',
+              'source_provenance':source_provenance,
+              'point_table':point_table,'data_tables':sorted(tables),
               'static_projection':static,'object_references':object_references,
               'intrinsic_references':sorted(intrinsic_references),
               'enum_references':sorted(enum_references),

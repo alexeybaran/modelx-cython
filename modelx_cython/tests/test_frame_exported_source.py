@@ -64,6 +64,25 @@ def test_exported_graph_rejects_changed_formula_in_any_space():
         describe_source_graph(manifest)
 
 
+def test_exported_graph_uses_explicit_alias_and_nested_target_identity():
+    manifest = {'schema': 'modelx.formula_sources.v2', 'model': 'Example',
+                'spaces': {
+                    'Example.Root': {'parameters': [], 'references': ['Alias'],
+                                     'reference_targets': {'Alias': 'Example.Root.Child'},
+                                     'cells': {}},
+                    'Example.Root.Child': {'parameters': [], 'references': [],
+                                           'cells': {}},
+                }}
+    graph = describe_source_graph(manifest)
+    assert graph['spaces']['Example.Root']['space_references'] == {
+        'Alias': 'Example.Root.Child'}
+    assert graph['edges'] == [{'from': 'Example.Root', 'reference': 'Alias',
+                               'to': 'Example.Root.Child'}]
+    manifest['spaces']['Example.Root']['reference_targets']['Alias'] = 'Example.Missing'
+    with pytest.raises(ContractError, match='absent from export'):
+        describe_source_graph(manifest)
+
+
 def test_exported_formula_hash_mismatch_fails_before_import(tmp_path):
     package = tmp_path / 'exported'
     package.mkdir()
@@ -86,3 +105,74 @@ def test_unknown_export_source_schema_fails_before_import(tmp_path):
     }), encoding='utf-8')
     with pytest.raises(ContractError, match='Unsupported modelx formula-source'):
         from_exported(package, tmp_path / 'source')
+
+
+def test_metadata_free_original_export_recovers_formula_for_compiled_static_space(tmp_path):
+    import modelx as mx
+    from modelx_cython._frame_runtime.compiler import build, compile_generated
+    from modelx_cython._frame_runtime.model import CompiledModel
+
+    model = mx.new_model('OldStyle')
+    try:
+        space = model.new_space('Projection')
+        space.new_cells('amount', 'lambda: 2.5')
+        exported = tmp_path / 'old_export'
+        model.export(exported)
+    finally:
+        model.close()
+    (exported / '_mx_formula_sources.json').unlink()
+    spec = from_exported(exported, tmp_path / 'source')
+    assert (tmp_path / 'source' / 'recovered_formula_sources.json').exists()
+    assert (tmp_path / 'source' / 'frontend.json').read_text().find(
+        'reconstructed_export_methods') >= 0
+    artifact = tmp_path / 'artifact'
+    build(spec, artifact, compile_native=False)
+    assert not list(artifact.rglob('*.pyd'))
+    compile_generated(artifact)
+    compiled = CompiledModel(artifact, spec.initial_tables)
+    try:
+        assert compiled.Projection.amount() == 2.5
+        assert compiled.Projection.amount() == 2.5
+    finally:
+        compiled.close()
+    source = artifact / json.loads((artifact / 'manifest.json').read_text())['package'] / '_kernel.pyx'
+    source_before = source.read_text(encoding='utf-8')
+    source.write_text(source_before + '\n# stale translation\n',
+                      encoding='utf-8')
+    with pytest.raises(ContractError, match='differs from translation receipt'):
+        compile_generated(artifact)
+    source.write_text(source_before, encoding='utf-8')
+    setup = artifact / 'setup.py'
+    setup.write_text(setup.read_text(encoding='utf-8') + '\n# stale setup\n',
+                     encoding='utf-8')
+    with pytest.raises(ContractError, match='setup.py differs'):
+        compile_generated(artifact)
+
+
+def test_metadata_free_original_export_preserves_dynamic_parameters(tmp_path):
+    import modelx as mx
+    import pandas as pd
+    from modelx_cython._frame_runtime.compiler import build
+    from modelx_cython._frame_runtime.model import CompiledModel
+
+    model = mx.new_model('OldDynamic')
+    try:
+        space = model.new_space('Projection', formula='lambda policy_id: None')
+        space.new_cells('amount', 'lambda: policy_id * 2.0')
+        exported = tmp_path / 'old_dynamic'
+        model.export(exported)
+    finally:
+        model.close()
+    (exported / '_mx_formula_sources.json').unlink()
+    records = pd.DataFrame(index=pd.Index([1, 3], name='policy_id'))
+    spec = from_exported(exported, tmp_path / 'source_dynamic',
+                         policy_records=records, point_table='points')
+    artifact = tmp_path / 'artifact_dynamic'
+    build(spec, artifact)
+    compiled = CompiledModel(artifact, spec.initial_tables)
+    try:
+        assert compiled.Projection[1].amount() == 2.0
+        assert compiled.Projection[3].amount() == 6.0
+        assert compiled.Projection[1].amount() == 2.0
+    finally:
+        compiled.close()

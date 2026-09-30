@@ -79,11 +79,12 @@ def load_connected(graph, artifacts, *, external_bindings, tables_by_space=None)
         nodes[name] = graph_spaces[fullname]
 
     def target_name(ref, target):
-        # Flat Space references have one unambiguous target in this model.
-        expected = model_name + '.' + ref
-        if target != expected or target not in graph_spaces:
+        # The exported identity, not the local alias, names the target Space.
+        prefix = model_name + '.'
+        if (not isinstance(target, str) or not target.startswith(prefix)
+                or len(target.split('.')) != 2 or target not in graph_spaces):
             raise ContractError('Invalid source Space edge: ' + str(target))
-        return ref
+        return target[len(prefix):]
 
     order = []
     visiting = set()

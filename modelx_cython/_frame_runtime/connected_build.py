@@ -14,11 +14,12 @@ from .contracts import ContractError
 from .source_graph import describe_source_graph
 
 
-def plan_collect_regions(graph, *, external_names=()):
-    """Select collect Spaces and every Space consuming their results.
+def plan_package(graph, *, external_names=(), collect_only=False):
+    """Plan one compiled package from the verified exported Space graph.
 
-    Unselected source Spaces remain explicit external dependencies. The
-    returned order puts compiled dependencies before their consumers.
+    A complete package includes every Space. A collect-only package includes
+    declared collect Spaces and their consumers, leaving other Spaces as
+    explicit external dependencies. Both use the same dependency ordering.
     """
     if graph.get('schema') != 'mxcf.exported_space_graph.v1':
         raise ContractError('Expected a verified exported Space graph')
@@ -34,12 +35,12 @@ def plan_collect_regions(graph, *, external_names=()):
             raise ContractError('Connected collect build supports flat Spaces')
         names[fullname[len(prefix):]] = node
     roots = sorted(name for name, node in names.items() if node.get('collect') is not None)
-    if not roots:
+    if collect_only and not roots:
         raise ContractError('Export has no declared collect Space')
     external = set(external_names)
     if any(not isinstance(name, str) or not name.isidentifier() for name in external):
         raise ContractError('External Space names must be identifiers')
-    selected = set(roots)
+    selected = set(roots) if collect_only else set(names)
     # Follow reverse Space edges: consumers of a collect result also belong to
     # the compiled region. This handles multiple independent collect regions.
     changed = True
@@ -86,9 +87,15 @@ def plan_collect_regions(graph, *, external_names=()):
                 if target[len(prefix):] not in selected})}
 
 
-def build_collect_package(exported, destination, *, external_imports,
-                          space_options=None, package_name=None, eager=False):
-    """Compile all discovered collect regions and assemble one package.
+def plan_collect_regions(graph, *, external_names=()):
+    """Compatibility spelling for the collect-only package plan."""
+    return plan_package(graph, external_names=external_names, collect_only=True)
+
+
+def build_package(exported, destination, *, external_imports,
+                  space_options=None, package_name=None, eager=False,
+                  collect_only=False):
+    """Compile a complete or collect-only connected package.
 
     ``space_options`` contains only representation and tracing contracts
     accepted by ``from_exported``. The graph, not that mapping, decides which
@@ -105,7 +112,8 @@ def build_collect_package(exported, destination, *, external_imports,
     manifest = json.loads((exported / '_mx_formula_sources.json').read_text(encoding='utf-8'))
     graph = describe_source_graph(manifest)
     external_imports = dict(external_imports)
-    plan = plan_collect_regions(graph, external_names=external_imports)
+    plan = plan_package(graph, external_names=external_imports,
+                        collect_only=collect_only)
     options = {str(name): dict(value) for name, value in (space_options or {}).items()}
     if set(options) - set(plan['compiled_spaces']):
         raise ContractError('Options supplied for an unselected Space')
@@ -131,3 +139,13 @@ def build_collect_package(exported, destination, *, external_imports,
         external_imports=external_imports, eager=eager)
     return {'plan': plan, 'package': package, 'manifest': assembled,
             'artifacts': artifacts}
+
+
+def build_collect_package(exported, destination, *, external_imports,
+                          space_options=None, package_name=None, eager=False):
+    """Compatibility entry for a package containing collect regions."""
+    return build_package(exported, destination,
+                         external_imports=external_imports,
+                         space_options=space_options,
+                         package_name=package_name, eager=eager,
+                         collect_only=True)

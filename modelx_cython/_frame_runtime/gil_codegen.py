@@ -288,19 +288,23 @@ def augment(source, manifest, spec, forced_python=()):
     # A persistent ItemSpace owns an unchanged input frame between explicit
     # table/reference updates. Clear every Cell once without rebinding that frame.
     # The ordinary root reset/select protocol is intentionally unchanged.
-    methods += ['    def _reset_item_cache(self):',
-                '        cdef bint selected',
-                '        self._require_idle()',
-                '        selected = self._frame._scope_valid',
-                '        self._frame._scope_valid = False',
-                '        self._advance()',
-                '        self._frame._scope_valid = selected', '']
+    if manifest.get('python_cells'):
+        methods += ['    def _reset_item_cache(self):',
+                    '        cdef bint selected',
+                    '        self._require_idle()',
+                    '        selected = self._frame._scope_valid',
+                    '        self._frame._scope_valid = False',
+                    '        self._advance()',
+                    '        self._frame._scope_valid = selected', '']
+    else:
+        methods += ['    def _reset_item_cache(self):',
+                    '        self._advance()', '']
     source = source+'\n'+'\n'.join(methods)+'\n'
     # Keep object ownership/exception cleanup on the miss path, just as the
     # numeric memo does. There is still one authoritative owned singleton.
     hot = []
     for name in sorted(objects - numeric):
-        if rows[name]['params']:
+        if rows[name]['params'] or not rows[name]['cached']:
             continue
         kind = signatures.get(name, {}).get('return', 'object')
         ct = 'Curve' if kind == 'curve' else 'str' if kind == 'str' else 'object'
@@ -315,7 +319,7 @@ def augment(source, manifest, spec, forced_python=()):
                 f'        return self._object_compute_{name}()', '']
     source += '\n' + '\n'.join(hot) + '\n'
     memo_signatures = {name: hint for name, hint in signatures.items()
-                       if name in objects}
+                       if name in objects and rows[name]['cached']}
     if memo_signatures:
         from .typed_memo_codegen import augment as typed_augment
         source=typed_augment(source,manifest,spec,memo_signatures,bodies)

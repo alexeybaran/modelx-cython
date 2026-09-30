@@ -43,21 +43,31 @@ def describe_source_graph(manifest):
         parts = paths[fullname]
         info = spaces[fullname]
         refs = info.get('references', ())
+        explicit_targets = info.get('reference_targets', {})
         parameters = info.get('parameters', ())
         if (not isinstance(refs, list) or any(not isinstance(r, str) for r in refs)
+                or not isinstance(explicit_targets, dict)
+                or any(ref not in refs or not isinstance(target, str)
+                       for ref, target in explicit_targets.items())
                 or not isinstance(parameters, list)
                 or any(not isinstance(p, str) for p in parameters)):
             raise ContractError('Invalid Space interface: ' + fullname)
         internal = {}
         external = []
         for ref in refs:
-            target = None
-            for i in range(len(parts) - 1, 0, -1):
-                candidate = '.'.join([*parts[:i], ref])
-                if candidate in paths:
-                    target = candidate
-                    break
+            target = explicit_targets.get(ref)
             if target is None:
+                for i in range(len(parts) - 1, 0, -1):
+                    candidate = '.'.join([*parts[:i], ref])
+                    if candidate in paths:
+                        target = candidate
+                        break
+            if target is not None and target.startswith(model + '.') and target not in paths:
+                raise ContractError('Space reference target is absent from export: '
+                                    + fullname + '.' + ref)
+            if target is None:
+                external.append(ref)
+            elif target not in paths:
                 external.append(ref)
             else:
                 internal[ref] = target
@@ -71,4 +81,5 @@ def describe_source_graph(manifest):
             'external_references': external,
         }
     return {'schema': 'mxcf.exported_space_graph.v1', 'model': model,
+            'source_provenance': manifest.get('source_provenance', 'author_sources'),
             'spaces': nodes, 'edges': edges}
