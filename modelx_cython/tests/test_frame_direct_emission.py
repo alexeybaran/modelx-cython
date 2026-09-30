@@ -67,6 +67,9 @@ def test_output_plan_is_bound_before_runtime_generation():
                       outputs={'cash': {'period': 'value(t)', 'aggregate': 'total()'}},
                       steps=4, length='4')
     parts, manifest = emit(spec, frame_parts=True)
+    assert parts['runtime'] == parts['runtime_prefix']
+    assert not any('def evaluate(' in line or 'def run(' in line
+                   or 'def run_scalar(' in line for line in parts['runtime'])
     assert parts['frame_outputs'] == {
         'length': '4',
         'tables': {'cash': ['_cell_value(state, t)', '_cell_total(state)']},

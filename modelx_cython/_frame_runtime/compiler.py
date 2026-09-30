@@ -936,70 +936,73 @@ def emit(spec, *, diagnostics=False, python_cells=(), frame_parts=False):
                 frame_methods.extend((frame_entry,
                                       tuple(lines[calc_start:])))
     frame_runtime_end = len(lines) if frame_parts else None
-    binder = BindNames(selected, spec.inputs, enums, {'t'}, native_lookups=True)
-    length_expr = _expression(spec.length, binder)
     frame_runtime_prefix_end = len(lines) if frame_parts else None
-    lines += ['    def evaluate(self, Py_ssize_t policy, str cell, tuple args):',
-              '        if policy < 0 or policy >= len(self._records):', '            raise IndexError(policy)',
-              '        self._select(self._records[policy])']
-    for k, r in rows.items():
-        lines += [f'        if cell == {k!r}:', f"            if len(args) != {len(r['params'])}: raise TypeError('Use canonical positional arguments')",
-                  f"            return self._cell_{k}(" + ', '.join(f'args[{i}]' for i in range(len(r['params']))) + ')']
-    lines += ["        raise KeyError(cell)"]
-    for table, cols in spec.outputs.items():
+    for table in spec.outputs:
         if not table.isidentifier() or table.startswith('_'):
             raise ContractError('Output tables require public identifier names')
-        lines += [f'    cdef object _table_{table}(self):', '        cdef Py_ssize_t t, n',
-                  '        cdef double[:, ::1] out', f'        n = {length_expr}',
-                  f"        if n < 0 or n > {spec.steps}: raise IndexError('Output length exceeds declared bound')",
-                  f'        result = np.empty((n, {len(cols)}), dtype=np.float64)', '        out = result',
-                  '        for t in range(n):']
-        for j, expr in enumerate(cols.values()):
-            lines += [f'            out[t, {j}] = ' + _expression(expr, binder)]
-        lines += ['        return result']
-    lines += ['    def run(self, str table, bint sums):', '        cdef Py_ssize_t i',
-              '        result = []', '        for i in range(len(self._records)):',
-              '            self._select(self._records[i])']
-    for i, table in enumerate(spec.outputs):
-        lines += [f"            {'if' if i == 0 else 'elif'} table == {table!r}:", f'                out = self._table_{table}()']
-    lines += ["            else: raise KeyError(table)",
-              '            if not np.isfinite(out).all():', "                raise ArithmeticError('Non-finite kernel output')",
-              '            result.append(float(out.sum()) if sums else out)',
-              '        return np.asarray(result, dtype=np.float64) if sums else result']
-    lines += ['    def run_one(self, Py_ssize_t policy, str table):',
-              '        if policy < 0 or policy >= len(self._records): raise IndexError(policy)',
-              '        self._select(self._records[policy])']
-    for i, table in enumerate(spec.outputs):
-        lines += [f"        {'if' if i == 0 else 'elif'} table == {table!r}:", f'            out = self._table_{table}()']
-    lines += ["        else: raise KeyError(table)",
-              "        if not np.isfinite(out).all(): raise ArithmeticError('Non-finite kernel output')",
-              '        return out']
-    lines += ['    def run_scalar(self, str name):', '        cdef Py_ssize_t i',
-              '        cdef double[::1] view', '        result = np.empty(len(self._records), dtype=np.float64)',
-              '        view = result', '        for i in range(len(self._records)):',
-              '            self._select(self._records[i])']
-    if not spec.scalar_outputs:
-        lines += ["            raise KeyError(name)"]
-    for i, name in enumerate(spec.scalar_outputs):
+    for name in spec.scalar_outputs:
         if name not in rows or rows[name]['params']:
             raise ContractError('Scalar outputs must be declared zero-argument Cells')
-        lines += [f"            {'if' if i == 0 else 'elif'} name == {name!r}:",
-                  f'                view[i] = self._cell_{name}()']
-    if spec.scalar_outputs:
-        lines += ["            else: raise KeyError(name)"]
-    lines += ["        if not np.isfinite(result).all(): raise ArithmeticError('Non-finite scalar output')",
-              '        return result',
-              '    def run_scalar_one(self, Py_ssize_t policy, str name):',
-              '        if policy < 0 or policy >= len(self._records): raise IndexError(policy)',
-              '        self._select(self._records[policy])']
-    if not spec.scalar_outputs:
-        lines += ["        raise KeyError(name)"]
-    for i, name in enumerate(spec.scalar_outputs):
-        lines += [f"        {'if' if i == 0 else 'elif'} name == {name!r}:", f'            value = self._cell_{name}()']
-    if spec.scalar_outputs:
-        lines += ["        else: raise KeyError(name)"]
-    lines += ["        if not np.isfinite(value): raise ArithmeticError('Non-finite scalar output')",
-              '        return value']
+    if not frame_parts:
+        binder = BindNames(selected, spec.inputs, enums, {'t'}, native_lookups=True)
+        length_expr = _expression(spec.length, binder)
+        lines += ['    def evaluate(self, Py_ssize_t policy, str cell, tuple args):',
+                  '        if policy < 0 or policy >= len(self._records):', '            raise IndexError(policy)',
+                  '        self._select(self._records[policy])']
+        for k, r in rows.items():
+            lines += [f'        if cell == {k!r}:', f"            if len(args) != {len(r['params'])}: raise TypeError('Use canonical positional arguments')",
+                      f"            return self._cell_{k}(" + ', '.join(f'args[{i}]' for i in range(len(r['params']))) + ')']
+        lines += ["        raise KeyError(cell)"]
+        for table, cols in spec.outputs.items():
+            lines += [f'    cdef object _table_{table}(self):', '        cdef Py_ssize_t t, n',
+                      '        cdef double[:, ::1] out', f'        n = {length_expr}',
+                      f"        if n < 0 or n > {spec.steps}: raise IndexError('Output length exceeds declared bound')",
+                      f'        result = np.empty((n, {len(cols)}), dtype=np.float64)', '        out = result',
+                      '        for t in range(n):']
+            for j, expr in enumerate(cols.values()):
+                lines += [f'            out[t, {j}] = ' + _expression(expr, binder)]
+            lines += ['        return result']
+        lines += ['    def run(self, str table, bint sums):', '        cdef Py_ssize_t i',
+                  '        result = []', '        for i in range(len(self._records)):',
+                  '            self._select(self._records[i])']
+        for i, table in enumerate(spec.outputs):
+            lines += [f"            {'if' if i == 0 else 'elif'} table == {table!r}:", f'                out = self._table_{table}()']
+        lines += ["            else: raise KeyError(table)",
+                  '            if not np.isfinite(out).all():', "                raise ArithmeticError('Non-finite kernel output')",
+                  '            result.append(float(out.sum()) if sums else out)',
+                  '        return np.asarray(result, dtype=np.float64) if sums else result']
+        lines += ['    def run_one(self, Py_ssize_t policy, str table):',
+                  '        if policy < 0 or policy >= len(self._records): raise IndexError(policy)',
+                  '        self._select(self._records[policy])']
+        for i, table in enumerate(spec.outputs):
+            lines += [f"        {'if' if i == 0 else 'elif'} table == {table!r}:", f'            out = self._table_{table}()']
+        lines += ["        else: raise KeyError(table)",
+                  "        if not np.isfinite(out).all(): raise ArithmeticError('Non-finite kernel output')",
+                  '        return out']
+        lines += ['    def run_scalar(self, str name):', '        cdef Py_ssize_t i',
+                  '        cdef double[::1] view', '        result = np.empty(len(self._records), dtype=np.float64)',
+                  '        view = result', '        for i in range(len(self._records)):',
+                  '            self._select(self._records[i])']
+        if not spec.scalar_outputs:
+            lines += ["            raise KeyError(name)"]
+        for i, name in enumerate(spec.scalar_outputs):
+            lines += [f"            {'if' if i == 0 else 'elif'} name == {name!r}:",
+                      f'                view[i] = self._cell_{name}()']
+        if spec.scalar_outputs:
+            lines += ["            else: raise KeyError(name)"]
+        lines += ["        if not np.isfinite(result).all(): raise ArithmeticError('Non-finite scalar output')",
+                  '        return result',
+                  '    def run_scalar_one(self, Py_ssize_t policy, str name):',
+                  '        if policy < 0 or policy >= len(self._records): raise IndexError(policy)',
+                  '        self._select(self._records[policy])']
+        if not spec.scalar_outputs:
+            lines += ["        raise KeyError(name)"]
+        for i, name in enumerate(spec.scalar_outputs):
+            lines += [f"        {'if' if i == 0 else 'elif'} name == {name!r}:", f'            value = self._cell_{name}()']
+        if spec.scalar_outputs:
+            lines += ["        else: raise KeyError(name)"]
+        lines += ["        if not np.isfinite(value): raise ArithmeticError('Non-finite scalar output')",
+                  '        return value']
     manifest = dict(schema='mxcf.scalar_kernel.v1', inputs=input_info, outputs=spec.outputs,
                      steps=spec.steps, length=spec.length, parameters=spec.parameters, scalar_outputs=spec.scalar_outputs, output_dtype='float64', cells=all_rows, cache_slots=slot,
                      native_scalar_outputs=native_scalar_outputs,
