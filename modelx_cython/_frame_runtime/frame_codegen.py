@@ -8,32 +8,21 @@ import io
 import tokenize
 
 
-def to_c_frame(source, manifest):
+def to_c_frame(parts, manifest):
     if manifest.get('object_cells'):
         from .object_codegen import augment
         # Numeric emission/guard analysis must never see Python-owned temporaries.
         physical = dict(manifest, cells={k: v for k, v in manifest['cells'].items()
                                         if k not in manifest['object_cells']})
         physical.pop('object_cells')
-        source = to_c_frame(source, physical)
+        source = to_c_frame(parts, physical)
         for key in ('physical_layout', 'native_error_abi', 'mixed_cache_protocol'):
             manifest[key] = physical[key]
         return augment(source, manifest)
     marker = '@cython.final\ncdef class Kernel:\n'
-    head, body = source.split(marker, 1)
+    head = '\n'.join(parts['header']) + '\n'
+    fields = parts['field_types']
     native_guard = manifest['memo'] == 'dense' and manifest['lookups'] == 'native'
-    lines = body.splitlines()
-    end = next(i for i, x in enumerate(lines) if x.startswith('    def __init__('))
-    declarations = lines[:end]
-    fields = {}
-    for line in declarations:
-        match = re.fullmatch(r'    cdef (.+?) ([A-Za-z_]\w*(?:, *[A-Za-z_]\w*)*)', line)
-        if not match:
-            raise ValueError('Unexpected emitter declaration: ' + line)
-        dtype, names = match.groups()
-        for name in names.split(', '):
-            if name != '_records':
-                fields[name] = dtype
     objects = {k: v for k, v in fields.items() if v in {
         'object', 'Curve', 'CurveTable', 'IndexedInt1', 'IndexedFloat1',
         'IndexedInt2', 'IndexedFloat2', 'dict', 'set'}}
@@ -70,24 +59,11 @@ def to_c_frame(source, manifest):
             frame.append(f'    {dtype.replace("[::1]", "")} {name}[{sizes[name]}]')
         else:
             frame.append(f'    {t} {name}')
-    # Extract numeric Cell functions (their decorators belong to that function).
-    functions, outer = [], []
-    i = end
-    while i < len(lines):
-        start = i
-        while i < len(lines) and lines[i].startswith('    @'):
-            i += 1
-        if i < len(lines) and lines[i].startswith('    cdef inline ') and ('_cell_' in lines[i] or '_calc_' in lines[i]):
-            signature = i
-            i += 1
-            while i < len(lines) and (lines[i].startswith('        ') or not lines[i].strip()):
-                i += 1
-            block = '\n'.join(x[4:] for x in lines[start:i])
-            block = block.replace('(self, ', '(_Frame* state, ', 1).replace('(self)', '(_Frame* state)', 1)
-            functions.append(block)
-        else:
-            outer.extend(lines[start:i+1])
-            i += 1
+    functions = [('\n'.join(x[4:] for x in method)
+                  .replace('(self, ', '(_Frame* state, ', 1)
+                  .replace('(self)', '(_Frame* state)', 1))
+                 for method in parts['methods']]
+    outer = parts['runtime']
     def lower_calls(text, pointer):
         text = re.sub(r'self\.(_cell_|_calc_)(\w+)\(\)', lambda m: f'{m[1]}{m[2]}({pointer})', text)
         return re.sub(r'self\.(_cell_|_calc_)(\w+)\(', lambda m: f'{m[1]}{m[2]}({pointer}, ', text)

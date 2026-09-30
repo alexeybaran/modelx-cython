@@ -7,6 +7,7 @@ references/Data values; it does not reverse-engineer rewritten methods.
 import importlib.util
 import inspect
 import json
+from contextlib import contextmanager
 from pathlib import Path
 import sys
 from types import SimpleNamespace
@@ -80,23 +81,13 @@ def _load_export(path):
     return alias, module.mx_model
 
 
-def from_exported(package, destination, **options):
-    """Derive one frame spec from the standard modelx export source handoff.
-
-    The supported model subset remains the one declared by ``from_modelx``.
-    Missing or mismatched source metadata is a build error, never permission to
-    substitute the Python-export methods as different formula bodies.
-    """
+@contextmanager
+def open_exported_source(package):
+    """Load one verified export for one or several Space compilations."""
     path = Path(package)
     manifest_path = path / '_mx_formula_sources.json'
     manifest = json.loads(manifest_path.read_text(encoding='utf-8'))
     graph = describe_source_graph(manifest)
-    dest = Path(destination)
-    if dest.exists() and any(dest.iterdir()):
-        raise FileExistsError('Frame source destination must be empty')
-    dest.mkdir(parents=True, exist_ok=True)
-    (dest / 'source_graph.json').write_bytes(
-        (json.dumps(graph, indent=2) + '\n').encode('utf-8'))
     alias, exported = _load_export(path)
     try:
         if exported._name != manifest['model']:
@@ -108,15 +99,30 @@ def from_exported(package, destination, **options):
             for name in parts[1:]:
                 instance = getattr(instance, name)
             spaces[tuple(parts[1:])] = _SourceSpace(instance, info)
-        proxy = SimpleNamespace(name=manifest['model'], source_graph=graph,
-                                spaces=spaces)
-        projection = options.get('projection', 'Projection')
-        data_space = options.get('data_space', 'Data')
-        for name in (projection, data_space):
-            if (name,) in spaces:
-                setattr(proxy, name, spaces[(name,)])
-        return from_modelx(proxy, destination, **options)
+        def derive(destination, **options):
+            dest = Path(destination)
+            if dest.exists() and any(dest.iterdir()):
+                raise FileExistsError('Frame source destination must be empty')
+            dest.mkdir(parents=True, exist_ok=True)
+            (dest / 'source_graph.json').write_bytes(
+                (json.dumps(graph, indent=2) + '\n').encode('utf-8'))
+            proxy = SimpleNamespace(name=manifest['model'], source_graph=graph,
+                                    spaces=spaces)
+            projection = options.get('projection', 'Projection')
+            data_space = options.get('data_space', 'Data')
+            for name in (projection, data_space):
+                if (name,) in spaces:
+                    setattr(proxy, name, spaces[(name,)])
+            return from_modelx(proxy, dest, **options)
+
+        yield derive
     finally:
         for name in tuple(sys.modules):
             if name == alias or name.startswith(alias + '.'):
                 del sys.modules[name]
+
+
+def from_exported(package, destination, **options):
+    """Derive one frame spec from the verified modelx formula sources."""
+    with open_exported_source(package) as derive:
+        return derive(destination, **options)

@@ -426,7 +426,7 @@ def _native_rejection(node, selected, spec, enums, native_suffix):
     return None
 
 
-def emit(spec, *, diagnostics=False, python_cells=()):
+def emit(spec, *, diagnostics=False, python_cells=(), frame_parts=False):
     native_suffix = ' nogil'
     cells = spec.cells
     if any(n.startswith('_mx_') for n in cells):
@@ -673,20 +673,33 @@ def emit(spec, *, diagnostics=False, python_cells=()):
     for name, typ in enums.items():
         type_info(typ)
         lines += ['cdef enum:'] + [f'    _E_{name}_{k} = {int(v)}' for k, v in typ.__members__.items()]
+    frame_header = tuple(lines) if frame_parts else None
+    frame_field_types = {
+        '_epoch': 'unsigned int', '_floats': 'double[::1]',
+        '_ints': 'long long[::1]', '_seen': 'unsigned int[::1]',
+        '_calls': 'unsigned long long', '_misses': 'unsigned long long',
+    } if frame_parts else None
     lines += ['@cython.final', 'cdef class Kernel:', '    cdef object _records', '    cdef unsigned int _epoch',
               '    cdef double[::1] _floats', '    cdef long long[::1] _ints',
               '    cdef unsigned int[::1] _seen',
               '    cdef unsigned long long _calls, _misses']
     if mixed:
         lines += ['    cdef object _python_scope']
+        if frame_parts:
+            frame_field_types['_python_scope'] = 'object'
     for k, ti in input_info.items():
         ct = ti['ctype']
         lines += [f'    cdef {ct} {k}']
+        if frame_parts:
+            frame_field_types[k] = ct
     for k, r in rows.items():
         if r['hashed']:
             for param in r['params']:
                 dt = 'double' if param['type']['kind'] == 'float' else 'long long'
                 lines += [f"    cdef {dt}[::1] _keys_{k}_{param['name']}"]
+                if frame_parts:
+                    frame_field_types[f"_keys_{k}_{param['name']}"] = f'{dt}[::1]'
+    frame_fields = tuple(lines[len(frame_header) + 2:]) if frame_parts else None
     allocated = max(1, slot)
     lines += ['    def __init__(self, records):', '        self._records = records', '        self._epoch = 0',
               f'        self._floats = np.empty({allocated}, dtype=np.float64)',
@@ -711,7 +724,10 @@ def emit(spec, *, diagnostics=False, python_cells=()):
     for i, (k, ti) in enumerate(input_info.items()):
         lines += [f'        self.{k} = record[{i}]']
     lines += ['        self._advance()']
+    frame_runtime_start = len(lines) if frame_parts else None
+    frame_methods = [] if frame_parts else None
     for name, row in rows.items():
+        method_start = len(lines)
         params = row['params']
         decl = ', '.join(p['type']['ctype'] + ' ' + p['name'] + ((' = ' + p['default']) if p['default'] is not None else '') for p in params)
         tail = (', ' + decl) if decl else ''
@@ -723,6 +739,8 @@ def emit(spec, *, diagnostics=False, python_cells=()):
             exception = 'noexcept' if native_suffix else 'except? -1'
             lines += [f'    cdef inline {ret} _cell_{name}(self{tail}) {exception}{native_suffix}:',
                       f"        return self.{row['direct_input']}"]
+            if frame_parts:
+                frame_methods.append(tuple(lines[method_start:]))
             continue
         if row['cached']:
             lines += ['    @cython.boundscheck(False)', '    @cython.wraparound(False)', '    @cython.overflowcheck(False)', '    @cython.initializedcheck(False)',
@@ -783,6 +801,7 @@ def emit(spec, *, diagnostics=False, python_cells=()):
             memo_return = f'self.{store}[_mx_key] = _mx_value\nself._seen[_mx_key] = self._epoch\nreturn _mx_value'
             lines += ['        _mx_value = self._calc_' + name + '(' + call + ')']
             lines += textwrap.indent(memo_return, '        ').splitlines()
+            calc_start = len(lines)
             lines += [f'    cdef inline {ret} _calc_{name}(self{calc_tail}) except? -1{native_suffix}:']
         if name in python_reasons:
             tuple_expr = '(' + call + (',' if params else '') + ')'
@@ -798,8 +817,13 @@ def emit(spec, *, diagnostics=False, python_cells=()):
                       '        _mx_value = self._calc_' + name + '(' + call + ')',
                       '        return _mx_value',
                       f'    cdef inline {ret} _calc_{name}(self{calc_tail}) except? -1{native_suffix}:']
+            calc_start = len(lines) - 1
         for s in body:
             lines += textwrap.indent(s, '        ').splitlines()
+        if frame_parts:
+            frame_methods.extend((tuple(lines[method_start:calc_start]),
+                                  tuple(lines[calc_start:])))
+    frame_runtime_end = len(lines) if frame_parts else None
     binder = BindNames(selected, spec.inputs, enums, {'t'}, native_lookups=True)
     length_expr = _expression(spec.length, binder)
     lines += ['    def evaluate(self, Py_ssize_t policy, str cell, tuple args):',
@@ -882,6 +906,15 @@ def emit(spec, *, diagnostics=False, python_cells=()):
     if spec.model is not None:
         manifest['model'] = spec.model
         manifest['model_sha256'] = hashlib.sha256(json.dumps(spec.model, sort_keys=True).encode()).hexdigest()
+    if frame_parts:
+        return {
+            'header': frame_header,
+            'fields': frame_fields,
+            'field_types': frame_field_types,
+            'methods': tuple(frame_methods),
+            'runtime': tuple(lines[len(frame_header) + 2 + len(frame_fields):frame_runtime_start])
+                       + tuple(lines[frame_runtime_end:]),
+        }, manifest
     return '\n'.join(lines) + '\n', manifest
 
 
@@ -890,11 +923,12 @@ def build(spec, destination, *, diagnostics=False, python_cells=()):
     if destination.exists() and any(destination.iterdir()):
         raise FileExistsError('Build destination must be empty')
     destination.mkdir(parents=True, exist_ok=True)
-    source, manifest = emit(spec, diagnostics=diagnostics, python_cells=python_cells)
+    parts, manifest = emit(spec, diagnostics=diagnostics, python_cells=python_cells,
+                           frame_parts=True)
     if spec.cython_objects:
         manifest["cython_objects"] = True
     from .frame_codegen import to_c_frame
-    source = to_c_frame(source, manifest)
+    source = to_c_frame(parts, manifest)
     if spec.cython_objects:
         from .gil_codegen import augment
         source = augment(source, manifest, spec, python_cells)

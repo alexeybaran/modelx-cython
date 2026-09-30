@@ -1,6 +1,7 @@
 """Collect-connected compilation is selected from source metadata, not names."""
 import hashlib
 import json
+from contextlib import contextmanager
 from types import SimpleNamespace
 
 import pytest
@@ -63,6 +64,7 @@ def test_one_build_invocation_uses_discovered_spaces_not_option_keys(tmp_path, m
             'OtherModel.Unrelated': space(()),
         }}))
     generated = []
+    sessions = []
     def fake_frontend(package, destination, **options):
         generated.append(('frontend', options['projection'], options.get('steps')))
         return SimpleNamespace(projection=options['projection'])
@@ -72,7 +74,11 @@ def test_one_build_invocation_uses_discovered_spaces_not_option_keys(tmp_path, m
     def fake_assemble(package, graph, artifacts, **kwargs):
         generated.append(('assemble', sorted(artifacts)))
         return {'native': {}}
-    monkeypatch.setattr(modelx_frontend_exported, 'from_exported', fake_frontend)
+    @contextmanager
+    def fake_source(package):
+        sessions.append(package)
+        yield lambda destination, **options: fake_frontend(package, destination, **options)
+    monkeypatch.setattr(modelx_frontend_exported, 'open_exported_source', fake_source)
     monkeypatch.setattr(compiler, 'build', fake_build)
     monkeypatch.setattr(connected_package, 'assemble_connected_package', fake_assemble)
     output = tmp_path / 'output'
@@ -84,4 +90,5 @@ def test_one_build_invocation_uses_discovered_spaces_not_option_keys(tmp_path, m
                          ('frontend', 'Total', None), ('build', 'Total'),
                          ('assemble', ['Policies', 'Total'])]
     assert result['package'] == output / 'CompiledOther'
+    assert sessions == [exported]
     assert json.loads((output / 'build_plan.json').read_text())['collect_roots'] == ['Policies']

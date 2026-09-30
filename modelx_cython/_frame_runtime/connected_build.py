@@ -96,7 +96,7 @@ def build_collect_package(exported, destination, *, external_imports,
     """
     from .compiler import build
     from .connected_package import assemble_connected_package
-    from .modelx_frontend_exported import from_exported
+    from .modelx_frontend_exported import open_exported_source
 
     exported = Path(exported)
     destination = Path(destination)
@@ -116,15 +116,16 @@ def build_collect_package(exported, destination, *, external_imports,
     (destination / 'build_plan.json').write_text(json.dumps(plan, indent=2) + '\n',
                                                  encoding='utf-8')
     artifacts = {}
-    for name in plan['compiled_spaces']:
-        arguments = dict(options.get(name, {}))
-        if 'projection' in arguments:
-            raise ContractError('Space options cannot override discovered projection')
-        spec = from_exported(exported, destination / '_sources' / name,
-                             projection=name, **arguments)
-        artifact = destination / '_artifacts' / name
-        build(spec, artifact)
-        artifacts[name] = artifact
+    with open_exported_source(exported) as derive:
+        for name in plan['compiled_spaces']:
+            arguments = dict(options.get(name, {}))
+            if 'projection' in arguments:
+                raise ContractError('Space options cannot override discovered projection')
+            spec = derive(destination / '_sources' / name,
+                          projection=name, **arguments)
+            artifact = destination / '_artifacts' / name
+            build(spec, artifact)
+            artifacts[name] = artifact
     package = destination / package_name
     assembled = assemble_connected_package(package, graph, artifacts,
         external_imports=external_imports, eager=eager)
