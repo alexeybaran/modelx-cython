@@ -139,19 +139,15 @@ def to_c_frame(parts, manifest):
         if manifest.get('python_cells'):
             from .mixed_codegen import augment_frame
             frame, lowered = augment_frame(frame, lowered, manifest, heap_numeric=heap_numeric)
-        manifest['native_error_abi'] = 'checked_cython_miss_with_cpp_guard'
-        runtime_source = guard_runtime(manifest, prefix, length, tables)
-        if manifest.get('python_cells'):
-            from .mixed_codegen import augment_runtime
-            runtime_source = augment_runtime(runtime_source, manifest)
-            manifest['native_error_abi'] = 'reentrant_guard_with_checked_python_miss'
+        owner_init = []
+        owner_dealloc = None
         if heap_numeric:
             slots = max(1, manifest['cache_slots'])
             has_busy = bool(manifest.get('python_cells'))
             busy_slots = manifest.get('busy_cache_slots', slots) if has_busy else 0
             byte_count = f'sizeof(_Frame) + {slots} * sizeof(double)' + (f' + {busy_slots} * sizeof(unsigned int)' if has_busy else '')
-            allocation = ['        if sizeof(double) != sizeof(long long): raise RuntimeError("Unsupported numeric cache layout")',
-                          f'        if self._cache_storage == NULL:',
+            owner_init = ['        if sizeof(double) != sizeof(long long): raise RuntimeError("Unsupported numeric cache layout")',
+                          '        if self._cache_storage == NULL:',
                           f'            self._cache_storage = malloc({byte_count})',
                           '            if self._cache_storage == NULL: raise MemoryError()',
                           '        self._frame = <_Frame*>self._cache_storage',
@@ -159,11 +155,19 @@ def to_c_frame(parts, manifest):
                           '        self._frame._floats = <double*>(<char*>self._cache_storage + sizeof(_Frame))',
                           '        self._frame._ints = <long long*>(<char*>self._cache_storage + sizeof(_Frame))']
             if has_busy:
-                allocation.append(f'        self._frame._busy_owner = <unsigned int*>(<char*>self._cache_storage + sizeof(_Frame) + {slots} * sizeof(double))')
-            runtime_source = runtime_source.replace('    def __init__(self, records):',
-                                                    '    def __init__(self, records):\n' + '\n'.join(allocation), 1)
-            runtime_source = runtime_source.replace('    def __dealloc__(self):\n        mx_guard_clear(&self._frame._guard)',
-                                                    '    def __dealloc__(self):\n        if self._frame != NULL:\n            mx_guard_clear(&self._frame._guard)\n            free(self._cache_storage)', 1)
+                owner_init.append(f'        self._frame._busy_owner = <unsigned int*>(<char*>self._cache_storage + sizeof(_Frame) + {slots} * sizeof(double))')
+            owner_dealloc = ('        if self._frame != NULL:',
+                             '            mx_guard_clear(&self._frame._guard)',
+                             '            free(self._cache_storage)')
+        manifest['native_error_abi'] = 'checked_cython_miss_with_cpp_guard'
+        runtime_source = guard_runtime(manifest, prefix, length, tables,
+                                       owner_init=owner_init,
+                                       owner_dealloc=owner_dealloc)
+        if manifest.get('python_cells'):
+            from .mixed_codegen import augment_runtime
+            runtime_source = augment_runtime(runtime_source, manifest)
+            manifest['native_error_abi'] = 'reentrant_guard_with_checked_python_miss'
+        if heap_numeric:
             # The epoch advances by three for ready/busy/tombstone states.
             # Reset before unsigned-byte tags can wrap or alias an older state.
             runtime_source = runtime_source.replace('self._frame._epoch >= 4294967293',

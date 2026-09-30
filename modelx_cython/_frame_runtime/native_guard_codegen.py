@@ -110,7 +110,7 @@ def guarded_functions(functions, manifest):
     return aliases,result
 
 
-def runtime(manifest, prefix, length_expression, tables):
+def runtime(manifest, prefix, length_expression, tables, *, owner_init=(), owner_dealloc=None):
     rows=manifest['cells'];indices={k:i for i,k in enumerate(rows)}
     max_args=max([len(r['params']) for r in rows.values()]+[1])
     lines=['cdef union _Scalar:', '    double f', '    long long i',
@@ -134,9 +134,13 @@ def runtime(manifest, prefix, length_expression, tables):
     lines += [('        else: ' if tables else '        ') + 'mx_fail(&state._guard, 4, b"Table dispatch")',
               '    else: mx_fail(&state._guard, 4, b"Command dispatch")','']
     # The existing owner/lifetime prefix contains no formula calls.
-    prefix=prefix.replace('    def __init__(self, records):','    def __init__(self, records):\n        mx_guard_init(&self._frame._guard)')
+    init = ['    def __init__(self, records):', *owner_init,
+            '        mx_guard_init(&self._frame._guard)']
+    prefix = prefix.replace('    def __init__(self, records):', '\n'.join(init), 1)
+    if owner_dealloc is None:
+        owner_dealloc = ('        mx_guard_clear(&self._frame._guard)',)
     lines += ['@cython.final','cdef class Kernel:',prefix,
-              '    def __dealloc__(self):','        mx_guard_clear(&self._frame._guard)',
+              '    def __dealloc__(self):', *owner_dealloc,
               '    cdef void _invoke(self, _Command* command) except *:',
               '        if mx_guarded(&self._frame._guard, _execute, &self._frame, command) != 0:',
               '            _raise_guard(&self._frame._guard)',
