@@ -188,6 +188,46 @@ def test_metadata_free_original_export_preserves_dynamic_parameters(tmp_path):
         compiled.close()
 
 
+@pytest.mark.parametrize('preserve_metadata', [False, True])
+def test_original_dynamic_export_needs_no_policy_table(tmp_path, preserve_metadata):
+    import modelx as mx
+    from modelx_cython._frame_runtime.compiler import build
+    from modelx_cython._frame_runtime.model import CompiledModel
+
+    model = mx.new_model('UnboundedDynamic')
+    try:
+        space = model.new_space('Projection', formula='lambda policy_id: None')
+        space.new_cells('amount', 'lambda: policy_id * 2.0')
+        space.new_cells('label', 'lambda: ("policy", policy_id)')
+        exported = tmp_path / 'exported'
+        model.export(exported)
+    finally:
+        model.close()
+    if not preserve_metadata:
+        (exported / '_mx_formula_sources.json').unlink()
+    spec = from_exported(exported, tmp_path / 'source')
+    assert spec.model['point_table'] is None
+    assert spec.initial_tables == {}
+    artifact = tmp_path / 'artifact'
+    build(spec, artifact)
+    compiled = CompiledModel(artifact, {})
+    try:
+        first = compiled.Projection[1]
+        second = compiled.Projection[3]
+        assert first.amount() == 2.0
+        assert second.amount() == 6.0
+        assert first.amount() == 2.0
+        assert first.label() == ('policy', 1)
+        assert second.label() == ('policy', 3)
+        assert compiled.Projection['S'].label() == ('policy', 'S')
+        assert first is compiled.Projection[1]
+        compiled.reset()
+        assert first.amount() == 2.0
+        assert second.label() == ('policy', 3)
+    finally:
+        compiled.close()
+
+
 def test_metadata_free_export_preserves_cell_defaults_and_keyword_calls(tmp_path):
     import modelx as mx
     import pandas as pd

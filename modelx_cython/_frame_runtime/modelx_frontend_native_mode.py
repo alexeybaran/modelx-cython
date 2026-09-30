@@ -240,8 +240,10 @@ def from_modelx(model, destination, *, projection='Projection', data_space='Data
         if point_table is None:
             candidates=[n for n,t in tables.items() if isinstance(t,pd.DataFrame)
                         and list(t.index.names)==[point]]
-            if len(candidates)!=1:raise ContractError('Declare point_table: policy index is ambiguous')
-            point_table=candidates[0]
+            if len(candidates) == 1:
+                point_table = candidates[0]
+            elif len(candidates) > 1 or domains is not None:
+                raise ContractError('Declare point_table: policy index is ambiguous')
     replacements=dict(replacements or {}); contracts=dict(contracts or {})
     if (replacements.keys()|contracts.keys())-space.cells.keys():
         raise ContractError('Unknown formula replacement/contract')
@@ -340,7 +342,8 @@ def from_modelx(model, destination, *, projection='Projection', data_space='Data
     if data_program is not None:
         spec.model['data_program'] = data_program
         spec.model['data_reference_names'] = sorted(data_references)
-    collect = _collect_sum_plan(space, point, tables[point_table]) if not static else None
+    collect = (_collect_sum_plan(space, point, tables[point_table])
+               if not static and point_table is not None else None)
     if collect is not None:
         from dataclasses import replace
         spec.model['collect'] = collect

@@ -93,7 +93,7 @@ def prepare_inputs(manifest, tables, *, references=None, packed=None,
     packed = pack_tables(plan, tables) if packed is None else packed
     point_table = plan['point_table']
     points = tables[point_table] if point_table is not None else None
-    point_index = points.index if points is not None else (0,)
+    point_index = points.index if points is not None else (0 if plan.get('static_projection') else None,)
     if not len(point_index): raise ContractError('At least one policy is required')
     # A policy table is normally read repeatedly for every bound scalar. Select
     # each aligned column once, while retaining the original label lookup for

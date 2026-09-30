@@ -41,7 +41,8 @@ def derive_spec(module, tables, *, references, space_formula, outputs, steps, le
     """Build a kernel contract without author INPUTS/FRONTEND maps.
 
     Supported structure: one Data Space with zero-argument DataFrame Cells and
-    one independent-policy dynamic Space. The first Space parameter selects a row.
+    one independent-policy dynamic Space. Direct dynamic Spaces can instead
+    bind their selector on each ItemSpace without a finite policy table.
     Grouped lookup tables have exactly two named index levels, one numeric axis.
     Ambiguous numeric/numeric indexes use the explicit (group, x) convention.
     """
@@ -258,7 +259,7 @@ def derive_spec(module, tables, *, references, space_formula, outputs, steps, le
             raise ContractError('Declared policy table conflicts with lookup.field/category')
         if tables[point_table].index.nlevels != 1 or not tables[point_table].index.is_unique:
             raise ContractError('A policy table needs a unique single-level index')
-    elif not static_projection or point_tables:
+    elif point_tables:
         if len(point_tables) != 1:
             raise ContractError('Exactly one policy table must be identifiable from lookup.field/category')
         point_table = next(iter(point_tables))
@@ -277,6 +278,11 @@ def derive_spec(module, tables, *, references, space_formula, outputs, steps, le
             add(name, object, dict(kind='row_reference', table=point_table, column=column))
             schemas[point_table]['columns'][column] = 'object'
     # Declared references are model data, not inferred actuarial assumptions.
+    if point_table is None and not static_projection and point in used:
+        # A direct dynamic Space has no finite portfolio domain. Its selector is
+        # an object-valued input in the single template record; each ItemSpace
+        # receives its own checked override and independently owned cache.
+        add(point, object, dict(kind='point'))
     if frontend['arrays'] and point in used and point_table is not None:
         from pandas.api.types import is_integer_dtype
         index = tables[point_table].index

@@ -369,7 +369,14 @@ class CompiledKernel:
             self._require_root()
             if isinstance(policy, bool) or not isinstance(policy, numbers.Integral) or not 0 <= policy < len(self._records):
                 raise IndexError('Policy position outside the bound portfolio')
-            if set(parameters) - set(self.manifest.get('parameters', ())):
+            unbounded_point = (self.manifest.get('model', {}).get('point_parameter')
+                               if self.manifest.get('model', {}).get('point_table') is None
+                               and not self.manifest.get('model', {}).get('static_projection')
+                               else None)
+            allowed = set(self.manifest.get('parameters', ()))
+            if unbounded_point is not None:
+                allowed.add(unbounded_point)
+            if set(parameters) - allowed:
                 raise ContractError('Unknown ItemSpace parameter')
             overrides = dict(input_overrides or {})
             if _native_kernel is not None and (parameters or overrides or
@@ -420,6 +427,8 @@ class CompiledKernel:
             child._lazy_python_source = None
             if self._python_scope is not None:
                 bindings = [self._python_scope.bindings[policy]] if self._python_scope.bindings else None
+                if bindings is not None and unbounded_point in parameters:
+                    bindings = [{**bindings[0], unbounded_point: parameters[unbounded_point]}]
                 child._lazy_python_source = (bindings, self._python_scope.program)
             if _native_kernel is None:
                 return ItemContext(child)

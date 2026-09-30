@@ -17,12 +17,10 @@ from .runtime import CompiledKernel
 
 
 def _policy_index(plan, tables):
-    """A static Space has one runtime context without a fabricated Data table."""
+    """Use a single template record when a Space has no policy table."""
     table = plan['point_table']
     if table is None:
-        if not plan.get('static_projection'):
-            raise ContractError('Parameterized Space requires a policy table')
-        return (0,)
+        return (0 if plan.get('static_projection') else None,)
     return tables[table].index
 
 
@@ -210,6 +208,10 @@ class _ItemSpace:
                       if name in model.manifest['parameters']}
             row_inputs = {name: value for name, value in self._dynamic_refs.items()
                           if name in model.manifest['inputs']}
+        if model._plan['point_table'] is None and not model._plan.get('static_projection'):
+            point_name = model._plan['point_parameter']
+            if point_name in model.manifest['inputs']:
+                params = {**params, point_name: self._arguments[point_name]}
         if native_root and not params and not row_inputs:
             record = model._kernel._records[position]
             self._context = model._kernel._module.Kernel((record,))
@@ -246,8 +248,9 @@ class _ItemSpace:
         with model._lock:
             model._require_idle()
             point = self._arguments[model._plan['point_parameter']]
-            if point not in model._positions: raise KeyError(point)
-            position = model._positions[point]
+            if model._plan['point_table'] is not None and point not in model._positions:
+                raise KeyError(point)
+            position = model._positions.get(point, 0)
             native_root = (name in model.manifest.get('native_scalar_outputs', ())
                            and model.manifest['cells'][name]['result']['kind'] in
                                ('float', 'int', 'bool')
@@ -285,9 +288,9 @@ def _native_scalar_method(name, simple_inputs):
         with model._lock:
             model._require_idle()
             point = self._arguments[model._plan['point_parameter']]
-            if point not in model._positions:
+            if model._plan['point_table'] is not None and point not in model._positions:
                 raise KeyError(point)
-            position = model._positions[point]
+            position = model._positions.get(point, 0)
             if self._context is None:
                 self._create_context(position, True, simple_inputs=simple_inputs)
             model._active += 1
@@ -359,7 +362,8 @@ class _ProjectionSpace:
                 arguments = bound.arguments
                 key = tuple(arguments.values())
             point = arguments[model._plan['point_parameter']]
-            if point not in model._positions: raise KeyError(point)
+            if model._plan['point_table'] is not None and point not in model._positions:
+                raise KeyError(point)
             if key not in self._items:
                 refs = (model._space_formula_refs(bindings=model._space_bindings,
                         **arguments) if model._space_bindings is not None else None)
