@@ -78,6 +78,8 @@ def test_original_nested_exports_reach_one_package_plan(
     with open_exported_source(exported) as derive:
         plan = plan_package(derive.source_graph)
         if fixture == 'ref_space':
+            assert derive.source_graph['spaces']['RefSpace.Foo'][
+                'base_parameter_values'] == {'i': 1}
             parent = derive(tmp_path / 'parent_sources', projection='Bar')
             assert parent.model['projection'] == 'Bar'
             assert set(parent.cells) == {'baz'}
@@ -232,5 +234,56 @@ def test_complete_package_wires_real_cyclic_space_references(tmp_path):
         assert connected.Second.via_first() == 7
         assert connected.First.Other is connected.Second
         assert connected.Second.Other is connected.First
+    finally:
+        connected.close()
+
+
+def test_complete_package_preserves_nested_references_and_base_parameters(tmp_path):
+    import modelx as mx
+    from modelx_cython._frame_runtime.connected_package import load_connected_package
+
+    source = Path(__file__).parent / 'samples' / 'ref_space' / 'RefSpace'
+    live = mx.read_model(source)
+    try:
+        exported = tmp_path / 'exported'
+        live.export(exported)
+        expected = [(live.Foo[i].foo(), live.Foo[i].quux()) for i in range(10)]
+        base = live.Bar.Qux.corge()
+    finally:
+        live.close()
+
+    result = build_package(exported, tmp_path / 'compiled', external_imports={})
+    assert result['plan']['generated_spaces']['Bar.Qux'] != 'Bar.Qux'
+    connected = load_connected_package(result['package'] / '__init__.py')
+    try:
+        assert connected.Bar.Qux.corge() == connected.Foo.foo() == base
+        assert [(connected.Foo[i].foo(), connected.Foo[i].quux())
+                for i in range(10)] == expected
+    finally:
+        connected.close()
+
+
+def test_complete_package_preserves_uncached_and_fractional_power_cells(tmp_path):
+    import modelx as mx
+    from modelx_cython._frame_runtime.connected_package import load_connected_package
+
+    source = Path(__file__).parent / 'samples' / 'fractional_power' / 'FractionalPower'
+    live = mx.read_model(source)
+    try:
+        exported = tmp_path / 'exported'
+        live.export(exported)
+        expected = [(live.Space1.uncached_rate(t), live.Space1.mth_rate(t),
+                     live.Space1.int_pow(t)) for t in range(11)]
+    finally:
+        live.close()
+    result = build_package(exported, tmp_path / 'compiled', external_imports={})
+    assert result['plan']['collect_roots'] == []
+    connected = load_connected_package(result['package'] / '__init__.py')
+    try:
+        for t, values in enumerate(expected):
+            assert connected.Space1.uncached_rate(t) == pytest.approx(values[0])
+            assert connected.Space1.mth_rate(t) == pytest.approx(values[1])
+            assert connected.Space1.int_pow(t) == values[2]
+        assert connected.Space1.uncached_rate(2) == pytest.approx(expected[2][0])
     finally:
         connected.close()

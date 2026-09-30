@@ -104,7 +104,21 @@ def open_exported_source(package):
             instance = exported
             for name in parts[1:]:
                 instance = getattr(instance, name)
-            spaces[tuple(parts[1:])] = _SourceSpace(instance, info)
+            source_space = _SourceSpace(instance, info)
+            spaces[tuple(parts[1:])] = source_space
+            # A base Space may define references with the same names as its
+            # dynamic parameters. Its Cells can then be called without first
+            # selecting an item (for example Foo.i = 1; Foo.foo()). Preserve
+            # those values separately from the parameterized item signature.
+            base_values = {}
+            for name in set(info['parameters']) & set(info['references']):
+                value = source_space.refs[name]
+                if type(value) not in (type(None), bool, int, float, str):
+                    raise ContractError('Unsupported base parameter reference: '
+                                        + fullname + '.' + name)
+                base_values[name] = value
+            if base_values:
+                graph['spaces'][fullname]['base_parameter_values'] = base_values
         def derive(destination, **options):
             dest = Path(destination)
             if dest.exists() and any(dest.iterdir()):

@@ -10,6 +10,7 @@ import shutil
 
 from .connected_model import load_connected
 from .contracts import ContractError
+from .source_graph import generated_space_name
 
 
 _SCHEMA = 'mxcf.connected_package.v1'
@@ -56,9 +57,11 @@ def assemble_connected_package(destination, graph, artifacts, *,
             or keyword.iskeyword(model_name)):
         raise ContractError('Connected model name must be an identifier')
     artifacts = {str(name): Path(path) for name, path in artifacts.items()}
-    if not artifacts or any(not name.isidentifier() or keyword.iskeyword(name)
-                            for name in artifacts):
-        raise ContractError('Connected Spaces need public identifier names')
+    if not artifacts:
+        raise ContractError('Connected package needs Space artifacts')
+    physical_names = {name: generated_space_name(name) for name in artifacts}
+    if len(set(physical_names.values())) != len(physical_names):
+        raise ContractError('Connected Space artifact names collide')
     external_imports = dict(external_imports or {})
     if any(not name.isidentifier() for name in external_imports):
         raise ContractError('External binding names must be identifiers')
@@ -80,16 +83,20 @@ def assemble_connected_package(destination, graph, artifacts, *,
         manifest_path = original / 'manifest.json'
         manifest = json.loads(manifest_path.read_text(encoding='utf-8'))
         private = manifest.get('package')
+        plan = manifest.get('model', {})
         if (not isinstance(private, str) or not private.isidentifier()
-                or manifest.get('model', {}).get('projection') != name):
+                or plan.get('projection') != physical_names[name]
+                or plan.get('source_space', model_name + '.' + name)
+                != model_name + '.' + name):
             raise ContractError('Artifact identity differs from connected Space: ' + name)
-        current = destination / name
+        current = destination / physical_names[name]
         current.mkdir()
         for filename in ('manifest.json', '_mx_tables.pkl'):
             shutil.copy2(original / filename, current / filename)
         shutil.copytree(original / private, current / private,
                         ignore=shutil.ignore_patterns('__pycache__'))
-        entries[name] = {'path': name, 'manifest_sha256': _sha(current / 'manifest.json'),
+        entries[name] = {'path': physical_names[name],
+                         'manifest_sha256': _sha(current / 'manifest.json'),
                          'tables_sha256': _sha(current / '_mx_tables.pkl')}
         for binary in sorted((current / private).rglob('*.pyd')):
             native[str(binary.relative_to(destination)).replace('\\', '/')] = _sha(binary)

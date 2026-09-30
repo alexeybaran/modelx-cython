@@ -11,6 +11,7 @@ import keyword
 from pathlib import Path
 
 from .contracts import ContractError
+from .source_graph import generated_space_name
 
 
 def plan_package(graph, *, external_names=(), collect_only=False):
@@ -35,6 +36,9 @@ def plan_package(graph, *, external_names=(), collect_only=False):
                 or not isinstance(node, dict)):
             raise ContractError('Invalid exported Space identity: ' + str(fullname))
         names[relative] = node
+    generated = {name: generated_space_name(name) for name in names}
+    if len(set(generated.values())) != len(generated):
+        raise ContractError('Exported Space paths collide in generated names')
     roots = sorted(name for name, node in names.items() if node.get('collect') is not None)
     if collect_only and not roots:
         raise ContractError('Export has no declared collect Space')
@@ -86,6 +90,7 @@ def plan_package(graph, *, external_names=(), collect_only=False):
     for name in sorted(selected):
         visit(name)
     return {'model': model, 'collect_roots': roots, 'compiled_spaces': order,
+            'generated_spaces': {name: generated[name] for name in order},
             'external_spaces': sorted({target[len(prefix):]
                 for name in selected
                 for target in names[name].get('space_references', {}).values()
@@ -138,7 +143,7 @@ def build_package(exported, destination, *, external_imports,
                 (*declared, *arguments.get('object_bindings', ()))))
             spec = derive(destination / '_sources' / name,
                           projection=name, **arguments)
-            artifact = destination / '_artifacts' / name
+            artifact = destination / '_artifacts' / plan['generated_spaces'][name]
             build(spec, artifact)
             artifacts[name] = artifact
     package = destination / package_name

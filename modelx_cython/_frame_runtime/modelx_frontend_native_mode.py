@@ -15,6 +15,7 @@ import sys
 import types
 from .contracts import ContractError, cell
 from .model_plan import derive_spec
+from .source_graph import generated_space_name
 
 
 def _collect_sum_plan(space, point, point_table):
@@ -106,6 +107,7 @@ def from_modelx(model, destination, *, projection='Projection', data_space='Data
         space = model
         for name in path:
             space = getattr(space, name)
+    physical_projection = generated_space_name(projection)
     data=getattr(model,data_space,None)
     row_references=dict(row_references or {})
     object_bindings=frozenset(object_bindings)
@@ -319,7 +321,7 @@ def from_modelx(model, destination, *, projection='Projection', data_space='Data
         return False
     spec = derive_spec(module,tables,references=refs,space_formula=space_formula,
         outputs={},length='0',steps=steps,cell_outputs=tuple(space.cells),
-        data_space=data_space,projection=projection,point_table=point_table,
+        data_space=data_space,projection=physical_projection,point_table=point_table,
         static_projection=static,
         allow_none={n:effective_allow_none(c) for n,c in space.cells.items()},
         model_name=model.name,cython_objects=cython_objects,
@@ -328,6 +330,8 @@ def from_modelx(model, destination, *, projection='Projection', data_space='Data
     spec.model.update(static_projection=static,object_references=object_references,
                       module_references={name: value.__name__ for name, value in modules.items()},
                       required_object_bindings=sorted(reference_types))
+    if physical_projection != projection:
+        spec.model['source_space'] = model.name + '.' + projection
     if space.formula is not None:
         graph = getattr(model, 'source_graph', None)
         name = model.name + '.' + projection

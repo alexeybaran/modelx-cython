@@ -5,8 +5,20 @@ the exporter's original sources and are compiled by Cython downstream.
 """
 
 import hashlib
+import keyword
 
 from .contracts import ContractError
+
+
+def generated_space_name(relative):
+    """Give a nested export a stable Cython identifier without losing its path."""
+    if (not isinstance(relative, str) or not relative
+            or any(not part.isidentifier() or keyword.iskeyword(part)
+                   for part in relative.split('.'))):
+        raise ContractError('Invalid exported Space path: ' + repr(relative))
+    if '.' not in relative:
+        return relative
+    return 'MxcfNested' + hashlib.sha256(relative.encode('utf-8')).hexdigest()[:20]
 
 
 def describe_source_graph(manifest):

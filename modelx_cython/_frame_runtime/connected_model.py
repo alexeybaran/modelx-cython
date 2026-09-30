@@ -15,6 +15,35 @@ from pathlib import Path
 
 from .contracts import ContractError
 from .model import CompiledModel
+from .source_graph import generated_space_name
+
+
+class _SpaceView:
+    """Expose nested children and base parameter references on a compiled Space."""
+
+    def __init__(self, space, children, base_values=None):
+        object.__setattr__(self, '_space', space)
+        object.__setattr__(self, '_children', children)
+        object.__setattr__(self, '_base_values', dict(base_values or {}))
+
+    def __getattr__(self, name):
+        if name in self._children:
+            return self._children[name]
+        if name in self._base_values:
+            return self._base_values[name]
+        if (self._base_values and name in self._space._model.manifest['cells']
+                and set(self._space.parameters) == set(self._base_values)):
+            return getattr(self._space(**self._base_values), name)
+        return getattr(self._space, name)
+
+    def __setattr__(self, name, value):
+        setattr(self._space, name, value)
+
+    def __call__(self, *args, **kwargs):
+        return self._space(*args, **kwargs)
+
+    def __getitem__(self, key):
+        return self._space[key]
 
 
 def _sha(path):
@@ -42,7 +71,7 @@ class ConnectedModel:
 
 
 def load_connected(graph, artifacts, *, external_bindings, tables_by_space=None):
-    """Load a flat compiled Space graph and bind its declared dependencies.
+    """Load compiled Space artifacts and bind their declared dependencies.
 
     ``artifacts`` and ``tables_by_space`` use public Space names. An omitted
     Space in the source graph must be supplied through ``external_bindings``.
@@ -69,20 +98,23 @@ def load_connected(graph, artifacts, *, external_bindings, tables_by_space=None)
         raise ContractError('Invalid exported Space graph')
     nodes = {}
     for name in artifacts:
-        if not name.isidentifier():
-            raise ContractError('Compiled Space needs an identifier: ' + name)
+        generated_space_name(name)
         fullname = model_name + '.' + name
         if fullname not in graph_spaces:
             raise ContractError('Compiled Space is absent from source graph: ' + name)
-        if len(fullname.split('.')) != 2:
-            raise ContractError('Connected frame loader supports flat Spaces')
         nodes[name] = graph_spaces[fullname]
+        base_values = nodes[name].get('base_parameter_values', {})
+        if (not isinstance(base_values, dict)
+                or set(base_values) - set(nodes[name].get('parameters', ()))
+                or any(type(value) not in (type(None), bool, int, float, str)
+                       for value in base_values.values())):
+            raise ContractError('Invalid base parameter references: ' + name)
 
     def target_name(ref, target):
         # The exported identity, not the local alias, names the target Space.
         prefix = model_name + '.'
         if (not isinstance(target, str) or not target.startswith(prefix)
-                or len(target.split('.')) != 2 or target not in graph_spaces):
+                or target not in graph_spaces):
             raise ContractError('Invalid source Space edge: ' + str(target))
         return target[len(prefix):]
 
@@ -115,7 +147,9 @@ def load_connected(graph, artifacts, *, external_bindings, tables_by_space=None)
     for name, artifact in artifacts.items():
         manifest = json.loads((artifact / 'manifest.json').read_text(encoding='utf-8'))
         plan = manifest.get('model', {})
-        if (plan.get('projection') != name
+        if (plan.get('projection') != generated_space_name(name)
+                or plan.get('source_space', model_name + '.' + name)
+                != model_name + '.' + name
                 or manifest.get('public_api', {}).get('model_name') != model_name):
             raise ContractError('Compiled Space identity differs from source graph: ' + name)
         source_cells = nodes[name]['cells']
@@ -149,7 +183,20 @@ def load_connected(graph, artifacts, *, external_bindings, tables_by_space=None)
                 tables = pickle.loads(path.read_bytes())
             model = CompiledModel(artifact, tables, _defer_bindings=True)
             models[name] = model
-            spaces[name] = getattr(model, name)
+            spaces[name] = getattr(model, plan['projection'])
+        children = {}
+        for name in artifacts:
+            if '.' in name:
+                parent, leaf = name.rsplit('.', 1)
+                if parent not in artifacts:
+                    raise ContractError('Nested Space parent is absent: ' + parent)
+                children.setdefault(parent, {})[leaf] = name
+        for name in sorted(artifacts, key=lambda value: value.count('.'), reverse=True):
+            base_values = nodes[name].get('base_parameter_values', {})
+            if name in children or base_values:
+                spaces[name] = _SpaceView(spaces[name], {
+                    leaf: spaces[child] for leaf, child in children.get(name, {}).items()},
+                    base_values)
         for name in order:
             plan = manifests[name]['model']
             refs = {ref: spaces[target_name(ref, target)]
