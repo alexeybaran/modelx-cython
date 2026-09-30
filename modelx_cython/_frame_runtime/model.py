@@ -189,6 +189,24 @@ class _ItemSpace:
                 bindings=model._space_bindings, **self._arguments)
                 if model._space_bindings is not None else {})
 
+    def _create_context(self, position, native_root, *, simple_inputs=False):
+        """Create this item's sole cache owner for either public Cell entry."""
+        model = self._space._model
+        if simple_inputs:
+            params = row_inputs = {}
+        else:
+            self._ensure_dynamic_refs()
+            params = {name: value for name, value in self._arguments.items()
+                      if name in model.manifest['parameters']}
+            row_inputs = {name: value for name, value in self._dynamic_refs.items()
+                          if name in model.manifest['inputs']}
+        if native_root and not params and not row_inputs:
+            record = model._kernel._records[position]
+            self._context = model._kernel._module.Kernel((record,))
+        else:
+            self._context = model._kernel.fork_item(
+                position, input_overrides=row_inputs, **params)
+
     def __getattr__(self, name):
         model = self._space._model
         model._require_open()
@@ -225,16 +243,7 @@ class _ItemSpace:
                                ('float', 'int', 'bool')
                            and not args and not kwargs)
             if self._context is None:
-                self._ensure_dynamic_refs()
-                params = {n: v for n, v in self._arguments.items() if n in model.manifest['parameters']}
-                row_inputs = {name: value for name, value in self._dynamic_refs.items()
-                              if name in model.manifest['inputs']}
-                if native_root and not params and not row_inputs:
-                    record = model._kernel._records[position]
-                    self._context = model._kernel._module.Kernel((record,))
-                else:
-                    self._context = model._kernel.fork_item(
-                        position, input_overrides=row_inputs, **params)
+                self._create_context(position, native_root)
             model._active += 1
             try:
                 if type(self._context) is model._kernel._module.Kernel:
@@ -270,21 +279,7 @@ def _native_scalar_method(name, simple_inputs):
                 raise KeyError(point)
             position = model._positions[point]
             if self._context is None:
-                if simple_inputs:
-                    record = model._kernel._records[position]
-                    self._context = model._kernel._module.Kernel((record,))
-                else:
-                    self._ensure_dynamic_refs()
-                    params = {n: v for n, v in self._arguments.items()
-                              if n in model.manifest['parameters']}
-                    row_inputs = {n: v for n, v in self._dynamic_refs.items()
-                                  if n in model.manifest['inputs']}
-                    if params or row_inputs:
-                        self._context = model._kernel.fork_item(
-                            position, input_overrides=row_inputs, **params)
-                    else:
-                        record = model._kernel._records[position]
-                        self._context = model._kernel._module.Kernel((record,))
+                self._create_context(position, True, simple_inputs=simple_inputs)
             model._active += 1
             try:
                 owner = self._context
