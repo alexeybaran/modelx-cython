@@ -11,7 +11,6 @@ import keyword
 from pathlib import Path
 
 from .contracts import ContractError
-from .source_graph import describe_source_graph
 
 
 def plan_package(graph, *, external_names=(), collect_only=False):
@@ -111,22 +110,21 @@ def build_package(exported, destination, *, external_imports,
     destination = Path(destination)
     if destination.exists():
         raise FileExistsError('Connected build destination must be fresh')
-    manifest = json.loads((exported / '_mx_formula_sources.json').read_text(encoding='utf-8'))
-    graph = describe_source_graph(manifest)
     external_imports = dict(external_imports)
-    plan = plan_package(graph, external_names=external_imports,
-                        collect_only=collect_only)
-    options = {str(name): dict(value) for name, value in (space_options or {}).items()}
-    if set(options) - set(plan['compiled_spaces']):
-        raise ContractError('Options supplied for an unselected Space')
-    package_name = package_name or (plan['model'] + 'Compiled')
-    if not package_name.isidentifier() or keyword.iskeyword(package_name):
-        raise ContractError('Connected package name must be an identifier')
-    destination.mkdir(parents=True)
-    (destination / 'build_plan.json').write_text(json.dumps(plan, indent=2) + '\n',
-                                                 encoding='utf-8')
-    artifacts = {}
     with open_exported_source(exported) as derive:
+        graph = derive.source_graph
+        plan = plan_package(graph, external_names=external_imports,
+                            collect_only=collect_only)
+        options = {str(name): dict(value) for name, value in (space_options or {}).items()}
+        if set(options) - set(plan['compiled_spaces']):
+            raise ContractError('Options supplied for an unselected Space')
+        package_name = package_name or (plan['model'] + 'Compiled')
+        if not package_name.isidentifier() or keyword.iskeyword(package_name):
+            raise ContractError('Connected package name must be an identifier')
+        destination.mkdir(parents=True)
+        (destination / 'build_plan.json').write_text(json.dumps(plan, indent=2) + '\n',
+                                                     encoding='utf-8')
+        artifacts = {}
         for name in plan['compiled_spaces']:
             arguments = dict(options.get(name, {}))
             if 'projection' in arguments:

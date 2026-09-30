@@ -124,6 +124,10 @@ def open_exported_source(package):
                     setattr(proxy, name, spaces[(name,)])
             return from_modelx(proxy, dest, **options)
 
+        # Package planning and individual Space compilation must consume the
+        # same verified graph. This also covers ordinary exports whose author
+        # formula manifest must be reconstructed from exported methods.
+        derive.source_graph = graph
         yield derive
     finally:
         for name in tuple(sys.modules):

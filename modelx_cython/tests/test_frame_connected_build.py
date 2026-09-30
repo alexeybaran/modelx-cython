@@ -90,7 +90,12 @@ def test_one_build_invocation_uses_discovered_spaces_not_option_keys(tmp_path, m
     @contextmanager
     def fake_source(package):
         sessions.append(package)
-        yield lambda destination, **options: fake_frontend(package, destination, **options)
+        def derive(destination, **options):
+            return fake_frontend(package, destination, **options)
+        from modelx_cython._frame_runtime.source_graph import describe_source_graph
+        derive.source_graph = describe_source_graph(json.loads(
+            (package / '_mx_formula_sources.json').read_text()))
+        yield derive
     monkeypatch.setattr(modelx_frontend_exported, 'open_exported_source', fake_source)
     monkeypatch.setattr(compiler, 'build', fake_build)
     monkeypatch.setattr(connected_package, 'assemble_connected_package', fake_assemble)
@@ -124,7 +129,12 @@ def test_complete_package_builds_single_space_without_collect(tmp_path, monkeypa
     called = []
     @contextmanager
     def fake_source(_package):
-        yield lambda destination, **options: SimpleNamespace(projection=options['projection'])
+        def derive(destination, **options):
+            return SimpleNamespace(projection=options['projection'])
+        from modelx_cython._frame_runtime.source_graph import describe_source_graph
+        derive.source_graph = describe_source_graph(json.loads(
+            (_package / '_mx_formula_sources.json').read_text()))
+        yield derive
     def fake_build(spec, artifact):
         called.append(spec.projection)
         artifact.mkdir(parents=True)
@@ -138,7 +148,8 @@ def test_complete_package_builds_single_space_without_collect(tmp_path, monkeypa
     assert result['plan']['collect_roots'] == []
 
 
-def test_complete_package_compiles_ordinary_single_space(tmp_path):
+@pytest.mark.parametrize('preserve_metadata', [True, False])
+def test_complete_package_compiles_ordinary_single_space(tmp_path, preserve_metadata):
     import modelx as mx
     from modelx_cython._frame_runtime.connected_build import build_package
     from modelx_cython._frame_runtime.connected_model import load_connected
@@ -148,6 +159,8 @@ def test_complete_package_compiles_ordinary_single_space(tmp_path):
         model.new_space('Projection').new_cells('value', 'lambda: 4.25')
         exported = tmp_path / 'exported'
         model.export(exported)
+        if not preserve_metadata:
+            (exported / '_mx_formula_sources.json').unlink()
     finally:
         model.close()
     result = build_package(exported, tmp_path / 'compiled', external_imports={})
