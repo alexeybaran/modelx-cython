@@ -29,16 +29,20 @@ def plan_package(graph, *, external_names=(), collect_only=False):
     prefix = model + '.'
     names = {}
     for fullname, node in nodes.items():
-        if (not fullname.startswith(prefix) or len(fullname.split('.')) != 2
+        relative = fullname[len(prefix):] if fullname.startswith(prefix) else ''
+        if (not relative or any(not part.isidentifier()
+                                for part in relative.split('.'))
                 or not isinstance(node, dict)):
-            raise ContractError('Connected collect build supports flat Spaces')
-        names[fullname[len(prefix):]] = node
+            raise ContractError('Invalid exported Space identity: ' + str(fullname))
+        names[relative] = node
     roots = sorted(name for name, node in names.items() if node.get('collect') is not None)
     if collect_only and not roots:
         raise ContractError('Export has no declared collect Space')
     external = set(external_names)
-    if any(not isinstance(name, str) or not name.isidentifier() for name in external):
-        raise ContractError('External Space names must be identifiers')
+    if any(not isinstance(name, str) or not name
+           or any(not part.isidentifier() for part in name.split('.'))
+           for name in external):
+        raise ContractError('External Space names must be qualified identifiers')
     selected = set(roots) if collect_only else set(names)
     # Follow reverse Space edges: consumers of a collect result also belong to
     # the compiled region. This handles multiple independent collect regions.

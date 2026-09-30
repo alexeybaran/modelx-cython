@@ -2,6 +2,7 @@
 import hashlib
 import json
 from contextlib import contextmanager
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -52,6 +53,32 @@ def test_complete_package_uses_same_graph_without_collect_declarations():
         'Inputs', 'Policies', 'Scenarios', 'Report', 'Unrelated'}
     assert plan['compiled_spaces'].index('Inputs') < plan['compiled_spaces'].index('Policies')
     assert plan['compiled_spaces'].index('Policies') < plan['compiled_spaces'].index('Report')
+    assert plan['external_spaces'] == []
+
+
+@pytest.mark.parametrize('fixture, model_name, spaces', [
+    ('ref_space', 'RefSpace', {'Bar', 'Bar.Qux', 'Foo'}),
+    ('nested_params', 'NestedParams',
+     {'TopLevel', 'TopLevel.SecondLevel', 'TopLevel.SecondLevel.ThirdLevel'}),
+    ('duplicated_params', 'DuplicatedParams',
+     {'Space1', 'Space1.Space2', 'Space1.Space2.Space3'}),
+])
+def test_original_nested_exports_reach_one_package_plan(
+        tmp_path, fixture, model_name, spaces):
+    import modelx as mx
+    from modelx_cython._frame_runtime.modelx_frontend_exported import open_exported_source
+
+    source = Path(__file__).parent / 'samples' / fixture / model_name
+    exported = tmp_path / 'exported'
+    model = mx.read_model(source)
+    try:
+        model.export(exported)
+    finally:
+        model.close()
+    with open_exported_source(exported) as derive:
+        plan = plan_package(derive.source_graph)
+    assert set(plan['compiled_spaces']) == spaces
+    assert plan['collect_roots'] == []
     assert plan['external_spaces'] == []
 
 
