@@ -199,6 +199,19 @@ def from_modelx(model, destination, *, projection='Projection', data_space='Data
             intrinsic_references[name]=value
         elif type(value) in (int,float,bool,str,type(None)):
             refs[name]=value
+        elif type(value) in (dict, list):
+            # Keep ordinary JSON-valued references as Python objects for
+            # checked Cell bodies. The manifest owns one value per binding;
+            # objects that need shared identity or custom serialization
+            # still require an explicit connected binding.
+            try:
+                encoded = json.dumps(value, allow_nan=False)
+                if json.loads(encoded) != value:
+                    raise ValueError('JSON changes the reference value')
+            except (TypeError, ValueError):
+                raise ContractError('Unsupported detached reference: '+name) from None
+            refs[name]=value
+            reference_types[name]=object
         elif isinstance(value,(pd.DataFrame,pd.Series,np.ndarray)):
             table='reference_'+name
             if table in tables:raise ContractError('Conflicting detached Data name: '+table)

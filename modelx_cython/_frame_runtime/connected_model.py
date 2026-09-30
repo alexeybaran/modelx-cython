@@ -204,11 +204,13 @@ def load_connected(graph, artifacts, *, external_bindings, tables_by_space=None)
             def resolve(ref):
                 if ref in refs:
                     return refs[ref]
-                try:
+                if ref in external_bindings:
                     return external_bindings[ref]
-                except KeyError as exc:
-                    raise ContractError('Unbound connected reference: '
-                                        + name + '.' + ref) from exc
+                default = plan.get('reference_defaults', {}).get(ref)
+                if default is not None:
+                    return default
+                raise ContractError('Unbound connected reference: '
+                                    + name + '.' + ref)
             formula = plan.get('space_formula')
             formula_refs = (formula.get('references', ()) if formula is not None else ())
             space_bindings = {ref: resolve(ref) for ref in formula_refs}

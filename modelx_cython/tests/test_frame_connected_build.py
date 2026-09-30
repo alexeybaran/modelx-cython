@@ -287,3 +287,32 @@ def test_complete_package_preserves_uncached_and_fractional_power_cells(tmp_path
         assert connected.Space1.uncached_rate(2) == pytest.approx(expected[2][0])
     finally:
         connected.close()
+
+
+def test_complete_package_uncached_cell_repeats_side_effects(tmp_path):
+    import modelx as mx
+    from modelx_cython._frame_runtime.connected_package import load_connected_package
+
+    live = mx.new_model('UncachedConnected')
+    try:
+        space = live.new_space('Space1')
+        space.counter = {'n': 0}
+        space.new_cells('tick', 'def tick():\n    counter["n"] += 1\n    return counter["n"]')
+        space.tick.is_cached = False
+        space.new_cells('twice', 'lambda: tick() + tick()')
+        exported = tmp_path / 'exported'
+        live.export(exported)
+    finally:
+        live.close()
+
+    result = build_package(exported, tmp_path / 'compiled', external_imports={})
+    connected = load_connected_package(result['package'] / '__init__.py')
+    try:
+        assert connected.Space1.tick() == 1
+        assert connected.Space1.tick() == 2
+        assert connected.Space1.twice() == 7
+        assert connected.Space1.twice() == 7
+        assert connected.Space1.tick() == 5
+        assert connected.Space1.counter == {'n': 5}
+    finally:
+        connected.close()
