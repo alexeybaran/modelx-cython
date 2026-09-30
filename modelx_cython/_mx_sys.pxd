@@ -75,4 +75,5 @@ cdef class BaseSpace(BaseParent):
 
     cdef BaseSpace _space
     cdef dict _mx_itemspaces
+    cdef dict _mx_collect_cache
     cdef public list _mx_roots
