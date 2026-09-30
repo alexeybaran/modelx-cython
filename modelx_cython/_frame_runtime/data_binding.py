@@ -91,8 +91,10 @@ def prepare_inputs(manifest, tables, *, references=None, packed=None,
     refs = {**plan['reference_defaults'], **dict(references or {})}
     if set(refs) != set(plan['reference_defaults']): raise ContractError('Unknown Projection reference')
     packed = pack_tables(plan, tables) if packed is None else packed
-    points = tables[plan['point_table']]
-    if not len(points): raise ContractError('At least one policy is required')
+    point_table = plan['point_table']
+    points = tables[point_table] if point_table is not None else None
+    point_index = points.index if points is not None else (0,)
+    if not len(point_index): raise ContractError('At least one policy is required')
     # A policy table is normally read repeatedly for every bound scalar. Select
     # each aligned column once, while retaining the original label lookup for
     # other layouts (including duplicated or differently ordered indexes).
@@ -107,7 +109,7 @@ def prepare_inputs(manifest, tables, *, references=None, packed=None,
             continue
         if kind in ('field', 'row_reference', 'row_reference_numeric'):
             table = tables[binding['table']]
-            if (table.index.is_unique and points.index.is_unique
+            if (points is not None and table.index.is_unique and points.index.is_unique
                     and table.index.equals(points.index)):
                 column_key = (binding['table'], binding['column'])
                 if column_key not in field_columns:
@@ -123,7 +125,7 @@ def prepare_inputs(manifest, tables, *, references=None, packed=None,
         else:
             fixed[name] = refs[binding['name']]
     rows = []
-    for position, point in enumerate(points.index):
+    for position, point in enumerate(point_index):
         row = fixed.copy()
         for name in point_bindings:
             row[name] = point

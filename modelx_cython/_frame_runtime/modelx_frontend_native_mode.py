@@ -197,9 +197,9 @@ def from_modelx(model, destination, *, projection='Projection', data_space='Data
         else:raise ContractError('Unsupported detached reference: '+name)
     static=not parameters
     if static:
-        point='mxcf_scope_id'; point_table='mxcf_static_scope'
-        if point_table in tables:raise ContractError('Reserved static scope Data name is already used')
-        tables[point_table]=pd.DataFrame(index=pd.Index([0],name=point))
+        point='mxcf_scope_id'
+        if point_table is not None:
+            raise ContractError('A static Space does not select a policy table')
     else:
         if point_table in object_references:point_table=object_references[point_table]
         if reference_table and domains is not None:
@@ -311,6 +311,7 @@ def from_modelx(model, destination, *, projection='Projection', data_space='Data
     spec = derive_spec(module,tables,references=refs,space_formula=space_formula,
         outputs={},length='0',steps=steps,cell_outputs=tuple(space.cells),
         data_space=data_space,projection=projection,point_table=point_table,
+        static_projection=static,
         allow_none={n:effective_allow_none(c) for n,c in space.cells.items()},
         model_name=model.name,cython_objects=cython_objects,
         row_references=row_references,point_parameter=point,

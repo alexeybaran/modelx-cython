@@ -107,7 +107,10 @@ def test_unknown_export_source_schema_fails_before_import(tmp_path):
         from_exported(package, tmp_path / 'source')
 
 
-def test_metadata_free_original_export_recovers_formula_for_compiled_static_space(tmp_path):
+@pytest.mark.parametrize('preserve_metadata', [False, True])
+@pytest.mark.parametrize('use_slots', [False, True])
+def test_original_export_compiles_static_space_without_policy_table(
+        tmp_path, preserve_metadata, use_slots):
     import modelx as mx
     from modelx_cython._frame_runtime.compiler import build, compile_generated
     from modelx_cython._frame_runtime.model import CompiledModel
@@ -118,14 +121,18 @@ def test_metadata_free_original_export_recovers_formula_for_compiled_static_spac
         space.factor = 2.0
         space.new_cells('amount', 'lambda: factor + 0.5')
         exported = tmp_path / 'old_export'
-        model.export(exported)
+        model.export(exported, use_slots=use_slots)
     finally:
         model.close()
-    (exported / '_mx_formula_sources.json').unlink()
+    if not preserve_metadata:
+        (exported / '_mx_formula_sources.json').unlink()
     spec = from_exported(exported, tmp_path / 'source')
-    assert (tmp_path / 'source' / 'recovered_formula_sources.json').exists()
-    assert (tmp_path / 'source' / 'frontend.json').read_text().find(
-        'reconstructed_export_methods') >= 0
+    assert spec.model['point_table'] is None
+    assert 'mxcf_static_scope' not in spec.initial_tables
+    if not preserve_metadata:
+        assert (tmp_path / 'source' / 'recovered_formula_sources.json').exists()
+        assert (tmp_path / 'source' / 'frontend.json').read_text().find(
+            'reconstructed_export_methods') >= 0
     artifact = tmp_path / 'artifact'
     build(spec, artifact, compile_native=False)
     assert not list(artifact.rglob('*.pyd'))
@@ -134,6 +141,8 @@ def test_metadata_free_original_export_recovers_formula_for_compiled_static_spac
     try:
         assert compiled.Projection.amount() == 2.5
         assert compiled.Projection.amount() == 2.5
+        compiled.Projection.factor = 4.0
+        assert compiled.Projection.amount() == 4.5
     finally:
         compiled.close()
     source = artifact / json.loads((artifact / 'manifest.json').read_text())['package'] / '_kernel.pyx'

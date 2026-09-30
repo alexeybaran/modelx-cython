@@ -16,6 +16,16 @@ from .data_binding import pack_tables, prepare_inputs
 from .runtime import CompiledKernel
 
 
+def _policy_index(plan, tables):
+    """A static Space has one runtime context without a fabricated Data table."""
+    table = plan['point_table']
+    if table is None:
+        if not plan.get('static_projection'):
+            raise ContractError('Parameterized Space requires a policy table')
+        return (0,)
+    return tables[table].index
+
+
 class CollectResult:
     """Attribute-style container matching the exported collect result shape."""
 
@@ -509,7 +519,7 @@ class CompiledModel:
         self._space_bindings = (dict(space_bindings) if space_bindings is not None
                                 else None)
         self._connected_context_key = None
-        self._positions = {key: i for i, key in enumerate(self._tables[self._plan['point_table']].index)}
+        self._positions = {key: i for i, key in enumerate(_policy_index(self._plan, self._tables))}
         self._initialized = True
         if hasattr(self, '_deferred_tables'):
             del self._deferred_tables
@@ -616,7 +626,7 @@ class CompiledModel:
                   **{name: importlib.import_module(module) for name, module in
                      self._plan.get('module_references', {}).items()}}
         rows = []
-        for key in tables[self._plan['point_table']].index:
+        for key in _policy_index(self._plan, tables):
             row = {**shared, self._plan['point_parameter']: key}
             if required - row.keys(): raise ContractError('Unbound formula references: ' + repr(sorted(required - row.keys())))
             rows.append({n: row[n] for n in required})
@@ -629,7 +639,7 @@ class CompiledModel:
         self._tables, self._references, self._packed = tables, refs, packed
         self._collect_cache.clear()
         self._connected_context_key = None
-        self._positions = {key: i for i, key in enumerate(tables[self._plan['point_table']].index)}
+        self._positions = {key: i for i, key in enumerate(_policy_index(self._plan, tables))}
         if not preserve_item_contexts:
             for item in self._projection._items.values():
                 item._context = None

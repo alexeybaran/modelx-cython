@@ -37,7 +37,7 @@ def derive_spec(module, tables, *, references, space_formula, outputs, steps, le
                 scalar_outputs=(), cell_outputs=(), data_space='Data', projection='Projection',
                 allow_none=None, model_name=None, point_table=None, cython_objects=False,
                 row_references=None, point_parameter=None, parameter_initial_values=None,
-                reference_types=None):
+                reference_types=None, static_projection=False):
     """Build a kernel contract without author INPUTS/FRONTEND maps.
 
     Supported structure: one Data Space with zero-argument DataFrame Cells and
@@ -258,13 +258,13 @@ def derive_spec(module, tables, *, references, space_formula, outputs, steps, le
             raise ContractError('Declared policy table conflicts with lookup.field/category')
         if tables[point_table].index.nlevels != 1 or not tables[point_table].index.is_unique:
             raise ContractError('A policy table needs a unique single-level index')
-    else:
+    elif not static_projection or point_tables:
         if len(point_tables) != 1:
             raise ContractError('Exactly one policy table must be identifiable from lookup.field/category')
         point_table = next(iter(point_tables))
     used = set().union(*(referenced_names(f) for f in cells.values()))
     row_references = dict(row_references or {})
-    if row_references and not isinstance(tables[point_table], pd.DataFrame):
+    if row_references and (point_table is None or not isinstance(tables[point_table], pd.DataFrame)):
         raise ContractError('Per-policy references require a DataFrame policy table')
     if set(row_references) & (set(references) | set(defaults) | set(cells)
                               | {point, 'data', 'lookup'}):
@@ -277,7 +277,7 @@ def derive_spec(module, tables, *, references, space_formula, outputs, steps, le
             add(name, object, dict(kind='row_reference', table=point_table, column=column))
             schemas[point_table]['columns'][column] = 'object'
     # Declared references are model data, not inferred actuarial assumptions.
-    if frontend['arrays'] and point in used:
+    if frontend['arrays'] and point in used and point_table is not None:
         from pandas.api.types import is_integer_dtype
         index = tables[point_table].index
         if is_integer_dtype(index.dtype) and all(
@@ -305,6 +305,7 @@ def derive_spec(module, tables, *, references, space_formula, outputs, steps, le
     inputs = dict(sorted(inputs.items()))
     plan = dict(schema='mxcf.model.v1', data_space=data_space, projection=projection,
                 point_parameter=point, point_table=point_table, parameter_defaults=defaults,
+                static_projection=static_projection,
                 required_parameters=sorted(required),
                 space_parameters=[(p.name, p.kind.name) for p in parameters],
                 reference_defaults=dict(references), bindings=bindings, tables=schemas,
