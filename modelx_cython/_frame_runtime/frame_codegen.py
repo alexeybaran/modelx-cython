@@ -45,7 +45,16 @@ def to_c_frame(source, manifest):
         if row['hashed'] and manifest['memo'] == 'dense':
             for param in row['params']:
                 sizes['_keys_' + cell + '_' + param['name']] = row['slots']
+    # Large retained frames pay for embedded numeric and in-progress arrays at
+    # Space construction, even though validity flags gate every value read.
+    # Keep the flags inline and own the other arrays in one uninitialised block.
+    # Each cache slot has one statically known result type, so float and integer
+    # values can occupy the same 8-byte slot rather than two parallel arrays.
+    # Small frames stay inline to avoid adding an allocation to cheap Cells.
+    heap_numeric = native_guard and manifest['memo'] == 'dense' and manifest['cache_slots'] >= 1024
     frame = ['from cpython.ref cimport PyObject', 'from libc.string cimport memset']
+    if heap_numeric:
+        frame.append('from libc.stdlib cimport malloc, free')
     if native_guard:
         from .native_guard_codegen import HEADER
         frame.append(HEADER)
@@ -53,7 +62,11 @@ def to_c_frame(source, manifest):
     if native_guard: frame.append('    MxGuard _guard')
     for name, dtype in fields.items():
         t = 'PyObject*' if name in objects else dtype.replace('[::1]', '*')
-        if name in buffers:
+        if heap_numeric and name == '_seen':
+            frame.append(f'    unsigned char _seen[{sizes[name]}]')
+        elif heap_numeric and name in ('_floats', '_ints'):
+            frame.append(f'    {dtype.replace("[::1]", "")}* {name}')
+        elif name in buffers:
             frame.append(f'    {dtype.replace("[::1]", "")} {name}[{sizes[name]}]')
         else:
             frame.append(f'    {t} {name}')
@@ -100,7 +113,10 @@ def to_c_frame(source, manifest):
             block = block.replace(f'__mx_literal_{i}__', literal)
         lowered.append(block)
     # Runtime keeps the ownership fields; scalar values have one location in _Frame.
-    owner_decls = ['    cdef _Frame _frame', '    cdef object _records']
+    owner_decls = ['    cdef _Frame* _frame' if heap_numeric else '    cdef _Frame _frame',
+                   '    cdef object _records']
+    if heap_numeric:
+        owner_decls.append('    cdef void* _cache_storage')
     for name, dtype in objects.items():
         owner_decls.append(f'    cdef {dtype} {name}')
     runtime = lower_calls('\n'.join(outer), '&self._frame')
@@ -124,7 +140,8 @@ def to_c_frame(source, manifest):
             elif name in objects:
                 result.append(f'{indent}self._frame.{name} = <PyObject*>self.{name}')
     # Generated init has a chained assignment only for counters (numeric), not owners.
-    manifest['physical_layout'] = 'embedded_native_memo_frame_with_python_owners'
+    manifest['physical_layout'] = ('retained_heap_numeric_memo_frame_with_python_owners'
+                                   if heap_numeric else 'embedded_native_memo_frame_with_python_owners')
     if native_guard:
         from .native_guard_codegen import guarded_functions, runtime as guard_runtime
         aliases, lowered = guarded_functions(lowered, manifest)
@@ -145,12 +162,38 @@ def to_c_frame(source, manifest):
             if len(tables[table]) != len(manifest['outputs'][table]): raise ValueError('Output template mismatch')
         if manifest.get('python_cells'):
             from .mixed_codegen import augment_frame
-            frame, lowered = augment_frame(frame, lowered, manifest)
+            frame, lowered = augment_frame(frame, lowered, manifest, heap_numeric=heap_numeric)
         manifest['native_error_abi'] = 'checked_cython_miss_with_cpp_guard'
         runtime_source = guard_runtime(manifest, prefix, length, tables)
         if manifest.get('python_cells'):
             from .mixed_codegen import augment_runtime
             runtime_source = augment_runtime(runtime_source, manifest)
             manifest['native_error_abi'] = 'reentrant_guard_with_checked_python_miss'
+        if heap_numeric:
+            slots = max(1, manifest['cache_slots'])
+            has_busy = bool(manifest.get('python_cells'))
+            busy_slots = manifest.get('busy_cache_slots', slots) if has_busy else 0
+            byte_count = f'sizeof(_Frame) + {slots} * sizeof(double)' + (f' + {busy_slots} * sizeof(unsigned int)' if has_busy else '')
+            allocation = ['        if sizeof(double) != sizeof(long long): raise RuntimeError("Unsupported numeric cache layout")',
+                          f'        if self._cache_storage == NULL:',
+                          f'            self._cache_storage = malloc({byte_count})',
+                          '            if self._cache_storage == NULL: raise MemoryError()',
+                          '        self._frame = <_Frame*>self._cache_storage',
+                          '        memset(self._frame, 0, sizeof(_Frame))',
+                          '        self._frame._floats = <double*>(<char*>self._cache_storage + sizeof(_Frame))',
+                          '        self._frame._ints = <long long*>(<char*>self._cache_storage + sizeof(_Frame))']
+            if has_busy:
+                allocation.append(f'        self._frame._busy_owner = <unsigned int*>(<char*>self._cache_storage + sizeof(_Frame) + {slots} * sizeof(double))')
+            runtime_source = runtime_source.replace('    def __init__(self, records):',
+                                                    '    def __init__(self, records):\n' + '\n'.join(allocation), 1)
+            runtime_source = runtime_source.replace('    def __dealloc__(self):\n        mx_guard_clear(&self._frame._guard)',
+                                                    '    def __dealloc__(self):\n        if self._frame != NULL:\n            mx_guard_clear(&self._frame._guard)\n            free(self._cache_storage)', 1)
+            # The epoch advances by three for ready/busy/tombstone states.
+            # Reset before unsigned-byte tags can wrap or alias an older state.
+            runtime_source = runtime_source.replace('self._frame._epoch >= 4294967293',
+                                                    'self._frame._epoch >= 252')
+            runtime_source = runtime_source.replace('self._frame._epoch >= 4294967294',
+                                                    'self._frame._epoch >= 252')
+            manifest['seen_tag_width'] = 'uint8_with_clear_before_wrap'
         return head + '\n' + '\n'.join(frame + aliases) + '\n\n' + '\n\n'.join(lowered) + '\n\n' + runtime_source + '\n'
     return head + '\n' + '\n'.join(frame) + '\n\n' + '\n\n'.join(lowered) + '\n\n' + marker + '\n'.join(owner_decls + result) + '\n'

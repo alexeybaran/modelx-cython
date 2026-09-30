@@ -219,16 +219,35 @@ class _ItemSpace:
             model._require_idle()
             point = self._arguments[model._plan['point_parameter']]
             if point not in model._positions: raise KeyError(point)
+            position = model._positions[point]
+            native_root = (name in model.manifest.get('native_scalar_outputs', ())
+                           and model.manifest['cells'][name]['result']['kind'] in
+                               ('float', 'int', 'bool')
+                           and not args and not kwargs)
             if self._context is None:
                 self._ensure_dynamic_refs()
                 params = {n: v for n, v in self._arguments.items() if n in model.manifest['parameters']}
                 row_inputs = {name: value for name, value in self._dynamic_refs.items()
                               if name in model.manifest['inputs']}
-                self._context = model._kernel.fork_item(
-                    model._positions[point], input_overrides=row_inputs, **params)
+                if native_root and not params and not row_inputs:
+                    record = model._kernel._records[position]
+                    self._context = model._kernel._module.Kernel((record,))
+                else:
+                    self._context = model._kernel.fork_item(
+                        position, input_overrides=row_inputs, **params)
             model._active += 1
             try:
-                result = self._context.call(name, *args, **kwargs)
+                if type(self._context) is model._kernel._module.Kernel:
+                    if native_root:
+                        result = getattr(self._context, '_native_direct_' + name)()
+                        if model.manifest['cells'][name]['result']['kind'] == 'bool':
+                            result = bool(result)
+                    else:
+                        self._context = model._kernel.fork_item(
+                            position, _native_kernel=self._context)
+                        result = self._context.call(name, *args, **kwargs)
+                else:
+                    result = self._context.call(name, *args, **kwargs)
             finally:
                 model._active -= 1
             if name in model.manifest['outputs']:
@@ -236,6 +255,49 @@ class _ItemSpace:
                 return pd.DataFrame(result, columns=list(model.manifest['outputs'][name]),
                                     index=pd.Index(range(len(result)), name=model._plan['output_index']))
             return result
+
+
+def _native_scalar_method(name, simple_inputs):
+    """Bind one checked Cython Cell entry to an ordinary retained ItemSpace."""
+    entry_name = '_native_direct_' + name
+
+    def cell(self):
+        model = self._space._model
+        with model._lock:
+            model._require_idle()
+            point = self._arguments[model._plan['point_parameter']]
+            if point not in model._positions:
+                raise KeyError(point)
+            position = model._positions[point]
+            if self._context is None:
+                if simple_inputs:
+                    record = model._kernel._records[position]
+                    self._context = model._kernel._module.Kernel((record,))
+                else:
+                    self._ensure_dynamic_refs()
+                    params = {n: v for n, v in self._arguments.items()
+                              if n in model.manifest['parameters']}
+                    row_inputs = {n: v for n, v in self._dynamic_refs.items()
+                                  if n in model.manifest['inputs']}
+                    if params or row_inputs:
+                        self._context = model._kernel.fork_item(
+                            position, input_overrides=row_inputs, **params)
+                    else:
+                        record = model._kernel._records[position]
+                        self._context = model._kernel._module.Kernel((record,))
+            model._active += 1
+            try:
+                owner = self._context
+                if type(owner) is model._kernel._module.Kernel:
+                    value = getattr(owner, entry_name)()
+                    return (bool(value) if model.manifest['cells'][name]['result']['kind'] == 'bool'
+                            else value)
+                return owner.call(name)
+            finally:
+                model._active -= 1
+
+    cell.__name__ = name
+    return cell
 
 
 class _ProjectionSpace:
@@ -251,7 +313,21 @@ class _ProjectionSpace:
         point = model._plan['point_parameter']
         object.__setattr__(self, '_collect_signature',
                            inspect.Signature(p for p in params if p.name != point))
+        object.__setattr__(self, '_positional_names',
+                           tuple(p.name for p in params)
+                           if all(p.kind in (inspect.Parameter.POSITIONAL_ONLY,
+                                             inspect.Parameter.POSITIONAL_OR_KEYWORD)
+                                  for p in params) else ())
         object.__setattr__(self, '_items', {})
+        native = (name for name in model.manifest.get('native_scalar_outputs', ())
+                  if model.manifest['cells'][name]['result']['kind'] in
+                     ('float', 'int', 'bool')
+                  and not name.startswith('_') and not hasattr(_ItemSpace, name))
+        simple_inputs = (not model.manifest['parameters']
+                         and model._plan.get('space_formula') is None)
+        methods = {name: _native_scalar_method(name, simple_inputs) for name in native}
+        object.__setattr__(self, '_item_class',
+                           type('_CompiledItemSpace', (_ItemSpace,), methods) if methods else _ItemSpace)
 
     @property
     def parameters(self):
@@ -270,14 +346,19 @@ class _ProjectionSpace:
             raise TypeError('This Space is not parameterized')
         with model._lock:
             model._require_open()
-            bound = self._signature.bind(*args, **kwargs); bound.apply_defaults()
-            point = bound.arguments[model._plan['point_parameter']]
+            if not kwargs and self._positional_names and len(args) == len(self._positional_names):
+                arguments = dict(zip(self._positional_names, args))
+                key = args
+            else:
+                bound = self._signature.bind(*args, **kwargs); bound.apply_defaults()
+                arguments = bound.arguments
+                key = tuple(arguments.values())
+            point = arguments[model._plan['point_parameter']]
             if point not in model._positions: raise KeyError(point)
-            key = tuple(bound.arguments.values())
             if key not in self._items:
                 refs = (model._space_formula_refs(bindings=model._space_bindings,
-                        **bound.arguments) if model._space_bindings is not None else None)
-                self._items[key] = _ItemSpace(self, dict(bound.arguments), refs)
+                        **arguments) if model._space_bindings is not None else None)
+                self._items[key] = self._item_class(self, dict(arguments), refs)
             return self._items[key]
 
     def collect(self, *args, **kwargs):

@@ -277,13 +277,17 @@ class PythonScope(CellCodec):
                                           for p in manifest['cells'][name]['params'])
                                  for name in self.calculators}
         self.diagnostics = manifest['diagnostics']
-        self.entries = {name: self._proxy(name) for name in manifest['cells']}
+        # A direct ItemSpace may use only a few Cells, yet its Python receiver
+        # used to build a callable for every Cell in the compiled model. Keep
+        # the formulas and globals local to this receiver; create each callable
+        # only when a Python formula or an external call actually needs it.
+        self.entries = {}
         for row in manifest['cells'].values():
             if row.get('calculator') == 'python':
                 for name in row['dependencies']:
-                    self.namespace[name] = self.entries[name]
+                    self.namespace[name] = self.entry(name)
         for name in self.calculators:
-            self.namespace[name] = self.entries[name]
+            self.namespace[name] = self.entry(name)
 
     def select(self, record, policy):
         self._record, self._raw_record = None, record

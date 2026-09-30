@@ -16,7 +16,8 @@ _ENTRY = '''cdef class _ObjectEntry:
 
 def augment(source, manifest):
     rows = {k: manifest['cells'][k] for k in manifest['object_cells']}
-    fields = ['    cdef list _object_dirty', '    cdef bint _object_key_guard, _clearing_objects']
+    fields = ['    cdef list _object_dirty', '    cdef bint _object_key_guard, _clearing_objects',
+              '    cdef bint _object_initialized']
     init = ['        self._object_dirty = []']
     clear = []
     methods = []
@@ -114,10 +115,22 @@ def augment(source, manifest):
 
     marker = 'cdef class Kernel:\n'
     source = source.replace(marker, marker + '\n'.join(fields) + '\n', 1)
-    source = source.replace('    def __init__(self, records):\n',
-                            '    def __init__(self, records):\n' + '\n'.join(init) + '\n', 1)
-    source = source.replace('        self._frame._python_scope = <PyObject*>scope',
-                            '        self._frame._python_scope = <PyObject*>scope\n' + '\n'.join(bind), 1)
+    lazy_object_cache = bool(manifest.get('native_scalar_outputs'))
+    if lazy_object_cache:
+        source = source.replace('    def __init__(self, records):\n',
+                                '    def __init__(self, records):\n        self._object_dirty = []\n', 1)
+        setup = ('        if not self._object_initialized:\n' +
+                 '\n'.join('    ' + line for line in init[1:]) +
+                 '\n            self._object_initialized = True')
+        source = source.replace('        self._frame._python_scope = <PyObject*>scope',
+                                '        self._frame._python_scope = <PyObject*>scope\n' + setup +
+                                '\n' + '\n'.join(bind), 1)
+    else:
+        source = source.replace('    def __init__(self, records):\n',
+                                '    def __init__(self, records):\n' + '\n'.join(init) +
+                                '\n        self._object_initialized = True\n', 1)
+        source = source.replace('        self._frame._python_scope = <PyObject*>scope',
+                                '        self._frame._python_scope = <PyObject*>scope\n' + '\n'.join(bind), 1)
     source = source.replace('    cdef void _advance(self) except *:\n',
                             '    cdef void _advance(self) except *:\n        self._clear_object_cache()\n', 1)
     source = source.replace('    cdef void _require_idle(self) except *:\n',
@@ -136,6 +149,8 @@ def augment(source, manifest):
     source = source[:start] + call + source[end:]
     clear_body = '''    cdef void _clear_object_cache(self) except *:
         cdef _ObjectEntry entry
+        if not self._object_initialized:
+            return
         self._clearing_objects = True
         try:
             for entry in self._object_dirty:

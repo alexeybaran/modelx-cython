@@ -359,7 +359,7 @@ class CompiledKernel:
             raise ContractError('Shared scope requires a mixed artifact')
         return _EvaluationScope(self, policy)
 
-    def fork_item(self, policy=0, *, input_overrides=None, **parameters):
+    def fork_item(self, policy=0, *, input_overrides=None, _native_kernel=None, **parameters):
         """Own one ItemSpace cache, sharing immutable tables with the parent.
 
         No repacking, formula reconstruction or second Python result cache. Each
@@ -371,52 +371,59 @@ class CompiledKernel:
                 raise IndexError('Policy position outside the bound portfolio')
             if set(parameters) - set(self.manifest.get('parameters', ())):
                 raise ContractError('Unknown ItemSpace parameter')
-            infos = self.manifest['inputs']
-            record = dict(zip(infos, self._records[policy]))
-            for name, value in parameters.items():
-                record[name] = self._scalar_value(name, infos[name], value, record)
             overrides = dict(input_overrides or {})
-            eligible = {name for name, binding in
-                        self.manifest.get('model', {}).get('bindings', {}).items()
-                        if binding['kind'] == 'row_reference'}
-            if set(overrides) - eligible:
-                raise ContractError('ItemSpace input overrides must be row references')
-            for name, value in overrides.items():
-                record[name] = self._scalar_value(name, infos[name], value, record)
-            # A dynamic Space formula can replace a row's object references.
-            # Numeric views derived from those references must follow the same
-            # replacement in this independently owned ItemSpace context.
-            for name, binding in self.manifest.get('model', {}).get(
-                    'native_row_references', {}).items():
-                column = binding['column']
-                if column not in overrides:
-                    continue
-                value = overrides[column]
-                field = binding['field']
-                if field is not None:
-                    try:
-                        value = value[field]
-                    except (KeyError, IndexError, TypeError) as exc:
-                        raise ContractError(name + ': missing numeric row field') from exc
-                info = infos[name]
-                if info['kind'] == 'indexed_array':
-                    record[name] = getattr(self._lookups, info['ctype'])(value)
-                else:
-                    record[name] = self._scalar_value(name, info, value, record)
+            if _native_kernel is not None and (parameters or overrides or
+                    type(_native_kernel) is not self._module.Kernel):
+                raise ContractError('Existing native ItemSpace owner cannot change its inputs')
+            if not parameters and not overrides:
+                record_tuple = self._records[policy]
+            else:
+                infos = self.manifest['inputs']
+                record = dict(zip(infos, self._records[policy]))
+                for name, value in parameters.items():
+                    record[name] = self._scalar_value(name, infos[name], value, record)
+                eligible = {name for name, binding in
+                            self.manifest.get('model', {}).get('bindings', {}).items()
+                            if binding['kind'] == 'row_reference'}
+                if set(overrides) - eligible:
+                    raise ContractError('ItemSpace input overrides must be row references')
+                for name, value in overrides.items():
+                    record[name] = self._scalar_value(name, infos[name], value, record)
+                # A dynamic Space formula can replace a row's object references.
+                # Derived numeric views follow that replacement in this owner.
+                for name, binding in self.manifest.get('model', {}).get(
+                        'native_row_references', {}).items():
+                    column = binding['column']
+                    if column not in overrides:
+                        continue
+                    value = overrides[column]
+                    field = binding['field']
+                    if field is not None:
+                        try:
+                            value = value[field]
+                        except (KeyError, IndexError, TypeError) as exc:
+                            raise ContractError(name + ': missing numeric row field') from exc
+                    info = infos[name]
+                    if info['kind'] == 'indexed_array':
+                        record[name] = getattr(self._lookups, info['ctype'])(value)
+                    else:
+                        record[name] = self._scalar_value(name, info, value, record)
+                record_tuple = tuple(record[n] for n in infos)
             child = object.__new__(type(self))
             for name in ('artifact', 'manifest', '_lookups', '_module'):
                 setattr(child, name, getattr(self, name))
-            child._lock, child._open_scope = threading.RLock(), None
-            child._records = (tuple(record[n] for n in infos),)
-            child._kernel = child._module.Kernel(child._records)
+            child._lock, child._open_scope = self._lock, None
+            child._records = (record_tuple,)
+            child._kernel = (_native_kernel if _native_kernel is not None
+                             else child._module.Kernel(child._records))
             child._python_scope = None
+            child._lazy_python_source = None
             if self._python_scope is not None:
-                from .python_calculator import PythonScope
                 bindings = [self._python_scope.bindings[policy]] if self._python_scope.bindings else None
-                child._python_scope = PythonScope(child.artifact, child.manifest, child._kernel, bindings,
-                                                   program=self._python_scope.program)
-                child._kernel.set_python_scope(child._python_scope)
-            return ItemContext(child)
+                child._lazy_python_source = (bindings, self._python_scope.program)
+            if _native_kernel is None:
+                return ItemContext(child)
+            return ItemContext(child, selected_native=True)
 
     def stats(self):
         with self._lock:
@@ -522,7 +529,7 @@ class _EvaluationScope:
         if cell not in self.owner.manifest['cells']:
             raise ContractError('Cell is not in the compiled closure')
         # The proxy binds defaults/keywords and encodes/decodes enum/key values.
-        return self.owner._python_scope.entries[cell](*args, **kwargs)
+        return self.owner._python_scope.entry(cell)(*args, **kwargs)
 
     def __getattr__(self, name):
         if name in self.owner.manifest['cells']:
@@ -532,37 +539,80 @@ class _EvaluationScope:
 
 class ItemContext:
     """Persistent compiled cache for one ItemSpace/revision. Internal façade API."""
-    def __init__(self, owner):
-        from .python_calculator import CellCodec
+    def __init__(self, owner, *, selected_native=False):
         self._owner = owner
-        self._codec = owner._python_scope or CellCodec(owner.manifest, owner._kernel, owner._records[0])
-        self._selected = False
+        # Native scalar roots need neither signature proxies nor Enum resolution.
+        # Construct the Python boundary only if a later public entry uses it.
+        self._codec = owner._python_scope
+        self._selected = selected_native
+        self._selected_native = selected_native
+
+    def _ensure_codec(self):
+        if self._codec is None:
+            from .python_calculator import CellCodec
+            owner = self._owner
+            self._codec = CellCodec(owner.manifest, owner._kernel, owner._records[0])
+        return self._codec
+
+    def _ensure_python_scope(self):
+        owner = self._owner
+        if owner._python_scope is not None or owner._lazy_python_source is None:
+            return
+        from .python_calculator import PythonScope
+        bindings, program = owner._lazy_python_source
+        scope = PythonScope(owner.artifact, owner.manifest, owner._kernel, bindings,
+                            program=program)
+        owner._kernel.set_python_scope(scope)
+        owner._python_scope = scope
+        self._codec = scope
+
+    def _select_for(self, name):
+        owner = self._owner
+        native = (name in owner.manifest.get('native_scalar_outputs', ())
+                  and hasattr(owner._kernel, 'select_native_scope'))
+        if not self._selected:
+            if native:
+                owner._kernel.select_native_scope(0)
+                self._selected_native = True
+            else:
+                self._ensure_python_scope()
+                owner._kernel.select_scope(0)
+            self._selected = True
+        elif self._selected_native and not native:
+            self._ensure_python_scope()
+            owner._kernel.attach_python_scope_current()
+            self._selected_native = False
 
     def call(self, name, *args, **kwargs):
         owner = self._owner
         with owner._lock:
-            if not self._selected:
-                owner._kernel.select_scope(0)
-                self._selected = True
+            self._select_for(name)
             if name in owner.manifest['outputs']:
                 if args or kwargs: raise TypeError('Output tables have no arguments')
                 return owner._kernel.call_table(name)
             if name in owner.manifest['scalar_outputs']:
                 if args or kwargs: raise TypeError('Scalar output has no arguments')
                 value = owner._kernel.call_scalar(name)
-                return self._codec.decode(owner.manifest['cells'][name]['result'], value)
+                result = owner.manifest['cells'][name]['result']
+                if result['kind'] == 'bool':
+                    return bool(value)
+                if result['kind'] not in ('enum', 'table_key'):
+                    return value
+                return self._ensure_codec().decode(result, value)
             if name not in owner.manifest['cells']:
                 raise AttributeError(name)
-            return self._codec.entry(name)(*args, **kwargs)
+            return self._ensure_codec().entry(name)(*args, **kwargs)
 
     def reset(self):
         owner = self._owner
         with owner._lock:
             owner._require_root()
-            selected, self._selected = self._selected, False
+            selected, native = self._selected, self._selected_native
+            self._selected = self._selected_native = False
             reset_item = getattr(owner._kernel, '_reset_item_cache', None)
             if reset_item is None:  # Native/older artifacts keep their root protocol.
                 owner._kernel.reset()
             else:
                 reset_item()
                 self._selected = selected
+                self._selected_native = native

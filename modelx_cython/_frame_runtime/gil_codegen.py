@@ -157,6 +157,15 @@ def augment(source, manifest, spec, forced_python=()):
             for key in sorted(entries))
     source=source.replace('        self._python_scope.select(self._records[policy], policy)',
                            '        self._python_scope.select(self._records[policy], policy)\n'+assignments,1)
+    if manifest.get('native_scalar_outputs'):
+        source += ('\n    def attach_python_scope_current(self):\n'
+                   '        """Bind Python fallbacks after a native entry without clearing its cache."""\n'
+                   '        self._require_idle()\n'
+                   '        if self._python_scope is None or len(self._records) != 1:\n'
+                   '            raise RuntimeError("Expected one retained ItemSpace and a Python receiver")\n'
+                   '        self._python_scope.select(self._records[0], 0)\n'
+                   + assignments + '\n'
+                   '        self._frame._scope_valid = True\n')
     methods=[]
     for name,node in bodies.items():
         params=rows[name]['params']
@@ -265,6 +274,9 @@ def augment(source, manifest, spec, forced_python=()):
     init += '\n' + '\n'.join(f"        self._gil_raw_table_{n} = self._python_scope.namespace['data'].{n}()" for n in sorted(raw_tables))
     source=source.replace('        self._python_scope.select(self._records[policy], policy)',
         '        self._python_scope.select(self._records[policy], policy)\n'+init,1)
+    if manifest.get('native_scalar_outputs'):
+        source=source.replace('        self._python_scope.select(self._records[0], 0)',
+                              '        self._python_scope.select(self._records[0], 0)\n'+init,1)
     manifest['bound_data_readers'] = sorted(raw_tables)
     if tables_:
         source='from ._table_lookup cimport IndexedTable as _IndexedTable\n'+source

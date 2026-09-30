@@ -11,6 +11,7 @@ import hashlib
 import inspect
 import json
 import os
+import re
 import subprocess
 import sys
 import textwrap
@@ -23,7 +24,7 @@ _INDEXED_ARRAYS = (IndexedInt1, IndexedFloat1, IndexedInt2, IndexedFloat2)
 
 
 _TYPES = {float: 'double', int: 'long long', bool: 'bint'}
-_BUILTINS = {'min', 'max', 'abs', 'int', 'float', 'bool', 'range', 'len',
+_BUILTINS = {'min', 'max', 'abs', 'int', 'float', 'bool', 'range', 'len', 'round',
              'ValueError', 'KeyError', 'RuntimeError', 'IndexError', 'OverflowError',
              'ArithmeticError', 'ZeroDivisionError'}
 _MATH = {'floor', 'ceil', 'sqrt', 'exp', 'log', 'log1p', 'expm1', 'fabs', 'isfinite'}
@@ -317,6 +318,8 @@ class BindNames(ast.NodeTransformer):
             return node
         if node.id == 'power':
             return ast.copy_location(ast.Name('_power', ast.Load()), node)
+        if node.id == 'round':
+            return ast.copy_location(ast.Name('_round_compatible', ast.Load()), node)
         if node.id in _MATH:
             return ast.copy_location(ast.Name('_math_' + node.id, ast.Load()), node)
         if node.id not in _BUILTINS and not node.id.startswith('_E_'):
@@ -348,7 +351,7 @@ def _needs_checked_formula(node, result_info, params, inputs, cells):
             if isinstance(n.func, ast.Name):
                 if n.func.id in cells:
                     continue
-                if n.func.id in {'power', '_power_compatible', 'int'}:
+                if n.func.id in {'power', '_power_compatible', 'int', 'round'}:
                     return True
             if (isinstance(n.func, ast.Attribute) and isinstance(n.func.value, ast.Name)
                     and n.func.value.id in inputs and inputs[n.func.value.id] in (Curve, CurveTable, *_INDEXED_ARRAYS)
@@ -388,6 +391,14 @@ def _native_rejection(node, selected, spec, enums, native_suffix):
                 raise ContractError("Comprehensions use the Python calculator")
             if isinstance(n, ast.Name) and (n.id.startswith('_mx_') or n.id == 'self'):
                 raise ContractError('Use ordinary free functions; self and the _mx_ prefix are reserved')
+            if (isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+                    and n.func.id == 'round'):
+                if (len(n.args) != 2 or n.keywords
+                        or not isinstance(n.args[1], ast.Constant)
+                        or type(n.args[1].value) is not int
+                        or (node.name in spec.cells and
+                            spec.cells[node.name].__globals__.get('round', round) is not round)):
+                    raise ContractError('Native round requires the builtin and a literal integer ndigits')
             if isinstance(n, ast.arg) and n.arg.startswith('_mx_'):
                 raise ContractError('The _mx_ prefix is reserved for generated names')
             if isinstance(n, ast.Attribute) and (isinstance(n.ctx, ast.Store) or n.attr.startswith('_')):
@@ -638,6 +649,13 @@ def emit(spec, *, diagnostics=False, python_cells=()):
     lines += ['cdef inline double _power(double base, double exponent) except? -1 nogil:']
     for statement in power_body:
         lines += textwrap.indent(ast.unparse(statement), '    ').splitlines()
+    if any(isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id == 'round'
+           for name in selected - python_reasons.keys() for n in ast.walk(parsed[name])):
+        lines += [
+            'cdef inline double _round_compatible(double value, long long ndigits) except? -1 nogil:',
+            '    with gil:',
+            '        return <double>round(value, ndigits)',
+        ]
     if numeric_power_rewrites:
         lines += ['cdef inline double _power_compatible(double base, double exponent) except? -1 nogil:',
                   '    cdef double result',
@@ -890,6 +908,10 @@ def build(spec, destination, *, diagnostics=False, python_cells=()):
         if spec.cython_objects:
             from .collect_map_codegen import augment as add_collect_map
             source = add_collect_map(source, manifest, spec)
+    if manifest.get('physical_layout') == 'retained_heap_numeric_memo_frame_with_python_owners':
+        # The full mixed generator has finished adding its entrypoints. All
+        # numeric calls now receive the owned _Frame pointer, not its address.
+        source = re.sub(r'&self\._frame(?!\.)', 'self._frame', source)
     from .coverage import record_formula_coverage
     record_formula_coverage(manifest, spec, python_cells)
     import Cython
