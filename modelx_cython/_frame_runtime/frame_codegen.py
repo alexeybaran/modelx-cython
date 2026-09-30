@@ -72,7 +72,7 @@ def to_c_frame(parts, manifest):
             functions.append(('\n'.join(x[4:] for x in method)
                               .replace('(self, ', '(_Frame* state, ', 1)
                               .replace('(self)', '(_Frame* state)', 1)))
-    outer = parts['runtime']
+    outer = parts['runtime_prefix'] if native_guard else parts['runtime']
     def lower_calls(text, pointer):
         text = re.sub(r'self\.(_cell_|_calc_)(\w+)\(\)', lambda m: f'{m[1]}{m[2]}({pointer})', text)
         return re.sub(r'self\.(_cell_|_calc_)(\w+)\(', lambda m: f'{m[1]}{m[2]}({pointer}, ', text)
@@ -133,21 +133,14 @@ def to_c_frame(parts, manifest):
     if native_guard:
         from .native_guard_codegen import guarded_functions, runtime as guard_runtime
         aliases, lowered = guarded_functions(lowered, manifest)
-        text = '\n'.join(result)
-        prefix = '\n'.join(owner_decls) + '\n' + text.split('    def evaluate(', 1)[0]
-        def expression(expr):
-            expr = expr.replace('&self._frame', 'state').replace('self._frame.', 'state.')
-            for name, dtype in objects.items():
-                expr = re.sub(r'\bself\.' + re.escape(name) + r'\b',
-                              lambda _: f'(<{dtype}>state.{name})', expr)
-            if 'self.' in expr: raise ValueError('Unlowered output binding')
-            return expr
-        length = expression(re.search(r'^        n = (.+)$', text, re.M)[1]) if manifest['outputs'] else '0'
-        tables = {}
-        for table in manifest['outputs']:
-            part = re.split(r'^    (?:def|cdef) ', text.split('    cdef object _table_' + table + '(self):',1)[1], maxsplit=1, flags=re.M)[0]
-            tables[table] = [expression(m[1]) for m in re.finditer(r'^            out\[t, \d+\] = (.+)$', part, re.M)]
-            if len(tables[table]) != len(manifest['outputs'][table]): raise ValueError('Output template mismatch')
+        prefix = '\n'.join(owner_decls) + '\n' + '\n'.join(result) + '\n'
+        output_plan = parts['frame_outputs']
+        length = output_plan['length']
+        tables = output_plan['tables']
+        if set(tables) != set(manifest['outputs']) or any(
+                len(tables[name]) != len(columns)
+                for name, columns in manifest['outputs'].items()):
+            raise ValueError('Output plan differs from Cell compilation metadata')
         if manifest.get('python_cells'):
             from .mixed_codegen import augment_frame
             frame, lowered = augment_frame(frame, lowered, manifest, heap_numeric=heap_numeric)

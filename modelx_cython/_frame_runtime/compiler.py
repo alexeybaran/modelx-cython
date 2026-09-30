@@ -367,6 +367,18 @@ def _frame_cast_names(source, casts):
     return source
 
 
+def _frame_input_casts(input_info):
+    object_types = {'object', 'Curve', 'CurveTable', 'IndexedInt1',
+                    'IndexedFloat1', 'IndexedInt2', 'IndexedFloat2',
+                    'dict', 'set'}
+    return {key: info['ctype'] for key, info in input_info.items()
+            if info['ctype'] in object_types}
+
+
+def _frame_expression(source, binder, cast_names):
+    return _frame_cast_names(_expression(source, binder), cast_names)
+
+
 def _cell_entry_lines(name, row, tail, call, native_suffix, diagnostics,
                       *, frame_native=False, input_info=None):
     """Emit the same cache protocol for a Space or its physical frame."""
@@ -896,11 +908,7 @@ def emit(spec, *, diagnostics=False, python_cells=(), frame_parts=False):
             if not direct_frame_calc:
                 lines += [f'    cdef inline {ret} _calc_{name}(self{calc_tail}) except? -1{native_suffix}:']
         if direct_frame_calc:
-            object_types = {'object', 'Curve', 'CurveTable', 'IndexedInt1',
-                            'IndexedFloat1', 'IndexedInt2', 'IndexedFloat2',
-                            'dict', 'set'}
-            frame_casts = {key: info['ctype'] for key, info in input_info.items()
-                           if info['ctype'] in object_types}
+            frame_casts = _frame_input_casts(input_info)
             cast_names = {'__MX_FRAME_CAST_' + key + '__':
                           f'(<{ctype}>state.{key})'
                           for key, ctype in frame_casts.items()}
@@ -930,6 +938,7 @@ def emit(spec, *, diagnostics=False, python_cells=(), frame_parts=False):
     frame_runtime_end = len(lines) if frame_parts else None
     binder = BindNames(selected, spec.inputs, enums, {'t'}, native_lookups=True)
     length_expr = _expression(spec.length, binder)
+    frame_runtime_prefix_end = len(lines) if frame_parts else None
     lines += ['    def evaluate(self, Py_ssize_t policy, str cell, tuple args):',
               '        if policy < 0 or policy >= len(self._records):', '            raise IndexError(policy)',
               '        self._select(self._records[policy])']
@@ -1011,11 +1020,28 @@ def emit(spec, *, diagnostics=False, python_cells=(), frame_parts=False):
         manifest['model'] = spec.model
         manifest['model_sha256'] = hashlib.sha256(json.dumps(spec.model, sort_keys=True).encode()).hexdigest()
     if frame_parts:
+        frame_casts = _frame_input_casts(input_info)
+        cast_names = {'__MX_FRAME_CAST_' + key + '__':
+                      f'(<{ctype}>state.{key})'
+                      for key, ctype in frame_casts.items()}
+        output_binder = BindNames(selected, spec.inputs, enums, {'t'},
+                                  native_lookups=True, frame_native=True,
+                                  frame_casts=frame_casts)
+        frame_outputs = {
+            'length': (_frame_expression(spec.length, output_binder, cast_names)
+                       if spec.outputs else '0'),
+            'tables': {table: [_frame_expression(expr, output_binder, cast_names)
+                               for expr in columns.values()]
+                       for table, columns in spec.outputs.items()},
+        }
         return {
             'header': frame_header,
             'fields': frame_fields,
             'field_types': frame_field_types,
             'methods': tuple(frame_methods),
+            'frame_outputs': frame_outputs,
+            'runtime_prefix': tuple(lines[len(frame_header) + 2 + len(frame_fields):frame_runtime_start])
+                              + tuple(lines[frame_runtime_end:frame_runtime_prefix_end]),
             'runtime': tuple(lines[len(frame_header) + 2 + len(frame_fields):frame_runtime_start])
                        + tuple(lines[frame_runtime_end:]),
         }, manifest

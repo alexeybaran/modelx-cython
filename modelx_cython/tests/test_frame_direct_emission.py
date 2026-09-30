@@ -57,3 +57,20 @@ def test_frame_casts_do_not_change_formula_string_literals():
     source = f"return {marker}.get(1) if flag else '{marker}'"
     assert _frame_cast_names(source, {marker: '(<Curve>state.curve)'}) == (
         f"return (<Curve>state.curve).get(1) if flag else '{marker}'")
+
+
+def test_output_plan_is_bound_before_runtime_generation():
+    module = ModuleType('frame_output_plan_fixture')
+    module.value = value
+    module.total = total
+    spec = KernelSpec(module=module, inputs={'base': float},
+                      outputs={'cash': {'period': 'value(t)', 'aggregate': 'total()'}},
+                      steps=4, length='4')
+    parts, manifest = emit(spec, frame_parts=True)
+    assert parts['frame_outputs'] == {
+        'length': '4',
+        'tables': {'cash': ['_cell_value(state, t)', '_cell_total(state)']},
+    }
+    generated = to_c_frame(parts, manifest)
+    assert 'command.output[t * 2 + 0] = _cell_value(state, t)' in generated
+    assert 'command.output[t * 2 + 1] = _cell_total(state)' in generated
