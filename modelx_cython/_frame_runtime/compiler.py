@@ -867,6 +867,9 @@ def emit(spec, *, diagnostics=False, python_cells=(), frame_parts=False):
     lines += ['        self._advance()']
     frame_runtime_start = len(lines) if frame_parts else None
     frame_methods = [] if frame_parts else None
+    frame_casts = _frame_input_casts(input_info) if frame_parts else None
+    cast_names = ({'__MX_FRAME_CAST_' + key + '__': f'(<{ctype}>state.{key})'
+                   for key, ctype in frame_casts.items()} if frame_parts else None)
     for name, row in rows.items():
         params = row['params']
         decl = ', '.join(p['type']['ctype'] + ' ' + p['name'] + ((' = ' + p['default']) if p['default'] is not None else '') for p in params)
@@ -875,9 +878,10 @@ def emit(spec, *, diagnostics=False, python_cells=(), frame_parts=False):
         calc_tail = (', ' + calc_decl) if calc_decl else ''
         call = ', '.join(p['name'] for p in params)
         ret = row['result']['ctype']
-        entry = _cell_entry_lines(name, row, tail, call, native_suffix,
-                                  diagnostics, input_info=input_info)
-        lines.extend('    ' + line for line in entry)
+        if not frame_parts:
+            entry = _cell_entry_lines(name, row, tail, call, native_suffix,
+                                      diagnostics, input_info=input_info)
+            lines.extend('    ' + line for line in entry)
         frame_entry = (tuple(_cell_entry_lines(name, row, tail, call,
                                                native_suffix, diagnostics,
                                                frame_native=True,
@@ -890,7 +894,6 @@ def emit(spec, *, diagnostics=False, python_cells=(), frame_parts=False):
         calc_start = len(lines)
         node = copy.deepcopy(parsed[name])
         loc = ({'_mx_value', '_mx_key', '_mx_object_key', 'self'} if row['cached'] else set()) | {p['name'] for p in params} | {n.id for n in ast.walk(node) if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store)}
-        binder = BindNames(selected, spec.inputs, enums, loc, native_lookups=True)
         body = []
         direct_frame_calc = frame_parts and name not in python_reasons
         if row['cached']:
@@ -900,6 +903,7 @@ def emit(spec, *, diagnostics=False, python_cells=(), frame_parts=False):
             tuple_expr = '(' + call + (',' if params else '') + ')'
             body = ['with gil:\n    return self._python_scope.calculate(' + repr(name) + ', ' + tuple_expr + ')']
         elif not direct_frame_calc:
+            binder = BindNames(selected, spec.inputs, enums, loc, native_lookups=True)
             for n in node.body:
                 if isinstance(n, ast.Expr) and isinstance(n.value, ast.Constant) and isinstance(n.value.value, str):
                     continue
@@ -908,10 +912,6 @@ def emit(spec, *, diagnostics=False, python_cells=(), frame_parts=False):
             if not direct_frame_calc:
                 lines += [f'    cdef inline {ret} _calc_{name}(self{calc_tail}) except? -1{native_suffix}:']
         if direct_frame_calc:
-            frame_casts = _frame_input_casts(input_info)
-            cast_names = {'__MX_FRAME_CAST_' + key + '__':
-                          f'(<{ctype}>state.{key})'
-                          for key, ctype in frame_casts.items()}
             frame_binder = BindNames(selected, spec.inputs, enums, loc,
                                      native_lookups=True, frame_native=True,
                                      frame_casts=frame_casts)
@@ -1023,10 +1023,6 @@ def emit(spec, *, diagnostics=False, python_cells=(), frame_parts=False):
         manifest['model'] = spec.model
         manifest['model_sha256'] = hashlib.sha256(json.dumps(spec.model, sort_keys=True).encode()).hexdigest()
     if frame_parts:
-        frame_casts = _frame_input_casts(input_info)
-        cast_names = {'__MX_FRAME_CAST_' + key + '__':
-                      f'(<{ctype}>state.{key})'
-                      for key, ctype in frame_casts.items()}
         output_binder = BindNames(selected, spec.inputs, enums, {'t'},
                                   native_lookups=True, frame_native=True,
                                   frame_casts=frame_casts)
