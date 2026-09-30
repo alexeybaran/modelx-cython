@@ -115,7 +115,8 @@ def test_metadata_free_original_export_recovers_formula_for_compiled_static_spac
     model = mx.new_model('OldStyle')
     try:
         space = model.new_space('Projection')
-        space.new_cells('amount', 'lambda: 2.5')
+        space.factor = 2.0
+        space.new_cells('amount', 'lambda: factor + 0.5')
         exported = tmp_path / 'old_export'
         model.export(exported)
     finally:
@@ -174,5 +175,41 @@ def test_metadata_free_original_export_preserves_dynamic_parameters(tmp_path):
         assert compiled.Projection[1].amount() == 2.0
         assert compiled.Projection[3].amount() == 6.0
         assert compiled.Projection[1].amount() == 2.0
+    finally:
+        compiled.close()
+
+
+def test_metadata_free_export_preserves_cell_defaults_and_keyword_calls(tmp_path):
+    import modelx as mx
+    import pandas as pd
+    from modelx_cython._frame_runtime.compiler import build
+    from modelx_cython._frame_runtime.model import CompiledModel
+
+    model = mx.new_model('OldSignatures')
+    try:
+        space = model.new_space('Projection', formula='lambda policy_id: None')
+        space.new_cells('amount', 'lambda t=2: policy_id + t')
+        space.new_cells('label', 'lambda t=2: ("policy", policy_id, t)')
+        exported = tmp_path / 'old_signatures'
+        model.export(exported)
+    finally:
+        model.close()
+    (exported / '_mx_formula_sources.json').unlink()
+    records = pd.DataFrame(index=pd.Index([1, 3], name='policy_id'))
+    spec = from_exported(exported, tmp_path / 'source_signatures',
+                         policy_records=records, point_table='points')
+    artifact = tmp_path / 'artifact_signatures'
+    build(spec, artifact)
+    compiled = CompiledModel(artifact, spec.initial_tables)
+    try:
+        item = compiled.Projection[1]
+        assert item.amount() == 3
+        assert item.amount(t=3) == 4
+        assert item.amount(4) == 5
+        assert item.amount() == 3
+        assert item.label(t=4) == ('policy', 1, 4)
+        assert item.label() == ('policy', 1, 2)
+        with pytest.raises(TypeError):
+            item.amount(2, t=3)
     finally:
         compiled.close()

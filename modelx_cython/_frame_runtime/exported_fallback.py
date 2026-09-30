@@ -12,7 +12,9 @@ import hashlib
 import inspect
 import sys
 import textwrap
+from pathlib import Path
 
+from modelx_cython.parser import ModuleVisitor
 from .contracts import ContractError
 
 
@@ -47,36 +49,37 @@ def _method_source(method, cell_name):
     return ast.unparse(node) + '\n', unbinder.references
 
 
-def _assigned_references(space):
-    """Read names the exporter explicitly assigns as Space references."""
-    method = getattr(type(space), '_mx_assign_refs', None)
-    if method is None:
-        return set()
-    try:
-        tree = ast.parse(textwrap.dedent(inspect.getsource(method)))
-    except (OSError, TypeError, SyntaxError) as exc:
-        raise ContractError('Cannot recover exported Space references') from exc
-    return {node.attr for node in ast.walk(tree)
-            if isinstance(node, ast.Attribute) and isinstance(node.ctx, ast.Store)
-            and isinstance(node.value, ast.Name) and node.value.id == 'self'
-            and not node.attr.startswith('_')}
-
-
 def recover_source_manifest(exported):
     """Return an in-memory source manifest for an older, metadata-free export."""
     model_name = getattr(exported, '_name', None)
     if not isinstance(model_name, str) or not model_name.isidentifier():
         raise ContractError('Exported model has no usable identity')
     spaces = {}
+    parsed_modules = {}
 
     def visit(space, path):
         module = sys.modules[type(space).__module__]
+        if module not in parsed_modules:
+            try:
+                source = Path(module.__file__).read_text(encoding='utf-8')
+                parsed_modules[module] = ModuleVisitor(module.__name__, source)
+            except (AttributeError, OSError, SyntaxError) as exc:
+                raise ContractError('Cannot parse exported Space module: ' + path) from exc
+        structure = parsed_modules[module]
+        class_name = type(space).__name__
         cell_names = getattr(module, '_v_cells_names_' + space._name, None)
         if not isinstance(cell_names, list):
             raise ContractError('Exported Space has no Cell inventory: ' + path)
         parameters = getattr(module, '_v_space_params_' + space._name, ())
         if not isinstance(parameters, (list, tuple)):
             raise ContractError('Exported Space has no parameter inventory: ' + path)
+        # Use the same lexical discovery as the original compiler. Its class
+        # inventory includes __call__ (the Space formula), which is not a Cell.
+        lexical_cells = structure.cells_info.get(class_name)
+        if lexical_cells is None or not set(cell_names) <= set(lexical_cells):
+            raise ContractError('Exported Cell inventory differs from parsed source: ' + path)
+        if tuple(parameters) != structure.space_params.get(class_name, ()):
+            raise ContractError('Exported Space parameters differ from parsed source: ' + path)
         cells = {}
         reads = set()
         for name in cell_names:
@@ -84,6 +87,9 @@ def recover_source_manifest(exported):
                 raise ContractError('Invalid exported Cell name: ' + path)
             body = getattr(type(space), '_f_' + name, None)
             cached = body is not None
+            if cached != (name in structure.formula_defs.get(class_name, ())):
+                raise ContractError('Exported Cell cache mode differs from parsed source: '
+                                    + path + '.' + name)
             if body is None:
                 body = getattr(type(space), name, None)
             if body is None:
@@ -94,7 +100,7 @@ def recover_source_manifest(exported):
                            'sha256': hashlib.sha256(source.encode('utf-8')).hexdigest(),
                            'cached': cached,
                            'allow_none': bool(getattr(space, '_allow_none', False))}
-        references = sorted((_assigned_references(space) | reads)
+        references = sorted((set(structure.ref_info.get(class_name, ())) | reads)
                             - set(cell_names) - set(parameters))
         formula = None
         if parameters:
