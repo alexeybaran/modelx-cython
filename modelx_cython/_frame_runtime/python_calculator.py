@@ -273,7 +273,8 @@ class PythonScope(CellCodec):
                     or ('module' in info and actual is not resolve_enum(info))):
                 raise ContractError('Public Enum contract changed: ' + name)
         compiled_numeric = set(manifest.get('cython_numeric_fallback_cells', ()))
-        self.calculators = {name: (None if name in compiled_numeric else self.namespace[name])
+        self.calculators = {name: (getattr(kernel, '_gil_entry_' + name)
+                                   if name in compiled_numeric else self.namespace[name])
                             for name in manifest['python_cells']}
         self.calls = {name: 0 for name in self.calculators}
         self._record, self._raw_record = {}, ()
@@ -305,10 +306,7 @@ class PythonScope(CellCodec):
         args = arguments if self._plain_arguments[name] else tuple(self.decode(p['type'], value) for p, value in zip(row['params'], arguments))
         if self.diagnostics:
             self.calls[name] += 1
-        if name in self.manifest.get('cython_numeric_fallback_cells', ()):
-            value = getattr(self.kernel, '_gil_entry_' + name)(*args)
-        else:
-            value = self.calculators[name](*args)
+        value = self.calculators[name](*args)
         if value is None and row.get('allow_none') is False:
             raise ValueError('None is not allowed for Cell ' + name)
         return self.encode(row['result'], value)
