@@ -211,7 +211,10 @@ def augment(source, manifest, spec, forced_python=()):
             methods += ['        self._invoke(&command)',
                         f'        return command.value.{result_field}']
         else:
-            methods.append(f"        return _cell_{name}(&self._frame"
+            frame_pointer = ('self._frame' if manifest.get('physical_layout')
+                             == 'retained_heap_numeric_memo_frame_with_python_owners'
+                             else '&self._frame')
+            methods.append(f"        return _cell_{name}({frame_pointer}"
                            + (', ' + args if args else '') + ')')
         methods.append('')
     manifest['curve_result_conversion'] = 'once on memo miss; one owned native Curve value'

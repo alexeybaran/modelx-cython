@@ -76,7 +76,8 @@ def to_c_frame(parts, manifest):
         owner_decls.append('    cdef void* _cache_storage')
     for name, dtype in objects.items():
         owner_decls.append(f'    cdef {dtype} {name}')
-    runtime = lower_calls('\n'.join(outer), '&self._frame')
+    frame_pointer = 'self._frame' if heap_numeric else '&self._frame'
+    runtime = lower_calls('\n'.join(outer), frame_pointer)
     for name in {**numeric, **buffers}:
         runtime = re.sub(r'\bself\.' + re.escape(name) + r'\b', lambda _: 'self._frame.' + name, runtime)
     # Synchronize the raw pointer immediately after an owning buffer/object binding.

@@ -75,6 +75,9 @@ def augment_frame(frame, functions, manifest, heap_numeric=False):
 
 
 def augment_runtime(source, manifest):
+    frame_pointer = ('self._frame' if manifest.get('physical_layout')
+                     == 'retained_heap_numeric_memo_frame_with_python_owners'
+                     else '&self._frame')
     # Three distinct epoch states: READY, BUSY, failed hash tombstone. Previous
     # epochs cannot alias tombstones. Failed slots retain keys so probe chains and
     # successfully cached collision neighbours survive a caught exception.
@@ -84,7 +87,7 @@ def augment_runtime(source, manifest):
         source = source.replace(signature, signature + '\n        self._require_idle()\n        self._frame._scope_valid = False')
     start = source.index('    cdef void _invoke(')
     end = source.index('    def evaluate(', start)
-    source = source[:start] + '''    cdef void _require_idle(self) except *:
+    source = source[:start] + f'''    cdef void _require_idle(self) except *:
         if self._frame._entry_depth:
             raise RuntimeError("Cannot reset, rebind or switch scope during a Cell evaluation")
 
@@ -127,8 +130,8 @@ def augment_runtime(source, manifest):
         mx_guard_init(&self._frame._guard)
         self._frame._entry_depth += 1
         try:
-            if mx_guarded(&self._frame._guard, _execute, &self._frame, command) != 0:
-                _rollback(&self._frame, mark)
+            if mx_guarded(&self._frame._guard, _execute, {frame_pointer}, command) != 0:
+                _rollback({frame_pointer}, mark)
                 _raise_guard(&self._frame._guard)
         finally:
             self._frame._entry_depth -= 1

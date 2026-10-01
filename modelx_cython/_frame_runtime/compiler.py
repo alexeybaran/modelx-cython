@@ -978,10 +978,6 @@ def build(spec, destination, *, diagnostics=False, python_cells=(),
         if spec.cython_objects:
             from .collect_map_codegen import augment as add_collect_map
             source = add_collect_map(source, manifest, spec)
-    if manifest.get('physical_layout') == 'retained_heap_numeric_memo_frame_with_python_owners':
-        # The full mixed generator has finished adding its entrypoints. All
-        # numeric calls now receive the owned _Frame pointer, not its address.
-        source = re.sub(r'&self\._frame(?!\.)', 'self._frame', source)
     from .coverage import record_formula_coverage
     record_formula_coverage(manifest, spec, python_cells)
     import Cython
