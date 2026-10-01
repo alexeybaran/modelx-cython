@@ -192,12 +192,16 @@ class _ItemSpace:
         self._entries = {}
 
     def _ensure_dynamic_refs(self):
-        if not self._dynamic_refs_ready:
+        if self._dynamic_refs is None or not self._dynamic_refs_ready:
             model = self._space._model
+            formula_refs = (model._space_formula_refs(
+                bindings=model._space_bindings, **self._arguments)
+                if self._dynamic_refs is None and model._space_bindings is not None
+                else (self._dynamic_refs or {}))
             relative_refs = {name: target(**{param: self._arguments[param]
                                                     for param in parameters})
                              for name, (target, parameters) in model._relative_references.items()}
-            self._dynamic_refs = {**relative_refs, **self._dynamic_refs}
+            self._dynamic_refs = {**relative_refs, **formula_refs}
             self._dynamic_refs_ready = True
 
     def _create_context(self, position, native_root, *, simple_inputs=False):
