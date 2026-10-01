@@ -81,10 +81,10 @@ class _SpaceView:
                 self._child_views[name] = (child._with_bindings(self._bindings)
                                            if isinstance(child, _SpaceView) else child)
             return self._child_views[name]
-        if name in self._base_values:
-            return self._base_values[name]
         if name in self._bindings:
             return self._bindings[name]
+        if name in self._base_values:
+            return self._base_values[name]
         if name in self._references:
             return self._references[name]
         if self._space is None:

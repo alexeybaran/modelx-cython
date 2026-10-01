@@ -153,3 +153,12 @@ def test_connected_loader_wires_cyclic_spaces_without_proxies(tmp_path, monkeypa
         assert model.B is b.space
     finally:
         model.close()
+
+
+def test_bound_item_parameter_shadows_base_space_reference():
+    space = connected_model._SpaceView(None, {}, base_values={'i': 1},
+                                       parameters=('i',))
+    assert space.i == 1
+    assert space[2].i == 2
+    assert space[2] is space[2]
+    assert space.i == 1
