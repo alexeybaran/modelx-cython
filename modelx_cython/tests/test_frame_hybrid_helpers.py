@@ -130,7 +130,12 @@ def test_native_scalar_selection_does_not_stale_object_receivers(tmp_path):
     model = CompiledModel(artifact, {'points': table})
     try:
         assert list(model._kernel.run_scalar('point_value')) == [1., 2., 3.]
+        with pytest.raises(RuntimeError, match='Select an evaluation scope'):
+            model._kernel._kernel.call_formula('point_object_value', ())
         assert list(model._kernel.run_scalar('point_object_value')) == [1., 2., 3.]
+        model._kernel._kernel.select_scope(1)
+        assert model._kernel._kernel.call_formula('point_value', ()) == 2.0
+        assert model._kernel._kernel.call_formula('point_object_value', ()) == 2.0
         assert list(model._kernel.run_scalar('point_value')) == [1., 2., 3.]
         detached = []
         def detach(value):

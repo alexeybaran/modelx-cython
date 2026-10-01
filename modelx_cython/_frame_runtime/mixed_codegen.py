@@ -159,7 +159,7 @@ def augment_runtime(source, manifest):
                               '            else:\n                self._select_policy(i)', 1)
         source = source[:a] + block + source[b:]
     a = source.index('    def evaluate(')
-    b = source.index('    def run_scalar(', a)
+    b = source.index('    def call_formula(', a)
     call = source[a:b].replace('def evaluate(self, Py_ssize_t policy, str cell, tuple args):',
                               'def call(self, str cell, tuple args):')
     call = call.replace('        if policy < 0 or policy >= len(self._records): raise IndexError(policy)\n', '')

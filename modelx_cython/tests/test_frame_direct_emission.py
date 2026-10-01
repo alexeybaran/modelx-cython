@@ -25,8 +25,10 @@ def report() -> object:
 
 
 @pytest.mark.parametrize('mixed, expected', [
-    (False, '9d940b287c2057d29532f9e9ec2602aaa1fcd75f87995d3027dc94516db5c6af'),
-    (True, '54d8bcaefe6d59ae9d1389e265bf911fad8dd5217fc8c888d9042a5b11c6a2d9'),
+    # The private formula command adds an uncached entry after the existing
+    # cached dispatch. Formula bodies and their Cell cache entries are unchanged.
+    (False, '15b7398f9794ac11352ee1cacbd29515b6fa4da5c7cbd94273490f4dcec883af'),
+    (True, '7f4279f38f15ae881ef98daf20c7c990b7f59279387a338dc67a1c3737d0ba80'),
 ])
 def test_structured_emission_preserves_generated_source(mixed, expected):
     module = ModuleType('frame_emission_fixture')
