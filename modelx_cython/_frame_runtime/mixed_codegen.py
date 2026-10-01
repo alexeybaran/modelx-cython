@@ -127,12 +127,10 @@ def augment_runtime(source, manifest):
     cdef void _invoke(self, _Command* command) except *:
         cdef MxGuard saved = self._frame._guard
         cdef unsigned int mark = self._frame._entry_depth + 1
-        cdef MxCallback callback = _execute
-        if command.mode == 3: callback = _execute_formula
         mx_guard_init(&self._frame._guard)
         self._frame._entry_depth += 1
         try:
-            if mx_guarded(&self._frame._guard, callback, {frame_pointer}, command) != 0:
+            if mx_guarded(&self._frame._guard, _execute, {frame_pointer}, command) != 0:
                 _rollback({frame_pointer}, mark)
                 _raise_guard(&self._frame._guard)
         finally:
@@ -161,7 +159,7 @@ def augment_runtime(source, manifest):
                               '            else:\n                self._select_policy(i)', 1)
         source = source[:a] + block + source[b:]
     a = source.index('    def evaluate(')
-    b = source.index('    def call_formula(', a)
+    b = source.index('    def run_scalar(', a)
     call = source[a:b].replace('def evaluate(self, Py_ssize_t policy, str cell, tuple args):',
                               'def call(self, str cell, tuple args):')
     call = call.replace('        if policy < 0 or policy >= len(self._records): raise IndexError(policy)\n', '')

@@ -25,10 +25,8 @@ def report() -> object:
 
 
 @pytest.mark.parametrize('mixed, expected', [
-        # The uncached private formula uses a separate command callback so the
-        # cached execution callback keeps its original dispatch shape.
-        (False, '1b1af00a10bec96497e7deefceea91a47341afdd0b30618f65bdcb73c9b18f37'),
-        (True, '2ec9ccea9a65c79afeec0853ea32fd4527820cbd1afde66f6f3e6870d3bd8770'),
+    (False, '9d940b287c2057d29532f9e9ec2602aaa1fcd75f87995d3027dc94516db5c6af'),
+    (True, '54d8bcaefe6d59ae9d1389e265bf911fad8dd5217fc8c888d9042a5b11c6a2d9'),
 ])
 def test_structured_emission_preserves_generated_source(mixed, expected):
     module = ModuleType('frame_emission_fixture')
