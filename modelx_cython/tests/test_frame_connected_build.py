@@ -263,6 +263,47 @@ def test_complete_package_preserves_nested_references_and_base_parameters(tmp_pa
         connected.close()
 
 
+def test_complete_package_keeps_static_cell_free_parent_as_space_shell(tmp_path):
+    import modelx as mx
+    from modelx_cython._frame_runtime.connected_package import load_connected_package
+
+    live = mx.new_model('StaticNested')
+    try:
+        parent = live.new_space('Parent')
+        child = parent.new_space('Child')
+        child.new_cells('value', 'lambda: 7')
+        exported = tmp_path / 'exported'
+        live.export(exported)
+    finally:
+        live.close()
+
+    result = build_package(exported, tmp_path / 'compiled', external_imports={})
+    assert result['plan']['compiled_spaces'] == ['Parent', 'Parent.Child']
+    assert set(result['artifacts']) == {'Parent.Child'}
+    assert result['manifest']['shells'] == ['Parent']
+    connected = load_connected_package(result['package'] / '__init__.py')
+    try:
+        assert connected.Parent.Child.value() == 7
+        assert connected.Parent.Child is connected._spaces['Parent.Child']
+    finally:
+        connected.close()
+
+
+def test_parameterized_cell_free_parent_requires_inherited_item_binding(tmp_path):
+    import modelx as mx
+
+    source = Path(__file__).parent / 'samples' / 'nested_params' / 'NestedParams'
+    live = mx.read_model(source)
+    try:
+        exported = tmp_path / 'exported'
+        live.export(exported)
+    finally:
+        live.close()
+
+    with pytest.raises(ContractError, match='hierarchical item binding: TopLevel'):
+        build_package(exported, tmp_path / 'compiled', external_imports={})
+
+
 def test_complete_package_preserves_uncached_and_fractional_power_cells(tmp_path):
     import modelx as mx
     from modelx_cython._frame_runtime.connected_package import load_connected_package

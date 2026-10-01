@@ -35,7 +35,7 @@ def _provider_value(reference):
 
 
 def assemble_connected_package(destination, graph, artifacts, *,
-                               external_imports=None, eager=False):
+                               shells=(), external_imports=None, eager=False):
     """Copy compiled Space runtime files into a fresh importable package.
 
     External providers are explicit module:attribute references. ``eager``
@@ -57,6 +57,7 @@ def assemble_connected_package(destination, graph, artifacts, *,
             or keyword.iskeyword(model_name)):
         raise ContractError('Connected model name must be an identifier')
     artifacts = {str(name): Path(path) for name, path in artifacts.items()}
+    shells = sorted(set(shells))
     if not artifacts:
         raise ContractError('Connected package needs Space artifacts')
     physical_names = {name: generated_space_name(name) for name in artifacts}
@@ -102,10 +103,15 @@ def assemble_connected_package(destination, graph, artifacts, *,
             native[str(binary.relative_to(destination)).replace('\\', '/')] = _sha(binary)
     if not native:
         raise ContractError('Connected package contains no native extensions')
+    for name in shells:
+        node = graph_data['spaces'].get(model_name + '.' + name)
+        if (node is None or name in artifacts or node['cells']
+                or node['parameters'] or node.get('formula') is not None):
+            raise ContractError('Invalid Cell-free Space shell: ' + name)
     package_manifest = {
         'schema': _SCHEMA, 'model': model_name,
         'source_graph_sha256': _sha(destination / 'source_graph.json'),
-        'artifacts': entries, 'native': native,
+        'artifacts': entries, 'shells': shells, 'native': native,
         'external_imports': external_imports, 'eager': bool(eager),
     }
     (destination / 'connected_manifest.json').write_text(
@@ -149,5 +155,7 @@ def load_connected_package(package_file, *, external_bindings=None,
                 package_manifest['external_imports'].items()
                 if name not in supplied}
     external.update(supplied)
-    return load_connected(graph, artifacts, external_bindings=external,
-                          tables_by_space=tables_by_space)
+    options = {'external_bindings': external, 'tables_by_space': tables_by_space}
+    if package_manifest.get('shells'):
+        options['shells'] = package_manifest['shells']
+    return load_connected(graph, artifacts, **options)

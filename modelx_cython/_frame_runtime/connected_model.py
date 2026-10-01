@@ -21,28 +21,40 @@ from .source_graph import generated_space_name
 class _SpaceView:
     """Expose nested children and base parameter references on a compiled Space."""
 
-    def __init__(self, space, children, base_values=None):
+    def __init__(self, space, children, base_values=None, references=None):
         object.__setattr__(self, '_space', space)
         object.__setattr__(self, '_children', children)
         object.__setattr__(self, '_base_values', dict(base_values or {}))
+        object.__setattr__(self, '_references', dict(references or {}))
 
     def __getattr__(self, name):
         if name in self._children:
             return self._children[name]
         if name in self._base_values:
             return self._base_values[name]
+        if name in self._references:
+            return self._references[name]
+        if self._space is None:
+            raise AttributeError(name)
         if (self._base_values and name in self._space._model.manifest['cells']
                 and set(self._space.parameters) == set(self._base_values)):
             return getattr(self._space(**self._base_values), name)
         return getattr(self._space, name)
 
     def __setattr__(self, name, value):
+        if self._space is None:
+            self._references[name] = value
+            return
         setattr(self._space, name, value)
 
     def __call__(self, *args, **kwargs):
+        if self._space is None:
+            raise TypeError('Cell-free Space has no item formula')
         return self._space(*args, **kwargs)
 
     def __getitem__(self, key):
+        if self._space is None:
+            raise TypeError('Cell-free Space has no item formula')
         return self._space[key]
 
 
@@ -67,10 +79,12 @@ class ConnectedModel:
 
     def close(self):
         for name in reversed(self._order):
-            self._models[name].close()
+            if name in self._models:
+                self._models[name].close()
 
 
-def load_connected(graph, artifacts, *, external_bindings, tables_by_space=None):
+def load_connected(graph, artifacts, *, external_bindings, tables_by_space=None,
+                   shells=()):
     """Load compiled Space artifacts and bind their declared dependencies.
 
     ``artifacts`` and ``tables_by_space`` use public Space names. An omitted
@@ -87,9 +101,11 @@ def load_connected(graph, artifacts, *, external_bindings, tables_by_space=None)
     if not isinstance(model_name, str) or not model_name:
         raise ContractError('Missing graph model identity')
     artifacts = {str(name): Path(path) for name, path in artifacts.items()}
+    shells = set(shells)
     external_bindings = dict(external_bindings)
     tables_by_space = dict(tables_by_space or {})
-    if not artifacts or set(artifacts) & set(external_bindings):
+    if (not artifacts or set(artifacts) & set(external_bindings)
+            or shells & (set(artifacts) | set(external_bindings))):
         raise ContractError('Compiled and external Space names must be distinct')
     if set(tables_by_space) - set(artifacts):
         raise ContractError('Tables supplied for an uncompiled Space')
@@ -97,12 +113,15 @@ def load_connected(graph, artifacts, *, external_bindings, tables_by_space=None)
     if not isinstance(graph_spaces, dict):
         raise ContractError('Invalid exported Space graph')
     nodes = {}
-    for name in artifacts:
+    for name in (*artifacts, *sorted(shells)):
         generated_space_name(name)
         fullname = model_name + '.' + name
         if fullname not in graph_spaces:
             raise ContractError('Compiled Space is absent from source graph: ' + name)
         nodes[name] = graph_spaces[fullname]
+        if name in shells and (nodes[name]['cells'] or nodes[name]['parameters']
+                               or nodes[name].get('formula') is not None):
+            raise ContractError('Invalid Cell-free Space shell: ' + name)
         base_values = nodes[name].get('base_parameter_values', {})
         if (not isinstance(base_values, dict)
                 or set(base_values) - set(nodes[name].get('parameters', ()))
@@ -132,7 +151,7 @@ def load_connected(graph, artifacts, *, external_bindings, tables_by_space=None)
         visiting.add(name)
         for ref, target in nodes[name]['space_references'].items():
             dependency = target_name(ref, target)
-            if dependency in artifacts:
+            if dependency in nodes:
                 visit(dependency)
             elif dependency not in external_bindings:
                 raise ContractError('Unbound source Space: ' + target)
@@ -140,7 +159,7 @@ def load_connected(graph, artifacts, *, external_bindings, tables_by_space=None)
         visited.add(name)
         order.append(name)
 
-    for name in sorted(artifacts):
+    for name in sorted(nodes):
         visit(name)
 
     manifests = {}
@@ -168,6 +187,9 @@ def load_connected(graph, artifacts, *, external_bindings, tables_by_space=None)
         # Construct every real Space before connecting any references. This
         # preserves Space identity even when A refers to B and B refers to A.
         for name in order:
+            if name in shells:
+                spaces[name] = _SpaceView(None, {})
+                continue
             artifact = artifacts[name]
             manifest = manifests[name]
             plan = manifest['model']
@@ -185,22 +207,29 @@ def load_connected(graph, artifacts, *, external_bindings, tables_by_space=None)
             models[name] = model
             spaces[name] = getattr(model, plan['projection'])
         children = {}
-        for name in artifacts:
+        for name in nodes:
             if '.' in name:
                 parent, leaf = name.rsplit('.', 1)
-                if parent not in artifacts:
+                if parent not in nodes:
                     raise ContractError('Nested Space parent is absent: ' + parent)
                 children.setdefault(parent, {})[leaf] = name
-        for name in sorted(artifacts, key=lambda value: value.count('.'), reverse=True):
+        for name in sorted(nodes, key=lambda value: value.count('.'), reverse=True):
             base_values = nodes[name].get('base_parameter_values', {})
-            if name in children or base_values:
+            if name in shells:
+                spaces[name]._children.update({
+                    leaf: spaces[child] for leaf, child in children.get(name, {}).items()})
+                spaces[name]._base_values.update(base_values)
+            elif name in children or base_values:
                 spaces[name] = _SpaceView(spaces[name], {
                     leaf: spaces[child] for leaf, child in children.get(name, {}).items()},
                     base_values)
         for name in order:
-            plan = manifests[name]['model']
             refs = {ref: spaces[target_name(ref, target)]
                     for ref, target in nodes[name]['space_references'].items()}
+            if name in shells:
+                spaces[name]._references.update(refs)
+                continue
+            plan = manifests[name]['model']
             def resolve(ref):
                 if ref in refs:
                     return refs[ref]

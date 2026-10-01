@@ -134,7 +134,24 @@ def build_package(exported, destination, *, external_imports,
         (destination / 'build_plan.json').write_text(json.dumps(plan, indent=2) + '\n',
                                                      encoding='utf-8')
         artifacts = {}
+        shells = []
         for name in plan['compiled_spaces']:
+            node = graph['spaces'][plan['model'] + '.' + name]
+            if not node['cells']:
+                # A static, Cell-free Space is a hierarchy shell, not a
+                # formula kernel. Its children are assembled below from the
+                # same source graph. Parameterized shells need item-scoped
+                # inherited bindings and cannot be flattened safely.
+                if node['parameters']:
+                    raise ContractError('Parameterized Cell-free Space requires '
+                                        'hierarchical item binding: ' + name)
+                if node.get('formula') is not None or node.get('collect') is not None:
+                    raise ContractError('Cell-free Space with formula or collect '
+                                        'requires compiled execution: ' + name)
+                if options.get(name):
+                    raise ContractError('A Cell-free Space has no kernel options: ' + name)
+                shells.append(name)
+                continue
             arguments = dict(options.get(name, {}))
             if 'projection' in arguments:
                 raise ContractError('Space options cannot override discovered projection')
@@ -148,7 +165,7 @@ def build_package(exported, destination, *, external_imports,
             artifacts[name] = artifact
     package = destination / package_name
     assembled = assemble_connected_package(package, graph, artifacts,
-        external_imports=external_imports, eager=eager)
+        shells=shells, external_imports=external_imports, eager=eager)
     return {'plan': plan, 'package': package, 'manifest': assembled,
             'artifacts': artifacts}
 
