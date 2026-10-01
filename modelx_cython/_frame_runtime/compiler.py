@@ -755,7 +755,8 @@ def emit(spec, *, diagnostics=False, python_cells=()):
         cached = getattr(fn, '__kernel_cached__', True)
         python_key = any(p['type']['kind'] == 'object' for p in params)
         object_storage = name in object_cells
-        if object_storage and (python_key or hashed):
+        dictionary = (object_storage and (spec.original_cache_kinds or {}).get(name) == 'dictionary')
+        if object_storage and (python_key or hashed or dictionary):
             count = 0  # Python dictionaries grow with actual keys, not guessed bounds.
         elif hashed:
             count = _hash_capacity()
@@ -778,7 +779,7 @@ def emit(spec, *, diagnostics=False, python_cells=()):
             row['native_rejection'] = python_reasons.get(name)
             row['dependencies'] = sorted(dependencies[name])
         if object_storage:
-            row.update(storage='python_dict' if python_key or hashed else 'object_slots',
+            row.update(storage='python_dict' if python_key or hashed or dictionary else 'object_slots',
                        key_abi='python' if python_key else 'native',
                        allow_none=(spec.allow_none or {}).get(name, True),
                        offset=0, hashed=False)
@@ -1001,6 +1002,7 @@ def build(spec, destination, *, diagnostics=False, python_cells=(),
         manifest['original_prepared_inputs'] = spec.original_prepared_inputs or {}
         manifest['original_helper_modules'] = spec.original_helper_modules or {}
         manifest['original_native_calls'] = list(spec.original_native_calls)
+        manifest['original_cache_kinds'] = spec.original_cache_kinds or {}
     from .frame_codegen import to_c_frame
     source = to_c_frame(parts, manifest)
     if spec.cython_objects:

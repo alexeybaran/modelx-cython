@@ -95,7 +95,7 @@ def plan(unit, *, package_plan=None):
                 reason = _reason(fn, info)
             if not reason and set(info.cells) & BUILTINS:
                 reason = 'Cell/builtin name collision in free-function namespace'
-            if not reason and cell.params and cell_plan.cached:
+            if not reason and cell_plan.cache_kind == 'dense':
                 sizes = info.cells_arg_sizes[tuple(cell.params)]
                 slots = 1
                 for size in sizes:
@@ -224,7 +224,9 @@ def emit_private_kernels(plans, package_path, package_name, *, formula_transform
                           cache_domains=domains, original_space_shell=True, cython_objects=True,
                           cython_signatures=signatures, original_prepared_inputs=prepared,
                           original_helper_modules=helper_modules,
-                          original_native_calls=tuple(sorted(native_calls)))
+                          original_native_calls=tuple(sorted(native_calls)),
+                          original_cache_kinds={n: p['emission_plan'].cells[n].cache_kind
+                                                for n in p['methods']})
         artifact = folder / 'artifact'
         build(spec, artifact, compile_native=False)
         manifest_file = artifact / 'manifest.json'
@@ -399,6 +401,12 @@ def add_owner_entries(source, manifest):
         if row['storage'] == 'object_singleton':
             lines += [f'        if self._object_initialized and self._object_singleton_{name} is not _DICT_EMPTY and self._object_singleton_{name} is not _DICT_BUSY:',
                       f'            result.append((({name!r}, "object"), self._object_singleton_{name}))']
+        elif row['storage'] == 'python_dict':
+            lines += ['        if self._object_initialized:',
+                      f'            for key, value in self._object_{name}.items():',
+                      '                if value is not _DICT_EMPTY and value is not _DICT_BUSY:',
+                      f'                    result.append((({name!r}, key), value))']
+
         elif row['storage'] == 'object_slots':
             lines += ['        if self._object_initialized:',
                       f'            for i in range({row["slots"]}):',
@@ -422,6 +430,9 @@ def add_owner_entries(source, manifest):
             if row['storage'] == 'object_singleton':
                 lines += ['                    if index != "object": raise ValueError("Invalid completed object slot")',
                           f'                    self._object_singleton_{name} = value']
+            elif row['storage'] == 'python_dict':
+                lines += [f'                    self._object_{name}[index] = value']
+
             elif row['storage'] == 'object_slots':
                 lines += [f'                    if not 0 <= index < {row["slots"]}: raise ValueError("Invalid completed object slot")',
                           '                    entry = _ObjectEntry()',

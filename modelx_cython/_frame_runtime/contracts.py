@@ -65,6 +65,8 @@ class KernelSpec:
     original_helper_modules: dict[str, str] | None = None
     # Resolved checked nogil helpers from the original formula transformation.
     original_native_calls: tuple[str, ...] = ()
+    # Original semantic cache shape; integral keys do not imply dense bounds.
+    original_cache_kinds: dict[str, str] | None = None
 
     def __post_init__(self):
         if not isinstance(self.steps, int) or isinstance(self.steps, bool) or not 0 < self.steps <= 1000000:
@@ -84,6 +86,10 @@ class KernelSpec:
                 any(name not in {'_mx_sys._mx_pow', '_mx_curves.power'} or name.split('.')[0] not in
                     (self.original_helper_modules or {}) for name in self.original_native_calls)):
             raise ContractError('Native shell calls require resolved original numeric helpers')
+        if self.original_cache_kinds and (not self.original_space_shell or
+                any(kind not in {'scalar', 'dense', 'dictionary', 'uncached'}
+                    for kind in self.original_cache_kinds.values())):
+            raise ContractError('Original cache descriptors require an original Space receiver')
         for name in self.inputs:
             if not name.isidentifier() or name.startswith('_'):
                 raise ContractError('Input names must be public identifiers')
