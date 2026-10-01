@@ -987,6 +987,8 @@ def build(spec, destination, *, diagnostics=False, python_cells=(),
         manifest["cython_objects"] = True
     if spec.original_space_shell:
         manifest['original_space_shell'] = True
+        manifest['original_prepared_inputs'] = spec.original_prepared_inputs or {}
+        manifest['original_helper_modules'] = spec.original_helper_modules or {}
     from .frame_codegen import to_c_frame
     source = to_c_frame(parts, manifest)
     if spec.cython_objects:

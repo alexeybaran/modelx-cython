@@ -59,6 +59,10 @@ class KernelSpec:
     cache_domains: dict | None = None
     # Internal integration contract; never changes the existing frame default.
     original_space_shell: bool = False
+    # Prepared original-shell resources: shared snapshots, not live public refs.
+    # Values are existing compiled helper class paths or 'object'.
+    original_prepared_inputs: dict[str, str] | None = None
+    original_helper_modules: dict[str, str] | None = None
 
     def __post_init__(self):
         if not isinstance(self.steps, int) or isinstance(self.steps, bool) or not 0 < self.steps <= 1000000:
@@ -69,6 +73,11 @@ class KernelSpec:
             raise ContractError('Output columns or Cell entries must be explicit')
         if len(set(self.parameters)) != len(self.parameters) or any(k not in self.inputs for k in self.parameters):
             raise ContractError('Parameters must be unique declared input names')
+        if self.original_prepared_inputs and (not self.original_space_shell or
+                any(self.inputs.get(n) is not object for n in self.original_prepared_inputs)):
+            raise ContractError('Prepared shell resources require original-shell object inputs')
+        if self.original_helper_modules and not self.original_space_shell:
+            raise ContractError('Compiled shell helpers require an original Space receiver')
         for name in self.inputs:
             if not name.isidentifier() or name.startswith('_'):
                 raise ContractError('Input names must be public identifiers')

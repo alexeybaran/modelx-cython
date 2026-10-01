@@ -13,9 +13,16 @@ class FormulaEmitter:
         return copy.deepcopy(cell.formula_node)
 
     @staticmethod
-    def native(cell, argument_types, result_type):
+    def native(cell, argument_types, result_type, *, source_node=None, reference_aliases=None):
         from ._frame_runtime.exported_fallback import _UnbindFormula
-        node = FormulaEmitter.ordinary(cell)
+        node = copy.deepcopy(source_node) if source_node is not None else FormulaEmitter.ordinary(cell)
+        aliases = reference_aliases or {}
+        class BindReceiver(ast.NodeTransformer):
+            def visit_Attribute(self, node):
+                if isinstance(node.value, ast.Name) and node.value.id == 'self' and node.attr in aliases:
+                    return ast.copy_location(ast.Attribute(node.value, aliases[node.attr], node.ctx), node)
+                return self.generic_visit(node)
+        node = BindReceiver().visit(node)
         node.name = cell.name
         if not node.args.args or node.args.args[0].arg != 'self':
             raise ValueError('Exported formula needs its original receiver')

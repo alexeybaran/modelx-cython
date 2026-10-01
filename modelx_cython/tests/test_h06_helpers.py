@@ -108,3 +108,20 @@ print('helper contract passed in exported Python and compiled package')
     assert cp.returncode==0,cp.stdout
     inventory=json.loads((tmp_path/'model_cy/_mx_helper_inventory.json').read_text())
     assert any(x['status']=='native_fixed_helper' for x in inventory['calls'])
+    if env.get('MX_CY_ORIGINAL_FRAME_SHELL') == '1':
+        # Behavioral success on the old helper wrapper is not frame coverage.
+        # Confirm that the original prepared resources are actually held with
+        # their compiled types inside the frame, including canonical categories.
+        receipt = json.loads((tmp_path/'model_cy/_mx_classes.frame-shell.json').read_text())
+        routes = {r['cell']: r['execution'] for r in receipt['cells']}
+        for name in ('category', 'curve', 'field', 'total'):
+            assert routes[name] == 'frame_exact'
+        manifests = [json.loads(p.read_text()) for p in (tmp_path/'model_cy').glob('_mx_frame_*/manifest.json')]
+        prepared = [m for m in manifests if m.get('original_prepared_inputs')]
+        assert prepared
+        types = {tp for m in prepared for tp in m['original_prepared_inputs'].values()}
+        assert 'model_cy._mx_helpers.FieldTable' in types
+        assert 'model_cy._mx_curves.CurveTable' in types
+        kernels = [p.read_text() for p in (tmp_path/'model_cy').glob('_mx_frame_*/*/_kernel.pyx')]
+        assert any('cimport FieldTable as _mx_prepared_type_' in s for s in kernels)
+        assert any('cimport CurveTable as _mx_prepared_type_' in s for s in kernels)

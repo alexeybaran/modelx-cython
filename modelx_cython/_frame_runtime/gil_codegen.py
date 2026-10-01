@@ -41,6 +41,10 @@ def augment(source, manifest, spec, forced_python=()):
             continue
         bodies[name] = node
         globals_.update(_global_names(spec.cells[name].__code__) - rows.keys() - vars(builtins).keys())
+    prepared = spec.original_prepared_inputs or {}
+    helper_modules = spec.original_helper_modules or {}
+    globals_.difference_update(helper_modules)
+    resource_types = {n: '_mx_prepared_type_' + str(i) for i, (n, tp) in enumerate(prepared.items()) if tp != 'object'}
     numeric_bodies = set(bodies) - objects
     if numeric_bodies != set(manifest.get('cython_numeric_fallback_cells', ())):
         raise ContractError('Cython numeric body selection differs from bundled source')
@@ -150,7 +154,7 @@ def augment(source, manifest, spec, forced_python=()):
             if node.id in self.cython_names:
                 return node
             if isinstance(node.ctx,ast.Load) and node.id in globals_ and node.id not in self.locals:
-                if spec.original_space_shell and node.id in spec.inputs:
+                if spec.original_space_shell and node.id in spec.inputs and node.id not in prepared:
                     return ast.copy_location(ast.Call(ast.Attribute(
                         ast.Attribute(ast.Name('self', ast.Load()), '_python_scope', ast.Load()),
                         'original_reference', ast.Load()), [ast.Constant(node.id)], []), node)
@@ -158,7 +162,14 @@ def augment(source, manifest, spec, forced_python=()):
             return node
 
     def global_type(name):
+        if name in resource_types: return resource_types[name]
         return {int:'long long',float:'double',bool:'bint'}.get(spec.inputs.get(name),'object') if signatures else 'object'
+    imports = []
+    for name, alias in resource_types.items():
+        module, cls = prepared[name].rsplit('.', 1)
+        imports.append('from ' + module + ' cimport ' + cls + ' as ' + alias)
+    imports.extend('cimport ' + module + ' as ' + name for name, module in helper_modules.items())
+    if imports: source = '\n'.join(imports) + '\n' + source
     fields = '\n'.join('    cdef '+global_type(n)+' _gil_global_'+n for n in sorted(globals_))
     if typed_fields:
         fields += '\n' + '\n'.join(

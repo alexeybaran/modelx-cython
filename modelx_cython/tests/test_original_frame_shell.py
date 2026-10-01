@@ -433,3 +433,58 @@ assert len(destroyed) >= 5
 print('checked object/numeric failures, uncached effects, cache restore and relocation passed')
 ''', encoding='utf-8')
     _run(relocated, ['-I', str(relocated/'verify.py')], 'verify')
+
+
+def test_original_shell_checked_cell_boundary_defaults_and_dense_axes(tmp_path):
+    """One unmigrated key path must not remove its callers from the frame."""
+    import modelx as mx
+    m = mx.new_model('BoundaryShell')
+    s = m.new_space('S')
+    s.values = {('row', i): float(i * 2) for i in range(4)}
+    s.counts = {}
+    s.flags = {'fail': False}
+    s.offset = 0.0
+    s.new_cells('matrix', 'def matrix(i, j=1):\n return float(i * 10 + j) + offset\n')
+    s.new_cells('keyed', "def keyed(key):\n counts['keyed'] = counts.get('keyed', 0) + 1\n if flags['fail'] and key[1] == 2: raise ValueError('retry')\n return values[key] + matrix(key[1], j=0)\n")
+    s.new_cells('root', "def root(i=1):\n child = matrix(i, j=1)\n return child + float(keyed(('row', i)))\n")
+    m.export(tmp_path/'model'); m.close()
+    (tmp_path/'sample.py').write_text('from model import mx_model\ns=mx_model.S\nfor i in range(4):\n for j in range(3): s.matrix(i, j=j)\n s.root(i=i)\n', encoding='utf-8')
+    (tmp_path/'spec.py').write_text(repr({'spaces': {'S': {'cells_param_size': {'i': 4, 'j': 3}}}}), encoding='utf-8')
+    _run(tmp_path, ['-m', 'modelx_cython', str(tmp_path/'model'), '--sample', str(tmp_path/'sample.py'),
+                    '--spec', str(tmp_path/'spec.py'), '--translate-only'], 'translate')
+    receipt = json.loads((tmp_path/'model_cy/_mx_classes.frame-shell.json').read_text())
+    routes = {r['cell']: r for r in receipt['cells']}
+    assert routes['matrix']['execution'] == routes['root']['execution'] == 'frame_exact'
+    assert routes['keyed']['execution'] == 'original_cython'
+    assert routes['root']['checked_cell_dependencies'] == ['keyed']
+    assert routes['matrix']['checked_cell_dependencies'] == []
+    _run(tmp_path, ['-m', 'modelx_cython', str(tmp_path/'model'), '--compile-only'], 'build')
+    (tmp_path/'verify.py').write_text("""
+import pickle
+from model_cy import mx_model
+s = type(mx_model)().S
+assert s.root() == s.root(i=1) == 23.0
+assert s.counts == {'keyed': 1}
+s.offset = 100.0; s.values[('row',1)] = 1000.0
+assert s.root(1) == 23.0 and s.keyed(('row',1)) == 12.0
+s.offset = 0.0; s.flags['fail'] = True
+for _ in range(2):
+ try: s.root(i=2)
+ except ValueError as e: assert str(e) == 'retry'
+ else: raise AssertionError('failed parent committed')
+assert s.counts == {'keyed': 3}
+s.offset = 100.0; s.flags['fail'] = False
+assert s.root(i=2) == 145.0  # retained matrix(2,1)=21, newly matrix(2,0)=120
+assert s.counts == {'keyed': 4}
+for i,j in ((-1,0),(4,0),(0,-1),(0,3)):
+ try: s.matrix(i,j=j)
+ except IndexError: pass
+ else: raise AssertionError('original multidimensional bounds lost')
+q = pickle.loads(pickle.dumps(s))
+q.offset = -100.0; q.values[('row',1)] = -500.0
+assert q.root() == 23.0 and q.keyed(('row',1)) == 12.0
+assert q.matrix(2,j=1) == 21.0 and q.root(2) == 145.0
+assert q.counts == {'keyed': 4}
+print('checked original Cell boundary, defaults, keywords, dense axes and serialization passed')
+""", encoding='utf-8')
+    _run(tmp_path, ['verify.py'], 'verify')
