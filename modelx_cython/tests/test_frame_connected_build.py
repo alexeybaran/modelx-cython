@@ -289,19 +289,52 @@ def test_complete_package_keeps_static_cell_free_parent_as_space_shell(tmp_path)
         connected.close()
 
 
-def test_parameterized_cell_free_parent_requires_inherited_item_binding(tmp_path):
+@pytest.mark.parametrize('fixture, model_name, preserve_metadata', [
+    ('nested_params', 'NestedParams', True),
+    ('nested_params', 'NestedParams', False),
+    ('duplicated_params', 'DuplicatedParams', True),
+    ('duplicated_params', 'DuplicatedParams', False),
+])
+def test_parameterized_cell_free_parents_bind_inherited_values(
+        tmp_path, fixture, model_name, preserve_metadata):
     import modelx as mx
+    from modelx_cython._frame_runtime.connected_package import load_connected_package
 
-    source = Path(__file__).parent / 'samples' / 'nested_params' / 'NestedParams'
+    source = Path(__file__).parent / 'samples' / fixture / model_name
     live = mx.read_model(source)
     try:
         exported = tmp_path / 'exported'
         live.export(exported)
+        if not preserve_metadata:
+            (exported / '_mx_formula_sources.json').unlink()
+        if fixture == 'nested_params':
+            expected = [live.TopLevel[i].SecondLevel[j].ThirdLevel[k].Cells1()
+                        for i, j, k in ((1, 2, 3), (2, 3, 4), (0, 0, 0))]
+        else:
+            expected = [live.Space1[i, j].Space2[k, l].Space3.Cells1()
+                        for i, j, k, l in ((1, 2, 3, 4), (2, 9, 5, 6), (0, 0, 0, 0))]
     finally:
         live.close()
 
-    with pytest.raises(ContractError, match='hierarchical item binding: TopLevel'):
-        build_package(exported, tmp_path / 'compiled', external_imports={})
+    result = build_package(exported, tmp_path / 'compiled', external_imports={})
+    connected = load_connected_package(result['package'] / '__init__.py')
+    try:
+        if fixture == 'nested_params':
+            actual = [connected.TopLevel[i].SecondLevel[j].ThirdLevel[k].Cells1()
+                      for i, j, k in ((1, 2, 3), (2, 3, 4), (0, 0, 0))]
+            assert connected.TopLevel[1] is connected.TopLevel[1]
+            assert connected.TopLevel[1].SecondLevel[2] is connected.TopLevel[1].SecondLevel[2]
+            assert connected.TopLevel[1].SecondLevel[2].ThirdLevel[3].Cells1() == expected[0]
+            assert connected.TopLevel(i=1).SecondLevel(j=2).ThirdLevel(k=3).Cells1() == expected[0]
+        else:
+            actual = [connected.Space1[i, j].Space2[k, l].Space3.Cells1()
+                      for i, j, k, l in ((1, 2, 3, 4), (2, 9, 5, 6), (0, 0, 0, 0))]
+            assert connected.Space1[1, 2] is connected.Space1[1, 2]
+            assert connected.Space1[1, 2].Space2[3, 4].Space3.Cells1() == expected[0]
+            assert connected.Space1(1, 2).Space2(3, 4).Space3.Cells1() == expected[0]
+        assert actual == expected
+    finally:
+        connected.close()
 
 
 def test_complete_package_preserves_uncached_and_fractional_power_cells(tmp_path):

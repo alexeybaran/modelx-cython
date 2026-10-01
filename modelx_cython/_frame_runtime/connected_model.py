@@ -15,27 +15,86 @@ from pathlib import Path
 
 from .contracts import ContractError
 from .model import CompiledModel
-from .source_graph import generated_space_name
+from .source_graph import (generated_space_name, inherited_parameters,
+                           is_empty_space_formula)
 
 
 class _SpaceView:
     """Expose nested children and base parameter references on a compiled Space."""
 
-    def __init__(self, space, children, base_values=None, references=None):
+    def __init__(self, space, children, base_values=None, references=None,
+                 parameters=(), inherited=(), bindings=None):
         object.__setattr__(self, '_space', space)
         object.__setattr__(self, '_children', children)
         object.__setattr__(self, '_base_values', dict(base_values or {}))
         object.__setattr__(self, '_references', dict(references or {}))
+        object.__setattr__(self, '_parameters', tuple(parameters))
+        object.__setattr__(self, '_inherited', tuple(inherited))
+        object.__setattr__(self, '_bindings', dict(bindings or {}))
+        object.__setattr__(self, '_items', {})
+        object.__setattr__(self, '_child_views', {})
+
+    def _with_bindings(self, bindings):
+        if not bindings:
+            return self
+        return _SpaceView(self._space, self._children, self._base_values,
+                          self._references, self._parameters, self._inherited,
+                          bindings)
+
+    def _select(self, args, kwargs):
+        if not self._parameters:
+            raise TypeError('Space has no item parameters')
+        if len(args) > len(self._parameters):
+            raise TypeError('Too many Space parameters')
+        values = dict(zip(self._parameters, args))
+        for name, value in kwargs.items():
+            if name not in self._parameters or name in values:
+                raise TypeError('Unknown or repeated Space parameter: ' + name)
+            values[name] = value
+        if set(values) != set(self._parameters):
+            raise TypeError('Missing Space parameters')
+        key = tuple(values[name] for name in self._parameters)
+        hash(key)
+        try:
+            return self._items[key]
+        except KeyError:
+            pass
+        bound = {**self._bindings, **values}
+        if self._space is None:
+            item = self._with_bindings(bound)
+            object.__setattr__(item, '_parameters', ())
+        else:
+            missing = set(self._inherited) - set(bound)
+            if missing:
+                raise TypeError('Missing inherited Space parameters: ' + ', '.join(sorted(missing)))
+            selected = self._space(**bound)
+            item = (_SpaceView(selected, self._children, self._base_values,
+                               self._references, bindings=bound)
+                    if self._children else selected)
+        self._items[key] = item
+        return item
 
     def __getattr__(self, name):
         if name in self._children:
-            return self._children[name]
+            if name not in self._child_views:
+                child = self._children[name]
+                self._child_views[name] = (child._with_bindings(self._bindings)
+                                           if isinstance(child, _SpaceView) else child)
+            return self._child_views[name]
         if name in self._base_values:
             return self._base_values[name]
+        if name in self._bindings:
+            return self._bindings[name]
         if name in self._references:
             return self._references[name]
         if self._space is None:
             raise AttributeError(name)
+        if self._inherited:
+            missing = set(self._inherited) - set(self._bindings)
+            if missing:
+                raise AttributeError('Missing inherited Space parameters: '
+                                     + ', '.join(sorted(missing)))
+            return getattr(self._space(**self._bindings), name)
         if (self._base_values and name in self._space._model.manifest['cells']
                 and set(self._space.parameters) == set(self._base_values)):
             return getattr(self._space(**self._base_values), name)
@@ -48,11 +107,16 @@ class _SpaceView:
         setattr(self._space, name, value)
 
     def __call__(self, *args, **kwargs):
+        if self._parameters:
+            return self._select(args, kwargs)
         if self._space is None:
             raise TypeError('Cell-free Space has no item formula')
         return self._space(*args, **kwargs)
 
     def __getitem__(self, key):
+        if self._parameters:
+            args = key if isinstance(key, tuple) else (key,)
+            return self._select(args, {})
         if self._space is None:
             raise TypeError('Cell-free Space has no item formula')
         return self._space[key]
@@ -119,8 +183,8 @@ def load_connected(graph, artifacts, *, external_bindings, tables_by_space=None,
         if fullname not in graph_spaces:
             raise ContractError('Compiled Space is absent from source graph: ' + name)
         nodes[name] = graph_spaces[fullname]
-        if name in shells and (nodes[name]['cells'] or nodes[name]['parameters']
-                               or nodes[name].get('formula') is not None):
+        if name in shells and (nodes[name]['cells']
+                               or not is_empty_space_formula(nodes[name].get('formula'))):
             raise ContractError('Invalid Cell-free Space shell: ' + name)
         base_values = nodes[name].get('base_parameter_values', {})
         if (not isinstance(base_values, dict)
@@ -188,7 +252,7 @@ def load_connected(graph, artifacts, *, external_bindings, tables_by_space=None,
         # preserves Space identity even when A refers to B and B refers to A.
         for name in order:
             if name in shells:
-                spaces[name] = _SpaceView(None, {})
+                spaces[name] = _SpaceView(None, {}, parameters=nodes[name]['parameters'])
                 continue
             artifact = artifacts[name]
             manifest = manifests[name]
@@ -219,10 +283,12 @@ def load_connected(graph, artifacts, *, external_bindings, tables_by_space=None,
                 spaces[name]._children.update({
                     leaf: spaces[child] for leaf, child in children.get(name, {}).items()})
                 spaces[name]._base_values.update(base_values)
-            elif name in children or base_values:
+            elif name in children or base_values or inherited_parameters(graph, model_name, name):
+                inherited = inherited_parameters(graph, model_name, name)
                 spaces[name] = _SpaceView(spaces[name], {
                     leaf: spaces[child] for leaf, child in children.get(name, {}).items()},
-                    base_values)
+                    base_values, parameters=nodes[name]['parameters'] if (inherited or name in children) else (),
+                    inherited=inherited)
         for name in order:
             refs = {ref: spaces[target_name(ref, target)]
                     for ref, target in nodes[name]['space_references'].items()}

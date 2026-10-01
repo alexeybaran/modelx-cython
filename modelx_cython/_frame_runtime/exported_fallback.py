@@ -57,7 +57,7 @@ def recover_source_manifest(exported):
     spaces = {}
     parsed_modules = {}
 
-    def visit(space, path):
+    def visit(space, path, inherited=()):
         module = sys.modules[type(space).__module__]
         if module not in parsed_modules:
             try:
@@ -100,14 +100,16 @@ def recover_source_manifest(exported):
                            'sha256': hashlib.sha256(source.encode('utf-8')).hexdigest(),
                            'cached': cached,
                            'allow_none': bool(getattr(space, '_allow_none', False))}
-        references = sorted((set(structure.ref_info.get(class_name, ())) | reads)
+        declared = set(structure.ref_info.get(class_name, ()))
+        references = sorted((declared | (reads - set(inherited)))
                             - set(cell_names) - set(parameters))
         formula = None
         if parameters:
             generated = getattr(type(space), '_mx_space_formula', None)
             if generated is not None:
                 formula, formula_reads = _method_source(generated, '_formula')
-                references = sorted(set(references) | formula_reads - set(parameters))
+                references = sorted(set(references) |
+                                    (formula_reads - set(parameters) - set(inherited)))
             else:
                 signature = inspect.signature(space.__call__)
                 formula = ('def _formula' + str(signature)
@@ -132,7 +134,8 @@ def recover_source_manifest(exported):
                             'reference_targets': targets, 'cells': cells,
                             'collect': None}
         for child_name, child in getattr(space, '_mx_spaces', {}).items():
-            visit(child, path + '.' + child_name)
+            visible = dict.fromkeys((*inherited, *parameters))
+            visit(child, path + '.' + child_name, tuple(visible))
 
     for name, space in getattr(exported, '_mx_spaces', {}).items():
         visit(space, name)

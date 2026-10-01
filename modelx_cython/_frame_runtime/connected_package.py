@@ -10,7 +10,7 @@ import shutil
 
 from .connected_model import load_connected
 from .contracts import ContractError
-from .source_graph import generated_space_name
+from .source_graph import generated_space_name, is_empty_space_formula
 
 
 _SCHEMA = 'mxcf.connected_package.v1'
@@ -106,7 +106,7 @@ def assemble_connected_package(destination, graph, artifacts, *,
     for name in shells:
         node = graph_data['spaces'].get(model_name + '.' + name)
         if (node is None or name in artifacts or node['cells']
-                or node['parameters'] or node.get('formula') is not None):
+                or not is_empty_space_formula(node.get('formula'))):
             raise ContractError('Invalid Cell-free Space shell: ' + name)
     package_manifest = {
         'schema': _SCHEMA, 'model': model_name,

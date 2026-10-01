@@ -76,7 +76,8 @@ def from_modelx(model, destination, *, projection='Projection', data_space='Data
                 replacements=None, contracts=None, signatures=None,
                 cython_objects=True, policy_records=None, row_references=None,
                 parameter_initial_values=None, object_bindings=(), typed_mapping_inputs=None,
-                native_typed_inputs=False, typed_object_inputs=None):
+                native_typed_inputs=False, typed_object_inputs=None,
+                inherited_parameters=()):
     """Derive a self-contained build spec; destination stores source evidence only.
 
     replacements is an explicit mapping of Cell names to replacement formula source.
@@ -111,11 +112,45 @@ def from_modelx(model, destination, *, projection='Projection', data_space='Data
     data=getattr(model,data_space,None)
     row_references=dict(row_references or {})
     object_bindings=frozenset(object_bindings)
-    parameters=tuple(space.parameters or ())
+    own_parameters=tuple(space.parameters or ())
+    inherited_parameters=tuple(name for name in inherited_parameters
+                               if name not in own_parameters)
+    parameters=(*own_parameters, *inherited_parameters)
     # A declared collect domain identifies the independent policy selector even
     # when it is not the first Space parameter. The public signature stays in
     # author order; initial values only establish typed internal frame bindings.
-    space_signature = inspect.signature(space.formula.func) if parameters else None
+    space_signature = inspect.signature(space.formula.func) if own_parameters else None
+    synthetic_formula = None
+    if inherited_parameters:
+        graph = getattr(model, 'source_graph', None)
+        original = graph['spaces'][model.name + '.' + projection]['formula'] if graph else None
+        from .source_graph import is_empty_space_formula
+        if not is_empty_space_formula(original):
+            raise ContractError('Inherited parameters need a no-op Space formula')
+        original_parameters = list(space_signature.parameters.values()) if space_signature else []
+        safe_parameters = []
+        for parameter in original_parameters:
+            default = parameter.default
+            if default is not inspect.Parameter.empty:
+                try:
+                    restored = json.loads(json.dumps(default, allow_nan=False))
+                except (TypeError, ValueError):
+                    raise ContractError('Inherited Space parameter default must be JSON') from None
+                if type(restored) is not type(default) or restored != default:
+                    raise ContractError('Inherited Space parameter default changes in JSON')
+                default = restored
+            safe_parameters.append(parameter.replace(default=default,
+                                                     annotation=inspect.Parameter.empty))
+        defaults = [inspect.Parameter(name, inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                                      default=(inspect.Parameter.empty
+                                               if not own_parameters and index == 0 else 0))
+                    for index, name in enumerate(inherited_parameters)]
+        synthetic_signature = inspect.Signature((*safe_parameters, *defaults))
+        synthetic_source = 'def space_formula' + str(synthetic_signature) + ':\n    return None'
+        def synthetic_formula(*args, **kwargs):
+            return None
+        synthetic_formula.__signature__ = synthetic_signature
+        space_signature = synthetic_signature
     domains = getattr(space._impl, 'collect_over_spec', None)
     if domains is not None and len(domains) != 1:
         raise ContractError('Frame collect requires one policy domain')
@@ -136,6 +171,10 @@ def from_modelx(model, destination, *, projection='Projection', data_space='Data
             raise ContractError('The point selector must be a required Space parameter')
         required = {p.name for p in sig_parameters
                     if p.name != point and p.default is inspect.Parameter.empty}
+        if inherited_parameters and not initial:
+            # Internal hierarchy selection always supplies these values. Zero
+            # is only the construction placeholder for an unselected item.
+            initial = {name: 0 for name in required}
         if set(initial) != required:
             raise ContractError('Required non-policy Space parameters need initial values')
     tables={}
@@ -305,7 +344,7 @@ def from_modelx(model, destination, *, projection='Projection', data_space='Data
     else:
         # derive_spec only inspects this signature. Passing the live modelx Space
         # formula preserves declared defaults without evaluating model logic.
-        space_formula=space.formula.func
+        space_formula=synthetic_formula or space.formula.func
     source_provenance = getattr(model, 'source_graph', {}).get('source_provenance',
                                                                'author_sources')
     evidence={'model':model.name,'formula_sha256':original,'replaced_cells':sorted(replacements),
@@ -316,7 +355,8 @@ def from_modelx(model, destination, *, projection='Projection', data_space='Data
               'intrinsic_references':sorted(intrinsic_references),
               'enum_references':sorted(enum_references),
               'lambda_cells_normalized':normalized,
-              'space_parameters':list(parameters),
+              'space_parameters':list(own_parameters),
+              'inherited_parameters':list(inherited_parameters),
               'row_references':row_references,
               'parameter_defaults':({p.name:(initial[p.name] if p.name in initial else p.default)
                                       for p in space_signature.parameters.values() if p.name != point}
@@ -345,11 +385,12 @@ def from_modelx(model, destination, *, projection='Projection', data_space='Data
                       required_object_bindings=sorted(reference_types))
     if physical_projection != projection:
         spec.model['source_space'] = model.name + '.' + projection
-    if space.formula is not None:
+    if space.formula is not None or synthetic_formula is not None:
         graph = getattr(model, 'source_graph', None)
         name = model.name + '.' + projection
-        source = (graph['spaces'][name]['formula'] if graph is not None else
-                  getattr(space.formula, 'source', None))
+        source = (synthetic_source if synthetic_formula is not None else
+                  (graph['spaces'][name]['formula'] if graph is not None else
+                   getattr(space.formula, 'source', None)))
         if not isinstance(source, str):
             raise ContractError('Space formula source is required for Cython preparation')
         scopes = symtable.symtable(source, '<space formula>', 'exec').get_children()

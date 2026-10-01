@@ -11,7 +11,8 @@ import keyword
 from pathlib import Path
 
 from .contracts import ContractError
-from .source_graph import generated_space_name
+from .source_graph import (generated_space_name, inherited_parameters,
+                           is_empty_space_formula)
 
 
 def plan_package(graph, *, external_names=(), collect_only=False):
@@ -142,10 +143,7 @@ def build_package(exported, destination, *, external_imports,
                 # formula kernel. Its children are assembled below from the
                 # same source graph. Parameterized shells need item-scoped
                 # inherited bindings and cannot be flattened safely.
-                if node['parameters']:
-                    raise ContractError('Parameterized Cell-free Space requires '
-                                        'hierarchical item binding: ' + name)
-                if node.get('formula') is not None or node.get('collect') is not None:
+                if node.get('collect') is not None or not is_empty_space_formula(node.get('formula')):
                     raise ContractError('Cell-free Space with formula or collect '
                                         'requires compiled execution: ' + name)
                 if options.get(name):
@@ -153,9 +151,19 @@ def build_package(exported, destination, *, external_imports,
                 shells.append(name)
                 continue
             arguments = dict(options.get(name, {}))
-            if 'projection' in arguments:
-                raise ContractError('Space options cannot override discovered projection')
+            if 'projection' in arguments or 'inherited_parameters' in arguments:
+                raise ContractError('Space options cannot override discovered hierarchy')
             declared = graph['spaces'][plan['model'] + '.' + name]['space_references']
+            inherited = inherited_parameters(graph, plan['model'], name)
+            if inherited:
+                parts = name.split('.')
+                for depth in range(1, len(parts)):
+                    ancestor = '.'.join(parts[:depth])
+                    ancestor_node = graph['spaces'][plan['model'] + '.' + ancestor]
+                    if not is_empty_space_formula(ancestor_node.get('formula')):
+                        raise ContractError('Inherited parameter binding requires '
+                                            'a no-op ancestor Space formula: ' + ancestor)
+                arguments['inherited_parameters'] = inherited
             arguments['object_bindings'] = tuple(dict.fromkeys(
                 (*declared, *arguments.get('object_bindings', ()))))
             spec = derive(destination / '_sources' / name,

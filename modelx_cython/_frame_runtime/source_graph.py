@@ -4,10 +4,51 @@ The graph describes names and declared interfaces only. Formula bodies remain
 the exporter's original sources and are compiled by Cython downstream.
 """
 
+import ast
 import hashlib
 import keyword
 
 from .contracts import ContractError
+
+
+def is_empty_space_formula(source):
+    """Recognize a declaration-only Space formula without running it."""
+    if source is None:
+        return True
+    try:
+        statements = ast.parse(source).body
+    except SyntaxError:
+        return False
+    if len(statements) != 1:
+        return False
+    expression = statements[0]
+    if isinstance(expression, ast.Expr) and isinstance(expression.value, ast.Lambda):
+        body = expression.value.body
+    elif (isinstance(expression, ast.FunctionDef) and len(expression.body) == 1
+          and isinstance(expression.body[0], ast.Return)):
+        body = expression.body[0].value
+    else:
+        return False
+    if isinstance(body, ast.Constant) and body.value is None:
+        return True
+    # Older exports encode a no-op item formula as an empty reference map.
+    return (isinstance(body, ast.Dict) and len(body.keys) == 1
+            and isinstance(body.keys[0], ast.Constant)
+            and body.keys[0].value == 'refs'
+            and isinstance(body.values[0], ast.Dict)
+            and not body.values[0].keys)
+
+
+def inherited_parameters(graph, model, name):
+    """Return visible ancestor parameter names, shadowed by the local Space."""
+    parts = name.split('.')
+    inherited = {}
+    for depth in range(1, len(parts)):
+        parent = graph['spaces'][model + '.' + '.'.join(parts[:depth])]
+        for parameter in parent.get('parameters', ()):
+            inherited[parameter] = None
+    own = graph['spaces'][model + '.' + name].get('parameters', ())
+    return tuple(parameter for parameter in inherited if parameter not in own)
 
 
 def generated_space_name(relative):
