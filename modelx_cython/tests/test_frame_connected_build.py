@@ -390,3 +390,55 @@ def test_complete_package_uncached_cell_repeats_side_effects(tmp_path):
         assert connected.Space1.counter == {'n': 5}
     finally:
         connected.close()
+
+
+@pytest.mark.parametrize('preserve_metadata', [True, False])
+def test_complete_package_preserves_original_various_types(tmp_path, preserve_metadata):
+    import modelx as mx
+    import numpy as np
+    from modelx_cython._frame_runtime.connected_package import load_connected_package
+
+    source = Path(__file__).parent / 'samples' / 'various_types' / 'VariousTypes'
+    live = mx.read_model(source)
+    try:
+        exported = tmp_path / 'exported'
+        live.export(exported)
+        if not preserve_metadata:
+            (exported / '_mx_formula_sources.json').unlink()
+        expected = {
+            'int': [live.IntArg.foo(10), live.IntArg.bar(10),
+                    live.IntArg.baz(11), live.IntArg.qux(10),
+                    live.IntArg.quux(10), live.IntArg.grault(10),
+                    live.IntArg.garply(11)],
+            'static': [live.NoArg.foo(), live.NoArg.qux(),
+                       live.NoArg.grault()],
+            'multi': [live.IntArgs.foo(1, 2), live.IntArgs.qux(3, 4),
+                      live.IntArgs.garply(3, 4)],
+        }
+    finally:
+        live.close()
+
+    result = build_package(exported, tmp_path / 'compiled', external_imports={})
+    connected = load_connected_package(result['package'] / '__init__.py')
+    try:
+        actual = {
+            'int': [connected.IntArg.foo(10), connected.IntArg.bar(10),
+                    connected.IntArg.baz(11), connected.IntArg.qux(10),
+                    connected.IntArg.quux(10), connected.IntArg.grault(10),
+                    connected.IntArg.garply(11)],
+            'static': [connected.NoArg.foo(), connected.NoArg.qux(),
+                       connected.NoArg.grault()],
+            'multi': [connected.IntArgs.foo(1, 2), connected.IntArgs.qux(3, 4),
+                      connected.IntArgs.garply(3, 4)],
+        }
+        for group in expected:
+            for value, reference in zip(actual[group], expected[group]):
+                if isinstance(reference, np.ndarray):
+                    np.testing.assert_array_equal(value, reference)
+                else:
+                    assert value == reference
+        # The original CLI's out-of-range assertions depend on the traced
+        # capacity specification. This connected build has no such spec; its
+        # object/array result parity is a separate coverage gate.
+    finally:
+        connected.close()
