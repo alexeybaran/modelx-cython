@@ -148,6 +148,10 @@ def test_original_export_compiles_static_space_without_policy_table(
         (exported / '_mx_formula_sources.json').unlink()
     spec = from_exported(exported, tmp_path / 'source')
     assert spec.model['point_table'] is None
+    assert spec.model['cell_interfaces']['amount']['parameters'] == []
+    source_graph = json.loads((tmp_path / 'source' / 'source_graph.json').read_text())
+    assert spec.model['cell_interfaces']['amount'] == source_graph['spaces'][
+        'OldStyle.Projection']['cell_interfaces']['amount']
     assert 'mxcf_static_scope' not in spec.initial_tables
     if not preserve_metadata:
         assert (tmp_path / 'source' / 'recovered_formula_sources.json').exists()

@@ -398,8 +398,15 @@ def from_modelx(model, destination, *, projection='Projection', data_space='Data
     spec.model.update(static_projection=static,object_references=object_references,
                       module_references={name: value.__name__ for name, value in modules.items()},
                       required_object_bindings=sorted(reference_types))
+    source_graph = getattr(model, 'source_graph', None)
+    source_space = model.name + '.' + projection
+    if source_graph is not None:
+        # Keep the verified author interface beside the compiled Cell plan.
+        # Public adapters must not reconstruct signatures from rewritten
+        # exported methods or guess defaults from the traced sample.
+        spec.model['cell_interfaces'] = source_graph['spaces'][source_space]['cell_interfaces']
     if physical_projection != projection:
-        spec.model['source_space'] = model.name + '.' + projection
+        spec.model['source_space'] = source_space
     if space.formula is not None or synthetic_formula is not None:
         graph = getattr(model, 'source_graph', None)
         name = model.name + '.' + projection
