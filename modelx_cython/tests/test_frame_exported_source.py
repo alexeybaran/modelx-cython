@@ -64,6 +64,26 @@ def test_exported_graph_rejects_changed_formula_in_any_space():
         describe_source_graph(manifest)
 
 
+def test_exported_graph_preserves_public_cell_signatures_for_adapter_generation():
+    first = _cell('def value(x: float, /, y=2, *, label="a") -> float:\n    return x + y\n')
+    first.update(cached=False, allow_none=True)
+    second = _cell('lambda policy, period=0: policy + period')
+    manifest = {'schema': 'modelx.formula_sources.v2', 'model': 'Example',
+                'spaces': {'Example.S': {'parameters': [], 'references': [],
+                                         'cells': {'value': first, 'other': second}}}}
+    interfaces = describe_source_graph(manifest)['spaces']['Example.S']['cell_interfaces']
+    assert interfaces['value'] == {
+        'formula_kind': 'function', 'parameters': [
+            {'name': 'x', 'kind': 'POSITIONAL_ONLY', 'annotation': 'float'},
+            {'name': 'y', 'kind': 'POSITIONAL_OR_KEYWORD', 'default': '2'},
+            {'name': 'label', 'kind': 'KEYWORD_ONLY', 'default': "'a'"}],
+        'cached': False, 'allow_none': True, 'source_sha256': first['sha256'],
+        'return_annotation': 'float'}
+    assert interfaces['other']['parameters'] == [
+        {'name': 'policy', 'kind': 'POSITIONAL_OR_KEYWORD'},
+        {'name': 'period', 'kind': 'POSITIONAL_OR_KEYWORD', 'default': '0'}]
+
+
 def test_exported_graph_uses_explicit_alias_and_nested_target_identity():
     manifest = {'schema': 'modelx.formula_sources.v2', 'model': 'Example',
                 'spaces': {

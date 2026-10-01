@@ -11,6 +11,54 @@ import keyword
 from .contracts import ContractError
 
 
+def _cell_interface(name, cell):
+    """Describe the author-visible signature without interpreting its body.
+
+    Cython type choices are supplied separately by tracing/specification. This
+    record preserves the Python calling contract for public adapter emission.
+    """
+    statements = ast.parse(cell['source']).body
+    if len(statements) != 1:
+        raise ContractError('A Cell source must contain one formula: ' + name)
+    formula = statements[0]
+    if isinstance(formula, ast.FunctionDef) and formula.name == name:
+        args, result, kind = formula.args, formula.returns, 'function'
+    elif (isinstance(formula, ast.Expr)
+          and isinstance(formula.value, ast.Lambda)):
+        args, result, kind = formula.value.args, None, 'lambda'
+    else:
+        raise ContractError('Invalid Cell formula signature: ' + name)
+    positional = [*args.posonlyargs, *args.args]
+    default_start = len(positional) - len(args.defaults)
+    params = []
+    for index, arg in enumerate(positional):
+        parameter = {'name': arg.arg, 'kind': ('POSITIONAL_ONLY' if index < len(args.posonlyargs)
+                                                else 'POSITIONAL_OR_KEYWORD')}
+        if arg.annotation is not None:
+            parameter['annotation'] = ast.unparse(arg.annotation)
+        if index >= default_start:
+            parameter['default'] = ast.unparse(args.defaults[index - default_start])
+        params.append(parameter)
+    if args.vararg is not None:
+        params.append({'name': args.vararg.arg, 'kind': 'VAR_POSITIONAL'})
+    for arg, default in zip(args.kwonlyargs, args.kw_defaults):
+        parameter = {'name': arg.arg, 'kind': 'KEYWORD_ONLY'}
+        if arg.annotation is not None:
+            parameter['annotation'] = ast.unparse(arg.annotation)
+        if default is not None:
+            parameter['default'] = ast.unparse(default)
+        params.append(parameter)
+    if args.kwarg is not None:
+        params.append({'name': args.kwarg.arg, 'kind': 'VAR_KEYWORD'})
+    interface = {'formula_kind': kind, 'parameters': params,
+                 'cached': bool(cell.get('cached', True)),
+                 'allow_none': bool(cell.get('allow_none', False)),
+                 'source_sha256': cell['sha256']}
+    if result is not None:
+        interface['return_annotation'] = ast.unparse(result)
+    return interface
+
+
 def is_empty_space_formula(source):
     """Recognize a declaration-only Space formula without running it."""
     if source is None:
@@ -128,6 +176,8 @@ def describe_source_graph(manifest):
         nodes[fullname] = {
             'parameters': list(parameters),
             'cells': {name: info['cells'][name]['sha256'] for name in sorted(info['cells'])},
+            'cell_interfaces': {name: _cell_interface(name, info['cells'][name])
+                                for name in sorted(info['cells'])},
             'formula': info.get('formula'),
             'collect': info.get('collect'),
             'space_references': internal,

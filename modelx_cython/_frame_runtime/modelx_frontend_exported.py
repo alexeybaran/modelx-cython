@@ -5,7 +5,6 @@ methods. This adapter reads that metadata and the exported model's actual
 references/Data values; it does not reverse-engineer rewritten methods.
 """
 import importlib.util
-import inspect
 import json
 from contextlib import contextmanager
 from pathlib import Path
@@ -19,11 +18,11 @@ from .source_graph import describe_source_graph
 
 
 class _SourceCell:
-    def __init__(self, instance, name, info):
+    def __init__(self, instance, name, info, interface):
         self.formula = SimpleNamespace(source=info['source'])
-        self.parameters = tuple(inspect.signature(getattr(instance, name)).parameters)
-        self.is_cached = info['cached']
-        self.allow_none = info['allow_none']
+        self.parameters = tuple(parameter['name'] for parameter in interface['parameters'])
+        self.is_cached = interface['cached']
+        self.allow_none = interface['allow_none']
         self._method = getattr(instance, name)
 
     def __call__(self, *args, **kwargs):
@@ -45,11 +44,12 @@ class _CollectDomain:
 
 
 class _SourceSpace:
-    def __init__(self, instance, info):
+    def __init__(self, instance, info, graph_node):
         self.parameters = tuple(info['parameters'])
         self.spaces = getattr(instance, '_mx_spaces', {})
         self.refs = {name: getattr(instance, name) for name in info['references']}
-        self.cells = {name: _SourceCell(instance, name, cell)
+        self.cells = {name: _SourceCell(instance, name, cell,
+                                       graph_node['cell_interfaces'][name])
                       for name, cell in info['cells'].items()}
         self.formula = (SimpleNamespace(func=instance.__call__)
                         if info['formula'] is not None else None)
@@ -104,7 +104,7 @@ def open_exported_source(package):
             instance = exported
             for name in parts[1:]:
                 instance = getattr(instance, name)
-            source_space = _SourceSpace(instance, info)
+            source_space = _SourceSpace(instance, info, graph['spaces'][fullname])
             spaces[tuple(parts[1:])] = source_space
             # A base Space may define references with the same names as its
             # dynamic parameters. Its Cells can then be called without first
