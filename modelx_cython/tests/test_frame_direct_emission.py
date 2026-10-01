@@ -67,6 +67,8 @@ def test_checked_python_formula_is_emitted_with_a_frame_receiver():
                       steps=4, length='4', cell_outputs=('total',),
                       scalar_outputs=('total',))
     parts, manifest = emit(spec, python_cells=('total',), frame_parts=True)
+    assert all(any(line.startswith('cdef inline ') and '(_Frame* state' in line
+                   for line in method) for method in parts['methods'])
     formula = next(method for method in parts['methods']
                    if method[0].startswith('cdef inline double _calc_total('))
     assert formula[0].startswith('cdef inline double _calc_total(_Frame* state')

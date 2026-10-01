@@ -4,8 +4,6 @@ This is physical code generation over our fixed template, never analysis of
 pandas or model expressions. Python owners keep buffers/Curve objects alive.
 """
 import re
-import io
-import tokenize
 
 
 def to_c_frame(parts, manifest):
@@ -60,46 +58,17 @@ def to_c_frame(parts, manifest):
         else:
             frame.append(f'    {t} {name}')
     functions = []
-    direct_entries = set()
     for method in parts['methods']:
         if any(line.startswith('cdef inline ') and '(_Frame* state' in line
                for line in method):
-            # The emitter already chose the physical receiver for this Cell
-            # entry or formula. Do not re-parse or rewrite its source.
             functions.append('\n'.join(method))
-            direct_entries.add(len(functions) - 1)
         else:
-            functions.append(('\n'.join(x[4:] for x in method)
-                              .replace('(self, ', '(_Frame* state, ', 1)
-                              .replace('(self)', '(_Frame* state)', 1)))
+            raise ValueError('Cell emission must use the physical frame receiver')
     outer = parts['runtime_prefix'] if native_guard else parts['runtime']
     def lower_calls(text, pointer):
         text = re.sub(r'self\.(_cell_|_calc_)(\w+)\(\)', lambda m: f'{m[1]}{m[2]}({pointer})', text)
         return re.sub(r'self\.(_cell_|_calc_)(\w+)\(', lambda m: f'{m[1]}{m[2]}({pointer}, ', text)
-    lowered = []
-    for block_index, block in enumerate(functions):
-        if block_index in direct_entries:
-            lowered.append(block)
-            continue
-        offsets = [0]
-        for ln in block.splitlines(keepends=True): offsets.append(offsets[-1] + len(ln))
-        literals = []
-        for tok in tokenize.generate_tokens(io.StringIO(block).readline):
-            if tok.type in (tokenize.STRING, getattr(tokenize, 'FSTRING_MIDDLE', -999)):
-                start = offsets[tok.start[0]-1] + tok.start[1]
-                stop = offsets[tok.end[0]-1] + tok.end[1]
-                literals.append((start, stop, tok.string))
-        for i, (start, stop, literal) in reversed(list(enumerate(literals))):
-            block = block[:start] + f'__mx_literal_{i}__' + block[stop:]
-        block = lower_calls(block, 'state')
-        for name in sorted(fields, key=len, reverse=True):
-            target = f'(<{objects[name]}>state.{name})' if name in objects else 'state.' + name
-            block = re.sub(r'\bself\.' + re.escape(name) + r'\b', lambda _: target, block)
-        if re.search(r'\bself\.', block):
-            raise ValueError('Numeric Cell retained a Python owner reference')
-        for i, (_, _, literal) in enumerate(literals):
-            block = block.replace(f'__mx_literal_{i}__', literal)
-        lowered.append(block)
+    lowered = functions
     # Runtime keeps the ownership fields; scalar values have one location in _Frame.
     owner_decls = ['    cdef _Frame* _frame' if heap_numeric else '    cdef _Frame _frame',
                    '    cdef object _records']
