@@ -127,10 +127,12 @@ def augment_runtime(source, manifest):
     cdef void _invoke(self, _Command* command) except *:
         cdef MxGuard saved = self._frame._guard
         cdef unsigned int mark = self._frame._entry_depth + 1
+        cdef MxCallback callback = _execute
+        if command.mode == 3: callback = _execute_formula
         mx_guard_init(&self._frame._guard)
         self._frame._entry_depth += 1
         try:
-            if mx_guarded(&self._frame._guard, _execute, {frame_pointer}, command) != 0:
+            if mx_guarded(&self._frame._guard, callback, {frame_pointer}, command) != 0:
                 _rollback({frame_pointer}, mark)
                 _raise_guard(&self._frame._guard)
         finally:

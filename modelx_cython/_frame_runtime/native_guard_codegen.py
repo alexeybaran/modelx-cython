@@ -132,18 +132,21 @@ def runtime(manifest, prefix, length_expression, tables, *, owner_init=(), owner
         lines += [f'        {"if" if i==0 else "elif"} command.identity == {i}:','            for t in range(command.n):']
         for j,expr in enumerate(columns): lines += [f'                command.output[t * {len(columns)} + {j}] = {expr}']
     lines += [('        else: ' if tables else '        ') + 'mx_fail(&state._guard, 4, b"Table dispatch")',
-              '    elif command.mode == 3:']
+              '    else: mx_fail(&state._guard, 4, b"Command dispatch")',
+              '',
+              'cdef void _execute_formula(void* raw_state, void* raw_command) noexcept nogil:',
+              '    cdef _Frame* state = <_Frame*>raw_state',
+              '    cdef _Command* command = <_Command*>raw_command']
     for i,(name,row) in enumerate(rows.items()):
         dest='f' if row['result']['kind']=='float' else 'i'
         args=', '.join('command.args[%d].%s'%(j,'f' if p['type']['kind']=='float' else 'i') for j,p in enumerate(row['params']))
         formula = (f'_cell_{name}' if row.get('direct_input') is not None
                    else f'(<_Calc_{name}>_calc_{name})')
-        lines += [f'        {"if" if i==0 else "elif"} command.identity == {i}:',
-                  f'            command.value.{dest} = {formula}(state'+(', '+args if args else '')+')']
+        lines += [f'    {"if" if i==0 else "elif"} command.identity == {i}:',
+                  f'        command.value.{dest} = {formula}(state'+(', '+args if args else '')+')']
         if row.get('checked_formula') and row.get('direct_input') is None:
-            lines.append(f'            if command.value.{dest} == -1: mx_capture(&state._guard)')
-    lines += [('        else: ' if rows else '        ') + 'mx_fail(&state._guard, 4, b"Formula dispatch")',
-              '    else: mx_fail(&state._guard, 4, b"Command dispatch")','']
+            lines.append(f'        if command.value.{dest} == -1: mx_capture(&state._guard)')
+    lines += [('    else: ' if rows else '    ') + 'mx_fail(&state._guard, 4, b"Formula dispatch")', '']
     # The existing owner/lifetime prefix contains no formula calls.
     init = ['    def __init__(self, records):', *owner_init,
             '        mx_guard_init(&self._frame._guard)']
@@ -156,7 +159,9 @@ def runtime(manifest, prefix, length_expression, tables, *, owner_init=(), owner
     lines += ['@cython.final','cdef class Kernel:',prefix,
               '    def __dealloc__(self):', *owner_dealloc,
               '    cdef void _invoke(self, _Command* command) except *:',
-              f'        if mx_guarded(&self._frame._guard, _execute, {frame_pointer}, command) != 0:',
+              '        cdef MxCallback callback = _execute',
+              '        if command.mode == 3: callback = _execute_formula',
+              f'        if mx_guarded(&self._frame._guard, callback, {frame_pointer}, command) != 0:',
               '            _raise_guard(&self._frame._guard)',
               '    def evaluate(self, Py_ssize_t policy, str cell, tuple args):',
               '        cdef _Command command',
