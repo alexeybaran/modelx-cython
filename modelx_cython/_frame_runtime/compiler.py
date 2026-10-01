@@ -715,6 +715,10 @@ def emit(spec, *, diagnostics=False, python_cells=()):
             lower, size = (0, len(ti['members'])) if ti['kind'] == 'enum' else (-1, spec.steps + 2)
             if ti['kind'] == 'bool':
                 lower, size = 0, 2
+            if spec.cache_domains and name in spec.cache_domains:
+                lower, size = spec.cache_domains[name][p.name]
+                if type(lower) is not int or type(size) is not int or size <= 0:
+                    raise ContractError('Cache domains need an integer lower bound and positive size')
             if ti['kind'] == 'float':
                 hashed = True
             default = None
@@ -757,7 +761,7 @@ def emit(spec, *, diagnostics=False, python_cells=()):
             field=body[0].value.id
             if field in input_info and field not in sig.parameters and input_info[field]['ctype']==ret['ctype']:
                 direct=field
-        row['direct_input'] = None if name in python_reasons else direct
+        row['direct_input'] = None if name in python_reasons or spec.original_space_shell else direct
         if mixed:
             row['calculator'] = 'python' if name in python_reasons else 'native'
             row['native_rejection'] = python_reasons.get(name)
@@ -783,6 +787,10 @@ def emit(spec, *, diagnostics=False, python_cells=()):
              'from ._lookups cimport Curve, CurveTable, IndexedInt1, IndexedFloat1, IndexedInt2, IndexedFloat2',
              'from libc.math cimport pow as real_pow, floor, isfinite',
              'from libc.math cimport ' + ', '.join(f'{x} as _math_{x}' for x in sorted(_MATH))]
+    if spec.original_space_shell:
+        # Match the original translator's Cython integer-arithmetic directive.
+        # The existing frame frontend retains its checked-overflow contract.
+        lines[0] = lines[0].replace('overflowcheck=True', 'overflowcheck=False')
     from .lookup_codegen import inline_lookup_source
     lines += [inline_lookup_source()]
     power_body = function_ast(power).body
@@ -988,6 +996,9 @@ def build(spec, destination, *, diagnostics=False, python_cells=(),
         if spec.cython_objects:
             from .collect_map_codegen import augment as add_collect_map
             source = add_collect_map(source, manifest, spec)
+    if spec.original_space_shell:
+        from .space_shell import add_owner_entries
+        source = add_owner_entries(source, manifest)
     from .coverage import record_formula_coverage
     record_formula_coverage(manifest, spec, python_cells)
     import Cython

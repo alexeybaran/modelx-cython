@@ -55,6 +55,10 @@ class KernelSpec:
     # Optional build contract for numeric fields of object-valued row references.
     # The model's formula source and public references remain unchanged.
     typed_mapping_inputs: dict[str, dict[str, str]] | None = None
+    # Original compiler cache domains, rather than a projection-sized guess.
+    cache_domains: dict | None = None
+    # Internal integration contract; never changes the existing frame default.
+    original_space_shell: bool = False
 
     def __post_init__(self):
         if not isinstance(self.steps, int) or isinstance(self.steps, bool) or not 0 < self.steps <= 1000000:

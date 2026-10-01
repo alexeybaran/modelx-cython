@@ -577,7 +577,7 @@ def raw_context_declaration(cls_name, owner, arrays, scalar_types=None):
     return '\n'.join(fields) + '\n'
 
 
-def transform(source, declarations, module, path):
+def transform(source, declarations, module, path, *, frame_cells=None):
     import os
     connected = os.environ.get('MX_CY_CONNECTED_NATIVE', '1') == '1'
     compact_context = os.environ.get('MX_CY_COLLECT_COMPACT_CONTEXT', '0') == '1'
@@ -697,7 +697,10 @@ def transform(source, declarations, module, path):
             cached = [Storage(arrays, owner).visit(s) for s in cached]
             # NodeTransformer may return statement lists inside compound suites.
             if native_keys:native_keys.begin_formula()
-            formula_body = [Edges(cls.name, selected, native_keys, indexed,
+            # A frame-backed dependency must reach its public entry. Sending it
+            # to the legacy native entry would publish a competing exact cache.
+            edge_targets = selected - set((frame_cells or {}).get(cls.name, ()))
+            formula_body = [Edges(cls.name, edge_targets, native_keys, indexed,
                                   compact if n in compact else (),
                                   '_mx_ctx' if raw_context else '_mx_owner',
                                   not frame_entry).visit(s)

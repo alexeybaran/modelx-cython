@@ -367,6 +367,18 @@ def main_handler(args: argparse.Namespace, stdout: IO[str], stderr: IO[str]) -> 
 
         # Phase 3: transform and write out
         for u in units:
+            shell_plans = {}
+            if os.environ.get('MX_CY_ORIGINAL_FRAME_SHELL', '0') == '1':
+                from modelx_cython._frame_runtime.space_shell import plan, emit_private_kernels
+                shell_plans, shell_inventory = plan(u)
+                u.abs_src_path.with_suffix('.frame-shell.json').write_text(
+                    json.dumps({'schema': 1, 'cells': shell_inventory}, indent=2), encoding='utf-8')
+                private_modules = emit_private_kernels(
+                    shell_plans, u.abs_src_path.parent, u.fqname.rsplit('.', 1)[0])
+                modules.extend(u.rel_src_path.parent / m for m in private_modules)
+                if shell_plans:
+                    shutil.copy(pathlib.Path(__file__).parent / '_frame_runtime' / 'space_owner.py',
+                                model_path / '_mx_frame_owner.py')
             trans = ModuleTransformer(
                 u.source, u.module_info,
                 resolver=resolver,
@@ -411,14 +423,28 @@ def main_handler(args: argparse.Namespace, stdout: IO[str], stderr: IO[str]) -> 
 
             # Native execution beneath ordinary Space/Cell entry points.
             import os as _native_os
+            shell_original_methods = {}
+            if shell_plans:
+                shell_original_methods = {
+                    cls.name: {fn.name: fn for fn in cls.body if isinstance(fn, ast.FunctionDef)}
+                    for cls in ast.parse(u.abs_src_path.read_text(encoding='utf-8')).body
+                    if isinstance(cls, ast.ClassDef)}
             if _native_os.environ.get("MX_CY_INTEGRATED_NATIVE", "1") == "1":
                 from modelx_cython.integrated_native import transform as native_transform
                 native_py, native_pxd = native_transform(
                     u.abs_src_path.read_text(encoding="utf-8"),
                     u.abs_pxd_path.read_text(encoding="utf-8"), u.module_info,
-                    u.abs_src_path.with_suffix(".native.json"))
+                    u.abs_src_path.with_suffix(".native.json"),
+                    frame_cells={name: p['methods'] for name, p in shell_plans.items()} or None)
                 u.abs_src_path.write_text(native_py, encoding="utf-8")
                 u.abs_pxd_path.write_text(native_pxd, encoding="utf-8")
+            if shell_plans:
+                from modelx_cython._frame_runtime.space_shell import transform as shell_transform
+                shell_py, shell_pxd = shell_transform(
+                    u.abs_src_path.read_text(encoding='utf-8'),
+                    u.abs_pxd_path.read_text(encoding='utf-8'), shell_plans, shell_original_methods)
+                u.abs_src_path.write_text(shell_py, encoding='utf-8')
+                u.abs_pxd_path.write_text(shell_pxd, encoding='utf-8')
 
             # Reuse scratch cache owners only for exported collect traversals.
             if _native_os.environ.get("MX_CY_COLLECT_REUSE", "1") == "1":
@@ -429,6 +455,11 @@ def main_handler(args: argparse.Namespace, stdout: IO[str], stderr: IO[str]) -> 
                     u.abs_src_path.with_suffix(".collect.json"))
                 u.abs_src_path.write_text(collect_py, encoding="utf-8")
                 u.abs_pxd_path.write_text(collect_pxd, encoding="utf-8")
+
+            if shell_plans and _native_os.environ.get('MX_CY_COLLECT_REUSE', '1') == '1':
+                from modelx_cython._frame_runtime.space_shell import add_collect_hooks
+                u.abs_src_path.write_text(add_collect_hooks(
+                    u.abs_src_path.read_text(encoding='utf-8'), shell_plans), encoding='utf-8')
 
             # Experiment-only native traversal for one typed numeric sum leaf.
             if _native_os.environ.get("MX_CY_COLLECT_NATIVE", "0") == "1":
