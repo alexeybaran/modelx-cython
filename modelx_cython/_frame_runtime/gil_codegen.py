@@ -103,7 +103,8 @@ def augment(source, manifest, spec, forced_python=()):
             return self.generic_visit(node)
 
         def visit_Call(self, node):
-            if (isinstance(node.func,ast.Attribute) and isinstance(node.func.value,ast.Name)
+            if (not spec.original_space_shell
+                    and isinstance(node.func,ast.Attribute) and isinstance(node.func.value,ast.Name)
                     and node.func.value.id == 'lookup' and node.func.attr in
                     {'at','get','previous','previous_group','max_key','max_level','keys','group_curve'} and node.args):
                 table = node.args[0]
@@ -149,6 +150,10 @@ def augment(source, manifest, spec, forced_python=()):
             if node.id in self.cython_names:
                 return node
             if isinstance(node.ctx,ast.Load) and node.id in globals_ and node.id not in self.locals:
+                if spec.original_space_shell and node.id in spec.inputs:
+                    return ast.copy_location(ast.Call(ast.Attribute(
+                        ast.Attribute(ast.Name('self', ast.Load()), '_python_scope', ast.Load()),
+                        'original_reference', ast.Load()), [ast.Constant(node.id)], []), node)
                 return ast.copy_location(ast.Attribute(ast.Name('self',ast.Load()), '_gil_global_'+node.id,ast.Load()),node)
             return node
 
@@ -170,7 +175,7 @@ def augment(source, manifest, spec, forced_python=()):
             for key in sorted(entries))
     source=source.replace('        self._python_scope.select(self._records[policy], policy)',
                            '        self._python_scope.select(self._records[policy], policy)\n'+assignments,1)
-    if manifest.get('native_scalar_outputs'):
+    if manifest.get('native_scalar_outputs') or (spec.original_space_shell and manifest.get('python_cells')):
         source += ('\n    def attach_python_scope_current(self):\n'
                    '        """Bind Python fallbacks after a native entry without clearing its cache."""\n'
                    '        self._require_idle()\n'
@@ -192,7 +197,8 @@ def augment(source, manifest, spec, forced_python=()):
             transformed = binder.visit(copy.deepcopy(statement))
             if transformed is not None:
                 methods.extend(textwrap.indent(ast.unparse(ast.fix_missing_locations(transformed)), '        ').splitlines())
-        if name in numeric:methods.append('        raise ValueError("Numeric Cell formula fell through without a result")')
+        if name in numeric and not spec.original_space_shell:
+            methods.append('        raise ValueError("Numeric Cell formula fell through without a result")')
         methods.append('')
         source=source.replace(f'entry.value = self._object_fn_{name}(',f'entry.value = self._gil_formula_{name}(')
         source=source.replace(f'value = self._object_fn_{name}(',f'value = self._gil_formula_{name}(')
@@ -212,6 +218,8 @@ def augment(source, manifest, spec, forced_python=()):
         args = ', '.join(p['name'] for p in params)
         methods.append(f"    cdef inline {CTYPES[hint['return']]} _native_cell_{name}(self"
                        + (', ' + typed if typed else '') + ') except? -1:')
+        if spec.original_space_shell:
+            methods.append('        self._mx_synchronize_inputs()')
         if manifest.get('native_error_abi', '').endswith('guard') or manifest.get('native_error_abi') == 'reentrant_guard_with_checked_python_miss':
             # The native Cell ABI can throw MxAbort. A direct call from a GIL
             # formula has no surrounding C++ guard and would terminate the
@@ -296,7 +304,7 @@ def augment(source, manifest, spec, forced_python=()):
     init += '\n' + '\n'.join(f"        self._gil_raw_table_{n} = self._python_scope.namespace['data'].{n}()" for n in sorted(raw_tables))
     source=source.replace('        self._python_scope.select(self._records[policy], policy)',
         '        self._python_scope.select(self._records[policy], policy)\n'+init,1)
-    if manifest.get('native_scalar_outputs'):
+    if manifest.get('native_scalar_outputs') or (spec.original_space_shell and manifest.get('python_cells')):
         source=source.replace('        self._python_scope.select(self._records[0], 0)',
                               '        self._python_scope.select(self._records[0], 0)\n'+init,1)
     manifest['bound_data_readers'] = sorted(raw_tables)

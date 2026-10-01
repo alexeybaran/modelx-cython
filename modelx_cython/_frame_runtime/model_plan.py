@@ -15,6 +15,7 @@ from .compiler import FrontendRewrite, function_ast, type_info
 from .lookups import (Curve, CurveTable, IndexedFloat1, IndexedFloat2,
                       IndexedInt1, IndexedInt2)
 from .python_calculator import referenced_names
+from modelx_cython.formula_emitter import is_formula, with_annotations
 
 
 def _name(*parts):
@@ -87,7 +88,7 @@ def derive_spec(module, tables, *, references, space_formula, outputs, steps, le
         allowed = (pd.DataFrame, pd.Series, np.ndarray) if cython_objects else (pd.DataFrame,)
         if not table.isidentifier() or not isinstance(frame, allowed):
             raise ContractError('Data must be named DataFrames, or opaque Series/ndarrays in Cython-object mode')
-    cells = {n: f for n, f in vars(module).items() if inspect.isfunction(f) and hasattr(f, '__kernel_cell__')}
+    cells = {n: f for n, f in vars(module).items() if is_formula(f) and hasattr(f, '__kernel_cell__')}
     trees = {n: function_ast(f) for n, f in cells.items()}
     calls = [(name, node) for name, tree in trees.items() for node in ast.walk(tree)
              if isinstance(node, ast.Call) and FrontendRewrite._lookup_name(node.func)]
@@ -303,9 +304,7 @@ def derive_spec(module, tables, *, references, space_formula, outputs, steps, le
         annotations = {k: TableKey(domains[v.table], v.default) if isinstance(v, TableKey) and v.table in domains else v
                        for k, v in fn.__annotations__.items()}
         if annotations != fn.__annotations__:
-            bound = types.FunctionType(fn.__code__, fn.__globals__, fn.__name__, fn.__defaults__, fn.__closure__)
-            bound.__dict__.update(fn.__dict__); bound.__annotations__ = annotations
-            bound.__module__ = fn.__module__; clone.__dict__[name] = bound
+            clone.__dict__[name] = with_annotations(fn, annotations)
     # Stable generic ordering; the model author never names the physical inputs.
     for schema in schemas.values(): schema['native'] = bool(schema['columns'])
     inputs = dict(sorted(inputs.items()))

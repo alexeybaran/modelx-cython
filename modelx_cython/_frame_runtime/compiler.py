@@ -61,7 +61,8 @@ def type_info(typ):
 
 
 def function_ast(fn):
-    node = ast.parse(textwrap.dedent(inspect.getsource(fn))).body[0]
+    from modelx_cython.formula_emitter import formula_source
+    node = ast.parse(textwrap.dedent(formula_source(fn))).body[0]
     node.decorator_list = []
     return node
 
@@ -941,7 +942,10 @@ def emit(spec, *, diagnostics=False, python_cells=()):
                             if spec.cython_objects else set())
         python_source, required, used_inputs = bundle_source(
             cells, python_reasons, spec.inputs, enums,
-            compiled_numeric=compiled_numeric)
+            compiled_numeric=compiled_numeric | {
+                name for name in object_cells
+                if spec.cython_objects and name not in python_cells
+                and not cython_fallback_reasons(cells[name], all_rows)})
         manifest.update(python_cells=python_reasons, python_source=python_source,
                         python_references=required, python_inputs=used_inputs,
                         python_enums={k: type_info(v) for k, v in enums.items()},
@@ -981,6 +985,8 @@ def build(spec, destination, *, diagnostics=False, python_cells=(),
     parts, manifest = emit(spec, diagnostics=diagnostics, python_cells=python_cells)
     if spec.cython_objects:
         manifest["cython_objects"] = True
+    if spec.original_space_shell:
+        manifest['original_space_shell'] = True
     from .frame_codegen import to_c_frame
     source = to_c_frame(parts, manifest)
     if spec.cython_objects:
@@ -996,11 +1002,11 @@ def build(spec, destination, *, diagnostics=False, python_cells=(),
         if spec.cython_objects:
             from .collect_map_codegen import augment as add_collect_map
             source = add_collect_map(source, manifest, spec)
+    from .coverage import record_formula_coverage
+    record_formula_coverage(manifest, spec, python_cells)
     if spec.original_space_shell:
         from .space_shell import add_owner_entries
         source = add_owner_entries(source, manifest)
-    from .coverage import record_formula_coverage
-    record_formula_coverage(manifest, spec, python_cells)
     import Cython
     build_flags = {k: os.environ.get(k, '') for k in ('CC', 'CXX', 'CFLAGS', 'CXXFLAGS', 'LDFLAGS')}
     build_flags.update(cython=Cython.__version__, python=sys.version)

@@ -365,12 +365,18 @@ def main_handler(args: argparse.Namespace, stdout: IO[str], stderr: IO[str]) -> 
             (model_path / "_mx_helper_inventory.json").write_text(
                 json.dumps({"schema": 1, "calls": helper_inventory}, indent=2), encoding="utf-8")
 
+        # Final type/reference/cache authority shared by every emission choice.
+        from modelx_cython.compilation_plan import build_package_plan
+        package_plan = build_package_plan(units)
+        (model_path / '_mx_compilation_plan.json').write_text(
+            json.dumps(package_plan.inventory(), indent=2), encoding='utf-8')
+
         # Phase 3: transform and write out
         for u in units:
             shell_plans = {}
             if os.environ.get('MX_CY_ORIGINAL_FRAME_SHELL', '0') == '1':
                 from modelx_cython._frame_runtime.space_shell import plan, emit_private_kernels
-                shell_plans, shell_inventory = plan(u)
+                shell_plans, shell_inventory = plan(u, package_plan=package_plan)
                 u.abs_src_path.with_suffix('.frame-shell.json').write_text(
                     json.dumps({'schema': 1, 'cells': shell_inventory}, indent=2), encoding='utf-8')
                 private_modules = emit_private_kernels(
@@ -379,6 +385,14 @@ def main_handler(args: argparse.Namespace, stdout: IO[str], stderr: IO[str]) -> 
                 if shell_plans:
                     shutil.copy(pathlib.Path(__file__).parent / '_frame_runtime' / 'space_owner.py',
                                 model_path / '_mx_frame_owner.py')
+                    # Existing checked receiver/codec utilities, without a
+                    # CompiledModel/Space facade or an installed compiler.
+                    support = model_path / '_mx_frame_support'
+                    support.mkdir(exist_ok=True)
+                    (support / '__init__.py').write_text('', encoding='utf-8')
+                    for name in ('python_calculator.py', 'contracts.py', 'enum_binding.py'):
+                        shutil.copy(pathlib.Path(__file__).parent / '_frame_runtime' / name,
+                                    support / name)
             trans = ModuleTransformer(
                 u.source, u.module_info,
                 resolver=resolver,

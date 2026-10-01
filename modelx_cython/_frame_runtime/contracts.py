@@ -86,8 +86,10 @@ class KernelSpec:
 
     @property
     def cells(self):
+        from modelx_cython.formula_emitter import SourceFormula
         return {k: v for k, v in vars(self.module).items()
-                if inspect.isfunction(v) and hasattr(v, '__kernel_cell__')}
+                if (inspect.isfunction(v) or isinstance(v, SourceFormula))
+                and hasattr(v, '__kernel_cell__')}
 
     @property
     def enums(self):

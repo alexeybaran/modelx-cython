@@ -28,6 +28,8 @@ def test_original_shell_frame_cache_and_subclass_abi(tmp_path):
         'parent': 'def parent(n):\n return leaf(n) + leaf(n)\n',
         'fib': 'def fib(n):\n return float(n) if n < 2 else 0.5 * (fib(n-1) + fib(n-2))\n',
         'input_value': 'def input_value():\n return offset\n',
+        'index_value': 'def index_value(n):\n return n - 1\n',
+        'even': 'def even(n):\n return n % 2 == 0\n',
         'failure': 'def failure(n):\n child = leaf(n)\n if fail: raise ValueError("retry")\n return child + 1.0\n',
         'observed': 'def observed(n):\n counts[n] = counts.get(n, 0) + 1\n return parent(n)\n',
         'uncached': 'def uncached(n):\n return leaf(n) + offset\n',
@@ -42,14 +44,23 @@ def test_original_shell_frame_cache_and_subclass_abi(tmp_path):
         metadata.unlink()
     (tmp_path / 'sample.py').write_text(
         'from model import mx_model\ns=mx_model.S\n'
-        'for n in range(8):\n s.observed(n)\n s.fib(n)\n s.failure(n)\n s.uncached(n)\n'
+        'for n in range(8):\n s.observed(n)\n s.fib(n)\n s.failure(n)\n s.uncached(n)\n s.index_value(n)\n s.even(n)\n'
         's.input_value()\n', encoding='utf-8')
     _run(tmp_path, ['-m', 'modelx_cython', str(tmp_path / 'model'), '--no-spec',
                     '--sample', str(tmp_path / 'sample.py'), '--translate-only'], 'translate')
     receipt = json.loads((tmp_path / 'model_cy/_mx_classes.frame-shell.json').read_text())
+    assert all(row['formula_compiler'] == 'Cython' for row in receipt['cells'])
+    assert all(row['receiver_representation'] ==
+               ('native_frame' if row['execution'] == 'frame_exact' else 'original_space')
+               for row in receipt['cells'])
     routes = {row['cell']: row['execution'] for row in receipt['cells'] if row['space'].endswith('._c_S')}
     assert routes['fib'] == routes['parent'] == routes['failure'] == 'frame_exact'
-    assert routes['observed'] == routes['uncached'] == 'original_cython'
+    assert routes['observed'] == routes['uncached'] == 'frame_exact'
+    shell_source = (tmp_path / 'model_cy/_mx_classes.py').read_text()
+    assert '.call(' not in shell_source
+    assert '_mx_frame__c_S_fib(self._mx_frame_owner.kernel, self, n,' in shell_source
+    private_pxd = next((tmp_path / 'model_cy/_mx_frame_S').rglob('_kernel.pxd')).read_text()
+    assert 'cdef double _mx_shell_fib(object kernel, object receiver, long long n,' in private_pxd
     _run(tmp_path, ['-m', 'modelx_cython', str(tmp_path / 'model'), '--compile-only'], 'build')
     (tmp_path / 'override.pyx').write_text('''
 from model_cy._mx_classes cimport _c_S
@@ -75,6 +86,8 @@ from override import Private, Public, uncached_parent, uncached_leaf
 factory = type(mx_model)
 m = factory(); s = m.S
 assert s.parent(0) == -2.0
+assert s.index_value(0) == -1 and s.index_value(1) == 0
+assert s.even(0) is True and s.even(1) is False
 assert s.observed(0) == -2.0 and s.counts == {0: 1}
 assert s.input_value() == 0.0
 s.offset = 10.0
@@ -114,6 +127,89 @@ assert sub.parent(0) == 24.0
 sub.leaf = lambda n: 20.0
 assert sub.parent(1) == 40.0
 print('original shell + native exact graph: all behavioral checks passed')
+''', encoding='utf-8')
+    _run(tmp_path, ['verify.py'], 'verify')
+
+
+def test_original_shell_connected_space_checked_edges(tmp_path):
+    """Resolved original Space references enter Cython without a second facade."""
+    import modelx as mx
+    m = mx.new_model('ConnectedShell')
+    data = m.new_space('Data')
+    data.values = [10.0, 20.0, 30.0, 40.0]
+    data.new_cells('value', 'def value(n):\n return values[n]\n')
+    import importlib
+    import pandas as pd
+    (tmp_path/'fixture_lookup.py').write_text(
+        'class Lookup:\n'
+        ' def get(self, table, key, column, default=0.0):\n'
+        '  return table.loc[key, column] if key in table.index else default\n'
+        'lookup = Lookup()\n', encoding='utf-8')
+    sys.path.insert(0, str(tmp_path))
+    try:
+        lookup = importlib.import_module('fixture_lookup').lookup
+    finally:
+        sys.path.pop(0)
+    data.table_data = pd.DataFrame({'value': data.values})
+    data.new_cells('table', 'def table():\n return table_data\n')
+    s = m.new_space('S')
+    s.data = data
+    s.other = data
+    s.lookup = lookup
+    s.hook = None
+    s.new_cells('checked_lookup', 'def checked_lookup(n):\n return float(lookup.get(data.table(), n, \'value\', 0.0))\n')
+    s.new_cells('read', 'def read(n):\n return data.value(n)\n')
+    s.new_cells('alias', 'def alias(n):\n return other.value(n)\n')
+    s.new_cells('after_callback',
+                'def after_callback(n):\n hook()\n return data.value(n) + read(n)\n')
+    m.export(tmp_path / 'model')
+    m.close()
+    (tmp_path / 'sample.py').write_text(
+        'from model import mx_model\n'
+        's=mx_model.S\ns.hook=lambda: None\n'
+        'for n in range(4):\n s.read(n)\n s.alias(n)\n s.after_callback(n)\n s.checked_lookup(n)\n', encoding='utf-8')
+    _run(tmp_path, ['-m', 'modelx_cython', str(tmp_path/'model'), '--no-spec',
+                    '--sample', str(tmp_path/'sample.py'), '--translate-only'], 'translate')
+    receipt = json.loads((tmp_path/'model_cy/_mx_classes.frame-shell.json').read_text())
+    routes = {(row['space'].split('.')[-1], row['cell']): row['execution']
+              for row in receipt['cells']}
+    for key in (('_c_Data', 'value'), ('_c_Data', 'table'), ('_c_S', 'read'), ('_c_S', 'alias'), ('_c_S', 'after_callback'), ('_c_S','checked_lookup')):
+        assert routes[key] == 'frame_exact', (key, routes)
+    _run(tmp_path, ['-m', 'modelx_cython', str(tmp_path/'model'), '--compile-only'], 'build')
+    (tmp_path/'verify.py').write_text('''
+import pickle
+from model_cy import mx_model
+from model_cy._mx_frame_owner import SpaceFrameOwner
+created = []
+original_init = SpaceFrameOwner.__init__
+def record_owner(self, module, inputs):
+    original_init(self, module, inputs)
+    created.append(module)
+SpaceFrameOwner.__init__ = record_owner
+m = type(mx_model)(); s = m.S
+assert s.data is s.other is m.Data
+assert s.read(0) == s.alias(0) == s.checked_lookup(0) == 10.0
+assert any('_mx_frame_S.' in name for name in created)
+assert any('_mx_frame_Data.' in name for name in created)
+other_model = type(mx_model)()
+other_model.Data.values = [100.0, 200.0, 300.0, 400.0]
+other_model.Data.table_data['value'] = other_model.Data.values
+s.data = other_model.Data
+assert s.read(0) == 10.0  # rebinding does not invalidate a completed result
+assert s.read(1) == s.checked_lookup(1) == 200.0 and s.alias(1) == 20.0
+def rebind():
+    s.data = m.Data
+s.hook = rebind
+assert s.after_callback(2) == 60.0
+assert s.data is m.Data
+assert s.read(2) == 30.0
+m.Data.values[3] = 44.0
+assert s.read(3) == 44.0  # mutable input observed before the first evaluation
+q = pickle.loads(pickle.dumps(m))
+assert q.S.data is q.S.other is q.Data
+q.Data.values[0] = -100.0
+assert q.S.read(0) == 10.0 and q.S.read(3) == 44.0
+print('original connected Spaces, aliases, live rebinding and retained caches passed')
 ''', encoding='utf-8')
     _run(tmp_path, ['verify.py'], 'verify')
 
@@ -191,14 +287,22 @@ def test_original_dynamic_shell_collect_detachment_and_ownership(tmp_path):
     outer = m.new_space('Outer')
     outer.Policies = policies
     outer.new_cells('total', 'def total():\n value = 0.0\n for i in Policies.policy_ids:\n  value += Policies[i].fib(7)\n return value\n')
+    outer.new_cells('collected_total', 'def collected_total():\n return Policies.collect().sum.total\n')
     m.export(tmp_path / 'model')
     m.close()
     (tmp_path / 'sample.py').write_text(
-        'from model import mx_model\nmx_model.Outer.total()\nmx_model.Policies.collect()\n', encoding='utf-8')
+        'from model import mx_model\nmx_model.Outer.total()\nmx_model.Outer.collected_total()\n', encoding='utf-8')
     _run(tmp_path, ['-m', 'modelx_cython', str(tmp_path / 'model'), '--no-spec',
                     '--sample', str(tmp_path / 'sample.py')], 'build')
     receipt = json.loads((tmp_path / 'model_cy/_mx_classes.frame-shell.json').read_text())
     assert any(r['cell'] == 'fib' and r['execution'] == 'frame_exact' for r in receipt['cells'])
+    shared_plan = json.loads((tmp_path / 'model_cy/_mx_compilation_plan.json').read_text())
+    declaration = shared_plan['spaces']['model_cy.Policies']['collection']
+    assert declaration['over'] == 'policy_id' and declaration['parameters'] == ['shock']
+    assert declaration['domain_source'] == 'tuple(self.policy_ids)'
+    assert shared_plan['collection_consumers'] == [{
+        'cell': 'model_cy.Outer.collected_total', 'expression': 'self.Policies.collect()',
+        'target': 'model_cy.Policies', 'declared': True}]
     (tmp_path / 'verify.py').write_text('''
 import pickle
 from model_cy import mx_model
@@ -206,7 +310,8 @@ from model_cy._mx_frame_owner import SpaceFrameOwner
 created = []
 init = SpaceFrameOwner.__init__
 def record(self, *args):
-    init(self, *args); created.append(self)
+    init(self, *args)
+    if '_mx_frame_Policies.' in self.module: created.append(self)
 SpaceFrameOwner.__init__ = record
 factory = type(mx_model)
 m = factory(); s = m.Policies
@@ -238,3 +343,93 @@ assert restored.sum.total == 6.0 and restored.individual[3].values == {0: 3.0, 7
 print('dynamic construction, compiled portfolio, collect cache and detachment passed')
 ''', encoding='utf-8')
     _run(tmp_path, ['verify.py'], 'verify')
+
+
+def test_original_shell_object_boundaries_and_relocated_runtime(tmp_path):
+    import modelx as mx
+    m = mx.new_model('ObjectShell')
+    m.allow_none = True
+    s = m.new_space('S')
+    s.flags = {'fail': False}
+    s.factory = dict
+    s.offset = -1.0
+    for name, source in {
+        'child': 'def child(n):\n return offset + float(n)\n',
+        'make': 'def make():\n return factory()\n',
+        'report': ('def report(n):\n item = make()\n value = child(n)\n'
+                   ' if flags["fail"]: raise ValueError("object retry")\n'
+                   ' return {"item": item, "value": value}\n'),
+        'parent': 'def parent(n):\n return report(n)["value"] * 2.0\n',
+        'caught': ('def caught(n):\n try:\n  return parent(n)\n'
+                   ' except ValueError:\n  return child(n)\n'),
+        'nothing': 'def nothing():\n return None\n',
+    }.items():
+        s.new_cells(name, source)
+    s.make.is_cached = False
+    m.export(tmp_path / 'model')
+    m.close()
+    (tmp_path/'sample.py').write_text(
+        'from model import mx_model\ns=mx_model.S\n'
+        'for n in range(3):\n s.caught(n)\n s.report(n)\n'
+        's.nothing()\n', encoding='utf-8')
+    _run(tmp_path, ['-m', 'modelx_cython', str(tmp_path/'model'), '--no-spec',
+                    '--sample', str(tmp_path/'sample.py')], 'build')
+    receipt = json.loads((tmp_path/'model_cy/_mx_classes.frame-shell.json').read_text())
+    assert all(row['execution'] == 'frame_exact' for row in receipt['cells'])
+    manifest = json.loads((tmp_path/'model_cy/_mx_frame_S/manifest.json').read_text())
+    assert manifest['cells']['make']['cached'] is False
+    assert manifest['cells']['report']['coverage']['body_backend'] == 'cython_gil'
+    assert not any(row['coverage']['detached_python'] for row in manifest['cells'].values())
+    binding_source = next((tmp_path/'model_cy/_mx_frame_S').rglob('_python.py')).read_text()
+    assert 'def report(' not in binding_source and 'def make(' not in binding_source
+    # Relocation must not need compiler/modelx imports or the build directory.
+    import shutil
+    relocated = tmp_path/'relocated'
+    shutil.copytree(tmp_path/'model_cy', relocated/'model_cy')
+    (relocated/'verify.py').write_text('''
+import gc, importlib.abc, pickle, sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).parent))
+class NoCompiler(importlib.abc.MetaPathFinder):
+    def find_spec(self, name, path=None, target=None):
+        if name.split('.')[0] in ('modelx', 'modelx_cython'):
+            raise AssertionError('Compiled package imported development dependency: ' + name)
+sys.meta_path.insert(0, NoCompiler())
+from model_cy import mx_model
+destroyed = []
+class Token:
+    def __del__(self): destroyed.append(1)
+m = type(mx_model)(); s = m.S
+s.factory = Token
+s.flags = {'fail': True}
+for _ in range(2):
+    try: s.parent(0)
+    except ValueError as e: assert str(e) == 'object retry'
+    else: raise AssertionError('failure was swallowed')
+assert len(destroyed) == 2
+assert s.caught(1) == 0.0
+assert len(destroyed) == 3
+s.offset = 100.0
+s.flags = {'fail': False}
+assert s.parent(0) == -2.0  # completed child survives object failure
+assert s.parent(1) == 0.0
+assert s.child(2) == 102.0  # replacement before uncached work is synchronized
+assert s.report(0) is s.report(0)
+assert s.nothing() is None
+q = pickle.loads(pickle.dumps(s))
+q.offset = 999.0
+assert q.parent(0) == -2.0 and q.report(0)['value'] == -1.0
+assert q.report(0) is q.report(0) and q.nothing() is None
+u = type(mx_model)()
+def change_input():
+    u.S.offset = 200.0
+    return Token()
+u.S.factory = change_input
+assert u.S.parent(2) == 404.0  # callback changes an input before uncached child work
+del u
+del s, q, m
+gc.collect()
+assert len(destroyed) >= 5
+print('checked object/numeric failures, uncached effects, cache restore and relocation passed')
+''', encoding='utf-8')
+    _run(relocated, ['-I', str(relocated/'verify.py')], 'verify')

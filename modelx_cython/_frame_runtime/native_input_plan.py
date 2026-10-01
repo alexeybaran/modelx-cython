@@ -9,6 +9,7 @@ import types
 
 from .contracts import ContractError
 from .lookups import IndexedFloat1
+from modelx_cython.formula_emitter import with_annotations
 
 
 _KINDS = {'float': float, 'float64_1d': IndexedFloat1}
@@ -61,16 +62,12 @@ def expand(spec, signatures, direct_inputs):
         if any(kind not in _ANNOTATIONS for kind in hint['parameters'].values()):
             continue
         fn = spec.cells[name]
-        bound = types.FunctionType(fn.__code__, fn.__globals__, fn.__name__,
-                                   fn.__defaults__, fn.__closure__)
-        bound.__dict__.update(fn.__dict__)
-        bound.__annotations__ = {
+        annotations = {
             **{key: _ANNOTATIONS[kind]
                for key, kind in hint['parameters'].items()},
             'return': _ANNOTATIONS[hint['return']],
         }
-        bound.__module__ = fn.__module__
-        setattr(clone, name, bound)
+        setattr(clone, name, with_annotations(fn, annotations))
     model['native_row_references'] = {
         name: binding for name, binding in bindings.items()
         if binding['kind'] == 'row_reference_numeric'

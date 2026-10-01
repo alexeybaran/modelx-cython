@@ -141,7 +141,7 @@ def augment(source, manifest):
 
     marker = 'cdef class Kernel:\n'
     source = source.replace(marker, marker + '\n'.join(fields) + '\n', 1)
-    lazy_object_cache = bool(manifest.get('native_scalar_outputs'))
+    lazy_object_cache = bool(manifest.get('native_scalar_outputs') or manifest.get('original_space_shell'))
     if lazy_object_cache:
         source = source.replace('    def __init__(self, records):\n',
                                 '    def __init__(self, records):\n        self._object_dirty = []\n', 1)

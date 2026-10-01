@@ -7,12 +7,13 @@ silently drift from the decision that selected a detached Python calculator.
 import ast
 import hashlib
 import inspect
+from modelx_cython.formula_emitter import formula_source, formula_location
 import textwrap
 
 
 def cython_fallback_reasons(fn, cell_names, *, forced=False):
     """Explain only the bounded GIL-Cython boundary, not scalar/native typing."""
-    node=ast.parse(textwrap.dedent(inspect.getsource(fn))).body[0]
+    node=ast.parse(textwrap.dedent(formula_source(fn))).body[0]
     reasons=[]
     if forced:reasons.append('explicit_python_override')
     kinds=((ast.Lambda,'lambda'),(ast.Yield,'yield'),(ast.YieldFrom,'yield_from'),
@@ -44,7 +45,8 @@ def record_formula_coverage(manifest,spec,forced_python=()):
     """Attach per-formula evidence without changing the generated hot path."""
     counts={};forced=set(forced_python)
     for name,row in manifest['cells'].items():
-        fn=spec.cells[name];source=textwrap.dedent(inspect.getsource(fn));tree=ast.parse(source)
+        fn=spec.cells[name];source=textwrap.dedent(formula_source(fn));tree=ast.parse(source)
+        source_file, source_line = formula_location(fn)
         calculator=row.get('calculator','native')
         backend={'native':'cython_nogil','cython_scalar':'cython_gil',
                  'cython_object':'cython_gil','python':'detached_python'}[calculator]
@@ -57,7 +59,7 @@ def record_formula_coverage(manifest,spec,forced_python=()):
             and inspect.ismodule(fn.__globals__.get(n.func.value.id))})
         row['coverage']={'body_backend':backend,'detached_python':backend=='detached_python',
             'fallback_reasons':reasons,'source_sha256':hashlib.sha256(source.encode()).hexdigest(),
-            'source_file':inspect.getsourcefile(fn),'source_line':inspect.getsourcelines(fn)[1],
+            'source_file':source_file,'source_line':source_line,
             'module_call_names':modules,
             'contains_attribute_calls':any(isinstance(n,ast.Call) and isinstance(n.func,ast.Attribute) for n in ast.walk(tree)),
             'contains_comprehension':any(isinstance(n,(ast.ListComp,ast.DictComp,ast.SetComp,ast.GeneratorExp)) for n in ast.walk(tree)),

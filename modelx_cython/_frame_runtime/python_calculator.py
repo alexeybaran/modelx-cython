@@ -67,6 +67,7 @@ def cell_dependencies(fn, cells, seen=None):
 
 def bundle_source(cells, python_cells, inputs, enums, *, compiled_numeric=()):
     """Bundle executable source and imports, not live modelx/exported objects."""
+    from modelx_cython.formula_emitter import formula_source, is_formula
     compiled_numeric = set(compiled_numeric)
     from .enum_binding import enum_origin
     chunks = ['# Detached raw formulas. Cell names are rebound by PythonScope.', 'from enum import IntEnum']
@@ -87,7 +88,7 @@ def bundle_source(cells, python_cells, inputs, enums, *, compiled_numeric=()):
     def add_function(name, fn):
         if fn.__closure__:
             raise ContractError(name + ': captured Python closures need an explicit detached binding')
-        node = ast.parse(textwrap.dedent(inspect.getsource(fn))).body[0]
+        node = ast.parse(textwrap.dedent(formula_source(fn))).body[0]
         if not isinstance(node, ast.FunctionDef):
             raise ContractError(name + ': a plain Python function is required')
         if any(isinstance(n, (ast.Global, ast.Nonlocal)) for n in ast.walk(node)):
@@ -121,7 +122,7 @@ def bundle_source(cells, python_cells, inputs, enums, *, compiled_numeric=()):
         done.add(name)
         if isinstance(value, types.ModuleType):
             chunks.append(f'import {value.__name__} as {name}')
-        elif inspect.isfunction(value) and (name in python_cells or value.__module__ == owner):
+        elif is_formula(value) and (name in python_cells or value.__module__ == owner):
             add_function(name, value)
         elif (inspect.isfunction(value) or inspect.isclass(value)) and '<locals>' not in value.__qualname__:
             module = value.__module__
@@ -146,6 +147,7 @@ class CellCodec:
     def __init__(self, manifest, kernel, record):
         from .enum_binding import resolve_enum
         self.manifest, self.kernel = manifest, kernel
+        self._original_receiver = None
         self._record, self._raw_record = None, record
         infos = list(manifest['inputs'].values())
         for row in manifest['cells'].values():
@@ -247,6 +249,7 @@ class PythonScope(CellCodec):
     """One receiver/globals namespace per native context, no cache of its own."""
     def __init__(self, artifact, manifest, kernel, bindings=None, *, program=None):
         self.manifest, self.kernel = manifest, kernel
+        self._original_receiver = None
         self.bindings = tuple(dict(row) for row in bindings) if bindings is not None else ()
         if program is None:
             path = Path(artifact) / manifest['package'] / '_python.py'
@@ -273,8 +276,10 @@ class PythonScope(CellCodec):
                     or ('module' in info and actual is not resolve_enum(info))):
                 raise ContractError('Public Enum contract changed: ' + name)
         compiled_numeric = set(manifest.get('cython_numeric_fallback_cells', ()))
+        compiled_objects = set(manifest.get('cython_object_cells', ()))
         self.calculators = {name: (getattr(kernel, '_gil_entry_' + name)
-                                   if name in compiled_numeric else self.namespace[name])
+                                   if name in compiled_numeric else None
+                                   if name in compiled_objects else self.namespace[name])
                             for name in manifest['python_cells']}
         self.calls = {name: 0 for name in self.calculators}
         self._record, self._raw_record = {}, ()
@@ -301,12 +306,19 @@ class PythonScope(CellCodec):
         for name in self.manifest['python_inputs']:
             self.namespace[name] = self.decode(self.manifest['inputs'][name], self.record[name])
 
+    def original_reference(self, name):
+        """Ordinary public fields remain live across checked callback boundaries."""
+        receiver = getattr(self, '_original_receiver', None)
+        return getattr(receiver, name) if receiver is not None else self.namespace[name]
+
     def calculate(self, name, arguments):
         row = self.manifest['cells'][name]
         args = arguments if self._plain_arguments[name] else tuple(self.decode(p['type'], value) for p, value in zip(row['params'], arguments))
         if self.diagnostics:
             self.calls[name] += 1
         value = self.calculators[name](*args)
+        if getattr(self, '_original_receiver', None) is not None:
+            self.kernel._mx_synchronize_inputs()
         if value is None and row.get('allow_none') is False:
             raise ValueError('None is not allowed for Cell ' + name)
         return self.encode(row['result'], value)

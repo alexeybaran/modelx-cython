@@ -77,7 +77,7 @@ def from_modelx(model, destination, *, projection='Projection', data_space='Data
                 cython_objects=True, policy_records=None, row_references=None,
                 parameter_initial_values=None, object_bindings=(), typed_mapping_inputs=None,
                 native_typed_inputs=False, typed_object_inputs=None,
-                inherited_parameters=()):
+                inherited_parameters=(), emission_space=None):
     """Derive a self-contained build spec; destination stores source evidence only.
 
     replacements is an explicit mapping of Cell names to replacement formula source.
@@ -341,7 +341,15 @@ def from_modelx(model, destination, *, projection='Projection', data_space='Data
     from . import lookup
     module.lookup = lookup
     # Do not bake point selectors, reference defaults or modelx objects into globals.
-    exec(compile(path.read_text(encoding='utf-8'),str(path),'exec'),module.__dict__)
+    if emission_space is None:
+        exec(compile(path.read_text(encoding='utf-8'),str(path),'exec'),module.__dict__)
+    else:
+        if replacements or contracts:
+            raise ContractError('Shared compilation plan already owns formula and type decisions')
+        if set(emission_space.cells) != set(space.cells):
+            raise ContractError('Shared plan and resource adapter have different Cell identities')
+        from .compilation_plan_adapter import formula_module
+        module = formula_module(emission_space, globals_=module.__dict__, filename=str(path))
     sys.modules[module_name]=module
     for name in space.cells:
         fn=module.__dict__[name]; cell(fn, cached=getattr(space.cells[name], 'is_cached', True))

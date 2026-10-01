@@ -8,19 +8,29 @@ Unsupported graphs retain generated Cython, not an interpreted replacement.
 import ast
 import copy
 import hashlib
-import importlib.util
 import json
 import shutil
-import sys
-import textwrap
+from types import ModuleType
 from pathlib import Path
 
 from .contracts import KernelSpec
-from .exported_fallback import _UnbindFormula
+from modelx_cython.formula_emitter import FormulaEmitter, SourceFormula
 
-TYPES = {'double': float, 'long long': int, 'bint': bool}
+TYPES = {'double': float, 'long long': int, 'bint': bool, 'object': object, 'str': str}
 BUILTINS = {'float', 'int', 'bool', 'abs', 'min', 'max', 'range',
             'ValueError', 'IndexError', 'ArithmeticError', 'RuntimeError'}
+
+
+def _input_type(reference):
+    """Preserve the public field type; carry Space references as owned objects.
+
+    Calls through such a reference stay on a checked Cython edge. Its target's
+    original public wrapper remains responsible for dispatch and cache ownership.
+    This does not reconstruct a second Space or snapshot its current results.
+    """
+    if reference.mx_class:
+        return object
+    return TYPES.get(reference.get_type_expr(c_style=True))
 
 
 def _reason(fn, info):
@@ -31,20 +41,19 @@ def _reason(fn, info):
         return 'non-simple signature'
     if any(arg.arg == 'state' or arg.arg.startswith('_mx_') for arg in a.args[1:]):
         return 'name overlaps the current native receiver namespace'
-    forbidden = (ast.Try, ast.TryStar, ast.With, ast.Lambda, ast.Yield,
-                 ast.YieldFrom, ast.GeneratorExp, ast.ListComp, ast.DictComp,
-                 ast.SetComp, ast.Subscript, ast.Dict, ast.List, ast.Set,
-                 ast.NamedExpr, ast.Delete, ast.Global, ast.Nonlocal,
-                 ast.Tuple, ast.Assert, ast.Match)
+    # Object ownership and checked Python operations are supported Cython
+    # representations, not reasons to reject the dependency graph. Deferred
+    # closures and global state mutation still need a separate receiver bridge.
+    forbidden = (ast.Lambda, ast.Yield, ast.YieldFrom, ast.GeneratorExp,
+                 ast.Global, ast.Nonlocal)
     for node in ast.walk(fn):
         if isinstance(node, ast.Name) and (node.id == 'state' or node.id.startswith('_mx_')):
             return 'name overlaps the current native receiver namespace'
         if isinstance(node, forbidden) or isinstance(node, ast.FunctionDef) and node is not fn:
             return 'effectful or object formula'
-        if isinstance(node, ast.Attribute) and not (
-                isinstance(node.value, ast.Name) and node.value.id == 'self'
-                and not node.attr.startswith('_') and isinstance(node.ctx, ast.Load)):
-            return 'non-scalar reference or attribute write'
+        if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name) and node.value.id == 'self' and (
+                node.attr.startswith('_') or not isinstance(node.ctx, ast.Load)):
+            return 'receiver mutation or private receiver reference'
         if isinstance(node, ast.Call) and node.keywords:
             return 'keyword dependency call'
         if isinstance(node, ast.Raise) and (node.cause is not None or
@@ -52,7 +61,7 @@ def _reason(fn, info):
                 not isinstance(node.exc.func, ast.Name) or
                 any(not isinstance(a, ast.Constant) for a in node.exc.args)):
             return 'effectful exception construction'
-        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id not in BUILTINS:
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id not in BUILTINS and node.func.id not in {'dict', 'list', 'tuple', 'set', 'str', 'len'}:
             return 'unresolved or effectful call'
         # Keep the original power transformation until its contract is shared.
         if isinstance(node, ast.Pow):
@@ -60,21 +69,27 @@ def _reason(fn, info):
     return None
 
 
-def plan(unit):
+def plan(unit, *, package_plan=None):
     """Use final original types/specifications; do not trace or rediscover Spaces."""
-    classes = {c.name: c for c in ast.parse(unit.source).body if isinstance(c, ast.ClassDef)}
+    if package_plan is None:
+        from modelx_cython.compilation_plan import build_package_plan
+        package_plan = build_package_plan((unit,))
     plans, inventory = {}, []
     for cls_name, info in unit.module_info.classes.items():
-        methods = {f.name: f for f in classes[cls_name].body if isinstance(f, ast.FunctionDef)}
+        shared = package_plan.by_class[info.fqname]
+        methods = {'_f_' + n: c.formula_node for n, c in shared.cells.items()}
         candidates, reasons, dependencies, reads = {}, {}, {}, {}
         for name, cell in info.cells.items():
+            if name not in shared.cells:
+                continue
+            cell_plan = shared.cells[name]
             fn = methods.get('_f_' + name)
             reason = None
-            if fn is None or not cell.has_typeinfo() or not cell.has_formula_def:
-                reason = 'untraced or uncached Cell'
-            elif cell.called_with_kwargs or cell.get_rettype_expr(c_style=True) not in TYPES:
+            if fn is None or (cell_plan.cached and not cell.has_typeinfo()):
+                reason = 'untraced Cell'
+            elif cell.called_with_kwargs or cell_plan.public_result not in TYPES:
                 reason = 'object result or keyword public entry'
-            elif any(cell.get_argtype_expr(p, c_style=True) != 'long long' for p in cell.params):
+            elif cell_plan.cached and any(t != 'long long' for p, t in cell_plan.public_arguments):
                 reason = 'non-dense argument domain; retain original growing cache'
             elif len(cell.params) > 1:
                 reason = 'multidimensional legacy storage migration not yet shared'
@@ -82,7 +97,7 @@ def plan(unit):
                 reason = _reason(fn, info)
             if not reason and set(info.cells) & BUILTINS:
                 reason = 'Cell/builtin name collision in free-function namespace'
-            if not reason and cell.params:
+            if not reason and cell.params and cell_plan.cached:
                 sizes = info.cells_arg_sizes[tuple(cell.params)]
                 slots = 1
                 for size in sizes:
@@ -90,13 +105,11 @@ def plan(unit):
                 if any(size <= 0 or size > 1000000 for size in sizes) or slots > 20000000:
                     reason = 'dense layout outside current frame allocation contract'
             if not reason:
-                dep = {n.attr for n in ast.walk(fn) if isinstance(n, ast.Attribute)
-                       and isinstance(n.value, ast.Name) and n.value.id == 'self'}
-                dependencies[name] = dep & info.cells.keys()
-                reads[name] = dep - info.cells.keys()
-                if any(k not in info.refs or info.refs[k].get_type_expr(c_style=True) not in TYPES
+                dependencies[name] = set(cell_plan.dependencies)
+                reads[name] = set(cell_plan.reference_reads)
+                if any(k not in info.refs or _input_type(info.refs[k]) is None
                        for k in reads[name]):
-                    reason = 'non-scalar or unresolved input'
+                    reason = 'unresolved input representation'
                 else:
                     candidates[name] = fn
             if reason:
@@ -110,10 +123,15 @@ def plan(unit):
                     reasons[name] = 'dependency retains original Cython: ' + ', '.join(sorted(missing))
                     del candidates[name]
                     changed = True
-        for name in info.cells:
+        for name in shared.cells:
             cell = info.cells[name]
             inventory.append({'space': info.fqname, 'cell': name,
                               'execution': 'frame_exact' if name in candidates else 'original_cython',
+                              # "original_cython" is the retained receipt label,
+                              # not a choice of compiler versus native execution.
+                              'formula_compiler': 'Cython',
+                              'receiver_representation': ('native_frame' if name in candidates
+                                                          else 'original_space'),
                               'reason': reasons.get(name),
                               'original_module_sha256': hashlib.sha256(unit.source.encode()).hexdigest(),
                               'formula_sha256': (hashlib.sha256(ast.unparse(methods['_f_' + name]).encode()).hexdigest()
@@ -122,8 +140,8 @@ def plan(unit):
                               'public_arguments': {p: cell.get_argtype_expr(p, c_style=True) for p in cell.params}})
         if candidates:
             refs = set().union(*(reads[n] for n in candidates))
-            plans[cls_name] = {'methods': candidates, 'info': info,
-                               'inputs': {n: TYPES[info.refs[n].get_type_expr(c_style=True)]
+            plans[cls_name] = {'methods': candidates, 'info': info, 'emission_plan': shared,
+                               'inputs': {n: _input_type(info.refs[n])
                                           for n in sorted(refs)}}
     return plans, inventory
 
@@ -133,60 +151,56 @@ def emit_private_kernels(plans, package_path, package_name):
     from .compiler import build
     modules = []
     for cls_name, p in plans.items():
-        source = ['from modelx_cython._frame_runtime.contracts import cell as _mx_shell_cell']
         domains = {}
         info = p['info']
-        for name, original in sorted(p['methods'].items()):
-            cell = info.cells[name]
-            fn = copy.deepcopy(original)
-            fn.name = name
-            fn.args.args.pop(0)
-            fn.decorator_list = [ast.Name('_mx_shell_cell', ast.Load())]
-            for arg in fn.args.args:
-                arg.annotation = ast.Name(TYPES[cell.get_argtype_expr(arg.arg, c_style=True)].__name__, ast.Load())
-            fn.returns = ast.Name(TYPES[cell.get_rettype_expr(c_style=True)].__name__, ast.Load())
-            fn = ast.fix_missing_locations(_UnbindFormula().visit(fn))
-            source.append(ast.unparse(fn))
-            if cell.params:
-                domains[name] = {arg: (0, size) for arg, size in
-                                 zip(cell.params, info.cells_arg_sizes[tuple(cell.params)])}
         name = '_mx_frame_' + cls_name.removeprefix('_c_')
         folder = package_path / name
         folder.mkdir()
         (folder / '__init__.py').write_text('', encoding='utf-8')
-        formula_file = folder / '_formulas.py'
-        formula_file.write_text('\n\n'.join(source) + '\n', encoding='utf-8')
-        module_name = package_name + '.' + name + '._formulas'
-        loader = importlib.util.spec_from_file_location(module_name, formula_file)
-        module = importlib.util.module_from_spec(loader)
-        sys.modules[module_name] = module
-        try:
-            loader.loader.exec_module(module)
-            capacity = max([1] + [s for params in domains.values() for _, s in params.values()])
-            spec = KernelSpec(module, p['inputs'], {}, max(1, capacity), '0',
-                              cell_outputs=tuple(sorted(p['methods'])),
-                              cache_domains=domains, original_space_shell=True)
-            artifact = folder / 'artifact'
-            build(spec, artifact, compile_native=False)
-        finally:
-            sys.modules.pop(module_name, None)
+        module_name = package_name + '.' + name
+        module = ModuleType(module_name)
+        module.__file__ = str(package_path / '_mx_classes.py')
+        for name, original in sorted(p['methods'].items()):
+            cell = p['emission_plan'].cells[name]
+            arguments = {n: TYPES[t] for n, t in cell.public_arguments}
+            result = TYPES[cell.public_result]
+            node = FormulaEmitter.native(cell, arguments, result)
+            setattr(module, name, SourceFormula(node, arguments, result,
+                    cached=cell.cached, filename=module.__file__, module_name=module_name))
+            if cell.cache_domains:
+                domains[name] = {arg: (lo, hi - lo) for arg, lo, hi in cell.cache_domains}
+        name = folder.name
+        capacity = max([1] + [s for params in domains.values() for _, s in params.values()])
+        signatures = {name: {'parameters': {n: TYPES[t].__name__ for n, t in cell.public_arguments},
+                             'return': TYPES[cell.public_result].__name__}
+                      for name, cell in p['emission_plan'].cells.items() if name in p['methods']}
+        spec = KernelSpec(module, p['inputs'], {}, max(1, capacity), '0',
+                          cell_outputs=tuple(sorted(p['methods'])),
+                          cache_domains=domains, original_space_shell=True, cython_objects=True,
+                          cython_signatures=signatures)
+        artifact = folder / 'artifact'
+        build(spec, artifact, compile_native=False)
         manifest_file = artifact / 'manifest.json'
         manifest = json.loads(manifest_file.read_text(encoding='utf-8'))
-        if manifest.get('python_cells'):
-            raise ValueError('Original-shell admission disagrees with native emitter: ' + str(manifest['python_cells']))
+        if any(row['coverage']['detached_python'] for row in manifest['cells'].values()):
+            raise ValueError('Original-shell admission requires compiled Cython bodies')
         private = manifest['package']
         target = folder / private
         shutil.move(str(artifact / private), str(target))
         # Let original create_setup consume this extension in the same build.
         kernel = target / '_kernel.pyx'
         kernel.write_text('# distutils: language=c++\n' + kernel.read_text(encoding='utf-8'), encoding='utf-8')
+        (target / '_kernel.pxd').write_text(owner_entry_declarations(manifest), encoding='utf-8')
         manifest['source_sha256'] = hashlib.sha256(kernel.read_bytes()).hexdigest()
         manifest['build_driver'] = 'original mx2cy package setup'
         manifest['original_space_shell'] = True
         manifest['package'] = package_name + '.' + name + '.' + private
         (folder / 'manifest.json').write_text(json.dumps(manifest, indent=2), encoding='utf-8')
         p['kernel_module'] = manifest['package'] + '._kernel'
+        p['manifest'] = manifest
         modules.extend([Path(name) / private / '_lookups.py', Path(name) / private / '_kernel.pyx'])
+        if (target / '_table_lookup.py').exists():
+            modules.append(Path(name) / private / '_table_lookup.py')
     return modules
 
 
@@ -195,12 +209,27 @@ def transform(source, declarations, plans, original_methods):
     if not plans:
         return source, declarations
     tree = ast.parse(source)
+    tree.body.insert(0, ast.parse(
+        'from cython.cimports.cpython.pycapsule import PyCapsule_GetPointer as _mx_frame_capsule_ptr').body[0])
     owner_module = next(iter(plans.values()))['kernel_module'].split('.')[0] + '._mx_frame_owner'
     tree.body.insert(0, ast.parse(f'from {owner_module} import SpaceFrameOwner as _mx_SpaceFrameOwner').body[0])
-    for cls in tree.body:
+    for cls in tuple(tree.body):
         if not isinstance(cls, ast.ClassDef) or cls.name not in plans:
             continue
         p = plans[cls.name]
+        for cell_name in p['methods']:
+            cell = p['emission_plan'].cells[cell_name]
+            alias = '_mx_frame_' + cls.name + '_' + cell_name
+            ctypes = ['object', *(t for _, t in cell.public_arguments),
+                      *(t.__name__ for t in p['inputs'].values())]
+            if p['manifest'].get('python_cells'):
+                ctypes.insert(1, 'object')
+            ctypes = [dict(float='double', int='long long', bool='bint', str='object').get(t, t) for t in ctypes]
+            result_type = p['manifest']['cells'][cell_name]['result']['ctype']
+            exception = '' if result_type == 'object' else ' except? -1'
+            declarations += (f'\nctypedef {result_type} (*{alias}_t)('
+                             + ', '.join(ctypes) + ')' + exception + '\n'
+                             + f'cdef {alias}_t {alias}\n')
         cls.body.insert(0, ast.AnnAssign(ast.Name('_mx_frame_owner', ast.Store()),
                                        ast.Name('object', ast.Load()), None, 1))
         marker = next(l for l in declarations.splitlines() if l.startswith('cdef class ' + cls.name + '('))
@@ -210,11 +239,30 @@ def transform(source, declarations, plans, original_methods):
             if not isinstance(fn, ast.FunctionDef):
                 continue
             if fn.name in p['methods']:
-                args = '(' + ', '.join(a.arg for a in fn.args.args[1:]) + (',' if len(fn.args.args) > 1 else '') + ')'
+                args = ', '.join([*(a.arg for a in fn.args.args[1:]),
+                                  *('self.' + k for k in p['inputs'])])
+                receiver = ', self' if p['manifest'].get('python_cells') else ''
+                alias = '_mx_frame_' + cls.name + '_' + fn.name
+                cell = p['emission_plan'].cells[fn.name]
+                c_api = {'object': 'PyObject *', 'long long': 'PY_LONG_LONG',
+                         'double': 'double', 'bint': 'int'}
+                ctypes = ['object', *(t for _, t in cell.public_arguments),
+                          *({float: 'double', int: 'long long', bool: 'bint', object: 'object', str: 'object'}[t]
+                            for t in p['inputs'].values())]
+                if p['manifest'].get('python_cells'):
+                    ctypes.insert(1, 'object')
+                result_type = p['manifest']['cells'][fn.name]['result']['ctype']
+                checked = not p['manifest']['cells'][fn.name]['coverage']['python_free_proven']
+                capsule_signature = (c_api[result_type] + ('(' if result_type == 'object' else ' (')
+                                     + ', '.join(c_api[t] for t in ctypes) + ')').encode()
                 head = ast.parse(f'''if type(self) is {cls.name}:
+    global {alias}
     if self._mx_frame_owner is None:
         self._mx_frame_owner = _mx_SpaceFrameOwner({p['kernel_module']!r}, {inputs})
-    return self._mx_frame_owner.call({fn.name!r}, {args}, {inputs})''').body
+    {"self._mx_frame_owner.prepare_checked()" if checked else "pass"}
+    if {alias} == _mx_cy.NULL:
+        {alias} = _mx_cy.cast({alias}_t, _mx_frame_capsule_ptr(self._mx_frame_owner.entry_capsule({fn.name!r}), {capsule_signature!r}))
+    return {alias}(self._mx_frame_owner.kernel{receiver}{', ' + args if args else ''})''').body
                 fn.body = head + fn.body
             elif fn.name.startswith('_f_') and fn.name[3:] in p['methods']:
                 # Keep decorators and the original virtual declaration, but
@@ -256,21 +304,153 @@ def add_owner_entries(source, manifest):
     from .model_codegen import add_model_entries
     source = add_model_entries(source, manifest)
     lines = ['    def bind_inputs(self, tuple record):']
-    lines += [f'        self._frame.{name} = record[{i}]' for i, name in enumerate(manifest['inputs'])]
+    lines += [f'        self.{"" if row["kind"] == "object" else "_frame."}{name} = record[{i}]'
+              for i, (name, row) in enumerate(manifest['inputs'].items())]
+    lines += [f'        self._frame.{name} = <PyObject*>self.{name}'
+              for name, row in manifest['inputs'].items() if row['kind'] == 'object']
+    if manifest.get('python_cells'):
+        lines += ['        self._records = (record,)',
+                  '        self._python_scope.select(record, 0)']
+        # Rebind only input globals. Library globals keep their initialized
+        # bindings. This does not reset or invalidate any completed Cell.
+        # gil_codegen may bind input names from compiled bodies omitted from
+        # the Python source; its declared fields are the emission authority.
+        for name in manifest['inputs']:
+            if ' _gil_global_' + name + '\n' in source:
+                lines += [f'        self._gil_global_{name} = self._python_scope.namespace[{name!r}]']
     if not manifest['inputs']:
         lines.append('        pass')
+    bound = ', '.join(f'self.{"" if row["kind"] == "object" else "_frame."}{name}'
+                      for name, row in manifest['inputs'].items())
+    lines += ['    def bound_inputs(self):',
+              '        return (' + bound + (',' if bound else '') + ')']
+    if manifest.get('python_cells'):
+        refs = ', '.join('receiver.' + name for name in manifest['inputs'])
+        lines += ['    def _mx_synchronize_inputs(self):',
+                  '        receiver = self._python_scope._original_receiver',
+                  '        if receiver is not None:',
+                  '            self.bind_inputs((' + refs + (',' if refs else '') + '))']
+        # The checked object formula can call back into numeric execution after
+        # changing public inputs. Update the held native fields before that edge.
+        marker = '    def call(self, str cell, tuple args):\n        cdef _Command command'
+        source = source.replace(marker, marker + '\n        self._mx_synchronize_inputs()', 1)
     lines += ['    def snapshot(self):', '        result = []', '        cdef Py_ssize_t i']
-    for name, row in manifest['cells'].items():
+    objects = set(manifest.get('object_cells', ()))
+    numeric_rows = {n: r for n, r in manifest['cells'].items() if n not in objects and r['cached']}
+    for name, row in numeric_rows.items():
         value = '_floats' if row['result']['kind'] == 'float' else '_ints'
         lines += [f"        for i in range({row['offset']}, {row['offset'] + row['slots']}):",
                   '            if self._frame._seen[i] == self._frame._epoch:',
                   f'                result.append((i, self._frame.{value}[i]))']
-    lines += ['        return result', '    def restore(self, entries):', '        cdef Py_ssize_t i',
-              '        for i, value in entries:']
-    for j, row in enumerate(manifest['cells'].values()):
+    for name in sorted(objects):
+        row = manifest['cells'][name]
+        if not row['cached']:
+            continue
+        if row['storage'] == 'object_singleton':
+            lines += [f'        if self._object_initialized and self._object_singleton_{name} is not _DICT_EMPTY and self._object_singleton_{name} is not _DICT_BUSY:',
+                      f'            result.append((({name!r}, "object"), self._object_singleton_{name}))']
+        elif row['storage'] == 'object_slots':
+            lines += ['        if self._object_initialized:',
+                      f'            for i in range({row["slots"]}):',
+                      f'                entry = self._object_{name}[i]',
+                      '                if entry is not None and (<_ObjectEntry>entry).state == 2:',
+                      f'                    result.append((({name!r}, i), (<_ObjectEntry>entry).value))']
+    lines += ['        return result', '    def restore(self, entries):', '        cdef Py_ssize_t i']
+    if objects:
+        lines.append('        cdef _ObjectEntry entry')
+    lines.append('        for key, value in entries:')
+    if objects:
+        lines += ['            if isinstance(key, tuple):',
+                  '                name, index = key']
+        cases = 0
+        for name in sorted(objects):
+            row = manifest['cells'][name]
+            if not row['cached']:
+                continue
+            lines += [f'                {"if" if cases == 0 else "elif"} name == {name!r}:']
+            cases += 1
+            if row['storage'] == 'object_singleton':
+                lines += ['                    if index != "object": raise ValueError("Invalid completed object slot")',
+                          f'                    self._object_singleton_{name} = value']
+            elif row['storage'] == 'object_slots':
+                lines += [f'                    if not 0 <= index < {row["slots"]}: raise ValueError("Invalid completed object slot")',
+                          '                    entry = _ObjectEntry()',
+                          '                    entry.state = 2', '                    entry.value = value',
+                          '                    entry.touched = True',
+                          '                    self._object_dirty.append(entry)',
+                          f'                    self._object_{name}[index] = entry']
+        if cases:
+            lines += ['                else: raise ValueError("Unknown completed object Cell")']
+        else:
+            lines += ['                raise ValueError("No cached object Cell")']
+        lines += ['                continue']
+    lines += ['            i = key']
+    for j, row in enumerate(numeric_rows.values()):
         value = '_floats' if row['result']['kind'] == 'float' else '_ints'
         lines += [f"            {'if' if j == 0 else 'elif'} {row['offset']} <= i < {row['offset'] + row['slots']}:",
                   f'                self._frame.{value}[i] = value']
-    lines += ['            else: raise ValueError("Invalid completed cache slot")',
-              '            self._frame._seen[i] = self._frame._epoch']
-    return source.rstrip() + '\n\n' + '\n'.join(lines) + '\n'
+    if numeric_rows:
+        lines += ['            else: raise ValueError("Invalid completed cache slot")',
+                  '            self._frame._seen[i] = self._frame._epoch']
+    else:
+        lines.append('            raise ValueError("No numeric cache slots")')
+    source = source.rstrip() + '\n\n' + '\n'.join(lines) + '\n'
+    numeric_names = [n for n in manifest['cells'] if n not in objects]
+    for name, row in manifest['cells'].items():
+        signature = _owner_signature(name, row, manifest)
+        entry = [signature + ':', '    cdef Kernel owner = kernel',
+                 '    cdef _Command command']
+        checked = bool(manifest.get('python_cells')) and not row['coverage']['python_free_proven']
+        if checked:
+            entry += ['    saved_receiver = getattr(owner._python_scope, "_original_receiver", None)',
+                      '    owner._python_scope._original_receiver = receiver', '    try:']
+        prefix_size = len(entry)
+        if checked:
+            inputs = ', '.join('_mx_input_' + n for n in manifest['inputs'])
+            entry.append('    owner.bind_inputs((' + inputs + (',' if inputs else '') + '))')
+        else:
+            for input_name in manifest['inputs']:
+                info = manifest['inputs'][input_name]
+                if info['kind'] == 'object':
+                    entry += [f'    owner.{input_name} = _mx_input_{input_name}',
+                              f'    owner._frame.{input_name} = <PyObject*>owner.{input_name}']
+                else:
+                    entry.append(f'    owner._frame.{input_name} = _mx_input_{input_name}')
+        if name in objects:
+            args = ', '.join(p['name'] for p in row['params'])
+            entry += ['    owner._frame._entry_depth += 1', '    try:',
+                      f'        return owner._object_cell_{name}({args})',
+                      '    finally:', '        owner._frame._entry_depth -= 1']
+            if checked:
+                entry[prefix_size:] = ['    ' + line for line in entry[prefix_size:]]
+                entry += ['    finally:', '        owner._python_scope._original_receiver = saved_receiver']
+            source += '\n' + '\n'.join(entry) + '\n'
+            continue
+        entry += ['    command.mode = 0', f'    command.identity = {numeric_names.index(name)}']
+        for index, param in enumerate(row['params']):
+            field = 'f' if param['type']['kind'] == 'float' else 'i'
+            entry.append(f'    command.args[{index}].{field} = {param["name"]}')
+        result = 'f' if row['result']['kind'] == 'float' else 'i'
+        entry += ['    owner._invoke(&command)', f'    return command.value.{result}']
+        if checked:
+            entry[prefix_size:] = ['    ' + line for line in entry[prefix_size:]]
+            entry += ['    finally:', '        owner._python_scope._original_receiver = saved_receiver']
+        source += '\n' + '\n'.join(entry) + '\n'
+    return source
+
+
+def _owner_signature(name, row, manifest):
+    """A private native ABI; the original public .pxd stays authoritative."""
+    args = ['object kernel']
+    if manifest.get('python_cells'):
+        args.append('object receiver')
+    args += [p['type']['ctype'] + ' ' + p['name'] for p in row['params']]
+    args += [info['ctype'] + ' _mx_input_' + n for n, info in manifest['inputs'].items()]
+    exception = '' if row['result']['ctype'] == 'object' else ' except? -1'
+    return (f'cdef {row["result"]["ctype"]} _mx_shell_{name}('
+            + ', '.join(args) + ')' + exception)
+
+
+def owner_entry_declarations(manifest):
+    return '\n'.join(_owner_signature(n, row, manifest)
+                     for n, row in manifest['cells'].items()) + '\n'
