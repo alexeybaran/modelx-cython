@@ -59,6 +59,23 @@ def test_frame_casts_do_not_change_formula_string_literals():
         f"return (<Curve>state.curve).get(1) if flag else '{marker}'")
 
 
+def test_checked_python_formula_is_emitted_with_a_frame_receiver():
+    module = ModuleType('frame_checked_formula_fixture')
+    module.value = value
+    module.total = total
+    spec = KernelSpec(module=module, inputs={'base': float}, outputs={},
+                      steps=4, length='4', cell_outputs=('total',),
+                      scalar_outputs=('total',))
+    parts, manifest = emit(spec, python_cells=('total',), frame_parts=True)
+    formula = next(method for method in parts['methods']
+                   if method[0].startswith('cdef inline double _calc_total('))
+    assert formula[0].startswith('cdef inline double _calc_total(_Frame* state')
+    assert '(<object>state._python_scope).calculate' in '\n'.join(formula)
+    assert 'self.' not in '\n'.join(formula)
+    generated = to_c_frame(parts, manifest)
+    assert '(<object>state._python_scope).calculate' in generated
+
+
 def test_output_plan_is_bound_before_runtime_generation():
     module = ModuleType('frame_output_plan_fixture')
     module.value = value

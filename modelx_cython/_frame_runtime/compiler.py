@@ -895,7 +895,10 @@ def emit(spec, *, diagnostics=False, python_cells=(), frame_parts=False):
         node = copy.deepcopy(parsed[name])
         loc = ({'_mx_value', '_mx_key', '_mx_object_key', 'self'} if row['cached'] else set()) | {p['name'] for p in params} | {n.id for n in ast.walk(node) if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store)}
         body = []
-        direct_frame_calc = frame_parts and name not in python_reasons
+        # Both native and checked fallback formulas know their physical frame
+        # receiver here. Emit that receiver directly instead of creating a
+        # method-shaped body for frame_codegen to rewrite later.
+        direct_frame_calc = frame_parts
         if row['cached']:
             if not direct_frame_calc:
                 lines += [f'    cdef inline {ret} _calc_{name}(self{calc_tail}) except? -1{native_suffix}:']
@@ -912,19 +915,25 @@ def emit(spec, *, diagnostics=False, python_cells=(), frame_parts=False):
             if not direct_frame_calc:
                 lines += [f'    cdef inline {ret} _calc_{name}(self{calc_tail}) except? -1{native_suffix}:']
         if direct_frame_calc:
-            frame_binder = BindNames(selected, spec.inputs, enums, loc,
-                                     native_lookups=True, frame_native=True,
-                                     frame_casts=frame_casts)
-            frame_body = []
-            for statement in node.body:
-                if (isinstance(statement, ast.Expr)
-                        and isinstance(statement.value, ast.Constant)
-                        and isinstance(statement.value.value, str)):
-                    continue
-                source = ast.unparse(ast.fix_missing_locations(
-                    frame_binder.visit(copy.deepcopy(statement))))
-                source = _frame_cast_names(source, cast_names)
-                frame_body.extend(textwrap.indent(source, '    ').splitlines())
+            if name in python_reasons:
+                tuple_expr = '(' + call + (',' if params else '') + ')'
+                frame_body = ['    with gil:',
+                              '        return (<object>state._python_scope).calculate('
+                              + repr(name) + ', ' + tuple_expr + ')']
+            else:
+                frame_binder = BindNames(selected, spec.inputs, enums, loc,
+                                         native_lookups=True, frame_native=True,
+                                         frame_casts=frame_casts)
+                frame_body = []
+                for statement in node.body:
+                    if (isinstance(statement, ast.Expr)
+                            and isinstance(statement.value, ast.Constant)
+                            and isinstance(statement.value.value, str)):
+                        continue
+                    source = ast.unparse(ast.fix_missing_locations(
+                        frame_binder.visit(copy.deepcopy(statement))))
+                    source = _frame_cast_names(source, cast_names)
+                    frame_body.extend(textwrap.indent(source, '    ').splitlines())
             frame_methods.extend((frame_entry,
                                   tuple([f'cdef inline {ret} _calc_{name}(_Frame* state{calc_tail}) except? -1{native_suffix}:']
                                         + frame_body)))
