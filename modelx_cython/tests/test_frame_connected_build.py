@@ -214,12 +214,13 @@ def test_complete_package_uses_standard_trace_for_typed_cell_contracts(tmp_path)
     model = mx.new_model('TracedPackage')
     try:
         model.new_space('S').new_cells('value', 'lambda x: x + 0.5')
-        exported = tmp_path / 'exported'
+        exported = tmp_path / 'mxcf_typed_contract_trace_fixture'
         model.export(exported)
     finally:
         model.close()
     sample = tmp_path / 'sample.py'
-    sample.write_text('from exported import mx_model\nmx_model.S.value(2.0)\n')
+    sample.write_text('from mxcf_typed_contract_trace_fixture import mx_model\n'
+                      'mx_model.S.value(2.0)\n')
     trace = run_sample(exported, str(sample))
     result = build_package(exported, tmp_path / 'compiled',
                            external_imports={}, trace_logger=trace)
