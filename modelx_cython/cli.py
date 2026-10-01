@@ -464,7 +464,7 @@ def _frame_collect_handler(args: argparse.Namespace, orig_path: pathlib.Path) ->
     if args.setup:
         raise HandlerError("--frame-collect generates its own setup.py")
 
-    from modelx_cython._frame_runtime.modelx_frontend_exported import from_exported
+    from modelx_cython._frame_runtime.modelx_frontend_exported import open_exported_source
     from modelx_cython._frame_runtime.trace_contracts import from_mx2cy_trace
     from modelx_cython._frame_runtime.compiler import build, compile_generated
 
@@ -475,16 +475,13 @@ def _frame_collect_handler(args: argparse.Namespace, orig_path: pathlib.Path) ->
         return 0
     if destination.exists() or source_dir.exists():
         raise FileExistsError("Frame output or source directory already exists")
-    manifest_path = orig_path / "_mx_formula_sources.json"
-    manifest = (json.loads(manifest_path.read_text(encoding="utf-8"))
-                if manifest_path.exists() else None)
     logger = run_sample(orig_path, args.sample)
-    contracts = (from_mx2cy_trace(logger, manifest, space=args.frame_space)
-                 if manifest is not None else {})
-    spec = from_exported(
-        orig_path, source_dir, projection=args.frame_space,
-        point_table=args.frame_point_table, steps=args.frame_steps,
-        contracts=contracts)
+    with open_exported_source(orig_path) as derive:
+        contracts = from_mx2cy_trace(
+            logger, derive.source_manifest, space=args.frame_space)
+        spec = derive(source_dir, projection=args.frame_space,
+                      point_table=args.frame_point_table,
+                      steps=args.frame_steps, contracts=contracts)
     if args.translate_only:
         build(spec, destination, compile_native=False)
     else:

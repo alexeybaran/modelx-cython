@@ -174,6 +174,12 @@ def test_metadata_free_original_export_preserves_dynamic_parameters(tmp_path):
     finally:
         model.close()
     (exported / '_mx_formula_sources.json').unlink()
+    from modelx_cython._frame_runtime.modelx_frontend_exported import open_exported_source
+    with open_exported_source(exported) as derive:
+        recovered = derive.source_manifest
+        assert recovered['source_provenance'] == 'reconstructed_export_methods'
+        assert recovered['spaces']['OldDynamic.Projection']['cells']['amount']['source']
+        assert derive.source_graph['spaces']['OldDynamic.Projection']['cells']['amount']
     records = pd.DataFrame(index=pd.Index([1, 3], name='policy_id'))
     spec = from_exported(exported, tmp_path / 'source_dynamic',
                          policy_records=records, point_table='points')

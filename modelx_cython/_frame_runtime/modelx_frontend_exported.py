@@ -142,6 +142,7 @@ def open_exported_source(package):
         # same verified graph. This also covers ordinary exports whose author
         # formula manifest must be reconstructed from exported methods.
         derive.source_graph = graph
+        derive.source_manifest = manifest
         yield derive
     finally:
         for name in tuple(sys.modules):
