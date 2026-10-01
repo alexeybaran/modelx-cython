@@ -136,6 +136,8 @@ def augment(source, manifest, spec, forced_python=()):
                     native_called.add(name)
                     return ast.copy_location(ast.Call(ast.Attribute(ast.Name('self',ast.Load()), '_native_cell_'+name, ast.Load()), args, []), node)
                 if name in numeric:
+                    if name in objects:
+                        return ast.copy_location(ast.Call(ast.Attribute(ast.Name('self',ast.Load()), '_typed_cell_'+name, ast.Load()), args, []), node)
                     return ast.copy_location(ast.Call(ast.Attribute(ast.Name('self',ast.Load()), 'call',ast.Load()),
                         [ast.Constant(name),ast.Tuple(args,ast.Load())],[]),node)
                 if name in objects:
