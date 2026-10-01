@@ -1018,17 +1018,22 @@ def build(spec, destination, *, diagnostics=False, python_cells=(),
     if spec.model is not None:
         from .package_codegen import add_public_package
         add_public_package(destination, manifest, spec.initial_tables, spec.model_name)
-    setup = """from setuptools import setup, Extension
-from Cython.Build import cythonize
-setup(ext_modules=cythonize([
-    Extension('%(p)s._lookups', ['%(p)s/_lookups.py']),
-    Extension('%(p)s._kernel', ['%(p)s/_kernel.pyx'], language='c++'),
-], compiler_directives={'language_level':3,'infer_types':True}, annotate=True))
-""" % {'p': package}
-    if spec.cython_objects:
-        setup=setup.replace('setup(ext_modules=cythonize([', 'setup(ext_modules=cythonize([\n    Extension('+repr(package+'._table_lookup')+', ['+repr(package+'/_table_lookup.py')+']),')
+    extensions = []
     if space_source:
-        setup=setup.replace('setup(ext_modules=cythonize([', 'setup(ext_modules=cythonize([\n    Extension('+repr(package+'._space_formula')+', ['+repr(package+'/_space_formula.pyx')+']),')
+        extensions.append(
+            f"    Extension('{package}._space_formula', ['{package}/_space_formula.pyx']),")
+    if spec.cython_objects:
+        extensions.append(
+            f"    Extension('{package}._table_lookup', ['{package}/_table_lookup.py']),")
+    extensions.extend((
+        f"    Extension('{package}._lookups', ['{package}/_lookups.py']),",
+        f"    Extension('{package}._kernel', ['{package}/_kernel.pyx'], language='c++'),",
+    ))
+    setup = ("from setuptools import setup, Extension\n"
+             "from Cython.Build import cythonize\n"
+             "setup(ext_modules=cythonize([\n"
+             + "\n".join(extensions) + "\n"
+             "], compiler_directives={'language_level':3,'infer_types':True}, annotate=True))\n")
     (destination / 'setup.py').write_text(setup)
     manifest['setup_sha256'] = hashlib.sha256((destination / 'setup.py').read_bytes()).hexdigest()
     (destination / 'manifest.json').write_text(json.dumps(manifest, indent=2))
