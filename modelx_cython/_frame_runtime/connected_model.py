@@ -14,7 +14,7 @@ import pickle
 from pathlib import Path
 
 from .contracts import ContractError
-from .model import CompiledModel
+from .model import CompiledModel, _ItemSpace, _ProjectionSpace
 from .source_graph import (generated_space_name, inherited_parameters,
                            is_empty_space_formula)
 
@@ -89,6 +89,12 @@ class _SpaceView:
             return self._references[name]
         if self._space is None:
             raise AttributeError(name)
+        owner = (self._space._model if isinstance(self._space, _ProjectionSpace)
+                 else self._space._space._model if isinstance(self._space, _ItemSpace)
+                 else None)
+        if (owner is not None and name in owner._references
+                and name not in owner._relative_references):
+            return getattr(self._space, name)
         if self._inherited:
             missing = set(self._inherited) - set(self._bindings)
             if missing:
@@ -270,6 +276,28 @@ def load_connected(graph, artifacts, *, external_bindings, tables_by_space=None,
             model = CompiledModel(artifact, tables, _defer_bindings=True)
             models[name] = model
             spaces[name] = getattr(model, plan['projection'])
+        shared_references = {}
+        for group in graph.get('reference_aliases', ()):
+            members = [tuple(member) for member in group]
+            if len(members) < 2 or any(len(member) != 2 for member in members):
+                raise ContractError('Invalid shared reference identity group')
+            selected = [(fullname[len(model_name) + 1:], ref)
+                        for fullname, ref in members
+                        if fullname.startswith(model_name + '.')]
+            if len(selected) != len(members) or len(set(selected)) != len(selected):
+                raise ContractError('Invalid shared reference identity group')
+            compiled = [(space, ref) for space, ref in selected if space in models
+                        and ref in models[space]._plan['reference_defaults']]
+            if len(compiled) < 2:
+                continue
+            first_space, first_ref = compiled[0]
+            value = models[first_space]._plan['reference_defaults'][first_ref]
+            if type(value) not in (list, dict):
+                raise ContractError('Shared reference has an unsupported runtime type')
+            for space, ref in compiled:
+                if ref not in models[space]._plan['reference_defaults']:
+                    raise ContractError('Shared reference absent from compiled Space')
+                shared_references[(space, ref)] = value
         children = {}
         for name in nodes:
             if '.' in name:
@@ -311,8 +339,23 @@ def load_connected(graph, artifacts, *, external_bindings, tables_by_space=None,
             space_bindings = {ref: resolve(ref) for ref in formula_refs}
             overrides = {ref: resolve(ref)
                          for ref in plan.get('required_object_bindings', ())}
+            overrides.update({ref: value for (space, ref), value in
+                              shared_references.items() if space == name})
+            # An exported nested Space can refer to an ancestor's *current
+            # item*. Bind that reference when the child item is selected, not
+            # to the ancestor's unparameterized Space shell at package load.
+            relative = {}
+            for ref, target in nodes[name]['space_references'].items():
+                ancestor = target_name(ref, target)
+                if name.startswith(ancestor + '.'):
+                    parameters = tuple(dict.fromkeys((
+                        *inherited_parameters(graph, model_name, ancestor),
+                        *nodes[ancestor]['parameters'])))
+                    if parameters:
+                        relative[ref] = (spaces[ancestor], parameters)
             models[name]._finish_bindings(overrides=overrides,
-                                          space_bindings=space_bindings or None)
+                                          space_bindings=space_bindings or None,
+                                          relative_references=relative)
         return ConnectedModel(model_name, models, spaces, order)
     except BaseException:
         for name in reversed(order):

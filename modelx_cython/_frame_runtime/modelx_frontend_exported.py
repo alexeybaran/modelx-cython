@@ -119,6 +119,17 @@ def open_exported_source(package):
                 base_values[name] = value
             if base_values:
                 graph['spaces'][fullname]['base_parameter_values'] = base_values
+        # The export keeps shared mutable references by identity. Independent
+        # Space artifacts would otherwise deserialize separate copies.
+        identities = {}
+        for path_parts, source_space in spaces.items():
+            fullname = '.'.join((manifest['model'], *path_parts))
+            for name, value in source_space.refs.items():
+                if type(value) in (list, dict):
+                    identities.setdefault(id(value), []).append((fullname, name))
+        graph['reference_aliases'] = [sorted(group) for group in identities.values()
+                                      if len(group) > 1]
+        graph['reference_aliases'].sort()
         def derive(destination, **options):
             dest = Path(destination)
             if dest.exists() and any(dest.iterdir()):

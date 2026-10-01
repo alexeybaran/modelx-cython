@@ -110,6 +110,12 @@ def from_modelx(model, destination, *, projection='Projection', data_space='Data
             space = getattr(space, name)
     physical_projection = generated_space_name(projection)
     data=getattr(model,data_space,None)
+    # A Space named Data is not necessarily an input-table provider. It may
+    # itself contain ordinary Cells, including parameterized calculations.
+    # Never execute those formulas while discovering build-time tables.
+    if (data is space or (data is not None and
+            (data.parameters or any(fn.parameters for fn in data.cells.values())))):
+        data = None
     row_references=dict(row_references or {})
     object_bindings=frozenset(object_bindings)
     own_parameters=tuple(space.parameters or ())
@@ -218,7 +224,11 @@ def from_modelx(model, destination, *, projection='Projection', data_space='Data
                   for node in ast.walk(ast.parse(fn.formula.source))
                   if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load)}
     for name,value in space.refs.items():
-        if name in parameters or name in ('data','_model','_space','__builtins__'):continue
+        if name in parameters or name in ('_model','_space','__builtins__'):continue
+        # ``data`` is the synthetic table receiver only when it is not a
+        # declared connected Space reference. A compiled computational Data
+        # Space must be wired like any other referenced Space.
+        if name == 'data' and name not in object_bindings:continue
         if name in row_references:continue
         if name not in cell_loads:continue
         if name in object_bindings:
@@ -372,9 +382,14 @@ def from_modelx(model, destination, *, projection='Projection', data_space='Data
             if value is not None:return bool(value)
             obj=getattr(obj,'parent',None)
         return False
+    # A computational Space called Data is the projection being compiled, not
+    # a second Data facade. Give the unused facade a private generated name so
+    # normal model.Data continues to resolve to the compiled Space.
+    plan_data_space = ('MxcfUnusedData' if data is None and
+                       physical_projection == data_space else data_space)
     spec = derive_spec(module,tables,references=refs,space_formula=space_formula,
         outputs={},length='0',steps=steps,cell_outputs=tuple(space.cells),
-        data_space=data_space,projection=physical_projection,point_table=point_table,
+        data_space=plan_data_space,projection=physical_projection,point_table=point_table,
         static_projection=static,
         allow_none={n:effective_allow_none(c) for n,c in space.cells.items()},
         model_name=model.name,cython_objects=cython_objects,

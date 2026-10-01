@@ -40,15 +40,18 @@ def _fixture(tmp_path, monkeypatch):
         def __init__(self, artifact, tables, *, _defer_bindings):
             assert _defer_bindings
             self.name = artifact.name
+            self._plan = json.loads((artifact / 'manifest.json').read_text())['model']
             self.tables = tables
             self.overrides = self.bindings = None
             self.space = SimpleNamespace(name=self.name)
             self.closed = False
             created.append(self)
 
-        def _finish_bindings(self, *, overrides, space_bindings):
+        def _finish_bindings(self, *, overrides, space_bindings,
+                             relative_references=None):
             self.overrides = overrides
             self.bindings = space_bindings
+            self.relative_references = relative_references
 
         def __getattr__(self, name):
             if name == self.name:

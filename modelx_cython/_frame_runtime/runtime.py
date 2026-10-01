@@ -359,7 +359,8 @@ class CompiledKernel:
             raise ContractError('Shared scope requires a mixed artifact')
         return _EvaluationScope(self, policy)
 
-    def fork_item(self, policy=0, *, input_overrides=None, _native_kernel=None, **parameters):
+    def fork_item(self, policy=0, *, input_overrides=None, python_overrides=None,
+                  _native_kernel=None, **parameters):
         """Own one ItemSpace cache, sharing immutable tables with the parent.
 
         No repacking, formula reconstruction or second Python result cache. Each
@@ -379,8 +380,11 @@ class CompiledKernel:
             if set(parameters) - allowed:
                 raise ContractError('Unknown ItemSpace parameter')
             overrides = dict(input_overrides or {})
+            python_overrides = dict(python_overrides or {})
+            if set(python_overrides) - set(self.manifest.get('python_references', ())):
+                raise ContractError('ItemSpace Python overrides must be declared references')
             if _native_kernel is not None and (parameters or overrides or
-                    type(_native_kernel) is not self._module.Kernel):
+                    python_overrides or type(_native_kernel) is not self._module.Kernel):
                 raise ContractError('Existing native ItemSpace owner cannot change its inputs')
             if not parameters and not overrides:
                 record_tuple = self._records[policy]
@@ -392,8 +396,11 @@ class CompiledKernel:
                 eligible = {name for name, binding in
                             self.manifest.get('model', {}).get('bindings', {}).items()
                             if binding['kind'] == 'row_reference'}
+                eligible.update(name for name in self.manifest.get('model', {}).get(
+                    'required_object_bindings', ()) if name in infos
+                    and infos[name]['kind'] == 'object')
                 if set(overrides) - eligible:
-                    raise ContractError('ItemSpace input overrides must be row references')
+                    raise ContractError('ItemSpace input overrides must be row or object references')
                 for name, value in overrides.items():
                     record[name] = self._scalar_value(name, infos[name], value, record)
                 # A dynamic Space formula can replace a row's object references.
@@ -427,8 +434,11 @@ class CompiledKernel:
             child._lazy_python_source = None
             if self._python_scope is not None:
                 bindings = [self._python_scope.bindings[policy]] if self._python_scope.bindings else None
-                if bindings is not None and unbounded_point in parameters:
+                if (bindings is not None and unbounded_point in parameters
+                        and unbounded_point not in self.manifest['inputs']):
                     bindings = [{**bindings[0], unbounded_point: parameters[unbounded_point]}]
+                if python_overrides:
+                    bindings = [{**(bindings[0] if bindings else {}), **python_overrides}]
                 child._lazy_python_source = (bindings, self._python_scope.program)
             if _native_kernel is None:
                 return ItemContext(child)

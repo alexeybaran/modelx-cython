@@ -233,6 +233,84 @@ def test_complete_connected_package_imports_an_eager_model_without_providers(
         sys.modules.pop(package.__name__, None)
 
 
+def test_computational_data_space_is_not_executed_as_build_input(tmp_path):
+    import modelx as mx
+    from modelx_cython._frame_runtime.connected_package import load_connected_package
+
+    model = mx.new_model('ComputationalData')
+    try:
+        data = model.new_space('Data')
+        data.calls = {'scale': 0}
+        data.log = []
+        data.new_cells('scale', 'def scale():\n'
+                     '    calls["scale"] += 1\n'
+                     '    log.append("scale")\n'
+                     '    return 2.0')
+        data.new_cells('rate', 'lambda t: scale() * t')
+        projection = model.new_space('Projection')
+        projection.Data = data
+        projection.data = data
+        projection.log = data.log
+        projection.new_cells('value', 'lambda t: Data.rate(t)')
+        projection.new_cells('value_lower', 'def value_lower(t):\n'
+                             '    log.append(t)\n'
+                             '    return data.rate(t)')
+        exported = tmp_path / 'exported'
+        model.export(exported)
+    finally:
+        model.close()
+
+    result = build_package(exported, tmp_path / 'compiled', external_imports={})
+    connected = load_connected_package(result['package'] / '__init__.py')
+    try:
+        assert connected.Data.calls == {'scale': 0}
+        assert connected.Projection.value(2) == 4.0
+        assert connected.Projection.value(2) == 4.0
+        assert connected.Projection.value_lower(2) == 4.0
+        assert connected.Data.log is connected.Projection.log
+        assert connected.Data.log == ['scale', 2]
+        assert connected.Data.calls == {'scale': 1}
+    finally:
+        connected.close()
+
+
+def test_original_locked_export_preserves_nested_parent_and_shared_references(
+        tmp_path, monkeypatch):
+    import math
+    import shutil
+    import subprocess
+    import sys
+    from concurrent.futures import ThreadPoolExecutor
+    from modelx_cython._frame_runtime.connected_package import load_connected_package
+
+    fixture = Path(__file__).parent / 'samples' / 'locked_spaces'
+    source = tmp_path / 'source'
+    shutil.copytree(fixture, source)
+    subprocess.run([sys.executable, str(source / 'build_model.py')],
+                   cwd=source, check=True)
+    monkeypatch.syspath_prepend(str(source))
+    from LockedSpaces_nomx import LockedSpaces as exported
+
+    result = build_package(source / 'LockedSpaces_nomx', tmp_path / 'built',
+                           external_imports={})
+    compiled = load_connected_package(result['package'] / '__init__.py')
+    try:
+        assert compiled.Data.log is compiled.Table.log is compiled.Table.Child.log
+        assert compiled.Table['B'].Child.tbl is compiled.Table['B']
+        def values(policy):
+            return [compiled.Projection[policy].pv(t) for t in range(8)]
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            actual = list(pool.map(values, range(16)))
+        for policy, row in enumerate(actual):
+            for period, value in enumerate(row):
+                assert math.isclose(value, exported.Projection[policy].pv(period),
+                                    rel_tol=1e-9, abs_tol=1e-7)
+        log = compiled.Data.log
+        assert len(log) == len(set(log))
+    finally:
+        compiled.close()
+
+
 def test_complete_package_wires_real_cyclic_space_references(tmp_path):
     import modelx as mx
     from modelx_cython._frame_runtime.connected_build import build_package

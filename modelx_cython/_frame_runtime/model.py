@@ -187,15 +187,18 @@ class _ItemSpace:
     def __init__(self, space, arguments, dynamic_refs=None):
         self._space, self._arguments = space, arguments
         self._dynamic_refs = dict(dynamic_refs or {})
+        self._dynamic_refs_ready = not bool(space._model._relative_references)
         self._context = None
         self._entries = {}
 
     def _ensure_dynamic_refs(self):
-        if self._dynamic_refs is None:
+        if not self._dynamic_refs_ready:
             model = self._space._model
-            self._dynamic_refs = (model._space_formula_refs(
-                bindings=model._space_bindings, **self._arguments)
-                if model._space_bindings is not None else {})
+            relative_refs = {name: target(**{param: self._arguments[param]
+                                                    for param in parameters})
+                             for name, (target, parameters) in model._relative_references.items()}
+            self._dynamic_refs = {**relative_refs, **self._dynamic_refs}
+            self._dynamic_refs_ready = True
 
     def _create_context(self, position, native_root, *, simple_inputs=False):
         """Create this item's sole cache owner for either public Cell entry."""
@@ -212,12 +215,15 @@ class _ItemSpace:
             point_name = model._plan['point_parameter']
             if point_name in model.manifest['inputs']:
                 params = {**params, point_name: self._arguments[point_name]}
-        if native_root and not params and not row_inputs:
+        python_refs = {name: value for name, value in self._dynamic_refs.items()
+                       if name in model.manifest['python_references']}
+        if native_root and not params and not row_inputs and not python_refs:
             record = model._kernel._records[position]
             self._context = model._kernel._module.Kernel((record,))
         else:
             self._context = model._kernel.fork_item(
-                position, input_overrides=row_inputs, **params)
+                position, input_overrides=row_inputs, python_overrides=python_refs,
+                **params)
 
     def __getattr__(self, name):
         model = self._space._model
@@ -491,7 +497,8 @@ class CompiledModel:
         self._finish_bindings(tables, overrides=overrides,
                               space_bindings=space_bindings)
 
-    def _finish_bindings(self, tables=None, *, overrides=None, space_bindings=None):
+    def _finish_bindings(self, tables=None, *, overrides=None, space_bindings=None,
+                         relative_references=None):
         """Wire a constructed Space shell after all peer shells exist."""
         if self._initialized:
             raise ContractError('Compiled Space bindings are already initialized')
@@ -522,6 +529,7 @@ class CompiledModel:
                 raise ContractError('Space formula bindings differ from declared references')
         self._space_bindings = (dict(space_bindings) if space_bindings is not None
                                 else None)
+        self._relative_references = dict(relative_references or {})
         self._connected_context_key = None
         self._positions = {key: i for i, key in enumerate(_policy_index(self._plan, self._tables))}
         self._initialized = True
