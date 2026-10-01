@@ -28,12 +28,22 @@ def augment(source, manifest, spec, forced_python=()):
     curve_cells={n for n,h in signatures.items() if h['return']=='curve'}
     bodies, globals_, tables_ = {}, set(), set()
     from .coverage import cython_fallback_reasons
-    for name in sorted(objects - set(forced_python)):
+    # Numeric Cells that need Python-object inputs still have a Cython formula
+    # body. Only their cache entry must cross the checked GIL boundary. This
+    # keeps ordinary exported formulas in the same compiler pipeline instead
+    # of treating object input access as a reason to interpret the whole body.
+    candidates = objects | {name for name, row in rows.items()
+                            if row.get('calculator') == 'python'
+                            and row['result']['kind'] in ('float', 'int', 'bool')}
+    for name in sorted(candidates - set(forced_python)):
         node = function_ast(spec.cells[name])
         if cython_fallback_reasons(spec.cells[name], rows):
             continue
         bodies[name] = node
         globals_.update(_global_names(spec.cells[name].__code__) - rows.keys() - vars(builtins).keys())
+    numeric_bodies = set(bodies) - objects
+    if numeric_bodies != set(manifest.get('cython_numeric_fallback_cells', ())):
+        raise ContractError('Cython numeric body selection differs from bundled source')
     if set(typed_fields) - globals_:
         raise ContractError('Typed mapping input is not used by a Cython Cell formula')
     declared = {(name, key) for name, fields in typed_fields.items() for key in fields}
@@ -126,7 +136,8 @@ def augment(source, manifest, spec, forced_python=()):
                     native_called.add(name)
                     return ast.copy_location(ast.Call(ast.Attribute(ast.Name('self',ast.Load()), '_native_cell_'+name, ast.Load()), args, []), node)
                 if name in numeric:
-                    return ast.copy_location(ast.Call(ast.Attribute(ast.Name('self',ast.Load()), '_typed_cell_'+name, ast.Load()), args, []), node)
+                    return ast.copy_location(ast.Call(ast.Attribute(ast.Name('self',ast.Load()), 'call',ast.Load()),
+                        [ast.Constant(name),ast.Tuple(args,ast.Load())],[]),node)
                 if name in objects:
                     return ast.copy_location(ast.Call(ast.Attribute(ast.Name('self',ast.Load()), '_object_cell_'+name, ast.Load()), args, []), node)
                 return ast.copy_location(ast.Call(ast.Attribute(ast.Name('self',ast.Load()), 'call',ast.Load()),
@@ -184,7 +195,13 @@ def augment(source, manifest, spec, forced_python=()):
         source=source.replace(f'entry.value = self._object_fn_{name}(',f'entry.value = self._gil_formula_{name}(')
         source=source.replace(f'value = self._object_fn_{name}(',f'value = self._gil_formula_{name}(')
         source=source.replace(f"            if self._python_scope.diagnostics:\n                self._python_scope.calls[{name!r}] += 1\n", '')
-        rows[name]['calculator']='cython_object'
+        rows[name]['calculator']='cython_object' if name in objects else 'cython_scalar'
+        if name not in objects:
+            # The numeric cache/miss entry already calls PythonScope.calculate.
+            # Expose the one Cython body to that bridge without replacing the
+            # entry or creating a second cache.
+            methods += [f'    def _gil_entry_{name}(self'+(', '+signature if signature else '')+'): ',
+                        f'        return self._gil_formula_{name}({", ".join(p["name"] for p in params)})', '']
     for name in sorted(native_called):
         hint = signatures[name]
         params = rows[name]['params']
@@ -284,7 +301,7 @@ def augment(source, manifest, spec, forced_python=()):
     if tables_:
         source='from ._table_lookup cimport IndexedTable as _IndexedTable\n'+source
     manifest['prepared_lookup_tables']=sorted(tables_)
-    manifest['cython_object_cells']=sorted(bodies)
+    manifest['cython_object_cells']=sorted(set(bodies) & objects)
     if typed_fields:
         manifest['typed_mapping_inputs'] = typed_fields
     manifest['direct_object_entries']=[n for n in sorted(objects) if rows[n]['result']['kind']=='object' and all(p['type']['kind']=='object' for p in rows[n]['params'])]

@@ -65,8 +65,9 @@ def cell_dependencies(fn, cells, seen=None):
     return result
 
 
-def bundle_source(cells, python_cells, inputs, enums):
+def bundle_source(cells, python_cells, inputs, enums, *, compiled_numeric=()):
     """Bundle executable source and imports, not live modelx/exported objects."""
+    compiled_numeric = set(compiled_numeric)
     from .enum_binding import enum_origin
     chunks = ['# Detached raw formulas. Cell names are rebound by PythonScope.', 'from enum import IntEnum']
     for name, enum in sorted(enums.items()):
@@ -91,14 +92,15 @@ def bundle_source(cells, python_cells, inputs, enums):
             raise ContractError(name + ': a plain Python function is required')
         if any(isinstance(n, (ast.Global, ast.Nonlocal)) for n in ast.walk(node)):
             raise ContractError(name + ': mutation of formula globals is not supported')
-        node.name = name
-        node.decorator_list = []
-        node.returns = None
-        if name in cells:
-            node.args.defaults = []  # The shared Cell entry always binds every argument.
-        for arg in (*node.args.posonlyargs, *node.args.args, *node.args.kwonlyargs):
-            arg.annotation = None
-        chunks.append(ast.unparse(node))
+        if name not in compiled_numeric:
+            node.name = name
+            node.decorator_list = []
+            node.returns = None
+            if name in cells:
+                node.args.defaults = []  # The shared Cell entry always binds every argument.
+            for arg in (*node.args.posonlyargs, *node.args.args, *node.args.kwonlyargs):
+                arg.annotation = None
+            chunks.append(ast.unparse(node))
         for used in sorted(_global_names(fn.__code__)):
             if used in inputs:
                 used_inputs.add(used)
@@ -270,7 +272,9 @@ class PythonScope(CellCodec):
                     or {k: int(v) for k, v in actual.__members__.items()} != info['members']
                     or ('module' in info and actual is not resolve_enum(info))):
                 raise ContractError('Public Enum contract changed: ' + name)
-        self.calculators = {name: self.namespace[name] for name in manifest['python_cells']}
+        compiled_numeric = set(manifest.get('cython_numeric_fallback_cells', ()))
+        self.calculators = {name: (None if name in compiled_numeric else self.namespace[name])
+                            for name in manifest['python_cells']}
         self.calls = {name: 0 for name in self.calculators}
         self._record, self._raw_record = {}, ()
         self._plain_arguments = {name: all(p['type']['kind'] in ('float', 'int', 'object')
@@ -301,7 +305,10 @@ class PythonScope(CellCodec):
         args = arguments if self._plain_arguments[name] else tuple(self.decode(p['type'], value) for p, value in zip(row['params'], arguments))
         if self.diagnostics:
             self.calls[name] += 1
-        value = self.calculators[name](*args)
+        if name in self.manifest.get('cython_numeric_fallback_cells', ()):
+            value = getattr(self.kernel, '_gil_entry_' + name)(*args)
+        else:
+            value = self.calculators[name](*args)
         if value is None and row.get('allow_none') is False:
             raise ValueError('None is not allowed for Cell ' + name)
         return self.encode(row['result'], value)

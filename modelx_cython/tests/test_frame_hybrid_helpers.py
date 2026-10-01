@@ -175,6 +175,11 @@ def test_per_policy_object_reference_follows_binding_and_native_traversal(tmp_pa
         'kind': 'row_reference', 'table': 'points', 'column': 'model_point'}
     artifact = tmp_path / 'per_policy_reference'
     build(spec, artifact)
+    import json
+    manifest = json.loads((artifact / 'manifest.json').read_text())
+    assert manifest['cells']['row_amount']['coverage']['body_backend'] == 'cython_gil'
+    assert 'row_amount' in manifest['cython_numeric_fallback_cells']
+    assert 'def row_amount' not in next(artifact.glob('mxk_*/_python.py')).read_text()
     model = CompiledModel(artifact, {'points': points})
     try:
         assert model.Projection[10].model_point == {'amount': 1.25}

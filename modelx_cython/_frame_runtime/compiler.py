@@ -924,10 +924,20 @@ def emit(spec, *, diagnostics=False, python_cells=()):
                         object_cache_slots=sum(r['slots'] for r in object_rows.values()))
     if mixed:
         from .python_calculator import bundle_source
-        python_source, required, used_inputs = bundle_source(cells, python_reasons, spec.inputs, enums)
+        from .coverage import cython_fallback_reasons
+        compiled_numeric = ({name for name in python_reasons
+                             if spec.cython_objects and name not in object_cells
+                             and rows[name]['result']['kind'] in ('float', 'int', 'bool')
+                             and name not in python_cells
+                             and not cython_fallback_reasons(cells[name], all_rows)}
+                            if spec.cython_objects else set())
+        python_source, required, used_inputs = bundle_source(
+            cells, python_reasons, spec.inputs, enums,
+            compiled_numeric=compiled_numeric)
         manifest.update(python_cells=python_reasons, python_source=python_source,
                         python_references=required, python_inputs=used_inputs,
-                        python_enums={k: type_info(v) for k, v in enums.items()})
+                        python_enums={k: type_info(v) for k, v in enums.items()},
+                        cython_numeric_fallback_cells=sorted(compiled_numeric))
     if spec.model is not None:
         manifest['model'] = spec.model
         manifest['model_sha256'] = hashlib.sha256(json.dumps(spec.model, sort_keys=True).encode()).hexdigest()
