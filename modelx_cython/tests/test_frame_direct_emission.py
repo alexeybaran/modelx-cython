@@ -38,10 +38,8 @@ def test_structured_emission_preserves_generated_source(mixed, expected):
                       steps=4, length='4',
                       cell_outputs=('report',) if mixed else ('total',),
                       scalar_outputs=('total',), cython_objects=mixed)
-    source, old_manifest = emit(spec)
-    parts, manifest = emit(spec, frame_parts=True)
-    assert source.startswith('# cython:')
-    assert old_manifest == manifest
+    parts, manifest = emit(spec)
+    assert parts['header'][0].startswith('# cython:')
     for name in ('value', 'total'):
         entry = next(method for method in parts['methods']
                      if any(line.startswith('cdef inline double _cell_' + name + '(')
@@ -66,7 +64,7 @@ def test_checked_python_formula_is_emitted_with_a_frame_receiver():
     spec = KernelSpec(module=module, inputs={'base': float}, outputs={},
                       steps=4, length='4', cell_outputs=('total',),
                       scalar_outputs=('total',))
-    parts, manifest = emit(spec, python_cells=('total',), frame_parts=True)
+    parts, manifest = emit(spec, python_cells=('total',))
     assert all(any(line.startswith('cdef inline ') and '(_Frame* state' in line
                    for line in method) for method in parts['methods'])
     formula = next(method for method in parts['methods']
@@ -85,7 +83,7 @@ def test_output_plan_is_bound_before_runtime_generation():
     spec = KernelSpec(module=module, inputs={'base': float},
                       outputs={'cash': {'period': 'value(t)', 'aggregate': 'total()'}},
                       steps=4, length='4')
-    parts, manifest = emit(spec, frame_parts=True)
+    parts, manifest = emit(spec)
     assert parts['runtime'] == parts['runtime_prefix']
     assert not any('def evaluate(' in line or 'def run(' in line
                    or 'def run_scalar(' in line for line in parts['runtime'])

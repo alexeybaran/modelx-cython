@@ -380,25 +380,24 @@ def _frame_expression(source, binder, cast_names):
 
 
 def _cell_entry_lines(name, row, tail, call, native_suffix, diagnostics,
-                      *, frame_native=False, input_info=None):
-    """Emit the same cache protocol for a Space or its physical frame."""
-    receiver = 'state' if frame_native else 'self'
-    signature = ('_Frame* state' if frame_native else 'self') + tail
+                      *, input_info):
+    """Emit one typed Cell cache entry for the physical frame."""
+    receiver = 'state'
+    signature = '_Frame* state' + tail
     ret = row['result']['ctype']
     def field(key):
         return receiver + '.' + key
-    args = ('state' + (', ' + call if call else '') if frame_native else call)
-    formula = f'_calc_{name}({args})' if frame_native else f'self._calc_{name}({call})'
+    args = 'state' + (', ' + call if call else '')
+    formula = f'_calc_{name}({args})'
     if row['direct_input'] is not None:
         exception = 'noexcept' if native_suffix else 'except? -1'
         value = field(row['direct_input'])
-        if frame_native and input_info is not None:
-            info = input_info.get(row['direct_input'], {})
-            if info.get('ctype') in {'object', 'Curve', 'CurveTable',
-                                     'IndexedInt1', 'IndexedFloat1',
-                                     'IndexedInt2', 'IndexedFloat2',
-                                     'dict', 'set'}:
-                value = f"(<{info['ctype']}>{value})"
+        info = input_info.get(row['direct_input'], {})
+        if info.get('ctype') in {'object', 'Curve', 'CurveTable',
+                                 'IndexedInt1', 'IndexedFloat1',
+                                 'IndexedInt2', 'IndexedFloat2',
+                                 'dict', 'set'}:
+            value = f"(<{info['ctype']}>{value})"
         return [f'cdef inline {ret} _cell_{name}({signature}) {exception}{native_suffix}:',
                 f'    return {value}']
     if not row['cached']:
@@ -564,7 +563,7 @@ def _native_rejection(node, selected, spec, enums, native_suffix):
     return None
 
 
-def emit(spec, *, diagnostics=False, python_cells=(), frame_parts=False):
+def emit(spec, *, diagnostics=False, python_cells=()):
     native_suffix = ' nogil'
     cells = spec.cells
     if any(n.startswith('_mx_') for n in cells):
@@ -814,33 +813,30 @@ def emit(spec, *, diagnostics=False, python_cells=(), frame_parts=False):
     for name, typ in enums.items():
         type_info(typ)
         lines += ['cdef enum:'] + [f'    _E_{name}_{k} = {int(v)}' for k, v in typ.__members__.items()]
-    frame_header = tuple(lines) if frame_parts else None
+    frame_header = tuple(lines)
     frame_field_types = {
         '_epoch': 'unsigned int', '_floats': 'double[::1]',
         '_ints': 'long long[::1]', '_seen': 'unsigned int[::1]',
         '_calls': 'unsigned long long', '_misses': 'unsigned long long',
-    } if frame_parts else None
+    }
     lines += ['@cython.final', 'cdef class Kernel:', '    cdef object _records', '    cdef unsigned int _epoch',
               '    cdef double[::1] _floats', '    cdef long long[::1] _ints',
               '    cdef unsigned int[::1] _seen',
               '    cdef unsigned long long _calls, _misses']
     if mixed:
         lines += ['    cdef object _python_scope']
-        if frame_parts:
-            frame_field_types['_python_scope'] = 'object'
+        frame_field_types['_python_scope'] = 'object'
     for k, ti in input_info.items():
         ct = ti['ctype']
         lines += [f'    cdef {ct} {k}']
-        if frame_parts:
-            frame_field_types[k] = ct
+        frame_field_types[k] = ct
     for k, r in rows.items():
         if r['hashed']:
             for param in r['params']:
                 dt = 'double' if param['type']['kind'] == 'float' else 'long long'
                 lines += [f"    cdef {dt}[::1] _keys_{k}_{param['name']}"]
-                if frame_parts:
-                    frame_field_types[f"_keys_{k}_{param['name']}"] = f'{dt}[::1]'
-    frame_fields = tuple(lines[len(frame_header) + 2:]) if frame_parts else None
+                frame_field_types[f"_keys_{k}_{param['name']}"] = f'{dt}[::1]'
+    frame_fields = tuple(lines[len(frame_header) + 2:])
     allocated = max(1, slot)
     lines += ['    def __init__(self, records):', '        self._records = records', '        self._epoch = 0',
               f'        self._floats = np.empty({allocated}, dtype=np.float64)',
@@ -865,11 +861,11 @@ def emit(spec, *, diagnostics=False, python_cells=(), frame_parts=False):
     for i, (k, ti) in enumerate(input_info.items()):
         lines += [f'        self.{k} = record[{i}]']
     lines += ['        self._advance()']
-    frame_runtime_start = len(lines) if frame_parts else None
-    frame_methods = [] if frame_parts else None
-    frame_casts = _frame_input_casts(input_info) if frame_parts else None
+    frame_runtime_start = len(lines)
+    frame_methods = []
+    frame_casts = _frame_input_casts(input_info)
     cast_names = ({'__MX_FRAME_CAST_' + key + '__': f'(<{ctype}>state.{key})'
-                   for key, ctype in frame_casts.items()} if frame_parts else None)
+                   for key, ctype in frame_casts.items()})
     for name, row in rows.items():
         params = row['params']
         decl = ', '.join(p['type']['ctype'] + ' ' + p['name'] + ((' = ' + p['default']) if p['default'] is not None else '') for p in params)
@@ -878,140 +874,44 @@ def emit(spec, *, diagnostics=False, python_cells=(), frame_parts=False):
         calc_tail = (', ' + calc_decl) if calc_decl else ''
         call = ', '.join(p['name'] for p in params)
         ret = row['result']['ctype']
-        if not frame_parts:
-            entry = _cell_entry_lines(name, row, tail, call, native_suffix,
-                                      diagnostics, input_info=input_info)
-            lines.extend('    ' + line for line in entry)
-        frame_entry = (tuple(_cell_entry_lines(name, row, tail, call,
-                                               native_suffix, diagnostics,
-                                               frame_native=True,
-                                               input_info=input_info))
-                       if frame_parts else None)
+        frame_entry = tuple(_cell_entry_lines(name, row, tail, call,
+                                              native_suffix, diagnostics,
+                                              input_info=input_info))
         if row['direct_input'] is not None:
-            if frame_parts:
-                frame_methods.append(frame_entry)
+            frame_methods.append(frame_entry)
             continue
-        calc_start = len(lines)
         node = copy.deepcopy(parsed[name])
         loc = ({'_mx_value', '_mx_key', '_mx_object_key', 'self'} if row['cached'] else set()) | {p['name'] for p in params} | {n.id for n in ast.walk(node) if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store)}
-        body = []
-        # Both native and checked fallback formulas know their physical frame
-        # receiver here. Emit that receiver directly instead of creating a
-        # method-shaped body for frame_codegen to rewrite later.
-        direct_frame_calc = frame_parts
-        if row['cached']:
-            if not direct_frame_calc:
-                lines += [f'    cdef inline {ret} _calc_{name}(self{calc_tail}) except? -1{native_suffix}:']
         if name in python_reasons:
             tuple_expr = '(' + call + (',' if params else '') + ')'
-            body = ['with gil:\n    return self._python_scope.calculate(' + repr(name) + ', ' + tuple_expr + ')']
-        elif not direct_frame_calc:
-            binder = BindNames(selected, spec.inputs, enums, loc, native_lookups=True)
-            for n in node.body:
-                if isinstance(n, ast.Expr) and isinstance(n.value, ast.Constant) and isinstance(n.value.value, str):
-                    continue
-                body.append(ast.unparse(ast.fix_missing_locations(binder.visit(n))))
-        if not row['cached']:
-            if not direct_frame_calc:
-                lines += [f'    cdef inline {ret} _calc_{name}(self{calc_tail}) except? -1{native_suffix}:']
-        if direct_frame_calc:
-            if name in python_reasons:
-                tuple_expr = '(' + call + (',' if params else '') + ')'
-                frame_body = ['    with gil:',
-                              '        return (<object>state._python_scope).calculate('
-                              + repr(name) + ', ' + tuple_expr + ')']
-            else:
-                frame_binder = BindNames(selected, spec.inputs, enums, loc,
-                                         native_lookups=True, frame_native=True,
-                                         frame_casts=frame_casts)
-                frame_body = []
-                for statement in node.body:
-                    if (isinstance(statement, ast.Expr)
-                            and isinstance(statement.value, ast.Constant)
-                            and isinstance(statement.value.value, str)):
-                        continue
-                    source = ast.unparse(ast.fix_missing_locations(
-                        frame_binder.visit(copy.deepcopy(statement))))
-                    source = _frame_cast_names(source, cast_names)
-                    frame_body.extend(textwrap.indent(source, '    ').splitlines())
-            frame_methods.extend((frame_entry,
-                                  tuple([f'cdef inline {ret} _calc_{name}(_Frame* state{calc_tail}) except? -1{native_suffix}:']
-                                        + frame_body)))
+            frame_body = ['    with gil:',
+                          '        return (<object>state._python_scope).calculate('
+                          + repr(name) + ', ' + tuple_expr + ')']
         else:
-            for s in body:
-                lines += textwrap.indent(s, '        ').splitlines()
-        if frame_parts:
-            if not direct_frame_calc:
-                frame_methods.extend((frame_entry,
-                                      tuple(lines[calc_start:])))
-    frame_runtime_end = len(lines) if frame_parts else None
-    frame_runtime_prefix_end = len(lines) if frame_parts else None
+            frame_binder = BindNames(selected, spec.inputs, enums, loc,
+                                     native_lookups=True, frame_native=True,
+                                     frame_casts=frame_casts)
+            frame_body = []
+            for statement in node.body:
+                if (isinstance(statement, ast.Expr)
+                        and isinstance(statement.value, ast.Constant)
+                        and isinstance(statement.value.value, str)):
+                    continue
+                source = ast.unparse(ast.fix_missing_locations(
+                    frame_binder.visit(copy.deepcopy(statement))))
+                source = _frame_cast_names(source, cast_names)
+                frame_body.extend(textwrap.indent(source, '    ').splitlines())
+        frame_methods.extend((frame_entry,
+                              tuple([f'cdef inline {ret} _calc_{name}(_Frame* state{calc_tail}) except? -1{native_suffix}:']
+                                    + frame_body)))
+    frame_runtime_end = len(lines)
+    frame_runtime_prefix_end = len(lines)
     for table in spec.outputs:
         if not table.isidentifier() or table.startswith('_'):
             raise ContractError('Output tables require public identifier names')
     for name in spec.scalar_outputs:
         if name not in rows or rows[name]['params']:
             raise ContractError('Scalar outputs must be declared zero-argument Cells')
-    if not frame_parts:
-        binder = BindNames(selected, spec.inputs, enums, {'t'}, native_lookups=True)
-        length_expr = _expression(spec.length, binder)
-        lines += ['    def evaluate(self, Py_ssize_t policy, str cell, tuple args):',
-                  '        if policy < 0 or policy >= len(self._records):', '            raise IndexError(policy)',
-                  '        self._select(self._records[policy])']
-        for k, r in rows.items():
-            lines += [f'        if cell == {k!r}:', f"            if len(args) != {len(r['params'])}: raise TypeError('Use canonical positional arguments')",
-                      f"            return self._cell_{k}(" + ', '.join(f'args[{i}]' for i in range(len(r['params']))) + ')']
-        lines += ["        raise KeyError(cell)"]
-        for table, cols in spec.outputs.items():
-            lines += [f'    cdef object _table_{table}(self):', '        cdef Py_ssize_t t, n',
-                      '        cdef double[:, ::1] out', f'        n = {length_expr}',
-                      f"        if n < 0 or n > {spec.steps}: raise IndexError('Output length exceeds declared bound')",
-                      f'        result = np.empty((n, {len(cols)}), dtype=np.float64)', '        out = result',
-                      '        for t in range(n):']
-            for j, expr in enumerate(cols.values()):
-                lines += [f'            out[t, {j}] = ' + _expression(expr, binder)]
-            lines += ['        return result']
-        lines += ['    def run(self, str table, bint sums):', '        cdef Py_ssize_t i',
-                  '        result = []', '        for i in range(len(self._records)):',
-                  '            self._select(self._records[i])']
-        for i, table in enumerate(spec.outputs):
-            lines += [f"            {'if' if i == 0 else 'elif'} table == {table!r}:", f'                out = self._table_{table}()']
-        lines += ["            else: raise KeyError(table)",
-                  '            if not np.isfinite(out).all():', "                raise ArithmeticError('Non-finite kernel output')",
-                  '            result.append(float(out.sum()) if sums else out)',
-                  '        return np.asarray(result, dtype=np.float64) if sums else result']
-        lines += ['    def run_one(self, Py_ssize_t policy, str table):',
-                  '        if policy < 0 or policy >= len(self._records): raise IndexError(policy)',
-                  '        self._select(self._records[policy])']
-        for i, table in enumerate(spec.outputs):
-            lines += [f"        {'if' if i == 0 else 'elif'} table == {table!r}:", f'            out = self._table_{table}()']
-        lines += ["        else: raise KeyError(table)",
-                  "        if not np.isfinite(out).all(): raise ArithmeticError('Non-finite kernel output')",
-                  '        return out']
-        lines += ['    def run_scalar(self, str name):', '        cdef Py_ssize_t i',
-                  '        cdef double[::1] view', '        result = np.empty(len(self._records), dtype=np.float64)',
-                  '        view = result', '        for i in range(len(self._records)):',
-                  '            self._select(self._records[i])']
-        if not spec.scalar_outputs:
-            lines += ["            raise KeyError(name)"]
-        for i, name in enumerate(spec.scalar_outputs):
-            lines += [f"            {'if' if i == 0 else 'elif'} name == {name!r}:",
-                      f'                view[i] = self._cell_{name}()']
-        if spec.scalar_outputs:
-            lines += ["            else: raise KeyError(name)"]
-        lines += ["        if not np.isfinite(result).all(): raise ArithmeticError('Non-finite scalar output')",
-                  '        return result',
-                  '    def run_scalar_one(self, Py_ssize_t policy, str name):',
-                  '        if policy < 0 or policy >= len(self._records): raise IndexError(policy)',
-                  '        self._select(self._records[policy])']
-        if not spec.scalar_outputs:
-            lines += ["        raise KeyError(name)"]
-        for i, name in enumerate(spec.scalar_outputs):
-            lines += [f"        {'if' if i == 0 else 'elif'} name == {name!r}:", f'            value = self._cell_{name}()']
-        if spec.scalar_outputs:
-            lines += ["        else: raise KeyError(name)"]
-        lines += ["        if not np.isfinite(value): raise ArithmeticError('Non-finite scalar output')",
-                  '        return value']
     manifest = dict(schema='mxcf.scalar_kernel.v1', inputs=input_info, outputs=spec.outputs,
                      steps=spec.steps, length=spec.length, parameters=spec.parameters, scalar_outputs=spec.scalar_outputs, output_dtype='float64', cells=all_rows, cache_slots=slot,
                      native_scalar_outputs=native_scalar_outputs,
@@ -1031,29 +931,27 @@ def emit(spec, *, diagnostics=False, python_cells=(), frame_parts=False):
     if spec.model is not None:
         manifest['model'] = spec.model
         manifest['model_sha256'] = hashlib.sha256(json.dumps(spec.model, sort_keys=True).encode()).hexdigest()
-    if frame_parts:
-        output_binder = BindNames(selected, spec.inputs, enums, {'t'},
-                                  native_lookups=True, frame_native=True,
-                                  frame_casts=frame_casts)
-        frame_outputs = {
-            'length': (_frame_expression(spec.length, output_binder, cast_names)
-                       if spec.outputs else '0'),
-            'tables': {table: [_frame_expression(expr, output_binder, cast_names)
-                               for expr in columns.values()]
-                       for table, columns in spec.outputs.items()},
-        }
-        return {
-            'header': frame_header,
-            'fields': frame_fields,
-            'field_types': frame_field_types,
-            'methods': tuple(frame_methods),
-            'frame_outputs': frame_outputs,
-            'runtime_prefix': tuple(lines[len(frame_header) + 2 + len(frame_fields):frame_runtime_start])
-                              + tuple(lines[frame_runtime_end:frame_runtime_prefix_end]),
-            'runtime': tuple(lines[len(frame_header) + 2 + len(frame_fields):frame_runtime_start])
-                       + tuple(lines[frame_runtime_end:]),
-        }, manifest
-    return '\n'.join(lines) + '\n', manifest
+    output_binder = BindNames(selected, spec.inputs, enums, {'t'},
+                              native_lookups=True, frame_native=True,
+                              frame_casts=frame_casts)
+    frame_outputs = {
+        'length': (_frame_expression(spec.length, output_binder, cast_names)
+                   if spec.outputs else '0'),
+        'tables': {table: [_frame_expression(expr, output_binder, cast_names)
+                           for expr in columns.values()]
+                   for table, columns in spec.outputs.items()},
+    }
+    return {
+        'header': frame_header,
+        'fields': frame_fields,
+        'field_types': frame_field_types,
+        'methods': tuple(frame_methods),
+        'frame_outputs': frame_outputs,
+        'runtime_prefix': tuple(lines[len(frame_header) + 2 + len(frame_fields):frame_runtime_start])
+                          + tuple(lines[frame_runtime_end:frame_runtime_prefix_end]),
+        'runtime': tuple(lines[len(frame_header) + 2 + len(frame_fields):frame_runtime_start])
+                   + tuple(lines[frame_runtime_end:]),
+    }, manifest
 
 
 def build(spec, destination, *, diagnostics=False, python_cells=(),
@@ -1062,8 +960,7 @@ def build(spec, destination, *, diagnostics=False, python_cells=(),
     if destination.exists() and any(destination.iterdir()):
         raise FileExistsError('Build destination must be empty')
     destination.mkdir(parents=True, exist_ok=True)
-    parts, manifest = emit(spec, diagnostics=diagnostics, python_cells=python_cells,
-                           frame_parts=True)
+    parts, manifest = emit(spec, diagnostics=diagnostics, python_cells=python_cells)
     if spec.cython_objects:
         manifest["cython_objects"] = True
     from .frame_codegen import to_c_frame

@@ -104,7 +104,7 @@ def test_native_scalar_traversal_skips_only_unneeded_object_binding():
                        scalar_outputs=('numeric_total', 'report_total'),
                        cell_outputs=('report',), point_table='rates',
                        cython_objects=True)
-    parts, manifest = emit(spec, frame_parts=True)
+    parts, manifest = emit(spec)
     assert manifest['native_scalar_outputs'] == ['numeric_total']
     source = augment(to_c_frame(parts, manifest), manifest, spec)
     assert 'cdef void _select_native_policy' in source
