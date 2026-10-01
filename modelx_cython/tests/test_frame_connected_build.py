@@ -238,7 +238,9 @@ def test_complete_package_wires_real_cyclic_space_references(tmp_path):
         connected.close()
 
 
-def test_complete_package_preserves_nested_references_and_base_parameters(tmp_path):
+@pytest.mark.parametrize('use_slots', [True, False])
+def test_complete_package_preserves_nested_references_and_base_parameters(
+        tmp_path, use_slots):
     import modelx as mx
     from modelx_cython._frame_runtime.connected_package import load_connected_package
 
@@ -246,7 +248,7 @@ def test_complete_package_preserves_nested_references_and_base_parameters(tmp_pa
     live = mx.read_model(source)
     try:
         exported = tmp_path / 'exported'
-        live.export(exported)
+        live.export(exported, use_slots=use_slots)
         expected = [(live.Foo[i].foo(), live.Foo[i].quux()) for i in range(10)]
         base = live.Bar.Qux.corge()
     finally:
