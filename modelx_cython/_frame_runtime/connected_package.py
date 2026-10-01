@@ -66,8 +66,6 @@ def assemble_connected_package(destination, graph, artifacts, *,
     external_imports = dict(external_imports or {})
     if any(not name.isidentifier() for name in external_imports):
         raise ContractError('External binding names must be identifiers')
-    if eager and not external_imports:
-        raise ContractError('Eager connected loading requires external providers')
     for reference in external_imports.values():
         if (not isinstance(reference, str) or reference.count(':') != 1
                 or any(not part.isidentifier() for part in

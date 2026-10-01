@@ -207,6 +207,32 @@ def test_complete_package_compiles_ordinary_single_space(tmp_path, preserve_meta
         connected.close()
 
 
+def test_complete_connected_package_imports_an_eager_model_without_providers(
+        tmp_path, monkeypatch):
+    import importlib
+    import sys
+    import modelx as mx
+
+    model = mx.new_model('EagerNative')
+    try:
+        model.new_space('Projection').new_cells('value', 'lambda: 4.25')
+        exported = tmp_path / 'exported'
+        model.export(exported)
+    finally:
+        model.close()
+    result = build_package(exported, tmp_path / 'compiled', external_imports={},
+                           package_name='EagerNativeCompiled', eager=True)
+    assert result['manifest']['external_imports'] == {}
+    monkeypatch.syspath_prepend(str(tmp_path / 'compiled'))
+    package = importlib.import_module('EagerNativeCompiled')
+    try:
+        assert package.mx_model is package.EagerNative
+        assert package.mx_model.Projection.value() == 4.25
+    finally:
+        package.mx_model.close()
+        sys.modules.pop(package.__name__, None)
+
+
 def test_complete_package_wires_real_cyclic_space_references(tmp_path):
     import modelx as mx
     from modelx_cython._frame_runtime.connected_build import build_package
