@@ -105,16 +105,20 @@ def plan_collect_regions(graph, *, external_names=()):
 
 def build_package(exported, destination, *, external_imports,
                   space_options=None, package_name=None, eager=False,
-                  collect_only=False):
+                  collect_only=False, trace_logger=None):
     """Compile a complete or collect-only connected package.
 
     ``space_options`` contains only representation and tracing contracts
     accepted by ``from_exported``. The graph, not that mapping, decides which
-    Spaces compile. Build artifacts stay outside the exported source tree.
+    Spaces compile. A standard mx2cy ``trace_logger`` supplies observed Cell
+    types across the selected Spaces before generation; explicit contract
+    options cannot silently override that trace. Build artifacts stay outside
+    the exported source tree.
     """
     from .compiler import build
     from .connected_package import assemble_connected_package
     from .modelx_frontend_exported import open_exported_source
+    from .trace_contracts import from_mx2cy_trace
 
     exported = Path(exported)
     destination = Path(destination)
@@ -153,6 +157,11 @@ def build_package(exported, destination, *, external_imports,
             arguments = dict(options.get(name, {}))
             if 'projection' in arguments or 'inherited_parameters' in arguments:
                 raise ContractError('Space options cannot override discovered hierarchy')
+            if trace_logger is not None:
+                if 'contracts' in arguments:
+                    raise ContractError('Trace contracts and Space contract options conflict')
+                arguments['contracts'] = from_mx2cy_trace(
+                    trace_logger, derive.source_manifest, space=name)
             declared = graph['spaces'][plan['model'] + '.' + name]['space_references']
             inherited = inherited_parameters(graph, plan['model'], name)
             if inherited:
@@ -179,10 +188,11 @@ def build_package(exported, destination, *, external_imports,
 
 
 def build_collect_package(exported, destination, *, external_imports,
-                          space_options=None, package_name=None, eager=False):
+                          space_options=None, package_name=None, eager=False,
+                          trace_logger=None):
     """Compatibility entry for a package containing collect regions."""
     return build_package(exported, destination,
                          external_imports=external_imports,
                          space_options=space_options,
                          package_name=package_name, eager=eager,
-                         collect_only=True)
+                         collect_only=True, trace_logger=trace_logger)

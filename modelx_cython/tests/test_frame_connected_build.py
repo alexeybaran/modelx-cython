@@ -207,6 +207,33 @@ def test_complete_package_compiles_ordinary_single_space(tmp_path, preserve_meta
         connected.close()
 
 
+def test_complete_package_uses_standard_trace_for_typed_cell_contracts(tmp_path):
+    import modelx as mx
+    from modelx_cython.cli import run_sample
+
+    model = mx.new_model('TracedPackage')
+    try:
+        model.new_space('S').new_cells('value', 'lambda x: x + 0.5')
+        exported = tmp_path / 'exported'
+        model.export(exported)
+    finally:
+        model.close()
+    sample = tmp_path / 'sample.py'
+    sample.write_text('from exported import mx_model\nmx_model.S.value(2.0)\n')
+    trace = run_sample(exported, str(sample))
+    result = build_package(exported, tmp_path / 'compiled',
+                           external_imports={}, trace_logger=trace)
+    manifest = json.loads((result['artifacts']['S'] / 'manifest.json').read_text())
+    assert manifest['cells']['value']['result']['kind'] == 'float'
+    assert manifest['cells']['value']['params'][0]['type']['kind'] == 'float'
+    from modelx_cython._frame_runtime.connected_package import load_connected_package
+    compiled = load_connected_package(result['package'] / '__init__.py')
+    try:
+        assert compiled.S.value(2.0) == 2.5
+    finally:
+        compiled.close()
+
+
 def test_complete_connected_package_imports_an_eager_model_without_providers(
         tmp_path, monkeypatch):
     import importlib

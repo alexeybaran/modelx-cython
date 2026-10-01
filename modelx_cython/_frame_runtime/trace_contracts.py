@@ -80,7 +80,11 @@ def from_mx2cy_trace(logger, source_manifest, *, space='Projection'):
         source_cells = source_manifest['spaces'][key]['cells']
     except KeyError as exc:
         raise ContractError('Source manifest has no Space: ' + key) from exc
-    suffix = '._mx_classes._c_' + space + '._f_'
+    parts = space.split('.')
+    if any(not part.isidentifier() for part in parts):
+        raise ContractError('Invalid traced Space identity: ' + space)
+    module_path = ''.join('._m_' + part for part in parts[:-1])
+    suffix = module_path + '._mx_classes._c_' + parts[-1] + '._f_'
     result = {}
     for fullname, observed in logger.cells_info.items():
         if suffix not in fullname:

@@ -43,6 +43,20 @@ def test_frame_contracts_reject_ambiguous_trace():
         from_mx2cy_trace(logger, manifest)
 
 
+def test_nested_space_trace_uses_exported_module_and_class_identity():
+    observed = SimpleNamespace(
+        ret_type=SimpleNamespace(is_array=False, value_type=float),
+        arg_types={'t': int})
+    logger = SimpleNamespace(cells_info={
+        'exported._m_Top._m_Child._mx_classes._c_Leaf._f_value': observed,
+        'exported._m_Else._m_Child._mx_classes._c_Leaf._f_value': observed,
+    })
+    manifest = {'model': 'M', 'spaces': {'M.Top.Child.Leaf': {
+        'cells': {'value': {}}}}}
+    assert from_mx2cy_trace(logger, manifest, space='Top.Child.Leaf') == {
+        'value': {'return': float, 't': int}}
+
+
 def test_explicit_lookup_key_keeps_its_table_domain():
     observed = SimpleNamespace(
         ret_type=SimpleNamespace(is_array=False, value_type=str),
