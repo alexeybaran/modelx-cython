@@ -488,3 +488,89 @@ assert q.counts == {'keyed': 4}
 print('checked original Cell boundary, defaults, keywords, dense axes and serialization passed')
 """, encoding='utf-8')
     _run(tmp_path, ['verify.py'], 'verify')
+
+
+
+def test_original_shell_canonical_power_and_checked_object_errors(tmp_path):
+    """Reuse original power typing/guards across numeric and owned-object entries."""
+    import modelx as mx
+    m = mx.new_model('PowerShell')
+    s = m.new_space('S')
+    s.base = 4.0
+    s.exponent = 0.5
+    s.offset = 0.0
+    s.factory = dict
+    for name, source in {
+        'leaf': 'def leaf(n):\n return offset + float(n)\n',
+        'value': 'def value(n):\n child = leaf(n)\n return base ** exponent + child\n',
+        'cast_base': 'def cast_base(n):\n return 2 ** (n / 12)\n',
+        'negative_integer': 'def negative_integer(n):\n return 2 ** -n\n',
+        'report': 'def report(n):\n item = factory()\n return {"item": item, "value": value(n)}\n',
+        'caught': 'def caught(n):\n try:\n  return report(n)["value"]\n except ValueError:\n  return -7.0\n',
+        'rounded': 'def rounded(n):\n return round(value(n), 2)\n',
+    }.items():
+        s.new_cells(name, source)
+    m.export(tmp_path/'model'); m.close()
+    (tmp_path/'sample.py').write_text('from model import mx_model\ns=mx_model.S\nfor n in range(4):\n s.value(n)\n s.cast_base(n)\n s.negative_integer(n)\n s.report(n)\n s.caught(n)\n s.rounded(n)\n', encoding='utf-8')
+    _run(tmp_path, ['-m', 'modelx_cython', str(tmp_path/'model'), '--no-spec',
+                    '--sample', str(tmp_path/'sample.py')], 'build')
+    routes = json.loads((tmp_path/'model_cy/_mx_classes.frame-shell.json').read_text())
+    assert all(r['execution'] == 'frame_exact' for r in routes['cells'])
+    manifest = json.loads((tmp_path/'model_cy/_mx_frame_S/manifest.json').read_text())
+    assert manifest['original_native_calls'] == ['_mx_sys._mx_pow']
+    assert manifest['cells']['value']['coverage']['body_backend'] == 'cython_nogil'
+    assert manifest['cells']['value']['checked_formula'] is True
+    assert manifest['cells']['cast_base']['coverage']['body_backend'] == 'cython_nogil'
+    assert manifest['cells']['rounded']['coverage']['body_backend'] == 'cython_gil'
+    kernel = next((tmp_path/'model_cy/_mx_frame_S').rglob('_kernel.pyx')).read_text()
+    assert 'cimport model_cy._mx_sys as _mx_sys' in kernel
+    assert '_mx_sys._mx_pow' in kernel and '_mx_cy.cast(_mx_cy.double, 2)' in kernel
+    (tmp_path/'private_power.pyx').write_text(
+        'from model_cy._mx_classes cimport _c_S\ndef value(_c_S s, long long n):\n return s._f_value(n)\n', encoding='utf-8')
+    (tmp_path/'private_setup.py').write_text(
+        'from setuptools import setup\nfrom Cython.Build import cythonize\nsetup(ext_modules=cythonize("private_power.pyx", compiler_directives={"language_level":3}))\n', encoding='utf-8')
+    _run(tmp_path, ['private_setup.py', 'build_ext', '--inplace'], 'private-build')
+    (tmp_path/'verify.py').write_text("""
+import gc, math, pickle, private_power
+from model_cy import mx_model
+factory = type(mx_model)
+def fresh(base, exponent):
+ m = factory(); m.S.base = base; m.S.exponent = exponent
+ return m
+m = fresh(4.0, .5); s=m.S
+for n in range(4):
+ assert s.value(n) == 2.0+n
+ assert private_power.value(s,n) == 2.0+n
+ assert s.cast_base(n) == 2**(n/12)
+ assert s.negative_integer(n) == 2**-n
+ assert s.rounded(n) == round(2.0+n, 2)
+# Sentinel -1 is an ordinary valid result, not a failed cache entry.
+u=fresh(-1.0, 1.0); assert u.S.value(0) == -1.0
+u.S.base=100.0; assert u.S.value(0) == -1.0
+assert pickle.loads(pickle.dumps(u.S)).value(0) == -1.0
+# Preserve the original finite-domain error guards, object cleanup and retry.
+destroyed=[]
+class Token:
+ def __del__(self): destroyed.append(1)
+u=fresh(-1.0, .5); u.S.factory=Token
+for _ in range(2):
+ try: u.S.report(1)
+ except ValueError as e: assert str(e)=='a negative number cannot be raised to a fractional power'
+ else: raise AssertionError('numeric failure swallowed by object boundary')
+assert len(destroyed)==2
+assert u.S.caught(2)==-7.0 and len(destroyed)==3
+u.S.base=4.0; u.S.offset=100.0
+assert u.S.report(1)['value']==3.0  # completed leaf survives failed parent
+assert u.S.value(2)==4.0
+v=fresh(0.0,-.5)
+for _ in range(2):
+ try: v.S.value(0)
+ except ZeroDivisionError as e: assert str(e)=='0.0 cannot be raised to a negative power'
+ else: raise AssertionError('zero-base error swallowed')
+v.S.base=4.0; assert v.S.value(0)==.5
+for base,exponent,expected in [(float('inf'),.5,float('inf')),(-2.0,2.0,4.0),(1e308,2.0,float('inf'))]:
+ v=fresh(base,exponent); assert v.S.value(0)==expected
+v=fresh(float('nan'),.5); assert math.isnan(v.S.value(0))
+print('canonical power, integer exponent, checked object failure, cleanup, retries and sentinel passed')
+""", encoding='utf-8')
+    _run(tmp_path, ['verify.py'], 'verify')

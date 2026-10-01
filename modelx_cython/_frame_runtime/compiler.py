@@ -283,11 +283,12 @@ class FrontendRewrite(ast.NodeTransformer):
 class BindNames(ast.NodeTransformer):
     """Only structural name binding and explicitly declared enum constants."""
     def __init__(self, cells, inputs, enums, locals_, native_lookups=False,
-                 frame_native=False, frame_casts=None):
+                 frame_native=False, frame_casts=None, compiled_modules=()):
         self.cells, self.inputs, self.enums, self.locals = cells, inputs, enums, locals_
         self.native_lookups = native_lookups
         self.frame_native = frame_native
         self.frame_casts = frame_casts or {}
+        self.compiled_modules = set(compiled_modules)
 
     def visit_Call(self, node):
         if (self.frame_native and isinstance(node.func, ast.Name)
@@ -332,6 +333,8 @@ class BindNames(ast.NodeTransformer):
                     return ast.copy_location(ast.Name('__MX_FRAME_CAST_' + node.id + '__', ast.Load()), node)
                 return ast.copy_location(ast.Attribute(ast.Name('state', ast.Load()), node.id, ast.Load()), node)
             return ast.copy_location(ast.Attribute(ast.Name('self', ast.Load()), node.id, ast.Load()), node)
+        if node.id in self.compiled_modules:
+            return node
         if node.id == '_power_compatible':
             return node
         if node.id == 'power':
@@ -471,7 +474,7 @@ def _cell_entry_lines(name, row, tail, call, native_suffix, diagnostics,
 
 
 
-def _needs_checked_formula(node, result_info, params, inputs, cells):
+def _needs_checked_formula(node, result_info, params, inputs, cells, checked_helpers=()):
     """Whether this formula can directly create a checked Cython error state.
 
     This is intentionally shallow. Projection-index arithmetic is bounded by
@@ -486,6 +489,8 @@ def _needs_checked_formula(node, result_info, params, inputs, cells):
         if isinstance(n, ast.Raise):
             return True
         if isinstance(n, ast.Call):
+            if ast.unparse(n.func) in checked_helpers:
+                return True
             if isinstance(n.func, ast.Name):
                 if n.func.id in cells:
                     continue
@@ -527,10 +532,13 @@ def _native_rejection(node, selected, spec, enums, native_suffix):
         for n in ast.walk(node):
             if isinstance(n, (ast.GeneratorExp, ast.ListComp, ast.DictComp, ast.SetComp)):
                 raise ContractError("Comprehensions use the Python calculator")
-            if isinstance(n, ast.Name) and (n.id.startswith('_mx_') or n.id == 'self'):
+            if isinstance(n, ast.Name) and (n.id == 'self' or
+                    n.id.startswith('_mx_') and n.id not in (spec.original_helper_modules or {})):
                 raise ContractError('Use ordinary free functions; self and the _mx_ prefix are reserved')
             if (isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
                     and n.func.id == 'round'):
+                if spec.original_space_shell:
+                    raise ContractError('Original builtin round uses a checked Cython boundary')
                 if (len(n.args) != 2 or n.keywords
                         or not isinstance(n.args[1], ast.Constant)
                         or type(n.args[1].value) is not int
@@ -539,7 +547,8 @@ def _native_rejection(node, selected, spec, enums, native_suffix):
                     raise ContractError('Native round requires the builtin and a literal integer ndigits')
             if isinstance(n, ast.arg) and n.arg.startswith('_mx_'):
                 raise ContractError('The _mx_ prefix is reserved for generated names')
-            if isinstance(n, ast.Attribute) and (isinstance(n.ctx, ast.Store) or n.attr.startswith('_')):
+            if isinstance(n, ast.Attribute) and (isinstance(n.ctx, ast.Store) or
+                    n.attr.startswith('_') and ast.unparse(n) not in spec.original_native_calls):
                 raise ContractError('Scalar formulas use read-only public helper operations')
             if isinstance(n, ast.Subscript) and isinstance(n.ctx, ast.Store):
                 raise ContractError('Scalar formulas cannot mutate indexed storage')
@@ -556,7 +565,8 @@ def _native_rejection(node, selected, spec, enums, native_suffix):
             if n is not node and isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.Yield, ast.YieldFrom)):
                 raise ContractError('Closures/generators are not admitted in native scalar kernels')
         local = {p.arg for p in node.args.args} | {n.id for n in ast.walk(node) if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store)}
-        binder = BindNames(selected, spec.inputs, enums, local, native_lookups=True)
+        binder = BindNames(selected, spec.inputs, enums, local, native_lookups=True,
+                           compiled_modules=spec.original_helper_modules or {})
         for statement in node.body:
             binder.visit(copy.deepcopy(statement))
     except ContractError as exc:
@@ -669,7 +679,7 @@ def emit(spec, *, diagnostics=False, python_cells=()):
                                    if native_closure(name))
     from .power_codegen import lower_numeric_powers
     numeric_power_rewrites = {}
-    for name in selected - python_reasons.keys():
+    for name in (selected - python_reasons.keys()) if not spec.original_space_shell else ():
         parsed[name], count = lower_numeric_powers(parsed[name], cells, spec.inputs)
         if count:
             numeric_power_rewrites[name] = count
@@ -754,7 +764,7 @@ def emit(spec, *, diagnostics=False, python_cells=()):
         if count > 20_000_000:
             raise ContractError('Declared cache exceeds the per-Cell allocation limit')
         row = dict(name=name, result=ret, params=params, cached=cached, hashed=hashed, last=False,
-                   recursive=name in python_reasons or _recursive(name), checked_formula=name in python_reasons or _needs_checked_formula(node, ret, params, spec.inputs, cells),
+                   recursive=name in python_reasons or _recursive(name), checked_formula=name in python_reasons or _needs_checked_formula(node, ret, params, spec.inputs, cells, spec.original_native_calls),
                    offset=slot, slots=count)
         body = [n for n in node.body if not (isinstance(n,ast.Expr) and isinstance(n.value,ast.Constant) and isinstance(n.value.value,str))]
         direct = None
@@ -899,7 +909,8 @@ def emit(spec, *, diagnostics=False, python_cells=()):
         else:
             frame_binder = BindNames(selected, spec.inputs, enums, loc,
                                      native_lookups=True, frame_native=True,
-                                     frame_casts=frame_casts)
+                                     frame_casts=frame_casts,
+                                     compiled_modules=spec.original_helper_modules or {})
             frame_body = []
             for statement in node.body:
                 if (isinstance(statement, ast.Expr)
@@ -989,6 +1000,7 @@ def build(spec, destination, *, diagnostics=False, python_cells=(),
         manifest['original_space_shell'] = True
         manifest['original_prepared_inputs'] = spec.original_prepared_inputs or {}
         manifest['original_helper_modules'] = spec.original_helper_modules or {}
+        manifest['original_native_calls'] = list(spec.original_native_calls)
     from .frame_codegen import to_c_frame
     source = to_c_frame(parts, manifest)
     if spec.cython_objects:

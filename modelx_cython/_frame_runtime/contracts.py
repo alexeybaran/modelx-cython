@@ -63,6 +63,8 @@ class KernelSpec:
     # Values are existing compiled helper class paths or 'object'.
     original_prepared_inputs: dict[str, str] | None = None
     original_helper_modules: dict[str, str] | None = None
+    # Resolved checked nogil helpers from the original formula transformation.
+    original_native_calls: tuple[str, ...] = ()
 
     def __post_init__(self):
         if not isinstance(self.steps, int) or isinstance(self.steps, bool) or not 0 < self.steps <= 1000000:
@@ -78,6 +80,10 @@ class KernelSpec:
             raise ContractError('Prepared shell resources require original-shell object inputs')
         if self.original_helper_modules and not self.original_space_shell:
             raise ContractError('Compiled shell helpers require an original Space receiver')
+        if self.original_native_calls and (not self.original_space_shell or
+                any(name not in {'_mx_sys._mx_pow', '_mx_curves.power'} or name.split('.')[0] not in
+                    (self.original_helper_modules or {}) for name in self.original_native_calls)):
+            raise ContractError('Native shell calls require resolved original numeric helpers')
         for name in self.inputs:
             if not name.isidentifier() or name.startswith('_'):
                 raise ContractError('Input names must be public identifiers')

@@ -18,7 +18,7 @@ from modelx_cython.formula_emitter import FormulaEmitter, SourceFormula
 
 TYPES = {'double': float, 'long long': int, 'bint': bool, 'object': object, 'str': str}
 BUILTINS = {'float', 'int', 'bool', 'abs', 'min', 'max', 'range',
-            'ValueError', 'IndexError', 'ArithmeticError', 'RuntimeError'}
+            'ValueError', 'IndexError', 'ArithmeticError', 'RuntimeError', 'round'}
 
 
 def _input_type(reference):
@@ -66,9 +66,6 @@ def _reason(fn, info):
             return 'effectful exception construction'
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id not in BUILTINS and node.func.id not in {'dict', 'list', 'tuple', 'set', 'str', 'len'}:
             return 'unresolved or effectful call'
-        # Keep the original power transformation until its contract is shared.
-        if isinstance(node, ast.Pow):
-            return 'power lowering not yet shared'
     return None
 
 
@@ -151,7 +148,7 @@ def plan(unit, *, package_plan=None):
     return plans, inventory
 
 
-def emit_private_kernels(plans, package_path, package_name):
+def emit_private_kernels(plans, package_path, package_name, *, formula_transform):
     """One build graph, with private kernel modules beneath the exported package."""
     from .compiler import build
     modules = []
@@ -172,28 +169,38 @@ def emit_private_kernels(plans, package_path, package_name):
         prepared, aliases, nodes = {}, {}, {}
         input_expressions = {n: 'self.' + n for n in p['inputs']}
         helper_modules = {}
-        if helper and helper.calls:
-            import libcst as cst
-            from modelx_cython.experimental_helpers import rewrite, code
-            types = dict(helper.declarations())
-            for cell_name in p['methods']:
-                cell = p['emission_plan'].cells[cell_name]
-                transformed = rewrite(cst.parse_statement(cell.formula_source), info, cell.original_info)
-                node = ast.parse(code(transformed)).body[0]
-                nodes[cell_name] = node
-                for part in ast.walk(node):
-                    if isinstance(part, ast.Attribute) and isinstance(part.value, ast.Name) and part.value.id == 'self' and part.attr in types:
-                        private = part.attr
-                        if private not in aliases:
-                            alias = 'mxprepared' + str(len(aliases))
-                            while alias in p['inputs']: alias += 'x'
-                            aliases[private] = alias
-                            p['inputs'][alias] = object
-                            input_expressions[alias] = 'self.' + private
-                            tp = types[private]
-                            prepared[alias] = 'object' if tp == 'object' else package_name.split('.')[0] + '.' + tp
-                if any(isinstance(part, ast.Name) and part.id == '_mx_curves' for part in ast.walk(node)):
-                    helper_modules['_mx_curves'] = package_name.split('.')[0] + '._mx_curves'
+        import libcst as cst
+        from modelx_cython.experimental_helpers import code
+        types = dict(helper.declarations()) if helper else {}
+        enum_bindings = getattr(info, 'enum_info', None)
+        if enum_bindings:
+            types.update(enum_bindings.declarations())
+        native_calls = set()
+        for cell_name in p['methods']:
+            cell = p['emission_plan'].cells[cell_name]
+            transformed = formula_transform(cst.parse_statement(cell.formula_source),
+                                            info, cell.original_info)
+            node = ast.parse(code(transformed)).body[0]
+            nodes[cell_name] = node
+            for part in ast.walk(node):
+                if isinstance(part, ast.Attribute) and isinstance(part.value, ast.Name) and part.value.id == 'self' and part.attr in types:
+                    private = part.attr
+                    if private not in aliases:
+                        alias = 'mxprepared' + str(len(aliases))
+                        while alias in p['inputs']: alias += 'x'
+                        aliases[private] = alias
+                        p['inputs'][alias] = object
+                        input_expressions[alias] = 'self.' + private
+                        tp = types[private]
+                        prepared[alias] = 'object' if tp == 'object' else package_name.split('.')[0] + '.' + tp
+                if isinstance(part, ast.Name) and part.id in {'_mx_curves', '_mx_sys', '_mx_cy'}:
+                    helper_modules[part.id] = ('cython' if part.id == '_mx_cy' else
+                                              package_name.split('.')[0] + '.' + part.id)
+                if (isinstance(part, ast.Call) and isinstance(part.func, ast.Attribute)
+                        and isinstance(part.func.value, ast.Name)
+                        and (part.func.value.id, part.func.attr) in
+                        {('_mx_sys', '_mx_pow'), ('_mx_curves', 'power')}):
+                    native_calls.add(part.func.value.id + '.' + part.func.attr)
         p['input_expressions'] = input_expressions
         p['prepared_input_types'] = prepared
         globals_ = {n: ModuleType(path) for n, path in helper_modules.items()}
@@ -216,7 +223,8 @@ def emit_private_kernels(plans, package_path, package_name):
                           cell_outputs=tuple(sorted(p['methods'])),
                           cache_domains=domains, original_space_shell=True, cython_objects=True,
                           cython_signatures=signatures, original_prepared_inputs=prepared,
-                          original_helper_modules=helper_modules)
+                          original_helper_modules=helper_modules,
+                          original_native_calls=tuple(sorted(native_calls)))
         artifact = folder / 'artifact'
         build(spec, artifact, compile_native=False)
         manifest_file = artifact / 'manifest.json'

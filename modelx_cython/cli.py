@@ -373,6 +373,9 @@ def main_handler(args: argparse.Namespace, stdout: IO[str], stderr: IO[str]) -> 
 
         # Phase 3: transform and write out
         for u in units:
+            trans = ModuleTransformer(
+                u.source, u.module_info, resolver=resolver,
+                cells_kinds=cells_kinds, ref_kinds=ref_kinds)
             shell_plans = {}
             if os.environ.get('MX_CY_ORIGINAL_FRAME_SHELL', '0') == '1':
                 from modelx_cython._frame_runtime.space_shell import plan, emit_private_kernels
@@ -380,7 +383,8 @@ def main_handler(args: argparse.Namespace, stdout: IO[str], stderr: IO[str]) -> 
                 u.abs_src_path.with_suffix('.frame-shell.json').write_text(
                     json.dumps({'schema': 1, 'cells': shell_inventory}, indent=2), encoding='utf-8')
                 private_modules = emit_private_kernels(
-                    shell_plans, u.abs_src_path.parent, u.fqname.rsplit('.', 1)[0])
+                    shell_plans, u.abs_src_path.parent, u.fqname.rsplit('.', 1)[0],
+                    formula_transform=trans._rewrite_powers)
                 modules.extend(u.rel_src_path.parent / m for m in private_modules)
                 if shell_plans:
                     shutil.copy(pathlib.Path(__file__).parent / '_frame_runtime' / 'space_owner.py',
@@ -393,12 +397,6 @@ def main_handler(args: argparse.Namespace, stdout: IO[str], stderr: IO[str]) -> 
                     for name in ('python_calculator.py', 'contracts.py', 'enum_binding.py'):
                         shutil.copy(pathlib.Path(__file__).parent / '_frame_runtime' / name,
                                     support / name)
-            trans = ModuleTransformer(
-                u.source, u.module_info,
-                resolver=resolver,
-                cells_kinds=cells_kinds,
-                ref_kinds=ref_kinds,
-            )
             pxd = PXDGenerator(u.module_info)
 
             u.abs_src_path.write_text(trans.transformed.code, encoding="utf-8")

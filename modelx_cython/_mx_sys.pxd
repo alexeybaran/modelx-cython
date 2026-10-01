@@ -2,7 +2,7 @@ from libc.math cimport (
     pow as _mx_c_pow, floor as _mx_c_floor, isfinite as _mx_c_isfinite)
 
 
-cdef inline double _mx_pow(double b, double e) except? -1.0:
+cdef inline double _mx_pow(double b, double e) except? -1.0 nogil:
     """``**`` between operands mx2cy has typed as C numbers.
 
     Cython would otherwise evaluate a fractional power on
@@ -24,10 +24,12 @@ cdef inline double _mx_pow(double b, double e) except? -1.0:
     """
     if _mx_c_isfinite(b) and _mx_c_isfinite(e):
         if b < 0.0 and e != _mx_c_floor(e):
-            raise ValueError(
-                "a negative number cannot be raised to a fractional power")
+            with gil:
+                raise ValueError(
+                    "a negative number cannot be raised to a fractional power")
         if b == 0.0 and e < 0.0:
-            raise ZeroDivisionError("0.0 cannot be raised to a negative power")
+            with gil:
+                raise ZeroDivisionError("0.0 cannot be raised to a negative power")
     return _mx_c_pow(b, e)
 
 
