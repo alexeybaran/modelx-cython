@@ -249,6 +249,7 @@ def test_original_shell_heap_frame_allocation_failure_and_restore(tmp_path):
     generated = next((tmp_path/'model_cy').rglob('_kernel.pyx'))
     text = generated.read_text()
     assert 'overflowcheck=False' in text and 'cdef _Frame* _frame' in text
+    assert text.count('    property original_receiver:') == 1
     text = text.replace('from libc.stdlib cimport malloc, free', '''from libc.stdlib cimport malloc as _mx_real_malloc, free
 from libc.stddef cimport size_t
 cdef int _mx_test_fail = 0

@@ -5,7 +5,7 @@ import re
 def _method(source, name):
     match = re.search(r'^    def ' + re.escape(name) + r'\(', source, re.M)
     if match is None: raise ValueError('Missing generated entry: ' + name)
-    following = re.search(r'\n    (?:def |cdef |cpdef )', source[match.end():])
+    following = re.search(r'\n    (?:def |cdef |cpdef |property |@)', source[match.end():])
     end = match.end() + following.start() if following else len(source)
     return source[match.start():end].rstrip() + '\n'
 
