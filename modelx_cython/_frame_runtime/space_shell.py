@@ -412,7 +412,7 @@ def add_owner_entries(source, manifest):
               for name, row in manifest['inputs'].items() if row['kind'] == 'object']
     if manifest.get('python_cells'):
         lines += ['        self._records = (record,)',
-                  '        self._python_scope.select(record, 0)']
+                  '        self._python_scope.bind_original_inputs(record)']
         # Rebind only input globals. Library globals keep their initialized
         # bindings. This does not reset or invalidate any completed Cell.
         # gil_codegen may bind input names from compiled bodies omitted from

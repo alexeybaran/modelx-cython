@@ -307,6 +307,20 @@ class PythonScope(CellCodec):
         for name in self.manifest['python_inputs']:
             self.namespace[name] = self.decode(self.manifest['inputs'][name], self.record[name])
 
+    def bind_original_inputs(self, record):
+        """Already-public values need no physical enum/key decoding.
+
+        Original generated fields own public types and reference semantics.
+        Prepared aliases retain their existing snapshot contract. Synchronize
+        namespace ownership and the codec record without treating these values
+        as a newly selected prepared-policy representation. Library globals
+        and completed Cell caches are untouched.
+        """
+        if not self.manifest.get('original_space_shell'):
+            raise ContractError('Original input synchronization needs original generated fields')
+        self._record, self._raw_record = None, record
+        self.namespace.update(zip(self.manifest['inputs'], record))
+
     def original_reference(self, name):
         """Ordinary public fields remain live across checked callback boundaries."""
         receiver = getattr(self, '_original_receiver', None)
