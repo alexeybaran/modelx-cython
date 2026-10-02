@@ -34,10 +34,12 @@ def test_collect_hook_reuses_only_declared_dense_cache(tmp_path):
     assert (tmp_path / 'collect.json').exists()
 
 
-def test_no_collect_method_means_no_rewrite(tmp_path):
+def test_descendant_without_collect_declaration_gets_dormant_lifecycle_hooks(tmp_path):
     plain = SOURCE.replace('def collect(self)', 'def other(self)')
     output, declarations = transform(
         plain, DECLARATIONS, tmp_path / 'collect.json')
-    assert output == plain
+    assert 'def _mx_collect_attach' in output
+    assert 'def _mx_collect_release' in output
+    assert 'context.get(template)' in output
     assert declarations == DECLARATIONS
-    assert not (tmp_path / 'collect.json').exists()
+    assert (tmp_path / 'collect.json').exists()

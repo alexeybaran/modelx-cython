@@ -95,8 +95,13 @@ def entries(manifest):
         if manifest.get('python_cells'):
             export += ['    if owner._object_key_guard or owner._clearing_objects:',
                        '        raise RuntimeError("Cell calls during cache maintenance are unsupported")']
-        export += ['    owner._frame._entry_depth += 1', '    try:',
+        # Numeric-only kernels do not carry mixed-object rollback fields.
+        # Track their checked virtual callbacks on the owner, leaving the exact
+        # native frame and recursive functions unchanged.
+        depth = ('owner._frame._entry_depth' if manifest.get('python_cells')
+                 else 'owner._mx_virtual_depth')
+        export += [f'    {depth} += 1', '    try:',
                    f'        return owner._virtual_cell_{name}(compute' + (', ' + args if args else '') + ')',
-                   '    finally:', '        owner._frame._entry_depth -= 1']
+                   '    finally:', f'        {depth} -= 1']
         exports.extend(export + [''])
     return methods, exports

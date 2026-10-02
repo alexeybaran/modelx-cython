@@ -14,9 +14,8 @@ import re
 def transform(source, declarations, receipt_path):
     tree = ast.parse(source)
     classes = [node for node in tree.body if isinstance(node, ast.ClassDef)]
-    if not any(any(isinstance(item, ast.FunctionDef) and item.name == 'collect'
-                   for item in cls.body) for cls in classes):
-        return source, declarations
+    # Collection walks every descendant, including static Spaces in another
+    # exported module. Hooks describe cache ownership, not declarations.
 
     selected = []
     for cls in classes:

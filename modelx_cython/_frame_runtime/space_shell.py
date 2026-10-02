@@ -288,16 +288,19 @@ def transform(source, declarations, plans, original_methods):
             declarations += (f'\nctypedef {result} (*{alias}_t)('
                              + ', '.join(ctypes) + ')' + exception + '\n'
                              + f'cdef {alias}_t {alias}\n')
+        cls.body.insert(0, ast.AnnAssign(ast.Name('_mx_frame_expired', ast.Store()),
+                                       ast.Attribute(ast.Name('_mx_cy', ast.Load()), 'bint', ast.Load()), None, 1))
         cls.body.insert(0, ast.AnnAssign(ast.Name('_mx_frame_owner', ast.Store()),
                                        ast.Name('object', ast.Load()), None, 1))
         marker = next(l for l in declarations.splitlines() if l.startswith('cdef class ' + cls.name + '('))
-        declarations = declarations.replace(marker, marker + '\n    cdef object _mx_frame_owner', 1)
+        declarations = declarations.replace(marker, marker + '\n    cdef object _mx_frame_owner\n    cdef bint _mx_frame_expired', 1)
         expressions = p.get('input_expressions', {n: 'self.' + n for n in p['inputs']})
         inputs = '(' + ', '.join(expressions[k] for k in p['inputs']) + (',' if p['inputs'] else '') + ')'
         for fn in cls.body:
             if not isinstance(fn, ast.FunctionDef):
                 continue
             if fn.name in p['methods']:
+                expired = ast.parse('if self._mx_frame_expired:\n    raise RuntimeError("Collection policy cache has expired")').body
                 args = ', '.join([*(a.arg for a in fn.args.args[1:]),
                                   *(expressions[k] for k in p['inputs'])])
                 receiver = ', self' if p['manifest'].get('python_cells') else ''
@@ -323,7 +326,7 @@ def transform(source, declarations, plans, original_methods):
         {alias} = _mx_cy.cast({alias}_t, _mx_frame_capsule_ptr(self._mx_frame_owner.entry_capsule({fn.name!r}), {capsule_signature!r}))
     return {alias}(self._mx_frame_owner.kernel{receiver}{', ' + args if args else ''})''').body
                 if not cell.cached:
-                    fn.body = head + copy.deepcopy(original_methods[cls.name][fn.name].body)
+                    fn.body = expired + head + copy.deepcopy(original_methods[cls.name][fn.name].body)
                     continue
                 virtual = '_mx_virtual_' + cls.name + '_' + fn.name
                 row = p['manifest']['cells'][fn.name]
@@ -339,7 +342,7 @@ if self._mx_frame_owner is None:
 if {virtual} == _mx_cy.NULL:
     {virtual} = _mx_cy.cast({virtual}_t, _mx_frame_capsule_ptr(self._mx_frame_owner.virtual_capsule({fn.name!r}), {virtual_signature!r}))
 return {virtual}(self._mx_frame_owner.kernel, self.{callback}{', ' + body_args if body_args else ''})''').body
-                fn.body = head + derived
+                fn.body = expired + head + derived
 
             elif fn.name.startswith('_f_') and fn.name[3:] in p['methods']:
                 # Keep decorators and the original virtual declaration, but
@@ -367,15 +370,15 @@ def add_collect_hooks(source, plans):
         if not isinstance(cls, ast.ClassDef) or cls.name not in plans:
             continue
         methods = {f.name: f for f in cls.body if isinstance(f, ast.FunctionDef)}
-        if 'collect' not in methods:
-            continue
         snippets = {
             '_mx_collect_attach': '''_mx_frame_scratch = context.get((template, "frame"))
+self._mx_frame_expired = False
 if _mx_frame_scratch is not None:
     _mx_frame_scratch.reset()
     self._mx_frame_owner = _mx_frame_scratch''',
             '_mx_collect_release': '''if self._mx_frame_owner is not None:
-    context[(template, "frame")] = self._mx_frame_owner''',
+    context[(template, "frame")] = self._mx_frame_owner
+self._mx_frame_expired = True''',
         }
         for name, code in snippets.items():
             if name not in methods:
@@ -392,6 +395,15 @@ def add_owner_entries(source, manifest):
     """Retained call, non-invalidating input update, completed-cache pickle state."""
     from .model_codegen import add_model_entries
     source = add_model_entries(source, manifest)
+    if not manifest.get('python_cells'):
+        marker = 'cdef class Kernel:\n'
+        assert source.count(marker) == 1
+        source = source.replace(marker, marker + '    cdef unsigned int _mx_virtual_depth\n', 1)
+        for signature in ('    def reset(self):', '    def replace_records(self, records):',
+                          '    def _reset_item_cache(self):'):
+            source = source.replace(signature, signature +
+                '\n        if self._mx_virtual_depth:\n'
+                '            raise RuntimeError("Cannot reset cache during a Cell evaluation")', 1)
     lines = ['    def bind_inputs(self, tuple record):']
     lines += [f'        self.{"" if row["kind"] == "object" else "_frame."}{name} = record[{i}]'
               for i, (name, row) in enumerate(manifest['inputs'].items())]
