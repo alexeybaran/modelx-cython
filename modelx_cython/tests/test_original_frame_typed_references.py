@@ -77,6 +77,9 @@ assert s.amount(0) == s.alias(0) == s.uncached(0) == 1.5
 assert owner(s) is not None
 assert owner(s).kernel.original_receiver is None
 assert '_scope_original_receiver' not in vars(owner(s)._scope)
+assert not owner(s)._scope.entries, 'Compiled formulas created unused Python Cell wrappers'
+assert owner(s)._scope.entry('amount')(0) == s.amount(0)
+assert set(owner(s)._scope.entries) == {'amount'}
 try:
     owner(s).kernel.original_receiver = object()
 except TypeError:

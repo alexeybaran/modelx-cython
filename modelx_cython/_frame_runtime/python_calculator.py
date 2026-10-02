@@ -309,11 +309,16 @@ class PythonScope(CellCodec):
         # the formulas and globals local to this receiver; create each callable
         # only when a Python formula or an external call actually needs it.
         self.entries = {}
-        for row in manifest['cells'].values():
-            if row.get('calculator') == 'python':
-                for name in row['dependencies']:
-                    self.namespace[name] = self.entry(name)
-        for name in self.calculators:
+        # Only detached Python formulas resolve Cell names through these
+        # globals. Compiled object/numeric formulas already call the generated
+        # entries directly. Keep external compatibility entries lazy instead
+        # of rebuilding their unused wrappers for every ordinary Space owner.
+        detached = {name for name in manifest['python_cells']
+                    if manifest['cells'][name].get('calculator') == 'python'}
+        referenced = set(detached)
+        for name in detached:
+            referenced.update(manifest['cells'][name]['dependencies'])
+        for name in sorted(referenced):
             self.namespace[name] = self.entry(name)
 
     def select(self, record, policy):
