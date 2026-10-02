@@ -66,3 +66,44 @@ def test_real_first_class_cell_uses_original_checked_wrapper(tmp_path):
     assert 'expose' in manifest['inputs']
     (tmp_path/'verify.py').write_text('from model_cy import mx_model\ncallback = mx_model.S.expose()\nassert callback(1) == mx_model.S.consume(1) == 2.0\nassert callback(2) == mx_model.S.consume(2) == 3.0\nassert mx_model.S.expose() is callback\n', encoding='utf-8')
     _run(tmp_path, ['verify.py'], 'verify')
+
+
+def test_qualified_cell_and_public_parameter_keep_distinct_bindings(tmp_path):
+    import modelx as mx
+    model = mx.new_model('ParameterNames')
+    space = model.new_space('S')
+    space.new_cells('leaf', 'def leaf():\n return 2.0\n')
+    space.new_cells('total', 'def total(leaf):\n return leaf + 2.0\n')
+    space.new_cells('parent', 'def parent(n):\n return total(n)\n')
+    model.export(tmp_path/'model')
+    model.close()
+    classes = tmp_path/'model/_mx_classes.py'
+    text = classes.read_text().replace('return leaf + 2.0', 'return leaf + self.leaf()')
+    classes.write_text(text)
+    (tmp_path/'model/_mx_formula_sources.json').unlink(missing_ok=True)
+    (tmp_path/'sample.py').write_text('from model import mx_model\nmx_model.S.parent(3.0)\n')
+    _run(tmp_path, ['-m','modelx_cython',str(tmp_path/'model'),'--no-spec',
+                   '--sample',str(tmp_path/'sample.py')], 'build')
+    rows = json.loads((tmp_path/'model_cy/_mx_classes.frame-shell.json').read_text())['cells']
+    total = next(row for row in rows if row['cell']=='total')
+    assert total['execution'] == 'original_cython'
+    assert 'public argument' in total['reason']
+    manifest = json.loads((tmp_path/'model_cy/_mx_frame_S/manifest.json').read_text())
+    assert 'total' in manifest['inputs']
+    assert 'parent' in manifest['cells']
+    (tmp_path/'probe.pyx').write_text('''from model_cy._mx_classes cimport _c_S
+cpdef double private_total(_c_S space, double argument):
+    return space._f_total(argument)
+''')
+    (tmp_path/'probe_setup.py').write_text('''from setuptools import setup
+from Cython.Build import cythonize
+setup(ext_modules=cythonize('probe.pyx', language_level=3))
+''')
+    _run(tmp_path, ['probe_setup.py','build_ext','--inplace'], 'probe-build')
+    (tmp_path/'verify.py').write_text('''from model_cy import mx_model
+from probe import private_total
+assert mx_model.S.total(3.0) == mx_model.S.parent(3.0) == 5.0
+assert mx_model.S.total(leaf=4.0) == 6.0
+assert private_total(mx_model.S, 5.0) == 7.0
+''')
+    _run(tmp_path, ['verify.py'], 'verify')

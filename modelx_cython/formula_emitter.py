@@ -44,7 +44,7 @@ def _separate_receiver_locals(node):
     intact. Nested scopes retain their own shadowing and closure bindings.
     """
     import libcst as cst
-    from libcst.metadata import MetadataWrapper, ScopeProvider, ExpressionContextProvider
+    from libcst.metadata import MetadataWrapper, ScopeProvider, ExpressionContextProvider, ParentNodeProvider
     parameters = {a.arg for a in (*node.args.posonlyargs, *node.args.args, *node.args.kwonlyargs)}
     references = {n.attr for n in ast.walk(node) if isinstance(n, ast.Attribute)
                   and isinstance(n.value, ast.Name) and n.value.id == 'self'}
@@ -65,12 +65,20 @@ def _separate_receiver_locals(node):
     formula_scope = scopes[wrapper.module.body[0].body.body[0]]
 
     class LocalBindings(cst.CSTTransformer):
-        METADATA_DEPENDENCIES = (ScopeProvider, ExpressionContextProvider)
+        METADATA_DEPENDENCIES = (ScopeProvider, ExpressionContextProvider, ParentNodeProvider)
         def leave_Name(self, original, updated):
             name = original.value
             scope = self.get_metadata(ScopeProvider, original, None)
             context = self.get_metadata(ExpressionContextProvider, original, None)
-            if name in replacements and scope is not None and context is not None:
+            parent = self.get_metadata(ParentNodeProvider, original, None)
+            declaration = isinstance(parent, cst.NameItem)
+            if declaration:
+                # ScopeProvider records nonlocal declarations on the statement,
+                # not on the declaration's Name node.
+                statement = self.get_metadata(ParentNodeProvider, parent, None)
+                if isinstance(statement, cst.Nonlocal):
+                    scope = self.get_metadata(ScopeProvider, statement, None)
+            if name in replacements and scope is not None and (context is not None or declaration):
                 assignments = scope[name]
                 if assignments and all(a.scope is formula_scope for a in assignments):
                     return updated.with_changes(value=replacements[name])

@@ -35,6 +35,13 @@ def _input_type(reference):
 
 
 def _reason(fn, info):
+    parameters = {arg.arg for arg in (*fn.args.posonlyargs, *fn.args.args, *fn.args.kwonlyargs)}
+    for node in ast.walk(fn):
+        if (isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name)
+                and node.value.id == 'self' and node.attr in parameters):
+            # Preserve the original receiver when removing it would capture a
+            # public argument. Compiled callers keep their checked Cell edge.
+            return 'qualified receiver name shadows public argument; original checked entry'
     if info.is_locked:
         return 'locked Space'
     a = fn.args

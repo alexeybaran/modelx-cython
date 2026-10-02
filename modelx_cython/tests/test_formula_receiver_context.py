@@ -42,3 +42,22 @@ def test_no_collision_leaves_formula_tree_unchanged():
     node = ast.parse('def f(self):\n result = self.cell(2)\n return result\n').body[0]
     before = ast.dump(node)
     assert ast.dump(_separate_receiver_locals(node)) == before
+
+
+def test_nonlocal_assignment_preserves_its_declaration():
+    node = ast.parse('''def f(self):
+    cell = []
+    def child():
+        nonlocal cell
+        cell = [1]
+    child()
+    return cell, self.cell()
+''').body[0]
+    transformed = _separate_receiver_locals(node)
+    scope = {}
+    exec(compile(ast.fix_missing_locations(ast.Module(body=[transformed], type_ignores=[])),
+                 '<test nonlocal binding>', 'exec'), scope)
+    class Receiver:
+        def cell(self):
+            return 2
+    assert scope['f'](Receiver()) == ([1], 2)
