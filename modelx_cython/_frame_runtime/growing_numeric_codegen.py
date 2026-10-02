@@ -13,6 +13,16 @@ def tag(name):
     return '_nc_' + name
 
 
+def dense_location(row,arguments):
+    """An acceleration range, never an author-facing key-domain restriction."""
+    inside=' and '.join(f'{p["lower"]} <= {arg} < {p["lower"]+p["size"]}'
+                        for p,arg in zip(row['params'],arguments))
+    index='0'
+    for p,arg in zip(row['params'],arguments):
+        index=f'(({index}) * {p["size"]} + ({arg} - ({p["lower"]})))'
+    return inside,f'{row["offset"]} + {index}'
+
+
 def support_header(rows):
     from modelx_cython.numeric_cache import support
     rows = selected(rows)
@@ -68,7 +78,7 @@ def frame_parts(rows):
                                for p, argument in zip(params, arguments)
                                if p['type']['kind'] == 'float') or 'False'
         fields += [f'    {t}_cache _numeric_{name}', f'    PyObject* _numeric_fallback_{name}']
-        helpers.append(f'''cdef int _nc_lookup_{name}(_Frame* state, {declaration}, {ret}* value) except -1 nogil:
+        helper = f'''cdef int _nc_lookup_{name}(_Frame* state, {declaration}, {ret}* value) except -1 nogil:
     cdef Py_ssize_t found
     if state._numeric_fallback_{name} == NULL and not ({nonfinite}):
         found = {t}_find(&state._numeric_{name}, {names})
@@ -108,11 +118,32 @@ cdef int _nc_commit_{name}(_Frame* state, {declaration}, {ret} value) except -1 
 cdef int _nc_dict_commit_{name}(_Frame* state, {declaration}, {ret} value) except -1:
     (<dict>state._numeric_fallback_{name})[{key}] = value
     return 0
-''')
+'''
+        if row.get('dense_prefix'):
+            inside,index=dense_location(row,arguments)
+            store='_floats' if row['result']['kind']=='float' else '_ints'
+            lookup=(f'    cdef Py_ssize_t dense_key\n    if {inside}:\n'
+                    f'        dense_key = {index}\n'
+                    '        if state._seen[dense_key] == state._epoch:\n'
+                    f'            value[0] = state.{store}[dense_key]\n'
+                    '            return 1\n')
+            if row['recursive']:
+                lookup+=('        if state._seen[dense_key] == state._epoch - 1:\n'
+                         f'            _cache_error(1, b"{name}")\n')
+            lookup+='        return 0\n'
+            helper=helper.replace('    cdef Py_ssize_t found\n','    cdef Py_ssize_t found\n'+lookup,1)
+            commit=(f'    cdef Py_ssize_t dense_key\n    if {inside}:\n'
+                    f'        dense_key = {index}\n'
+                    f'        state.{store}[dense_key] = value\n'
+                    '        state._seen[dense_key] = state._epoch\n'
+                    '        return 0\n')
+            marker=f'cdef int _nc_commit_{name}(_Frame* state, {declaration}, {ret} value) except -1 nogil:\n'
+            helper=helper.replace(marker,marker+commit,1)
+        helpers.append(helper)
     return fields, helpers
 
 
-def owner_parts(rows):
+def owner_parts(rows, frame_pointer='self._frame'):
     rows = selected(rows)
     fields, initialize, reset, deallocate, methods = [], [], [], [], []
     if rows:
@@ -130,7 +161,7 @@ def owner_parts(rows):
         key = 'key' if len(params) == 1 else ', '.join('key['+str(i)+']' for i in range(len(params)))
         nonfinite = ' or '.join('not isfinite(' + ('key' if len(params) == 1 else 'key['+str(i)+']') + ')'
                                for i, p in enumerate(params) if p['type']['kind'] == 'float') or 'False'
-        methods += [f'    def _numeric_snapshot_{name}(self):',
+        snapshot = [f'    def _numeric_snapshot_{name}(self):',
                     f'        if self._frame._numeric_fallback_{name} != NULL:',
                     f'            return dict(self._numeric_dict_{name})',
                     f'        return {t}_dictionary(&self._frame._numeric_{name})',
@@ -142,4 +173,23 @@ def owner_parts(rows):
                     '                return',
                     '        for key, value in values.items():',
                     f'            {t}_put(&self._frame._numeric_{name}, {key}, value)']
+        if row.get('dense_prefix'):
+            store='_floats' if row['result']['kind']=='float' else '_ints'
+            snapshot=[f'    def _numeric_snapshot_{name}(self):',
+                '        cdef Py_ssize_t slot, remainder',
+                f'        result = {t}_dictionary(&self._frame._numeric_{name})',
+                '        if self._frame._epoch != 0:',
+                f'            for slot in range({row["slots"]}):',
+                f'                if self._frame._seen[{row["offset"]} + slot] != self._frame._epoch: continue',
+                '                remainder = slot']
+            keys=['_dense_key_'+str(i) for i in range(len(params))]
+            for p,k in reversed(list(zip(params,keys))):
+                snapshot += [f'                {k} = remainder % {p["size"]} + ({p["lower"]})',
+                             f'                remainder = remainder // {p["size"]}']
+            dense_key=keys[0] if len(keys)==1 else '('+', '.join(keys)+')'
+            snapshot += [f'                result[{dense_key}] = self._frame.{store}[{row["offset"]} + slot]',
+                         '        return result',f'    def _numeric_restore_{name}(self, dict values):',
+                         '        for key, value in values.items():',
+                         f'            _nc_commit_{name}({frame_pointer}, {key}, value)']
+        methods += snapshot
     return fields, initialize, reset, deallocate, methods

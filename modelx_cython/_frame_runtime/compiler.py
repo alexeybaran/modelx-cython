@@ -395,6 +395,19 @@ def _cell_entry_lines(name, row, tail, call, native_suffix, diagnostics,
     formula = f'_calc_{name}({args})'
     if row.get('storage') == 'growing_numeric':
         from .growing_numeric_codegen import cell_entry
+        if row.get('dense_prefix'):
+            overflow = cell_entry(name,row,signature,args,formula,diagnostics)
+            overflow = [line.replace(' _cell_'+name+'(', ' _overflow_cell_'+name+'(', 1)
+                        if line.startswith('cdef inline ') else line for line in overflow]
+            dense_row = dict(row)
+            dense_row.pop('storage')
+            dense_row.pop('dense_prefix')
+            dense = _cell_entry_lines(name,dense_row,tail,call,native_suffix,diagnostics,input_info=input_info)
+            outside = ' or '.join(f'{p["name"]} < {p["lower"]} or {p["name"]} >= {p["lower"]+p["size"]}'
+                                  for p in row['params'])
+            insert = next(i for i,line in enumerate(dense) if line == '    cdef '+ret+' _mx_value')+1
+            dense[insert:insert] = ['    if '+outside+':',f'        return _overflow_cell_{name}({args})']
+            return overflow+dense
         return cell_entry(name, row, signature, args, formula, diagnostics)
     if row['direct_input'] is not None:
         exception = 'noexcept' if native_suffix else 'except? -1'
@@ -771,7 +784,9 @@ def emit(spec, *, diagnostics=False, python_cells=()):
                    and name not in object_cells and cached)
         object_storage = name in object_cells
         dictionary = (object_storage and (spec.original_cache_kinds or {}).get(name) == 'dictionary')
-        if growing:
+        dense_prefix = (growing and bool(params) and not hashed and count <= 20_000_000
+                        and all(p['type']['kind'] in ('int','bool','enum','table_key') for p in params))
+        if growing and not dense_prefix:
             count, hashed = 0, False
         elif object_storage and (python_key or hashed or dictionary):
             count = 0  # Python dictionaries grow with actual keys, not guessed bounds.
@@ -792,6 +807,8 @@ def emit(spec, *, diagnostics=False, python_cells=()):
                 direct=field
         if growing:
             row['storage'] = 'growing_numeric'
+            if dense_prefix:
+                row['dense_prefix'] = True
         row['direct_input'] = None if name in python_reasons or spec.original_space_shell else direct
         if mixed:
             row['calculator'] = 'python' if name in python_reasons else 'native'

@@ -37,6 +37,18 @@ def entries(manifest):
                     f'        if _nc_lookup_{name}({keys}, &value): return value',
                     '        value = ' + call,
                     f'        _nc_commit_{name}({keys}, value)', '        return value']
+            if row.get('dense_prefix') and row['recursive']:
+                from .growing_numeric_codegen import dense_location
+                inside,index=dense_location(row,[p['name'] for p in params])
+                body=[head,f'        cdef {result} value','        cdef Py_ssize_t pending = -1',
+                    f'        if _nc_lookup_{name}({keys}, &value): return value',
+                    f'        if {inside}:',f'            pending = {index}',
+                    '            self._frame._seen[pending] = self._frame._epoch - 1',
+                    '        try:','            value = '+call,
+                    f'            _nc_commit_{name}({keys}, value)','            return value',
+                    '        except BaseException:',
+                    '            if pending >= 0 and self._frame._seen[pending] != self._frame._epoch:',
+                    '                self._frame._seen[pending] = 0','            raise']
         elif storage.startswith('typed_'):
             from .typed_memo_codegen import cached_entry
             body = cached_entry(name, row['typed_signature'], row,
