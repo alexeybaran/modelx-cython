@@ -63,6 +63,8 @@ def augment(source, manifest, spec, forced_python=()):
     raw_tables = set()
     bound_table_names = set(spec.initial_tables or {}) if spec.model is not None else set()
 
+    live_inputs = set()
+
     class Bind(ast.NodeTransformer):
         def __init__(self, fn):
             self.cython_names = {a.asname or a.name for n in ast.walk(function_ast(fn))
@@ -160,6 +162,10 @@ def augment(source, manifest, spec, forced_python=()):
                 return node
             if isinstance(node.ctx,ast.Load) and node.id in globals_ and node.id not in self.locals:
                 if spec.original_space_shell and node.id in spec.inputs and node.id not in prepared:
+                    if spec.original_receiver_type:
+                        live_inputs.add(node.id)
+                        return ast.copy_location(ast.Call(ast.Attribute(
+                            ast.Name('self', ast.Load()), '_mx_live_' + node.id, ast.Load()), [], []), node)
                     return ast.copy_location(ast.Call(ast.Attribute(
                         ast.Attribute(ast.Name('self', ast.Load()), '_python_scope', ast.Load()),
                         'original_reference', ast.Load()), [ast.Constant(node.id)], []), node)
@@ -170,6 +176,9 @@ def augment(source, manifest, spec, forced_python=()):
         if name in resource_types: return resource_types[name]
         return {int:'long long',float:'double',bool:'bint'}.get(spec.inputs.get(name),'object') if signatures else 'object'
     imports = []
+    if spec.original_receiver_type:
+        module, cls = spec.original_receiver_type.rsplit('.', 1)
+        imports.append('from ' + module + ' cimport ' + cls + ' as _mx_original_space')
     for name, alias in resource_types.items():
         module, cls = prepared[name].rsplit('.', 1)
         imports.append('from ' + module + ' cimport ' + cls + ' as ' + alias)
@@ -220,12 +229,21 @@ def augment(source, manifest, spec, forced_python=()):
         source=source.replace(f'value = self._object_fn_{name}(',f'value = self._gil_formula_{name}(')
         source=source.replace(f"            if self._python_scope.diagnostics:\n                self._python_scope.calls[{name!r}] += 1\n", '')
         rows[name]['calculator']='cython_object' if name in objects else 'cython_scalar'
-        if name not in objects:
-            # The numeric cache/miss entry already calls PythonScope.calculate.
-            # Expose the one Cython body to that bridge without replacing the
-            # entry or creating a second cache.
+        if name not in objects and name not in manifest.get('original_checked_numeric_bridges', ()):
+            # Only compatibility callers still need a Python calculator
+            # adapter. Connected original-shell entries call the one Cython
+            # body directly and must not retain an unused callable interface.
             methods += [f'    def _gil_entry_{name}(self'+(', '+signature if signature else '')+'): ',
                         f'        return self._gil_formula_{name}({", ".join(p["name"] for p in params)})', '']
+    for name in sorted(live_inputs):
+        result_type = global_type(name)
+        exception = ' except? -1' if result_type != 'object' else ''
+        methods += [f'    cdef inline {result_type} _mx_live_{name}(self){exception}:',
+                    '        cdef _mx_original_space receiver = self._python_scope._original_receiver',
+                    '        if receiver is not None:',
+                    f'            return receiver.{name}',
+                    f'        return self._gil_global_{name}', '']
+    manifest['original_live_typed_inputs'] = sorted(live_inputs)
     for name in sorted(native_called):
         hint = signatures[name]
         params = rows[name]['params']

@@ -222,6 +222,7 @@ def emit_private_kernels(plans, package_path, package_name, *, formula_transform
         spec = KernelSpec(module, p['inputs'], {}, max(1, capacity), '0',
                           cell_outputs=tuple(sorted(p['methods'])),
                           cache_domains=domains, original_space_shell=True, cython_objects=True,
+                          original_receiver_type=info.fqname,
                           cython_signatures=signatures, original_prepared_inputs=prepared,
                           original_helper_modules=helper_modules,
                           original_native_calls=tuple(sorted(native_calls)),
@@ -430,10 +431,28 @@ def add_owner_entries(source, manifest):
         prepared = manifest.get('original_prepared_inputs', {})
         refs = ', '.join(('self.' if name in prepared else 'receiver.') + name
                          for name in manifest['inputs'])
+        receiver_type = manifest.get('original_receiver_type')
         lines += ['    def _mx_synchronize_inputs(self):',
-                  '        receiver = self._python_scope._original_receiver',
-                  '        if receiver is not None:',
-                  '            self.bind_inputs((' + refs + (',' if refs else '') + '))']
+                  ('        cdef _mx_original_space receiver = self._python_scope._original_receiver'
+                   if receiver_type else '        receiver = self._python_scope._original_receiver'),
+                  '        if receiver is not None:']
+        if receiver_type:
+            # Live fields are compared without Python equality or namespace
+            # reconstruction. Float bits preserve signed zero and NaN payloads.
+            source = 'from libc.string cimport memcmp as _mx_input_memcmp\n' + source
+            changed = []
+            for name, row in manifest['inputs'].items():
+                if name in prepared:
+                    continue
+                if row['kind'] == 'object':
+                    changed.append(f'self.{name} is not receiver.{name}')
+                elif row['kind'] == 'float':
+                    changed.append(f'_mx_input_memcmp(&self._frame.{name}, &receiver.{name}, sizeof(double)) != 0')
+                else:
+                    changed.append(f'self._frame.{name} != receiver.{name}')
+            lines += ['            if not (' + (' or '.join(changed) or 'False') + '):',
+                      '                return']
+        lines += ['            self.bind_inputs((' + refs + (',' if refs else '') + '))']
         # The checked object formula can call back into numeric execution after
         # changing public inputs. Update the held native fields before that edge.
         marker = '    def call(self, str cell, tuple args):\n        cdef _Command command'

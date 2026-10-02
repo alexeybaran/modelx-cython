@@ -30,6 +30,7 @@ def maybe_fail():
     model = mx.new_model('OriginalBoundary')
     space = model.new_space('S')
     space.tracker = tracker
+    space.level = 0.0
     for name, source in {
         'leaf': 'def leaf(n):\n if n == 2: raise ValueError("numeric failure")\n return float(n-2)\n',
         'parent': 'def parent(n):\n return leaf(n) + 1.0\n',
@@ -40,6 +41,11 @@ def maybe_fail():
         'failing': ('def failing(n):\n token = tracker.Token()\n completed = child(n)\n'
                     ' tracker.maybe_fail()\n return completed\n'),
         'numeric_parent': 'def numeric_parent(n):\n return float(failing(n)["value"])\n',
+        'walk': ('def walk(n):\n token = tracker.Token()\n value = 0.0\n'
+                 ' for i in range(200): value += numeric_parent(n)\n'
+                 ' return {"value": value}\n'),
+        'level_value': 'def level_value(n):\n return level\n',
+        'change': 'def change(n):\n tracker.callback()\n return {"value": level_value(n)}\n',
         'nested': ('def nested(n):\n token = tracker.Token()\n tracker.callback()\n'
                    ' return {"value": parent(n)}\n'),
     }.items():
@@ -48,7 +54,9 @@ def maybe_fail():
     model.close()
     (tmp_path / 'sample.py').write_text(
         'from model import mx_model\ns=mx_model.S\ns.leaf(1);s.parent(1)\n'
-        's.caught(1);s.child(1);s.numeric_parent(1)\n', encoding='utf-8')
+        's.caught(1);s.child(1);s.numeric_parent(1);s.walk(1)\n'
+        'import shell_boundary_tracker as tracker\n'
+        'tracker.callback=lambda: None\ns.change(1);s.level_value(0)\n', encoding='utf-8')
     (tmp_path / 'spec.py').write_text(
         repr({'spaces': {'S': {'cells_param_size': {'n': 4}}}}), encoding='utf-8')
     _run(tmp_path, ['-m', 'modelx_cython', str(tmp_path / 'model'),
@@ -59,6 +67,8 @@ def maybe_fail():
     assert manifest['cells']['caught']['coverage']['body_backend'] == 'cython_gil'
     assert manifest['cells']['numeric_parent']['coverage']['body_backend'] == 'cython_gil'
     assert 'numeric_parent' in manifest['original_checked_numeric_bridges']
+    generated = next((tmp_path / 'model_cy/_mx_frame_S').rglob('_kernel.pyx')).read_text()
+    assert 'def _gil_entry_numeric_parent(' not in generated
     assert all(not row['coverage']['detached_python'] for row in manifest['cells'].values())
     (tmp_path / 'verify.py').write_text('''
 import gc
@@ -97,6 +107,30 @@ except ValueError as error: assert str(error) == 'numeric failure'
 else: raise AssertionError('native guard not restored')
 gc.collect()
 assert tracker.created == tracker.destroyed == 5
+original_bind = PythonScope.bind_original_inputs
+bindings = []
+def record_bind(self, values):
+    bindings.append(self)
+    return original_bind(self, values)
+PythonScope.bind_original_inputs = record_bind
+before = len(bindings)
+assert item.walk(1) == {'value': 200.0}
+assert len(bindings) - before <= 2, 'Unchanged internal inputs were repeatedly rebuilt'
+import math
+assert math.copysign(1.0, item.level_value(0)) == 1.0
+def negative_zero(): item.level = -0.0
+tracker.callback = negative_zero
+assert math.copysign(1.0, item.change(1)['value']) == -1.0
+def positive_zero(): item.level = 0.0
+tracker.callback = positive_zero
+assert math.copysign(1.0, item.change(2)['value']) == 1.0
+def sentinel(): item.level = -1.0
+tracker.callback = sentinel
+assert item.change(3)['value'] == -1.0
+assert math.copysign(1.0, item.level_value(0)) == 1.0
+assert math.copysign(1.0, item.level_value(1)) == -1.0
+gc.collect()
+assert tracker.created == tracker.destroyed == 6
 print('original classes: object cleanup, checked bridges, nested guard and retry PASS')
 ''', encoding='utf-8')
     _run(tmp_path, ['verify.py'], 'verify')

@@ -1037,6 +1037,7 @@ def build(spec, destination, *, diagnostics=False, python_cells=(),
         manifest["cython_objects"] = True
     if spec.original_space_shell:
         manifest['original_space_shell'] = True
+        manifest['original_receiver_type'] = spec.original_receiver_type
         manifest['original_prepared_inputs'] = spec.original_prepared_inputs or {}
         manifest['original_helper_modules'] = spec.original_helper_modules or {}
         manifest['original_native_calls'] = list(spec.original_native_calls)

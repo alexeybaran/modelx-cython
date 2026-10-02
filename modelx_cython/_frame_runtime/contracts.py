@@ -59,6 +59,8 @@ class KernelSpec:
     cache_domains: dict | None = None
     # Internal integration contract; never changes the existing frame default.
     original_space_shell: bool = False
+    # Resolved original public ABI, used for checked live field access.
+    original_receiver_type: str | None = None
     # Prepared original-shell resources: shared snapshots, not live public refs.
     # Values are existing compiled helper class paths or 'object'.
     original_prepared_inputs: dict[str, str] | None = None

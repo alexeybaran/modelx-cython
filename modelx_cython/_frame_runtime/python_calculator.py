@@ -277,10 +277,11 @@ class PythonScope(CellCodec):
                     or ('module' in info and actual is not resolve_enum(info))):
                 raise ContractError('Public Enum contract changed: ' + name)
         compiled_numeric = set(manifest.get('cython_numeric_fallback_cells', ()))
+        compiled_numeric.difference_update(manifest.get('original_checked_numeric_bridges', ()))
         compiled_objects = set(manifest.get('cython_object_cells', ()))
         self.calculators = {name: (getattr(kernel, '_gil_entry_' + name)
                                    if name in compiled_numeric else None
-                                   if name in compiled_objects else self.namespace[name])
+                                   if name in compiled_objects or name in manifest.get('original_checked_numeric_bridges', ()) else self.namespace[name])
                             for name in manifest['python_cells']}
         self.calls = {name: 0 for name in self.calculators}
         self._record, self._raw_record = {}, ()
