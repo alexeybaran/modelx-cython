@@ -223,6 +223,7 @@ def emit_private_kernels(plans, package_path, package_name, *, formula_transform
                           cell_outputs=tuple(sorted(p['methods'])),
                           cache_domains=domains, original_space_shell=True, cython_objects=True,
                           original_receiver_type=info.fqname,
+                          original_live_fields=tuple(n for n in p["inputs"] if n in info.refs),
                           cython_signatures=signatures, original_prepared_inputs=prepared,
                           original_helper_modules=helper_modules,
                           original_native_calls=tuple(sorted(native_calls)),
@@ -429,8 +430,17 @@ def add_owner_entries(source, manifest):
               '        return (' + bound + (',' if bound else '') + ')']
     if manifest.get('python_cells'):
         prepared = manifest.get('original_prepared_inputs', {})
-        refs = ', '.join(('self.' if name in prepared else 'receiver.') + name
-                         for name in manifest['inputs'])
+        live_fields = set(manifest.get('original_live_fields', ()))
+        def read_input(name):
+            if name in prepared:
+                return 'self.' + name
+            if name in live_fields:
+                return 'receiver.' + name
+            # Checked Cell dependencies are bound methods, not reference
+            # fields. Preserve Python method binding and virtual dispatch;
+            # converting a raw cpdef C function loses its hidden dispatch ABI.
+            return f'getattr(receiver, {name!r})'
+        refs = ', '.join(read_input(name) for name in manifest['inputs'])
         receiver_type = manifest.get('original_receiver_type')
         lines += ['    def _mx_synchronize_inputs(self):',
                   ('        cdef _mx_original_space receiver = self._python_scope._original_receiver'
@@ -445,7 +455,7 @@ def add_owner_entries(source, manifest):
                 if name in prepared:
                     continue
                 if row['kind'] == 'object':
-                    changed.append(f'self.{name} is not receiver.{name}')
+                    changed.append(f'self.{name} is not {read_input(name)}')
                 elif row['kind'] == 'float':
                     changed.append(f'_mx_input_memcmp(&self._frame.{name}, &receiver.{name}, sizeof(double)) != 0')
                 else:

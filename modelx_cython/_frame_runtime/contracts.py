@@ -61,6 +61,8 @@ class KernelSpec:
     original_space_shell: bool = False
     # Resolved original public ABI, used for checked live field access.
     original_receiver_type: str | None = None
+    # Fields and checked Cell callables have different Cython ABIs.
+    original_live_fields: tuple[str, ...] = ()
     # Prepared original-shell resources: shared snapshots, not live public refs.
     # Values are existing compiled helper class paths or 'object'.
     original_prepared_inputs: dict[str, str] | None = None

@@ -162,7 +162,7 @@ def augment(source, manifest, spec, forced_python=()):
                 return node
             if isinstance(node.ctx,ast.Load) and node.id in globals_ and node.id not in self.locals:
                 if spec.original_space_shell and node.id in spec.inputs and node.id not in prepared:
-                    if spec.original_receiver_type:
+                    if spec.original_receiver_type and node.id in spec.original_live_fields:
                         live_inputs.add(node.id)
                         return ast.copy_location(ast.Call(ast.Attribute(
                             ast.Name('self', ast.Load()), '_mx_live_' + node.id, ast.Load()), [], []), node)
@@ -178,7 +178,11 @@ def augment(source, manifest, spec, forced_python=()):
     imports = []
     if spec.original_receiver_type:
         module, cls = spec.original_receiver_type.rsplit('.', 1)
-        imports.append('from ' + module + ' cimport ' + cls + ' as _mx_original_space')
+        # Cython's bound-C-function conversion needs the canonical receiver
+        # name as well as our emitter alias. Keep the original public type in
+        # this module's Cython namespace; no second class or formula is emitted.
+        imports.append('from ' + module + ' cimport ' + cls)
+        imports.append('ctypedef ' + cls + ' _mx_original_space')
     for name, alias in resource_types.items():
         module, cls = prepared[name].rsplit('.', 1)
         imports.append('from ' + module + ' cimport ' + cls + ' as ' + alias)

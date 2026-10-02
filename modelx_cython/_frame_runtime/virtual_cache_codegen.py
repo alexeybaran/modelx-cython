@@ -92,7 +92,7 @@ def entries(manifest):
             body.append('            raise')
         methods.extend(body + [''])
         export = [signature(name, row) + ':', '    cdef Kernel owner = kernel']
-        if manifest.get('python_cells'):
+        if manifest.get('object_cells'):
             export += ['    if owner._object_key_guard or owner._clearing_objects:',
                        '        raise RuntimeError("Cell calls during cache maintenance are unsupported")']
         # Numeric-only kernels do not carry mixed-object rollback fields.
