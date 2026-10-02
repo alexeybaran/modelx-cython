@@ -83,7 +83,16 @@ def test_integrated_mutation_and_exceptions(tmp_path):
         assert cp.returncode == 0, cp.stdout[-18000:]
     run(['-m', 'modelx_cython', 'model', '--sample', 'sample.py', '--spec', 'spec.py'], 'build')
     src = (tmp_path / 'model_cy/_mx_classes.py').read_text()
-    assert '_mx_data_' in src
+    frame_manifest = tmp_path / 'model_cy/_mx_frame_S/manifest.json'
+    if frame_manifest.exists():
+        import json
+        routes = json.loads((tmp_path / 'model_cy/_mx_classes.frame-shell.json').read_text())['cells']
+        assert all(r['execution'] == 'frame_exact' for r in routes if r['cell'] in ('leaf', 'total', 'large'))
+        manifest = json.loads(frame_manifest.read_text())
+        assert manifest['cells']['large']['calculator'] == 'cython_scalar'
+        assert '_mx_n_c_S_total' not in src  # no competing fused formula entry
+    else:
+        assert '_mx_data_' in src
     (tmp_path / 'verify.py').write_text('''import pickle, numpy as np
 from model_cy import mx_model
 factory = type(mx_model)

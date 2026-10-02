@@ -671,6 +671,21 @@ def transform(source, declarations, module, path, *, frame_cells=None):
             edits.append((cls.body[0].lineno-1, cls.body[0].lineno-1, f'    _mx_native: {owner}\n'))
         for n in sorted(selected):
             public = copy.deepcopy(methods[n]); formula = copy.deepcopy(methods['_f_' + n])
+            if n in (frame_cells or {}).get(cls.name, ()):
+                # The shared frame already owns exact-receiver execution.
+                # Keep only the original override-aware cache wrapper and its
+                # lazy storage; do not emit a second fused formula entry.
+                public = Storage(arrays, owner).visit(public)
+                ast.fix_missing_locations(public)
+                original = methods[n]
+                first = min([original.lineno] + [d.lineno for d in original.decorator_list]) - 1
+                edits.append((first, original.end_lineno,
+                              textwrap.indent(ast.unparse(public), '    ') + '\n'))
+                inventory.append({'class': cls.name, 'cell': n,
+                                  'frame_entry': True, 'native_storage': n in arrays,
+                                  'original_override_cache_wrapper': True,
+                                  'duplicate_fused_formula_entry': False})
+                continue
             key_positions=key_parameters(public) if connected and n in indexed else []
             if key_positions:use_precomputed_keys(public,key_positions)
             indices = [] if top_range_shadow else local_indices(formula, methods)
