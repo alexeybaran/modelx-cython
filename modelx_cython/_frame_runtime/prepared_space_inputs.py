@@ -62,3 +62,13 @@ class PreparedSpaceInputs(NativeInputCodec):
             name = declared[parameter]
             updated[locations[name]] = self._scalar_value(name, infos[name], value, raw)
         return tuple(updated)
+
+    def __getstate__(self):
+        # Module objects are not pickle state. Completed native resources own
+        # their own ordinary reductions; preserve sharing through pickle's memo.
+        return self.manifest, self._lookups.__name__, self._records, self._packed
+
+    def __setstate__(self, state):
+        from importlib import import_module
+        self.manifest, module, self._records, self._packed = state
+        self._lookups = import_module(module)

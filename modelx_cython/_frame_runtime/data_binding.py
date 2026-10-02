@@ -177,7 +177,8 @@ class DataView:
         return self._prepared[key]
 
     def __getattr__(self, name):
-        if name in self._tables:
+        tables = object.__getattribute__(self, '_tables')
+        if name in tables:
             if name in self._reference_names:
                 return self._tables[name]
             def reader():
@@ -191,3 +192,8 @@ class DataView:
 
     def __setattr__(self, name, value):
         raise AttributeError('Formula Data receivers are read-only; replace model Data references')
+
+    def __reduce__(self):
+        # Readers and lookup indexes are derived preparation, not Cell results.
+        # Reconstruct them lazily rather than pickle self-capturing closures.
+        return DataView, (self._tables, tuple(self._reference_names))

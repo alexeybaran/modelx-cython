@@ -30,6 +30,7 @@ def _binding_program(module):
 class SpaceFrameOwner:
     def __init__(self, module, inputs):
         self.module = module
+        self._prepared_record = inputs
         self._extension, self._manifest = _metadata(module)
         self.kernel = self._extension.Kernel((inputs,))
         self._scope = None
@@ -72,12 +73,17 @@ class SpaceFrameOwner:
 
     @property
     def inputs(self):
+        if self._manifest.get('public_entry_abi'):
+            return self._prepared_record
         return self.kernel.bound_inputs()
 
     def reset(self):
         self.kernel._reset_item_cache()
 
     def __reduce__(self):
+        if self._manifest.get('public_entry_abi'):
+            bindings = self._scope.bindings if self._scope is not None else None
+            return _restore_prepared, (self.module, self.inputs, bindings, self.kernel.snapshot())
         return _restore, (self.module, self.inputs, self.kernel.snapshot())
 
 
@@ -145,6 +151,7 @@ def prepared_owner(receiver, module, resources, existing=None):
             owner._scope.bindings = (bindings,)
         owner.kernel.replace_records((record,))
         owner.kernel.select_scope(0)
+        owner._prepared_record = record
     return owner
 
 
@@ -152,5 +159,12 @@ def _restore(module, inputs, entries):
     owner = SpaceFrameOwner(module, inputs)
     if owner._manifest.get('python_cells'):
         owner.prepare_checked()
+    owner.kernel.restore(entries)
+    return owner
+
+
+def _restore_prepared(module, inputs, bindings, entries):
+    owner = SpaceFrameOwner(module, inputs)
+    owner.prepare_checked(bindings)
     owner.kernel.restore(entries)
     return owner

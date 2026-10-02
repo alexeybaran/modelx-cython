@@ -83,3 +83,7 @@ def test_table_lookup_adapter_is_shared_with_existing_facade():
     assert view._prepare_lookup('points', factory) is first
     assert calls == [source]
     assert view.points() is source
+    import pickle
+    restored = pickle.loads(pickle.dumps(view))
+    assert restored.points().equals(source)
+    assert not restored._prepared

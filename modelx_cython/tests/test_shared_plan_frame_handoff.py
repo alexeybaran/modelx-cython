@@ -258,7 +258,7 @@ def test_prepared_context_preserves_native_categories_behind_object_public_abi(t
     assert manifest['public_entry_abi']['amount']['public_arguments'] == {'kind': 'object'}
     assert manifest['public_entry_abi']['amount']['physical_arguments']['kind']['kind'] == 'enum'
     adapted_source = (artifact/manifest['package']/'_kernel.pyx').read_text()
-    assert adapted_source.split('\ncdef double _mx_public_amount(', 1)[0].rstrip() == plain_source.rstrip()
+    assert adapted_source.split('\n    def snapshot(', 1)[0].rstrip() == plain_source.rstrip()
     # A real compiled caller uses the public ABI, not a cast to the incompatible
     # private long-long signature. The calculation body/cache remains native.
     (artifact/'public_boundary.pyx').write_text(
@@ -330,6 +330,16 @@ def test_prepared_context_preserves_native_categories_behind_object_public_abi(t
     public_source, public_declarations = transform_prepared(
         source_file.read_text(), declarations_file.read_text(), plans)
     public_source = add_collect_hooks(public_source, plans)
+    # Test-only access to an internal owner; no extra product API is emitted.
+    # Whole-model pickle with module-valued public refs is separately limited
+    # by the original shell's automatic Cython serialization.
+    import ast
+    public_tree = ast.parse(public_source)
+    for cls in public_tree.body:
+        if isinstance(cls, ast.ClassDef) and cls.name == space.class_name:
+            cls.body.extend(ast.parse('def _mx_test_owner(self):\n return self._mx_frame_owner\n'
+                                      'def _mx_test_resources(self):\n return self._mx_prepared_resources\n').body)
+    public_source = ast.unparse(ast.fix_missing_locations(public_tree)) + '\n'
     source_file.write_text(public_source, encoding='utf-8')
     declarations_file.write_text(public_declarations, encoding='utf-8')
     shutil.copyfile(space_owner.__file__, package/'_mx_frame_owner.py')
@@ -379,6 +389,17 @@ assert collected.individual[1].record == {'category': p.Kind.ZERO, 'amount': -1.
 assert len(created) == 1
 assert mx_model.Projection.collect() is collected
 assert p.report()['amount'] == 3.5 and q.report()['amount'] == -1.0
+import pickle
+restored_owner = pickle.loads(pickle.dumps(p._mx_test_owner()))
+assert restored_owner.kernel.call('amount', (1,)) == 3.5
+assert restored_owner.kernel.call('amount', (0,)) == -1.0
+assert restored_owner.kernel.call('report', ()) == p.report()
+restored_resources = pickle.loads(pickle.dumps(mx_model.Projection._mx_test_resources()))
+assert len(restored_resources) == 1
+prepared, positions, data_view = next(iter(restored_resources.values()))
+assert positions == {0: 0, 1: 1}
+assert prepared.record(0) == p._mx_test_owner().inputs
+assert data_view.points().equals(mx_model.Data.points())
 print('checking derived receiver', flush=True)
 class Derived(type(p)):
     def amount(self, kind=0): return 12.0

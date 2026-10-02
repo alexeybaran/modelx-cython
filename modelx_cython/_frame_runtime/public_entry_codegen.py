@@ -30,6 +30,10 @@ def augment(source, manifest, space):
     capsule to a numeric ABI. The current codec's domain checks remain visible
     in the manifest; this adapter alone is not general-object qualification.
     """
+    from .typed_memo_codegen import completed_cache_methods
+    from .cache_state_codegen import methods as cache_state_methods
+    state_methods = completed_cache_methods(manifest['cells']) + cache_state_methods(manifest)
+    source = source.rstrip() + '\n\n' + '\n'.join(state_methods) + '\n'
     numeric = [n for n in manifest['cells'] if n not in manifest.get('object_cells', ())]
     exports = []
     inventory = {}
