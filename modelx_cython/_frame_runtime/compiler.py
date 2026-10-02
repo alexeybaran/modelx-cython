@@ -1073,6 +1073,14 @@ def build(spec, destination, *, diagnostics=False, python_cells=(),
             if len(references) != 1:
                 raise ContractError('Prepared public resources require one resolved Data reference')
             manifest['public_space_binding'] = dict(data_reference=references[0])
+            program = spec.model.get('data_program')
+            if program is not None:
+                domain = spec.public_emission_plan.cells[program['domain_name']]
+                if not domain.cached:
+                    raise ContractError('Uncached prepared policy domains need an original receiver entry')
+                manifest['public_space_binding'].update(
+                    synthetic_policy_table=program['policy_table'],
+                    domain_entry='_f_' + domain.name)
     # Normalize the final module header once, after every generation component.
     # Cython directives must precede imports to preserve inferred native types.
     lines = source.splitlines()
@@ -1086,6 +1094,11 @@ def build(spec, destination, *, diagnostics=False, python_cells=(),
     if spec.cython_objects:
         helper_bytes += b''.join(Path(__file__).with_name('table_lookup'+suffix).read_bytes() for suffix in ('.py','.pxd'))
     python_source = manifest.pop('python_source', '')
+    lookup_source = ''
+    if 'from . import _lookup as ' in python_source:
+        lookup_source = Path(__file__).with_name('lookup.py').read_text().replace(
+            'from .lookups import ', 'from ._lookups import ')
+        helper_bytes += lookup_source.encode()
     space_source = ''
     if spec.model is not None and spec.model.get('space_formula'):
         from .space_formula_codegen import emit_space_preparer
@@ -1106,6 +1119,9 @@ def build(spec, destination, *, diagnostics=False, python_cells=(),
     if python_source:
         (pkg / '_python.py').write_text(python_source, encoding='utf-8', newline='\n')
         manifest['python_source_sha256'] = hashlib.sha256(python_source.encode()).hexdigest()
+    if lookup_source:
+        (pkg / '_lookup.py').write_text(lookup_source, encoding='utf-8', newline='\n')
+        manifest['bundled_lookup_sha256'] = hashlib.sha256(lookup_source.encode()).hexdigest()
     if space_source:
         (pkg / '_space_formula.pyx').write_text(space_source, encoding='utf-8', newline='\n')
     for suffix in ('.py', '.pxd'):

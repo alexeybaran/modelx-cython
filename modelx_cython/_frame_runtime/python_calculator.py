@@ -121,7 +121,12 @@ def bundle_source(cells, python_cells, inputs, enums, *, compiled_numeric=()):
             return
         done.add(name)
         if isinstance(value, types.ModuleType):
-            chunks.append(f'import {value.__name__} as {name}')
+            if value.__name__ == __package__ + '.lookup':
+                # Compiler-owned helper vocabulary travels with the artifact.
+                # Never require the compiler installation to run its package.
+                chunks.append(f'from . import _lookup as {name}')
+            else:
+                chunks.append(f'import {value.__name__} as {name}')
         elif is_formula(value) and (name in python_cells or value.__module__ == owner):
             add_function(name, value)
         elif (inspect.isfunction(value) or inspect.isclass(value)) and '<locals>' not in value.__qualname__:

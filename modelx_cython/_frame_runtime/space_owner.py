@@ -101,7 +101,17 @@ def prepared_owner(receiver, module, resources, existing=None):
         data = getattr(receiver, binding['data_reference'])
         reference_names = frozenset(plan.get('data_reference_names', ()))
         tables = {name: (getattr(data, name) if name in reference_names
-                         else getattr(data, name)()) for name in plan['tables']}
+                         else getattr(data, name)()) for name in plan['tables']
+                  if name != binding.get('synthetic_policy_table')}
+        if 'synthetic_policy_table' in binding:
+            # This index is preparation metadata, not an extra economic Data
+            # Cell. Its existing formula executes on the original compiled
+            # receiver; never reconstruct or interpret the author formula.
+            import pandas as pd
+            domain = tuple(getattr(receiver, binding['domain_entry'])())
+            schema = plan['tables'][binding['synthetic_policy_table']]
+            tables[binding['synthetic_policy_table']] = pd.DataFrame(
+                index=pd.Index(domain, name=schema['index_names'][0]))
         # Original public Data Cells may expose Cython memoryviews where the
         # physical preparation schema describes their underlying ndarray.
         # np.asarray borrows that view here; established indexed-input packing

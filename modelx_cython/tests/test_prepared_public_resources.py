@@ -3,13 +3,15 @@ from types import SimpleNamespace
 
 import numpy as np
 import pandas as pd
+import pytest
 
 from modelx_cython._frame_runtime import space_owner
 from modelx_cython._frame_runtime.data_binding import DataView
 from modelx_cython._frame_runtime.prepared_space_inputs import PreparedSpaceInputs
 
 
-def test_reference_tables_memoryviews_and_checked_scope_bindings(monkeypatch):
+@pytest.mark.parametrize('synthetic_domain', [False, True])
+def test_reference_tables_memoryviews_and_checked_scope_bindings(monkeypatch, synthetic_domain):
     points = pd.DataFrame({'age': [40, 41]}, index=pd.Index([10, 11], name='point_id'))
     rates = pd.Series([.01, .02])
     array = np.array([40, 41], dtype='int64')
@@ -19,6 +21,10 @@ def test_reference_tables_memoryviews_and_checked_scope_bindings(monkeypatch):
                     'rates': {'object_kind': 'Series'}, 'ages': {'object_kind': 'ndarray'}},
             reference_defaults={}, data_reference_names=['rates'], point_table='points',
             point_parameter='point_id', parameter_defaults={}))
+    if synthetic_domain:
+        manifest['public_space_binding'].update(synthetic_policy_table='domain', domain_entry='_f_domain')
+        manifest['model']['tables']['domain'] = dict(object_kind='DataFrame', index_names=['point_id'])
+        manifest['model']['point_table'] = 'domain'
     monkeypatch.setattr(space_owner, '_metadata', lambda module: (None, manifest))
     monkeypatch.setattr(space_owner, 'import_module', lambda module: None)
     captured = []
@@ -44,12 +50,14 @@ def test_reference_tables_memoryviews_and_checked_scope_bindings(monkeypatch):
             self.selected = index
     monkeypatch.setattr(space_owner, 'SpaceFrameOwner', Owner)
     data = SimpleNamespace(points=lambda:points, rates=rates, ages=lambda:memoryview(array))
-    receiver = SimpleNamespace(data_alias=data, point_id=10)
+    receiver = SimpleNamespace(data_alias=data, point_id=10, _f_domain=lambda:(10,11))
     resources = {}
     owner = space_owner.prepared_owner(receiver, 'kernel.module', resources)
     assert captured[0]['rates'] is rates
     assert captured[0]['points'] is points
     assert np.shares_memory(captured[0]['ages'], array)
+    if synthetic_domain:
+        assert captured[0]['domain'].index.tolist() == [10,11]
     binding = owner._scope.bindings[0]
     assert binding['point_id'] == 10
     assert binding['data'].points() is points
