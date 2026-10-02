@@ -35,7 +35,7 @@ def load(path, ios, iospecs):
 '''
 
 
-def emit(package):
+def emit(package, *, source_package=None):
     package = Path(package)
     sys_path = package / '_mx_sys.py'
     tree = ast.parse(sys_path.read_text(encoding='utf-8'))
@@ -44,8 +44,9 @@ def emit(package):
     io_path = package / '_mx_io.py'
     if method is None or not io_path.exists():
         return None
-    exported = importlib.import_module(package.name + '._mx_sys')
-    declarations = importlib.import_module(package.name + '._mx_io')
+    source_name = Path(source_package).name if source_package is not None else package.name
+    exported = importlib.import_module(source_name + '._mx_sys')
+    declarations = importlib.import_module(source_name + '._mx_io')
     if not declarations.ios:
         return None
     # No custom IO backend, hidden client ownership or arbitrary class state is

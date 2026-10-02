@@ -492,7 +492,7 @@ def main_handler(args: argparse.Namespace, stdout: IO[str], stderr: IO[str]) -> 
 
         if _native_os.environ.get("MX_CY_ORIGINAL_FRAME_SHELL", "0") == "1":
             from modelx_cython.prepared_io_cache import emit as emit_prepared_io
-            emit_prepared_io(model_path)
+            emit_prepared_io(model_path, source_package=orig_path)
         create_setup(model_name, modules=modules, setup_file=setup_file)
 
     if args.translate_only:
