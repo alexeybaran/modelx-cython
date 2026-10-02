@@ -38,14 +38,14 @@ class SpaceFrameOwner:
         else:
             self.kernel.select_scope(0)
 
-    def prepare_checked(self):
+    def prepare_checked(self, bindings=None):
         if self._scope is not None or not self._manifest.get('python_cells'):
             return
         if __package__.endswith('._frame_runtime'):
             from .python_calculator import PythonScope
         else:
             from ._mx_frame_support.python_calculator import PythonScope
-        scope = PythonScope(None, self._manifest, self.kernel,
+        scope = PythonScope(None, self._manifest, self.kernel, bindings,
                             program=_binding_program(self.module))
         self.kernel.set_python_scope(scope)
         if self._manifest.get('public_entry_abi'):
@@ -93,29 +93,46 @@ def prepared_owner(receiver, module, resources, existing=None):
     if module not in resources:
         if __package__.endswith('._frame_runtime'):
             from .prepared_space_inputs import PreparedSpaceInputs
+            from .data_binding import DataView
         else:
             from ._mx_frame_support.prepared_space_inputs import PreparedSpaceInputs
+            from ._mx_frame_support.data_binding import DataView
         plan = manifest['model']
         data = getattr(receiver, binding['data_reference'])
-        tables = {name: getattr(data, name)() for name in plan['tables']}
+        reference_names = frozenset(plan.get('data_reference_names', ()))
+        tables = {name: (getattr(data, name) if name in reference_names
+                         else getattr(data, name)()) for name in plan['tables']}
+        # Original public Data Cells may expose Cython memoryviews where the
+        # physical preparation schema describes their underlying ndarray.
+        # np.asarray borrows that view here; established indexed-input packing
+        # subsequently applies its declared snapshot contract. Live mutable
+        # array synchronization is a separate qualification gate.
+        import numpy as np
+        for name, schema in plan['tables'].items():
+            if schema.get('object_kind') == 'ndarray' and not isinstance(tables[name], np.ndarray):
+                tables[name] = np.asarray(tables[name])
         references = {name: getattr(receiver, name) for name in plan['reference_defaults']}
         lookups = import_module(module.rsplit('.', 1)[0] + '._lookups')
         prepared = PreparedSpaceInputs(manifest, lookups, tables, references=references)
         point = tables[plan['point_table']] if plan['point_table'] is not None else None
         positions = {label: i for i, label in enumerate(point.index)} if point is not None else {0: 0}
-        resources[module] = prepared, positions
-    prepared, positions = resources[module]
+        resources[module] = prepared, positions, DataView(tables, reference_names)
+    prepared, positions, data_view = resources[module]
     plan = manifest['model']
     label = getattr(receiver, plan['point_parameter']) if plan['point_parameter'] else 0
     parameters = {name: getattr(receiver, name) for name in plan['parameter_defaults']}
     record = prepared.record(positions[label], parameters=parameters)
+    bindings = {name: (data_view if name == 'data' else getattr(receiver, name))
+                for name in manifest.get('python_references', ())}
     if existing is None:
         owner = SpaceFrameOwner(module, record)
-        owner.prepare_checked()
+        owner.prepare_checked((bindings,))
     else:
         if existing.module != module:
             raise ValueError('Collection owner has a different generated layout')
         owner = existing
+        if owner._scope is not None:
+            owner._scope.bindings = (bindings,)
         owner.kernel.replace_records((record,))
         owner.kernel.select_scope(0)
     return owner

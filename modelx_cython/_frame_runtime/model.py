@@ -12,7 +12,7 @@ import threading
 from collections import OrderedDict
 from copy import deepcopy
 from .contracts import ContractError
-from .data_binding import pack_tables, prepare_inputs
+from .data_binding import DataView, pack_tables, prepare_inputs
 from .runtime import CompiledKernel
 
 
@@ -128,38 +128,6 @@ class _CollectAccumulator:
             raise ValueError('collect domain must not be empty')
         return CollectResult({mode: value if mode == 'individual' else CollectResult(value)
                               for mode, value in self.result.items()})
-
-
-class DataView:
-    """Snapshot receiver for ordinary Python formulas using data.<table>()."""
-    def __init__(self, tables, reference_names=()):
-        object.__setattr__(self, '_tables', tables)
-        object.__setattr__(self, '_prepared', {})
-        object.__setattr__(self, '_reference_names', frozenset(reference_names))
-
-    def _prepare_lookup(self, name, factory=None):
-        from .table_lookup import IndexedTable
-        factory = factory or IndexedTable
-        key = (name, factory)
-        if key not in self._prepared:
-            self._prepared[key] = factory(self._tables[name])
-        return self._prepared[key]
-
-    def __getattr__(self, name):
-        if name in self._tables:
-            if name in self._reference_names:
-                return self._tables[name]
-            def reader():
-                return self._tables[name]
-            # Bind a reader once, not a new Python closure on every formula call.
-            # Read through self so public Data-reference replacement stays live.
-            object.__setattr__(self, name, reader)
-            return reader
-        if name.endswith('_data') and name[:-5] in self._tables: return self._tables[name[:-5]]
-        raise AttributeError(name)
-
-    def __setattr__(self, name, value):
-        raise AttributeError('Formula Data receivers are read-only; replace model Data references')
 
 
 class _DataSpace(DataView):

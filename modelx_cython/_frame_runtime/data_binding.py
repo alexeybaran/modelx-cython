@@ -158,3 +158,36 @@ def prepare_inputs(manifest, tables, *, references=None, packed=None,
             or (manifest['inputs'][name]['kind'] != 'table_key'
                 and type(value) in (int, float, bool, str, type(None)))))
     return PreparedModelRows(tuple(rows), fixed_names)
+
+
+class DataView:
+    """Snapshot receiver for ordinary Python formulas using data.<table>()."""
+    def __init__(self, tables, reference_names=()):
+        object.__setattr__(self, '_tables', tables)
+        object.__setattr__(self, '_prepared', {})
+        object.__setattr__(self, '_reference_names', frozenset(reference_names))
+
+    def _prepare_lookup(self, name, factory=None):
+        if factory is None:
+            from .table_lookup import IndexedTable
+            factory = IndexedTable
+        key = (name, factory)
+        if key not in self._prepared:
+            self._prepared[key] = factory(self._tables[name])
+        return self._prepared[key]
+
+    def __getattr__(self, name):
+        if name in self._tables:
+            if name in self._reference_names:
+                return self._tables[name]
+            def reader():
+                return self._tables[name]
+            # Bind a reader once, not a new Python closure on every formula call.
+            # Read through self so public Data-reference replacement stays live.
+            object.__setattr__(self, name, reader)
+            return reader
+        if name.endswith('_data') and name[:-5] in self._tables: return self._tables[name[:-5]]
+        raise AttributeError(name)
+
+    def __setattr__(self, name, value):
+        raise AttributeError('Formula Data receivers are read-only; replace model Data references')
