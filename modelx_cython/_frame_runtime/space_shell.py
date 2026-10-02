@@ -461,6 +461,7 @@ def transform_prepared(source, declarations, plans):
             capsule = (capi[result] + ('(' if result in ('object', 'str', 'unicode') else ' (')
                        + ', '.join(capi[t] for t in types) + ')').encode()
             args = ', '.join(a.arg for a in fn.args.args[1:])
+            checked = p['manifest']['public_entry_abi'][fn.name]['checked_scope_required']
             entry = ast.parse(f'''if self._mx_frame_expired:
     raise RuntimeError("Collection policy cache has expired")
 if type(self) is {cls.name}{selected_receiver}:
@@ -473,6 +474,7 @@ if type(self) is {cls.name}{selected_receiver}:
             _mx_template._mx_prepared_resources = {{}}
         self._mx_frame_owner = _mx_prepared_owner(self, {p['kernel_module']!r}, _mx_template._mx_prepared_resources, self._mx_frame_owner)
         self._mx_frame_rebind = False
+    {"self._mx_frame_owner.prepare_checked()" if checked else "pass"}
     if {alias} == _mx_cy.NULL:
         {alias} = _mx_cy.cast({alias}_t, _mx_frame_capsule_ptr(self._mx_frame_owner.entry_capsule({fn.name!r}), {capsule!r}))
     return {alias}(self._mx_frame_owner.kernel{', ' + args if args else ''})''').body

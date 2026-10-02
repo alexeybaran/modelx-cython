@@ -199,6 +199,7 @@ def test_prepared_context_preserves_native_categories_behind_object_public_abi(t
         collect_outputs='lambda: {"sum": {"total": amount(category())}, "individual": {"record": report()}}')
     p.data, p.lookup, p.Kind = data, lookup, _PlanCategory
     p.flags = {'fail': False, 'object_fail': False}
+    p.new_cells('shallow', 'def shallow(n):\n return 0.5 * n\n')
     p.new_cells('category', 'def category():\n return lookup.category(data.points(), policy_id, "category", Kind)\n')
     p.new_cells('amount', 'def amount(kind=0):\n return 3.5 if kind == Kind.ONE else -1.0\n')
     p.new_cells('report', 'def report():\n return {"category": category(), "amount": amount(category())}\n')
@@ -212,7 +213,7 @@ def test_prepared_context_preserves_native_categories_behind_object_public_abi(t
         'from model import mx_model\n'
         'for i in (0,1):\n p=mx_model.Projection[i]\n'
         ' p.report();p.amount(p.Kind.ONE);p.amount(0)\n'
-        ' for n in range(3): p.failed_parent(n);p.object_failure(n);p.numeric_from_object(n);p.caught_failure(n)\n', encoding='utf-8')
+        ' for n in range(3): p.shallow(n);p.failed_parent(n);p.object_failure(n);p.numeric_from_object(n);p.caught_failure(n)\n', encoding='utf-8')
     captured = []
     original = compilation_plan.build_package_plan
     def capture(units):
@@ -366,8 +367,14 @@ print('loading original package', flush=True)
 from model_cy import mx_model
 print('selecting original policy', flush=True)
 p = mx_model.Projection[0]
+assert p.shallow(2) == 1.0
+assert p._mx_test_owner()._scope is None
+completed_before_objects = p._mx_test_owner().kernel.snapshot()
+assert completed_before_objects
 print('entering original category', flush=True)
 assert p.category() is p.Kind.ONE
+assert p._mx_test_owner()._scope is not None
+assert all(entry in p._mx_test_owner().kernel.snapshot() for entry in completed_before_objects)
 print('entering original amount', flush=True)
 assert p.amount(p.Kind.ONE) == p.amount(1) == 3.5
 assert p.report() == {'category': p.Kind.ONE, 'amount': 3.5}
@@ -394,6 +401,7 @@ restored_owner = pickle.loads(pickle.dumps(p._mx_test_owner()))
 assert restored_owner.kernel.call('amount', (1,)) == 3.5
 assert restored_owner.kernel.call('amount', (0,)) == -1.0
 assert restored_owner.kernel.call('report', ()) == p.report()
+assert restored_owner.kernel.call('shallow', (2,)) == 1.0
 restored_resources = pickle.loads(pickle.dumps(mx_model.Projection._mx_test_resources()))
 assert len(restored_resources) == 1
 prepared, positions, data_view = next(iter(restored_resources.values()))

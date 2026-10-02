@@ -34,6 +34,7 @@ class SpaceFrameOwner:
         self._extension, self._manifest = _metadata(module)
         self.kernel = self._extension.Kernel((inputs,))
         self._scope = None
+        self._checked_bindings = None
         if self._manifest and self._manifest.get('python_cells'):
             self.kernel.select_native_scope(0)
         else:
@@ -46,15 +47,13 @@ class SpaceFrameOwner:
             from .python_calculator import PythonScope
         else:
             from ._mx_frame_support.python_calculator import PythonScope
+        bindings = self._checked_bindings if bindings is None else bindings
         scope = PythonScope(None, self._manifest, self.kernel, bindings,
                             program=_binding_program(self.module))
         self.kernel.set_python_scope(scope)
-        if self._manifest.get('public_entry_abi'):
-            # First attachment, before any formula is executed. A prepared
-            # record needs physical decoding, not bind_original_inputs.
-            self.kernel.select_scope(0)
-        else:
-            self.kernel.attach_python_scope_current()
+        # Existing checked attachment decodes the current record without
+        # advancing cache state. Earlier native results remain authoritative.
+        self.kernel.attach_python_scope_current()
         self._scope = scope
 
     def entry_capsule(self, cell):
@@ -82,7 +81,7 @@ class SpaceFrameOwner:
 
     def __reduce__(self):
         if self._manifest.get('public_entry_abi'):
-            bindings = self._scope.bindings if self._scope is not None else None
+            bindings = self._scope.bindings if self._scope is not None else self._checked_bindings
             return _restore_prepared, (self.module, self.inputs, bindings, self.kernel.snapshot())
         return _restore, (self.module, self.inputs, self.kernel.snapshot())
 
@@ -142,15 +141,18 @@ def prepared_owner(receiver, module, resources, existing=None):
                 for name in manifest.get('python_references', ())}
     if existing is None:
         owner = SpaceFrameOwner(module, record)
-        owner.prepare_checked((bindings,))
+        owner._checked_bindings = (bindings,)
     else:
         if existing.module != module:
             raise ValueError('Collection owner has a different generated layout')
         owner = existing
         if owner._scope is not None:
             owner._scope.bindings = (bindings,)
+        owner._checked_bindings = (bindings,)
         owner.kernel.replace_records((record,))
-        owner.kernel.select_scope(0)
+        owner.kernel.select_native_scope(0)
+        if owner._scope is not None:
+            owner.kernel.attach_python_scope_current()
         owner._prepared_record = record
     return owner
 

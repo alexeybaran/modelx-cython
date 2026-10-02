@@ -11,6 +11,18 @@ PUBLIC_TYPES = {'double': 'double', 'long long': 'long long', 'bint': 'bint',
                 'object': 'object', 'str': 'str', 'unicode': 'str'}
 
 
+def needs_checked_scope(row, cell):
+    """A complete native closure needs no object namespace preparation.
+
+    Public object/category conversion is still checked even when its formula
+    closure is native. This uses the existing transitive coverage verdict.
+    """
+    return (not row['coverage']['python_free_proven']
+            or row['result']['kind'] in ('enum', 'table_key', 'object')
+            or any(public in ('object', 'str', 'unicode') and param['type']['kind'] != 'object'
+                   for param, (_, public) in zip(row['params'], cell.public_arguments)))
+
+
 def signature(name, cell):
     args = ['object kernel'] + [PUBLIC_TYPES[t] + ' _mx_public_arg_' + str(i)
                                for i, (_, t) in enumerate(cell.public_arguments)]
@@ -53,7 +65,9 @@ def augment(source, manifest, space):
             head += ['    cdef _Command command']
         if row['result']['kind'] in ('enum', 'table_key'):
             head += ['    cdef ' + row['result']['ctype'] + ' _mx_native_result']
-        body = ['    if not owner._frame._scope_valid:',
+        checked = needs_checked_scope(row, cell)
+        valid = 'owner._frame._scope_valid' if checked else 'owner._frame._epoch != 0'
+        body = ['    if not (' + valid + '):',
                 '        raise RuntimeError("Select an evaluation scope first")']
         uses_codec = row['result']['kind'] in ('enum', 'table_key')
         for i, (param, (_, public)) in enumerate(zip(row['params'], cell.public_arguments)):
@@ -94,7 +108,8 @@ def augment(source, manifest, space):
                                public_arguments=dict(cell.public_arguments),
                                physical_return=row['result'],
                                physical_arguments={p['name']: p['type'] for p in row['params']},
-                               codec_at_public_boundary=uses_codec)
+                               codec_at_public_boundary=uses_codec,
+                               checked_scope_required=checked)
     manifest['public_entry_abi'] = inventory
     manifest['public_entry_limits'] = [
         'Category/key arguments use the existing checked physical domain; '

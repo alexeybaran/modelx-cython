@@ -41,9 +41,10 @@ def test_reference_tables_memoryviews_and_checked_scope_bindings(monkeypatch, sy
             self._scope = None
             self.selected = None
             self.kernel = SimpleNamespace(replace_records=self.replace_records,
-                                          select_scope=self.select_scope)
-        def prepare_checked(self, bindings):
-            self._scope = SimpleNamespace(bindings=bindings)
+                                          select_native_scope=self.select_scope,
+                                          attach_python_scope_current=lambda: None)
+        def prepare_checked(self):
+            self._scope = SimpleNamespace(bindings=self._checked_bindings)
         def replace_records(self, records):
             self.record = records[0]
         def select_scope(self, index):
@@ -58,10 +59,12 @@ def test_reference_tables_memoryviews_and_checked_scope_bindings(monkeypatch, sy
     assert np.shares_memory(captured[0]['ages'], array)
     if synthetic_domain:
         assert captured[0]['domain'].index.tolist() == [10,11]
-    binding = owner._scope.bindings[0]
+    assert owner._scope is None  # Numeric work does not prepare object formulas.
+    binding = owner._checked_bindings[0]
     assert binding['point_id'] == 10
     assert binding['data'].points() is points
     assert binding['data'].rates is rates
+    owner.prepare_checked()
     receiver.point_id = 11
     assert space_owner.prepared_owner(receiver, 'kernel.module', resources, owner) is owner
     assert len(captured) == 1
