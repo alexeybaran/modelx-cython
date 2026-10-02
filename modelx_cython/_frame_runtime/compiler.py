@@ -393,6 +393,9 @@ def _cell_entry_lines(name, row, tail, call, native_suffix, diagnostics,
         return receiver + '.' + key
     args = 'state' + (', ' + call if call else '')
     formula = f'_calc_{name}({args})'
+    if row.get('storage') == 'growing_numeric':
+        from .growing_numeric_codegen import cell_entry
+        return cell_entry(name, row, signature, args, formula, diagnostics)
     if row['direct_input'] is not None:
         exception = 'noexcept' if native_suffix else 'except? -1'
         value = field(row['direct_input'])
@@ -545,6 +548,16 @@ def _native_rejection(node, selected, spec, enums, native_suffix):
                         or (node.name in spec.cells and
                             spec.cells[node.name].__globals__.get('round', round) is not round)):
                     raise ContractError('Native round requires the builtin and a literal integer ndigits')
+            if (isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+                    and n.func.id in {'float', 'int', 'bool'}
+                    and any(isinstance(arg, ast.Constant) and isinstance(arg.value, (str, bytes))
+                            for arg in n.args)):
+                raise ContractError('String conversion uses checked object-capable Cython')
+            if (isinstance(n, ast.BinOp) and isinstance(n.op, ast.Pow)
+                    and isinstance(n.left, ast.Constant) and type(n.left.value) is int
+                    and isinstance(n.right, ast.Constant) and type(n.right.value) is int
+                    and n.right.value >= 63 and abs(n.left.value) > 1):
+                raise ContractError('Large integer power uses checked object-capable Cython')
             if isinstance(n, ast.arg) and n.arg.startswith('_mx_'):
                 raise ContractError('The _mx_ prefix is reserved for generated names')
             if isinstance(n, ast.Attribute) and (isinstance(n.ctx, ast.Store) or
@@ -754,9 +767,13 @@ def emit(spec, *, diagnostics=False, python_cells=()):
                 count *= size
         cached = getattr(fn, '__kernel_cached__', True)
         python_key = any(p['type']['kind'] == 'object' for p in params)
+        growing = ((spec.original_cache_kinds or {}).get(name) == 'dictionary'
+                   and name not in object_cells and cached)
         object_storage = name in object_cells
         dictionary = (object_storage and (spec.original_cache_kinds or {}).get(name) == 'dictionary')
-        if object_storage and (python_key or hashed or dictionary):
+        if growing:
+            count, hashed = 0, False
+        elif object_storage and (python_key or hashed or dictionary):
             count = 0  # Python dictionaries grow with actual keys, not guessed bounds.
         elif hashed:
             count = _hash_capacity()
@@ -773,6 +790,8 @@ def emit(spec, *, diagnostics=False, python_cells=()):
             field=body[0].value.id
             if field in input_info and field not in sig.parameters and input_info[field]['ctype']==ret['ctype']:
                 direct=field
+        if growing:
+            row['storage'] = 'growing_numeric'
         row['direct_input'] = None if name in python_reasons or spec.original_space_shell else direct
         if mixed:
             row['calculator'] = 'python' if name in python_reasons else 'native'
@@ -803,6 +822,8 @@ def emit(spec, *, diagnostics=False, python_cells=()):
         # Match the original translator's Cython integer-arithmetic directive.
         # The existing frame frontend retains its checked-overflow contract.
         lines[0] = lines[0].replace('overflowcheck=True', 'overflowcheck=False')
+    from .growing_numeric_codegen import support_header
+    lines += support_header(rows)
     from .lookup_codegen import inline_lookup_source
     lines += [inline_lookup_source()]
     power_body = function_ast(power).body

@@ -202,7 +202,8 @@ class CellCodec:
             if type(value) not in (float, int) and (isinstance(value, (bool,)) or not isinstance(value, numbers.Real)):
                 raise TypeError('Python formula must return/pass a real scalar')
             value = float(value)
-            if not math.isfinite(value):
+            if (not math.isfinite(value)
+                    and not self.manifest.get('original_space_shell')):
                 raise ValueError('Non-finite scalar at Python/native boundary')
             return value
         if kind == 'bool':

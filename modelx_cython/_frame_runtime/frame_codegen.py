@@ -57,6 +57,10 @@ def to_c_frame(parts, manifest):
             frame.append(f'    {dtype.replace("[::1]", "")} {name}[{sizes[name]}]')
         else:
             frame.append(f'    {t} {name}')
+    from .growing_numeric_codegen import frame_parts, owner_parts
+    growing_fields, growing_helpers = frame_parts(manifest['cells'])
+    frame.extend(growing_fields)
+    growing_owner, growing_init, growing_reset, growing_free, growing_methods = owner_parts(manifest['cells'])
     functions = []
     for method in parts['methods']:
         if any(line.startswith('cdef inline ') and '(_Frame* state' in line
@@ -76,8 +80,15 @@ def to_c_frame(parts, manifest):
         owner_decls.append('    cdef void* _cache_storage')
     for name, dtype in objects.items():
         owner_decls.append(f'    cdef {dtype} {name}')
+    owner_decls.extend(growing_owner)
     frame_pointer = 'self._frame' if heap_numeric else '&self._frame'
     runtime = lower_calls('\n'.join(outer), frame_pointer)
+    if growing_reset:
+        runtime = runtime.replace('    cdef void _advance(self) except *:\n',
+                                  '    cdef void _advance(self) except *:\n' +
+                                  '\n'.join(growing_reset) + '\n', 1)
+        runtime += '\n' + '\n'.join(growing_methods) + '\n'
+
     for name in {**numeric, **buffers}:
         runtime = re.sub(r'\bself\.' + re.escape(name) + r'\b', lambda _: 'self._frame.' + name, runtime)
     # Synchronize the raw pointer immediately after an owning buffer/object binding.
@@ -114,6 +125,7 @@ def to_c_frame(parts, manifest):
         if manifest.get('python_cells'):
             from .mixed_codegen import augment_frame
             frame, lowered = augment_frame(frame, lowered, manifest, heap_numeric=heap_numeric)
+        frame.extend(growing_helpers)
         owner_init = []
         owner_dealloc = None
         if heap_numeric:
@@ -133,7 +145,12 @@ def to_c_frame(parts, manifest):
                 owner_init.append(f'        self._frame._busy_owner = <unsigned int*>(<char*>self._cache_storage + sizeof(_Frame) + {slots} * sizeof(double))')
             owner_dealloc = ('        if self._frame != NULL:',
                              '            mx_guard_clear(&self._frame._guard)',
+                             *('            ' + line for line in growing_free),
                              '            free(self._cache_storage)')
+        elif growing_free:
+            owner_dealloc = ('        mx_guard_clear(&self._frame._guard)',
+                             *('        ' + line for line in growing_free))
+        owner_init.extend(growing_init)
         manifest['native_error_abi'] = 'checked_cython_miss_with_cpp_guard'
         runtime_source = guard_runtime(manifest, prefix, length, tables,
                                        owner_init=owner_init,
@@ -151,4 +168,5 @@ def to_c_frame(parts, manifest):
                                                     'self._frame._epoch >= 252')
             manifest['seen_tag_width'] = 'uint8_with_clear_before_wrap'
         return head + '\n' + '\n'.join(frame + aliases) + '\n\n' + '\n\n'.join(lowered) + '\n\n' + runtime_source + '\n'
+    frame.extend(growing_helpers)
     return head + '\n' + '\n'.join(frame) + '\n\n' + '\n\n'.join(lowered) + '\n\n' + marker + '\n'.join(owner_decls + result) + '\n'

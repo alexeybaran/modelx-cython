@@ -328,3 +328,67 @@ def dense_compute(name,hint,names,kinds,manifest,compiled):
              '            complete = True','            return value', '        finally:',
              '            if not complete: stamp[0] = 0', '']
     return body
+
+
+def completed_cache_methods(rows):
+    """Serialize logical completed entries without evaluating any formula.
+
+    Existing dense/sparse lookup, epoch reset and key conventions are unchanged.
+    Restoring into the same physical store keeps one authoritative cache.
+    """
+    methods = []
+    for name, row in rows.items():
+        if row.get('storage') not in {'typed_scalar', 'typed_epoch_slabs', 'typed_python_dict'}:
+            continue
+        params = row['params']; count = len(params)
+        hint = row['typed_signature']
+        kinds = [hint['parameters'][p['name']] for p in params]
+        first = bool(kinds) and kinds[0] == 'int'
+        member = 'real' if hint['return'] == 'float' else 'integer'
+        methods += [f'    def _typed_snapshot_{name}(self):',
+                    '        cdef _MemoSlab slab', '        cdef Py_ssize_t i',
+                    '        result = {}',
+                    f'        for key, value in self._typed_sparse_{name}.items():',
+                    '            if value is not _DICT_BUSY: result[key] = value']
+        if not count:
+            methods += [f'        if self._typed_stamp_{name} == self._typed_epoch + 1:',
+                        f'            result[()] = self._typed_value_{name}']
+        elif first:
+            if count == 1:
+                methods += [f'        slab = self._typed_slab_{name}',
+                            '        for i in range(slab.size):',
+                            '            if slab.stamps[i] == self._typed_epoch + 1:',
+                            f'                result[i-1] = slab.values[i].{member}']
+            else:
+                axis = 'axis' if count == 2 else 'axis[' + str(0) + ']'
+                tails = ['axis'] if count == 2 else ['axis['+str(j)+']' for j in range(count-1)]
+                key = '(' + ', '.join(['i-1', *tails]) + ')'
+                methods += [f'        for axis, raw_slab in self._typed_axes_{name}.items():',
+                            '            slab = raw_slab', '            for i in range(slab.size):',
+                            '                if slab.stamps[i] == self._typed_epoch + 1:',
+                            f'                    result[{key}] = slab.values[i].{member}']
+        methods += ['        return result', f'    def _typed_restore_{name}(self, dict entries):',
+                    '        cdef _MemoSlab slab', '        cdef Py_ssize_t i',
+                    '        for key, value in entries.items():']
+        if not count:
+            methods += ['            if key != (): raise ValueError("Invalid scalar memo key")',
+                        f'            self._typed_value_{name} = value',
+                        f'            self._typed_stamp_{name} = self._typed_epoch + 1']
+        elif first:
+            primitive = ' and '.join(f'(key[{j}] is None or type(key[{j}]) is str)'
+                                    for j in range(1, count) if kinds[j] in ('object', 'str')) or 'True'
+            index = 'key' if count == 1 else 'key[0]'
+            if count == 1:
+                methods += [f'            slab = self._typed_slab_{name}']
+            else:
+                args = ', '.join('key['+str(j)+']' for j in range(1,count))
+                methods += ['            slab = None', f'            if {primitive}:',
+                            f'                slab = <object>self._typed_axis_{name}({args})']
+            methods += [f'            i = {index} + 1',
+                        '            if slab is not None and 0 <= i < slab.size:',
+                        f'                slab.values[i].{member} = value',
+                        '                slab.stamps[i] = self._typed_epoch + 1', '            else:',
+                        f'                self._typed_sparse_{name}[key] = value']
+        else:
+            methods += [f'            self._typed_sparse_{name}[key] = value']
+    return methods

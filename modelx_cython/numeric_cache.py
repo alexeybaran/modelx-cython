@@ -6,7 +6,7 @@ import textwrap
 TYPES = {'_mx_cy.longlong': 'long long', '_mx_cy.double': 'double', '_mx_cy.bint': 'bint'}
 
 
-def support(tag, types, result):
+def support(tag, types, result, *, native=False):
     args = ', '.join(f'{tp} k{i}' for i, tp in enumerate(types))
     names = ', '.join(f'k{i}' for i in range(len(types)))
     fields = '\n'.join(f'    {tp} k{i}' for i, tp in enumerate(types))
@@ -20,7 +20,7 @@ def support(tag, types, result):
     copied = ', '.join(f'c.items[i].k{j}' for j in range(len(types)))
     setkeys = '\n'.join(f'    c.items[pos].k{i} = k{i}' for i in range(len(types)))
     key = 'entry.k0' if len(types) == 1 else '(' + ', '.join(f'entry.k{i}' for i in range(len(types))) + ')'
-    return f"""
+    source = f"""
 cdef struct {tag}_entry:
     bint used
 {fields}
@@ -94,6 +94,22 @@ cdef inline dict {tag}_dictionary({tag}_cache* c):
             result[{key}] = entry.value
     return result
 """
+    if native:
+        # Same exact-key/growth primitive; adapt only its numeric checked ABI.
+        # Object conversion stays GIL-held. Successful numeric work owns no
+        # Python temporaries and may serve the shared frame's nogil entries.
+        source = source.replace(') noexcept:', ') noexcept nogil:')
+        source = source.replace(f'cdef inline void {tag}_grow({tag}_cache* c) except *:',
+                                f'cdef inline int {tag}_grow({tag}_cache* c) except -1 nogil:')
+        source = source.replace(f'cdef inline void {tag}_put({tag}_cache* c, {args}, {result} value) except *:',
+                                f'cdef inline int {tag}_put({tag}_cache* c, {args}, {result} value) except -1 nogil:')
+        source = source.replace('        raise MemoryError()',
+                                '        with gil:\n            raise MemoryError()')
+        source = source.replace('    c.capacity = capacity\n',
+                                '    c.capacity = capacity\n    return 0\n')
+        source = source.replace('        return\n', '        return 0\n')
+        source = source.replace('    c.count += 1\n', '    c.count += 1\n    return 0\n')
+    return source
 
 
 def transform(source, declarations, module, support_path):

@@ -89,8 +89,6 @@ def plan(unit, *, package_plan=None):
                 reason = 'untraced Cell'
             elif cell_plan.public_result not in TYPES:
                 reason = 'unsupported original public result type'
-            elif cell_plan.cached and any(t != 'long long' for p, t in cell_plan.public_arguments):
-                reason = 'non-dense argument domain; retain original growing cache'
             else:
                 reason = _reason(fn, info)
             if not reason and set(info.cells) & BUILTINS:
@@ -294,7 +292,7 @@ def transform(source, declarations, plans, original_methods):
                 receiver = ', self' if p['manifest'].get('python_cells') else ''
                 alias = '_mx_frame_' + cls.name + '_' + fn.name
                 cell = p['emission_plan'].cells[fn.name]
-                c_api = {'object': 'PyObject *', 'long long': 'PY_LONG_LONG',
+                c_api = {'object': 'PyObject *', 'str': 'PyObject *', 'long long': 'PY_LONG_LONG',
                          'double': 'double', 'bint': 'int'}
                 ctypes = ['object', *(t for _, t in cell.public_arguments),
                           *({float: 'double', int: 'long long', bool: 'bint', object: 'object', str: 'object'}[t]
@@ -386,9 +384,19 @@ def add_owner_entries(source, manifest):
         # changing public inputs. Update the held native fields before that edge.
         marker = '    def call(self, str cell, tuple args):\n        cdef _Command command'
         source = source.replace(marker, marker + '\n        self._mx_synchronize_inputs()', 1)
+    from .typed_memo_codegen import completed_cache_methods
+    lines.extend(completed_cache_methods(manifest['cells']))
+    typed = {n: r for n, r in manifest['cells'].items()
+             if r.get('storage') in {'typed_scalar', 'typed_epoch_slabs', 'typed_python_dict'}}
     lines += ['    def snapshot(self):', '        result = []', '        cdef Py_ssize_t i']
     objects = set(manifest.get('object_cells', ()))
-    numeric_rows = {n: r for n, r in manifest['cells'].items() if n not in objects and r['cached']}
+    growing = {n: r for n, r in manifest['cells'].items() if r.get('storage') == 'growing_numeric'}
+    numeric_rows = {n: r for n, r in manifest['cells'].items()
+                    if n not in objects and n not in growing and n not in typed and r['cached']}
+    for name in growing:
+        lines += [f'        result.append((({name!r}, "numeric"), self._numeric_snapshot_{name}()))']
+    for name in typed:
+        lines += [f'        result.append((({name!r}, "typed"), self._typed_snapshot_{name}()))']
     for name, row in numeric_rows.items():
         value = '_floats' if row['result']['kind'] == 'float' else '_ints'
         lines += [f"        for i in range({row['offset']}, {row['offset'] + row['slots']}):",
@@ -396,7 +404,7 @@ def add_owner_entries(source, manifest):
                   f'                result.append((i, self._frame.{value}[i]))']
     for name in sorted(objects):
         row = manifest['cells'][name]
-        if not row['cached']:
+        if not row['cached'] or name in typed:
             continue
         if row['storage'] == 'object_singleton':
             lines += [f'        if self._object_initialized and self._object_singleton_{name} is not _DICT_EMPTY and self._object_singleton_{name} is not _DICT_BUSY:',
@@ -417,13 +425,23 @@ def add_owner_entries(source, manifest):
     if objects:
         lines.append('        cdef _ObjectEntry entry')
     lines.append('        for key, value in entries:')
-    if objects:
+    if objects or growing:
         lines += ['            if isinstance(key, tuple):',
                   '                name, index = key']
         cases = 0
+        for name in growing:
+            lines += [f'                {"if" if cases == 0 else "elif"} name == {name!r}:',
+                      '                    if index != "numeric": raise ValueError("Invalid numeric cache snapshot")',
+                      f'                    self._numeric_restore_{name}(value)']
+            cases += 1
+        for name in typed:
+            lines += [f'                {"if" if cases == 0 else "elif"} name == {name!r}:',
+                      '                    if index != "typed": raise ValueError("Invalid typed cache snapshot")',
+                      f'                    self._typed_restore_{name}(value)']
+            cases += 1
         for name in sorted(objects):
             row = manifest['cells'][name]
-            if not row['cached']:
+            if not row['cached'] or name in typed:
                 continue
             lines += [f'                {"if" if cases == 0 else "elif"} name == {name!r}:']
             cases += 1
