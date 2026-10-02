@@ -173,6 +173,23 @@ def _select_owner(module, record, bindings, existing):
     return owner
 
 
+def prepared_collection(receiver, module, resources, coordinates, output):
+    """Traverse a closed prepared graph through its authoritative declaration.
+
+    Only namespace-free declarations are admitted by generation. A dynamic
+    Space formula, unresolved receiver dependency or override keeps the ordinary
+    transient-Space traversal. Preparation and record selection stay in the
+    measured collection call; direct Spaces keep independent owners.
+    """
+    owner = prepared_owner(receiver, module, resources)
+    prepared, positions, _ = resources[module]
+    parameters = {name:getattr(receiver,name)
+                  for name in owner._manifest['model']['parameter_defaults']}
+    records = tuple(prepared.record(positions[label],parameters=parameters)
+                    for label in coordinates)
+    return owner.kernel.collect_scalar_records(records,output)
+
+
 def _restore(module, inputs, entries):
     owner = SpaceFrameOwner(module, inputs)
     if owner._manifest.get('python_cells'):

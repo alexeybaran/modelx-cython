@@ -52,6 +52,36 @@ def augment(source, manifest, space):
         self._records = (record,)
         self._select_native_policy(0)
 '''
+    declaration = manifest['cells'].get('collect_outputs')
+    if (declaration and declaration.get('checked_namespace_required') is False
+            and declaration.get('storage') == 'object_singleton'):
+        # Call the authoritative compiled declaration. Numeric dependencies
+        # retain their checked object/native bridges and cache entries.
+        source += '''
+    def collect_scalar_records(self, tuple records, str output):
+        cdef Py_ssize_t position
+        cdef double value, total = 0.0
+        self._require_idle()
+        if not records:
+            raise ValueError("Collection needs a nonempty policy domain")
+        self._records = records
+        try:
+            for position in range(len(records)):
+                self._select_native_policy(position)
+                self._initialize_object_cache()
+                self._frame._entry_depth += 1
+                try:
+                    value = self._object_cell_collect_outputs()['sum'][output]
+                finally:
+                    self._frame._entry_depth -= 1
+                if position == 0:
+                    total = value
+                else:
+                    total += value
+            return total
+        finally:
+            self._reset_item_cache()
+'''
     numeric = [n for n in manifest['cells'] if n not in manifest.get('object_cells', ())]
     exports = []
     inventory = {}

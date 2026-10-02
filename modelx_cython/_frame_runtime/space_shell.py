@@ -507,6 +507,30 @@ self._mx_frame_expired = False
 self._mx_frame_rebind = True
 if _mx_frame_scratch is not None:
     self._mx_frame_owner = _mx_frame_scratch'''
+            plan = plans[cls.name]
+            declaration = plan['manifest']['cells'].get('collect_outputs', {})
+            if (declaration.get('checked_namespace_required') is False
+                    and declaration.get('storage') == 'object_singleton'
+                    and not plan['manifest']['public_space_binding'].get('receiver_rows')):
+                # The scalar traversal already validates exact type, domain
+                # and declaration shape. Preserve ordinary binding of the first
+                # transient receiver; a real Space formula disables this hook.
+                module = plan['kernel_module']
+                owner_module = plan.get('owner_module', module.split('.')[0]+'._mx_frame_owner')
+                hook = ast.parse(f'''def _mx_collect_scalar(self, coordinates, arguments, output):
+    from {owner_module} import prepared_collection
+    root = {cls.name}(self)
+    root._mx_copy_refs(self, self)
+    self._mx_assign_params(root, coordinates[0], *arguments)
+    root._mx_roots.append(root)
+    if self._mx_prepared_resources is None:
+        self._mx_prepared_resources = {{}}
+    try:
+        return prepared_collection(root, {module!r}, self._mx_prepared_resources, coordinates, output)
+    finally:
+        root._mx_frame_expired = True
+''').body[0]
+                cls.body.append(hook)
         for name, code in snippets.items():
             if name not in methods:
                 fn = ast.parse(f'def {name}(self, context, template):\n    pass').body[0]

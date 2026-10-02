@@ -61,6 +61,20 @@ def test_frame_sum_reads_authoritative_output_entry_without_second_cache(tmp_pat
     assert '_has_collect_outputs =' not in output
 
 
+def test_closed_prepared_sum_uses_batch_hook_but_keeps_effectful_space_formula(tmp_path):
+    source = SOURCE.replace('    def depth(self)',
+        '    def collect_outputs(self) -> object:\n'
+        '        return self._mx_frame_owner.call("collect_outputs", ())\n'
+        '    def _mx_collect_scalar(self, coordinates, arguments, output):\n'
+        '        return 1.0\n'
+        '    def depth(self)')
+    output,_ = transform(source,DECLARATIONS,tmp_path/'batch.json')
+    assert 'self._mx_collect_scalar(_mx_coords, _mx_extra_args,' in output
+    assert 'getattr(self, \'_mx_apply_formula\', None) is None' in output
+    assert 'for _mx_coordinate in _mx_coords:' in output
+    assert '_v_collect_outputs =' not in output
+
+
 def test_range_domain_uses_native_numeric_traversal(tmp_path):
     source = SOURCE.replace('self.policy_ids', 'range(3)').replace(
         'def _f_collect_outputs(self) -> object:\n',

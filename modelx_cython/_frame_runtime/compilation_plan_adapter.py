@@ -252,9 +252,14 @@ def from_compilation_plan(package_plan, exported, destination, *, projection, **
         records = options['policy_records']
         model.spaces[tuple(projection.split('.'))].refs.update(
             {name: records.iloc[0][column] for name, column in declared_rows.items()})
+    instance = exported
+    for part in projection.split('.'):
+        instance = getattr(instance, part)
+    # Resource-name discovery must inspect the same receiver-resolved bodies
+    # that emission consumes. Filtering the old descriptions left ``self``
+    # qualification on row-bound bodies and hid their scalar/library references.
     model.spaces[tuple(projection.split('.'))].cells = {
-        name: cell for name, cell in model.spaces[tuple(projection.split('.'))].cells.items()
-        if name in retained}
+        name: _ResolvedCell(cell, instance) for name, cell in retained.items()}
     context_space = replace(space, cells=MappingProxyType(retained))
     spec = from_modelx(model, destination, projection=projection,
                       emission_space=context_space, **options)

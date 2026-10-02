@@ -151,6 +151,52 @@ def test_source_metadata_preserves_literal_defaults():
     assert bound.arguments == {'t': 2}
 
 
+def test_closed_scalar_records_share_compiled_declaration_and_reset_on_failure(tmp_path,monkeypatch):
+    import modelx as mx
+    from dataclasses import replace
+    from modelx_cython import cli,compilation_plan
+    from modelx_cython._frame_runtime import lookup
+    from modelx_cython._frame_runtime.compiler import build
+    from modelx_cython._frame_runtime.compilation_plan_adapter import from_compilation_plan
+    from modelx_cython._frame_runtime.prepared_space_inputs import PreparedSpaceInputs
+    import importlib
+    model=mx.new_model('ScalarRecords')
+    data=model.new_space('Data')
+    data.points_data=pd.DataFrame({'value':[1.5,-1.0]},index=pd.Index([0,1],name='policy_id'))
+    data.new_cells('points','def points():\n return points_data\n')
+    p=model.new_space('Projection',formula='def Projection(policy_id):\n return {"refs":{}}\n')
+    p.data=data;p.lookup=lookup
+    p.new_cells('amount','def amount():\n return lookup.field(data.points(),policy_id,"value")\n')
+    p.new_cells('collect_outputs','def collect_outputs():\n return {"sum":{"total":amount()}}\n')
+    model.export(tmp_path/'model');model.close()
+    (tmp_path/'sample.py').write_text('from model import mx_model\nfor i in (0,1): mx_model.Projection[i].collect_outputs()\n')
+    captured=[];original=compilation_plan.build_package_plan
+    def capture(units):
+        result=original(units);captured.append(result);return result
+    monkeypatch.setattr(compilation_plan,'build_package_plan',capture)
+    monkeypatch.setenv('MX_CY_ORIGINAL_FRAME_SHELL','0')
+    cli.main_handler(argparse.Namespace(model_path=str(tmp_path/'model'),sample=str(tmp_path/'sample.py'),
+        no_spec=True,spec=None,setup=None,frame_collect=False,compile_only=False,translate_only=True),io.StringIO(),io.StringIO())
+    plan=captured[0];space=plan.spaces['model_cy.Projection']
+    spec=from_compilation_plan(plan,sys.modules['model'].mx_model,tmp_path/'source',
+        projection='Projection',point_table='points',cython_objects=True,steps=8)
+    spec=replace(spec,public_emission_plan=space)
+    build(spec,tmp_path/'artifact')
+    manifest=json.loads((tmp_path/'artifact/manifest.json').read_text())
+    assert manifest['cells']['collect_outputs']['checked_namespace_required'] is False
+    monkeypatch.syspath_prepend(str(tmp_path/'artifact'))
+    lookups=importlib.import_module(manifest['package']+'._lookups')
+    extension=importlib.import_module(manifest['package']+'._kernel')
+    prepared=PreparedSpaceInputs(manifest,lookups,spec.initial_tables)
+    records=tuple(prepared.record(i) for i in (0,1))
+    owner=extension.Kernel(records)
+    assert owner.collect_scalar_records(records,'total')==0.5
+    assert owner.collect_scalar_records(records,'total')==0.5
+    with pytest.raises(KeyError):owner.collect_scalar_records(records,'missing')
+    assert owner.collect_scalar_records(records,'total')==0.5
+    with pytest.raises(ValueError,match='nonempty'):owner.collect_scalar_records((),'total')
+
+
 @pytest.mark.parametrize('source', ['self.policies()', 'tuple(self.policies())'])
 def test_resolved_export_domain_retains_order_and_repeated_selection(source):
     from types import SimpleNamespace

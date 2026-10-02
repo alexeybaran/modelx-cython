@@ -377,6 +377,12 @@ return _mx_sys.CollectResult({'sum': _mx_sys.CollectResult({%r: _mx_total})})
             native = native.replace(
                 '        _mx_root._v_collect_outputs = {\'sum\': {' + repr(output_name) + ': _mx_value}}\n'
                 '        _mx_root._has_collect_outputs = True\n', '')
+            if _method(cls, '_mx_collect_scalar') is not None:
+                native = native.replace('_mx_scratch = {}\n',
+                    'if getattr(self, "_mx_apply_formula", None) is None:\n'
+                    '    _mx_total = self._mx_collect_scalar(_mx_coords, _mx_extra_args, '+repr(output_name)+')\n'
+                    '    return _mx_sys.CollectResult({"sum": _mx_sys.CollectResult({'+repr(output_name)+': _mx_total})})\n'
+                    '_mx_scratch = {}\n', 1)
         old_collect.body = ast.parse(native).body
         cls.body.remove(value_method)
         cls.body.insert(cls.body.index(old_collect), value_method)
