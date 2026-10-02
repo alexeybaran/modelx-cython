@@ -24,6 +24,7 @@ class PreparedSpaceInputs(NativeInputCodec):
         self.manifest = manifest
         self._lookups = lookups
         self._record_layout()
+
         self.replace(tables, references=references)
 
     def _record_layout(self):
@@ -79,3 +80,42 @@ class PreparedSpaceInputs(NativeInputCodec):
         self.manifest, module, self._records, self._packed = state
         self._lookups = import_module(module)
         self._record_layout()
+
+
+class PreparedReceiverInputs(NativeInputCodec):
+    """Resolved row resources supplied by the original dynamic Space formula.
+
+    Selection happens after that compiled formula has assigned references.
+    This adapter converts declared representations; it never executes formulas
+    or constructs another policy Space. Held records own their native views.
+    """
+    def __init__(self, manifest, lookups):
+        self.manifest, self._lookups = manifest, lookups
+        self._layout = tuple((name, info, manifest['model']['bindings'][name])
+                             for name, info in manifest['inputs'].items())
+
+    def record(self, receiver):
+        values = []
+        raw = {}
+        for name, info, binding in self._layout:
+            kind = binding['kind']
+            if kind in ('reference', 'parameter'):
+                value = getattr(receiver, binding['name'])
+            elif kind == 'point':
+                value = getattr(receiver, self.manifest['model']['point_parameter'])
+            elif kind in ('row_reference', 'row_reference_numeric'):
+                value = getattr(receiver, binding['column'])
+                if kind == 'row_reference_numeric' and binding['field'] is not None:
+                    value = value[binding['field']]
+            else:
+                raise ContractError('Unsupported original receiver resource: ' + kind)
+            if info['kind'] == 'indexed_array':
+                value = getattr(self._lookups, info['ctype'])(value)
+            elif info['kind'] in ('curve', 'curve_table'):
+                constructor = getattr(self._lookups, info['ctype'])
+                value = constructor(*value.arrays)
+            else:
+                value = self._scalar_value(name, info, value, raw)
+            raw[name] = value
+            values.append(value)
+        return tuple(values)

@@ -189,7 +189,7 @@ def resolved_resource_model(package_plan, exported):
         instance = exported
         for part in path:
             instance = getattr(instance, part)
-        references = {name: getattr(instance, name) for name, _ in space.reference_types
+        references = {name: getattr(instance, name, None) for name, _ in space.reference_types
                       if name not in space.parameters}
         cells = {name: _ResolvedCell(cell, instance) for name, cell in space.cells.items()}
         source = _space_source(space, instance)

@@ -1070,9 +1070,12 @@ def build(spec, destination, *, diagnostics=False, python_cells=(),
         if spec.model is not None:
             target = spec.public_emission_plan.identity.split('.')[0] + '.' + spec.model['data_space']
             references = [n for n, identity in spec.public_emission_plan.reference_targets if identity == target]
-            if len(references) != 1:
+            if not references and spec.model.get('row_references'):
+                manifest['public_space_binding'] = dict(receiver_rows=True)
+            elif len(references) != 1:
                 raise ContractError('Prepared public resources require one resolved Data reference')
-            manifest['public_space_binding'] = dict(data_reference=references[0])
+            else:
+                manifest['public_space_binding'] = dict(data_reference=references[0])
             program = spec.model.get('data_program')
             if program is not None:
                 domain = spec.public_emission_plan.cells[program['domain_name']]

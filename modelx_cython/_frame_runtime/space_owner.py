@@ -95,6 +95,18 @@ def prepared_owner(receiver, module, resources, existing=None):
     """
     extension, manifest = _metadata(module)
     binding = manifest['public_space_binding']
+    receiver_rows = binding.get('receiver_rows', False)
+    if receiver_rows and module not in resources:
+        if __package__.endswith('._frame_runtime'):
+            from .prepared_space_inputs import PreparedReceiverInputs
+        else:
+            from ._mx_frame_support.prepared_space_inputs import PreparedReceiverInputs
+        lookups = import_module(module.rsplit('.', 1)[0] + '._lookups')
+        resources[module] = PreparedReceiverInputs(manifest, lookups)
+    if receiver_rows:
+        record = resources[module].record(receiver)
+        bindings = {name: getattr(receiver, name) for name in manifest.get('python_references', ())}
+        return _select_owner(module, record, bindings, existing)
     if module not in resources:
         if __package__.endswith('._frame_runtime'):
             from .prepared_space_inputs import PreparedSpaceInputs
@@ -139,6 +151,11 @@ def prepared_owner(receiver, module, resources, existing=None):
     record = prepared.record(positions[label], parameters=parameters)
     bindings = {name: (data_view if name == 'data' else getattr(receiver, name))
                 for name in manifest.get('python_references', ())}
+    return _select_owner(module, record, bindings, existing)
+
+
+def _select_owner(module, record, bindings, existing):
+    """One ownership/selection path for table and dynamic-reference resources."""
     if existing is None:
         owner = SpaceFrameOwner(module, record)
         owner._checked_bindings = (bindings,)

@@ -7,6 +7,7 @@ import pytest
 from modelx_cython._frame_runtime.contracts import ContractError
 from modelx_cython._frame_runtime.lookups import Curve
 from modelx_cython._frame_runtime.prepared_space_inputs import PreparedSpaceInputs
+from modelx_cython._frame_runtime.prepared_space_inputs import PreparedReceiverInputs
 
 
 def manifest():
@@ -43,6 +44,33 @@ def test_original_owners_share_resources_but_keep_independent_records():
     assert first[1] is second[1]
     assert first[3] == 2 and second[3] == 3
     assert inputs.record(0)[3] == -1
+
+
+def test_dynamic_receiver_rows_keep_owned_views_and_check_scalar_domains():
+    import numpy as np
+    class View:
+        def __init__(self, values): self.values = values
+    manifest = {'inputs':{'policy':{'kind':'int'},'amount':{'kind':'float'},
+        'path':{'kind':'indexed_array','ctype':'IndexedFloat1'},
+        'objects':{'kind':'object','python_type':'dict'}},
+        'model':{'point_parameter':'policy_id','bindings':{
+            'policy':{'kind':'point'},
+            'amount':{'kind':'row_reference_numeric','column':'point','field':'amount'},
+            'path':{'kind':'row_reference_numeric','column':'paths','field':'rate'},
+            'objects':{'kind':'row_reference','column':'point'}}}}
+    source = np.array([.01,.02])
+    receiver = SimpleNamespace(policy_id=7,point={'amount':1.5},paths={'rate':source})
+    resources = PreparedReceiverInputs(manifest,SimpleNamespace(IndexedFloat1=View))
+    first = resources.record(receiver)
+    assert first[0:2] == (7,1.5)
+    assert first[2].values is source and first[3] is receiver.point
+    receiver.point={'amount':-1.0}
+    second = resources.record(receiver)
+    assert second[1] == -1.0 and first[1] == 1.5
+    receiver.point={'amount':float('nan')}
+    with pytest.raises(ContractError,match='finite real'):
+        resources.record(receiver)
+    assert first[2].values is source
 
 
 def test_replacement_is_atomic_and_does_not_change_existing_owner_record():
