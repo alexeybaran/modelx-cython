@@ -280,6 +280,9 @@ def augment(source, manifest, spec, forced_python=()):
         methods.append(f"    cdef inline {CTYPES[hint['return']]} _native_cell_{name}(self"
                        + (', ' + typed if typed else '') + ') except? -1:')
         if spec.original_space_shell:
+            from .completed_cache_codegen import completed_dense_hit
+            methods.extend(completed_dense_hit(rows[name], manifest, owner='self',
+                           arguments=[p['name'] for p in params], indent=8))
             methods.append('        self._mx_synchronize_inputs()')
         if manifest.get('native_error_abi', '').endswith('guard') or manifest.get('native_error_abi') == 'reentrant_guard_with_checked_python_miss':
             # The native Cell ABI can throw MxAbort. A direct call from a GIL

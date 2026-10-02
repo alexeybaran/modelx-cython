@@ -584,6 +584,9 @@ def add_owner_entries(source, manifest):
         entry = [signature + ':', '    cdef Kernel owner = kernel',
                  '    cdef _Command command']
         checked = bool(manifest.get('python_cells')) and not row['coverage']['python_free_proven']
+        from .completed_cache_codegen import completed_dense_hit
+        entry.extend(completed_dense_hit(row, manifest, owner='owner',
+                     arguments=['_mx_arg_' + str(i) for i in range(len(row['params']))], indent=4))
         # Original cached entries return a completed value before preparing
         # uncached work. Keep that behavior at the checked owner boundary:
         # rebinding cannot invalidate a completed Cell, and a later miss still
