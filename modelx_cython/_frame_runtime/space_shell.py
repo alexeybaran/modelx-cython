@@ -86,8 +86,8 @@ def plan(unit, *, package_plan=None):
             cell_plan = shared.cells[name]
             fn = methods.get('_f_' + name)
             reason = None
-            if fn is None or (cell_plan.cached and not cell.has_typeinfo()):
-                reason = 'untraced Cell'
+            if fn is None:
+                reason = 'missing original formula body'
             elif cell_plan.public_result not in TYPES:
                 reason = 'unsupported original public result type'
             else:
