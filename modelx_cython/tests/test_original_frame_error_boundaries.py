@@ -45,6 +45,7 @@ def maybe_fail():
                  ' for i in range(200): value += numeric_parent(n)\n'
                  ' return {"value": value}\n'),
         'level_value': 'def level_value(n):\n return level\n',
+        'span': 'def span(n):\n value = 0.0\n for i in range(n): value += float(i)\n return value\n',
         'change': 'def change(n):\n tracker.callback()\n return {"value": level_value(n)}\n',
         'nested': ('def nested(n):\n token = tracker.Token()\n tracker.callback()\n'
                    ' return {"value": parent(n)}\n'),
@@ -56,7 +57,7 @@ def maybe_fail():
         'from model import mx_model\ns=mx_model.S\ns.leaf(1);s.parent(1)\n'
         's.caught(1);s.child(1);s.numeric_parent(1);s.walk(1)\n'
         'import shell_boundary_tracker as tracker\n'
-        'tracker.callback=lambda: None\ns.change(1);s.level_value(0)\n', encoding='utf-8')
+        'tracker.callback=lambda: None\ns.change(1);s.level_value(0);s.span(3)\n', encoding='utf-8')
     (tmp_path / 'spec.py').write_text(
         repr({'spaces': {'S': {'cells_param_size': {'n': 4}}}}), encoding='utf-8')
     _run(tmp_path, ['-m', 'modelx_cython', str(tmp_path / 'model'),
@@ -69,6 +70,8 @@ def maybe_fail():
     assert 'numeric_parent' in manifest['original_checked_numeric_bridges']
     generated = next((tmp_path / 'model_cy/_mx_frame_S').rglob('_kernel.pyx')).read_text()
     assert 'def _gil_entry_numeric_parent(' not in generated
+    assert next(line for line in generated.splitlines() if not line.startswith('# distutils:')).startswith('# cython:')
+    assert manifest['cells']['span']['coverage']['body_backend'] == 'cython_nogil'
     assert all(not row['coverage']['detached_python'] for row in manifest['cells'].values())
     (tmp_path / 'verify.py').write_text('''
 import gc
@@ -83,6 +86,7 @@ def reject_redundant_numeric_adapter(self, name, arguments):
 PythonScope.calculate = reject_redundant_numeric_adapter
 model = type(mx_model)(); item = model.S
 assert item.caught(2) == {'caught': 'numeric failure'}
+assert item.span(3) == 3.0
 assert item.leaf(1) == -1.0
 tracker.fail = True
 for _ in range(2):

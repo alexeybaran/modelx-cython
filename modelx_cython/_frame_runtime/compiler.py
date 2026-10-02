@@ -1047,10 +1047,6 @@ def build(spec, destination, *, diagnostics=False, python_cells=(),
     if spec.cython_objects:
         from .gil_codegen import augment
         source = augment(source, manifest, spec, python_cells)
-    if spec.cython_objects:
-        lines=source.splitlines()
-        directives=[x for x in lines if x.startswith('# cython:')]
-        source='\n'.join(directives+[x for x in lines if not x.startswith('# cython:')])+'\n'
     if spec.model is not None:
         from .model_codegen import add_model_entries
         source = add_model_entries(source, manifest)
@@ -1062,6 +1058,12 @@ def build(spec, destination, *, diagnostics=False, python_cells=(),
     if spec.original_space_shell:
         from .space_shell import add_owner_entries
         source = add_owner_entries(source, manifest)
+    # Normalize the final module header once, after every generation component.
+    # Cython directives must precede imports to preserve inferred native types.
+    lines = source.splitlines()
+    directives = [line for line in lines if line.startswith('# cython:')]
+    source = '\n'.join(directives + [line for line in lines
+                                    if not line.startswith('# cython:')]) + '\n'
     import Cython
     build_flags = {k: os.environ.get(k, '') for k in ('CC', 'CXX', 'CFLAGS', 'CXXFLAGS', 'LDFLAGS')}
     build_flags.update(cython=Cython.__version__, python=sys.version)
