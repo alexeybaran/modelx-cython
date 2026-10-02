@@ -60,7 +60,7 @@ def test_original_shell_frame_cache_and_subclass_abi(tmp_path):
     assert '.call(' not in shell_source
     assert '_mx_frame__c_S_fib(self._mx_frame_owner.kernel, self, n,' in shell_source
     private_pxd = next((tmp_path / 'model_cy/_mx_frame_S').rglob('_kernel.pxd')).read_text()
-    assert 'cdef double _mx_shell_fib(object kernel, object receiver, long long n,' in private_pxd
+    assert 'cdef double _mx_shell_fib(object kernel, object receiver, long long _mx_arg_0,' in private_pxd
     _run(tmp_path, ['-m', 'modelx_cython', str(tmp_path / 'model'), '--compile-only'], 'build')
     (tmp_path / 'override.pyx').write_text('''
 from model_cy._mx_classes cimport _c_S

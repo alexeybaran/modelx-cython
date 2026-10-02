@@ -379,13 +379,13 @@ def augment(source, manifest, spec, forced_python=()):
         args = ', '.join(p['type']['ctype'] + ' ' + p['name'] for p in row['params'])
         call = ', '.join(p['name'] for p in row['params'])
         result = row['result']['ctype']
-        bridges += [f'cdef {result} _mx_checked_{name}(object scope' + (', ' + args if args else '') + ') except? -1:',
-                    '    cdef Kernel owner = scope.kernel',
-                    f'    cdef {result} value']
+        bridges += [f'cdef {result} _mx_checked_{name}(object _mx_scope' + (', ' + args if args else '') + ') except? -1:',
+                    '    cdef Kernel _mx_owner = _mx_scope.kernel',
+                    f'    cdef {result} _mx_value']
         if manifest['diagnostics']:
-            bridges.append(f'    scope.calls[{name!r}] += 1')
-        bridges += [f'    value = owner._gil_formula_{name}({call})',
-                    '    owner._mx_synchronize_inputs()', '    return value', '']
+            bridges.append(f'    _mx_scope.calls[{name!r}] += 1')
+        bridges += [f'    _mx_value = _mx_owner._gil_formula_{name}({call})',
+                    '    _mx_owner._mx_synchronize_inputs()', '    return _mx_value', '']
     marker = '@cython.final\ncdef class Kernel:\n' if '@cython.final\ncdef class Kernel:\n' in source else 'cdef class Kernel:\n'
     if source.count(marker) != 1: raise ContractError('Expected one cache owner declaration')
     source = source.replace(marker, '\n'.join(bridges) + '\n' + marker, 1)

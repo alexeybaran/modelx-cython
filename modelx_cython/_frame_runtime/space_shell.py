@@ -582,7 +582,7 @@ def add_owner_entries(source, manifest):
                 else:
                     entry.append(f'    owner._frame.{input_name} = _mx_input_{input_name}')
         if name in objects:
-            args = ', '.join(p['name'] for p in row['params'])
+            args = ', '.join('_mx_arg_' + str(i) for i, _ in enumerate(row['params']))
             entry += ['    owner._frame._entry_depth += 1', '    try:',
                       f'        return owner._object_cell_{name}({args})',
                       '    finally:', '        owner._frame._entry_depth -= 1']
@@ -594,7 +594,7 @@ def add_owner_entries(source, manifest):
         entry += ['    command.mode = 0', f'    command.identity = {numeric_names.index(name)}']
         for index, param in enumerate(row['params']):
             field = 'f' if param['type']['kind'] == 'float' else 'i'
-            entry.append(f'    command.args[{index}].{field} = {param["name"]}')
+            entry.append(f'    command.args[{index}].{field} = _mx_arg_{index}')
         result = 'f' if row['result']['kind'] == 'float' else 'i'
         entry += ['    owner._invoke(&command)', f'    return command.value.{result}']
         if checked:
@@ -610,7 +610,8 @@ def _owner_signature(name, row, manifest):
     args = ['object kernel']
     if manifest.get('python_cells'):
         args.append('object receiver')
-    args += [p['type']['ctype'] + ' ' + p['name'] for p in row['params']]
+    args += [p['type']['ctype'] + ' _mx_arg_' + str(i)
+             for i, p in enumerate(row['params'])]
     args += [info['ctype'] + ' _mx_input_' + n for n, info in manifest['inputs'].items()]
     exception = '' if row['result']['ctype'] == 'object' else ' except? -1'
     return (f'cdef {row["result"]["ctype"]} _mx_shell_{name}('
