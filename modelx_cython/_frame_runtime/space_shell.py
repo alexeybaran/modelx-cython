@@ -52,6 +52,15 @@ def _reason(fn, info):
     # closures and global state mutation still need a separate receiver bridge.
     forbidden = (ast.Lambda, ast.Yield, ast.YieldFrom, ast.GeneratorExp,
                  ast.Global, ast.Nonlocal)
+    direct_calls = {id(n.func): n for n in ast.walk(fn) if isinstance(n, ast.Call)}
+    for node in ast.walk(fn):
+        if (isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name)
+                and node.value.id == 'self' and node.attr in info.cells):
+            call = direct_calls.get(id(node))
+            if call is None:
+                return 'first-class Cell reference requires the original checked wrapper'
+            if any(isinstance(a, ast.Starred) for a in call.args) or any(k.arg is None for k in call.keywords):
+                return 'expanded Cell arguments require the original checked wrapper'
     for node in ast.walk(fn):
         if isinstance(node, ast.Name) and (node.id == 'state' or node.id.startswith('_mx_')):
             return 'name overlaps the current native receiver namespace'

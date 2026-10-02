@@ -32,9 +32,12 @@ def cython_fallback_reasons(fn, cell_names, *, forced=False):
                 and parent.func.id not in fn.__globals__):
             reasons.append('deferred_or_unrecognized_generator');break
     calls={id(n.func) for n in ast.walk(node) if isinstance(n,ast.Call)}
-    if any(isinstance(n,ast.Name) and n.id in cell_names and id(n) not in calls for n in ast.walk(node)):
+    # Local variables may share names with unrelated Cells. Python's lexical
+    # binding information distinguishes them without evaluating formulas.
+    global_cells = set(cell_names) - set(fn.__code__.co_varnames) - set(fn.__code__.co_cellvars)
+    if any(isinstance(n,ast.Name) and n.id in global_cells and id(n) not in calls for n in ast.walk(node)):
         reasons.append('cell_as_value')
-    if any(isinstance(n,ast.Call) and isinstance(n.func,ast.Name) and n.func.id in cell_names
+    if any(isinstance(n,ast.Call) and isinstance(n.func,ast.Name) and n.func.id in global_cells
            and (any(isinstance(a,ast.Starred) for a in n.args) or any(k.arg is None for k in n.keywords))
            for n in ast.walk(node)):
         reasons.append('expanded_cell_arguments')
