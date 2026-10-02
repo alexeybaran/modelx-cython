@@ -44,7 +44,7 @@ def expr(text):
 
 
 def owner_source(tag, types):
-    generated = support(tag, types, 'PyObject*')
+    generated = 'cimport cython\n' + support(tag, types, 'PyObject*')
     generated = generated[:generated.index(f'cdef inline dict {tag}_dictionary')]
     generated += f'''
 cdef class {tag}_owner:
