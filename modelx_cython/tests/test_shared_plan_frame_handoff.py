@@ -8,6 +8,8 @@ from enum import IntEnum
 import pandas as pd
 import pytest
 
+pytestmark = pytest.mark.filterwarnings('error::pytest.PytestUnraisableExceptionWarning')
+
 
 class _PlanCategory(IntEnum):
     ZERO = 0

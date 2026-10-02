@@ -31,6 +31,7 @@ cdef struct {tag}_cache:
     size_t capacity
     size_t count
 
+@cython.overflowcheck(False)
 cdef inline uint64_t {tag}_hash({args}) noexcept:
     cdef uint64_t h = 1469598103934665603
     cdef _mx_bits bits
@@ -193,7 +194,7 @@ return val
     if not snippets:
         return source, declarations
     for start, end, text in sorted(edits, reverse=True):lines[start:end] = [text]
-    support_path.write_text('from libc.stdint cimport uint64_t\nfrom libc.stdlib cimport calloc, free\ncdef union _mx_bits:\n    double d\n    uint64_t u\n' + '\n'.join(snippets + owners), encoding='utf-8')
+    support_path.write_text('cimport cython\nfrom libc.stdint cimport uint64_t\nfrom libc.stdlib cimport calloc, free\ncdef union _mx_bits:\n    double d\n    uint64_t u\n' + '\n'.join(snippets + owners), encoding='utf-8')
     support_path.with_suffix('.py').write_text('import cython as _mx_cy\nfrom cython.cimports.libc.stdlib import free as _mx_free\n' + '\n'.join(owner_code), encoding='utf-8')
     package = module.fqname.rsplit('.', 1)[0]
     pre = f'from cython.cimports.{package}._mx_numeric_cache import ' + ', '.join(imports) + '\nfrom cython.cimports.libc.stdlib import free as _mx_free\nfrom cython.cimports.libc.math import isfinite as _mx_isfinite\n'
