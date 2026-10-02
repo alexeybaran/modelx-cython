@@ -191,6 +191,10 @@ class RuntimeCellsInfo:     # TODO: Create base class RuntimeBaseMemberInfo
                     if val > types[tp]:
                         types[tp] = val
 
+        # Keep the concrete observations alongside the merged public ABI.
+        # IntEnum plus int deliberately remains public object, but internal
+        # reference binding may still describe the declared category domain.
+        self.observed_arg_types = {arg: tuple(types) for arg, types in arg_type_val.items()}
         for arg, type_val in arg_type_val.items():
 
             if len(type_val) == 1:

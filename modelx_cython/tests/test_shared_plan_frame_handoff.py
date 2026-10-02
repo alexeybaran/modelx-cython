@@ -3,9 +3,15 @@ import argparse
 import io
 import json
 import sys
+from enum import IntEnum
 
 import pandas as pd
 import pytest
+
+
+class _PlanCategory(IntEnum):
+    ZERO = 0
+    ONE = 1
 
 
 def test_shared_plan_drives_helper_object_and_uncached_bodies(tmp_path, monkeypatch):
@@ -119,3 +125,67 @@ def test_resolved_domain_does_not_execute_unsupported_expressions(source):
         raise AssertionError('Domain discovery must not execute expressions')
     with pytest.raises(ContractError):
         _ResolvedDomain(SimpleNamespace(policies=forbidden, other=forbidden), source)
+
+
+def test_prepared_context_preserves_native_categories_behind_object_public_abi(tmp_path, monkeypatch):
+    import modelx as mx
+    from modelx_cython import cli, compilation_plan
+    from modelx_cython._frame_runtime import lookup
+    from modelx_cython._frame_runtime.compiler import build
+    from modelx_cython._frame_runtime.compilation_plan_adapter import cell_bindings, from_compilation_plan
+    from modelx_cython._frame_runtime.model import CompiledModel
+    m = mx.new_model('CategoryHandoff')
+    data = m.new_space('Data')
+    data.points_data = pd.DataFrame({'category': ['ONE', 'ZERO']},
+                                   index=pd.Index([0, 1], name='policy_id'))
+    data.new_cells('points', 'def points():\n return points_data\n')
+    p = m.new_space('Projection', formula='def Projection(policy_id):\n return {"refs": {}}\n')
+    p.data, p.lookup, p.Kind = data, lookup, _PlanCategory
+    p.new_cells('category', 'def category():\n return lookup.category(data.points(), policy_id, "category", Kind)\n')
+    p.new_cells('amount', 'def amount(kind=0):\n return 3.5 if kind == Kind.ONE else -1.0\n')
+    p.new_cells('report', 'def report():\n return {"category": category(), "amount": amount(category())}\n')
+    m.export(tmp_path / 'model')
+    m.close()
+    (tmp_path / 'sample.py').write_text(
+        'from model import mx_model\n'
+        'for i in (0,1):\n p=mx_model.Projection[i]\n'
+        ' p.report();p.amount(p.Kind.ONE);p.amount(0)\n', encoding='utf-8')
+    captured = []
+    original = compilation_plan.build_package_plan
+    def capture(units):
+        result = original(units)
+        captured.append(result)
+        return result
+    monkeypatch.setattr(compilation_plan, 'build_package_plan', capture)
+    monkeypatch.setenv('MX_CY_ORIGINAL_FRAME_SHELL', '0')
+    cli.main_handler(argparse.Namespace(model_path=str(tmp_path/'model'),
+        sample=str(tmp_path/'sample.py'), no_spec=True, spec=None, setup=None,
+        frame_collect=False, compile_only=False, translate_only=True), io.StringIO(), io.StringIO())
+    space = captured[0].spaces['model_cy.Projection']
+    assert space.cells['category'].public_result == 'object'
+    assert dict(space.cells['amount'].public_arguments) == {'kind': 'object'}
+    assert cell_bindings(space.cells['category'])['return'] is _PlanCategory
+    assert cell_bindings(space.cells['amount'])['kind'] is _PlanCategory
+    category = space.cells['category'].original_info
+    category._spec_ret_t = 'object'
+    assert cell_bindings(space.cells['category'])['return'] is object
+    category._spec_ret_t = ''
+    spec = from_compilation_plan(captured[0], sys.modules['model'].mx_model,
+        tmp_path/'source', projection='Projection', point_table='points', steps=8)
+    artifact = tmp_path/'artifact'
+    build(spec, artifact)
+    manifest = json.loads((artifact/'manifest.json').read_text())
+    assert manifest['cells']['category']['result']['kind'] == 'enum'
+    assert manifest['cells']['amount']['params'][0]['type']['kind'] == 'enum'
+    assert manifest['cells']['amount']['calculator'] == 'native'
+    model = CompiledModel(artifact, spec.initial_tables)
+    try:
+        for policy, category in ((0, _PlanCategory.ONE), (1, _PlanCategory.ZERO)):
+            item = model.Projection[policy]
+            assert item.category() is category
+            assert item.amount(_PlanCategory.ONE) == item.amount(1) == 3.5
+            assert item.amount(0) == item.amount(_PlanCategory.ZERO) == -1.0
+            assert item.report() == {'category': category,
+                                     'amount': 3.5 if category is _PlanCategory.ONE else -1.0}
+    finally:
+        model.close()

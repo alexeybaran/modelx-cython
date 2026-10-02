@@ -9,6 +9,7 @@ from enum import IntEnum
 from types import ModuleType
 from types import SimpleNamespace
 import inspect
+import numbers
 
 from modelx_cython.formula_emitter import FormulaEmitter, SourceFormula
 from .contracts import TableKey
@@ -20,20 +21,50 @@ CTYPES = {'double': float, 'long long': int, 'bint': bool, 'str': str,
 
 
 def cell_bindings(cell):
-    """Public types win; native category/key encodings are explicit adapters."""
+    """Keep the public ABI separate from native category/key representations.
+
+    A public object ABI is required for a mix of IntEnum and int observations.
+    It must not erase a concrete category binding within the prepared context.
+    Public wrappers still need explicit checked encoding/decoding; this function
+    does not change public signatures or authorize dropping general object paths.
+    """
     result = CTYPES.get(cell.public_result, object)
     observed = cell.original_info._rt
-    if observed is not None and result is int:
+    explicit_result = getattr(cell.original_info, '_spec_ret_t', '')
+    if observed is not None and result in (int, object) and not explicit_result:
         actual = observed.ret_type.value_type
-        if isinstance(actual, type) and issubclass(actual, IntEnum):
+        if not observed.ret_type.is_array and _native_category(actual) is not None:
             result = actual
     body = FormulaEmitter.native(cell, dict(cell.public_arguments), object)
     if result in (str, int):
         table = _direct_lookup_key_table(ast.unparse(body))
         if table is not None:
             result = TableKey(table)
-    return {'return': result,
-            **{n: CTYPES.get(t, object) for n, t in cell.public_arguments}}
+    arguments = {n: CTYPES.get(t, object) for n, t in cell.public_arguments}
+    if observed is not None:
+        choices = getattr(observed, 'observed_arg_types', {})
+        for name, value in tuple(arguments.items()):
+            if value is not object:
+                continue
+            kinds = choices.get(name, (observed.arg_types.get(name, object),))
+            categories = {t for t in kinds if _native_category(t) is not None}
+            if len(categories) == 1 and all(isinstance(t, type) and
+                    issubclass(t, numbers.Integral) for t in kinds):
+                arguments[name] = next(iter(categories))
+    return {'return': result, **arguments}
+
+
+def _native_category(typ):
+    """Use the existing emitter's category domain contract, not new inference."""
+    if not isinstance(typ, type) or not issubclass(typ, IntEnum):
+        return None
+    from .compiler import type_info
+    from .contracts import ContractError
+    try:
+        type_info(typ)
+    except ContractError:
+        return None
+    return typ
 
 
 def formula_module(space, *, globals_=None, filename='<compiled model>'):
