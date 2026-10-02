@@ -46,6 +46,7 @@ class CellEmissionPlan:
     original_info: object = field(repr=False, compare=False)
     formula_node: ast.FunctionDef = field(repr=False, compare=False)
     physical_bindings: Mapping | None = field(default=None, repr=False, compare=False)
+    receiver_requirements: tuple[str, ...] = ()
 
     def inventory(self):
         from ._frame_runtime.compiler import type_info
@@ -61,7 +62,8 @@ class CellEmissionPlan:
                     dependencies=list(self.dependencies),
                     reference_reads=list(self.reference_reads), locked=self.locked,
                     source_provenance=self.source_provenance,
-                    physical_bindings=physical)
+                    physical_bindings=physical,
+                    receiver_requirements=list(self.receiver_requirements))
 
 
 @dataclass(frozen=True)
@@ -155,6 +157,8 @@ def build_package_plan(units):
                 # trace/spec/helper information. All emission choices consume
                 # this snapshot rather than reconstructing it from public ABI.
                 from ._frame_runtime.compilation_plan_adapter import _resolve_cell_bindings
+                cells[cell_name] = replace(cells[cell_name],
+                    receiver_requirements=_receiver_requirements(fn, names, info.refs))
                 cells[cell_name] = replace(cells[cell_name], physical_bindings=MappingProxyType(
                     _resolve_cell_bindings(cells[cell_name])))
             helper = getattr(info, 'helper_info', None)
@@ -196,6 +200,22 @@ def build_package_plan(units):
                                       declared=bool(target and target.collection)))
     return PackageEmissionPlan(models.pop(), MappingProxyType(spaces),
                                MappingProxyType(classes), tuple(consumers))
+
+
+def _receiver_requirements(node, cells, references):
+    """Record explicit original-receiver operations, not business semantics."""
+    parents = {child: parent for parent in ast.walk(node) for child in ast.iter_child_nodes(parent)}
+    required = set()
+    for part in ast.walk(node):
+        if not isinstance(part, ast.Name) or part.id != 'self' or not isinstance(part.ctx, ast.Load):
+            continue
+        parent = parents.get(part)
+        if isinstance(parent, ast.Attribute) and parent.value is part:
+            if parent.attr.startswith('_') or parent.attr not in cells and parent.attr not in references:
+                required.add('original receiver member: ' + parent.attr)
+        else:
+            required.add('original receiver value')
+    return tuple(sorted(required))
 
 
 def _collection(method):

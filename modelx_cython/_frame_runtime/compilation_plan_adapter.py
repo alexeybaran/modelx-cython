@@ -42,8 +42,8 @@ def _resolve_cell_bindings(cell):
         actual = observed.ret_type.value_type
         if not observed.ret_type.is_array and _native_category(actual) is not None:
             result = actual
-    body = FormulaEmitter.native(cell, dict(cell.public_arguments), object)
-    if result in (str, int):
+    if result in (str, int) and not cell.receiver_requirements:
+        body = FormulaEmitter.native(cell, dict(cell.public_arguments), object)
         table = _direct_lookup_key_table(ast.unparse(body))
         if table is not None:
             result = TableKey(table)
@@ -111,8 +111,16 @@ class _ResolvedCell:
     def __init__(self, cell, instance):
         bindings = cell_bindings(cell)
         arguments = {n: t for n, t in bindings.items() if n != 'return'}
-        self.formula = SimpleNamespace(source=ast.unparse(
-            FormulaEmitter.native(cell, arguments, bindings['return'])) + '\n')
+        if cell.receiver_requirements:
+            # Preserve the public interface for graph metadata without trying
+            # to detach operations that require the original receiver. These
+            # bodies stay on the generated class, never the context module.
+            node = ast.parse(cell.formula_source).body[0]
+            node.name = cell.name
+            node.args.args.pop(0)
+        else:
+            node = FormulaEmitter.native(cell, arguments, bindings['return'])
+        self.formula = SimpleNamespace(source=ast.unparse(node) + '\n')
         self.parameters = tuple(n for n, _ in cell.public_arguments)
         self.is_cached = cell.cached
         # The original generated body, rather than a new boundary validator,
@@ -217,8 +225,25 @@ def resolved_resource_model(package_plan, exported):
 def from_compilation_plan(package_plan, exported, destination, *, projection, **options):
     """Reuse physical resource preparation with original discovery as authority."""
     from dataclasses import replace
+    from types import MappingProxyType
     from .modelx_frontend_native_mode import from_modelx
     space = package_plan.spaces[package_plan.model + '.' + projection]
-    spec = from_modelx(resolved_resource_model(package_plan, exported), destination,
-                      projection=projection, emission_space=space, **options)
-    return replace(spec, cache_domains=cache_domains(space))
+    # Portfolio traversal and other explicit receiver operations stay compiled
+    # on the original public class. They are not free functions in a per-policy
+    # calculation context, nor another model facade to reconstruct here.
+    retained = {name: cell for name, cell in space.cells.items()
+                if not cell.receiver_requirements}
+    excluded = {name: list(cell.receiver_requirements) for name, cell in space.cells.items()
+                if cell.receiver_requirements}
+    if any(set(cell.dependencies) & excluded.keys() for cell in retained.values()):
+        from .contracts import ContractError
+        raise ContractError('Native context needs an original-receiver dependency bridge')
+    model = resolved_resource_model(package_plan, exported)
+    model.spaces[tuple(projection.split('.'))].cells = {
+        name: cell for name, cell in model.spaces[tuple(projection.split('.'))].cells.items()
+        if name in retained}
+    context_space = replace(space, cells=MappingProxyType(retained))
+    spec = from_modelx(model, destination, projection=projection,
+                      emission_space=context_space, **options)
+    spec.model['original_receiver_cells'] = excluded
+    return replace(spec, cache_domains=cache_domains(context_space))

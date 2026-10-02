@@ -71,6 +71,7 @@ def test_plan_preserves_final_types_uncached_defaults_and_capacity(tmp_path):
     s.observed.is_cached = False
     s.new_cells('defaulted', 'def defaulted(i=2):\n return dense(i, 1)\n')
     s.new_cells('unseen', 'def unseen():\n raise RuntimeError("not traced")\n')
+    s.new_cells('receiver_value', 'def receiver_value():\n return _space\n')
     live.export(tmp_path / 'model')
     live.close()
     (tmp_path / 'sample.py').write_text(
@@ -86,6 +87,7 @@ def test_plan_preserves_final_types_uncached_defaults_and_capacity(tmp_path):
     assert cells['dense']['cache_kind'] == 'dictionary'  # explicit object override
     assert cells['observed']['cache_kind'] == 'uncached'
     assert not cells['unseen']['traced'] and cells['unseen']['public_result'] == 'object'
+    assert cells['receiver_value']['receiver_requirements'] == ['original receiver member: _space']
     assert 'i=2' in cells['defaulted']['signature']
     assert cells['defaulted']['dependencies'] == ['dense']
     # Without the return override the *same* original spec determines both axes.

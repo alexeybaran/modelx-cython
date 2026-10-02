@@ -106,6 +106,8 @@ def plan(unit, *, package_plan=None):
                 reason = 'missing original formula body'
             elif cell_plan.public_result not in TYPES:
                 reason = 'unsupported original public result type'
+            elif cell_plan.receiver_requirements:
+                reason = '; '.join(cell_plan.receiver_requirements)
             else:
                 reason = _reason(fn, info)
             if not reason and set(info.cells) & BUILTINS:

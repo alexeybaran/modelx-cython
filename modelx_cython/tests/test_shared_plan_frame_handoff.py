@@ -47,6 +47,7 @@ def test_shared_plan_drives_helper_object_and_uncached_bodies(tmp_path, monkeypa
     p.new_cells('amount', 'def amount():\n return lookup.field(data.points(), policy_id, "value")\n')
     p.new_cells('report', 'def report():\n return {"amount": amount()}\n')
     p.new_cells('uncached', 'def uncached():\n return report()["amount"]\n')
+    p.new_cells('receiver_value', 'def receiver_value():\n return _space\n')
     p.uncached.is_cached = False
     m.export(tmp_path / 'model')
     (tmp_path / 'model' / '_mx_formula_sources.json').unlink()
@@ -71,6 +72,7 @@ def test_shared_plan_drives_helper_object_and_uncached_bodies(tmp_path, monkeypa
     space = captured[0].spaces['model_cy.Projection']
     assert space.cells['amount'].public_result == 'double'
     assert not space.cells['uncached'].cached
+    assert space.cells['receiver_value'].receiver_requirements
     import modelx_cython._frame_runtime.modelx_frontend_exported as retired_discovery
     def forbidden(*args, **kwargs):
         raise AssertionError('Resolved handoff must not rediscover the export')
@@ -79,6 +81,8 @@ def test_shared_plan_drives_helper_object_and_uncached_bodies(tmp_path, monkeypa
         tmp_path/'source', projection='Projection', point_table='points',
         cython_objects=True, steps=8)
     assert all(isinstance(formula, SourceFormula) for formula in spec.cells.values())
+    assert 'receiver_value' not in spec.cells
+    assert 'receiver_value' in spec.model['original_receiver_cells']
     for formula in spec.cells.values():
         with pytest.raises(TypeError, match='metadata'):
             formula()
