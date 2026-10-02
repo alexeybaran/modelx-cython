@@ -151,6 +151,36 @@ def test_source_metadata_preserves_literal_defaults():
     assert bound.arguments == {'t': 2}
 
 
+def test_dynamic_row_resolution_preserves_scalar_reference_discovery(tmp_path,monkeypatch):
+    import modelx as mx
+    from modelx_cython import cli,compilation_plan
+    from modelx_cython._frame_runtime.compilation_plan_adapter import from_compilation_plan
+    from modelx_cython._frame_runtime.compiler import build
+    model=mx.new_model('DynamicReference')
+    p=model.new_space('Projection',formula='def Projection(policy_id):\n return {"refs":{"value":float(policy_id)+1.0}}\n')
+    p.rate=0.5
+    p.new_cells('amount','def amount():\n return value * rate\n')
+    model.export(tmp_path/'model');model.close()
+    (tmp_path/'sample.py').write_text('from model import mx_model\nfor i in (0,1): mx_model.Projection[i].amount()\n')
+    captured=[];original=compilation_plan.build_package_plan
+    def capture(units):
+        plan=original(units);captured.append(plan);return plan
+    monkeypatch.setattr(compilation_plan,'build_package_plan',capture)
+    monkeypatch.setenv('MX_CY_ORIGINAL_FRAME_SHELL','0')
+    cli.main_handler(argparse.Namespace(model_path=str(tmp_path/'model'),sample=str(tmp_path/'sample.py'),
+        no_spec=True,spec=None,setup=None,frame_collect=False,compile_only=False,translate_only=True),io.StringIO(),io.StringIO())
+    assert captured[0].spaces['model_cy.Projection'].cells['amount'].receiver_requirements
+    spec=from_compilation_plan(captured[0],sys.modules['model'].mx_model,tmp_path/'source',
+        projection='Projection',policy_records=pd.DataFrame({'value':[1.0,2.0]},index=pd.Index([0,1],name='policy_id')),
+        row_references={'value':'value'},point_parameter='policy_id',steps=4,cython_objects=True,
+        typed_object_inputs={'value':'float'},native_typed_inputs=True,
+        signatures={'amount':{'return':'float','parameters':{}}})
+    build(spec,tmp_path/'artifact',compile_native=False)
+    manifest=json.loads((tmp_path/'artifact/manifest.json').read_text())
+    assert manifest['model']['reference_defaults']['rate']==0.5
+    assert manifest['cells']['amount']['coverage']['python_free_proven'] is True
+
+
 def test_closed_scalar_records_share_compiled_declaration_and_reset_on_failure(tmp_path,monkeypatch):
     import modelx as mx
     from dataclasses import replace
