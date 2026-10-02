@@ -90,3 +90,32 @@ def test_source_metadata_preserves_literal_defaults():
     bound = inspect.signature(formula).bind()
     bound.apply_defaults()
     assert bound.arguments == {'t': 2}
+
+
+@pytest.mark.parametrize('source', ['self.policies()', 'tuple(self.policies())'])
+def test_resolved_export_domain_retains_order_and_repeated_selection(source):
+    from types import SimpleNamespace
+    from modelx_cython._frame_runtime.compilation_plan_adapter import _ResolvedDomain
+    calls = []
+    values = [4, 1, 4]
+    def policies():
+        calls.append(tuple(values))
+        return iter(values)
+    domain = _ResolvedDomain(SimpleNamespace(policies=policies), source)
+    assert domain.ref_name == 'policies'
+    assert tuple(domain.value(None)) == (4, 1, 4)
+    values[:] = [8, 2]
+    assert tuple(domain.value(None)) == (8, 2)
+    assert calls == [(4, 1, 4), (8, 2)]
+
+
+@pytest.mark.parametrize('source', ['self.policies(1)', 'tuple(self.policies(), self.other)',
+                                  'self.policies() + self.other', 'list(self.policies())'])
+def test_resolved_domain_does_not_execute_unsupported_expressions(source):
+    from types import SimpleNamespace
+    from modelx_cython._frame_runtime.compilation_plan_adapter import _ResolvedDomain
+    from modelx_cython._frame_runtime.contracts import ContractError
+    def forbidden(*args):
+        raise AssertionError('Domain discovery must not execute expressions')
+    with pytest.raises(ContractError):
+        _ResolvedDomain(SimpleNamespace(policies=forbidden, other=forbidden), source)

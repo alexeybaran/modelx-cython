@@ -81,6 +81,14 @@ class _ResolvedCell:
 class _ResolvedDomain:
     def __init__(self, instance, source):
         node = ast.parse(source, mode='eval').body
+        # The standard exporter freezes its policy domain with tuple(...).
+        # Resolve the enclosed declared field/Cell, retaining that snapshot
+        # operation; do not evaluate arbitrary domain expressions here.
+        self._tuple = (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                       and node.func.id == 'tuple' and len(node.args) == 1
+                       and not node.keywords)
+        if self._tuple:
+            node = node.args[0]
         self._call = isinstance(node, ast.Call) and not node.args and not node.keywords
         target = node.func if self._call else node
         if not (isinstance(target, ast.Attribute)
@@ -92,7 +100,8 @@ class _ResolvedDomain:
 
     def value(self, _impl):
         value = getattr(self._instance, self._name)
-        return value() if self._call else value
+        result = value() if self._call else value
+        return tuple(result) if self._tuple else result
 
 
 def _space_source(space, instance):
