@@ -285,10 +285,9 @@ def transform(source, declarations, receipt_path):
         # Frame-backed collect_outputs owns its result in the frame. Keep that
         # authoritative entry instead of publishing a competing class-cache slot.
         output_entry = _method(cls, 'collect_outputs')
-        if output_entry is not None and any(
+        frame_output = output_entry is not None and any(
                 isinstance(node, ast.Attribute) and node.attr == '_mx_frame_owner'
-                for node in ast.walk(output_entry)):
-            contract = None
+                for node in ast.walk(output_entry))
         if contract is None:
             collect, call = traversal
             if not re.search(r'^cdef class ' + re.escape(cls.name) + r'\(', declarations, re.M):
@@ -314,8 +313,9 @@ def transform(source, declarations, receipt_path):
         docstring = (output_formula.body[:1]
                      if isinstance(output_formula.body[0], ast.Expr)
                      and _string(output_formula.body[0].value) is not None else [])
-        output_formula.body = docstring + ast.parse(
-            'return {"sum": {' + repr(output_name) + ': self._mx_collect_value()}}').body
+        if not frame_output:
+            output_formula.body = docstring + ast.parse(
+                'return {"sum": {' + repr(output_name) + ': self._mx_collect_value()}}').body
         value_method = ast.parse('''
 @_mx_cy.cfunc
 @_mx_cy.exceptval(-1, check=True)
@@ -323,7 +323,8 @@ def _mx_collect_value(self) -> _mx_cy.double:
     return 0.0
 ''').body[0]
         value_method.returns = ast.parse(leaf_type, mode='eval').body
-        value_method.body = [ast.Return(expression)]
+        value_method.body = ([ast.Return(expression)] if not frame_output else ast.parse(
+            'return self.collect_outputs()["sum"][' + repr(output_name) + ']').body)
         cls.body.append(value_method)
         old_collect = _method(cls, 'collect')
         old_collect.decorator_list.append(ast.parse(
@@ -369,6 +370,13 @@ for _mx_coordinate in _mx_coords:
 return _mx_sys.CollectResult({'sum': _mx_sys.CollectResult({%r: _mx_total})})
 ''' % (domain_text, ast.unparse(extra_args), cls.name, fallback, fallback, fallback, cls.name,
        output_name, output_name)
+        if frame_output:
+            # The declaration's compiled entry owns its one object result.
+            # Only accumulation is specialized: never publish another class
+            # cache, duplicate the declaration body or bypass its exceptions.
+            native = native.replace(
+                '        _mx_root._v_collect_outputs = {\'sum\': {' + repr(output_name) + ': _mx_value}}\n'
+                '        _mx_root._has_collect_outputs = True\n', '')
         old_collect.body = ast.parse(native).body
         cls.body.remove(value_method)
         cls.body.insert(cls.body.index(old_collect), value_method)
@@ -380,6 +388,7 @@ return _mx_sys.CollectResult({'sum': _mx_sys.CollectResult({%r: _mx_total})})
         declarations = _preserve_collect_cache(cls, old_collect, original_body,
                                                original_decorators, declarations)
         selected.append({'class': cls.name, 'route': 'numeric-sum', 'output': output_name,
+                         'authoritative_output_cache': 'frame' if frame_output else 'class',
                          'type': leaf_type, 'parameter': parameter,
                          'expression': ast.unparse(expression)})
     if not selected:

@@ -46,6 +46,21 @@ def test_numeric_sum_uses_one_typed_expression_and_keeps_fallback(tmp_path):
     assert (tmp_path / 'receipt.json').exists()
 
 
+def test_frame_sum_reads_authoritative_output_entry_without_second_cache(tmp_path):
+    source = SOURCE.replace('    def depth(self)',
+        '    def collect_outputs(self) -> object:\n'
+        '        return self._mx_frame_owner.call("collect_outputs", ())\n'
+        '    def depth(self)')
+    output, _ = transform(source, DECLARATIONS, tmp_path / 'frame.json')
+    tree = ast.parse(output)
+    cls = next(node for node in tree.body if isinstance(node, ast.ClassDef))
+    methods = {node.name: node for node in cls.body if isinstance(node, ast.FunctionDef)}
+    assert ast.unparse(methods['_mx_collect_value'].body[0].value) == "self.collect_outputs()['sum']['fib']"
+    assert 'self.fib(self.depth())' in ast.unparse(methods['_f_collect_outputs'])
+    assert '_v_collect_outputs =' not in output
+    assert '_has_collect_outputs =' not in output
+
+
 def test_range_domain_uses_native_numeric_traversal(tmp_path):
     source = SOURCE.replace('self.policy_ids', 'range(3)').replace(
         'def _f_collect_outputs(self) -> object:\n',
