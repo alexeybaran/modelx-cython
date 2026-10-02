@@ -904,6 +904,7 @@ def emit(spec, *, diagnostics=False, python_cells=()):
     lines += ['        self._advance()']
     frame_runtime_start = len(lines)
     frame_methods = []
+    checked_numeric_bridges = []
     frame_casts = _frame_input_casts(input_info)
     cast_names = ({'__MX_FRAME_CAST_' + key + '__': f'(<{ctype}>state.{key})'
                    for key, ctype in frame_casts.items()})
@@ -924,10 +925,24 @@ def emit(spec, *, diagnostics=False, python_cells=()):
         node = copy.deepcopy(parsed[name])
         loc = ({'_mx_value', '_mx_key', '_mx_object_key', 'self'} if row['cached'] else set()) | {p['name'] for p in params} | {n.id for n in ast.walk(node) if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store)}
         if name in python_reasons:
-            tuple_expr = '(' + call + (',' if params else '') + ')'
-            frame_body = ['    with gil:',
-                          '        return (<object>state._python_scope).calculate('
-                          + repr(name) + ', ' + tuple_expr + ')']
+            from .coverage import cython_fallback_reasons
+            if (spec.original_space_shell and spec.cython_objects
+                    and name not in python_cells
+                    and row['result']['kind'] in ('float', 'int', 'bool')
+                    and not cython_fallback_reasons(cells[name], all_rows)):
+                # The authoritative body is already a checked Cython method.
+                # Do not box arguments/results through PythonScope.calculate.
+                # The owning checked helper finishes Cython cleanup before a
+                # numeric caller may capture the ordinary Python exception.
+                checked_numeric_bridges.append(name)
+                frame_body = ['    with gil:',
+                              '        return _mx_checked_' + name
+                              + '(<object>state._python_scope' + (', ' + call if call else '') + ')']
+            else:
+                tuple_expr = '(' + call + (',' if params else '') + ')'
+                frame_body = ['    with gil:',
+                              '        return (<object>state._python_scope).calculate('
+                              + repr(name) + ', ' + tuple_expr + ')']
         else:
             frame_binder = BindNames(selected, spec.inputs, enums, loc,
                                      native_lookups=True, frame_native=True,
@@ -961,6 +976,8 @@ def emit(spec, *, diagnostics=False, python_cells=()):
                     numeric_power_rewrites=numeric_power_rewrites,
                     limitations=['flat scalar kernel', 'explicit contiguous IntEnums', 'bounded integral cache keys',
                                  'continuous numeric Cell keys use compiler-owned bounded exact hash memo', 'real-valued arithmetic', 'serial independent policies', 'errors abort the evaluation epoch'])
+    if checked_numeric_bridges:
+        manifest['original_checked_numeric_bridges'] = checked_numeric_bridges
     if object_rows:
         manifest.update(object_cells=sorted(object_rows), cell_outputs=spec.cell_outputs,
                         object_cache_slots=sum(r['slots'] for r in object_rows.values()))

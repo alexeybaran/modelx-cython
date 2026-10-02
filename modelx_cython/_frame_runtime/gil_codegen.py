@@ -341,6 +341,28 @@ def augment(source, manifest, spec, forced_python=()):
         methods += ['    def _reset_item_cache(self):',
                     '        self._advance()', '']
     source = source+'\n'+'\n'.join(methods)+'\n'
+    # Numeric frame entries use the same checked formula without a Python
+    # calculator round trip. This is an ownership/cleanup bridge, not another
+    # formula implementation or exception protocol.
+    bridges = []
+    for name in manifest.get('original_checked_numeric_bridges', ()):
+        if name not in numeric_bodies:
+            raise ContractError('Checked numeric bridge has no compiled formula body')
+        row = rows[name]
+        args = ', '.join(p['type']['ctype'] + ' ' + p['name'] for p in row['params'])
+        call = ', '.join(p['name'] for p in row['params'])
+        result = row['result']['ctype']
+        bridges += [f'cdef {result} _mx_checked_{name}(object scope' + (', ' + args if args else '') + ') except? -1:',
+                    '    cdef Kernel owner = scope.kernel',
+                    f'    cdef {result} value']
+        if manifest['diagnostics']:
+            bridges.append(f'    scope.calls[{name!r}] += 1')
+        bridges += [f'    value = owner._gil_formula_{name}({call})',
+                    '    owner._mx_synchronize_inputs()', '    return value', '']
+    marker = '@cython.final\ncdef class Kernel:\n' if '@cython.final\ncdef class Kernel:\n' in source else 'cdef class Kernel:\n'
+    if source.count(marker) != 1: raise ContractError('Expected one cache owner declaration')
+    source = source.replace(marker, '\n'.join(bridges) + '\n' + marker, 1)
+
     # Keep object ownership/exception cleanup on the miss path, just as the
     # numeric memo does. There is still one authoritative owned singleton.
     hot = []

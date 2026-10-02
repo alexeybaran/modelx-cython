@@ -58,11 +58,19 @@ def maybe_fail():
     assert manifest['cells']['parent']['coverage']['body_backend'] == 'cython_nogil'
     assert manifest['cells']['caught']['coverage']['body_backend'] == 'cython_gil'
     assert manifest['cells']['numeric_parent']['coverage']['body_backend'] == 'cython_gil'
+    assert 'numeric_parent' in manifest['original_checked_numeric_bridges']
     assert all(not row['coverage']['detached_python'] for row in manifest['cells'].values())
     (tmp_path / 'verify.py').write_text('''
 import gc
 import shell_boundary_tracker as tracker
 from model_cy import mx_model
+from model_cy._mx_frame_support.python_calculator import PythonScope
+original_calculate = PythonScope.calculate
+def reject_redundant_numeric_adapter(self, name, arguments):
+    if name in self.manifest.get('original_checked_numeric_bridges', ()):
+        raise AssertionError('Compiled numeric entry crossed the Python calculator adapter')
+    return original_calculate(self, name, arguments)
+PythonScope.calculate = reject_redundant_numeric_adapter
 model = type(mx_model)(); item = model.S
 assert item.caught(2) == {'caught': 'numeric failure'}
 assert item.leaf(1) == -1.0
