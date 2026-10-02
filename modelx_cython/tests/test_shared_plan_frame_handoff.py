@@ -92,6 +92,24 @@ def test_shared_plan_drives_helper_object_and_uncached_bodies(tmp_path, monkeypa
     assert all(not row['coverage']['detached_python'] for row in manifest['cells'].values())
     assert manifest['cells']['report']['coverage']['body_backend'] == 'cython_gil'
     assert manifest['cells']['uncached']['cached'] is False
+    # Original public classes can consume the exact same prepared resources
+    # without constructing a second model/Space facade. Exercise real generated
+    # lookup classes and object-capable Cython, not a mocked formula evaluator.
+    import importlib
+    from modelx_cython._frame_runtime.prepared_space_inputs import PreparedSpaceInputs
+    from modelx_cython._frame_runtime.python_calculator import PythonScope
+    monkeypatch.syspath_prepend(str(artifact))
+    native_lookups = importlib.import_module(manifest['package'] + '._lookups')
+    native_kernel = importlib.import_module(manifest['package'] + '._kernel')
+    prepared = PreparedSpaceInputs(manifest, native_lookups, spec.initial_tables)
+    for position, expected in enumerate((1.5, -1.0)):
+        owner = native_kernel.Kernel((prepared.record(position),))
+        scope = PythonScope(artifact, manifest, owner)
+        owner.set_python_scope(scope)
+        owner.select_scope(0)
+        assert owner.call('amount', ()) == expected
+        assert owner.call('report', ()) == {'amount': expected}
+        assert owner.call('uncached', ()) == expected
     model = CompiledModel(artifact, spec.initial_tables)
     try:
         for policy, value in ((0, 1.5), (1, -1.0)):

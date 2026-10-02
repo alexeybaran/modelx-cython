@@ -11,8 +11,9 @@ from .lookups import (IndexedFloat1, IndexedFloat2, IndexedInt1,
 class PreparedModelRows:
     """Internal row set with fixed values established by ``prepare_inputs``.
 
-    Only CompiledModel constructs this marker. Public CompiledKernel.bind records
-    continue to take the complete validation path. ``fixed_names`` contains
+    Only internal resource preparation constructs this marker. Public
+    CompiledKernel.bind records continue to take the complete validation path.
+    ``fixed_names`` contains
     values known to be identical and safe to convert once across this binding.
     """
 
