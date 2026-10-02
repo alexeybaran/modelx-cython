@@ -21,6 +21,13 @@ CTYPES = {'double': float, 'long long': int, 'bint': bool, 'str': str,
 
 
 def cell_bindings(cell):
+    """Consume the shared physical snapshot; older records use its resolver."""
+    if cell.physical_bindings is not None:
+        return dict(cell.physical_bindings)
+    return _resolve_cell_bindings(cell)
+
+
+def _resolve_cell_bindings(cell):
     """Keep the public ABI separate from native category/key representations.
 
     A public object ABI is required for a mix of IntEnum and int observations.

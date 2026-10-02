@@ -144,7 +144,7 @@ def test_prepared_context_preserves_native_categories_behind_object_public_abi(t
     from modelx_cython import cli, compilation_plan
     from modelx_cython._frame_runtime import lookup
     from modelx_cython._frame_runtime.compiler import build
-    from modelx_cython._frame_runtime.compilation_plan_adapter import cell_bindings, from_compilation_plan
+    from modelx_cython._frame_runtime.compilation_plan_adapter import cell_bindings, from_compilation_plan, _resolve_cell_bindings
     from modelx_cython._frame_runtime.model import CompiledModel
     m = mx.new_model('CategoryHandoff')
     data = m.new_space('Data')
@@ -178,9 +178,14 @@ def test_prepared_context_preserves_native_categories_behind_object_public_abi(t
     assert dict(space.cells['amount'].public_arguments) == {'kind': 'object'}
     assert cell_bindings(space.cells['category'])['return'] is _PlanCategory
     assert cell_bindings(space.cells['amount'])['kind'] is _PlanCategory
+    assert space.cells['category'].inventory()['physical_bindings']['return']['kind'] == 'enum'
+    assert space.cells['category'].inventory()['public_result'] == 'object'
     category = space.cells['category'].original_info
     category._spec_ret_t = 'object'
-    assert cell_bindings(space.cells['category'])['return'] is object
+    # A finalized plan is immutable; a new resolution honors a new explicit
+    # specification, without changing the already recorded emission decision.
+    assert cell_bindings(space.cells['category'])['return'] is _PlanCategory
+    assert _resolve_cell_bindings(space.cells['category'])['return'] is object
     category._spec_ret_t = ''
     spec = from_compilation_plan(captured[0], sys.modules['model'].mx_model,
         tmp_path/'source', projection='Projection', point_table='points', steps=8)

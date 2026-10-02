@@ -6,7 +6,7 @@ Build it after usage/specification/helper resolution and before source emission.
 from __future__ import annotations
 
 import ast
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 import hashlib
 from types import MappingProxyType
 from typing import Mapping
@@ -45,8 +45,12 @@ class CellEmissionPlan:
     source_provenance: str
     original_info: object = field(repr=False, compare=False)
     formula_node: ast.FunctionDef = field(repr=False, compare=False)
+    physical_bindings: Mapping | None = field(default=None, repr=False, compare=False)
 
     def inventory(self):
+        from ._frame_runtime.compiler import type_info
+        physical = ({name: type_info(typ) for name, typ in self.physical_bindings.items()}
+                    if self.physical_bindings is not None else None)
         return dict(identity=self.identity, name=self.name,
                     signature=self.signature, formula_sha256=_digest(self.formula_source),
                     public_result=self.public_result,
@@ -56,7 +60,8 @@ class CellEmissionPlan:
                                    for n, lo, hi in self.cache_domains],
                     dependencies=list(self.dependencies),
                     reference_reads=list(self.reference_reads), locked=self.locked,
-                    source_provenance=self.source_provenance)
+                    source_provenance=self.source_provenance,
+                    physical_bindings=physical)
 
 
 @dataclass(frozen=True)
@@ -146,6 +151,12 @@ def build_package_plan(units):
                     cached, cell.has_typeinfo(), kind, domains,
                     tuple(sorted(reads & names)), tuple(sorted(reads - names)),
                     cell.is_locked, 'original exported method', cell, fn)
+                # Resolve physical bindings once from finalized original
+                # trace/spec/helper information. All emission choices consume
+                # this snapshot rather than reconstructing it from public ABI.
+                from ._frame_runtime.compilation_plan_adapter import _resolve_cell_bindings
+                cells[cell_name] = replace(cells[cell_name], physical_bindings=MappingProxyType(
+                    _resolve_cell_bindings(cells[cell_name])))
             helper = getattr(info, 'helper_info', None)
             bindings = tuple(dict(vars(b)) for b in helper.bindings.values()) if helper else ()
             formula = methods.get('_mx_space_formula')
