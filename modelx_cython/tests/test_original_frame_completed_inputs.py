@@ -31,6 +31,8 @@ s.value(); s.empty(); s.child(); s.fresh(); s.failure()
     manifest = json.loads((folder / 'manifest.json').read_text())
     assert manifest['cells']['value']['storage'] == 'object_singleton'
     source = next(folder.rglob('_kernel.pyx')).read_text()
+    assert "cpdef void bind_inputs(self, tuple record) except *:" in source
+    assert "cpdef void _mx_synchronize_inputs(self) except *:" in source
     start = source.index('cdef object _mx_shell_value(')
     entry = source[start:source.index('\ncdef ', start + 1)]
     assert entry.index('return owner._object_cell_value()') < entry.index('owner.bind_inputs(')

@@ -425,7 +425,7 @@ def add_owner_entries(source, manifest):
             source = source.replace(signature, signature +
                 '\n        if self._mx_virtual_depth:\n'
                 '            raise RuntimeError("Cannot reset cache during a Cell evaluation")', 1)
-    lines = ['    def bind_inputs(self, tuple record):']
+    lines = ['    cpdef void bind_inputs(self, tuple record) except *:']
     lines += [f'        self.{"" if row["kind"] == "object" else "_frame."}{name} = record[{i}]'
               for i, (name, row) in enumerate(manifest['inputs'].items())]
     lines += [f'        self._frame.{name} = <PyObject*>self.{name}'
@@ -460,7 +460,7 @@ def add_owner_entries(source, manifest):
             return f'getattr(receiver, {name!r})'
         refs = ', '.join(read_input(name) for name in manifest['inputs'])
         receiver_type = manifest.get('original_receiver_type')
-        lines += ['    def _mx_synchronize_inputs(self):',
+        lines += ['    cpdef void _mx_synchronize_inputs(self) except *:',
                   ('        cdef _mx_original_space receiver = self._python_scope._original_receiver'
                    if receiver_type else '        receiver = self._python_scope._original_receiver'),
                   '        if receiver is not None:']
