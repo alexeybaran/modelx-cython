@@ -56,11 +56,17 @@ def frame_parts(rows):
     for name, row in rows.items():
         t = tag(name); ret = row['result']['ctype']
         params = row['params']
-        declaration = ', '.join(p['type']['ctype'] + ' ' + p['name'] for p in params)
-        names = ', '.join(p['name'] for p in params)
-        key = params[0]['name'] if len(params) == 1 else '(' + names + ')'
-        nonfinite = ' or '.join('not isfinite(' + p['name'] + ')'
-                               for p in params if p['type']['kind'] == 'float') or 'False'
+        # These helpers own their local names, not the formula's public ABI.
+        # Positional private arguments avoid collisions with key/value/found or
+        # any other author parameter without modifying the formula itself.
+        arguments = ['_mx_key_' + str(i) for i in range(len(params))]
+        declaration = ', '.join(p['type']['ctype'] + ' ' + argument
+                                for p, argument in zip(params, arguments))
+        names = ', '.join(arguments)
+        key = arguments[0] if len(params) == 1 else '(' + names + ')'
+        nonfinite = ' or '.join('not isfinite(' + argument + ')'
+                               for p, argument in zip(params, arguments)
+                               if p['type']['kind'] == 'float') or 'False'
         fields += [f'    {t}_cache _numeric_{name}', f'    PyObject* _numeric_fallback_{name}']
         helpers.append(f'''cdef int _nc_lookup_{name}(_Frame* state, {declaration}, {ret}* value) except -1 nogil:
     cdef Py_ssize_t found

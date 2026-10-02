@@ -98,10 +98,11 @@ class KernelSpec:
                 any(name not in {'_mx_sys._mx_pow', '_mx_curves.power'} or name.split('.')[0] not in
                     (self.original_helper_modules or {}) for name in self.original_native_calls)):
             raise ContractError('Native shell calls require resolved original numeric helpers')
-        if self.original_cache_kinds and (not self.original_space_shell or
+        if self.original_cache_kinds and (
+                set(self.original_cache_kinds) - self.cells.keys() or
                 any(kind not in {'scalar', 'dense', 'dictionary', 'uncached'}
                     for kind in self.original_cache_kinds.values())):
-            raise ContractError('Original cache descriptors require an original Space receiver')
+            raise ContractError('Original cache descriptors must name declared Cells and cache kinds')
         for name in self.inputs:
             if not name.isidentifier() or name.startswith('_'):
                 raise ContractError('Input names must be public identifiers')

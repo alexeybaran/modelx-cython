@@ -246,4 +246,6 @@ def from_compilation_plan(package_plan, exported, destination, *, projection, **
     spec = from_modelx(model, destination, projection=projection,
                       emission_space=context_space, **options)
     spec.model['original_receiver_cells'] = excluded
-    return replace(spec, cache_domains=cache_domains(context_space))
+    return replace(spec, cache_domains=cache_domains(context_space),
+                   original_cache_kinds={name: cell.cache_kind
+                                         for name, cell in retained.items()})

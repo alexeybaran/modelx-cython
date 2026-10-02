@@ -47,6 +47,8 @@ def test_shared_plan_drives_helper_object_and_uncached_bodies(tmp_path, monkeypa
     p.new_cells('amount', 'def amount():\n return lookup.field(data.points(), policy_id, "value")\n')
     p.new_cells('report', 'def report():\n return {"amount": amount()}\n')
     p.new_cells('uncached', 'def uncached():\n return report()["amount"]\n')
+    p.new_cells('numeric_key', 'def numeric_key(key):\n return float(key)\n')
+    p.new_cells('numeric_pair', 'def numeric_pair(value, found):\n return value + found\n')
     p.new_cells('receiver_value', 'def receiver_value():\n return _space\n')
     p.uncached.is_cached = False
     m.export(tmp_path / 'model')
@@ -54,7 +56,9 @@ def test_shared_plan_drives_helper_object_and_uncached_bodies(tmp_path, monkeypa
     m.close()
     (tmp_path / 'sample.py').write_text(
         'from model import mx_model\n'
-        'for i in (0,1):\n p=mx_model.Projection[i]\n p.amount(); p.report(); p.uncached()\n',
+        'for i in (0,1):\n p=mx_model.Projection[i]\n p.amount(); p.report(); p.uncached()\n'
+        ' for key in (-1.0, 0.0, 0.5): p.numeric_key(key)\n'
+        ' p.numeric_pair(0.5, 1)\n',
         encoding='utf-8')
     captured = []
     original = compilation_plan.build_package_plan
@@ -92,6 +96,8 @@ def test_shared_plan_drives_helper_object_and_uncached_bodies(tmp_path, monkeypa
     assert all(not row['coverage']['detached_python'] for row in manifest['cells'].values())
     assert manifest['cells']['report']['coverage']['body_backend'] == 'cython_gil'
     assert manifest['cells']['uncached']['cached'] is False
+    assert manifest['cells']['numeric_key']['storage'] == 'growing_numeric'
+    assert manifest['cells']['numeric_pair']['storage'] == 'growing_numeric'
     # Original public classes can consume the exact same prepared resources
     # without constructing a second model/Space facade. Exercise real generated
     # lookup classes and object-capable Cython, not a mocked formula evaluator.
@@ -110,6 +116,16 @@ def test_shared_plan_drives_helper_object_and_uncached_bodies(tmp_path, monkeypa
         assert owner.call('amount', ()) == expected
         assert owner.call('report', ()) == {'amount': expected}
         assert owner.call('uncached', ()) == expected
+        for key in range(1024):
+            assert owner.call('numeric_key', (key + 0.5,)) == key + 0.5
+        # Old entries survive growth, signed zeros retain numeric key equality,
+        # and a non-finite key can transition to the ordinary dictionary path.
+        assert owner.call('numeric_key', (0.5,)) == 0.5
+        assert owner.call('numeric_pair', (2.5, -1)) == 1.5
+        assert owner.call('numeric_key', (-0.0,)) == 0.0
+        import math
+        assert math.isnan(owner.call('numeric_key', (float('nan'),)))
+        assert owner.call('numeric_key', (0.5,)) == 0.5
     model = CompiledModel(artifact, spec.initial_tables)
     try:
         for policy, value in ((0, 1.5), (1, -1.0)):
@@ -217,6 +233,9 @@ def test_prepared_context_preserves_native_categories_behind_object_public_abi(t
     assert manifest['cells']['category']['result']['kind'] == 'enum'
     assert manifest['cells']['amount']['params'][0]['type']['kind'] == 'enum'
     assert manifest['cells']['amount']['calculator'] == 'native'
+    assert space.cells['amount'].cache_kind == 'dictionary'
+    assert manifest['cells']['amount']['storage'] == 'growing_numeric'
+    assert manifest['original_cache_kinds']['amount'] == 'dictionary'
     model = CompiledModel(artifact, spec.initial_tables)
     try:
         for policy, category in ((0, _PlanCategory.ONE), (1, _PlanCategory.ZERO)):

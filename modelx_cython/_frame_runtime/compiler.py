@@ -1035,6 +1035,10 @@ def build(spec, destination, *, diagnostics=False, python_cells=(),
     parts, manifest = emit(spec, diagnostics=diagnostics, python_cells=python_cells)
     if spec.cython_objects:
         manifest["cython_objects"] = True
+    if spec.original_cache_kinds:
+        # Semantic ownership/layout information comes from shared discovery,
+        # independently of the public receiver specialization being emitted.
+        manifest['original_cache_kinds'] = spec.original_cache_kinds
     if spec.original_space_shell:
         manifest['original_space_shell'] = True
         manifest['original_receiver_type'] = spec.original_receiver_type
