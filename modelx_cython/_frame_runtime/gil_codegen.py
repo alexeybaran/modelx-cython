@@ -195,7 +195,13 @@ def augment(source, manifest, spec, forced_python=()):
         imports.append('from ' + module + ' cimport ' + cls + ' as ' + alias)
     imports.extend('cimport ' + module + ' as ' + name for name, module in helper_modules.items())
     if imports: source = '\n'.join(imports) + '\n' + source
+    typed_receiver = bool(spec.original_space_shell and spec.original_receiver_type)
+    manifest['original_typed_receiver'] = typed_receiver
     fields = '\n'.join('    cdef '+global_type(n)+' _gil_global_'+n for n in sorted(globals_))
+    if typed_receiver:
+        # One strong, invocation-scoped reference. Checked formulas read live
+        # original fields through this receiver, without a Python attribute hop.
+        fields += '\n    cdef _mx_original_space _mx_active_receiver'
     if typed_fields:
         fields += '\n' + '\n'.join(
             '    cdef ' + ('double[::1]' if kind == 'float64_1d' else 'double')
@@ -221,6 +227,12 @@ def augment(source, manifest, spec, forced_python=()):
                    + assignments + '\n'
                    '        self._frame._scope_valid = True\n')
     methods=[]
+    if typed_receiver:
+        methods += ['    property original_receiver:',
+                    '        def __get__(self):',
+                    '            return self._mx_active_receiver',
+                    '        def __set__(self, _mx_original_space value):',
+                    '            self._mx_active_receiver = value', '']
     for name,node in bodies.items():
         params=rows[name]['params']
         hints=signatures.get(name,{'parameters':{},'return':'object'})
@@ -254,7 +266,7 @@ def augment(source, manifest, spec, forced_python=()):
         result_type = global_type(name)
         exception = ' except? -1' if result_type in ('long long', 'double', 'bint') else ''
         methods += [f'    cdef inline {result_type} _mx_live_{name}(self){exception}:',
-                    '        cdef _mx_original_space receiver = self._python_scope._original_receiver',
+                    '        cdef _mx_original_space receiver = self._mx_active_receiver',
                     '        if receiver is not None:',
                     f'            return receiver.{name}',
                     f'        return self._gil_global_{name}', '']

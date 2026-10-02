@@ -155,6 +155,21 @@ class CellCodec:
         self.namespace = {i['name']: resolve_enum(i) for i in infos if i['kind'] == 'enum'}
         self.entries = {}
 
+    @property
+    def _original_receiver(self):
+        # The checked native owner is authoritative. Compatibility callers
+        # retain the old attribute contract, without a duplicate receiver.
+        if self.manifest.get('original_typed_receiver'):
+            return self.kernel.original_receiver
+        return self.__dict__.get('_scope_original_receiver')
+
+    @_original_receiver.setter
+    def _original_receiver(self, value):
+        if self.manifest.get('original_typed_receiver'):
+            self.kernel.original_receiver = value
+        else:
+            self._scope_original_receiver = value
+
     def entry(self, name):
         if name not in self.entries:
             self.entries[name] = self._proxy(name)

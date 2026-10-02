@@ -461,7 +461,7 @@ def add_owner_entries(source, manifest):
         refs = ', '.join(read_input(name) for name in manifest['inputs'])
         receiver_type = manifest.get('original_receiver_type')
         lines += ['    cpdef void _mx_synchronize_inputs(self) except *:',
-                  ('        cdef _mx_original_space receiver = self._python_scope._original_receiver'
+                  ('        cdef _mx_original_space receiver = self._mx_active_receiver'
                    if receiver_type else '        receiver = self._python_scope._original_receiver'),
                   '        if receiver is not None:']
         if receiver_type:
@@ -595,9 +595,15 @@ def add_owner_entries(source, manifest):
             entry += ['    if owner._frame._scope_valid and owner._object_initialized and not owner._object_key_guard and not owner._clearing_objects:',
                       f'        if owner._object_singleton_{name} is not _DICT_EMPTY and owner._object_singleton_{name} is not _DICT_BUSY:',
                       f'            return owner._object_cell_{name}()']
+        receiver_field = ('owner._mx_active_receiver' if manifest.get('original_typed_receiver')
+                          else 'owner._python_scope._original_receiver')
         if checked:
-            entry += ['    saved_receiver = getattr(owner._python_scope, "_original_receiver", None)',
-                      '    owner._python_scope._original_receiver = receiver', '    try:']
+            if manifest.get('original_typed_receiver'):
+                entry += ['    cdef _mx_original_space saved_receiver = owner._mx_active_receiver',
+                          '    owner._mx_active_receiver = receiver', '    try:']
+            else:
+                entry += ['    saved_receiver = getattr(owner._python_scope, "_original_receiver", None)',
+                          '    owner._python_scope._original_receiver = receiver', '    try:']
         prefix_size = len(entry)
         if checked:
             inputs = ', '.join('_mx_input_' + n for n in manifest['inputs'])
@@ -617,7 +623,7 @@ def add_owner_entries(source, manifest):
                       '    finally:', '        owner._frame._entry_depth -= 1']
             if checked:
                 entry[prefix_size:] = ['    ' + line for line in entry[prefix_size:]]
-                entry += ['    finally:', '        owner._python_scope._original_receiver = saved_receiver']
+                entry += ['    finally:', f'        {receiver_field} = saved_receiver']
             source += '\n' + '\n'.join(entry) + '\n'
             continue
         entry += ['    command.mode = 0', f'    command.identity = {numeric_names.index(name)}']
@@ -628,7 +634,7 @@ def add_owner_entries(source, manifest):
         entry += ['    owner._invoke(&command)', f'    return command.value.{result}']
         if checked:
             entry[prefix_size:] = ['    ' + line for line in entry[prefix_size:]]
-            entry += ['    finally:', '        owner._python_scope._original_receiver = saved_receiver']
+            entry += ['    finally:', f'        {receiver_field} = saved_receiver']
         source += '\n' + '\n'.join(entry) + '\n'
     source += '\n' + '\n'.join(virtual_exports) + '\n'
     return source

@@ -46,6 +46,10 @@ for n in range(4):
     assert 'cdef inline _mx_reference_type_0 _mx_live_data(self):' in source
     assert 'from model_cy._mx_classes cimport _c_Data as _mx_reference_type_0' in source
     assert '@cython.nonecheck(True)' in source
+    assert manifest['original_typed_receiver'] is True
+    assert 'cdef _mx_original_space _mx_active_receiver' in source
+    assert 'self._python_scope._original_receiver' not in source
+    assert 'owner._python_scope._original_receiver' not in source
     assert all(not row['coverage']['detached_python'] for row in manifest['cells'].values())
     (tmp_path / 'overrides.pyx').write_text('''from model_cy._mx_classes cimport _c_S, _c_Data
 cdef class PrivateData(_c_Data):
@@ -71,6 +75,14 @@ other = type(mx_model)()
 other.Data.inputs = np.array([10.0, 20.0, 30.0, 40.0])
 assert s.amount(0) == s.alias(0) == s.uncached(0) == 1.5
 assert owner(s) is not None
+assert owner(s).kernel.original_receiver is None
+assert '_scope_original_receiver' not in vars(owner(s)._scope)
+try:
+    owner(s).kernel.original_receiver = object()
+except TypeError:
+    pass
+else:
+    raise AssertionError('The native receiver must retain its original ABI')
 s.data = other.Data
 assert s.amount(0) == 1.5
 assert s.amount(1) == s.uncached(1) == 20.0
@@ -78,9 +90,31 @@ assert s.alias(1) == -1.0
 other.Data.inputs[1] = 22.0
 assert s.amount(1) == 20.0 and s.uncached(1) == 22.0
 def callback():
+    assert owner(s).kernel.original_receiver is s
+    assert owner(s)._scope._original_receiver is s
+    # Reenter the same checked owner; restoring its prior receiver must not
+    # clear the outer invocation's live-reference context.
+    assert s.uncached(1) == (22.0 if s.data is other.Data else -1.0)
+    assert owner(s).kernel.original_receiver is s
     s.data = m.Data
 s.hook = callback
 assert s.after_callback(2) == 6.0 and s.data is m.Data
+assert owner(s).kernel.original_receiver is None
+def failing_callback():
+    assert owner(s).kernel.original_receiver is s
+    assert s.alias(2) == 3.0
+    raise ValueError('nested cleanup')
+s.hook = failing_callback
+try:
+    s.after_callback(3)
+except ValueError as error:
+    assert str(error) == 'nested cleanup'
+else:
+    raise AssertionError('The original exception must propagate')
+assert owner(s).kernel.original_receiver is None
+s.hook = callback
+assert s.after_callback(3) == 8.0
+assert owner(s).kernel.original_receiver is None
 s.data = None
 assert s.amount(0) == 1.5
 try:
