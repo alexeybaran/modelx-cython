@@ -65,6 +65,81 @@ def checked_signatures(spec, rows):
         out[name]=hint
     return out
 
+
+def cached_entry(name, hint, row, steps, diagnostics, compiled, *, virtual=False):
+    """One checked cache/rollback template for exact and virtual formula entries."""
+    params = row['params']; original_names = [p['name'] for p in params]
+    names = ['_mx_arg_' + str(i) for i in range(len(params))]
+    kinds = [hint['parameters'][n] for n in original_names]; ct = CTYPES[hint['return']]
+    sig = ', '.join(CTYPES[t] + ' ' + n for n, t in zip(names, kinds))
+    args = ', '.join(names)
+    member = 'real' if hint['return'] == 'float' else 'integer'
+    first = bool(kinds) and kinds[0] == 'int'; zero = not params
+    primitive = ' and '.join(f'({n} is None or type({n}) is str)' for n, t in zip(names[1:], kinds[1:]) if t in ('object', 'str')) or 'True'
+    fullkey = names[0] if len(names) == 1 else '(' + args + (',' if names else '') + ')'
+    entry = ('_virtual_cell_' if virtual else '_typed_cell_') + name
+    body=['    @cython.overflowcheck(False)', f'    cdef {ct} {entry}(self'+(', object compute' if virtual else '')+(', '+sig if sig else '')+') except? -1:',
+          '        cdef _MemoSlab slab = None','        cdef Py_ssize_t index = -1',
+          '        cdef object key, cached, raw','        cdef uint64_t stamp',f'        cdef {ct} value',
+          '        cdef bint complete = False']
+    if diagnostics:body += [f'        self._ocalls_{name} += 1','        self._frame._calls += 1']
+    if zero:
+        body += [f'        stamp = self._typed_stamp_{name}',
+                 '        if stamp == self._typed_epoch + 1:',f'            return self._typed_value_{name}',
+                 '        if stamp == self._typed_epoch:',f'            raise RuntimeError("Cell cycle: {name}")',
+                 f'        self._typed_stamp_{name} = self._typed_epoch']
+    else:
+        if first:
+            t=names[0]
+            body += [f'        if -1 <= {t} <= {steps} and ({primitive}):',f'            index = {t} + 1']
+            if len(params)==1:body += [f'            slab = self._typed_slab_{name}']
+            else:
+                body += [f'            slab = <object>self._typed_axis_{name}('+', '.join(names[1:])+')']
+            body += ['            stamp = slab.stamps[index]',
+                     '            if stamp == self._typed_epoch + 1:',f'                return slab.values[index].{member}',
+                     '            if stamp == self._typed_epoch:',f'                raise RuntimeError("Cell cycle: {name}")',
+                     '            slab.stamps[index] = self._typed_epoch']
+        body += ['        if slab is None:',f'            key = {fullkey}',
+                 '            self._object_key_guard = True','            try:',
+                 f'                cached = self._typed_sparse_{name}.get(key, _DICT_EMPTY)',
+                 '                if cached is _DICT_BUSY:',f'                    raise RuntimeError("Cell cycle: {name}")',
+                 '                if cached is not _DICT_EMPTY: return cached',
+                 f'                self._typed_sparse_{name}[key] = _DICT_BUSY',
+                 '            finally:','                self._object_key_guard = False']
+    if diagnostics:body += [f'        self._omisses_{name} += 1','        self._frame._misses += 1']
+    body += ['        try:']
+    if not compiled:
+        body += ['            if self._python_scope.diagnostics:',f'                self._python_scope.calls[{name!r}] += 1']
+    calc='_gil_formula_' if compiled else '_object_fn_'
+    if compiled:
+        body += [f'            value = compute({args})' if virtual else f'            value = self.{calc}{name}({args})']
+    else:
+        body += [f'            raw = self.{calc}{name}({args})',
+                 '            if raw is None: raise ValueError("None violates a numeric Cell contract")']
+        if hint['return']=='bool':
+            body += ['            if not isinstance(raw, (bool, np.bool_)): raise TypeError("Boolean Cell result required")',
+                     '            value = raw']
+        else:
+            converter='_checked_memo_float' if hint['return']=='float' else '_checked_memo_int'
+            body += [f'            value = {converter}(raw)']
+    if zero:body += [f'            self._typed_value_{name} = value',f'            self._typed_stamp_{name} = self._typed_epoch + 1']
+    else:
+        body += ['            if slab is not None:',f'                slab.values[index].{member} = value',
+                 '                slab.stamps[index] = self._typed_epoch + 1','            else:',
+                 '                self._object_key_guard = True','                try:',
+                 f'                    self._typed_sparse_{name}[key] = value',
+                 '                finally:','                    self._object_key_guard = False']
+    body += ['            complete = True','            return value','        finally:',
+             '            if not complete:']
+    if zero:body += [f'                self._typed_stamp_{name} = 0']
+    else:
+        body += ['                if slab is not None: slab.stamps[index] = 0','                else:',
+                 '                    self._object_key_guard = True','                    try:',
+                 f'                        self._typed_sparse_{name}.pop(key, None)',
+                 '                    finally:','                        self._object_key_guard = False']
+    return body + ['']
+
+
 def augment(source, manifest, spec, signatures, compiled):
     numeric={n:h for n,h in signatures.items() if h['return'] in ('int','float','bool')}
     if not numeric:return source
@@ -94,66 +169,7 @@ def augment(source, manifest, spec, signatures, compiled):
             af, ai, am = axis_entries(name, names[1:], kinds[1:], spec)
             fields += af; init += ai; methods += am
         fullkey=names[0] if len(names)==1 else '('+args+(',' if names else '')+')'
-        body=['    @cython.overflowcheck(False)', f'    cdef {ct} _typed_cell_{name}(self'+(', '+sig if sig else '')+') except? -1:',
-              '        cdef _MemoSlab slab = None','        cdef Py_ssize_t index = -1',
-              '        cdef object key, cached, raw','        cdef uint64_t stamp',f'        cdef {ct} value',
-              '        cdef bint complete = False']
-        if manifest['diagnostics']:body += [f'        self._ocalls_{name} += 1','        self._frame._calls += 1']
-        if zero:
-            body += [f'        stamp = self._typed_stamp_{name}',
-                     '        if stamp == self._typed_epoch + 1:',f'            return self._typed_value_{name}',
-                     '        if stamp == self._typed_epoch:',f'            raise RuntimeError("Cell cycle: {name}")',
-                     f'        self._typed_stamp_{name} = self._typed_epoch']
-        else:
-            if first:
-                t=names[0]
-                body += [f'        if -1 <= {t} <= {spec.steps} and ({primitive}):',f'            index = {t} + 1']
-                if len(params)==1:body += [f'            slab = self._typed_slab_{name}']
-                else:
-                    body += [f'            slab = <object>self._typed_axis_{name}('+', '.join(names[1:])+')']
-                body += ['            stamp = slab.stamps[index]',
-                         '            if stamp == self._typed_epoch + 1:',f'                return slab.values[index].{member}',
-                         '            if stamp == self._typed_epoch:',f'                raise RuntimeError("Cell cycle: {name}")',
-                         '            slab.stamps[index] = self._typed_epoch']
-            body += ['        if slab is None:',f'            key = {fullkey}',
-                     '            self._object_key_guard = True','            try:',
-                     f'                cached = self._typed_sparse_{name}.get(key, _DICT_EMPTY)',
-                     '                if cached is _DICT_BUSY:',f'                    raise RuntimeError("Cell cycle: {name}")',
-                     '                if cached is not _DICT_EMPTY: return cached',
-                     f'                self._typed_sparse_{name}[key] = _DICT_BUSY',
-                     '            finally:','                self._object_key_guard = False']
-        if manifest['diagnostics']:body += [f'        self._omisses_{name} += 1','        self._frame._misses += 1']
-        body += ['        try:']
-        if name not in compiled:
-            body += ['            if self._python_scope.diagnostics:',f'                self._python_scope.calls[{name!r}] += 1']
-        calc='_gil_formula_' if name in compiled else '_object_fn_'
-        if name in compiled:
-            body += [f'            value = self.{calc}{name}({args})']
-        else:
-            body += [f'            raw = self.{calc}{name}({args})',
-                     '            if raw is None: raise ValueError("None violates a numeric Cell contract")']
-            if hint['return']=='bool':
-                body += ['            if not isinstance(raw, (bool, np.bool_)): raise TypeError("Boolean Cell result required")',
-                         '            value = raw']
-            else:
-                converter='_checked_memo_float' if hint['return']=='float' else '_checked_memo_int'
-                body += [f'            value = {converter}(raw)']
-        if zero:body += [f'            self._typed_value_{name} = value',f'            self._typed_stamp_{name} = self._typed_epoch + 1']
-        else:
-            body += ['            if slab is not None:',f'                slab.values[index].{member} = value',
-                     '                slab.stamps[index] = self._typed_epoch + 1','            else:',
-                     '                self._object_key_guard = True','                try:',
-                     f'                    self._typed_sparse_{name}[key] = value',
-                     '                finally:','                    self._object_key_guard = False']
-        body += ['            complete = True','            return value','        finally:',
-                 '            if not complete:']
-        if zero:body += [f'                self._typed_stamp_{name} = 0']
-        else:
-            body += ['                if slab is not None: slab.stamps[index] = 0','                else:',
-                     '                    self._object_key_guard = True','                    try:',
-                     f'                        self._typed_sparse_{name}.pop(key, None)',
-                     '                    finally:','                        self._object_key_guard = False']
-        body += [''];methods+=body
+        methods += cached_entry(name, hint, row, spec.steps, manifest['diagnostics'], name in compiled)
         # Replace, rather than layer another cache over, the existing object entry.
         anchor=f'    cdef object _object_cell_{name}('
         start=source.index(anchor);match=re.search(r'^    (?:cdef |def )',source[start+len(anchor):],flags=re.M)

@@ -47,7 +47,14 @@ def index(): return 0
     import json
     selected={r['cell'] for r in json.loads((tmp_path/'model_cy/_mx_classes.object-index.json').read_text())}
     assert selected=={'value','fraction'}
-    assert '_mx_edge_key_' in (tmp_path/'model_cy/_mx_classes.py').read_text()
+    frame_receipt = tmp_path/'model_cy/_mx_classes.frame-shell.json'
+    if frame_receipt.exists():
+        routes = {r['cell']: r for r in json.loads(frame_receipt.read_text())['cells']}
+        assert all(routes[n]['execution'] == 'frame_exact' for n in selected)
+        manifest = json.loads((tmp_path/'model_cy/_mx_frame_S/manifest.json').read_text())
+        assert all(manifest['cells'][n]['storage'] == 'typed_python_dict' for n in selected)
+    else:
+        assert '_mx_edge_key_' in (tmp_path/'model_cy/_mx_classes.py').read_text()
     (tmp_path/'verify.py').write_text('''import pickle, math
 from enum import IntEnum
 from model_cy import mx_model

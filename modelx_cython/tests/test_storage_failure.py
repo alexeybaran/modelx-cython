@@ -1,4 +1,5 @@
 """Fault injection is confined to disposable generated test artifacts."""
+import ast
 import os
 from pathlib import Path
 import subprocess
@@ -20,11 +21,11 @@ def test_native_allocation_failure_and_destruction(tmp_path):
         assert r.returncode==0,r.stdout[-12000:]
     run([sys.executable,'-m','modelx_cython','model','--sample','sample.py','--no-spec','--translate-only'],'translate')
     package=tmp_path/'model_cy'
-    (package/'_mx_fault.pxd').write_text('cdef void* mx_alloc(size_t) noexcept\ncdef void* mx_calloc(size_t,size_t) noexcept\ncdef void mx_free(void*) noexcept\ncpdef int mx_state(int) noexcept\n')
+    (package/'_mx_fault.pxd').write_text('cdef void* mx_alloc(size_t) noexcept nogil\ncdef void* mx_calloc(size_t,size_t) noexcept nogil\ncdef void mx_free(void*) noexcept nogil\ncpdef int mx_state(int) noexcept\n')
     (package/'_mx_fault.pyx').write_text('''from libc.stdlib cimport malloc, calloc, free
 cdef int fail_next = 0
 cdef int owned = 0
-cdef void* mx_alloc(size_t n) noexcept:
+cdef void* mx_alloc(size_t n) noexcept nogil:
     global fail_next, owned
     cdef void* p
     if fail_next:
@@ -33,7 +34,7 @@ cdef void* mx_alloc(size_t n) noexcept:
     p = malloc(n)
     if p != NULL: owned += 1
     return p
-cdef void* mx_calloc(size_t n, size_t size) noexcept:
+cdef void* mx_calloc(size_t n, size_t size) noexcept nogil:
     global fail_next, owned
     cdef void* p
     if fail_next:
@@ -42,7 +43,7 @@ cdef void* mx_calloc(size_t n, size_t size) noexcept:
     p = calloc(n,size)
     if p != NULL: owned += 1
     return p
-cdef void mx_free(void* p) noexcept:
+cdef void mx_free(void* p) noexcept nogil:
     global owned
     if p != NULL: owned -= 1
     free(p)
@@ -66,10 +67,23 @@ cpdef int mx_state(int fail) noexcept:
         support.write_text(support.read_text().replace('from libc.stdlib cimport calloc, free','from model_cy._mx_fault cimport mx_calloc as calloc, mx_free as free'))
         owner=package/'_mx_numeric_cache.py'
         owner.write_text(owner.read_text().replace('from cython.cimports.libc.stdlib import free as _mx_free','from cython.cimports.model_cy._mx_fault import mx_free as _mx_free'))
+    for kernel in package.rglob('_kernel.pyx'):
+        text = kernel.read_text()
+        text = text.replace('from libc.stdlib cimport calloc, free',
+                            'from model_cy._mx_fault cimport mx_calloc as calloc, mx_free as free')
+        kernel.write_text(text)
     src+='\nfrom cython.cimports.model_cy._mx_fault import mx_state\n@_mx_cy.ccall\ndef fault_state(fail: _mx_cy.int) -> _mx_cy.int:\n    return mx_state(fail)\n'
     p.write_text(src)
     p=package/'_mx_classes.pxd';p.write_text(p.read_text()+'\ncpdef int fault_state(int fail)\n')
-    (tmp_path/'setup_fault.py').write_text("from setuptools import setup\nfrom Cython.Build import cythonize\nsetup(ext_modules=cythonize(['model_cy/_mx_sys.py','model_cy/_mx_classes.py','model_cy/_mx_fault.pyx','model_cy/_mx_numeric_cache.py']))\n")
+    # Consume the actual translation union, including private kernels. A fixed
+    # legacy list would skip the storage implementation under test.
+    setup_tree = ast.parse((tmp_path/'setup.py').read_text())
+    cython_call = next(n for n in ast.walk(setup_tree) if isinstance(n, ast.Call)
+                       and isinstance(n.func, ast.Name) and n.func.id == 'cythonize')
+    modules = ast.literal_eval(cython_call.args[0]) + ['model_cy/_mx_fault.pyx']
+    (tmp_path/'setup_fault.py').write_text(
+        "from setuptools import setup\nfrom Cython.Build import cythonize\n"
+        + "setup(ext_modules=cythonize(" + repr(modules) + "))\n")
     run([sys.executable,'setup_fault.py','build_ext','--inplace'],'build')
     verify='''import gc
 from model_cy import mx_model

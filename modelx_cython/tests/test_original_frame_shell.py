@@ -70,6 +70,9 @@ cdef class Private(_c_S):
 cdef class Public(_c_S):
     cpdef double leaf(self, long long n) except? -1:
         return 50.0
+def frame_owner(_c_S space):
+    return space._mx_frame_owner
+
 def uncached_parent(_c_S space, long long n):
     return space._f_parent(n)
 def uncached_leaf(_c_S space, long long n):
@@ -82,7 +85,7 @@ def uncached_leaf(_c_S space, long long n):
     (tmp_path / 'verify.py').write_text('''
 import pickle
 from model_cy import mx_model
-from override import Private, Public, uncached_parent, uncached_leaf
+from override import Private, Public, uncached_parent, uncached_leaf, frame_owner
 factory = type(mx_model)
 m = factory(); s = m.S
 assert s.parent(0) == -2.0
@@ -120,10 +123,27 @@ for cls, expected in ((Private, 80.0), (Public, 100.0)):
     sub = cls(m); sub.offset = 0.0; sub.fail = False; sub.counts = {}
     assert sub.parent(0) == expected and sub.observed(0) == expected
     assert sub.leaf(0) == expected / 2
+    # This is an override-aware frame cache, not a legacy class-cache pass.
+    owner = frame_owner(sub)
+    assert owner is not None
+    assert owner.kernel.call('parent', (0,)) == expected
+    assert owner.kernel.call('observed', (0,)) == expected
+    sub.offset = 100.0
+    assert sub.parent(0) == expected
+    assert uncached_parent(sub, 0) == expected
+    sub.fail = True
+    for _ in range(2):
+        try: sub.failure(2)
+        except ValueError as e: assert str(e) == 'retry'
+        else: raise AssertionError('failed overridden parent was cached')
+    sub.fail = False
+    assert sub.failure(2) == expected / 2 + 1.0
+    assert owner.kernel.call('failure', (2,)) == expected / 2 + 1.0
 class PythonOverride(type(s)):
     def leaf(self, n): return 12.0
 sub = PythonOverride(m); sub.offset = 0.0; sub.fail = False; sub.counts = {}
 assert sub.parent(0) == 24.0
+assert frame_owner(sub).kernel.call('parent', (0,)) == 24.0
 sub.leaf = lambda n: 20.0
 assert sub.parent(1) == 40.0
 print('original shell + native exact graph: all behavioral checks passed')
@@ -436,7 +456,7 @@ print('checked object/numeric failures, uncached effects, cache restore and relo
 
 
 def test_original_shell_checked_cell_boundary_defaults_and_dense_axes(tmp_path):
-    """One unmigrated key path must not remove its callers from the frame."""
+    """Object-key Cython, defaults and full dense domains share the frame."""
     import modelx as mx
     m = mx.new_model('BoundaryShell')
     s = m.new_space('S')
@@ -455,8 +475,11 @@ def test_original_shell_checked_cell_boundary_defaults_and_dense_axes(tmp_path):
     receipt = json.loads((tmp_path/'model_cy/_mx_classes.frame-shell.json').read_text())
     routes = {r['cell']: r for r in receipt['cells']}
     assert routes['matrix']['execution'] == routes['root']['execution'] == 'frame_exact'
-    assert routes['keyed']['execution'] == 'original_cython'
-    assert routes['root']['checked_cell_dependencies'] == ['keyed']
+    assert routes['keyed']['execution'] == 'frame_exact'
+    assert routes['root']['checked_cell_dependencies'] == []
+    manifest = json.loads((tmp_path/'model_cy/_mx_frame_S/manifest.json').read_text())
+    assert manifest['cells']['keyed']['storage'] == 'typed_python_dict'
+    assert manifest['cells']['keyed']['calculator'] == 'cython_scalar'
     assert routes['matrix']['checked_cell_dependencies'] == []
     _run(tmp_path, ['-m', 'modelx_cython', str(tmp_path/'model'), '--compile-only'], 'build')
     (tmp_path/'verify.py').write_text("""

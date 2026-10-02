@@ -198,12 +198,13 @@ def augment(source, manifest):
     return source
 
 
-def _direct_dict_body(name, row, params, diagnostics):
+def _direct_dict_body(name, row, params, diagnostics, *, virtual=False):
     """Same empty/busy/ready protocol without allocating a box for every dict value."""
     signature=', '.join(p['type']['ctype']+' '+p['name'] for p in params)
     values=', '.join(p['name'] for p in params)
     key=params[0]['name'] if len(params)==1 else '('+values+(',' if params else '')+')'
-    lines=[f'    cdef object _object_cell_{name}(self'+(', '+signature if signature else '')+'):',
+    entry = ('_virtual_cell_' if virtual else '_object_cell_') + name
+    lines=[f'    cdef object {entry}(self'+(', object compute' if virtual else '')+(', '+signature if signature else '')+'):',
            '        cdef object key, value',f'        key = {key}']
     if diagnostics:lines += [f'        self._ocalls_{name} += 1','        self._frame._calls += 1']
     lines += ['        self._object_key_guard = True','        try:',
@@ -217,7 +218,7 @@ def _direct_dict_body(name, row, params, diagnostics):
               '            self._object_key_guard = False']
     if diagnostics:lines += [f'        self._omisses_{name} += 1','        self._frame._misses += 1']
     lines += ['        try:', '            if self._python_scope.diagnostics:',f'                self._python_scope.calls[{name!r}] += 1',
-              f'            value = self._object_fn_{name}({values})']
+              f'            value = compute({values})' if virtual else f'            value = self._object_fn_{name}({values})']
     if row.get('allow_none') is False:lines += ['            if value is None:',f'                raise ValueError("None is not allowed for Cell {name}")']
     result=row['result'];expected=result.get('python_type','object')
     if result['kind']=='object' and expected!='object':

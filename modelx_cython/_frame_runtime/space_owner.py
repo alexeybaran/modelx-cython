@@ -52,6 +52,10 @@ class SpaceFrameOwner:
         """Bind the private typed ABI after the ordinary lazy kernel load."""
         return self._extension.__pyx_capi__['_mx_shell_' + cell]
 
+    def virtual_capsule(self, cell):
+        """Checked cache entry; a miss invokes the original virtual formula."""
+        return self._extension.__pyx_capi__['_mx_virtual_' + cell]
+
     def call(self, cell, args, inputs):
         self.prepare_checked()
         self.kernel.bind_inputs(inputs)

@@ -2,7 +2,8 @@
 
 Discovery, specification precedence, public declarations, construction and
 virtual dispatch belong to the original compiler. This adapter consumes its
-ModuleInfo, emits a private kernel, and redirects exact public entries only.
+ModuleInfo and emits a private kernel. Exact and override-aware entries share
+its cache owner; derived formulas retain original virtual dispatch.
 Unsupported graphs retain generated Cython, not an interpreted replacement.
 """
 import ast
@@ -127,6 +128,7 @@ def plan(unit, *, package_plan=None):
                               # "original_cython" is the retained receipt label,
                               # not a choice of compiler versus native execution.
                               'formula_compiler': 'Cython',
+                              'derived_cache': 'frame_virtual' if name in candidates else 'original_class',
                               'receiver_representation': ('native_frame' if name in candidates
                                                           else 'original_space'),
                               'reason': reasons.get(name),
@@ -252,7 +254,7 @@ def emit_private_kernels(plans, package_path, package_name, *, formula_transform
 
 
 def transform(source, declarations, plans, original_methods):
-    """Reuse original wrapper bodies on subclasses, original private ABI always."""
+    """Shared frame caches with exact or original virtual formula dispatch."""
     if not plans:
         return source, declarations
     tree = ast.parse(source)
@@ -275,6 +277,15 @@ def transform(source, declarations, plans, original_methods):
             result_type = p['manifest']['cells'][cell_name]['result']['ctype']
             exception = '' if result_type == 'object' else ' except? -1'
             declarations += (f'\nctypedef {result_type} (*{alias}_t)('
+                             + ', '.join(ctypes) + ')' + exception + '\n'
+                             + f'cdef {alias}_t {alias}\n')
+        for cell_name in p['methods']:
+            row = p['manifest']['cells'][cell_name]
+            alias = '_mx_virtual_' + cls.name + '_' + cell_name
+            ctypes = ['object', 'object'] + [arg['type']['ctype'] for arg in row['params']]
+            result = row['result']['ctype']
+            exception = '' if result == 'object' else ' except? -1'
+            declarations += (f'\nctypedef {result} (*{alias}_t)('
                              + ', '.join(ctypes) + ')' + exception + '\n'
                              + f'cdef {alias}_t {alias}\n')
         cls.body.insert(0, ast.AnnAssign(ast.Name('_mx_frame_owner', ast.Store()),
@@ -311,11 +322,41 @@ def transform(source, declarations, plans, original_methods):
     if {alias} == _mx_cy.NULL:
         {alias} = _mx_cy.cast({alias}_t, _mx_frame_capsule_ptr(self._mx_frame_owner.entry_capsule({fn.name!r}), {capsule_signature!r}))
     return {alias}(self._mx_frame_owner.kernel{receiver}{', ' + args if args else ''})''').body
-                fn.body = head + fn.body
+                if not cell.cached:
+                    fn.body = head + copy.deepcopy(original_methods[cls.name][fn.name].body)
+                    continue
+                virtual = '_mx_virtual_' + cls.name + '_' + fn.name
+                row = p['manifest']['cells'][fn.name]
+                callback = '_mx_frame_formula_' + fn.name
+                body_args = ', '.join(a.arg for a in fn.args.args[1:])
+                virtual_types = ['object', 'object'] + [arg['type']['ctype'] for arg in row['params']]
+                virtual_signature = (c_api[result_type] + ('(' if result_type == 'object' else ' (')
+                                     + ', '.join(c_api[t] for t in virtual_types) + ')').encode()
+                derived = ast.parse(f'''global {virtual}
+if self._mx_frame_owner is None:
+    self._mx_frame_owner = _mx_SpaceFrameOwner({p['kernel_module']!r}, {inputs})
+{"self._mx_frame_owner.prepare_checked()" if p['manifest'].get('python_cells') else "pass"}
+if {virtual} == _mx_cy.NULL:
+    {virtual} = _mx_cy.cast({virtual}_t, _mx_frame_capsule_ptr(self._mx_frame_owner.virtual_capsule({fn.name!r}), {virtual_signature!r}))
+return {virtual}(self._mx_frame_owner.kernel, self.{callback}{', ' + body_args if body_args else ''})''').body
+                fn.body = head + derived
+
             elif fn.name.startswith('_f_') and fn.name[3:] in p['methods']:
                 # Keep decorators and the original virtual declaration, but
                 # restore its uncached body. Dependencies enter public wrappers.
                 fn.body = copy.deepcopy(original_methods[cls.name][fn.name].body)
+        for cell_name in p['methods']:
+            if not p['emission_plan'].cells[cell_name].cached:
+                continue
+            original = original_methods[cls.name]['_f_' + cell_name]
+            callback = ast.FunctionDef(
+                name='_mx_frame_formula_' + cell_name,
+                args=copy.deepcopy(original.args),
+                body=ast.parse('return self._f_' + cell_name + '(' +
+                               ', '.join(a.arg for a in original.args.args[1:]) + ')').body,
+                decorator_list=[], returns=copy.deepcopy(original.returns),
+                type_comment=None)
+            cls.body.append(callback)
     return ast.unparse(ast.fix_missing_locations(tree)) + '\n', declarations
 
 
@@ -386,6 +427,9 @@ def add_owner_entries(source, manifest):
         source = source.replace(marker, marker + '\n        self._mx_synchronize_inputs()', 1)
     from .typed_memo_codegen import completed_cache_methods
     lines.extend(completed_cache_methods(manifest['cells']))
+    from .virtual_cache_codegen import entries as virtual_entries
+    virtual_methods, virtual_exports = virtual_entries(manifest)
+    lines.extend(virtual_methods)
     typed = {n: r for n, r in manifest['cells'].items()
              if r.get('storage') in {'typed_scalar', 'typed_epoch_slabs', 'typed_python_dict'}}
     lines += ['    def snapshot(self):', '        result = []', '        cdef Py_ssize_t i']
@@ -515,6 +559,7 @@ def add_owner_entries(source, manifest):
             entry[prefix_size:] = ['    ' + line for line in entry[prefix_size:]]
             entry += ['    finally:', '        owner._python_scope._original_receiver = saved_receiver']
         source += '\n' + '\n'.join(entry) + '\n'
+    source += '\n' + '\n'.join(virtual_exports) + '\n'
     return source
 
 
@@ -531,5 +576,7 @@ def _owner_signature(name, row, manifest):
 
 
 def owner_entry_declarations(manifest):
-    return '\n'.join(_owner_signature(n, row, manifest)
+    from .virtual_cache_codegen import signature
+    virtual = '\n'.join(signature(n, r) for n, r in manifest['cells'].items()) + '\n'
+    return virtual + '\n'.join(_owner_signature(n, row, manifest)
                      for n, row in manifest['cells'].items()) + '\n'
