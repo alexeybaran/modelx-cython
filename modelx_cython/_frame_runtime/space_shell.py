@@ -584,6 +584,17 @@ def add_owner_entries(source, manifest):
         entry = [signature + ':', '    cdef Kernel owner = kernel',
                  '    cdef _Command command']
         checked = bool(manifest.get('python_cells')) and not row['coverage']['python_free_proven']
+        # Original cached entries return a completed value before preparing
+        # uncached work. Keep that behavior at the checked owner boundary:
+        # rebinding cannot invalidate a completed Cell, and a later miss still
+        # runs the full live-input synchronization and rollback protocol.
+        # Reuse the existing object entry and its authoritative singleton slot;
+        # guards and diagnostic accounting retain their established paths.
+        if (row['cached'] and row.get('storage') == 'object_singleton'
+                and not row['params'] and not manifest.get('diagnostics')):
+            entry += ['    if owner._frame._scope_valid and owner._object_initialized and not owner._object_key_guard and not owner._clearing_objects:',
+                      f'        if owner._object_singleton_{name} is not _DICT_EMPTY and owner._object_singleton_{name} is not _DICT_BUSY:',
+                      f'            return owner._object_cell_{name}()']
         if checked:
             entry += ['    saved_receiver = getattr(owner._python_scope, "_original_receiver", None)',
                       '    owner._python_scope._original_receiver = receiver', '    try:']
