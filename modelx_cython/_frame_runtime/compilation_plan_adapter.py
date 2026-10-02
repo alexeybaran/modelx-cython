@@ -228,17 +228,30 @@ def from_compilation_plan(package_plan, exported, destination, *, projection, **
     from types import MappingProxyType
     from .modelx_frontend_native_mode import from_modelx
     space = package_plan.spaces[package_plan.model + '.' + projection]
+    declared_rows = options.get('row_references') or {}
+    # Original Space formulas can assign references that do not exist on the
+    # template. An explicit resolved row declaration supplies that receiver
+    # context without changing formula semantics or inventing a table reader.
+    # Other receiver operations remain excluded.
+    contextual = {name: replace(cell, receiver_requirements=tuple(reason
+        for reason in cell.receiver_requirements
+        if reason not in {'original receiver member: ' + reference for reference in declared_rows}))
+        for name, cell in space.cells.items()}
     # Portfolio traversal and other explicit receiver operations stay compiled
     # on the original public class. They are not free functions in a per-policy
     # calculation context, nor another model facade to reconstruct here.
-    retained = {name: cell for name, cell in space.cells.items()
+    retained = {name: cell for name, cell in contextual.items()
                 if not cell.receiver_requirements}
-    excluded = {name: list(cell.receiver_requirements) for name, cell in space.cells.items()
+    excluded = {name: list(cell.receiver_requirements) for name, cell in contextual.items()
                 if cell.receiver_requirements}
     if any(set(cell.dependencies) & excluded.keys() for cell in retained.values()):
         from .contracts import ContractError
         raise ContractError('Native context needs an original-receiver dependency bridge')
     model = resolved_resource_model(package_plan, exported)
+    if declared_rows:
+        records = options['policy_records']
+        model.spaces[tuple(projection.split('.'))].refs.update(
+            {name: records.iloc[0][column] for name, column in declared_rows.items()})
     model.spaces[tuple(projection.split('.'))].cells = {
         name: cell for name, cell in model.spaces[tuple(projection.split('.'))].cells.items()
         if name in retained}
