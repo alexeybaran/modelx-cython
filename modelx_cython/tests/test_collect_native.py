@@ -120,9 +120,34 @@ def test_other_output_shapes_keep_native_traversal(tmp_path):
         assert (tmp_path / 'receipt.json').exists()
 
 
-def test_nested_space_keeps_existing_route(tmp_path):
+def test_nested_space_uses_general_compiled_traversal(tmp_path):
     source = SOURCE.replace('self._mx_spaces = {}',
                             'self._mx_spaces = {"Child": object()}')
     output, declarations = transform(source, DECLARATIONS, tmp_path / 'nested.json')
-    assert output == source and declarations == DECLARATIONS
-    assert not (tmp_path / 'nested.json').exists()
+    assert output != source and declarations == DECLARATIONS
+    assert '_mx_root._mx_walk()' in output
+    assert '_mx_sys._mx_collect_detach' in output
+    assert (tmp_path / 'nested.json').exists()
+
+
+def test_cached_collection_preserves_public_cache_and_emits_miss_traversal(tmp_path):
+    old = "        return _mx_sys.collect_from_space(self, self.policy_ids, 'idx', (), ())"
+    body = """        key = tuple(self.policy_ids)
+        if key in self._mx_collect_cache:
+            return self._mx_collect_cache[key]
+        result = _mx_sys.collect_from_space(self, self.policy_ids, 'idx', (), ())
+        self._mx_collect_cache[key] = result
+        return result"""
+    source = SOURCE.replace(old, body)
+    assert source != SOURCE
+    output, declarations = transform(source, DECLARATIONS, tmp_path / 'cached.json')
+    cls = next(node for node in ast.parse(output).body if isinstance(node, ast.ClassDef))
+    methods = {node.name: node for node in cls.body if isinstance(node, ast.FunctionDef)}
+    wrapper = ast.unparse(methods['collect'])
+    assert 'self._mx_collect_cache[key] = result' in wrapper
+    assert 'result = self._mx_collect_execute(self.policy_ids)' in wrapper
+    traversal = ast.unparse(methods['_mx_collect_execute'])
+    assert 'for _mx_coordinate in _mx_coords:' in traversal
+    assert '_mx_apply(_mx_coordinate, *_mx_extra_args)' in traversal
+    assert 'finally:' in traversal and '_mx_collect_release' in traversal
+    assert 'cdef object _mx_collect_execute(_c_Projection self, object _mx_collect_domain)' in declarations

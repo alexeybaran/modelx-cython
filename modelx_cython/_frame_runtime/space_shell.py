@@ -378,6 +378,7 @@ if _mx_frame_scratch is not None:
     self._mx_frame_owner = _mx_frame_scratch''',
             '_mx_collect_release': '''if self._mx_frame_owner is not None:
     context[(template, "frame")] = self._mx_frame_owner
+self._mx_frame_owner = None
 self._mx_frame_expired = True''',
         }
         for name, code in snippets.items():

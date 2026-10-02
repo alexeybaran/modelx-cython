@@ -6,6 +6,7 @@ with the exported collector's detachment and accumulation contracts.
 """
 
 import ast
+import copy
 import json
 import re
 
@@ -116,9 +117,12 @@ def _traversal_contract(cls):
     collect = _method(cls, 'collect')
     if collect is None or _method(cls, '_f_collect_outputs') is None:
         return None
-    if len(collect.body) != 1 or not isinstance(collect.body[0], ast.Return):
+    calls = [node for statement in collect.body for node in ast.walk(statement)
+             if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+             and ast.unparse(node.func) == '_mx_sys.collect_from_space']
+    if len(calls) != 1:
         return None
-    call = collect.body[0].value
+    call = calls[0]
     if (not isinstance(call, ast.Call) or not isinstance(call.func, ast.Attribute)
             or ast.unparse(call.func) != '_mx_sys.collect_from_space'
             or len(call.args) != 5 or ast.unparse(call.args[0]) != 'self'
@@ -135,7 +139,7 @@ def _traversal_contract(cls):
     if (initializer is None or not any(
             isinstance(node, ast.Assign)
             and any(ast.unparse(target) == 'self._mx_spaces' for target in node.targets)
-            and isinstance(node.value, ast.Dict) and not node.value.keys
+            and isinstance(node.value, ast.Dict)
             for node in initializer.body)):
         return None
     return collect, call
@@ -163,14 +167,17 @@ for _mx_coordinate in _mx_coords:
     _mx_values = dict(zip(_mx_names, _mx_args))
     _mx_values[%r] = _mx_coordinate
     _mx_root = %s(self)
-    for _mx_space, _mx_template in zip(_mx_root._mx_walk(), self._mx_walk()):
-        _mx_space._mx_copy_refs(_mx_template, self)
-        self._mx_assign_params(_mx_space, **_mx_values)
-        _mx_space._mx_roots.append(_mx_root)
-        _mx_attach = getattr(_mx_space, '_mx_collect_attach', None)
-        if _mx_attach is not None:
-            _mx_attach(_mx_scratch, _mx_template)
     try:
+        for _mx_space, _mx_template in zip(_mx_root._mx_walk(), self._mx_walk()):
+            _mx_space._mx_copy_refs(_mx_template, self)
+            self._mx_assign_params(_mx_space, **_mx_values)
+            _mx_space._mx_roots.append(_mx_root)
+            _mx_attach = getattr(_mx_space, '_mx_collect_attach', None)
+            if _mx_attach is not None:
+                _mx_attach(_mx_scratch, _mx_template)
+        _mx_apply = getattr(_mx_root, '_mx_apply_formula', None)
+        if _mx_apply is not None:
+            _mx_apply(**_mx_values)
         _mx_outputs = _mx_root.collect_outputs()
         if type(_mx_outputs) is not dict or not _mx_outputs or set(_mx_outputs) - {'individual', 'sum'}:
             raise ValueError('collect_outputs must declare individual and/or sum')
@@ -215,6 +222,49 @@ return _mx_sys.CollectResult(_mx_final)
        call.args[2].value, cls.name)
 
 
+def _preserve_collect_cache(cls, collect, original_body, original_decorators, declarations):
+    """Keep the export's result-cache wrapper around its compiled miss traversal."""
+    if len(original_body) == 1 and isinstance(original_body[0], ast.Return):
+        return declarations
+    entry = copy.deepcopy(collect)
+    entry.name = '_mx_collect_execute'
+    entry.args.args.insert(1, ast.arg('_mx_collect_domain', ast.Name('object', ast.Load())))
+    if not (isinstance(entry.body[0], ast.Assign)
+            and ast.unparse(entry.body[0].targets[0]) == '_mx_domain'):
+        raise ValueError('Generated collection traversal has no domain binding')
+    entry.body[0].value = ast.Name('_mx_collect_domain', ast.Load())
+    entry.decorator_list = [ast.parse('@_mx_cy.cfunc\ndef entry(): pass').body[0].decorator_list[0]] + [
+        node for node in collect.decorator_list
+        if isinstance(node, ast.Call) and ast.unparse(node.func) == '_mx_cy.locals']
+    entry.returns = ast.Name('object', ast.Load())
+    parameters = collect.args.args[1:]
+    defaults_from = len(parameters) - len(collect.args.defaults)
+    types = {'_mx_cy.double': 'double', '_mx_cy.longlong': 'long long',
+             '_mx_cy.bint': 'bint', 'object': 'object', 'str': 'str'}
+    arguments = [cls.name + ' self', 'object _mx_collect_domain']
+    for index, argument in enumerate(parameters):
+        annotation = ast.unparse(argument.annotation) if argument.annotation else 'object'
+        arguments.append(types[annotation] + ' ' + argument.arg +
+                         ('=*' if index >= defaults_from else ''))
+    marker = next(line for line in declarations.splitlines()
+                  if line.startswith('cdef class ' + cls.name + '('))
+    declarations = declarations.replace(marker, marker + '\n    cdef object _mx_collect_execute('
+                                        + ', '.join(arguments) + ')', 1)
+    collect.body = original_body
+    collect.decorator_list = original_decorators
+    calls = [node for statement in collect.body for node in ast.walk(statement)
+             if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+             and ast.unparse(node.func) == '_mx_sys.collect_from_space']
+    if len(calls) != 1:
+        raise ValueError('Generated collection wrapper has ambiguous traversal')
+    domain = copy.deepcopy(calls[0].args[1])
+    calls[0].func = ast.Attribute(ast.Name('self', ast.Load()), entry.name, ast.Load())
+    calls[0].args = [domain, *(ast.Name(argument.arg, ast.Load()) for argument in parameters)]
+    calls[0].keywords = []
+    cls.body.append(entry)
+    return declarations
+
+
 def transform(source, declarations, receipt_path):
     tree = ast.parse(source)
     selected = []
@@ -224,21 +274,41 @@ def transform(source, declarations, receipt_path):
         traversal = _traversal_contract(cls)
         if traversal is None:
             continue
+        original_collect, original_call = traversal
+        original_body = copy.deepcopy(original_collect.body)
+        original_decorators = copy.deepcopy(original_collect.decorator_list)
+        if (original_collect.args.vararg or original_collect.args.kwarg
+                or original_collect.args.kwonlyargs):
+            continue
+        original_collect.body = [ast.Return(copy.deepcopy(original_call))]
         contract = _collect_contract(cls)
+        # Frame-backed collect_outputs owns its result in the frame. Keep that
+        # authoritative entry instead of publishing a competing class-cache slot.
+        output_entry = _method(cls, 'collect_outputs')
+        if output_entry is not None and any(
+                isinstance(node, ast.Attribute) and node.attr == '_mx_frame_owner'
+                for node in ast.walk(output_entry)):
+            contract = None
         if contract is None:
             collect, call = traversal
             if not re.search(r'^cdef class ' + re.escape(cls.name) + r'\(', declarations, re.M):
+                original_collect.body = original_body
                 continue
             collect.decorator_list.append(ast.parse(
                 '@_mx_cy.locals(_mx_root=' + cls.name + ')\ndef _mx_dummy(): pass'
             ).body[0].decorator_list[0])
             collect.body = ast.parse(_general_traversal(cls, call)).body
-            selected.append({'class': cls.name, 'route': 'mixed-native-traversal'})
+            declarations = _preserve_collect_cache(cls, collect, original_body,
+                                                   original_decorators, declarations)
+            selected.append({'class': cls.name, 'route': 'mixed-native-traversal',
+                             'result_cache_preserved': True})
             continue
         output_name, expression, leaf_type, domain, parameter, extra_args = contract
         if not re.search(r'^cdef class ' + re.escape(cls.name) + r'\(', declarations, re.M):
+            original_collect.body = original_body
             continue
         if not _method(cls, '_mx_collect_attach') or not _method(cls, '_mx_collect_release'):
+            original_collect.body = original_body
             continue
         output_formula = _method(cls, '_f_collect_outputs')
         docstring = (output_formula.body[:1]
@@ -278,19 +348,24 @@ _mx_first = True
 _mx_total = 0.0
 for _mx_coordinate in _mx_coords:
     _mx_root = %s(self)
-    _mx_root._mx_copy_refs(self, self)
-    self._mx_assign_params(_mx_root, _mx_coordinate, *_mx_extra_args)
-    _mx_root._mx_roots.append(_mx_root)
-    _mx_root._mx_collect_attach(_mx_scratch, self)
-    _mx_value = _mx_root._mx_collect_value()
-    _mx_root._v_collect_outputs = {'sum': {%r: _mx_value}}
-    _mx_root._has_collect_outputs = True
-    if _mx_first:
-        _mx_total = _mx_value
-        _mx_first = False
-    else:
-        _mx_total += _mx_value
-    _mx_root._mx_collect_release(_mx_scratch, self)
+    try:
+        _mx_root._mx_copy_refs(self, self)
+        self._mx_assign_params(_mx_root, _mx_coordinate, *_mx_extra_args)
+        _mx_root._mx_roots.append(_mx_root)
+        _mx_root._mx_collect_attach(_mx_scratch, self)
+        _mx_apply = getattr(_mx_root, '_mx_apply_formula', None)
+        if _mx_apply is not None:
+            _mx_apply(_mx_coordinate, *_mx_extra_args)
+        _mx_value = _mx_root._mx_collect_value()
+        _mx_root._v_collect_outputs = {'sum': {%r: _mx_value}}
+        _mx_root._has_collect_outputs = True
+        if _mx_first:
+            _mx_total = _mx_value
+            _mx_first = False
+        else:
+            _mx_total += _mx_value
+    finally:
+        _mx_root._mx_collect_release(_mx_scratch, self)
 return _mx_sys.CollectResult({'sum': _mx_sys.CollectResult({%r: _mx_total})})
 ''' % (domain_text, ast.unparse(extra_args), cls.name, fallback, fallback, fallback, cls.name,
        output_name, output_name)
@@ -302,6 +377,8 @@ return _mx_sys.CollectResult({'sum': _mx_sys.CollectResult({%r: _mx_total})})
         declarations = declarations.replace(
             marker, marker + '\n    cdef ' + _NUMERIC[leaf_type]
             + ' _mx_collect_value(' + cls.name + ' self) except? -1', 1)
+        declarations = _preserve_collect_cache(cls, old_collect, original_body,
+                                               original_decorators, declarations)
         selected.append({'class': cls.name, 'route': 'numeric-sum', 'output': output_name,
                          'type': leaf_type, 'parameter': parameter,
                          'expression': ast.unparse(expression)})

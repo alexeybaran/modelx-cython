@@ -4,8 +4,9 @@ import json
 from test_original_frame_shell import _run
 
 
-def test_nested_collection_reuses_descendant_owner_and_expires_transient_cache(tmp_path):
+def test_nested_collection_reuses_descendant_owner_and_expires_transient_cache(tmp_path, monkeypatch):
     import modelx as mx
+    monkeypatch.setenv("MX_CY_COLLECT_NATIVE", "1")
 
     model = mx.new_model('NestedCollectShell')
     policies = model.new_space(
@@ -28,6 +29,9 @@ def test_nested_collection_reuses_descendant_owner_and_expires_transient_cache(t
         's.collect()\n', encoding='utf-8')
     _run(tmp_path, ['-m', 'modelx_cython', str(tmp_path / 'model'), '--no-spec',
                     '--sample', str(tmp_path / 'sample.py')], 'build')
+    native = json.loads((tmp_path / 'model_cy/_mx_classes.collect-native.json').read_text())
+    assert native['selected'][0]['route'] == 'mixed-native-traversal'
+    assert native['selected'][0]['result_cache_preserved'] is True
     receipts = list((tmp_path / 'model_cy').rglob('*.frame-shell.json'))
     rows = [row for path in receipts for row in json.loads(path.read_text())['cells']]
     assert any(row['space'].endswith('._c_Child') and row['cell'] == 'fib'
