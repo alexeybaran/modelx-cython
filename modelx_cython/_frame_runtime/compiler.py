@@ -1080,7 +1080,8 @@ def build(spec, destination, *, diagnostics=False, python_cells=(),
                     raise ContractError('Uncached prepared policy domains need an original receiver entry')
                 manifest['public_space_binding'].update(
                     synthetic_policy_table=program['policy_table'],
-                    domain_entry='_f_' + domain.name)
+                    domain_entry='_mx_prepared_policy_domain',
+                    domain_formula_entry='_f_' + domain.name)
     # Normalize the final module header once, after every generation component.
     # Cython directives must precede imports to preserve inferred native types.
     lines = source.splitlines()

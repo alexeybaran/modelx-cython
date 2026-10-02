@@ -437,6 +437,15 @@ def transform_prepared(source, declarations, plans):
         marker = next(l for l in declarations.splitlines() if l.startswith('cdef class ' + cls.name + '('))
         declarations = declarations.replace(marker, marker +
             '\n    cdef object _mx_frame_owner\n    cdef object _mx_prepared_resources\n    cdef bint _mx_frame_expired\n    cdef bint _mx_frame_rebind', 1)
+        binding = p['manifest'].get('public_space_binding', {})
+        if 'domain_formula_entry' in binding:
+            # Original private formulas are cdef entries, not Python methods.
+            # Call through the typed original receiver, keeping formula
+            # execution in Cython and its public visibility unchanged.
+            cls.body.append(ast.parse('def ' + binding['domain_entry'] + '(self):\n'
+                '    return self.' + binding['domain_formula_entry'] + '()').body[0])
+        selected_receiver = (' and type(self._parent) is ' + cls.name
+                             if p['emission_plan'].parameters else '')
         for fn in cls.body:
             if not isinstance(fn, ast.FunctionDef) or fn.name not in p['methods']:
                 continue
@@ -454,7 +463,7 @@ def transform_prepared(source, declarations, plans):
             args = ', '.join(a.arg for a in fn.args.args[1:])
             entry = ast.parse(f'''if self._mx_frame_expired:
     raise RuntimeError("Collection policy cache has expired")
-if type(self) is {cls.name}:
+if type(self) is {cls.name}{selected_receiver}:
     global {alias}
     if self._mx_frame_owner is None or self._mx_frame_rebind:
         _mx_template = self
