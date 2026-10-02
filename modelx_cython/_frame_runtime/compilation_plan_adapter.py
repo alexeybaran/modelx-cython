@@ -74,6 +74,16 @@ def formula_module(space, *, globals_=None, filename='<compiled model>'):
     module.__dict__.update(globals_ or {})
     for name, cell in space.cells.items():
         bindings = cell_bindings(cell)
+        # Public reference aliases may differ from the class name carried by
+        # physical result metadata. Checked decoding needs that same canonical
+        # class, not a reconstructed Enum with equivalent integer members.
+        for typ in bindings.values():
+            if _native_category(typ) is not None:
+                existing = module.__dict__.get(typ.__name__, typ)
+                if existing is not typ:
+                    from .contracts import ContractError
+                    raise ContractError('Physical category name conflicts with a formula binding: ' + typ.__name__)
+                module.__dict__[typ.__name__] = typ
         arguments = {n: t for n, t in bindings.items() if n != 'return'}
         node = FormulaEmitter.native(cell, arguments, bindings['return'])
         formula = SourceFormula(node, arguments, bindings['return'],

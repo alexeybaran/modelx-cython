@@ -14,6 +14,18 @@ class _PlanCategory(IntEnum):
     ONE = 1
 
 
+@pytest.fixture(autouse=True)
+def isolated_export_imports():
+    """Each fixture exports a different package under the same test name."""
+    def clear():
+        for name in tuple(sys.modules):
+            if name in ('model', 'model_cy') or name.startswith(('model.', 'model_cy.')):
+                sys.modules.pop(name, None)
+    clear()
+    yield
+    clear()
+
+
 def test_shared_plan_drives_helper_object_and_uncached_bodies(tmp_path, monkeypatch):
     import modelx as mx
     from modelx_cython import cli, compilation_plan
