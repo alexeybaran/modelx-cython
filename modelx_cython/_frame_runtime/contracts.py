@@ -73,8 +73,13 @@ class KernelSpec:
     original_native_calls: tuple[str, ...] = ()
     # Original semantic cache shape; integral keys do not imply dense bounds.
     original_cache_kinds: dict[str, str] | None = None
+    # Resolved public signatures for prepared-graph ABI adapters. This is
+    # compile-time metadata, never imported by the generated package runtime.
+    public_emission_plan: object = field(default=None, repr=False, compare=False)
 
     def __post_init__(self):
+        if self.public_emission_plan is not None and self.original_space_shell:
+            raise ContractError('Prepared public adapters and original receiver specialization are distinct emission choices')
         if not isinstance(self.steps, int) or isinstance(self.steps, bool) or not 0 < self.steps <= 1000000:
             raise ContractError('steps must be an explicit positive bound <= 1,000,000')
         if self.allow_none is not None and any(type(v) is not bool for v in self.allow_none.values()):

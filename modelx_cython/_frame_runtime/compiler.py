@@ -1064,6 +1064,15 @@ def build(spec, destination, *, diagnostics=False, python_cells=(),
     if spec.original_space_shell:
         from .space_shell import add_owner_entries
         source = add_owner_entries(source, manifest)
+    if spec.public_emission_plan is not None:
+        from .public_entry_codegen import augment as add_public_entries
+        source = add_public_entries(source, manifest, spec.public_emission_plan)
+        if spec.model is not None:
+            target = spec.public_emission_plan.identity.split('.')[0] + '.' + spec.model['data_space']
+            references = [n for n, identity in spec.public_emission_plan.reference_targets if identity == target]
+            if len(references) != 1:
+                raise ContractError('Prepared public resources require one resolved Data reference')
+            manifest['public_space_binding'] = dict(data_reference=references[0])
     # Normalize the final module header once, after every generation component.
     # Cython directives must precede imports to preserve inferred native types.
     lines = source.splitlines()
@@ -1090,6 +1099,10 @@ def build(spec, destination, *, diagnostics=False, python_cells=(),
     pkg.mkdir()
     (pkg / '__init__.py').write_text('', encoding='utf-8', newline='\n')
     (pkg / '_kernel.pyx').write_text(source, encoding='utf-8', newline='\n')
+    if spec.public_emission_plan is not None:
+        from .public_entry_codegen import declarations as public_declarations
+        (pkg / '_kernel.pxd').write_text(
+            public_declarations(spec.public_emission_plan, manifest), encoding='utf-8', newline='\n')
     if python_source:
         (pkg / '_python.py').write_text(python_source, encoding='utf-8', newline='\n')
         manifest['python_source_sha256'] = hashlib.sha256(python_source.encode()).hexdigest()
@@ -1101,7 +1114,7 @@ def build(spec, destination, *, diagnostics=False, python_cells=(),
         for suffix in ('.py','.pxd'):
             (pkg / ('_table_lookup'+suffix)).write_text(Path(__file__).with_name('table_lookup'+suffix).read_text().replace('from .lookups ', 'from ._lookups '))
     manifest.update(package=package, artifact_signature=digest, build_flags=build_flags, source_sha256=hashlib.sha256(source.encode()).hexdigest(), python=sys.version, source_file=inspect.getsourcefile(spec.module))
-    if spec.model is not None:
+    if spec.model is not None and spec.public_emission_plan is None:
         from .package_codegen import add_public_package
         add_public_package(destination, manifest, spec.initial_tables, spec.model_name)
     extensions = []

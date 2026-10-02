@@ -171,6 +171,13 @@ def emit_private_kernels(plans, package_path, package_name, *, formula_transform
     from .compiler import build
     modules = []
     for cls_name, p in plans.items():
+        if p.get('prepared_spec') is not None:
+            spec = p['prepared_spec']
+            if spec.public_emission_plan is not p['emission_plan']:
+                raise ValueError('Prepared graph must use the same resolved public Space plan')
+            p['methods'] = {n: p['emission_plan'].cells[n].formula_node for n in spec.cells}
+            modules.extend(_assemble_private_kernel(spec, p, package_path, package_name, cls_name))
+            continue
         domains = {}
         info = p['info']
         name = '_mx_frame_' + cls_name.removeprefix('_c_')
@@ -249,29 +256,40 @@ def emit_private_kernels(plans, package_path, package_name, *, formula_transform
                           original_native_calls=tuple(sorted(native_calls)),
                           original_cache_kinds={n: p['emission_plan'].cells[n].cache_kind
                                                 for n in p['methods']})
-        artifact = folder / 'artifact'
-        build(spec, artifact, compile_native=False)
-        manifest_file = artifact / 'manifest.json'
-        manifest = json.loads(manifest_file.read_text(encoding='utf-8'))
-        if any(row['coverage']['detached_python'] for row in manifest['cells'].values()):
-            raise ValueError('Original-shell admission requires compiled Cython bodies')
-        private = manifest['package']
-        target = folder / private
-        shutil.move(str(artifact / private), str(target))
-        # Let original create_setup consume this extension in the same build.
-        kernel = target / '_kernel.pyx'
-        kernel.write_text('# distutils: language=c++\n' + kernel.read_text(encoding='utf-8'), encoding='utf-8')
+        modules.extend(_assemble_private_kernel(spec, p, package_path, package_name, cls_name))
+    return modules
+
+
+def _assemble_private_kernel(spec, plan, package_path, package_name, cls_name):
+    """Both receiver representations use the original package build planner."""
+    from .compiler import build
+    name = '_mx_frame_' + cls_name.removeprefix('_c_')
+    folder = package_path / name
+    folder.mkdir(exist_ok=True)
+    (folder / '__init__.py').write_text('', encoding='utf-8')
+    artifact = folder / 'artifact'
+    build(spec, artifact, compile_native=False)
+    manifest = json.loads((artifact / 'manifest.json').read_text(encoding='utf-8'))
+    if any(row['coverage']['detached_python'] for row in manifest['cells'].values()):
+        raise ValueError('Original-shell admission requires compiled Cython bodies')
+    private = manifest['package']
+    target = folder / private
+    shutil.move(str(artifact / private), str(target))
+    kernel = target / '_kernel.pyx'
+    kernel.write_text('# distutils: language=c++\n' + kernel.read_text(encoding='utf-8'), encoding='utf-8')
+    if spec.public_emission_plan is None:
         (target / '_kernel.pxd').write_text(owner_entry_declarations(manifest), encoding='utf-8')
-        manifest['source_sha256'] = hashlib.sha256(kernel.read_bytes()).hexdigest()
-        manifest['build_driver'] = 'original mx2cy package setup'
-        manifest['original_space_shell'] = True
-        manifest['package'] = package_name + '.' + name + '.' + private
-        (folder / 'manifest.json').write_text(json.dumps(manifest, indent=2), encoding='utf-8')
-        p['kernel_module'] = manifest['package'] + '._kernel'
-        p['manifest'] = manifest
-        modules.extend([Path(name) / private / '_lookups.py', Path(name) / private / '_kernel.pyx'])
-        if (target / '_table_lookup.py').exists():
-            modules.append(Path(name) / private / '_table_lookup.py')
+    manifest['source_sha256'] = hashlib.sha256(kernel.read_bytes()).hexdigest()
+    manifest['build_driver'] = 'original mx2cy package setup'
+    manifest['original_space_shell'] = spec.original_space_shell
+    manifest['public_space_classes'] = True
+    manifest['package'] = package_name + '.' + name + '.' + private
+    (folder / 'manifest.json').write_text(json.dumps(manifest, indent=2), encoding='utf-8')
+    plan['kernel_module'], plan['manifest'] = manifest['package'] + '._kernel', manifest
+    modules = [Path(name) / private / '_lookups.py', Path(name) / private / '_kernel.pyx']
+    for child in ('_table_lookup.py', '_space_formula.pyx'):
+        if (target / child).exists():
+            modules.append(Path(name) / private / child)
     return modules
 
 
@@ -279,6 +297,12 @@ def transform(source, declarations, plans, original_methods):
     """Shared frame caches with exact or original virtual formula dispatch."""
     if not plans:
         return source, declarations
+    prepared = {name: p for name, p in plans.items() if p['manifest'].get('public_entry_abi')}
+    if prepared:
+        source, declarations = transform_prepared(source, declarations, prepared)
+        plans = {name: p for name, p in plans.items() if name not in prepared}
+        if not plans:
+            return source, declarations
     tree = ast.parse(source)
     tree.body.insert(0, ast.parse(
         'from cython.cimports.cpython.pycapsule import PyCapsule_GetPointer as _mx_frame_capsule_ptr').body[0])
@@ -385,6 +409,69 @@ return {virtual}(self._mx_frame_owner.kernel, self.{callback}{', ' + body_args i
     return ast.unparse(ast.fix_missing_locations(tree)) + '\n', declarations
 
 
+def transform_prepared(source, declarations, plans):
+    """Original public classes enter the complete prepared dependency graph.
+
+    This adapter emits public wrappers only. Formula specialization for derived
+    receivers stays on the original class; exact receivers share the native
+    graph's cache. Input synchronization and full-domain compatibility remain
+    qualification gates before enabling this representation by default.
+    """
+    tree = ast.parse(source)
+    first = next(iter(plans.values()))
+    owner_module = first.get('owner_module', first['kernel_module'].split('.')[0] + '._mx_frame_owner')
+    tree.body[:0] = ast.parse(
+        'from cython.cimports.cpython.pycapsule import PyCapsule_GetPointer as _mx_frame_capsule_ptr\n'
+        f'from {owner_module} import prepared_owner as _mx_prepared_owner\n').body
+    capi = {'object': 'PyObject *', 'str': 'PyObject *', 'unicode': 'PyObject *',
+            'long long': 'PY_LONG_LONG', 'double': 'double', 'bint': 'int'}
+    for cls in tree.body:
+        if not isinstance(cls, ast.ClassDef) or cls.name not in plans:
+            continue
+        p = plans[cls.name]
+        fields = ('_mx_frame_owner', '_mx_prepared_resources', '_mx_frame_expired', '_mx_frame_rebind')
+        for field in fields:
+            annotation = (ast.Attribute(ast.Name('_mx_cy', ast.Load()), 'bint', ast.Load())
+                          if field in ('_mx_frame_expired', '_mx_frame_rebind') else ast.Name('object', ast.Load()))
+            cls.body.insert(0, ast.AnnAssign(ast.Name(field, ast.Store()), annotation, None, 1))
+        marker = next(l for l in declarations.splitlines() if l.startswith('cdef class ' + cls.name + '('))
+        declarations = declarations.replace(marker, marker +
+            '\n    cdef object _mx_frame_owner\n    cdef object _mx_prepared_resources\n    cdef bint _mx_frame_expired\n    cdef bint _mx_frame_rebind', 1)
+        for fn in cls.body:
+            if not isinstance(fn, ast.FunctionDef) or fn.name not in p['methods']:
+                continue
+            cell = p['emission_plan'].cells[fn.name]
+            alias = '_mx_frame_' + cls.name + '_' + fn.name
+            types = ['object', *(t for _, t in cell.public_arguments)]
+            result = cell.public_result
+            ctype = lambda t: 'object' if t == 'unicode' else t
+            exception = '' if result in ('object', 'str', 'unicode') else ' except? -1'
+            declarations += (f'\nctypedef {ctype(result)} (*{alias}_t)('
+                             + ', '.join(ctype(t) for t in types) + ')' + exception + '\n'
+                             + f'cdef {alias}_t {alias}\n')
+            capsule = (capi[result] + ('(' if result in ('object', 'str', 'unicode') else ' (')
+                       + ', '.join(capi[t] for t in types) + ')').encode()
+            args = ', '.join(a.arg for a in fn.args.args[1:])
+            entry = ast.parse(f'''if self._mx_frame_expired:
+    raise RuntimeError("Collection policy cache has expired")
+if type(self) is {cls.name}:
+    global {alias}
+    if self._mx_frame_owner is None or self._mx_frame_rebind:
+        _mx_template = self
+        while type(_mx_template._parent) is {cls.name}:
+            _mx_template = _mx_cy.cast({cls.name}, _mx_template._parent)
+        if _mx_template._mx_prepared_resources is None:
+            _mx_template._mx_prepared_resources = {{}}
+        self._mx_frame_owner = _mx_prepared_owner(self, {p['kernel_module']!r}, _mx_template._mx_prepared_resources, self._mx_frame_owner)
+        self._mx_frame_rebind = False
+    if {alias} == _mx_cy.NULL:
+        {alias} = _mx_cy.cast({alias}_t, _mx_frame_capsule_ptr(self._mx_frame_owner.entry_capsule({fn.name!r}), {capsule!r}))
+    return {alias}(self._mx_frame_owner.kernel{', ' + args if args else ''})''').body
+            template_type = ast.AnnAssign(ast.Name('_mx_template', ast.Store()), ast.Name(cls.name, ast.Load()), None, 1)
+            fn.body = [template_type] + entry + fn.body
+    return ast.unparse(ast.fix_missing_locations(tree)) + '\n', declarations
+
+
 def add_collect_hooks(source, plans):
     """Delegate lifetime to the existing exported collector and detachment rules."""
     tree = ast.parse(source)
@@ -403,6 +490,12 @@ if _mx_frame_scratch is not None:
 self._mx_frame_owner = None
 self._mx_frame_expired = True''',
         }
+        if plans[cls.name]['manifest'].get('public_entry_abi'):
+            snippets['_mx_collect_attach'] = '''_mx_frame_scratch = context.get((template, "frame"))
+self._mx_frame_expired = False
+self._mx_frame_rebind = True
+if _mx_frame_scratch is not None:
+    self._mx_frame_owner = _mx_frame_scratch'''
         for name, code in snippets.items():
             if name not in methods:
                 fn = ast.parse(f'def {name}(self, context, template):\n    pass').body[0]

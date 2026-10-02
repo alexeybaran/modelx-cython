@@ -394,7 +394,11 @@ def main_handler(args: argparse.Namespace, stdout: IO[str], stderr: IO[str]) -> 
                     support = model_path / '_mx_frame_support'
                     support.mkdir(exist_ok=True)
                     (support / '__init__.py').write_text('', encoding='utf-8')
-                    for name in ('python_calculator.py', 'contracts.py', 'enum_binding.py'):
+                    support_names = ['python_calculator.py', 'contracts.py', 'enum_binding.py']
+                    if any(p.get('prepared_spec') is not None for p in shell_plans.values()):
+                        support_names.extend(['prepared_space_inputs.py', 'input_codec.py',
+                                              'data_binding.py', 'lookups.py'])
+                    for name in support_names:
                         shutil.copy(pathlib.Path(__file__).parent / '_frame_runtime' / name,
                                     support / name)
             pxd = PXDGenerator(u.module_info)

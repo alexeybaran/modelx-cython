@@ -41,16 +41,25 @@ class SpaceFrameOwner:
     def prepare_checked(self):
         if self._scope is not None or not self._manifest.get('python_cells'):
             return
-        from ._mx_frame_support.python_calculator import PythonScope
+        if __package__.endswith('._frame_runtime'):
+            from .python_calculator import PythonScope
+        else:
+            from ._mx_frame_support.python_calculator import PythonScope
         scope = PythonScope(None, self._manifest, self.kernel,
                             program=_binding_program(self.module))
         self.kernel.set_python_scope(scope)
-        self.kernel.attach_python_scope_current()
+        if self._manifest.get('public_entry_abi'):
+            # First attachment, before any formula is executed. A prepared
+            # record needs physical decoding, not bind_original_inputs.
+            self.kernel.select_scope(0)
+        else:
+            self.kernel.attach_python_scope_current()
         self._scope = scope
 
     def entry_capsule(self, cell):
         """Bind the private typed ABI after the ordinary lazy kernel load."""
-        return self._extension.__pyx_capi__['_mx_shell_' + cell]
+        prefix = '_mx_public_' if self._manifest.get('public_entry_abi') else '_mx_shell_'
+        return self._extension.__pyx_capi__[prefix + cell]
 
     def virtual_capsule(self, cell):
         """Checked cache entry; a miss invokes the original virtual formula."""
@@ -70,6 +79,46 @@ class SpaceFrameOwner:
 
     def __reduce__(self):
         return _restore, (self.module, self.inputs, self.kernel.snapshot())
+
+
+def prepared_owner(receiver, module, resources, existing=None):
+    """Prepare resolved resources behind original classes, never a Space facade.
+
+    This is the initial-owner boundary. Replacement/synchronization is a
+    separate responsibility; this helper does not invalidate completed Cells.
+    The generated public-binding descriptor resolves aliases at compile time.
+    """
+    extension, manifest = _metadata(module)
+    binding = manifest['public_space_binding']
+    if module not in resources:
+        if __package__.endswith('._frame_runtime'):
+            from .prepared_space_inputs import PreparedSpaceInputs
+        else:
+            from ._mx_frame_support.prepared_space_inputs import PreparedSpaceInputs
+        plan = manifest['model']
+        data = getattr(receiver, binding['data_reference'])
+        tables = {name: getattr(data, name)() for name in plan['tables']}
+        references = {name: getattr(receiver, name) for name in plan['reference_defaults']}
+        lookups = import_module(module.rsplit('.', 1)[0] + '._lookups')
+        prepared = PreparedSpaceInputs(manifest, lookups, tables, references=references)
+        point = tables[plan['point_table']] if plan['point_table'] is not None else None
+        positions = {label: i for i, label in enumerate(point.index)} if point is not None else {0: 0}
+        resources[module] = prepared, positions
+    prepared, positions = resources[module]
+    plan = manifest['model']
+    label = getattr(receiver, plan['point_parameter']) if plan['point_parameter'] else 0
+    parameters = {name: getattr(receiver, name) for name in plan['parameter_defaults']}
+    record = prepared.record(positions[label], parameters=parameters)
+    if existing is None:
+        owner = SpaceFrameOwner(module, record)
+        owner.prepare_checked()
+    else:
+        if existing.module != module:
+            raise ValueError('Collection owner has a different generated layout')
+        owner = existing
+        owner.kernel.replace_records((record,))
+        owner.kernel.select_scope(0)
+    return owner
 
 
 def _restore(module, inputs, entries):

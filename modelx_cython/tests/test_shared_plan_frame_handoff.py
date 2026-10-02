@@ -4,6 +4,7 @@ import io
 import json
 import sys
 from enum import IntEnum
+from pathlib import Path
 
 import pandas as pd
 import pytest
@@ -180,6 +181,7 @@ def test_resolved_domain_does_not_execute_unsupported_expressions(source):
 
 
 def test_prepared_context_preserves_native_categories_behind_object_public_abi(tmp_path, monkeypatch):
+    from dataclasses import replace
     import modelx as mx
     from modelx_cython import cli, compilation_plan
     from modelx_cython._frame_runtime import lookup
@@ -191,17 +193,26 @@ def test_prepared_context_preserves_native_categories_behind_object_public_abi(t
     data.points_data = pd.DataFrame({'category': ['ONE', 'ZERO']},
                                    index=pd.Index([0, 1], name='policy_id'))
     data.new_cells('points', 'def points():\n return points_data\n')
-    p = m.new_space('Projection', formula='def Projection(policy_id):\n return {"refs": {}}\n')
+    domain = (0, 1)
+    p = m.new_space('Projection', formula='def Projection(policy_id):\n return {"refs": {}}\n',
+        refs={'policy_ids': domain}, collect_over={'policy_id': domain},
+        collect_outputs='lambda: {"sum": {"total": amount(category())}, "individual": {"record": report()}}')
     p.data, p.lookup, p.Kind = data, lookup, _PlanCategory
+    p.flags = {'fail': False, 'object_fail': False}
     p.new_cells('category', 'def category():\n return lookup.category(data.points(), policy_id, "category", Kind)\n')
     p.new_cells('amount', 'def amount(kind=0):\n return 3.5 if kind == Kind.ONE else -1.0\n')
     p.new_cells('report', 'def report():\n return {"category": category(), "amount": amount(category())}\n')
+    p.new_cells('failed_parent', 'def failed_parent(n):\n child = amount(Kind.ONE)\n if flags["fail"]: raise ValueError("numeric retry")\n return child + n\n')
+    p.new_cells('object_failure', 'def object_failure(n):\n if flags["object_fail"]: raise LookupError("object retry")\n return {"amount": amount(Kind.ONE)}\n')
+    p.new_cells('numeric_from_object', 'def numeric_from_object(n):\n return float(object_failure(n)["amount"])\n')
+    p.new_cells('caught_failure', 'def caught_failure(n):\n try:\n  return {"value": failed_parent(n)}\n except ValueError:\n  return {"value": -1.0}\n')
     m.export(tmp_path / 'model')
     m.close()
     (tmp_path / 'sample.py').write_text(
         'from model import mx_model\n'
         'for i in (0,1):\n p=mx_model.Projection[i]\n'
-        ' p.report();p.amount(p.Kind.ONE);p.amount(0)\n', encoding='utf-8')
+        ' p.report();p.amount(p.Kind.ONE);p.amount(0)\n'
+        ' for n in range(3): p.failed_parent(n);p.object_failure(n);p.numeric_from_object(n);p.caught_failure(n)\n', encoding='utf-8')
     captured = []
     original = compilation_plan.build_package_plan
     def capture(units):
@@ -229,6 +240,11 @@ def test_prepared_context_preserves_native_categories_behind_object_public_abi(t
     category._spec_ret_t = ''
     spec = from_compilation_plan(captured[0], sys.modules['model'].mx_model,
         tmp_path/'source', projection='Projection', point_table='points', steps=8)
+    plain = tmp_path/'plain_artifact'
+    build(spec, plain, compile_native=False)
+    plain_manifest = json.loads((plain/'manifest.json').read_text())
+    plain_source = (plain/plain_manifest['package']/'_kernel.pyx').read_text()
+    spec = replace(spec, public_emission_plan=space)
     artifact = tmp_path/'artifact'
     build(spec, artifact)
     manifest = json.loads((artifact/'manifest.json').read_text())
@@ -238,6 +254,145 @@ def test_prepared_context_preserves_native_categories_behind_object_public_abi(t
     assert space.cells['amount'].cache_kind == 'dictionary'
     assert manifest['cells']['amount']['storage'] == 'growing_numeric'
     assert manifest['original_cache_kinds']['amount'] == 'dictionary'
+    assert manifest['public_entry_abi']['category']['public_return'] == 'object'
+    assert manifest['public_entry_abi']['amount']['public_arguments'] == {'kind': 'object'}
+    assert manifest['public_entry_abi']['amount']['physical_arguments']['kind']['kind'] == 'enum'
+    adapted_source = (artifact/manifest['package']/'_kernel.pyx').read_text()
+    assert adapted_source.split('\ncdef double _mx_public_amount(', 1)[0].rstrip() == plain_source.rstrip()
+    # A real compiled caller uses the public ABI, not a cast to the incompatible
+    # private long-long signature. The calculation body/cache remains native.
+    (artifact/'public_boundary.pyx').write_text(
+        'from ' + manifest['package'] + '._kernel cimport _mx_public_category, _mx_public_amount, _mx_public_report, _mx_public_failed_parent, _mx_public_numeric_from_object, _mx_public_caught_failure\n'
+        'def category(object owner):\n return _mx_public_category(owner)\n'
+        'def amount(object owner, object kind):\n return _mx_public_amount(owner, kind)\n'
+        'def report(object owner):\n return _mx_public_report(owner)\n'
+        'def failed_parent(object owner, long long n):\n return _mx_public_failed_parent(owner, n)\n'
+        'def numeric_from_object(object owner, long long n):\n return _mx_public_numeric_from_object(owner, n)\n'
+        'def caught_failure(object owner, long long n):\n return _mx_public_caught_failure(owner, n)\n', encoding='utf-8')
+    (artifact/'public_boundary_setup.py').write_text(
+        "from setuptools import setup, Extension\nfrom Cython.Build import cythonize\n"
+        "setup(packages=[], ext_modules=cythonize([Extension('public_boundary', ['public_boundary.pyx'])], compiler_directives={'language_level':3}))\n", encoding='utf-8')
+    import subprocess
+    built = subprocess.run([sys.executable, 'public_boundary_setup.py', 'build_ext', '--inplace'],
+                           cwd=artifact, capture_output=True, text=True)
+    (artifact/'public_boundary_build.log').write_text(built.stdout + built.stderr, encoding='utf-8')
+    assert built.returncode == 0, built.stderr[-3000:]
+    monkeypatch.syspath_prepend(str(artifact))
+    import importlib
+    boundary = importlib.import_module('public_boundary')
+    from modelx_cython._frame_runtime.prepared_space_inputs import PreparedSpaceInputs
+    from modelx_cython._frame_runtime.python_calculator import PythonScope
+    native = importlib.import_module(manifest['package'] + '._kernel')
+    native_lookups = importlib.import_module(manifest['package'] + '._lookups')
+    resources = PreparedSpaceInputs(manifest, native_lookups, spec.initial_tables)
+    for i, category in enumerate((_PlanCategory.ONE, _PlanCategory.ZERO)):
+        owner = native.Kernel((resources.record(i),))
+        scope = PythonScope(artifact, manifest, owner)
+        owner.set_python_scope(scope)
+        owner.select_scope(0)
+        assert boundary.category(owner) is category
+        assert boundary.amount(owner, _PlanCategory.ONE) == boundary.amount(owner, 1) == 3.5
+        assert boundary.amount(owner, _PlanCategory.ZERO) == boundary.amount(owner, 0) == -1.0
+        assert boundary.report(owner) == {'category': category,
+            'amount': 3.5 if category is _PlanCategory.ONE else -1.0}
+        # These completed native entries are the public entries' cache too.
+        assert owner.call('amount', (1,)) == 3.5
+        with pytest.raises(ValueError, match='category'):
+            boundary.amount(owner, 9)
+        assert boundary.amount(owner, 1) == 3.5
+        live_flags = scope.namespace['flags']
+        live_flags['fail'] = True
+        for _ in range(2):
+            with pytest.raises(ValueError, match='numeric retry'):
+                boundary.failed_parent(owner, 1)
+        assert boundary.caught_failure(owner, 2) == {'value': -1.0}
+        assert boundary.amount(owner, 1) == 3.5  # Completed child survives.
+        live_flags['fail'] = False
+        assert boundary.failed_parent(owner, 1) == 4.5
+        live_flags['object_fail'] = True
+        for _ in range(2):
+            with pytest.raises(LookupError, match='object retry'):
+                boundary.numeric_from_object(owner, 1)
+        live_flags['object_fail'] = False
+        assert boundary.numeric_from_object(owner, 1) == 3.5
+    # Exercise the same public capsules behind original generated classes.
+    # This is a wiring fixture, not a claim that all original-shell contracts
+    # are qualified or that the standard command has switched its default.
+    import shutil
+    from modelx_cython._frame_runtime import space_owner
+    from modelx_cython._frame_runtime.space_shell import transform_prepared, add_collect_hooks
+    package = tmp_path/'model_cy'
+    source_file, declarations_file = package/'_mx_classes.py', package/'_mx_classes.pxd'
+    plans = {space.class_name: dict(kernel_module=manifest['package']+'._kernel',
+        owner_module='model_cy._mx_frame_owner', manifest=manifest,
+        methods={name: space.cells[name].formula_node for name in manifest['cells']},
+        emission_plan=space)}
+    public_source, public_declarations = transform_prepared(
+        source_file.read_text(), declarations_file.read_text(), plans)
+    public_source = add_collect_hooks(public_source, plans)
+    source_file.write_text(public_source, encoding='utf-8')
+    declarations_file.write_text(public_declarations, encoding='utf-8')
+    shutil.copyfile(space_owner.__file__, package/'_mx_frame_owner.py')
+    support = package/'_mx_frame_support'
+    support.mkdir()
+    (support/'__init__.py').write_text('', encoding='utf-8')
+    for name in ('contracts.py', 'python_calculator.py', 'enum_binding.py',
+                 'prepared_space_inputs.py', 'input_codec.py', 'data_binding.py', 'lookups.py'):
+        shutil.copyfile(Path(space_owner.__file__).with_name(name), support/name)
+    original_build = subprocess.run([sys.executable, 'setup.py', 'build_ext', '--inplace'],
+        cwd=tmp_path, capture_output=True, text=True)
+    (tmp_path/'original_prepared_build.log').write_text(original_build.stdout+original_build.stderr, encoding='utf-8')
+    assert original_build.returncode == 0, original_build.stderr[-5000:]
+    # Both extensions are in their existing package locations. No alternative
+    # CompiledModel or ConnectedModel participates in these original calls.
+    import os
+    environment = os.environ.copy()
+    environment['PYTHONPATH'] = os.pathsep.join((str(artifact), str(tmp_path),
+        str(Path(__file__).parent), environment.get('PYTHONPATH','')))
+    verify_source = '''
+import faulthandler
+faulthandler.dump_traceback_later(15)
+print('loading original package', flush=True)
+from model_cy import mx_model
+print('selecting original policy', flush=True)
+p = mx_model.Projection[0]
+print('entering original category', flush=True)
+assert p.category() is p.Kind.ONE
+print('entering original amount', flush=True)
+assert p.amount(p.Kind.ONE) == p.amount(1) == 3.5
+assert p.report() == {'category': p.Kind.ONE, 'amount': 3.5}
+q = mx_model.Projection[1]
+assert q.category() is q.Kind.ZERO
+assert q.report() == {'category': q.Kind.ZERO, 'amount': -1.0}
+assert p.category() is p.Kind.ONE and p.report()['amount'] == 3.5
+from model_cy._mx_frame_owner import SpaceFrameOwner
+created = []
+original_init = SpaceFrameOwner.__init__
+def count_owner(self, *args):
+    original_init(self, *args)
+    created.append(self)
+SpaceFrameOwner.__init__ = count_owner
+collected = mx_model.Projection.collect()
+assert collected.sum.total == 2.5
+assert collected.individual[0].record == {'category': p.Kind.ONE, 'amount': 3.5}
+assert collected.individual[1].record == {'category': p.Kind.ZERO, 'amount': -1.0}
+assert len(created) == 1
+assert mx_model.Projection.collect() is collected
+assert p.report()['amount'] == 3.5 and q.report()['amount'] == -1.0
+print('checking derived receiver', flush=True)
+class Derived(type(p)):
+    def amount(self, kind=0): return 12.0
+template = Derived(mx_model)
+template._mx_copy_refs(mx_model.Projection, mx_model.Projection)
+r = template[0]
+assert r.report() == {'category': r.Kind.ONE, 'amount': 12.0}
+print('original public classes enter prepared kernels; subclass dispatch preserved')
+'''
+    (tmp_path/'verify_original_prepared.py').write_text(verify_source, encoding='utf-8')
+    verified = subprocess.run([sys.executable, 'verify_original_prepared.py'], cwd=tmp_path,
+                              env=environment, capture_output=True, text=True, timeout=60)
+    (tmp_path/'original_prepared_verify.log').write_text(verified.stdout+verified.stderr, encoding='utf-8')
+    assert verified.returncode == 0, verified.stderr[-5000:]
     model = CompiledModel(artifact, spec.initial_tables)
     try:
         for policy, category in ((0, _PlanCategory.ONE), (1, _PlanCategory.ZERO)):
