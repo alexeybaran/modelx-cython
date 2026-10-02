@@ -19,6 +19,11 @@ def test_local_names_matching_unrelated_cells_remain_compiled(tmp_path):
 ''')
     model.export(tmp_path/'model')
     model.close()
+    classes = tmp_path/'model/_mx_classes.py'
+    text = classes.read_text()
+    text = text.replace('base.append(self.value(n))', 'base.append(self.value(n) + self.base())')
+    classes.write_text(text)
+    (tmp_path/'model/_mx_formula_sources.json').unlink(missing_ok=True)
     (tmp_path/'sample.py').write_text(
         'from model import mx_model\nmx_model.S.base();mx_model.S.results()\n',
         encoding='utf-8')
@@ -30,7 +35,7 @@ def test_local_names_matching_unrelated_cells_remain_compiled(tmp_path):
     (tmp_path/'verify.py').write_text('''
 from model_cy import mx_model
 result = mx_model.S.results()
-assert result == {'base': [0.0, 1.0, 2.0]}
+assert result == {'base': [10.0, 11.0, 12.0]}
 assert mx_model.S.results() is result
 assert mx_model.S.base() == 10.0
 ''', encoding='utf-8')

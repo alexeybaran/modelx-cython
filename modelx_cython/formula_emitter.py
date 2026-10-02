@@ -23,6 +23,7 @@ class FormulaEmitter:
                     return ast.copy_location(ast.Attribute(node.value, aliases[node.attr], node.ctx), node)
                 return self.generic_visit(node)
         node = BindReceiver().visit(node)
+        node = _separate_receiver_locals(node)
         node.name = cell.name
         if not node.args.args or node.args.args[0].arg != 'self':
             raise ValueError('Exported formula needs its original receiver')
@@ -32,6 +33,50 @@ class FormulaEmitter:
             arg.annotation = ast.Name(getattr(argument_types[arg.arg], '__name__', 'object'), ast.Load())
         node.returns = ast.Name(getattr(result_type, '__name__', 'object'), ast.Load())
         return ast.fix_missing_locations(_UnbindFormula().visit(node))
+
+
+def _separate_receiver_locals(node):
+    """Keep explicit receiver reads distinct from same-named local variables.
+
+    Receiver removal must not turn ``self.cell()`` into a call on a local
+    results list named ``cell``. Alpha-renaming those locals is solely a
+    reference-context operation; formula operations and public signatures stay
+    intact. Nested scopes retain their own shadowing and closure bindings.
+    """
+    import libcst as cst
+    from libcst.metadata import MetadataWrapper, ScopeProvider, ExpressionContextProvider
+    parameters = {a.arg for a in (*node.args.posonlyargs, *node.args.args, *node.args.kwonlyargs)}
+    references = {n.attr for n in ast.walk(node) if isinstance(n, ast.Attribute)
+                  and isinstance(n.value, ast.Name) and n.value.id == 'self'}
+    locals_ = {n.id for n in ast.walk(node) if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store)}
+    collisions = (references & locals_) - parameters
+    if not collisions:
+        return node
+    names = {n.id for n in ast.walk(node) if isinstance(n, ast.Name)} | parameters | references
+    replacements = {}
+    for name in sorted(collisions):
+        alias = '_mx_local_' + name
+        while alias in names:
+            alias += '_'
+        names.add(alias)
+        replacements[name] = alias
+    wrapper = MetadataWrapper(cst.parse_module(ast.unparse(node) + '\n'))
+    scopes = wrapper.resolve(ScopeProvider)
+    formula_scope = scopes[wrapper.module.body[0].body.body[0]]
+
+    class LocalBindings(cst.CSTTransformer):
+        METADATA_DEPENDENCIES = (ScopeProvider, ExpressionContextProvider)
+        def leave_Name(self, original, updated):
+            name = original.value
+            scope = self.get_metadata(ScopeProvider, original, None)
+            context = self.get_metadata(ExpressionContextProvider, original, None)
+            if name in replacements and scope is not None and context is not None:
+                assignments = scope[name]
+                if assignments and all(a.scope is formula_scope for a in assignments):
+                    return updated.with_changes(value=replacements[name])
+            return updated
+    transformed = wrapper.visit(LocalBindings())
+    return ast.parse(transformed.code).body[0]
 
 
 class SourceFormula:
