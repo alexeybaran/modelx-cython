@@ -240,6 +240,8 @@ def emit_private_kernels(plans, package_path, package_name, *, formula_transform
                           cache_domains=domains, original_space_shell=True, cython_objects=True,
                           original_receiver_type=info.fqname,
                           original_live_fields=tuple(n for n in p["inputs"] if n in info.refs),
+                          original_reference_types={n: info.refs[n].mx_class for n in p["inputs"]
+                                                    if n in info.refs and info.refs[n].mx_class},
                           cython_signatures=signatures, original_prepared_inputs=prepared,
                           original_helper_modules=helper_modules,
                           original_native_calls=tuple(sorted(native_calls)),

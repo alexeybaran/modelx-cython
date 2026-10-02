@@ -63,6 +63,8 @@ class KernelSpec:
     original_receiver_type: str | None = None
     # Fields and checked Cell callables have different Cython ABIs.
     original_live_fields: tuple[str, ...] = ()
+    # Resolved compiled Space references retain the public receiver ABI.
+    original_reference_types: dict[str, str] | None = None
     # Prepared original-shell resources: shared snapshots, not live public refs.
     # Values are existing compiled helper class paths or 'object'.
     original_prepared_inputs: dict[str, str] | None = None
@@ -84,6 +86,12 @@ class KernelSpec:
         if self.original_prepared_inputs and (not self.original_space_shell or
                 any(self.inputs.get(n) is not object for n in self.original_prepared_inputs)):
             raise ContractError('Prepared shell resources require original-shell object inputs')
+        if self.original_reference_types and (not self.original_space_shell or
+                any(self.inputs.get(n) is not object or n not in self.original_live_fields
+                    or not isinstance(tp, str) or len(tp.split('.')) < 2
+                    or any(not part.isidentifier() for part in tp.split('.'))
+                    for n, tp in self.original_reference_types.items())):
+            raise ContractError('Compiled reference types require resolved original live object fields')
         if self.original_helper_modules and not self.original_space_shell:
             raise ContractError('Compiled shell helpers require an original Space receiver')
         if self.original_native_calls and (not self.original_space_shell or

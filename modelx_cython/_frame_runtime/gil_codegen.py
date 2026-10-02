@@ -43,6 +43,9 @@ def augment(source, manifest, spec, forced_python=()):
         globals_.update(_global_names(spec.cells[name].__code__) - rows.keys() - vars(builtins).keys())
     prepared = spec.original_prepared_inputs or {}
     helper_modules = spec.original_helper_modules or {}
+    reference_types = spec.original_reference_types or {}
+    reference_aliases = {n: '_mx_reference_type_' + str(i)
+                         for i, n in enumerate(sorted(reference_types))}
     globals_.difference_update(helper_modules)
     resource_types = {n: '_mx_prepared_type_' + str(i) for i, (n, tp) in enumerate(prepared.items()) if tp != 'object'}
     numeric_bodies = set(bodies) - objects
@@ -174,6 +177,7 @@ def augment(source, manifest, spec, forced_python=()):
 
     def global_type(name):
         if name in resource_types: return resource_types[name]
+        if name in reference_aliases: return reference_aliases[name]
         return {int:'long long',float:'double',bool:'bint'}.get(spec.inputs.get(name),'object') if signatures else 'object'
     imports = []
     if spec.original_receiver_type:
@@ -185,6 +189,9 @@ def augment(source, manifest, spec, forced_python=()):
         imports.append('ctypedef ' + cls + ' _mx_original_space')
     for name, alias in resource_types.items():
         module, cls = prepared[name].rsplit('.', 1)
+        imports.append('from ' + module + ' cimport ' + cls + ' as ' + alias)
+    for name, alias in reference_aliases.items():
+        module, cls = reference_types[name].rsplit('.', 1)
         imports.append('from ' + module + ' cimport ' + cls + ' as ' + alias)
     imports.extend('cimport ' + module + ' as ' + name for name, module in helper_modules.items())
     if imports: source = '\n'.join(imports) + '\n' + source
@@ -219,6 +226,10 @@ def augment(source, manifest, spec, forced_python=()):
         hints=signatures.get(name,{'parameters':{},'return':'object'})
         signature=', '.join(CTYPES[hints['parameters'].get(p['name'],'object')]+' '+p['name'] for p in params)
         result_type=CTYPES[hints['return']]
+        if reference_types:
+            # Typed calls must still raise on None, rather than dereferencing it.
+            # This checks receiver access; it does not reinterpret the formula.
+            methods.append('    @cython.nonecheck(True)')
         methods.append(f'    cdef {result_type} _gil_formula_{name}(self'+(', '+signature if signature else '')+')'+(' except? -1' if name in numeric else '')+':')
         binder=Bind(spec.cells[name])
         for statement in node.body:
@@ -241,7 +252,7 @@ def augment(source, manifest, spec, forced_python=()):
                         f'        return self._gil_formula_{name}({", ".join(p["name"] for p in params)})', '']
     for name in sorted(live_inputs):
         result_type = global_type(name)
-        exception = ' except? -1' if result_type != 'object' else ''
+        exception = ' except? -1' if result_type in ('long long', 'double', 'bint') else ''
         methods += [f'    cdef inline {result_type} _mx_live_{name}(self){exception}:',
                     '        cdef _mx_original_space receiver = self._python_scope._original_receiver',
                     '        if receiver is not None:',
