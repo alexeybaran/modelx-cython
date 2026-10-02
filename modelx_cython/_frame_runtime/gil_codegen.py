@@ -137,7 +137,12 @@ def augment(source, manifest, spec, forced_python=()):
                 args = [self.visit(v) if isinstance(v, ast.AST) else ast.Constant(v) for v in bound.arguments.values()]
                 if name in curve_cells:
                     return ast.copy_location(ast.Call(ast.Attribute(ast.Name('self',ast.Load()), '_object_cell_'+name, ast.Load()), args, []), node)
-                if name in native_numeric:
+                if (name in native_numeric or
+                        (spec.original_space_shell and name in numeric and name not in objects)):
+                    # Checked numeric dependencies use their typed cached entry.
+                    # The scoped _invoke guard completes Cython object cleanup
+                    # before returning an error; no Python name/tuple adapter
+                    # and no additional formula or cache is introduced.
                     native_called.add(name)
                     return ast.copy_location(ast.Call(ast.Attribute(ast.Name('self',ast.Load()), '_native_cell_'+name, ast.Load()), args, []), node)
                 if name in numeric:
