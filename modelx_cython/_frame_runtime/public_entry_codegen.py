@@ -17,8 +17,8 @@ def needs_checked_scope(row, cell):
     Public object/category conversion is still checked even when its formula
     closure is native. This uses the existing transitive coverage verdict.
     """
-    return (not row['coverage']['python_free_proven']
-            or row['result']['kind'] in ('enum', 'table_key', 'object')
+    return (row.get('checked_namespace_required', not row['coverage']['python_free_proven'])
+            or row['result']['kind'] in ('enum', 'table_key')
             or any(public in ('object', 'str', 'unicode') and param['type']['kind'] != 'object'
                    for param, (_, public) in zip(row['params'], cell.public_arguments)))
 
@@ -46,6 +46,12 @@ def augment(source, manifest, space):
     from .cache_state_codegen import methods as cache_state_methods
     state_methods = completed_cache_methods(manifest['cells']) + cache_state_methods(manifest)
     source = source.rstrip() + '\n\n' + '\n'.join(state_methods) + '\n'
+    source += '''
+    def replace_native_record(self, tuple record):
+        self._require_idle()
+        self._records = (record,)
+        self._select_native_policy(0)
+'''
     numeric = [n for n in manifest['cells'] if n not in manifest.get('object_cells', ())]
     exports = []
     inventory = {}
@@ -90,6 +96,8 @@ def augment(source, manifest, space):
             body += ['    owner._invoke(&command)']
             result = 'command.value.' + field
         else:
+            if not checked:
+                body += ['    owner._initialize_object_cache()']
             body += ['    if owner._object_key_guard or owner._clearing_objects:',
                      '        raise RuntimeError("Cell calls during cache maintenance are unsupported")',
                      '    owner._frame._entry_depth += 1', '    try:',

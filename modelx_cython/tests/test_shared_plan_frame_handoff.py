@@ -200,6 +200,7 @@ def test_prepared_context_preserves_native_categories_behind_object_public_abi(t
     p.data, p.lookup, p.Kind = data, lookup, _PlanCategory
     p.flags = {'fail': False, 'object_fail': False}
     p.new_cells('shallow', 'def shallow(n):\n return 0.5 * n\n')
+    p.new_cells('native_report', 'def native_report():\n return {"value": shallow(2)}\n')
     p.new_cells('category', 'def category():\n return lookup.category(data.points(), policy_id, "category", Kind)\n')
     p.new_cells('amount', 'def amount(kind=0):\n return 3.5 if kind == Kind.ONE else -1.0\n')
     p.new_cells('report', 'def report():\n return {"category": category(), "amount": amount(category())}\n')
@@ -212,7 +213,7 @@ def test_prepared_context_preserves_native_categories_behind_object_public_abi(t
     (tmp_path / 'sample.py').write_text(
         'from model import mx_model\n'
         'for i in (0,1):\n p=mx_model.Projection[i]\n'
-        ' p.report();p.amount(p.Kind.ONE);p.amount(0)\n'
+        ' p.native_report();p.report();p.amount(p.Kind.ONE);p.amount(0)\n'
         ' for n in range(3): p.shallow(n);p.failed_parent(n);p.object_failure(n);p.numeric_from_object(n);p.caught_failure(n)\n', encoding='utf-8')
     captured = []
     original = compilation_plan.build_package_plan
@@ -368,6 +369,9 @@ from model_cy import mx_model
 print('selecting original policy', flush=True)
 p = mx_model.Projection[0]
 assert p.shallow(2) == 1.0
+assert p._mx_test_owner()._scope is None
+assert p.native_report() == {'value': 1.0}
+assert p.native_report() is p.native_report()
 assert p._mx_test_owner()._scope is None
 completed_before_objects = p._mx_test_owner().kernel.snapshot()
 assert completed_before_objects

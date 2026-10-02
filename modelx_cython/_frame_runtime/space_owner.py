@@ -149,8 +149,7 @@ def prepared_owner(receiver, module, resources, existing=None):
         if owner._scope is not None:
             owner._scope.bindings = (bindings,)
         owner._checked_bindings = (bindings,)
-        owner.kernel.replace_records((record,))
-        owner.kernel.select_native_scope(0)
+        owner.kernel.replace_native_record(record)
         if owner._scope is not None:
             owner.kernel.attach_python_scope_current()
         owner._prepared_record = record

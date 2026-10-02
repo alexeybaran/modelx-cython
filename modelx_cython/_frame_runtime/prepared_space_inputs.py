@@ -23,7 +23,15 @@ class PreparedSpaceInputs(NativeInputCodec):
     def __init__(self, manifest, lookups, tables, *, references=None):
         self.manifest = manifest
         self._lookups = lookups
+        self._record_layout()
         self.replace(tables, references=references)
+
+    def _record_layout(self):
+        infos = self.manifest['inputs']
+        locations = {name: i for i, name in enumerate(infos)}
+        self._parameter_locations = {binding['name']: (name, locations[name], infos[name])
+            for name, binding in self.manifest['model']['bindings'].items()
+            if binding['kind'] == 'parameter'}
 
     def replace(self, tables, *, references=None):
         """Prepare a complete replacement before publishing any resource."""
@@ -49,18 +57,16 @@ class PreparedSpaceInputs(NativeInputCodec):
         record = self._records[position]
         if not parameters:
             return record
-        bindings = self.manifest['model']['bindings']
-        declared = {binding['name']: name for name, binding in bindings.items()
-                    if binding['kind'] == 'parameter'}
+        declared = self._parameter_locations
         if set(parameters) - declared.keys():
             raise ContractError('Unknown dynamic Space parameter')
-        infos = self.manifest['inputs']
-        raw = dict(zip(infos, record))
+        raw = None
         updated = list(record)
-        locations = {name: i for i, name in enumerate(infos)}
         for parameter, value in parameters.items():
-            name = declared[parameter]
-            updated[locations[name]] = self._scalar_value(name, infos[name], value, raw)
+            name, position, info = declared[parameter]
+            if info['kind'] == 'table_key' and raw is None:
+                raw = dict(zip(self.manifest['inputs'], record))
+            updated[position] = self._scalar_value(name, info, value, raw)
         return tuple(updated)
 
     def __getstate__(self):
@@ -72,3 +78,4 @@ class PreparedSpaceInputs(NativeInputCodec):
         from importlib import import_module
         self.manifest, module, self._records, self._packed = state
         self._lookups = import_module(module)
+        self._record_layout()

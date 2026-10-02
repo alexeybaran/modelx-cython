@@ -149,7 +149,7 @@ def augment(source, manifest):
                  '\n'.join('    ' + line for line in init[1:]) +
                  '\n            self._object_initialized = True')
         source = source.replace('        self._frame._python_scope = <PyObject*>scope',
-                                '        self._frame._python_scope = <PyObject*>scope\n' + setup +
+                                '        self._frame._python_scope = <PyObject*>scope\n        self._initialize_object_cache()' +
                                 '\n' + '\n'.join(bind), 1)
     else:
         source = source.replace('    def __init__(self, records):\n',
@@ -157,6 +157,11 @@ def augment(source, manifest):
                                 '\n        self._object_initialized = True\n', 1)
         source = source.replace('        self._frame._python_scope = <PyObject*>scope',
                                 '        self._frame._python_scope = <PyObject*>scope\n' + '\n'.join(bind), 1)
+    setup = ('        if not self._object_initialized:\n' +
+             '\n'.join('    ' + line for line in init[1:]) +
+             '\n            self._object_initialized = True')
+    source += '\n    def initialize_compiled_objects(self):\n        self._require_idle()\n        self._initialize_object_cache()\n'
+    source += '\n    cdef void _initialize_object_cache(self) except *:\n' + setup + '\n'
     source = source.replace('    cdef void _advance(self) except *:\n',
                             '    cdef void _advance(self) except *:\n        self._clear_object_cache()\n', 1)
     source = source.replace('    cdef void _require_idle(self) except *:\n',

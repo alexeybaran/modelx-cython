@@ -41,6 +41,7 @@ def test_reference_tables_memoryviews_and_checked_scope_bindings(monkeypatch, sy
             self._scope = None
             self.selected = None
             self.kernel = SimpleNamespace(replace_records=self.replace_records,
+                                          replace_native_record=self.replace_native_record,
                                           select_native_scope=self.select_scope,
                                           attach_python_scope_current=lambda: None)
         def prepare_checked(self):
@@ -49,6 +50,9 @@ def test_reference_tables_memoryviews_and_checked_scope_bindings(monkeypatch, sy
             self.record = records[0]
         def select_scope(self, index):
             self.selected = index
+        def replace_native_record(self, record):
+            self.replace_records((record,))
+            self.select_scope(0)
     monkeypatch.setattr(space_owner, 'SpaceFrameOwner', Owner)
     data = SimpleNamespace(points=lambda:points, rates=rates, ages=lambda:memoryview(array))
     receiver = SimpleNamespace(data_alias=data, point_id=10, _f_domain=lambda:(10,11))

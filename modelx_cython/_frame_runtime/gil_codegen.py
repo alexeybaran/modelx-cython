@@ -24,6 +24,21 @@ def augment(source, manifest, spec, forced_python=()):
     numeric = {n for n,h in signatures.items() if h['return'] in ('int','float','bool')}
     native_numeric = {n for n in numeric
                       if rows[n].get('calculator') == 'native'}
+    # The physical native signature is already resolved by the shared plan.
+    # It need not also appear in the optional checked-signature overrides.
+    # Use its typed, guarded entry from object-owning Cython bodies instead of
+    # a name/tuple call through the Python namespace.
+    for name, row in rows.items():
+        if row.get('calculator') != 'native' or row['result']['kind'] not in ('float', 'int', 'bool'):
+            continue
+        kinds = {'float': 'float', 'int': 'int', 'bool': 'bool',
+                 'enum': 'int', 'table_key': 'int'}
+        if any(p['type']['kind'] not in kinds for p in row['params']):
+            continue
+        signatures.setdefault(name, {'return': kinds[row['result']['kind']],
+            'parameters': {p['name']: kinds[p['type']['kind']] for p in row['params']}})
+        numeric.add(name)
+        native_numeric.add(name)
     native_called = set()
     curve_cells={n for n,h in signatures.items() if h['return']=='curve'}
     bodies, globals_, tables_ = {}, set(), set()
@@ -227,6 +242,7 @@ def augment(source, manifest, spec, forced_python=()):
                    + assignments + '\n'
                    '        self._frame._scope_valid = True\n')
     methods=[]
+    namespace_local = {}
     if typed_receiver:
         methods += ['    property original_receiver:',
                     '        def __get__(self):',
@@ -244,11 +260,17 @@ def augment(source, manifest, spec, forced_python=()):
             methods.append('    @cython.nonecheck(True)')
         methods.append(f'    cdef {result_type} _gil_formula_{name}(self'+(', '+signature if signature else '')+')'+(' except? -1' if name in numeric else '')+':')
         binder=Bind(spec.cells[name])
+        emitted = []
         for statement in node.body:
             if isinstance(statement,ast.Expr) and isinstance(statement.value,ast.Constant) and isinstance(statement.value.value,str):continue
             transformed = binder.visit(copy.deepcopy(statement))
             if transformed is not None:
-                methods.extend(textwrap.indent(ast.unparse(ast.fix_missing_locations(transformed)), '        ').splitlines())
+                emitted.extend(textwrap.indent(ast.unparse(ast.fix_missing_locations(transformed)), '        ').splitlines())
+        methods.extend(emitted)
+        rendered = '\n'.join(emitted)
+        namespace_local[name] = not any(token in rendered for token in
+            ('self._python_scope', 'self._gil_global_', 'self._gil_raw_table_',
+             'self._gil_table_', 'self._gil_field_', 'self.call(', 'self._mx_live_'))
         if name in numeric and not spec.original_space_shell:
             methods.append('        raise ValueError("Numeric Cell formula fell through without a result")')
         methods.append('')
@@ -308,6 +330,21 @@ def augment(source, manifest, spec, forced_python=()):
             methods.append(f"        return _cell_{name}({frame_pointer}"
                            + (', ' + args if args else '') + ')')
         methods.append('')
+    # Object ownership does not itself require decoding a whole policy
+    # namespace. Literal mixed outputs with typed dependencies stay checked,
+    # but can execute against the already selected native record.
+    namespace_free = {n for n, row in rows.items() if row.get('calculator') == 'native'}
+    namespace_free.update(n for n, independent in namespace_local.items()
+        if independent and rows[n]['result']['kind'] not in ('enum', 'table_key')
+        and all(p['type']['kind'] not in ('enum', 'table_key') for p in rows[n]['params']))
+    changed = True
+    while changed:
+        previous = set(namespace_free)
+        namespace_free = {n for n in namespace_free
+                          if set(rows[n].get('dependencies', ())) <= namespace_free}
+        changed = namespace_free != previous
+    for name, row in rows.items():
+        row['checked_namespace_required'] = name not in namespace_free
     manifest['curve_result_conversion'] = 'once on memo miss; one owned native Curve value'
     manifest['numeric_array_builders'] = 0
     manifest['numeric_buffer_backend'] = 'standard Cython declarations and memoryviews'
