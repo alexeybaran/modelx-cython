@@ -109,6 +109,11 @@ def _streaming_accumulator(plan):
         if entry['kind'] == 'map':
             lines += [f'        if keys_by_source[{entry["source"]!r}] != self._keys_{i}:',
                       '            return False']
+    lines += ['        return True', '\n    def identical(self, dict keys_by_source):']
+    for i, entry in enumerate(plan['entries']):
+        if entry['kind'] == 'map':
+            lines += [f'        if keys_by_source[{entry["source"]!r}] is not self._keys_{i}:',
+                      '            return False']
     lines += ['        return True',
               '\n    cdef void _append(self, Kernel owner) except *:',
               '        cdef Py_ssize_t j', '        cdef double value',

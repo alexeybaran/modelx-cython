@@ -6,7 +6,7 @@ Unsupported stores and misses continue through their normal checked entry.
 """
 
 
-def completed_dense_hit(row, manifest, *, owner, arguments, indent):
+def completed_dense_hit(row, manifest, *, owner, arguments, indent, native_scope=False):
     if (manifest.get('diagnostics') or not row['cached'] or row['hashed']
             or row.get('storage') is not None or not row['slots']
             or row['result']['kind'] not in ('float', 'int', 'bool')
@@ -19,7 +19,10 @@ def completed_dense_hit(row, manifest, *, owner, arguments, indent):
     if not manifest.get('python_cells'):
         return []
     prefix = ' ' * indent
-    valid = [owner + '._frame._scope_valid']
+    # Prepared public numeric entries already distinguish selected native state
+    # from an attached Python namespace. A completed value needs the former;
+    # it must not require namespace preparation merely to read that cache.
+    valid = [owner + ('._frame._epoch != 0' if native_scope else '._frame._scope_valid')]
     if manifest.get('object_cells'):
         valid += ['not ' + owner + '._object_key_guard',
                   'not ' + owner + '._clearing_objects']

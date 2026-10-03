@@ -52,6 +52,11 @@ def checked_report() -> object:
     return {'amount': checked_amount(0)}
 
 
+@cell(cached=False)
+def uncached_report(n: int) -> object:
+    return {'amount': amount(n)}
+
+
 @pytest.mark.parametrize('steps', [4, 40])
 def test_prefix_overflow_sharing_restore_and_failed_parent(tmp_path, monkeypatch, steps):
     module = ModuleType('native_prefix_' + str(steps))
@@ -143,3 +148,44 @@ def test_prepared_checked_numeric_body_stays_connected(tmp_path, monkeypatch):
     with pytest.raises(ValueError,match='checked retry'):
         bad.call('checked_report',())
     assert bad.call('amount',(0,)) == 0.255
+
+
+def test_completed_prepared_read_needs_native_selection_not_python_namespace(tmp_path, monkeypatch):
+    # The generic compatibility call intentionally requires a Python scope.
+    # Exercise the typed public ABI used by the original generated classes.
+    from modelx_cython._frame_runtime import public_entry_codegen
+    emit = public_entry_codegen.augment
+    def with_test_boundary(source, manifest, space):
+        return emit(source, manifest, space) + (
+            '\ndef selected_report(object owner, long long n):\n'
+            '    return _mx_public_uncached_report(owner, n)\n')
+    monkeypatch.setattr(public_entry_codegen, 'augment', with_test_boundary)
+    module = ModuleType('prepared_selected_native_cache')
+    module.__file__ = __file__
+    for function in (amount, uncached_report):
+        setattr(module, function.__name__, function)
+    plan = SimpleNamespace(cells={
+        'amount': SimpleNamespace(identity='amount',public_result='double',
+                                 public_arguments=(('n','long long'),)),
+        'uncached_report': SimpleNamespace(identity='uncached_report',public_result='object',
+                                          public_arguments=(('n','long long'),))})
+    spec = KernelSpec(module=module,inputs={'offset':float},outputs={},steps=4,
+        length='0',cell_outputs=('uncached_report',),cython_objects=True,
+        cache_domains={'amount': {'n': (0, 4)}},public_emission_plan=plan)
+    artifact = tmp_path/'artifact'
+    build(spec,artifact)
+    manifest = json.loads((artifact/'manifest.json').read_text())
+    source = next(artifact.rglob('_kernel.pyx')).read_text()
+    entry = source.split(' _native_cell_amount(',1)[1].split('\n    cdef ',1)[0]
+    assert 'self._frame._epoch != 0' in entry
+    monkeypatch.syspath_prepend(str(artifact))
+    native = importlib.import_module(manifest['package']+'._kernel')
+    owner = native.Kernel(((-1.0,), (2.0,)))
+    owner.select_native_scope(0)
+    assert native.selected_report(owner, 0) == {'amount': -1.0}
+    assert native.selected_report(owner, 0) == {'amount': -1.0}
+    with pytest.raises(IndexError):
+        native.selected_report(owner, 4)
+    owner.select_native_scope(1)
+    assert native.selected_report(owner, 0) == {'amount': 2.0}
+    assert native.selected_report(owner, 0) == {'amount': 2.0}

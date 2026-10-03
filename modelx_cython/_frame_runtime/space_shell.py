@@ -520,16 +520,17 @@ if _mx_frame_scratch is not None:
                 hook = ast.parse(f'''def _mx_collect_map(self, accumulator):
     from {owner_module} import prepared_owner
     keys = {keys}
-    for values in keys.values():
-        if type(values) is not tuple:
-            return None
-        for key in values:
-            if type(key) is not int or not (-(1 << 63) <= key < (1 << 63)):
+    if accumulator is None or not accumulator.identical(keys):
+        for values in keys.values():
+            if type(values) is not tuple:
                 return None
-        if len(set(values)) != len(values):
+            for key in values:
+                if type(key) is not int or not (-(1 << 63) <= key < (1 << 63)):
+                    return None
+            if len(set(values)) != len(values):
+                return None
+        if accumulator is not None and not accumulator.matches(keys):
             return None
-    if accumulator is not None and not accumulator.matches(keys):
-        return None
     _mx_template: {cls.name} = self
     while type(_mx_template._parent) is {cls.name}:
         _mx_template = _mx_cy.cast({cls.name}, _mx_template._parent)

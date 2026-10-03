@@ -305,7 +305,8 @@ def augment(source, manifest, spec, forced_python=()):
                        + (', ' + typed if typed else '') + ') except? -1:')
         from .completed_cache_codegen import completed_dense_hit
         methods.extend(completed_dense_hit(rows[name], manifest, owner='self',
-                       arguments=[p['name'] for p in params], indent=8))
+                       arguments=[p['name'] for p in params], indent=8,
+                       native_scope=spec.public_emission_plan is not None))
         if spec.original_space_shell:
             methods.append('        self._mx_synchronize_inputs()')
         if manifest.get('native_error_abi', '').endswith('guard') or manifest.get('native_error_abi') == 'reentrant_guard_with_checked_python_miss':

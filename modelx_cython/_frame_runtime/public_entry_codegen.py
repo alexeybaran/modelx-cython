@@ -57,7 +57,31 @@ def augment(source, manifest, space):
             and declaration.get('storage') == 'object_singleton'):
         # Call the authoritative compiled declaration. Numeric dependencies
         # retain their checked object/native bridges and cache entries.
-        source += '''
+        fold = manifest.get('compiled_collect_map')
+        if (manifest.get('streaming_collect_map') and fold
+                and all(e['kind'] == 'scalar' for e in fold['entries'])):
+            # Scalar and map collection share the same typed fold. The public
+            # declaration still has its authoritative object body/cache; this
+            # transient fold avoids materializing its literal dict per policy.
+            source += '''
+    def collect_scalar_records(self, tuple records, str output):
+        cdef Py_ssize_t position
+        cdef _CollectMapAccumulator accumulator
+        self._require_idle()
+        if not records:
+            raise ValueError("Collection needs a nonempty policy domain")
+        self._records = records
+        accumulator = _CollectMapAccumulator({})
+        try:
+            for position in range(len(records)):
+                self._select_native_policy(position)
+                accumulator._append(self)
+            return accumulator.finish()['sum'][output]
+        finally:
+            self._reset_item_cache()
+'''
+        else:
+            source += '''
     def collect_scalar_records(self, tuple records, str output):
         cdef Py_ssize_t position
         cdef double value, total = 0.0
