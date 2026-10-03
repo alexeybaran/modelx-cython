@@ -37,6 +37,21 @@ def report() -> object:
     return {'amount': amount(0)}
 
 
+@cell
+def checked_amount(n: int) -> float:
+    # Force a Python-semantic, Cython-compiled numeric body instead of the
+    # pure-native arithmetic path. Its callers still use checked typed entries.
+    value = float(str(round(amount(n), 2)))
+    if fail:
+        raise ValueError('checked retry')
+    return value
+
+
+@cell
+def checked_report() -> object:
+    return {'amount': checked_amount(0)}
+
+
 @pytest.mark.parametrize('steps', [4, 40])
 def test_prefix_overflow_sharing_restore_and_failed_parent(tmp_path, monkeypatch, steps):
     module = ModuleType('native_prefix_' + str(steps))
@@ -86,3 +101,42 @@ def test_prefix_overflow_sharing_restore_and_failed_parent(tmp_path, monkeypatch
         bad.call('parent', (0,))
     assert bad.call('amount', (0,)) == 0.25
     assert not any(key == ('parent', 'numeric') and values for key, values in bad.snapshot())
+
+
+def test_prepared_checked_numeric_body_stays_connected(tmp_path, monkeypatch):
+    module = ModuleType('prepared_checked_numeric')
+    module.__file__ = __file__
+    for function in (amount, checked_amount, checked_report):
+        setattr(module, function.__name__, function)
+    plan = SimpleNamespace(cells={name: SimpleNamespace(identity=name,
+        public_result='double', public_arguments=(('n','long long'),))
+        for name in ('amount','checked_amount')})
+    plan.cells['checked_report'] = SimpleNamespace(identity='checked_report',
+        public_result='object',public_arguments=())
+    spec = KernelSpec(module=module, inputs={'offset': float, 'fail': bool},
+        outputs={},steps=4,length='0',cell_outputs=('checked_report',),
+        cython_objects=True,public_emission_plan=plan)
+    artifact = tmp_path/'artifact'
+    build(spec,artifact)
+    manifest = json.loads((artifact/'manifest.json').read_text())
+    assert 'checked_amount' in manifest['original_checked_numeric_bridges']
+    monkeypatch.syspath_prepend(str(artifact))
+    native = importlib.import_module(manifest['package']+'._kernel')
+    from modelx_cython._frame_runtime.python_calculator import PythonScope
+    owner = native.Kernel(((0.255,False),))
+    scope = PythonScope(artifact,manifest,owner)
+    owner.set_python_scope(scope)
+    owner.select_scope(0)
+    def forbidden(*args):
+        raise AssertionError('Compiled numeric body crossed Python calculate')
+    scope.calculate = forbidden
+    assert owner.call('checked_report',()) == {'amount': 0.26}
+    assert owner.call('checked_amount',(0,)) == 0.26
+    bad = native.Kernel(((0.255,True),))
+    failed_scope = PythonScope(artifact,manifest,bad)
+    bad.set_python_scope(failed_scope)
+    bad.select_scope(0)
+    failed_scope.calculate = forbidden
+    with pytest.raises(ValueError,match='checked retry'):
+        bad.call('checked_report',())
+    assert bad.call('amount',(0,)) == 0.255

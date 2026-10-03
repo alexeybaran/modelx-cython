@@ -29,10 +29,11 @@ def augment(source, manifest, spec, forced_python=()):
     # Use its typed, guarded entry from object-owning Cython bodies instead of
     # a name/tuple call through the Python namespace.
     for name, row in rows.items():
-        if row.get('calculator') != 'native' or row['result']['kind'] not in ('float', 'int', 'bool'):
+        if (row.get('calculator') != 'native' and name not in manifest.get('original_checked_numeric_bridges', ())
+                or row['result']['kind'] not in ('float', 'int', 'bool')):
             continue
         kinds = {'float': 'float', 'int': 'int', 'bool': 'bool',
-                 'enum': 'int', 'table_key': 'int'}
+                 'enum': 'int', 'table_key': 'int', 'object': 'object'}
         if any(p['type']['kind'] not in kinds for p in row['params']):
             continue
         signatures.setdefault(name, {'return': kinds[row['result']['kind']],
@@ -158,7 +159,8 @@ def augment(source, manifest, spec, forced_python=()):
                 if name in curve_cells:
                     return ast.copy_location(ast.Call(ast.Attribute(ast.Name('self',ast.Load()), '_object_cell_'+name, ast.Load()), args, []), node)
                 if (name in native_numeric or
-                        (spec.original_space_shell and name in numeric and name not in objects)):
+                        ((spec.original_space_shell or spec.public_emission_plan is not None)
+                         and name in numeric and name not in objects)):
                     # Checked numeric dependencies use their typed cached entry.
                     # The scoped _invoke guard completes Cython object cleanup
                     # before returning an error; no Python name/tuple adapter
@@ -447,8 +449,10 @@ def augment(source, manifest, spec, forced_python=()):
                     f'    cdef {result} _mx_value']
         if manifest['diagnostics']:
             bridges.append(f'    _mx_scope.calls[{name!r}] += 1')
-        bridges += [f'    _mx_value = _mx_owner._gil_formula_{name}({call})',
-                    '    _mx_owner._mx_synchronize_inputs()', '    return _mx_value', '']
+        bridges += [f'    _mx_value = _mx_owner._gil_formula_{name}({call})']
+        if spec.original_space_shell:
+            bridges.append('    _mx_owner._mx_synchronize_inputs()')
+        bridges += ['    return _mx_value', '']
     marker = '@cython.final\ncdef class Kernel:\n' if '@cython.final\ncdef class Kernel:\n' in source else 'cdef class Kernel:\n'
     if source.count(marker) != 1: raise ContractError('Expected one cache owner declaration')
     source = source.replace(marker, '\n'.join(bridges) + '\n' + marker, 1)

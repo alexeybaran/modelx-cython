@@ -932,9 +932,10 @@ def emit(spec, *, diagnostics=False, python_cells=()):
         loc = ({'_mx_value', '_mx_key', '_mx_object_key', 'self'} if row['cached'] else set()) | {p['name'] for p in params} | {n.id for n in ast.walk(node) if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store)}
         if name in python_reasons:
             from .coverage import cython_fallback_reasons
-            if (spec.original_space_shell and spec.cython_objects
+            if ((spec.original_space_shell or spec.public_emission_plan is not None) and spec.cython_objects
                     and name not in python_cells
                     and row['result']['kind'] in ('float', 'int', 'bool')
+                    and all(p['type']['kind'] in ('float', 'int', 'bool', 'object') for p in params)
                     and not cython_fallback_reasons(cells[name], all_rows)):
                 # The authoritative body is already a checked Cython method.
                 # Do not box arguments/results through PythonScope.calculate.
