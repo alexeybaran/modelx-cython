@@ -1,5 +1,6 @@
 """Fault injection is confined to disposable generated test artifacts."""
 import ast
+import json
 import os
 from pathlib import Path
 import subprocess
@@ -102,17 +103,22 @@ assert p.value(0)==-1.0 and p.counts[0]==2
 assert fault_state(0)==1
 '''
     else:
-        verify+='''for i in range(8):assert p.value(i+0.25)==i-0.75
+        # Inline keys allocate only at promotion/growth; inject at that boundary.
+        manifest = next(package.glob('_mx_frame_S/manifest.json'))
+        row = json.loads(manifest.read_text())['cells']['value']
+        growth_count = 2 * row['slots'] if row.get('native_prefix') and row['hashed'] else 8
+        verify+='''for i in range(GROWTH_COUNT):assert p.value(i+0.25)==i-0.75
 assert fault_state(0)==1
 fault_state(1)
-try:p.value(8.25)
+try:p.value(GROWTH_COUNT+0.25)
 except MemoryError:pass
 else:raise AssertionError('growth failure not propagated')
 assert fault_state(0)==1
-for i in range(8):assert p.value(i+0.25)==i-0.75 and p.counts[i+0.25]==1
-assert p.value(8.25)==7.25 and p.counts[8.25]==2
+for i in range(GROWTH_COUNT):assert p.value(i+0.25)==i-0.75 and p.counts[i+0.25]==1
+assert p.value(GROWTH_COUNT+0.25)==GROWTH_COUNT-0.75 and p.counts[GROWTH_COUNT+0.25]==2
 assert fault_state(0)==1
 '''
+        verify = verify.replace('GROWTH_COUNT', str(growth_count))
     verify+='''del p,m
 gc.collect()
 assert fault_state(0)==0
