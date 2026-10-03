@@ -55,7 +55,8 @@ def emit_invocation_state(frame, manifest, heap_numeric=False):
               f'    for slot in range({slots}):',
               '        if state._seen[slot] == state._epoch - 1:',
               '            owner_slot = _busy_slot(slot)',
-              '            if owner_slot < 0 or state._busy_owner[owner_slot] >= mark:',
+              ('            if owner_slot < 0 or state._busy_owner[owner_slot] >= mark:' if pure_spans
+               else '            if owner_slot >= 0 and state._busy_owner[owner_slot] >= mark:'),
               '                state._seen[slot] = state._epoch - 2 if _hash_slot(slot) else 0']
     manifest['mixed_cache_protocol'] = 'ready/busy/tombstone; rollback scan by invocation depth'
     return frame

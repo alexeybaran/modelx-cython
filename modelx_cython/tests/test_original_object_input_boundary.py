@@ -24,12 +24,16 @@ def test_object_input_closure_uses_authoritative_original_receiver(tmp_path):
     assert len(rows) == 2
     assert all(r['execution'] == 'original_cython' for r in rows)
     assert all('external object Cell ABI' in r['reason'] for r in rows)
+    (tmp_path/'private.pyx').write_text('from model_cy._mx_classes cimport _c_S\ndef private_value(_c_S s):\n return s._f_value(0)\n')
+    (tmp_path/'private_setup.py').write_text('from setuptools import setup\nfrom Cython.Build import cythonize\nsetup(ext_modules=cythonize("private.pyx", language_level=3))\n')
+    _run(tmp_path,['private_setup.py','build_ext','--inplace'],'private-build')
     (tmp_path/'verify.py').write_text('''from model_cy import mx_model
+from private import private_value
 m=type(mx_model)();s=m.S
 assert s.parent(0)==-1.0
 m.Data.inputs['value']=10.0
 assert s.value(0)==-1.0
-assert s._f_value(0)==10.0
+assert private_value(s)==10.0
 assert s.parent(0)==-1.0
 assert s.parent(2)==25.0
 ''')
