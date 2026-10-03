@@ -28,6 +28,11 @@ def _binding_program(module):
 
 
 class SpaceFrameOwner:
+    # Fixed lifecycle fields avoid a dictionary allocation per ItemSpace.
+    # Preserve weak references used by cleanup observers and ownership audits.
+    __slots__ = ('module', '_prepared_record', '_extension', '_manifest',
+                 'kernel', '_scope', '_checked_bindings', '__weakref__')
+
     def __init__(self, module, inputs):
         self.module = module
         self._prepared_record = inputs

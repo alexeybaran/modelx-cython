@@ -18,7 +18,7 @@ def augment(source, manifest):
     rows = {k: manifest['cells'][k] for k in manifest['object_cells']}
     fields = ['    cdef list _object_dirty', '    cdef bint _object_key_guard, _clearing_objects',
               '    cdef bint _object_initialized']
-    init = ['        self._object_dirty = []']
+    init = ['        # Object-entry tracking is allocated only on its first use.']
     clear = []
     methods = []
     bind = []
@@ -96,7 +96,9 @@ def augment(source, manifest):
             body += [f'            self._ohits_{name} += 1']
         body += ['            return entry.value',
                  '        if entry.state == 1:', f'            raise RuntimeError("Cell cycle: {name}")',
-                 '        if not entry.touched:', '            self._object_dirty.append(entry)',
+                 '        if not entry.touched:',
+                 '            if self._object_dirty is None: self._object_dirty = []',
+                 '            self._object_dirty.append(entry)',
                  '            entry.touched = True', '        entry.state = 1']
         if manifest['diagnostics']:
             body += [f'        self._omisses_{name} += 1', '        self._frame._misses += 1']
@@ -143,8 +145,6 @@ def augment(source, manifest):
     source = source.replace(marker, marker + '\n'.join(fields) + '\n', 1)
     lazy_object_cache = bool(manifest.get('native_scalar_outputs') or manifest.get('original_space_shell'))
     if lazy_object_cache:
-        source = source.replace('    def __init__(self, records):\n',
-                                '    def __init__(self, records):\n        self._object_dirty = []\n', 1)
         setup = ('        if not self._object_initialized:\n' +
                  '\n'.join('    ' + line for line in init[1:]) +
                  '\n            self._object_initialized = True')
@@ -184,11 +184,12 @@ def augment(source, manifest):
             return
         self._clearing_objects = True
         try:
-            for entry in self._object_dirty:
-                entry.state = 0
-                entry.touched = False
-                entry.value = None
-            self._object_dirty.clear()
+            if self._object_dirty is not None:
+                for entry in self._object_dirty:
+                    entry.state = 0
+                    entry.touched = False
+                    entry.value = None
+                self._object_dirty.clear()
 ''' + '\n'.join(clear) + '''
         finally:
             self._clearing_objects = False
