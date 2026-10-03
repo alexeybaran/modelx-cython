@@ -12,7 +12,7 @@ def busy_layout(rows):
     spans = {}
     for name, row in rows.items():
         if (row['cached'] and row['recursive'] and row['direct_input'] is None
-                and row.get('storage') != 'growing_numeric'
+                and (row.get('storage') != 'growing_numeric' or row.get('native_prefix'))
                 and row.get('invocation_owner_required', True)):
             spans[name] = (row['offset'], row['offset'] + row['slots'], offset)
             offset += row['slots']
@@ -28,7 +28,7 @@ def emit_invocation_state(frame, manifest, heap_numeric=False):
                   for row in manifest['cells'].values()
                   if row['cached'] and row['recursive'] and row['direct_input'] is None
                   and not row.get('invocation_owner_required', True)
-                  and row.get('storage') != 'growing_numeric']
+                  and (row.get('storage') != 'growing_numeric' or row.get('native_prefix'))]
     if heap_numeric:
         manifest['busy_cache_slots'] = size
     busy_field = '    unsigned int* _busy_owner' if heap_numeric else f'    unsigned int _busy_owner[{slots}]'

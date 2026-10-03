@@ -27,8 +27,23 @@ def slot_lines(name, row, arguments, unavailable, full):
         if row['recursive']:
             occupied += ' or state._seen[slot] == state._epoch - 1'
         equal = ' and '.join(f'state._keys_{name}_{p["name"]}[bucket] == {a}' for p,a in zip(params,arguments))
-        lines += [f'        if not ({occupied}) or ({equal}): break',
-                  f'        bucket = (bucket + 1) & {row["slots"]-1}', '    else:', '        '+full]
+        if row['recursive']:
+            # A failed parent can leave completed children behind its bucket.
+            # Keep probing through rollback tombstones before reusing one.
+            lines.insert(0, '    cdef Py_ssize_t available = -1')
+            lines += [f'        if {occupied}:',
+                      f'            if {equal}: break',
+                      '        elif state._seen[slot] == state._epoch - 2:',
+                      '            if available < 0: available = slot',
+                      '        else:',
+                      '            if available >= 0: slot = available',
+                      '            break',
+                      f'        bucket = (bucket + 1) & {row["slots"]-1}',
+                      '    else:', '        if available >= 0: slot = available',
+                      '        else: '+full]
+        else:
+            lines += [f'        if not ({occupied}) or ({equal}): break',
+                      f'        bucket = (bucket + 1) & {row["slots"]-1}', '    else:', '        '+full]
     else:
         index = '0'
         for p,a in zip(params,arguments):
@@ -114,7 +129,8 @@ def commit_lines(name, row, arguments, value, indent='    '):
     return lines
 
 
-def cell_entry(name, row, signature, args, formula, diagnostics):
+def cell_entry(name, row, signature, args, formula, diagnostics, *,
+               invocation_scope=False, busy_span=None):
     from .growing_numeric_codegen import cell_entry as growing_entry
     ret=row['result']['ctype'];arguments=[p['name'] for p in row['params']]
     canonical='_Frame* state'+''.join(', '+p['type']['ctype']+' '+p['name'] for p in row['params'])
@@ -131,8 +147,11 @@ def cell_entry(name, row, signature, args, formula, diagnostics):
     if row['hashed']:switched+=f' or state._prefix_disabled_{name}'
     lines.append(f'    if {switched}: return _overflow_{name}({args})')
     if row['recursive']:
-        lines += ['    if state._seen[slot] == state._epoch - 1:',f'        mx_fail(&state._guard, 1, b"{name}")',
-                  '    state._seen[slot] = state._epoch - 1']
+        lines += ['    if state._seen[slot] == state._epoch - 1:',f'        mx_fail(&state._guard, 1, b"{name}")']
+        if invocation_scope and row.get('invocation_owner_required', True):
+            key = f'(slot - {busy_span[0]} + {busy_span[2]})' if busy_span else 'slot'
+            lines.append(f'    state._busy_owner[{key}] = state._entry_depth')
+        lines.append('    state._seen[slot] = state._epoch - 1')
     if row['hashed']:
         for p,a in zip(row['params'],arguments):
             lines.append(f'    state._keys_{name}_{p["name"]}[slot - {row["offset"]}] = {a}')

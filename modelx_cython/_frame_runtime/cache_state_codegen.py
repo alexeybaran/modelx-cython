@@ -77,6 +77,7 @@ def methods(manifest):
                           '                    entry = _ObjectEntry()',
                           '                    entry.state = 2', '                    entry.value = value',
                           '                    entry.touched = True',
+                          '                    if self._object_dirty is None: self._object_dirty = []',
                           '                    self._object_dirty.append(entry)',
                           f'                    self._object_{name}[index] = entry']
         if cases:

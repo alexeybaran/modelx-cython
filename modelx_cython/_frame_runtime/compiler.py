@@ -398,7 +398,8 @@ def _cell_entry_lines(name, row, tail, call, native_suffix, diagnostics,
         from .growing_numeric_codegen import cell_entry
         if row.get('native_prefix'):
             from .native_prefix_codegen import cell_entry as prefix_entry
-            return prefix_entry(name, row, signature, args, formula, diagnostics)
+            return prefix_entry(name, row, signature, args, formula, diagnostics,
+                                invocation_scope=invocation_scope, busy_span=busy_span)
         return cell_entry(name, row, signature, args, formula, diagnostics)
     if row['direct_input'] is not None:
         exception = 'noexcept' if native_suffix else 'except? -1'

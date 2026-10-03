@@ -26,8 +26,8 @@ def report() -> object:
 
 @pytest.mark.parametrize('mixed, expected', [
     (False, '9d940b287c2057d29532f9e9ec2602aaa1fcd75f87995d3027dc94516db5c6af'),
-    # Includes the previously committed checked typed dependency bridge.
-    (True, '78236203fa3baba5bd8f2495851f900e76b86268f4772415ee9e9e3abef44851'),
+    # Includes checked typed dependencies and lazy object-entry tracking.
+    (True, 'bf80aba88c5e8e73e9a64602944199da583d98e49022da41890625036c85a215'),
 ])
 def test_structured_emission_preserves_generated_source(mixed, expected):
     module = ModuleType('frame_emission_fixture')
@@ -101,13 +101,15 @@ def test_output_plan_is_bound_before_runtime_generation():
     (4, False, False, '1a3b1056b4ac295ccf7f39f3d42ba89e9de1a111dfb387b89fe17b5e9908a5a9'),
     (1200, False, False, '9f1003fef1e532b7513fb0f32a088012a8315e26fb5e4635eb56a3be28f39682'),
     (4, True, False, 'd3f500e8739263ec07faf1b3f6f715e02a6713ebac97e7909804fcdcd570806e'),
-    (4, False, True, 'a1133b3a54588e2b2caf84e5187431d915c47074fffea70fc358694b934a9f80'),
-    (1200, False, True, '7d1708c57725475f4c1c4e4693ad3f50ab7418b2c8c9a20acc4eaa7683fefc1e'),
+    (4, False, True, 'eb0aa55f1b69c7cc75d0230845ffe5f8e6fd02f103ad63c77191cbc7125b3851'),
+    (1200, False, True, '05bcd4bcc80b785a6dd33af048d8fc578ce55bc47826301e6914c63bed604075'),
 ])
 def test_direct_owner_and_guard_protocol_preserve_complete_program(steps, growing, mixed, expected):
     # Frozen at 068c270 before removing the mixed-runtime source rewrite. Covers
     # inline/heap allocation, dictionary growth, checked object boundaries and
     # native-only traversal selection, not just the owner declaration prefix.
+    # Mixed snapshots additionally include lazy object bookkeeping; formula
+    # and cache semantics remain covered by compiled behavioral fixtures.
     import ast
     from modelx_cython.formula_emitter import SourceFormula
     module = ModuleType('owner_protocol_probe')
