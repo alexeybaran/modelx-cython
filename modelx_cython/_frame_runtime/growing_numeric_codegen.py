@@ -30,16 +30,28 @@ def support_header(rows):
 
 def cell_entry(name, row, signature, args, formula, diagnostics):
     ret = row['result']['ctype']
+    names = ', '.join(p['name'] for p in row['params'])
+    nonfinite = ' or '.join('not isfinite(' + p['name'] + ')'
+                           for p in row['params'] if p['type']['kind'] == 'float') or 'False'
     types = ', '.join(['_Frame*'] + [p['type']['ctype'] for p in row['params']])
     lines = [f'ctypedef int (*_NcLookup_{name})({types}, {ret}*) noexcept nogil',
              f'ctypedef int (*_NcCommit_{name})({types}, {ret}) noexcept nogil']
     lines += [f'cdef inline {ret} _cell_{name}({signature}) except? -1 nogil:',
-             f'    cdef {ret} _mx_value', '    cdef int _mx_status']
+             f'    cdef {ret} _mx_value', '    cdef int _mx_status',
+             '    cdef Py_ssize_t _mx_found']
     if diagnostics:
         lines.append('    state._calls += 1')
-    lines += [f'    _mx_status = (<_NcLookup_{name}>_nc_lookup_{name})({args}, &_mx_value)',
-              '    if _mx_status < 0: mx_capture(&state._guard)',
-              '    if _mx_status: return _mx_value']
+    # A native cache hit has no Python-owned locals or failure path. Keep it
+    # beside the Cell entry, rather than crossing the checked dictionary bridge.
+    # Formula execution still owns no item pointer: children may grow storage or
+    # atomically move completed entries into the authoritative dictionary.
+    lines += [f'    if state._numeric_fallback_{name} == NULL and not ({nonfinite}):',
+              f'        _mx_found = {tag(name)}_find(&state._numeric_{name}, {names})',
+              f'        if _mx_found >= 0: return state._numeric_{name}.items[_mx_found].value',
+              '    else:',
+              f'        _mx_status = (<_NcLookup_{name}>_nc_lookup_{name})({args}, &_mx_value)',
+              '        if _mx_status < 0: mx_capture(&state._guard)',
+              '        if _mx_status: return _mx_value']
     if diagnostics:
         lines.append('    state._misses += 1')
     lines += [f'    _mx_value = {formula}',
