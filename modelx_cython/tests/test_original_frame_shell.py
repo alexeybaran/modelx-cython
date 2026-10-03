@@ -8,7 +8,6 @@ import sys
 
 def _run(folder, args, label):
     env = os.environ.copy()
-    env['MX_CY_ORIGINAL_FRAME_SHELL'] = '1'
     env['PYTHONPATH'] = str(folder) + os.pathsep + env.get('PYTHONPATH', '')
     result = subprocess.run([sys.executable, *args], cwd=folder, env=env,
                             text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)

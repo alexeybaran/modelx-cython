@@ -209,18 +209,30 @@ def _direct_dict_body(name, row, params, diagnostics, *, virtual=False):
     values=', '.join(p['name'] for p in params)
     key=params[0]['name'] if len(params)==1 else '('+values+(',' if params else '')+')'
     entry = ('_virtual_cell_' if virtual else '_object_cell_') + name
-    lines=[f'    cdef object {entry}(self'+(', object compute' if virtual else '')+(', '+signature if signature else '')+'):',
-           '        cdef object key, value',f'        key = {key}']
-    if diagnostics:lines += [f'        self._ocalls_{name} += 1','        self._frame._calls += 1']
-    lines += ['        self._object_key_guard = True','        try:',
-              f'            value = self._object_{name}.get(key, _DICT_EMPTY)',
-              '        finally:', '            self._object_key_guard = False',
-              '        if value is _DICT_BUSY:',f'            raise RuntimeError("Cell cycle: {name}")',
+    singleton = not params
+    lines = [f'    cdef object {entry}(self' + (', object compute' if virtual else '')
+             + (', ' + signature if signature else '') + '):']
+    lines += ['        cdef object value'] if singleton else [
+        '        cdef object key, value', f'        key = {key}']
+    if diagnostics:
+        lines += [f'        self._ocalls_{name} += 1', '        self._frame._calls += 1']
+    if singleton:
+        lines += [f'        value = self._object_singleton_{name}']
+    else:
+        lines += ['        self._object_key_guard = True', '        try:',
+                  f'            value = self._object_{name}.get(key, _DICT_EMPTY)',
+                  '        finally:', '            self._object_key_guard = False']
+    lines += ['        if value is _DICT_BUSY:', f'            raise RuntimeError("Cell cycle: {name}")',
               '        if value is not _DICT_EMPTY:']
-    if diagnostics:lines += [f'            self._ohits_{name} += 1']
-    lines += ['            return value','        self._object_key_guard = True','        try:',
-              f'            self._object_{name}[key] = _DICT_BUSY', '        finally:',
-              '            self._object_key_guard = False']
+    if diagnostics:
+        lines += [f'            self._ohits_{name} += 1']
+    lines += ['            return value']
+    if singleton:
+        lines += [f'        self._object_singleton_{name} = _DICT_BUSY']
+    else:
+        lines += ['        self._object_key_guard = True', '        try:',
+                  f'            self._object_{name}[key] = _DICT_BUSY', '        finally:',
+                  '            self._object_key_guard = False']
     if diagnostics:lines += [f'        self._omisses_{name} += 1','        self._frame._misses += 1']
     lines += ['        try:', '            if self._python_scope.diagnostics:',f'                self._python_scope.calls[{name!r}] += 1',
               f'            value = compute({values})' if virtual else f'            value = self._object_fn_{name}({values})']
@@ -230,32 +242,15 @@ def _direct_dict_body(name, row, params, diagnostics, *, virtual=False):
         typ='type(None)' if expected=='NoneType' else expected
         lines += [f'            if not isinstance(value, {typ}):',f'                raise TypeError("Python object boundary requires {expected}")']
     elif result['kind']!='object':lines += [f'            value = self._python_scope.encode({result!r}, value)']
-    lines += ['            self._object_key_guard = True','            try:',f'                self._object_{name}[key] = value',
-              '            finally:', '                self._object_key_guard = False', '            return value',
-              '        except BaseException:', '            self._object_key_guard = True','            try:',
-              f'                self._object_{name}.pop(key, None)', '            finally:',
-              '                self._object_key_guard = False', '            raise']
-    if not params:
-        # The zero-argument key has a single owned slot, not a Python dict lookup.
-        # Use exactly the same empty/busy/ready and rollback protocol. Reset drops
-        # the owned value under the existing finalization/reentry guard.
-        text='\n'.join(lines)
-        text=text.replace('        cdef object key, value\n        key = ()', '        cdef object value')
-        text=text.replace('        self._object_key_guard = True\n        try:\n'
-            +f'            value = self._object_{name}.get(key, _DICT_EMPTY)\n'
-            +'        finally:\n            self._object_key_guard = False',
-            f'        value = self._object_singleton_{name}')
-        text=text.replace('        self._object_key_guard = True\n        try:\n'
-            +f'            self._object_{name}[key] = _DICT_BUSY\n'
-            +'        finally:\n            self._object_key_guard = False',
-            f'        self._object_singleton_{name} = _DICT_BUSY')
-        text=text.replace('            self._object_key_guard = True\n            try:\n'
-            +f'                self._object_{name}[key] = value\n'
-            +'            finally:\n                self._object_key_guard = False',
-            f'            self._object_singleton_{name} = value')
-        text=text.replace('            self._object_key_guard = True\n            try:\n'
-            +f'                self._object_{name}.pop(key, None)\n'
-            +'            finally:\n                self._object_key_guard = False',
-            f'            self._object_singleton_{name} = _DICT_EMPTY')
-        lines=text.splitlines()
+    if singleton:
+        lines += [f'            self._object_singleton_{name} = value',
+                  '            return value', '        except BaseException:',
+                  f'            self._object_singleton_{name} = _DICT_EMPTY', '            raise']
+    else:
+        lines += ['            self._object_key_guard = True', '            try:',
+                  f'                self._object_{name}[key] = value', '            finally:',
+                  '                self._object_key_guard = False', '            return value',
+                  '        except BaseException:', '            self._object_key_guard = True', '            try:',
+                  f'                self._object_{name}.pop(key, None)', '            finally:',
+                  '                self._object_key_guard = False', '            raise']
     return lines
