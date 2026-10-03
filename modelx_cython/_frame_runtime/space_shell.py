@@ -101,7 +101,17 @@ def plan(unit, *, package_plan=None, prepared_contexts=None):
             cell_plan = shared.cells[name]
             fn = methods.get('_f_' + name)
             reason = None
-            if fn is None:
+            if (shared.collection is not None and
+                    name == shared.collection.get('outputs_cell')):
+                # The export declaration is orchestration around Cell entries,
+                # not part of their native numeric dependency closure. Keep its
+                # one public cache/body on the original Cython receiver so a
+                # numeric-only policy does not allocate object memo fields just
+                # to describe collection. Object-valued calculation Cells still
+                # use the shared context; callers of this declaration use the
+                # usual checked bridge. Prepared regions own their full plan.
+                reason = 'collection declaration retains original orchestration cache'
+            elif fn is None:
                 reason = 'missing original formula body'
             elif cell_plan.public_result not in TYPES:
                 reason = 'unsupported original public result type'

@@ -321,6 +321,10 @@ def test_original_dynamic_shell_collect_detachment_and_ownership(tmp_path):
                     '--sample', str(tmp_path / 'sample.py')], 'build')
     receipt = json.loads((tmp_path / 'model_cy/_mx_classes.frame-shell.json').read_text())
     assert any(r['cell'] == 'fib' and r['execution'] == 'frame_exact' for r in receipt['cells'])
+    context = json.loads((tmp_path / 'model_cy/_mx_frame_Policies/manifest.json').read_text())
+    assert 'collect_outputs' not in context['cells']
+    output_route = next(r for r in receipt['cells'] if r['cell'] == 'collect_outputs')
+    assert output_route['reason'] == 'collection declaration retains original orchestration cache'
     shared_plan = json.loads((tmp_path / 'model_cy/_mx_compilation_plan.json').read_text())
     declaration = shared_plan['spaces']['model_cy.Policies']['collection']
     assert declaration['over'] == 'policy_id' and declaration['parameters'] == ['shock']
