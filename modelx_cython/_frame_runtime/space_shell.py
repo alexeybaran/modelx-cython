@@ -671,6 +671,9 @@ def add_owner_entries(source, manifest):
         unchanged += [f'self.{name} is record[{i}]'
                       for i, name in enumerate(manifest['inputs'])]
         lines += ['        if ' + ' and '.join(unchanged) + ':', '            return']
+        # A changed binding may fail after publishing some input fields. Mark
+        # it incomplete before those assignments, including on the same scope.
+        lines.append('        self._mx_bound_input_scope = None')
     lines += [f'        self.{"" if row["kind"] == "object" else "_frame."}{name} = record[{i}]'
               for i, (name, row) in enumerate(manifest['inputs'].items())]
     lines += [f'        self._frame.{name} = <PyObject*>self.{name}'

@@ -98,6 +98,24 @@ owner.kernel.bind_inputs(record)
 assert len(calls) == count+1
 owner.kernel.bind_inputs(record)
 assert len(calls) == count+1
+# Same-scope failure after input assignments must also retry the namespace.
+changed=list(record)
+# Identify the original resource by identity rather than relying on input order.
+resource_index=next(i for i, value in enumerate(record) if value is s.resource)
+changed[resource_index]=dict(s.resource)
+changed[resource_index]['d']=101.0
+changed=tuple(changed)
+PythonScope.bind_original_inputs=failed
+try: owner.kernel.bind_inputs(changed)
+except RuntimeError as error: assert str(error) == 'bind failure'
+else: raise AssertionError('same-scope binding failure lost')
+PythonScope.bind_original_inputs=observed
+count=len(calls)
+owner.kernel.bind_inputs(changed)
+assert len(calls) == count+1
+assert other.namespace['resource'] is changed[resource_index]
+owner.kernel.bind_inputs(changed)
+assert len(calls) == count+1
 print('identity binding behavioral checks passed')
 """)
     _run(tmp_path, ['verify.py'], 'verify')
