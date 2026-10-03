@@ -656,6 +656,21 @@ def add_owner_entries(source, manifest):
                 '\n        if self._mx_virtual_depth:\n'
                 '            raise RuntimeError("Cannot reset cache during a Cell evaluation")', 1)
     lines = ['    cpdef void bind_inputs(self, tuple record) except *:']
+    object_bindings = (bool(manifest.get('python_cells')) and bool(manifest['inputs'])
+                       and all(row['kind'] == 'object' for row in manifest['inputs'].values()))
+    if object_bindings:
+        # Identity checks observe replacement without invoking user equality.
+        # Mutated objects remain live through their existing references. Native
+        # scalar binders retain their conversion/error order and bitwise guards.
+        marker = 'cdef class Kernel:\n'
+        assert source.count(marker) == 1
+        source = source.replace(marker, marker + '    cdef object _mx_bound_input_scope\n', 1)
+        unchanged = ['self._python_scope is not None',
+                     'self._mx_bound_input_scope is self._python_scope',
+                     f'len(record) == {len(manifest["inputs"])}']
+        unchanged += [f'self.{name} is record[{i}]'
+                      for i, name in enumerate(manifest['inputs'])]
+        lines += ['        if ' + ' and '.join(unchanged) + ':', '            return']
     lines += [f'        self.{"" if row["kind"] == "object" else "_frame."}{name} = record[{i}]'
               for i, (name, row) in enumerate(manifest['inputs'].items())]
     lines += [f'        self._frame.{name} = <PyObject*>self.{name}'
@@ -670,6 +685,10 @@ def add_owner_entries(source, manifest):
         for name in manifest['inputs']:
             if ' _gil_global_' + name + '\n' in source:
                 lines += [f'        self._gil_global_{name} = self._python_scope.namespace[{name!r}]']
+        if object_bindings:
+            # Publish only after namespace/global synchronization succeeds. A
+            # replacement scope must bind even when every input is identical.
+            lines.append('        self._mx_bound_input_scope = self._python_scope')
     if not manifest['inputs']:
         lines.append('        pass')
     bound = ', '.join(f'self.{"" if row["kind"] == "object" else "_frame."}{name}'
