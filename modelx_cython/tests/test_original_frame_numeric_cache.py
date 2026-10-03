@@ -26,6 +26,8 @@ def test_original_shell_native_numeric_growth_failure_and_restore(tmp_path):
     assert all(r['execution']=='frame_exact' and not r['checked_cell_dependencies'] for r in routes['cells'])
     source=next((tmp_path/'model_cy/_mx_frame_S').rglob('_kernel.pyx'))
     text=source.read_text()
+    assert 'h = (h ^ (h >> 30)) * <uint64_t>13787848793156543929' in text
+    assert 'h = (h ^ (h >> 27)) * <uint64_t>10723151780598845931' in text
     # Fault injection belongs only to this generated test artifact.
     needle='from libc.stdlib cimport calloc, free'
     assert text.count(needle)==1
