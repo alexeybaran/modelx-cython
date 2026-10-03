@@ -108,3 +108,41 @@ def test_prepared_snapshot_and_parameter_validation_match_existing_contract():
     with pytest.raises(ContractError, match='Unknown dynamic'):
         inputs.record(0, parameters={'unknown': 1})
     assert inputs.record(0) is held
+
+
+def test_typed_builtin_binding_keeps_value_checks_and_custom_conversions():
+    import numpy as np
+    from enum import IntEnum
+    from modelx_cython._frame_runtime.input_codec import NativeInputCodec
+    convert = NativeInputCodec._scalar_value
+    calls = []
+    class CustomInt(int):
+        def __int__(self):
+            calls.append('int')
+            return 7
+    class CustomFloat(float):
+        def __float__(self):
+            calls.append('float')
+            return 2.5
+    class Category(IntEnum):
+        NEGATIVE = -1
+    assert convert('n', {'kind': 'int'}, -(1 << 63)) == -(1 << 63)
+    assert convert('n', {'kind': 'int'}, (1 << 63) - 1) == (1 << 63) - 1
+    assert convert('n', {'kind': 'int'}, np.int64(4)) == 4
+    assert convert('n', {'kind': 'int'}, CustomInt(3)) == 7
+    assert convert('x', {'kind': 'float'}, CustomFloat(1.5)) == 2.5
+    assert calls == ['int', 'float']
+    category = {'kind': 'enum', 'members': {'NEGATIVE': -1}}
+    assert convert('c', category, Category.NEGATIVE) == -1
+    assert convert('c', category, -1) == -1
+    with pytest.raises(ContractError, match='category domain'):
+        convert('c', category, 0)
+    for invalid in (True, np.bool_(False), 0.5):
+        with pytest.raises(ContractError, match='integral scalar'):
+            convert('n', {'kind': 'int'}, invalid)
+    for invalid in (-(1 << 63) - 1, 1 << 63):
+        with pytest.raises(ContractError, match='signed int64'):
+            convert('n', {'kind': 'int'}, invalid)
+    for invalid in (True, np.bool_(False), float('nan'), float('inf')):
+        with pytest.raises(ContractError, match='finite real'):
+            convert('x', {'kind': 'float'}, invalid)

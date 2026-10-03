@@ -52,7 +52,8 @@ class PreparedSpaceInputs(NativeInputCodec):
         Selection and required parameter conversion belong inside calculation.
         Existing owners retain their record; this does not reset their caches.
         """
-        if (isinstance(position, bool) or not isinstance(position, numbers.Integral)
+        if ((type(position) is not int and
+                (isinstance(position, bool) or not isinstance(position, numbers.Integral)))
                 or not 0 <= position < len(self._records)):
             raise IndexError('Policy position outside the prepared binding')
         record = self._records[position]

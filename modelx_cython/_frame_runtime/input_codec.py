@@ -117,7 +117,11 @@ class NativeInputCodec:
             try: return record[ti['table']].code(v)
             except (KeyError,TypeError,ValueError) as e: raise ContractError(f'{key}: unknown table label {v!r}') from e
         if kind == 'float':
-            if isinstance(v, (bool, np.bool_)) or not isinstance(v, numbers.Real) or not math.isfinite(v):
+            # Original typed fields produce exact builtins. Their declared
+            # representation needs the same value checks, not repeated ABC
+            # discovery. Subclasses and custom numbers retain normal conversion.
+            if (type(v) not in (float, int) and
+                    (isinstance(v, (bool, np.bool_)) or not isinstance(v, numbers.Real))) or not math.isfinite(v):
                 raise ContractError(f'{key}: finite real scalar required')
             v = float(v)
         elif kind == 'bool':
@@ -125,7 +129,7 @@ class NativeInputCodec:
                 raise ContractError(f'{key}: boolean required')
             v = bool(v)
         else:
-            if isinstance(v, (bool, np.bool_)) or not isinstance(v, numbers.Integral):
+            if type(v) is not int and (isinstance(v, (bool, np.bool_)) or not isinstance(v, numbers.Integral)):
                 raise ContractError(f'{key}: integral scalar required')
             v = int(v)
             if not -(1 << 63) <= v < (1 << 63):
