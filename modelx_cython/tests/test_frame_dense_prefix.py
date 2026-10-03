@@ -10,7 +10,7 @@ from modelx_cython._frame_runtime.contracts import KernelSpec, cell
 
 
 @cell
-def amount(n: int) -> float:
+def amount(n: int = 0) -> float:
     return float(n) + offset
 
 
@@ -58,6 +58,9 @@ def test_dense_prefix_and_overflow_share_cache_and_survive_restore(tmp_path, mon
     artifact = tmp_path / 'artifact'
     build(spec, artifact)
     manifest = json.loads((artifact/'manifest.json').read_text())
+    source = (artifact/manifest['package']/'_kernel.pyx').read_text()
+    assert 'cdef double _overflow_cell_amount(_Frame* state, long long n) noexcept nogil:' in source
+    assert 'cdef inline double _cell_amount(_Frame* state, long long n = 0) noexcept nogil:' in source
     assert all(manifest['cells'][name]['dense_prefix'] for name in ('amount','pair','recursive','parent'))
     monkeypatch.syspath_prepend(str(artifact))
     native = importlib.import_module(manifest['package'] + '._kernel')
