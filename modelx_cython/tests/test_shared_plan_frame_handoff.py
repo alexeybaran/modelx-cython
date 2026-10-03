@@ -513,3 +513,42 @@ print('original public classes enter prepared kernels; subclass dispatch preserv
                                      'amount': 3.5 if category is _PlanCategory.ONE else -1.0}
     finally:
         model.close()
+
+
+def test_computational_data_alias_keeps_receiver_owned_inputs(tmp_path):
+    """Standard compilation must not read synthetic records from a Data Cell graph."""
+    import subprocess
+    import modelx as mx
+    model = mx.new_model('ComputationalDataRows')
+    data = model.new_space('Data')
+    data.values = (3.0, 8.0)
+    data.new_cells('read', 'def read(i):\n return values[i]\n')
+    projection = model.new_space('Projection', formula=
+        'def Projection(policy_id):\n return {"refs": {"value": Data.read(policy_id)}}\n')
+    projection.Data = data
+    projection.value = 0.0
+    projection.new_cells('amount', 'def amount(n):\n return value + n + 0.0 * Data.read(policy_id)\n')
+    model.export(tmp_path/'model')
+    model.close()
+    pd.DataFrame({'value': [3.0, 8.0]}, index=pd.Index([0,1], name='policy_id')).to_pickle(tmp_path/'records.pkl')
+    (tmp_path/'spec.txt').write_text(repr({'spaces': {'Projection': {'native_context': {
+        'records_file':'records.pkl', 'row_references': {'value':'value'},
+        'point_parameter':'policy_id', 'steps':4, 'native_typed_inputs':True,
+        'object_bindings':['Data'], 'typed_object_inputs':{'value':'float'}}}}}))
+    (tmp_path/'sample.py').write_text(
+        'from model import mx_model\nfor i in (0,1):\n for n in (0,1): mx_model.Projection[i].amount(n)\n')
+    result = subprocess.run([sys.executable, '-m', 'modelx_cython', str(tmp_path/'model'),
+        '--sample',str(tmp_path/'sample.py'),'--spec',str(tmp_path/'spec.txt')],
+        cwd=tmp_path, capture_output=True, text=True)
+    assert result.returncode == 0, result.stdout + result.stderr
+    manifest = json.loads((tmp_path/'model_cy/_mx_frame_Projection/manifest.json').read_text())
+    assert manifest['public_space_binding'] == {'receiver_rows': True}
+    assert manifest['model']['public_resource_source'] == 'receiver'
+    result = subprocess.run([sys.executable, '-c',
+        'from model_cy import mx_model as m\n'
+        'a=m.Projection[0]; b=m.Projection[1]\n'
+        'assert a.amount(0)==3.0 and b.amount(0)==8.0\n'
+        'assert a.amount(0)==3.0 and a.amount(1)==4.0\n'
+        'assert b.amount(1)==9.0 and m.Data.read(0)==3.0\n'],
+        cwd=tmp_path, capture_output=True, text=True)
+    assert result.returncode == 0, result.stdout + result.stderr

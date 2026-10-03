@@ -403,6 +403,11 @@ def from_resolved_resources(model, destination, *, projection='Projection', data
         model_name=model.name,cython_objects=cython_objects,
         row_references=row_references,point_parameter=point,
         parameter_initial_values=initial,reference_types=reference_types)
+    # Resource discovery already distinguishes computational Spaces from table
+    # providers. Keep that decision for public binding; a resolved alias alone
+    # must not turn a computational Data Space into a synthetic table reader.
+    spec.model['public_resource_source'] = ('receiver' if data is None and row_references
+                                          else 'data_provider')
     spec.model.update(static_projection=static,object_references=object_references,
                       module_references={name: value.__name__ for name, value in modules.items()},
                       required_object_bindings=sorted(reference_types))
