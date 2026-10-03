@@ -1,160 +1,68 @@
-"""The opt-in frame build must use the standard trace and source handoff."""
-
+"""The retired frame flag uses the standard public-package compilation pipeline."""
 import json
-from contextlib import contextmanager
+import os
+from pathlib import Path
+import subprocess
+import sys
 from types import SimpleNamespace
 
 import pytest
-
 from modelx_cython import cli
 
 
-def _args():
-    return SimpleNamespace(
-        translate_only=False, compile_only=False, no_spec=True, setup='',
-        sample='sample.py', frame_space='Projection',
-        frame_point_table='points', frame_steps=480)
+def test_compatibility_options_share_specification_and_preserve_precedence():
+    args = SimpleNamespace(frame_collect=True, frame_space='Top.P',
+                           frame_point_table='points', frame_steps=480)
+    specification = {'spaces': {'Top': {'spaces': {'P': {
+        'cells_param_size': {'n': 9},
+        'native_context': {'steps': 32, 'point_table': 'author_points'}}}}}}
+    result = cli._frame_option_spec(specification, args)
+    p = result['spaces']['Top']['spaces']['P']
+    assert p['native_context'] == {'steps':32, 'point_table':'author_points'}
+    assert p['cells_param_size'] == {'n':9}
+    assert not hasattr(cli, '_frame_collect_handler')
 
 
-def _source_session(manifest, derive):
-    @contextmanager
-    def open_source(_package):
-        derive.source_manifest = manifest
-        yield derive
-    return open_source
+def test_compatibility_options_do_not_invent_a_policy_domain():
+    args = SimpleNamespace(frame_collect=True, frame_space='S',
+                           frame_point_table=None, frame_steps=480)
+    assert cli._frame_option_spec({}, args) == {}
+    args.frame_space = '../bad'
+    with pytest.raises(cli.HandlerError):
+        cli._frame_option_spec({}, args)
 
 
-def test_frame_cli_routes_standard_trace_to_source_preserved_build(tmp_path, monkeypatch):
-    exported = tmp_path / 'exported'
-    exported.mkdir()
-    manifest = {'model': 'M', 'spaces': {'M.Projection': {'cells': {'value': {}}}}}
-    (exported / '_mx_formula_sources.json').write_text(json.dumps(manifest))
-    calls = []
-    logger = object()
-    contracts = {'value': {'return': float}}
-    spec = SimpleNamespace(model={'collect': {'over': 'point', 'sum': ['value']}})
-
-    monkeypatch.setattr(cli, 'run_sample', lambda path, sample: (
-        calls.append(('trace', path, sample)) or logger))
-    from modelx_cython._frame_runtime import trace_contracts, modelx_frontend_exported, compiler
-    monkeypatch.setattr(trace_contracts, 'from_mx2cy_trace', lambda log, source, space: (
-        calls.append(('contracts', log, source, space)) or contracts))
-    monkeypatch.setattr(modelx_frontend_exported, 'open_exported_source',
-                        _source_session(manifest,
-                            lambda *a, **kw: (calls.append(('source', a, kw)) or spec)))
-    monkeypatch.setattr(compiler, 'build',
-                        lambda *a: calls.append(('build', a)))
-
-    assert cli._frame_collect_handler(_args(), exported) == 0
-    assert [row[0] for row in calls] == ['trace', 'contracts', 'source', 'build']
-    assert calls[2][2]['contracts'] is contracts
-    assert calls[2][2]['steps'] == 480
-    assert calls[3][1][1] == tmp_path / 'exported_cy'
-
-
-def test_frame_cli_refuses_overwrite_before_tracing(tmp_path, monkeypatch):
-    exported = tmp_path / 'exported'
-    exported.mkdir()
-    (exported / '_mx_formula_sources.json').write_text('{}')
-    (tmp_path / 'exported_cy').mkdir()
-    monkeypatch.setattr(cli, 'run_sample', lambda *a: pytest.fail('trace ran'))
-    with pytest.raises(FileExistsError, match='already exists'):
-        cli._frame_collect_handler(_args(), exported)
-
-
-def test_frame_cli_builds_a_model_without_collect(tmp_path, monkeypatch):
-    exported = tmp_path / 'exported'
-    exported.mkdir()
-    (exported / '_mx_formula_sources.json').write_text(json.dumps({
-        'model': 'M', 'spaces': {'M.Projection': {'cells': {'value': {}}}},
-    }))
-    monkeypatch.setattr(cli, 'run_sample', lambda *_: object())
-    from modelx_cython._frame_runtime import trace_contracts, modelx_frontend_exported, compiler
-    monkeypatch.setattr(trace_contracts, 'from_mx2cy_trace', lambda *_a, **_k: {})
-    monkeypatch.setattr(modelx_frontend_exported, 'open_exported_source',
-                        _source_session({'model': 'M', 'spaces': {'M.Projection': {'cells': {}}}},
-                            lambda *_a, **_k: SimpleNamespace(model={'collect': None})))
-    built = []
-    monkeypatch.setattr(compiler, 'build', lambda spec, destination: built.append((spec, destination)))
-
-    assert cli._frame_collect_handler(_args(), exported) == 0
-    assert built[0][1] == tmp_path / 'exported_cy'
-
-
-def test_frame_cli_accepts_metadata_free_original_export(tmp_path, monkeypatch):
-    exported = tmp_path / 'exported'
-    exported.mkdir()
-    monkeypatch.setattr(cli, 'run_sample', lambda *_: object())
-    from modelx_cython._frame_runtime import trace_contracts, modelx_frontend_exported, compiler
-    recovered = {'model': 'M', 'spaces': {'M.Projection': {'cells': {'value': {}}}}}
-    monkeypatch.setattr(trace_contracts, 'from_mx2cy_trace',
-                        lambda _logger, source, **_kw: (
-                            {'value': {'return': float}} if source is recovered
-                            else pytest.fail('Recovered source manifest was not traced')))
-    seen = []
-    monkeypatch.setattr(modelx_frontend_exported, 'open_exported_source',
-                        _source_session(recovered,
-                            lambda *_a, **kwargs: seen.append(kwargs) or object()))
-    monkeypatch.setattr(compiler, 'build', lambda *_a: None)
-    assert cli._frame_collect_handler(_args(), exported) == 0
-    assert seen[0]['contracts'] == {'value': {'return': float}}
-
-
-def test_frame_cli_translate_then_compile_without_retracing(tmp_path, monkeypatch):
-    exported = tmp_path / 'exported'
-    exported.mkdir()
-    (exported / '_mx_formula_sources.json').write_text(json.dumps({
-        'model': 'M', 'spaces': {'M.Projection': {'cells': {'value': {}}}},
-    }))
-    traced = []
-    monkeypatch.setattr(cli, 'run_sample', lambda *_: traced.append(1) or object())
-    from modelx_cython._frame_runtime import trace_contracts, modelx_frontend_exported, compiler
-    monkeypatch.setattr(trace_contracts, 'from_mx2cy_trace', lambda *_a, **_k: {})
-    monkeypatch.setattr(modelx_frontend_exported, 'open_exported_source',
-                        _source_session({'model': 'M', 'spaces': {'M.Projection': {'cells': {}}}},
-                            lambda *_a, **_k: object()))
-    built = []
-    monkeypatch.setattr(compiler, 'build',
-                        lambda *_a, **kwargs: built.append(kwargs))
-    compiled = []
-    monkeypatch.setattr(compiler, 'compile_generated',
-                        lambda destination: compiled.append(destination))
-    args = _args()
-    args.translate_only = True
-    assert cli._frame_collect_handler(args, exported) == 0
-    assert built == [{'compile_native': False}]
-    args.translate_only = False
-    args.compile_only = True
-    assert cli._frame_collect_handler(args, exported) == 0
-    assert traced == [1]
-    assert compiled == [tmp_path / 'exported_cy']
-
-
-def test_frame_cli_traces_a_metadata_free_export_before_compiling(tmp_path):
+@pytest.mark.parametrize('alias', [False, True])
+def test_standard_translate_compile_and_original_interfaces_without_metadata(tmp_path, alias):
     import modelx as mx
-    from modelx_cython._frame_runtime.model import CompiledModel
-
-    model = mx.new_model('RecoveredCLI')
+    m = mx.new_model('UnifiedCLI')
     try:
-        model.new_space('Projection').new_cells('value', 'lambda: 4.25')
-        exported = tmp_path / 'exported'
-        model.export(exported)
+        m.new_space('Projection').new_cells('value', 'lambda: 4.25')
+        m.export(tmp_path/'model')
     finally:
-        model.close()
-    (exported / '_mx_formula_sources.json').unlink()
-    sample = tmp_path / 'sample.py'
-    sample.write_text('from exported import mx_model\n'
-                      'assert mx_model.Projection.value() == 4.25\n')
-    args = _args()
-    args.sample = str(sample)
-    args.frame_point_table = None
-    args.frame_steps = 2
-    assert cli._frame_collect_handler(args, exported) == 0
-    artifact = tmp_path / 'exported_cy'
-    manifest = json.loads((artifact / 'manifest.json').read_text())
-    assert manifest['cells']['value']['result']['kind'] == 'float'
-    compiled = CompiledModel(artifact, {})
-    try:
-        assert compiled.Projection.value() == 4.25
-    finally:
-        compiled.close()
+        m.close()
+    (tmp_path/'model/_mx_formula_sources.json').unlink()
+    sample = tmp_path/'sample.py'
+    sample.write_text('from model import mx_model\nmx_model.Projection.value()\n')
+    environment = os.environ.copy()
+    environment.pop('MX_CY_ORIGINAL_FRAME_SHELL', None)
+    environment['PYTHONPATH'] = str(tmp_path)+os.pathsep+environment.get('PYTHONPATH','')
+    def run(arguments):
+        result = subprocess.run([sys.executable,'-m','modelx_cython',str(tmp_path/'model'),*arguments],
+            cwd=tmp_path, env=environment, text=True, capture_output=True)
+        assert result.returncode == 0, result.stdout[-2000:]+result.stderr[-2000:]
+    options = ['--frame-collect'] if alias else []
+    setup = tmp_path/'custom_setup.py'
+    run(['--sample',str(sample),'--no-spec','--translate-only','--setup',str(setup),*options])
+    package = tmp_path/'model_cy'
+    assert (package/'_mx_classes.pxd').exists()
+    routes = json.loads((package/'_mx_classes.frame-shell.json').read_text())
+    assert any(r['cell']=='value' and r['execution']=='frame_exact' for r in routes['cells'])
+    assert not (package/'model.py').exists()  # No replacement CompiledModel facade.
+    sample.write_text('raise AssertionError("compile-only must not trace")\n')
+    run(['--compile-only','--setup',str(setup),*options])
+    result = subprocess.run([sys.executable,'-c',
+        'from model_cy import mx_model\nassert mx_model.Projection.value()==4.25\n'
+        'assert "modelx_cython" not in __import__("sys").modules\n'],
+        cwd=tmp_path,env=environment,text=True,capture_output=True)
+    assert result.returncode == 0, result.stderr[-2000:]

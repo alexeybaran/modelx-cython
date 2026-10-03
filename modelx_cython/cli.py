@@ -267,8 +267,6 @@ def main_handler(args: argparse.Namespace, stdout: IO[str], stderr: IO[str]) -> 
     """
 
     orig_path = pathlib.Path(args.model_path).resolve()
-    if getattr(args, "frame_collect", False):
-        return _frame_collect_handler(args, orig_path)
     work_dir = orig_path.parent
     model_name = orig_path.name + "_cy"
     model_path = work_dir / model_name
@@ -288,6 +286,7 @@ def main_handler(args: argparse.Namespace, stdout: IO[str], stderr: IO[str]) -> 
             except FileNotFoundError as e:
                 raise FileNotFoundError(f"{e}. Add '--no-spec' to omit the spec file.") from e
 
+        d = _frame_option_spec(d, args)
         spec = TransSpec(d)
         rel_model_path = model_path.relative_to(model_path.parent)
 
@@ -386,34 +385,33 @@ def main_handler(args: argparse.Namespace, stdout: IO[str], stderr: IO[str]) -> 
                 u.source, u.module_info, resolver=resolver,
                 cells_kinds=cells_kinds, ref_kinds=ref_kinds)
             shell_plans = {}
-            if prepared_contexts or os.environ.get('MX_CY_ORIGINAL_FRAME_SHELL', '0') == '1':
-                from modelx_cython._frame_runtime.space_shell import plan, emit_private_kernels
-                if prepared_contexts:
-                    shell_plans, shell_inventory = plan(u, package_plan=package_plan,
-                                                        prepared_contexts=prepared_contexts)
-                else:
-                    shell_plans, shell_inventory = plan(u, package_plan=package_plan)
-                u.abs_src_path.with_suffix('.frame-shell.json').write_text(
-                    json.dumps({'schema': 1, 'cells': shell_inventory}, indent=2), encoding='utf-8')
-                private_modules = emit_private_kernels(
-                    shell_plans, u.abs_src_path.parent, u.fqname.rsplit('.', 1)[0],
-                    formula_transform=trans._rewrite_powers)
-                modules.extend(u.rel_src_path.parent / m for m in private_modules)
-                if shell_plans:
-                    shutil.copy(pathlib.Path(__file__).parent / '_frame_runtime' / 'space_owner.py',
-                                model_path / '_mx_frame_owner.py')
-                    # Existing checked receiver/codec utilities, without a
-                    # CompiledModel/Space facade or an installed compiler.
-                    support = model_path / '_mx_frame_support'
-                    support.mkdir(exist_ok=True)
-                    (support / '__init__.py').write_text('', encoding='utf-8')
-                    support_names = ['python_calculator.py', 'contracts.py', 'enum_binding.py']
-                    if any(p.get('prepared_spec') is not None for p in shell_plans.values()):
-                        support_names.extend(['prepared_space_inputs.py', 'input_codec.py',
-                                              'data_binding.py', 'lookups.py'])
-                    for name in support_names:
-                        shutil.copy(pathlib.Path(__file__).parent / '_frame_runtime' / name,
-                                    support / name)
+            from modelx_cython._frame_runtime.space_shell import plan, emit_private_kernels
+            if prepared_contexts:
+                shell_plans, shell_inventory = plan(u, package_plan=package_plan,
+                                                    prepared_contexts=prepared_contexts)
+            else:
+                shell_plans, shell_inventory = plan(u, package_plan=package_plan)
+            u.abs_src_path.with_suffix('.frame-shell.json').write_text(
+                json.dumps({'schema': 1, 'cells': shell_inventory}, indent=2), encoding='utf-8')
+            private_modules = emit_private_kernels(
+                shell_plans, u.abs_src_path.parent, u.fqname.rsplit('.', 1)[0],
+                formula_transform=trans._rewrite_powers)
+            modules.extend(u.rel_src_path.parent / m for m in private_modules)
+            if shell_plans:
+                shutil.copy(pathlib.Path(__file__).parent / '_frame_runtime' / 'space_owner.py',
+                            model_path / '_mx_frame_owner.py')
+                # Existing checked receiver/codec utilities, without a
+                # CompiledModel/Space facade or an installed compiler.
+                support = model_path / '_mx_frame_support'
+                support.mkdir(exist_ok=True)
+                (support / '__init__.py').write_text('', encoding='utf-8')
+                support_names = ['python_calculator.py', 'contracts.py', 'enum_binding.py']
+                if any(p.get('prepared_spec') is not None for p in shell_plans.values()):
+                    support_names.extend(['prepared_space_inputs.py', 'input_codec.py',
+                                          'data_binding.py', 'lookups.py'])
+                for name in support_names:
+                    shutil.copy(pathlib.Path(__file__).parent / '_frame_runtime' / name,
+                                support / name)
             pxd = PXDGenerator(u.module_info)
 
             u.abs_src_path.write_text(trans.transformed.code, encoding="utf-8")
@@ -490,8 +488,8 @@ def main_handler(args: argparse.Namespace, stdout: IO[str], stderr: IO[str]) -> 
                 u.abs_src_path.write_text(add_collect_hooks(
                     u.abs_src_path.read_text(encoding='utf-8'), shell_plans), encoding='utf-8')
 
-            # Experiment-only native traversal for one typed numeric sum leaf.
-            if _native_os.environ.get("MX_CY_COLLECT_NATIVE", "0") == "1":
+            # Shared compiled traversal, including checked object-capable output paths.
+            if _native_os.environ.get("MX_CY_COLLECT_NATIVE", "1") == "1":
                 from modelx_cython.collect_native import transform as native_collect_transform
                 collect_py, collect_pxd = native_collect_transform(
                     u.abs_src_path.read_text(encoding="utf-8"),
@@ -503,9 +501,8 @@ def main_handler(args: argparse.Namespace, stdout: IO[str], stderr: IO[str]) -> 
             u.abs_init_path.write_text("from . cimport _mx_classes", encoding="utf-8")
             modules.append(u.rel_src_path)
 
-        if _native_os.environ.get("MX_CY_ORIGINAL_FRAME_SHELL", "0") == "1":
-            from modelx_cython.prepared_io_cache import emit as emit_prepared_io
-            emit_prepared_io(model_path, source_package=orig_path)
+        from modelx_cython.prepared_io_cache import emit as emit_prepared_io
+        emit_prepared_io(model_path, source_package=orig_path)
         create_setup(model_name, modules=modules, setup_file=setup_file)
 
     if args.translate_only:
@@ -514,42 +511,28 @@ def main_handler(args: argparse.Namespace, stdout: IO[str], stderr: IO[str]) -> 
         return compile_main(work_dir, setup_file)
 
 
-def _frame_collect_handler(args: argparse.Namespace, orig_path: pathlib.Path) -> int:
-    """Build the experimental native frame from an ordinary exported model.
+def _frame_option_spec(specification, args):
+    """Translate the retired backend flag into the ordinary specification.
 
-    Keep this entry separate from the established translator.  Unsupported
-    model/collect shapes fail during source import; they never fall through to
-    a different execution or cache path after the user requested the frame.
-    The source handoff is retained beside the generated package for audit.
+    Ordinary models need no artificial table or collect declaration. An explicit
+    table requests the prepared representation through the same package plan.
+    Existing resource declarations and specifications retain precedence.
     """
-    if not args.no_spec:
-        raise HandlerError("--frame-collect requires --no-spec")
-    if args.setup:
-        raise HandlerError("--frame-collect generates its own setup.py")
-
-    from modelx_cython._frame_runtime.modelx_frontend_exported import open_exported_source
-    from modelx_cython._frame_runtime.trace_contracts import from_mx2cy_trace
-    from modelx_cython._frame_runtime.compiler import build, compile_generated
-
-    destination = orig_path.parent / (orig_path.name + "_cy")
-    source_dir = orig_path.parent / (orig_path.name + "_cy_sources")
-    if args.compile_only:
-        compile_generated(destination)
-        return 0
-    if destination.exists() or source_dir.exists():
-        raise FileExistsError("Frame output or source directory already exists")
-    logger = run_sample(orig_path, args.sample)
-    with open_exported_source(orig_path) as derive:
-        contracts = from_mx2cy_trace(
-            logger, derive.source_manifest, space=args.frame_space)
-        spec = derive(source_dir, projection=args.frame_space,
-                      point_table=args.frame_point_table,
-                      steps=args.frame_steps, contracts=contracts)
-    if args.translate_only:
-        build(spec, destination, compile_native=False)
-    else:
-        build(spec, destination)
-    return 0
+    if not getattr(args, 'frame_collect', False):
+        return specification
+    path = getattr(args, 'frame_space', 'Projection').split('.')
+    if not path or any(not n.isidentifier() for n in path):
+        raise HandlerError('--frame-space must identify an exported Space')
+    table = getattr(args, 'frame_point_table', None)
+    if table is None:
+        return specification
+    result = specification
+    for name in path:
+        result = result.setdefault('spaces', {}).setdefault(name, {})
+    resources = result.setdefault('native_context', {})
+    resources.setdefault('point_table', table)
+    resources.setdefault('steps', getattr(args, 'frame_steps', 2048))
+    return specification
 
 
 # Mapping from string names to logging levels
@@ -701,11 +684,11 @@ def main(argv: Sequence[str], stdout: IO[str], stderr: IO[str]) -> int:
 
     parser.add_argument(
         "--frame-collect", action="store_true", default=False,
-        help="Build the experimental source-preserved native collect frame",
+        help="Compatibility alias using shared planning and original public Space classes",
     )
     parser.add_argument(
         "--frame-space", default="Projection",
-        help="collect-enabled Space name for --frame-collect (default: Projection)",
+        help="Space for prepared-resource options (default: Projection)",
     )
     parser.add_argument(
         "--frame-point-table", default=None,
