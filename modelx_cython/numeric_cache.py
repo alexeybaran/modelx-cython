@@ -36,11 +36,7 @@ cdef inline uint64_t {tag}_hash({args}) noexcept:
     cdef uint64_t h = 1469598103934665603
     cdef _mx_bits bits
 {chr(10).join(hashes)}
-    # Match the established native cache avalanche. Correlated IEEE keys can
-    # otherwise occupy long clusters even when this growing table is half full.
-    h = (h ^ (h >> 30)) * <uint64_t>13787848793156543929
-    h = (h ^ (h >> 27)) * <uint64_t>10723151780598845931
-    h ^= h >> 31
+    h ^= h >> 32
     return h
 
 cdef inline Py_ssize_t {tag}_find({tag}_cache* c, {args}) noexcept:
