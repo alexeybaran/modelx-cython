@@ -373,9 +373,11 @@ def main_handler(args: argparse.Namespace, stdout: IO[str], stderr: IO[str]) -> 
         prepared_contexts = {}
         if any(s.native_context is not None for s in package_plan.spaces.values()):
             from modelx_cython._frame_runtime.prepared_region_plan import resolve
-            # The sample already loaded the export. Only its reference values
-            # supply preparation; all formula/type metadata comes from the plan.
-            exported = sys.modules[orig_path.name].mx_model
+            # The sample may deliberately restrict a cached collection domain.
+            # Use a fresh instance of the already-loaded original export for
+            # resource examples; trace mutations must not define runtime inputs.
+            # Formula/type metadata still comes only from the finalized plan.
+            exported = type(sys.modules[orig_path.name].mx_model)()
             prepared_contexts = resolve(package_plan, exported, model_path)
 
         # Phase 3: transform and write out
