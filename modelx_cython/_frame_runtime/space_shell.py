@@ -508,6 +508,41 @@ self._mx_frame_rebind = True
 if _mx_frame_scratch is not None:
     self._mx_frame_owner = _mx_frame_scratch'''
             plan = plans[cls.name]
+            if plan['manifest'].get('streaming_collect_map'):
+                # Reuse the typed fold behind the original transient receiver.
+                # Its Space formula still executes before input selection. A
+                # changed/unsupported map domain falls back before evaluating
+                # this policy, retaining previously accumulated policy results.
+                module = plan['kernel_module']
+                owner_module = plan.get('owner_module', module.split('.')[0]+'._mx_frame_owner')
+                sources = plan['manifest']['compiled_collect_map']['sources']
+                keys = '{' + ', '.join(repr(n)+': self.'+n for n in sources) + '}'
+                hook = ast.parse(f'''def _mx_collect_map(self, accumulator):
+    from {owner_module} import prepared_owner
+    keys = {keys}
+    for values in keys.values():
+        if type(values) is not tuple:
+            return None
+        for key in values:
+            if type(key) is not int or not (-(1 << 63) <= key < (1 << 63)):
+                return None
+        if len(set(values)) != len(values):
+            return None
+    if accumulator is not None and not accumulator.matches(keys):
+        return None
+    _mx_template: {cls.name} = self
+    while type(_mx_template._parent) is {cls.name}:
+        _mx_template = _mx_cy.cast({cls.name}, _mx_template._parent)
+    if _mx_template._mx_prepared_resources is None:
+        _mx_template._mx_prepared_resources = {{}}
+    self._mx_frame_owner = prepared_owner(self, {module!r}, _mx_template._mx_prepared_resources, self._mx_frame_owner)
+    self._mx_frame_rebind = False
+    if accumulator is None:
+        accumulator = self._mx_frame_owner.kernel.new_collect_accumulator(keys)
+    self._mx_frame_owner.kernel.append_collect_accumulator(accumulator)
+    return accumulator
+''').body[0]
+                cls.body.append(hook)
             declaration = plan['manifest']['cells'].get('collect_outputs', {})
             if (declaration.get('checked_namespace_required') is False
                     and declaration.get('storage') == 'object_singleton'

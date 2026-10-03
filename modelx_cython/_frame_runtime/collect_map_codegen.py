@@ -74,8 +74,71 @@ def _plan(spec, manifest):
         entries.append({'kind': 'map', 'name': output, 'cell': cell,
                         'source': source})
     return {'entries': entries, 'sources': sorted({entry['source'] for entry in entries
-                                                  if entry['kind'] == 'map'})} if any(
-        entry['kind'] == 'map' for entry in entries) else None
+                                                  if entry['kind'] == 'map'})}
+
+
+def _streaming_accumulator(plan):
+    """The same typed fold for an already selected ordinary policy owner.
+
+    It does not select inputs, create Spaces or evaluate declarations. Only
+    literal numeric sum declarations use it; public declaration calls retain
+    their authoritative compiled formula and object cache.
+    """
+    lines = ['cdef class _CollectMapAccumulator:',
+             '    cdef Py_ssize_t _count']
+    for i, entry in enumerate(plan['entries']):
+        if entry['kind'] == 'scalar':
+            lines.append(f'    cdef double _total_{i}')
+        else:
+            lines += [f'    cdef tuple _keys_{i}',
+                      f'    cdef vector[long long] _native_keys_{i}',
+                      f'    cdef vector[double] _totals_{i}']
+    lines += ['\n    def __init__(self, dict keys_by_source):',
+              '        cdef object key']
+    if not plan['sources']:
+        lines.append('        pass')
+    for i, entry in enumerate(plan['entries']):
+        if entry['kind'] == 'map':
+            lines += [f'        self._keys_{i} = keys_by_source[{entry["source"]!r}]',
+                      f'        self._native_keys_{i}.reserve(len(self._keys_{i}))',
+                      f'        self._totals_{i}.resize(len(self._keys_{i}))',
+                      f'        for key in self._keys_{i}:',
+                      f'            self._native_keys_{i}.push_back(<long long>key)']
+    lines += ['\n    def matches(self, dict keys_by_source):']
+    for i, entry in enumerate(plan['entries']):
+        if entry['kind'] == 'map':
+            lines += [f'        if keys_by_source[{entry["source"]!r}] != self._keys_{i}:',
+                      '            return False']
+    lines += ['        return True',
+              '\n    cdef void _append(self, Kernel owner) except *:',
+              '        cdef Py_ssize_t j', '        cdef double value',
+              '        owner._require_idle()']
+    for i, entry in enumerate(plan['entries']):
+        if entry['kind'] == 'scalar':
+            lines += [f'        value = owner._native_cell_{entry["cell"]}()',
+                      '        if self._count == 0:',
+                      f'            self._total_{i} = value',
+                      '        else:', f'            self._total_{i} += value']
+        else:
+            lines += [f'        for j in range(self._native_keys_{i}.size()):',
+                      f'            value = owner._native_cell_{entry["cell"]}(self._native_keys_{i}[j])',
+                      '            if self._count == 0:',
+                      f'                self._totals_{i}[j] = value',
+                      '            else:', f'                self._totals_{i}[j] += value']
+    lines += ['        self._count += 1', '\n    def finish(self):',
+              '        cdef Py_ssize_t j',
+              '        if not self._count:',
+              '            raise ValueError("Collection needs a nonempty policy domain")']
+    for i, entry in enumerate(plan['entries']):
+        if entry['kind'] == 'map':
+            lines += [f'        result_{i} = {{}}',
+                      f'        for j in range(self._native_keys_{i}.size()):',
+                      f'            result_{i}[self._keys_{i}[j]] = self._totals_{i}[j]']
+    members = ', '.join(repr(e['name']) + ': ' +
+        (f'self._total_{i}' if e['kind'] == 'scalar' else f'result_{i}')
+        for i, e in enumerate(plan['entries']))
+    lines += ["        return {'sum': {" + members + '}}', '']
+    return '\n'.join(lines)
 
 
 def augment(source, manifest, spec):
@@ -129,5 +192,30 @@ def augment(source, manifest, spec):
                         (f'total_{index}' if entry['kind'] == 'scalar' else f'result_map_{index}')
                         for index, entry in enumerate(plan['entries']))
     lines += ["        return {'sum': {" + members + '}}', '']
+    lines += [
+        '    def new_collect_accumulator(self, dict keys_by_source):',
+        '        return _CollectMapAccumulator(keys_by_source)', '',
+        '    def append_collect_accumulator(self, _CollectMapAccumulator accumulator):',
+        '        accumulator._append(self)', '']
     manifest['compiled_collect_map'] = plan
+    # The streaming entry is narrower than bulk prepared traversal: object or
+    # callback edges keep the normal checked declaration and exported fold.
+    pending = [entry['cell'] for entry in plan['entries']]
+    seen = set()
+    while pending:
+        name = pending.pop()
+        if name in seen:
+            continue
+        seen.add(name)
+        row = manifest['cells'][name]
+        if row['calculator'] != 'native':
+            manifest['streaming_collect_map'] = False
+            break
+        pending.extend(row.get('dependencies', ()))
+    else:
+        manifest['streaming_collect_map'] = True
+    # Later owner/public emitters extend Kernel by appending indented methods.
+    # Keep that class last; the accumulator is a private module-level type.
+    source = source.replace('cdef class Kernel:',
+        _streaming_accumulator(plan) + '\ncdef class Kernel:', 1)
     return 'from libcpp.vector cimport vector\n' + source + '\n' + '\n'.join(lines) + '\n'

@@ -61,6 +61,29 @@ def test_native_map_sum_keeps_public_shape_and_falls_back_for_duplicate_keys(tmp
         assert fast.sum.amounts == pytest.approx(expected)
         assert model.Projection.collect() is fast
         assert model.Projection[1].amount(0) == pytest.approx(1.5)
+        # The original-shell streaming hook uses this same accumulator after
+        # its ordinary Space formula has selected each policy's native owner.
+        kernel = model._kernel._kernel
+        streamed = kernel.new_collect_accumulator({'periods': (0, 1)})
+        assert streamed.matches({'periods': (0, 1)})
+        assert not streamed.matches({'periods': (1, 0)})
+        for policy in range(2):
+            kernel.select_scope(policy)
+            kernel.append_collect_accumulator(streamed)
+        assert streamed.finish() == {'sum': {'amounts': expected}}
+        detached = streamed.finish()
+        detached['sum']['amounts'][0] = -1000.0
+        assert streamed.finish()['sum']['amounts'][0] == expected[0]
+        failed = kernel.new_collect_accumulator({'periods': (0, 2)})
+        kernel.select_scope(0)
+        with pytest.raises(IndexError):
+            kernel.append_collect_accumulator(failed)
+        with pytest.raises(ValueError, match='nonempty'):
+            failed.finish()
+        assert kernel.call('amount', (0,)) == pytest.approx(1.5)
+        retry = kernel.new_collect_accumulator({'periods': (0, 1)})
+        kernel.append_collect_accumulator(retry)
+        assert retry.finish() == {'sum': {'amounts': {0: 1.5, 1: 2.0}}}
 
         # A tuple with duplicate keys has normal Python dict-comprehension
         # semantics and uses the original checked traversal.

@@ -148,6 +148,21 @@ def _traversal_contract(cls):
 def _general_traversal(cls, call):
     """Use the exported fold rules while keeping policy selection in Cython."""
     fallback = ast.unparse(call)
+    has_map_hook = _method(cls, '_mx_collect_map') is not None
+    start_map = '_mx_map_state = None\n_mx_use_map = True\n' if has_map_hook else ''
+    select_map = '''        if _mx_use_map:
+            _mx_next_map = _mx_root._mx_collect_map(_mx_map_state)
+            if _mx_next_map is not None:
+                _mx_map_state = _mx_next_map
+                continue
+            if _mx_map_state is not None:
+                _mx_result = _mx_map_state.finish()
+                _mx_modes = tuple(_mx_result)
+            _mx_use_map = False
+''' if has_map_hook else ''
+    finish_map = '''if _mx_use_map and _mx_map_state is not None:
+    _mx_result = _mx_map_state.finish()
+''' if has_map_hook else ''
     return '''
 _mx_domain = %s
 if type(self) is not %s or self._mx_roots:
@@ -163,6 +178,7 @@ _mx_scratch = {}
 _mx_result = None
 _mx_modes = None
 _mx_shape = None
+%s\
 for _mx_coordinate in _mx_coords:
     _mx_values = dict(zip(_mx_names, _mx_args))
     _mx_values[%r] = _mx_coordinate
@@ -178,6 +194,7 @@ for _mx_coordinate in _mx_coords:
         _mx_apply = getattr(_mx_root, '_mx_apply_formula', None)
         if _mx_apply is not None:
             _mx_apply(**_mx_values)
+%s\
         _mx_outputs = _mx_root.collect_outputs()
         if type(_mx_outputs) is not dict or not _mx_outputs or set(_mx_outputs) - {'individual', 'sum'}:
             raise ValueError('collect_outputs must declare individual and/or sum')
@@ -210,6 +227,7 @@ for _mx_coordinate in _mx_coords:
             _mx_release = getattr(_mx_space, '_mx_collect_release', None)
             if _mx_release is not None:
                 _mx_release(_mx_scratch, _mx_template)
+%s\
 _mx_final = {}
 for _mx_mode, _mx_value in _mx_result.items():
     if _mx_mode == 'individual':
@@ -218,8 +236,8 @@ for _mx_mode, _mx_value in _mx_result.items():
         _mx_final[_mx_mode] = _mx_sys.CollectResult(_mx_value)
 return _mx_sys.CollectResult(_mx_final)
 ''' % (ast.unparse(call.args[1]), cls.name, fallback, fallback, fallback,
-       ast.unparse(call.args[3]), ast.unparse(call.args[4]),
-       call.args[2].value, cls.name)
+       ast.unparse(call.args[3]), ast.unparse(call.args[4]), start_map,
+       call.args[2].value, cls.name, select_map, finish_map)
 
 
 def _preserve_collect_cache(cls, collect, original_body, original_decorators, declarations):

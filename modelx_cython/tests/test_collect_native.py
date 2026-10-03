@@ -1,6 +1,7 @@
 """The native collect route must retain the exported fallback contract."""
 
 import ast
+import pytest
 
 from modelx_cython.collect_native import transform
 
@@ -32,6 +33,58 @@ class _c_Projection:
         return _mx_sys.collect_from_space(self, self.policy_ids, 'idx', (), ())
 '''
 DECLARATIONS = 'cdef class _c_Projection(_mx_sys.BaseSpace):\n    cpdef object collect(_c_Projection self)\n'
+
+
+@pytest.mark.parametrize('fallback_at', [None, 2])
+def test_map_fold_keeps_completed_policies_when_later_domain_falls_back(tmp_path, fallback_at):
+    from modelx.export import _mx_sys
+    visits, releases = [], []
+    class Buffer:
+        def __init__(self):
+            self.total = 0.0
+        def append(self, value):
+            self.total += value
+        def finish(self):
+            return {'sum': {'amount': self.total, 'other': self.total}}
+    source = SOURCE.replace(
+        'return {"sum": {"fib": self.fib(self.depth())}}',
+        'return {"sum": {"amount": float(self.idx), "other": float(self.idx)}}')
+    source = source.replace('    def depth(self)', '''    def _mx_walk(self):
+        return (self,)
+    def _mx_apply_formula(self, **values):
+        visits.append(('bind', self.idx))
+    def collect_outputs(self):
+        visits.append(('ordinary', self.idx))
+        return self._f_collect_outputs()
+    def _mx_collect_map(self, accumulator):
+        if self.idx == fallback_at:
+            return None
+        visits.append(('native', self.idx))
+        if accumulator is None:
+            accumulator = Buffer()
+        accumulator.append(float(self.idx))
+        return accumulator
+    def depth(self)''')
+    source = source.replace('def _mx_collect_release(self, context, template):\n        pass',
+                            'def _mx_collect_release(self, context, template):\n        releases.append(self.idx)')
+    output, _ = transform(source, DECLARATIONS, tmp_path/'map.json')
+    namespace = dict(_mx_sys=_mx_sys, Buffer=Buffer, visits=visits,
+                     releases=releases, fallback_at=fallback_at)
+    tree = ast.parse(output)
+    # Execute the emitted traversal control flow without Cython's compile-time
+    # self-type annotations, whose names do not exist during Python class setup.
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.ClassDef, ast.FunctionDef)):
+            node.decorator_list = [d for d in node.decorator_list
+                                   if isinstance(d, ast.Name) and d.id == 'staticmethod']
+    exec(compile(tree, '<generated map traversal>', 'exec'), namespace)
+    projection = namespace['_c_Projection'](None)
+    projection.policy_ids = (1, 2, 3)
+    result = projection.collect()
+    assert result.sum.amount == result.sum.other == 6.0
+    assert releases == [1, 2, 3]
+    assert [policy for kind, policy in visits if kind == 'bind'] == [1, 2, 3]
+    assert [policy for kind, policy in visits if kind != 'bind'] == [1, 2, 3]
 
 
 def test_numeric_sum_uses_one_typed_expression_and_keeps_fallback(tmp_path):
