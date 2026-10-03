@@ -13,8 +13,8 @@ from enum import IntEnum
 from pathlib import Path
 import sys
 import types
-from .contracts import ContractError, cell
-from .model_plan import derive_spec
+from modelx_cython._frame_runtime.contracts import ContractError, cell
+from modelx_cython._frame_runtime.model_plan import derive_spec
 from .source_graph import generated_space_name
 
 
@@ -215,7 +215,7 @@ def from_modelx(model, destination, *, projection='Projection', data_space='Data
         if point_table in tables:
             raise ContractError('Prepared policy records conflict with a Data table: '+point_table)
         tables[point_table]=policy_records
-    from .lookups import power as kernel_power
+    from modelx_cython._frame_runtime.lookups import power as kernel_power
     modules={}; refs={}; object_references={}; intrinsic_references={}; enum_references={}
     reference_types={}
     if object_bindings - space.refs.keys():
@@ -281,7 +281,7 @@ def from_modelx(model, destination, *, projection='Projection', data_space='Data
             domain_name = getattr(domains[point], 'ref_name', None)
             if domain_name not in space.cells:
                 raise ContractError('Collection domain must name a source-preserved Cell')
-            from .data_program import prepare_data
+            from modelx_cython._frame_runtime.data_program import prepare_data
             data_modules = {name: value.__name__ for name, value in data.refs.items()
                             if isinstance(value, types.ModuleType)}
             data_program = dict(references=sorted(data_references), modules=data_modules,
@@ -338,7 +338,7 @@ def from_modelx(model, destination, *, projection='Projection', data_space='Data
     module.__dict__.update(modules)
     module.__dict__.update(intrinsic_references)
     module.__dict__.update(enum_references)
-    from . import lookup
+    from modelx_cython._frame_runtime import lookup
     module.lookup = lookup
     # Do not bake point selectors, reference defaults or modelx objects into globals.
     if emission_space is None:
@@ -348,7 +348,7 @@ def from_modelx(model, destination, *, projection='Projection', data_space='Data
             raise ContractError('Shared compilation plan already owns formula and type decisions')
         if set(emission_space.cells) != set(space.cells):
             raise ContractError('Shared plan and resource adapter have different Cell identities')
-        from .compilation_plan_adapter import formula_module
+        from modelx_cython._frame_runtime.compilation_plan_adapter import formula_module
         module = formula_module(emission_space, globals_=module.__dict__, filename=str(path))
     sys.modules[module_name]=module
     for name in space.cells:
@@ -453,6 +453,6 @@ def from_modelx(model, destination, *, projection='Projection', data_space='Data
     if native_typed_inputs:
         if not signatures:
             raise ContractError('Native typed inputs require exported Cell signatures')
-        from .native_input_plan import expand
+        from modelx_cython._frame_runtime.native_input_plan import expand
         spec = expand(spec, signatures, typed_object_inputs)
     return spec

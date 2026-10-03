@@ -1113,9 +1113,6 @@ def build(spec, destination, *, diagnostics=False, python_cells=(),
         for suffix in ('.py','.pxd'):
             (pkg / ('_table_lookup'+suffix)).write_text(Path(__file__).with_name('table_lookup'+suffix).read_text().replace('from .lookups ', 'from ._lookups '))
     manifest.update(package=package, artifact_signature=digest, build_flags=build_flags, source_sha256=hashlib.sha256(source.encode()).hexdigest(), python=sys.version, source_file=inspect.getsourcefile(spec.module))
-    if not package_build and spec.model is not None and spec.public_emission_plan is None:
-        from .package_codegen import add_public_package
-        add_public_package(destination, manifest, spec.initial_tables, spec.model_name)
     if not package_build:
         extensions = []
         if space_source:

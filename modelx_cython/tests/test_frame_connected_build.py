@@ -7,8 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from modelx_cython._frame_runtime.connected_build import (
-    build_collect_package, plan_collect_regions, plan_package, build_package)
+from modelx_cython.tests.reference_frame.connected_build import build_collect_package, plan_collect_regions, plan_package, build_package
 from modelx_cython._frame_runtime.contracts import ContractError
 
 
@@ -66,7 +65,7 @@ def test_complete_package_uses_same_graph_without_collect_declarations():
 def test_original_nested_exports_reach_one_package_plan(
         tmp_path, fixture, model_name, spaces):
     import modelx as mx
-    from modelx_cython._frame_runtime.modelx_frontend_exported import open_exported_source
+    from modelx_cython.tests.reference_frame.modelx_frontend_exported import open_exported_source
 
     source = Path(__file__).parent / 'samples' / fixture / model_name
     exported = tmp_path / 'exported'
@@ -89,8 +88,8 @@ def test_original_nested_exports_reach_one_package_plan(
 
 
 def test_one_build_invocation_uses_discovered_spaces_not_option_keys(tmp_path, monkeypatch):
-    from modelx_cython._frame_runtime import compiler, connected_package
-    from modelx_cython._frame_runtime import modelx_frontend_exported
+    from modelx_cython.tests.reference_frame import compiler, connected_package
+    from modelx_cython.tests.reference_frame import modelx_frontend_exported
 
     source = 'def value():\n    return 1\n'
     def space(references, collect=None):
@@ -125,7 +124,7 @@ def test_one_build_invocation_uses_discovered_spaces_not_option_keys(tmp_path, m
         sessions.append(package)
         def derive(destination, **options):
             return fake_frontend(package, destination, **options)
-        from modelx_cython._frame_runtime.source_graph import describe_source_graph
+        from modelx_cython.tests.reference_frame.source_graph import describe_source_graph
         derive.source_graph = describe_source_graph(json.loads(
             (package / '_mx_formula_sources.json').read_text()))
         yield derive
@@ -146,8 +145,8 @@ def test_one_build_invocation_uses_discovered_spaces_not_option_keys(tmp_path, m
 
 
 def test_complete_package_builds_single_space_without_collect(tmp_path, monkeypatch):
-    from modelx_cython._frame_runtime import compiler, connected_package
-    from modelx_cython._frame_runtime import modelx_frontend_exported
+    from modelx_cython.tests.reference_frame import compiler, connected_package
+    from modelx_cython.tests.reference_frame import modelx_frontend_exported
 
     source = 'def value():\n    return 1\n'
     exported = tmp_path / 'exported'
@@ -164,7 +163,7 @@ def test_complete_package_builds_single_space_without_collect(tmp_path, monkeypa
     def fake_source(_package):
         def derive(destination, **options):
             return SimpleNamespace(projection=options['projection'])
-        from modelx_cython._frame_runtime.source_graph import describe_source_graph
+        from modelx_cython.tests.reference_frame.source_graph import describe_source_graph
         derive.source_graph = describe_source_graph(json.loads(
             (_package / '_mx_formula_sources.json').read_text()))
         yield derive
@@ -184,8 +183,8 @@ def test_complete_package_builds_single_space_without_collect(tmp_path, monkeypa
 @pytest.mark.parametrize('preserve_metadata', [True, False])
 def test_complete_package_compiles_ordinary_single_space(tmp_path, preserve_metadata):
     import modelx as mx
-    from modelx_cython._frame_runtime.connected_build import build_package
-    from modelx_cython._frame_runtime.connected_model import load_connected
+    from modelx_cython.tests.reference_frame.connected_build import build_package
+    from modelx_cython.tests.reference_frame.connected_model import load_connected
 
     model = mx.new_model('OrdinaryPackage')
     try:
@@ -227,7 +226,7 @@ def test_complete_package_uses_standard_trace_for_typed_cell_contracts(tmp_path)
     manifest = json.loads((result['artifacts']['S'] / 'manifest.json').read_text())
     assert manifest['cells']['value']['result']['kind'] == 'float'
     assert manifest['cells']['value']['params'][0]['type']['kind'] == 'float'
-    from modelx_cython._frame_runtime.connected_package import load_connected_package
+    from modelx_cython.tests.reference_frame.connected_package import load_connected_package
     compiled = load_connected_package(result['package'] / '__init__.py')
     try:
         assert compiled.S.value(2.0) == 2.5
@@ -263,7 +262,7 @@ def test_complete_connected_package_imports_an_eager_model_without_providers(
 
 def test_computational_data_space_is_not_executed_as_build_input(tmp_path):
     import modelx as mx
-    from modelx_cython._frame_runtime.connected_package import load_connected_package
+    from modelx_cython.tests.reference_frame.connected_package import load_connected_package
 
     model = mx.new_model('ComputationalData')
     try:
@@ -309,7 +308,7 @@ def test_original_locked_export_preserves_nested_parent_and_shared_references(
     import subprocess
     import sys
     from concurrent.futures import ThreadPoolExecutor
-    from modelx_cython._frame_runtime.connected_package import load_connected_package
+    from modelx_cython.tests.reference_frame.connected_package import load_connected_package
 
     fixture = Path(__file__).parent / 'samples' / 'locked_spaces'
     source = tmp_path / 'source'
@@ -341,8 +340,8 @@ def test_original_locked_export_preserves_nested_parent_and_shared_references(
 
 def test_complete_package_wires_real_cyclic_space_references(tmp_path):
     import modelx as mx
-    from modelx_cython._frame_runtime.connected_build import build_package
-    from modelx_cython._frame_runtime.connected_model import load_connected
+    from modelx_cython.tests.reference_frame.connected_build import build_package
+    from modelx_cython.tests.reference_frame.connected_model import load_connected
 
     model = mx.new_model('CyclicSpaces')
     try:
@@ -374,7 +373,7 @@ def test_complete_package_wires_real_cyclic_space_references(tmp_path):
 def test_complete_package_preserves_nested_references_and_base_parameters(
         tmp_path, use_slots):
     import modelx as mx
-    from modelx_cython._frame_runtime.connected_package import load_connected_package
+    from modelx_cython.tests.reference_frame.connected_package import load_connected_package
 
     source = Path(__file__).parent / 'samples' / 'ref_space' / 'RefSpace'
     live = mx.read_model(source)
@@ -399,7 +398,7 @@ def test_complete_package_preserves_nested_references_and_base_parameters(
 
 def test_complete_package_keeps_static_cell_free_parent_as_space_shell(tmp_path):
     import modelx as mx
-    from modelx_cython._frame_runtime.connected_package import load_connected_package
+    from modelx_cython.tests.reference_frame.connected_package import load_connected_package
 
     live = mx.new_model('StaticNested')
     try:
@@ -432,7 +431,7 @@ def test_complete_package_keeps_static_cell_free_parent_as_space_shell(tmp_path)
 def test_parameterized_cell_free_parents_bind_inherited_values(
         tmp_path, fixture, model_name, preserve_metadata):
     import modelx as mx
-    from modelx_cython._frame_runtime.connected_package import load_connected_package
+    from modelx_cython.tests.reference_frame.connected_package import load_connected_package
 
     source = Path(__file__).parent / 'samples' / fixture / model_name
     live = mx.read_model(source)
@@ -473,7 +472,7 @@ def test_parameterized_cell_free_parents_bind_inherited_values(
 
 def test_complete_package_preserves_uncached_and_fractional_power_cells(tmp_path):
     import modelx as mx
-    from modelx_cython._frame_runtime.connected_package import load_connected_package
+    from modelx_cython.tests.reference_frame.connected_package import load_connected_package
 
     source = Path(__file__).parent / 'samples' / 'fractional_power' / 'FractionalPower'
     live = mx.read_model(source)
@@ -499,7 +498,7 @@ def test_complete_package_preserves_uncached_and_fractional_power_cells(tmp_path
 
 def test_complete_package_uncached_cell_repeats_side_effects(tmp_path):
     import modelx as mx
-    from modelx_cython._frame_runtime.connected_package import load_connected_package
+    from modelx_cython.tests.reference_frame.connected_package import load_connected_package
 
     live = mx.new_model('UncachedConnected')
     try:
@@ -530,7 +529,7 @@ def test_complete_package_uncached_cell_repeats_side_effects(tmp_path):
 def test_complete_package_preserves_original_various_types(tmp_path, preserve_metadata):
     import modelx as mx
     import numpy as np
-    from modelx_cython._frame_runtime.connected_package import load_connected_package
+    from modelx_cython.tests.reference_frame.connected_package import load_connected_package
 
     source = Path(__file__).parent / 'samples' / 'various_types' / 'VariousTypes'
     live = mx.read_model(source)

@@ -13,7 +13,7 @@ import numbers
 
 from modelx_cython.formula_emitter import FormulaEmitter, SourceFormula
 from .contracts import TableKey
-from .trace_contracts import _direct_lookup_key_table
+from .resource_interfaces import _direct_lookup_key_table
 
 
 CTYPES = {'double': float, 'long long': int, 'bint': bool, 'str': str,
@@ -205,7 +205,7 @@ def resolved_resource_model(package_plan, exported):
             formula=(SimpleNamespace(func=instance.__call__, source=source)
                      if source is not None else None),
             _impl=SimpleNamespace(collect_over_spec=domains))
-        from .source_graph import _cell_interface
+        from .resource_interfaces import _cell_interface
         interfaces = {}
         for name, cell in space.cells.items():
             interfaces[name] = _cell_interface(name, dict(
@@ -226,7 +226,7 @@ def from_compilation_plan(package_plan, exported, destination, *, projection, **
     """Reuse physical resource preparation with original discovery as authority."""
     from dataclasses import replace
     from types import MappingProxyType
-    from .modelx_frontend_native_mode import from_modelx
+    from .prepared_resources import from_resolved_resources
     space = package_plan.spaces[package_plan.model + '.' + projection]
     declared_rows = options.get('row_references') or {}
     # Original Space formulas can assign references that do not exist on the
@@ -269,7 +269,7 @@ def from_compilation_plan(package_plan, exported, destination, *, projection, **
                    'parameters': {arg: CTYPES[typ].__name__
                                   for arg, typ in cell.public_arguments}}
             for name, cell in retained.items()}
-    spec = from_modelx(model, destination, projection=projection,
+    spec = from_resolved_resources(model, destination, projection=projection,
                       emission_space=context_space, **options)
     spec.model['original_receiver_cells'] = excluded
     return replace(spec, cache_domains=cache_domains(context_space),

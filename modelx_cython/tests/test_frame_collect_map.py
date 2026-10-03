@@ -6,9 +6,9 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from modelx_cython._frame_runtime.compiler import build
-from modelx_cython._frame_runtime.model import CompiledModel
-from modelx_cython._frame_runtime.modelx_frontend_native_mode import from_modelx
+from modelx_cython.tests.reference_frame.compiler import build
+from modelx_cython.tests.reference_frame.model import CompiledModel
+from modelx_cython.tests.reference_frame.modelx_frontend_native_mode import from_modelx
 
 
 def _source_cell(source):

@@ -5,7 +5,7 @@ from types import SimpleNamespace
 import pytest
 
 from modelx_cython._frame_runtime.contracts import ContractError
-from modelx_cython._frame_runtime.modelx_frontend_native_mode import _collect_sum_plan
+from modelx_cython.tests.reference_frame.modelx_frontend_native_mode import _collect_sum_plan
 
 
 class _Domain:

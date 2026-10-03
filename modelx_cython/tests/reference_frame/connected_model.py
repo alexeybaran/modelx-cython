@@ -13,7 +13,7 @@ import json
 import pickle
 from pathlib import Path
 
-from .contracts import ContractError
+from modelx_cython._frame_runtime.contracts import ContractError
 from .model import CompiledModel, _ItemSpace, _ProjectionSpace
 from .source_graph import (generated_space_name, inherited_parameters,
                            is_empty_space_formula)

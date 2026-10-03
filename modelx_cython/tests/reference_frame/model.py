@@ -11,9 +11,9 @@ import hashlib
 import threading
 from collections import OrderedDict
 from copy import deepcopy
-from .contracts import ContractError
-from .data_binding import DataView, pack_tables, prepare_inputs
-from .runtime import CompiledKernel
+from modelx_cython._frame_runtime.contracts import ContractError
+from modelx_cython._frame_runtime.data_binding import DataView, pack_tables, prepare_inputs
+from modelx_cython._frame_runtime.runtime import CompiledKernel
 
 
 def _policy_index(plan, tables):
@@ -522,7 +522,7 @@ class CompiledModel:
         if program is None:
             return tables
         import pandas as pd
-        from .data_program import prepare_data
+        from modelx_cython._frame_runtime.data_program import prepare_data
         references = {name: tables[name] for name in program['references']}
         derived, domain = prepare_data(program, references)
         updated = {**tables, **self._snapshot(derived)}

@@ -5,7 +5,7 @@ from types import ModuleType, SimpleNamespace
 
 import pytest
 
-from modelx_cython._frame_runtime.compiler import build
+from modelx_cython.tests.reference_frame.compiler import build
 from modelx_cython._frame_runtime.contracts import KernelSpec, cell
 
 

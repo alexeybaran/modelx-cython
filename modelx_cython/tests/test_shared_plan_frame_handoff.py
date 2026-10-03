@@ -33,8 +33,8 @@ def test_shared_plan_drives_helper_object_and_uncached_bodies(tmp_path, monkeypa
     import modelx as mx
     from modelx_cython import cli, compilation_plan
     from modelx_cython._frame_runtime import lookup
-    from modelx_cython._frame_runtime.compiler import build
-    from modelx_cython._frame_runtime.model import CompiledModel
+    from modelx_cython.tests.reference_frame.compiler import build
+    from modelx_cython.tests.reference_frame.model import CompiledModel
     from modelx_cython._frame_runtime.compilation_plan_adapter import from_compilation_plan
     from modelx_cython.formula_emitter import SourceFormula
 
@@ -80,7 +80,7 @@ def test_shared_plan_drives_helper_object_and_uncached_bodies(tmp_path, monkeypa
     assert space.cells['amount'].public_result == 'double'
     assert not space.cells['uncached'].cached
     assert space.cells['receiver_value'].receiver_requirements
-    import modelx_cython._frame_runtime.modelx_frontend_exported as retired_discovery
+    import modelx_cython.tests.reference_frame.modelx_frontend_exported as retired_discovery
     def forbidden(*args, **kwargs):
         raise AssertionError('Resolved handoff must not rediscover the export')
     monkeypatch.setattr(retired_discovery, 'open_exported_source', forbidden)
@@ -155,7 +155,7 @@ def test_dynamic_row_resolution_preserves_scalar_reference_discovery(tmp_path,mo
     import modelx as mx
     from modelx_cython import cli,compilation_plan
     from modelx_cython._frame_runtime.compilation_plan_adapter import from_compilation_plan
-    from modelx_cython._frame_runtime.compiler import build
+    from modelx_cython.tests.reference_frame.compiler import build
     model=mx.new_model('DynamicReference')
     p=model.new_space('Projection',formula='def Projection(policy_id):\n return {"refs":{"value":float(policy_id)+1.0}}\n')
     p.rate=0.5
@@ -186,7 +186,7 @@ def test_closed_scalar_records_share_compiled_declaration_and_reset_on_failure(t
     from dataclasses import replace
     from modelx_cython import cli,compilation_plan
     from modelx_cython._frame_runtime import lookup
-    from modelx_cython._frame_runtime.compiler import build
+    from modelx_cython.tests.reference_frame.compiler import build
     from modelx_cython._frame_runtime.compilation_plan_adapter import from_compilation_plan
     from modelx_cython._frame_runtime.prepared_space_inputs import PreparedSpaceInputs
     import importlib
@@ -261,9 +261,9 @@ def test_prepared_context_preserves_native_categories_behind_object_public_abi(t
     import modelx as mx
     from modelx_cython import cli, compilation_plan
     from modelx_cython._frame_runtime import lookup
-    from modelx_cython._frame_runtime.compiler import build
+    from modelx_cython.tests.reference_frame.compiler import build
     from modelx_cython._frame_runtime.compilation_plan_adapter import cell_bindings, from_compilation_plan, _resolve_cell_bindings
-    from modelx_cython._frame_runtime.model import CompiledModel
+    from modelx_cython.tests.reference_frame.model import CompiledModel
     m = mx.new_model('CategoryHandoff')
     data = m.new_space('Data')
     data.points_data = pd.DataFrame({'category': ['ONE', 'ZERO']},

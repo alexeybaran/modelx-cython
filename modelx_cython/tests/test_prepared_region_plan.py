@@ -26,7 +26,7 @@ def test_standard_command_resolves_prepared_context_without_frontend_hook(tmp_pa
     import modelx as mx
     from modelx_cython import cli
     from lifelib.helpers import lookup
-    from modelx_cython._frame_runtime import modelx_frontend_exported
+    from modelx_cython.tests.reference_frame import modelx_frontend_exported
     from modelx_cython._frame_runtime import space_shell
     m = mx.new_model('ResourcePlan')
     data = m.new_space('Data')

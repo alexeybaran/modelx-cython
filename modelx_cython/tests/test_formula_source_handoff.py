@@ -7,7 +7,7 @@ from types import ModuleType
 import pytest
 
 from modelx_cython.formula_emitter import SourceFormula, with_annotations
-from modelx_cython._frame_runtime.compiler import build
+from modelx_cython.tests.reference_frame.compiler import build
 from modelx_cython._frame_runtime.contracts import KernelSpec
 from modelx_cython._frame_runtime.runtime import CompiledKernel
 

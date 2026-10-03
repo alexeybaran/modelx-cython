@@ -9,7 +9,7 @@ from pathlib import Path
 import shutil
 
 from .connected_model import load_connected
-from .contracts import ContractError
+from modelx_cython._frame_runtime.contracts import ContractError
 from .source_graph import generated_space_name, is_empty_space_formula
 
 
@@ -115,7 +115,7 @@ def assemble_connected_package(destination, graph, artifacts, *,
     (destination / 'connected_manifest.json').write_text(
         json.dumps(package_manifest, indent=2, sort_keys=True) + '\n',
         encoding='utf-8')
-    init = '''"""Generated connected modelx-cython package."""\nfrom modelx_cython._frame_runtime.connected_package import load_connected_package as _open\n\ndef load(*, external_bindings=None, tables_by_space=None):\n    return _open(__file__, external_bindings=external_bindings, tables_by_space=tables_by_space)\n'''
+    init = '''"""Generated connected modelx-cython package."""\nfrom modelx_cython.tests.reference_frame.connected_package import load_connected_package as _open\n\ndef load(*, external_bindings=None, tables_by_space=None):\n    return _open(__file__, external_bindings=external_bindings, tables_by_space=tables_by_space)\n'''
     if eager:
         init += f'\nmx_model = {model_name} = load()\n'
         init += f'__all__ = ["load", "mx_model", {model_name!r}]\n'

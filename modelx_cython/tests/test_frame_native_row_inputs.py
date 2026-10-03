@@ -6,12 +6,12 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from modelx_cython._frame_runtime.compiler import FrontendRewrite, build, emit
+from modelx_cython.tests.reference_frame.compiler import FrontendRewrite, build, emit
 from modelx_cython._frame_runtime.contracts import ContractError, KernelSpec, cell
 from modelx_cython._frame_runtime.lookups import IndexedFloat1
-from modelx_cython._frame_runtime.modelx_frontend_native_mode import from_modelx
+from modelx_cython.tests.reference_frame.modelx_frontend_native_mode import from_modelx
 from modelx_cython._frame_runtime.native_input_plan import expand
-from modelx_cython._frame_runtime.model import CompiledModel
+from modelx_cython.tests.reference_frame.model import CompiledModel
 
 
 @cell

@@ -11,7 +11,7 @@ import keyword
 import pickle
 from pathlib import Path
 
-from .contracts import ContractError
+from modelx_cython._frame_runtime.contracts import ContractError
 
 
 _TABLES_FILE = "_mx_tables.pkl"
@@ -50,5 +50,5 @@ def add_public_package(destination, manifest, tables, model_name):
         "tables_sha256": hashlib.sha256(payload).hexdigest(),
     }
 
-    init_source = f'''"""Generated compiled model package; do not edit by hand."""\nfrom modelx_cython._frame_runtime.model import _load_embedded_model as _mx_load_model\n\nmx_model = {model_name} = _mx_load_model(__file__)\n__all__ = ["mx_model", {model_name!r}]\n\ndel _mx_load_model\n'''
+    init_source = f'''"""Generated compiled model package; do not edit by hand."""\nfrom modelx_cython.tests.reference_frame.model import _load_embedded_model as _mx_load_model\n\nmx_model = {model_name} = _mx_load_model(__file__)\n__all__ = ["mx_model", {model_name!r}]\n\ndel _mx_load_model\n'''
     (destination / "__init__.py").write_text(init_source)

@@ -78,7 +78,7 @@ def test_reference_tables_memoryviews_and_checked_scope_bindings(monkeypatch, sy
 
 
 def test_table_lookup_adapter_is_shared_with_existing_facade():
-    from modelx_cython._frame_runtime.model import DataView as ExistingDataView
+    from modelx_cython.tests.reference_frame.model import DataView as ExistingDataView
     assert ExistingDataView is DataView
     source = pd.DataFrame({'value': [1., 2.]})
     view = DataView({'points': source})

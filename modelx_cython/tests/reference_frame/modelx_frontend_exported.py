@@ -12,7 +12,7 @@ import sys
 from types import SimpleNamespace
 from uuid import uuid4
 
-from .contracts import ContractError
+from modelx_cython._frame_runtime.contracts import ContractError
 from .modelx_frontend_native_mode import from_modelx
 from .source_graph import describe_source_graph
 
@@ -93,7 +93,7 @@ def open_exported_source(package):
     alias, exported = _load_export(path)
     try:
         if manifest is None:
-            from .exported_fallback import recover_source_manifest
+            from modelx_cython._frame_runtime.exported_fallback import recover_source_manifest
             manifest = recover_source_manifest(exported)
             graph = describe_source_graph(manifest)
         if exported._name != manifest['model']:

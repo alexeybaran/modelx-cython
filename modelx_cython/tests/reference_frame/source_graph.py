@@ -8,7 +8,7 @@ import ast
 import hashlib
 import keyword
 
-from .contracts import ContractError
+from modelx_cython._frame_runtime.contracts import ContractError
 
 
 def _cell_interface(name, cell):

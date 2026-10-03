@@ -9,9 +9,9 @@ import pytest
 
 
 def test_numeric_object_failures_cleanup_retry_and_nested_guard(tmp_path, monkeypatch):
-    from modelx_cython._frame_runtime.compiler import build
-    from modelx_cython._frame_runtime.model import CompiledModel
-    from modelx_cython._frame_runtime.modelx_frontend_native_mode import from_modelx
+    from modelx_cython.tests.reference_frame.compiler import build
+    from modelx_cython.tests.reference_frame.model import CompiledModel
+    from modelx_cython.tests.reference_frame.modelx_frontend_native_mode import from_modelx
 
     tracker = ModuleType('mxcf_error_boundary_tracker')
     tracker.created = tracker.destroyed = tracker.child_evals = 0

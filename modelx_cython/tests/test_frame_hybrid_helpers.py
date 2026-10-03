@@ -9,12 +9,12 @@ import pytest
 from modelx_cython._frame_runtime.contracts import cell
 from modelx_cython._frame_runtime.contracts import ContractError
 from modelx_cython._frame_runtime.compiler import emit
-from modelx_cython._frame_runtime.compiler import build
+from modelx_cython.tests.reference_frame.compiler import build
 from modelx_cython._frame_runtime.frame_codegen import emit_context
 from modelx_cython._frame_runtime.gil_codegen import augment
-from modelx_cython._frame_runtime.model import CompiledModel
+from modelx_cython.tests.reference_frame.model import CompiledModel
 from modelx_cython._frame_runtime.model_plan import derive_spec
-from modelx_cython._frame_runtime.modelx_frontend_native_mode import from_modelx
+from modelx_cython.tests.reference_frame.modelx_frontend_native_mode import from_modelx
 
 
 def _space_formula(point_id):

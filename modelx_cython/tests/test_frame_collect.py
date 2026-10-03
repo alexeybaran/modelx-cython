@@ -6,9 +6,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from modelx_cython._frame_runtime.model import (
-    CompiledModel, _ProjectionSpace, _CollectAccumulator,
-    _detach_collect_value)
+from modelx_cython.tests.reference_frame.model import CompiledModel, _ProjectionSpace, _CollectAccumulator, _detach_collect_value
 
 
 class _Kernel:

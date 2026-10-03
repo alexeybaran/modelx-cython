@@ -4,7 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from modelx_cython._frame_runtime import connected_model
+from modelx_cython.tests.reference_frame import connected_model
 from modelx_cython._frame_runtime.contracts import ContractError
 
 

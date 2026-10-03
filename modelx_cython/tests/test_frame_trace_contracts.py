@@ -4,7 +4,7 @@ from types import SimpleNamespace
 import pytest
 
 from modelx_cython._frame_runtime.contracts import ContractError, TableKey
-from modelx_cython._frame_runtime.trace_contracts import from_mx2cy_trace
+from modelx_cython.tests.reference_frame.trace_contracts import from_mx2cy_trace
 
 
 class Category(IntEnum):

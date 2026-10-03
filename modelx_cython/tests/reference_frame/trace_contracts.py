@@ -8,7 +8,7 @@ import ast
 import numbers
 from enum import IntEnum
 
-from .contracts import ContractError, TableKey
+from modelx_cython._frame_runtime.contracts import ContractError, TableKey
 
 
 def _scalar_type(observed):

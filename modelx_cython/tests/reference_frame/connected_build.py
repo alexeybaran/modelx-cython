@@ -10,7 +10,7 @@ import json
 import keyword
 from pathlib import Path
 
-from .contracts import ContractError
+from modelx_cython._frame_runtime.contracts import ContractError
 from .source_graph import (generated_space_name, inherited_parameters,
                            is_empty_space_formula)
 
@@ -115,7 +115,7 @@ def build_package(exported, destination, *, external_imports,
     options cannot silently override that trace. Build artifacts stay outside
     the exported source tree.
     """
-    from .compiler import build
+    from modelx_cython.tests.reference_frame.compiler import build
     from .connected_package import assemble_connected_package
     from .modelx_frontend_exported import open_exported_source
     from .trace_contracts import from_mx2cy_trace

@@ -6,7 +6,7 @@ import sys
 
 import pytest
 
-from modelx_cython._frame_runtime import connected_package
+from modelx_cython.tests.reference_frame import connected_package
 from modelx_cython._frame_runtime.contracts import ContractError
 
 

@@ -5,8 +5,8 @@ import json
 import pytest
 
 from modelx_cython._frame_runtime.contracts import ContractError
-from modelx_cython._frame_runtime.modelx_frontend_exported import from_exported
-from modelx_cython._frame_runtime.source_graph import describe_source_graph
+from modelx_cython.tests.reference_frame.modelx_frontend_exported import from_exported
+from modelx_cython.tests.reference_frame.source_graph import describe_source_graph
 
 
 def _cell(source):
@@ -132,8 +132,8 @@ def test_unknown_export_source_schema_fails_before_import(tmp_path):
 def test_original_export_compiles_static_space_without_policy_table(
         tmp_path, preserve_metadata, use_slots):
     import modelx as mx
-    from modelx_cython._frame_runtime.compiler import build, compile_generated
-    from modelx_cython._frame_runtime.model import CompiledModel
+    from modelx_cython.tests.reference_frame.compiler import build, compile_generated
+    from modelx_cython.tests.reference_frame.model import CompiledModel
 
     model = mx.new_model('OldStyle')
     try:
@@ -186,8 +186,8 @@ def test_original_export_compiles_static_space_without_policy_table(
 def test_metadata_free_original_export_preserves_dynamic_parameters(tmp_path):
     import modelx as mx
     import pandas as pd
-    from modelx_cython._frame_runtime.compiler import build
-    from modelx_cython._frame_runtime.model import CompiledModel
+    from modelx_cython.tests.reference_frame.compiler import build
+    from modelx_cython.tests.reference_frame.model import CompiledModel
 
     model = mx.new_model('OldDynamic')
     try:
@@ -198,7 +198,7 @@ def test_metadata_free_original_export_preserves_dynamic_parameters(tmp_path):
     finally:
         model.close()
     (exported / '_mx_formula_sources.json').unlink()
-    from modelx_cython._frame_runtime.modelx_frontend_exported import open_exported_source
+    from modelx_cython.tests.reference_frame.modelx_frontend_exported import open_exported_source
     with open_exported_source(exported) as derive:
         recovered = derive.source_manifest
         assert recovered['source_provenance'] == 'reconstructed_export_methods'
@@ -221,8 +221,8 @@ def test_metadata_free_original_export_preserves_dynamic_parameters(tmp_path):
 @pytest.mark.parametrize('preserve_metadata', [False, True])
 def test_original_dynamic_export_needs_no_policy_table(tmp_path, preserve_metadata):
     import modelx as mx
-    from modelx_cython._frame_runtime.compiler import build
-    from modelx_cython._frame_runtime.model import CompiledModel
+    from modelx_cython.tests.reference_frame.compiler import build
+    from modelx_cython.tests.reference_frame.model import CompiledModel
 
     model = mx.new_model('UnboundedDynamic')
     try:
@@ -261,8 +261,8 @@ def test_original_dynamic_export_needs_no_policy_table(tmp_path, preserve_metada
 def test_metadata_free_export_preserves_cell_defaults_and_keyword_calls(tmp_path):
     import modelx as mx
     import pandas as pd
-    from modelx_cython._frame_runtime.compiler import build
-    from modelx_cython._frame_runtime.model import CompiledModel
+    from modelx_cython.tests.reference_frame.compiler import build
+    from modelx_cython.tests.reference_frame.model import CompiledModel
 
     model = mx.new_model('OldSignatures')
     try:
