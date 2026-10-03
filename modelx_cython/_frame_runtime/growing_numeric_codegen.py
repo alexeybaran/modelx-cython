@@ -28,12 +28,12 @@ def support_header(rows):
     return lines
 
 
-def cell_entry(name, row, signature, args, formula, diagnostics):
+def cell_entry(name, row, signature, args, formula, diagnostics, *, entry_name=None):
     ret = row['result']['ctype']
     types = ', '.join(['_Frame*'] + [p['type']['ctype'] for p in row['params']])
     lines = [f'ctypedef int (*_NcLookup_{name})({types}, {ret}*) noexcept nogil',
              f'ctypedef int (*_NcCommit_{name})({types}, {ret}) noexcept nogil']
-    lines += [f'cdef inline {ret} _cell_{name}({signature}) except? -1 nogil:',
+    lines += [f'cdef inline {ret} {entry_name or ("_cell_" + name)}({signature}) noexcept nogil:',
              f'    cdef {ret} _mx_value', '    cdef int _mx_status']
     if diagnostics:
         lines.append('    state._calls += 1')
@@ -43,6 +43,7 @@ def cell_entry(name, row, signature, args, formula, diagnostics):
     if diagnostics:
         lines.append('    state._misses += 1')
     lines += [f'    _mx_value = {formula}',
+              *(['    if _mx_value == -1: mx_capture(&state._guard)'] if row.get('checked_formula') else []),
               f'    _mx_status = (<_NcCommit_{name}>_nc_commit_{name})({args}, _mx_value)',
               '    if _mx_status < 0: mx_capture(&state._guard)',
               '    return _mx_value']

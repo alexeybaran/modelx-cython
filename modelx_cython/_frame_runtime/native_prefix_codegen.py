@@ -118,12 +118,11 @@ def cell_entry(name, row, signature, args, formula, diagnostics):
     from .growing_numeric_codegen import cell_entry as growing_entry
     ret=row['result']['ctype'];arguments=[p['name'] for p in row['params']]
     canonical='_Frame* state'+''.join(', '+p['type']['ctype']+' '+p['name'] for p in row['params'])
-    cold=growing_entry(name,row,canonical,args,formula,diagnostics)
-    cold=[line.replace('_cell_'+name+'(', '_overflow_'+name+'(') for line in cold]
+    cold=growing_entry(name,row,canonical,args,formula,diagnostics,entry_name='_overflow_'+name)
     store='_floats' if row['result']['kind']=='float' else '_ints'
     lines=cold+['@cython.overflowcheck(False)', '@cython.boundscheck(False)',
         '@cython.wraparound(False)', '@cython.initializedcheck(False)',
-        f'cdef inline {ret} _cell_{name}({signature}) except? -1 nogil:',
+        f'cdef inline {ret} _cell_{name}({signature}) noexcept nogil:',
         '    cdef Py_ssize_t slot',f'    cdef {ret} _mx_value','    cdef int status']
     lines += slot_lines(name,row,arguments,f'return _overflow_{name}({args})',f'return _overflow_{name}({args})')
     if diagnostics:lines.append('    state._calls += 1')
@@ -132,13 +131,15 @@ def cell_entry(name, row, signature, args, formula, diagnostics):
     if row['hashed']:switched+=f' or state._prefix_disabled_{name}'
     lines.append(f'    if {switched}: return _overflow_{name}({args})')
     if row['recursive']:
-        lines += ['    if state._seen[slot] == state._epoch - 1:',f'        _cache_error(1, b"{name}")',
+        lines += ['    if state._seen[slot] == state._epoch - 1:',f'        mx_fail(&state._guard, 1, b"{name}")',
                   '    state._seen[slot] = state._epoch - 1']
     if row['hashed']:
         for p,a in zip(row['params'],arguments):
             lines.append(f'    state._keys_{name}_{p["name"]}[slot - {row["offset"]}] = {a}')
     if diagnostics:lines.append('    state._misses += 1')
     lines.append(f'    _mx_value = {formula}')
+    if row.get('checked_formula'):
+        lines.append('    if _mx_value == -1: mx_capture(&state._guard)')
     lines += [f'    if {switched}:',f'        status = (<_NcCommit_{name}>_nc_commit_{name})({args}, _mx_value)',
               '        if status < 0: mx_capture(&state._guard)','    else:',
               f'        state.{store}[slot] = _mx_value','        state._seen[slot] = state._epoch',

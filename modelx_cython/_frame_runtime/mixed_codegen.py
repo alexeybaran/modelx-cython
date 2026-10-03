@@ -4,22 +4,27 @@ Pure-native output is untouched. Python calculators finish Cython cleanup before
 numeric code captures their error. Unfinished entries carry the owning invocation
 depth; a failure scans and clears only entries from that invocation or its children.
 """
-import re
 
 
-def augment_frame(frame, functions, manifest, heap_numeric=False):
-    slots = max(1, manifest['cache_slots'])
-    busy_spans = []
-    if heap_numeric:
-        offset = 0
-        for function in functions:
-            match = re.search(r'cdef inline .+? _cell_(\w+)\(', function)
-            if not match or 'state._seen[_mx_key] = state._epoch - 1' not in function:
-                continue
-            row = manifest['cells'][match[1]]
-            busy_spans.append((row['offset'], row['offset'] + row['slots'], offset))
+def busy_layout(rows):
+    """Describe invocation ownership from the same semantic cache descriptors."""
+    offset = 0
+    spans = {}
+    for name, row in rows.items():
+        if (row['cached'] and row['recursive'] and row['direct_input'] is None
+                and row.get('storage') != 'growing_numeric'):
+            spans[name] = (row['offset'], row['offset'] + row['slots'], offset)
             offset += row['slots']
-        manifest['busy_cache_slots'] = max(1, offset)
+    return spans, max(1, offset)
+
+
+def emit_invocation_state(frame, manifest, heap_numeric=False):
+    """Emit guard/rollback state directly; Cell entries already publish ownership."""
+    slots = max(1, manifest['cache_slots'])
+    spans, size = busy_layout(manifest['cells'])
+    busy_spans = list(spans.values()) if heap_numeric else []
+    if heap_numeric:
+        manifest['busy_cache_slots'] = size
     busy_field = '    unsigned int* _busy_owner' if heap_numeric else f'    unsigned int _busy_owner[{slots}]'
     frame += [busy_field, '    unsigned int _entry_depth',
               '    bint _scope_valid']
@@ -45,33 +50,8 @@ def augment_frame(frame, functions, manifest, heap_numeric=False):
               '            owner_slot = _busy_slot(slot)',
               '            if owner_slot >= 0 and state._busy_owner[owner_slot] >= mark:',
               '                state._seen[slot] = state._epoch - 2 if _hash_slot(slot) else 0']
-    result = []
-    for function in functions:
-        match = re.search(r'cdef inline .+? _cell_(\w+)\(', function)
-        if not match:
-            result.append(function)
-            continue
-        row = manifest['cells'][match[1]]
-        if row['hashed']:
-            function = function.replace(
-                'if state._seen[_mx_key] != state._epoch and state._seen[_mx_key] != state._epoch - 1:',
-                'if state._seen[_mx_key] != state._epoch and state._seen[_mx_key] != state._epoch - 1 and state._seen[_mx_key] != state._epoch - 2:')
-        lines = []
-        for line in function.splitlines():
-            indent = line[:len(line) - len(line.lstrip())]
-            if line.strip() == 'state._seen[_mx_key] = state._epoch - 1':
-                owner_key = '_mx_key'
-                if heap_numeric:
-                    owner_span = next((span for span in busy_spans
-                                       if span[0] == row['offset'] and span[1] == row['offset'] + row['slots']), None)
-                    if owner_span is None:
-                        raise ValueError('Busy Cell missing compact owner span')
-                    owner_key = f'(_mx_key - {owner_span[0]} + {owner_span[2]})'
-                lines.append(indent + f'state._busy_owner[{owner_key}] = state._entry_depth')
-            lines.append(line)
-        result.append('\n'.join(lines))
     manifest['mixed_cache_protocol'] = 'ready/busy/tombstone; rollback scan by invocation depth'
-    return frame, result
+    return frame
 
 
 def emit_scope_protocol(frame_pointer):

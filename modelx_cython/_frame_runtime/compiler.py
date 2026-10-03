@@ -384,7 +384,7 @@ def _frame_expression(source, binder, cast_names):
 
 
 def _cell_entry_lines(name, row, tail, call, native_suffix, diagnostics,
-                      *, input_info):
+                      *, input_info, invocation_scope=False, busy_span=None):
     """Emit one typed Cell cache entry for the physical frame."""
     receiver = 'state'
     signature = '_Frame* state' + tail
@@ -392,7 +392,8 @@ def _cell_entry_lines(name, row, tail, call, native_suffix, diagnostics,
     def field(key):
         return receiver + '.' + key
     args = 'state' + (', ' + call if call else '')
-    formula = f'_calc_{name}({args})'
+    formula = f'(<_Calc_{name}>_calc_{name})({args})'
+    capture = ['    if _mx_value == -1: mx_capture(&state._guard)'] if row.get('checked_formula') else []
     if row.get('storage') == 'growing_numeric':
         from .growing_numeric_codegen import cell_entry
         if row.get('native_prefix'):
@@ -411,15 +412,15 @@ def _cell_entry_lines(name, row, tail, call, native_suffix, diagnostics,
         return [f'cdef inline {ret} _cell_{name}({signature}) {exception}{native_suffix}:',
                 f'    return {value}']
     if not row['cached']:
-        return [f'cdef inline {ret} _cell_{name}({signature}) except? -1{native_suffix}:',
+        return [f'cdef inline {ret} _cell_{name}({signature}) noexcept{native_suffix}:',
                 f'    cdef {ret} _mx_value',
-                f'    _mx_value = {formula}',
+                f'    _mx_value = {formula}', *capture,
                 '    return _mx_value']
 
     params = row['params']
     result = ['@cython.boundscheck(False)', '@cython.wraparound(False)',
               '@cython.overflowcheck(False)', '@cython.initializedcheck(False)',
-              f'cdef inline {ret} _cell_{name}({signature}) except? -1{native_suffix}:',
+              f'cdef inline {ret} _cell_{name}({signature}) noexcept{native_suffix}:',
               '    cdef Py_ssize_t _mx_key', f'    cdef {ret} _mx_value']
     if diagnostics:
         result.append(f'    {field("_calls")} += 1')
@@ -430,7 +431,7 @@ def _cell_entry_lines(name, row, tail, call, native_suffix, diagnostics,
         for p in params:
             arg = p['name']
             if p['type']['kind'] == 'float':
-                result += [f'    if not _math_isfinite({arg}): _cache_error(2, b"{name}.{arg}")',
+                result += [f'    if not _math_isfinite({arg}): mx_fail(&state._guard, 2, b"{name}.{arg}")',
                            f'    _mx_bits.value = 0.0 if {arg} == 0.0 else {arg}',
                            '    _mx_hashcode = (_mx_hashcode ^ _mx_bits.bits) * <unsigned long long>1099511628211']
             else:
@@ -442,7 +443,8 @@ def _cell_entry_lines(name, row, tail, call, native_suffix, diagnostics,
                    f"    for _mx_probe in range({row['slots']}):",
                    f"        _mx_key = {row['offset']} + _mx_bucket"]
         if row['recursive']:
-            result += [f'        if {field("_seen")}[_mx_key] != {field("_epoch")} and {field("_seen")}[_mx_key] != {field("_epoch")} - 1:',
+            tombstone = f' and {field("_seen")}[_mx_key] != {field("_epoch")} - 2' if invocation_scope else ''
+            result += [f'        if {field("_seen")}[_mx_key] != {field("_epoch")} and {field("_seen")}[_mx_key] != {field("_epoch")} - 1{tombstone}:',
                        '            break']
         else:
             result += [f'        if {field("_seen")}[_mx_key] != {field("_epoch")}:',
@@ -451,13 +453,13 @@ def _cell_entry_lines(name, row, tail, call, native_suffix, diagnostics,
                              for p in params) or 'True'
         result += [f'        if {equal}: break',
                    f"        _mx_bucket = (_mx_bucket + 1) & {row['slots']-1}",
-                   '    else:', f'        _cache_error(3, b"{name}")']
+                   '    else:', f'        mx_fail(&state._guard, 3, b"{name}")']
     else:
         index = '0'
         for p in params:
             pnm, lower, size = p['name'], p['lower'], p['size']
             result += [f'    if {pnm} < {lower} or {pnm} >= {lower + size}:',
-                       f'        _cache_error(0, b"{name}.{pnm}")']
+                       f'        mx_fail(&state._guard, 0, b"{name}.{pnm}")']
             index = f'(({index}) * {size} + ({pnm} - ({lower})))'
         result.append(f"    _mx_key = {row['offset']} + {index}")
     store = '_floats' if row['result']['kind'] == 'float' else '_ints'
@@ -465,14 +467,17 @@ def _cell_entry_lines(name, row, tail, call, native_suffix, diagnostics,
                f'        return {field(store)}[_mx_key]']
     if row['recursive']:
         result += [f'    if {field("_seen")}[_mx_key] == {field("_epoch")} - 1:',
-                   f'        _cache_error(1, b"{name}")',
-                   f'    {field("_seen")}[_mx_key] = {field("_epoch")} - 1']
+                   f'        mx_fail(&state._guard, 1, b"{name}")']
+        if invocation_scope:
+            key = f'(_mx_key - {busy_span[0]} + {busy_span[2]})' if busy_span else '_mx_key'
+            result.append(f'    state._busy_owner[{key}] = state._entry_depth')
+        result.append(f'    {field("_seen")}[_mx_key] = {field("_epoch")} - 1')
     if row['hashed']:
         for p in params:
             result.append(f'    {field("_keys_" + name + "_" + p["name"])}[_mx_bucket] = {p["name"]}')
     if diagnostics:
         result.append(f'    {field("_misses")} += 1')
-    result += [f'    _mx_value = {formula}',
+    result += [f'    _mx_value = {formula}', *capture,
                f'    {field(store)}[_mx_key] = _mx_value',
                f'    {field("_seen")}[_mx_key] = {field("_epoch")}',
                '    return _mx_value']
@@ -880,6 +885,9 @@ def emit(spec, *, diagnostics=False, python_cells=()):
     frame_casts = _frame_input_casts(input_info)
     cast_names = ({'__MX_FRAME_CAST_' + key + '__': f'(<{ctype}>state.{key})'
                    for key, ctype in frame_casts.items()})
+    from .mixed_codegen import busy_layout
+    busy_spans, _ = busy_layout(rows)
+    heap_numeric = slot >= 1024
     for name, row in rows.items():
         params = row['params']
         decl = ', '.join(p['type']['ctype'] + ' ' + p['name'] + ((' = ' + p['default']) if p['default'] is not None else '') for p in params)
@@ -890,7 +898,8 @@ def emit(spec, *, diagnostics=False, python_cells=()):
         ret = row['result']['ctype']
         frame_entry = tuple(_cell_entry_lines(name, row, tail, call,
                                               native_suffix, diagnostics,
-                                              input_info=input_info))
+                                              input_info=input_info, invocation_scope=bool(python_reasons),
+                                              busy_span=busy_spans.get(name) if heap_numeric else None))
         if row['direct_input'] is not None:
             frame_methods.append(frame_entry)
             continue

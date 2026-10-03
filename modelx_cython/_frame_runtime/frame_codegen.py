@@ -73,8 +73,8 @@ def emit_context(parts, manifest):
     manifest['physical_layout'] = ('retained_heap_numeric_memo_frame_with_python_owners'
                                    if heap_numeric else 'embedded_native_memo_frame_with_python_owners')
     if native_guard:
-        from .native_guard_codegen import guarded_functions, runtime as guard_runtime
-        aliases, lowered = guarded_functions(lowered, manifest)
+        from .native_guard_codegen import calculation_aliases, runtime as guard_runtime
+        aliases = calculation_aliases(manifest['cells'])
         output_plan = parts['frame_outputs']
         length = output_plan['length']
         tables = output_plan['tables']
@@ -83,8 +83,8 @@ def emit_context(parts, manifest):
                 for name, columns in manifest['outputs'].items()):
             raise ValueError('Output plan differs from Cell compilation metadata')
         if manifest.get('python_cells'):
-            from .mixed_codegen import augment_frame
-            frame, lowered = augment_frame(frame, lowered, manifest, heap_numeric=heap_numeric)
+            from .mixed_codegen import emit_invocation_state
+            frame = emit_invocation_state(frame, manifest, heap_numeric=heap_numeric)
         frame.extend(growing_helpers)
         owner_init = []
         owner_dealloc = None

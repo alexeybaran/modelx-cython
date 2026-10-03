@@ -78,36 +78,17 @@ cdef void _raise_guard(MxGuard* guard) except *:
 '''
 
 
-def guarded_functions(functions, manifest):
-    """Lower Cell wrappers to the native guard with sparse checked boundaries.
+def calculation_aliases(rows):
+    """Declare native cache-to-formula boundaries from resolved signatures.
 
-    Every calc call is made through its declared noexcept ABI so intermediate Cython
-    frames do not add exception branches. Only Cells whose *own* syntax may create a
-    checked error inspect the sentinel and capture PyErr. Deeper Cell errors use
-    mx_fail/mx_capture at the deeper boundary and unwind directly.
+    Cache entries capture directly created checked errors. Formula bodies keep
+    their Cython checked signatures; object-owning frames unwind normally.
     """
-    aliases=[]
-    for name,row in manifest['cells'].items():
-        types=', '.join(['_Frame*']+[p['type']['ctype'] for p in row['params']])
+    aliases = []
+    for name, row in rows.items():
+        types = ', '.join(['_Frame*'] + [p['type']['ctype'] for p in row['params']])
         aliases.append(f"ctypedef {row['result']['ctype']} (*_Calc_{name})({types}) noexcept nogil")
-    result=[]
-    for block in functions:
-        match=re.search(r'cdef inline \w+(?: \w+)? _cell_(\w+)', block)
-        if match:
-            name=match.group(1)
-            block=block.replace('except? -1 nogil:', 'noexcept nogil:')
-            block=re.sub(r'(?<!\w)_calc_(\w+)\(state',r'(<_Calc_\1>_calc_\1)(state',block)
-            block=block.replace('_cache_error(', 'mx_fail(&state._guard, ')
-            if manifest['cells'][name].get('checked_formula'):
-                lines=[]
-                for line in block.splitlines():
-                    lines.append(line)
-                    if '_mx_value = (<_Calc_' in line:
-                        indent=line[:len(line)-len(line.lstrip())]
-                        lines.append(indent+'if _mx_value == -1: mx_capture(&state._guard)')
-                block='\n'.join(lines)
-        result.append(block)
-    return aliases,result
+    return aliases
 
 
 def runtime(manifest, prefix, length_expression, tables, *, owner_dealloc=None):
@@ -139,7 +120,6 @@ def runtime(manifest, prefix, length_expression, tables, *, owner_dealloc=None):
                      == 'retained_heap_numeric_memo_frame_with_python_owners'
                      else '&self._frame')
     mixed = bool(manifest.get('python_cells'))
-    selection = '_select_policy' if mixed else '_select'
     def select(index):
         return f'self._select_policy({index})' if mixed else f'self._select(self._records[{index}])'
     lines += ['@cython.final', 'cdef class Kernel:', prefix,
