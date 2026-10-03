@@ -74,20 +74,9 @@ def augment_frame(frame, functions, manifest, heap_numeric=False):
     return frame, result
 
 
-def augment_runtime(source, manifest):
-    frame_pointer = ('self._frame' if manifest.get('physical_layout')
-                     == 'retained_heap_numeric_memo_frame_with_python_owners'
-                     else '&self._frame')
-    # Three distinct epoch states: READY, BUSY, failed hash tombstone. Previous
-    # epochs cannot alias tombstones. Failed slots retain keys so probe chains and
-    # successfully cached collision neighbours survive a caught exception.
-    source = source.replace('if self._frame._epoch >= 4294967294:', 'if self._frame._epoch >= 4294967293:')
-    source = source.replace('self._frame._epoch += 2', 'self._frame._epoch += 3')
-    for signature in ('    def reset(self):', '    def replace_records(self, records):'):
-        source = source.replace(signature, signature + '\n        self._require_idle()\n        self._frame._scope_valid = False')
-    start = source.index('    cdef void _invoke(')
-    end = source.index('    def evaluate(', start)
-    source = source[:start] + f'''    cdef void _require_idle(self) except *:
+def emit_scope_protocol(frame_pointer):
+    """Emit the checked selection/nested-call protocol without rewriting source."""
+    return f'''    cdef void _require_idle(self) except *:
         if self._frame._entry_depth:
             raise RuntimeError("Cannot reset, rebind or switch scope during a Cell evaluation")
 
@@ -137,41 +126,14 @@ def augment_runtime(source, manifest):
             self._frame._entry_depth -= 1
             mx_guard_clear(&self._frame._guard)
             self._frame._guard = saved
-''' + source[end:]
-    # Every public root selects once. call() below is the only nested entry, and
-    # deliberately never selects/rebinds/advances an epoch.
-    source = re.sub(r'self\._select\(self\._records\[(policy|i)\]\)', r'self._select_policy(\1)', source)
-    # Undo the replacement in the implementation of _select_policy itself.
-    source = source.replace('        self._frame._scope_valid = False\n        self._select_policy(policy)',
-                            '        self._frame._scope_valid = False\n        self._select(self._records[policy])')
-    native_roots = manifest.get('native_scalar_outputs', ())
-    if native_roots:
-        a = source.index('    def run_scalar(')
-        b = source.index('    def run_scalar_one(', a)
-        block = source[a:b]
-        if block.count('            self._select_policy(i)') != 1:
-            raise ValueError('Unexpected scalar traversal template')
-        native_test = ' or '.join(f'name == {name!r}' for name in native_roots)
-        block = block.replace('        cdef _Command command',
-                              '        cdef bint native_only = ' + native_test + '\n        cdef _Command command', 1)
-        block = block.replace('            self._select_policy(i)',
-                              '            if native_only:\n                self._select_native_policy(i)\n'
-                              '            else:\n                self._select_policy(i)', 1)
-        source = source[:a] + block + source[b:]
-    a = source.index('    def evaluate(')
-    b = source.index('    def run_scalar(', a)
-    call = source[a:b].replace('def evaluate(self, Py_ssize_t policy, str cell, tuple args):',
-                              'def call(self, str cell, tuple args):')
-    call = call.replace('        if policy < 0 or policy >= len(self._records): raise IndexError(policy)\n', '')
-    call = call.replace('        self._select_policy(policy)',
-                        '        if not self._frame._scope_valid: raise RuntimeError("Select an evaluation scope first")')
-    source = source[:b] + call + source[b:]
-    # Internal direct-root diagnostic: one retained Kernel per policy and one
-    # checked Cython entry, without the Python ItemSpace/CellCodec layers.
-    # This is not exposed as a model Cell and does not replace normal dispatch.
+'''
+
+
+def emit_direct_roots(manifest):
+    """Generate diagnostic native roots from the same dispatch metadata."""
     indices = {name: i for i, name in enumerate(manifest['cells'])}
     direct = []
-    for name in native_roots:
+    for name in manifest.get('native_scalar_outputs', ()):
         row = manifest['cells'][name]
         value = 'f' if row['result']['kind'] == 'float' else 'i'
         direct += [f'    def _native_direct_{name}(self):',
@@ -182,6 +144,4 @@ def augment_runtime(source, manifest):
                    f'        command.identity = {indices[name]}',
                    '        self._invoke(&command)',
                    f'        return command.value.{value}', '']
-    if direct:
-        source += '\n' + '\n'.join(direct)
-    return source
+    return '\n'.join(direct)

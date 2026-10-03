@@ -68,9 +68,6 @@ def emit_context(parts, manifest):
         else:
             raise ValueError('Cell emission must use the physical frame receiver')
     from .owner_codegen import emit_prefix
-    prefix = emit_prefix(manifest, objects, heap=heap_numeric,
-                         growing_owner=growing_owner, resets=growing_reset,
-                         methods=growing_methods)
     lowered = functions
     # Generated init has a chained assignment only for counters (numeric), not owners.
     manifest['physical_layout'] = ('retained_heap_numeric_memo_frame_with_python_owners'
@@ -115,21 +112,17 @@ def emit_context(parts, manifest):
                              *('        ' + line for line in growing_free))
         owner_init.extend(growing_init)
         manifest['native_error_abi'] = 'checked_cython_miss_with_cpp_guard'
+        prefix = emit_prefix(manifest, objects, heap=heap_numeric,
+                             growing_owner=growing_owner, resets=growing_reset,
+                             methods=growing_methods, owner_init=owner_init, guarded=True)
         runtime_source = guard_runtime(manifest, prefix, length, tables,
-                                       owner_init=owner_init,
                                        owner_dealloc=owner_dealloc)
         if manifest.get('python_cells'):
-            from .mixed_codegen import augment_runtime
-            runtime_source = augment_runtime(runtime_source, manifest)
             manifest['native_error_abi'] = 'reentrant_guard_with_checked_python_miss'
         if heap_numeric:
-            # The epoch advances by three for ready/busy/tombstone states.
-            # Reset before unsigned-byte tags can wrap or alias an older state.
-            runtime_source = runtime_source.replace('self._frame._epoch >= 4294967293',
-                                                    'self._frame._epoch >= 252')
-            runtime_source = runtime_source.replace('self._frame._epoch >= 4294967294',
-                                                    'self._frame._epoch >= 252')
             manifest['seen_tag_width'] = 'uint8_with_clear_before_wrap'
         return head + '\n' + '\n'.join(frame + aliases) + '\n\n' + '\n\n'.join(lowered) + '\n\n' + runtime_source + '\n'
+    prefix = emit_prefix(manifest, objects, heap=heap_numeric,
+                         growing_owner=growing_owner, resets=growing_reset, methods=growing_methods)
     frame.extend(growing_helpers)
     return head + '\n' + '\n'.join(frame) + '\n\n' + '\n\n'.join(lowered) + '\n\n' + marker + prefix

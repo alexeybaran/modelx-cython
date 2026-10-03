@@ -95,3 +95,32 @@ def test_output_plan_is_bound_before_runtime_generation():
     generated = emit_context(parts, manifest)
     assert 'command.output[t * 2 + 0] = _cell_value(state, t)' in generated
     assert 'command.output[t * 2 + 1] = _cell_total(state)' in generated
+
+
+@pytest.mark.parametrize('steps, growing, mixed, expected', [
+    (4, False, False, '1a3b1056b4ac295ccf7f39f3d42ba89e9de1a111dfb387b89fe17b5e9908a5a9'),
+    (1200, False, False, '9f1003fef1e532b7513fb0f32a088012a8315e26fb5e4635eb56a3be28f39682'),
+    (4, True, False, 'd3f500e8739263ec07faf1b3f6f715e02a6713ebac97e7909804fcdcd570806e'),
+    (4, False, True, 'a1133b3a54588e2b2caf84e5187431d915c47074fffea70fc358694b934a9f80'),
+    (1200, False, True, '7d1708c57725475f4c1c4e4693ad3f50ab7418b2c8c9a20acc4eaa7683fefc1e'),
+])
+def test_direct_owner_and_guard_protocol_preserve_complete_program(steps, growing, mixed, expected):
+    # Frozen at 068c270 before removing the mixed-runtime source rewrite. Covers
+    # inline/heap allocation, dictionary growth, checked object boundaries and
+    # native-only traversal selection, not just the owner declaration prefix.
+    import ast
+    from modelx_cython.formula_emitter import SourceFormula
+    module = ModuleType('owner_protocol_probe')
+    module.value = SourceFormula(ast.parse('def value(n):\n return base+0.5*n\n').body[0],
+                                 {'n':int}, float, module_name=module.__name__, filename=__file__)
+    module.total = SourceFormula(ast.parse('def total():\n return value(1)+value(2)\n').body[0],
+                                 {}, float, module_name=module.__name__, filename=__file__)
+    if mixed:
+        module.report = SourceFormula(ast.parse("def report():\n return {'value': value(1)}\n").body[0],
+                                      {}, object, module_name=module.__name__, filename=__file__)
+    spec = KernelSpec(module, {'base':float}, {}, steps, '0',
+                      cell_outputs=('report','total') if mixed else ('value','total'),
+                      scalar_outputs=('total',), cython_objects=True,
+                      original_cache_kinds={'value':'dictionary'} if growing else {})
+    parts, manifest = emit(spec)
+    assert hashlib.sha256(emit_context(parts, manifest).encode()).hexdigest() == expected

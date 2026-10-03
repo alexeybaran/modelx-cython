@@ -110,7 +110,7 @@ def guarded_functions(functions, manifest):
     return aliases,result
 
 
-def runtime(manifest, prefix, length_expression, tables, *, owner_init=(), owner_dealloc=None):
+def runtime(manifest, prefix, length_expression, tables, *, owner_dealloc=None):
     rows=manifest['cells'];indices={k:i for i,k in enumerate(rows)}
     max_args=max([len(r['params']) for r in rows.values()]+[1])
     lines=['cdef union _Scalar:', '    double f', '    long long i',
@@ -133,42 +133,66 @@ def runtime(manifest, prefix, length_expression, tables, *, owner_init=(), owner
         for j,expr in enumerate(columns): lines += [f'                command.output[t * {len(columns)} + {j}] = {expr}']
     lines += [('        else: ' if tables else '        ') + 'mx_fail(&state._guard, 4, b"Table dispatch")',
               '    else: mx_fail(&state._guard, 4, b"Command dispatch")','']
-    # The existing owner/lifetime prefix contains no formula calls.
-    init = ['    def __init__(self, records):', *owner_init,
-            '        mx_guard_init(&self._frame._guard)']
-    prefix = prefix.replace('    def __init__(self, records):', '\n'.join(init), 1)
     if owner_dealloc is None:
         owner_dealloc = ('        mx_guard_clear(&self._frame._guard)',)
     frame_pointer = ('self._frame' if manifest.get('physical_layout')
                      == 'retained_heap_numeric_memo_frame_with_python_owners'
                      else '&self._frame')
-    lines += ['@cython.final','cdef class Kernel:',prefix,
-              '    def __dealloc__(self):', *owner_dealloc,
-              '    cdef void _invoke(self, _Command* command) except *:',
-              f'        if mx_guarded(&self._frame._guard, _execute, {frame_pointer}, command) != 0:',
-              '            _raise_guard(&self._frame._guard)',
-              '    def evaluate(self, Py_ssize_t policy, str cell, tuple args):',
-              '        cdef _Command command',
-              "        if policy < 0 or policy >= len(self._records): raise IndexError(policy)",
-              '        self._select(self._records[policy])','        command.mode = 0']
-    for i,(name,row) in enumerate(rows.items()):
-        lines += [f'        {"if" if i==0 else "elif"} cell == {name!r}:',f'            command.identity = {i}',
-                  f"            if len(args) != {len(row['params'])}: raise TypeError('Use canonical positional arguments')"]
-        for j,p in enumerate(row['params']):
-            d='f' if p['type']['kind']=='float' else 'i'; lines += [f'            command.args[{j}].{d} = args[{j}]']
-        d='f' if row['result']['kind']=='float' else 'i'
-        result = f'command.value.{d}'
-        if row['result']['kind'] == 'bool': result = 'bool(command.value.i)'
-        lines += ['            self._invoke(&command)',f'            return {result}']
-    lines += ['        else: raise KeyError(cell)' if rows else '        raise KeyError(cell)',
-              '    def run_scalar(self, str name):','        cdef _Command command','        cdef Py_ssize_t i',
+    mixed = bool(manifest.get('python_cells'))
+    selection = '_select_policy' if mixed else '_select'
+    def select(index):
+        return f'self._select_policy({index})' if mixed else f'self._select(self._records[{index}])'
+    lines += ['@cython.final', 'cdef class Kernel:', prefix,
+              '    def __dealloc__(self):', *owner_dealloc]
+    if mixed:
+        from .mixed_codegen import emit_scope_protocol, emit_direct_roots
+        lines.append(emit_scope_protocol(frame_pointer).rstrip('\n'))
+    else:
+        lines += ['    cdef void _invoke(self, _Command* command) except *:',
+                  f'        if mx_guarded(&self._frame._guard, _execute, {frame_pointer}, command) != 0:',
+                  '            _raise_guard(&self._frame._guard)']
+    def emit_entry(nested=False):
+        nonlocal lines
+        lines.append('    def call(self, str cell, tuple args):' if nested else
+                     '    def evaluate(self, Py_ssize_t policy, str cell, tuple args):')
+        lines.append('        cdef _Command command')
+        if nested:
+            lines.append('        if not self._frame._scope_valid: raise RuntimeError("Select an evaluation scope first")')
+        else:
+            lines.extend(['        if policy < 0 or policy >= len(self._records): raise IndexError(policy)',
+                          '        ' + select('policy')])
+        lines.append('        command.mode = 0')
+        for i,(name,row) in enumerate(rows.items()):
+            lines += [f'        {"if" if i==0 else "elif"} cell == {name!r}:',f'            command.identity = {i}',
+                      f"            if len(args) != {len(row['params'])}: raise TypeError('Use canonical positional arguments')"]
+            for j,p in enumerate(row['params']):
+                d='f' if p['type']['kind']=='float' else 'i'; lines += [f'            command.args[{j}].{d} = args[{j}]']
+            d='f' if row['result']['kind']=='float' else 'i'
+            result = f'command.value.{d}'
+            if row['result']['kind'] == 'bool': result = 'bool(command.value.i)'
+            lines += ['            self._invoke(&command)',f'            return {result}']
+        lines.append('        else: raise KeyError(cell)' if rows else '        raise KeyError(cell)')
+    emit_entry()
+    if mixed:
+        emit_entry(nested=True)
+    lines += ['    def run_scalar(self, str name):']
+    native_roots = manifest.get('native_scalar_outputs', ())
+    if mixed and native_roots:
+        native_test = ' or '.join(f'name == {name!r}' for name in native_roots)
+        lines.append('        cdef bint native_only = ' + native_test)
+    lines += ['        cdef _Command command','        cdef Py_ssize_t i',
               '        cdef double[::1] values', '        command.mode = 0']
     for i,name in enumerate(manifest['scalar_outputs']):
         lines += [f'        {"if" if i==0 else "elif"} name == {name!r}: command.identity = {indices[name]}']
     lines += ["        else: raise KeyError(name)" if manifest['scalar_outputs'] else "        raise KeyError(name)",
               '        result = np.empty(len(self._records), dtype=np.float64)', '        values = result',
-              '        for i in range(len(self._records)):', '            self._select(self._records[i])',
-              '            self._invoke(&command)']
+              '        for i in range(len(self._records)):']
+    if mixed and native_roots:
+        lines += ['            if native_only:', '                self._select_native_policy(i)',
+                  '            else:', '                self._select_policy(i)']
+    else:
+        lines.append('            ' + select('i'))
+    lines.append('            self._invoke(&command)')
     for i,name in enumerate(manifest['scalar_outputs']):
         d='f' if rows[name]['result']['kind']=='float' else 'i'
         lines += [f'            {"if" if i==0 else "elif"} command.identity == {indices[name]}: values[i] = command.value.{d}']
@@ -179,7 +203,7 @@ def runtime(manifest, prefix, length_expression, tables, *, owner_init=(), owner
     for i,name in enumerate(manifest['scalar_outputs']):
         lines += [f'        {"if" if i==0 else "elif"} name == {name!r}: command.identity = {indices[name]}']
     lines += ["        else: raise KeyError(name)" if manifest['scalar_outputs'] else "        raise KeyError(name)",
-              '        self._select(self._records[policy])','        self._invoke(&command)']
+              '        ' + select('policy'),'        self._invoke(&command)']
     for i,name in enumerate(manifest['scalar_outputs']):
         d='f' if rows[name]['result']['kind']=='float' else 'i'
         lines += [f'        {"if" if i==0 else "elif"} command.identity == {indices[name]}: return command.value.{d}']
@@ -188,7 +212,7 @@ def runtime(manifest, prefix, length_expression, tables, *, owner_init=(), owner
     for i,(name,cols) in enumerate(tables.items()):
         lines += [f'        {"if" if i==0 else "elif"} table == {name!r}:',f'            table_id = {i}',f'            columns = {len(cols)}']
     lines += ['        else: raise KeyError(table)' if tables else '        raise KeyError(table)','        result = []','        for i in range(len(self._records)):',
-              '            self._select(self._records[i])','            command.mode = 1','            self._invoke(&command)',
+              '            ' + select('i'),'            command.mode = 1','            self._invoke(&command)',
               '            n = command.value.i',f"            if n < 0 or n > {manifest['steps']}: raise IndexError('Output length exceeds declared bound')",
               '            out = np.empty((n,columns),dtype=np.float64)', '            view = out',
               '            command.mode = 2','            command.identity = table_id','            command.n = n',
@@ -201,7 +225,7 @@ def runtime(manifest, prefix, length_expression, tables, *, owner_init=(), owner
               "        if policy < 0 or policy >= len(self._records): raise IndexError(policy)"]
     for i,(name,cols) in enumerate(tables.items()):
         lines += [f'        {"if" if i==0 else "elif"} table == {name!r}:',f'            table_id = {i}',f'            columns = {len(cols)}']
-    lines += ['        else: raise KeyError(table)' if tables else '        raise KeyError(table)','        self._select(self._records[policy])',
+    lines += ['        else: raise KeyError(table)' if tables else '        raise KeyError(table)','        ' + select('policy'),
               '        command.mode = 1','        self._invoke(&command)','        n = command.value.i',
               f"        if n < 0 or n > {manifest['steps']}: raise IndexError('Output length exceeds declared bound')",
               '        out = np.empty((n,columns),dtype=np.float64)','        view = out','        command.mode = 2',
@@ -209,4 +233,8 @@ def runtime(manifest, prefix, length_expression, tables, *, owner_init=(), owner
               '            command.output = &view[0,0]','            self._invoke(&command)',
               "        if not np.isfinite(out).all(): raise ArithmeticError('Non-finite kernel output')",
               '        return out','']
-    return '\n'.join(lines)
+    source = '\n'.join(lines)
+    if mixed:
+        direct = emit_direct_roots(manifest)
+        if direct: source += '\n' + direct
+    return source
