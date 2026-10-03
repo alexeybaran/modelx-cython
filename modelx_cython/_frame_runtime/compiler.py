@@ -396,12 +396,8 @@ def _cell_entry_lines(name, row, tail, call, native_suffix, diagnostics,
     if row.get('storage') == 'growing_numeric':
         from .growing_numeric_codegen import cell_entry
         if row.get('dense_prefix'):
-            # This cold adapter always receives canonical arguments. Defaults
-            # would create another optional-argument ABI inside the hot entry.
-            overflow_signature = '_Frame* state' + ''.join(
-                ', '+p['type']['ctype']+' '+p['name'] for p in row['params'])
-            overflow = cell_entry(name,row,overflow_signature,args,formula,diagnostics)
-            overflow = [line.replace('cdef inline ', 'cdef ', 1).replace(' _cell_'+name+'(', ' _overflow_cell_'+name+'(', 1)
+            overflow = cell_entry(name,row,signature,args,formula,diagnostics)
+            overflow = [line.replace(' _cell_'+name+'(', ' _overflow_cell_'+name+'(', 1)
                         if line.startswith('cdef inline ') else line for line in overflow]
             dense_row = dict(row)
             dense_row.pop('storage')
