@@ -192,8 +192,13 @@ def test_original_shell_connected_space_checked_edges(tmp_path):
     receipt = json.loads((tmp_path/'model_cy/_mx_classes.frame-shell.json').read_text())
     routes = {(row['space'].split('.')[-1], row['cell']): row['execution']
               for row in receipt['cells']}
-    for key in (('_c_Data', 'value'), ('_c_Data', 'table'), ('_c_S', 'read'), ('_c_S', 'alias'), ('_c_S', 'after_callback'), ('_c_S','checked_lookup')):
+    for key in (('_c_Data', 'value'), ('_c_Data', 'table'), ('_c_S', 'read'), ('_c_S', 'alias'), ('_c_S', 'after_callback')):
         assert routes[key] == 'frame_exact', (key, routes)
+    # The external Data.table object ABI stays on its original typed receiver.
+    # All callback, alias, cache and serialization expectations below are unchanged.
+    assert routes[('_c_S', 'checked_lookup')] == 'original_cython'
+    assert any(row['cell'] == 'checked_lookup' and 'external object Cell ABI' in row['reason']
+               for row in receipt['cells'])
     _run(tmp_path, ['-m', 'modelx_cython', str(tmp_path/'model'), '--compile-only'], 'build')
     (tmp_path/'verify.py').write_text('''
 import pickle
