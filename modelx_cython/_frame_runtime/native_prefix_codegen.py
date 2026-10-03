@@ -5,21 +5,15 @@ completed entries atomically; no item pointer survives formula execution.
 """
 
 
-def slot_function(name, row, arguments):
+def slot_lines(name, row, arguments, unavailable, full):
     params = row['params']
-    declaration = ', '.join(p['type']['ctype'] + ' ' + a for p,a in zip(params,arguments))
-    lines = ['@cython.overflowcheck(False)', '@cython.boundscheck(False)',
-             '@cython.wraparound(False)', '@cython.initializedcheck(False)',
-             f'cdef inline Py_ssize_t _nc_prefix_slot_{name}(_Frame* state, {declaration}) noexcept nogil:',
-             '    cdef Py_ssize_t slot, bucket, probe',
+    lines = ['    cdef Py_ssize_t bucket, probe',
              '    cdef unsigned long long h = 1469598103934665603',
-             '    cdef _DoubleBits bits',
-             f'    if state._numeric_fallback_{name} != NULL: return -1']
+             '    cdef _DoubleBits bits']
     if row['hashed']:
-        lines.append(f'    if state._prefix_disabled_{name}: return -1')
         for p,a in zip(params,arguments):
             if p['type']['kind'] == 'float':
-                lines += [f'    if not isfinite({a}): return -1',
+                lines += [f'    if not isfinite({a}): {unavailable}',
                           f'    bits.value = 0.0 if {a} == 0.0 else {a}',
                           '    h = (h ^ bits.bits) * <unsigned long long>1099511628211']
             else:
@@ -33,14 +27,25 @@ def slot_function(name, row, arguments):
         if row['recursive']:
             occupied += ' or state._seen[slot] == state._epoch - 1'
         equal = ' and '.join(f'state._keys_{name}_{p["name"]}[bucket] == {a}' for p,a in zip(params,arguments))
-        lines += [f'        if not ({occupied}) or ({equal}): return slot',
-                  f'        bucket = (bucket + 1) & {row["slots"]-1}', '    return -2']
+        lines += [f'        if not ({occupied}) or ({equal}): break',
+                  f'        bucket = (bucket + 1) & {row["slots"]-1}', '    else:', '        '+full]
     else:
         index = '0'
         for p,a in zip(params,arguments):
-            lines.append(f'    if {a} < {p["lower"]} or {a} >= {p["lower"]+p["size"]}: return -1')
+            lines.append(f'    if {a} < {p["lower"]} or {a} >= {p["lower"]+p["size"]}: {unavailable}')
             index = f'(({index}) * {p["size"]} + ({a} - ({p["lower"]})))'
-        lines.append(f'    return {row["offset"]} + {index}')
+        lines.append(f'    slot = {row["offset"]} + {index}')
+    return lines
+
+
+def slot_function(name, row, arguments):
+    declaration = ', '.join(p['type']['ctype'] + ' ' + a for p,a in zip(row['params'],arguments))
+    lines = ['@cython.overflowcheck(False)', '@cython.boundscheck(False)',
+             '@cython.wraparound(False)', '@cython.initializedcheck(False)',
+             f'cdef inline Py_ssize_t _nc_prefix_slot_{name}(_Frame* state, {declaration}) noexcept nogil:',
+             '    cdef Py_ssize_t slot']
+    lines += slot_lines(name,row,arguments,'return -1','return -2')
+    lines.append('    return slot')
     return '\n'.join(lines)+'\n'
 
 
@@ -92,6 +97,7 @@ cdef int _nc_promote_{name}(_Frame* state) except -1 nogil:
                 return -1
     free(state._numeric_{name}.items)
     state._numeric_{name} = staged
+    memset(&state._seen[{row['offset']}], 0, {row['slots']} * sizeof(state._seen[0]))
     state._prefix_disabled_{name} = True
     return 0
 '''
@@ -115,12 +121,16 @@ def cell_entry(name, row, signature, args, formula, diagnostics):
     cold=growing_entry(name,row,canonical,args,formula,diagnostics)
     cold=[line.replace('_cell_'+name+'(', '_overflow_'+name+'(') for line in cold]
     store='_floats' if row['result']['kind']=='float' else '_ints'
-    lines=cold+[f'cdef inline {ret} _cell_{name}({signature}) except? -1 nogil:',
-        '    cdef Py_ssize_t slot',f'    cdef {ret} _mx_value','    cdef int status',
-        f'    slot = _nc_prefix_slot_{name}({args})',
-        f'    if slot < 0: return _overflow_{name}({args})']
+    lines=cold+['@cython.overflowcheck(False)', '@cython.boundscheck(False)',
+        '@cython.wraparound(False)', '@cython.initializedcheck(False)',
+        f'cdef inline {ret} _cell_{name}({signature}) except? -1 nogil:',
+        '    cdef Py_ssize_t slot',f'    cdef {ret} _mx_value','    cdef int status']
+    lines += slot_lines(name,row,arguments,f'return _overflow_{name}({args})',f'return _overflow_{name}({args})')
     if diagnostics:lines.append('    state._calls += 1')
     lines += ['    if state._seen[slot] == state._epoch:',f'        return state.{store}[slot]']
+    switched=f'state._numeric_fallback_{name} != NULL'
+    if row['hashed']:switched+=f' or state._prefix_disabled_{name}'
+    lines.append(f'    if {switched}: return _overflow_{name}({args})')
     if row['recursive']:
         lines += ['    if state._seen[slot] == state._epoch - 1:',f'        _cache_error(1, b"{name}")',
                   '    state._seen[slot] = state._epoch - 1']
@@ -129,8 +139,6 @@ def cell_entry(name, row, signature, args, formula, diagnostics):
             lines.append(f'    state._keys_{name}_{p["name"]}[slot - {row["offset"]}] = {a}')
     if diagnostics:lines.append('    state._misses += 1')
     lines.append(f'    _mx_value = {formula}')
-    switched=f'state._numeric_fallback_{name} != NULL'
-    if row['hashed']:switched+=f' or state._prefix_disabled_{name}'
     lines += [f'    if {switched}:',f'        status = (<_NcCommit_{name}>_nc_commit_{name})({args}, _mx_value)',
               '        if status < 0: mx_capture(&state._guard)','    else:',
               f'        state.{store}[slot] = _mx_value','        state._seen[slot] = state._epoch',

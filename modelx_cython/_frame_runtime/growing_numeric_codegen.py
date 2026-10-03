@@ -74,9 +74,11 @@ def frame_parts(rows):
             helpers += [slot_function(name,row,arguments), snapshot_function(name,row), promote_function(name,row)]
             if row['hashed']:
                 fields.append(f'    bint _prefix_disabled_{name}')
+            enabled=f'state._numeric_fallback_{name} == NULL'
+            if row['hashed']:enabled+=f' and not state._prefix_disabled_{name}'
             prefix_lookup = f'    cdef Py_ssize_t slot = _nc_prefix_slot_{name}(state, {names})\n'
             if row['hashed']:
-                prefix_lookup += f'    if slot == -2: _nc_promote_{name}(state)\n'
+                prefix_lookup += f'    if slot == -2 and {enabled}: _nc_promote_{name}(state)\n'
             store = '_floats' if row['result']['kind']=='float' else '_ints'
             prefix_lookup += ('    if slot >= 0:\n'
                 '        if state._seen[slot] == state._epoch:\n'
@@ -85,12 +87,14 @@ def frame_parts(rows):
             if row['recursive']:
                 prefix_lookup += ('        if state._seen[slot] == state._epoch - 1:\n'
                                   f'            _cache_error(1, b"{name}")\n')
-            prefix_lookup += '        return 0\n'
+            prefix_lookup += f'        if {enabled}: return 0\n'
             prefix_commit = f'    cdef Py_ssize_t slot = _nc_prefix_slot_{name}(state, {names})\n'
             if row['hashed']:
-                prefix_commit += f'    if slot == -2: _nc_promote_{name}(state)\n'
-            prefix_commit += '    if slot >= 0:\n'+'\n'.join(commit_lines(name,row,arguments,'value',indent='        '))+'\n        return 0\n'
+                prefix_commit += f'    if slot == -2 and {enabled}: _nc_promote_{name}(state)\n'
+            prefix_commit += f'    if slot >= 0 and {enabled}:\n'+'\n'.join(commit_lines(name,row,arguments,'value',indent='        '))+'\n        return 0\n'
             prefix_snapshot = f'        mapping.update(_nc_prefix_snapshot_{name}(state))\n'
+        clear_prefix = (f'        memset(&state._seen[{row["offset"]}], 0, {row["slots"]} * sizeof(state._seen[0]))\n'
+                        if row.get('native_prefix') else '')
         helpers.append(f'''cdef int _nc_lookup_{name}(_Frame* state, {declaration}, {ret}* value) except -1 nogil:
     cdef Py_ssize_t found
 {prefix_lookup}
@@ -112,6 +116,7 @@ cdef int _nc_dict_lookup_{name}(_Frame* state, {declaration}, {ret}* value) exce
         # Publish after every completed native entry has transferred.
         (<Kernel>state._numeric_owner)._numeric_dict_{name} = mapping
         state._numeric_fallback_{name} = <PyObject*>mapping
+{clear_prefix}
         free(state._numeric_{name}.items)
         state._numeric_{name}.items = NULL
         state._numeric_{name}.capacity = state._numeric_{name}.count = 0
