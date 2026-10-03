@@ -86,7 +86,7 @@ def _reason(fn, info):
     return None
 
 
-def plan(unit, *, package_plan=None):
+def plan(unit, *, package_plan=None, prepared_contexts=None):
     """Use final original types/specifications; do not trace or rediscover Spaces."""
     if package_plan is None:
         from modelx_cython.compilation_plan import build_package_plan
@@ -163,6 +163,21 @@ def plan(unit, *, package_plan=None):
             inputs.update((n, object) for n in sorted(external))
             plans[cls_name] = {'methods': candidates, 'info': info, 'emission_plan': shared,
                                'checked_cell_dependencies': bridges, 'inputs': inputs}
+    for shared in package_plan.spaces.values():
+        context = (prepared_contexts or {}).get(shared.class_identity)
+        if (context is None or shared.class_name not in unit.module_info.classes
+                or unit.module_info.classes[shared.class_name].fqname != shared.class_identity):
+            continue
+        if context.public_emission_plan is not shared:
+            raise ValueError('Prepared representation must use the authoritative Space plan')
+        plans[shared.class_name] = dict(info=shared.original_info, emission_plan=shared,
+            prepared_spec=context,
+            methods={n: shared.cells[n].formula_node for n in context.cells})
+        for item in inventory:
+            if item['space'] == shared.class_identity and item['cell'] in context.cells:
+                item.update(execution='prepared_public_graph',
+                            receiver_representation='original_public_space_with_prepared_context',
+                            derived_cache='original_class', reason=None)
     return plans, inventory
 
 

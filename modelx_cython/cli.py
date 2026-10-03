@@ -370,6 +370,13 @@ def main_handler(args: argparse.Namespace, stdout: IO[str], stderr: IO[str]) -> 
         package_plan = build_package_plan(units)
         (model_path / '_mx_compilation_plan.json').write_text(
             json.dumps(package_plan.inventory(), indent=2), encoding='utf-8')
+        prepared_contexts = {}
+        if any(s.native_context is not None for s in package_plan.spaces.values()):
+            from modelx_cython._frame_runtime.prepared_region_plan import resolve
+            # The sample already loaded the export. Only its reference values
+            # supply preparation; all formula/type metadata comes from the plan.
+            exported = sys.modules[orig_path.name].mx_model
+            prepared_contexts = resolve(package_plan, exported, model_path)
 
         # Phase 3: transform and write out
         for u in units:
@@ -377,9 +384,13 @@ def main_handler(args: argparse.Namespace, stdout: IO[str], stderr: IO[str]) -> 
                 u.source, u.module_info, resolver=resolver,
                 cells_kinds=cells_kinds, ref_kinds=ref_kinds)
             shell_plans = {}
-            if os.environ.get('MX_CY_ORIGINAL_FRAME_SHELL', '0') == '1':
+            if prepared_contexts or os.environ.get('MX_CY_ORIGINAL_FRAME_SHELL', '0') == '1':
                 from modelx_cython._frame_runtime.space_shell import plan, emit_private_kernels
-                shell_plans, shell_inventory = plan(u, package_plan=package_plan)
+                if prepared_contexts:
+                    shell_plans, shell_inventory = plan(u, package_plan=package_plan,
+                                                        prepared_contexts=prepared_contexts)
+                else:
+                    shell_plans, shell_inventory = plan(u, package_plan=package_plan)
                 u.abs_src_path.with_suffix('.frame-shell.json').write_text(
                     json.dumps({'schema': 1, 'cells': shell_inventory}, indent=2), encoding='utf-8')
                 private_modules = emit_private_kernels(

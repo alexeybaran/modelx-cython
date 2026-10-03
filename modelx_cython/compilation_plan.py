@@ -83,6 +83,7 @@ class SpaceEmissionPlan:
     collect_source: str | None
     collection: Mapping | None
     original_info: object = field(repr=False, compare=False)
+    native_context: Mapping | None = field(default=None, repr=False, compare=False)
 
     def inventory(self):
         return dict(identity=self.identity, class_identity=self.class_identity,
@@ -94,6 +95,7 @@ class SpaceEmissionPlan:
                     space_formula_source=self.space_formula_source,
                     collect_source=self.collect_source,
                     collection=dict(self.collection) if self.collection is not None else None,
+                    native_context=dict(self.native_context) if self.native_context is not None else None,
                     cells={n: c.inventory() for n, c in self.cells.items()})
 
 
@@ -173,6 +175,12 @@ def build_package_plan(units):
                 bindings, info.is_locked, ast.unparse(formula) if formula else None,
                 ast.unparse(collector) if collector else None,
                 MappingProxyType(collection) if collection else None, info)
+            original_spec = getattr(getattr(info, 'module', None), 'spec', None)
+            context = original_spec.get_spec(info.fqname).get('native_context') if original_spec is not None else None
+            if context is not None:
+                if not isinstance(context, dict):
+                    raise ValueError('native_context must describe resource bindings: ' + identity)
+                space = replace(space, native_context=MappingProxyType(dict(context)))
             spaces[identity] = space
             classes[info.fqname] = space
     models = {u.fqname.split('.')[0] for u in units}

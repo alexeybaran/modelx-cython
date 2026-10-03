@@ -261,6 +261,14 @@ def from_compilation_plan(package_plan, exported, destination, *, projection, **
     model.spaces[tuple(projection.split('.'))].cells = {
         name: _ResolvedCell(cell, instance) for name, cell in retained.items()}
     context_space = replace(space, cells=MappingProxyType(retained))
+    if options.get('native_typed_inputs') and not options.get('signatures'):
+        # Typed input expansion consumes the same finalized public signatures.
+        # This is not a second trace or inference pass in the resource adapter.
+        options['signatures'] = {
+            name: {'return': CTYPES[cell.public_result].__name__,
+                   'parameters': {arg: CTYPES[typ].__name__
+                                  for arg, typ in cell.public_arguments}}
+            for name, cell in retained.items()}
     spec = from_modelx(model, destination, projection=projection,
                       emission_space=context_space, **options)
     spec.model['original_receiver_cells'] = excluded
