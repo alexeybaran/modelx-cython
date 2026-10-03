@@ -1,19 +1,18 @@
-"""Lower the emitter-owned kernel layout to a plain C frame.
+"""Emit final native-context and owner structures from the shared layout.
 
 This is physical code generation over our fixed template, never analysis of
 pandas or model expressions. Python owners keep buffers/Curve objects alive.
 """
-import re
 
 
-def to_c_frame(parts, manifest):
+def emit_context(parts, manifest):
     if manifest.get('object_cells'):
         from .object_codegen import augment
         # Numeric emission/guard analysis must never see Python-owned temporaries.
         physical = dict(manifest, cells={k: v for k, v in manifest['cells'].items()
                                         if k not in manifest['object_cells']})
         physical.pop('object_cells')
-        source = to_c_frame(parts, physical)
+        source = emit_context(parts, physical)
         for key in ('physical_layout', 'native_error_abi', 'mixed_cache_protocol'):
             manifest[key] = physical[key]
         return augment(source, manifest)
@@ -25,7 +24,6 @@ def to_c_frame(parts, manifest):
         'object', 'Curve', 'CurveTable', 'IndexedInt1', 'IndexedFloat1',
         'IndexedInt2', 'IndexedFloat2', 'dict', 'set'}}
     buffers = {k: v for k, v in fields.items() if '[::1]' in v}
-    numeric = {k: v for k, v in fields.items() if k not in objects and k not in buffers}
     sizes = {name: max(1, manifest['cache_slots']) if manifest['memo'] == 'dense' else 1
              for name in buffers}
     for cell, row in manifest['cells'].items():
@@ -69,53 +67,17 @@ def to_c_frame(parts, manifest):
             functions.append('\n'.join(method))
         else:
             raise ValueError('Cell emission must use the physical frame receiver')
-    outer = parts['runtime_prefix'] if native_guard else parts['runtime']
-    def lower_calls(text, pointer):
-        text = re.sub(r'self\.(_cell_|_calc_)(\w+)\(\)', lambda m: f'{m[1]}{m[2]}({pointer})', text)
-        return re.sub(r'self\.(_cell_|_calc_)(\w+)\(', lambda m: f'{m[1]}{m[2]}({pointer}, ', text)
+    from .owner_codegen import emit_prefix
+    prefix = emit_prefix(manifest, objects, heap=heap_numeric,
+                         growing_owner=growing_owner, resets=growing_reset,
+                         methods=growing_methods)
     lowered = functions
-    # Runtime keeps the ownership fields; scalar values have one location in _Frame.
-    owner_decls = ['    cdef _Frame* _frame' if heap_numeric else '    cdef _Frame _frame',
-                   '    cdef object _records']
-    if heap_numeric:
-        owner_decls.append('    cdef void* _cache_storage')
-    for name, dtype in objects.items():
-        owner_decls.append(f'    cdef {dtype} {name}')
-    owner_decls.extend(growing_owner)
-    frame_pointer = 'self._frame' if heap_numeric else '&self._frame'
-    runtime = lower_calls('\n'.join(outer), frame_pointer)
-    if growing_reset:
-        runtime = runtime.replace('    cdef void _advance(self) except *:\n',
-                                  '    cdef void _advance(self) except *:\n' +
-                                  '\n'.join(growing_reset) + '\n', 1)
-        runtime += '\n' + '\n'.join(growing_methods) + '\n'
-
-    for name in {**numeric, **buffers}:
-        runtime = re.sub(r'\bself\.' + re.escape(name) + r'\b', lambda _: 'self._frame.' + name, runtime)
-    # Synchronize the raw pointer immediately after an owning buffer/object binding.
-    result = []
-    for line in runtime.splitlines():
-        if any(line.strip().startswith('self._frame.' + n + ' = np.') for n in buffers):
-            if line.strip().startswith('self._frame._seen ='):
-                result.append('        memset(self._frame._seen, 0, sizeof(self._frame._seen))')
-            continue
-        line = line.replace('np.asarray(self._frame._seen).fill(0)',
-                            'memset(self._frame._seen, 0, sizeof(self._frame._seen))')
-        result.append(line)
-        match = re.match(r'(\s*)self\.(\w+) = ', line)
-        if match:
-            indent, name = match.groups()
-            if name in buffers:
-                result.append(f'{indent}self._frame.{name} = &self.{name}[0]')
-            elif name in objects:
-                result.append(f'{indent}self._frame.{name} = <PyObject*>self.{name}')
     # Generated init has a chained assignment only for counters (numeric), not owners.
     manifest['physical_layout'] = ('retained_heap_numeric_memo_frame_with_python_owners'
                                    if heap_numeric else 'embedded_native_memo_frame_with_python_owners')
     if native_guard:
         from .native_guard_codegen import guarded_functions, runtime as guard_runtime
         aliases, lowered = guarded_functions(lowered, manifest)
-        prefix = '\n'.join(owner_decls) + '\n' + '\n'.join(result) + '\n'
         output_plan = parts['frame_outputs']
         length = output_plan['length']
         tables = output_plan['tables']
@@ -170,4 +132,4 @@ def to_c_frame(parts, manifest):
             manifest['seen_tag_width'] = 'uint8_with_clear_before_wrap'
         return head + '\n' + '\n'.join(frame + aliases) + '\n\n' + '\n\n'.join(lowered) + '\n\n' + runtime_source + '\n'
     frame.extend(growing_helpers)
-    return head + '\n' + '\n'.join(frame) + '\n\n' + '\n\n'.join(lowered) + '\n\n' + marker + '\n'.join(owner_decls + result) + '\n'
+    return head + '\n' + '\n'.join(frame) + '\n\n' + '\n\n'.join(lowered) + '\n\n' + marker + prefix

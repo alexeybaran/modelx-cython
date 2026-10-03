@@ -298,9 +298,10 @@ def test_prepared_context_preserves_native_categories_behind_object_public_abi(t
         captured.append(result)
         return result
     monkeypatch.setattr(compilation_plan, 'build_package_plan', capture)
-    monkeypatch.setenv('MX_CY_ORIGINAL_FRAME_SHELL', '0')
+    (tmp_path/'spec.txt').write_text(repr({'spaces': {'Projection': {'native_context':
+        {'point_table': 'points', 'steps': 8}}}}), encoding='utf-8')
     cli.main_handler(argparse.Namespace(model_path=str(tmp_path/'model'),
-        sample=str(tmp_path/'sample.py'), no_spec=True, spec=None, setup=None,
+        sample=str(tmp_path/'sample.py'), no_spec=False, spec=str(tmp_path/'spec.txt'), setup=None,
         frame_collect=False, compile_only=False, translate_only=True), io.StringIO(), io.StringIO())
     space = captured[0].spaces['model_cy.Projection']
     assert space.cells['category'].public_result == 'object'
@@ -336,7 +337,24 @@ def test_prepared_context_preserves_native_categories_behind_object_public_abi(t
     assert manifest['public_entry_abi']['amount']['public_arguments'] == {'kind': 'object'}
     assert manifest['public_entry_abi']['amount']['physical_arguments']['kind']['kind'] == 'enum'
     adapted_source = (artifact/manifest['package']/'_kernel.pyx').read_text()
-    assert adapted_source.split('\n    def snapshot(', 1)[0].rstrip() == plain_source.rstrip()
+    # Prepared public entries additionally select the already-qualified typed
+    # checked bridge for numeric bodies with object dependencies. Requiring the
+    # old name/tuple Python adapter byte-for-byte would freeze an obsolete ABI.
+    # Every cache contract and unaffected native formula must remain identical;
+    # the runtime assertions below cover category conversion and failure/retry.
+    import re
+    bridges = set(manifest.get('original_checked_numeric_bridges', ()))
+    for name, row in manifest['cells'].items():
+        old = plain_manifest['cells'][name]
+        for key in ('result', 'params', 'cached', 'storage', 'offset', 'slots'):
+            assert row.get(key) == old.get(key), (name, key)
+        if name not in manifest.get('object_cells', ()) and name not in bridges:
+            prefix = '_cell_' if row.get('direct_input') is not None else '_calc_'
+            pattern = r'^cdef inline [^\n]* ' + prefix + re.escape(name) + r'\([^\n]*:\n(?:[ \t]+[^\n]*\n|\n)*'
+            before = re.search(pattern, plain_source, re.M)
+            after = re.search(pattern, adapted_source, re.M)
+            assert before and after and before.group() == after.group(), name
+    assert 'failed_parent' in bridges and 'numeric_from_object' in bridges
     # A real compiled caller uses the public ABI, not a cast to the incompatible
     # private long-long signature. The calculation body/cache remains native.
     (artifact/'public_boundary.pyx').write_text(
@@ -393,21 +411,11 @@ def test_prepared_context_preserves_native_categories_behind_object_public_abi(t
                 boundary.numeric_from_object(owner, 1)
         live_flags['object_fail'] = False
         assert boundary.numeric_from_object(owner, 1) == 3.5
-    # Exercise the same public capsules behind original generated classes.
-    # This is a wiring fixture, not a claim that all original-shell contracts
-    # are qualified or that the standard command has switched its default.
-    import shutil
-    from modelx_cython._frame_runtime import space_owner
-    from modelx_cython._frame_runtime.space_shell import transform_prepared, add_collect_hooks
+    # The standard command generated the original public classes and prepared
+    # context together. Do not reapply shell transformations to completed source.
     package = tmp_path/'model_cy'
     source_file, declarations_file = package/'_mx_classes.py', package/'_mx_classes.pxd'
-    plans = {space.class_name: dict(kernel_module=manifest['package']+'._kernel',
-        owner_module='model_cy._mx_frame_owner', manifest=manifest,
-        methods={name: space.cells[name].formula_node for name in manifest['cells']},
-        emission_plan=space)}
-    public_source, public_declarations = transform_prepared(
-        source_file.read_text(), declarations_file.read_text(), plans)
-    public_source = add_collect_hooks(public_source, plans)
+    public_source = source_file.read_text()
     # Test-only access to an internal owner; no extra product API is emitted.
     # Whole-model pickle with module-valued public refs is separately limited
     # by the original shell's automatic Cython serialization.
@@ -419,14 +427,6 @@ def test_prepared_context_preserves_native_categories_behind_object_public_abi(t
                                       'def _mx_test_resources(self):\n return self._mx_prepared_resources\n').body)
     public_source = ast.unparse(ast.fix_missing_locations(public_tree)) + '\n'
     source_file.write_text(public_source, encoding='utf-8')
-    declarations_file.write_text(public_declarations, encoding='utf-8')
-    shutil.copyfile(space_owner.__file__, package/'_mx_frame_owner.py')
-    support = package/'_mx_frame_support'
-    support.mkdir()
-    (support/'__init__.py').write_text('', encoding='utf-8')
-    for name in ('contracts.py', 'python_calculator.py', 'enum_binding.py',
-                 'prepared_space_inputs.py', 'input_codec.py', 'data_binding.py', 'lookups.py'):
-        shutil.copyfile(Path(space_owner.__file__).with_name(name), support/name)
     original_build = subprocess.run([sys.executable, 'setup.py', 'build_ext', '--inplace'],
         cwd=tmp_path, capture_output=True, text=True)
     (tmp_path/'original_prepared_build.log').write_text(original_build.stdout+original_build.stderr, encoding='utf-8')

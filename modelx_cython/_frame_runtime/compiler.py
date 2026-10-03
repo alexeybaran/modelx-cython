@@ -866,49 +866,15 @@ def emit(spec, *, diagnostics=False, python_cells=()):
         '_ints': 'long long[::1]', '_seen': 'unsigned int[::1]',
         '_calls': 'unsigned long long', '_misses': 'unsigned long long',
     }
-    lines += ['@cython.final', 'cdef class Kernel:', '    cdef object _records', '    cdef unsigned int _epoch',
-              '    cdef double[::1] _floats', '    cdef long long[::1] _ints',
-              '    cdef unsigned int[::1] _seen',
-              '    cdef unsigned long long _calls, _misses']
     if mixed:
-        lines += ['    cdef object _python_scope']
         frame_field_types['_python_scope'] = 'object'
-    for k, ti in input_info.items():
-        ct = ti['ctype']
-        lines += [f'    cdef {ct} {k}']
-        frame_field_types[k] = ct
-    for k, r in rows.items():
-        if r['hashed']:
-            for param in r['params']:
-                dt = 'double' if param['type']['kind'] == 'float' else 'long long'
-                lines += [f"    cdef {dt}[::1] _keys_{k}_{param['name']}"]
-                frame_field_types[f"_keys_{k}_{param['name']}"] = f'{dt}[::1]'
-    frame_fields = tuple(lines[len(frame_header) + 2:])
-    allocated = max(1, slot)
-    lines += ['    def __init__(self, records):', '        self._records = records', '        self._epoch = 0',
-              f'        self._floats = np.empty({allocated}, dtype=np.float64)',
-              f'        self._ints = np.empty({allocated}, dtype=np.int64)',
-              f'        self._seen = np.zeros({allocated}, dtype=np.uint32)',
-              '        self._calls = self._misses = 0']
-    if mixed:
-        lines += ['        self._python_scope = None']
-    for k, r in rows.items():
-        if r['hashed']:
-            for param in r['params']:
-                dt = 'np.float64' if param['type']['kind'] == 'float' else 'np.int64'
-                lines += [f"        self._keys_{k}_{param['name']} = np.empty({r['slots']}, dtype={dt})"]
-    lines += ['    cdef void _advance(self) except *:',
-              '        if self._epoch >= 4294967294:',
-              '            np.asarray(self._seen).fill(0)',
-              '            self._epoch = 0', '        self._epoch += 2']
-    lines += ['    def reset(self):', '        self._advance()',
-              '    def stats(self):', f"        return {{'enabled': {diagnostics}, 'calls': self._calls, 'misses': self._misses, 'cache_slots': {slot}, 'epoch': self._epoch}}",
-              '    def replace_records(self, records):', '        self._records = records', '        self._advance()',
-              '    cdef void _select(self, tuple record) except *:']
-    for i, (k, ti) in enumerate(input_info.items()):
-        lines += [f'        self.{k} = record[{i}]']
-    lines += ['        self._advance()']
-    frame_runtime_start = len(lines)
+    for name, info in input_info.items():
+        frame_field_types[name] = info['ctype']
+    for name, row in rows.items():
+        if row['hashed']:
+            for parameter in row['params']:
+                dtype = 'double' if parameter['type']['kind'] == 'float' else 'long long'
+                frame_field_types['_keys_' + name + '_' + parameter['name']] = dtype + '[::1]'
     frame_methods = []
     checked_numeric_bridges = []
     frame_casts = _frame_input_casts(input_info)
@@ -968,8 +934,6 @@ def emit(spec, *, diagnostics=False, python_cells=()):
         frame_methods.extend((frame_entry,
                               tuple([f'cdef inline {ret} _calc_{name}(_Frame* state{calc_tail}) except? -1{native_suffix}:']
                                     + frame_body)))
-    frame_runtime_end = len(lines)
-    frame_runtime_prefix_end = len(lines)
     for table in spec.outputs:
         if not table.isidentifier() or table.startswith('_'):
             raise ContractError('Output tables require public identifier names')
@@ -1022,19 +986,18 @@ def emit(spec, *, diagnostics=False, python_cells=()):
     }
     return {
         'header': frame_header,
-        'fields': frame_fields,
         'field_types': frame_field_types,
         'methods': tuple(frame_methods),
         'frame_outputs': frame_outputs,
-        'runtime_prefix': tuple(lines[len(frame_header) + 2 + len(frame_fields):frame_runtime_start])
-                          + tuple(lines[frame_runtime_end:frame_runtime_prefix_end]),
-        'runtime': tuple(lines[len(frame_header) + 2 + len(frame_fields):frame_runtime_start])
-                   + tuple(lines[frame_runtime_end:]),
     }, manifest
 
 
 def build(spec, destination, *, diagnostics=False, python_cells=(),
-          compile_native=True):
+          compile_native=True, package_build=False):
+    if package_build and compile_native:
+        raise ValueError('Private contexts compile through the original package build')
+    if package_build and spec.model is not None and spec.public_emission_plan is None:
+        raise ValueError('Prepared package contexts require an authoritative public Space plan')
     destination = Path(destination).resolve()
     if destination.exists() and any(destination.iterdir()):
         raise FileExistsError('Build destination must be empty')
@@ -1055,8 +1018,8 @@ def build(spec, destination, *, diagnostics=False, python_cells=(),
         manifest['original_helper_modules'] = spec.original_helper_modules or {}
         manifest['original_native_calls'] = list(spec.original_native_calls)
         manifest['original_cache_kinds'] = spec.original_cache_kinds or {}
-    from .frame_codegen import to_c_frame
-    source = to_c_frame(parts, manifest)
+    from .frame_codegen import emit_context
+    source = emit_context(parts, manifest)
     if spec.cython_objects:
         from .gil_codegen import augment
         source = augment(source, manifest, spec, python_cells)
@@ -1141,27 +1104,28 @@ def build(spec, destination, *, diagnostics=False, python_cells=(),
         for suffix in ('.py','.pxd'):
             (pkg / ('_table_lookup'+suffix)).write_text(Path(__file__).with_name('table_lookup'+suffix).read_text().replace('from .lookups ', 'from ._lookups '))
     manifest.update(package=package, artifact_signature=digest, build_flags=build_flags, source_sha256=hashlib.sha256(source.encode()).hexdigest(), python=sys.version, source_file=inspect.getsourcefile(spec.module))
-    if spec.model is not None and spec.public_emission_plan is None:
+    if not package_build and spec.model is not None and spec.public_emission_plan is None:
         from .package_codegen import add_public_package
         add_public_package(destination, manifest, spec.initial_tables, spec.model_name)
-    extensions = []
-    if space_source:
-        extensions.append(
-            f"    Extension('{package}._space_formula', ['{package}/_space_formula.pyx']),")
-    if spec.cython_objects:
-        extensions.append(
-            f"    Extension('{package}._table_lookup', ['{package}/_table_lookup.py']),")
-    extensions.extend((
-        f"    Extension('{package}._lookups', ['{package}/_lookups.py']),",
-        f"    Extension('{package}._kernel', ['{package}/_kernel.pyx'], language='c++'),",
-    ))
-    setup = ("from setuptools import setup, Extension\n"
-             "from Cython.Build import cythonize\n"
-             "setup(ext_modules=cythonize([\n"
-             + "\n".join(extensions) + "\n"
-             "], compiler_directives={'language_level':3,'infer_types':True}, annotate=True))\n")
-    (destination / 'setup.py').write_text(setup)
-    manifest['setup_sha256'] = hashlib.sha256((destination / 'setup.py').read_bytes()).hexdigest()
+    if not package_build:
+        extensions = []
+        if space_source:
+            extensions.append(
+                f"    Extension('{package}._space_formula', ['{package}/_space_formula.pyx']),")
+        if spec.cython_objects:
+            extensions.append(
+                f"    Extension('{package}._table_lookup', ['{package}/_table_lookup.py']),")
+        extensions.extend((
+            f"    Extension('{package}._lookups', ['{package}/_lookups.py']),",
+            f"    Extension('{package}._kernel', ['{package}/_kernel.pyx'], language='c++'),",
+        ))
+        setup = ("from setuptools import setup, Extension\n"
+                 "from Cython.Build import cythonize\n"
+                 "setup(ext_modules=cythonize([\n"
+                 + "\n".join(extensions) + "\n"
+                 "], compiler_directives={'language_level':3,'infer_types':True}, annotate=True))\n")
+        (destination / 'setup.py').write_text(setup)
+        manifest['setup_sha256'] = hashlib.sha256((destination / 'setup.py').read_bytes()).hexdigest()
     (destination / 'manifest.json').write_text(json.dumps(manifest, indent=2))
     if compile_native:
         compile_generated(destination)

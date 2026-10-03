@@ -261,7 +261,7 @@ def from_compilation_plan(package_plan, exported, destination, *, projection, **
     model.spaces[tuple(projection.split('.'))].cells = {
         name: _ResolvedCell(cell, instance) for name, cell in retained.items()}
     context_space = replace(space, cells=MappingProxyType(retained))
-    if options.get('native_typed_inputs') and not options.get('signatures'):
+    if (options.get('native_typed_inputs') or declared_rows) and not options.get('signatures'):
         # Typed input expansion consumes the same finalized public signatures.
         # This is not a second trace or inference pass in the resource adapter.
         options['signatures'] = {

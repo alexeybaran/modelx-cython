@@ -10,7 +10,6 @@ import ast
 import copy
 import hashlib
 import json
-import shutil
 from types import ModuleType
 from pathlib import Path
 
@@ -197,8 +196,6 @@ def emit_private_kernels(plans, package_path, package_name, *, formula_transform
         info = p['info']
         name = '_mx_frame_' + cls_name.removeprefix('_c_')
         folder = package_path / name
-        folder.mkdir()
-        (folder / '__init__.py').write_text('', encoding='utf-8')
         module_name = package_name + '.' + name
         module = ModuleType(module_name)
         module.__file__ = str(package_path / '_mx_classes.py')
@@ -281,15 +278,13 @@ def _assemble_private_kernel(spec, plan, package_path, package_name, cls_name):
     name = '_mx_frame_' + cls_name.removeprefix('_c_')
     folder = package_path / name
     folder.mkdir(exist_ok=True)
+    build(spec, folder, compile_native=False, package_build=True)
     (folder / '__init__.py').write_text('', encoding='utf-8')
-    artifact = folder / 'artifact'
-    build(spec, artifact, compile_native=False)
-    manifest = json.loads((artifact / 'manifest.json').read_text(encoding='utf-8'))
+    manifest = json.loads((folder / 'manifest.json').read_text(encoding='utf-8'))
     if any(row['coverage']['detached_python'] for row in manifest['cells'].values()):
         raise ValueError('Original-shell admission requires compiled Cython bodies')
     private = manifest['package']
     target = folder / private
-    shutil.move(str(artifact / private), str(target))
     kernel = target / '_kernel.pyx'
     kernel.write_text('# distutils: language=c++\n' + kernel.read_text(encoding='utf-8'), encoding='utf-8')
     if spec.public_emission_plan is None:

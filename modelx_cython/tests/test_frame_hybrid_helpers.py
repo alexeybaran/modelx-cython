@@ -10,7 +10,7 @@ from modelx_cython._frame_runtime.contracts import cell
 from modelx_cython._frame_runtime.contracts import ContractError
 from modelx_cython._frame_runtime.compiler import emit
 from modelx_cython._frame_runtime.compiler import build
-from modelx_cython._frame_runtime.frame_codegen import to_c_frame
+from modelx_cython._frame_runtime.frame_codegen import emit_context
 from modelx_cython._frame_runtime.gil_codegen import augment
 from modelx_cython._frame_runtime.model import CompiledModel
 from modelx_cython._frame_runtime.model_plan import derive_spec
@@ -106,7 +106,7 @@ def test_native_scalar_traversal_skips_only_unneeded_object_binding():
                        cython_objects=True)
     parts, manifest = emit(spec)
     assert manifest['native_scalar_outputs'] == ['numeric_total']
-    source = augment(to_c_frame(parts, manifest), manifest, spec)
+    source = augment(emit_context(parts, manifest), manifest, spec)
     assert 'cdef void _select_native_policy' in source
     assert "cdef bint native_only = name == 'numeric_total'" in source
     assert 'if native_only:\n                self._select_native_policy(i)' in source

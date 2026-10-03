@@ -53,9 +53,9 @@ def test_declared_numeric_reads_use_one_native_closure():
     assert spec.model['bindings']['mxinput_state']['field'] is None
     assert spec.cells['_amount'].__annotations__ == {'t': int, 'return': float}
     assert _amount.__annotations__ == {}
-    from modelx_cython._frame_runtime.frame_codegen import to_c_frame
+    from modelx_cython._frame_runtime.frame_codegen import emit_context
     parts, manifest = emit(spec)
-    source = to_c_frame(parts, manifest)
+    source = emit_context(parts, manifest)
     assert manifest['cells']['_amount']['calculator'] == 'native'
     assert manifest['cells']['_outputs']['calculator'] == 'python'
     assert '(<IndexedFloat1>state.mxinput_paths_premium).get(j)' in source

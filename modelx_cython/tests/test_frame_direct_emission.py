@@ -6,7 +6,7 @@ import pytest
 
 from modelx_cython._frame_runtime.compiler import emit, _frame_cast_names
 from modelx_cython._frame_runtime.contracts import KernelSpec, cell
-from modelx_cython._frame_runtime.frame_codegen import to_c_frame
+from modelx_cython._frame_runtime.frame_codegen import emit_context
 
 
 @cell
@@ -47,7 +47,7 @@ def test_structured_emission_preserves_generated_source(mixed, expected):
                             for line in method))
         assert any('(_Frame* state' in line for line in entry)
         assert all('self.' not in line for line in entry)
-    direct = to_c_frame(parts, manifest)
+    direct = emit_context(parts, manifest)
     assert hashlib.sha256(direct.encode()).hexdigest() == expected
 
 
@@ -73,7 +73,7 @@ def test_checked_python_formula_is_emitted_with_a_frame_receiver():
     assert formula[0].startswith('cdef inline double _calc_total(_Frame* state')
     assert '(<object>state._python_scope).calculate' in '\n'.join(formula)
     assert 'self.' not in '\n'.join(formula)
-    generated = to_c_frame(parts, manifest)
+    generated = emit_context(parts, manifest)
     assert '(<object>state._python_scope).calculate' in generated
 
 
@@ -85,13 +85,13 @@ def test_output_plan_is_bound_before_runtime_generation():
                       outputs={'cash': {'period': 'value(t)', 'aggregate': 'total()'}},
                       steps=4, length='4')
     parts, manifest = emit(spec)
-    assert parts['runtime'] == parts['runtime_prefix']
-    assert not any('def evaluate(' in line or 'def run(' in line
-                   or 'def run_scalar(' in line for line in parts['runtime'])
+    assert 'runtime' not in parts and 'runtime_prefix' not in parts
+    assert 'fields' not in parts  # No temporary class-shaped program.
+    assert parts['field_types']['_epoch'] == 'unsigned int'
     assert parts['frame_outputs'] == {
         'length': '4',
         'tables': {'cash': ['_cell_value(state, t)', '_cell_total(state)']},
     }
-    generated = to_c_frame(parts, manifest)
+    generated = emit_context(parts, manifest)
     assert 'command.output[t * 2 + 0] = _cell_value(state, t)' in generated
     assert 'command.output[t * 2 + 1] = _cell_total(state)' in generated
