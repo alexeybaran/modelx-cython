@@ -6,9 +6,7 @@ import textwrap
 TYPES = {'_mx_cy.longlong': 'long long', '_mx_cy.double': 'double', '_mx_cy.bint': 'bint'}
 
 
-def support(tag, types, result, *, native=False, epochs=False):
-    if epochs and not native:
-        raise ValueError('Epoch reset requires the native cache-owner lifecycle')
+def support(tag, types, result, *, native=False):
     args = ', '.join(f'{tp} k{i}' for i, tp in enumerate(types))
     names = ', '.join(f'k{i}' for i in range(len(types)))
     fields = '\n'.join(f'    {tp} k{i}' for i, tp in enumerate(types))
@@ -22,12 +20,9 @@ def support(tag, types, result, *, native=False, epochs=False):
     copied = ', '.join(f'c.items[i].k{j}' for j in range(len(types)))
     setkeys = '\n'.join(f'    c.items[pos].k{i} = k{i}' for i in range(len(types)))
     key = 'entry.k0' if len(types) == 1 else '(' + ', '.join(f'entry.k{i}' for i in range(len(types))) + ')'
-    occupied = 'c.items[pos].used == c.epoch' if epochs else 'c.items[pos].used'
-    completed = 'c.items[i].used == c.epoch' if epochs else 'c.items[i].used'
-    published = 'c.epoch' if epochs else 'True'
     source = f"""
 cdef struct {tag}_entry:
-    {'uint64_t' if epochs else 'bint'} used
+    bint used
 {fields}
     {result} value
 
@@ -35,7 +30,6 @@ cdef struct {tag}_cache:
     {tag}_entry* items
     size_t capacity
     size_t count
-{('    uint64_t epoch' if epochs else '')}
 
 @cython.overflowcheck(False)
 cdef inline uint64_t {tag}_hash({args}) noexcept:
@@ -50,7 +44,7 @@ cdef inline Py_ssize_t {tag}_find({tag}_cache* c, {args}) noexcept:
     if c.capacity == 0:
         return -1
     pos = {tag}_hash({names}) & (c.capacity - 1)
-    while {occupied}:
+    while c.items[pos].used:
         if {equality}:
             return <Py_ssize_t>pos
         pos = (pos + 1) & (c.capacity - 1)
@@ -60,14 +54,13 @@ cdef inline void {tag}_grow({tag}_cache* c) except *:
     cdef size_t capacity = 16 if c.capacity == 0 else c.capacity * 2
     cdef size_t i, pos
     cdef {tag}_entry* items
-{('    if c.epoch == 0: c.epoch = 1' if epochs else '')}
     if capacity <= c.capacity or capacity > <size_t>-1 // sizeof({tag}_entry):
         raise MemoryError()
     items = <{tag}_entry*>calloc(capacity, sizeof({tag}_entry))
     if items == NULL:
         raise MemoryError()
     for i in range(c.capacity):
-        if {completed}:
+        if c.items[i].used:
             pos = {tag}_hash({copied}) & (capacity - 1)
             while items[pos].used:
                 pos = (pos + 1) & (capacity - 1)
@@ -85,11 +78,11 @@ cdef inline void {tag}_put({tag}_cache* c, {args}, {result} value) except *:
     if c.count >= c.capacity // 2:
         {tag}_grow(c)
     pos = {tag}_hash({names}) & (c.capacity - 1)
-    while {occupied}:
+    while c.items[pos].used:
         pos = (pos + 1) & (c.capacity - 1)
 {setkeys}
     c.items[pos].value = value
-    c.items[pos].used = {published}
+    c.items[pos].used = True
     c.count += 1
 
 cdef inline dict {tag}_dictionary({tag}_cache* c):
@@ -97,22 +90,10 @@ cdef inline dict {tag}_dictionary({tag}_cache* c):
     cdef size_t i
     cdef {tag}_entry entry
     for i in range(c.capacity):
-        if {completed}:
+        if c.items[i].used:
             entry = c.items[i]
             result[{key}] = entry.value
     return result
-"""
-    if epochs:
-        source += f"""
-cdef inline void {tag}_reset({tag}_cache* c) noexcept nogil:
-    if c.epoch == <uint64_t>-1:
-        # Old completed entries may carry every earlier tag. Clear before wrap.
-        if c.items != NULL:
-            memset(c.items, 0, c.capacity * sizeof({tag}_entry))
-        c.epoch = 1
-    else:
-        c.epoch += 1
-    c.count = 0
 """
     if native:
         # Same exact-key/growth primitive; adapt only its numeric checked ABI.

@@ -26,8 +26,7 @@ def report() -> object:
 
 @pytest.mark.parametrize('mixed, expected', [
     (False, '9d940b287c2057d29532f9e9ec2602aaa1fcd75f87995d3027dc94516db5c6af'),
-    # Includes the previously committed checked typed dependency bridge.
-    (True, '78236203fa3baba5bd8f2495851f900e76b86268f4772415ee9e9e3abef44851'),
+    (True, '54d8bcaefe6d59ae9d1389e265bf911fad8dd5217fc8c888d9042a5b11c6a2d9'),
 ])
 def test_structured_emission_preserves_generated_source(mixed, expected):
     module = ModuleType('frame_emission_fixture')
