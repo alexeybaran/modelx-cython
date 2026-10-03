@@ -73,19 +73,12 @@ assert s.after(2) == {{'held': 202.0, 'fresh': 203.0, 'again': 202.0}}
 try: s.loop(64)
 except IndexError: pass
 else: raise AssertionError('Declared bounds must still reach the checked miss path')
-try: q = pickle.loads(pickle.dumps(s))
-except pickle.PicklingError:
-    if {removed_callback!r}:
-        print('KNOWN_REMOVED_CALLBACK_SNAPSHOT')
-        raise SystemExit(0)
-    raise
+q = pickle.loads(pickle.dumps(s))
 assert q.read(0) == -1.0 and q.read(2) == 202.0
 assert q.loop(0) == {{'total': -200.0}}
 ''')
     # The callback is not picklable. Remove it after the callback/error gates;
     # completed caches must restore independently of the current reference.
-    text = (tmp_path / 'verify.py').read_text().replace('try: q = pickle.loads', 's.hook = None\ntry: q = pickle.loads')
+    text = (tmp_path / 'verify.py').read_text().replace('q = pickle.loads', 's.hook = None\nq = pickle.loads')
     (tmp_path / 'verify.py').write_text(text)
     _run(tmp_path, ['verify.py'], 'verify')
-    if 'KNOWN_REMOVED_CALLBACK_SNAPSHOT' in (tmp_path / 'verify.log').read_text():
-        pytest.xfail('Baseline 62f2f0d also serializes a removed callback retained in owner inputs; pending reference/serialization integration')

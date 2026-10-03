@@ -416,6 +416,21 @@ return {virtual}(self._mx_frame_owner.kernel, self.{callback}{', ' + body_args i
                 decorator_list=[], returns=copy.deepcopy(original.returns),
                 type_comment=None)
             cls.body.append(callback)
+        if p['manifest'].get('python_cells'):
+            # Let Cython retain its authoritative state reducer. Synchronize
+            # current public references only at pickle entry, before the owner
+            # captures its input record; completed caches are not invalidated.
+            reducer = '_mx_pickle_' + cls.name
+            tree.body.extend(ast.parse(f"""
+@_mx_cy.locals(self={cls.name})
+def {reducer}(self):
+    if self._mx_frame_owner is not None:
+        self._mx_frame_owner.prepare_checked()
+        self._mx_frame_owner.kernel.bind_inputs({inputs})
+    return self.__reduce_cython__()
+import copyreg as _mx_pickle_registry
+_mx_pickle_registry.pickle({cls.name}, {reducer})
+""").body)
     return ast.unparse(ast.fix_missing_locations(tree)) + '\n', declarations
 
 
