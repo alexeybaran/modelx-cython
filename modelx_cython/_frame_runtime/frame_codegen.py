@@ -60,7 +60,8 @@ def to_c_frame(parts, manifest):
     from .growing_numeric_codegen import frame_parts, owner_parts
     growing_fields, growing_helpers = frame_parts(manifest['cells'])
     frame.extend(growing_fields)
-    growing_owner, growing_init, growing_reset, growing_free, growing_methods = owner_parts(manifest['cells'])
+    growing_owner, growing_init, growing_reset, growing_free, growing_methods = owner_parts(
+        manifest['cells'], frame_pointer='self._frame' if heap_numeric else '&self._frame')
     functions = []
     for method in parts['methods']:
         if any(line.startswith('cdef inline ') and '(_Frame* state' in line

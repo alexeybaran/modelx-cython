@@ -395,6 +395,9 @@ def _cell_entry_lines(name, row, tail, call, native_suffix, diagnostics,
     formula = f'_calc_{name}({args})'
     if row.get('storage') == 'growing_numeric':
         from .growing_numeric_codegen import cell_entry
+        if row.get('native_prefix'):
+            from .native_prefix_codegen import cell_entry as prefix_entry
+            return prefix_entry(name, row, signature, args, formula, diagnostics)
         return cell_entry(name, row, signature, args, formula, diagnostics)
     if row['direct_input'] is not None:
         exception = 'noexcept' if native_suffix else 'except? -1'
@@ -771,7 +774,9 @@ def emit(spec, *, diagnostics=False, python_cells=()):
                    and name not in object_cells and cached)
         object_storage = name in object_cells
         dictionary = (object_storage and (spec.original_cache_kinds or {}).get(name) == 'dictionary')
-        if growing:
+        native_prefix = (growing and (hashed or count <= 20_000_000)
+                         and slot + (_hash_capacity() if hashed else count) <= 30_000_000)
+        if growing and not native_prefix:
             count, hashed = 0, False
         elif object_storage and (python_key or hashed or dictionary):
             count = 0  # Python dictionaries grow with actual keys, not guessed bounds.
@@ -792,6 +797,7 @@ def emit(spec, *, diagnostics=False, python_cells=()):
                 direct=field
         if growing:
             row['storage'] = 'growing_numeric'
+            row['native_prefix'] = native_prefix
         row['direct_input'] = None if name in python_reasons or spec.original_space_shell else direct
         if mixed:
             row['calculator'] = 'python' if name in python_reasons else 'native'

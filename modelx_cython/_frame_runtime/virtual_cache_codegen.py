@@ -34,9 +34,17 @@ def entries(manifest):
                        'retained_heap_numeric_memo_frame_with_python_owners' else '&self._frame')
             keys = pointer + (', ' + args if args else '')
             body = [head, f'        cdef {result} value',
-                    f'        if _nc_lookup_{name}({keys}, &value): return value',
-                    '        value = ' + call,
-                    f'        _nc_commit_{name}({keys}, value)', '        return value']
+                    '        cdef Py_ssize_t slot = -1',
+                    f'        if _nc_lookup_{name}({keys}, &value): return value']
+            if row.get('native_prefix') and row['recursive']:
+                body += [f'        slot = _nc_prefix_slot_{name}({keys})',
+                         '        if slot >= 0: self._frame._seen[slot] = self._frame._epoch - 1']
+            body += ['        try:',
+                     '            value = ' + call,
+                     f'            _nc_commit_{name}({keys}, value)', '            return value',
+                     '        except BaseException:',
+                     '            if slot >= 0 and self._frame._seen[slot] == self._frame._epoch - 1:',
+                     '                self._frame._seen[slot] = 0','            raise']
         elif storage.startswith('typed_'):
             from .typed_memo_codegen import cached_entry
             body = cached_entry(name, row['typed_signature'], row,

@@ -4,6 +4,8 @@ from test_original_frame_shell import _run
 
 
 def test_original_shell_native_numeric_growth_failure_and_restore(tmp_path):
+    # Force prefix-to-growing migration at a small capacity. It remains an
+    # acceleration hint, not a key-domain or workload bound.
     import modelx as mx
     m = mx.new_model('NativeKeys')
     s = m.new_space('S'); s.offset = 0.25
@@ -22,6 +24,8 @@ def test_original_shell_native_numeric_growth_failure_and_restore(tmp_path):
     manifest=json.loads((tmp_path/'model_cy/_mx_frame_S/manifest.json').read_text())
     for name in ('affine','pair','parent','recursive','fallback_child'):
         assert manifest['cells'][name]['storage']=='growing_numeric'
+        assert manifest['cells'][name]['native_prefix']
+    assert manifest['cells']['affine']['slots'] == 16
     routes=json.loads((tmp_path/'model_cy/_mx_classes.frame-shell.json').read_text())
     assert all(r['execution']=='frame_exact' and not r['checked_cell_dependencies'] for r in routes['cells'])
     source=next((tmp_path/'model_cy/_mx_frame_S').rglob('_kernel.pyx'))
@@ -49,22 +53,22 @@ import gc, importlib, math, pickle
 from model_cy import mx_model
 module=importlib.import_module({manifest['package']+'._kernel'!r})
 factory=type(mx_model); m=factory(); s=m.S
-for i in range(8): assert s.affine(float(i))==i+0.25
+for i in range(16): assert s.affine(float(i))==i+0.25
 module._test_fail_next()
-try: s.parent(8.0)
+try: s.parent(16.0)
 except MemoryError: pass
 else: raise AssertionError('growth failure swallowed')
 s.offset=100.25
-assert s.affine(7.0)==7.25
+assert s.affine(15.0)==15.25
 assert s.anchor()==10.25
-assert s.parent(8.0)==118.5
-assert s.parent(8.0)==118.5
+assert s.parent(16.0)==126.5
+assert s.parent(16.0)==126.5
 for i in range(3000): assert s.pair(i, i+0.25)==2*i+100.5
 s.offset=-200.0
 for i in reversed(range(3000)): assert s.pair(i, i+0.25)==2*i+100.5
 assert s.recursive(300.0)==300.0
 q=pickle.loads(pickle.dumps(s)); q.offset=-1000.0
-assert q.parent(8.0)==118.5 and q.pair(2999,2999.25)==6098.5
+assert q.parent(16.0)==126.5 and q.pair(2999,2999.25)==6098.5
 for i in range(301): assert q.recursive(float(i))==float(i)
 assert s.fallback_child(0.25)==0.25 and s.fallback_child(2.0)==2.0
 assert s.fallback_child(0.25)==0.25 and s.fallback_child(float('inf'))==0.0
