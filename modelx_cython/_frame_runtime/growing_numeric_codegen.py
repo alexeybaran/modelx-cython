@@ -24,7 +24,7 @@ def support_header(rows):
              '_NC_MISSING = object()']
     for name, row in rows.items():
         lines.append(support(tag(name), [p['type']['ctype'] for p in row['params']],
-                             row['result']['ctype'], native=True))
+                             row['result']['ctype'], native=True, epochs=True))
     return lines
 
 
@@ -120,9 +120,7 @@ def owner_parts(rows):
     for name, row in rows.items():
         t = tag(name)
         fields += [f'    cdef object _numeric_dict_{name}']
-        reset += [f'        if self._frame._numeric_{name}.items != NULL:',
-                  f'            memset(self._frame._numeric_{name}.items, 0, self._frame._numeric_{name}.capacity * sizeof({t}_entry))',
-                  f'        self._frame._numeric_{name}.count = 0',
+        reset += [f'        {t}_reset(&self._frame._numeric_{name})',
                   f'        self._frame._numeric_fallback_{name} = NULL',
                   f'        self._numeric_dict_{name} = None']
         deallocate += [f'free(self._frame._numeric_{name}.items)']
