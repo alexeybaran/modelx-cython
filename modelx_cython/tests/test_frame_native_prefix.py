@@ -120,6 +120,9 @@ def test_prepared_checked_numeric_body_stays_connected(tmp_path, monkeypatch):
     build(spec,artifact)
     manifest = json.loads((artifact/'manifest.json').read_text())
     assert 'checked_amount' in manifest['original_checked_numeric_bridges']
+    kernel_source = next(artifact.rglob('_kernel.pyx')).read_text()
+    entry = kernel_source.split(' _native_cell_amount(', 1)[1].split('\n    cdef ', 1)[0]
+    assert entry.index('_mx_completed_key] ==') < entry.index('self._invoke(&command)')
     monkeypatch.syspath_prepend(str(artifact))
     native = importlib.import_module(manifest['package']+'._kernel')
     from modelx_cython._frame_runtime.python_calculator import PythonScope

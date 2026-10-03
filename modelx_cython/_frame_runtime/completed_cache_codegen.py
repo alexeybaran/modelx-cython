@@ -13,9 +13,10 @@ def completed_dense_hit(row, manifest, *, owner, arguments, indent):
             or row.get('direct_input') is not None
             or any(p['type']['kind'] not in ('int', 'enum', 'bool') for p in row['params'])):
         return []
-    # Original-shell checked entries always use the mixed scope/ownership ABI.
-    # Other generated representations keep their existing entry unchanged.
-    if not manifest.get('original_space_shell') or not manifest.get('python_cells'):
+    # Both original-shell and prepared public graphs use this mixed ownership
+    # ABI. A completed numeric read owns no Python temporary and cannot throw;
+    # misses still enter the scoped guard after Cython's object cleanup boundary.
+    if not manifest.get('python_cells'):
         return []
     prefix = ' ' * indent
     valid = [owner + '._frame._scope_valid']
