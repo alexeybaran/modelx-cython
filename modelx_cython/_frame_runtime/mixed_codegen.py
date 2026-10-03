@@ -12,7 +12,8 @@ def busy_layout(rows):
     spans = {}
     for name, row in rows.items():
         if (row['cached'] and row['recursive'] and row['direct_input'] is None
-                and row.get('storage') != 'growing_numeric'):
+                and row.get('storage') != 'growing_numeric'
+                and row.get('invocation_owner_required', True)):
             spans[name] = (row['offset'], row['offset'] + row['slots'], offset)
             offset += row['slots']
     return spans, max(1, offset)
@@ -22,7 +23,12 @@ def emit_invocation_state(frame, manifest, heap_numeric=False):
     """Emit guard/rollback state directly; Cell entries already publish ownership."""
     slots = max(1, manifest['cache_slots'])
     spans, size = busy_layout(manifest['cells'])
-    busy_spans = list(spans.values()) if heap_numeric else []
+    busy_spans = list(spans.values())
+    pure_spans = [(row['offset'], row['offset'] + row['slots'])
+                  for row in manifest['cells'].values()
+                  if row['cached'] and row['recursive'] and row['direct_input'] is None
+                  and not row.get('invocation_owner_required', True)
+                  and row.get('storage') != 'growing_numeric']
     if heap_numeric:
         manifest['busy_cache_slots'] = size
     busy_field = '    unsigned int* _busy_owner' if heap_numeric else f'    unsigned int _busy_owner[{slots}]'
@@ -41,6 +47,7 @@ def emit_invocation_state(frame, manifest, heap_numeric=False):
                   for start, end, compact in busy_spans]
         frame += ['    return -1']
     else:
+        frame += [f'    if {start} <= slot < {end}: return -1' for start, end in pure_spans]
         frame += ['    return slot']
     frame += [
               '\ncdef void _rollback(_Frame* state, unsigned int mark) noexcept nogil:',
@@ -48,7 +55,7 @@ def emit_invocation_state(frame, manifest, heap_numeric=False):
               f'    for slot in range({slots}):',
               '        if state._seen[slot] == state._epoch - 1:',
               '            owner_slot = _busy_slot(slot)',
-              '            if owner_slot >= 0 and state._busy_owner[owner_slot] >= mark:',
+              '            if owner_slot < 0 or state._busy_owner[owner_slot] >= mark:',
               '                state._seen[slot] = state._epoch - 2 if _hash_slot(slot) else 0']
     manifest['mixed_cache_protocol'] = 'ready/busy/tombstone; rollback scan by invocation depth'
     return frame

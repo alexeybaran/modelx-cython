@@ -468,7 +468,7 @@ def _cell_entry_lines(name, row, tail, call, native_suffix, diagnostics,
     if row['recursive']:
         result += [f'    if {field("_seen")}[_mx_key] == {field("_epoch")} - 1:',
                    f'        mx_fail(&state._guard, 1, b"{name}")']
-        if invocation_scope:
+        if invocation_scope and row.get('invocation_owner_required', True):
             key = f'(_mx_key - {busy_span[0]} + {busy_span[2]})' if busy_span else '_mx_key'
             result.append(f'    state._busy_owner[{key}] = state._entry_depth')
         result.append(f'    {field("_seen")}[_mx_key] = {field("_epoch")} - 1')
@@ -792,7 +792,8 @@ def emit(spec, *, diagnostics=False, python_cells=()):
         if count > 20_000_000:
             raise ContractError('Declared cache exceeds the per-Cell allocation limit')
         row = dict(name=name, result=ret, params=params, cached=cached, hashed=hashed, last=False,
-                   recursive=name in python_reasons or _recursive(name), checked_formula=name in python_reasons or _needs_checked_formula(node, ret, params, spec.inputs, cells, spec.original_native_calls),
+                   recursive=name in python_reasons or _recursive(name),
+                   invocation_owner_required=not native_closure(name), checked_formula=name in python_reasons or _needs_checked_formula(node, ret, params, spec.inputs, cells, spec.original_native_calls),
                    offset=slot, slots=count)
         body = [n for n in node.body if not (isinstance(n,ast.Expr) and isinstance(n.value,ast.Constant) and isinstance(n.value.value,str))]
         direct = None

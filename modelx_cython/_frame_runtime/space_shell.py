@@ -128,6 +128,35 @@ def plan(unit, *, package_plan=None, prepared_contexts=None):
                     candidates[name] = fn
             if reason:
                 reasons[name] = reason
+        # Keep the original typed receiver for closures that read an external
+        # Space through an object Cell ABI. Wrapping those existing checked
+        # calls in a second numeric context adds ownership/guard work without
+        # producing a connected native input path. Prepared graphs and typed
+        # array/MemoryView edges retain their resolved native representation.
+        original_receiver = set()
+        for name, fn in candidates.items():
+            for node in ast.walk(fn):
+                if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                        and isinstance(node.func.value, ast.Attribute)
+                        and isinstance(node.func.value.value, ast.Name)
+                        and node.func.value.value.id == 'self'):
+                    continue
+                ref = info.refs.get(node.func.value.attr)
+                target = package_plan.by_class.get(ref.mx_class) if ref and ref.mx_class else None
+                if target is None or target.native_context is not None:
+                    continue
+                called = target.cells.get(node.func.attr)
+                if called is not None and called.public_result == 'object':
+                    original_receiver.add(name)
+        changed = True
+        while changed:
+            previous = set(original_receiver)
+            original_receiver.update(n for n in candidates
+                                     if dependencies[n] & original_receiver)
+            changed = original_receiver != previous
+        for name in original_receiver:
+            reasons[name] = 'external object Cell ABI retains the connected original receiver'
+            del candidates[name]
         # An unsupported dependency does not exclude its compiled callers.
         # Bind the actual original public Cell on a checked Cython edge. Its
         # original receiver/cache remains authoritative; no second body or memo
