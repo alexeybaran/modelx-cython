@@ -99,6 +99,8 @@ def _match(node, cls, module, reuse):
 
 def _reset_lines(cls):
     for name, cell in cls.cells.items():
+        if memo := getattr(cell, 'power_memo', None):
+            yield f'root.{memo}.ready = False'
         if cell.is_special() or not cell.has_formula_def:
             continue
         if not cell.has_args():

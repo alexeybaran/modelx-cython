@@ -280,6 +280,8 @@ class PXDGenerator:
 
             if cells.is_special():
                 continue
+            if memo := getattr(cells, 'power_memo', None):
+                decl_stmts.append(f"cdef {MX_SYS_MOD}.PowerMemo {memo}\n")
 
             if not cells.has_formula_def:
                 # uncached cells: the public method is the formula itself
@@ -777,6 +779,9 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
                 decl_stmts.append(stmt)
 
             from modelx_cython.helpers import module_name
+            for cell in self.module.classes[cls_name].cells.values():
+                if memo := getattr(cell, 'power_memo', None):
+                    decl_stmts.append(cst.parse_statement(f'{memo}: {MX_SYS_MOD}.PowerMemo\n'))
             contexts = getattr(self.module.classes[cls_name], 'native_contexts', {})
             for name, provider in contexts.items():
                 decl_stmts.append(cst.parse_statement(f'{name}: {module_name(provider)}.LookupContext\n'))

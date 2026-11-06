@@ -222,12 +222,13 @@ class OperandKind:
 class _PowerRewriter(cst.CSTTransformer):
     """Replace provably real ``**`` operations with ``_mx_sys._mx_pow``."""
 
-    def __init__(self, operand_kind: OperandKind) -> None:
+    def __init__(self, operand_kind: OperandKind, memo=None) -> None:
         super().__init__()
         self._kind = operand_kind
         self._opaque_depth = 0
         self.rewritten = 0
         self.declined: List[str] = []
+        self.memo = memo
 
     def on_visit(self, node: cst.CSTNode) -> bool:
         if isinstance(node, _OPAQUE_SCOPES):
@@ -256,14 +257,19 @@ class _PowerRewriter(cst.CSTTransformer):
         exponent = self._kind.kind(original_node.right)
         if exponent == KIND_FLOAT and base != KIND_UNKNOWN:
             self.rewritten += 1
+            operation = MX_POW
+            args = [
+                cst.Arg(value=self._as_double(updated_node.left, base)),
+                cst.Arg(value=updated_node.right),
+            ]
+            if self.memo:
+                operation = "_mx_memo_pow"
+                args.insert(0, cst.Arg(cst.parse_expression(f"{CY_MOD}.address(self.{self.memo})")))
             return cst.Call(
                 func=cst.Attribute(
-                    value=cst.Name(MX_SYS_MOD), attr=cst.Name(MX_POW)
+                    value=cst.Name(MX_SYS_MOD), attr=cst.Name(operation)
                 ),
-                args=[
-                    cst.Arg(value=self._as_double(updated_node.left, base)),
-                    cst.Arg(value=updated_node.right),
-                ],
+                args=args,
                 lpar=updated_node.lpar,
                 rpar=updated_node.rpar,
             )
@@ -328,6 +334,12 @@ def rewrite_powers(
     """
     if resolver is None:
         return node
+    memo = getattr(cells, '_spec', {}).get('memoize_power', False)
+    if type(memo) is not bool:
+        raise ValueError('memoize_power must be a boolean')
+    if memo:
+        from modelx_cython.numeric_cache import exclusively_owned
+        memo = f'_mx_power_{cells.name}' if exclusively_owned(cells) else None
     param_kinds = {}
     if cells.has_args() and cells.has_typeinfo():
         for param in cells.params:
@@ -335,7 +347,7 @@ def rewrite_powers(
                 cells.get_argtype_expr(param, c_style=True)
             )
     rewriter = _PowerRewriter(
-        OperandKind(resolver, cells_kinds, ref_kinds, cls_fqname, param_kinds)
+        OperandKind(resolver, cells_kinds, ref_kinds, cls_fqname, param_kinds), memo
     )
     updated = node.body.visit(rewriter)
     if rewriter.declined:
@@ -346,4 +358,6 @@ def rewrite_powers(
         )
     if not rewriter.rewritten:
         return node
+    if memo:
+        cells.power_memo = memo
     return node.with_changes(body=updated)

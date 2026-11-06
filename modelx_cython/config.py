@@ -61,6 +61,10 @@ class TransSpec:
       in parameter order for a dense cache. The physical window must
       fit inside the existing logical bounds. Exact spill keeps the
       original logical domain available.
+    * ``"native_divisibility"``: enable the checked Cython zero-remainder
+      comparison for proven signed-integer operands.
+    * ``"memoize_power"``: enable a one-entry exact-operand memo for the
+      existing typed power helper on a privately owned policy Space.
     * ``"return_type"``: either a type name accepted by
       :data:`modelx_cython.typedefs.str_to_type` (``"bool"``,
       ``"int"``, ``"float"``, ``"str"``, ``"object"``) that overrides
@@ -74,6 +78,9 @@ class TransSpec:
 
     The ``"space_params"`` and ``"param_type"`` keys are defined
     below but are not currently consumed by the pipeline.
+
+    The top-level ``"dense_one_axis"`` experiment separates checked and proven
+    calls to an existing one-axis dense cache body.
 
     Attributes
     ----------
