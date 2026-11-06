@@ -34,12 +34,25 @@ def _eligible(method, syntax, keys):
     return True
 
 
+class _ExactTests(cst.CSTTransformer):
+    def __init__(self, owner, replacement):
+        self.test = cst.parse_expression(exact_receiver(owner))
+        self.replacement = cst.parse_expression(replacement)
+
+    def leave_Comparison(self, original, updated):
+        if original.deep_equals(self.test):
+            return self.replacement.with_changes(lpar=(*updated.lpar, *self.replacement.lpar),
+                                                 rpar=(*self.replacement.rpar, *updated.rpar))
+        return updated
+
+
 class _Miss(cst.CSTTransformer):
-    def __init__(self, owner, formula, direct, keys):
+    def __init__(self, owner, formula, direct, keys, propagate=False):
         self.guard = cst.parse_expression(exact_receiver(owner))
         self.formula = formula
         self.direct = direct
         self.keys = keys
+        self.propagate = propagate
 
     def leave_Call(self, original, updated):
         target = updated.func
@@ -49,13 +62,15 @@ class _Miss(cst.CSTTransformer):
                 and all(not arg.keyword and not arg.star and isinstance(arg.value, cst.Name)
                         and arg.value.value == key for arg, key in zip(updated.args, self.keys))):
             return updated
-        direct = updated.with_changes(func=cst.Name(self.direct),
-                                      args=(cst.Arg(cst.Name(MX_SELF)), *updated.args))
+        args = (cst.Arg(cst.Name(MX_SELF)), *updated.args)
+        if self.propagate:
+            args += (cst.Arg(cst.Name("True")),)
+        direct = updated.with_changes(func=cst.Name(self.direct), args=args)
         return cst.IfExp(test=self.guard, body=direct, orelse=updated,
                          lpar=(cst.LeftParen(),), rpar=(cst.RightParen(),))
 
 
-def _rewrite(source, entries):
+def _rewrite(source, entries, propagate=False):
     tree = ast.parse(source)
     module = cst.parse_module(source)
     names = {node.id for node in ast.walk(tree) if isinstance(node, ast.Name)}
@@ -64,6 +79,9 @@ def _rewrite(source, entries):
     names.update(node.arg for node in ast.walk(tree) if isinstance(node, ast.arg))
     names.update(node.asname or node.name.split(".")[0] for node in ast.walk(tree)
                  if isinstance(node, ast.alias))
+    exact = "_mx_exact_receiver"
+    while exact in names:
+        exact += "_"
     receiver_types = {fn.name.value: fn.params.params[0].annotation
                       for fn in module.body if isinstance(fn, cst.FunctionDef)
                       and fn.name.value in entries}
@@ -85,22 +103,33 @@ def _rewrite(source, entries):
             keys = tuple(axis.key for axis in layout.axes)
             if not _eligible(fn, formulas[identity], keys):
                 continue
+            if propagate and any(isinstance(node, ast.Name) and node.id == MX_SELF
+                                 and not isinstance(node.ctx, ast.Load)
+                                 for node in ast.walk(formulas[identity])):
+                continue
             direct = f"_mx_dense_formula_{len(replacements)}"
             while direct in names:
                 direct += "_"
             names.add(direct)
             receiver, *params = fn.params.params
             receiver = receiver.with_changes(annotation=receiver_types[entry])
+            args = ", ".join((MX_SELF, *keys))
+            formula_body = fn.body
+            if propagate:
+                params.append(cst.Param(cst.Name(exact), annotation=cst.Annotation(
+                    cst.parse_expression(f"{CY_MOD}.bint"))))
+                formula_body = formula_body.visit(_ExactTests(layout.owner, exact))
+                args += ", " + exact_receiver(layout.owner)
             replacements.append(fn.with_changes(
                 name=cst.Name(direct),
+                body=formula_body,
                 params=fn.params.with_changes(params=(receiver, *params)),
                 decorators=(*fn.decorators, cst.Decorator(cst.parse_expression(f"{CY_MOD}.inline"))),
             ))
-            args = ", ".join((MX_SELF, *keys))
             methods[fn] = fn.with_changes(body=fn.body.with_changes(body=(
                 cst.parse_statement(f"return {direct}({args})\n"),
             )))
-            misses[entry] = _Miss(layout.owner, layout.formula, direct, keys)
+            misses[entry] = _Miss(layout.owner, layout.formula, direct, keys, propagate)
     if not replacements:
         return source
     body = []
@@ -114,10 +143,10 @@ def _rewrite(source, entries):
     return module.with_changes(body=(*body, *replacements)).bytes
 
 
-def bind_dense_formulas(modules, layouts):
+def bind_dense_formulas(modules, layouts, propagate=False):
     for module, entries in layouts.items():
         path = modules[module]
         original = path.read_bytes()
-        rewritten = _rewrite(original, entries)
+        rewritten = _rewrite(original, entries, propagate)
         if rewritten != original:
             path.write_bytes(rewritten)

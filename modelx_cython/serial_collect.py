@@ -14,6 +14,7 @@ class SerialCollect:
     cell: str
     parameter: str
     reuse: bool
+    private_lookups: bool
 
 
 def _self_attribute(node):
@@ -58,13 +59,16 @@ def analyze(source, module):
             continue
         if option not in ('reduce', 'reuse'):
             raise ValueError('serial_collect must be reduce or reuse')
-        shape = _match(node, cls, module, option == 'reuse')
+        private = module.spec.get_spec(cls.fqname).get('serial_private_lookups', False)
+        if type(private) is not bool or (private and option != 'reuse'):
+            raise ValueError('serial_private_lookups requires serial_collect reuse')
+        shape = _match(node, cls, module, option == 'reuse', private)
         if shape is not None:
             result[node.name] = shape
     return result
 
 
-def _match(node, cls, module, reuse):
+def _match(node, cls, module, reuse, private_lookups=False):
     if (len(node.bases) != 1 or ast.unparse(node.bases[0]) != '_mx_sys.BaseSpace'
             or cls.spaces or cls.is_locked or node.name in module.visitor.dynamic_ref_classes
             or _method(node, '_mx_apply_formula') is not None):
@@ -94,7 +98,7 @@ def _match(node, cls, module, reuse):
             or cls.cells[cell].body_has_closure or cls.cells[cell].called_with_kwargs):
         return None
 
-    return SerialCollect(label, cell, parameter, reuse)
+    return SerialCollect(label, cell, parameter, reuse, private_lookups)
 
 
 def _reset_lines(cls):
@@ -134,9 +138,18 @@ def add_methods(cls, node, shape):
         '    try:',
         '        root._mx_copy_refs(self, self)',
         '        root._mx_roots.append(root)',
+    ]
+    if shape.private_lookups:
+        for context in getattr(cls, 'native_contexts', {}):
+            lines.extend((
+                f"        enable = getattr(root.{context}, '_mx_enable_private_lookup', None)",
+                '        if enable is not None:',
+                '            enable()',
+            ))
+    lines.extend((
         '        for coordinate in coords:',
         '            if not first:',
-    ]
+    ))
     if shape.reuse:
         lines.extend('                ' + line for line in _reset_lines(cls))
     else:
