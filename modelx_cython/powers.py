@@ -52,6 +52,7 @@ KIND_INT : str
 KIND_UNKNOWN : str
     Nothing is known about the expression; never rewrite through it.
 """
+import ast
 import logging
 from typing import Dict, List, Mapping, Optional
 
@@ -222,13 +223,14 @@ class OperandKind:
 class _PowerRewriter(cst.CSTTransformer):
     """Replace provably real ``**`` operations with ``_mx_sys._mx_pow``."""
 
-    def __init__(self, operand_kind: OperandKind, memo=None) -> None:
+    def __init__(self, operand_kind: OperandKind, memo=None, checked=False) -> None:
         super().__init__()
         self._kind = operand_kind
         self._opaque_depth = 0
         self.rewritten = 0
         self.declined: List[str] = []
         self.memo = memo
+        self.checked = checked
 
     def on_visit(self, node: cst.CSTNode) -> bool:
         if isinstance(node, _OPAQUE_SCOPES):
@@ -255,14 +257,20 @@ class _PowerRewriter(cst.CSTTransformer):
         # been rewritten into a call in ``updated_node``
         base = self._kind.kind(original_node.left)
         exponent = self._kind.kind(original_node.right)
-        if exponent == KIND_FLOAT and base != KIND_UNKNOWN:
+        integer_exponent = (self.checked and base == KIND_FLOAT and exponent == KIND_INT
+                            and isinstance(original_node.right, (cst.Name, cst.Call)))
+        if integer_exponent or exponent == KIND_FLOAT and base != KIND_UNKNOWN:
             self.rewritten += 1
             operation = MX_POW
             args = [
                 cst.Arg(value=self._as_double(updated_node.left, base)),
                 cst.Arg(value=updated_node.right),
             ]
-            if self.memo:
+            if integer_exponent:
+                operation = "_mx_positive_int_pow"
+            elif self.checked:
+                operation = "_mx_positive_pow"
+            elif self.memo:
                 operation = "_mx_memo_pow"
                 args.insert(0, cst.Arg(cst.parse_expression(f"{CY_MOD}.address(self.{self.memo})")))
             return cst.Call(
@@ -301,6 +309,41 @@ class _PowerRewriter(cst.CSTTransformer):
         )
 
 
+def _rewrite_with_locals(node, rewriter, kinds):
+    """Track numeric assignments in the straight-line prefix of a formula."""
+    if not isinstance(node.body, cst.IndentedBlock):
+        return node.body.visit(rewriter)
+    tree, = ast.parse(cst.Module([]).code_for_node(node).lstrip()).body
+    nodes = tuple(ast.walk(tree))
+    if any(isinstance(n, (ast.Global, ast.Nonlocal, ast.Import, ast.ImportFrom, ast.ExceptHandler))
+           or isinstance(n, getattr(ast, "Match", ())) for n in nodes):
+        return node.body.visit(rewriter)
+    stores = [n.id for n in nodes if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store)]
+    body = []
+    straight = True
+    for line in node.body.body:
+        body.append(line.visit(rewriter))
+        if not straight or not isinstance(line, cst.SimpleStatementLine) or len(line.body) != 1:
+            straight = False
+            continue
+        statement, = line.body
+        if not isinstance(statement, cst.Assign) or len(statement.targets) != 1:
+            if not isinstance(statement, cst.Expr) or not isinstance(statement.value, cst.SimpleString):
+                straight = False
+            continue
+        target, value = statement.targets[0].target, statement.value
+        pairs = [(target, value)]
+        if isinstance(target, cst.Tuple) and isinstance(value, cst.Tuple):
+            if (len(target.elements) != len(value.elements)
+                    or not all(isinstance(part, cst.Element) for part in (*target.elements, *value.elements))):
+                continue
+            pairs = [(a.value, b.value) for a, b in zip(target.elements, value.elements)]
+        updates = {a.value: kinds.kind(b) for a, b in pairs
+                   if isinstance(a, cst.Name) and stores.count(a.value) == 1}
+        kinds._param_kinds.update(updates)
+    return node.body.with_changes(body=body)
+
+
 def rewrite_powers(
     node: cst.FunctionDef,
     resolver: Optional[CellsResolver],
@@ -335,6 +378,9 @@ def rewrite_powers(
     if resolver is None:
         return node
     memo = getattr(cells, '_spec', {}).get('memoize_power', False)
+    checked = getattr(cells, '_spec', {}).get('native_power_operands', False)
+    if type(checked) is not bool or checked and memo:
+        raise ValueError('native_power_operands requires a boolean and excludes memoize_power')
     if type(memo) is not bool:
         raise ValueError('memoize_power must be a boolean')
     if memo:
@@ -346,10 +392,9 @@ def rewrite_powers(
             param_kinds[param] = kind_of_type_expr(
                 cells.get_argtype_expr(param, c_style=True)
             )
-    rewriter = _PowerRewriter(
-        OperandKind(resolver, cells_kinds, ref_kinds, cls_fqname, param_kinds), memo
-    )
-    updated = node.body.visit(rewriter)
+    kinds = OperandKind(resolver, cells_kinds, ref_kinds, cls_fqname, param_kinds)
+    rewriter = _PowerRewriter(kinds, memo, checked)
+    updated = _rewrite_with_locals(node, rewriter, kinds) if checked else node.body.visit(rewriter)
     if rewriter.declined:
         _logger.info(
             f"'**' left as exported in {cells.fqname}, so a fractional "

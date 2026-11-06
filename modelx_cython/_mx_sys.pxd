@@ -1,7 +1,10 @@
 from libc.math cimport (
-    pow as _mx_c_pow, floor as _mx_c_floor, isfinite as _mx_c_isfinite)
+    pow as _mx_c_pow, floor as _mx_c_floor, isfinite as _mx_c_isfinite,
+    ceil as _mx_c_ceil, fabs, copysign, fma)
 from libc.limits cimport LLONG_MIN
 from libc.string cimport memcmp
+from cpython.float cimport PyFloat_AS_DOUBLE, PyFloat_CheckExact
+from cpython.long cimport PyLong_CheckExact, PyLong_AsLongLongAndOverflow
 cimport cython
 
 
@@ -32,6 +35,80 @@ cdef inline double _mx_pow(double b, double e) except? -1.0:
         if b == 0.0 and e < 0.0:
             raise ZeroDivisionError("0.0 cannot be raised to a negative power")
     return _mx_c_pow(b, e)
+
+
+cdef inline double _mx_positive_pow(double base, double exponent) except? -1.0:
+    cdef double result
+    if ((base > 0.0 or base == 0.0 and exponent >= 0.0)
+            and _mx_c_isfinite(base) and _mx_c_isfinite(exponent)):
+        result = _mx_c_pow(base, exponent)
+        if _mx_c_isfinite(result):
+            return result
+    return (<object>base) ** (<object>exponent)
+
+
+cdef inline double _mx_positive_int_pow(double base, long long exponent) except? -1.0:
+    cdef double result
+    if (base > 0.0 and _mx_c_isfinite(base)
+            and -9007199254740992 <= exponent <= 9007199254740992):
+        result = _mx_c_pow(base, <double>exponent)
+        if _mx_c_isfinite(result):
+            return result
+    return (<object>base) ** (<object>exponent)
+
+
+cdef inline object _mx_integral_math_call(object fn, object value, object canonical, bint up):
+    cdef double x
+    if canonical is not None and fn is canonical and PyFloat_CheckExact(value):
+        x = PyFloat_AS_DOUBLE(value)
+        # Both operations stay within signed 64 bits on this interval.
+        if -9223372036854775808.0 <= x < 9223372036854775808.0:
+            return <long long>(_mx_c_ceil(x) if up else _mx_c_floor(x))
+    return fn(value)
+
+
+cdef inline double _mx_nearest_even(double scaled, double residual) noexcept:
+    cdef double lower = _mx_c_floor(scaled)
+    cdef double fraction = scaled - lower
+    if (fraction > 0.5 or fraction == 0.5
+            and (residual > 0.0 or residual == 0.0 and (<long long>lower & 1))):
+        return lower + 1.0
+    return lower
+
+
+cdef inline object _mx_round_one(object fn, object value, object canonical):
+    cdef double x, magnitude
+    if canonical is not None and fn is canonical and PyFloat_CheckExact(value):
+        x = PyFloat_AS_DOUBLE(value)
+        magnitude = fabs(x)
+        if magnitude < 4503599627370496.0:
+            return <long long>copysign(_mx_nearest_even(magnitude, 0.0), x)
+    return fn(value)
+
+
+cdef inline object _mx_round_digits(object fn, object value, object digits, object canonical):
+    cdef double x, magnitude, scale = 1.0, scaled, residual = 0.0, rounded
+    cdef int overflow
+    cdef long long n, i
+    if canonical is not None and fn is canonical and PyFloat_CheckExact(value) and PyLong_CheckExact(digits):
+        n = PyLong_AsLongLongAndOverflow(digits, &overflow)
+        x = PyFloat_AS_DOUBLE(value)
+        if not overflow and -22 <= n <= 22:
+            if not _mx_c_isfinite(x) or x == 0.0:
+                return value
+            for i in range(n if n >= 0 else -n):
+                scale *= 10.0
+            magnitude = fabs(x)
+            scaled = magnitude * scale if n >= 0 else magnitude / scale
+            if scaled < 4503599627370496.0:
+                if scaled - _mx_c_floor(scaled) == 0.5:
+                    # A rounded intermediate can land on a half even when
+                    # the exact scaled input lies just to one side of it.
+                    residual = (fma(magnitude, scale, -scaled) if n >= 0
+                                else fma(-scaled, scale, magnitude))
+                rounded = _mx_nearest_even(scaled, residual)
+                return copysign(rounded / scale if n >= 0 else rounded * scale, x)
+    return fn(value, digits)
 
 
 cdef struct PowerMemo:

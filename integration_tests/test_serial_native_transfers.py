@@ -16,6 +16,12 @@ def test_native_transfers(tmp_path):
         space.new_cells('divisible', 'lambda t, n: t % n == 0')
         space.new_cells('offset', 'lambda t, n: (t - 1) % n != 0')
         space.new_cells('factor', 'lambda i, b, e: b ** e')
+        space.new_cells('integer_power', 'lambda i, b, e: b ** e')
+        space.new_cells('local_power', textwrap.dedent('''\
+            def local_power(i, b, e):
+                base, exponent = b, e
+                return base ** exponent
+            '''))
         model.export(tmp_path / 'exported')
     finally:
         model.close()
@@ -23,28 +29,52 @@ def test_native_transfers(tmp_path):
     (tmp_path / 'sample.py').write_text(
         'from exported import mx_model\n'
         's = mx_model.Policy[1]\n'
-        's.derived(0); s.derived(3); s.divisible(-7, -3); s.offset(-7, -3); s.factor(0, 4.0, 0.5)\n',
+        's.derived(0); s.derived(3); s.divisible(-7, -3); s.offset(-7, -3); s.factor(0, 4.0, 0.5)\n'
+        's.integer_power(0, 1.25, 3); s.local_power(0, 4.0, 0.5)\n',
         encoding='utf-8')
     (tmp_path / 'spec.py').write_text(repr({
         'dense_bounds_proofs': True,
         'dense_one_axis': True,
+        'dense_miss_binding': True,
+        'propagate_exact_receiver': True,
         'spaces': {'Policy': {'cells': {
             'divisible': {'native_divisibility': True},
             'offset': {'native_divisibility': True},
             'factor': {'memoize_power': True},
+            'integer_power': {'native_power_operands': True},
+            'local_power': {'native_power_operands': True},
         }}},
     }), encoding='utf-8')
     subprocess.run([sys.executable, '-m', 'modelx_cython', 'exported'],
                    cwd=tmp_path, check=True)
     generated = (tmp_path / 'exported_cy/_mx_classes.py').read_text(encoding='utf-8')
     assert '_inbounds(' in generated
+    assert '_mx_inbounds_exact' in generated and '_mx_exact_receiver' in generated
     assert '_mx_divisible(' in generated and '_mx_divisible_after_decrement(' in generated
     assert '_mx_memo_pow(' in generated
+    assert '_mx_positive_int_pow(' in generated and '_mx_positive_pow(' in generated
+    (tmp_path / 'override.pyx').write_text(textwrap.dedent('''\
+        # cython: freethreading_compatible=True
+        from exported_cy._mx_classes cimport _c_Policy
+
+        cdef class Alternate(_c_Policy):
+            cdef double _f_value(self, long long t) except? -1:
+                return 100.0 + t
+        '''), encoding='utf-8')
+    (tmp_path / 'setup_override.py').write_text(
+        'from setuptools import setup\n'
+        'from Cython.Build import cythonize\n'
+        'setup(ext_modules=cythonize("override.pyx"))\n', encoding='utf-8')
+    subprocess.run([sys.executable, 'setup_override.py', 'build_ext', '--inplace'],
+                   cwd=tmp_path, check=True)
     probe = textwrap.dedent('''\
         import math
         from exported_cy import mx_model
+        from override import Alternate
         s = mx_model.Policy[1]
         assert [s.derived(i) for i in range(4)] == [1.0, 2.0, 3.0, 4.0]
+        alternate = Alternate(mx_model.Policy)
+        assert alternate.derived(1) == 102.0
         for key in (-(1 << 63), -1, 4, (1 << 63) - 1):
             try:
                 s.value(key)
@@ -73,5 +103,17 @@ def test_native_transfers(tmp_path):
             else:
                 raise AssertionError('failed power was cached')
         assert s.factor(0, 9.0, 0.5) == 3.0
+        for i, (base, exponent) in enumerate(((1.25, 3), (-1.0, (1 << 53)+1),
+                                               (-0.0, 3), (-0.0, 2), (1.0, -(1 << 63)))):
+            result = s.integer_power(i, base, exponent)
+            expected = base ** exponent
+            assert result == expected and math.copysign(1.0, result) == math.copysign(1.0, expected)
+        assert s.local_power(1, 9.0, 0.5) == 3.0
+        try:
+            s.local_power(2, 0.0, -1.0)
+        except ZeroDivisionError:
+            pass
+        else:
+            raise AssertionError('negative power of zero was accepted')
         ''')
     subprocess.run([sys.executable, '-c', probe], cwd=tmp_path, check=True)

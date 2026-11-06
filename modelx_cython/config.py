@@ -50,6 +50,8 @@ class TransSpec:
       ``"reuse"`` for one receiver. The collect Space owns policy execution:
       policies are independent and their live receiver and cache stay inside
       collect. In reuse mode, Reference bindings are captured at entry.
+    * ``"serial_private_lookups"``: enable supported helpers' private warm
+      path on a worker-owned serial collect receiver.
     * ``"cells_params"`` (deprecated): older form of
       ``"cells_param_size"``; maps a parameter name (or tuple) to a
       dict with a ``"size"`` key.  Consulted only when
@@ -65,6 +67,8 @@ class TransSpec:
       comparison for proven signed-integer operands.
     * ``"memoize_power"``: enable a one-entry exact-operand memo for the
       existing typed power helper on a privately owned policy Space.
+    * ``"native_power_operands"``: enable guarded real power for eligible
+      local operands and typed integer exponents in this Cell.
     * ``"return_type"``: either a type name accepted by
       :data:`modelx_cython.typedefs.str_to_type` (``"bool"``,
       ``"int"``, ``"float"``, ``"str"``, ``"object"``) that overrides
@@ -81,6 +85,9 @@ class TransSpec:
 
     The top-level ``"dense_one_axis"`` experiment separates checked and proven
     calls to an existing one-axis dense cache body.
+    ``"propagate_exact_receiver"`` carries the receiver fact through those
+    entries and private dense formula calls. ``"native_math"`` enables guarded
+    scalar lowering for ``round``, ``math.floor``, and ``math.ceil``.
 
     Attributes
     ----------
