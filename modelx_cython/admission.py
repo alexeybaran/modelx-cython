@@ -35,12 +35,13 @@ def describe(module_infos):
                 result[cell.fqname] = {
                     'formula': 'python-method' if formula_python else 'cython-cfunction',
                     'public_entry': 'python-method' if public_python else 'cython-cpdef',
+                    'inline_entry': getattr(cell, 'inline_entry', None),
                     'return_type': cell.get_rettype_expr(c_style=True),
                     'arguments': {name: cell.get_argtype_expr(name, c_style=True)
                                   for name in cell.params},
                     'cache': cache,
                     'dense_offsets': list(cell.cache_offsets) if cache == 'dense' else [],
-                    'exact_spill': cell.has_shifted_cache,
+                    'exact_spill': cell.has_dense_spill,
                     'nogil_qualified': False,
                     'native_helpers': getattr(cell, 'native_helpers', []),
                     'native_numeric_helpers': getattr(cell, 'native_numeric_helpers', []),

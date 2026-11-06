@@ -1,4 +1,4 @@
-"""Temporary lowering of explicit registered numeric sums in return statements.
+"""Lower explicit registered reductions in return statements.
 
 Only range loops and singleton bindings with proven numeric expressions qualify.
 The existing formula body remains authoritative; general generators stay intact.
@@ -7,15 +7,64 @@ import ast
 
 import libcst as cst
 
+from .cell_entries import exact_receiver
 from .helpers import module_name
 
 
-class NativeSums(cst.CSTTransformer):
-    def __init__(self, cls_info, providers):
+def _call(node, name, argc):
+    return (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+            and node.func.id == name and len(node.args) == argc and not node.keywords
+            and not any(isinstance(arg, ast.Starred) for arg in node.args))
+
+
+class NativeReductions(cst.CSTTransformer):
+    def __init__(self, cls_info, cells, providers, formula, reserve_fallback, builtin_bounds):
         self.cls_info = cls_info
+        self.cells = cells
         self.providers = providers
+        self.formula = formula
+        self.reserve_fallback = reserve_fallback
+        self.builtin_bounds = builtin_bounds
+        self.fallbacks = []
+        self.exact_receiver_guards = set()
         self.count = 0
         self.module = cst.Module([])
+        self.captures = {}
+        self.integer_captures = {}
+        if isinstance(formula.body, cst.IndentedBlock):
+            lines = formula.body.body
+            for assignment, consumer in zip(lines, lines[1:]):
+                if (not isinstance(assignment, cst.SimpleStatementLine)
+                        or len(assignment.body) != 1
+                        or not isinstance(assignment.body[0], cst.Assign)
+                        or not isinstance(consumer, cst.SimpleStatementLine)
+                        or len(consumer.body) != 1
+                        or not isinstance(consumer.body[0], cst.Return)):
+                    continue
+                expression = assignment.body[0]
+                if len(expression.targets) != 1:
+                    continue
+                target = expression.targets[0].target
+                if isinstance(target, cst.Name) and not target.value.startswith('_mx_'):
+                    rhs = ast.parse('(' + self.module.code_for_node(expression.value) + ')', mode='eval')
+                    if self.double_expression(rhs.body):
+                        self.captures[id(consumer)] = target.value
+                    elif isinstance(rhs.body, ast.Call) and self.kind(rhs.body, {}) == 'longlong':
+                        self.integer_captures[id(consumer)] = target.value
+
+    def double_expression(self, node):
+        """Check an existing binding formed solely from C doubles."""
+        if isinstance(node, ast.Constant):
+            return type(node.value) is float
+        if (isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name)
+                and node.value.id == 'self'):
+            ref = self.cls_info.refs.get(node.attr)
+            return ref is not None and ref.get_type_expr(c_style=True) == 'double'
+        if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.UAdd, ast.USub)):
+            return self.double_expression(node.operand)
+        if isinstance(node, ast.BinOp) and isinstance(node.op, (ast.Add, ast.Sub, ast.Mult, ast.Div)):
+            return self.double_expression(node.left) and self.double_expression(node.right)
+        return False
 
     def visit_FunctionDef(self, node):
         return '_mx_reduce_' not in self.module.code_for_node(node)
@@ -46,6 +95,232 @@ class NativeSums(cst.CSTTransformer):
                 return 'double'
         return None
 
+    def cold_fallback(self, source, generator, capture, function, capture_type='_mx_cy.double',
+                      boxed_param=None):
+        original = f'{function}({source})'
+        if not self.cells.has_formula_def:
+            return original
+        formula, = ast.parse(self.module.code_for_node(self.formula)).body
+        nodes = [node for statement in formula.body for node in ast.walk(statement)]
+        # A moved generator cannot share enclosing bindings with another closure.
+        if any(isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef,
+                                 ast.Nonlocal, ast.Global, ast.NamedExpr, ast.Import, ast.ImportFrom,
+                                 ast.Delete, ast.ExceptHandler, getattr(ast, 'Match', ast.Global)))
+               for node in nodes):
+            return original
+        names = {node.id for node in ast.walk(generator) if isinstance(node, ast.Name)
+                 and isinstance(node.ctx, ast.Load)}
+        targets = {part.target.id for part in generator.generators}
+        stores = [node.id for node in nodes if isinstance(node, ast.Name)
+                  and isinstance(node.ctx, ast.Store)]
+        if ((names - targets) & set(stores)) - {capture}:
+            return original
+        if capture is not None and stores.count(capture) != 1:
+            return original
+        params = {param.arg for param in ast.walk(formula.args) if isinstance(param, ast.arg)}
+        if targets & params or not (names & params) <= {'self', *self.cells.params}:
+            return original
+        args = []
+        for name in self.cells.params:
+            if name in names:
+                kind = self.cells.get_argtype_expr(name, c_style=True)
+                if kind not in ('double', 'long long', 'bint', 'object'):
+                    return original
+                args.append((name, 'object' if name == boxed_param else self.cells.get_argtype_expr(name)))
+        if capture is not None:
+            args.append((capture, capture_type))
+
+        helper = self.reserve_fallback()
+        formals = ', '.join([f'self: {self.cls_info.name}', f'{function}: object'] +
+                            [f'{name}: {kind}' for name, kind in args])
+        self.fallbacks.append(cst.parse_statement(
+            f'\n\n@_mx_cy.cfunc\ndef {helper}({formals}) -> object:\n    return {original}\n'))
+        actuals = ', '.join(['self', function] + [name for name, _ in args])
+        return f'{helper}({actuals})'
+
+    def bounded_any(self, before, after, func, ref, source, tree):
+        capture = self.integer_captures.get(id(before))
+        if not (self.builtin_bounds and capture and capture not in self.cells.params
+                and capture not in {'self', 'min', 'max', 'range'}
+                and self.cells.get_rettype_expr(c_style=True) == 'bint'
+                and len(tree.generators) == 1):
+            return after
+        part, = tree.generators
+
+        def named(node, name):
+            return isinstance(node, ast.Name) and node.id == name
+
+        if not (isinstance(part.target, ast.Name) and not part.ifs and not part.is_async
+                and _call(part.iter, 'range', 2)):
+            return after
+        index = part.target.id
+        if (index in {capture, 'self', 'range', 'min', 'max', *self.cells.params}
+                or not isinstance(tree.elt, ast.Call) or len(tree.elt.args) != 1
+                or not named(tree.elt.args[0], index)
+                or self.kind(tree.elt, {index: 'longlong'}) != 'bint'):
+            return after
+        low, high = part.iter.args
+        if not (_call(low, 'max', 2) and _call(high, 'min', 2)
+                and isinstance(low.args[0], ast.Constant) and type(low.args[0].value) is int
+                and low.args[0].value == 0 and named(low.args[1], capture)):
+            return after
+        upper, limit = high.args
+        if not (isinstance(upper, ast.BinOp) and isinstance(upper.op, ast.Add)
+                and named(upper.left, capture) and isinstance(upper.right, ast.Constant)
+                and type(upper.right.value) is int and 0 < upper.right.value <= (1 << 31) - 1
+                and isinstance(limit, ast.Call) and not limit.args
+                and self.kind(limit, {}) == 'longlong'):
+            return after
+        offset = upper.right.value
+        provider, operation = ref.helper
+        alias = module_name(provider)
+        prefix = f'_mx_reduce_{self.count}'
+        function = f'{prefix}_function'
+        before_fallbacks = len(self.fallbacks)
+        fallback = self.cold_fallback(source, tree, capture, function, 'object')
+        if len(self.fallbacks) == before_fallbacks:
+            return after
+        self.providers.add(provider)
+        self.count += 1
+        guard = f'{prefix}_native'
+        self.exact_receiver_guards.add(guard)
+        predicate = f'self.{tree.elt.func.attr}({prefix}_index)'
+        return cst.FlattenSentinel(cst.parse_module(f"""
+{function}: object = self.{func.attr.value}
+{prefix}_first: _mx_cy.longlong = {capture}
+{guard}: _mx_cy.bint = {alias}.{operation}_accepts({function}) and {prefix}_first <= {(1 << 63) - 1 - offset}
+if {guard}:
+    {prefix}_low: _mx_cy.longlong = {prefix}_first if {prefix}_first > 0 else 0
+    {prefix}_high: _mx_cy.longlong = {prefix}_first + {offset}
+    {prefix}_limit: _mx_cy.longlong = {ast.unparse(limit)}
+    if {prefix}_high > {prefix}_limit:
+        {prefix}_high = {prefix}_limit
+    {prefix}_index: _mx_cy.longlong
+    for {prefix}_index in range({prefix}_low, {prefix}_high):
+        if {predicate}:
+            return True
+    return False
+return {fallback}
+""").body)
+
+    def single_range(self, after, func, ref, source, tree):
+        """Lower the proven typed predicate or bounded descending maximum."""
+        if len(tree.generators) != 1 or not self.cells.formula_allows_exact_receiver:
+            return after
+        part, = tree.generators
+        if not isinstance(part.target, ast.Name) or part.ifs or part.is_async:
+            return after
+        index = part.target.id
+        if index.startswith('_mx_') or index in {'self', 'range', 'abs', 'max', *self.cells.params}:
+            return after
+
+        provider, operation = ref.helper
+        alias = module_name(provider)
+        prefix = f'_mx_reduce_{self.count}'
+        counter = f'{prefix}_index'
+        guard = f'{prefix}_native'
+        function = f'{prefix}_function'
+        predicate = tree.elt
+        boxed_param = None
+        if ref.reduction == 'bool_all':
+            if not (_call(part.iter, 'range', 1)
+                    and isinstance(part.iter.args[0], ast.Call)
+                    and not part.iter.args[0].args
+                    and self.kind(part.iter.args[0], {}) == 'longlong'
+                    and self.cells.get_rettype_expr(c_style=True) == 'bint'):
+                return after
+            bound = ast.unparse(part.iter.args[0])
+            extra_guard = ''
+            iterator = f'range({bound})'
+            if isinstance(predicate, ast.Compare):
+                if not (len(predicate.ops) == 1
+                        and isinstance(predicate.ops[0], (ast.Lt, ast.LtE, ast.Gt, ast.GtE))
+                        and _call(predicate.left, 'abs', 1)
+                        and self.kind(predicate.comparators[0], {}) == 'double'
+                        and isinstance(predicate.comparators[0], (ast.Constant, ast.Attribute))):
+                    return after
+                value = self.indexed_cell(predicate.left.args[0], index, 'double', counter)
+                if value is None:
+                    return after
+                op = {ast.Lt: '<', ast.LtE: '<=', ast.Gt: '>', ast.GtE: '>='}[type(predicate.ops[0])]
+                test = f'{alias}.f64_abs({value}) {op} {ast.unparse(predicate.comparators[0])}'
+            else:
+                test = self.indexed_cell(predicate, index, 'bint', counter)
+                if test is None:
+                    return after
+            loop = f"""    for {counter} in {iterator}:
+        if not ({test}):
+            return False
+    return True"""
+        else:
+            value = self.indexed_cell(predicate, index, 'double', counter)
+            bounds = self.descending_window(part.iter)
+            if value is None or bounds is None or self.cells.get_rettype_expr(c_style=True) != 'double':
+                return after
+            start, offset, step = bounds
+            boxed_param = start
+            extra_guard = f' and {start} >= 0'
+            stop = f'{prefix}_stop'
+            best = f'{prefix}_best'
+            item = f'{prefix}_item'
+            # A nonnegative start and negative stop floor guarantee a first value.
+            # Later values replace it only on strict greater-than, as in max().
+            first = self.indexed_cell(predicate, index, 'double', start)
+            loop = f"""    {stop}: _mx_cy.longlong = {start} - {offset}
+    if {stop} < -1:
+        {stop} = -1
+    {best}: _mx_cy.double = {first}
+    {item}: _mx_cy.double
+    for {counter} in range({start} - {step}, {stop}, -{step}):
+        {item} = {value}
+        if {item} > {best}:
+            {best} = {item}
+    return {best}"""
+
+        before_fallbacks = len(self.fallbacks)
+        fallback = self.cold_fallback(source, tree, None, function, boxed_param=boxed_param)
+        if len(self.fallbacks) == before_fallbacks:
+            return after
+        self.providers.add(provider)
+        self.count += 1
+        return cst.FlattenSentinel(cst.parse_module(f"""
+{function}: object = self.{func.attr.value}
+{guard}: _mx_cy.bint = {alias}.{operation}_accepts({function}){extra_guard}
+if {exact_receiver(self.cls_info.name)} and {guard}:
+    {counter}: _mx_cy.longlong
+{loop}
+return {fallback}
+""").body)
+
+    def indexed_cell(self, node, index, kind, counter):
+        if not (isinstance(node, ast.Call) and len(node.args) == 1
+                and isinstance(node.args[0], ast.Name) and node.args[0].id == index
+                and self.kind(node, {index: 'longlong'}) == kind):
+            return None
+        cell = self.cls_info.cells[node.func.attr]
+        if len(cell.params) != 1 or cell.get_argtype_expr(cell.params[0], c_style=True) != 'long long':
+            return None
+        return f'self.{node.func.attr}({counter})'
+
+    def descending_window(self, node):
+        """Prove range(start, max(-1, start - offset), -step) for start >= 0."""
+        if not _call(node, 'range', 3):
+            return None
+        start, limit, step = node.args
+        if not (isinstance(start, ast.Name) and start.id in self.cells.params
+                and self.cells.get_argtype_expr(start.id, c_style=True) == 'long long'
+                and _call(limit, 'max', 2) and ast.unparse(limit.args[0]) == '-1'
+                and isinstance(step, ast.UnaryOp) and isinstance(step.op, ast.USub)):
+            return None
+        lower = limit.args[1]
+        if not (isinstance(lower, ast.BinOp) and isinstance(lower.op, ast.Sub)
+                and isinstance(lower.left, ast.Name) and lower.left.id == start.id
+                and isinstance(lower.right, ast.Constant) and type(lower.right.value) is int
+                and isinstance(step.operand, ast.Constant) and type(step.operand.value) is int
+                and 0 < step.operand.value <= lower.right.value <= (1 << 31) - 1):
+            return None
+        return start.id, lower.right.value, step.operand.value
+
     def leave_SimpleStatementLine(self, before, after):
         if not hasattr(ast, 'unparse'):
             return after
@@ -59,20 +334,31 @@ class NativeSums(cst.CSTTransformer):
                 and func.value.value == 'self'):
             return after
         ref = self.cls_info.refs.get(func.attr.value)
-        if (not ref or getattr(ref, 'reduction', None) != 'f64_sum'
+        reduction = getattr(ref, 'reduction', None)
+        if (reduction not in ('f64_sum', 'bool_any', 'bool_all', 'f64_max')
                 or not ref.helper or value.args[0].keyword or value.args[0].star):
             return after
         source = self.module.code_for_node(value.args[0].value)
         tree = ast.parse('(' + source + ')', mode='eval').body
-        if not isinstance(tree, ast.GeneratorExp):
+        if not isinstance(tree, ast.GeneratorExp) or not self.builtin_bounds:
             return after
-        local_types = {}
+        if reduction == 'bool_any':
+            return self.bounded_any(before, after, func, ref, source, tree)
+        if reduction in ('bool_all', 'f64_max'):
+            return self.single_range(after, func, ref, source, tree)
+        capture = self.captures.get(id(before))
+        if capture == 'range':
+            return after
+        if capture is not None and not any(isinstance(node, ast.Name) and node.id == capture
+                                           for node in ast.walk(tree)):
+            capture = None
+        local_types = {capture: 'double'} if capture is not None else {}
         for part in tree.generators:
             if part.is_async or part.ifs or not isinstance(part.target, ast.Name):
                 return after
             name = part.target.id
             # Reserved generated names must never capture authored names.
-            if name.startswith('_mx_'):
+            if name.startswith('_mx_') or name == capture:
                 return after
             iterator = part.iter
             if name not in local_types and any(isinstance(n, ast.Name) and n.id == name
@@ -96,6 +382,7 @@ class NativeSums(cst.CSTTransformer):
         provider, operation = ref.helper
         alias = module_name(provider)
         prefix = f'_mx_reduce_{self.count}'
+        fallback = self.cold_fallback(source, tree, capture, f'{prefix}_function')
         # Keep generator locals isolated from the enclosing authored scope.
         renamed = {name: f'{prefix}_{name}' for name in local_types}
         class Rename(ast.NodeTransformer):
@@ -112,6 +399,8 @@ class NativeSums(cst.CSTTransformer):
         lines = declarations + [f'{prefix}_function = self.{func.attr.value}',
                                f'if {alias}.f64_accepts({prefix}_function):',
                                f'    {alias}.f64_init(_mx_cy.address({prefix}_state))']
+        if capture is not None:
+            lines.append(f'    {renamed[capture]} = {capture}')
         indent = '    '
         for part in tree.generators:
             if isinstance(part.iter, ast.Tuple):
@@ -121,7 +410,7 @@ class NativeSums(cst.CSTTransformer):
                 indent += '    '
         lines += [indent + f'{alias}.f64_add(_mx_cy.address({prefix}_state), {ast.unparse(tree.elt)})',
                   f'    return {alias}.f64_result(_mx_cy.address({prefix}_state))',
-                  'else:', f'    return {prefix}_function({source})']
+                  'else:', f'    return {fallback}']
         self.providers.add(provider)
         self.count += 1
         return cst.FlattenSentinel(cst.parse_module('\n'.join(lines)+'\n').body)

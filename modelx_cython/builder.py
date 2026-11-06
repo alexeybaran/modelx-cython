@@ -43,16 +43,17 @@ except ImportError:  # Python -3.9
 
 from functools import cached_property
 
-from modelx_cython.typedefs import get_type_expr
+from modelx_cython.typedefs import CY_BOOL_T, get_type_expr
 from modelx_cython.config import TransSpec
 from modelx_cython.tracer import RuntimeCellsInfo, MxCallTraceLogger
 from modelx_cython.parser import ModuleVisitor, LexicalCellsInfo, LexicalRefInfo
+from modelx_cython.cell_entries import DenseAxis
 
 from modelx_cython.consts import (
     FORMULA_PREF,
     SPACE_PREF,
     MODULE_PREF,
-    CY_MOD
+    CY_MOD,
 )
 from modelx_cython.typedefs import str_to_type, normalize_type
 
@@ -431,16 +432,57 @@ class CombinedCellsInfo(LexicalCellsInfo):
 
     @property
     def cache_offsets(self):
-        return tuple(getattr(self._rt, 'min_args', {}).get(p, 0)
-                     if self.has_shifted_cache else 0 for p in self.params)
+        return tuple(axis.lower for axis in self.dense_axes)
+
+    @cached_property
+    def dense_logical_axes(self):
+        sizes = self.parent.cells_arg_sizes[tuple(self.params)]
+        offsets = tuple(getattr(self._rt, 'min_args', {}).get(p, 0)
+                        if self.has_shifted_cache else 0 for p in self.params)
+        return tuple(DenseAxis(key, lower, stop, self.get_argtype_expr(key, c_style=True))
+                     for key, lower, stop in zip(self.params, offsets, sizes))
+
+    @cached_property
+    def dense_axes(self):
+        requested = self._spec.get(TransSpec.DENSE_WINDOW)
+        if requested is None:
+            return self.dense_logical_axes
+        if not (self.has_formula_def and self.has_args() and self.has_typeinfo()
+                and self.is_arrayable()):
+            raise ValueError(f'{self.fqname}: dense_window requires a dense cache')
+        logical = self.dense_logical_axes
+        if not isinstance(requested, (tuple, list)) or len(requested) != len(logical):
+            raise ValueError(f'{self.fqname}: dense_window needs one pair per axis')
+        axes = []
+        for axis, bounds in zip(logical, requested):
+            if not (isinstance(bounds, (tuple, list)) and len(bounds) == 2
+                    and all(type(value) is int for value in bounds)
+                    and axis.lower <= bounds[0] < bounds[1] <= axis.stop):
+                raise ValueError(f'{self.fqname}: invalid dense_window for {axis.key}')
+            axes.append(DenseAxis(axis.key, bounds[0], bounds[1], axis.c_type))
+        return tuple(axes)
+
+    @property
+    def has_compact_cache(self):
+        return (self._spec.get(TransSpec.DENSE_WINDOW) is not None
+                and self.dense_axes != self.dense_logical_axes)
+
+    @property
+    def has_dense_spill(self):
+        return self.has_compact_cache or self.has_shifted_cache
+
+    def get_readiness_array_decl_expr(self, c_style=False):
+        if getattr(self, 'inline_entry', None):
+            element = 'unsigned char' if c_style else f'{CY_MOD}.uchar'
+        else:
+            element = CY_BOOL_T if c_style else f'{CY_MOD}.{CY_BOOL_T}'
+        return self.get_array_decl_expr(rettype_expr=element, c_style=c_style)
 
     def get_array_decl_expr(self, rettype_expr="", c_style=False):
         """Return the C array declaration expression for the cache.
 
-        Appends one ``[size]`` per parameter to the return type
-        expression (e.g. ``double[10][20]``), taking sizes from the
-        parent class's :attr:`ClassInfo.cells_arg_sizes` entry for
-        this cells' parameter tuple.
+        Appends one ``[size]`` per physical cache axis to the return
+        type expression (e.g. ``double[10][20]``).
 
         Parameters
         ----------
@@ -455,8 +497,7 @@ class CombinedCellsInfo(LexicalCellsInfo):
         if not rettype_expr:
             rettype_expr = self.get_rettype_expr(c_style=c_style)
 
-        sizes = self.parent.cells_arg_sizes[tuple(self.params)]
-        return rettype_expr + "".join(f"[{i - lower}]" for i, lower in zip(sizes, self.cache_offsets))
+        return rettype_expr + "".join(f"[{axis.stop - axis.lower}]" for axis in self.dense_axes)
 
 
 class CombinedRefInfo:
@@ -503,6 +544,11 @@ class CombinedRefInfo:
     reduction = None
     enum = None
     numeric_helper = None
+    clamped_helper = None
+    clamped_context_helper = None
+    optional_helper = None
+    grouped_helper = None
+    bounded_helper = None
     enum_definitions = ()
     enum_safe = False
 
@@ -520,6 +566,11 @@ class CombinedRefInfo:
             self.reduction = getattr(rt_info, 'reduction', None)
             self.enum = getattr(rt_info, 'enum', None)
             self.numeric_helper = getattr(rt_info, 'numeric_helper', None)
+            self.clamped_helper = getattr(rt_info, 'clamped_helper', None)
+            self.clamped_context_helper = getattr(rt_info, 'clamped_context_helper', None)
+            self.optional_helper = getattr(rt_info, 'optional_helper', None)
+            self.grouped_helper = getattr(rt_info, 'grouped_helper', None)
+            self.bounded_helper = getattr(rt_info, 'bounded_helper', None)
             self.enum_definitions = getattr(rt_info, 'enum_definitions', ())
             self.enum_safe = getattr(rt_info, 'enum_safe', False)
 

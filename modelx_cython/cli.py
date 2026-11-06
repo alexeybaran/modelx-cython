@@ -52,6 +52,8 @@ from modelx_cython.usage import (
     analyze_usage, apply_verdicts, build_resolver)
 from modelx_cython.powers import build_kind_maps
 from modelx_cython.admission import describe
+from modelx_cython.dense_proofs import reuse_dense_bounds
+from modelx_cython.dense_formulas import bind_dense_formulas
 from modelx_cython.helpers import install as install_helpers
 
 _logger = logging.getLogger(__name__)
@@ -355,6 +357,10 @@ def main_handler(args: argparse.Namespace, stdout: IO[str], stderr: IO[str]) -> 
         parallel_workers = d.get('parallel_workers', 1)
         if type(parallel_workers) is not int or parallel_workers < 1:
             raise ValueError('parallel_workers must be a positive integer')
+        dense_bounds_proofs = d.get('dense_bounds_proofs', sys.platform == "win32")
+        dense_miss_binding = d.get('dense_miss_binding', sys.platform == "win32")
+        if type(dense_bounds_proofs) is not bool or type(dense_miss_binding) is not bool:
+            raise ValueError('dense_bounds_proofs and dense_miss_binding must be booleans')
         if parallel_workers > 1:
             runtime = model_path / (MX_SYS_MOD + '.py')
             source = runtime.read_text(encoding='utf-8')
@@ -366,6 +372,7 @@ def main_handler(args: argparse.Namespace, stdout: IO[str], stderr: IO[str]) -> 
 
         # Phase 3: transform and write out
         helper_providers = set()
+        dense_entries = {}
         for u in units:
             trans = ModuleTransformer(
                 u.source, u.module_info,
@@ -377,11 +384,19 @@ def main_handler(args: argparse.Namespace, stdout: IO[str], stderr: IO[str]) -> 
 
             u.abs_src_path.write_text(trans.transformed.code, encoding="utf-8")
             helper_providers.update(trans.helper_providers)
+            if trans.dense_entries:
+                dense_entries[u.module_info.fqname] = trans.dense_entries
             u.abs_pxd_path.write_text(pxd.code, encoding="utf-8")
             u.abs_init_path.write_text("from . cimport _mx_classes", encoding="utf-8")
             modules.append(u.rel_src_path)
 
         modules.extend(install_helpers(helper_providers, model_path))
+        if dense_bounds_proofs or dense_miss_binding:
+            sources = {u.module_info.fqname: u.abs_src_path for u in units}
+            if dense_bounds_proofs:
+                reuse_dense_bounds(sources, dense_entries)
+            if dense_miss_binding:
+                bind_dense_formulas(sources, dense_entries)
         create_setup(model_name, modules=modules, setup_file=setup_file)
         (model_path / '_mx_admission.json').write_text(
             json.dumps(describe(module_infos), indent=2), encoding='utf-8')
@@ -599,7 +614,6 @@ def create_setup(model_name: str, modules: Sequence[str], setup_file: pathlib.Pa
     ), " " * 8)
 
     setup_script = textwrap.dedent("""\
-    import sys
     from setuptools import setup
     from Cython.Build import cythonize
 

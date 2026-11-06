@@ -8,6 +8,40 @@ ALIAS = module_name(PROVIDER)
 TYPE = ALIAS + '.NumericCache'
 
 
+def exclusively_owned(cell):
+    # Exported ItemSpaces are partitioned by the caller. Shared Spaces use
+    # locked_spaces. Keep the synchronized path for other receivers.
+    owner = cell.parent
+    return (not cell.is_locked and owner.name in owner.visitor.itemspace_classes
+            and owner.name not in owner.visitor.dynamic_ref_classes)
+
+
+def primary_capacity(cell):
+    size = cell._spec.get('numeric_cache_capacity', 0)
+    if type(size) is not int or (size and (
+            not 2 <= size <= 4096 or size & (size - 1) or not exclusively_owned(cell))):
+        raise ValueError(f'{cell.fqname}: invalid capacity for a private numeric cache')
+    return size
+
+
+def reserved_body(cell, cache, keys, reflexive, bits, result, encode, decode):
+    prefix = '_mx_reservation'
+    while any(name.startswith(prefix) for name in cell.params):
+        prefix += '_'
+    words = [f'{prefix}_{i}' for i in range(len(keys))]
+    slot = prefix + '_slot'
+    args = ', '.join(words)
+    source = (
+        ''.join(f'{name}: {ALIAS}.word = {key}\n' for name, key in zip(words, keys))
+        + f'{slot}: _mx_cy.Py_ssize_t\n{bits}: {ALIAS}.word\n'
+        + f'if {cache}.reserve({args}, {reflexive}, _mx_cy.address({slot}), '
+          f'_mx_cy.address({bits})):\n    return {ALIAS}.{decode}({bits})\n'
+        + f'{result}: {cell.get_rettype_expr()} = self._f_{cell.name}({", ".join(cell.params)})\n'
+        + f'{cache}.publish({args}, {slot}, {ALIAS}.{encode}({result}))\nreturn {result}\n'
+    )
+    return cst.IndentedBlock(body=cst.parse_module(source).body)
+
+
 def body(cell):
     cache = 'self._v_' + cell.name
     bits, result = '_mx_cache_bits', '_mx_cache_result'
@@ -26,6 +60,9 @@ def body(cell):
     floating = cell.get_rettype_expr(c_style=True) == 'double'
     encode = 'value_word' if floating else 'int_word'
     decode = 'word_double' if floating else 'word_int'
+    if primary_capacity(cell):
+        return reserved_body(cell, cache, keys, ' and '.join(reflexive) or 'True',
+                             bits, result, encode, decode)
     found = f'if {cache}.get({args}, _mx_cy.address({bits})):\n    return {ALIAS}.{decode}({bits})\n'
     compute = (f'{result} = self._f_{cell.name}({", ".join(cell.params)})\n'
                f'{cache}.put({args}, {ALIAS}.{encode}({result}))\nreturn {result}\n')

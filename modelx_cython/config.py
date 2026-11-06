@@ -52,6 +52,10 @@ class TransSpec:
 
     A per-cells dict may have:
 
+    * ``"dense_window"``: a sequence of half-open ``(lower, stop)`` pairs
+      in parameter order for a dense cache. The physical window must
+      fit inside the existing logical bounds. Exact spill keeps the
+      original logical domain available.
     * ``"return_type"``: either a type name accepted by
       :data:`modelx_cython.typedefs.str_to_type` (``"bool"``,
       ``"int"``, ``"float"``, ``"str"``, ``"object"``) that overrides
@@ -96,6 +100,7 @@ class TransSpec:
     CELLS_PARAMS = "cells_params"   # deprecated
     SIZE = "size"   # deprecated
     RET_T = "return_type"
+    DENSE_WINDOW = "dense_window"
     RET_MEMORYVIEW = "memoryview"   # RET_T value forcing memoryview emission
     PARAM_T = "param_type"
 
