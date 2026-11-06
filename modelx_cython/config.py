@@ -67,8 +67,6 @@ class TransSpec:
       comparison for proven signed-integer operands.
     * ``"memoize_power"``: enable a one-entry exact-operand memo for the
       existing typed power helper on a privately owned policy Space.
-    * ``"native_power_operands"``: enable guarded real power for eligible
-      local operands and typed integer exponents in this Cell.
     * ``"return_type"``: either a type name accepted by
       :data:`modelx_cython.typedefs.str_to_type` (``"bool"``,
       ``"int"``, ``"float"``, ``"str"``, ``"object"``) that overrides

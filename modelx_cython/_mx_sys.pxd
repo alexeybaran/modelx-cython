@@ -37,26 +37,6 @@ cdef inline double _mx_pow(double b, double e) except? -1.0:
     return _mx_c_pow(b, e)
 
 
-cdef inline double _mx_positive_pow(double base, double exponent) except? -1.0:
-    cdef double result
-    if ((base > 0.0 or base == 0.0 and exponent >= 0.0)
-            and _mx_c_isfinite(base) and _mx_c_isfinite(exponent)):
-        result = _mx_c_pow(base, exponent)
-        if _mx_c_isfinite(result):
-            return result
-    return (<object>base) ** (<object>exponent)
-
-
-cdef inline double _mx_positive_int_pow(double base, long long exponent) except? -1.0:
-    cdef double result
-    if (base > 0.0 and _mx_c_isfinite(base)
-            and -9007199254740992 <= exponent <= 9007199254740992):
-        result = _mx_c_pow(base, <double>exponent)
-        if _mx_c_isfinite(result):
-            return result
-    return (<object>base) ** (<object>exponent)
-
-
 cdef inline object _mx_integral_math_call(object fn, object value, object canonical, bint up):
     cdef double x
     if canonical is not None and fn is canonical and PyFloat_CheckExact(value):
