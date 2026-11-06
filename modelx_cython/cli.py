@@ -359,8 +359,11 @@ def main_handler(args: argparse.Namespace, stdout: IO[str], stderr: IO[str]) -> 
             raise ValueError('parallel_workers must be a positive integer')
         dense_bounds_proofs = d.get('dense_bounds_proofs', sys.platform == "win32")
         dense_miss_binding = d.get('dense_miss_binding', sys.platform == "win32")
+        dense_one_axis = d.get('dense_one_axis', False)
         if type(dense_bounds_proofs) is not bool or type(dense_miss_binding) is not bool:
             raise ValueError('dense_bounds_proofs and dense_miss_binding must be booleans')
+        if type(dense_one_axis) is not bool:
+            raise ValueError('dense_one_axis must be a boolean')
         if parallel_workers > 1:
             runtime = model_path / (MX_SYS_MOD + '.py')
             source = runtime.read_text(encoding='utf-8')
@@ -399,12 +402,15 @@ def main_handler(args: argparse.Namespace, stdout: IO[str], stderr: IO[str]) -> 
         if serial_enabled:
             serial_collect.enable_runtime(model_path / (MX_SYS_MOD + '.py'))
         modules.extend(install_helpers(helper_providers, model_path))
-        if dense_bounds_proofs or dense_miss_binding:
+        if dense_bounds_proofs or dense_miss_binding or dense_one_axis:
             sources = {u.module_info.fqname: u.abs_src_path for u in units}
             if dense_bounds_proofs:
                 reuse_dense_bounds(sources, dense_entries)
             if dense_miss_binding:
                 bind_dense_formulas(sources, dense_entries)
+            if dense_one_axis:
+                from modelx_cython.dense_one_axis import specialize_one_axis
+                specialize_one_axis(sources, dense_entries)
         create_setup(model_name, modules=modules, setup_file=setup_file)
         (model_path / '_mx_admission.json').write_text(
             json.dumps(describe(module_infos), indent=2), encoding='utf-8')
