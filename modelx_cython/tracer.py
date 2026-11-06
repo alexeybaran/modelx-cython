@@ -40,9 +40,10 @@ import pathlib
 import random
 import numbers
 import itertools
+from enum import IntEnum
 from dataclasses import dataclass
 from contextlib import contextmanager
-from types import FrameType, MemberDescriptorType
+from types import FrameType, MemberDescriptorType, FunctionType
 from typing import Any, Mapping, Iterator, Sequence, Optional, Dict, List
 import logging
 
@@ -158,6 +159,7 @@ class RuntimeCellsInfo:     # TODO: Create base class RuntimeBaseMemberInfo
         self.arg_types = {}
         self.max_args = {}
         self.min_args = {}
+        self.has_negative_args = False
         self._init_arg_types(traces)
         self.ret_type = self._init_ret_type(traces)
 
@@ -182,12 +184,15 @@ class RuntimeCellsInfo:     # TODO: Create base class RuntimeBaseMemberInfo
                 trace.arg_vals.items(), 1, None
             ):  # remove self
                 tp = type(val)
-                if issubclass(tp, numbers.Integral):
-                    self.min_args[arg] = min(self.min_args.get(arg, int(val)), int(val))
+                integral = issubclass(tp, numbers.Integral)
+                if integral and val < 0:
+                    self.has_negative_args = True
+                if integral:
+                    self.min_args[arg] = min(self.min_args.get(arg, 0), val)
                 types = arg_type_val.setdefault(arg, {})
                 if tp not in types:
                     types[tp] = val
-                elif issubclass(tp, numbers.Integral):
+                elif integral:
                     if val > types[tp]:
                         types[tp] = val
 
@@ -323,6 +328,21 @@ class RuntimeValueInfo:
         """Record the type of ``value`` and an optional class name."""
         self.type_ = type(value)
         self.mx_class = mx_class
+        self.helper = (value.__dict__.get('__modelx_cython_helper__')
+                       if type(value) is FunctionType else None)
+        self.reduction = (value.__dict__.get('__modelx_cython_reduction__')
+                          if type(value) is FunctionType else None)
+        self.numeric_helper = (value.__dict__.get('__modelx_cython_numeric__')
+                               if type(value) is FunctionType else None)
+        self.enum_definitions = (tuple(value) if isinstance(value, tuple)
+            and vars(type(value)).get('__modelx_cython_enum_definitions__') is True else ())
+        self.enum_safe = (isinstance(value, type) and issubclass(value, IntEnum)
+                          and type(value) is type(IntEnum)
+                          and value.__eq__ is int.__eq__ and value.__ne__ is int.__ne__)
+        self.enum = ((value.__module__, value.__qualname__,
+                      {name: int(member) for name, member in value.__members__.items()})
+                     if isinstance(value, type) and issubclass(value, IntEnum)
+                     and '<locals>' not in value.__qualname__ else None)
 
     @classmethod
     def init_mxobj(cls, value, module):
@@ -600,7 +620,7 @@ class MxCodeFilter:
                 return True
             elif code.co_name == MX_ASSIGN_REFS:
                 return True
-            elif code.co_name == "__call__":
+            elif code.co_name in ("__call__", "_mx_assign_params", "_mx_copy_params"):
                 return True
 
         return False
@@ -651,6 +671,7 @@ class MxCallTraceLogger(CallTraceLogger):
         self.ref_info = {}
         self.modules = []
         self.param_info = {}  # class name -> {param: RuntimeParamInfo}
+        self._assigned_params = {}
 
     def log(self, trace: CallTrace) -> None:
         """Log a single call trace.
@@ -658,7 +679,25 @@ class MxCallTraceLogger(CallTraceLogger):
         The trace is appended to an internal list keyed by its fully
         qualified function name, for aggregation in :meth:`flush`.
         """
-        self._traces.setdefault(trace.funcname, []).append(trace)
+        name = trace.func.__name__
+        if name == "_mx_assign_params":
+            values = iter(trace.arg_vals.items())
+            _, target = next(values)
+            self._record_params(target, values)
+        elif name == "_mx_copy_params":
+            source, target = trace.arg_vals.values()
+            cls = type(source)
+            params = getattr(sys.modules[cls.__module__], SPACE_PARAMS + "_" + cls.__name__[len(SPACE_PREF):])
+            self._record_params(target, ((param, getattr(source, param)) for param in params))
+        else:
+            self._traces.setdefault(trace.funcname, []).append(trace)
+
+    def _record_params(self, target, values):
+        cls = type(target)
+        params = self._assigned_params.setdefault(cls.__module__ + "." + cls.__name__, {})
+        for name, value in values:
+            if name not in params:
+                params[name] = RuntimeParamInfo.init_mxobj(value, self.module)
 
     def flush(self) -> None:
         """Aggregate the accumulated traces into runtime info objects.
@@ -692,6 +731,12 @@ class MxCallTraceLogger(CallTraceLogger):
 
         self._traces.clear()
         self._get_params()
+        # Collection receivers are absent from the retained ItemSpace tree.
+        for cls, assigned in self._assigned_params.items():
+            params = self.param_info.setdefault(cls, {})
+            for name, info in assigned.items():
+                params.setdefault(name, info)
+        self._assigned_params.clear()
 
         if self.new_name:
             self._update_model_name()

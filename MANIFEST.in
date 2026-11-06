@@ -1,1 +1,2 @@
 include modelx_cython/*.pxd
+include modelx_cython/*.pyx

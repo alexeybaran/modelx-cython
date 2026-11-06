@@ -63,6 +63,9 @@ from libcst.metadata import ParentNodeProvider, ScopeProvider, GlobalScope, Clas
 from modelx_cython.parser import ParentScopeAddin
 from modelx_cython.builder import ModuleInfo, CombinedCellsInfo
 from modelx_cython.powers import rewrite_powers
+from modelx_cython.exceptions import clause as exception_clause
+from modelx_cython import numeric_cache
+from modelx_cython import enums as code_enums
 
 from modelx_cython.consts import (
     FORMULA_PREF,
@@ -153,8 +156,19 @@ class PXDGenerator:
         with newlines.
         """
         stmts = []
+        if any(c.uses_native_numeric_cache for cls in self.module.classes.values()
+               for c in cls.cells.values() if not c.is_special()):
+            stmts.append(f'from {self.package} cimport {numeric_cache.ALIAS}')
         for ci in self.module.cimports:
             stmts.append(f"cimport {ci}")
+        from modelx_cython.helpers import module_name
+        contexts = {provider for cls in self.module.classes.values()
+                    for provider in getattr(cls, 'native_contexts', {}).values()}
+        for provider in sorted(contexts):
+            stmts.append(f'from {self.package} cimport {module_name(provider)}')
+        enum_declarations = code_enums.declarations(self.module)
+        if enum_declarations:
+            stmts.append(enum_declarations)
         return "\n".join(stmts)
 
     @cached_property
@@ -247,6 +261,15 @@ class PXDGenerator:
 
         cls_info = self.module.classes[cls_name]
         decl_stmts = []
+        if cls_name in self.module.visitor.collect_cache_classes:
+            decl_stmts.append("cdef dict _mx_collect_cache\n")
+        if cls_name in self.module.visitor.dynamic_ref_classes:
+            decl_stmts.append("cdef dict __dict__\n")
+        for name in getattr(cls_info, 'readonly_refs', ()):
+            decl_stmts.append(f'cdef object {code_enums.storage(name)}\n')
+        from modelx_cython.helpers import module_name
+        for name, provider in getattr(cls_info, 'native_contexts', {}).items():
+            decl_stmts.append(f'cdef {module_name(provider)}.LookupContext {name}\n')
         for cells in cls_info.cells.values():
 
             assert cells.module == self.module.fqname
@@ -271,7 +294,11 @@ class PXDGenerator:
                     has_type = cells.get_array_decl_expr(
                                 rettype_expr=CY_BOOL_T, c_style=True)
                     decl_stmts.append(f"cdef {has_type} {has_name}\n")
+                    if cells.has_shifted_cache:
+                        decl_stmts.append(f"cdef dict _spill_{cells.name}\n")
 
+                elif cells.uses_native_numeric_cache:
+                    decl_stmts.append(f'cdef {numeric_cache.TYPE} {VAR_PREF + cells.name}\n')
                 else:
                     decl_stmts.append(f"cdef dict {VAR_PREF + cells.name}\n")
             else:
@@ -308,6 +335,8 @@ class PXDGenerator:
 
             if ref.name in self.module.classes[cls_name].spaces:
                 # declared below as a child space
+                continue
+            if ref.name in getattr(self.module.classes[cls_name], 'readonly_refs', ()):
                 continue
 
             stmt = f"cdef public {ref.get_type_expr(c_style=True)} {ref.name}\n"
@@ -387,7 +416,8 @@ class PXDGenerator:
                     cls_name=cls_name, cells_name=cells.name
                 )
                 decl_stmts.append(
-                    f"cdef {rettype} {FORMULA_PREF + cells.name}({parameters})\n"
+                    f"cdef {rettype} {FORMULA_PREF + cells.name}({parameters})"
+                    + exception_clause(rettype) + "\n"
                 )
             else:
                 parameters = self._add_param_type_hints(
@@ -435,7 +465,8 @@ class PXDGenerator:
                     cls_name=cls_name, cells_name=cells.name
                 )
                 decl_stmts.append(
-                    f"cpdef {rettype} {cells.name}({parameters})\n"
+                    f"cpdef {rettype} {cells.name}({parameters})"
+                    + exception_clause(rettype) + "\n"
                 )
             else:
                 parameters = self._add_param_type_hints(
@@ -501,6 +532,11 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
         self._resolver = resolver
         self._cells_kinds = cells_kinds or {}
         self._ref_kinds = ref_kinds or {}
+        self.helper_providers = set()
+        if any(c.uses_native_numeric_cache for cls in module.classes.values()
+               for c in cls.cells.values() if not c.is_special()):
+            self.helper_providers.add(numeric_cache.PROVIDER)
+        code_enums.prepare(module)
 
     def _rewrite_powers(self, node, cls_info, cells):
         """Rewrite the provably real ``**`` of one formula body.
@@ -508,6 +544,25 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
         See :mod:`modelx_cython.powers`; the node is returned unchanged
         when no operand pair can be typed.
         """
+        from modelx_cython.helpers import HelperCalls
+        from modelx_cython.numeric_helpers import NumericReturns
+        numeric_returns = NumericReturns(cls_info, cells, self.helper_providers)
+        node = node.visit(numeric_returns)
+        if not hasattr(cls_info, 'native_contexts'):
+            cls_info.native_contexts = {}
+        cls_info.native_contexts.update(numeric_returns.contexts)
+        enum_comparisons = code_enums.Constants(cls_info, cells, self.module.code_enum_symbols)
+        node = node.visit(enum_comparisons)
+        cells.native_enum_comparisons = enum_comparisons.comparisons
+        cells.native_enum_constants = enum_comparisons.count
+        from modelx_cython.reductions import NativeSums
+        reductions = NativeSums(cls_info, self.helper_providers)
+        node = node.visit(reductions)
+        cells.native_reductions = reductions.count
+        helpers = HelperCalls(cls_info.refs, self.helper_providers)
+        node = node.visit(helpers)
+        cells.native_helpers = sorted(helpers.operations | numeric_returns.operations)
+        cells.native_numeric_helpers = sorted(numeric_returns.operations)
         return rewrite_powers(
             node, self._resolver, self._cells_kinds, self._ref_kinds,
             cls_info.fqname, cells,
@@ -529,6 +584,11 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
         # cimports for child spaces
         parent = ".".join(self.module.fqname.split(".")[:-1])
         stmts = []
+        from modelx_cython.helpers import module_name
+        from modelx_cython.exceptions import NumericExceptions
+        for provider in sorted(self.helper_providers):
+            stmts.append(cst.parse_statement(
+                f'from cython.cimports.{self.package} import {module_name(provider)}'))
         for child in self.module.sub_modules:
             stmts.append(cst.parse_statement(
                 f"from cython.cimports.{parent} import {child}",
@@ -547,7 +607,7 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
                 ),
                 *updated_node.body,
             )
-        )
+        ).visit(NumericExceptions())
 
     def leave_ClassDef(
         self, original_node: ClassDef, updated_node: ClassDef
@@ -598,6 +658,10 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
                                 config=self._module_node.config_for_parsing,
                             )
                         )
+                        if cells.has_shifted_cache:
+                            decl_stmts.append(cst.parse_statement(f'_spill_{cells.name}: dict\n'))
+                    elif cells.uses_native_numeric_cache:
+                        decl_stmts.append(cst.parse_statement(f'{VAR_PREF + cells.name}: {numeric_cache.TYPE}\n'))
                     else:
                         decl_stmts.append(
                             cst.parse_statement(
@@ -631,7 +695,7 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
                     continue
 
                 stmt = cst.parse_statement(
-                    f"{ref.name}: {ref.get_type_expr()}",
+                    f"{code_enums.storage(ref.name) if ref.name in getattr(self.module.classes[cls_name], 'readonly_refs', ()) else ref.name}: {ref.get_type_expr()}",
                     config=self._module_node.config_for_parsing,
                 )
                 if is_first:
@@ -661,6 +725,22 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
 
                 decl_stmts.append(stmt)
 
+            from modelx_cython.helpers import module_name
+            contexts = getattr(self.module.classes[cls_name], 'native_contexts', {})
+            for name, provider in contexts.items():
+                decl_stmts.append(cst.parse_statement(f'{name}: {module_name(provider)}.LookupContext\n'))
+            if contexts:
+                body = []
+                for statement in updated_node.body.body:
+                    if isinstance(statement, cst.FunctionDef) and statement.name.value == '__init__':
+                        assignments = [cst.parse_statement(f'self.{name} = {module_name(provider)}.LookupContext()\n')
+                                       for name,provider in contexts.items()]
+                        statement = statement.with_changes(body=statement.body.with_changes(
+                            body=(*statement.body.body, *assignments)))
+                    body.append(statement)
+                updated_node = updated_node.with_changes(body=updated_node.body.with_changes(body=tuple(body)))
+            updated_node = updated_node.with_changes(body=updated_node.body.with_changes(
+                body=code_enums.bind_properties(self.module.classes[cls_name], updated_node.body.body)))
             decorator = cst.Decorator(
                 decorator=cst.Attribute(value=cst.Name(CY_MOD), attr=cst.Name("cclass"))
             )
@@ -834,6 +914,12 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
             meth_name = original_node.name.value
             cls_info = self.module.classes[cls_name]
 
+            if meth_name == '__init__':
+                initializers = [cst.parse_statement(f'self._v_{c.name} = {numeric_cache.TYPE}()\n')
+                                for c in cls_info.cells.values() if c.uses_native_numeric_cache]
+                return updated_node.with_changes(body=updated_node.body.with_changes(
+                    body=(*updated_node.body.body, *initializers)))
+
             if meth_name[: len(FORMULA_PREF)] == FORMULA_PREF:
                 # _f_ methods
                 cells = cls_info.cells.get(meth_name[len(FORMULA_PREF):])
@@ -960,7 +1046,8 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
                     if cells.has_typeinfo() and cells.is_arrayable():
 
                         # Construct indented_block to replace the original one
-                        c_idx_expr = ''.join([f"[{p}]" for p in cells.params])
+                        c_idx_expr = ''.join(f'[{p} - ({lo})]' if lo else f'[{p}]'
+                                             for p,lo in zip(cells.params, cells.cache_offsets))
                         param_expr = f"{', '.join([p for p in cells.params])}"
 
                         has_expr = f"{MX_SELF}.{HAS_PREF}{meth_name}{c_idx_expr}"
@@ -971,7 +1058,7 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
                         size = cls_info.cells_arg_sizes[args]
 
                         idx_range = " and ".join(
-                            [f"(0 <= {p} < {i})" for p, i in zip(args, size)])
+                            [f"({lo} <= {p} < {i})" for p, i, lo in zip(args, size, cells.cache_offsets)])
 
                         if cells.is_locked:
                             cache_body = self._locked_body(
@@ -986,11 +1073,21 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
                                     {has_expr} = True
                                     return val
                                 """)
+                        outside = 'raise IndexError("array index out of range")\n'
+                        if cells.has_shifted_cache:
+                            key = '(' + ', '.join(args) + (',' if len(args)==1 else '') + ')'
+                            cache = f'self._spill_{meth_name}'
+                            outside = (f'if {cache} is None:\n    {cache} = {{}}\n'
+                                       f'try:\n    return {cache}[{key}]\n'
+                                       f'except KeyError:\n    pass\n'
+                                       f'val = {f_expr}\n{cache}[{key}] = val\nreturn val\n')
+                            if cells.is_locked:
+                                outside = f'with self.{MX_LOCK}:\n' + textwrap.indent(outside, '    ')
                         if_stmt = (
                             f"if {idx_range}:\n"
                             + textwrap.indent(cache_body, " " * 4)
                             + "else:\n"
-                            + '    raise IndexError("array index out of range")\n')
+                            + textwrap.indent(outside, '    '))
                         if_node = cst.parse_statement(
                             if_stmt, config=self._module_node.config_for_parsing
                         )
@@ -1004,6 +1101,9 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
                             returns=returns,
                             body=indented_block,
                         )
+                    elif cells.uses_native_numeric_cache:
+                        return updated_node.with_changes(decorators=decorators,
+                            params=parameters, returns=returns, body=numeric_cache.body(cells))
                     else:
                         if cells.is_locked:
                             # the exported body is already double-checked
@@ -1011,6 +1111,16 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
                             body = updated_node.body
                         else:
                             body = self._add_dict_assign(meth_name, updated_node)
+                        key_types = {"bint", "long long", "double"}
+                        if not cells.is_locked:
+                            key_types.add("str")
+                        if (cells.has_typeinfo() and not cells.is_array_returned
+                                and cells.get_rettype_expr(c_style=True)
+                                in {"bint", "long long", "double"}
+                                and all(cells.get_argtype_expr(p, c_style=True)
+                                        in key_types
+                                        for p in cells.params)):
+                            body = self._single_lookup_body(meth_name, body, cells.params)
                         return updated_node.with_changes(
                             decorators=decorators,
                             params=parameters,
@@ -1040,6 +1150,33 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
 
 
         return updated_node
+
+    @staticmethod
+    def _single_lookup_body(meth_name, body, params=()):
+        cache = f"{MX_SELF}.{VAR_PREF}{meth_name}"
+        module = cst.Module([])
+        value_name = '_mx_cache_value'
+        while value_name in params:
+            value_name += '_'
+
+        class Lookup(cst.CSTTransformer):
+            def leave_If(self, original_node, updated_node):
+                test = updated_node.test
+                if (not isinstance(test, cst.Comparison)
+                        or len(test.comparisons) != 1
+                        or not isinstance(test.comparisons[0].operator, cst.In)
+                        or module.code_for_node(test.comparisons[0].comparator) != cache):
+                    return updated_node
+                key = module.code_for_node(test.left)
+                assignment = cst.parse_statement(
+                    f"{value_name} = {cache}.get({key})\n")
+                hit = cst.parse_statement(f"if {value_name} is not None:\n    return {value_name}\n")
+                return cst.FlattenSentinel((assignment, hit.with_changes(orelse=updated_node.orelse)))
+
+        # A numeric C return cannot contain None, so None is an unambiguous miss.
+        declaration = cst.parse_statement(f"{value_name}: object\n")
+        body = body.visit(Lookup())
+        return body.with_changes(body=(declaration,) + body.body)
 
     @staticmethod
     def _locked_body(has_expr: str, v_expr: str, f_expr: str, indent=0) -> str:

@@ -53,8 +53,6 @@ KIND_UNKNOWN : str
     Nothing is known about the expression; never rewrite through it.
 """
 import logging
-import ast
-from collections import Counter
 from typing import Dict, List, Mapping, Optional
 
 import libcst as cst
@@ -336,45 +334,10 @@ def rewrite_powers(
             param_kinds[param] = kind_of_type_expr(
                 cells.get_argtype_expr(param, c_style=True)
             )
-    operand_kind = OperandKind(resolver, cells_kinds, ref_kinds, cls_fqname, param_kinds)
-    rewriter = _PowerRewriter(operand_kind)
-    # Census compatibility: prove only single-assignment, straight-line locals.
-    # Count every syntactic binding/deletion, including nested scopes, so branch,
-    # loop, import, exception and closure rebinding cannot make a local eligible.
-    tree = ast.parse(cst.Module([]).code_for_node(node)).body[0]
-    writes = Counter()
-    dynamic = False
-    for item in ast.walk(tree):
-        if isinstance(item, ast.Name) and isinstance(item.ctx, (ast.Store, ast.Del)):
-            writes[item.id] += 1
-        elif isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-            writes[item.name] += 1
-        elif isinstance(item, ast.arg):
-            writes[item.arg] += 1
-        elif isinstance(item, ast.alias):
-            writes[item.asname or item.name.split('.')[0]] += 1
-        elif isinstance(item, ast.ExceptHandler) and item.name:
-            writes[item.name] += 1
-        elif isinstance(item, (ast.Global, ast.Nonlocal, ast.Match)):
-            dynamic = True
-        elif isinstance(item, ast.Call) and isinstance(item.func, ast.Name) and item.func.id in {'exec', 'eval', 'locals', 'globals'}:
-            dynamic = True
-    if isinstance(node.body, cst.IndentedBlock) and not dynamic:
-        statements = []
-        for statement in node.body.body:
-            # Rewrite before binding: use-before-assignment stays unknown.
-            statements.append(statement.visit(rewriter))
-            if isinstance(statement, cst.SimpleStatementLine) and len(statement.body) == 1:
-                assignment = statement.body[0]
-                if isinstance(assignment, cst.Assign) and len(assignment.targets) == 1:
-                    target = assignment.targets[0].target
-                    if isinstance(target, cst.Name) and writes[target.value] == 1 and target.value not in param_kinds:
-                        kind = operand_kind.kind(assignment.value)
-                        if kind != KIND_UNKNOWN:
-                            param_kinds[target.value] = kind
-        updated = node.body.with_changes(body=statements)
-    else:
-        updated = node.body.visit(rewriter)
+    rewriter = _PowerRewriter(
+        OperandKind(resolver, cells_kinds, ref_kinds, cls_fqname, param_kinds)
+    )
+    updated = node.body.visit(rewriter)
     if rewriter.declined:
         _logger.info(
             f"'**' left as exported in {cells.fqname}, so a fractional "

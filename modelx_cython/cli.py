@@ -38,6 +38,7 @@ import ast
 import argparse
 import dataclasses
 import logging
+import json
 import subprocess
 from typing import IO, TYPE_CHECKING, Sequence, Optional, Tuple
 
@@ -50,6 +51,8 @@ from modelx_cython.transformer import ModuleTransformer, PXDGenerator
 from modelx_cython.usage import (
     analyze_usage, apply_verdicts, build_resolver)
 from modelx_cython.powers import build_kind_maps
+from modelx_cython.admission import describe
+from modelx_cython.helpers import install as install_helpers
 
 _logger = logging.getLogger(__name__)
 
@@ -349,7 +352,20 @@ def main_handler(args: argparse.Namespace, stdout: IO[str], stderr: IO[str]) -> 
         resolver = build_resolver(module_infos)
         cells_kinds, ref_kinds = build_kind_maps(module_infos)
 
+        parallel_workers = d.get('parallel_workers', 1)
+        if type(parallel_workers) is not int or parallel_workers < 1:
+            raise ValueError('parallel_workers must be a positive integer')
+        if parallel_workers > 1:
+            runtime = model_path / (MX_SYS_MOD + '.py')
+            source = runtime.read_text(encoding='utf-8')
+            setting = '_mx_parallel_workers = 1'
+            if setting not in source:
+                raise ValueError('parallel_workers requires a collection-enabled modelx export')
+            runtime.write_text(source.replace(setting, f'_mx_parallel_workers = {parallel_workers}'),
+                               encoding='utf-8')
+
         # Phase 3: transform and write out
+        helper_providers = set()
         for u in units:
             trans = ModuleTransformer(
                 u.source, u.module_info,
@@ -360,11 +376,15 @@ def main_handler(args: argparse.Namespace, stdout: IO[str], stderr: IO[str]) -> 
             pxd = PXDGenerator(u.module_info)
 
             u.abs_src_path.write_text(trans.transformed.code, encoding="utf-8")
+            helper_providers.update(trans.helper_providers)
             u.abs_pxd_path.write_text(pxd.code, encoding="utf-8")
             u.abs_init_path.write_text("from . cimport _mx_classes", encoding="utf-8")
             modules.append(u.rel_src_path)
 
+        modules.extend(install_helpers(helper_providers, model_path))
         create_setup(model_name, modules=modules, setup_file=setup_file)
+        (model_path / '_mx_admission.json').write_text(
+            json.dumps(describe(module_infos), indent=2), encoding='utf-8')
 
     if args.translate_only:
         return 0

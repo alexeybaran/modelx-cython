@@ -20,6 +20,14 @@ def make_trace(ret_val, i):
     return CallTrace(foo, {"self": None, "i": i}, ret_val=ret_val)
 
 
+def test_records_negative_integral_arguments():
+    info = RuntimeCellsInfo([make_trace(0, 8), make_trace(0, np.int64(-1))])
+
+    assert info.has_negative_args
+    assert info.max_args == {"i": 8}
+    assert not RuntimeCellsInfo([make_trace(0, 8)]).has_negative_args
+
+
 @pytest.mark.parametrize("ret_vals", [
     [np.array([1.0, 2.0]), 3],
     [3, np.array([1.0, 2.0])],

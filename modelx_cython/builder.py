@@ -262,7 +262,7 @@ class CombinedCellsInfo(LexicalCellsInfo):
         which is every cells with parameters that has no type
         information.  Its ``_v_`` attribute is a ``cdef dict``.
         """
-        return (self.has_formula_def and self.has_args()
+        return (self.has_formula_def and self.has_args() and not self.uses_native_numeric_cache
                 and not (self.has_typeinfo() and self.is_arrayable()))
 
     @property
@@ -398,19 +398,41 @@ class CombinedCellsInfo(LexicalCellsInfo):
         """Return True if results can be cached in a fixed-size C
         array.
 
-        A cells is arrayable when all its parameters are integral and
-        it returns a real-valued scalar (not an array).  Requires
-        parameters and type information.
+        A cells is arrayable when all its parameters are integral,
+        no observed argument is negative, and it returns a real-valued
+        scalar. Requires parameters and type information.
         """
         assert self.has_args() and self.has_typeinfo()
-        if self.is_int_args and self.is_real_value and not self.is_array_returned:
-            # Negative semantic keys cannot index a zero-based C cache.
-            # Keep the existing dictionary-cache path for these Cells.
-            if any(v < 0 for v in getattr(self._rt, 'min_args', {}).values()):
-                return False
+        if (self.is_int_args and self.is_real_value and not self.is_array_returned
+                and (not self._rt.has_negative_args or self.has_shifted_cache)):
             return True
         else:
             return False
+
+    @property
+    def has_shifted_cache(self):
+        if not (self.has_typeinfo() and self.has_args() and self.is_int_args
+                and self.is_real_value and not self.is_array_returned
+                and self._rt.has_negative_args):
+            return False
+        sizes = self.parent.cells_arg_sizes[tuple(self.params)]
+        count = 1
+        for p, size in zip(self.params, sizes):
+            count *= size - getattr(self._rt, 'min_args', {}).get(p, 0)
+        return 0 < count <= 65536
+
+    @property
+    def uses_native_numeric_cache(self):
+        numeric = {'double', 'long long', 'bint'}
+        return (self.has_formula_def and self.has_typeinfo() and self.has_args()
+                and len(self.params) <= 3 and not self.is_arrayable()
+                and not self.is_array_returned and self.get_rettype_expr(c_style=True) in numeric
+                and all(self.get_argtype_expr(p, c_style=True) in numeric for p in self.params))
+
+    @property
+    def cache_offsets(self):
+        return tuple(getattr(self._rt, 'min_args', {}).get(p, 0)
+                     if self.has_shifted_cache else 0 for p in self.params)
 
     def get_array_decl_expr(self, rettype_expr="", c_style=False):
         """Return the C array declaration expression for the cache.
@@ -434,7 +456,7 @@ class CombinedCellsInfo(LexicalCellsInfo):
             rettype_expr = self.get_rettype_expr(c_style=c_style)
 
         sizes = self.parent.cells_arg_sizes[tuple(self.params)]
-        return rettype_expr + "".join([f"[{str(i)}]" for i in sizes])
+        return rettype_expr + "".join(f"[{i - lower}]" for i, lower in zip(sizes, self.cache_offsets))
 
 
 class CombinedRefInfo:
@@ -477,6 +499,12 @@ class CombinedRefInfo:
     mx_class: str = ''
     decl_type_expr: str = ''
     is_relative: bool = False
+    helper = None
+    reduction = None
+    enum = None
+    numeric_helper = None
+    enum_definitions = ()
+    enum_safe = False
 
     def __init__(self, module,
                  cls,
@@ -488,6 +516,12 @@ class CombinedRefInfo:
         ``name`` are set; the class-level defaults remain in effect.
         """
         if rt_info:
+            self.helper = getattr(rt_info, 'helper', None)
+            self.reduction = getattr(rt_info, 'reduction', None)
+            self.enum = getattr(rt_info, 'enum', None)
+            self.numeric_helper = getattr(rt_info, 'numeric_helper', None)
+            self.enum_definitions = getattr(rt_info, 'enum_definitions', ())
+            self.enum_safe = getattr(rt_info, 'enum_safe', False)
 
             if rt_info.mx_class:
                 if rt_info.mx_class.startswith(module + "."):
@@ -809,4 +843,5 @@ class ModuleInfo:
         for cls in self.visitor.spaces:
             result.append(MODULE_PREF + cls[len(SPACE_PREF):])    # replace _c_ with _m_
         return result
+
 
