@@ -123,8 +123,9 @@ class CheckedArithmetic:
         return result.body
 
     def divisibility(self, body, tree):
-        if any(isinstance(node, (ast.Import, ast.ImportFrom, ast.ExceptHandler, ast.Match,
+        if any(isinstance(node, (ast.Import, ast.ImportFrom, ast.ExceptHandler,
                                  ast.Global, ast.Nonlocal, ast.ClassDef))
+               or isinstance(node, getattr(ast, 'Match', ()))
                or isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node is not tree
                for node in ast.walk(tree)):
             return body
