@@ -518,6 +518,7 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
         resolver=None,
         cells_kinds=None,
         ref_kinds=None,
+        serial_shapes=None,
     ) -> None:
         """Parse ``source`` and record the module info and package.
 
@@ -535,6 +536,7 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
         self._resolver = resolver
         self._cells_kinds = cells_kinds or {}
         self._ref_kinds = ref_kinds or {}
+        self._serial_shapes = serial_shapes or {}
         self.helper_providers = set()
         self.dense_entries = {}
         if any(c.uses_native_numeric_cache for cls in module.classes.values()
@@ -623,6 +625,9 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
         # cimports for child spaces
         parent = ".".join(self.module.fqname.split(".")[:-1])
         stmts = []
+        if any(shape.reuse for shape in self._serial_shapes.values()):
+            stmts.append(cst.parse_statement(
+                'from cython.cimports.libc.string import memset as _mx_collect_memset'))
         from modelx_cython.helpers import module_name
         from modelx_cython.exceptions import NumericExceptions
         for provider in sorted(self.helper_providers):
@@ -787,6 +792,10 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
                 updated_node = updated_node.with_changes(body=updated_node.body.with_changes(body=tuple(body)))
             updated_node = updated_node.with_changes(body=updated_node.body.with_changes(
                 body=code_enums.bind_properties(self.module.classes[cls_name], updated_node.body.body)))
+            if cls_name in self._serial_shapes:
+                from modelx_cython.serial_collect import add_methods
+                updated_node = add_methods(
+                    self.module.classes[cls_name], updated_node, self._serial_shapes[cls_name])
             decorator = cst.Decorator(
                 decorator=cst.Attribute(value=cst.Name(CY_MOD), attr=cst.Name("cclass"))
             )

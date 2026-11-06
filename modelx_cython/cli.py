@@ -371,14 +371,20 @@ def main_handler(args: argparse.Namespace, stdout: IO[str], stderr: IO[str]) -> 
                                encoding='utf-8')
 
         # Phase 3: transform and write out
+        from modelx_cython import serial_collect
+
         helper_providers = set()
         dense_entries = {}
+        serial_enabled = False
         for u in units:
+            serial_shapes = serial_collect.analyze(u.source, u.module_info)
+            serial_enabled |= bool(serial_shapes)
             trans = ModuleTransformer(
                 u.source, u.module_info,
                 resolver=resolver,
                 cells_kinds=cells_kinds,
                 ref_kinds=ref_kinds,
+                serial_shapes=serial_shapes,
             )
             pxd = PXDGenerator(u.module_info)
 
@@ -390,6 +396,8 @@ def main_handler(args: argparse.Namespace, stdout: IO[str], stderr: IO[str]) -> 
             u.abs_init_path.write_text("from . cimport _mx_classes", encoding="utf-8")
             modules.append(u.rel_src_path)
 
+        if serial_enabled:
+            serial_collect.enable_runtime(model_path / (MX_SYS_MOD + '.py'))
         modules.extend(install_helpers(helper_providers, model_path))
         if dense_bounds_proofs or dense_miss_binding:
             sources = {u.module_info.fqname: u.abs_src_path for u in units}

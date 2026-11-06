@@ -45,6 +45,11 @@ class TransSpec:
       cells with parameters; sampled maximum arguments can enlarge
       but not shrink these sizes.
     * ``"cells"``: dict mapping cells names to per-cells dicts.
+    * ``"serial_collect"``: optional experimental scalar collection for an
+      isolated slotted leaf Space. Use ``"reduce"`` for fresh receivers or
+      ``"reuse"`` for one receiver. The collect Space owns policy execution:
+      policies are independent and their live receiver and cache stay inside
+      collect. In reuse mode, Reference bindings are captured at entry.
     * ``"cells_params"`` (deprecated): older form of
       ``"cells_param_size"``; maps a parameter name (or tuple) to a
       dict with a ``"size"`` key.  Consulted only when
