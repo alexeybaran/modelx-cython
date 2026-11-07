@@ -122,8 +122,19 @@ def _rewrite(source, tree, records, uses):
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in native:
             calls[node.func.id].append(node)
 
-    ranges_by_entry = {name: _formula_ranges(guard, layout, uses, spill_functions, spill_uses)
-                       for name, (_, guard, layout) in native.items()}
+    ranges_by_entry = {}
+    for name, (_, guard, layout) in native.items():
+        entry_uses, entry_spills = uses, spill_uses
+        public = formulas.get((layout.owner, layout.formula[len(FORMULA_PREF):]))
+        public_guard = _checked_guard(public, layout) if public is not None else None
+        if public_guard is not None and ast.dump(public_guard) == ast.dump(guard):
+            # The public cache entry repeats the same checked path to the same
+            # formula/cache. Account for it without admitting unchecked uses.
+            entry_uses = uses - _attribute_counts(public)
+            entry_spills = spill_uses - Counter(node.id for node in ast.walk(public)
+                if isinstance(node, ast.Name) and node.id in spills)
+        ranges_by_entry[name] = _formula_ranges(
+            guard, layout, entry_uses, spill_functions, entry_spills)
     masks = {}
     for name, (_, guard, layout) in native.items():
         source_axes = ranges_by_entry[name]

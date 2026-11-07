@@ -60,8 +60,7 @@ class _ExactTests(cst.CSTTransformer):
 
 
 class _Miss(cst.CSTTransformer):
-    def __init__(self, owner, formula, direct, keys, propagate=False):
-        self.guard = cst.parse_expression(exact_receiver(owner))
+    def __init__(self, formula, direct, keys, propagate=False):
         self.formula = formula
         self.direct = direct
         self.keys = keys
@@ -78,9 +77,9 @@ class _Miss(cst.CSTTransformer):
         args = (cst.Arg(cst.Name(MX_SELF)), *updated.args)
         if self.propagate:
             args += (cst.Arg(cst.Name("True")),)
-        direct = updated.with_changes(func=cst.Name(self.direct), args=args)
-        return cst.IfExp(test=self.guard, body=direct, orelse=updated,
-                         lpar=(cst.LeftParen(),), rpar=(cst.RightParen(),))
+        # Only proven exact-receiver calls enter a private cache function.
+        # Public cache methods keep their original virtual formula call.
+        return updated.with_changes(func=cst.Name(self.direct), args=args)
 
 
 def _rewrite(source, entries, propagate=False):
@@ -135,7 +134,7 @@ def _rewrite(source, entries, propagate=False):
             methods[fn] = fn.with_changes(body=fn.body.with_changes(body=(
                 cst.parse_statement(f"return {direct}({args})\n"),
             )))
-            misses[entry] = _Miss(layout.owner, layout.formula, direct, keys, propagate)
+            misses[entry] = _Miss(layout.formula, direct, keys, propagate)
     if not replacements:
         return source
     body = []

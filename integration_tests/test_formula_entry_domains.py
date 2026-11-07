@@ -16,7 +16,11 @@ def test_long_and_hash_formula_contracts(tmp_path):
     try:
         s=model.new_space('Policy',formula='lambda key: None')
         s.failure=RuntimeError('sentinel')
-        s.new_cells('value','lambda t: float(t)')
+        s.counter=[0]
+        s.new_cells('value','''def value(t):
+    counter[0] += 1
+    return float(t)
+''')
         s.new_cells('long_total',long)
         s.new_cells('hash_total','''def hash_total(t, x):
     if t == 2:
@@ -37,6 +41,11 @@ def test_long_and_hash_formula_contracts(tmp_path):
         fn=functions[name]
         assert len(fn.body)==1 and isinstance(fn.body[0],ast.Return)
         assert fn.body[0].value.func.id.startswith('_mx_dense_formula_')
+    for name in ('long_total','hash_total','value'):
+        # Public cache methods must not delegate unproven receivers to a
+        # private entry; public/private paths share the same cache fields.
+        assert not any(isinstance(n,ast.Call) and isinstance(n.func,ast.Name)
+            and n.func.id.startswith('_mx_cache_entry_') for n in ast.walk(functions[name]))
     assert not any(isinstance(n,ast.Call) and isinstance(n.func,ast.Name)
         and n.func.id.startswith('_mx_dense_formula_') for n in ast.walk(functions['_f_untyped']))
     (tmp_path/'override.pyx').write_text(textwrap.dedent('''\
@@ -45,13 +54,16 @@ def test_long_and_hash_formula_contracts(tmp_path):
         cdef class Alternate(_c_Policy):
             cdef double _f_value(self, long long t) except? -1:
                 return 100.0 + t
+        cdef class PublicAlternate(_c_Policy):
+            cpdef double value(self, long long t) except? -1:
+                return 200.0 + t
         '''))
     (tmp_path/'setup_override.py').write_text('from setuptools import setup\n'
         'from Cython.Build import cythonize\nsetup(ext_modules=cythonize("override.pyx"))\n')
     subprocess.run([sys.executable,'-B','setup_override.py','build_ext','--inplace'],cwd=tmp_path,check=True)
     subprocess.run([sys.executable,'-B','-c',textwrap.dedent('''\
         from exported_cy import mx_model
-        from override import Alternate
+        from override import Alternate, PublicAlternate
         s=mx_model.Policy[1]
         assert s.long_total(0)==-1.0 and s.long_total(0)==-1.0
         assert s.long_total(1)==23.0 and s.long_total(1,2)==22.0
@@ -65,5 +77,21 @@ def test_long_and_hash_formula_contracts(tmp_path):
         alternate=Alternate(mx_model.Policy)
         assert alternate.long_total(1)==2423.0
         assert alternate.hash_total(1,0.25)==101.25
+        public_alternate=PublicAlternate(mx_model.Policy)
+        assert public_alternate.long_total(1)==4823.0
+        assert public_alternate.hash_total(1,0.25)==201.25
+        fresh=mx_model.Policy[2]
+        before=fresh.counter[0]
+        assert fresh.value(0)==0.0
+        assert fresh.hash_total(0,0.25)==0.25
+        assert fresh.counter[0]==before+1
+        assert fresh.hash_total(1,0.25)==1.25
+        assert fresh.value(1)==1.0
+        assert fresh.counter[0]==before+2
+        for call in (lambda:fresh.value(7),lambda:fresh.hash_total(7,0.25)):
+            for _ in range(2):
+                try:call()
+                except IndexError:pass
+                else:raise AssertionError('dense bounds not enforced')
         assert s.untyped(1)=={'value':1}
         ''')],cwd=tmp_path,check=True)

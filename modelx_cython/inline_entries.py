@@ -214,10 +214,10 @@ def add_inline_entries(module, classes):
                 decorators=tuple(cst.Decorator(cst.parse_expression(f"{CY_MOD}.{kind}"))
                                  for kind in ("cfunc", "inline")),
             ))
-            args = ", ".join((MX_SELF, *cell.params))
-            methods.append(method.with_changes(body=method.body.with_changes(
-                body=(cst.parse_statement(f"return {entry}({args})\n"),)
-            )))
+            # Public methods retain virtual formula dispatch. Private entries
+            # are called only behind the exact-receiver proof emitted below.
+            # Both entry paths use the same Cell cache fields.
+            methods.append(method)
 
         if entries:
             dense = {}
