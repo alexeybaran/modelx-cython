@@ -553,6 +553,9 @@ class CombinedRefInfo:
     optional_helper = None
     grouped_helper = None
     bounded_helper = None
+    bound_bounded_helper = None
+    bound_grouped_helper = None
+    bound_numeric_helper = None
     enum_definitions = ()
     enum_safe = False
 
@@ -575,6 +578,9 @@ class CombinedRefInfo:
             self.optional_helper = getattr(rt_info, 'optional_helper', None)
             self.grouped_helper = getattr(rt_info, 'grouped_helper', None)
             self.bounded_helper = getattr(rt_info, 'bounded_helper', None)
+            self.bound_bounded_helper = getattr(rt_info, 'bound_bounded_helper', None)
+            self.bound_grouped_helper = getattr(rt_info, 'bound_grouped_helper', None)
+            self.bound_numeric_helper = getattr(rt_info, 'bound_numeric_helper', None)
             self.enum_definitions = getattr(rt_info, 'enum_definitions', ())
             self.enum_safe = getattr(rt_info, 'enum_safe', False)
 

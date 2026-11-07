@@ -330,9 +330,9 @@ class RuntimeValueInfo:
         self.type_ = type(value)
         self.mx_class = mx_class
         self.helper = registered_helper(value) if type(value) is FunctionType else None
-        for capability in ('reduction', 'numeric', 'clamped', 'clamped_context', 'optional', 'grouped', 'bounded'):
+        for capability in ('reduction', 'numeric', 'clamped', 'clamped_context', 'optional', 'grouped', 'bounded', 'bound_bounded', 'bound_grouped', 'bound_numeric'):
             name = 'reduction' if capability == 'reduction' else capability + '_helper'
-            setattr(self, name, helper_capability(value, capability, grouped=capability == 'grouped')
+            setattr(self, name, helper_capability(value, capability, grouped=capability in ('grouped', 'bound_grouped', 'bound_numeric'))
                     if self.helper is not None else None)
         self.enum_definitions = (tuple(value) if isinstance(value, tuple)
             and vars(type(value)).get('__modelx_cython_enum_definitions__') is True else ())

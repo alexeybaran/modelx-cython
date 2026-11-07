@@ -1,5 +1,6 @@
 """Native helper returns only at an already-double formula return boundary."""
 import ast
+import math
 import re
 
 import libcst as cst
@@ -98,17 +99,34 @@ class NumericReturns(cst.CSTTransformer):
                 context_arg = f'{code(context)}, '
         slot, view, saved = (prefix + '_' + name for name in ('slot', 'view', 'record'))
         value, status = prefix + '_value', prefix + '_status'
+        probe_code = (f'{saved} = {code(record)}\n'
+                      f'{view} = {probe}({context_arg}{code(has.func)}, {saved}, {code(group)}, '
+                      f'{code(column)}, _mx_cy.address({slot}))\n')
+        value_args = (f'{code(subtable.func)}, {code(contains.func)}, {code(lookup.func)}, '
+                      f'{view}, {slot}, {code(key)}, _mx_cy.address({value})')
+        value_code = f'{status} = {get}({value_args})\n'
+        resource_guard = f'{code(record)} is {saved}'
+        admission = ''
+        bound_operations = getattr(lookup_ref, 'bound_grouped_helper', None)
+        if context_arg and bound_operations and len(bound_operations) == 3:
+            bound_probe, bound_value, admit_value = (f'{alias}.{name}' for name in bound_operations)
+            bound = prefix + '_bound'
+            admission = f'{bound}: _mx_cy.bint = False\n'
+            probe_code = (f'{bound} = {bound_probe}({code(context)}, {code(group)}, _mx_cy.address({slot}))\n'
+                          f'if not {bound}:\n'+''.join('    '+line for line in probe_code.splitlines(True)))
+            value_code = (f'if {bound}:\n'
+                          f'    {status} = {bound_value}({code(context)}, {slot}, {code(key)}, _mx_cy.address({value}))\n'
+                          f'else:\n    {status} = {admit_value}({code(context)}, {value_args})\n')
+            resource_guard = f'({bound} or {resource_guard})'
         native = cst.parse_module(
             f'{slot}: _mx_cy.Py_ssize_t = -2\n{view}: object = None\n{saved}: object = None\n'
+            f'{admission}'
             f'if {exact_receiver(self.cls.name)}:\n'
-            f'    {saved} = {code(record)}\n'
-            f'    {view} = {probe}({context_arg}{code(has.func)}, {saved}, {code(group)}, '
-            f'{code(column)}, _mx_cy.address({slot}))\n'
+            + ''.join('    '+line for line in probe_code.splitlines(True)) +
             f'if {slot} == -1 or ({slot} == -2 and not {code(has)}):\n    return 0.0\n'
             f'{code(key_line)}'
-            f'if {slot} >= 0 and {code(record)} is {saved}:\n'
-            f'    {status} = {get}({code(subtable.func)}, {code(contains.func)}, {code(lookup.func)}, '
-            f'{view}, {slot}, {code(key)}, _mx_cy.address({value}))\n'
+            f'if {slot} >= 0 and {resource_guard}:\n'
+            + ''.join('    '+line for line in value_code.splitlines(True)) +
             f'    if {status} == 0:\n        return 0.0\n'
             f'    if {status} == 1:\n        return min({value}, {code(cap)})\n'
         ).body
@@ -173,10 +191,15 @@ class NumericReturns(cst.CSTTransformer):
         args = ', '.join(module.code_for_node(arg) for arg in (
             lookup.func, lower.value.func, upper.value.func, context,
             table, key_name, column, below.value))
+        admission = f'{module_name(provider)}.{operation}({args}, _mx_cy.address({value}))'
+        bound = getattr(ref, 'bound_bounded_helper', None)
+        if bound:
+            bound_args = ', '.join(module.code_for_node(arg) for arg in (context, key_name, below.value))
+            admission = (f'({module_name(provider)}.{bound}({bound_args}, _mx_cy.address({value})) '
+                         f'or {admission})')
         fast = cst.parse_module(
             f'{value}: _mx_cy.double\n'
-            f'if {exact_receiver(self.cls.name)} and '
-            f'{module_name(provider)}.{operation}({args}, _mx_cy.address({value})):\n'
+            f'if {exact_receiver(self.cls.name)} and {admission}:\n'
             f'    return {value}\n'
         ).body
         self.providers.add(provider)
@@ -235,7 +258,7 @@ class NumericReturns(cst.CSTTransformer):
         used_names = set(re.findall(r'\b[A-Za-z_]\w*\b', module.code_for_node(after)))
         prefix = '_mx_optional'
         while any(prefix + suffix in used_names for suffix in
-                  ('_value', '_status', '_fallback', '_slot', '_view', '_record')):
+                  ('_value', '_status', '_fallback', '_slot', '_view', '_record', '_bound')):
             prefix += '_'
         value, status = prefix + '_value', prefix + '_status'
         fallback = prefix + '_fallback'
@@ -330,6 +353,52 @@ class NumericReturns(cst.CSTTransformer):
                     and cell.get_rettype_expr(c_style=True) in ('long long', 'bint'))
         return False
 
+    def bound_numeric(self, call, native, ref, provider, context):
+        operations = getattr(ref, 'bound_numeric_helper', None)
+        if not (operations and len(operations) == 3 and self.cell.formula_allows_exact_receiver
+                and not self.cell.is_locked and self.cell.cls not in self.cls.visitor.dynamic_ref_classes):
+            return native
+        table, key, column = (arg.value for arg in call.args[:3])
+        module = cst.Module([])
+        code = module.code_for_node
+        ready = ''
+        if (isinstance(table, cst.Attribute) and isinstance(table.value, cst.Name)
+                and table.value.value == 'self' and table.attr.value in self.cls.refs):
+            source = code(table)
+        elif self.self_call(table) and not table.args:
+            cell = self.cls.cells.get(table.func.attr.value)
+            if not (cell is not None and cell.has_formula_def and not cell.has_args()
+                    and not cell.is_locked and not cell.body_has_closure
+                    and cell.get_rettype_expr(c_style=True) == 'object'):
+                return native
+            source = f'self._v_{cell.name}'
+            ready = f'self._has_{cell.name} and '
+        else:
+            return native
+        named = isinstance(column, cst.SimpleString) and type(column.evaluated_value) is str
+        if not named and not self.native_key(column):
+            return native
+        default = 0.0
+        if len(call.args) == 4:
+            try:
+                literal = ast.literal_eval(code(call.args[3].value))
+                default = float(literal)
+                if type(literal) not in (int, float) or not math.isfinite(default) or default != literal:
+                    return native
+            except (ValueError, TypeError, OverflowError, SyntaxError):
+                return native
+        alias = module_name(provider)
+        column_pointer = f'_mx_cy.cast(_mx_cy.p_void, {code(column)})' if named else '_mx_cy.NULL'
+        test = cst.parse_expression(
+            f'{exact_receiver(self.cls.name)} and ({ready}{alias}.{operations[0]}('
+            f'{code(context)}, _mx_cy.cast(_mx_cy.p_void, {source}), {column_pointer}))')
+        result = cst.parse_expression(
+            f'{alias}.{operations[1]}({code(context)}, {code(key)}, {0 if named else code(column)}, '
+            f'{named}, {len(call.args) == 4}, {default!r})')
+        prepare = native.with_changes(func=cst.Attribute(cst.Name(alias), cst.Name(operations[2])))
+        return cst.IfExp(test=test, body=result, orelse=prepare,
+                         lpar=(cst.LeftParen(),), rpar=(cst.RightParen(),))
+
     def leave_Return(self, before, after):
         if (self.function_depth != 1 or self.cell.get_rettype_expr(c_style=True) != 'double'
                 or (not self.cell.has_formula_def and self.cell.called_with_kwargs)):
@@ -355,6 +424,7 @@ class NumericReturns(cst.CSTTransformer):
         if context is None:
             return after
         self.providers.add(provider)
-        return after.with_changes(value=call.with_changes(
+        native = call.with_changes(
             func=cst.Attribute(cst.Name(alias), cst.Name(operation)),
-            args=(cst.Arg(call.func), cst.Arg(context), *call.args)))
+            args=(cst.Arg(call.func), cst.Arg(context), *call.args))
+        return after.with_changes(value=self.bound_numeric(call, native, ref, provider, context))
