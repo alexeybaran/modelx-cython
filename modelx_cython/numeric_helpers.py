@@ -1,6 +1,5 @@
 """Native helper returns only at an already-double formula return boundary."""
 import ast
-import keyword
 import re
 
 import libcst as cst
@@ -10,11 +9,11 @@ from .helpers import module_name
 
 
 class NumericReturns(cst.CSTTransformer):
-    def __init__(self, cls, cell, providers, builtin_min=False):
+    def __init__(self, cls, cell, providers, builtin_keys=()):
         self.cls, self.cell, self.providers = cls, cell, providers
         self.contexts = {}
         self.operations = set()
-        self.builtin_min = builtin_min
+        self.builtin_keys = builtin_keys
         self.function_depth = 0
 
     def visit_FunctionDef(self, node):
@@ -48,9 +47,7 @@ class NumericReturns(cst.CSTTransformer):
     def grouped(self, body, key, column, cap, lookup_ref, contains, lookup, prefix, declarations):
         operations = getattr(lookup_ref, 'grouped_helper', None)
         if not (getattr(self.cell, 'formula_allows_exact_receiver', False)
-                and isinstance(operations, tuple) and len(operations) in (2, 3)
-                and all(isinstance(name, str) and name.isidentifier()
-                        and not keyword.iskeyword(name) for name in operations)
+                and operations
                 and type(column.evaluated_value) is str
                 and len(body) >= 6):
             return None
@@ -136,8 +133,7 @@ class NumericReturns(cst.CSTTransformer):
         lookup = result.value
         ref = self.cls.refs.get(lookup.func.attr.value)
         operation = getattr(ref, 'bounded_helper', None)
-        if not (isinstance(operation, str) and operation.isidentifier()
-                and not keyword.iskeyword(operation) and ref.helper):
+        if not (operation and ref.helper):
             return None
         table, clamp, column = (arg.value for arg in lookup.args)
         key_name, lo, hi = (stmt.targets[0].target for stmt in (key, lower, upper))
@@ -189,7 +185,7 @@ class NumericReturns(cst.CSTTransformer):
     def leave_FunctionDef(self, before, after):
         """Fuse a terminal membership check with its guarded numeric consumer."""
         self.function_depth -= 1
-        if (self.function_depth or not self.builtin_min or self.cell.is_locked
+        if (self.function_depth or 'min' not in self.builtin_keys or self.cell.is_locked
                 or self.cell.cls in self.cls.visitor.dynamic_ref_classes
                 or self.cell.get_rettype_expr(c_style=True) != 'double'
                 or not isinstance(after.body, cst.IndentedBlock) or len(after.body.body) < 4):
@@ -277,7 +273,7 @@ class NumericReturns(cst.CSTTransformer):
         return cst.parse_expression('self.' + context)
 
     def clamped_lookup(self, call, ref):
-        if not (self.function_depth == 1 and self.builtin_min
+        if not ('min' in self.builtin_keys
                 and getattr(ref, 'clamped_helper', None) and len(call.args) == 3):
             return None
         table, key, column = (arg.value for arg in call.args)
@@ -303,7 +299,7 @@ class NumericReturns(cst.CSTTransformer):
         operation = ref.clamped_helper
         args = (call.func, table, native, last.func, column)
         context_operation = getattr(ref, 'clamped_context_helper', None)
-        if isinstance(context_operation, str) and context_operation.isidentifier():
+        if context_operation:
             context = self.lookup_context(provider)
             if context is not None:
                 operation = context_operation
@@ -323,18 +319,19 @@ class NumericReturns(cst.CSTTransformer):
             ref = self.cls.refs.get(key.attr.value)
             return ref is not None and ref.get_type_expr(c_style=True) in ('long long','bint')
         if (isinstance(key, cst.Call) and isinstance(key.func, cst.Name)
-                and key.func.value in ('min','max') and len(key.args) >= 2
+                and key.func.value in self.builtin_keys and len(key.args) >= 2
                 and not any(a.keyword or a.star for a in key.args)):
             return all(self.native_key(a.value) for a in key.args)
         if (isinstance(key, cst.Call) and isinstance(key.func, cst.Attribute)
                 and isinstance(key.func.value, cst.Name) and key.func.value.value == 'self'):
             cell = self.cls.cells.get(key.func.attr.value)
-            return (cell is not None and not cell.called_with_kwargs and not cell.body_has_closure
+            return (cell is not None and not cell.is_special() and not cell.called_with_kwargs
+                    and not cell.body_has_closure
                     and cell.get_rettype_expr(c_style=True) in ('long long', 'bint'))
         return False
 
     def leave_Return(self, before, after):
-        if (self.cell.get_rettype_expr(c_style=True) != 'double'
+        if (self.function_depth != 1 or self.cell.get_rettype_expr(c_style=True) != 'double'
                 or (not self.cell.has_formula_def and self.cell.called_with_kwargs)):
             return after
         call = after.value

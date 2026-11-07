@@ -4,9 +4,11 @@ import sys
 import textwrap
 
 import modelx as mx
+import pytest
 
 
-def test_numeric_dict_lookup_preserves_misses_errors_and_locked_cells(tmp_path):
+@pytest.mark.parametrize("native_cache", [False, True])
+def test_numeric_dict_lookup_preserves_misses_errors_and_locked_cells(tmp_path, native_cache):
     model = mx.new_model('DictionaryLookup')
     try:
         for name in ('Plain', 'Locked'):
@@ -25,14 +27,20 @@ def test_numeric_dict_lookup_preserves_misses_errors_and_locked_cells(tmp_path):
         'for s in (m.Plain, m.Locked):\n'
         '    s.number(0.5); s.text(); s.nullable("a"); s.general((1,)); s.internal_name(0.5); s.text_internal("a")\n',
         encoding='utf-8')
+    (tmp_path / 'spec.py').write_text(repr({'spaces': {
+        name: {'cells': {cell: {'native_numeric_cache': native_cache}
+                         for cell in ('number', 'internal_name')}}
+        for name in ('Plain', 'Locked')
+    }}), encoding='utf-8')
     subprocess.run([sys.executable, '-m', 'modelx_cython', 'exported',
-                    '--sample', 'sample.py', '--no-spec'],
+                    '--sample', 'sample.py', '--spec', 'spec.py'],
                    cwd=tmp_path, env=dict(os.environ), check=True)
     probe = textwrap.dedent('''\
         from pathlib import Path
         from exported_cy import mx_model as m
         source = Path('exported_cy/_mx_classes.py').read_text()
-        assert '.NumericCache()' in source
+        import sys
+        assert ('.NumericCache()' in source) == (sys.argv[1] == 'True')
         assert '.get(key)' in source
         assert 'if key in self._v_text:' in source
         assert 'if key in self._v_general:' in source
@@ -76,5 +84,5 @@ def test_numeric_dict_lookup_preserves_misses_errors_and_locked_cells(tmp_path):
             space.values = {'a': 9.0}
             assert space.text('a') == 0.0
         ''')
-    subprocess.run([sys.executable, '-c', probe], cwd=tmp_path,
+    subprocess.run([sys.executable, '-c', probe, str(native_cache)], cwd=tmp_path,
                    env=dict(os.environ), check=True)

@@ -8,7 +8,7 @@ def describe(module_infos):
             for cell in cls.cells.values():
                 if cell.is_special():
                     continue
-                formula_python = cell.formula_is_generator or (
+                formula_python = cell.formula_is_generator or cell.formula_has_captured_default or (
                     not cell.has_formula_def and cell.body_has_closure)
                 public_python = cell.body_has_closure or cell.called_with_kwargs
                 if not cell.has_formula_def:
@@ -26,6 +26,8 @@ def describe(module_infos):
                     reasons.append('formula not observed by the sample')
                 if cell.formula_is_generator:
                     reasons.append('yield requires a Python method')
+                if cell.formula_has_captured_default:
+                    reasons.append('captured default uses the compiled Python signature')
                 if cell.body_has_closure:
                     reasons.append('closure requires a Python public method')
                 if cell.called_with_kwargs:
@@ -40,8 +42,9 @@ def describe(module_infos):
                     'arguments': {name: cell.get_argtype_expr(name, c_style=True)
                                   for name in cell.params},
                     'cache': cache,
-                    'dense_offsets': list(cell.cache_offsets) if cache == 'dense' else [],
-                    'exact_spill': cell.has_dense_spill,
+                    'dense_offsets': [int(offset) for offset in cell.cache_offsets]
+                    if cache == 'dense' else [],
+                    'exact_spill': bool(cell.has_dense_spill),
                     'nogil_qualified': False,
                     'native_helpers': getattr(cell, 'native_helpers', []),
                     'native_numeric_helpers': getattr(cell, 'native_numeric_helpers', []),

@@ -15,6 +15,7 @@ class SerialCollect:
     parameter: str
     reuse: bool
     private_lookups: bool
+    parallel_reuse: bool
 
 
 def _self_attribute(node):
@@ -45,32 +46,37 @@ def _single_dict(expr):
 
 def analyze(source, module):
     """Recognize the numeric sum shape. Policy isolation is a Space contract."""
-    options = {name: module.spec.get_spec(cls.fqname).get('serial_collect')
+    options = {name: module.spec.get_spec(cls.fqname)
                for name, cls in module.classes.items()}
-    if all(option is None for option in options.values()):
+    if not any('serial_collect' in spec or 'parallel_collect_reuse' in spec
+               for spec in options.values()):
         return {}
     result = {}
     for node in ast.parse(source).body:
         if not isinstance(node, ast.ClassDef) or node.name not in module.classes:
             continue
         cls = module.classes[node.name]
-        option = options[node.name]
+        spec = options[node.name]
+        option = spec.get('serial_collect')
+        parallel = spec.get('parallel_collect_reuse', False)
+        if type(parallel) is not bool or (parallel and option != 'reuse'):
+            raise ValueError('parallel_collect_reuse requires serial_collect reuse')
         if option is None:
             continue
         if option not in ('reduce', 'reuse'):
             raise ValueError('serial_collect must be reduce or reuse')
-        private = module.spec.get_spec(cls.fqname).get('serial_private_lookups', False)
+        private = spec.get('serial_private_lookups', False)
         if type(private) is not bool or (private and option != 'reuse'):
             raise ValueError('serial_private_lookups requires serial_collect reuse')
-        shape = _match(node, cls, module, option == 'reuse', private)
+        shape = _match(node, cls, option == 'reuse', private, parallel)
         if shape is not None:
             result[node.name] = shape
     return result
 
 
-def _match(node, cls, module, reuse, private_lookups=False):
+def _match(node, cls, reuse, private_lookups, parallel_reuse):
     if (len(node.bases) != 1 or ast.unparse(node.bases[0]) != '_mx_sys.BaseSpace'
-            or cls.spaces or cls.is_locked or node.name in module.visitor.dynamic_ref_classes
+            or cls.spaces or cls.is_locked or node.name in cls.visitor.dynamic_ref_classes
             or _method(node, '_mx_apply_formula') is not None):
         return None
     call = _return_expr(_method(node, 'collect'))
@@ -98,7 +104,7 @@ def _match(node, cls, module, reuse, private_lookups=False):
             or cls.cells[cell].body_has_closure or cls.cells[cell].called_with_kwargs):
         return None
 
-    return SerialCollect(label, cell, parameter, reuse, private_lookups)
+    return SerialCollect(label, cell, parameter, reuse, private_lookups, parallel_reuse)
 
 
 def _reset_lines(cls):
@@ -182,7 +188,10 @@ def add_methods(cls, node, shape):
             ret = stmt.body[0]
             arg = cst.Arg(keyword=cst.Name('evaluate_serial'),
                           value=cst.parse_expression('self._mx_evaluate_serial_collect'))
-            ret = ret.with_changes(value=ret.value.with_changes(args=(*ret.value.args, arg)))
+            args = (*ret.value.args, arg)
+            if shape.parallel_reuse:
+                args += (cst.Arg(keyword=cst.Name('reuse_in_parallel'), value=cst.Name('True')),)
+            ret = ret.with_changes(value=ret.value.with_changes(args=args))
             item = item.with_changes(body=item.body.with_changes(
                 body=(stmt.with_changes(body=(ret,)),)))
         methods.append(item)
@@ -194,7 +203,15 @@ def enable_runtime(path):
     source = path.read_text(encoding='utf-8')
     signature = 'def collect_from_space(base, domain, loop_name, names, args, cache=None, evaluate=None):'
     dispatch = '    if evaluate is None:\n'
-    if source.count(signature) != 1 or source.count(dispatch) != 1:
+    parallel_dispatch = '            result = _mx_collect_parallel(base, coords, loop_name, names, args)'
+    parallel = 'def _mx_collect_parallel(base, coords, loop_name, names, args):'
+    submit = 'executor.submit(_mx_collect_chunk, base, chunk, loop_name, names, args)'
+    chunk = '''def _mx_collect_chunk(base, coords, loop_name, names, args):
+    _mx_collect_context.active = True
+    try:
+        return _mx_collect_evaluate(base, coords, loop_name, names, args)'''
+    if any(source.count(marker) != 1
+           for marker in (signature, dispatch, parallel_dispatch, parallel, submit, chunk)):
         raise ValueError('serial_collect requires the supported collect runtime')
     source = source.replace(signature, '''
 def _mx_collect_native_coords(coords):
@@ -202,7 +219,7 @@ def _mx_collect_native_coords(coords):
 
 
 def collect_from_space(base, domain, loop_name, names, args, cache=None, evaluate=None,
-                       evaluate_serial=None):'''.lstrip())
+                       evaluate_serial=None, reuse_in_parallel=False):'''.lstrip())
     source = source.replace(dispatch, '''    if (evaluate_serial is not None and _mx_parallel_workers == 1
             and not getattr(_mx_collect_context, 'active', False)
             and sys.gettrace() is None and sys.getprofile() is None):
@@ -214,4 +231,23 @@ def collect_from_space(base, domain, loop_name, names, args, cache=None, evaluat
         if result is not None:
             return result if cache is None else cache.setdefault(key, result)
 ''' + dispatch)
+    source = source.replace(
+        parallel_dispatch,
+        '''            private = None
+            if (reuse_in_parallel and evaluate_serial is not None
+                    and sys.gettrace() is None and sys.getprofile() is None
+                    and _mx_collect_native_coords(coords)):
+                private = evaluate_serial
+            result = _mx_collect_parallel(base, coords, loop_name, names, args, private)''')
+    source = source.replace(parallel,
+                            'def _mx_collect_parallel(base, coords, loop_name, names, args, private=None):')
+    source = source.replace(submit, submit[:-1] + ', private)')
+    source = source.replace(chunk, '''def _mx_collect_chunk(base, coords, loop_name, names, args, private=None):
+    _mx_collect_context.active = True
+    try:
+        if private is not None:
+            result = private(coords)
+            if result is not None:
+                return result
+        return _mx_collect_evaluate(base, coords, loop_name, names, args)''')
     path.write_text(source, encoding='utf-8')

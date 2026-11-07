@@ -64,7 +64,6 @@ from libcst.metadata.scope_provider import BuiltinAssignment
 from modelx_cython.parser import ParentScopeAddin
 from modelx_cython.builder import ModuleInfo, CombinedCellsInfo
 from modelx_cython.powers import rewrite_powers
-from modelx_cython.exceptions import clause as exception_clause
 from modelx_cython.inline_entries import add_inline_entries, allows_exact_receiver
 from modelx_cython.cell_entries import dense_condition
 from modelx_cython import numeric_cache
@@ -410,7 +409,8 @@ class PXDGenerator:
             if cells.is_special():
                 continue
 
-            if not cells.has_formula_def or cells.formula_is_generator:
+            if (not cells.has_formula_def or cells.formula_is_generator
+                    or cells.formula_has_captured_default):
                 # no _f_ method exists, or it stays a plain Python method
                 continue
 
@@ -420,8 +420,7 @@ class PXDGenerator:
                     cls_name=cls_name, cells_name=cells.name
                 )
                 decl_stmts.append(
-                    f"cdef {rettype} {FORMULA_PREF + cells.name}({parameters})"
-                    + exception_clause(rettype) + "\n"
+                    f"cdef {rettype} {FORMULA_PREF + cells.name}({parameters})\n"
                 )
             else:
                 parameters = self._add_param_type_hints(
@@ -469,8 +468,7 @@ class PXDGenerator:
                     cls_name=cls_name, cells_name=cells.name
                 )
                 decl_stmts.append(
-                    f"cpdef {rettype} {cells.name}({parameters})"
-                    + exception_clause(rettype) + "\n"
+                    f"cpdef {rettype} {cells.name}({parameters})\n"
                 )
             else:
                 parameters = self._add_param_type_hints(
@@ -585,10 +583,10 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
             node = node.with_changes(body=node.body.visit(math_calls))
             self._uses_native_math |= math_calls.used
         node = CheckedArithmetic(cls_info, cells).rewrite(node)
-        min_bindings = scope["min"]
-        builtin_min = bool(min_bindings) and all(isinstance(binding, BuiltinAssignment)
-                                                for binding in min_bindings)
-        numeric_returns = NumericReturns(cls_info, cells, self.helper_providers, builtin_min)
+        builtin_keys = {name for name in ("min", "max")
+                        if scope[name] and all(isinstance(binding, BuiltinAssignment)
+                                               for binding in scope[name])}
+        numeric_returns = NumericReturns(cls_info, cells, self.helper_providers, builtin_keys)
         node = node.visit(numeric_returns)
         if not hasattr(cls_info, 'native_contexts'):
             cls_info.native_contexts = {}
@@ -1004,8 +1002,18 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
                     # leave as a plain Python method
                     return updated_node
 
+                scope = self.get_metadata(ScopeProvider, original_node.body)
+                if any(isinstance(binding.node, cst.Param)
+                       and binding.node.default is not None
+                       and any(access.scope is not scope for access in binding.references)
+                       for binding in scope.assignments):
+                    # Cython's pxd-declared optional C arguments are not
+                    # initialized in the closure. A compiled def binds them
+                    # through its normal Python argument handling.
+                    cells.formula_has_captured_default = True
+                    return updated_node
                 updated_node = self._rewrite_powers(
-                    updated_node, cls_info, cells, self.get_metadata(ScopeProvider, original_node.body))
+                    updated_node, cls_info, cells, scope)
 
                 decorators = [
                     cst.Decorator(

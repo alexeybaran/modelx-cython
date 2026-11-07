@@ -14,6 +14,37 @@ def module_name(provider):
     return '_mx_helper_' + hashlib.sha256(provider.encode()).hexdigest()[:12]
 
 
+def valid_identifier(name):
+    return isinstance(name, str) and name.isidentifier() and not keyword.iskeyword(name)
+
+
+def registered_helper(value):
+    contract = value.__dict__.get('__modelx_cython_helper__')
+    if contract is None:
+        return None
+    if not (isinstance(contract, tuple) and len(contract) == 2
+            and all(isinstance(item, str) for item in contract)):
+        raise ValueError('helper registration must be (provider, operation)')
+    provider, operation = contract
+    if '.' not in provider or not all(valid_identifier(part) for part in (*provider.split('.'), operation)):
+        raise ValueError('helper registration must name a packaged provider and an operation')
+    return contract
+
+
+def helper_capability(value, name, grouped=False):
+    capability = value.__dict__.get(f'__modelx_cython_{name}__')
+    if capability is None:
+        return None
+    if grouped:
+        valid = (isinstance(capability, tuple) and len(capability) in (2, 3)
+                 and all(valid_identifier(part) for part in capability))
+    else:
+        valid = valid_identifier(capability)
+    if not valid:
+        raise ValueError(f'invalid helper capability {name!r} on {value.__qualname__}')
+    return capability
+
+
 class HelperCalls(cst.CSTTransformer):
     def __init__(self, refs, used):
         self.refs = refs
@@ -29,13 +60,7 @@ class HelperCalls(cst.CSTTransformer):
         contract = ref.helper if ref is not None else None
         if not contract or any(arg.keyword or arg.star for arg in updated.args):
             return updated
-        if not (isinstance(contract, tuple) and len(contract) == 2
-                and all(isinstance(item, str) for item in contract)):
-            raise ValueError('helper registration must be (provider, operation)')
         provider, operation = contract
-        if not all(part.isidentifier() and not keyword.iskeyword(part)
-                   for part in (*provider.split('.'), operation)):
-            raise ValueError('helper registration must use Python identifiers')
         self.used.add(provider)
         self.operations.add(provider + '.' + operation)
         args = tuple(arg.with_changes(value=arg.value.with_changes(

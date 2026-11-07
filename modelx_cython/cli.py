@@ -357,7 +357,7 @@ def main_handler(args: argparse.Namespace, stdout: IO[str], stderr: IO[str]) -> 
         parallel_workers = d.get('parallel_workers', 1)
         if type(parallel_workers) is not int or parallel_workers < 1:
             raise ValueError('parallel_workers must be a positive integer')
-        dense_bounds_proofs = d.get('dense_bounds_proofs', sys.platform == "win32")
+        dense_bounds_proofs = d.get('dense_bounds_proofs', False)
         dense_miss_binding = d.get('dense_miss_binding', sys.platform == "win32")
         dense_one_axis = d.get('dense_one_axis', False)
         propagate_exact_receiver = d.get('propagate_exact_receiver', False)

@@ -1,4 +1,5 @@
 """Observed negative bounds size a cache without closing its key domain."""
+import json
 import subprocess
 import sys
 import textwrap
@@ -21,13 +22,17 @@ def test_shifted_dense_and_exact_spill(tmp_path):
     finally:
         model.close()
     (tmp_path/'sample.py').write_text('from exported import mx_model as m\n'
+        'from numpy import int64\n'
         'for s in (m.Plain, m.Locked):\n'
-        '    for t in (-1, 0, 3): s.value(t)\n'
+        '    for t in (-1, 0, 3): s.value(int64(t))\n'
         '    s.legacy(0); s.legacy(3)\n')
     subprocess.run([sys.executable, '-m', 'modelx_cython', 'exported',
                     '--sample', 'sample.py', '--no-spec'], cwd=tmp_path, check=True)
     generated = (tmp_path/'exported_cy/_mx_classes.py').read_text()
     assert '_spill_value' in generated
+    report = json.loads((tmp_path/'exported_cy/_mx_admission.json').read_text())
+    shifted = report['exported_cy._mx_classes._c_Plain._f_value']
+    assert shifted['dense_offsets'] == [-1] and shifted['exact_spill'] is True
     probe = textwrap.dedent('''\
         from exported_cy import mx_model as m
         for s in (m.Plain, m.Locked):

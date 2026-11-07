@@ -28,6 +28,7 @@ def _eligible(cell, params):
         cell.has_formula_def
         and not cell.is_locked
         and not cell.formula_is_generator
+        and not cell.formula_has_captured_default
         and not cell.body_has_closure
         and not cell.called_with_kwargs
         and cell.get_rettype_expr(c_style=True) in _NUMERIC_TYPES
@@ -240,7 +241,8 @@ def add_inline_entries(module, classes):
                 name = method.name.value
                 if name.startswith(FORMULA_PREF):
                     cell = cells.get(name[len(FORMULA_PREF):])
-                    compiled = cell is not None and not cell.formula_is_generator
+                    compiled = (cell is not None and not cell.formula_is_generator
+                                and not cell.formula_has_captured_default)
                 else:
                     cell = cells.get(name)
                     compiled = (cell is not None and not cell.has_formula_def

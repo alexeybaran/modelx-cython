@@ -49,6 +49,7 @@ import logging
 
 import numpy as np
 
+from modelx_cython.helpers import helper_capability, registered_helper
 from modelx_cython.monkeytype_tracing import (
     CallTraceLogger,
     get_func,
@@ -328,22 +329,11 @@ class RuntimeValueInfo:
         """Record the type of ``value`` and an optional class name."""
         self.type_ = type(value)
         self.mx_class = mx_class
-        self.helper = (value.__dict__.get('__modelx_cython_helper__')
-                       if type(value) is FunctionType else None)
-        self.reduction = (value.__dict__.get('__modelx_cython_reduction__')
-                          if type(value) is FunctionType else None)
-        self.numeric_helper = (value.__dict__.get('__modelx_cython_numeric__')
-                               if type(value) is FunctionType else None)
-        self.clamped_helper = (value.__dict__.get('__modelx_cython_clamped__')
-                               if type(value) is FunctionType else None)
-        self.clamped_context_helper = (value.__dict__.get('__modelx_cython_clamped_context__')
-                                       if type(value) is FunctionType else None)
-        self.optional_helper = (value.__dict__.get('__modelx_cython_optional__')
-                                if type(value) is FunctionType else None)
-        self.grouped_helper = (value.__dict__.get('__modelx_cython_grouped__')
-                               if type(value) is FunctionType else None)
-        self.bounded_helper = (value.__dict__.get('__modelx_cython_bounded__')
-                               if type(value) is FunctionType else None)
+        self.helper = registered_helper(value) if type(value) is FunctionType else None
+        for capability in ('reduction', 'numeric', 'clamped', 'clamped_context', 'optional', 'grouped', 'bounded'):
+            name = 'reduction' if capability == 'reduction' else capability + '_helper'
+            setattr(self, name, helper_capability(value, capability, grouped=capability == 'grouped')
+                    if self.helper is not None else None)
         self.enum_definitions = (tuple(value) if isinstance(value, tuple)
             and vars(type(value)).get('__modelx_cython_enum_definitions__') is True else ())
         self.enum_safe = (isinstance(value, type) and issubclass(value, IntEnum)

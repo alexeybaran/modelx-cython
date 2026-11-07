@@ -52,6 +52,9 @@ class TransSpec:
       collect. In reuse mode, Reference bindings are captured at entry.
     * ``"serial_private_lookups"``: enable supported helpers' private warm
       path on a worker-owned serial collect receiver.
+    * ``"parallel_collect_reuse"``: with ``"serial_collect": "reuse"``, give
+      each ordered collect chunk its own reusable receiver. The same policy
+      isolation and stable Reference contract applies across workers.
     * ``"cells_params"`` (deprecated): older form of
       ``"cells_param_size"``; maps a parameter name (or tuple) to a
       dict with a ``"size"`` key.  Consulted only when
@@ -59,6 +62,10 @@ class TransSpec:
 
     A per-cells dict may have:
 
+    * ``"native_numeric_cache"``: explicitly select experimental numeric key
+      storage for an eligible cell. The default dictionary supports compiled
+      model pickling. Setting ``"numeric_cache_capacity"`` also opts in unless
+      ``"native_numeric_cache"`` is false.
     * ``"dense_window"``: a sequence of half-open ``(lower, stop)`` pairs
       in parameter order for a dense cache. The physical window must
       fit inside the existing logical bounds. Exact spill keeps the

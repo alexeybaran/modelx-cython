@@ -133,3 +133,38 @@ consumes an array-returning cells as a whole array and the compiled model
 hands you a memoryview, set `"return_type": "object"` for that cells;
 conversely, `"return_type": "memoryview"` forces the memoryview even when
 the analysis would fall back.
+
+## Experimental cache and collection options
+
+Cells that need an associative cache use a Python dictionary by default.
+For eligible scalar Cells, set `native_numeric_cache` in the Cell spec to try
+the native key store. A Cell spec with `numeric_cache_capacity` also opts in unless
+`native_numeric_cache` is false. Use the default for compiled models that
+need to be pickled.
+
+`dense_bounds_proofs` is an explicit top-level opt-in. The compiler still
+uses checked cache entries and exact-receiver dispatch with the default.
+
+Set `serial_collect` to `"reuse"` on an eligible leaf Space with one scalar
+sum output to reuse a receiver. Set `parallel_collect_reuse` on the same Space
+to reuse one receiver per chunk when `parallel_workers` exceeds one. Each
+policy must be independent, its receiver and mutable cache must stay inside
+collect, and Reference bindings must stay stable during the calculation.
+The existing chunk partition and result merge order apply. Shapes outside
+the admitted contract use the ordinary collection implementation.
+
+## Registered helper providers
+
+An exported callable Reference may declare `__modelx_cython_helper__` as a
+`(provider, operation)` tuple. The provider names a Python package resource
+with matching Cython `.pxd` and `.pyx` files. The operation receives the
+current callable first. It must delegate to that callable when its
+identity, argument types, or table layout fall outside the native path.
+
+A provider owns the table representation and the rules for exact keys,
+predecessors, column identifiers, grouped keys, and defaults. The Python
+Reference remains the behavioral oracle for live modelx, Python export,
+and compiled calls. The compiler checks operation names and only selects
+numeric capabilities where the generated call has a justified signature.
+It leaves user-defined key expressions and arbitrary generators on the
+ordinary path when their types or bindings are uncertain.

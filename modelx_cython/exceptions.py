@@ -1,12 +1,11 @@
-"""Use Cython conditional error checks for numeric generated signatures."""
+"""Use conditional error checks on private numeric functions we emit."""
 import libcst as cst
 
 
-def clause(type_):
-    return ' except? -1' if type_ in ('double', 'long long', 'bint') else ''
-
-
 class NumericExceptions(cst.CSTTransformer):
+    def visit_ClassDef(self, node):
+        return False
+
     def leave_FunctionDef(self, before, after):
         module = cst.Module([])
         decorators = [module.code_for_node(d.decorator) for d in after.decorators]

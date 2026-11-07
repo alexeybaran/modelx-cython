@@ -139,6 +139,7 @@ class CombinedCellsInfo(LexicalCellsInfo):
     # True if some formula calls this cells with keyword arguments, which
     # C-level (cpdef) calls do not support; set in cli.main_handler
     called_with_kwargs: bool = False
+    formula_has_captured_default: bool = False
 
     def __init__(self, cls_info, lx_info, rt_info, spec) -> None:
         """Merge lexical, runtime and spec info, validating the spec's
@@ -424,8 +425,11 @@ class CombinedCellsInfo(LexicalCellsInfo):
 
     @property
     def uses_native_numeric_cache(self):
+        requested = self._spec.get('native_numeric_cache', 'numeric_cache_capacity' in self._spec)
+        if type(requested) is not bool:
+            raise ValueError(f'{self.fqname}: native_numeric_cache must be a boolean')
         numeric = {'double', 'long long', 'bint'}
-        return (self.has_formula_def and self.has_typeinfo() and self.has_args()
+        return (requested and self.has_formula_def and self.has_typeinfo() and self.has_args()
                 and len(self.params) <= 3 and not self.is_arrayable()
                 and not self.is_array_returned and self.get_rettype_expr(c_style=True) in numeric
                 and all(self.get_argtype_expr(p, c_style=True) in numeric for p in self.params))
