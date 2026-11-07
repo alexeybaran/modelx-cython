@@ -116,6 +116,8 @@ def _rewrite(source, entries, propagate=False):
             args = ", ".join((MX_SELF, *keys))
             formula_body = fn.body
             if propagate:
+                params = [param.with_changes(default=None, equal=cst.MaybeSentinel.DEFAULT)
+                          for param in params]
                 params.append(cst.Param(cst.Name(exact), annotation=cst.Annotation(
                     cst.parse_expression(f"{CY_MOD}.bint"))))
                 formula_body = formula_body.visit(_ExactTests(layout.owner, exact))
