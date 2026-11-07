@@ -1,4 +1,4 @@
-"""Bind small dense cache misses before handing source to Cython."""
+"""Bind proven numeric cache misses without a formula-length eligibility rule."""
 
 import ast
 
@@ -6,16 +6,23 @@ import libcst as cst
 
 from .cell_entries import exact_receiver
 from .consts import CY_MOD, MX_SELF
+from .inline_entries import _Names
 
 
-def _eligible(method, syntax, keys):
+def _eligible(method, syntax, keys, guard_safe):
+    if not guard_safe:
+        return False
     params = method.params
     if (params.posonly_params or params.kwonly_params or params.star_kwarg
             or isinstance(params.star_arg, cst.Param)
             or tuple(param.name.value for param in params.params) != (MX_SELF, *keys)):
         return False
     body = [node for statement in syntax.body for node in ast.walk(statement)]
-    if len(body) > 150:
+    code = cst.Module([]).code_for_node
+    native = {f'{CY_MOD}.{name}' for name in ('double', 'longlong', 'bint')}
+    if (method.returns is None or code(method.returns.annotation) not in native
+            or any(param.annotation is None or code(param.annotation.annotation) not in native
+                   for param in params.params[1:])):
         return False
     if not any(isinstance(item.decorator, cst.Attribute)
                and isinstance(item.decorator.value, cst.Name)
@@ -23,6 +30,12 @@ def _eligible(method, syntax, keys):
                for item in method.decorators):
         return False
     for node in body:
+        if isinstance(node, ast.Name) and node.id == MX_SELF and not isinstance(node.ctx, ast.Load):
+            return False
+        # Exception/pattern targets store names as strings, not Name(Store).
+        if (getattr(node, 'name', None) == MX_SELF or getattr(node, 'rest', None) == MX_SELF
+                or (isinstance(node, ast.alias) and (node.asname or node.name.split('.')[0]) == MX_SELF)):
+            return False
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef,
                              ast.Lambda, ast.Yield, ast.YieldFrom, ast.GeneratorExp,
                              ast.ListComp, ast.SetComp, ast.DictComp)):
@@ -73,12 +86,7 @@ class _Miss(cst.CSTTransformer):
 def _rewrite(source, entries, propagate=False):
     tree = ast.parse(source)
     module = cst.parse_module(source)
-    names = {node.id for node in ast.walk(tree) if isinstance(node, ast.Name)}
-    names.update(node.name for node in ast.walk(tree)
-                 if isinstance(node, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)))
-    names.update(node.arg for node in ast.walk(tree) if isinstance(node, ast.arg))
-    names.update(node.asname or node.name.split(".")[0] for node in ast.walk(tree)
-                 if isinstance(node, ast.alias))
+    names = _Names(module).names
     exact = "_mx_exact_receiver"
     while exact in names:
         exact += "_"
@@ -100,12 +108,8 @@ def _rewrite(source, entries, propagate=False):
             if identity not in targets:
                 continue
             entry, layout = targets[identity]
-            keys = tuple(axis.key for axis in layout.axes)
-            if not _eligible(fn, formulas[identity], keys):
-                continue
-            if propagate and any(isinstance(node, ast.Name) and node.id == MX_SELF
-                                 and not isinstance(node.ctx, ast.Load)
-                                 for node in ast.walk(formulas[identity])):
+            keys = layout.keys
+            if not _eligible(fn, formulas[identity], keys, layout.guard_safe):
                 continue
             direct = f"_mx_dense_formula_{len(replacements)}"
             while direct in names:
@@ -145,7 +149,7 @@ def _rewrite(source, entries, propagate=False):
     return module.with_changes(body=(*body, *replacements)).bytes
 
 
-def bind_dense_formulas(modules, layouts, propagate=False):
+def bind_formula_entries(modules, layouts, propagate=False):
     for module, entries in layouts.items():
         path = modules[module]
         original = path.read_bytes()

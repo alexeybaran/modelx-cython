@@ -25,6 +25,15 @@ class DenseEntry:
     spill_entry: str | None = None
 
 
+@dataclass(frozen=True)
+class FormulaEntry:
+    """A proven private numeric call target, independent of cache geometry."""
+    owner: str
+    formula: str
+    keys: tuple[str, ...]
+    guard_safe: bool
+
+
 def dense_condition(axes, proof=None, proved_axes=()):
     checks = [f"({axis.lower} <= {axis.key} < {axis.stop})" for axis in axes]
     if proof is not None:

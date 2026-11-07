@@ -53,7 +53,7 @@ from modelx_cython.usage import (
 from modelx_cython.powers import build_kind_maps
 from modelx_cython.admission import describe
 from modelx_cython.dense_proofs import reuse_dense_bounds
-from modelx_cython.dense_formulas import bind_dense_formulas
+from modelx_cython.dense_formulas import bind_formula_entries
 from modelx_cython.helpers import install as install_helpers
 
 _logger = logging.getLogger(__name__)
@@ -383,6 +383,7 @@ def main_handler(args: argparse.Namespace, stdout: IO[str], stderr: IO[str]) -> 
 
         helper_providers = set()
         dense_entries = {}
+        formula_entries = {}
         serial_enabled = False
         for u in units:
             serial_shapes = serial_collect.analyze(u.source, u.module_info)
@@ -400,6 +401,8 @@ def main_handler(args: argparse.Namespace, stdout: IO[str], stderr: IO[str]) -> 
             helper_providers.update(trans.helper_providers)
             if trans.dense_entries:
                 dense_entries[u.module_info.fqname] = trans.dense_entries
+            if trans.formula_entries:
+                formula_entries[u.module_info.fqname] = trans.formula_entries
             u.abs_pxd_path.write_text(pxd.code, encoding="utf-8")
             u.abs_init_path.write_text("from . cimport _mx_classes", encoding="utf-8")
             modules.append(u.rel_src_path)
@@ -412,7 +415,7 @@ def main_handler(args: argparse.Namespace, stdout: IO[str], stderr: IO[str]) -> 
             if dense_bounds_proofs:
                 reuse_dense_bounds(sources, dense_entries)
             if dense_miss_binding:
-                bind_dense_formulas(sources, dense_entries, propagate_exact_receiver)
+                bind_formula_entries(sources, formula_entries, propagate_exact_receiver)
             if dense_one_axis:
                 from modelx_cython.dense_one_axis import specialize_one_axis
                 specialize_one_axis(sources, dense_entries, propagate_exact_receiver)

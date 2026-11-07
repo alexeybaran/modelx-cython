@@ -2,7 +2,7 @@
 
 import libcst as cst
 
-from modelx_cython.cell_entries import DenseEntry, exact_receiver
+from modelx_cython.cell_entries import DenseEntry, FormulaEntry, exact_receiver
 from modelx_cython.consts import CY_MOD, FORMULA_PREF, HAS_PREF, MX_POW, MX_SELF, MX_SYS_MOD
 
 
@@ -170,6 +170,7 @@ def add_inline_entries(module, classes):
         optional_receiver += '_'
     functions = []
     dense_entries = {}
+    formula_entries = {}
     next_entry = 0
     body = []
     for statement in module.body:
@@ -197,6 +198,8 @@ def add_inline_entries(module, classes):
             next_entry += 1
             cell.inline_entry = entry
             entries[cell.name] = entry, len(cell.params), defaults
+            formula_entries[entry] = FormulaEntry(owner, FORMULA_PREF + cell.name,
+                tuple(cell.params), getattr(cell, 'formula_allows_exact_receiver', False))
             params = method.params
             # The public method always has a receiver. Internal calls prove
             # the exact receiver before entering this private C function.
@@ -275,4 +278,4 @@ def add_inline_entries(module, classes):
             index = len(body)
         body.insert(index, cst.parse_statement(
             f'from typing import Optional as {optional_receiver}\n'))
-    return module.with_changes(body=(*body, *functions)), dense_entries
+    return module.with_changes(body=(*body, *functions)), dense_entries, formula_entries

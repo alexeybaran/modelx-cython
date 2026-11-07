@@ -540,6 +540,7 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
         self._uses_native_math = False
         self.helper_providers = set()
         self.dense_entries = {}
+        self.formula_entries = {}
         if any(c.uses_native_numeric_cache for cls in module.classes.values()
                for c in cls.cells.values() if not c.is_special()):
             self.helper_providers.add(numeric_cache.PROVIDER)
@@ -667,7 +668,7 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
             # Exact type alone cannot rule out overrides on a receiver with a dict.
             ordinary = {name: cls for name, cls in self.module.classes.items()
                         if name not in self.module.visitor.dynamic_ref_classes}
-            module, self.dense_entries = add_inline_entries(module, ordinary)
+            module, self.dense_entries, self.formula_entries = add_inline_entries(module, ordinary)
         if self._cold_sums or self._cold_spills:
             module = module.with_changes(body=(*module.body, *self._cold_sums, *self._cold_spills))
         return module.visit(NumericExceptions())
