@@ -54,7 +54,8 @@ class TransSpec:
       path on a worker-owned serial collect receiver.
     * ``"parallel_collect_reuse"``: with ``"serial_collect": "reuse"``, give
       each ordered collect chunk its own reusable receiver. The same policy
-      isolation and stable Reference contract applies across workers.
+      isolation and stable Reference contract applies across workers. Scalar
+      chunk totals merge in completion order.
     * ``"cells_params"`` (deprecated): older form of
       ``"cells_param_size"``; maps a parameter name (or tuple) to a
       dict with a ``"size"`` key.  Consulted only when

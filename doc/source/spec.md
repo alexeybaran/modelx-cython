@@ -150,8 +150,9 @@ sum output to reuse a receiver. Set `parallel_collect_reuse` on the same Space
 to reuse one receiver per chunk when `parallel_workers` exceeds one. Each
 policy must be independent, its receiver and mutable cache must stay inside
 collect, and Reference bindings must stay stable during the calculation.
-The existing chunk partition and result merge order apply. Shapes outside
-the admitted contract use the ordinary collection implementation.
+The existing chunk partition applies. The private scalar chunk totals merge
+as workers finish, so floating-point totals can differ by roundoff. Shapes
+outside the admitted contract use the ordinary collection implementation.
 
 ## Registered helper providers
 

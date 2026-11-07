@@ -5,7 +5,7 @@ import textwrap
 import modelx as mx
 
 
-def test_parallel_collect_reuse_keeps_order_isolation_and_retry(tmp_path):
+def test_parallel_collect_reuse_merges_completed_chunks_and_retries(tmp_path):
     model = mx.new_model("PrivateCollect")
     try:
         values = (1e16, 1.0, -1e16, 1.0, 2.0, 3.0, 4.0, -0.0)
@@ -31,7 +31,7 @@ def test_parallel_collect_reuse_keeps_order_isolation_and_retry(tmp_path):
     subprocess.run([sys.executable, "-m", "modelx_cython", "exported",
                     "--sample", "sample.py", "--spec", "spec.py"], cwd=tmp_path, check=True)
     generated = (tmp_path / "exported_cy/_mx_classes.py").read_text(encoding="utf-8")
-    assert "reuse_in_parallel = True" in generated or "reuse_in_parallel=True" in generated
+    assert "reuse_in_parallel" in generated
     probe = textwrap.dedent("""\
         from concurrent import futures
         import sys
@@ -56,8 +56,13 @@ def test_parallel_collect_reuse_keeps_order_isolation_and_retry(tmp_path):
                     return fn(*args, **kwargs)
                 return super().submit(run)
 
-        ordinary = m.Ordinary.collect().sum.value
+        def completion_order(tasks):
+            for index in (2, 0, 1, 3):
+                yield tasks[index]
+
+        assert m.Ordinary.collect().sum.value == 9.0
         futures.ThreadPoolExecutor = Observer
+        futures.as_completed = completion_order
         failure = LookupError("retry")
         def broken(x):
             if x == -1e16:
@@ -72,7 +77,7 @@ def test_parallel_collect_reuse_keeps_order_isolation_and_retry(tmp_path):
             raise AssertionError("failure swallowed")
         m.Reused.adjust = float
         result = m.Reused.collect()
-        assert result.sum.value == ordinary
+        assert result.sum.value == 8.0
         assert m.Reused.collect() is result
         assert len(threads) >= 4
         try:

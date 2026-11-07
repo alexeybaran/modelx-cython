@@ -190,7 +190,9 @@ def add_methods(cls, node, shape):
                           value=cst.parse_expression('self._mx_evaluate_serial_collect'))
             args = (*ret.value.args, arg)
             if shape.parallel_reuse:
-                args += (cst.Arg(keyword=cst.Name('reuse_in_parallel'), value=cst.Name('True')),)
+                can_reuse = cst.parse_expression(
+                    f'type(self) is {cls.name} and not self._mx_roots and not self._mx_spaces')
+                args += (cst.Arg(keyword=cst.Name('reuse_in_parallel'), value=can_reuse),)
             ret = ret.with_changes(value=ret.value.with_changes(args=args))
             item = item.with_changes(body=item.body.with_changes(
                 body=(stmt.with_changes(body=(ret,)),)))
@@ -206,12 +208,15 @@ def enable_runtime(path):
     parallel_dispatch = '            result = _mx_collect_parallel(base, coords, loop_name, names, args)'
     parallel = 'def _mx_collect_parallel(base, coords, loop_name, names, args):'
     submit = 'executor.submit(_mx_collect_chunk, base, chunk, loop_name, names, args)'
+    merge = '''        # Merge in domain order too, so an earlier shape error precedes a
+        # later worker's formula error. The executor joins all workers on exit.
+        for future in futures:'''
     chunk = '''def _mx_collect_chunk(base, coords, loop_name, names, args):
     _mx_collect_context.active = True
     try:
         return _mx_collect_evaluate(base, coords, loop_name, names, args)'''
     if any(source.count(marker) != 1
-           for marker in (signature, dispatch, parallel_dispatch, parallel, submit, chunk)):
+           for marker in (signature, dispatch, parallel_dispatch, parallel, submit, merge, chunk)):
         raise ValueError('serial_collect requires the supported collect runtime')
     source = source.replace(signature, '''
 def _mx_collect_native_coords(coords):
@@ -242,6 +247,11 @@ def collect_from_space(base, domain, loop_name, names, args, cache=None, evaluat
     source = source.replace(parallel,
                             'def _mx_collect_parallel(base, coords, loop_name, names, args, private=None):')
     source = source.replace(submit, submit[:-1] + ', private)')
+    source = source.replace(merge, '''        # Only private scalar chunks may merge in completion order.
+        if private is not None:
+            from concurrent.futures import as_completed
+            futures = as_completed(futures)
+        for future in futures:''')
     source = source.replace(chunk, '''def _mx_collect_chunk(base, coords, loop_name, names, args, private=None):
     _mx_collect_context.active = True
     try:
