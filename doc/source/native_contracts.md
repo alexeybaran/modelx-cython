@@ -19,8 +19,11 @@ comprehension scopes. A statement-changing lowering declines observable binding
 effects it cannot preserve, including globals, nonlocals and exception targets.
 Declining an optimization retains ordinary Cython execution.
 Detached expressions retain the implicit parentheses supplied by their source
-context, including multiline operators and comments. Admission shares this
-parsing boundary across arithmetic, reductions and cache-entry facts.
+context, including multiline operators and comments. Arithmetic, reductions and
+cache-entry passes inspect the existing LibCST nodes and binding metadata.
+The compiler has one source frontend; it does not parse formula bodies into a
+second Python AST. LibCST's literal token conversion still uses `literal_eval`
+internally. Cython parses and compiles the resulting Space/Cell package.
 
 Exact receiver checks preserve Cell subclass dispatch. `EnumDefinitions` marks
 fixed compiled model-code bindings: changing a declared binding or its marker

@@ -12,7 +12,7 @@ from modelx_cython.dense_formulas import _eligible
 
 def eligible(body, guard_safe=True):
     source='@_mx_cy.cfunc\ndef formula(self, t: _mx_cy.longlong) -> _mx_cy.double:\n'+textwrap.indent(body,'    ')
-    return _eligible(cst.parse_module(source).body[0],ast.parse(source).body[0],('t',),guard_safe)
+    return _eligible(cst.parse_module(source).body[0],('t',),guard_safe)
 
 
 @pytest.mark.parametrize('body',[
@@ -36,7 +36,7 @@ def test_formula_length_is_not_call_eligibility():
 
 def test_unknown_signature_is_not_admitted():
     source='@_mx_cy.cfunc\ndef formula(self, t) -> object:\n    return t\n'
-    assert not _eligible(cst.parse_module(source).body[0],ast.parse(source).body[0],('t',),True)
+    assert not _eligible(cst.parse_module(source).body[0],('t',),True)
 
 
 def test_guard_shadowing_stays_on_method_path(tmp_path):
