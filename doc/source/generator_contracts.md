@@ -49,13 +49,13 @@ Creating a separate helper for each business formula is excluded.
    machine-integer admission is a proof obligation for every arithmetic
    intermediate and terminating increment, not just sampled endpoints.
 
-## Current composed boolean lowering
+## Current composed primitive lowering
 
-Registered `all_true` and `any_true` can use composed typed loops when all of
+Registered `all_true`, `any_true`, `sum_f64` and `max_value` can use composed typed loops when all of
 these conditions hold:
 
 - The formula returns the reduction directly, has a safe lexical scope and a
-  cold generator fallback, and has a native boolean result.
+  cold generator fallback, and has a native boolean or double result as appropriate.
 - The receiver is exact and the current callable passes the provider's identity
   check. A subclass or replacement callable keeps the generator path.
 - Clauses use builtin `range` with primitive proved integer arguments and a
@@ -69,11 +69,16 @@ these conditions hold:
 
 The fast branch evaluates outer range arguments once before the generator-body
 exception boundary. It evaluates inner bounds and filters on demand inside that
-boundary. Empty identities are `True` for all and `False` for any. The terminating
+boundary. Empty identities are `True` for all, `False` for any, and float zero for
+sum. Maximum stores the first value, compares later values strictly, and preserves
+the first NaN and signed-zero tie behavior. Its empty-error boundary delegates to
+the registered callable so the Python release's exact exception message is
+preserved. Sum reuses the existing provider's compensated F64Sum state; no second
+summation algorithm is introduced. The terminating
 increment of a unit-step half-open int64 range is representable. General steps
 retain compatibility until a separate checked progression mechanism is proven.
 
-Existing sum and bounded max/any mechanisms remain separately admitted. Their
+Existing singleton/captured sum and bounded max/any mechanisms remain separately admitted. Their
 presence does not imply arbitrary-range, arbitrary-capture or arbitrary-iterator
 coverage. Object-capable Cython is useful compatibility but does not by itself
 close a primitive native-coverage row.

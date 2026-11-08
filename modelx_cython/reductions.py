@@ -357,16 +357,18 @@ return {fallback}
             return None
         return start.id, lower.right.value, step.operand.value
 
-    def boolean_ranges(self, after, func, ref, source, tree):
-        """Compose primitive range predicates with Python generator boundaries.
+    def primitive_ranges(self, after, func, ref, source, tree):
+        """Compose primitive reductions with Python generator boundaries.
 
         Unit steps cannot overflow at the terminating increment. General steps
         need a separate checked progression proof; they retain their generator.
         The outer range arguments are eager, outside PEP 479's body boundary.
         Inner bounds, filters and payloads remain lazy and inside that boundary.
         """
+        boolean = ref.reduction in ('bool_any', 'bool_all')
+        expected_result = 'bint' if boolean else 'double'
         if (not self.cells.formula_allows_exact_receiver
-                or self.cells.get_rettype_expr(c_style=True) != 'bint'):
+                or self.cells.get_rettype_expr(c_style=True) != expected_result):
             return after
         locals_ = {}
         for name in self.cells.params:
@@ -438,7 +440,9 @@ return {fallback}
             locals_[part.target.id] = 'longlong'
             if not all(self.native_truth(test, locals_) and primitive_safe(test) for test in part.ifs):
                 return after
-        if not self.native_truth(tree.elt, locals_) or not primitive_safe(tree.elt):
+        if (not primitive_safe(tree.elt)
+                or (not self.native_truth(tree.elt, locals_) if boolean
+                    else self.kind(tree.elt, locals_) != 'double')):
             return after
         prefix = self.reserve_prefix()
         function = f'{prefix}_function'
@@ -476,9 +480,16 @@ return {fallback}
         outer.args = ([ast.Name(name, ast.Load()) for name, _ in arguments]
                       + outer.args[2:])
         lines = [f'{function}: object = self.{func.attr.value}',
-                 f'if {exact_receiver(self.cls_info.name)} and {alias}.{operation}_accepts({function}):']
+                 f'if {exact_receiver(self.cls_info.name)} and {alias}.{"f64_accepts" if ref.reduction == "f64_sum" else operation + "_accepts"}({function}):']
         lines += [f'    {name}: _mx_cy.longlong' for name in names.values()]
         lines += [f'    {name}: _mx_cy.longlong = {value}' for name, value in arguments]
+        if ref.reduction == 'f64_sum':
+            lines += [f'    {prefix}_state: {alias}.F64Sum',
+                      f'    {alias}.f64_init(_mx_cy.address({prefix}_state))']
+        elif ref.reduction == 'f64_max':
+            lines += [f'    {prefix}_seen: _mx_cy.bint = False',
+                      f'    {prefix}_best: _mx_cy.double = 0.0',
+                      f'    {prefix}_item: _mx_cy.double']
         lines += ['    try:']
         indent = '        '
         for part in tree.generators:
@@ -487,13 +498,28 @@ return {fallback}
             for test in part.ifs:
                 lines.append(indent + f'if {ast.unparse(test)}:')
                 indent += '    '
-        any_ = ref.reduction == 'bool_any'
         predicate = ast.unparse(tree.elt)
-        lines += [indent + (f'if {predicate}:' if any_ else f'if not ({predicate}):'),
-                  indent + f'    return {any_}',
-                  '    except StopIteration as ' + prefix + '_error:',
+        if boolean:
+            any_ = ref.reduction == 'bool_any'
+            lines += [indent + (f'if {predicate}:' if any_ else f'if not ({predicate}):'),
+                      indent + f'    return {any_}']
+            finish = [f'    return {not any_}']
+        elif ref.reduction == 'f64_sum':
+            lines += [indent + f'{alias}.f64_add(_mx_cy.address({prefix}_state), {predicate})']
+            finish = [f'    return {alias}.f64_result(_mx_cy.address({prefix}_state))']
+        else:
+            lines += [indent + f'{prefix}_item = {predicate}',
+                      indent + f'if not {prefix}_seen or {prefix}_item > {prefix}_best:',
+                      indent + f'    {prefix}_best = {prefix}_item',
+                      indent + f'    {prefix}_seen = True']
+            finish = [f'    if not {prefix}_seen:',
+                      # Delegate the empty error to the registered callable;
+                      # CPython's exact max() message varies across releases.
+                      f'        return {function}(())',
+                      f'    return {prefix}_best']
+        lines += ['    except StopIteration as ' + prefix + '_error:',
                   '        raise RuntimeError("generator raised StopIteration") from ' + prefix + '_error',
-                  f'    return {not any_}', f'return {fallback}']
+                  *finish, f'return {fallback}']
         self.providers.add(provider)
         self.count += 1
         return cst.FlattenSentinel(cst.parse_module('\n'.join(lines) + '\n').body)
@@ -519,10 +545,9 @@ return {fallback}
         tree = ast.parse('(' + source + ')', mode='eval').body
         if not isinstance(tree, ast.GeneratorExp) or not self.builtin_bounds:
             return after
-        if reduction in ('bool_any', 'bool_all'):
-            result = self.boolean_ranges(after, func, ref, source, tree)
-            if result is not after:
-                return result
+        result = self.primitive_ranges(after, func, ref, source, tree)
+        if result is not after:
+            return result
         if reduction == 'bool_any':
             return self.bounded_any(before, after, func, ref, source, tree)
         if reduction in ('bool_all', 'f64_max'):
