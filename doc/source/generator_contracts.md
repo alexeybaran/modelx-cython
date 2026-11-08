@@ -75,8 +75,12 @@ these conditions hold:
 - The receiver is exact and the current callable passes the provider's identity
   check. A subclass or replacement callable keeps the generator path.
 - Clauses use builtin `range` with primitive proved signed-int64 arguments and
-  any nonzero signed-int64 step, or proved singleton bindings. Filters and payloads have proved
+  any nonzero signed-int64 step, homogeneous literal tuples, or proved singleton bindings. Filters and payloads have proved
   primitive truth/numeric semantics.
+- Literal tuples preserve order and exact homogeneous bool/int64/float/string
+  values. Their C counter indexes an immutable tuple; string tokens pass as the
+  original objects to compatible typed Cell arguments. Literal str/bytes/None
+  arguments are admitted only for matching string/bytes/object parameters.
 - Generator targets are distinct, hygienically renamed and separate from
   formula parameters. Unknown captures, unpacking, aliases and iterators decline.
 - Integer arithmetic is not introduced merely because a callee's result was

@@ -135,6 +135,8 @@ class NativeReductions(FormulaTransformer):
         return False
 
     def kind(self, node, locals_):
+        if isinstance(node, ast.Constant) and type(node.value) is str:
+            return 'str'
         if isinstance(node, ast.Constant) and type(node.value) is bool:
             return 'bint'
         if isinstance(node, ast.Constant) and type(node.value) in (int, float):
@@ -160,11 +162,12 @@ class NativeReductions(FormulaTransformer):
                 result = cell.get_rettype_expr(c_style=True)
                 return {'double': 'double', 'long long': 'longlong', 'bint': 'bint'}.get(result)
         if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.UAdd, ast.USub)):
-            return self.kind(node.operand, locals_)
+            operand = self.kind(node.operand, locals_)
+            return operand if operand in ('double', 'longlong', 'bint') else None
         if isinstance(node, ast.BinOp) and isinstance(node.op, (ast.Add, ast.Sub, ast.Mult, ast.Div)):
             left, right = self.kind(node.left, locals_), self.kind(node.right, locals_)
             # Do not introduce native integer arithmetic merely from observations.
-            if left and right and 'double' in (left, right):
+            if left in ('double', 'longlong', 'bint') and right in ('double', 'longlong', 'bint') and 'double' in (left, right):
                 return 'double'
         return None
 
@@ -442,17 +445,23 @@ return {fallback}
                 return self.kind(node, locals_) in ('double', 'longlong', 'bint')
             if isinstance(node, ast.Call):
                 if (self.kind(node, locals_) not in ('double', 'longlong', 'bint')
-                        or node.keywords or not all(primitive_safe(arg) for arg in node.args)):
+                        or node.keywords):
                     return False
-                if (_call(node, 'abs', 1)
-                        or _bounds_call(node)):
-                    return True
+                if _call(node, 'abs', 1) or _bounds_call(node):
+                    return all(primitive_safe(arg) for arg in node.args)
                 cell = self.cls_info.cells[node.func.attr]
                 if len(node.args) != len(cell.params):
                     return False
                 for arg, param in zip(node.args, cell.params):
                     actual = self.kind(arg, locals_)
                     expected = cell.get_argtype_expr(param, c_style=True)
+                    if isinstance(arg, ast.Constant) and (
+                            type(arg.value) is str and expected in ('str', 'object')
+                            or type(arg.value) is bytes and expected in ('bytes', 'object')
+                            or arg.value is None and expected == 'object'):
+                        continue
+                    if not primitive_safe(arg):
+                        return False
                     if {'longlong': 'long long'}.get(actual, actual) != expected:
                         if not (actual == 'bint' and expected == 'long long'):
                             return False
@@ -472,6 +481,7 @@ return {fallback}
             return False
         targets = []
         key_iteration = None
+        literal_sequences = {}
         for part in tree.generators:
             if (part.is_async or not isinstance(part.target, ast.Name)
                     or part.target.id in {'self', 'range', 'abs', 'min', 'max', *locals_, *targets}):
@@ -480,7 +490,23 @@ return {fallback}
                                              self.cls_info.refs)
                             if isinstance(part.iter, ast.Call) else None)
             iteration = getattr(iterator_ref, 'iteration_helper', None)
-            if (not targets and iteration and iterator_ref.helper
+            literal_values = None
+            if isinstance(part.iter, ast.Tuple) and part.iter.elts:
+                try:
+                    values = ast.literal_eval(part.iter)
+                except (TypeError, ValueError):
+                    pass
+                else:
+                    value_type = type(values[0])
+                    if (value_type in (str, int, float, bool)
+                            and all(type(value) is value_type for value in values)
+                            and (value_type is not int or all(-(1 << 63) <= value < (1 << 63) for value in values))):
+                        literal_values = values
+            if literal_values is not None:
+                literal_sequences[len(targets)] = len(literal_values)
+                args = ()
+                target_kind = {str: 'str', int: 'longlong', float: 'double', bool: 'bint'}[type(literal_values[0])]
+            elif (not targets and iteration and iterator_ref.helper
                     and len(part.iter.args) == 1 and not part.iter.keywords
                     and not isinstance(part.iter.args[0], ast.Starred)):
                 key_iteration = (iterator_ref.helper[0], iteration,
@@ -589,7 +615,7 @@ return {fallback}
                       'else:']
         else:
             lines.append(f'if {guard}:')
-        lines += [f'    {names[name]}: _mx_cy.{locals_[name]}' for name in names]
+        lines += [f'    {names[name]}: _mx_cy.{"unicode" if locals_[name] == "str" else locals_[name]}' for name in names]
         if capture:
             lines.append(f'    {names[capture]} = {capture}')
         lines += [f'    {name}: _mx_cy.longlong = {value}' for name, value in arguments]
@@ -597,7 +623,11 @@ return {fallback}
         if 0 in progressions:
             lines.append(f'    {utility}.i64_range_init(_mx_cy.address({progressions[0]}), '
                          + ', '.join(ast.unparse(arg) for arg in outer.args) + ')')
-        if isinstance(outer, ast.Tuple):
+        for i in literal_sequences:
+            lines.append(f'    {prefix}_sequence_position_{i}: _mx_cy.Py_ssize_t')
+        if 0 in literal_sequences:
+            lines.append(f'    {prefix}_sequence_0: tuple = {ast.unparse(outer)}')
+        elif isinstance(outer, ast.Tuple):
             lines += [f'    {tree.generators[0].target.id} = {ast.unparse(outer.elts[0])}']
         if ref.reduction == 'f64_sum':
             lines += [f'    {prefix}_state: {alias}.F64Sum',
@@ -615,6 +645,13 @@ return {fallback}
                 lines.append(indent + f'for {position} in range({producer_alias}.{span_count}({span})):')
                 indent += '    '
                 lines.append(indent + f'{part.target.id} = {producer_alias}.{span_at}({span}, {position})')
+            elif i in literal_sequences:
+                sequence, sequence_position = f'{prefix}_sequence_{i}', f'{prefix}_sequence_position_{i}'
+                if i:
+                    lines.append(indent + f'{sequence}: tuple = {ast.unparse(part.iter)}')
+                lines.append(indent + f'for {sequence_position} in range({literal_sequences[i]}):')
+                indent += '    '
+                lines.append(indent + f'{part.target.id} = {sequence}[{sequence_position}]')
             elif i in progressions:
                 state = progressions[i]
                 if i:

@@ -35,10 +35,15 @@ def test_module_helpers_compile_through_shared_metadata(tmp_path):
         p.new_cells('captured_every', 'def captured_every(n):\n    scale = max(term(n, 1), 1.0)\n    return all(abs(term(n, i)) <= 1e-10 * scale for i in range(count()))\n')
         p.new_cells('stepped_some', 'lambda n: any(term(n, i) > 0.0 for i in range(0, count(), step_ref))')
         p.new_cells('stepped_minimum', 'lambda n: min(i for i in range(0, count(), step_ref))')
+        p.new_cells('term_at', 'def term_at(n, i, timing):\n    if timing == \"AFT_INT\":\n        return term(n, i)\n    return 0.0\n')
+        p.new_cells('timed_some', 'lambda n: any(term_at(n, i, \"AFT_INT\") > 0.0 for i in range(count()))')
+        p.new_cells('state_total', 'lambda n: ops.sum_f64(term_at(n, i, \"AFT_INT\") for state in (\"DEATH\", \"LAPSE\") for i in range(count()))')
+        p.new_cells('state_some', 'lambda n: any(term_at(n, 1, state) > 0.0 for state in (\"AFT_INT\", \"BEF_INT\"))')
+        p.new_cells('tuple_minimum', 'lambda n: min(i for i in (-9223372036854775808, 0, 9223372036854775807))')
         model.export(tmp_path / 'exported')
     finally:
         model.close()
-    methods = ('total', 'alias_total', 'every', 'wrapped_every', 'some', 'builtin_every', 'minimum', 'maximum', 'scaled_every', 'key_total', 'key_every', 'key_minimum', 'key_local', 'captured_every', 'stepped_some', 'stepped_minimum')
+    methods = ('total', 'alias_total', 'every', 'wrapped_every', 'some', 'builtin_every', 'minimum', 'maximum', 'scaled_every', 'key_total', 'key_every', 'key_minimum', 'key_local', 'captured_every', 'stepped_some', 'stepped_minimum', 'timed_some', 'state_total', 'state_some', 'tuple_minimum')
     (tmp_path / 'sample.py').write_text('from exported import mx_model\np = mx_model.Projection\n'
         + ''.join(f'for n in range(3): p.{name}(n)\n' for name in methods))
     subprocess.run([sys.executable, '-m', 'modelx_cython', 'exported', '--sample', 'sample.py', '--no-spec'],
@@ -77,6 +82,10 @@ def test_module_helpers_compile_through_shared_metadata(tmp_path):
         assert p.scaled_every(0) is False
         assert p.captured_every(0) is False
         assert p.stepped_some(0) is True and p.stepped_minimum(0) == 0
+        assert p.timed_some(0) is True
+        assert p.state_total(0) == 2.0
+        assert p.state_some(0) is True
+        assert p.tuple_minimum(0) == -(1 << 63)
         assert p.wrapped_every(0) is False
         assert p.builtin_every(0) is False
         assert p.minimum(0) == 0 and p.maximum(0) == 2
