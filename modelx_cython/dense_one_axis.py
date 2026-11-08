@@ -1,13 +1,11 @@
 """Separate checked and proven calls to a single dense cache body."""
 
-import ast
-
 import libcst as cst
 
 from .cell_entries import EntryModule, dense_condition
 from .consts import CY_MOD, FORMULA_PREF
 from .dense_formulas import _ExactTests
-from .scopes import expression_ast
+from .syntax import same_expression
 
 
 def _unsigned_check(layout):
@@ -42,10 +40,9 @@ def _public_checks(cls, layouts):
                         cst.parse_expression(f'{CY_MOD}.longlong'))
                     and isinstance(method.body, cst.IndentedBlock) and len(method.body.body) == 1):
                 guard, = method.body.body
-                expected = expression_ast(dense_condition(layout.axes))
+                expected = cst.parse_expression(dense_condition(layout.axes))
                 if (isinstance(guard, cst.If) and isinstance(guard.orelse, cst.Else)
-                        and ast.dump(expression_ast(guard.test))
-                        == ast.dump(expected)):
+                        and same_expression(guard.test, expected)):
                     method = method.with_changes(body=method.body.with_changes(
                         body=(guard.with_changes(test=check),)))
         methods.append(method)
@@ -91,9 +88,9 @@ def specialize_entries(state: EntryModule, layouts, propagate=False):
         axis, = layout.axes
         guard, = stmt.body.body
         proof = params[-1].name.value if len(params) == 3 else None
-        expected = expression_ast(dense_condition(layout.axes, proof))
+        expected = cst.parse_expression(dense_condition(layout.axes, proof))
         if (not isinstance(guard, cst.If) or not isinstance(guard.orelse, cst.Else)
-                or ast.dump(expression_ast(guard.test)) != ast.dump(expected)):
+                or not same_expression(guard.test, expected)):
             rewritten.append(stmt)
             continue
         if proof is None:

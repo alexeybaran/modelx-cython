@@ -49,8 +49,8 @@ def _mx_cache_entry_1(self, t):
     layouts={f'_mx_cache_entry_{i}':DenseEntry('_c_Policy',formula,
         (DenseAxis('t',0,4,'long long'),),False)
         for i,formula in enumerate(('_f_value','_f_derived'))}
-    tree=ast.parse(source)
-    result=prove_entries(EntryModule(cst.parse_module(source)),layouts,_attribute_counts(tree)).syntax.bytes
+    tree=cst.parse_module(source)
+    result=prove_entries(EntryModule(tree),layouts,_attribute_counts(tree)).syntax.bytes
     assert (b'_mx_proven_axes' in result) is expected
     if expected and nested:
         result_tree=ast.parse(result)

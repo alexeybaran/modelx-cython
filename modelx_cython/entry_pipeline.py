@@ -11,7 +11,7 @@ def lower_entries(modules, dense, formulas, policy):
     uses = Counter()
     if policy.dense_bounds_proofs and dense:
         for state in modules.values():
-            uses.update(_attribute_counts(state.tree))
+            uses.update(_attribute_counts(state.syntax))
     result = {}
     for name, state in modules.items():
         layouts, entries = dense.get(name, {}), formulas.get(name, {})

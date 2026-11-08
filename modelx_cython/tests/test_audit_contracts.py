@@ -121,18 +121,20 @@ def test_helper_capability_shape_is_validated_at_registration(name,value):
         helper_capability(function,name)
 
 
-def test_cache_hit_optimization_keeps_python38_compatibility(monkeypatch):
+def test_cache_hit_optimization_does_not_depend_on_ast_unparse(monkeypatch):
     from modelx_cython.cache_hits import expose_entries
+    from modelx_cython.cell_entries import EntryModule
     monkeypatch.delattr(ast,'unparse')
-    # The optimized path is optional. No generated source needs to be opened.
-    state = object()
-    assert expose_entries(state, {'entry':object()}, 'auto') is state
+    state = EntryModule(cst.parse_module(''))
+    assert expose_entries(state, {'entry':object()}, 'auto').syntax.code == ''
 
 
-def test_unsupported_ast_runtime_keeps_ordinary_collection(monkeypatch):
+def test_collection_admission_reuses_the_existing_syntax_without_ast(monkeypatch):
     from modelx_cython.serial_collect import analyze
     monkeypatch.delattr(ast, 'unparse')
-    assert analyze('class Values: pass\n', object()) == {}
+    module = SimpleNamespace(classes={}, spec=SimpleNamespace(automatic_optimizations=True),
+        visitor=SimpleNamespace(wrapper=SimpleNamespace(module=cst.parse_module('class Values: pass\n'))))
+    assert analyze(module) == {}
 
 
 def test_provider_resources_use_the_legacy_resource_api(monkeypatch, tmp_path):

@@ -21,9 +21,10 @@ else:
 
 def rewrite(cache, call, args='self: Receiver, t: _mx_cy.longlong', prelude=''):
     source=cache+f'\ndef _mx_dense_formula_0({args}) -> _mx_cy.double:\n'+textwrap.indent(prelude+f'return {call}\n','    ')
-    functions={fn.name:fn for fn in ast.parse(source).body if isinstance(fn,ast.FunctionDef)}
+    syntax=cst.parse_module(source)
+    functions={fn.name.value:fn for fn in syntax.body if isinstance(fn,cst.FunctionDef)}
     layout=hits._layout(functions['_mx_cache_entry_0']);assert layout
-    return cst.parse_module(source).visit(hits._Calls(functions,{'_mx_cache_entry_0':layout})).code
+    return syntax.visit(hits._Calls(functions,{'_mx_cache_entry_0':layout})).code
 
 
 def test_checked_hit_keeps_checked_miss():
@@ -60,12 +61,12 @@ def test_arguments_with_effects_coercions_or_unknown_receiver_are_unchanged(call
 
 @pytest.mark.parametrize('guard',['check(t)','self.limit > t','0 <= t / 2 < 4','0 <= other < 4'])
 def test_effectful_or_unknown_domain_is_not_copied(guard):
-    assert hits._layout(ast.parse(entry(guard=guard)).body[0]) is None
+    assert hits._layout(cst.parse_module(entry(guard=guard)).body[0]) is None
 
 
 def test_mismatched_value_index_is_rejected():
     source=entry().replace('return self._v_value[t]','return self._v_value[t + 1]')
-    assert hits._layout(ast.parse(source).body[0]) is None
+    assert hits._layout(cst.parse_module(source).body[0]) is None
 
 
 @pytest.mark.parametrize('prelude',[

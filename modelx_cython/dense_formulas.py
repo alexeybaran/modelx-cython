@@ -1,14 +1,14 @@
 """Bind proven numeric cache misses without a formula-length eligibility rule."""
 
-import ast
-
 import libcst as cst
 
 from .cell_entries import EntryModule, exact_receiver
 from .consts import CY_MOD, MX_SELF
+from .scopes import CstFacts, OPAQUE_SCOPES
+from .syntax import walk
 
 
-def _eligible(method, syntax, keys, guard_safe):
+def _eligible(method, keys, guard_safe):
     if not guard_safe:
         return False
     params = method.params
@@ -16,7 +16,8 @@ def _eligible(method, syntax, keys, guard_safe):
             or isinstance(params.star_arg, cst.Param)
             or tuple(param.name.value for param in params.params) != (MX_SELF, *keys)):
         return False
-    body = [node for statement in syntax.body for node in ast.walk(statement)]
+    body = [node for statement in method.body.body for node in walk(statement)]
+    facts = CstFacts(method.body.body)
     code = cst.Module([]).code_for_node
     native = {f'{CY_MOD}.{name}' for name in ('double', 'longlong', 'bint')}
     if (method.returns is None or code(method.returns.annotation) not in native
@@ -28,19 +29,13 @@ def _eligible(method, syntax, keys, guard_safe):
                and item.decorator.value.value == CY_MOD and item.decorator.attr.value == "cfunc"
                for item in method.decorators):
         return False
+    if MX_SELF in facts.bindings(body):
+        return False
     for node in body:
-        if isinstance(node, ast.Name) and node.id == MX_SELF and not isinstance(node.ctx, ast.Load):
+        if isinstance(node, (*OPAQUE_SCOPES, cst.Yield)):
             return False
-        # Exception/pattern targets store names as strings, not Name(Store).
-        if (getattr(node, 'name', None) == MX_SELF or getattr(node, 'rest', None) == MX_SELF
-                or (isinstance(node, ast.alias) and (node.asname or node.name.split('.')[0]) == MX_SELF)):
-            return False
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef,
-                             ast.Lambda, ast.Yield, ast.YieldFrom, ast.GeneratorExp,
-                             ast.ListComp, ast.SetComp, ast.DictComp)):
-            return False
-        if isinstance(node, (ast.Name, ast.Attribute)):
-            name = node.id if isinstance(node, ast.Name) else node.attr
+        if isinstance(node, cst.Attribute) or isinstance(node, cst.Name) and node in facts.contexts:
+            name = node.value if isinstance(node, cst.Name) else node.attr.value
             if name.startswith("__") or name in {"super", "eval", "exec", "locals", "vars"}:
                 return False
     return True
@@ -90,7 +85,6 @@ def bind_entries(state: EntryModule, entries, propagate=False):
                       and fn.name.value in entries}
     targets = {(layout.owner, layout.formula): (entry, layout)
                for entry, layout in entries.items() if entry in receiver_types}
-    formulas = state.methods
     replacements, methods, misses = [], {}, {}
     for cls in module.body:
         if not isinstance(cls, cst.ClassDef) or not isinstance(cls.body, cst.IndentedBlock):
@@ -103,7 +97,7 @@ def bind_entries(state: EntryModule, entries, propagate=False):
                 continue
             entry, layout = targets[identity]
             keys = layout.keys
-            if not _eligible(fn, formulas[identity], keys, layout.guard_safe):
+            if not _eligible(fn, keys, layout.guard_safe):
                 continue
             direct = names.reserve(f'_mx_dense_formula_{len(replacements)}')
             receiver, *params = fn.params.params

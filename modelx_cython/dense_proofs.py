@@ -1,190 +1,167 @@
 """Reuse ranges that generated dense entries already check before a miss."""
-
-import ast
-from collections import Counter, defaultdict, deque
+from collections import Counter
 
 import libcst as cst
+from libcst.metadata import ExpressionContext
 
 from .cell_entries import EntryModule, dense_condition, exact_receiver
 from .consts import CY_MOD, FORMULA_PREF, MX_SELF
-from .scopes import binding_names as _binding_names
-from .scopes import expression_ast
+from .scopes import CstFacts, OPAQUE_SCOPES
+from .syntax import arguments, dotted_name, same_expression, statements, walk
+
+
+def _else_body(node):
+    if isinstance(node.orelse, cst.If):
+        return (node.orelse,)
+    return statements(node.orelse.body) if isinstance(node.orelse, cst.Else) else ()
 
 
 def _checked_guard(entry, layout):
-    if len(entry.body) != 1 or not isinstance(entry.body[0], ast.If):
+    body = statements(entry.body)
+    if len(body) != 1 or not isinstance(body[0], cst.If) or not 0 < len(layout.axes) <= 32:
         return None
-    guard = entry.body[0]
-    axes = layout.axes
-    if not 0 < len(axes) <= 32:
+    if [param.name.value for param in entry.params.params] != [MX_SELF, *(axis.key for axis in layout.axes)]:
         return None
-    if [param.arg for param in entry.args.args] != [MX_SELF, *(axis.key for axis in axes)]:
-        return None
-    expected = expression_ast(dense_condition(axes))
-    return guard if ast.dump(guard.test) == ast.dump(expected) else None
+    expected = cst.parse_expression(dense_condition(layout.axes))
+    return body[0] if same_expression(body[0].test, expected) else None
 
 
 def _argument_range(node, ranges, types, target_type):
-    if isinstance(node, ast.Name):
-        source_type = types.get(node.id)
-        if source_type == target_type or (source_type == "bint" and target_type == "long long"):
-            return ranges.get(node.id)
-    if (target_type == "long long" and isinstance(node, ast.BinOp) and isinstance(node.left, ast.Name)
-            and node.left.id in ranges and types[node.left.id] == "long long"
-            and isinstance(node.right, ast.Constant) and type(node.right.value) is int
-            and isinstance(node.op, (ast.Add, ast.Sub))):
-        lower, upper = ranges[node.left.id]
-        delta = node.right.value if isinstance(node.op, ast.Add) else -node.right.value
+    if isinstance(node, cst.Name):
+        source_type = types.get(node.value)
+        if source_type == target_type or (source_type == 'bint' and target_type == 'long long'):
+            return ranges.get(node.value)
+    if (target_type == 'long long' and isinstance(node, cst.BinaryOperation)
+            and isinstance(node.left, cst.Name) and node.left.value in ranges
+            and types[node.left.value] == 'long long' and isinstance(node.right, cst.Integer)
+            and isinstance(node.operator, (cst.Add, cst.Subtract))):
+        lower, upper = ranges[node.left.value]
+        delta = node.right.evaluated_value
+        if isinstance(node.operator, cst.Subtract):
+            delta = -delta
         if -(1 << 63) < delta < (1 << 63) and -(1 << 63) <= lower + delta < upper + delta <= (1 << 63):
             return lower + delta, upper + delta
     return None
 
 
 def _attribute_counts(tree):
-    return Counter(node.attr for node in ast.walk(tree)
-                   if isinstance(node, ast.Attribute) and node.attr.startswith(FORMULA_PREF))
+    return Counter(node.attr.value for node in walk(tree)
+                   if isinstance(node, cst.Attribute) and node.attr.value.startswith(FORMULA_PREF))
 
 
 def _exact_calls(node, receiver, exact=False):
-    if isinstance(node, ast.If) and ast.dump(node.test) == receiver:
-        for statement in node.body:
+    if isinstance(node, cst.If) and same_expression(node.test, receiver):
+        for statement in statements(node.body):
             yield from _exact_calls(statement, receiver, True)
-        for statement in node.orelse:
+        for statement in _else_body(node):
             yield from _exact_calls(statement, receiver, exact)
         return
-    if isinstance(node, ast.IfExp) and ast.dump(node.test) == receiver:
+    if isinstance(node, cst.IfExp) and same_expression(node.test, receiver):
         yield from _exact_calls(node.body, receiver, True)
         yield from _exact_calls(node.orelse, receiver, exact)
         return
-    if exact and isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+    if exact and isinstance(node, cst.Call) and isinstance(node.func, cst.Name):
         yield node
-    if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda,
-                             ast.GeneratorExp, ast.ListComp, ast.SetComp, ast.DictComp)):
-        for child in ast.iter_child_nodes(node):
+    if not isinstance(node, OPAQUE_SCOPES):
+        for child in node.children:
             yield from _exact_calls(child, receiver, exact)
 
 
 def _formula_ranges(guard, layout, uses, spill_functions, spill_uses):
-    """Return the bounds common to every generated entry to the formula."""
+    """Bounds common to every generated entry to the same formula/cache."""
     keys = ', '.join(axis.key for axis in layout.axes)
-    expected = ast.dump(expression_ast(f'{MX_SELF}.{layout.formula}({keys})'))
+    expected = cst.parse_expression(f'{MX_SELF}.{layout.formula}({keys})')
 
     def calls_formula(nodes):
-        return sum(isinstance(node, ast.Call) and ast.dump(node) == expected
-                   for statement in nodes for node in ast.walk(statement))
+        return sum(isinstance(node, cst.Call) and same_expression(node, expected)
+                   for statement in nodes for node in walk(statement))
 
-    if calls_formula(guard.body) != 1 or len(guard.orelse) != 1:
+    fallback = _else_body(guard)
+    if calls_formula(statements(guard.body)) != 1 or len(fallback) != 1:
         return ()
-    fallback, = guard.orelse
+    fallback, = fallback
     if not layout.exact_spill:
-        return layout.axes if uses[layout.formula] == 1 and isinstance(fallback, ast.Raise) else ()
+        return layout.axes if uses[layout.formula] == 1 and isinstance(fallback, cst.Raise) else ()
     if not (layout.spill_entry and layout.logical_axes and uses[layout.formula] == 2
-            and spill_uses[layout.spill_entry] == 1
-            and isinstance(fallback, ast.If) and len(fallback.body) == 1
-            and len(fallback.orelse) == 1 and isinstance(fallback.orelse[0], ast.Raise)):
+            and spill_uses[layout.spill_entry] == 1 and isinstance(fallback, cst.If)
+            and len(statements(fallback.body)) == 1 and len(_else_body(fallback)) == 1
+            and isinstance(_else_body(fallback)[0], cst.Raise)):
         return ()
-    logical = expression_ast(dense_condition(layout.logical_axes))
-    spill_call = ast.parse(f'return {layout.spill_entry}({MX_SELF}, {keys})').body[0]
-    if ast.dump(fallback.test) != ast.dump(logical) or ast.dump(fallback.body[0]) != ast.dump(spill_call):
+    logical = cst.parse_expression(dense_condition(layout.logical_axes))
+    spill_call = cst.parse_expression(f'{layout.spill_entry}({MX_SELF}, {keys})')
+    branch = statements(fallback.body)[0]
+    if (not same_expression(fallback.test, logical) or not isinstance(branch, cst.Return)
+            or not same_expression(branch.value, spill_call)):
         return ()
     spill = spill_functions.get(layout.spill_entry)
-    if not (spill and [arg.arg for arg in spill.args.args] == [MX_SELF, *(axis.key for axis in layout.axes)]
-            and calls_formula(spill.body) == 1):
+    if not (spill and [arg.name.value for arg in spill.params.params] == [MX_SELF, *(axis.key for axis in layout.axes)]
+            and calls_formula(statements(spill.body)) == 1):
         return ()
     return layout.logical_axes
 
 
 def prove_entries(state: EntryModule, records, uses):
-    tree = state.tree
     native = {}
-    for node in tree.body:
-        if isinstance(node, ast.FunctionDef) and node.name in records:
-            layout = records[node.name]
-            guard = _checked_guard(node, layout)
-            if guard is not None:
-                native[node.name] = node, guard, layout
+    for name, node in state.functions.items():
+        if name in records and (guard := _checked_guard(node, records[name])) is not None:
+            native[name] = node, guard, records[name]
     formulas = state.methods
     spills = {layout.spill_entry for layout in records.values() if layout.spill_entry}
-    spill_functions = {node.name: node for node in tree.body
-                       if isinstance(node, ast.FunctionDef) and node.name in spills}
-    spill_uses = Counter(node.id for node in ast.walk(tree)
-                         if isinstance(node, ast.Name) and node.id in spills) if spills else Counter()
-    calls = defaultdict(list)
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in native:
-            calls[node.func.id].append(node)
+    spill_functions = {name: node for name, node in state.functions.items() if name in spills}
 
+    def spill_references(nodes):
+        return Counter(node.value for node in nodes if isinstance(node, cst.Name)
+                       and node.value in spills and state.facts.contexts.get(node) is ExpressionContext.LOAD)
+
+    spill_uses = spill_references(walk(state.syntax)) if spills else Counter()
     ranges_by_entry = {}
     for name, (_, guard, layout) in native.items():
         entry_uses, entry_spills = uses, spill_uses
         public = formulas.get((layout.owner, layout.formula[len(FORMULA_PREF):]))
         public_guard = _checked_guard(public, layout) if public is not None else None
-        if public_guard is not None and ast.dump(public_guard) == ast.dump(guard):
-            # The public cache entry repeats the same checked path to the same
-            # formula/cache. Account for it without admitting unchecked uses.
+        if public_guard is not None and same_expression(public_guard, guard):
             entry_uses = uses - _attribute_counts(public)
-            entry_spills = spill_uses - Counter(node.id for node in ast.walk(public)
-                if isinstance(node, ast.Name) and node.id in spills)
-        ranges_by_entry[name] = _formula_ranges(
-            guard, layout, entry_uses, spill_functions, entry_spills)
+            entry_spills = spill_uses - spill_references(walk(public))
+        ranges_by_entry[name] = _formula_ranges(guard, layout, entry_uses, spill_functions, entry_spills)
+
     masks = {}
     for name, (_, guard, layout) in native.items():
         source_axes = ranges_by_entry[name]
-        if not source_axes:
-            continue
         formula = formulas.get((layout.owner, layout.formula))
-        if formula is None or not any(
-                isinstance(decorator, ast.Attribute) and decorator.attr == "cfunc"
-                and isinstance(decorator.value, ast.Name) and decorator.value.id == CY_MOD
-                for decorator in formula.decorator_list):
+        if not source_axes or formula is None or not any(
+                dotted_name(item.decorator) == f'{CY_MOD}.cfunc' for item in formula.decorators):
             continue
-        nodes = list(ast.walk(formula))
-        if any(isinstance(node, getattr(ast, "Match", ())) for node in nodes):
+        nodes = [node for statement in formula.body.body for node in walk(statement)]
+        if any(isinstance(node, getattr(cst, 'Match', ())) for node in nodes):
             continue
-        mutable = _binding_names(nodes)
+        mutable = CstFacts(formula.body.body).bindings(nodes)
         ranges = {axis.key: (axis.lower, axis.stop) for axis in source_axes if axis.key not in mutable}
         types = {axis.key: axis.c_type for axis in source_axes}
-        receiver = ast.dump(expression_ast(exact_receiver(layout.owner)))
-        # Private guarded calls are emitted only in the current scope by inline_entries.
-        for call in (call for statement in formula.body for call in _exact_calls(statement, receiver)):
-            target = call.func.id
+        receiver = cst.parse_expression(exact_receiver(layout.owner))
+        for call in (call for statement in formula.body.body for call in _exact_calls(statement, receiver)):
+            target = call.func.value
             if target not in native or records[target].owner != layout.owner:
                 continue
             target_axes = ranges_by_entry[target] or records[target].axes
-            if len(call.args) != len(target_axes) + 1 or call.keywords:
-                continue
-            receiver_arg = call.args[0]
-            if not isinstance(receiver_arg, ast.Name) or receiver_arg.id != MX_SELF:
+            args = arguments(call, count=len(target_axes) + 1)
+            if args is None or not isinstance(args[0], cst.Name) or args[0].value != MX_SELF:
                 continue
             mask = 0
-            for i, (arg, axis) in enumerate(zip(call.args[1:], target_axes)):
+            for index, (arg, axis) in enumerate(zip(args[1:], target_axes)):
                 interval = _argument_range(arg, ranges, types, axis.c_type)
                 if interval and axis.lower <= interval[0] < interval[1] <= axis.stop:
-                    mask |= 1 << i
+                    mask |= 1 << index
             if mask:
                 masks[call] = mask
-
     if not masks:
         return state
     flag = state.names.reserve('_mx_proven_axes', family=True)
-    targets = {call.func.id for call in masks}
-    # AST positions establish lexical order, including nested calls. CST visits
-    # in that order; no byte offsets or Unicode-sensitive source edits remain.
-    queues = {name: deque(masks.get(call, 0) for call in sorted(calls[name],
-                         key=lambda call: (call.lineno, call.col_offset))) for name in targets}
+    targets = {call.func.value for call in masks}
 
     class Proofs(cst.CSTTransformer):
-        def __init__(self):
-            self.call_masks = {}
-
-        def visit_Call(self, node):
-            if isinstance(node.func, cst.Name) and node.func.value in queues:
-                self.call_masks[id(node)] = queues[node.func.value].popleft()
-
         def leave_Call(self, before, after):
-            if id(before) in self.call_masks:
-                return after.with_changes(args=(*after.args,
-                    cst.Arg(cst.Integer(str(self.call_masks[id(before)])))))
+            if isinstance(before.func, cst.Name) and before.func.value in targets:
+                return after.with_changes(args=(*after.args, cst.Arg(cst.Integer(str(masks.get(before, 0))))))
             return after
 
         def leave_FunctionDef(self, before, after):
@@ -201,14 +178,10 @@ def prove_entries(state: EntryModule, records, uses):
                 else:
                     nested = fallback.body.body[0].with_changes(test=test)
                     fallback = fallback.with_changes(body=fallback.body.with_changes(body=(nested,)))
-            guard = guard.with_changes(test=cst.parse_expression(
-                dense_condition(layout.axes, flag, proved)), orelse=fallback)
-            parameter = cst.Param(cst.Name(flag), annotation=cst.Annotation(
-                cst.parse_expression(f'{CY_MOD}.uint')))
-            return after.with_changes(params=after.params.with_changes(
-                params=(*after.params.params, parameter)),
-                body=after.body.with_changes(body=(guard,)))
+            guard = guard.with_changes(test=cst.parse_expression(dense_condition(layout.axes, flag, proved)),
+                                       orelse=fallback)
+            parameter = cst.Param(cst.Name(flag), annotation=cst.Annotation(cst.parse_expression(f'{CY_MOD}.uint')))
+            return after.with_changes(params=after.params.with_changes(params=(*after.params.params, parameter)),
+                                      body=after.body.with_changes(body=(guard,)))
 
-    result = state.replace(state.syntax.visit(Proofs()))
-    assert not any(queues.values()), 'inconsistent generated entry call graph'
-    return result
+    return state.replace(state.syntax.visit(Proofs()))

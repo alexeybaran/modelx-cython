@@ -1,12 +1,12 @@
 """Native helper returns only at an already-double formula return boundary."""
-import ast
 import math
 
 import libcst as cst
 
 from .cell_entries import exact_receiver
 from .helpers import module_name
-from .scopes import Names, has_scope_effects
+from .scopes import CstFacts, Names, has_scope_effects
+from .syntax import literal_value
 from .typedefs import primitive_kind
 
 
@@ -21,8 +21,7 @@ class NumericReturns(cst.CSTTransformer):
 
     def visit_FunctionDef(self, node):
         if not self.function_depth:
-            syntax = ast.parse(cst.Module([]).code_for_node(node)).body[0]
-            self.scope_safe = not has_scope_effects(syntax.body)
+            self.scope_safe = not has_scope_effects(node.body.body)
         self.function_depth += 1
 
     @staticmethod
@@ -88,9 +87,7 @@ class NumericReturns(cst.CSTTransformer):
                for binding in bindings) != 1:
             return None
         module = cst.Module([])
-        prior = ast.parse(''.join(module.code_for_node(line) for line in body[:-5]))
-        if sum(isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store) and node.id == group.value
-               for node in ast.walk(prior)) != 1:
+        if CstFacts(body[:-5]).stores[group.value] != 1:
             return None
 
         code = module.code_for_node
@@ -386,7 +383,7 @@ class NumericReturns(cst.CSTTransformer):
         default = 0.0
         if len(call.args) == 4:
             try:
-                literal = ast.literal_eval(code(call.args[3].value))
+                literal = literal_value(call.args[3].value)
                 default = float(literal)
                 if type(literal) not in (int, float) or not math.isfinite(default) or default != literal:
                     return native

@@ -33,7 +33,6 @@ import os
 import pathlib
 import shutil
 import runpy
-import ast
 import argparse
 import dataclasses
 import logging
@@ -56,6 +55,7 @@ from modelx_cython.entry_pipeline import lower_entries
 from modelx_cython.helpers import install as install_helpers
 from modelx_cython.build import create_setup
 from modelx_cython.collect_adapter import CollectRuntime
+from modelx_cython.syntax import read_literal
 
 _logger = logging.getLogger(__name__)
 
@@ -224,7 +224,7 @@ def main_handler(args: argparse.Namespace, stdout: IO[str], stderr: IO[str]) -> 
     rotates backups of the output directory, copies the model there,
     copies the bundled ``_mx_sys.pxd`` into it, runs the sample script
     under tracing via :func:`run_sample`, and reads the spec file with
-    :func:`ast.literal_eval` (skipped when ``args.no_spec`` is set; a
+    a safe literal decoder (skipped when ``args.no_spec`` is set; a
     missing spec file re-raises :class:`FileNotFoundError` with a hint
     to use ``--no-spec``).  Translation proper then runs in three
     phases: (1) parse every model/space module and build its
@@ -287,7 +287,7 @@ def main_handler(args: argparse.Namespace, stdout: IO[str], stderr: IO[str]) -> 
             d = {}
         else:
             try:
-                d = ast.literal_eval(pathlib.Path(args.spec).read_text(encoding="utf-8"))
+                d = read_literal(pathlib.Path(args.spec).read_text(encoding="utf-8"))
             except FileNotFoundError as e:
                 raise FileNotFoundError(f"{e}. Add '--no-spec' to omit the spec file.") from e
 
@@ -369,7 +369,7 @@ def main_handler(args: argparse.Namespace, stdout: IO[str], stderr: IO[str]) -> 
         translated_modules = {}
         serial_enabled = False
         for u in units:
-            serial_shapes = serial_collect.analyze(u.source, u.module_info) if runtime.supported else {}
+            serial_shapes = serial_collect.analyze(u.module_info) if runtime.supported else {}
             serial_enabled |= bool(serial_shapes)
             trans = ModuleTransformer(
                 u.source, u.module_info,
@@ -395,7 +395,8 @@ def main_handler(args: argparse.Namespace, stdout: IO[str], stderr: IO[str]) -> 
         translated_modules = lower_entries(translated_modules, dense_entries, formula_entries, policy)
         for u in units:
             u.abs_src_path.write_text(translated_modules[u.fqname].syntax.code, encoding='utf-8')
-        create_setup(model_name, modules=modules, setup_file=setup_file, source_root=work_dir)
+        create_setup(model_name, modules=modules, setup_file=setup_file, source_root=work_dir,
+                     source_modules=(runtime.syntax, *(state.syntax for state in translated_modules.values())))
         (model_path / '_mx_admission.json').write_text(
             json.dumps(describe(module_infos), indent=2), encoding='utf-8')
 

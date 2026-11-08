@@ -75,7 +75,7 @@ class TransSpec:
     """Wrapper around the user-supplied translation-spec dictionary.
 
     The spec is a nested dict (read from the spec file with
-    ``ast.literal_eval``) in which each nesting level describes one
+    a safe literal decoder) in which each nesting level describes one
     space.  A space-level dict may have these keys:
 
     * ``"spaces"``: dict mapping child space names (without prefixes)

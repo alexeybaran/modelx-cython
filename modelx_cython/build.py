@@ -1,12 +1,15 @@
 """Build-time Cython compatibility and standalone setup generation."""
-import ast
 import pathlib
 import sys
 import textwrap
 from typing import Sequence
+import libcst as cst
+
+from .syntax import statements, walk
 
 
-def create_setup(model_name: str, modules: Sequence[str], setup_file: pathlib.Path, source_root=None):
+def create_setup(model_name: str, modules: Sequence[str], setup_file: pathlib.Path, source_root=None,
+                 source_modules=None):
     """Write a ``setup.py`` that cythonizes the translated modules.
 
     The generated script calls :func:`setuptools.setup` with
@@ -36,13 +39,14 @@ def create_setup(model_name: str, modules: Sequence[str], setup_file: pathlib.Pa
     # rather than requiring a model-specific recursion setting from the user.
     source_root = pathlib.Path(source_root) if source_root is not None else setup_file.parent
     recursion_budget = sys.getrecursionlimit()
-    for module in modules:
-        source = source_root / module
-        if source.suffix != '.py' or not source.is_file():
-            continue
-        for node in ast.walk(ast.parse(source.read_text(encoding='utf-8'))):
-            if isinstance(node, ast.ClassDef):
-                members = sum(isinstance(child, ast.AnnAssign) for child in node.body)
+    if source_modules is None:
+        source_modules = (cst.parse_module(source.read_text(encoding='utf-8'))
+                          for module in modules if (source := source_root / module).suffix == '.py'
+                          and source.is_file())
+    for module in source_modules:
+        for node in walk(module):
+            if isinstance(node, cst.ClassDef):
+                members = sum(isinstance(child, cst.AnnAssign) for child in statements(node.body))
                 recursion_budget = max(recursion_budget, 64 * (members + 32))
 
     modules_str = textwrap.indent(",\n".join(

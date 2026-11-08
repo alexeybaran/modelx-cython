@@ -1,11 +1,11 @@
 """Emit an opt-in scalar reduction through ordinary compiled leaf Cells."""
 
-import ast
 from dataclasses import dataclass
 
 import libcst as cst
 
 from modelx_cython.consts import CY_MOD
+from .syntax import arguments, dotted_name, literal_value, statements
 
 
 @dataclass(frozen=True)
@@ -20,35 +20,40 @@ class SerialCollect:
 
 
 def _self_attribute(node):
-    if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name):
-        if node.value.id == 'self' and not node.attr.startswith('_'):
-            return node.attr
+    if isinstance(node, cst.Attribute) and isinstance(node.value, cst.Name):
+        if node.value.value == 'self' and not node.attr.value.startswith('_'):
+            return node.attr.value
     return None
 
 
 def _method(node, name):
-    return next((item for item in node.body
-                 if isinstance(item, ast.FunctionDef) and item.name == name), None)
+    return next((item for item in node.body.body
+                 if isinstance(item, cst.FunctionDef) and item.asynchronous is None
+                 and item.name.value == name), None)
 
 
 def _return_expr(method):
-    if method and len(method.body) == 1 and isinstance(method.body[0], ast.Return):
-        return method.body[0].value
+    body = statements(method.body) if method else ()
+    if len(body) == 1 and isinstance(body[0], cst.Return):
+        return body[0].value
     return None
 
 
 def _single_dict(expr):
-    if isinstance(expr, ast.Dict) and len(expr.keys) == 1:
-        key = expr.keys[0]
-        if isinstance(key, ast.Constant) and type(key.value) is str:
-            return key.value, expr.values[0]
+    if (isinstance(expr, cst.Dict) and len(expr.elements) == 1
+            and isinstance(expr.elements[0], cst.DictElement)):
+        key = expr.elements[0].key
+        try:
+            value = literal_value(key)
+        except (ValueError, TypeError):
+            return None, None
+        if type(value) is str:
+            return value, expr.elements[0].value
     return None, None
 
 
-def analyze(source, module):
+def analyze(module):
     """Recognize the numeric sum shape. Policy isolation is a Space contract."""
-    if not hasattr(ast, 'unparse'):
-        return {}
     options = {name: module.spec.get_spec(cls.fqname)
                for name, cls in module.classes.items()}
     automatic = module.spec.automatic_optimizations
@@ -56,11 +61,11 @@ def analyze(source, module):
                for spec in options.values()) and not automatic:
         return {}
     result = {}
-    for node in ast.parse(source).body:
-        if not isinstance(node, ast.ClassDef) or node.name not in module.classes:
+    for node in module.visitor.wrapper.module.body:
+        if not isinstance(node, cst.ClassDef) or node.name.value not in module.classes:
             continue
-        cls = module.classes[node.name]
-        spec = options[node.name]
+        cls = module.classes[node.name.value]
+        spec = options[node.name.value]
         option = spec.get('serial_collect', 'reduce' if automatic else None)
         parallel = spec.get('parallel_collect_reuse', automatic and option == 'reuse')
         if type(parallel) is not bool or (parallel and option != 'reuse'):
@@ -77,34 +82,36 @@ def analyze(source, module):
             raise ValueError('serial_private_lookups requires serial_collect reuse')
         shape = _match(node, cls, option == 'reuse', private, parallel, order == 'domain')
         if shape is not None:
-            result[node.name] = shape
+            result[node.name.value] = shape
     return result
 
 
 def _match(node, cls, reuse, private_lookups, parallel_reuse, ordered=False):
-    if (len(node.bases) != 1 or ast.unparse(node.bases[0]) != '_mx_sys.BaseSpace'
-            or cls.spaces or cls.is_locked or node.name in cls.visitor.dynamic_ref_classes
+    if (len(node.bases) != 1 or dotted_name(node.bases[0].value) != '_mx_sys.BaseSpace'
+            or cls.spaces or cls.is_locked or node.name.value in cls.visitor.dynamic_ref_classes
             or any(_method(node, hook) is not None or hook in cls.refs
                    for hook in ('_mx_apply_formula', '_mx_collect_attach', '_mx_collect_release'))):
         return None
     call = _return_expr(_method(node, 'collect'))
-    if (not isinstance(call, ast.Call) or ast.unparse(call.func) != '_mx_sys.collect_from_space'
-            or len(call.args) != 5 or len(call.keywords) != 1
-            or ast.unparse(call.args[0]) != 'self'
-            or call.keywords[0].arg != 'cache'
-            or ast.unparse(call.keywords[0].value) != 'self._mx_collect_cache'
-            or not isinstance(call.args[2], ast.Constant)
-            or any(not isinstance(item, ast.Tuple) or item.elts for item in call.args[3:])):
+    if (not isinstance(call, cst.Call) or dotted_name(call.func) != '_mx_sys.collect_from_space'
+            or len(call.args) != 6 or any(arg.star for arg in call.args)
+            or any(arg.keyword for arg in call.args[:5])
+            or dotted_name(call.args[0].value) != 'self'
+            or call.args[-1].keyword is None or call.args[-1].keyword.value != 'cache'
+            or dotted_name(call.args[-1].value) != 'self._mx_collect_cache'
+            or any(not isinstance(arg.value, cst.Tuple) or arg.value.elements for arg in call.args[3:5])):
         return None
-    parameter = call.args[2].value
+    try:
+        parameter = literal_value(call.args[2].value)
+    except (ValueError, TypeError):
+        return None
     if (not isinstance(parameter, str) or parameter not in cls.refs
             or cls.refs[parameter].get_type_expr(c_style=True) != 'long long'):
         return None
     output = _return_expr(_method(node, '_f_collect_outputs'))
     mode, fields = _single_dict(output)
     label, entry = _single_dict(fields)
-    if (mode != 'sum' or not label or not isinstance(entry, ast.Call)
-            or entry.args or entry.keywords):
+    if mode != 'sum' or not label or arguments(entry, count=0) is None:
         return None
     cell = _self_attribute(entry.func)
     if (cell not in cls.cells or cls.cells[cell].has_args()

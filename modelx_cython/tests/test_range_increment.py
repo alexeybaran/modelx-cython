@@ -1,4 +1,4 @@
-import ast
+import libcst as cst
 import pytest
 
 from modelx_cython.reductions import safe_range_increment
@@ -14,5 +14,5 @@ from modelx_cython.reductions import safe_range_increment
     (f'{(1<<63)-3}, {(1<<63)-1}, 2', True),
 ])
 def test_native_range_final_increment_is_representable(arguments, safe):
-    iterator = ast.parse('range('+arguments+')', mode='eval').body
+    iterator = cst.parse_expression('range('+arguments+')')
     assert safe_range_increment(iterator) is safe

@@ -5,12 +5,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from functools import cached_property
 from typing import NamedTuple
-import ast
 
 import libcst as cst
 
 from .consts import MX_SELF
-from .scopes import Names
+from .scopes import CstFacts, Names
 
 
 @dataclass(frozen=True)
@@ -23,17 +22,17 @@ class EntryModule:
     syntax: cst.Module
 
     @cached_property
-    def tree(self):
-        return ast.parse(self.syntax.code)
+    def facts(self):
+        return CstFacts(self.syntax)
 
     @cached_property
     def functions(self):
-        return {node.name: node for node in self.tree.body if isinstance(node, ast.FunctionDef)}
+        return {node.name.value: node for node in self.syntax.body if isinstance(node, cst.FunctionDef)}
 
     @cached_property
     def methods(self):
-        return {(cls.name, node.name): node for cls in self.tree.body if isinstance(cls, ast.ClassDef)
-                for node in cls.body if isinstance(node, ast.FunctionDef)}
+        return {(cls.name.value, node.name.value): node for cls in self.syntax.body if isinstance(cls, cst.ClassDef)
+                for node in cls.body.body if isinstance(node, cst.FunctionDef)}
 
     @cached_property
     def names(self):

@@ -1,35 +1,48 @@
-"""Lower registered reductions at proved return and assignment boundaries.
-
-Only range loops and singleton bindings with proven numeric expressions qualify.
-The existing formula body remains authoritative; general generators stay intact.
-"""
-import ast
+"""Lower registered reductions using existing CST nodes and binding metadata."""
+from functools import cached_property
 
 import libcst as cst
 
 from .cell_entries import exact_receiver
 from .helpers import module_name
-from .scopes import FormulaTransformer, Names, expression_ast, has_scope_effects
+from .scopes import CstFacts, FormulaTransformer, Names, has_scope_effects
+from .syntax import arguments, code, literal_value
 from .typedefs import primitive_kind
 
 
-def _call(node, name, argc):
-    return (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
-            and node.func.id == name and len(node.args) == argc and not node.keywords
-            and not any(isinstance(arg, ast.Starred) for arg in node.args))
+def _call(node, name, count):
+    return arguments(node, name, count) is not None
+
+
+def _parts(generator):
+    part = generator.for_in
+    while part is not None:
+        yield part
+        part = part.inner_for_in
+
+
+def _literal_int(node, expected):
+    try:
+        value = literal_value(node)
+        return type(value) is int and value == expected
+    except (ValueError, TypeError):
+        return False
 
 
 def safe_range_increment(iterator):
     """Prove the final C loop increment, including an overshoot of stop."""
-    if len(iterator.args) < 3:
+    args = arguments(iterator)
+    if args is None:
+        return False
+    if len(args) < 3:
         return True
     try:
-        step = ast.literal_eval(iterator.args[2])
+        step = literal_value(args[2])
         if type(step) not in (int, bool):
             return False
         if step in (-1, 1):
             return True
-        bounds = [ast.literal_eval(arg) for arg in iterator.args]
+        bounds = [literal_value(arg) for arg in args]
         if not all(primitive_kind(value) in ('longlong', 'bint') for value in bounds):
             return False
         values = range(*bounds)
@@ -41,53 +54,45 @@ def safe_range_increment(iterator):
 class NativeReductions(FormulaTransformer):
     def __init__(self, cls_info, cells, providers, formula, reserve_fallback, builtin_bounds):
         super().__init__()
-        self.cls_info = cls_info
-        self.cells = cells
-        self.providers = providers
-        self.formula = formula
-        self.reserve_fallback = reserve_fallback
+        self.cls_info, self.cells, self.providers = cls_info, cells, providers
+        self.formula, self.reserve_fallback = formula, reserve_fallback
         self.builtin_bounds = builtin_bounds
-        self.fallbacks = []
-        self.exact_receiver_guards = set()
-        self.count = 0
-        self.module = cst.Module([])
-        self.captures = {}
-        self.integer_captures = {}
-        syntax = ast.parse(self.module.code_for_node(formula))
-        self.scope_safe = not has_scope_effects(syntax.body[0].body)
+        self.fallbacks, self.exact_receiver_guards, self.count = [], set(), 0
+        self.captures, self.integer_captures = {}, {}
+        self.scope_safe = not has_scope_effects(formula.body.body)
         self.names = Names(formula)
         if isinstance(formula.body, cst.IndentedBlock):
             lines = formula.body.body
             for assignment, consumer in zip(lines, lines[1:]):
-                if (not isinstance(assignment, cst.SimpleStatementLine)
-                        or len(assignment.body) != 1
+                if (not isinstance(assignment, cst.SimpleStatementLine) or len(assignment.body) != 1
                         or not isinstance(assignment.body[0], cst.Assign)
-                        or not isinstance(consumer, cst.SimpleStatementLine)
-                        or len(consumer.body) != 1
+                        or not isinstance(consumer, cst.SimpleStatementLine) or len(consumer.body) != 1
                         or not isinstance(consumer.body[0], (cst.Return, cst.Assign))):
                     continue
                 expression = assignment.body[0]
                 if len(expression.targets) != 1:
                     continue
-                target = expression.targets[0].target
+                target, rhs = expression.targets[0].target, expression.value
                 if isinstance(target, cst.Name):
-                    rhs = expression_ast(expression.value)
                     if self.double_expression(rhs):
                         self.captures[id(consumer)] = target.value
-                    elif isinstance(rhs, ast.Call) and self.kind(rhs, {}) == 'longlong':
+                    elif isinstance(rhs, cst.Call) and self.kind(rhs, {}) == 'longlong':
                         self.integer_captures[id(consumer)] = target.value
 
+    @cached_property
+    def body_facts(self):
+        return CstFacts(self.formula.body.body)
+
     def double_expression(self, node):
-        """Check an existing binding formed solely from C doubles."""
-        if isinstance(node, ast.Constant):
-            return type(node.value) is float
-        if (isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name)
-                and node.value.id == 'self'):
-            ref = self.cls_info.refs.get(node.attr)
+        if isinstance(node, cst.Float):
+            return True
+        if (isinstance(node, cst.Attribute) and isinstance(node.value, cst.Name)
+                and node.value.value == 'self'):
+            ref = self.cls_info.refs.get(node.attr.value)
             return ref is not None and ref.get_type_expr(c_style=True) == 'double'
-        if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.UAdd, ast.USub)):
-            return self.double_expression(node.operand)
-        if isinstance(node, ast.BinOp) and isinstance(node.op, (ast.Add, ast.Sub, ast.Mult, ast.Div)):
+        if isinstance(node, cst.UnaryOperation) and isinstance(node.operator, (cst.Plus, cst.Minus)):
+            return self.double_expression(node.expression)
+        if isinstance(node, cst.BinaryOperation) and isinstance(node.operator, (cst.Add, cst.Subtract, cst.Multiply, cst.Divide)):
             return self.double_expression(node.left) and self.double_expression(node.right)
         return False
 
@@ -98,81 +103,70 @@ class NativeReductions(FormulaTransformer):
         return self.scope_safe
 
     def native_truth(self, node, locals_):
-        """Prove a filter's primitive truth/comparison semantics, not its size."""
         if self.kind(node, locals_) in ('double', 'longlong', 'bint'):
             return True
-        if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.Not):
-            return self.native_truth(node.operand, locals_)
-        if isinstance(node, ast.BoolOp):
-            return all(self.native_truth(value, locals_) for value in node.values)
-        if isinstance(node, ast.Compare) and all(isinstance(op, (
-                ast.Eq, ast.NotEq, ast.Lt, ast.LtE, ast.Gt, ast.GtE)) for op in node.ops):
-            operands = [node.left, *node.comparators]
+        if isinstance(node, cst.UnaryOperation) and isinstance(node.operator, cst.Not):
+            return self.native_truth(node.expression, locals_)
+        if isinstance(node, cst.BooleanOperation):
+            return self.native_truth(node.left, locals_) and self.native_truth(node.right, locals_)
+        if isinstance(node, cst.Comparison) and all(isinstance(part.operator, (
+                cst.Equal, cst.NotEqual, cst.LessThan, cst.LessThanEqual, cst.GreaterThan, cst.GreaterThanEqual))
+                for part in node.comparisons):
+            operands = [node.left, *(part.comparator for part in node.comparisons)]
             kinds = [self.kind(value, locals_) for value in operands]
             if not all(kind in ('double', 'longlong', 'bint') for kind in kinds):
                 return False
-            # Unknown int64 values must not be rounded to double for Python
-            # mixed int/float comparisons. Booleans and small literals are exact.
             return 'double' not in kinds or all(kind != 'longlong' or (
-                isinstance(value, ast.Constant) and abs(value.value) <= (1 << 53))
+                isinstance(value, cst.Integer) and abs(value.evaluated_value) <= (1 << 53))
                 for value, kind in zip(operands, kinds))
         return False
 
     def kind(self, node, locals_):
-        if isinstance(node, ast.Constant):
-            return primitive_kind(node.value)
-        if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.UAdd, ast.USub)):
-            # Classify the signed literal as a whole: -2**63 fits, +2**63
-            # does not. A native negation of an unknown int64 can overflow.
+        if isinstance(node, (cst.Integer, cst.Float, cst.Imaginary, cst.SimpleString)):
+            return primitive_kind(literal_value(node))
+        if isinstance(node, cst.Name):
+            if node.value in ('True', 'False', 'None'):
+                return primitive_kind(literal_value(node))
+            return locals_.get(node.value)
+        if isinstance(node, cst.UnaryOperation) and isinstance(node.operator, (cst.Plus, cst.Minus)):
             try:
-                return primitive_kind(ast.literal_eval(node))
+                return primitive_kind(literal_value(node))
             except (ValueError, TypeError):
-                kind = self.kind(node.operand, locals_)
-                if isinstance(node.op, ast.UAdd) or kind == 'double':
+                kind = self.kind(node.expression, locals_)
+                if isinstance(node.operator, cst.Plus) or kind == 'double':
                     return kind
                 return 'longlong' if kind == 'bint' else None
-        if isinstance(node, ast.Name):
-            return locals_.get(node.id)
-        if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name) and node.value.id == 'self':
-            ref = self.cls_info.refs.get(node.attr)
+        if isinstance(node, cst.Attribute) and isinstance(node.value, cst.Name) and node.value.value == 'self':
+            ref = self.cls_info.refs.get(node.attr.value)
             if ref is not None:
                 return {float: 'double', int: 'longlong', bool: 'bint'}.get(ref.type_)
-        if (isinstance(node, ast.Call) and not node.keywords
-                and isinstance(node.func, ast.Attribute)
-                and isinstance(node.func.value, ast.Name) and node.func.value.id == 'self'):
-            cell = self.cls_info.cells.get(node.func.attr)
-            if (cell is not None and cell.has_typeinfo() and not cell.called_with_kwargs
-                    and not cell.body_has_closure):
-                result = cell.get_rettype_expr(c_style=True)
-                return {'double': 'double', 'long long': 'longlong', 'bint': 'bint'}.get(result)
-        if isinstance(node, ast.BinOp) and isinstance(node.op, (ast.Add, ast.Sub, ast.Mult, ast.Div)):
+        if (arguments(node) is not None and isinstance(node.func, cst.Attribute)
+                and isinstance(node.func.value, cst.Name) and node.func.value.value == 'self'):
+            cell = self.cls_info.cells.get(node.func.attr.value)
+            if cell is not None and cell.has_typeinfo() and not cell.called_with_kwargs and not cell.body_has_closure:
+                return {'double': 'double', 'long long': 'longlong', 'bint': 'bint'}.get(cell.get_rettype_expr(c_style=True))
+        if isinstance(node, cst.BinaryOperation) and isinstance(node.operator, (cst.Add, cst.Subtract, cst.Multiply, cst.Divide)):
             left, right = self.kind(node.left, locals_), self.kind(node.right, locals_)
-            # Do not introduce native integer arithmetic merely from observations.
             if left and right and 'double' in (left, right):
                 return 'double'
         return None
 
-    def cold_fallback(self, source, generator, capture, function, capture_type='_mx_cy.double',
-                      boxed_param=None):
+    def cold_fallback(self, source, generator, capture, function, capture_type='_mx_cy.double', boxed_param=None):
         original = f'{function}({source})'
-        if not self.cells.has_formula_def:
+        if not self.cells.has_formula_def or not self.scope_safe:
             return original
-        formula, = ast.parse(self.module.code_for_node(self.formula)).body
-        nodes = [node for statement in formula.body for node in ast.walk(statement)]
-        # A moved generator cannot share enclosing bindings with another closure.
-        if has_scope_effects(formula.body):
+        names = CstFacts(generator).reads
+        targets = {part.target.value for part in _parts(generator)}
+        stores = self.body_facts.stores
+        if ((names - targets) & stores.keys()) - {capture}:
             return original
-        names = {node.id for node in ast.walk(generator) if isinstance(node, ast.Name)
-                 and isinstance(node.ctx, ast.Load)}
-        targets = {part.target.id for part in generator.generators}
-        stores = [node.id for node in nodes if isinstance(node, ast.Name)
-                  and isinstance(node.ctx, ast.Store)]
-        if ((names - targets) & set(stores)) - {capture}:
+        if capture is not None and stores[capture] != 1:
             return original
-        if capture is not None and stores.count(capture) != 1:
-            return original
-        params = {param.arg for param in ast.walk(formula.args) if isinstance(param, ast.arg)}
-        if targets & params or not (names & params) <= {'self', *self.cells.params}:
+        params = self.formula.params
+        parameters = [*params.posonly_params, *params.params, *params.kwonly_params]
+        parameters += [param for param in (params.star_arg, params.star_kwarg) if isinstance(param, cst.Param)]
+        param_names = {param.name.value for param in parameters}
+        if targets & param_names or not (names & param_names) <= {'self', *self.cells.params}:
             return original
         args = []
         for name in self.cells.params:
@@ -183,10 +177,9 @@ class NativeReductions(FormulaTransformer):
                 args.append((name, 'object' if name == boxed_param else self.cells.get_argtype_expr(name)))
         if capture is not None:
             args.append((capture, capture_type))
-
         helper = self.reserve_fallback()
-        formals = ', '.join([f'self: {self.cls_info.name}', f'{function}: object'] +
-                            [f'{name}: {kind}' for name, kind in args])
+        formals = ', '.join([f'self: {self.cls_info.name}', f'{function}: object']
+                            + [f'{name}: {kind}' for name, kind in args])
         self.fallbacks.append(cst.parse_statement(
             f'\n\n@_mx_cy.cfunc\ndef {helper}({formals}) -> object:\n    return {original}\n'))
         actuals = ', '.join(['self', function] + [name for name, _ in args])
@@ -194,51 +187,48 @@ class NativeReductions(FormulaTransformer):
 
     def bounded_any(self, before, after, func, ref, source, tree):
         capture = self.integer_captures.get(id(before))
+        parts = tuple(_parts(tree))
         if not (self.builtin_bounds and capture and capture not in self.cells.params
                 and capture not in {'self', 'min', 'max', 'range'}
-                and self.cells.get_rettype_expr(c_style=True) == 'bint'
-                and len(tree.generators) == 1):
+                and self.cells.get_rettype_expr(c_style=True) == 'bint' and len(parts) == 1):
             return after
-        part, = tree.generators
+        part, = parts
 
         def named(node, name):
-            return isinstance(node, ast.Name) and node.id == name
+            return isinstance(node, cst.Name) and node.value == name
 
-        if not (isinstance(part.target, ast.Name) and not part.ifs and not part.is_async
+        if not (isinstance(part.target, cst.Name) and not part.ifs and part.asynchronous is None
                 and _call(part.iter, 'range', 2)):
             return after
-        index = part.target.id
+        index = part.target.value
+        predicate_args = arguments(tree.elt, count=1)
         if (index in {capture, 'self', 'range', 'min', 'max', *self.cells.params}
-                or not isinstance(tree.elt, ast.Call) or len(tree.elt.args) != 1
-                or not named(tree.elt.args[0], index)
+                or predicate_args is None or not named(predicate_args[0], index)
                 or self.kind(tree.elt, {index: 'longlong'}) != 'bint'):
             return after
-        low, high = part.iter.args
+        low, high = arguments(part.iter)
         if not (_call(low, 'max', 2) and _call(high, 'min', 2)
-                and isinstance(low.args[0], ast.Constant) and type(low.args[0].value) is int
-                and low.args[0].value == 0 and named(low.args[1], capture)):
+                and _literal_int(low.args[0].value, 0) and named(low.args[1].value, capture)):
             return after
-        upper, limit = high.args
-        if not (isinstance(upper, ast.BinOp) and isinstance(upper.op, ast.Add)
-                and named(upper.left, capture) and isinstance(upper.right, ast.Constant)
-                and type(upper.right.value) is int and 0 < upper.right.value <= (1 << 31) - 1
-                and isinstance(limit, ast.Call) and not limit.args
-                and self.kind(limit, {}) == 'longlong'):
+        upper, limit = arguments(high)
+        if not (isinstance(upper, cst.BinaryOperation) and isinstance(upper.operator, cst.Add)
+                and named(upper.left, capture) and isinstance(upper.right, cst.Integer)
+                and 0 < upper.right.evaluated_value <= (1 << 31) - 1
+                and arguments(limit, count=0) is not None and self.kind(limit, {}) == 'longlong'):
             return after
-        offset = upper.right.value
+        offset = upper.right.evaluated_value
         provider, operation = ref.helper
-        alias = module_name(provider)
-        prefix = self.reserve_prefix()
+        alias, prefix = module_name(provider), self.reserve_prefix()
         function = f'{prefix}_function'
-        before_fallbacks = len(self.fallbacks)
+        count = len(self.fallbacks)
         fallback = self.cold_fallback(source, tree, capture, function, 'object')
-        if len(self.fallbacks) == before_fallbacks:
+        if len(self.fallbacks) == count:
             return after
         self.providers.add(provider)
         self.count += 1
         guard = f'{prefix}_native'
         self.exact_receiver_guards.add(guard)
-        predicate = f'self.{tree.elt.func.attr}({prefix}_index)'
+        predicate = f'self.{tree.elt.func.attr.value}({prefix}_index)'
         return cst.FlattenSentinel(cst.parse_module(f"""
 {function}: object = self.{func.attr.value}
 {prefix}_first: _mx_cy.longlong = {capture}
@@ -246,7 +236,7 @@ class NativeReductions(FormulaTransformer):
 if {guard}:
     {prefix}_low: _mx_cy.longlong = {prefix}_first if {prefix}_first > 0 else 0
     {prefix}_high: _mx_cy.longlong = {prefix}_first + {offset}
-    {prefix}_limit: _mx_cy.longlong = {ast.unparse(limit)}
+    {prefix}_limit: _mx_cy.longlong = {code(limit)}
     if {prefix}_high > {prefix}_limit:
         {prefix}_high = {prefix}_limit
     {prefix}_index: _mx_cy.longlong
@@ -258,46 +248,40 @@ return {fallback}
 """).body)
 
     def single_range(self, after, func, ref, source, tree):
-        """Lower the proven typed predicate or bounded descending maximum."""
-        if len(tree.generators) != 1 or not self.cells.formula_allows_exact_receiver:
+        parts = tuple(_parts(tree))
+        if len(parts) != 1 or not self.cells.formula_allows_exact_receiver:
             return after
-        part, = tree.generators
-        if not isinstance(part.target, ast.Name) or part.ifs or part.is_async:
+        part, = parts
+        if not isinstance(part.target, cst.Name) or part.ifs or part.asynchronous is not None:
             return after
-        index = part.target.id
+        index = part.target.value
         if index in {'self', 'range', 'abs', 'max', *self.cells.params}:
             return after
-
         provider, operation = ref.helper
-        alias = module_name(provider)
-        prefix = self.reserve_prefix()
-        counter = f'{prefix}_index'
-        guard = f'{prefix}_native'
-        function = f'{prefix}_function'
-        predicate = tree.elt
-        boxed_param = None
+        alias, prefix = module_name(provider), self.reserve_prefix()
+        counter, guard, function = f'{prefix}_index', f'{prefix}_native', f'{prefix}_function'
+        predicate, boxed_param = tree.elt, None
         if ref.reduction == 'bool_all':
-            if not (_call(part.iter, 'range', 1)
-                    and isinstance(part.iter.args[0], ast.Call)
-                    and not part.iter.args[0].args
-                    and self.kind(part.iter.args[0], {}) == 'longlong'
+            args = arguments(part.iter, 'range', 1)
+            if not (args is not None and arguments(args[0], count=0) is not None
+                    and self.kind(args[0], {}) == 'longlong'
                     and self.cells.get_rettype_expr(c_style=True) == 'bint'):
                 return after
-            bound = ast.unparse(part.iter.args[0])
-            extra_guard = ''
-            iterator = f'range({bound})'
-            if isinstance(predicate, ast.Compare):
-                if not (len(predicate.ops) == 1
-                        and isinstance(predicate.ops[0], (ast.Lt, ast.LtE, ast.Gt, ast.GtE))
-                        and _call(predicate.left, 'abs', 1)
-                        and self.kind(predicate.comparators[0], {}) == 'double'
-                        and isinstance(predicate.comparators[0], (ast.Constant, ast.Attribute))):
+            iterator, extra_guard = f'range({code(args[0])})', ''
+            if isinstance(predicate, cst.Comparison):
+                if len(predicate.comparisons) != 1:
                     return after
-                value = self.indexed_cell(predicate.left.args[0], index, 'double', counter)
+                comparison = predicate.comparisons[0]
+                absolute = arguments(predicate.left, 'abs', 1)
+                if not (isinstance(comparison.operator, (cst.LessThan, cst.LessThanEqual, cst.GreaterThan, cst.GreaterThanEqual))
+                        and absolute is not None and self.kind(comparison.comparator, {}) == 'double'
+                        and isinstance(comparison.comparator, (cst.Float, cst.Attribute))):
+                    return after
+                value = self.indexed_cell(absolute[0], index, 'double', counter)
                 if value is None:
                     return after
-                op = {ast.Lt: '<', ast.LtE: '<=', ast.Gt: '>', ast.GtE: '>='}[type(predicate.ops[0])]
-                test = f'{alias}.f64_abs({value}) {op} {ast.unparse(predicate.comparators[0])}'
+                operator = {cst.LessThan: '<', cst.LessThanEqual: '<=', cst.GreaterThan: '>', cst.GreaterThanEqual: '>='}[type(comparison.operator)]
+                test = f'{alias}.f64_abs({value}) {operator} {code(comparison.comparator)}'
             else:
                 test = self.indexed_cell(predicate, index, 'bint', counter)
                 if test is None:
@@ -307,18 +291,12 @@ return {fallback}
             return False
     return True"""
         else:
-            value = self.indexed_cell(predicate, index, 'double', counter)
-            bounds = self.descending_window(part.iter)
+            value, bounds = self.indexed_cell(predicate, index, 'double', counter), self.descending_window(part.iter)
             if value is None or bounds is None or self.cells.get_rettype_expr(c_style=True) != 'double':
                 return after
             start, offset, step = bounds
-            boxed_param = start
-            extra_guard = f' and {start} >= 0'
-            stop = f'{prefix}_stop'
-            best = f'{prefix}_best'
-            item = f'{prefix}_item'
-            # A nonnegative start and negative stop floor guarantee a first value.
-            # Later values replace it only on strict greater-than, as in max().
+            boxed_param, extra_guard = start, f' and {start} >= 0'
+            stop, best, item = f'{prefix}_stop', f'{prefix}_best', f'{prefix}_item'
             first = self.indexed_cell(predicate, index, 'double', start)
             loop = f"""    {stop}: _mx_cy.longlong = {start} - {offset}
     if {stop} < -1:
@@ -330,10 +308,9 @@ return {fallback}
         if {item} > {best}:
             {best} = {item}
     return {best}"""
-
-        before_fallbacks = len(self.fallbacks)
+        count = len(self.fallbacks)
         fallback = self.cold_fallback(source, tree, None, function, boxed_param=boxed_param)
-        if len(self.fallbacks) == before_fallbacks:
+        if len(self.fallbacks) == count:
             return after
         self.providers.add(provider)
         self.count += 1
@@ -347,37 +324,34 @@ return {fallback}
 """).body)
 
     def indexed_cell(self, node, index, kind, counter):
-        if not (isinstance(node, ast.Call) and len(node.args) == 1
-                and isinstance(node.args[0], ast.Name) and node.args[0].id == index
+        args = arguments(node, count=1)
+        if not (args is not None and isinstance(args[0], cst.Name) and args[0].value == index
                 and self.kind(node, {index: 'longlong'}) == kind):
             return None
-        cell = self.cls_info.cells[node.func.attr]
+        cell = self.cls_info.cells[node.func.attr.value]
         if len(cell.params) != 1 or cell.get_argtype_expr(cell.params[0], c_style=True) != 'long long':
             return None
-        return f'self.{node.func.attr}({counter})'
+        return f'self.{node.func.attr.value}({counter})'
 
     def descending_window(self, node):
-        """Prove range(start, max(-1, start - offset), -step) for start >= 0."""
-        if not _call(node, 'range', 3):
+        args = arguments(node, 'range', 3)
+        if args is None:
             return None
-        start, limit, step = node.args
-        if not (isinstance(start, ast.Name) and start.id in self.cells.params
-                and self.cells.get_argtype_expr(start.id, c_style=True) == 'long long'
-                and _call(limit, 'max', 2) and ast.unparse(limit.args[0]) == '-1'
-                and isinstance(step, ast.UnaryOp) and isinstance(step.op, ast.USub)):
+        start, limit, step = args
+        if not (isinstance(start, cst.Name) and start.value in self.cells.params
+                and self.cells.get_argtype_expr(start.value, c_style=True) == 'long long'
+                and _call(limit, 'max', 2) and _literal_int(limit.args[0].value, -1)
+                and isinstance(step, cst.UnaryOperation) and isinstance(step.operator, cst.Minus)):
             return None
-        lower = limit.args[1]
-        if not (isinstance(lower, ast.BinOp) and isinstance(lower.op, ast.Sub)
-                and isinstance(lower.left, ast.Name) and lower.left.id == start.id
-                and isinstance(lower.right, ast.Constant) and type(lower.right.value) is int
-                and isinstance(step.operand, ast.Constant) and type(step.operand.value) is int
-                and 0 < step.operand.value <= lower.right.value <= (1 << 31) - 1):
+        lower = limit.args[1].value
+        if not (isinstance(lower, cst.BinaryOperation) and isinstance(lower.operator, cst.Subtract)
+                and isinstance(lower.left, cst.Name) and lower.left.value == start.value
+                and isinstance(lower.right, cst.Integer) and isinstance(step.expression, cst.Integer)
+                and 0 < step.expression.evaluated_value <= lower.right.evaluated_value <= (1 << 31) - 1):
             return None
-        return start.id, lower.right.value, step.operand.value
+        return start.value, lower.right.evaluated_value, step.expression.evaluated_value
 
     def leave_SimpleStatementLine(self, before, after):
-        if not hasattr(ast, 'unparse'):
-            return after
         if len(before.body) != 1:
             return after
         statement = before.body[0]
@@ -386,24 +360,19 @@ return {fallback}
                 and isinstance(statement.targets[0].target, cst.Name)):
             return after
         value = statement.value
-        if not isinstance(value, cst.Call) or len(value.args) != 1:
+        args = arguments(value, count=1)
+        if (args is None or not isinstance(value.func, cst.Attribute)
+                or not isinstance(value.func.value, cst.Name) or value.func.value.value != 'self'):
             return after
         func = value.func
-        if not (isinstance(func, cst.Attribute) and isinstance(func.value, cst.Name)
-                and func.value.value == 'self'):
-            return after
         ref = self.cls_info.refs.get(func.attr.value)
         reduction = getattr(ref, 'reduction', None)
-        if (reduction not in ('f64_sum', 'bool_any', 'bool_all', 'f64_max')
-                or not ref.helper or value.args[0].keyword or value.args[0].star):
+        if reduction not in ('f64_sum', 'bool_any', 'bool_all', 'f64_max') or not ref.helper:
             return after
-        source = self.module.code_for_node(value.args[0].value)
-        tree = expression_ast(source)
-        if not isinstance(tree, ast.GeneratorExp) or not self.builtin_bounds:
+        tree = args[0]
+        if not isinstance(tree, cst.GeneratorExp) or not self.builtin_bounds:
             return after
-        # A named sum result may remain an object when a replacement helper
-        # returns one. Do not force an intermediate through the Cell's return
-        # type or turn a predicate's early result into a return from the Cell.
+        source = code(tree)
         if assignment and reduction != 'f64_sum':
             return after
         if reduction == 'bool_any':
@@ -413,79 +382,72 @@ return {fallback}
         capture = self.captures.get(id(before))
         if capture == 'range':
             return after
-        if capture is not None and not any(isinstance(node, ast.Name) and node.id == capture
-                                           for node in ast.walk(tree)):
+        generator_facts = CstFacts(tree)
+        if capture is not None and capture not in generator_facts.reads:
             capture = None
         local_types = {capture: 'double'} if capture is not None else {}
-        for part in tree.generators:
-            if part.is_async or not isinstance(part.target, ast.Name):
+        for part in _parts(tree):
+            if part.asynchronous is not None or not isinstance(part.target, cst.Name):
                 return after
-            name = part.target.id
-            # Reserved generated names must never capture authored names.
+            name, iterator = part.target.value, part.iter
             if name == capture:
                 return after
-            iterator = part.iter
-            if name not in local_types and any(isinstance(n, ast.Name) and n.id == name
-                                               for n in ast.walk(iterator)):
+            if name not in local_types and name in CstFacts(iterator).reads:
                 return after
-            if (isinstance(iterator, ast.Call) and isinstance(iterator.func, ast.Name)
-                    and iterator.func.id == 'range' and not iterator.keywords
-                    and 1 <= len(iterator.args) <= 3
-                    and all(self.kind(arg, local_types) in ('longlong', 'bint')
-                            for arg in iterator.args)
+            bounds = arguments(iterator, 'range')
+            if (bounds is not None and 'range' not in local_types and 1 <= len(bounds) <= 3
+                    and all(self.kind(arg, local_types) in ('longlong', 'bint') for arg in bounds)
                     and safe_range_increment(iterator)):
                 local_types[name] = 'longlong'
-            elif isinstance(iterator, ast.Tuple) and len(iterator.elts) == 1:
-                kind = self.kind(iterator.elts[0], local_types)
+            elif (isinstance(iterator, cst.Tuple) and len(iterator.elements) == 1
+                    and isinstance(iterator.elements[0], cst.Element)):
+                kind = self.kind(iterator.elements[0].value, local_types)
                 if not kind:
                     return after
                 local_types[name] = kind
             else:
                 return after
-            if not all(self.native_truth(condition, local_types) for condition in part.ifs):
+            if not all(self.native_truth(condition.test, local_types) for condition in part.ifs):
                 return after
         if self.kind(tree.elt, local_types) != 'double':
             return after
         provider, operation = ref.helper
-        alias = module_name(provider)
-        prefix = self.reserve_prefix()
-        previous_fallbacks = len(self.fallbacks)
+        alias, prefix = module_name(provider), self.reserve_prefix()
+        count = len(self.fallbacks)
         fallback = self.cold_fallback(source, tree, capture, f'{prefix}_function')
-        if len(self.fallbacks) == previous_fallbacks:
+        if len(self.fallbacks) == count:
             return after
-        # Keep generator locals isolated from the enclosing authored scope.
         renamed = {name: f'{prefix}_{name}' for name in local_types}
-        class Rename(ast.NodeTransformer):
-            def visit_Name(self, node):
-                if node.id in renamed:
-                    return ast.copy_location(ast.Name(renamed[node.id], node.ctx), node)
-                return node
-        rename = Rename()
-        for part in tree.generators:
-            rename.visit(part)
-        rename.visit(tree.elt)
+        contexts = generator_facts.contexts
+
+        class Rename(cst.CSTTransformer):
+            def leave_Name(self, before, after):
+                if before.value in renamed and before in contexts:
+                    return after.with_changes(value=renamed[before.value])
+                return after
+
+        tree = tree.visit(Rename())
         declarations = [f'{prefix}_function: object', f'{prefix}_state: {alias}.F64Sum']
-        declarations += [f'{renamed[name]}: _mx_cy.{kind}' for name,kind in local_types.items()]
+        declarations += [f'{renamed[name]}: _mx_cy.{kind}' for name, kind in local_types.items()]
         lines = declarations + [f'{prefix}_function = self.{func.attr.value}',
                                f'if {alias}.f64_accepts({prefix}_function):',
                                f'    {alias}.f64_init(_mx_cy.address({prefix}_state))']
         if capture is not None:
             lines.append(f'    {renamed[capture]} = {capture}')
         indent = '    '
-        for part in tree.generators:
-            if isinstance(part.iter, ast.Tuple):
-                lines.append(indent + f'{part.target.id} = {ast.unparse(part.iter.elts[0])}')
+        for part in _parts(tree):
+            if isinstance(part.iter, cst.Tuple):
+                lines.append(indent + f'{part.target.value} = ({code(part.iter.elements[0].value)})')
             else:
-                lines.append(indent + f'for {part.target.id} in {ast.unparse(part.iter)}:')
+                lines.append(indent + f'for {part.target.value} in {code(part.iter)}:')
                 indent += '    '
             for condition in part.ifs:
-                lines.append(indent + f'if {ast.unparse(condition)}:')
+                lines.append(indent + f'if ({code(condition.test)}):')
                 indent += '    '
-        result = (self.module.code_for_node(statement.targets[0].target) + ' = '
-                  if assignment else 'return ')
-        lines += [indent + f'{alias}.f64_add(_mx_cy.address({prefix}_state), {ast.unparse(tree.elt)})',
+        result = code(statement.targets[0].target) + ' = ' if assignment else 'return '
+        lines += [indent + f'{alias}.f64_add(_mx_cy.address({prefix}_state), {code(tree.elt)})',
                   f'    {result}{alias}.f64_result(_mx_cy.address({prefix}_state))',
                   'else:', f'    {result}{fallback}']
         self.providers.add(provider)
         self.count += 1
-        return cst.FlattenSentinel(cst.parse_module('\n'.join(lines)+'\n').body)
+        return cst.FlattenSentinel(cst.parse_module('\n'.join(lines) + '\n').body)

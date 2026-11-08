@@ -26,11 +26,11 @@ def test_known_legacy_upgrade_is_structural_and_preserves_other_code(source):
     adapter = CollectRuntime(code)
     assert adapter.supported
     output = adapter.render(4, native=True)
-    assert _native(ast.parse(output))
+    assert _native(cst.parse_module(output))
     assert 'class Authored:\n    value = "unchanged"' in output
     assert '_mx_parallel_workers  =  4 # exported' in output
     assert CollectRuntime(output).render(4, native=True) == output
-    assert not _native(ast.parse(adapter.render(4)))
+    assert not _native(cst.parse_module(adapter.render(4)))
 
 
 @pytest.mark.parametrize('change', [
@@ -58,7 +58,7 @@ def test_native_export_requires_no_runtime_transplant():
     output = adapter.render(7, native=True)
     tree = cst.parse_module(output)
     assert tree.code == output
-    assert _native(ast.parse(output))
+    assert _native(cst.parse_module(output))
 
 
 def test_legacy_export_with_older_modelx_keeps_ordinary_collection(monkeypatch):
@@ -75,14 +75,7 @@ def test_parallel_worker_setting_requires_an_unambiguous_export():
             CollectRuntime(source).render(4)
 
 
-def test_legacy_protocol_ignores_python38_index_wrappers(monkeypatch):
+def test_legacy_protocol_uses_cst_and_ignores_parenthesized_layout():
     from modelx_cython.collect_adapter import _legacy
-    class Index(ast.AST):
-        _fields = ('value',)
-        def __init__(self, value): self.value = value
-    tree = ast.parse(legacy())
-    for node in list(ast.walk(tree)):
-        if isinstance(node, ast.Subscript) and not isinstance(node.slice, ast.Slice):
-            node.slice = Index(node.slice)
-    monkeypatch.setattr(ast, 'Index', Index)
-    assert _legacy(tree)
+    source = legacy().replace('key = (coords, args)', 'key = ((coords, args))')
+    assert _legacy(cst.parse_module(source))
