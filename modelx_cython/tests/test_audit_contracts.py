@@ -9,7 +9,6 @@ from modelx_cython.helpers import HelperCalls
 from modelx_cython.reductions import NativeReductions
 from modelx_cython.native_math import NativeMath
 from modelx_cython.helpers import helper_capability
-from modelx_cython.inline_entries import prune_exact_branches
 import pytest
 
 
@@ -74,28 +73,27 @@ def test_enum_constants_do_not_capture_a_comprehension_receiver():
     assert pass_.count == 0
 
 
-def test_readonly_enum_definition_keeps_subclass_reference_dispatch():
-    class Base:
-        @property
-        def Status(self):
-            return SimpleNamespace(OK=200)
-    class Derived(Base):
-        @property
-        def Status(self):
-            return SimpleNamespace(OK=201)
+def test_declared_code_enum_uses_its_fixed_definition():
     source='def formula(self, value):\n    return value == self.Status.OK\n'
     pass_=Constants(SimpleNamespace(name='_c_Values',cells={}),native_cell('bint',('value',)),
                     {('_c_Values','Status','OK'):('_mx_enum_const_0',200)})
-    namespace={'_c_Values':Base,'_mx_enum_const_0':200}
+    namespace={'_mx_enum_const_0':200}
     transformed=cst.parse_module(source).visit(pass_).code
     expression=ast.parse(transformed).body[0].body[0].value
-    assert isinstance(expression,ast.IfExp)
-    assert isinstance(expression.body,ast.Compare)
-    assert isinstance(expression.body.comparators[0],ast.Name)
-    assert isinstance(expression.orelse,ast.UnaryOp)
+    assert isinstance(expression,ast.Compare)
+    assert isinstance(expression.comparators[0],ast.Name)
     exec(transformed,namespace)
-    assert namespace['formula'](Base(),200) is True
-    assert namespace['formula'](Derived(),200) is False
+    assert namespace['formula'](object(),200) is True
+    assert namespace['formula'](object(),201) is False
+
+
+def test_enum_constants_decline_receiver_rebinding():
+    source='def formula(self, value, other):\n    self = other\n    return value == self.Status.OK\n'
+    pass_=Constants(SimpleNamespace(name='_c_Values',cells={}),
+        native_cell('bint',('value','other')),
+        {('_c_Values','Status','OK'):('_mx_enum_const_0',200)})
+    assert cst.parse_module(source).visit(pass_).code==source
+    assert pass_.count==0
 
 
 @pytest.mark.parametrize('source',[
@@ -173,31 +171,3 @@ def test_arithmetic_rewrite_preserves_global_assignment_effects():
     assert (namespace['a'],namespace['b'])==(4,4)
 
 
-def test_exact_branch_facts_preserve_virtual_arguments_and_child_scopes():
-    source='''def formula(self, call):
-    def nested(self):
-        return 1 if type(self) is _c_Values else self.value
-    return call(1 if type(self) is _c_Values else self.value) if type(self) is _c_Values else call(1 if type(self) is _c_Values else self.value)
-'''
-    node=cst.parse_module(source).body[0]
-    result=cst.Module([prune_exact_branches(node,'_c_Values')]).code
-    expression=ast.parse(result).body[0].body[-1].value
-    assert isinstance(expression.body.args[0],ast.Constant)
-    assert isinstance(expression.orelse.args[0],ast.Attribute)
-    assert 'return 1 if type(self) is _c_Values else self.value' in result
-    class Base:value=1
-    class Derived(Base):value=2
-    namespace={'_c_Values':Base};exec(result,namespace)
-    assert namespace['formula'](Base(),lambda x:x)==1
-    assert namespace['formula'](Derived(),lambda x:x)==2
-
-
-def test_exact_branch_facts_decline_receiver_rebinding():
-    source='''def formula(self, other):
-    if type(self) is _c_Values:
-        self = other
-        return 1 if type(self) is _c_Values else self.value
-    return 0
-'''
-    node=cst.parse_module(source).body[0]
-    assert cst.Module([prune_exact_branches(node,'_c_Values')]).code==source

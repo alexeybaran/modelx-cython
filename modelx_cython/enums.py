@@ -4,7 +4,7 @@ import ast
 import libcst as cst
 
 from .scopes import FormulaTransformer, binding_names, lexical_nodes
-from .cell_entries import exact_receiver
+from .consts import MX_SYS_MOD
 
 
 def storage(name):
@@ -46,7 +46,6 @@ class Constants(FormulaTransformer):
         self.locals = set()
         self.count = 0
         self.comparisons = 0
-        self._guarded_comparisons = {}
 
     def visit_FunctionDef(self, node):
         tree = ast.parse(cst.Module([]).code_for_node(node))
@@ -57,6 +56,8 @@ class Constants(FormulaTransformer):
         assignments = {}
         invalid = set()
         nodes = list(lexical_nodes(tree.body[0].body))
+        if 'self' in binding_names(nodes):
+            return False
         for part in nodes:
             if isinstance(part, ast.Assign):
                 for target in part.targets:
@@ -82,11 +83,9 @@ class Constants(FormulaTransformer):
         if (isinstance(node, cst.Attribute) and isinstance(node.value, cst.Attribute)
                 and isinstance(node.value.value, cst.Name) and node.value.value.value == 'self'):
             entry = self.symbols.get((self.cls.name, node.value.attr.value, node.attr.value))
-            if entry and getattr(self.cell, 'formula_allows_exact_receiver', False):
+            if entry:
                 self.count += 1
-                return cst.IfExp(test=cst.parse_expression(exact_receiver(self.cls.name)),
-                    body=cst.Name(entry[0]), orelse=node,
-                    lpar=(cst.LeftParen(),), rpar=(cst.RightParen(),))
+                return cst.Name(entry[0],lpar=node.lpar,rpar=node.rpar)
         return node
 
     def integer(self, node):
@@ -107,40 +106,8 @@ class Constants(FormulaTransformer):
                 member = self.member(comp.comparator)
                 if member is not comp.comparator:
                     self.comparisons += 1
-                    # Guard the comparison, not its operand: an object-valued
-                    # fallback operand would box even the exact native branch.
-                    result = member.with_changes(
-                        body=after.with_changes(comparisons=(comp.with_changes(
-                            comparator=member.body),)), orelse=after)
-                    self._guarded_comparisons[id(result)] = result
-                    return result
+                return after.with_changes(comparisons=(comp.with_changes(comparator=member),))
         return after
-
-    def truth_test(self, node, compound=False):
-        if compound and isinstance(node, cst.BooleanOperation):
-            return node.with_changes(left=self.truth_test(node.left, True),
-                                     right=self.truth_test(node.right, True))
-        if compound and isinstance(node, cst.UnaryOperation) and isinstance(node.operator, cst.Not):
-            return node.with_changes(expression=self.truth_test(node.expression, True))
-        if self._guarded_comparisons.get(id(node)) is not node:
-            return node
-        # Truth contexts already coerce comparison results. Make that coercion
-        # explicit only in the object branch so Cython keeps a native bint join.
-        fallback = node.orelse.with_changes(lpar=(cst.LeftParen(),), rpar=(cst.RightParen(),))
-        return node.with_changes(orelse=cst.UnaryOperation(cst.Not(),
-            cst.UnaryOperation(cst.Not(), fallback)))
-
-    def leave_If(self, before, after):
-        return after.with_changes(test=self.truth_test(after.test, True))
-
-    def leave_While(self, before, after):
-        return after.with_changes(test=self.truth_test(after.test, True))
-
-    def leave_IfExp(self, before, after):
-        return after.with_changes(test=self.truth_test(after.test, True))
-
-    def leave_Assert(self, before, after):
-        return after.with_changes(test=self.truth_test(after.test, True))
 
     def leave_Call(self, before, after):
         func = after.func
@@ -157,8 +124,6 @@ class Constants(FormulaTransformer):
         return after.with_changes(args=tuple(args))
 
     def leave_Return(self, before, after):
-        if self.cell.get_rettype_expr(c_style=True) == 'bint':
-            after = after.with_changes(value=self.truth_test(after.value))
         if (self.cell.get_rettype_expr(c_style=True) in ('long long','bint','double')
                 and (self.cell.has_formula_def or not self.cell.called_with_kwargs)):
             return after.with_changes(value=self.member(after.value))
@@ -181,6 +146,14 @@ def bind_properties(cls, body):
     names = getattr(cls, 'readonly_refs', ())
     result = []
     for statement in body:
+        if names and isinstance(statement,cst.FunctionDef) and statement.name.value=='__init__':
+            statements=list(statement.body.body)
+            docstring=(statements and isinstance(statements[0],cst.SimpleStatementLine)
+                and len(statements[0].body)==1 and isinstance(statements[0].body[0],cst.Expr)
+                and isinstance(statements[0].body[0].value,(cst.SimpleString,cst.ConcatenatedString)))
+            check=cst.parse_statement(f'{MX_SYS_MOD}._mx_check_enum_schema(self, {cls.name}, {names!r})\n')
+            statements.insert(int(bool(docstring)),check)
+            statement=statement.with_changes(body=statement.body.with_changes(body=tuple(statements)))
         if isinstance(statement, cst.FunctionDef) and statement.name.value in ('_mx_assign_refs','_mx_copy_refs'):
             statement = statement.visit(Bindings(names))
         result.append(statement)

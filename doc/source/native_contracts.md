@@ -19,11 +19,19 @@ comprehension scopes. A statement-changing lowering declines observable binding
 effects it cannot preserve, including globals, nonlocals and exception targets.
 Declining an optimization retains ordinary Cython execution.
 
-Exact receiver checks preserve subclass dispatch. Read-only enum definitions
-permit constants on an exact receiver; subclasses still read their actual
-Reference. Enum values use the underlying integer representation, not an
-overridable conversion method. Private formula admission uses native signatures,
-binding and override safety, not formula length.
+Exact receiver checks preserve Cell subclass dispatch. `EnumDefinitions` marks
+fixed compiled model-code bindings: changing a declared binding or its marker
+requires rebuilding the model. A compiled Space constructor rejects subclasses
+that shadow those bindings. Ordinary unmarked References remain assignable, and
+Cell overrides retain normal dispatch. This existing schema contract permits
+enum constants without a runtime guard in every formula. Enum values use the
+underlying integer representation, not an overridable conversion method. Facts
+do not cross child scopes or receiver rebinding. Private formula admission uses
+native signatures, binding and override safety, not formula length.
+
+The definitions describe the available category codes. Policy- and period-specific
+selections remain ordinary Cell inputs and results. An unmarked Reference retains
+the normal mutable-Reference contract.
 
 Integer arithmetic specialization proves bounds for every intermediate. The
 emitted input guards and binary64 exact-integer bound determine safety; operation
