@@ -4,9 +4,10 @@ import json
 from pathlib import Path
 import subprocess
 import sys
+from http import HTTPStatus
 
 import modelx as mx
-from lifelib.typed_inputs import sum_f64
+from lifelib.typed_inputs import EnumDefinitions, sum_f64
 
 
 def compile_model(path, sample):
@@ -20,19 +21,26 @@ def test_generator_literals_preserve_integer_width_and_sign(tmp_path):
               'above': 1 << 63, 'below': -(1 << 63)-1, 'large': 1 << 80}
     model = mx.new_model('LiteralDomains')
     try:
-        space = model.new_space('Values', refs={'sum_f64': sum_f64})
+        space = model.new_space('Values', refs={'sum_f64': sum_f64, 'Status':HTTPStatus,
+                                'definitions':EnumDefinitions(('Status',))})
         for name, value in values.items():
             space.new_cells(name, f'lambda: sum_f64(k * 1.0 for k in ({value},))')
         space.new_cells('step', f'lambda: sum_f64(k * 1.0 for k in range(0, 2, {1 << 80}))')
         space.new_cells('filtered', f'lambda: sum_f64(k * 1.0 for k in ({1 << 63},) if k > 0)')
+        space.new_cells('authored_enum_prefix', '''def authored_enum_prefix():
+    _mx_enum_const_0 = -123
+    if _mx_enum_const_0 < 0:
+        return Status.CONTINUE
+    return 0
+''')
         model.export(tmp_path/'exported')
     finally:
         model.close()
-    names = (*values, 'step', 'filtered')
+    names = (*values, 'step', 'filtered', 'authored_enum_prefix')
     compile_model(tmp_path, 'from exported import mx_model\n'
                   + '\n'.join(f'mx_model.Values.{name}()' for name in names)+'\n')
     expected = {name: float(value) for name, value in values.items()}
-    expected.update(step=0.0, filtered=float(1 << 63))
+    expected.update(step=0.0, filtered=float(1 << 63), authored_enum_prefix=100)
     for package in ('exported', 'exported_cy'):
         subprocess.run([sys.executable, '-B', '-c',
             f'from {package} import mx_model\n'

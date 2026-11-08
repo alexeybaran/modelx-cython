@@ -3,7 +3,7 @@ import ast
 
 import libcst as cst
 
-from .scopes import FormulaTransformer, binding_names, lexical_nodes
+from .scopes import FormulaTransformer, Names, binding_names, lexical_nodes
 from .consts import MX_SYS_MOD
 
 
@@ -13,6 +13,7 @@ def storage(name):
 
 def prepare(module):
     module.code_enum_symbols = {}
+    identifiers = Names(module.visitor.wrapper.module)
     for cls in module.classes.values():
         markers = {name: ref.enum_definitions for name,ref in cls.refs.items()
                    if getattr(ref, 'enum_definitions', ())}
@@ -28,7 +29,7 @@ def prepare(module):
                 continue
             for member, value in ref.enum[2].items():
                 if -(1 << 31) <= value < (1 << 31):
-                    symbol = f'_mx_enum_const_{len(module.code_enum_symbols)}'
+                    symbol = identifiers.reserve(f'_mx_enum_const_{len(module.code_enum_symbols)}')
                     module.code_enum_symbols[cls.name, name, member] = symbol, value
 
 
@@ -49,10 +50,6 @@ class Constants(FormulaTransformer):
 
     def visit_FunctionDef(self, node):
         tree = ast.parse(cst.Module([]).code_for_node(node))
-        if any((isinstance(n, ast.Name) and n.id.startswith('_mx_enum_const_'))
-               or (isinstance(n, ast.arg) and n.arg.startswith('_mx_enum_const_'))
-               for n in ast.walk(tree)):
-            return False
         assignments = {}
         invalid = set()
         nodes = list(lexical_nodes(tree.body[0].body))

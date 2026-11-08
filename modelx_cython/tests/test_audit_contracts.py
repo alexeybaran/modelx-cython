@@ -131,10 +131,11 @@ def test_collection_runtime_adapter_is_checked_before_rewriting():
 
 
 def test_cache_hit_optimization_keeps_python38_compatibility(monkeypatch):
-    from modelx_cython.cache_hits import expose_cache_hits
+    from modelx_cython.cache_hits import expose_entries
     monkeypatch.delattr(ast,'unparse')
     # The optimized path is optional. No generated source needs to be opened.
-    expose_cache_hits({'unused':object()},{'unused':{'entry':object()}},'auto')
+    state = object()
+    assert expose_entries(state, {'entry':object()}, 'auto') is state
 
 
 def test_unsupported_ast_runtime_keeps_ordinary_collection(monkeypatch):

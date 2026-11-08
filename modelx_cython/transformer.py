@@ -528,7 +528,8 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
         modelx exported it.
         """
         super().__init__()
-        self.wrapper = cst.metadata.MetadataWrapper(cst.parse_module(source))
+        self.wrapper = (module.visitor.wrapper if module.visitor.source == source else
+                        cst.metadata.MetadataWrapper(cst.parse_module(source)))
         self._module_node = self.wrapper.module
         self._source = source
         self.module = module
@@ -577,8 +578,7 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
         from modelx_cython.checked_arithmetic import CheckedArithmetic
         from modelx_cython.numeric_helpers import NumericReturns
         cells.formula_allows_exact_receiver = allows_exact_receiver(node, cls_info.name)
-        native_math = self.module.spec._data.get('native_math', self.module.spec.automatic_optimizations)
-        if native_math:
+        if self.module.spec.policy.native_math:
             from modelx_cython.native_math import NativeMath
             math_calls = NativeMath(cls_info.refs)
             node = node.with_changes(body=node.body.visit(math_calls))

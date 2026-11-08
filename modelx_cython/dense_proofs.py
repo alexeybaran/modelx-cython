@@ -1,9 +1,11 @@
 """Reuse ranges that generated dense entries already check before a miss."""
 
 import ast
-from collections import Counter, defaultdict
+from collections import Counter, defaultdict, deque
 
-from .cell_entries import dense_condition, exact_receiver
+import libcst as cst
+
+from .cell_entries import EntryModule, dense_condition, exact_receiver
 from .consts import CY_MOD, FORMULA_PREF, MX_SELF
 from .scopes import binding_names as _binding_names
 
@@ -91,7 +93,8 @@ def _formula_ranges(guard, layout, uses, spill_functions, spill_uses):
     return layout.logical_axes
 
 
-def _rewrite(source, tree, records, uses):
+def prove_entries(state: EntryModule, records, uses):
+    tree = state.tree
     native = {}
     for node in tree.body:
         if isinstance(node, ast.FunctionDef) and node.name in records:
@@ -99,8 +102,7 @@ def _rewrite(source, tree, records, uses):
             guard = _checked_guard(node, layout)
             if guard is not None:
                 native[node.name] = node, guard, layout
-    formulas = {(owner.name, fn.name): fn for owner in tree.body if isinstance(owner, ast.ClassDef)
-                for fn in owner.body if isinstance(fn, ast.FunctionDef)}
+    formulas = state.methods
     spills = {layout.spill_entry for layout in records.values() if layout.spill_entry}
     spill_functions = {node.name: node for node in tree.body
                        if isinstance(node, ast.FunctionDef) and node.name in spills}
@@ -162,52 +164,52 @@ def _rewrite(source, tree, records, uses):
                 masks[call] = mask
 
     if not masks:
-        return source
-    offsets = [0]
-    for line in source.splitlines(keepends=True):
-        offsets.append(offsets[-1] + len(line))
-    changes = []
-    flag = "_mx_proven_axes"
-    while flag.encode() in source:
-        flag += "_"
+        return state
+    flag = state.names.reserve('_mx_proven_axes', family=True)
+    targets = {call.func.id for call in masks}
+    # AST positions establish lexical order, including nested calls. CST visits
+    # in that order; no byte offsets or Unicode-sensitive source edits remain.
+    queues = {name: deque(masks.get(call, 0) for call in sorted(calls[name],
+                         key=lambda call: (call.lineno, call.col_offset))) for name in targets}
 
-    def span(node):
-        # Python AST columns are UTF-8 byte offsets.
-        return (offsets[node.lineno - 1] + node.col_offset,
-                offsets[node.end_lineno - 1] + node.end_col_offset)
+    class Proofs(cst.CSTTransformer):
+        def __init__(self):
+            self.call_masks = {}
 
-    for name in {call.func.id for call in masks}:
-        fn, guard, layout = native[name]
-        _, end = span(fn.args.args[-1])
-        changes.append((end, end, f", {flag}: {CY_MOD}.uint".encode()))
-        proved_axes = ranges_by_entry[name]
-        condition = dense_condition(layout.axes, flag, proved_axes)
-        changes.append((*span(guard.test), condition.encode()))
-        if proved_axes and layout.logical_axes:
-            logical_guard = guard.orelse[0]
-            logical = dense_condition(proved_axes, flag)
-            changes.append((*span(logical_guard.test), logical.encode()))
-        for call in calls[name]:
-            _, end = span(call)
-            changes.append((end - 1, end - 1, f", {masks.get(call, 0)}".encode()))
-    for start, stop, replacement in sorted(changes, reverse=True):
-        source = source[:start] + replacement + source[stop:]
-    return source
+        def visit_Call(self, node):
+            if isinstance(node.func, cst.Name) and node.func.value in queues:
+                self.call_masks[id(node)] = queues[node.func.value].popleft()
+
+        def leave_Call(self, before, after):
+            if id(before) in self.call_masks:
+                return after.with_changes(args=(*after.args,
+                    cst.Arg(cst.Integer(str(self.call_masks[id(before)])))))
+            return after
+
+        def leave_FunctionDef(self, before, after):
+            name = before.name.value
+            if name not in targets:
+                return after
+            layout, proved = records[name], ranges_by_entry[name]
+            guard = after.body.body[0]
+            fallback = guard.orelse
+            if proved and layout.logical_axes:
+                test = cst.parse_expression(dense_condition(proved, flag))
+                if isinstance(fallback, cst.If):
+                    fallback = fallback.with_changes(test=test)
+                else:
+                    nested = fallback.body.body[0].with_changes(test=test)
+                    fallback = fallback.with_changes(body=fallback.body.with_changes(body=(nested,)))
+            guard = guard.with_changes(test=cst.parse_expression(
+                dense_condition(layout.axes, flag, proved)), orelse=fallback)
+            parameter = cst.Param(cst.Name(flag), annotation=cst.Annotation(
+                cst.parse_expression(f'{CY_MOD}.uint')))
+            return after.with_changes(params=after.params.with_changes(
+                params=(*after.params.params, parameter)),
+                body=after.body.with_changes(body=(guard,)))
+
+    result = state.replace(state.syntax.visit(Proofs()))
+    assert not any(queues.values()), 'inconsistent generated entry call graph'
+    return result
 
 
-def reuse_dense_bounds(modules, records):
-    """Optimize private entries across the translated model, with an external-use audit."""
-    if not records:
-        return
-    uses = Counter()
-    inputs = {}
-    for module, path in modules.items():
-        source = path.read_bytes()
-        tree = ast.parse(source)
-        uses.update(_attribute_counts(tree))
-        if module in records:
-            inputs[module] = path, source, tree
-    for module, (path, source, tree) in inputs.items():
-        rewritten = _rewrite(source, tree, records[module], uses)
-        if rewritten != source:
-            path.write_bytes(rewritten)

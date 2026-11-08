@@ -10,6 +10,25 @@ OPAQUE_SCOPES = (
 )
 
 
+class Names(cst.CSTVisitor):
+    """Allocate identifiers from syntax, never comments or literal text."""
+    def __init__(self, node=None, used=()):
+        self.names = set(used)
+        if node is not None:
+            node.visit(self)
+
+    def visit_Name(self, node):
+        self.names.add(node.value)
+
+    def reserve(self, base, family=False):
+        name = base
+        while name in self.names or (family and any(
+                item.startswith(name + '_') for item in self.names)):
+            name += '_'
+        self.names.add(name)
+        return name
+
+
 class FormulaTransformer(cst.CSTTransformer):
     """Visit one formula at a time without borrowing facts into child scopes."""
     def __init__(self):

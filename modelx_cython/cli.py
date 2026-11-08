@@ -52,8 +52,8 @@ from modelx_cython.usage import (
     analyze_usage, apply_verdicts, build_resolver)
 from modelx_cython.powers import build_kind_maps
 from modelx_cython.admission import describe
-from modelx_cython.dense_proofs import reuse_dense_bounds
-from modelx_cython.dense_formulas import bind_formula_entries
+from modelx_cython.cell_entries import EntryModule
+from modelx_cython.entry_pipeline import lower_entries
 from modelx_cython.helpers import install as install_helpers
 
 _logger = logging.getLogger(__name__)
@@ -354,34 +354,14 @@ def main_handler(args: argparse.Namespace, stdout: IO[str], stderr: IO[str]) -> 
         resolver = build_resolver(module_infos)
         cells_kinds, ref_kinds = build_kind_maps(module_infos)
 
-        parallel_workers = d.get('parallel_workers', 1)
-        if type(parallel_workers) is not int or parallel_workers < 1:
-            raise ValueError('parallel_workers must be a positive integer')
-        automatic = spec.automatic_optimizations
-        dense_bounds_proofs = d.get('dense_bounds_proofs', automatic)
-        dense_miss_binding = d.get('dense_miss_binding', automatic or sys.platform == "win32")
-        dense_one_axis = d.get('dense_one_axis', automatic)
-        propagate_exact_receiver = d.get('propagate_exact_receiver', automatic and dense_miss_binding)
-        native_cache_hits = d.get('native_cache_hits', 'auto' if automatic and dense_miss_binding else 'none')
-        if type(d.get('native_math', automatic)) is not bool:
-            raise ValueError('native_math must be a boolean')
-        if type(dense_bounds_proofs) is not bool or type(dense_miss_binding) is not bool:
-            raise ValueError('dense_bounds_proofs and dense_miss_binding must be booleans')
-        if type(dense_one_axis) is not bool:
-            raise ValueError('dense_one_axis must be a boolean')
-        if type(propagate_exact_receiver) is not bool or (propagate_exact_receiver and not dense_miss_binding):
-            raise ValueError('propagate_exact_receiver requires dense_miss_binding')
-        if type(native_cache_hits) is not str or native_cache_hits not in ('none', 'scalar', 'dense', 'both', 'auto'):
-            raise ValueError('native_cache_hits must be none, scalar, dense, both or auto')
-        if native_cache_hits != 'none' and not dense_miss_binding:
-            raise ValueError('native_cache_hits requires dense_miss_binding')
-        if parallel_workers > 1:
+        policy = spec.policy
+        if policy.parallel_workers > 1:
             runtime = model_path / (MX_SYS_MOD + '.py')
             source = runtime.read_text(encoding='utf-8')
             setting = '_mx_parallel_workers = 1'
             if setting not in source:
                 raise ValueError('parallel_workers requires a collection-enabled modelx export')
-            runtime.write_text(source.replace(setting, f'_mx_parallel_workers = {parallel_workers}'),
+            runtime.write_text(source.replace(setting, f'_mx_parallel_workers = {policy.parallel_workers}'),
                                encoding='utf-8')
 
         # Phase 3: transform and write out
@@ -393,6 +373,7 @@ def main_handler(args: argparse.Namespace, stdout: IO[str], stderr: IO[str]) -> 
         helper_providers = set()
         dense_entries = {}
         formula_entries = {}
+        translated_modules = {}
         serial_enabled = False
         for u in units:
             serial_shapes = serial_collect.analyze(u.source, u.module_info) if collect_supported else {}
@@ -406,7 +387,7 @@ def main_handler(args: argparse.Namespace, stdout: IO[str], stderr: IO[str]) -> 
             )
             pxd = PXDGenerator(u.module_info)
 
-            u.abs_src_path.write_text(trans.transformed.code, encoding="utf-8")
+            translated_modules[u.fqname] = EntryModule(trans.transformed)
             helper_providers.update(trans.helper_providers)
             if trans.dense_entries:
                 dense_entries[u.module_info.fqname] = trans.dense_entries
@@ -419,18 +400,9 @@ def main_handler(args: argparse.Namespace, stdout: IO[str], stderr: IO[str]) -> 
         if serial_enabled:
             serial_collect.enable_runtime(runtime_path)
         modules.extend(install_helpers(helper_providers, model_path))
-        if dense_bounds_proofs or dense_miss_binding or dense_one_axis:
-            sources = {u.module_info.fqname: u.abs_src_path for u in units}
-            if dense_bounds_proofs:
-                reuse_dense_bounds(sources, dense_entries)
-            if dense_miss_binding:
-                bind_formula_entries(sources, formula_entries, propagate_exact_receiver)
-            if dense_one_axis:
-                from modelx_cython.dense_one_axis import specialize_one_axis
-                specialize_one_axis(sources, dense_entries, propagate_exact_receiver)
-            if native_cache_hits != 'none':
-                from modelx_cython.cache_hits import expose_cache_hits
-                expose_cache_hits(sources, formula_entries, native_cache_hits)
+        translated_modules = lower_entries(translated_modules, dense_entries, formula_entries, policy)
+        for u in units:
+            u.abs_src_path.write_text(translated_modules[u.fqname].syntax.code, encoding='utf-8')
         create_setup(model_name, modules=modules, setup_file=setup_file, source_root=work_dir)
         (model_path / '_mx_admission.json').write_text(
             json.dumps(describe(module_infos), indent=2), encoding='utf-8')

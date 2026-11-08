@@ -6,6 +6,8 @@ import libcst as cst
 
 from modelx_cython.consts import CY_MOD
 from modelx_cython.dense_proofs import _binding_names
+from modelx_cython.cell_entries import EntryModule
+from modelx_cython.typedefs import primitive_kind
 
 _NATIVE = {f'{CY_MOD}.{name}' for name in ('bint', 'double', 'longlong')}
 
@@ -171,9 +173,8 @@ class _Calls(cst.CSTTransformer):
                     value = ast.literal_eval(expression)
                 except (ValueError, TypeError):
                     return updated
-                if not ((annotation == f'{CY_MOD}.bint' and type(value) is bool)
-                        or (annotation == f'{CY_MOD}.longlong' and type(value) is int
-                            and -(1 << 63) <= value < (1 << 63))):
+                if (annotation, primitive_kind(value)) not in (
+                        (f'{CY_MOD}.bint', 'bint'), (f'{CY_MOD}.longlong', 'longlong')):
                     return updated
             mapping[name] = arg.value
         substitute = _Substitute(mapping)
@@ -182,18 +183,15 @@ class _Calls(cst.CSTTransformer):
                          lpar=(cst.LeftParen(),), rpar=(cst.RightParen(),))
 
 
-def expose_cache_hits(sources, entries, mode):
+def expose_entries(state: EntryModule, known, mode):
     """Only already-private, typed calls inherit their existing hit contract."""
     if not hasattr(ast, 'unparse'):
-        return
-    for module, known in entries.items():
-        path = sources[module]
-        source = path.read_bytes()
-        functions = {fn.name: fn for fn in ast.parse(source).body if isinstance(fn, ast.FunctionDef)}
-        layouts = {name: layout for name in _targets(functions, known)
-                   if (fn := functions.get(name)) is not None and (layout := _layout(fn))
-                   and (mode in (layout.kind, 'both') or mode == 'auto' and (
-                       layout.kind == 'scalar' or isinstance(ast.parse(layout.test, mode='eval').body, ast.Subscript)))}
-        updated = cst.parse_module(source).visit(_Calls(functions, layouts)).bytes
-        if updated != source:
-            path.write_bytes(updated)
+        return state
+    functions = state.functions
+    layouts = {name: layout for name in _targets(functions, known)
+               if (fn := functions.get(name)) is not None and (layout := _layout(fn))
+               and (mode in (layout.kind, 'both') or mode == 'auto' and (
+                   layout.kind == 'scalar' or isinstance(ast.parse(layout.test, mode='eval').body, ast.Subscript)))}
+    return state.replace(state.syntax.visit(_Calls(functions, layouts)))
+
+

@@ -9,7 +9,7 @@ import libcst as cst
 
 from .cell_entries import exact_receiver
 from .helpers import module_name
-from .scopes import FormulaTransformer, has_scope_effects
+from .scopes import FormulaTransformer, Names, has_scope_effects
 from .typedefs import primitive_kind
 
 
@@ -36,8 +36,7 @@ class NativeReductions(FormulaTransformer):
         self.integer_captures = {}
         syntax = ast.parse(self.module.code_for_node(formula))
         self.scope_safe = not has_scope_effects(syntax.body[0].body)
-        self.names = {node.id for node in ast.walk(syntax) if isinstance(node, ast.Name)}
-        self.names.update(node.arg for node in ast.walk(syntax) if isinstance(node, ast.arg))
+        self.names = Names(formula)
         if isinstance(formula.body, cst.IndentedBlock):
             lines = formula.body.body
             for assignment, consumer in zip(lines, lines[1:]):
@@ -74,11 +73,7 @@ class NativeReductions(FormulaTransformer):
         return False
 
     def reserve_prefix(self):
-        prefix = f'_mx_reduce_{self.count}'
-        while any(name == prefix or name.startswith(prefix + '_') for name in self.names):
-            prefix += '_'
-        self.names.add(prefix)
-        return prefix
+        return self.names.reserve(f'_mx_reduce_{self.count}', family=True)
 
     def visit_FunctionDef(self, node):
         return self.scope_safe

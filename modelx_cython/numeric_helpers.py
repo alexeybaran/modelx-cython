@@ -1,13 +1,13 @@
 """Native helper returns only at an already-double formula return boundary."""
 import ast
 import math
-import re
 
 import libcst as cst
 
 from .cell_entries import exact_receiver
 from .helpers import module_name
-from .scopes import has_scope_effects
+from .scopes import Names, has_scope_effects
+from .typedefs import primitive_kind
 
 
 class NumericReturns(cst.CSTTransformer):
@@ -260,11 +260,7 @@ class NumericReturns(cst.CSTTransformer):
             return after
 
         module = cst.Module([])
-        used_names = set(re.findall(r'\b[A-Za-z_]\w*\b', module.code_for_node(after)))
-        prefix = '_mx_optional'
-        while any(prefix + suffix in used_names for suffix in
-                  ('_value', '_status', '_fallback', '_slot', '_view', '_record', '_bound')):
-            prefix += '_'
+        prefix = Names(after).reserve('_mx_optional', family=True)
         value, status = prefix + '_value', prefix + '_status'
         fallback = prefix + '_fallback'
         args = ', '.join(module.code_for_node(arg) for arg in
@@ -298,14 +294,12 @@ class NumericReturns(cst.CSTTransformer):
             if owner == provider:
                 return cst.parse_expression('self.' + name)
         context = f'_v_mx_context_{self.cell.name}'
-        if context[len('_v_'):] in self.cls.cells:
-            return None
         # Keep the existing single-provider layout; a second provider owns a
         # distinct extension type and must never receive the first's context.
         if context in self.contexts:
             context += module_name(provider)
-        while context in self.contexts or context in self.cls.refs:
-            context += '_'
+        cache_fields = (prefix + name for name in self.cls.cells for prefix in ('_v_', '_has_'))
+        context = Names(used=(*self.contexts, *self.cls.refs, *cache_fields)).reserve(context)
         self.contexts[context] = provider
         return cst.parse_expression('self.' + context)
 
@@ -348,7 +342,7 @@ class NumericReturns(cst.CSTTransformer):
 
     def native_key(self, key):
         if isinstance(key, cst.Integer):
-            return -(1 << 63) <= key.evaluated_value < (1 << 63)
+            return primitive_kind(key.evaluated_value) == 'longlong'
         if isinstance(key, cst.Name) and key.value in self.cell.params:
             return self.cell.get_argtype_expr(key.value, c_style=True) in ('long long', 'bint')
         if (isinstance(key, cst.Attribute) and isinstance(key.value, cst.Name)

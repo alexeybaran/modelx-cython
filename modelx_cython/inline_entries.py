@@ -4,23 +4,16 @@ import libcst as cst
 
 from modelx_cython.cell_entries import DenseEntry, FormulaEntry, exact_receiver
 from modelx_cython.consts import CY_MOD, FORMULA_PREF, HAS_PREF, MX_POW, MX_SELF, MX_SYS_MOD
+from modelx_cython.scopes import Names
+from modelx_cython.typedefs import primitive_kind
 
 
 _NUMERIC_TYPES = {"bint", "double", "long long"}
 
 
-class _Names(cst.CSTVisitor):
-    def __init__(self, node):
-        self.names = set()
-        node.visit(self)
-
-    def visit_Name(self, node):
-        self.names.add(node.value)
-
-
 def allows_exact_receiver(node, owner):
     """Check guard names against the authored formula before emitting guards."""
-    return {'type', owner}.isdisjoint(_Names(node).names)
+    return {'type', owner}.isdisjoint(Names(node).names)
 
 
 def _eligible(cell, params):
@@ -58,7 +51,7 @@ def _literal_defaults(cell, params):
             value = -default.expression.evaluated_value
         else:
             return None
-        if not -(1 << 63) <= value < (1 << 63):
+        if primitive_kind(value) != 'longlong':
             return None
         values.append(default)
     return tuple(values)
@@ -164,10 +157,9 @@ class _Calls(cst.CSTTransformer):
 
 def add_inline_entries(module, classes):
     """Move each admitted cache body and report its dense layout to the build."""
-    used_names = _Names(module).names
-    optional_receiver = '_mx_private_receiver'
-    while optional_receiver in used_names:
-        optional_receiver += '_'
+    names = Names(module)
+    used_names = names.names
+    optional_receiver = names.reserve('_mx_private_receiver')
     functions = []
     dense_entries = {}
     formula_entries = {}

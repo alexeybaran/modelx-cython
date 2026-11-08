@@ -4,7 +4,7 @@ import ast
 import math
 
 import libcst as cst
-from .scopes import has_scope_effects
+from .scopes import Names, has_scope_effects
 
 _BOUND = 1 << 25
 
@@ -224,10 +224,7 @@ class CheckedArithmetic:
                     if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store)}
         self.parameters = {name for name in self.cell.params if name not in assigned
                            and self.cell.get_argtype_expr(name, c_style=True) == 'long long'}
-        self.prefix = '_mx_checked'
-        names = {node.id for node in ast.walk(tree) if isinstance(node, ast.Name)}
-        while any(name.startswith(self.prefix) for name in names):
-            self.prefix += '_'
+        self.prefix = Names(function).reserve('_mx_checked', family=True)
         self.inputs = []
         self.next_input = 0
         body = function.body.body

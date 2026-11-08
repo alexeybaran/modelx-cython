@@ -4,7 +4,7 @@ import ast
 
 import libcst as cst
 
-from .cell_entries import dense_condition
+from .cell_entries import EntryModule, dense_condition
 from .consts import CY_MOD, FORMULA_PREF
 from .dense_formulas import _ExactTests
 
@@ -69,13 +69,10 @@ class _Calls(cst.CSTTransformer):
         return updated.with_changes(func=target, args=args)
 
 
-def _rewrite(source, layouts, propagate=False):
-    module = cst.parse_module(source)
-    names = {node.id for node in ast.walk(ast.parse(source)) if isinstance(node, ast.Name)}
-    names.update(stmt.name.value for stmt in module.body if isinstance(stmt, cst.FunctionDef))
-    exact = "_mx_inbounds_exact"
-    while exact in names:
-        exact += "_"
+def specialize_entries(state: EntryModule, layouts, propagate=False):
+    module = state.syntax
+    names = state.names
+    exact = names.reserve('_mx_inbounds_exact')
     bodies, rewritten, proved = [], [], {}
     for stmt in module.body:
         if isinstance(stmt, cst.ClassDef) and isinstance(stmt.body, cst.IndentedBlock):
@@ -102,10 +99,7 @@ def _rewrite(source, layouts, propagate=False):
             rewritten.append(stmt.with_changes(body=stmt.body.with_changes(
                 body=(guard.with_changes(test=check),))))
             continue
-        name = stmt.name.value + "_inbounds"
-        while name in names:
-            name += "_"
-        names.add(name)
+        name = names.reserve(stmt.name.value + '_inbounds')
         proved[stmt.name.value] = cst.Name(name)
         args = tuple(param.with_changes(comma=cst.MaybeSentinel.DEFAULT) for param in params[:-1])
         signature = stmt.params.with_changes(params=args)
@@ -121,13 +115,6 @@ def _rewrite(source, layouts, propagate=False):
         entry = cst.parse_statement(f"return {name}({args[0].name.value}, {axis.key}{flag})\n")
         rewritten.append(stmt.with_changes(params=signature, body=stmt.body.with_changes(
             body=(guard.with_changes(test=check, body=guard.body.with_changes(body=(entry,))),))))
-    return module.with_changes(body=(*rewritten, *bodies)).visit(_Calls(proved, propagate)).bytes
+    return state.replace(module.with_changes(body=(*rewritten, *bodies)).visit(_Calls(proved, propagate)))
 
 
-def specialize_one_axis(sources, entries, propagate=False):
-    for name, layouts in entries.items():
-        path = sources[name]
-        original = path.read_bytes()
-        rewritten = _rewrite(original, layouts, propagate)
-        if rewritten != original:
-            path.write_bytes(rewritten)

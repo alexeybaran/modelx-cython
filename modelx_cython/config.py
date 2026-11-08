@@ -22,12 +22,53 @@ cells return type or declaring maximum cells parameter sizes.
 """
 
 from typing import Union, Sequence, Mapping
+from dataclasses import dataclass
+import sys
 from modelx_cython.consts import (
     FILE_PREF,
     GLOBAL_PREF,
     MODULE_PREF,
     SPACE_PREF,
 )
+
+
+@dataclass(frozen=True)
+class CompilerPolicy:
+    """Resolve dependent diagnostic options once, before code generation."""
+    automatic_optimizations: bool
+    parallel_workers: int
+    dense_bounds_proofs: bool
+    dense_miss_binding: bool
+    dense_one_axis: bool
+    propagate_exact_receiver: bool
+    native_cache_hits: str
+    native_math: bool
+
+    @classmethod
+    def resolve(cls, data):
+        automatic = data.get('automatic_optimizations', True)
+        miss = data.get('dense_miss_binding', automatic or sys.platform == 'win32')
+        values = dict(automatic_optimizations=automatic,
+            parallel_workers=data.get('parallel_workers', 1),
+            dense_bounds_proofs=data.get('dense_bounds_proofs', automatic),
+            dense_miss_binding=miss, dense_one_axis=data.get('dense_one_axis', automatic),
+            propagate_exact_receiver=data.get('propagate_exact_receiver', automatic and miss),
+            native_cache_hits=data.get('native_cache_hits', 'auto' if automatic and miss else 'none'),
+            native_math=data.get('native_math', automatic))
+        for name, value in values.items():
+            if name not in ('parallel_workers', 'native_cache_hits') and type(value) is not bool:
+                raise ValueError(f'{name} must be a boolean')
+        if type(values['parallel_workers']) is not int or values['parallel_workers'] < 1:
+            raise ValueError('parallel_workers must be a positive integer')
+        if type(values['native_cache_hits']) is not str or values['native_cache_hits'] not in (
+                'none', 'scalar', 'dense', 'both', 'auto'):
+            raise ValueError('native_cache_hits must be none, scalar, dense, both or auto')
+        if not miss:
+            if values['propagate_exact_receiver']:
+                raise ValueError('propagate_exact_receiver requires dense_miss_binding')
+            if values['native_cache_hits'] != 'none':
+                raise ValueError('native_cache_hits requires dense_miss_binding')
+        return cls(**values)
 
 
 class TransSpec:
@@ -144,9 +185,8 @@ class TransSpec:
         """
         
         self._data = data
-        self.automatic_optimizations = data.get('automatic_optimizations', True)
-        if type(self.automatic_optimizations) is not bool:
-            raise ValueError('automatic_optimizations must be a boolean')
+        self.policy = CompilerPolicy.resolve(data)
+        self.automatic_optimizations = self.policy.automatic_optimizations
 
     def get_spec(self, object_path: str):
         """Return the space-level spec dict for a dotted object path.

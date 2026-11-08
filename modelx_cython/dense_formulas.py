@@ -4,9 +4,8 @@ import ast
 
 import libcst as cst
 
-from .cell_entries import exact_receiver
+from .cell_entries import EntryModule, exact_receiver
 from .consts import CY_MOD, MX_SELF
-from .inline_entries import _Names
 
 
 def _eligible(method, syntax, keys, guard_safe):
@@ -82,20 +81,16 @@ class _Miss(cst.CSTTransformer):
         return updated.with_changes(func=cst.Name(self.direct), args=args)
 
 
-def _rewrite(source, entries, propagate=False):
-    tree = ast.parse(source)
-    module = cst.parse_module(source)
-    names = _Names(module).names
-    exact = "_mx_exact_receiver"
-    while exact in names:
-        exact += "_"
+def bind_entries(state: EntryModule, entries, propagate=False):
+    module = state.syntax
+    names = state.names
+    exact = names.reserve('_mx_exact_receiver')
     receiver_types = {fn.name.value: fn.params.params[0].annotation
                       for fn in module.body if isinstance(fn, cst.FunctionDef)
                       and fn.name.value in entries}
     targets = {(layout.owner, layout.formula): (entry, layout)
                for entry, layout in entries.items() if entry in receiver_types}
-    formulas = {(cls.name, node.name): node for cls in tree.body if isinstance(cls, ast.ClassDef)
-                for node in cls.body if isinstance(node, ast.FunctionDef)}
+    formulas = state.methods
     replacements, methods, misses = [], {}, {}
     for cls in module.body:
         if not isinstance(cls, cst.ClassDef) or not isinstance(cls.body, cst.IndentedBlock):
@@ -110,10 +105,7 @@ def _rewrite(source, entries, propagate=False):
             keys = layout.keys
             if not _eligible(fn, formulas[identity], keys, layout.guard_safe):
                 continue
-            direct = f"_mx_dense_formula_{len(replacements)}"
-            while direct in names:
-                direct += "_"
-            names.add(direct)
+            direct = names.reserve(f'_mx_dense_formula_{len(replacements)}')
             receiver, *params = fn.params.params
             receiver = receiver.with_changes(annotation=receiver_types[entry])
             args = ", ".join((MX_SELF, *keys))
@@ -136,7 +128,7 @@ def _rewrite(source, entries, propagate=False):
             )))
             misses[entry] = _Miss(layout.formula, direct, keys, propagate)
     if not replacements:
-        return source
+        return state
     body = []
     for stmt in module.body:
         if isinstance(stmt, cst.ClassDef) and isinstance(stmt.body, cst.IndentedBlock):
@@ -145,13 +137,6 @@ def _rewrite(source, entries, propagate=False):
         elif isinstance(stmt, cst.FunctionDef) and stmt.name.value in misses:
             stmt = stmt.with_changes(body=stmt.body.visit(misses[stmt.name.value]))
         body.append(stmt)
-    return module.with_changes(body=(*body, *replacements)).bytes
+    return state.replace(module.with_changes(body=(*body, *replacements)))
 
 
-def bind_formula_entries(modules, layouts, propagate=False):
-    for module, entries in layouts.items():
-        path = modules[module]
-        original = path.read_bytes()
-        rewritten = _rewrite(original, entries, propagate)
-        if rewritten != original:
-            path.write_bytes(rewritten)

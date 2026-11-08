@@ -1,7 +1,9 @@
 """Public dense checks preserve range and virtual-dispatch contracts."""
 import pytest
 from modelx_cython.cell_entries import DenseAxis, DenseEntry
-from modelx_cython.dense_one_axis import _rewrite
+import libcst as cst
+from modelx_cython.cell_entries import EntryModule
+from modelx_cython.dense_one_axis import specialize_entries
 
 
 @pytest.mark.parametrize('owner,annotation,guard,spill,changed', [
@@ -20,7 +22,7 @@ def test_only_proven_public_range_is_normalized(owner, annotation, guard, spill,
             raise IndexError(t)
 '''
     layout = DenseEntry('Policy', '_f_value', (DenseAxis('t', -2, 3, 'long long'),), spill)
-    result = _rewrite(source, {'entry': layout}).decode()
+    result = specialize_entries(EntryModule(cst.parse_module(source)), {'entry':layout}).syntax.code
     assert ('_mx_cy.cast' in result) == changed
     assert 'return self._f_value(t)' in result
     assert 'raise IndexError(t)' in result
