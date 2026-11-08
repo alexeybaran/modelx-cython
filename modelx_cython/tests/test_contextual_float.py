@@ -89,3 +89,41 @@ def test_original_scope_facts_survive_generated_exception_handlers():
     assert not rewrite(body)[1].operations
     assert rewrite(body,scope_safe=True)[1].operations
     assert not rewrite(body,scope_safe=False)[1].operations
+
+
+def test_existing_native_loop_declaration_supplies_key_kind():
+    body='i: _mx_cy.longlong\nfor i in range(3):\n    consume(float(self.ops.lookup(self.table, ("M", i), "rate")))\nreturn 1.0'
+    code,transform=rewrite(body)
+    assert '.lookup_key2_float_f64(float,' in code
+    assert transform.native_locals=={'i':'long long'}
+    assert not rewrite(body.replace('_mx_cy.longlong','int'))[1].operations
+
+
+def test_classifier_is_shared_side_effect_free_and_exposes_arithmetic_checks():
+    import ast
+    code,visitor=rewrite('return 1.0',scope_safe=True)
+    node=ast.parse('float(self.ops.lookup(self.table, ("M", i), "rate"))',mode='eval').body
+    match=visitor.classify_call(node,{'i':'longlong'})
+    assert match is not None and match.result_kind=='double' and match.checked_arguments==()
+    assert not visitor.operations and not visitor.contexts and not visitor.providers
+    assert visitor.native_locals=={}
+    assert visitor.classify_call(node,{'i':'double'}) is None
+
+
+def test_classifier_leaves_cell_argument_arithmetic_to_generator_proof():
+    import ast
+    _,visitor=rewrite('return 1.0',scope_safe=True)
+    visitor.cls.cells['age']=NS(is_special=lambda:False,called_with_kwargs=False,
+                               body_has_closure=False,get_rettype_expr=lambda **k:'long long')
+    node=ast.parse('float(self.ops.lookup(self.table, ("M", self.age(i+1)), "rate"))',mode='eval').body
+    match=visitor.classify_call(node,{'i':'longlong'})
+    assert match is not None
+    assert tuple(ast.unparse(x) for x in match.checked_arguments)==('i + 1',)
+    assert not visitor.operations and not visitor.contexts
+
+
+def test_classifier_refuses_object_argument_arithmetic():
+    import ast
+    _,visitor=rewrite('return 1.0',scope_safe=True)
+    node=ast.parse('float(self.ops.lookup(self.table[i+1], ("M", i), "rate"))',mode='eval').body
+    assert visitor.classify_call(node,{'i':'longlong'}) is None
