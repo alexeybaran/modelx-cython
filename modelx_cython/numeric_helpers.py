@@ -2,12 +2,13 @@
 import ast
 import math
 import re
+from dataclasses import dataclass
 
 import libcst as cst
 
 from .cell_entries import exact_receiver
 from .helpers import module_name
-from .scopes import FormulaTransformer, has_scope_effects
+from .scopes import FormulaTransformer, has_scope_effects, lexical_nodes
 from .helper_members import helper_reference
 
 
@@ -438,6 +439,13 @@ class NumericReturns(cst.CSTTransformer):
         return after.with_changes(value=self.bound_numeric(call, native, ref, provider, context))
 
 
+@dataclass(frozen=True)
+class FloatClassification:
+    """Consumer must prove closure arithmetic in these original arguments."""
+    checked_arguments: tuple
+    result_kind: str = 'double'
+
+
 class ContextualFloat(FormulaTransformer):
     """Lower explicit float(helper(...)) throughout one admitted formula scope.
 
@@ -453,8 +461,9 @@ class ContextualFloat(FormulaTransformer):
         self.builtin_keys = builtin_keys
         self.contexts = {} if contexts is None else contexts
         self.operations = set()
-        self.scope_safe = False
+        self.scope_safe = bool(scope_safe)
         self.original_scope_safe = scope_safe
+        self.native_locals = {}
 
     self_call = staticmethod(NumericReturns.self_call)
     native_key = NumericReturns.native_key
@@ -464,10 +473,21 @@ class ContextualFloat(FormulaTransformer):
         syntax = ast.parse(cst.Module([]).code_for_node(node)).body[0]
         self.scope_safe = (not has_scope_effects(syntax.body) if self.original_scope_safe is None
                            else self.original_scope_safe)
+        # Consume existing Cython declarations, especially generator-emitted
+        # native indices. This does not infer C types from Python annotations
+        # or move bindings; these names already have these types in Cython.
+        self.native_locals = {
+            item.target.id: {'longlong': 'long long', 'bint': 'bint'}[item.annotation.attr]
+            for item in lexical_nodes(syntax.body)
+            if (isinstance(item, ast.AnnAssign) and isinstance(item.target, ast.Name)
+                and isinstance(item.annotation, ast.Attribute)
+                and isinstance(item.annotation.value, ast.Name)
+                and item.annotation.value.id == '_mx_cy'
+                and item.annotation.attr in ('longlong', 'bint'))}
         return self.scope_safe
 
-    def lower_call(self, call):
-        """Return the contextual call, or None when admission is unproven."""
+    def match_call(self, call):
+        """Classify syntax/capabilities without requesting resources or emission."""
         if not (self.scope_safe and 'float' in self.builtin_keys
                 and isinstance(call.func, cst.Name) and call.func.value == 'float'
                 and len(call.args) == 1 and not call.args[0].keyword
@@ -498,6 +518,14 @@ class ContextualFloat(FormulaTransformer):
             operation = operations[len(parts)]
             args = (lookup.args[0], *(cst.Arg(part) for part in parts),
                     cst.Arg(cst.Name('True' if tuple_key else 'False')), *lookup.args[2:])
+        return ref, operation, lookup, args
+
+    def lower_call(self, call):
+        """Return the contextual call, or None when admission is unproven."""
+        match = self.match_call(call)
+        if match is None:
+            return None
+        ref, operation, lookup, args = match
         provider, original = ref.helper
         context = self.lookup_context(provider)
         if context is None:
@@ -507,6 +535,44 @@ class ContextualFloat(FormulaTransformer):
         return call.with_changes(
             func=cst.Attribute(cst.Name(module_name(provider)), cst.Name(operation)),
             args=(cst.Arg(call.func), cst.Arg(lookup.func), cst.Arg(context), *args))
+
+    def classify_call(self, node, local_types):
+        """AST hook for the generator owner, sharing this exact matcher.
+
+        Object arguments are restricted to reads/no-argument calls or literals.
+        The consumer must check ``checked_arguments`` for closure arithmetic
+        before admitting a loop. Classification emits no calls or resources.
+        ``local_types`` are the consumer's proven primitive types, not traces.
+        """
+        if not isinstance(node, ast.Call) or not self.scope_safe:
+            return None
+        previous = self.native_locals
+        self.native_locals = {**previous, **{name: {'longlong': 'long long'}.get(kind, kind)
+                                            for name, kind in local_types.items()}}
+        try:
+            match = self.match_call(cst.parse_expression(ast.unparse(node)))
+        finally:
+            self.native_locals = previous
+        if match is None:
+            return None
+        lookup = node.args[0]
+
+        def object_read(value):
+            if isinstance(value, (ast.Name, ast.Constant)):
+                return True
+            if isinstance(value, ast.Attribute):
+                return object_read(value.value)
+            return (isinstance(value, ast.Call) and isinstance(value.func, ast.Attribute)
+                    and not value.args and not value.keywords and object_read(value.func.value))
+
+        if (not object_read(lookup.args[0]) or not isinstance(lookup.args[2], ast.Constant)
+                or type(lookup.args[2].value) is not str
+                or len(lookup.args) == 4 and not object_read(lookup.args[3])):
+            return None
+        checks = tuple(arg for call in ast.walk(lookup.args[1])
+                       if isinstance(call, ast.Call) and isinstance(call.func, ast.Attribute)
+                       for arg in call.args)
+        return FloatClassification(checks)
 
     def native_component(self, key):
         return self.component_kind(key) is not None
@@ -523,6 +589,8 @@ class ContextualFloat(FormulaTransformer):
             if key.value in self.cell.params:
                 kind = self.cell.get_argtype_expr(key.value, c_style=True)
                 return kind if kind in kinds else None
+            kind = self.native_locals.get(key.value)
+            return kind if kind in kinds else None
         if (isinstance(key, cst.UnaryOperation) and isinstance(key.expression, cst.Integer)
                 and isinstance(key.operator, (cst.Minus, cst.Plus))):
             value = key.expression.evaluated_value * (-1 if isinstance(key.operator, cst.Minus) else 1)
