@@ -4,6 +4,7 @@ Only range loops and singleton bindings with proven numeric expressions qualify.
 The existing formula body remains authoritative; general generators stay intact.
 """
 import ast
+from types import SimpleNamespace
 
 import libcst as cst
 
@@ -19,7 +20,8 @@ def _call(node, name, argc):
 
 
 class NativeReductions(FormulaTransformer):
-    def __init__(self, cls_info, cells, providers, formula, reserve_fallback, builtin_bounds):
+    def __init__(self, cls_info, cells, providers, formula, reserve_fallback, builtin_bounds,
+                 builtin_reductions=()):
         super().__init__()
         self.cls_info = cls_info
         self.cells = cells
@@ -27,6 +29,7 @@ class NativeReductions(FormulaTransformer):
         self.formula = formula
         self.reserve_fallback = reserve_fallback
         self.builtin_bounds = builtin_bounds
+        self.builtin_reductions = frozenset(builtin_reductions)
         self.fallbacks = []
         self.exact_receiver_guards = set()
         self.count = 0
@@ -479,7 +482,8 @@ return {fallback}
             arguments.append((name, ast.unparse(arg)))
         outer.args = ([ast.Name(name, ast.Load()) for name, _ in arguments]
                       + outer.args[2:])
-        lines = [f'{function}: object = self.{func.attr.value}',
+        function_value = self.module.code_for_node(func)
+        lines = [f'{function}: object = {function_value}',
                  f'if {exact_receiver(self.cls_info.name)} and {alias}.{"f64_accepts" if ref.reduction == "f64_sum" else operation + "_accepts"}({function}):']
         lines += [f'    {name}: _mx_cy.longlong' for name in names.values()]
         lines += [f'    {name}: _mx_cy.longlong = {value}' for name, value in arguments]
@@ -532,11 +536,27 @@ return {fallback}
         value = before.body[0].value
         if not isinstance(value, cst.Call) or len(value.args) != 1:
             return after
+        # bool(all(...)) and bool(any(...)) are common report/check syntax.
+        # Only a scope-proved builtin bool can be removed; arbitrary wrappers
+        # retain their ordinary evaluation and callable effects.
+        if (isinstance(value.func, cst.Name) and value.func.value == 'bool'
+                and 'bool' in self.builtin_reductions
+                and not value.args[0].keyword and not value.args[0].star
+                and isinstance(value.args[0].value, cst.Call)):
+            inner = value.args[0].value
+            if (isinstance(inner.func, cst.Name) and inner.func.value in ('all', 'any')
+                    and inner.func.value in self.builtin_reductions and len(inner.args) == 1):
+                value = inner
         func = value.func
-        if not (isinstance(func, cst.Attribute) and isinstance(func.value, cst.Name)
+        builtin = isinstance(func, cst.Name) and func.value in ('all', 'any')
+        if builtin and func.value in self.builtin_reductions:
+            ref = SimpleNamespace(reduction='bool_' + func.value,
+                                  helper=('modelx_cython._native_iterables', func.value))
+        elif (isinstance(func, cst.Attribute) and isinstance(func.value, cst.Name)
                 and func.value.value == 'self'):
+            ref = self.cls_info.refs.get(func.attr.value)
+        else:
             return after
-        ref = self.cls_info.refs.get(func.attr.value)
         reduction = getattr(ref, 'reduction', None)
         if (reduction not in ('f64_sum', 'bool_any', 'bool_all', 'f64_max')
                 or not ref.helper or value.args[0].keyword or value.args[0].star):
@@ -548,6 +568,8 @@ return {fallback}
         result = self.primitive_ranges(after, func, ref, source, tree)
         if result is not after:
             return result
+        if builtin:
+            return after
         if reduction == 'bool_any':
             return self.bounded_any(before, after, func, ref, source, tree)
         if reduction in ('bool_all', 'f64_max'):
