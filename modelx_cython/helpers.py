@@ -15,7 +15,9 @@ from .scopes import FormulaTransformer
 # describe provider ABI operations, not model or formula source patterns.
 CAPABILITIES = {
     'reduction': ('reduction', None),
+    'iteration': ('iteration_helper', (4,)),
     'numeric': ('numeric_helper', None),
+    'float_numeric': ('float_numeric_helper', None),
     'clamped': ('clamped_helper', None),
     'clamped_context': ('clamped_context_helper', None),
     'optional': ('optional_helper', None),
@@ -73,10 +75,8 @@ class HelperCalls(FormulaTransformer):
 
     def leave_Call(self, original, updated):
         func = updated.func
-        if not (isinstance(func, cst.Attribute)
-                and isinstance(func.value, cst.Name) and func.value.value == 'self'):
-            return updated
-        ref = self.refs.get(func.attr.value)
+        from .helper_members import helper_reference
+        ref = helper_reference(func, self.refs)
         contract = ref.helper if ref is not None else None
         if not contract or any(arg.keyword or arg.star for arg in updated.args):
             return updated

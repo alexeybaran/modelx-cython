@@ -140,8 +140,10 @@ class NativeReductions(FormulaTransformer):
         return None
 
     def cold_fallback(self, source, generator, capture, function, capture_type='_mx_cy.double',
-                      boxed_param=None):
+                      boxed_param=None, wrapper=None):
         original = f'{function}({source})'
+        if wrapper is not None:
+            original = f'{wrapper}({original})'
         if not self.cells.has_formula_def:
             return original
         formula, = ast.parse(self.module.code_for_node(self.formula)).body
@@ -179,7 +181,7 @@ class NativeReductions(FormulaTransformer):
         actuals = ', '.join(['self', function] + [name for name, _ in args])
         return f'{helper}({actuals})'
 
-    def bounded_any(self, before, after, func, ref, source, tree):
+    def bounded_any(self, before, after, func, ref, source, tree, wrapper=None):
         capture = self.integer_captures.get(id(before))
         if not (self.builtin_bounds and capture and capture not in self.cells.params
                 and capture not in {'self', 'min', 'max', 'range'}
@@ -218,7 +220,7 @@ class NativeReductions(FormulaTransformer):
         prefix = self.reserve_prefix()
         function = f'{prefix}_function'
         before_fallbacks = len(self.fallbacks)
-        fallback = self.cold_fallback(source, tree, capture, function, 'object')
+        fallback = self.cold_fallback(source, tree, capture, function, 'object', wrapper=wrapper)
         if len(self.fallbacks) == before_fallbacks:
             return after
         self.providers.add(provider)
@@ -247,7 +249,7 @@ if {guard}:
 return {fallback}
 """).body)
 
-    def single_range(self, after, func, ref, source, tree):
+    def single_range(self, after, func, ref, source, tree, wrapper=None):
         """Lower the proven typed predicate or bounded descending maximum."""
         if len(tree.generators) != 1 or not self.cells.formula_allows_exact_receiver:
             return after
@@ -325,7 +327,7 @@ return {fallback}
                     + f'        raise RuntimeError("generator raised StopIteration") from {prefix}_error')
 
         before_fallbacks = len(self.fallbacks)
-        fallback = self.cold_fallback(source, tree, None, function, boxed_param=boxed_param)
+        fallback = self.cold_fallback(source, tree, None, function, boxed_param=boxed_param, wrapper=wrapper)
         if len(self.fallbacks) == before_fallbacks:
             return after
         self.providers.add(provider)
@@ -368,7 +370,7 @@ return {fallback}
             return None
         return start.id, lower.right.value, step.operand.value
 
-    def primitive_ranges(self, after, func, ref, source, tree):
+    def primitive_ranges(self, after, func, ref, source, tree, wrapper=None):
         """Compose primitive reductions with Python generator boundaries.
 
         Unit steps cannot overflow at the terminating increment. General steps
@@ -467,7 +469,7 @@ return {fallback}
         prefix = self.reserve_prefix()
         function = f'{prefix}_function'
         previous = len(self.fallbacks)
-        fallback = self.cold_fallback(source, tree, None, function)
+        fallback = self.cold_fallback(source, tree, None, function, wrapper=wrapper)
         if len(self.fallbacks) == previous:
             return after
         provider, operation = ref.helper
@@ -563,6 +565,7 @@ return {fallback}
         value = before.body[0].value
         if not isinstance(value, cst.Call) or len(value.args) != 1:
             return after
+        wrapper = None
         # bool(all(...)) and bool(any(...)) are common report/check syntax.
         # Only a scope-proved builtin bool can be removed; arbitrary wrappers
         # retain their ordinary evaluation and callable effects.
@@ -571,9 +574,13 @@ return {fallback}
                 and not value.args[0].keyword and not value.args[0].star
                 and isinstance(value.args[0].value, cst.Call)):
             inner = value.args[0].value
-            if (isinstance(inner.func, cst.Name) and inner.func.value in ('all', 'any')
-                    and inner.func.value in self.builtin_reductions and len(inner.args) == 1):
+            inner_ref = helper_reference(inner.func, self.cls_info.refs)
+            builtin_boolean = (isinstance(inner.func, cst.Name) and inner.func.value in ('all', 'any')
+                               and inner.func.value in self.builtin_reductions)
+            registered_boolean = getattr(inner_ref, 'reduction', None) in ('bool_all', 'bool_any')
+            if len(inner.args) == 1 and (builtin_boolean or registered_boolean):
                 value = inner
+                wrapper = 'bool'
         func = value.func
         builtin = isinstance(func, cst.Name) and func.value in ('all', 'any', 'min', 'max')
         if builtin and func.value in self.builtin_reductions:
@@ -590,15 +597,15 @@ return {fallback}
         tree = ast.parse('(' + source + ')', mode='eval').body
         if not isinstance(tree, ast.GeneratorExp) or not self.builtin_bounds:
             return after
-        result = self.primitive_ranges(after, func, ref, source, tree)
+        result = self.primitive_ranges(after, func, ref, source, tree, wrapper=wrapper)
         if result is not after:
             return result
         if builtin:
             return after
         if reduction == 'bool_any':
-            return self.bounded_any(before, after, func, ref, source, tree)
+            return self.bounded_any(before, after, func, ref, source, tree, wrapper=wrapper)
         if reduction in ('bool_all', 'f64_max'):
-            return self.single_range(after, func, ref, source, tree)
+            return self.single_range(after, func, ref, source, tree, wrapper=wrapper)
         capture = self.captures.get(id(before))
         if capture == 'range':
             return after

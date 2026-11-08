@@ -1,7 +1,8 @@
 # Generator and reduction contracts
 
-Development status: incomplete native coverage, pending the local qualified
-compiler checkpoint and full regional qualification. This document distinguishes
+Development status: incomplete native coverage. The baseline is qualified local
+compiler `299d8c10`; generator changes still need full regional native qualification.
+This document distinguishes
 implemented admission from the remaining design; it is not an acceptance receipt.
 
 ## Authoring interface
@@ -22,9 +23,24 @@ return types, large-integer and mixed-numeric behavior; replacing it with
 `sum_f64` requires a demonstrated compatible model domain. In particular, a
 sample of float results does not justify changing all legal integer inputs.
 
-No additional helper is yet agreed with the pandas lane. Builtin `min`, `next`,
-`sorted`, tuple/set/dict construction and pandas materialization retain their
-Python contracts until corresponding generic native mechanisms are qualified.
+For saved models, bind a module Reference such as `generators =
+lifelib.typed_inputs` and write `generators.all_true(...)`. Module References
+serialize as imports, preserving regional formulas-only folders; individual
+function References can require embedded pickle data. The compiler resolves
+registered module members through the same capability registry as direct
+References and passes the current member callable to the provider. Module aliases
+and ordinary Reference replacement remain checked. This source-saving contract
+does not add runtime pickle support for module objects: exported Python and
+compiled packages retain the existing module-object pickle limitation. A fresh
+model can be constructed through its normal model class.
+
+No additional reduction helper is required for builtin `all`, `any`, `min` and
+`max`: proved builtin bindings share the generic primitive lowering and identity
+provider. Integer extrema preserve integer results. Builtin `bool` around a
+boolean reduction is removed only from the admitted fast branch; fallback keeps
+the conversion, including replacement-helper truth effects and exceptions.
+Ordinary `sum`, `next`, `sorted`, general tuple/set/dict construction and pandas
+materialization still have open native-coverage rows.
 Creating a separate helper for each business formula is excluded.
 
 ## Evaluation boundaries
@@ -59,7 +75,8 @@ these conditions hold:
 - The receiver is exact and the current callable passes the provider's identity
   check. A subclass or replacement callable keeps the generator path.
 - Clauses use builtin `range` with primitive proved integer arguments and a
-  unit step. Filters and payloads have proved primitive truth semantics.
+  unit step, or proved singleton bindings. Filters and payloads have proved
+  primitive truth/numeric semantics.
 - Generator targets are distinct, hygienically renamed and separate from
   formula parameters. Unknown captures, unpacking, aliases and iterators decline.
 - Integer arithmetic is not introduced merely because a callee's result was
@@ -78,10 +95,39 @@ summation algorithm is introduced. The terminating
 increment of a unit-step half-open int64 range is representable. General steps
 retain compatibility until a separate checked progression mechanism is proven.
 
-Existing singleton/captured sum and bounded max/any mechanisms remain separately admitted. Their
+Existing captured sum and bounded max/any mechanisms remain separately admitted. Their
 presence does not imply arbitrary-range, arbitrary-capture or arbitrary-iterator
 coverage. Object-capable Cython is useful compatibility but does not by itself
 close a primitive native-coverage row.
+
+## Shared namespace and provider metadata
+
+`helper_members.module_helpers` captures registered functions of an exact module
+without invoking module `__getattr__`. `helper_reference(func, refs)` is the one
+resolver for `self.helper` and `self.namespace.helper`, shared with numeric
+lowering. Records contain provider identifiers and validated capabilities, not
+frozen callable objects. Unknown namespaces and unproved lexical receivers decline.
+
+Two capability shapes are agreed with the pandas lane and validated in the sole
+`helpers.CAPABILITIES` registry:
+
+| Suffix | Internal field | Contract |
+|---|---|---|
+| `iteration` | `iteration_helper` | Four identifiers: admission operation, owning span class, count operation and signed-int64 key access operation |
+| `float_numeric` | `float_numeric_helper` | Contextual conversion operation receiving current conversion, current helper, context and original arguments |
+
+The integer key-span preserves original key order, empty input and owner lifetime.
+Admission never invokes an unsupported callable; fallback must reuse captured
+arguments and must not repeat table expressions. The original outer iterator's
+errors remain eager. Unsupported key domains remain explicit coverage gaps.
+Resources are disposable and private to the compiled provider package.
+
+Contextual float fallback evaluates `conversion(helper(*args))` in source order.
+It cannot simply coerce a replacement helper's result through a C-double ABI:
+Python `float('2.5')`, for example, has different conversion semantics. Pandas owns
+the contextual numeric/provider implementation; the generator lane owns registry,
+namespace resolution and generator consumption. Registry reservation alone is not
+evidence that either capability is fully implemented or qualified.
 
 ## Remaining regional mechanisms
 

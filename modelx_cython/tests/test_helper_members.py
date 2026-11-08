@@ -5,6 +5,9 @@ import libcst as cst
 import pytest
 
 from modelx_cython.helper_members import helper_reference, module_helpers
+from modelx_cython.helpers import helper_capability
+from modelx_cython.tracer import RuntimeValueInfo
+from modelx_cython.builder import CombinedRefInfo
 
 
 def operation(values):
@@ -66,3 +69,32 @@ def test_direct_references_and_foreign_receiver_boundaries():
     assert helper_reference(cst.parse_expression('self.every'), refs) is direct
     assert helper_reference(cst.parse_expression('other.operations.every'), refs) is None
     assert helper_reference(cst.parse_expression('self.operations.nested.every'), refs) is None
+
+
+def test_shared_iteration_and_contextual_float_capabilities_reach_namespaces():
+    def lookup(*args):
+        return args
+    lookup.__modelx_cython_helper__ = ('sample.provider', 'lookup')
+    lookup.__modelx_cython_iteration__ = ('keys_span', 'KeySpan', 'key_span_count', 'key_span_at')
+    lookup.__modelx_cython_float_numeric__ = 'lookup_float_f64'
+    module = ModuleType('sample.owned')
+    module.lookup = lookup
+    traced = RuntimeValueInfo(module)
+    merged = CombinedRefInfo('exported._mx_classes', '_c_Test', 'operations', traced)
+    record = merged.helper_members['lookup']
+    assert record.iteration_helper == ('keys_span', 'KeySpan', 'key_span_count', 'key_span_at')
+    assert record.float_numeric_helper == 'lookup_float_f64'
+
+
+@pytest.mark.parametrize('capability,value', [
+    ('iteration', ('keys_span', 'KeySpan', 'key_span_count')),
+    ('iteration', ('keys_span', 'bad-name', 'key_span_count', 'key_span_at')),
+    ('float_numeric', ('lookup_float_f64',)),
+    ('float_numeric', 'bad-name'),
+])
+def test_new_capability_shapes_use_the_single_shared_validator(capability, value):
+    def invalid():
+        pass
+    setattr(invalid, '__modelx_cython_' + capability + '__', value)
+    with pytest.raises(ValueError, match='invalid helper capability'):
+        helper_capability(invalid, capability)
