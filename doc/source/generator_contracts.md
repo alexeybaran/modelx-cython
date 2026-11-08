@@ -95,7 +95,14 @@ summation algorithm is introduced. The terminating
 increment of a unit-step half-open int64 range is representable. General steps
 retain compatibility until a separate checked progression mechanism is proven.
 
-Existing captured sum and bounded max/any mechanisms remain separately admitted. Their
+A single immediately preceding double-valued binding can feed composed reductions.
+The original assignment executes eagerly in place; its value is passed into the
+retained fallback rather than recomputed. Scope-proved double Cells and double
+min/max expressions can establish that binding. Multi-argument double min/max
+payloads use Cython intrinsics, preserving argument order and first-value ties.
+Unknown, reassigned-parameter and arbitrary-object bindings decline.
+
+Existing bounded max/any mechanisms remain separately admitted. Their
 presence does not imply arbitrary-range, arbitrary-capture or arbitrary-iterator
 coverage. Object-capable Cython is useful compatibility but does not by itself
 close a primitive native-coverage row.

@@ -27,15 +27,16 @@ def test_module_helpers_compile_through_shared_metadata(tmp_path):
         p.new_cells('builtin_every', 'lambda n: bool(all(term(n, i) > 0.0 for i in range(count())))')
         p.new_cells('minimum', 'lambda n: min(i for i in range(count()) if i != 1)')
         p.new_cells('maximum', 'lambda n: max(i for i in range(count()) if i != 1)')
-        p.new_cells('scaled_every', 'lambda n: ops.all_true(abs(term(n, i)) <= 1e-10 * max(term(n, 1), 1.0) for i in range(count()))')
+        p.new_cells('scaled_every', 'lambda n: ops.all_true(abs(term(n, i)) <= 1e-10 * max(term(n, 1), 1.0, 0.0) for i in range(count()))')
         p.new_cells('key_total', 'lambda n: ops.sum_f64(term(n, i) for i in ops.keys(key_table))')
         p.new_cells('key_every', 'lambda n: all(i >= 0 for i in ops.keys(key_table))')
         p.new_cells('key_minimum', 'lambda n: min(i for i in ops.keys(key_table) if i != 1)')
         p.new_cells('key_local', 'def key_local(n):\n    i = key_table\n    return all(i >= 0 for i in ops.keys(i))\n')
+        p.new_cells('captured_every', 'def captured_every(n):\n    scale = max(term(n, 1), 1.0)\n    return all(abs(term(n, i)) <= 1e-10 * scale for i in range(count()))\n')
         model.export(tmp_path / 'exported')
     finally:
         model.close()
-    methods = ('total', 'alias_total', 'every', 'wrapped_every', 'some', 'builtin_every', 'minimum', 'maximum', 'scaled_every', 'key_total', 'key_every', 'key_minimum', 'key_local')
+    methods = ('total', 'alias_total', 'every', 'wrapped_every', 'some', 'builtin_every', 'minimum', 'maximum', 'scaled_every', 'key_total', 'key_every', 'key_minimum', 'key_local', 'captured_every')
     (tmp_path / 'sample.py').write_text('from exported import mx_model\np = mx_model.Projection\n'
         + ''.join(f'for n in range(3): p.{name}(n)\n' for name in methods))
     subprocess.run([sys.executable, '-m', 'modelx_cython', 'exported', '--sample', 'sample.py', '--no-spec'],
@@ -45,7 +46,7 @@ def test_module_helpers_compile_through_shared_metadata(tmp_path):
         assert report[f'exported_cy._mx_classes._c_Projection._f_{name}']['native_reductions'] == 1
     syntax = ast.parse((tmp_path / 'exported_cy/_mx_classes.py').read_text())
     c_source = (tmp_path / 'exported_cy/_mx_classes.c').read_text()
-    for name in ('key_total', 'key_every', 'key_minimum', 'key_local'):
+    for name in ('key_total', 'key_every', 'key_minimum', 'key_local', 'captured_every'):
         method = next(node for node in ast.walk(syntax)
                       if isinstance(node, ast.FunctionDef) and node.name == '_f_' + name)
         native = method.body[0].value.func.id
@@ -54,7 +55,9 @@ def test_module_helpers_compile_through_shared_metadata(tmp_path):
         assert signatures, native
         for signature in signatures:
             body = c_source[signature.start():c_source.index('\n}\n', signature.end())]
-            assert 'for (' in body and 'key_span_at(' in body
+            assert 'for (' in body
+            if name.startswith('key_'):
+                assert 'key_span_at(' in body
             assert not any(token in body for token in
                            ('PyObject_GetIter(', '__Pyx_PyObject_GetIterNextFunc(', 'PyIter_Next('))
     probe = textwrap.dedent('''\
@@ -70,6 +73,7 @@ def test_module_helpers_compile_through_shared_metadata(tmp_path):
         assert p.key_local(0) is True
         assert p.every(0) is False and p.some(0) is True
         assert p.scaled_every(0) is False
+        assert p.captured_every(0) is False
         assert p.wrapped_every(0) is False
         assert p.builtin_every(0) is False
         assert p.minimum(0) == 0 and p.maximum(0) == 2

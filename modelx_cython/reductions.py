@@ -21,6 +21,12 @@ def _call(node, name, argc):
             and not any(isinstance(arg, ast.Starred) for arg in node.args))
 
 
+def _bounds_call(node):
+    return (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+            and node.func.id in ('min', 'max') and len(node.args) >= 2
+            and not node.keywords and not any(isinstance(arg, ast.Starred) for arg in node.args))
+
+
 class NativeReductions(FormulaTransformer):
     def __init__(self, cls_info, cells, providers, formula, reserve_fallback, builtin_bounds,
                  builtin_reductions=()):
@@ -38,6 +44,7 @@ class NativeReductions(FormulaTransformer):
         self.module = cst.Module([])
         self.captures = {}
         self.integer_captures = {}
+        self.capture_operations = {}
         syntax = ast.parse(self.module.code_for_node(formula))
         self.scope_safe = not has_scope_effects(syntax.body[0].body)
         self.names = {node.id for node in ast.walk(syntax) if isinstance(node, ast.Name)}
@@ -60,6 +67,8 @@ class NativeReductions(FormulaTransformer):
                     rhs = ast.parse('(' + self.module.code_for_node(expression.value) + ')', mode='eval')
                     if self.double_expression(rhs.body):
                         self.captures[id(consumer)] = target.value
+                        self.capture_operations[id(consumer)] = {
+                            node.func.id for node in ast.walk(rhs.body) if _bounds_call(node)}
                     elif isinstance(rhs.body, ast.Call) and self.kind(rhs.body, {}) == 'longlong':
                         self.integer_captures[id(consumer)] = target.value
 
@@ -75,6 +84,8 @@ class NativeReductions(FormulaTransformer):
             return self.double_expression(node.operand)
         if isinstance(node, ast.BinOp) and isinstance(node.op, (ast.Add, ast.Sub, ast.Mult, ast.Div)):
             return self.double_expression(node.left) and self.double_expression(node.right)
+        if isinstance(node, ast.Call):
+            return self.kind(node, {}) == 'double'
         return False
 
     def reserve_prefix(self):
@@ -118,7 +129,7 @@ class NativeReductions(FormulaTransformer):
         if (self.builtin_bounds and _call(node, 'abs', 1)
                 and self.kind(node.args[0], locals_) == 'double'):
             return 'double'
-        if (self.builtin_bounds and any(_call(node, name, 2) for name in ('min', 'max'))
+        if (self.builtin_bounds and _bounds_call(node)
                 and all(self.kind(arg, locals_) == 'double' for arg in node.args)):
             return 'double'
         if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name) and node.value.id == 'self':
@@ -379,7 +390,8 @@ return {fallback}
             return None
         return start.id, lower.right.value, step.operand.value
 
-    def primitive_ranges(self, after, func, ref, source, tree, wrapper=None):
+    def primitive_ranges(self, after, func, ref, source, tree, wrapper=None,
+                         capture=None, capture_operations=()):
         """Compose primitive reductions with Python generator boundaries.
 
         Unit steps cannot overflow at the terminating increment. General steps
@@ -394,7 +406,9 @@ return {fallback}
         if (not self.cells.formula_allows_exact_receiver
                 or self.cells.get_rettype_expr(c_style=True) != expected_result):
             return after
-        locals_ = {}
+        if capture in {'self', *self.cells.params}:
+            return after
+        locals_ = {capture: 'double'} if capture else {}
         for name in self.cells.params:
             kind = self.cells.get_argtype_expr(name, c_style=True)
             if kind in ('double', 'long long', 'bint'):
@@ -416,7 +430,7 @@ return {fallback}
                         or node.keywords or not all(primitive_safe(arg) for arg in node.args)):
                     return False
                 if (_call(node, 'abs', 1)
-                        or any(_call(node, name, 2) for name in ('min', 'max'))):
+                        or _bounds_call(node)):
                     return True
                 cell = self.cls_info.cells[node.func.attr]
                 if len(node.args) != len(cell.params):
@@ -492,15 +506,15 @@ return {fallback}
         function = f'{prefix}_function'
         previous = len(self.fallbacks)
         prepared_outer = prefix + '_outer' if key_iteration else None
-        fallback = self.cold_fallback(source, tree, None, function, wrapper=wrapper,
+        fallback = self.cold_fallback(source, tree, capture, function, wrapper=wrapper,
                                       prepared_outer=prepared_outer)
         if len(self.fallbacks) == previous:
             return after
         provider, operation = ref.helper
         alias = module_name(provider)
         names = {name: f'{prefix}_index_{i}' for i, name in enumerate(targets)}
-        pair_operations = {node.func.id for node in ast.walk(tree)
-                           if any(_call(node, name, 2) for name in ('min', 'max'))}
+        pair_operations = set(capture_operations) | {
+            node.func.id for node in ast.walk(tree) if _bounds_call(node)}
         utility = module_name('modelx_cython._native_iterables')
 
         class Rename(ast.NodeTransformer):
@@ -652,7 +666,10 @@ return {fallback}
         tree = ast.parse('(' + source + ')', mode='eval').body
         if not isinstance(tree, ast.GeneratorExp) or not self.builtin_bounds:
             return after
-        result = self.primitive_ranges(after, func, ref, source, tree, wrapper=wrapper)
+        result = self.primitive_ranges(
+            after, func, ref, source, tree, wrapper=wrapper,
+            capture=self.captures.get(id(before)),
+            capture_operations=self.capture_operations.get(id(before), ()))
         if result is not after:
             return result
         if builtin:
