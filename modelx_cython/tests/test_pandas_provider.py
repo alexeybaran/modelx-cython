@@ -7,7 +7,8 @@ import textwrap
 
 import modelx as mx
 import pandas as pd
-from lifelib.pandas_inputs import numeric_table, lookup
+from lifelib.pandas_inputs import table as numeric_table
+from lifelib.typed_inputs import lookup
 
 
 def test_pandas_provider_public_cache_override_and_pickle(tmp_path):
@@ -31,7 +32,7 @@ def test_pandas_provider_public_cache_override_and_pickle(tmp_path):
         import pickle
         from pathlib import Path
         import pandas as pd
-        from lifelib.pandas_inputs import numeric_table
+        from lifelib.pandas_inputs import table as numeric_table
         from exported_cy import mx_model as m
         s = m.Projection
         assert s.rate(0) == s.rate(0) == 0.1
@@ -59,10 +60,10 @@ def test_pandas_provider_public_cache_override_and_pickle(tmp_path):
         assert s.rate(1) == 2.0
         providers = list(Path('exported_cy').glob('_mx_helper_*.pyx'))
         assert len(providers) == 1
-        assert 'return values[row, col]' in providers[0].read_text()
+        assert 'numeric_resource_value' in providers[0].read_text()
         sources = list(Path('exported_cy').glob('_mx_helper_*.c'))
-        assert sources and '__pyx_v_values.data' in sources[0].read_text()
-        assert 'double const' in sources[0].read_text()
+        assert sources and '__pyx_v_data' in sources[0].read_text()
+        assert 'lookup_f64' in Path('exported_cy/_mx_classes.py').read_text()
     ''')
     validation = subprocess.run([sys.executable, '-c', probe], cwd=tmp_path,
                                  capture_output=True, text=True, env=dict(os.environ))
