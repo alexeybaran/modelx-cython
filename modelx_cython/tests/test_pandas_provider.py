@@ -34,8 +34,20 @@ def test_pandas_provider_public_cache_override_and_pickle(tmp_path):
         import pandas as pd
         from lifelib.pandas_inputs import table as numeric_table
         from exported_cy import mx_model as m
+        from lifelib.typed_inputs import lookup as reference_lookup
+        import sys
+        helper_calls = []
+        def profile(frame, event, arg):
+            if event == 'call' and frame.f_code is reference_lookup.__code__:
+                helper_calls.append(frame.f_code.co_name)
         s = m.Projection
-        assert s.rate(0) == s.rate(0) == 0.1
+        sys.setprofile(profile)
+        try:
+            assert s.rate(0) == s.rate(0) == 0.1
+        finally:
+            sys.setprofile(None)
+        assert helper_calls == [], 'admitted native lookup called Python helper'
+
         # Prepared input replacement affects uncached calls; published caches stay.
         s.rates = numeric_table(pd.DataFrame({'rate': [1.0, 2.0, 3.0]}, index=[0, 1, 2]))
         assert s.rate(0) == 0.1
