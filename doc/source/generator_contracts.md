@@ -95,7 +95,14 @@ summation algorithm is introduced. The terminating
 increment of a unit-step half-open int64 range is representable. General steps
 retain compatibility until a separate checked progression mechanism is proven.
 
-Existing captured sum and bounded max/any mechanisms remain separately admitted. Their
+A single immediately preceding double-valued binding can feed composed reductions.
+The original assignment executes eagerly in place; its value is passed into the
+retained fallback rather than recomputed. Scope-proved double Cells and double
+min/max expressions can establish that binding. Multi-argument double min/max
+payloads use Cython intrinsics, preserving argument order and first-value ties.
+Unknown, reassigned-parameter and arbitrary-object bindings decline.
+
+Existing bounded max/any mechanisms remain separately admitted. Their
 presence does not imply arbitrary-range, arbitrary-capture or arbitrary-iterator
 coverage. Object-capable Cython is useful compatibility but does not by itself
 close a primitive native-coverage row.
@@ -121,6 +128,14 @@ Admission never invokes an unsupported callable; fallback must reuse captured
 arguments and must not repeat table expressions. The original outer iterator's
 errors remain eager. Unsupported key domains remain explicit coverage gaps.
 Resources are disposable and private to the compiled provider package.
+
+The reduction pass consumes the iteration capability for an outer keys call,
+composed with inner unit ranges and singleton bindings. It evaluates the current
+consumer, key producer and table argument once, in that order. Unsupported
+receivers, callables or key domains build the original generator over the already
+captured outer iterable; they never repeat the table expression. The native branch
+uses a Py_ssize_t C counter and signed-int64 key access, without a Python iterator.
+Nested key-span producers remain outside this admission until separately tested.
 
 Contextual float fallback evaluates `conversion(helper(*args))` in source order.
 It cannot simply coerce a replacement helper's result through a C-double ABI:

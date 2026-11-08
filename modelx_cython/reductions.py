@@ -21,6 +21,12 @@ def _call(node, name, argc):
             and not any(isinstance(arg, ast.Starred) for arg in node.args))
 
 
+def _bounds_call(node):
+    return (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+            and node.func.id in ('min', 'max') and len(node.args) >= 2
+            and not node.keywords and not any(isinstance(arg, ast.Starred) for arg in node.args))
+
+
 class NativeReductions(FormulaTransformer):
     def __init__(self, cls_info, cells, providers, formula, reserve_fallback, builtin_bounds,
                  builtin_reductions=()):
@@ -38,6 +44,7 @@ class NativeReductions(FormulaTransformer):
         self.module = cst.Module([])
         self.captures = {}
         self.integer_captures = {}
+        self.capture_operations = {}
         syntax = ast.parse(self.module.code_for_node(formula))
         self.scope_safe = not has_scope_effects(syntax.body[0].body)
         self.names = {node.id for node in ast.walk(syntax) if isinstance(node, ast.Name)}
@@ -60,6 +67,8 @@ class NativeReductions(FormulaTransformer):
                     rhs = ast.parse('(' + self.module.code_for_node(expression.value) + ')', mode='eval')
                     if self.double_expression(rhs.body):
                         self.captures[id(consumer)] = target.value
+                        self.capture_operations[id(consumer)] = {
+                            node.func.id for node in ast.walk(rhs.body) if _bounds_call(node)}
                     elif isinstance(rhs.body, ast.Call) and self.kind(rhs.body, {}) == 'longlong':
                         self.integer_captures[id(consumer)] = target.value
 
@@ -75,6 +84,8 @@ class NativeReductions(FormulaTransformer):
             return self.double_expression(node.operand)
         if isinstance(node, ast.BinOp) and isinstance(node.op, (ast.Add, ast.Sub, ast.Mult, ast.Div)):
             return self.double_expression(node.left) and self.double_expression(node.right)
+        if isinstance(node, ast.Call):
+            return self.kind(node, {}) == 'double'
         return False
 
     def reserve_prefix(self):
@@ -118,6 +129,9 @@ class NativeReductions(FormulaTransformer):
         if (self.builtin_bounds and _call(node, 'abs', 1)
                 and self.kind(node.args[0], locals_) == 'double'):
             return 'double'
+        if (self.builtin_bounds and _bounds_call(node)
+                and all(self.kind(arg, locals_) == 'double' for arg in node.args)):
+            return 'double'
         if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name) and node.value.id == 'self':
             ref = self.cls_info.refs.get(node.attr)
             if ref is not None:
@@ -140,7 +154,11 @@ class NativeReductions(FormulaTransformer):
         return None
 
     def cold_fallback(self, source, generator, capture, function, capture_type='_mx_cy.double',
-                      boxed_param=None, wrapper=None):
+                      boxed_param=None, wrapper=None, prepared_outer=None):
+        if prepared_outer is not None:
+            generator = ast.parse("(" + source + ")", mode="eval").body
+            generator.generators[0].iter = ast.Name(prepared_outer, ast.Load())
+            source = ast.unparse(generator)
         original = f'{function}({source})'
         if wrapper is not None:
             original = f'{wrapper}({original})'
@@ -173,6 +191,8 @@ class NativeReductions(FormulaTransformer):
         if capture is not None:
             args.append((capture, capture_type))
 
+        if prepared_outer is not None:
+            args.append((prepared_outer, 'object'))
         helper = self.reserve_fallback()
         formals = ', '.join([f'self: {self.cls_info.name}', f'{function}: object'] +
                             [f'{name}: {kind}' for name, kind in args])
@@ -370,7 +390,8 @@ return {fallback}
             return None
         return start.id, lower.right.value, step.operand.value
 
-    def primitive_ranges(self, after, func, ref, source, tree, wrapper=None):
+    def primitive_ranges(self, after, func, ref, source, tree, wrapper=None,
+                         capture=None, capture_operations=()):
         """Compose primitive reductions with Python generator boundaries.
 
         Unit steps cannot overflow at the terminating increment. General steps
@@ -385,7 +406,9 @@ return {fallback}
         if (not self.cells.formula_allows_exact_receiver
                 or self.cells.get_rettype_expr(c_style=True) != expected_result):
             return after
-        locals_ = {}
+        if capture in {'self', *self.cells.params}:
+            return after
+        locals_ = {capture: 'double'} if capture else {}
         for name in self.cells.params:
             kind = self.cells.get_argtype_expr(name, c_style=True)
             if kind in ('double', 'long long', 'bint'):
@@ -406,7 +429,8 @@ return {fallback}
                 if (self.kind(node, locals_) not in ('double', 'longlong', 'bint')
                         or node.keywords or not all(primitive_safe(arg) for arg in node.args)):
                     return False
-                if _call(node, 'abs', 1):
+                if (_call(node, 'abs', 1)
+                        or _bounds_call(node)):
                     return True
                 cell = self.cls_info.cells[node.func.attr]
                 if len(node.args) != len(cell.params):
@@ -432,11 +456,23 @@ return {fallback}
                 return all(primitive_safe(value) for value in [node.left, *node.comparators])
             return False
         targets = []
+        key_iteration = None
         for part in tree.generators:
             if (part.is_async or not isinstance(part.target, ast.Name)
-                    or part.target.id in {'self', 'range', 'abs', *locals_, *targets}):
+                    or part.target.id in {'self', 'range', 'abs', 'min', 'max', *locals_, *targets}):
                 return after
-            if isinstance(part.iter, ast.Tuple) and len(part.iter.elts) == 1:
+            iterator_ref = (helper_reference(cst.parse_expression(ast.unparse(part.iter.func)),
+                                             self.cls_info.refs)
+                            if isinstance(part.iter, ast.Call) else None)
+            iteration = getattr(iterator_ref, 'iteration_helper', None)
+            if (not targets and iteration and iterator_ref.helper
+                    and len(part.iter.args) == 1 and not part.iter.keywords
+                    and not isinstance(part.iter.args[0], ast.Starred)):
+                key_iteration = (iterator_ref.helper[0], iteration,
+                                 ast.parse(ast.unparse(part.iter), mode="eval").body)
+                args = ()
+                target_kind = 'longlong'
+            elif isinstance(part.iter, ast.Tuple) and len(part.iter.elts) == 1:
                 args = part.iter.elts
                 target_kind = self.kind(args[0], locals_)
                 if not target_kind or not primitive_safe(args[0]):
@@ -469,12 +505,17 @@ return {fallback}
         prefix = self.reserve_prefix()
         function = f'{prefix}_function'
         previous = len(self.fallbacks)
-        fallback = self.cold_fallback(source, tree, None, function, wrapper=wrapper)
+        prepared_outer = prefix + '_outer' if key_iteration else None
+        fallback = self.cold_fallback(source, tree, capture, function, wrapper=wrapper,
+                                      prepared_outer=prepared_outer)
         if len(self.fallbacks) == previous:
             return after
         provider, operation = ref.helper
         alias = module_name(provider)
         names = {name: f'{prefix}_index_{i}' for i, name in enumerate(targets)}
+        pair_operations = set(capture_operations) | {
+            node.func.id for node in ast.walk(tree) if _bounds_call(node)}
+        utility = module_name('modelx_cython._native_iterables')
 
         class Rename(ast.NodeTransformer):
             def visit_Name(self, node):
@@ -496,15 +537,35 @@ return {fallback}
         arguments = []
         # Keep the proved literal step visible to Cython. A variable step makes
         # Cython retain Python range iteration even when its value is +/-1.
-        if isinstance(outer, ast.Call):
+        if isinstance(outer, ast.Call) and not key_iteration:
             for i, arg in enumerate(outer.args[:2]):
                 name = f'{prefix}_bound_{i}'
                 arguments.append((name, ast.unparse(arg)))
             outer.args = ([ast.Name(name, ast.Load()) for name, _ in arguments]
                           + outer.args[2:])
         function_value = self.module.code_for_node(func)
-        lines = [f'{function}: object = {function_value}',
-                 f'if {exact_receiver(self.cls_info.name)} and {alias}.{"f64_accepts" if ref.reduction == "f64_sum" else operation + "_accepts"}({function}):']
+        extra_guard = ''.join(f' and {utility}.{name}_accepts({name})' for name in sorted(pair_operations))
+        guard = (f'{exact_receiver(self.cls_info.name)} and {alias}.'
+                 f'{"f64_accepts" if ref.reduction == "f64_sum" else operation + "_accepts"}'
+                 f'({function}){extra_guard}')
+        lines = [f'{function}: object = {function_value}']
+        if key_iteration:
+            producer, (prepare, span_type, span_count, span_at), original_outer = key_iteration
+            producer_alias = module_name(producer)
+            key_function, table, span, position = (prefix + suffix for suffix in
+                                                  ('_keys', '_table', '_span', '_position'))
+            lines += [f'{key_function}: object = {ast.unparse(original_outer.func)}',
+                      f'{table}: object = {ast.unparse(original_outer.args[0])}',
+                      f'{span}: {producer_alias}.{span_type} = None',
+                      f'{position}: _mx_cy.Py_ssize_t',
+                      f'if {guard}:',
+                      f'    {span} = {producer_alias}.{prepare}({key_function}, {table})',
+                      f'if {span} is None:',
+                      f'    {prepared_outer}: object = {key_function}({table})',
+                      f'    return {fallback}',
+                      'else:']
+        else:
+            lines.append(f'if {guard}:')
         lines += [f'    {names[name]}: _mx_cy.{locals_[name]}' for name in names]
         lines += [f'    {name}: _mx_cy.longlong = {value}' for name, value in arguments]
         if isinstance(outer, ast.Tuple):
@@ -521,7 +582,11 @@ return {fallback}
         lines += ['    try:']
         indent = '        '
         for i, part in enumerate(tree.generators):
-            if isinstance(part.iter, ast.Tuple):
+            if i == 0 and key_iteration:
+                lines.append(indent + f'for {position} in range({producer_alias}.{span_count}({span})):')
+                indent += '    '
+                lines.append(indent + f'{part.target.id} = {producer_alias}.{span_at}({span}, {position})')
+            elif isinstance(part.iter, ast.Tuple):
                 if i:
                     lines.append(indent + f'{part.target.id} = {ast.unparse(part.iter.elts[0])}')
             else:
@@ -554,6 +619,10 @@ return {fallback}
                   '        raise RuntimeError("generator raised StopIteration") from ' + prefix + '_error',
                   *finish, f'return {fallback}']
         self.providers.add(provider)
+        if key_iteration:
+            self.providers.add(key_iteration[0])
+        if pair_operations:
+            self.providers.add('modelx_cython._native_iterables')
         self.count += 1
         return cst.FlattenSentinel(cst.parse_module('\n'.join(lines) + '\n').body)
 
@@ -597,7 +666,10 @@ return {fallback}
         tree = ast.parse('(' + source + ')', mode='eval').body
         if not isinstance(tree, ast.GeneratorExp) or not self.builtin_bounds:
             return after
-        result = self.primitive_ranges(after, func, ref, source, tree, wrapper=wrapper)
+        result = self.primitive_ranges(
+            after, func, ref, source, tree, wrapper=wrapper,
+            capture=self.captures.get(id(before)),
+            capture_operations=self.capture_operations.get(id(before), ()))
         if result is not after:
             return result
         if builtin:
