@@ -23,10 +23,11 @@ def test_module_helpers_compile_through_shared_metadata(tmp_path):
         p.new_cells('builtin_every', 'lambda n: bool(all(term(n, i) > 0.0 for i in range(count())))')
         p.new_cells('minimum', 'lambda n: min(i for i in range(count()) if i != 1)')
         p.new_cells('maximum', 'lambda n: max(i for i in range(count()) if i != 1)')
+        p.new_cells('scaled_every', 'lambda n: ops.all_true(abs(term(n, i)) <= 1e-10 * max(term(n, 1), 1.0) for i in range(count()))')
         model.export(tmp_path / 'exported')
     finally:
         model.close()
-    methods = ('total', 'alias_total', 'every', 'wrapped_every', 'some', 'builtin_every', 'minimum', 'maximum')
+    methods = ('total', 'alias_total', 'every', 'wrapped_every', 'some', 'builtin_every', 'minimum', 'maximum', 'scaled_every')
     (tmp_path / 'sample.py').write_text('from exported import mx_model\np = mx_model.Projection\n'
         + ''.join(f'for n in range(3): p.{name}(n)\n' for name in methods))
     subprocess.run([sys.executable, '-m', 'modelx_cython', 'exported', '--sample', 'sample.py', '--no-spec'],
@@ -43,6 +44,7 @@ def test_module_helpers_compile_through_shared_metadata(tmp_path):
         p = fresh()
         assert p.total(0) == p.alias_total(0) == 1.0
         assert p.every(0) is False and p.some(0) is True
+        assert p.scaled_every(0) is False
         assert p.wrapped_every(0) is False
         assert p.builtin_every(0) is False
         assert p.minimum(0) == 0 and p.maximum(0) == 2

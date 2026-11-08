@@ -118,6 +118,9 @@ class NativeReductions(FormulaTransformer):
         if (self.builtin_bounds and _call(node, 'abs', 1)
                 and self.kind(node.args[0], locals_) == 'double'):
             return 'double'
+        if (self.builtin_bounds and any(_call(node, name, 2) for name in ('min', 'max'))
+                and all(self.kind(arg, locals_) == 'double' for arg in node.args)):
+            return 'double'
         if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name) and node.value.id == 'self':
             ref = self.cls_info.refs.get(node.attr)
             if ref is not None:
@@ -406,7 +409,8 @@ return {fallback}
                 if (self.kind(node, locals_) not in ('double', 'longlong', 'bint')
                         or node.keywords or not all(primitive_safe(arg) for arg in node.args)):
                     return False
-                if _call(node, 'abs', 1):
+                if (_call(node, 'abs', 1)
+                        or any(_call(node, name, 2) for name in ('min', 'max'))):
                     return True
                 cell = self.cls_info.cells[node.func.attr]
                 if len(node.args) != len(cell.params):
@@ -434,7 +438,7 @@ return {fallback}
         targets = []
         for part in tree.generators:
             if (part.is_async or not isinstance(part.target, ast.Name)
-                    or part.target.id in {'self', 'range', 'abs', *locals_, *targets}):
+                    or part.target.id in {'self', 'range', 'abs', 'min', 'max', *locals_, *targets}):
                 return after
             if isinstance(part.iter, ast.Tuple) and len(part.iter.elts) == 1:
                 args = part.iter.elts
@@ -475,6 +479,9 @@ return {fallback}
         provider, operation = ref.helper
         alias = module_name(provider)
         names = {name: f'{prefix}_index_{i}' for i, name in enumerate(targets)}
+        pair_operations = {node.func.id for node in ast.walk(tree)
+                           if any(_call(node, name, 2) for name in ('min', 'max'))}
+        utility = module_name('modelx_cython._native_iterables')
 
         class Rename(ast.NodeTransformer):
             def visit_Name(self, node):
@@ -503,8 +510,9 @@ return {fallback}
             outer.args = ([ast.Name(name, ast.Load()) for name, _ in arguments]
                           + outer.args[2:])
         function_value = self.module.code_for_node(func)
+        extra_guard = ''.join(f' and {utility}.{name}_accepts({name})' for name in sorted(pair_operations))
         lines = [f'{function}: object = {function_value}',
-                 f'if {exact_receiver(self.cls_info.name)} and {alias}.{"f64_accepts" if ref.reduction == "f64_sum" else operation + "_accepts"}({function}):']
+                 f'if {exact_receiver(self.cls_info.name)} and {alias}.{"f64_accepts" if ref.reduction == "f64_sum" else operation + "_accepts"}({function}){extra_guard}:']
         lines += [f'    {names[name]}: _mx_cy.{locals_[name]}' for name in names]
         lines += [f'    {name}: _mx_cy.longlong = {value}' for name, value in arguments]
         if isinstance(outer, ast.Tuple):
@@ -554,6 +562,8 @@ return {fallback}
                   '        raise RuntimeError("generator raised StopIteration") from ' + prefix + '_error',
                   *finish, f'return {fallback}']
         self.providers.add(provider)
+        if pair_operations:
+            self.providers.add('modelx_cython._native_iterables')
         self.count += 1
         return cst.FlattenSentinel(cst.parse_module('\n'.join(lines) + '\n').body)
 
