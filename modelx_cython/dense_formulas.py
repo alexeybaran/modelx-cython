@@ -138,5 +138,3 @@ def bind_entries(state: EntryModule, entries, propagate=False):
             stmt = stmt.with_changes(body=stmt.body.visit(misses[stmt.name.value]))
         body.append(stmt)
     return state.replace(module.with_changes(body=(*body, *replacements)))
-
-

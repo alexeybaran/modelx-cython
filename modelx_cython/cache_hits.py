@@ -193,5 +193,3 @@ def expose_entries(state: EntryModule, known, mode):
                and (mode in (layout.kind, 'both') or mode == 'auto' and (
                    layout.kind == 'scalar' or isinstance(ast.parse(layout.test, mode='eval').body, ast.Subscript)))}
     return state.replace(state.syntax.visit(_Calls(functions, layouts)))
-
-

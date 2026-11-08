@@ -1,4 +1,4 @@
-"""Lower explicit registered reductions in return statements.
+"""Lower registered reductions at proved return and assignment boundaries.
 
 Only range loops and singleton bindings with proven numeric expressions qualify.
 The existing formula body remains authoritative; general generators stay intact.
@@ -45,7 +45,7 @@ class NativeReductions(FormulaTransformer):
                         or not isinstance(assignment.body[0], cst.Assign)
                         or not isinstance(consumer, cst.SimpleStatementLine)
                         or len(consumer.body) != 1
-                        or not isinstance(consumer.body[0], cst.Return)):
+                        or not isinstance(consumer.body[0], (cst.Return, cst.Assign))):
                     continue
                 expression = assignment.body[0]
                 if len(expression.targets) != 1:
@@ -359,9 +359,14 @@ return {fallback}
     def leave_SimpleStatementLine(self, before, after):
         if not hasattr(ast, 'unparse'):
             return after
-        if len(before.body) != 1 or not isinstance(before.body[0], cst.Return):
+        if len(before.body) != 1:
             return after
-        value = before.body[0].value
+        statement = before.body[0]
+        assignment = isinstance(statement, cst.Assign)
+        if not (isinstance(statement, cst.Return) or assignment and len(statement.targets) == 1
+                and isinstance(statement.targets[0].target, cst.Name)):
+            return after
+        value = statement.value
         if not isinstance(value, cst.Call) or len(value.args) != 1:
             return after
         func = value.func
@@ -376,6 +381,11 @@ return {fallback}
         source = self.module.code_for_node(value.args[0].value)
         tree = ast.parse('(' + source + ')', mode='eval').body
         if not isinstance(tree, ast.GeneratorExp) or not self.builtin_bounds:
+            return after
+        # A named sum result may remain an object when a replacement helper
+        # returns one. Do not force an intermediate through the Cell's return
+        # type or turn a predicate's early result into a return from the Cell.
+        if assignment and reduction != 'f64_sum':
             return after
         if reduction == 'bool_any':
             return self.bounded_any(before, after, func, ref, source, tree)
@@ -451,9 +461,11 @@ return {fallback}
             for condition in part.ifs:
                 lines.append(indent + f'if {ast.unparse(condition)}:')
                 indent += '    '
+        result = (self.module.code_for_node(statement.targets[0].target) + ' = '
+                  if assignment else 'return ')
         lines += [indent + f'{alias}.f64_add(_mx_cy.address({prefix}_state), {ast.unparse(tree.elt)})',
-                  f'    return {alias}.f64_result(_mx_cy.address({prefix}_state))',
-                  'else:', f'    return {fallback}']
+                  f'    {result}{alias}.f64_result(_mx_cy.address({prefix}_state))',
+                  'else:', f'    {result}{fallback}']
         self.providers.add(provider)
         self.count += 1
         return cst.FlattenSentinel(cst.parse_module('\n'.join(lines)+'\n').body)

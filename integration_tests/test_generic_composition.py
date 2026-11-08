@@ -33,14 +33,25 @@ def test_generator_literals_preserve_integer_width_and_sign(tmp_path):
         return Status.CONTINUE
     return 0
 ''')
+        space.new_cells('assigned', '''def assigned(epoch=0):
+    total = sum_f64(k * 1.0 for k in range(3))
+    return str(total)
+''')
+        space.new_cells('weighted', '''def weighted(epoch=0):
+    factor = 1.5
+    total = sum_f64(k * factor for k in range(3))
+    return total
+''')
         model.export(tmp_path/'exported')
     finally:
         model.close()
-    names = (*values, 'step', 'filtered', 'authored_enum_prefix')
+    names = (*values, 'step', 'filtered', 'authored_enum_prefix', 'assigned', 'weighted')
     compile_model(tmp_path, 'from exported import mx_model\n'
-                  + '\n'.join(f'mx_model.Values.{name}()' for name in names)+'\n')
+                  + '\n'.join(f'mx_model.Values.{name}()' for name in names)
+                  + '\nfor epoch in (1,2): mx_model.Values.assigned(epoch); mx_model.Values.weighted(epoch)\n')
     expected = {name: float(value) for name, value in values.items()}
-    expected.update(step=0.0, filtered=float(1 << 63), authored_enum_prefix=100)
+    expected.update(step=0.0, filtered=float(1 << 63), authored_enum_prefix=100,
+                    assigned='3.0', weighted=4.5)
     for package in ('exported', 'exported_cy'):
         subprocess.run([sys.executable, '-B', '-c',
             f'from {package} import mx_model\n'
@@ -51,6 +62,28 @@ def test_generator_literals_preserve_integer_width_and_sign(tmp_path):
     admission = json.loads((tmp_path/'exported_cy/_mx_admission.json').read_text())
     for name in ('above', 'below', 'large', 'step', 'filtered'):
         assert admission[f'exported_cy._mx_classes._c_Values._f_{name}']['native_reductions'] == 0
+    for name in ('assigned', 'weighted'):
+        assert admission[f'exported_cy._mx_classes._c_Values._f_{name}']['native_reductions'] == 1
+    for package in ('exported', 'exported_cy'):
+        script=f'''from {package} import mx_model
+s=mx_model.Values
+class Value:
+    def __str__(self): return 'custom result'
+def replacement(values):
+    assert list(values)==[0.0,1.0,2.0]
+    return Value()
+s.sum_f64=replacement
+assert s.assigned(1)=='custom result'
+failure=RuntimeError('assigned reduction fallback')
+def broken(values):
+    assert next(values)==0.0
+    raise failure
+s.sum_f64=broken
+try: s.assigned(2)
+except RuntimeError as actual: assert actual is failure
+else: raise AssertionError('assigned reduction exception lost')
+'''
+        subprocess.run([sys.executable,'-B','-c',script],cwd=tmp_path,check=True)
 
 
 def test_two_providers_in_one_formula_keep_distinct_native_contexts(tmp_path):
@@ -85,21 +118,27 @@ cdef double lookup_f64(object function, LookupContext context, object table,
     formula = "def value(flag, epoch=0):\n    if flag: return left(table,1,'v')\n    return right(table,1,'v')\n"
     prepare = f'''import modelx as mx
 from test_providers import left,right
+from modelx_cython.helpers import module_name
 model=mx.new_model('ProviderComposition')
 s=model.new_space('Values',refs={{'left':left,'right':right,'table':{{1:{{'v':2.0}}}}}})
 s.new_cells('value',{formula!r})
+s.new_cells('value'+module_name('test_providers.second'),"lambda flag, epoch=0: left(table,1,'v')")
 model.export('exported')
 model.close()
 '''
     subprocess.run([sys.executable, '-B', '-c', prepare], cwd=tmp_path, check=True)
     compile_model(tmp_path, 'from exported import mx_model\n'
+                  'from modelx_cython.helpers import module_name\n'
                   'for epoch in range(3):\n'
-                  '    mx_model.Values.value(True,epoch); mx_model.Values.value(False,epoch)\n')
+                  '    mx_model.Values.value(True,epoch); mx_model.Values.value(False,epoch)\n'
+                  '    getattr(mx_model.Values,"value"+module_name("test_providers.second"))(True,epoch)\n')
     for name in ('exported', 'exported_cy'):
         script = f'''import pickle
 from {name} import mx_model
+from modelx_cython.helpers import module_name
 s=mx_model.Values
 assert s.value(True)==2.0 and s.value(False)==3.0
+assert getattr(s,'value'+module_name('test_providers.second'))(True)==2.0
 restored=pickle.loads(pickle.dumps(mx_model)).Values
 assert restored.value(True,1)==2.0 and restored.value(False,1)==3.0
 s.left=lambda *args:7.0
@@ -116,4 +155,4 @@ else: raise AssertionError('helper exception lost')
     owner = next(node for node in tree.body if isinstance(node, ast.ClassDef))
     context_types = [ast.dump(node.annotation) for node in owner.body if isinstance(node, ast.AnnAssign)
                      and isinstance(node.annotation, ast.Attribute) and node.annotation.attr=='LookupContext']
-    assert len(context_types)==len(set(context_types))==2
+    assert len(context_types)==3 and len(set(context_types))==2

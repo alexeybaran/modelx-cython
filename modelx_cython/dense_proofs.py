@@ -211,5 +211,3 @@ def prove_entries(state: EntryModule, records, uses):
     result = state.replace(state.syntax.visit(Proofs()))
     assert not any(queues.values()), 'inconsistent generated entry call graph'
     return result
-
-

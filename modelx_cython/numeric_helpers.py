@@ -188,11 +188,7 @@ class NumericReturns(cst.CSTTransformer):
         if context is None:
             return None
         module = cst.Module([])
-        used = set(re.findall(r'\b[A-Za-z_]\w*\b',
-                              ''.join(module.code_for_node(line) for line in body)))
-        value = '_mx_bounded_value'
-        while value in used or value in self.cell.params:
-            value += '_'
+        value = Names(cst.Module(body), used=self.cell.params).reserve('_mx_bounded_value')
         args = ', '.join(module.code_for_node(arg) for arg in (
             lookup.func, lower.value.func, upper.value.func, context,
             table, key_name, column, below.value))
@@ -299,7 +295,8 @@ class NumericReturns(cst.CSTTransformer):
         if context in self.contexts:
             context += module_name(provider)
         cache_fields = (prefix + name for name in self.cls.cells for prefix in ('_v_', '_has_'))
-        context = Names(used=(*self.contexts, *self.cls.refs, *cache_fields)).reserve(context)
+        previous = getattr(self.cls, 'native_contexts', {})
+        context = Names(used=(*previous, *self.contexts, *self.cls.refs, *cache_fields)).reserve(context)
         self.contexts[context] = provider
         return cst.parse_expression('self.' + context)
 

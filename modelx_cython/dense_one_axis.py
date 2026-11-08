@@ -116,5 +116,3 @@ def specialize_entries(state: EntryModule, layouts, propagate=False):
         rewritten.append(stmt.with_changes(params=signature, body=stmt.body.with_changes(
             body=(guard.with_changes(test=check, body=guard.body.with_changes(body=(entry,))),))))
     return state.replace(module.with_changes(body=(*rewritten, *bodies)).visit(_Calls(proved, propagate)))
-
-
