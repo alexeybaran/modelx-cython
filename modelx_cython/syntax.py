@@ -98,7 +98,9 @@ def semantic_key(node):
     """Compare existing CST structure independently of comments and layout."""
     if isinstance(node, (cst.Integer, cst.Float, cst.Imaginary,
                          cst.SimpleString, cst.ConcatenatedString)):
-        return 'literal', type(literal_value(node)).__name__, literal_value(node)
+        value = node.evaluated_value
+        if value is not None:
+            return 'literal', type(value).__name__, value
     if isinstance(node, cst.CSTNode):
         return type(node).__name__, tuple(
             (field.name, semantic_key(getattr(node, field.name)))

@@ -40,6 +40,7 @@ def test_known_legacy_upgrade_is_structural_and_preserves_other_code(source):
     lambda code: code + '\n_mx_collect_native_coords = object()\n',
     lambda code: code + '\ndef _mx_collect_adapter_version(): pass\n',
     lambda code: code.replace('scratch = {}', 'scratch = {"authored": True}'),
+    lambda code: code.replace('scratch = {}', 'scratch = {"authored": f"{base}" "text"}'),
 ])
 def test_unknown_adapter_keeps_the_general_runtime(change):
     source = change(legacy())
