@@ -1,18 +1,22 @@
 """Standard compiler path for module helpers, aliases and builtin reductions."""
+import ast
 import json
+import re
 import subprocess
 import sys
 import textwrap
 
 import modelx as mx
 from lifelib import typed_inputs
+from lifelib.immutable_inputs import Table
 
 
 def test_module_helpers_compile_through_shared_metadata(tmp_path):
     model = mx.new_model('ModuleHelpers')
     try:
         p = model.new_space('Projection', refs={'ops': typed_inputs, 'alias_ops': typed_inputs,
-            'values': (1e16, 1.0, -1e16), 'count_ref': 3})
+            'values': (1e16, 1.0, -1e16), 'count_ref': 3,
+            'key_table': Table((0, 1, 2), ((0.0,), (1.0,), (2.0,)), ('value',))})
         p.new_cells('count', 'lambda: count_ref')
         p.new_cells('term', 'lambda n, i: values[i] + n * 0.0')
         p.new_cells('total', 'lambda n: ops.sum_f64(term(n, i) for i in range(count()))')
@@ -24,10 +28,14 @@ def test_module_helpers_compile_through_shared_metadata(tmp_path):
         p.new_cells('minimum', 'lambda n: min(i for i in range(count()) if i != 1)')
         p.new_cells('maximum', 'lambda n: max(i for i in range(count()) if i != 1)')
         p.new_cells('scaled_every', 'lambda n: ops.all_true(abs(term(n, i)) <= 1e-10 * max(term(n, 1), 1.0) for i in range(count()))')
+        p.new_cells('key_total', 'lambda n: ops.sum_f64(term(n, i) for i in ops.keys(key_table))')
+        p.new_cells('key_every', 'lambda n: all(i >= 0 for i in ops.keys(key_table))')
+        p.new_cells('key_minimum', 'lambda n: min(i for i in ops.keys(key_table) if i != 1)')
+        p.new_cells('key_local', 'def key_local(n):\n    i = key_table\n    return all(i >= 0 for i in ops.keys(i))\n')
         model.export(tmp_path / 'exported')
     finally:
         model.close()
-    methods = ('total', 'alias_total', 'every', 'wrapped_every', 'some', 'builtin_every', 'minimum', 'maximum', 'scaled_every')
+    methods = ('total', 'alias_total', 'every', 'wrapped_every', 'some', 'builtin_every', 'minimum', 'maximum', 'scaled_every', 'key_total', 'key_every', 'key_minimum', 'key_local')
     (tmp_path / 'sample.py').write_text('from exported import mx_model\np = mx_model.Projection\n'
         + ''.join(f'for n in range(3): p.{name}(n)\n' for name in methods))
     subprocess.run([sys.executable, '-m', 'modelx_cython', 'exported', '--sample', 'sample.py', '--no-spec'],
@@ -35,14 +43,31 @@ def test_module_helpers_compile_through_shared_metadata(tmp_path):
     report = json.loads((tmp_path / 'exported_cy/_mx_admission.json').read_text())
     for name in methods:
         assert report[f'exported_cy._mx_classes._c_Projection._f_{name}']['native_reductions'] == 1
+    syntax = ast.parse((tmp_path / 'exported_cy/_mx_classes.py').read_text())
+    c_source = (tmp_path / 'exported_cy/_mx_classes.c').read_text()
+    for name in ('key_total', 'key_every', 'key_minimum', 'key_local'):
+        method = next(node for node in ast.walk(syntax)
+                      if isinstance(node, ast.FunctionDef) and node.name == '_f_' + name)
+        native = method.body[0].value.func.id
+        signatures = list(re.finditer(r'^static [^\n]*__pyx_f_[^\n]*' + re.escape(native)
+                                      + r'\([^\n]*\) \{', c_source, re.MULTILINE))
+        assert signatures, native
+        for signature in signatures:
+            body = c_source[signature.start():c_source.index('\n}\n', signature.end())]
+            assert 'for (' in body and 'key_span_at(' in body
+            assert not any(token in body for token in
+                           ('PyObject_GetIter(', '__Pyx_PyObject_GetIterNextFunc(', 'PyIter_Next('))
     probe = textwrap.dedent('''\
         from importlib import import_module
         import sys
         from types import SimpleNamespace
+        from lifelib import typed_inputs
         model = import_module(sys.argv[1]).mx_model
         def fresh(): return type(model)().Projection
         p = fresh()
-        assert p.total(0) == p.alias_total(0) == 1.0
+        assert p.total(0) == p.alias_total(0) == p.key_total(0) == 1.0
+        assert p.key_every(0) is True and p.key_minimum(0) == 0
+        assert p.key_local(0) is True
         assert p.every(0) is False and p.some(0) is True
         assert p.scaled_every(0) is False
         assert p.wrapped_every(0) is False
@@ -58,6 +83,20 @@ def test_module_helpers_compile_through_shared_metadata(tmp_path):
         assert p.total(1) == 42.0
         assert seen == [1e16, 1.0, -1e16]
         assert p.alias_total(1) == 1.0
+        p = fresh()
+        key_seen = []
+        def replacement_keys(table):
+            key_seen.append(table)
+            return iter((2, 0))
+        p.ops = SimpleNamespace(keys=replacement_keys, sum_f64=typed_inputs.sum_f64)
+        assert p.key_total(1) == 0.0
+        assert key_seen == [p.key_table]
+        error = StopIteration('outer iterator')
+        def broken_keys(table): raise error
+        p.ops = SimpleNamespace(keys=broken_keys)
+        try: p.key_every(1)
+        except StopIteration as actual: assert actual is error
+        else: raise AssertionError('outer StopIteration changed')
         truth_seen = []
         class Truth:
             def __bool__(self):

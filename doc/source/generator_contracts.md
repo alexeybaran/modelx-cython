@@ -122,6 +122,14 @@ arguments and must not repeat table expressions. The original outer iterator's
 errors remain eager. Unsupported key domains remain explicit coverage gaps.
 Resources are disposable and private to the compiled provider package.
 
+The reduction pass consumes the iteration capability for an outer keys call,
+composed with inner unit ranges and singleton bindings. It evaluates the current
+consumer, key producer and table argument once, in that order. Unsupported
+receivers, callables or key domains build the original generator over the already
+captured outer iterable; they never repeat the table expression. The native branch
+uses a Py_ssize_t C counter and signed-int64 key access, without a Python iterator.
+Nested key-span producers remain outside this admission until separately tested.
+
 Contextual float fallback evaluates `conversion(helper(*args))` in source order.
 It cannot simply coerce a replacement helper's result through a C-double ABI:
 Python `float('2.5')`, for example, has different conversion semantics. Pandas owns
