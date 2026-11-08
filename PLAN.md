@@ -1,5 +1,23 @@
 # Evidence-Gated Development Plan
 
+## Experiment update — native cache hits (2026-11-07)
+
+On `experiment/collect-15x`, the one-worker September comparison is recorded in
+`../september-gap/ATTRIBUTION.md`. Eight paired prototype rounds meet the 2x
+collect/API gate: MYGA 1.895x and VA 1.963x median ratios. Integrated generated
+programs and all native executable sections match the qualified prototypes.
+The retained mechanisms are existing range/receiver proofs and an opt-in
+`native_cache_hits` lowering. Scalar and dense modes are separate because
+checked dense hits regress MYGA. The split-miss experiment is rejected.
+
+Windows Python 3.12 and free-threaded 3.14 each pass 171 untouched tests and
+99 candidate/helper tests; the final 25 admission tests also pass on both.
+Original MYGA/BasicTerm_SC defaults retain generated/native code identity and
+pass their output contracts at 1/4 workers. Full adjusted report, policy and
+transition checks pass. Final integrated timing and repeated attribution are
+tracked in the same evidence directory. This is an experimental candidate;
+`core` remains unchanged and promotion still requires its separate approval.
+
 ## Overall objective
 
 Starting from pristine modelx-cython, approach the previous optimized compiler's **calculation performance on lifelib models where it achieved native execution**, while keeping the evolving compiler Cython-based, generic, maintainable and close to upstream.

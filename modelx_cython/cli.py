@@ -361,6 +361,7 @@ def main_handler(args: argparse.Namespace, stdout: IO[str], stderr: IO[str]) -> 
         dense_miss_binding = d.get('dense_miss_binding', sys.platform == "win32")
         dense_one_axis = d.get('dense_one_axis', False)
         propagate_exact_receiver = d.get('propagate_exact_receiver', False)
+        native_cache_hits = d.get('native_cache_hits', 'none')
         if type(d.get('native_math', False)) is not bool:
             raise ValueError('native_math must be a boolean')
         if type(dense_bounds_proofs) is not bool or type(dense_miss_binding) is not bool:
@@ -369,6 +370,10 @@ def main_handler(args: argparse.Namespace, stdout: IO[str], stderr: IO[str]) -> 
             raise ValueError('dense_one_axis must be a boolean')
         if type(propagate_exact_receiver) is not bool or (propagate_exact_receiver and not dense_miss_binding):
             raise ValueError('propagate_exact_receiver requires dense_miss_binding')
+        if type(native_cache_hits) is not str or native_cache_hits not in ('none', 'scalar', 'dense', 'both'):
+            raise ValueError('native_cache_hits must be none, scalar, dense or both')
+        if native_cache_hits != 'none' and not dense_miss_binding:
+            raise ValueError('native_cache_hits requires dense_miss_binding')
         if parallel_workers > 1:
             runtime = model_path / (MX_SYS_MOD + '.py')
             source = runtime.read_text(encoding='utf-8')
@@ -419,6 +424,9 @@ def main_handler(args: argparse.Namespace, stdout: IO[str], stderr: IO[str]) -> 
             if dense_one_axis:
                 from modelx_cython.dense_one_axis import specialize_one_axis
                 specialize_one_axis(sources, dense_entries, propagate_exact_receiver)
+            if native_cache_hits != 'none':
+                from modelx_cython.cache_hits import expose_cache_hits
+                expose_cache_hits(sources, formula_entries, native_cache_hits)
         create_setup(model_name, modules=modules, setup_file=setup_file)
         (model_path / '_mx_admission.json').write_text(
             json.dumps(describe(module_infos), indent=2), encoding='utf-8')

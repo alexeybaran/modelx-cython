@@ -94,6 +94,10 @@ class TransSpec:
     ``"propagate_exact_receiver"`` carries the receiver fact through those
     entries and private dense formula calls. ``"native_math"`` enables guarded
     scalar lowering for ``round``, ``math.floor``, and ``math.ceil``.
+    ``"native_cache_hits"`` opts into direct reads of existing native cache
+    fields at proven private calls: ``"scalar"``, ``"dense"`` or ``"both"``.
+    It defaults to ``"none"`` and requires ``"dense_miss_binding"``. Misses
+    retain their original entry and Cython exception handling.
 
     Attributes
     ----------

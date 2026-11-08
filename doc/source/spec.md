@@ -145,6 +145,15 @@ need to be pickled.
 `dense_bounds_proofs` is an explicit top-level opt-in. The compiler still
 uses checked cache entries and exact-receiver dispatch with the default.
 
+`native_cache_hits` is an explicit top-level opt-in: `"scalar"`, `"dense"`,
+or `"both"` (default `"none"`). It requires `dense_miss_binding`. At an
+existing private Cell call with matching native parameter types or bounded
+literal arguments, it can read the existing cache fields on a hit. It copies
+the entry's domain check or inherits its existing proven-range contract.
+Misses keep the original call and normal Cython error handling. Public methods
+and virtual overrides keep their dispatch behavior. Scalar and dense paths
+need separate workload measurements; enabling both can be slower.
+
 Set `serial_collect` to `"reuse"` on an eligible leaf Space with one scalar
 sum output to reuse a receiver. Set `parallel_collect_reuse` on the same Space
 to reuse one receiver per chunk when `parallel_workers` exceeds one. Each
