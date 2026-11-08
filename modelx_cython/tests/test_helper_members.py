@@ -77,6 +77,7 @@ def test_shared_iteration_and_contextual_float_capabilities_reach_namespaces():
     lookup.__modelx_cython_helper__ = ('sample.provider', 'lookup')
     lookup.__modelx_cython_iteration__ = ('keys_span', 'KeySpan', 'key_span_count', 'key_span_at')
     lookup.__modelx_cython_float_numeric__ = 'lookup_float_f64'
+    lookup.__modelx_cython_keyed_float_numeric__ = tuple(f'lookup_key{i}_float_f64' for i in range(5))
     module = ModuleType('sample.owned')
     module.lookup = lookup
     traced = RuntimeValueInfo(module)
@@ -84,6 +85,7 @@ def test_shared_iteration_and_contextual_float_capabilities_reach_namespaces():
     record = merged.helper_members['lookup']
     assert record.iteration_helper == ('keys_span', 'KeySpan', 'key_span_count', 'key_span_at')
     assert record.float_numeric_helper == 'lookup_float_f64'
+    assert record.keyed_float_numeric_helper == tuple(f'lookup_key{i}_float_f64' for i in range(5))
 
 
 @pytest.mark.parametrize('capability,value', [
@@ -91,6 +93,9 @@ def test_shared_iteration_and_contextual_float_capabilities_reach_namespaces():
     ('iteration', ('keys_span', 'bad-name', 'key_span_count', 'key_span_at')),
     ('float_numeric', ('lookup_float_f64',)),
     ('float_numeric', 'bad-name'),
+    ('keyed_float_numeric', ('lookup_key0',)),
+    ('keyed_float_numeric', ('key0', 'key1', 'bad-name', 'key3', 'key4')),
+    ('keyed_float_numeric', ('key0', 'key1', 'for', 'key3', 'key4')),
 ])
 def test_new_capability_shapes_use_the_single_shared_validator(capability, value):
     def invalid():

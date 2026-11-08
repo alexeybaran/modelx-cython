@@ -5,11 +5,12 @@ import pytest
 from modelx_cython.numeric_helpers import ContextualFloat
 
 
-def rewrite(body, builtins=('float',), kind='long long', contexts=None):
-    helper=NS(helper=('lifelib._native_inputs','lookup'),float_numeric_helper='lookup_float_f64')
+def rewrite(body, builtins=('float',), kind='long long', contexts=None, scope_safe=None):
+    helper=NS(helper=('lifelib._native_inputs','lookup'),float_numeric_helper='lookup_float_f64',
+              keyed_float_numeric_helper=tuple(f'lookup_key{i}_float_f64' for i in range(5)))
     cls=NS(refs={'lookup':helper,'ops':NS(helper_members={'lookup':helper})},cells={})
     cell=NS(name='rate',params=('t',),get_argtype_expr=lambda *a,**k:kind)
-    transform=ContextualFloat(cls,cell,set(),builtins,contexts)
+    transform=ContextualFloat(cls,cell,set(),builtins,contexts,scope_safe=scope_safe)
     node=cst.parse_module('def rate(self, t):\n'+''.join('    '+line+'\n' for line in body.splitlines()))
     return node.visit(transform).code,transform
 
@@ -50,3 +51,41 @@ def test_context_collision_declines_without_changing_existing_owner():
     contexts={'_v_mx_context_rate':'other.provider'}
     assert not rewrite('return float(self.lookup(self.table, t, "rate"))',contexts=contexts)[1].operations
     assert contexts=={'_v_mx_context_rate':'other.provider'}
+
+
+@pytest.mark.parametrize('key,arity,flag', [
+    ('()',0,'True'), ('("M",)',1,'True'), ('"M"',1,'False'),
+    ('("M", t)',2,'True'), ('("M", -3, t)',3,'True'),
+    ('("M", t, True, "Y")',4,'True')])
+def test_native_complete_keys_do_not_construct_query_tuples(key,arity,flag):
+    code,transform=rewrite(f'return float(self.ops.lookup(self.table, {key}, "rate"))')
+    assert f'.lookup_key{arity}_float_f64(float, self.ops.lookup, ' in code
+    assert f'{flag}, "rate")' in code
+    assert transform.operations=={'lifelib._native_inputs.lookup'}
+
+
+@pytest.mark.parametrize('key', ['("M", t, 1, 2, 3)', '("M", *other)',
+                                     '("M", unknown)', '("M", 0.5)', '(b"M", t)',
+                                     '(-9223372036854775809, t)'])
+def test_unsupported_complete_key_domain_remains_ordinary(key):
+    code,transform=rewrite(f'return float(self.ops.lookup(self.table, {key}, "rate"))')
+    assert not transform.operations and 'lookup_key' not in code
+
+
+def test_boolean_scalar_uses_type_preserving_entry():
+    body='return float(self.lookup(self.table, t, "rate"))'
+    code,transform=rewrite(body,kind='bint')
+    assert '.lookup_key1_float_f64(' in code
+    assert 't, False, "rate")' in code
+
+
+def test_mixed_minimum_cannot_erase_boolean_key_identity():
+    body='return float(self.lookup(self.table, min(t, True), "rate"))'
+    assert not rewrite(body,builtins=('float','min'))[1].operations
+
+
+def test_original_scope_facts_survive_generated_exception_handlers():
+    body='try:\n    return float(self.lookup(self.table, t, "rate"))\nexcept StopIteration as generated_error:\n    raise RuntimeError("generator raised StopIteration") from generated_error'
+    assert not rewrite(body)[1].operations
+    assert rewrite(body,scope_safe=True)[1].operations
+    assert not rewrite(body,scope_safe=False)[1].operations

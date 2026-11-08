@@ -18,6 +18,7 @@ CAPABILITIES = {
     'iteration': ('iteration_helper', (4,)),
     'numeric': ('numeric_helper', None),
     'float_numeric': ('float_numeric_helper', None),
+    'keyed_float_numeric': ('keyed_float_numeric_helper', (5,)),
     'clamped': ('clamped_helper', None),
     'clamped_context': ('clamped_context_helper', None),
     'optional': ('optional_helper', None),
