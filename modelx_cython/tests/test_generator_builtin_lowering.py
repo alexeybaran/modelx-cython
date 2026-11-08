@@ -31,16 +31,18 @@ def metadata(result='bint', params=()):
         get_argtype_expr=lambda *args, **kw: 'long long' if kw.get('c_style') else '_mx_cy.longlong')
 
 
-def lower(source, names):
+def lower(source, names, result='bint'):
     formula = cst.parse_module(source).body[0]
     info = SimpleNamespace(name='_c_Test', refs={}, cells={'predicate': metadata(params=('i',))})
-    pass_ = NativeReductions(info, metadata(params=('n',)), set(), formula,
+    pass_ = NativeReductions(info, metadata(result, params=('n',)), set(), formula,
                              lambda: '_cold', True, builtin_reductions=names)
     rewritten = cst.Module([formula.visit(pass_)]).code
     namespace = {'_mx_cy': cython, '_c_Test': Receiver,
         module_name('modelx_cython._native_iterables'): SimpleNamespace(
             all_accepts=lambda f: f is builtins.all,
-            any_accepts=lambda f: f is builtins.any)}
+            any_accepts=lambda f: f is builtins.any,
+            min_accepts=lambda f: f is builtins.min,
+            max_accepts=lambda f: f is builtins.max)}
     for fallback in pass_.fallbacks:
         exec(cst.Module([fallback]).code, namespace)
     exec(rewritten, namespace)
@@ -79,3 +81,21 @@ def test_unproved_builtin_and_integer_overflow_expression_keep_generators():
     assert lower(source, ())[1].count == 0
     overflow = 'def formula(self, n):\n    return all(self.predicate(i + 1) for i in range(n))\n'
     assert lower(overflow, ('all',))[1].count == 0
+
+
+@pytest.mark.parametrize('operation', ['min', 'max'])
+def test_filtered_integer_extrema_preserve_results_and_empty_errors(operation):
+    source = f'def formula(self, n):\n    return {operation}(i for i in range(n) if i != 1)\n'
+    original = {}
+    exec(source, original)
+    namespace, pass_ = lower(source, (operation,), 'long long')
+    assert pass_.count == 1
+    for n in (-5, 0, 1, 2, 5):
+        try:
+            expected = original['formula'](Receiver(), n)
+        except ValueError as expected:
+            with pytest.raises(ValueError) as actual:
+                namespace['formula'](Receiver(), n)
+            assert actual.value.args == expected.args
+        else:
+            assert namespace['formula'](Receiver(), n) == expected

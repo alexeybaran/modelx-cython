@@ -17,6 +17,8 @@ def test_nested_filtered_boolean_ranges(tmp_path):
             'all_true': all_true, 'any_true': any_true,
             'max_value': max_value, 'sum_f64': sum_f64, 'events': [],
             'amounts': (1e16, 1.0, -1e16, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0),
+            'rate': 0.25,
+            'throw_horizon': False,
             'throw_at': -1, 'false_at': 2, 'error': StopIteration('sentinel')})
         s.new_cells('bound', '''def bound(n):
     events.append(('bound', n))
@@ -45,6 +47,35 @@ def test_nested_filtered_boolean_ranges(tmp_path):
 ''')
         s.new_cells('total', 'lambda n: sum_f64(amount(i) for i in range(bound(n)) if i != 1)')
         s.new_cells('maximum', 'lambda n: max_value(amount(i) for i in range(bound(n)) if i != 1)')
+        s.new_cells('singleton', 'lambda n: sum_f64(value for value in (amount(n),))')
+        s.new_cells('inner_singleton', 'lambda n: sum_f64(value for i in range(bound(n)) for value in (amount(i),))')
+        s.new_cells('captured', '''def captured(n):
+    factor = rate
+    return sum_f64(amount(i) * factor for i in range(bound(n)))
+''')
+        s.new_cells('captured_singleton', '''def captured_singleton(n):
+    factor = rate
+    return sum_f64(value * factor for value in (amount(n),))
+''')
+        s.new_cells('descending', '''def descending(n):
+    if n == -10:
+        return 0.0
+    return max_value(amount(i) for i in range(n, max(-1, n - 12), -3))
+''')
+        s.new_cells('origin', '''def origin(n):
+    events.append(('origin', n))
+    return n
+''')
+        s.new_cells('horizon', '''def horizon():
+    events.append(('horizon',))
+    if throw_horizon:
+        raise error
+    return 8
+''')
+        s.new_cells('legacy_any', '''def legacy_any(n):
+    first = origin(n)
+    return any_true(predicate(i) for i in range(max(0, first), min(first + 3, horizon())))
+''')
         model.export(tmp_path / 'exported')
     finally:
         model.close()
@@ -52,11 +83,15 @@ def test_nested_filtered_boolean_ranges(tmp_path):
         'from exported import mx_model\np = mx_model.Projection\n'
         'p.every(8); p.some(8); p.reverse(8)\n'
         'p.every(-10); p.some(-10); p.reverse(-10)\n'
-        'p.total(8); p.total(-10); p.maximum(8)\n')
+        'p.total(8); p.total(-10); p.maximum(8)\n'
+        'p.singleton(0); p.singleton(8); p.inner_singleton(8); p.inner_singleton(-10)\n'
+        'p.captured(8); p.captured(-10); p.captured_singleton(0); p.captured_singleton(8)\n'
+        'p.descending(8); p.descending(-10); p.legacy_any(0); p.legacy_any(-10)\n')
     subprocess.run([sys.executable, '-m', 'modelx_cython', 'exported',
                     '--sample', 'sample.py', '--no-spec'], cwd=tmp_path, check=True)
     report = json.loads((tmp_path / 'exported_cy/_mx_admission.json').read_text())
-    for name in ('every', 'some', 'reverse', 'total', 'maximum'):
+    for name in ('every', 'some', 'reverse', 'total', 'maximum', 'singleton',
+                 'inner_singleton', 'captured', 'captured_singleton', 'descending', 'legacy_any'):
         assert report[f'exported_cy._mx_classes._c_Projection._f_{name}']['native_reductions'] == 1
     generated = tmp_path / 'exported_cy/_mx_classes.py'
     c_source = generated.with_suffix('.c').read_text()
@@ -71,11 +106,12 @@ def test_nested_filtered_boolean_ranges(tmp_path):
         pattern = r'^static [^\n]*' + re.escape(function.name) + r'\([^\n]*\) \{'
         for signature in re.finditer(pattern, c_source, re.MULTILINE):
             body = c_source[signature.start():c_source.index('\n}\n', signature.end())]
-            assert 'for (' in body
+            if any(isinstance(node, ast.For) for node in ast.walk(function)):
+                assert 'for (' in body
             assert not any(token in body for token in
                            ('PyObject_GetIter(', '__Pyx_PyObject_GetIterNextFunc(', 'PyIter_Next('))
             native_bodies += 1
-    assert native_bodies == 5
+    assert native_bodies == 11
     probe = textwrap.dedent('''\
         import sys
         import pickle
@@ -160,6 +196,72 @@ def test_nested_filtered_boolean_ranges(tmp_path):
                 assert error.__cause__ is s.error and error.__context__ is s.error
             else:
                 raise AssertionError('numeric body StopIteration not converted')
+        s = fresh()
+        assert s.singleton(3) == 4.0
+        assert s.events == [('amount', 3)]
+        s = fresh()
+        s.throw_at = 3
+        try:
+            s.singleton(3)
+        except StopIteration as error:
+            assert error is s.error
+        else:
+            raise AssertionError('outer singleton StopIteration changed')
+        s = fresh()
+        assert s.inner_singleton(3) == 1.0
+        assert s.events == [('bound', 3), ('amount', 0), ('amount', 1), ('amount', 2)]
+        s = fresh()
+        s.throw_at = 0
+        try:
+            s.inner_singleton(3)
+        except RuntimeError as error:
+            assert error.__cause__ is s.error and error.__context__ is s.error
+        else:
+            raise AssertionError('inner singleton StopIteration not converted')
+        s = fresh()
+        assert s.captured(3) == 0.25
+        s = fresh()
+        s.throw_at = 0
+        try:
+            s.captured(3)
+        except RuntimeError as error:
+            assert error.__cause__ is s.error and error.__context__ is s.error
+        else:
+            raise AssertionError('captured sum StopIteration not converted')
+        s = fresh()
+        s.throw_at = 3
+        try:
+            s.captured_singleton(3)
+        except StopIteration as error:
+            assert error is s.error
+        else:
+            raise AssertionError('captured outer singleton StopIteration changed')
+        s = fresh()
+        assert s.descending(6) == 1e16
+        s = fresh()
+        s.throw_at = 6
+        try:
+            s.descending(6)
+        except RuntimeError as error:
+            assert error.__cause__ is s.error and error.__context__ is s.error
+        else:
+            raise AssertionError('descending maximum StopIteration not converted')
+        s = fresh()
+        s.throw_at = 0
+        try:
+            s.legacy_any(0)
+        except RuntimeError as error:
+            assert error.__cause__ is s.error and error.__context__ is s.error
+        else:
+            raise AssertionError('bounded any StopIteration not converted')
+        s = fresh()
+        s.throw_horizon = True
+        try:
+            s.legacy_any(0)
+        except StopIteration as error:
+            assert error is s.error
+        else:
+            raise AssertionError('bounded any outer bound StopIteration changed')
         ''')
     for package in ('exported', 'exported_cy'):
         subprocess.run([sys.executable, '-c', probe, package], cwd=tmp_path, check=True)

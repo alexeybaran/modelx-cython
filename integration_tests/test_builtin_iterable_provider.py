@@ -13,6 +13,12 @@ def accepts_all(function):
     return native.all_accepts(function)
 def accepts_any(function):
     return native.any_accepts(function)
+def accepts_min(function):
+    return native.min_accepts(function)
+def accepts_max(function):
+    return native.max_accepts(function)
+def absolute(double value):
+    return native.f64_abs(value)
 ''')
     (tmp_path / 'setup.py').write_text('''from setuptools import setup
 from Cython.Build import cythonize
@@ -24,6 +30,10 @@ import probe
 original_all, original_any = builtins.all, builtins.any
 assert probe.accepts_all(original_all) and probe.accepts_any(original_any)
 assert not probe.accepts_all(original_any) and not probe.accepts_any(original_all)
+assert probe.accepts_min(min) and probe.accepts_max(max)
+assert not probe.accepts_min(max) and not probe.accepts_max(min)
+import math
+assert math.copysign(1.0, probe.absolute(-0.0)) == 1.0
 def replacement(values): return 17
 builtins.all = replacement
 assert not probe.accepts_all(builtins.all)
