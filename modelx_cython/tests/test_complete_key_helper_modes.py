@@ -36,7 +36,8 @@ m.Rates.defaulted('M',42);m.Rates.defaulted('X',9)
     (tmp_path/'build.log').write_text(build.stdout+build.stderr)
     assert build.returncode==0,build.stdout+build.stderr
     source=(tmp_path/'exported_cy/_mx_classes.py').read_text()
-    assert '.lookup_key2_float_f64(' in source
+    assert '.lookup(' in source
+    assert '.lookup_key2_float_f64(' not in source
     probe=textwrap.dedent('''
         import importlib,pickle,sys
         from lifelib import typed_inputs as h
