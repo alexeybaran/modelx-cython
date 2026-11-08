@@ -4,11 +4,14 @@ Only range loops and singleton bindings with proven numeric expressions qualify.
 The existing formula body remains authoritative; general generators stay intact.
 """
 import ast
+import textwrap
+from types import SimpleNamespace
 
 import libcst as cst
 
 from .cell_entries import exact_receiver
 from .helpers import module_name
+from .helper_members import helper_reference
 from .scopes import FormulaTransformer, has_scope_effects
 
 
@@ -19,7 +22,8 @@ def _call(node, name, argc):
 
 
 class NativeReductions(FormulaTransformer):
-    def __init__(self, cls_info, cells, providers, formula, reserve_fallback, builtin_bounds):
+    def __init__(self, cls_info, cells, providers, formula, reserve_fallback, builtin_bounds,
+                 builtin_reductions=()):
         super().__init__()
         self.cls_info = cls_info
         self.cells = cells
@@ -27,6 +31,7 @@ class NativeReductions(FormulaTransformer):
         self.formula = formula
         self.reserve_fallback = reserve_fallback
         self.builtin_bounds = builtin_bounds
+        self.builtin_reductions = frozenset(builtin_reductions)
         self.fallbacks = []
         self.exact_receiver_guards = set()
         self.count = 0
@@ -110,6 +115,9 @@ class NativeReductions(FormulaTransformer):
             return 'double' if type(node.value) is float else 'longlong'
         if isinstance(node, ast.Name):
             return locals_.get(node.id)
+        if (self.builtin_bounds and _call(node, 'abs', 1)
+                and self.kind(node.args[0], locals_) == 'double'):
+            return 'double'
         if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name) and node.value.id == 'self':
             ref = self.cls_info.refs.get(node.attr)
             if ref is not None:
@@ -132,8 +140,10 @@ class NativeReductions(FormulaTransformer):
         return None
 
     def cold_fallback(self, source, generator, capture, function, capture_type='_mx_cy.double',
-                      boxed_param=None):
+                      boxed_param=None, wrapper=None):
         original = f'{function}({source})'
+        if wrapper is not None:
+            original = f'{wrapper}({original})'
         if not self.cells.has_formula_def:
             return original
         formula, = ast.parse(self.module.code_for_node(self.formula)).body
@@ -171,7 +181,7 @@ class NativeReductions(FormulaTransformer):
         actuals = ', '.join(['self', function] + [name for name, _ in args])
         return f'{helper}({actuals})'
 
-    def bounded_any(self, before, after, func, ref, source, tree):
+    def bounded_any(self, before, after, func, ref, source, tree, wrapper=None):
         capture = self.integer_captures.get(id(before))
         if not (self.builtin_bounds and capture and capture not in self.cells.params
                 and capture not in {'self', 'min', 'max', 'range'}
@@ -210,7 +220,7 @@ class NativeReductions(FormulaTransformer):
         prefix = self.reserve_prefix()
         function = f'{prefix}_function'
         before_fallbacks = len(self.fallbacks)
-        fallback = self.cold_fallback(source, tree, capture, function, 'object')
+        fallback = self.cold_fallback(source, tree, capture, function, 'object', wrapper=wrapper)
         if len(self.fallbacks) == before_fallbacks:
             return after
         self.providers.add(provider)
@@ -219,7 +229,7 @@ class NativeReductions(FormulaTransformer):
         self.exact_receiver_guards.add(guard)
         predicate = f'self.{tree.elt.func.attr}({prefix}_index)'
         return cst.FlattenSentinel(cst.parse_module(f"""
-{function}: object = self.{func.attr.value}
+{function}: object = {self.module.code_for_node(func)}
 {prefix}_first: _mx_cy.longlong = {capture}
 {guard}: _mx_cy.bint = {alias}.{operation}_accepts({function}) and {prefix}_first <= {(1 << 63) - 1 - offset}
 if {guard}:
@@ -229,14 +239,17 @@ if {guard}:
     if {prefix}_high > {prefix}_limit:
         {prefix}_high = {prefix}_limit
     {prefix}_index: _mx_cy.longlong
-    for {prefix}_index in range({prefix}_low, {prefix}_high):
-        if {predicate}:
-            return True
+    try:
+        for {prefix}_index in range({prefix}_low, {prefix}_high):
+            if {predicate}:
+                return True
+    except StopIteration as {prefix}_error:
+        raise RuntimeError("generator raised StopIteration") from {prefix}_error
     return False
 return {fallback}
 """).body)
 
-    def single_range(self, after, func, ref, source, tree):
+    def single_range(self, after, func, ref, source, tree, wrapper=None):
         """Lower the proven typed predicate or bounded descending maximum."""
         if len(tree.generators) != 1 or not self.cells.formula_allows_exact_receiver:
             return after
@@ -309,15 +322,18 @@ return {fallback}
         if {item} > {best}:
             {best} = {item}
     return {best}"""
+            loop = ('    try:\n' + textwrap.indent(loop, '    ')
+                    + f'\n    except StopIteration as {prefix}_error:\n'
+                    + f'        raise RuntimeError("generator raised StopIteration") from {prefix}_error')
 
         before_fallbacks = len(self.fallbacks)
-        fallback = self.cold_fallback(source, tree, None, function, boxed_param=boxed_param)
+        fallback = self.cold_fallback(source, tree, None, function, boxed_param=boxed_param, wrapper=wrapper)
         if len(self.fallbacks) == before_fallbacks:
             return after
         self.providers.add(provider)
         self.count += 1
         return cst.FlattenSentinel(cst.parse_module(f"""
-{function}: object = self.{func.attr.value}
+{function}: object = {self.module.code_for_node(func)}
 {guard}: _mx_cy.bint = {alias}.{operation}_accepts({function}){extra_guard}
 if {exact_receiver(self.cls_info.name)} and {guard}:
     {counter}: _mx_cy.longlong
@@ -354,6 +370,193 @@ return {fallback}
             return None
         return start.id, lower.right.value, step.operand.value
 
+    def primitive_ranges(self, after, func, ref, source, tree, wrapper=None):
+        """Compose primitive reductions with Python generator boundaries.
+
+        Unit steps cannot overflow at the terminating increment. General steps
+        need a separate checked progression proof; they retain their generator.
+        The outer range arguments are eager, outside PEP 479's body boundary.
+        Inner bounds, filters and payloads remain lazy and inside that boundary.
+        """
+        boolean = ref.reduction in ('bool_any', 'bool_all')
+        integral_extremum = (ref.reduction in ('native_min', 'native_max')
+                             and self.cells.get_rettype_expr(c_style=True) == 'long long')
+        expected_result = 'bint' if boolean else 'long long' if integral_extremum else 'double'
+        if (not self.cells.formula_allows_exact_receiver
+                or self.cells.get_rettype_expr(c_style=True) != expected_result):
+            return after
+        locals_ = {}
+        for name in self.cells.params:
+            kind = self.cells.get_argtype_expr(name, c_style=True)
+            if kind in ('double', 'long long', 'bint'):
+                locals_[name] = {'long long': 'longlong'}.get(kind, kind)
+
+        def primitive_safe(node):
+            # A typed callee result does not prove its argument arithmetic.
+            # In particular, never introduce int64 overflow inside a closure
+            # which the ordinary checked-arithmetic pass deliberately skips.
+            if isinstance(node, ast.Constant):
+                return (type(node.value) in (bool, float)
+                        or type(node.value) is int and -(1 << 63) <= node.value < (1 << 63))
+            if isinstance(node, ast.Name):
+                return node.id in locals_
+            if isinstance(node, ast.Attribute):
+                return self.kind(node, locals_) in ('double', 'longlong', 'bint')
+            if isinstance(node, ast.Call):
+                if (self.kind(node, locals_) not in ('double', 'longlong', 'bint')
+                        or node.keywords or not all(primitive_safe(arg) for arg in node.args)):
+                    return False
+                if _call(node, 'abs', 1):
+                    return True
+                cell = self.cls_info.cells[node.func.attr]
+                if len(node.args) != len(cell.params):
+                    return False
+                for arg, param in zip(node.args, cell.params):
+                    actual = self.kind(arg, locals_)
+                    expected = cell.get_argtype_expr(param, c_style=True)
+                    if {'longlong': 'long long'}.get(actual, actual) != expected:
+                        if not (actual == 'bint' and expected == 'long long'):
+                            return False
+                return True
+            if isinstance(node, ast.UnaryOp):
+                return (primitive_safe(node.operand)
+                        and (isinstance(node.op, ast.Not)
+                             or self.kind(node.operand, locals_) == 'double'
+                             or isinstance(node.operand, ast.Constant)))
+            if isinstance(node, ast.BinOp):
+                return (self.kind(node, locals_) == 'double'
+                        and primitive_safe(node.left) and primitive_safe(node.right))
+            if isinstance(node, ast.BoolOp):
+                return all(primitive_safe(value) for value in node.values)
+            if isinstance(node, ast.Compare):
+                return all(primitive_safe(value) for value in [node.left, *node.comparators])
+            return False
+        targets = []
+        for part in tree.generators:
+            if (part.is_async or not isinstance(part.target, ast.Name)
+                    or part.target.id in {'self', 'range', 'abs', *locals_, *targets}):
+                return after
+            if isinstance(part.iter, ast.Tuple) and len(part.iter.elts) == 1:
+                args = part.iter.elts
+                target_kind = self.kind(args[0], locals_)
+                if not target_kind or not primitive_safe(args[0]):
+                    return after
+            elif (isinstance(part.iter, ast.Call) and isinstance(part.iter.func, ast.Name)
+                    and part.iter.func.id == 'range' and not part.iter.keywords
+                    and 1 <= len(part.iter.args) <= 3):
+                args = part.iter.args
+                if len(args) == 3 and ast.unparse(args[2]) not in ('1', '-1'):
+                    return after
+                if not all(self.kind(arg, locals_) in ('longlong', 'bint')
+                           and primitive_safe(arg) for arg in args):
+                    return after
+                target_kind = 'longlong'
+            else:
+                return after
+            # Literal typing must be justified independently of trace types.
+            if any(isinstance(n, ast.Constant) and type(n.value) is int
+                   and not -(1 << 63) <= n.value < (1 << 63)
+                   for arg in args for n in ast.walk(arg)):
+                return after
+            targets.append(part.target.id)
+            locals_[part.target.id] = target_kind
+            if not all(self.native_truth(test, locals_) and primitive_safe(test) for test in part.ifs):
+                return after
+        if (not primitive_safe(tree.elt)
+                or (not self.native_truth(tree.elt, locals_) if boolean
+                    else self.kind(tree.elt, locals_) != ('longlong' if integral_extremum else 'double'))):
+            return after
+        prefix = self.reserve_prefix()
+        function = f'{prefix}_function'
+        previous = len(self.fallbacks)
+        fallback = self.cold_fallback(source, tree, None, function, wrapper=wrapper)
+        if len(self.fallbacks) == previous:
+            return after
+        provider, operation = ref.helper
+        alias = module_name(provider)
+        names = {name: f'{prefix}_index_{i}' for i, name in enumerate(targets)}
+
+        class Rename(ast.NodeTransformer):
+            def visit_Name(self, node):
+                if node.id in names:
+                    return ast.copy_location(ast.Name(names[node.id], node.ctx), node)
+                return node
+
+            def visit_Call(self, node):
+                node = self.generic_visit(node)
+                if _call(node, 'abs', 1):
+                    node.func = ast.Attribute(ast.Name(alias, ast.Load()), 'f64_abs', ast.Load())
+                return node
+
+        rewrite = Rename()
+        for part in tree.generators:
+            rewrite.visit(part)
+        tree.elt = rewrite.visit(tree.elt)
+        outer = tree.generators[0].iter
+        arguments = []
+        # Keep the proved literal step visible to Cython. A variable step makes
+        # Cython retain Python range iteration even when its value is +/-1.
+        if isinstance(outer, ast.Call):
+            for i, arg in enumerate(outer.args[:2]):
+                name = f'{prefix}_bound_{i}'
+                arguments.append((name, ast.unparse(arg)))
+            outer.args = ([ast.Name(name, ast.Load()) for name, _ in arguments]
+                          + outer.args[2:])
+        function_value = self.module.code_for_node(func)
+        lines = [f'{function}: object = {function_value}',
+                 f'if {exact_receiver(self.cls_info.name)} and {alias}.{"f64_accepts" if ref.reduction == "f64_sum" else operation + "_accepts"}({function}):']
+        lines += [f'    {names[name]}: _mx_cy.{locals_[name]}' for name in names]
+        lines += [f'    {name}: _mx_cy.longlong = {value}' for name, value in arguments]
+        if isinstance(outer, ast.Tuple):
+            lines += [f'    {tree.generators[0].target.id} = {ast.unparse(outer.elts[0])}']
+        if ref.reduction == 'f64_sum':
+            lines += [f'    {prefix}_state: {alias}.F64Sum',
+                      f'    {alias}.f64_init(_mx_cy.address({prefix}_state))']
+        elif ref.reduction in ('f64_max', 'native_min', 'native_max'):
+            primitive = 'longlong' if integral_extremum else 'double'
+            zero = '0' if integral_extremum else '0.0'
+            lines += [f'    {prefix}_seen: _mx_cy.bint = False',
+                      f'    {prefix}_best: _mx_cy.{primitive} = {zero}',
+                      f'    {prefix}_item: _mx_cy.{primitive}']
+        lines += ['    try:']
+        indent = '        '
+        for i, part in enumerate(tree.generators):
+            if isinstance(part.iter, ast.Tuple):
+                if i:
+                    lines.append(indent + f'{part.target.id} = {ast.unparse(part.iter.elts[0])}')
+            else:
+                lines.append(indent + f'for {part.target.id} in {ast.unparse(part.iter)}:')
+                indent += '    '
+            for test in part.ifs:
+                lines.append(indent + f'if {ast.unparse(test)}:')
+                indent += '    '
+        predicate = ast.unparse(tree.elt)
+        if boolean:
+            any_ = ref.reduction == 'bool_any'
+            lines += [indent + (f'if {predicate}:' if any_ else f'if not ({predicate}):'),
+                      indent + f'    return {any_}']
+            finish = [f'    return {not any_}']
+        elif ref.reduction == 'f64_sum':
+            lines += [indent + f'{alias}.f64_add(_mx_cy.address({prefix}_state), {predicate})']
+            finish = [f'    return {alias}.f64_result(_mx_cy.address({prefix}_state))']
+        else:
+            comparison = '<' if ref.reduction == 'native_min' else '>'
+            lines += [indent + f'{prefix}_item = {predicate}',
+                      indent + f'if not {prefix}_seen or {prefix}_item {comparison} {prefix}_best:',
+                      indent + f'    {prefix}_best = {prefix}_item',
+                      indent + f'    {prefix}_seen = True']
+            finish = [f'    if not {prefix}_seen:',
+                      # Delegate the empty error to the registered callable;
+                      # CPython's exact max() message varies across releases.
+                      f'        return {function}(())',
+                      f'    return {prefix}_best']
+        lines += ['    except StopIteration as ' + prefix + '_error:',
+                  '        raise RuntimeError("generator raised StopIteration") from ' + prefix + '_error',
+                  *finish, f'return {fallback}']
+        self.providers.add(provider)
+        self.count += 1
+        return cst.FlattenSentinel(cst.parse_module('\n'.join(lines) + '\n').body)
+
     def leave_SimpleStatementLine(self, before, after):
         if not hasattr(ast, 'unparse'):
             return after
@@ -362,23 +565,47 @@ return {fallback}
         value = before.body[0].value
         if not isinstance(value, cst.Call) or len(value.args) != 1:
             return after
+        wrapper = None
+        # bool(all(...)) and bool(any(...)) are common report/check syntax.
+        # Only a scope-proved builtin bool can be removed; arbitrary wrappers
+        # retain their ordinary evaluation and callable effects.
+        if (isinstance(value.func, cst.Name) and value.func.value == 'bool'
+                and 'bool' in self.builtin_reductions
+                and not value.args[0].keyword and not value.args[0].star
+                and isinstance(value.args[0].value, cst.Call)):
+            inner = value.args[0].value
+            inner_ref = helper_reference(inner.func, self.cls_info.refs)
+            builtin_boolean = (isinstance(inner.func, cst.Name) and inner.func.value in ('all', 'any')
+                               and inner.func.value in self.builtin_reductions)
+            registered_boolean = getattr(inner_ref, 'reduction', None) in ('bool_all', 'bool_any')
+            if len(inner.args) == 1 and (builtin_boolean or registered_boolean):
+                value = inner
+                wrapper = 'bool'
         func = value.func
-        if not (isinstance(func, cst.Attribute) and isinstance(func.value, cst.Name)
-                and func.value.value == 'self'):
-            return after
-        ref = self.cls_info.refs.get(func.attr.value)
+        builtin = isinstance(func, cst.Name) and func.value in ('all', 'any', 'min', 'max')
+        if builtin and func.value in self.builtin_reductions:
+            reduction = ('bool_' if func.value in ('all', 'any') else 'native_') + func.value
+            ref = SimpleNamespace(reduction=reduction,
+                                  helper=('modelx_cython._native_iterables', func.value))
+        else:
+            ref = helper_reference(func, self.cls_info.refs)
         reduction = getattr(ref, 'reduction', None)
-        if (reduction not in ('f64_sum', 'bool_any', 'bool_all', 'f64_max')
+        if (reduction not in ('f64_sum', 'bool_any', 'bool_all', 'f64_max', 'native_min', 'native_max')
                 or not ref.helper or value.args[0].keyword or value.args[0].star):
             return after
         source = self.module.code_for_node(value.args[0].value)
         tree = ast.parse('(' + source + ')', mode='eval').body
         if not isinstance(tree, ast.GeneratorExp) or not self.builtin_bounds:
             return after
+        result = self.primitive_ranges(after, func, ref, source, tree, wrapper=wrapper)
+        if result is not after:
+            return result
+        if builtin:
+            return after
         if reduction == 'bool_any':
-            return self.bounded_any(before, after, func, ref, source, tree)
+            return self.bounded_any(before, after, func, ref, source, tree, wrapper=wrapper)
         if reduction in ('bool_all', 'f64_max'):
-            return self.single_range(after, func, ref, source, tree)
+            return self.single_range(after, func, ref, source, tree, wrapper=wrapper)
         capture = self.captures.get(id(before))
         if capture == 'range':
             return after
@@ -431,18 +658,35 @@ return {fallback}
         rename = Rename()
         for part in tree.generators:
             rename.visit(part)
-        rename.visit(tree.elt)
+        tree.elt = rename.visit(tree.elt)
         declarations = [f'{prefix}_function: object', f'{prefix}_state: {alias}.F64Sum']
         declarations += [f'{renamed[name]}: _mx_cy.{kind}' for name,kind in local_types.items()]
-        lines = declarations + [f'{prefix}_function = self.{func.attr.value}',
+        lines = declarations + [f'{prefix}_function = {self.module.code_for_node(func)}',
                                f'if {alias}.f64_accepts({prefix}_function):',
                                f'    {alias}.f64_init(_mx_cy.address({prefix}_state))']
         if capture is not None:
             lines.append(f'    {renamed[capture]} = {capture}')
-        indent = '    '
-        for part in tree.generators:
+        # The original outer iterator is created before entering the generator
+        # body. Eagerly bind its primitive arguments outside PEP 479's boundary.
+        outer = tree.generators[0]
+        if isinstance(outer.iter, ast.Tuple):
+            lines.append(f'    {outer.target.id} = {ast.unparse(outer.iter.elts[0])}')
+        else:
+            arguments = []
+            for i, argument in enumerate(outer.iter.args):
+                name = f'{prefix}_outer_bound_{i}'
+                lines.insert(i, f'{name}: _mx_cy.longlong')
+                lines.append(f'    {name} = {ast.unparse(argument)}')
+                arguments.append(ast.Name(name, ast.Load()))
+            outer.iter.args = arguments
+            if len(arguments) == 3:
+                lines += [f'    if {arguments[2].id} == 0:', '        range(0, 0, 0)']
+        lines.append('    try:')
+        indent = '        '
+        for i, part in enumerate(tree.generators):
             if isinstance(part.iter, ast.Tuple):
-                lines.append(indent + f'{part.target.id} = {ast.unparse(part.iter.elts[0])}')
+                if i:
+                    lines.append(indent + f'{part.target.id} = {ast.unparse(part.iter.elts[0])}')
             else:
                 lines.append(indent + f'for {part.target.id} in {ast.unparse(part.iter)}:')
                 indent += '    '
@@ -450,6 +694,8 @@ return {fallback}
                 lines.append(indent + f'if {ast.unparse(condition)}:')
                 indent += '    '
         lines += [indent + f'{alias}.f64_add(_mx_cy.address({prefix}_state), {ast.unparse(tree.elt)})',
+                  f'    except StopIteration as {prefix}_error:',
+                  f'        raise RuntimeError("generator raised StopIteration") from {prefix}_error',
                   f'    return {alias}.f64_result(_mx_cy.address({prefix}_state))',
                   'else:', f'    return {fallback}']
         self.providers.add(provider)

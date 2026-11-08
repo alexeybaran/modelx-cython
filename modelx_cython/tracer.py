@@ -355,6 +355,8 @@ class RuntimeValueInfo:
                       and not -(1 << 63) <= value < (1 << 63) else type(value))
         self.mx_class = mx_class
         self.helper = registered_helper(value) if type(value) is FunctionType else None
+        from .helper_members import module_helpers
+        self.helper_members = module_helpers(value)
         from .helpers import CAPABILITIES
         from .native_math import callable_operation
         self.math_operation = callable_operation(value)

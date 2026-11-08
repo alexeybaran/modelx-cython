@@ -576,6 +576,7 @@ class CombinedRefInfo:
         ``name`` are set; the class-level defaults remain in effect.
         """
         from .helpers import CAPABILITIES
+        self.helper_members = getattr(rt_info, 'helper_members', {})
         for field_name, _ in CAPABILITIES.values():
             setattr(self, field_name, getattr(rt_info, field_name, None))
         if rt_info:
