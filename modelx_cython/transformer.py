@@ -575,7 +575,7 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
         """
         from modelx_cython.helpers import HelperCalls
         from modelx_cython.checked_arithmetic import CheckedArithmetic
-        from modelx_cython.numeric_helpers import NumericReturns
+        from modelx_cython.numeric_helpers import NumericReturns, ContextualFloat
         cells.formula_allows_exact_receiver = allows_exact_receiver(node, cls_info.name)
         native_math = self.module.spec._data.get('native_math', self.module.spec.automatic_optimizations)
         if native_math:
@@ -584,7 +584,7 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
             node = node.with_changes(body=node.body.visit(math_calls))
             self._uses_native_math |= math_calls.used
         node = CheckedArithmetic(cls_info, cells).rewrite(node)
-        builtin_keys = {name for name in ("min", "max")
+        builtin_keys = {name for name in ("min", "max", "float")
                         if scope[name] and all(isinstance(binding, BuiltinAssignment)
                                                for binding in scope[name])}
         numeric_returns = NumericReturns(cls_info, cells, self.helper_providers, builtin_keys)
@@ -604,6 +604,11 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
         node = node.visit(reductions)
         cells.native_reductions = reductions.count
         cells.exact_reduction_guards = reductions.exact_receiver_guards
+        contextual_float = ContextualFloat(
+            cls_info, cells, self.helper_providers, builtin_keys,
+            contexts=numeric_returns.contexts)
+        node = node.visit(contextual_float)
+        cls_info.native_contexts.update(contextual_float.contexts)
         # Lowered loops have an explicit lexical receiver; authored generator
         # scopes retain object semantics. This ordering keeps safe constants
         # in admitted native loops without specializing a shadowed receiver.
@@ -614,8 +619,8 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
         helpers = HelperCalls(cls_info.refs, self.helper_providers)
         node = node.visit(helpers)
         self._cold_sums.extend(helper.visit(helpers) for helper in reductions.fallbacks)
-        cells.native_helpers = sorted(helpers.operations | numeric_returns.operations)
-        cells.native_numeric_helpers = sorted(numeric_returns.operations)
+        cells.native_helpers = sorted(helpers.operations | numeric_returns.operations | contextual_float.operations)
+        cells.native_numeric_helpers = sorted(numeric_returns.operations | contextual_float.operations)
         return rewrite_powers(
             node, self._resolver, self._cells_kinds, self._ref_kinds,
             cls_info.fqname, cells,
