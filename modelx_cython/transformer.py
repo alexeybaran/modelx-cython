@@ -580,7 +580,7 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
         native_math = self.module.spec._data.get('native_math', self.module.spec.automatic_optimizations)
         if native_math:
             from modelx_cython.native_math import NativeMath
-            math_calls = NativeMath()
+            math_calls = NativeMath(cls_info.refs)
             node = node.with_changes(body=node.body.visit(math_calls))
             self._uses_native_math |= math_calls.used
         node = CheckedArithmetic(cls_info, cells).rewrite(node)
@@ -592,10 +592,6 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
         if not hasattr(cls_info, 'native_contexts'):
             cls_info.native_contexts = {}
         cls_info.native_contexts.update(numeric_returns.contexts)
-        enum_comparisons = code_enums.Constants(cls_info, cells, self.module.code_enum_symbols)
-        node = node.visit(enum_comparisons)
-        cells.native_enum_comparisons = enum_comparisons.comparisons
-        cells.native_enum_constants = enum_comparisons.count
         from modelx_cython.reductions import NativeReductions
         builtin_bounds = all(isinstance(binding, BuiltinAssignment)
                              for name in ("range", "min", "max", "abs") for binding in scope[name])
@@ -604,6 +600,13 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
         node = node.visit(reductions)
         cells.native_reductions = reductions.count
         cells.exact_reduction_guards = reductions.exact_receiver_guards
+        # Lowered loops have an explicit lexical receiver; authored generator
+        # scopes retain object semantics. This ordering keeps safe constants
+        # in admitted native loops without specializing a shadowed receiver.
+        enum_comparisons = code_enums.Constants(cls_info, cells, self.module.code_enum_symbols)
+        node = node.visit(enum_comparisons)
+        cells.native_enum_comparisons = enum_comparisons.comparisons
+        cells.native_enum_constants = enum_comparisons.count
         helpers = HelperCalls(cls_info.refs, self.helper_providers)
         node = node.visit(helpers)
         self._cold_sums.extend(helper.visit(helpers) for helper in reductions.fallbacks)

@@ -167,6 +167,12 @@ class RuntimeCellsInfo:     # TODO: Create base class RuntimeBaseMemberInfo
             receiver = id(trace.arg_vals.get(MX_SELF))
             receiver_calls[receiver] = receiver_calls.get(receiver, 0) + 1
         self.max_evaluations_per_receiver = max(receiver_calls.values())
+        arrays = [trace.ret_val for trace in traces if isinstance(trace.ret_val, np.ndarray)]
+        formats = {array.dtype.str for array in arrays}
+        self.array_buffer_compatible = (len(formats) == 1 and all(
+            array.ndim > 0 and array.dtype.isnative
+            and array.dtype in (np.dtype('float64'), np.dtype('int64'))
+            for array in arrays)) if arrays else True
         self.has_negative_args = False
         self._init_arg_types(traces)
         self.ret_type = self._init_ret_type(traces)
@@ -185,6 +191,7 @@ class RuntimeCellsInfo:     # TODO: Create base class RuntimeBaseMemberInfo
     def _init_arg_types(self, traces):
         """Merge observed argument types into arg_types and max_args."""
         arg_type_val: Dict[str, dict[type, Any]] = {}
+        wide_arguments = set()
 
         for trace in traces:
 
@@ -196,6 +203,8 @@ class RuntimeCellsInfo:     # TODO: Create base class RuntimeBaseMemberInfo
                 if integral and val < 0:
                     self.has_negative_args = True
                 if integral:
+                    if not -(1 << 63) <= val < (1 << 63):
+                        wide_arguments.add(arg)
                     self.min_args[arg] = min(self.min_args.get(arg, 0), val)
                     value = int(val)
                     self.observed_min_args[arg] = min(self.observed_min_args.get(arg, value), value)
@@ -208,6 +217,10 @@ class RuntimeCellsInfo:     # TODO: Create base class RuntimeBaseMemberInfo
                         types[tp] = val
 
         for arg, type_val in arg_type_val.items():
+
+            if arg in wide_arguments:
+                self.arg_types[arg] = object
+                continue
 
             if len(type_val) == 1:
                 for tp, val in type_val.items():
@@ -252,7 +265,8 @@ class RuntimeCellsInfo:     # TODO: Create base class RuntimeBaseMemberInfo
                     val.dtype.type, is_array=True, ndim=val.ndim
                 )
             else:
-                tp = ReturnTypeInfo(type(val))
+                tp = ReturnTypeInfo(object if isinstance(val, numbers.Integral)
+                    and not -(1 << 63) <= val < (1 << 63) else type(val))
 
             if has_last:
                 if last_tp == tp:
@@ -337,12 +351,15 @@ class RuntimeValueInfo:
 
     def __init__(self, value, mx_class=''):
         """Record the type of ``value`` and an optional class name."""
-        self.type_ = type(value)
+        self.type_ = (object if isinstance(value, numbers.Integral)
+                      and not -(1 << 63) <= value < (1 << 63) else type(value))
         self.mx_class = mx_class
         self.helper = registered_helper(value) if type(value) is FunctionType else None
-        for capability in ('reduction', 'numeric', 'clamped', 'clamped_context', 'optional', 'grouped', 'bounded', 'bound_bounded', 'bound_grouped', 'bound_numeric'):
-            name = 'reduction' if capability == 'reduction' else capability + '_helper'
-            setattr(self, name, helper_capability(value, capability, grouped=capability in ('grouped', 'bound_grouped', 'bound_numeric'))
+        from .helpers import CAPABILITIES
+        from .native_math import callable_operation
+        self.math_operation = callable_operation(value)
+        for capability, (name, _) in CAPABILITIES.items():
+            setattr(self, name, helper_capability(value, capability)
                     if self.helper is not None else None)
         self.enum_definitions = (tuple(value) if isinstance(value, tuple)
             and vars(type(value)).get('__modelx_cython_enum_definitions__') is True else ())
@@ -350,7 +367,7 @@ class RuntimeValueInfo:
                           and type(value) is type(IntEnum)
                           and value.__eq__ is int.__eq__ and value.__ne__ is int.__ne__)
         self.enum = ((value.__module__, value.__qualname__,
-                      {name: int(member) for name, member in value.__members__.items()})
+                      {name: int.__int__(member) for name, member in value.__members__.items()})
                      if isinstance(value, type) and issubclass(value, IntEnum)
                      and '<locals>' not in value.__qualname__ else None)
 

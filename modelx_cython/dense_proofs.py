@@ -5,6 +5,7 @@ from collections import Counter, defaultdict
 
 from .cell_entries import dense_condition, exact_receiver
 from .consts import CY_MOD, FORMULA_PREF, MX_SELF
+from .scopes import binding_names as _binding_names
 
 
 def _checked_guard(entry, layout):
@@ -34,18 +35,6 @@ def _argument_range(node, ranges, types, target_type):
         if -(1 << 63) < delta < (1 << 63) and -(1 << 63) <= lower + delta < upper + delta <= (1 << 63):
             return lower + delta, upper + delta
     return None
-
-
-def _binding_names(nodes):
-    names = set()
-    for node in nodes:
-        if isinstance(node, ast.Name) and not isinstance(node.ctx, ast.Load):
-            names.add(node.id)
-        elif isinstance(node, ast.alias):
-            names.add(node.asname or node.name.split(".")[0])
-        elif isinstance(node, (ast.ExceptHandler, ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-            names.add(node.name)
-    return names
 
 
 def _attribute_counts(tree):

@@ -7,6 +7,7 @@ import libcst as cst
 
 from .cell_entries import exact_receiver
 from .helpers import module_name
+from .scopes import has_scope_effects
 
 
 class NumericReturns(cst.CSTTransformer):
@@ -16,8 +17,12 @@ class NumericReturns(cst.CSTTransformer):
         self.operations = set()
         self.builtin_keys = builtin_keys
         self.function_depth = 0
+        self.scope_safe = True
 
     def visit_FunctionDef(self, node):
+        if not self.function_depth:
+            syntax = ast.parse(cst.Module([]).code_for_node(node)).body[0]
+            self.scope_safe = not has_scope_effects(syntax.body)
         self.function_depth += 1
 
     @staticmethod
@@ -208,7 +213,7 @@ class NumericReturns(cst.CSTTransformer):
     def leave_FunctionDef(self, before, after):
         """Fuse a terminal membership check with its guarded numeric consumer."""
         self.function_depth -= 1
-        if (self.function_depth or 'min' not in self.builtin_keys or self.cell.is_locked
+        if (self.function_depth or not self.scope_safe or 'min' not in self.builtin_keys or self.cell.is_locked
                 or self.cell.cls in self.cls.visitor.dynamic_ref_classes
                 or self.cell.get_rettype_expr(c_style=True) != 'double'
                 or not isinstance(after.body, cst.IndentedBlock) or len(after.body.body) < 4):
@@ -400,7 +405,7 @@ class NumericReturns(cst.CSTTransformer):
                          lpar=(cst.LeftParen(),), rpar=(cst.RightParen(),))
 
     def leave_Return(self, before, after):
-        if (self.function_depth != 1 or self.cell.get_rettype_expr(c_style=True) != 'double'
+        if (self.function_depth != 1 or not self.scope_safe or self.cell.get_rettype_expr(c_style=True) != 'double'
                 or (not self.cell.has_formula_def and self.cell.called_with_kwargs)):
             return after
         call = after.value

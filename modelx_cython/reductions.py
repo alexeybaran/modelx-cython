@@ -9,6 +9,7 @@ import libcst as cst
 
 from .cell_entries import exact_receiver
 from .helpers import module_name
+from .scopes import FormulaTransformer, has_scope_effects
 
 
 def _call(node, name, argc):
@@ -17,8 +18,9 @@ def _call(node, name, argc):
             and not any(isinstance(arg, ast.Starred) for arg in node.args))
 
 
-class NativeReductions(cst.CSTTransformer):
+class NativeReductions(FormulaTransformer):
     def __init__(self, cls_info, cells, providers, formula, reserve_fallback, builtin_bounds):
+        super().__init__()
         self.cls_info = cls_info
         self.cells = cells
         self.providers = providers
@@ -31,6 +33,10 @@ class NativeReductions(cst.CSTTransformer):
         self.module = cst.Module([])
         self.captures = {}
         self.integer_captures = {}
+        syntax = ast.parse(self.module.code_for_node(formula))
+        self.scope_safe = not has_scope_effects(syntax.body[0].body)
+        self.names = {node.id for node in ast.walk(syntax) if isinstance(node, ast.Name)}
+        self.names.update(node.arg for node in ast.walk(syntax) if isinstance(node, ast.arg))
         if isinstance(formula.body, cst.IndentedBlock):
             lines = formula.body.body
             for assignment, consumer in zip(lines, lines[1:]):
@@ -45,7 +51,7 @@ class NativeReductions(cst.CSTTransformer):
                 if len(expression.targets) != 1:
                     continue
                 target = expression.targets[0].target
-                if isinstance(target, cst.Name) and not target.value.startswith('_mx_'):
+                if isinstance(target, cst.Name):
                     rhs = ast.parse('(' + self.module.code_for_node(expression.value) + ')', mode='eval')
                     if self.double_expression(rhs.body):
                         self.captures[id(consumer)] = target.value
@@ -66,10 +72,40 @@ class NativeReductions(cst.CSTTransformer):
             return self.double_expression(node.left) and self.double_expression(node.right)
         return False
 
+    def reserve_prefix(self):
+        prefix = f'_mx_reduce_{self.count}'
+        while any(name == prefix or name.startswith(prefix + '_') for name in self.names):
+            prefix += '_'
+        self.names.add(prefix)
+        return prefix
+
     def visit_FunctionDef(self, node):
-        return '_mx_reduce_' not in self.module.code_for_node(node)
+        return self.scope_safe
+
+    def native_truth(self, node, locals_):
+        """Prove a filter's primitive truth/comparison semantics, not its size."""
+        if self.kind(node, locals_) in ('double', 'longlong', 'bint'):
+            return True
+        if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.Not):
+            return self.native_truth(node.operand, locals_)
+        if isinstance(node, ast.BoolOp):
+            return all(self.native_truth(value, locals_) for value in node.values)
+        if isinstance(node, ast.Compare) and all(isinstance(op, (
+                ast.Eq, ast.NotEq, ast.Lt, ast.LtE, ast.Gt, ast.GtE)) for op in node.ops):
+            operands = [node.left, *node.comparators]
+            kinds = [self.kind(value, locals_) for value in operands]
+            if not all(kind in ('double', 'longlong', 'bint') for kind in kinds):
+                return False
+            # Unknown int64 values must not be rounded to double for Python
+            # mixed int/float comparisons. Booleans and small literals are exact.
+            return 'double' not in kinds or all(kind != 'longlong' or (
+                isinstance(value, ast.Constant) and abs(value.value) <= (1 << 53))
+                for value, kind in zip(operands, kinds))
+        return False
 
     def kind(self, node, locals_):
+        if isinstance(node, ast.Constant) and type(node.value) is bool:
+            return 'bint'
         if isinstance(node, ast.Constant) and type(node.value) in (int, float):
             return 'double' if type(node.value) is float else 'longlong'
         if isinstance(node, ast.Name):
@@ -103,10 +139,7 @@ class NativeReductions(cst.CSTTransformer):
         formula, = ast.parse(self.module.code_for_node(self.formula)).body
         nodes = [node for statement in formula.body for node in ast.walk(statement)]
         # A moved generator cannot share enclosing bindings with another closure.
-        if any(isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef,
-                                 ast.Nonlocal, ast.Global, ast.NamedExpr, ast.Import, ast.ImportFrom,
-                                 ast.Delete, ast.ExceptHandler, getattr(ast, 'Match', ast.Global)))
-               for node in nodes):
+        if has_scope_effects(formula.body):
             return original
         names = {node.id for node in ast.walk(generator) if isinstance(node, ast.Name)
                  and isinstance(node.ctx, ast.Load)}
@@ -174,7 +207,7 @@ class NativeReductions(cst.CSTTransformer):
         offset = upper.right.value
         provider, operation = ref.helper
         alias = module_name(provider)
-        prefix = f'_mx_reduce_{self.count}'
+        prefix = self.reserve_prefix()
         function = f'{prefix}_function'
         before_fallbacks = len(self.fallbacks)
         fallback = self.cold_fallback(source, tree, capture, function, 'object')
@@ -211,12 +244,12 @@ return {fallback}
         if not isinstance(part.target, ast.Name) or part.ifs or part.is_async:
             return after
         index = part.target.id
-        if index.startswith('_mx_') or index in {'self', 'range', 'abs', 'max', *self.cells.params}:
+        if index in {'self', 'range', 'abs', 'max', *self.cells.params}:
             return after
 
         provider, operation = ref.helper
         alias = module_name(provider)
-        prefix = f'_mx_reduce_{self.count}'
+        prefix = self.reserve_prefix()
         counter = f'{prefix}_index'
         guard = f'{prefix}_native'
         function = f'{prefix}_function'
@@ -354,11 +387,11 @@ return {fallback}
             capture = None
         local_types = {capture: 'double'} if capture is not None else {}
         for part in tree.generators:
-            if part.is_async or part.ifs or not isinstance(part.target, ast.Name):
+            if part.is_async or not isinstance(part.target, ast.Name):
                 return after
             name = part.target.id
             # Reserved generated names must never capture authored names.
-            if name.startswith('_mx_') or name == capture:
+            if name == capture:
                 return after
             iterator = part.iter
             if name not in local_types and any(isinstance(n, ast.Name) and n.id == name
@@ -377,12 +410,17 @@ return {fallback}
                 local_types[name] = kind
             else:
                 return after
+            if not all(self.native_truth(condition, local_types) for condition in part.ifs):
+                return after
         if self.kind(tree.elt, local_types) != 'double':
             return after
         provider, operation = ref.helper
         alias = module_name(provider)
-        prefix = f'_mx_reduce_{self.count}'
+        prefix = self.reserve_prefix()
+        previous_fallbacks = len(self.fallbacks)
         fallback = self.cold_fallback(source, tree, capture, f'{prefix}_function')
+        if len(self.fallbacks) == previous_fallbacks:
+            return after
         # Keep generator locals isolated from the enclosing authored scope.
         renamed = {name: f'{prefix}_{name}' for name in local_types}
         class Rename(ast.NodeTransformer):
@@ -407,6 +445,9 @@ return {fallback}
                 lines.append(indent + f'{part.target.id} = {ast.unparse(part.iter.elts[0])}')
             else:
                 lines.append(indent + f'for {part.target.id} in {ast.unparse(part.iter)}:')
+                indent += '    '
+            for condition in part.ifs:
+                lines.append(indent + f'if {ast.unparse(condition)}:')
                 indent += '    '
         lines += [indent + f'{alias}.f64_add(_mx_cy.address({prefix}_state), {ast.unparse(tree.elt)})',
                   f'    return {alias}.f64_result(_mx_cy.address({prefix}_state))',

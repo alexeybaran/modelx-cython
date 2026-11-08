@@ -60,6 +60,7 @@ import libcst as cst
 from modelx_cython.consts import CY_MOD, MX_POW, MX_SYS_MOD
 from modelx_cython.typedefs import CY_FLOAT_T, CY_INT_T
 from modelx_cython.usage import RESOLVED, CellsResolver, _extract_self_chain
+from modelx_cython.scopes import OPAQUE_SCOPES as _OPAQUE_SCOPES
 
 _logger = logging.getLogger(__name__)
 
@@ -81,10 +82,6 @@ _NUMERIC_OPS = (
 # inside one is ever rewritten.  A nested ``def`` or ``class`` belongs
 # here as much as a comprehension does: modelx exports such a formula
 # verbatim, and its body reaches Cython inside the ``@cfunc`` method.
-_OPAQUE_SCOPES = (
-    cst.ListComp, cst.SetComp, cst.DictComp, cst.GeneratorExp, cst.Lambda,
-    cst.FunctionDef, cst.ClassDef,
-)
 
 
 def kind_of_type_expr(type_expr: str) -> str:

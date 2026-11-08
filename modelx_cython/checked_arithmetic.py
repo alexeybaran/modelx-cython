@@ -1,9 +1,10 @@
-"""Keep small, proven integer expressions in the existing Cython formula."""
+"""Keep range-proven integer expressions in the existing Cython formula."""
 
 import ast
 import math
 
 import libcst as cst
+from .scopes import has_scope_effects
 
 _BOUND = 1 << 25
 
@@ -57,12 +58,40 @@ class CheckedArithmetic:
             + f'return {combine(*boxed)}\n'
         )
 
+    def integer_interval(self, expr):
+        """Bound every intermediate under the emitted native-input guards.
+
+        Integer intermediates through 2**53 are exact in binary64 and fit
+        signed 64 bits. This proof replaces expression operation-count limits.
+        """
+        if isinstance(expr, ast.Constant) and type(expr.value) is int:
+            return (expr.value, expr.value) if -_BOUND <= expr.value <= _BOUND else None
+        if self.native_call(expr) or isinstance(expr, ast.Name) and expr.id in self.parameters:
+            return -_BOUND, _BOUND
+        if not isinstance(expr, ast.BinOp):
+            return None
+        left, right = self.integer_interval(expr.left), self.integer_interval(expr.right)
+        if left is None or right is None:
+            return None
+        if isinstance(expr.op, ast.Add):
+            interval = left[0] + right[0], left[1] + right[1]
+        elif isinstance(expr.op, ast.Sub):
+            interval = left[0] - right[1], left[1] - right[0]
+        elif isinstance(expr.op, ast.Mult):
+            products = [a * b for a in left for b in right]
+            interval = min(products), max(products)
+        else:
+            return None
+        return interval if -(1 << 53) <= interval[0] <= interval[1] <= (1 << 53) else None
+
     def double_tail(self, body, tree):
         if len(tree.body) < 3 or not isinstance(tree.body[-1], ast.Return):
             return body
         left, right, result = tree.body[-3:]
         if not all(isinstance(node, ast.Assign) and len(node.targets) == 1
                    and isinstance(node.targets[0], ast.Name) for node in (left, right)):
+            return body
+        if left.targets[0].id == right.targets[0].id:
             return body
         expr = result.value
         if not (isinstance(expr, ast.BinOp) and isinstance(expr.op, ast.Add)
@@ -74,12 +103,8 @@ class CheckedArithmetic:
                 and expr.left.right.value > 0):
             return body
         expressions = (left.value, right.value)
-        for value in expressions:
-            # At most one product and four operations keeps the native result
-            # exactly representable in both signed 64 bits and a C double.
-            nodes = [node for node in ast.walk(value) if isinstance(node, ast.BinOp)]
-            if not nodes or len(nodes) > 4 or sum(isinstance(node.op, ast.Mult) for node in nodes) > 1:
-                return body
+        if any(self.integer_interval(value) is None for value in expressions):
+            return body
         captured = [self.capture(expr) for expr in expressions]
         if None in captured or not self.inputs:
             return body
@@ -98,6 +123,12 @@ class CheckedArithmetic:
                                  for n in ast.walk(tree)) == 1}
 
         class Product(cst.CSTTransformer):
+            def visit_FunctionDef(inner, node):
+                return False
+
+            visit_ClassDef = visit_Lambda = visit_GeneratorExp = visit_FunctionDef
+            visit_ListComp = visit_SetComp = visit_DictComp = visit_FunctionDef
+
             def leave_SimpleStatementLine(inner, before, after):
                 if len(before.body) != 1 or not isinstance(before.body[0], cst.Return):
                     return after
@@ -174,6 +205,8 @@ class CheckedArithmetic:
         return cst.Module(body).visit(Divisibility()).body
 
     def rewrite(self, function):
+        if not hasattr(ast, 'unparse'):
+            return function
         kind = self.cell.get_rettype_expr(c_style=True)
         from modelx_cython import automatic
         divisible = getattr(self.cell, '_spec', {}).get('native_divisibility', automatic.enabled(self.cell))
@@ -185,6 +218,8 @@ class CheckedArithmetic:
                 or not isinstance(function.body, cst.IndentedBlock)):
             return function
         tree, = ast.parse(self.code(function)).body
+        if has_scope_effects(tree.body):
+            return function
         assigned = {node.id for node in ast.walk(tree)
                     if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store)}
         self.parameters = {name for name in self.cell.params if name not in assigned

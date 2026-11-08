@@ -30,6 +30,14 @@ def test_numeric_keys(tmp_path):
         import math, sys
         from concurrent.futures import ThreadPoolExecutor
         from exported_cy import mx_model as m
+        cache_type = next(module.NumericCache for name, module in tuple(sys.modules.items())
+                          if name.startswith('exported_cy.') and hasattr(module, 'NumericCache'))
+        try:
+            cache_type(1 << 62)
+        except (MemoryError, OverflowError):
+            pass
+        else:
+            raise AssertionError('oversized native allocation was not rejected')
         for s in (m.Plain, m.Locked):
             assert math.copysign(1.0, s.value(-0.0, 1)) == -1.0
             assert math.copysign(1.0, s.value(0.0, True)) == -1.0

@@ -3,6 +3,9 @@ import ast
 
 import libcst as cst
 
+from .scopes import FormulaTransformer, binding_names, lexical_nodes
+from .consts import MX_SYS_MOD
+
 
 def storage(name):
     return '_mx_definition_' + name
@@ -36,8 +39,9 @@ def declarations(module):
         for symbol,value in module.code_enum_symbols.values())
 
 
-class Constants(cst.CSTTransformer):
+class Constants(FormulaTransformer):
     def __init__(self, cls, cell, symbols):
+        super().__init__()
         self.cls, self.cell, self.symbols = cls, cell, symbols
         self.locals = set()
         self.count = 0
@@ -51,7 +55,10 @@ class Constants(cst.CSTTransformer):
             return False
         assignments = {}
         invalid = set()
-        for part in ast.walk(tree):
+        nodes = list(lexical_nodes(tree.body[0].body))
+        if 'self' in binding_names(nodes):
+            return False
+        for part in nodes:
             if isinstance(part, ast.Assign):
                 for target in part.targets:
                     if isinstance(target, ast.Name):
@@ -60,6 +67,8 @@ class Constants(cst.CSTTransformer):
                 invalid.update(n.id for n in ast.walk(part.target) if isinstance(n, ast.Name))
             elif isinstance(part, (ast.For, ast.comprehension)):
                 invalid.update(n.id for n in ast.walk(part.target) if isinstance(n, ast.Name))
+            elif not isinstance(part, (ast.Name, ast.Assign)):
+                invalid.update(binding_names((part,)))
         for name, values in assignments.items():
             if name not in invalid and all(isinstance(v, ast.Call) and isinstance(v.func, ast.Attribute)
                     and isinstance(v.func.value, ast.Name) and v.func.value.id == 'self'
@@ -76,7 +85,7 @@ class Constants(cst.CSTTransformer):
             entry = self.symbols.get((self.cls.name, node.value.attr.value, node.attr.value))
             if entry:
                 self.count += 1
-                return cst.Name(entry[0])
+                return cst.Name(entry[0],lpar=node.lpar,rpar=node.rpar)
         return node
 
     def integer(self, node):
@@ -137,6 +146,14 @@ def bind_properties(cls, body):
     names = getattr(cls, 'readonly_refs', ())
     result = []
     for statement in body:
+        if names and isinstance(statement,cst.FunctionDef) and statement.name.value=='__init__':
+            statements=list(statement.body.body)
+            docstring=(statements and isinstance(statements[0],cst.SimpleStatementLine)
+                and len(statements[0].body)==1 and isinstance(statements[0].body[0],cst.Expr)
+                and isinstance(statements[0].body[0].value,(cst.SimpleString,cst.ConcatenatedString)))
+            check=cst.parse_statement(f'{MX_SYS_MOD}._mx_check_enum_schema(self, {cls.name}, {names!r})\n')
+            statements.insert(int(bool(docstring)),check)
+            statement=statement.with_changes(body=statement.body.with_changes(body=tuple(statements)))
         if isinstance(statement, cst.FunctionDef) and statement.name.value in ('_mx_assign_refs','_mx_copy_refs'):
             statement = statement.visit(Bindings(names))
         result.append(statement)

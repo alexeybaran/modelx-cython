@@ -182,7 +182,10 @@ domain work, so the automatic mode admits the existing proven-index form.
 
 ## Registered helper providers
 
-An exported callable Reference may declare `__modelx_cython_helper__` as a
+The shared safety and provider ABI rules are documented in
+[Native specialization contracts](native_contracts.md).
+
+An exported Python function Reference may declare `__modelx_cython_helper__` as a
 `(provider, operation)` tuple. The provider names a Python package resource
 with matching Cython `.pxd` and `.pyx` files. The operation receives the
 current callable first. It must delegate to that callable when its

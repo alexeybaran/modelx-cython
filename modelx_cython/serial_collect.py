@@ -202,9 +202,8 @@ def add_methods(cls, node, shape):
     return node.with_changes(body=node.body.with_changes(body=(*methods, helper)))
 
 
-def enable_runtime(path):
-    """Wire the opt-in evaluator into the copied export's dispatch and cache."""
-    source = path.read_text(encoding='utf-8')
+def _runtime_markers():
+    """The supported export adapter is checked before emitting its consumers."""
     signature = 'def collect_from_space(base, domain, loop_name, names, args, cache=None, evaluate=None):'
     dispatch = '    if evaluate is None:\n'
     parallel_dispatch = '            result = _mx_collect_parallel(base, coords, loop_name, names, args)'
@@ -217,8 +216,18 @@ def enable_runtime(path):
     _mx_collect_context.active = True
     try:
         return _mx_collect_evaluate(base, coords, loop_name, names, args)'''
-    if any(source.count(marker) != 1
-           for marker in (signature, dispatch, parallel_dispatch, parallel, submit, merge, chunk)):
+    return signature, dispatch, parallel_dispatch, parallel, submit, merge, chunk
+
+
+def supports_runtime(source):
+    return all(source.count(marker) == 1 for marker in _runtime_markers())
+
+
+def enable_runtime(path):
+    """Wire the eligible evaluator into the copied export's dispatch and cache."""
+    source = path.read_text(encoding='utf-8')
+    signature, dispatch, parallel_dispatch, parallel, submit, merge, chunk = _runtime_markers()
+    if not supports_runtime(source):
         raise ValueError('serial_collect requires the supported collect runtime')
     source = source.replace(signature, '''
 def _mx_collect_native_coords(coords):
@@ -250,10 +259,16 @@ def collect_from_space(base, domain, loop_name, names, args, cache=None, evaluat
                             'def _mx_collect_parallel(base, coords, loop_name, names, args, private=None):')
     source = source.replace(submit, submit[:-1] + ', private)')
     source = source.replace(merge, '''        # Only private scalar chunks may merge in completion order.
+        ordered_futures = futures
         if private is not None:
             from concurrent.futures import as_completed
             futures = as_completed(futures)
-        for future in futures:''')
+        for future in futures:
+            if private is not None and future.exception() is not None:
+                # Keep successful scalar merging in completion order, but
+                # propagate the first failure in original domain order.
+                for ordered_future in ordered_futures:
+                    ordered_future.result()''')
     source = source.replace(chunk, '''def _mx_collect_chunk(base, coords, loop_name, names, args, private=None):
     _mx_collect_context.active = True
     try:

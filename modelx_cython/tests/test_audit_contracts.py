@@ -1,0 +1,173 @@
+"""Regression cases found by the architecture/genericity audit."""
+import ast
+from types import SimpleNamespace
+
+import libcst as cst
+
+from modelx_cython.enums import Constants
+from modelx_cython.helpers import HelperCalls
+from modelx_cython.reductions import NativeReductions
+from modelx_cython.native_math import NativeMath
+from modelx_cython.helpers import helper_capability
+import pytest
+
+
+def native_cell(result='double', params=()):
+    return SimpleNamespace(params=params, has_formula_def=False,
+        has_typeinfo=lambda: True, called_with_kwargs=False, body_has_closure=False,
+        formula_allows_exact_receiver=True,
+        get_rettype_expr=lambda **kw: result,
+        get_argtype_expr=lambda *args, **kw: 'long long')
+
+
+def test_enum_constants_do_not_capture_a_nested_receiver():
+    source='''def formula(self):
+    def nested(self):
+        return self.Status.OK
+    return nested(self.other)
+'''
+    cls=SimpleNamespace(name='_c_Values', cells={})
+    pass_=Constants(cls,native_cell('long long'),
+                    {('_c_Values','Status','OK'):('_mx_enum_const_0',200)})
+    result=cst.parse_module(source).visit(pass_).code
+    assert 'return self.Status.OK' in result
+    assert pass_.count == 0
+
+
+def test_helper_binding_does_not_capture_a_nested_receiver():
+    source='''def formula(self):
+    def nested(self):
+        return self.lookup()
+    return nested(self.other)
+'''
+    ref=SimpleNamespace(helper=('sample.provider','lookup'))
+    result=cst.parse_module(source).visit(HelperCalls({'lookup':ref},set())).code
+    assert result == source
+
+
+def test_reduction_does_not_type_a_nested_receiver_from_outer_cells():
+    source='''def formula(self):
+    def nested(self):
+        return self.sum_f64(self.term(k) for k in range(self.count()))
+    return nested(self.other)
+'''
+    formula=cst.parse_module(source).body[0]
+    cls=SimpleNamespace(name='_c_Values', refs={'sum_f64':SimpleNamespace(
+        reduction='f64_sum',helper=('sample.provider','sum_f64'))},
+        cells={'term':native_cell(params=('k',)),'count':native_cell('long long')})
+    pass_=NativeReductions(cls,native_cell(),set(),formula,lambda:'_cold',True)
+    result=cst.Module([formula.visit(pass_)]).code
+    assert result == source
+    assert pass_.count == 0
+
+
+def test_enum_constants_do_not_capture_a_comprehension_receiver():
+    source='''def formula(self, value):
+    return tuple(value == self.Status.OK for self in self.others)
+'''
+    cls=SimpleNamespace(name='_c_Values',cells={})
+    pass_=Constants(cls,native_cell('object',('value',)),
+                    {('_c_Values','Status','OK'):('_mx_enum_const_0',200)})
+    result=cst.parse_module(source).visit(pass_).code
+    assert 'self.Status.OK' in result
+    assert pass_.count == 0
+
+
+def test_declared_code_enum_uses_its_fixed_definition():
+    source='def formula(self, value):\n    return value == self.Status.OK\n'
+    pass_=Constants(SimpleNamespace(name='_c_Values',cells={}),native_cell('bint',('value',)),
+                    {('_c_Values','Status','OK'):('_mx_enum_const_0',200)})
+    namespace={'_mx_enum_const_0':200}
+    transformed=cst.parse_module(source).visit(pass_).code
+    expression=ast.parse(transformed).body[0].body[0].value
+    assert isinstance(expression,ast.Compare)
+    assert isinstance(expression.comparators[0],ast.Name)
+    exec(transformed,namespace)
+    assert namespace['formula'](object(),200) is True
+    assert namespace['formula'](object(),201) is False
+
+
+def test_enum_constants_decline_receiver_rebinding():
+    source='def formula(self, value, other):\n    self = other\n    return value == self.Status.OK\n'
+    pass_=Constants(SimpleNamespace(name='_c_Values',cells={}),
+        native_cell('bint',('value','other')),
+        {('_c_Values','Status','OK'):('_mx_enum_const_0',200)})
+    assert cst.parse_module(source).visit(pass_).code==source
+    assert pass_.count==0
+
+
+@pytest.mark.parametrize('source',[
+    'return self.numbers.floor(x)',
+    'return self.numbers.ceil(x)',
+    'return self.downward(x)',
+])
+def test_native_math_uses_callable_contract_not_reference_name(source):
+    node=cst.parse_module('def formula(self, x):\n    '+source+'\n').body[0]
+    pass_=NativeMath({'downward':SimpleNamespace(math_operation='floor')})
+    result=cst.Module([node.with_changes(body=node.body.visit(pass_))]).code
+    assert '_mx_integral_math_call' in result
+    assert pass_.used
+
+
+@pytest.mark.parametrize('name,value',[
+    ('bound_numeric',('ready','value')),
+    ('bound_grouped',('probe','value')),
+    ('reduction','unsupported_reduction'),
+])
+def test_helper_capability_shape_is_validated_at_registration(name,value):
+    def function():pass
+    setattr(function,'__modelx_cython_'+name+'__',value)
+    with pytest.raises(ValueError,match='invalid helper capability'):
+        helper_capability(function,name)
+
+
+def test_collection_runtime_adapter_is_checked_before_rewriting():
+    from modelx_cython.serial_collect import _runtime_markers, supports_runtime
+    source='\n'.join(_runtime_markers())
+    assert supports_runtime(source)
+    assert not supports_runtime(source+_runtime_markers()[0])
+    assert not supports_runtime(source.replace('def collect_from_space(base,',
+                                             'def collect_from_space(\n    base,'))
+
+
+def test_cache_hit_optimization_keeps_python38_compatibility(monkeypatch):
+    from modelx_cython.cache_hits import expose_cache_hits
+    monkeypatch.delattr(ast,'unparse')
+    # The optimized path is optional. No generated source needs to be opened.
+    expose_cache_hits({'unused':object()},{'unused':{'entry':object()}},'auto')
+
+
+def test_enum_constants_follow_underlying_integer_not_overridden_conversion():
+    from enum import IntEnum
+    from modelx_cython.tracer import RuntimeValueInfo
+    class Codes(IntEnum):
+        VALUE=1
+        def __int__(self):return 999
+    info=RuntimeValueInfo(Codes)
+    # Local enum declarations deliberately do not qualify for export metadata.
+    Codes.__qualname__='Codes'
+    info=RuntimeValueInfo(Codes)
+    assert Codes.VALUE == 1 and int(Codes.VALUE)==999
+    assert info.enum[2]['VALUE']==1
+
+
+def test_arithmetic_rewrite_preserves_global_assignment_effects():
+    import cython
+    from modelx_cython.checked_arithmetic import CheckedArithmetic
+    cell=native_cell('double',('t',))
+    cell.is_locked=False;cell.cls='_c_Values';cell._spec={}
+    cls=SimpleNamespace(cells={},visitor=SimpleNamespace(dynamic_ref_classes=()))
+    source='''def formula(self, t):
+    global a, b
+    a = t * t
+    b = t + t
+    return a / 12.0 + b
+'''
+    function=cst.parse_module(source).body[0]
+    result=CheckedArithmetic(cls,cell).rewrite(function)
+    namespace={'a':0,'b':0,'_mx_cy':cython}
+    exec(cst.Module([result]).code,namespace)
+    assert namespace['formula'](None,2)==4/12.0+4
+    assert (namespace['a'],namespace['b'])==(4,4)
+
+

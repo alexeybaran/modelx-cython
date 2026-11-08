@@ -305,6 +305,10 @@ class CombinedCellsInfo(LexicalCellsInfo):
         """
         # A plain property, not cached: `usage` is assigned after
         # construction, between the build and transform phases.
+        if self.has_typeinfo() and not getattr(self._rt, 'array_buffer_compatible', True):
+            if self._force_memoryview:
+                raise ValueError(f'{self.fqname}: memoryview needs one native-endian float64/int64 buffer format')
+            return False
         if self._force_memoryview:
             return True
         if self.usage is None:
@@ -424,7 +428,8 @@ class CombinedCellsInfo(LexicalCellsInfo):
         count = 1
         for p, size in zip(self.params, sizes):
             count *= size - getattr(self._rt, 'min_args', {}).get(p, 0)
-        return 0 < count <= 65536
+        from .automatic import MAX_DENSE_ENTRIES
+        return 0 < count <= MAX_DENSE_ENTRIES
 
     @property
     def uses_native_numeric_cache(self):
@@ -556,17 +561,8 @@ class CombinedRefInfo:
     decl_type_expr: str = ''
     is_relative: bool = False
     helper = None
-    reduction = None
     enum = None
-    numeric_helper = None
-    clamped_helper = None
-    clamped_context_helper = None
-    optional_helper = None
-    grouped_helper = None
-    bounded_helper = None
-    bound_bounded_helper = None
-    bound_grouped_helper = None
-    bound_numeric_helper = None
+    math_operation = None
     enum_definitions = ()
     enum_safe = False
 
@@ -579,19 +575,13 @@ class CombinedRefInfo:
         When ``rt_info`` is falsy, only ``module``, ``cls`` and
         ``name`` are set; the class-level defaults remain in effect.
         """
+        from .helpers import CAPABILITIES
+        for field_name, _ in CAPABILITIES.values():
+            setattr(self, field_name, getattr(rt_info, field_name, None))
         if rt_info:
             self.helper = getattr(rt_info, 'helper', None)
-            self.reduction = getattr(rt_info, 'reduction', None)
+            self.math_operation = getattr(rt_info, 'math_operation', None)
             self.enum = getattr(rt_info, 'enum', None)
-            self.numeric_helper = getattr(rt_info, 'numeric_helper', None)
-            self.clamped_helper = getattr(rt_info, 'clamped_helper', None)
-            self.clamped_context_helper = getattr(rt_info, 'clamped_context_helper', None)
-            self.optional_helper = getattr(rt_info, 'optional_helper', None)
-            self.grouped_helper = getattr(rt_info, 'grouped_helper', None)
-            self.bounded_helper = getattr(rt_info, 'bounded_helper', None)
-            self.bound_bounded_helper = getattr(rt_info, 'bound_bounded_helper', None)
-            self.bound_grouped_helper = getattr(rt_info, 'bound_grouped_helper', None)
-            self.bound_numeric_helper = getattr(rt_info, 'bound_numeric_helper', None)
             self.enum_definitions = getattr(rt_info, 'enum_definitions', ())
             self.enum_safe = getattr(rt_info, 'enum_safe', False)
 
