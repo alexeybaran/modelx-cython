@@ -110,6 +110,9 @@ class NativeReductions(FormulaTransformer):
             return 'double' if type(node.value) is float else 'longlong'
         if isinstance(node, ast.Name):
             return locals_.get(node.id)
+        if (self.builtin_bounds and _call(node, 'abs', 1)
+                and self.kind(node.args[0], locals_) == 'double'):
+            return 'double'
         if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name) and node.value.id == 'self':
             ref = self.cls_info.refs.get(node.attr)
             if ref is not None:
@@ -354,6 +357,147 @@ return {fallback}
             return None
         return start.id, lower.right.value, step.operand.value
 
+    def boolean_ranges(self, after, func, ref, source, tree):
+        """Compose primitive range predicates with Python generator boundaries.
+
+        Unit steps cannot overflow at the terminating increment. General steps
+        need a separate checked progression proof; they retain their generator.
+        The outer range arguments are eager, outside PEP 479's body boundary.
+        Inner bounds, filters and payloads remain lazy and inside that boundary.
+        """
+        if (not self.cells.formula_allows_exact_receiver
+                or self.cells.get_rettype_expr(c_style=True) != 'bint'):
+            return after
+        locals_ = {}
+        for name in self.cells.params:
+            kind = self.cells.get_argtype_expr(name, c_style=True)
+            if kind in ('double', 'long long', 'bint'):
+                locals_[name] = {'long long': 'longlong'}.get(kind, kind)
+
+        def primitive_safe(node):
+            # A typed callee result does not prove its argument arithmetic.
+            # In particular, never introduce int64 overflow inside a closure
+            # which the ordinary checked-arithmetic pass deliberately skips.
+            if isinstance(node, ast.Constant):
+                return (type(node.value) in (bool, float)
+                        or type(node.value) is int and -(1 << 63) <= node.value < (1 << 63))
+            if isinstance(node, ast.Name):
+                return node.id in locals_
+            if isinstance(node, ast.Attribute):
+                return self.kind(node, locals_) in ('double', 'longlong', 'bint')
+            if isinstance(node, ast.Call):
+                if (self.kind(node, locals_) not in ('double', 'longlong', 'bint')
+                        or node.keywords or not all(primitive_safe(arg) for arg in node.args)):
+                    return False
+                if _call(node, 'abs', 1):
+                    return True
+                cell = self.cls_info.cells[node.func.attr]
+                if len(node.args) != len(cell.params):
+                    return False
+                for arg, param in zip(node.args, cell.params):
+                    actual = self.kind(arg, locals_)
+                    expected = cell.get_argtype_expr(param, c_style=True)
+                    if {'longlong': 'long long'}.get(actual, actual) != expected:
+                        if not (actual == 'bint' and expected == 'long long'):
+                            return False
+                return True
+            if isinstance(node, ast.UnaryOp):
+                return (primitive_safe(node.operand)
+                        and (isinstance(node.op, ast.Not)
+                             or self.kind(node.operand, locals_) == 'double'
+                             or isinstance(node.operand, ast.Constant)))
+            if isinstance(node, ast.BinOp):
+                return (self.kind(node, locals_) == 'double'
+                        and primitive_safe(node.left) and primitive_safe(node.right))
+            if isinstance(node, ast.BoolOp):
+                return all(primitive_safe(value) for value in node.values)
+            if isinstance(node, ast.Compare):
+                return all(primitive_safe(value) for value in [node.left, *node.comparators])
+            return False
+        targets = []
+        for part in tree.generators:
+            if (part.is_async or not isinstance(part.target, ast.Name)
+                    or part.target.id in {'self', 'range', 'abs', *locals_, *targets}
+                    or not isinstance(part.iter, ast.Call)
+                    or not isinstance(part.iter.func, ast.Name)
+                    or part.iter.func.id != 'range' or part.iter.keywords
+                    or not 1 <= len(part.iter.args) <= 3):
+                return after
+            args = part.iter.args
+            if len(args) == 3 and ast.unparse(args[2]) not in ('1', '-1'):
+                return after
+            if not all(self.kind(arg, locals_) in ('longlong', 'bint')
+                       and primitive_safe(arg) for arg in args):
+                return after
+            # Literal typing must be justified independently of trace types.
+            if any(isinstance(n, ast.Constant) and type(n.value) is int
+                   and not -(1 << 63) <= n.value < (1 << 63)
+                   for arg in args for n in ast.walk(arg)):
+                return after
+            targets.append(part.target.id)
+            locals_[part.target.id] = 'longlong'
+            if not all(self.native_truth(test, locals_) and primitive_safe(test) for test in part.ifs):
+                return after
+        if not self.native_truth(tree.elt, locals_) or not primitive_safe(tree.elt):
+            return after
+        prefix = self.reserve_prefix()
+        function = f'{prefix}_function'
+        previous = len(self.fallbacks)
+        fallback = self.cold_fallback(source, tree, None, function)
+        if len(self.fallbacks) == previous:
+            return after
+        provider, operation = ref.helper
+        alias = module_name(provider)
+        names = {name: f'{prefix}_index_{i}' for i, name in enumerate(targets)}
+
+        class Rename(ast.NodeTransformer):
+            def visit_Name(self, node):
+                if node.id in names:
+                    return ast.copy_location(ast.Name(names[node.id], node.ctx), node)
+                return node
+
+            def visit_Call(self, node):
+                node = self.generic_visit(node)
+                if _call(node, 'abs', 1):
+                    node.func = ast.Attribute(ast.Name(alias, ast.Load()), 'f64_abs', ast.Load())
+                return node
+
+        rewrite = Rename()
+        for part in tree.generators:
+            rewrite.visit(part)
+        rewrite.visit(tree.elt)
+        outer = tree.generators[0].iter
+        arguments = []
+        # Keep the proved literal step visible to Cython. A variable step makes
+        # Cython retain Python range iteration even when its value is +/-1.
+        for i, arg in enumerate(outer.args[:2]):
+            name = f'{prefix}_bound_{i}'
+            arguments.append((name, ast.unparse(arg)))
+        outer.args = ([ast.Name(name, ast.Load()) for name, _ in arguments]
+                      + outer.args[2:])
+        lines = [f'{function}: object = self.{func.attr.value}',
+                 f'if {exact_receiver(self.cls_info.name)} and {alias}.{operation}_accepts({function}):']
+        lines += [f'    {name}: _mx_cy.longlong' for name in names.values()]
+        lines += [f'    {name}: _mx_cy.longlong = {value}' for name, value in arguments]
+        lines += ['    try:']
+        indent = '        '
+        for part in tree.generators:
+            lines.append(indent + f'for {part.target.id} in {ast.unparse(part.iter)}:')
+            indent += '    '
+            for test in part.ifs:
+                lines.append(indent + f'if {ast.unparse(test)}:')
+                indent += '    '
+        any_ = ref.reduction == 'bool_any'
+        predicate = ast.unparse(tree.elt)
+        lines += [indent + (f'if {predicate}:' if any_ else f'if not ({predicate}):'),
+                  indent + f'    return {any_}',
+                  '    except StopIteration as ' + prefix + '_error:',
+                  '        raise RuntimeError("generator raised StopIteration") from ' + prefix + '_error',
+                  f'    return {not any_}', f'return {fallback}']
+        self.providers.add(provider)
+        self.count += 1
+        return cst.FlattenSentinel(cst.parse_module('\n'.join(lines) + '\n').body)
+
     def leave_SimpleStatementLine(self, before, after):
         if not hasattr(ast, 'unparse'):
             return after
@@ -375,6 +519,10 @@ return {fallback}
         tree = ast.parse('(' + source + ')', mode='eval').body
         if not isinstance(tree, ast.GeneratorExp) or not self.builtin_bounds:
             return after
+        if reduction in ('bool_any', 'bool_all'):
+            result = self.boolean_ranges(after, func, ref, source, tree)
+            if result is not after:
+                return result
         if reduction == 'bool_any':
             return self.bounded_any(before, after, func, ref, source, tree)
         if reduction in ('bool_all', 'f64_max'):
