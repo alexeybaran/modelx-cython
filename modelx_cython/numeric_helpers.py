@@ -7,7 +7,8 @@ import libcst as cst
 
 from .cell_entries import exact_receiver
 from .helpers import module_name
-from .scopes import has_scope_effects
+from .scopes import FormulaTransformer, has_scope_effects
+from .helper_members import helper_reference
 
 
 class NumericReturns(cst.CSTTransformer):
@@ -297,6 +298,8 @@ class NumericReturns(cst.CSTTransformer):
         context = f'_v_mx_context_{self.cell.name}'
         if context[len('_v_'):] in self.cls.cells:
             return None
+        if context in self.contexts and self.contexts[context] != provider:
+            return None
         self.contexts[context] = provider
         return cst.parse_expression('self.' + context)
 
@@ -433,3 +436,59 @@ class NumericReturns(cst.CSTTransformer):
             func=cst.Attribute(cst.Name(alias), cst.Name(operation)),
             args=(cst.Arg(call.func), cst.Arg(context), *call.args))
         return after.with_changes(value=self.bound_numeric(call, native, ref, provider, context))
+
+
+class ContextualFloat(FormulaTransformer):
+    """Lower explicit float(helper(...)) throughout one admitted formula scope.
+
+    The provider receives both current callable expressions. Its fallback must
+    perform conversion(helper(*args)), not an implicit C-double conversion.
+    Run after generator lowering, so admitted payloads use this same matcher;
+    authored child scopes keep their ordinary evaluation semantics.
+    """
+
+    def __init__(self, cls, cell, providers, builtin_keys=(), contexts=None):
+        super().__init__()
+        self.cls, self.cell, self.providers = cls, cell, providers
+        self.builtin_keys = builtin_keys
+        self.contexts = {} if contexts is None else contexts
+        self.operations = set()
+        self.scope_safe = False
+
+    self_call = staticmethod(NumericReturns.self_call)
+    native_key = NumericReturns.native_key
+    lookup_context = NumericReturns.lookup_context
+
+    def visit_FunctionDef(self, node):
+        syntax = ast.parse(cst.Module([]).code_for_node(node)).body[0]
+        self.scope_safe = not has_scope_effects(syntax.body)
+        return self.scope_safe
+
+    def lower_call(self, call):
+        """Return the contextual call, or None when admission is unproven."""
+        if not (self.scope_safe and 'float' in self.builtin_keys
+                and isinstance(call.func, cst.Name) and call.func.value == 'float'
+                and len(call.args) == 1 and not call.args[0].keyword
+                and not call.args[0].star):
+            return None
+        lookup = call.args[0].value
+        if not (isinstance(lookup, cst.Call) and 3 <= len(lookup.args) <= 4
+                and not any(arg.keyword or arg.star for arg in lookup.args)
+                and self.native_key(lookup.args[1].value)):
+            return None
+        ref = helper_reference(lookup.func, self.cls.refs)
+        operation = getattr(ref, 'float_numeric_helper', None)
+        if not operation or not getattr(ref, 'helper', None):
+            return None
+        provider, original = ref.helper
+        context = self.lookup_context(provider)
+        if context is None:
+            return None
+        self.providers.add(provider)
+        self.operations.add(provider + '.' + original)
+        return call.with_changes(
+            func=cst.Attribute(cst.Name(module_name(provider)), cst.Name(operation)),
+            args=(cst.Arg(call.func), cst.Arg(lookup.func), cst.Arg(context), *lookup.args))
+
+    def leave_Call(self, before, after):
+        return self.lower_call(after) or after
