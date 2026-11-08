@@ -103,3 +103,42 @@ def test_new_capability_shapes_use_the_single_shared_validator(capability, value
     setattr(invalid, '__modelx_cython_' + capability + '__', value)
     with pytest.raises(ValueError, match='invalid helper capability'):
         helper_capability(invalid, capability)
+
+
+@pytest.mark.parametrize('result', ['float64', 'int64', 'bool', 'unicode', 'object'])
+def test_scalar_result_is_physical_abi_metadata_for_direct_and_module_refs(result):
+    def lookup(*args):
+        raise AssertionError('metadata capture must not invoke a helper')
+    lookup.__modelx_cython_helper__ = ('sample.provider', 'lookup')
+    lookup.__modelx_cython_scalar_result__ = result
+    direct = CombinedRefInfo('exported._mx_classes', '_c_Test', 'lookup', RuntimeValueInfo(lookup))
+    module = ModuleType('sample.typed')
+    module.lookup = lookup
+    merged = CombinedRefInfo('exported._mx_classes', '_c_Test', 'tables', RuntimeValueInfo(module))
+    assert direct.scalar_result == result
+    assert merged.helper_members['lookup'].scalar_result == result
+    assert not hasattr(merged.helper_members['lookup'], 'function')
+
+
+@pytest.mark.parametrize('result', ['float', 'double', 'int', 'number', 'Float64', ('float64',)])
+def test_scalar_result_rejects_undeclared_physical_types(result):
+    def lookup():
+        pass
+    lookup.__modelx_cython_scalar_result__ = result
+    with pytest.raises(ValueError, match='invalid helper capability'):
+        helper_capability(lookup, 'scalar_result')
+
+
+@pytest.mark.parametrize('suffix,prefix', [('iteration_f64', 'float'), ('iteration_str', 'str')])
+def test_typed_key_iteration_uses_same_module_and_reference_registry(suffix, prefix):
+    def keys(table):
+        raise AssertionError('metadata capture must not invoke a producer')
+    keys.__modelx_cython_helper__ = ('sample.provider', 'keys')
+    capability = (f'keys_{prefix}_span', f'{prefix.title()}KeySpan',
+                  f'{prefix}_key_span_count', f'{prefix}_key_span_at')
+    setattr(keys, '__modelx_cython_' + suffix + '__', capability)
+    module = ModuleType('sample.keys')
+    module.keys = keys
+    field = suffix + '_helper'
+    assert getattr(RuntimeValueInfo(keys), field) == capability
+    assert getattr(RuntimeValueInfo(module).helper_members['keys'], field) == capability

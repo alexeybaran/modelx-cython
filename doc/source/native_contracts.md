@@ -51,6 +51,8 @@ The single `helpers.CAPABILITIES` registry defines optional capability metadata:
 | Metadata suffix | Meaning / shape |
 |---|---|
 | `reduction` | `f64_sum`, `bool_any`, `bool_all` or `f64_max` |
+| `iteration`, `iteration_f64`, `iteration_str` | Four identifiers: admission function, span type, count function, element function |
+| `scalar_result` | Physical provider ABI: `float64`, `int64`, `bool`, `unicode` or `object` |
 | `numeric` | Numeric-return operation identifier |
 | `clamped`, `clamped_context` | Clamped lookup operation identifiers |
 | `optional` | Guarded membership/value operation identifier |
@@ -61,6 +63,10 @@ The single `helpers.CAPABILITIES` registry defines optional capability metadata:
 Suffixes expand to `__modelx_cython_<suffix>__`. Names and tuple arities are
 validated while tracing. The registry is shared by runtime metadata and merged
 References; providers do not need insurance-specific compiler branches.
+`scalar_result` describes the declared `.pxd` result, not an inferred Python
+numeric type or a proof about a replacement callable. An `int64` provider must
+check its public integer range. An object-preserving mutable dispatcher uses
+`object` even when its canonical internal kernel returns `double`.
 
 Numeric contexts implement the common `LookupContext` ABI. They cache prepared
 input resources and indices, never policy results or formula execution state.

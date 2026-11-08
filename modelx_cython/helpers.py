@@ -16,6 +16,9 @@ from .scopes import FormulaTransformer
 CAPABILITIES = {
     'reduction': ('reduction', None),
     'iteration': ('iteration_helper', (4,)),
+    'iteration_f64': ('iteration_f64_helper', (4,)),
+    'iteration_str': ('iteration_str_helper', (4,)),
+    'scalar_result': ('scalar_result', None),
     'numeric': ('numeric_helper', None),
     'float_numeric': ('float_numeric_helper', None),
     'keyed_float_numeric': ('keyed_float_numeric_helper', (5,)),
@@ -29,6 +32,7 @@ CAPABILITIES = {
     'bound_numeric': ('bound_numeric_helper', (3,)),
 }
 REDUCTIONS = frozenset(('f64_sum', 'bool_any', 'bool_all', 'f64_max'))
+SCALAR_RESULTS = frozenset(('float64', 'int64', 'bool', 'unicode', 'object'))
 
 
 def module_name(provider):
@@ -62,7 +66,9 @@ def helper_capability(value, name):
                  and all(valid_identifier(part) for part in capability))
     else:
         valid = valid_identifier(capability)
-    if not valid or name == 'reduction' and capability not in REDUCTIONS:
+    if (not valid
+            or name == 'reduction' and capability not in REDUCTIONS
+            or name == 'scalar_result' and capability not in SCALAR_RESULTS):
         raise ValueError(f'invalid helper capability {name!r} on {value.__qualname__}')
     return capability
 
