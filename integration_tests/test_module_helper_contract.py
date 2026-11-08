@@ -16,7 +16,7 @@ def test_module_helpers_compile_through_shared_metadata(tmp_path):
     try:
         p = model.new_space('Projection', refs={'ops': typed_inputs, 'alias_ops': typed_inputs,
             'values': (1e16, 1.0, -1e16), 'count_ref': 3,
-            'key_table': Table((0, 1, 2), ((0.0,), (1.0,), (2.0,)), ('value',))})
+            'step_ref': 2, 'key_table': Table((0, 1, 2), ((0.0,), (1.0,), (2.0,)), ('value',))})
         p.new_cells('count', 'lambda: count_ref')
         p.new_cells('term', 'lambda n, i: values[i] + n * 0.0')
         p.new_cells('total', 'lambda n: ops.sum_f64(term(n, i) for i in range(count()))')
@@ -33,10 +33,12 @@ def test_module_helpers_compile_through_shared_metadata(tmp_path):
         p.new_cells('key_minimum', 'lambda n: min(i for i in ops.keys(key_table) if i != 1)')
         p.new_cells('key_local', 'def key_local(n):\n    i = key_table\n    return all(i >= 0 for i in ops.keys(i))\n')
         p.new_cells('captured_every', 'def captured_every(n):\n    scale = max(term(n, 1), 1.0)\n    return all(abs(term(n, i)) <= 1e-10 * scale for i in range(count()))\n')
+        p.new_cells('stepped_some', 'lambda n: any(term(n, i) > 0.0 for i in range(0, count(), step_ref))')
+        p.new_cells('stepped_minimum', 'lambda n: min(i for i in range(0, count(), step_ref))')
         model.export(tmp_path / 'exported')
     finally:
         model.close()
-    methods = ('total', 'alias_total', 'every', 'wrapped_every', 'some', 'builtin_every', 'minimum', 'maximum', 'scaled_every', 'key_total', 'key_every', 'key_minimum', 'key_local', 'captured_every')
+    methods = ('total', 'alias_total', 'every', 'wrapped_every', 'some', 'builtin_every', 'minimum', 'maximum', 'scaled_every', 'key_total', 'key_every', 'key_minimum', 'key_local', 'captured_every', 'stepped_some', 'stepped_minimum')
     (tmp_path / 'sample.py').write_text('from exported import mx_model\np = mx_model.Projection\n'
         + ''.join(f'for n in range(3): p.{name}(n)\n' for name in methods))
     subprocess.run([sys.executable, '-m', 'modelx_cython', 'exported', '--sample', 'sample.py', '--no-spec'],
@@ -74,9 +76,21 @@ def test_module_helpers_compile_through_shared_metadata(tmp_path):
         assert p.every(0) is False and p.some(0) is True
         assert p.scaled_every(0) is False
         assert p.captured_every(0) is False
+        assert p.stepped_some(0) is True and p.stepped_minimum(0) == 0
         assert p.wrapped_every(0) is False
         assert p.builtin_every(0) is False
         assert p.minimum(0) == 0 and p.maximum(0) == 2
+        q = fresh()
+        q.step_ref = 0
+        try: q.stepped_some(0)
+        except ValueError as error: assert str(error) == 'range() arg 3 must not be zero'
+        else: raise AssertionError('zero step did not raise eagerly')
+        q = fresh()
+        q.step_ref = -2
+        assert q.stepped_some(0) is False
+        try: q.stepped_minimum(0)
+        except ValueError: pass
+        else: raise AssertionError('empty stepped minimum did not raise')
         seen = []
         def replacement(values):
             assert iter(values) is values

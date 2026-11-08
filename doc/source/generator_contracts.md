@@ -74,8 +74,8 @@ these conditions hold:
   cold generator fallback, and has a native boolean or double result as appropriate.
 - The receiver is exact and the current callable passes the provider's identity
   check. A subclass or replacement callable keeps the generator path.
-- Clauses use builtin `range` with primitive proved integer arguments and a
-  unit step, or proved singleton bindings. Filters and payloads have proved
+- Clauses use builtin `range` with primitive proved signed-int64 arguments and
+  any nonzero signed-int64 step, or proved singleton bindings. Filters and payloads have proved
   primitive truth/numeric semantics.
 - Generator targets are distinct, hygienically renamed and separate from
   formula parameters. Unknown captures, unpacking, aliases and iterators decline.
@@ -92,8 +92,11 @@ the first NaN and signed-zero tie behavior. Its empty-error boundary delegates t
 the registered callable so the Python release's exact exception message is
 preserved. Sum reuses the existing provider's compensated F64Sum state; no second
 summation algorithm is introduced. The terminating
-increment of a unit-step half-open int64 range is representable. General steps
-retain compatibility until a separate checked progression mechanism is proven.
+increment of a unit-step half-open int64 range is representable. Other steps
+use a C progression state whose unsigned endpoint distance proves the next
+signed value is representable. It stops before computing an out-of-range final
+increment, including a step of `-2**63`. Zero-step errors are eager for the outer
+range and lazy within the PEP479 boundary for inner ranges.
 
 A single immediately preceding double-valued binding can feed composed reductions.
 The original assignment executes eagerly in place; its value is passed into the
@@ -107,7 +110,7 @@ original captured object. The native loop unboxes the admitted capture once.
 Unknown, reassigned-parameter and arbitrary-object bindings decline.
 
 Existing bounded max/any mechanisms remain separately admitted. Their
-presence does not imply arbitrary-range, arbitrary-capture or arbitrary-iterator
+presence does not imply arbitrary-precision bounds, arbitrary-capture or arbitrary-iterator
 coverage. Object-capable Cython is useful compatibility but does not by itself
 close a primitive native-coverage row.
 
@@ -134,7 +137,7 @@ errors remain eager. Unsupported key domains remain explicit coverage gaps.
 Resources are disposable and private to the compiled provider package.
 
 The reduction pass consumes the iteration capability for an outer keys call,
-composed with inner unit ranges and singleton bindings. It evaluates the current
+composed with inner signed-int64 ranges and singleton bindings. It evaluates the current
 consumer, key producer and table argument once, in that order. Unsupported
 receivers, callables or key domains build the original generator over the already
 captured outer iterable; they never repeat the table expression. The native branch

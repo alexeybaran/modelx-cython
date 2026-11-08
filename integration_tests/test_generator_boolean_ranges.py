@@ -38,6 +38,13 @@ def test_nested_filtered_boolean_ranges(tmp_path):
 ''')
         s.new_cells('every', 'lambda n: all_true(predicate(i) for i in range(bound(n)) if i != 1)')
         s.new_cells('some', 'lambda n: any_true(predicate(j) for i in range(bound(n)) if i != 1 for j in range(inner(i)) if j != 0)')
+        s.new_cells('inner_step', '''def inner_step(i):
+    events.append(('step', i))
+    if throw_horizon:
+        raise error
+    return 2
+''')
+        s.new_cells('some_step', 'lambda n: any_true(predicate(j) for i in range(bound(n)) if i != 1 for j in range(0, inner(i), inner_step(i)) if j != 0)')
         s.new_cells('reverse', 'lambda n: all_true(predicate(i) for i in range(bound(n), -1, -1) if i != 1)')
         s.new_cells('amount', '''def amount(i):
     events.append(('amount', i))
@@ -81,7 +88,7 @@ def test_nested_filtered_boolean_ranges(tmp_path):
         model.close()
     (tmp_path / 'sample.py').write_text(
         'from exported import mx_model\np = mx_model.Projection\n'
-        'p.every(8); p.some(8); p.reverse(8)\n'
+        'p.every(8); p.some(8); p.some_step(8); p.some_step(-10); p.reverse(8)\n'
         'p.every(-10); p.some(-10); p.reverse(-10)\n'
         'p.total(8); p.total(-10); p.maximum(8)\n'
         'p.singleton(0); p.singleton(8); p.inner_singleton(8); p.inner_singleton(-10)\n'
@@ -90,7 +97,7 @@ def test_nested_filtered_boolean_ranges(tmp_path):
     subprocess.run([sys.executable, '-m', 'modelx_cython', 'exported',
                     '--sample', 'sample.py', '--no-spec'], cwd=tmp_path, check=True)
     report = json.loads((tmp_path / 'exported_cy/_mx_admission.json').read_text())
-    for name in ('every', 'some', 'reverse', 'total', 'maximum', 'singleton',
+    for name in ('every', 'some', 'some_step', 'reverse', 'total', 'maximum', 'singleton',
                  'inner_singleton', 'captured', 'captured_singleton', 'descending', 'legacy_any'):
         assert report[f'exported_cy._mx_classes._c_Projection._f_{name}']['native_reductions'] == 1
     generated = tmp_path / 'exported_cy/_mx_classes.py'
@@ -111,7 +118,7 @@ def test_nested_filtered_boolean_ranges(tmp_path):
             assert not any(token in body for token in
                            ('PyObject_GetIter(', '__Pyx_PyObject_GetIterNextFunc(', 'PyIter_Next('))
             native_bodies += 1
-    assert native_bodies == 11
+    assert native_bodies == 12
     probe = textwrap.dedent('''\
         import sys
         import pickle
@@ -126,6 +133,18 @@ def test_nested_filtered_boolean_ranges(tmp_path):
         s = fresh()
         assert s.some(4) is True
         assert s.events == [('bound', 4), ('inner', 0), ('term', 1)]
+        s = fresh()
+        assert s.some_step(4) is False
+        assert s.events == [('bound', 4), ('inner', 0), ('step', 0), ('term', 2),
+                            ('inner', 2), ('step', 2), ('inner', 3), ('step', 3)]
+        s = fresh()
+        s.throw_horizon = True
+        try: s.some_step(4)
+        except RuntimeError as error:
+            assert error.__cause__ is s.error
+            assert error.__context__ is s.error
+        else: raise AssertionError('inner step StopIteration not converted')
+        assert s.events == [('bound', 4), ('inner', 0), ('step', 0)]
         s = fresh()
         assert s.every(0) is True
         assert s.events == [('bound', 0)]

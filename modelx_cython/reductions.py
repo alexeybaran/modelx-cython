@@ -1,6 +1,6 @@
 """Lower explicit registered reductions in return statements.
 
-Only range loops and singleton bindings with proven numeric expressions qualify.
+Ranges, registered key spans and singleton bindings need proven numeric expressions.
 The existing formula body remains authoritative; general generators stay intact.
 """
 import ast
@@ -409,8 +409,8 @@ return {fallback}
                          capture=None, capture_operations=(), capture_guard=None):
         """Compose primitive reductions with Python generator boundaries.
 
-        Unit steps cannot overflow at the terminating increment. General steps
-        need a separate checked progression proof; they retain their generator.
+        Unit steps use Cython counted loops; other int64 steps use the native
+        distance-checked progression, never computing an overflowing increment.
         The outer range arguments are eager, outside PEP 479's body boundary.
         Inner bounds, filters and payloads remain lazy and inside that boundary.
         """
@@ -496,8 +496,6 @@ return {fallback}
                     and part.iter.func.id == 'range' and not part.iter.keywords
                     and 1 <= len(part.iter.args) <= 3):
                 args = part.iter.args
-                if len(args) == 3 and ast.unparse(args[2]) not in ('1', '-1'):
-                    return after
                 if not all(self.kind(arg, locals_) in ('longlong', 'bint')
                            and primitive_safe(arg) for arg in args):
                     return after
@@ -553,15 +551,19 @@ return {fallback}
             rewrite.visit(part)
         tree.elt = rewrite.visit(tree.elt)
         outer = tree.generators[0].iter
+        progressions = {i: f'{prefix}_range_{i}' for i, part in enumerate(tree.generators)
+                        if _call(part.iter, 'range', 3)
+                        and ast.unparse(part.iter.args[2]) not in ('1', '-1')}
         arguments = []
         # Keep the proved literal step visible to Cython. A variable step makes
         # Cython retain Python range iteration even when its value is +/-1.
         if isinstance(outer, ast.Call) and not key_iteration:
-            for i, arg in enumerate(outer.args[:2]):
+            bound_count = 3 if 0 in progressions else 2
+            for i, arg in enumerate(outer.args[:bound_count]):
                 name = f'{prefix}_bound_{i}'
                 arguments.append((name, ast.unparse(arg)))
             outer.args = ([ast.Name(name, ast.Load()) for name, _ in arguments]
-                          + outer.args[2:])
+                          + outer.args[bound_count:])
         function_value = self.module.code_for_node(func)
         extra_guard = ''.join(f' and {utility}.{name}_accepts({name})' for name in sorted(pair_operations))
         guard = (f'{exact_receiver(self.cls_info.name)} and {alias}.'
@@ -591,6 +593,10 @@ return {fallback}
         if capture:
             lines.append(f'    {names[capture]} = {capture}')
         lines += [f'    {name}: _mx_cy.longlong = {value}' for name, value in arguments]
+        lines += [f'    {state}: {utility}.I64Range' for state in progressions.values()]
+        if 0 in progressions:
+            lines.append(f'    {utility}.i64_range_init(_mx_cy.address({progressions[0]}), '
+                         + ', '.join(ast.unparse(arg) for arg in outer.args) + ')')
         if isinstance(outer, ast.Tuple):
             lines += [f'    {tree.generators[0].target.id} = {ast.unparse(outer.elts[0])}']
         if ref.reduction == 'f64_sum':
@@ -609,6 +615,19 @@ return {fallback}
                 lines.append(indent + f'for {position} in range({producer_alias}.{span_count}({span})):')
                 indent += '    '
                 lines.append(indent + f'{part.target.id} = {producer_alias}.{span_at}({span}, {position})')
+            elif i in progressions:
+                state = progressions[i]
+                if i:
+                    bounds = []
+                    for j, arg in enumerate(part.iter.args):
+                        bound = f'{state}_bound_{j}'
+                        lines.append(indent + f'{bound}: _mx_cy.longlong = {ast.unparse(arg)}')
+                        bounds.append(bound)
+                    lines.append(indent + f'{utility}.i64_range_init(_mx_cy.address({state}), '
+                                 + ', '.join(bounds) + ')')
+                lines.append(indent + f'while {utility}.i64_range_next(_mx_cy.address({state}), '
+                             + f'_mx_cy.address({part.target.id})):')
+                indent += '    '
             elif isinstance(part.iter, ast.Tuple):
                 if i:
                     lines.append(indent + f'{part.target.id} = {ast.unparse(part.iter.elts[0])}')
@@ -644,7 +663,7 @@ return {fallback}
         self.providers.add(provider)
         if key_iteration:
             self.providers.add(key_iteration[0])
-        if pair_operations:
+        if pair_operations or progressions:
             self.providers.add('modelx_cython._native_iterables')
         self.count += 1
         return cst.FlattenSentinel(cst.parse_module('\n'.join(lines) + '\n').body)
