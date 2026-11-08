@@ -168,3 +168,15 @@ adjustment, exact semantic test, generated Cython/C evidence, loaded extension
 identity, full matched financial outputs and same-VM performance evidence for
 every regional model. Unresolved indirect calls and compatibility fallbacks stay
 explicitly open. Windows acceptance and core promotion remain separate.
+
+## Reduction expressions
+
+Assignments, conditions and arithmetic may call a generated C reduction function
+using the same primitive loop emitter as direct returns. Formula parameters are
+already bound and cross this boundary by their existing ABI. Only the final
+result is boxed. A replacement consumer returns its original object to the
+surrounding expression, preserving later truth conversion and arithmetic.
+Unknown local captures decline; authored child scopes retain their semantics.
+Scalar min/max ancestors remain conservative because Cython's intrinsic operand
+ordering requires separate handling. This does not qualify ordinary sum, zipped
+inputs, general materialization, or mixed public result ABIs.

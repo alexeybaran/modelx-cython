@@ -53,6 +53,9 @@ class NativeReductions(FormulaTransformer):
         self.fallbacks = []
         self.exact_receiver_guards = set()
         self.count = 0
+        self.expression_kind = None
+        self.direct_returns = set()
+        self.expression_barriers = set()
         self.module = cst.Module([])
         self.captures = {}
         self.integer_captures = {}
@@ -64,6 +67,25 @@ class NativeReductions(FormulaTransformer):
         if self.numeric_expressions is not None:
             self.numeric_expressions.scope_safe = self.scope_safe
             self.numeric_expressions.original_scope_safe = self.scope_safe
+        owner = self
+        class DirectReturns(FormulaTransformer):
+            def visit_Call(visitor, node):
+                if (isinstance(node.func, cst.Name) and node.func.value in ('min', 'max')
+                        and len(node.args) >= 2):
+                    class NestedCalls(cst.CSTVisitor):
+                        def visit_GeneratorExp(nested, item):
+                            return False
+                        def visit_Call(nested, item):
+                            owner.expression_barriers.add(id(item))
+                    for argument in node.args:
+                        argument.value.visit(NestedCalls())
+            def visit_Return(visitor, node):
+                if isinstance(node.value, cst.Call):
+                    owner.direct_returns.add(id(node.value))
+                    if (isinstance(node.value.func, cst.Name) and node.value.func.value == 'bool'
+                            and len(node.value.args) == 1):
+                        owner.direct_returns.add(id(node.value.args[0].value))
+        formula.visit(DirectReturns())
         self.names = {node.id for node in ast.walk(syntax) if isinstance(node, ast.Name)}
         self.names.update(node.arg for node in ast.walk(syntax) if isinstance(node, ast.arg))
         if isinstance(formula.body, cst.IndentedBlock):
@@ -430,11 +452,12 @@ return {fallback}
         """
         tree = copy.deepcopy(tree)
         boolean = ref.reduction in ('bool_any', 'bool_all')
+        result_type = self.expression_kind or self.cells.get_rettype_expr(c_style=True)
         integral_extremum = (ref.reduction in ('native_min', 'native_max')
-                             and self.cells.get_rettype_expr(c_style=True) == 'long long')
+                             and result_type == 'long long')
         expected_result = 'bint' if boolean else 'long long' if integral_extremum else 'double'
         if (not self.cells.formula_allows_exact_receiver
-                or self.cells.get_rettype_expr(c_style=True) != expected_result):
+                or result_type != expected_result):
             return after
         if capture in {'self', *self.cells.params}:
             return after
@@ -754,6 +777,61 @@ return {fallback}
             self.providers.add('modelx_cython._native_iterables')
         self.count += 1
         return cst.FlattenSentinel(cst.parse_module('\n'.join(lines) + '\n').body)
+
+    def leave_Call(self, before, after):
+        """Use the same loop backend for reductions inside larger expressions.
+
+        The generated C function boxes only its final result. A replacement
+        consumer keeps its original result object for the surrounding expression.
+        Only already-bound formula parameters may cross this boundary.
+        """
+        if id(before) in self.direct_returns or id(before) in self.expression_barriers or len(after.args) != 1:
+            return after
+        func = after.func
+        if isinstance(func, cst.Name) and func.value in self.builtin_reductions:
+            if func.value not in ('all', 'any', 'min', 'max'):
+                return after
+            operation = func.value
+            reduction = ('bool_' if operation in ('all', 'any') else 'native_') + operation
+            ref = SimpleNamespace(reduction=reduction, helper=('modelx_cython._native_iterables', operation))
+        else:
+            ref = helper_reference(func, self.cls_info.refs)
+        reduction = getattr(ref, 'reduction', None)
+        if reduction not in ('bool_all', 'bool_any', 'f64_sum', 'f64_max', 'native_min', 'native_max'):
+            return after
+        if after.args[0].keyword or after.args[0].star:
+            return after
+        source = self.module.code_for_node(after.args[0].value)
+        tree = ast.parse('(' + source + ')', mode='eval').body
+        if not isinstance(tree, ast.GeneratorExp) or not self.builtin_bounds:
+            return after
+        original = ast.parse(self.module.code_for_node(self.formula)).body[0]
+        stores = {node.id for node in ast.walk(original) if isinstance(node, ast.Name)
+                  and isinstance(node.ctx, ast.Store)}
+        targets = {part.target.id for part in tree.generators if isinstance(part.target, ast.Name)}
+        reads = {node.id for node in ast.walk(tree) if isinstance(node, ast.Name)
+                 and isinstance(node.ctx, ast.Load)}
+        if (reads - targets - set(self.cells.params)) & stores:
+            return after
+        kinds = ('bint',) if reduction in ('bool_all', 'bool_any') else (
+            ('long long', 'double') if reduction in ('native_min', 'native_max') else ('double',))
+        for kind in kinds:
+            self.expression_kind = kind
+            try:
+                result = self.primitive_ranges(after, func, ref, source, tree)
+            finally:
+                self.expression_kind = None
+            if result is after:
+                continue
+            helper = self.reserve_fallback()
+            formals = ', '.join([f'self: {self.cls_info.name}'] + [
+                f'{name}: {self.cells.get_argtype_expr(name)}' for name in self.cells.params])
+            function = cst.parse_statement(f'@_mx_cy.cfunc\ndef {helper}({formals}) -> object:\n    pass\n')
+            function = function.with_changes(body=cst.IndentedBlock(body=result.nodes))
+            self.fallbacks.append(function)
+            arguments = ', '.join(['self', *self.cells.params])
+            return cst.parse_expression(f'{helper}({arguments})')
+        return after
 
     def leave_SimpleStatementLine(self, before, after):
         if not hasattr(ast, 'unparse'):

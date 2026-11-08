@@ -47,10 +47,13 @@ def test_module_helpers_compile_through_shared_metadata(tmp_path):
         p.new_cells('lookup_bounded', 'lambda n: ops.sum_f64(float(ops.lookup(key_table, max(i, 0), \"value\")) for i in range(count()))')
         p.new_cells('mx_context_lookup_declined', 'lambda: 42')
         p.new_cells('lookup_declined', 'lambda n: ops.sum_f64(float(ops.lookup(key_table, i, \"value\")) for i in range(count()))')
+        p.new_cells('assigned_check', 'def assigned_check(n):\n    ok = ops.all_true(term(n, i) > 0.0 for i in range(count()))\n    return (ok,)\n')
+        p.new_cells('conditional_check', 'def conditional_check(n):\n    if ops.all_true(term(n, i) > 0.0 for i in range(count())):\n        return 1\n    return 2\n')
+        p.new_cells('arithmetic_total', 'lambda n: 1.0 + ops.sum_f64(term(n, i) for i in range(count()))')
         model.export(tmp_path / 'exported')
     finally:
         model.close()
-    methods = ('total', 'alias_total', 'every', 'wrapped_every', 'some', 'builtin_every', 'minimum', 'maximum', 'scaled_every', 'key_total', 'key_every', 'key_minimum', 'key_local', 'captured_every', 'stepped_some', 'stepped_minimum', 'timed_some', 'state_total', 'state_some', 'tuple_minimum', 'lookup_total', 'lookup_filtered', 'lookup_states', 'lookup_bounded')
+    methods = ('total', 'alias_total', 'every', 'wrapped_every', 'some', 'builtin_every', 'minimum', 'maximum', 'scaled_every', 'key_total', 'key_every', 'key_minimum', 'key_local', 'captured_every', 'stepped_some', 'stepped_minimum', 'timed_some', 'state_total', 'state_some', 'tuple_minimum', 'lookup_total', 'lookup_filtered', 'lookup_states', 'lookup_bounded', 'assigned_check', 'conditional_check', 'arithmetic_total')
     (tmp_path / 'sample.py').write_text('from exported import mx_model\np = mx_model.Projection\n'
         + ''.join(f'for n in range(3): p.{name}(n)\n' for name in methods)
         + 'for n in range(3): p.lookup_declined(n)\n')
@@ -106,6 +109,8 @@ def test_module_helpers_compile_through_shared_metadata(tmp_path):
         assert p.lookup_total(0) == p.lookup_states(0) == p.lookup_bounded(0) == 3.0
         assert p.lookup_filtered(0) is False
         assert p.lookup_declined(0) == 3.0
+        assert p.assigned_check(0) == (False,)
+        assert p.conditional_check(0) == 2 and p.arithmetic_total(0) == 2.0
         assert p.wrapped_every(0) is False
         assert p.builtin_every(0) is False
         assert p.minimum(0) == 0 and p.maximum(0) == 2
@@ -159,6 +164,10 @@ def test_module_helpers_compile_through_shared_metadata(tmp_path):
         except RuntimeError as actual:
             assert actual.__cause__ is error and actual.__context__ is error
         else: raise AssertionError('lookup StopIteration not converted')
+        p = fresh()
+        marker = object()
+        p.ops = SimpleNamespace(all_true=lambda values: marker)
+        assert p.assigned_check(1)[0] is marker
         truth_seen = []
         class Truth:
             def __bool__(self):
