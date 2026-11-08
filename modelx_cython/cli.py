@@ -357,12 +357,13 @@ def main_handler(args: argparse.Namespace, stdout: IO[str], stderr: IO[str]) -> 
         parallel_workers = d.get('parallel_workers', 1)
         if type(parallel_workers) is not int or parallel_workers < 1:
             raise ValueError('parallel_workers must be a positive integer')
-        dense_bounds_proofs = d.get('dense_bounds_proofs', False)
-        dense_miss_binding = d.get('dense_miss_binding', sys.platform == "win32")
-        dense_one_axis = d.get('dense_one_axis', False)
-        propagate_exact_receiver = d.get('propagate_exact_receiver', False)
-        native_cache_hits = d.get('native_cache_hits', 'none')
-        if type(d.get('native_math', False)) is not bool:
+        automatic = spec.automatic_optimizations
+        dense_bounds_proofs = d.get('dense_bounds_proofs', automatic)
+        dense_miss_binding = d.get('dense_miss_binding', automatic or sys.platform == "win32")
+        dense_one_axis = d.get('dense_one_axis', automatic)
+        propagate_exact_receiver = d.get('propagate_exact_receiver', automatic and dense_miss_binding)
+        native_cache_hits = d.get('native_cache_hits', 'auto' if automatic and dense_miss_binding else 'none')
+        if type(d.get('native_math', automatic)) is not bool:
             raise ValueError('native_math must be a boolean')
         if type(dense_bounds_proofs) is not bool or type(dense_miss_binding) is not bool:
             raise ValueError('dense_bounds_proofs and dense_miss_binding must be booleans')
@@ -370,8 +371,8 @@ def main_handler(args: argparse.Namespace, stdout: IO[str], stderr: IO[str]) -> 
             raise ValueError('dense_one_axis must be a boolean')
         if type(propagate_exact_receiver) is not bool or (propagate_exact_receiver and not dense_miss_binding):
             raise ValueError('propagate_exact_receiver requires dense_miss_binding')
-        if type(native_cache_hits) is not str or native_cache_hits not in ('none', 'scalar', 'dense', 'both'):
-            raise ValueError('native_cache_hits must be none, scalar, dense or both')
+        if type(native_cache_hits) is not str or native_cache_hits not in ('none', 'scalar', 'dense', 'both', 'auto'):
+            raise ValueError('native_cache_hits must be none, scalar, dense, both or auto')
         if native_cache_hits != 'none' and not dense_miss_binding:
             raise ValueError('native_cache_hits requires dense_miss_binding')
         if parallel_workers > 1:
@@ -427,7 +428,7 @@ def main_handler(args: argparse.Namespace, stdout: IO[str], stderr: IO[str]) -> 
             if native_cache_hits != 'none':
                 from modelx_cython.cache_hits import expose_cache_hits
                 expose_cache_hits(sources, formula_entries, native_cache_hits)
-        create_setup(model_name, modules=modules, setup_file=setup_file)
+        create_setup(model_name, modules=modules, setup_file=setup_file, source_root=work_dir)
         (model_path / '_mx_admission.json').write_text(
             json.dumps(describe(module_infos), indent=2), encoding='utf-8')
 
@@ -614,7 +615,7 @@ def main(argv: Sequence[str], stdout: IO[str], stderr: IO[str]) -> int:
     return main_handler(args, stdout, stderr)
 
 
-def create_setup(model_name: str, modules: Sequence[str], setup_file: pathlib.Path):
+def create_setup(model_name: str, modules: Sequence[str], setup_file: pathlib.Path, source_root=None):
     """Write a ``setup.py`` that cythonizes the translated modules.
 
     The generated script calls :func:`setuptools.setup` with
@@ -639,6 +640,20 @@ def create_setup(model_name: str, modules: Sequence[str], setup_file: pathlib.Pa
         Path of the ``setup.py`` file to write.
     """
 
+    # Cython's generated pickle state builds a recursive boolean chain over
+    # native members. Provision its visitor stack from generated class shape,
+    # rather than requiring a model-specific recursion setting from the user.
+    source_root = pathlib.Path(source_root) if source_root is not None else setup_file.parent
+    recursion_budget = sys.getrecursionlimit()
+    for module in modules:
+        source = source_root / module
+        if source.suffix != '.py' or not source.is_file():
+            continue
+        for node in ast.walk(ast.parse(source.read_text(encoding='utf-8'))):
+            if isinstance(node, ast.ClassDef):
+                members = sum(isinstance(child, ast.AnnAssign) for child in node.body)
+                recursion_budget = max(recursion_budget, 64 * (members + 32))
+
     modules_str = textwrap.indent(",\n".join(
         ['"' + s.as_posix() + '"' for s in modules]
     ), " " * 8)
@@ -646,6 +661,8 @@ def create_setup(model_name: str, modules: Sequence[str], setup_file: pathlib.Pa
     setup_script = textwrap.dedent("""\
     from setuptools import setup
     from Cython.Build import cythonize
+    import sys
+    sys.setrecursionlimit(max(sys.getrecursionlimit(), {recursion_budget}))
 
     setup(
         name="{model_name}",
@@ -661,7 +678,7 @@ def create_setup(model_name: str, modules: Sequence[str], setup_file: pathlib.Pa
     setup_file.write_text(
         setup_script.format(
             model_name=model_name,
-            modules_str=modules_str),
+            modules_str=modules_str, recursion_budget=recursion_budget),
         encoding="utf-8")
 
 

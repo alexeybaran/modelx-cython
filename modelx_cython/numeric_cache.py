@@ -17,7 +17,9 @@ def exclusively_owned(cell):
 
 
 def primary_capacity(cell):
-    size = cell._spec.get('numeric_cache_capacity', 0)
+    from . import automatic
+    inferred = automatic.primary_capacity(cell) if automatic.enabled(cell) and exclusively_owned(cell) else 0
+    size = cell._spec.get('numeric_cache_capacity', inferred)
     if type(size) is not int or (size and (
             not 2 <= size <= 4096 or size & (size - 1) or not exclusively_owned(cell))):
         raise ValueError(f'{cell.fqname}: invalid capacity for a private numeric cache')

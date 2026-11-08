@@ -2,6 +2,7 @@
 
 
 def describe(module_infos):
+    from modelx_cython.numeric_cache import primary_capacity
     result = {}
     for module in module_infos.values():
         for cls in module.classes.values():
@@ -42,6 +43,14 @@ def describe(module_infos):
                     'arguments': {name: cell.get_argtype_expr(name, c_style=True)
                                   for name in cell.params},
                     'cache': cache,
+                    'automatic_policy': module.spec.automatic_optimizations,
+                    'dense_window': [[int(axis.lower), int(axis.stop)] for axis in cell.dense_axes]
+                    if cache == 'dense' else [],
+                    'dense_logical_domain': [[int(axis.lower), int(axis.stop)] for axis in cell.dense_logical_axes]
+                    if cache == 'dense' else [],
+                    'numeric_primary_capacity': primary_capacity(cell)
+                    if cache == 'native-numeric-keys' else 0,
+                    'power_memo': bool(getattr(cell, 'power_memo', None)),
                     'dense_offsets': [int(offset) for offset in cell.cache_offsets]
                     if cache == 'dense' else [],
                     'exact_spill': bool(cell.has_dense_spill),

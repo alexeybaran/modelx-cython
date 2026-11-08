@@ -134,34 +134,51 @@ hands you a memoryview, set `"return_type": "object"` for that cells;
 conversely, `"return_type": "memoryview"` forces the memoryview even when
 the analysis would fall back.
 
-## Experimental cache and collection options
+## Automatic cache and collection policy (experimental)
 
-Cells that need an associative cache use a Python dictionary by default.
-For eligible scalar Cells, set `native_numeric_cache` in the Cell spec to try
-the native key store. A Cell spec with `numeric_cache_capacity` also opts in unless
-`native_numeric_cache` is false. Use the default for compiled models that
-need to be pickled.
+`automatic_optimizations` defaults to `True`. The compiler uses the same
+policy for every model; no per-Cell cache window, capacity or memo setting is
+required. The existing representative sample supplies types and working-set
+observations. It does not supply timing feedback to the native compiler, and
+the build uses no PGO.
 
-`dense_bounds_proofs` is an explicit top-level opt-in. The compiler still
-uses checked cache entries and exact-receiver dispatch with the default.
+For eligible native scalar results and integer arguments, the compiler chooses
+dense storage within a common 65,536-entry resource ceiling. An observed window
+may reduce physical storage when its saved data/readiness bytes cover the added
+pointer and cold dictionary. This never narrows the logical key domain:
+keys in that domain outside the physical window retain exact spill storage. A nearly full
+window stays full, preserving its simple range proofs.
 
-`native_cache_hits` is an explicit top-level opt-in: `"scalar"`, `"dense"`,
-or `"both"` (default `"none"`). It requires `dense_miss_binding`. At an
-existing private Cell call with matching native parameter types or bounded
-literal arguments, it can read the existing cache fields on a hit. It copies
-the entry's domain check or inherits its existing proven-range contract.
-Misses keep the original call and normal Cython error handling. Public methods
-and virtual overrides keep their dispatch behavior. Scalar and dense paths
-need separate workload measurements; enabling both can be slower.
+Eligible native numeric associative keys/results use the native store; other
+signatures retain Python dictionaries. An exclusively owned receiver gets a
+power-of-two primary table sized for at most 50% observed load, capped at 4,096
+entries, with growing exact overflow storage. The synchronized path remains
+for shared receivers. Published cache entries survive normal model pickling.
+The ceilings are common resource policies, not domain or correctness limits.
 
-Set `serial_collect` to `"reuse"` on an eligible leaf Space with one scalar
-sum output to reuse a receiver. Set `parallel_collect_reuse` on the same Space
-to reuse one receiver per chunk when `parallel_workers` exceeds one. Each
-policy must be independent, its receiver and mutable cache must stay inside
-collect, and Reference bindings must stay stable during the calculation.
-The existing chunk partition applies. The private scalar chunk totals merge
-as workers finish, so floating-point totals can differ by roundoff. Shapes
-outside the admitted contract use the ordinary collection implementation.
+Range proofs, receiver propagation, one-axis checks, guarded arithmetic, native
+math and exact-operand power reuse apply under their existing safety checks.
+`native_cache_hits` defaults to `"auto"`: scalar hits and dense hits that already
+have a proven index can read the existing cache fields directly. Every miss
+keeps the original checked call and Cython error handling; public methods and
+virtual overrides retain their dispatch behavior. No formula-length rule is
+used to select private formula calls.
+
+Eligible scalar sum collections use a fresh receiver by default. An explicit
+Space contract `serial_collect="reuse"` additionally declares independent
+policies, confined mutable state and stable Reference bindings. Under that
+contract the automatic policy can reuse one receiver serially or per parallel
+chunk and reuse private lookup resources. This semantic declaration cannot be
+inferred from the timing sample. Custom lifecycle hooks and unsupported shapes
+keep ordinary collection. Chunk totals merge as workers finish, so floating
+point totals can differ by roundoff.
+
+Individual switches and legacy per-Cell options remain available for controlled
+ablations and compatibility diagnostics. `automatic_optimizations=False`
+disables the automatic policy; explicit options can still request mechanisms.
+`native_cache_hits` also accepts `"none"`, `"scalar"`, `"dense"` and `"both"`;
+non-`"none"` modes require `dense_miss_binding`. Checked dense hits can repeat
+domain work, so the automatic mode admits the existing proven-index form.
 
 ## Registered helper providers
 

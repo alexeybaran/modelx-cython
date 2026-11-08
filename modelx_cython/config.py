@@ -144,6 +144,9 @@ class TransSpec:
         """
         
         self._data = data
+        self.automatic_optimizations = data.get('automatic_optimizations', True)
+        if type(self.automatic_optimizations) is not bool:
+            raise ValueError('automatic_optimizations must be a boolean')
 
     def get_spec(self, object_path: str):
         """Return the space-level spec dict for a dotted object path.

@@ -407,6 +407,9 @@ class CombinedCellsInfo(LexicalCellsInfo):
         assert self.has_args() and self.has_typeinfo()
         if (self.is_int_args and self.is_real_value and not self.is_array_returned
                 and (not self._rt.has_negative_args or self.has_shifted_cache)):
+            from modelx_cython import automatic
+            if automatic.enabled(self) and not automatic.dense_fits(self):
+                return False
             return True
         else:
             return False
@@ -425,7 +428,9 @@ class CombinedCellsInfo(LexicalCellsInfo):
 
     @property
     def uses_native_numeric_cache(self):
-        requested = self._spec.get('native_numeric_cache', 'numeric_cache_capacity' in self._spec)
+        from modelx_cython import automatic
+        requested = self._spec.get('native_numeric_cache',
+                                   'numeric_cache_capacity' in self._spec or automatic.enabled(self))
         if type(requested) is not bool:
             raise ValueError(f'{self.fqname}: native_numeric_cache must be a boolean')
         numeric = {'double', 'long long', 'bint'}
@@ -450,6 +455,9 @@ class CombinedCellsInfo(LexicalCellsInfo):
     def dense_axes(self):
         requested = self._spec.get(TransSpec.DENSE_WINDOW)
         if requested is None:
+            from modelx_cython import automatic
+            if automatic.enabled(self):
+                return automatic.observed_axes(self, self.dense_logical_axes)
             return self.dense_logical_axes
         if not (self.has_formula_def and self.has_args() and self.has_typeinfo()
                 and self.is_arrayable()):
@@ -468,18 +476,21 @@ class CombinedCellsInfo(LexicalCellsInfo):
 
     @property
     def has_compact_cache(self):
-        return (self._spec.get(TransSpec.DENSE_WINDOW) is not None
-                and self.dense_axes != self.dense_logical_axes)
+        if self._spec.get(TransSpec.DENSE_WINDOW) is not None:
+            return self.dense_axes != self.dense_logical_axes
+        from modelx_cython import automatic
+        return (automatic.enabled(self) and self.has_args() and self.has_typeinfo()
+                and self.is_arrayable() and self.dense_axes != self.dense_logical_axes)
 
     @property
     def has_dense_spill(self):
         return self.has_compact_cache or self.has_shifted_cache
 
     def get_readiness_array_decl_expr(self, c_style=False):
-        if getattr(self, 'inline_entry', None):
-            element = 'unsigned char' if c_style else f'{CY_MOD}.uchar'
-        else:
-            element = CY_BOOL_T if c_style else f'{CY_MOD}.{CY_BOOL_T}'
+        # Cython pickles unsigned-char arrays as NUL-terminated strings, which
+        # loses zero flags (and can read beyond the array). Ordinary bint arrays
+        # retain their full shape through the standard compiled-class serializer.
+        element = CY_BOOL_T if c_style else f'{CY_MOD}.{CY_BOOL_T}'
         return self.get_array_decl_expr(rettype_expr=element, c_style=c_style)
 
     def get_array_decl_expr(self, rettype_expr="", c_style=False):

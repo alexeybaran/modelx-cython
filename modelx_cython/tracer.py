@@ -160,6 +160,13 @@ class RuntimeCellsInfo:     # TODO: Create base class RuntimeBaseMemberInfo
         self.arg_types = {}
         self.max_args = {}
         self.min_args = {}
+        self.observed_min_args = {}
+        self.observed_max_args = {}
+        receiver_calls = {}
+        for trace in traces:
+            receiver = id(trace.arg_vals.get(MX_SELF))
+            receiver_calls[receiver] = receiver_calls.get(receiver, 0) + 1
+        self.max_evaluations_per_receiver = max(receiver_calls.values())
         self.has_negative_args = False
         self._init_arg_types(traces)
         self.ret_type = self._init_ret_type(traces)
@@ -190,6 +197,9 @@ class RuntimeCellsInfo:     # TODO: Create base class RuntimeBaseMemberInfo
                     self.has_negative_args = True
                 if integral:
                     self.min_args[arg] = min(self.min_args.get(arg, 0), val)
+                    value = int(val)
+                    self.observed_min_args[arg] = min(self.observed_min_args.get(arg, value), value)
+                    self.observed_max_args[arg] = max(self.observed_max_args.get(arg, value), value)
                 types = arg_type_val.setdefault(arg, {})
                 if tp not in types:
                     types[tp] = val

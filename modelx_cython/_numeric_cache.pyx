@@ -108,6 +108,28 @@ cdef class NumericCache:
         free(self.primary)
         free(self.entries)
 
+    def __reduce__(self):
+        cdef size_t index
+        values = []
+        with cython.critical_section(self):
+            for index in range(self.capacity):
+                if self.entries[index].ready:
+                    values.append((self.entries[index].a, self.entries[index].b,
+                                   self.entries[index].c, self.entries[index].value))
+            for index in range(self.primary_capacity):
+                if self.primary[index].state == 2:
+                    values.append((self.primary[index].a, self.primary[index].b,
+                                   self.primary[index].c, self.primary[index].value))
+        return (NumericCache, (self.primary_capacity,), values)
+
+    def __setstate__(self, values):
+        cdef word a, b, c, value, ignored
+        cdef Py_ssize_t slot
+        self.reset()
+        for a, b, c, value in values:
+            self.reserve(a, b, c, True, &slot, &ignored)
+            self.publish(a, b, c, slot, value)
+
     cdef bint get(self, word a, word b, word c, bint reflexive, word* value) except? -1:
         if not reflexive:
             return False

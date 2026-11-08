@@ -48,8 +48,9 @@ def analyze(source, module):
     """Recognize the numeric sum shape. Policy isolation is a Space contract."""
     options = {name: module.spec.get_spec(cls.fqname)
                for name, cls in module.classes.items()}
+    automatic = module.spec.automatic_optimizations
     if not any('serial_collect' in spec or 'parallel_collect_reuse' in spec
-               for spec in options.values()):
+               for spec in options.values()) and not automatic:
         return {}
     result = {}
     for node in ast.parse(source).body:
@@ -57,15 +58,15 @@ def analyze(source, module):
             continue
         cls = module.classes[node.name]
         spec = options[node.name]
-        option = spec.get('serial_collect')
-        parallel = spec.get('parallel_collect_reuse', False)
+        option = spec.get('serial_collect', 'reduce' if automatic else None)
+        parallel = spec.get('parallel_collect_reuse', automatic and option == 'reuse')
         if type(parallel) is not bool or (parallel and option != 'reuse'):
             raise ValueError('parallel_collect_reuse requires serial_collect reuse')
         if option is None:
             continue
         if option not in ('reduce', 'reuse'):
             raise ValueError('serial_collect must be reduce or reuse')
-        private = spec.get('serial_private_lookups', False)
+        private = spec.get('serial_private_lookups', automatic and option == 'reuse')
         if type(private) is not bool or (private and option != 'reuse'):
             raise ValueError('serial_private_lookups requires serial_collect reuse')
         shape = _match(node, cls, option == 'reuse', private, parallel)
@@ -77,7 +78,8 @@ def analyze(source, module):
 def _match(node, cls, reuse, private_lookups, parallel_reuse):
     if (len(node.bases) != 1 or ast.unparse(node.bases[0]) != '_mx_sys.BaseSpace'
             or cls.spaces or cls.is_locked or node.name in cls.visitor.dynamic_ref_classes
-            or _method(node, '_mx_apply_formula') is not None):
+            or any(_method(node, hook) is not None or hook in cls.refs
+                   for hook in ('_mx_apply_formula', '_mx_collect_attach', '_mx_collect_release'))):
         return None
     call = _return_expr(_method(node, 'collect'))
     if (not isinstance(call, ast.Call) or ast.unparse(call.func) != '_mx_sys.collect_from_space'

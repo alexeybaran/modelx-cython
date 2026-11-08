@@ -577,7 +577,7 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
         from modelx_cython.checked_arithmetic import CheckedArithmetic
         from modelx_cython.numeric_helpers import NumericReturns
         cells.formula_allows_exact_receiver = allows_exact_receiver(node, cls_info.name)
-        native_math = self.module.spec._data.get('native_math', False)
+        native_math = self.module.spec._data.get('native_math', self.module.spec.automatic_optimizations)
         if native_math:
             from modelx_cython.native_math import NativeMath
             math_calls = NativeMath()
@@ -671,6 +671,12 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
             module, self.dense_entries, self.formula_entries = add_inline_entries(module, ordinary)
         if self._cold_sums or self._cold_spills:
             module = module.with_changes(body=(*module.body, *self._cold_sums, *self._cold_spills))
+        if any(getattr(cell, 'power_memo', None) for cls in self.module.classes.values()
+               for cell in cls.cells.values()):
+            # Native memo structs contain only scalars. Use Cython's standard
+            # serializer; the module directive also works in pure-Python mode.
+            module = module.with_changes(header=(
+                cst.EmptyLine(comment=cst.Comment('# cython: auto_pickle=True')), *module.header))
         return module.visit(NumericExceptions())
 
     def leave_ClassDef(

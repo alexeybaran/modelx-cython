@@ -190,7 +190,8 @@ def expose_cache_hits(sources, entries, mode):
         functions = {fn.name: fn for fn in ast.parse(source).body if isinstance(fn, ast.FunctionDef)}
         layouts = {name: layout for name in _targets(functions, known)
                    if (fn := functions.get(name)) is not None and (layout := _layout(fn))
-                   and mode in (layout.kind, 'both')}
+                   and (mode in (layout.kind, 'both') or mode == 'auto' and (
+                       layout.kind == 'scalar' or isinstance(ast.parse(layout.test, mode='eval').body, ast.Subscript)))}
         updated = cst.parse_module(source).visit(_Calls(functions, layouts)).bytes
         if updated != source:
             path.write_bytes(updated)

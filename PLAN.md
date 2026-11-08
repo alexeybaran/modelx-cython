@@ -2,6 +2,26 @@
 
 ## Experiment update — native cache hits (2026-11-07)
 
+**Superseding direction:** the user requires automatic selection with no
+product-specific performance settings, and defers broader model validation
+until those models are adjusted. The current experiment implements one common
+policy for adjusted MYGA/VA: observed physical windows with exact spill and a
+storage-cost check, signature-based numeric stores, observed primary sizing,
+guarded math/memo reuse, and scalar/already-proven dense cache hits. Both build
+specs contain only worker count and the same independent-policy/stable-Reference
+reuse contract; neither has per-Cell tuning. Pickling regressions exposed by
+automatic native storage are fixed using normal Cython serialization and
+published numeric-cache state. See `../september-gap/AUTOMATIC_POLICY_PLAN.md`.
+Eight final paired rounds meet the 2x September gate: MYGA 1.895x and VA 1.910x
+median ratios, with upper mean confidence limits below 2x. All one/four-worker
+direct/collect comparisons improve against the frozen control. Windows 3.12
+and 3.14t each pass 108 candidate/helper regressions. Each untouched suite has
+169 passes, seven skips and two failures at old generated-source assertions;
+their unchanged threaded/financial runtime scripts pass separately. These
+failures are disclosed and the untouched suite is not labelled all-green.
+Final native attribution is recorded in the automatic report. The following
+paragraphs describe the preceding manually selected diagnostic candidate.
+
 On `experiment/collect-15x`, the one-worker September comparison is recorded in
 `../september-gap/ATTRIBUTION.md`. Eight paired prototype rounds meet the 2x
 collect/API gate: MYGA 1.895x and VA 1.963x median ratios. Integrated generated

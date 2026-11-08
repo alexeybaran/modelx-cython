@@ -175,7 +175,8 @@ class CheckedArithmetic:
 
     def rewrite(self, function):
         kind = self.cell.get_rettype_expr(c_style=True)
-        divisible = getattr(self.cell, '_spec', {}).get('native_divisibility', False)
+        from modelx_cython import automatic
+        divisible = getattr(self.cell, '_spec', {}).get('native_divisibility', automatic.enabled(self.cell))
         if type(divisible) is not bool:
             raise ValueError('native_divisibility must be a boolean')
         if ((kind not in ('double', 'long long') and not divisible)

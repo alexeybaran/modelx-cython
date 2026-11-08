@@ -334,7 +334,8 @@ def rewrite_powers(
     """
     if resolver is None:
         return node
-    memo = getattr(cells, '_spec', {}).get('memoize_power', False)
+    from modelx_cython import automatic
+    memo = getattr(cells, '_spec', {}).get('memoize_power', automatic.enabled(cells))
     if type(memo) is not bool:
         raise ValueError('memoize_power must be a boolean')
     if memo:
