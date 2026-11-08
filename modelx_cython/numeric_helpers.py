@@ -1,4 +1,4 @@
-"""Native helper returns only at an already-double formula return boundary."""
+"""Native helper values at proven numeric and explicit conversion boundaries."""
 import ast
 import math
 import re
@@ -447,13 +447,14 @@ class ContextualFloat(FormulaTransformer):
     authored child scopes keep their ordinary evaluation semantics.
     """
 
-    def __init__(self, cls, cell, providers, builtin_keys=(), contexts=None):
+    def __init__(self, cls, cell, providers, builtin_keys=(), contexts=None, scope_safe=None):
         super().__init__()
         self.cls, self.cell, self.providers = cls, cell, providers
         self.builtin_keys = builtin_keys
         self.contexts = {} if contexts is None else contexts
         self.operations = set()
         self.scope_safe = False
+        self.original_scope_safe = scope_safe
 
     self_call = staticmethod(NumericReturns.self_call)
     native_key = NumericReturns.native_key
@@ -461,7 +462,8 @@ class ContextualFloat(FormulaTransformer):
 
     def visit_FunctionDef(self, node):
         syntax = ast.parse(cst.Module([]).code_for_node(node)).body[0]
-        self.scope_safe = not has_scope_effects(syntax.body)
+        self.scope_safe = (not has_scope_effects(syntax.body) if self.original_scope_safe is None
+                           else self.original_scope_safe)
         return self.scope_safe
 
     def lower_call(self, call):
@@ -473,13 +475,29 @@ class ContextualFloat(FormulaTransformer):
             return None
         lookup = call.args[0].value
         if not (isinstance(lookup, cst.Call) and 3 <= len(lookup.args) <= 4
-                and not any(arg.keyword or arg.star for arg in lookup.args)
-                and self.native_key(lookup.args[1].value)):
+                and not any(arg.keyword or arg.star for arg in lookup.args)):
             return None
         ref = helper_reference(lookup.func, self.cls.refs)
         operation = getattr(ref, 'float_numeric_helper', None)
-        if not operation or not getattr(ref, 'helper', None):
+        if not getattr(ref, 'helper', None):
             return None
+        key = lookup.args[1].value
+        args = lookup.args
+        if not (operation and self.component_kind(key) == 'long long'):
+            operations = getattr(ref, 'keyed_float_numeric_helper', None)
+            tuple_key = isinstance(key, cst.Tuple)
+            if tuple_key:
+                if any(not isinstance(part, cst.Element) for part in key.elements):
+                    return None
+                parts = tuple(part.value for part in key.elements)
+            else:
+                parts = (key,)
+            if not (operations and len(parts) < len(operations)
+                    and all(self.native_component(part) for part in parts)):
+                return None
+            operation = operations[len(parts)]
+            args = (lookup.args[0], *(cst.Arg(part) for part in parts),
+                    cst.Arg(cst.Name('True' if tuple_key else 'False')), *lookup.args[2:])
         provider, original = ref.helper
         context = self.lookup_context(provider)
         if context is None:
@@ -488,7 +506,42 @@ class ContextualFloat(FormulaTransformer):
         self.operations.add(provider + '.' + original)
         return call.with_changes(
             func=cst.Attribute(cst.Name(module_name(provider)), cst.Name(operation)),
-            args=(cst.Arg(call.func), cst.Arg(lookup.func), cst.Arg(context), *lookup.args))
+            args=(cst.Arg(call.func), cst.Arg(lookup.func), cst.Arg(context), *args))
+
+    def native_component(self, key):
+        return self.component_kind(key) is not None
+
+    def component_kind(self, key):
+        kinds = ('long long', 'bint', 'str', 'unicode')
+        if isinstance(key, cst.Integer):
+            return 'long long' if -(1 << 63) <= key.evaluated_value < (1 << 63) else None
+        if isinstance(key, cst.SimpleString):
+            return 'str' if type(key.evaluated_value) is str else None
+        if isinstance(key, cst.Name):
+            if key.value in ('True', 'False'):
+                return 'bint'
+            if key.value in self.cell.params:
+                kind = self.cell.get_argtype_expr(key.value, c_style=True)
+                return kind if kind in kinds else None
+        if (isinstance(key, cst.UnaryOperation) and isinstance(key.expression, cst.Integer)
+                and isinstance(key.operator, (cst.Minus, cst.Plus))):
+            value = key.expression.evaluated_value * (-1 if isinstance(key.operator, cst.Minus) else 1)
+            return 'long long' if -(1 << 63) <= value < (1 << 63) else None
+        if isinstance(key, cst.Attribute) and isinstance(key.value, cst.Name) and key.value.value == 'self':
+            ref = self.cls.refs.get(key.attr.value)
+            kind = ref.get_type_expr(c_style=True) if ref is not None else None
+            return kind if kind in kinds else None
+        if (isinstance(key, cst.Call) and isinstance(key.func, cst.Name)
+                and key.func.value in self.builtin_keys and key.func.value in ('min', 'max')
+                and len(key.args) >= 2 and not any(arg.keyword or arg.star for arg in key.args)):
+            result = {self.component_kind(arg.value) for arg in key.args}
+            return result.pop() if len(result) == 1 else None
+        if self.self_call(key):
+            cell = self.cls.cells.get(key.func.attr.value)
+            if cell is not None and not cell.is_special() and not cell.called_with_kwargs and not cell.body_has_closure:
+                kind = cell.get_rettype_expr(c_style=True)
+                return kind if kind in kinds else None
+        return None
 
     def leave_Call(self, before, after):
         return self.lower_call(after) or after
