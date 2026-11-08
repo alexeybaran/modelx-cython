@@ -11,6 +11,7 @@ import libcst as cst
 
 from .cell_entries import exact_receiver
 from .helpers import module_name
+from .helper_members import helper_reference
 from .scopes import FormulaTransformer, has_scope_effects
 
 
@@ -226,7 +227,7 @@ class NativeReductions(FormulaTransformer):
         self.exact_receiver_guards.add(guard)
         predicate = f'self.{tree.elt.func.attr}({prefix}_index)'
         return cst.FlattenSentinel(cst.parse_module(f"""
-{function}: object = self.{func.attr.value}
+{function}: object = {self.module.code_for_node(func)}
 {prefix}_first: _mx_cy.longlong = {capture}
 {guard}: _mx_cy.bint = {alias}.{operation}_accepts({function}) and {prefix}_first <= {(1 << 63) - 1 - offset}
 if {guard}:
@@ -330,7 +331,7 @@ return {fallback}
         self.providers.add(provider)
         self.count += 1
         return cst.FlattenSentinel(cst.parse_module(f"""
-{function}: object = self.{func.attr.value}
+{function}: object = {self.module.code_for_node(func)}
 {guard}: _mx_cy.bint = {alias}.{operation}_accepts({function}){extra_guard}
 if {exact_receiver(self.cls_info.name)} and {guard}:
     {counter}: _mx_cy.longlong
@@ -579,11 +580,8 @@ return {fallback}
             reduction = ('bool_' if func.value in ('all', 'any') else 'native_') + func.value
             ref = SimpleNamespace(reduction=reduction,
                                   helper=('modelx_cython._native_iterables', func.value))
-        elif (isinstance(func, cst.Attribute) and isinstance(func.value, cst.Name)
-                and func.value.value == 'self'):
-            ref = self.cls_info.refs.get(func.attr.value)
         else:
-            return after
+            ref = helper_reference(func, self.cls_info.refs)
         reduction = getattr(ref, 'reduction', None)
         if (reduction not in ('f64_sum', 'bool_any', 'bool_all', 'f64_max', 'native_min', 'native_max')
                 or not ref.helper or value.args[0].keyword or value.args[0].star):
@@ -656,7 +654,7 @@ return {fallback}
         tree.elt = rename.visit(tree.elt)
         declarations = [f'{prefix}_function: object', f'{prefix}_state: {alias}.F64Sum']
         declarations += [f'{renamed[name]}: _mx_cy.{kind}' for name,kind in local_types.items()]
-        lines = declarations + [f'{prefix}_function = self.{func.attr.value}',
+        lines = declarations + [f'{prefix}_function = {self.module.code_for_node(func)}',
                                f'if {alias}.f64_accepts({prefix}_function):',
                                f'    {alias}.f64_init(_mx_cy.address({prefix}_state))']
         if capture is not None:
