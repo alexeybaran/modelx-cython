@@ -598,15 +598,17 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
         builtin_reductions = {name for name in ('all', 'any', 'bool', 'min', 'max')
                               if scope[name] and all(isinstance(binding, BuiltinAssignment)
                                                      for binding in scope[name])}
-        reductions = NativeReductions(
-            cls_info, cells, self.helper_providers, node, self._reserve_cold_sum, builtin_bounds,
-            builtin_reductions=builtin_reductions)
-        node = node.visit(reductions)
-        cells.native_reductions = reductions.count
-        cells.exact_reduction_guards = reductions.exact_receiver_guards
         contextual_float = ContextualFloat(
             cls_info, cells, self.helper_providers, builtin_keys,
             contexts=numeric_returns.contexts)
+        reductions = NativeReductions(
+            cls_info, cells, self.helper_providers, node, self._reserve_cold_sum, builtin_bounds,
+            builtin_reductions=builtin_reductions, numeric_expressions=contextual_float)
+        contextual_float.scope_safe = reductions.scope_safe
+        contextual_float.original_scope_safe = reductions.scope_safe
+        node = node.visit(reductions)
+        cells.native_reductions = reductions.count
+        cells.exact_reduction_guards = reductions.exact_receiver_guards
         node = node.visit(contextual_float)
         cls_info.native_contexts.update(contextual_float.contexts)
         # Lowered loops have an explicit lexical receiver; authored generator

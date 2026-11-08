@@ -15,3 +15,5 @@ cdef struct I64Range:
 
 cdef void i64_range_init(I64Range* state, long long start, long long stop, long long step) except *
 cdef bint i64_range_next(I64Range* state, long long* value) noexcept
+cdef long long i64_min_pair(long long first, long long second) noexcept
+cdef long long i64_max_pair(long long first, long long second) noexcept

@@ -4,6 +4,7 @@ Ranges, registered key spans and singleton bindings need proven numeric expressi
 The existing formula body remains authoritative; general generators stay intact.
 """
 import ast
+import copy
 import textwrap
 from types import SimpleNamespace
 
@@ -27,19 +28,19 @@ def _bounds_call(node):
             and not node.keywords and not any(isinstance(arg, ast.Starred) for arg in node.args))
 
 
-def _fold_bounds(node, alias):
+def _fold_bounds(node, alias, kind="double"):
     """Ordinary C calls preserve operand order; Cython's extrema intrinsic doesn't."""
     value = node.args[0]
     for argument in node.args[1:]:
         value = ast.Call(ast.Attribute(ast.Name(alias, ast.Load()),
-                                      'f64_' + node.func.id + '_pair', ast.Load()),
+                                      ('i64_' if kind == 'longlong' else 'f64_') + node.func.id + '_pair', ast.Load()),
                          [value, argument], [])
     return value
 
 
 class NativeReductions(FormulaTransformer):
     def __init__(self, cls_info, cells, providers, formula, reserve_fallback, builtin_bounds,
-                 builtin_reductions=()):
+                 builtin_reductions=(), numeric_expressions=None):
         super().__init__()
         self.cls_info = cls_info
         self.cells = cells
@@ -47,6 +48,7 @@ class NativeReductions(FormulaTransformer):
         self.formula = formula
         self.reserve_fallback = reserve_fallback
         self.builtin_bounds = builtin_bounds
+        self.numeric_expressions = numeric_expressions
         self.builtin_reductions = frozenset(builtin_reductions)
         self.fallbacks = []
         self.exact_receiver_guards = set()
@@ -59,6 +61,9 @@ class NativeReductions(FormulaTransformer):
         self.capture_guards = {}
         syntax = ast.parse(self.module.code_for_node(formula))
         self.scope_safe = not has_scope_effects(syntax.body[0].body)
+        if self.numeric_expressions is not None:
+            self.numeric_expressions.scope_safe = self.scope_safe
+            self.numeric_expressions.original_scope_safe = self.scope_safe
         self.names = {node.id for node in ast.walk(syntax) if isinstance(node, ast.Name)}
         self.names.update(node.arg for node in ast.walk(syntax) if isinstance(node, ast.arg))
         if isinstance(formula.body, cst.IndentedBlock):
@@ -84,7 +89,8 @@ class NativeReductions(FormulaTransformer):
                             node.func.id for node in ast.walk(rhs.body) if _bounds_call(node)}
                         if _bounds_call(rhs.body):
                             self.capture_assignments[id(assignment)] = (rhs.body, target.value, id(consumer))
-                    elif isinstance(rhs.body, ast.Call) and self.kind(rhs.body, {}) == 'longlong':
+                    elif (isinstance(rhs.body, ast.Call) and isinstance(rhs.body.func, ast.Attribute)
+                          and self.kind(rhs.body, {}) == 'longlong'):
                         self.integer_captures[id(consumer)] = target.value
 
     def double_expression(self, node):
@@ -146,9 +152,14 @@ class NativeReductions(FormulaTransformer):
         if (self.builtin_bounds and _call(node, 'abs', 1)
                 and self.kind(node.args[0], locals_) == 'double'):
             return 'double'
-        if (self.builtin_bounds and _bounds_call(node)
-                and all(self.kind(arg, locals_) == 'double' for arg in node.args)):
-            return 'double'
+        if self.builtin_bounds and _bounds_call(node):
+            kinds = {self.kind(arg, locals_) for arg in node.args}
+            if len(kinds) == 1 and next(iter(kinds)) in ('double', 'longlong'):
+                return next(iter(kinds))
+        if self.numeric_expressions is not None and _call(node, 'float', 1):
+            classification = self.numeric_expressions.classify_call(node, locals_)
+            if classification is not None:
+                return classification.result_kind
         if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name) and node.value.id == 'self':
             ref = self.cls_info.refs.get(node.attr)
             if ref is not None:
@@ -417,6 +428,7 @@ return {fallback}
         The outer range arguments are eager, outside PEP 479's body boundary.
         Inner bounds, filters and payloads remain lazy and inside that boundary.
         """
+        tree = copy.deepcopy(tree)
         boolean = ref.reduction in ('bool_any', 'bool_all')
         integral_extremum = (ref.reduction in ('native_min', 'native_max')
                              and self.cells.get_rettype_expr(c_style=True) == 'long long')
@@ -449,6 +461,12 @@ return {fallback}
                     return False
                 if _call(node, 'abs', 1) or _bounds_call(node):
                     return all(primitive_safe(arg) for arg in node.args)
+                if self.numeric_expressions is not None and _call(node, 'float', 1):
+                    classification = self.numeric_expressions.classify_call(node, locals_)
+                    if classification is None or not all(primitive_safe(arg) for arg in classification.checked_arguments):
+                        return False
+                    return all(primitive_safe(call) for call in ast.walk(node.args[0].args[1])
+                               if isinstance(call, ast.Call) and isinstance(call.func, ast.Attribute))
                 cell = self.cls_info.cells[node.func.attr]
                 if len(node.args) != len(cell.params):
                     return False
@@ -558,6 +576,11 @@ return {fallback}
             node.func.id for node in ast.walk(tree) if _bounds_call(node)}
         utility = module_name('modelx_cython._native_iterables')
 
+        owner = self
+        emission_declined = [False]
+        numeric_snapshot = (dict(self.numeric_expressions.contexts),
+                            set(self.numeric_expressions.operations), set(self.providers)) if self.numeric_expressions else None
+
         class Rename(ast.NodeTransformer):
             def visit_Name(self, node):
                 if node.id in names:
@@ -565,17 +588,44 @@ return {fallback}
                 return node
 
             def visit_Call(self, node):
+                bound_kind = owner.kind(node, locals_) if _bounds_call(node) else None
+                if owner.numeric_expressions is not None and _call(node, 'float', 1):
+                    matcher = owner.numeric_expressions
+                    previous = matcher.native_locals
+                    matcher.native_locals = {**previous, **{
+                        name: {'longlong': 'long long'}.get(kind, kind)
+                        for name, kind in locals_.items()}}
+                    try:
+                        lowered = matcher.lower_call(cst.parse_expression(ast.unparse(node)))
+                    finally:
+                        matcher.native_locals = previous
+                    if lowered is None:
+                        emission_declined[0] = True
+                    if lowered is not None:
+                        # Match the original key before rewriting ordered integer
+                        # extrema; one shared matcher owns all lookup semantics.
+                        return self.generic_visit(ast.parse(owner.module.code_for_node(lowered), mode='eval').body)
                 node = self.generic_visit(node)
                 if _call(node, 'abs', 1):
                     node.func = ast.Attribute(ast.Name(alias, ast.Load()), 'f64_abs', ast.Load())
-                elif _bounds_call(node):
-                    return ast.copy_location(_fold_bounds(node, utility), node)
+                elif _bounds_call(node) and bound_kind in ('double', 'longlong'):
+                    return ast.copy_location(_fold_bounds(node, utility, bound_kind), node)
                 return node
 
         rewrite = Rename()
         for part in tree.generators:
             rewrite.visit(part)
         tree.elt = rewrite.visit(tree.elt)
+        if emission_declined[0]:
+            del self.fallbacks[previous:]
+            contexts, operations, providers = numeric_snapshot
+            self.numeric_expressions.contexts.clear()
+            self.numeric_expressions.contexts.update(contexts)
+            self.numeric_expressions.operations.clear()
+            self.numeric_expressions.operations.update(operations)
+            self.providers.clear()
+            self.providers.update(providers)
+            return after
         outer = tree.generators[0].iter
         progressions = {i: f'{prefix}_range_{i}' for i, part in enumerate(tree.generators)
                         if _call(part.iter, 'range', 3)
@@ -767,7 +817,9 @@ return {fallback}
             capture_guard=self.capture_guards.get(id(before)))
         if result is not after:
             return result
-        if builtin:
+        if builtin or any(_call(node, 'float', 1) for node in ast.walk(tree)):
+            # Contextual conversions have one admission/emission path. A failed
+            # resource request must not fall into an older object-capable loop.
             return after
         if reduction == 'bool_any':
             return self.bounded_any(before, after, func, ref, source, tree, wrapper=wrapper)

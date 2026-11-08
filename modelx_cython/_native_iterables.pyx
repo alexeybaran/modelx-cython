@@ -73,3 +73,11 @@ cdef bint i64_range_next(I64Range* state, long long* value) noexcept:
         # signed-int64 endpoints; the terminating increment is never computed.
         state.current += state.step
     return True
+
+
+cdef long long i64_min_pair(long long first, long long second) noexcept:
+    return second if second < first else first
+
+
+cdef long long i64_max_pair(long long first, long long second) noexcept:
+    return second if second > first else first

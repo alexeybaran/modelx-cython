@@ -16,7 +16,8 @@ def test_module_helpers_compile_through_shared_metadata(tmp_path):
     try:
         p = model.new_space('Projection', refs={'ops': typed_inputs, 'alias_ops': typed_inputs,
             'values': (1e16, 1.0, -1e16), 'count_ref': 3,
-            'step_ref': 2, 'key_table': Table((0, 1, 2), ((0.0,), (1.0,), (2.0,)), ('value',))})
+            'step_ref': 2, 'state_table': Table(('AFT_INT', 'BEF_INT'), ((1.0,), (2.0,)), ('value',)),
+            'key_table': Table((0, 1, 2), ((0.0,), (1.0,), (2.0,)), ('value',))})
         p.new_cells('count', 'lambda: count_ref')
         p.new_cells('term', 'lambda n, i: values[i] + n * 0.0')
         p.new_cells('total', 'lambda n: ops.sum_f64(term(n, i) for i in range(count()))')
@@ -40,20 +41,32 @@ def test_module_helpers_compile_through_shared_metadata(tmp_path):
         p.new_cells('state_total', 'lambda n: ops.sum_f64(term_at(n, i, \"AFT_INT\") for state in (\"DEATH\", \"LAPSE\") for i in range(count()))')
         p.new_cells('state_some', 'lambda n: any(term_at(n, 1, state) > 0.0 for state in (\"AFT_INT\", \"BEF_INT\"))')
         p.new_cells('tuple_minimum', 'lambda n: min(i for i in (-9223372036854775808, 0, 9223372036854775807))')
+        p.new_cells('lookup_total', 'lambda n: ops.sum_f64(float(ops.lookup(key_table, i, \"value\")) for i in ops.keys(key_table))')
+        p.new_cells('lookup_filtered', 'lambda n: all(term(n, i) > 0.0 for i in range(count()) if float(ops.lookup(key_table, i, \"value\")) > 0.0)')
+        p.new_cells('lookup_states', 'lambda n: ops.sum_f64(float(ops.lookup(state_table, state, \"value\")) for state in (\"AFT_INT\", \"BEF_INT\"))')
+        p.new_cells('lookup_bounded', 'lambda n: ops.sum_f64(float(ops.lookup(key_table, max(i, 0), \"value\")) for i in range(count()))')
+        p.new_cells('mx_context_lookup_declined', 'lambda: 42')
+        p.new_cells('lookup_declined', 'lambda n: ops.sum_f64(float(ops.lookup(key_table, i, \"value\")) for i in range(count()))')
         model.export(tmp_path / 'exported')
     finally:
         model.close()
-    methods = ('total', 'alias_total', 'every', 'wrapped_every', 'some', 'builtin_every', 'minimum', 'maximum', 'scaled_every', 'key_total', 'key_every', 'key_minimum', 'key_local', 'captured_every', 'stepped_some', 'stepped_minimum', 'timed_some', 'state_total', 'state_some', 'tuple_minimum')
+    methods = ('total', 'alias_total', 'every', 'wrapped_every', 'some', 'builtin_every', 'minimum', 'maximum', 'scaled_every', 'key_total', 'key_every', 'key_minimum', 'key_local', 'captured_every', 'stepped_some', 'stepped_minimum', 'timed_some', 'state_total', 'state_some', 'tuple_minimum', 'lookup_total', 'lookup_filtered', 'lookup_states', 'lookup_bounded')
     (tmp_path / 'sample.py').write_text('from exported import mx_model\np = mx_model.Projection\n'
-        + ''.join(f'for n in range(3): p.{name}(n)\n' for name in methods))
+        + ''.join(f'for n in range(3): p.{name}(n)\n' for name in methods)
+        + 'for n in range(3): p.lookup_declined(n)\n')
     subprocess.run([sys.executable, '-m', 'modelx_cython', 'exported', '--sample', 'sample.py', '--no-spec'],
                    cwd=tmp_path, check=True)
     report = json.loads((tmp_path / 'exported_cy/_mx_admission.json').read_text())
     for name in methods:
         assert report[f'exported_cy._mx_classes._c_Projection._f_{name}']['native_reductions'] == 1
+    declined = report['exported_cy._mx_classes._c_Projection._f_lookup_declined']
+    assert declined['native_reductions'] == 0
+    assert declined['native_numeric_helpers'] == []
     syntax = ast.parse((tmp_path / 'exported_cy/_mx_classes.py').read_text())
     c_source = (tmp_path / 'exported_cy/_mx_classes.c').read_text()
-    for name in ('key_total', 'key_every', 'key_minimum', 'key_local', 'captured_every'):
+    for name in ('key_total', 'key_every', 'key_minimum', 'key_local', 'captured_every',
+                 'state_total', 'state_some', 'tuple_minimum', 'timed_some',
+                 'lookup_total', 'lookup_filtered', 'lookup_states', 'lookup_bounded'):
         method = next(node for node in ast.walk(syntax)
                       if isinstance(node, ast.FunctionDef) and node.name == '_f_' + name)
         native = method.body[0].value.func.id
@@ -65,6 +78,10 @@ def test_module_helpers_compile_through_shared_metadata(tmp_path):
             assert 'for (' in body
             if name.startswith('key_'):
                 assert 'key_span_at(' in body
+            if name.startswith('lookup_'):
+                operation = (typed_inputs.lookup.__modelx_cython_keyed_float_numeric__[1]
+                             if name == 'lookup_states' else typed_inputs.lookup.__modelx_cython_float_numeric__)
+                assert operation + '(' in body
             assert not any(token in body for token in
                            ('PyObject_GetIter(', '__Pyx_PyObject_GetIterNextFunc(', 'PyIter_Next('))
     probe = textwrap.dedent('''\
@@ -86,6 +103,9 @@ def test_module_helpers_compile_through_shared_metadata(tmp_path):
         assert p.state_total(0) == 2.0
         assert p.state_some(0) is True
         assert p.tuple_minimum(0) == -(1 << 63)
+        assert p.lookup_total(0) == p.lookup_states(0) == p.lookup_bounded(0) == 3.0
+        assert p.lookup_filtered(0) is False
+        assert p.lookup_declined(0) == 3.0
         assert p.wrapped_every(0) is False
         assert p.builtin_every(0) is False
         assert p.minimum(0) == 0 and p.maximum(0) == 2
@@ -124,6 +144,21 @@ def test_module_helpers_compile_through_shared_metadata(tmp_path):
         try: p.key_every(1)
         except StopIteration as actual: assert actual is error
         else: raise AssertionError('outer StopIteration changed')
+        p = fresh()
+        lookup_seen = []
+        def replacement_lookup(table, key, column):
+            lookup_seen.append((key, column))
+            return '2.5'
+        p.ops = SimpleNamespace(sum_f64=typed_inputs.sum_f64, keys=typed_inputs.keys, lookup=replacement_lookup)
+        assert p.lookup_total(1) == 7.5
+        assert lookup_seen == [(0, 'value'), (1, 'value'), (2, 'value')]
+        error = StopIteration('lookup body')
+        def broken_lookup(table, key, column): raise error
+        p.ops = SimpleNamespace(sum_f64=typed_inputs.sum_f64, keys=typed_inputs.keys, lookup=broken_lookup)
+        try: p.lookup_total(2)
+        except RuntimeError as actual:
+            assert actual.__cause__ is error and actual.__context__ is error
+        else: raise AssertionError('lookup StopIteration not converted')
         truth_seen = []
         class Truth:
             def __bool__(self):
