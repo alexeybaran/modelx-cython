@@ -99,7 +99,11 @@ A single immediately preceding double-valued binding can feed composed reduction
 The original assignment executes eagerly in place; its value is passed into the
 retained fallback rather than recomputed. Scope-proved double Cells and double
 min/max expressions can establish that binding. Multi-argument double min/max
-payloads use Cython intrinsics, preserving argument order and first-value ties.
+payloads use strict-comparison C helpers. Cython 3.2.9 extrema intrinsics can
+reorder effectful operands; ordinary nested C calls retain the original operand
+order and first-value ties. A captured min/max assignment records its current
+callable and admission before evaluating operands; its fallback retains the
+original captured object. The native loop unboxes the admitted capture once.
 Unknown, reassigned-parameter and arbitrary-object bindings decline.
 
 Existing bounded max/any mechanisms remain separately admitted. Their

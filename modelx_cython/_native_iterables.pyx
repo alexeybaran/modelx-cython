@@ -36,3 +36,11 @@ cdef bint max_accepts(object function):
 
 cdef double f64_abs(double value) noexcept:
     return fabs(value)
+
+
+cdef double f64_min_pair(double first, double second) noexcept:
+    return second if second < first else first
+
+
+cdef double f64_max_pair(double first, double second) noexcept:
+    return second if second > first else first

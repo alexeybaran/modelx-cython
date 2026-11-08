@@ -27,6 +27,16 @@ def _bounds_call(node):
             and not node.keywords and not any(isinstance(arg, ast.Starred) for arg in node.args))
 
 
+def _fold_bounds(node, alias):
+    """Ordinary C calls preserve operand order; Cython's extrema intrinsic doesn't."""
+    value = node.args[0]
+    for argument in node.args[1:]:
+        value = ast.Call(ast.Attribute(ast.Name(alias, ast.Load()),
+                                      'f64_' + node.func.id + '_pair', ast.Load()),
+                         [value, argument], [])
+    return value
+
+
 class NativeReductions(FormulaTransformer):
     def __init__(self, cls_info, cells, providers, formula, reserve_fallback, builtin_bounds,
                  builtin_reductions=()):
@@ -45,6 +55,8 @@ class NativeReductions(FormulaTransformer):
         self.captures = {}
         self.integer_captures = {}
         self.capture_operations = {}
+        self.capture_assignments = {}
+        self.capture_guards = {}
         syntax = ast.parse(self.module.code_for_node(formula))
         self.scope_safe = not has_scope_effects(syntax.body[0].body)
         self.names = {node.id for node in ast.walk(syntax) if isinstance(node, ast.Name)}
@@ -65,10 +77,13 @@ class NativeReductions(FormulaTransformer):
                 target = expression.targets[0].target
                 if isinstance(target, cst.Name):
                     rhs = ast.parse('(' + self.module.code_for_node(expression.value) + ')', mode='eval')
-                    if self.double_expression(rhs.body):
+                    bounds = [node for node in ast.walk(rhs.body) if _bounds_call(node)]
+                    if self.double_expression(rhs.body) and (not bounds or _bounds_call(rhs.body)):
                         self.captures[id(consumer)] = target.value
                         self.capture_operations[id(consumer)] = {
                             node.func.id for node in ast.walk(rhs.body) if _bounds_call(node)}
+                        if _bounds_call(rhs.body):
+                            self.capture_assignments[id(assignment)] = (rhs.body, target.value, id(consumer))
                     elif isinstance(rhs.body, ast.Call) and self.kind(rhs.body, {}) == 'longlong':
                         self.integer_captures[id(consumer)] = target.value
 
@@ -391,7 +406,7 @@ return {fallback}
         return start.id, lower.right.value, step.operand.value
 
     def primitive_ranges(self, after, func, ref, source, tree, wrapper=None,
-                         capture=None, capture_operations=()):
+                         capture=None, capture_operations=(), capture_guard=None):
         """Compose primitive reductions with Python generator boundaries.
 
         Unit steps cannot overflow at the terminating increment. General steps
@@ -507,12 +522,14 @@ return {fallback}
         previous = len(self.fallbacks)
         prepared_outer = prefix + '_outer' if key_iteration else None
         fallback = self.cold_fallback(source, tree, capture, function, wrapper=wrapper,
-                                      prepared_outer=prepared_outer)
+                                      prepared_outer=prepared_outer, capture_type="object")
         if len(self.fallbacks) == previous:
             return after
         provider, operation = ref.helper
         alias = module_name(provider)
         names = {name: f'{prefix}_index_{i}' for i, name in enumerate(targets)}
+        if capture:
+            names[capture] = prefix + '_capture'
         pair_operations = set(capture_operations) | {
             node.func.id for node in ast.walk(tree) if _bounds_call(node)}
         utility = module_name('modelx_cython._native_iterables')
@@ -527,6 +544,8 @@ return {fallback}
                 node = self.generic_visit(node)
                 if _call(node, 'abs', 1):
                     node.func = ast.Attribute(ast.Name(alias, ast.Load()), 'f64_abs', ast.Load())
+                elif _bounds_call(node):
+                    return ast.copy_location(_fold_bounds(node, utility), node)
                 return node
 
         rewrite = Rename()
@@ -548,6 +567,8 @@ return {fallback}
         guard = (f'{exact_receiver(self.cls_info.name)} and {alias}.'
                  f'{"f64_accepts" if ref.reduction == "f64_sum" else operation + "_accepts"}'
                  f'({function}){extra_guard}')
+        if capture_guard:
+            guard += ' and ' + capture_guard
         lines = [f'{function}: object = {function_value}']
         if key_iteration:
             producer, (prepare, span_type, span_count, span_at), original_outer = key_iteration
@@ -567,6 +588,8 @@ return {fallback}
         else:
             lines.append(f'if {guard}:')
         lines += [f'    {names[name]}: _mx_cy.{locals_[name]}' for name in names]
+        if capture:
+            lines.append(f'    {names[capture]} = {capture}')
         lines += [f'    {name}: _mx_cy.longlong = {value}' for name, value in arguments]
         if isinstance(outer, ast.Tuple):
             lines += [f'    {tree.generators[0].target.id} = {ast.unparse(outer.elts[0])}']
@@ -629,6 +652,21 @@ return {fallback}
     def leave_SimpleStatementLine(self, before, after):
         if not hasattr(ast, 'unparse'):
             return after
+        assignment = self.capture_assignments.get(id(before))
+        if assignment:
+            expression, target, consumer = assignment
+            prefix = self.reserve_prefix()
+            alias = module_name('modelx_cython._native_iterables')
+            function, guard = prefix + '_bound_function', prefix + '_bound_native'
+            self.capture_guards[consumer] = guard
+            self.providers.add('modelx_cython._native_iterables')
+            native = ast.unparse(_fold_bounds(expression, alias))
+            arguments = ', '.join(ast.unparse(arg) for arg in expression.args)
+            lines = [f'{function}: object = {expression.func.id}',
+                     f'{guard}: _mx_cy.bint = {alias}.{expression.func.id}_accepts({function})',
+                     f'if {guard}:', f'    {target} = {native}',
+                     'else:', f'    {target} = {function}({arguments})']
+            return cst.FlattenSentinel(cst.parse_module('\n'.join(lines) + '\n').body)
         if len(before.body) != 1 or not isinstance(before.body[0], cst.Return):
             return after
         value = before.body[0].value
@@ -669,7 +707,8 @@ return {fallback}
         result = self.primitive_ranges(
             after, func, ref, source, tree, wrapper=wrapper,
             capture=self.captures.get(id(before)),
-            capture_operations=self.capture_operations.get(id(before), ()))
+            capture_operations=self.capture_operations.get(id(before), ()),
+            capture_guard=self.capture_guards.get(id(before)))
         if result is not after:
             return result
         if builtin:
