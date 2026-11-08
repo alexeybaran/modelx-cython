@@ -8,6 +8,7 @@ from modelx_cython.consts import CY_MOD
 from modelx_cython.dense_proofs import _binding_names
 from modelx_cython.cell_entries import EntryModule
 from modelx_cython.typedefs import primitive_kind
+from modelx_cython.scopes import expression_ast
 
 _NATIVE = {f'{CY_MOD}.{name}' for name in ('bint', 'double', 'longlong')}
 
@@ -164,7 +165,7 @@ class _Calls(cst.CSTTransformer):
         types = {arg.arg: ast.unparse(arg.annotation) for arg in parameters if arg.annotation is not None}
         mapping = {layout.parameters[0][0]: updated.args[0].value}
         for (name, annotation), arg in zip(layout.parameters[1:], updated.args[1:]):
-            expression = ast.parse(cst.Module([]).code_for_node(arg.value), mode='eval').body
+            expression = expression_ast(arg.value)
             if isinstance(expression, ast.Name):
                 if types.get(expression.id) != annotation:
                     return updated
@@ -191,5 +192,5 @@ def expose_entries(state: EntryModule, known, mode):
     layouts = {name: layout for name in _targets(functions, known)
                if (fn := functions.get(name)) is not None and (layout := _layout(fn))
                and (mode in (layout.kind, 'both') or mode == 'auto' and (
-                   layout.kind == 'scalar' or isinstance(ast.parse(layout.test, mode='eval').body, ast.Subscript)))}
+                   layout.kind == 'scalar' or isinstance(expression_ast(layout.test), ast.Subscript)))}
     return state.replace(state.syntax.visit(_Calls(functions, layouts)))

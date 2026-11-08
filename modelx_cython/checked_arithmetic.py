@@ -4,7 +4,7 @@ import ast
 import math
 
 import libcst as cst
-from .scopes import Names, has_scope_effects
+from .scopes import Names, expression_ast, has_scope_effects
 
 _BOUND = 1 << 25
 
@@ -135,7 +135,7 @@ class CheckedArithmetic:
                 result = before.body[0].value
                 if result is None:
                     return after
-                expr = ast.parse(self.code(result), mode='eval').body
+                expr = expression_ast(result)
                 if not (isinstance(expr, ast.BinOp) and isinstance(expr.op, ast.Mult)
                         and isinstance(expr.right, ast.BinOp) and isinstance(expr.right.op, ast.Sub)
                         and isinstance(expr.right.right, ast.Constant)
@@ -179,9 +179,10 @@ class CheckedArithmetic:
             visit_ListComp = visit_SetComp = visit_DictComp = visit_GeneratorExp = visit_Lambda
 
             def leave_Comparison(inner, before, after):
-                if len(before.comparisons) != 1:
+                if (len(before.comparisons) != 1 or not isinstance(
+                        before.comparisons[0].operator, (cst.Equal, cst.NotEqual))):
                     return after
-                expr = ast.parse(self.code(before), mode='eval').body
+                expr = expression_ast(before)
                 if (not isinstance(expr.ops[0], (ast.Eq, ast.NotEq))
                         or not isinstance(expr.comparators[0], ast.Constant)
                         or type(expr.comparators[0].value) is not int

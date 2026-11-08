@@ -7,6 +7,7 @@ import libcst as cst
 from .cell_entries import EntryModule, dense_condition
 from .consts import CY_MOD, FORMULA_PREF
 from .dense_formulas import _ExactTests
+from .scopes import expression_ast
 
 
 def _unsigned_check(layout):
@@ -41,9 +42,9 @@ def _public_checks(cls, layouts):
                         cst.parse_expression(f'{CY_MOD}.longlong'))
                     and isinstance(method.body, cst.IndentedBlock) and len(method.body.body) == 1):
                 guard, = method.body.body
-                expected = ast.parse(dense_condition(layout.axes), mode='eval').body
+                expected = expression_ast(dense_condition(layout.axes))
                 if (isinstance(guard, cst.If) and isinstance(guard.orelse, cst.Else)
-                        and ast.dump(ast.parse(cst.Module([]).code_for_node(guard.test), mode='eval').body)
+                        and ast.dump(expression_ast(guard.test))
                         == ast.dump(expected)):
                     method = method.with_changes(body=method.body.with_changes(
                         body=(guard.with_changes(test=check),)))
@@ -90,9 +91,9 @@ def specialize_entries(state: EntryModule, layouts, propagate=False):
         axis, = layout.axes
         guard, = stmt.body.body
         proof = params[-1].name.value if len(params) == 3 else None
-        expected = ast.parse(dense_condition(layout.axes, proof), mode="eval").body
+        expected = expression_ast(dense_condition(layout.axes, proof))
         if (not isinstance(guard, cst.If) or not isinstance(guard.orelse, cst.Else)
-                or ast.dump(ast.parse(module.code_for_node(guard.test), mode="eval").body) != ast.dump(expected)):
+                or ast.dump(expression_ast(guard.test)) != ast.dump(expected)):
             rewritten.append(stmt)
             continue
         if proof is None:

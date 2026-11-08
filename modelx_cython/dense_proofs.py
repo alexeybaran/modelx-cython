@@ -8,6 +8,7 @@ import libcst as cst
 from .cell_entries import EntryModule, dense_condition, exact_receiver
 from .consts import CY_MOD, FORMULA_PREF, MX_SELF
 from .scopes import binding_names as _binding_names
+from .scopes import expression_ast
 
 
 def _checked_guard(entry, layout):
@@ -19,7 +20,7 @@ def _checked_guard(entry, layout):
         return None
     if [param.arg for param in entry.args.args] != [MX_SELF, *(axis.key for axis in axes)]:
         return None
-    expected = ast.parse(dense_condition(axes), mode="eval").body
+    expected = expression_ast(dense_condition(axes))
     return guard if ast.dump(guard.test) == ast.dump(expected) else None
 
 
@@ -66,7 +67,7 @@ def _exact_calls(node, receiver, exact=False):
 def _formula_ranges(guard, layout, uses, spill_functions, spill_uses):
     """Return the bounds common to every generated entry to the formula."""
     keys = ', '.join(axis.key for axis in layout.axes)
-    expected = ast.dump(ast.parse(f'{MX_SELF}.{layout.formula}({keys})', mode='eval').body)
+    expected = ast.dump(expression_ast(f'{MX_SELF}.{layout.formula}({keys})'))
 
     def calls_formula(nodes):
         return sum(isinstance(node, ast.Call) and ast.dump(node) == expected
@@ -82,7 +83,7 @@ def _formula_ranges(guard, layout, uses, spill_functions, spill_uses):
             and isinstance(fallback, ast.If) and len(fallback.body) == 1
             and len(fallback.orelse) == 1 and isinstance(fallback.orelse[0], ast.Raise)):
         return ()
-    logical = ast.parse(dense_condition(layout.logical_axes), mode='eval').body
+    logical = expression_ast(dense_condition(layout.logical_axes))
     spill_call = ast.parse(f'return {layout.spill_entry}({MX_SELF}, {keys})').body[0]
     if ast.dump(fallback.test) != ast.dump(logical) or ast.dump(fallback.body[0]) != ast.dump(spill_call):
         return ()
@@ -143,7 +144,7 @@ def prove_entries(state: EntryModule, records, uses):
         mutable = _binding_names(nodes)
         ranges = {axis.key: (axis.lower, axis.stop) for axis in source_axes if axis.key not in mutable}
         types = {axis.key: axis.c_type for axis in source_axes}
-        receiver = ast.dump(ast.parse(exact_receiver(layout.owner), mode="eval").body)
+        receiver = ast.dump(expression_ast(exact_receiver(layout.owner)))
         # Private guarded calls are emitted only in the current scope by inline_entries.
         for call in (call for statement in formula.body for call in _exact_calls(statement, receiver)):
             target = call.func.id

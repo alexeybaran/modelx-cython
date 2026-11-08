@@ -10,6 +10,12 @@ OPAQUE_SCOPES = (
 )
 
 
+def expression_ast(expression):
+    """Parse detached expressions with their implicit parenthesized context."""
+    source = expression if isinstance(expression, str) else cst.Module([]).code_for_node(expression)
+    return ast.parse('(\n' + source + '\n)', mode='eval').body
+
+
 class Names(cst.CSTVisitor):
     """Allocate identifiers from syntax, never comments or literal text."""
     def __init__(self, node=None, used=()):

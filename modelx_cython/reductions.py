@@ -9,7 +9,7 @@ import libcst as cst
 
 from .cell_entries import exact_receiver
 from .helpers import module_name
-from .scopes import FormulaTransformer, Names, has_scope_effects
+from .scopes import FormulaTransformer, Names, expression_ast, has_scope_effects
 from .typedefs import primitive_kind
 
 
@@ -71,10 +71,10 @@ class NativeReductions(FormulaTransformer):
                     continue
                 target = expression.targets[0].target
                 if isinstance(target, cst.Name):
-                    rhs = ast.parse('(' + self.module.code_for_node(expression.value) + ')', mode='eval')
-                    if self.double_expression(rhs.body):
+                    rhs = expression_ast(expression.value)
+                    if self.double_expression(rhs):
                         self.captures[id(consumer)] = target.value
-                    elif isinstance(rhs.body, ast.Call) and self.kind(rhs.body, {}) == 'longlong':
+                    elif isinstance(rhs, ast.Call) and self.kind(rhs, {}) == 'longlong':
                         self.integer_captures[id(consumer)] = target.value
 
     def double_expression(self, node):
@@ -398,7 +398,7 @@ return {fallback}
                 or not ref.helper or value.args[0].keyword or value.args[0].star):
             return after
         source = self.module.code_for_node(value.args[0].value)
-        tree = ast.parse('(' + source + ')', mode='eval').body
+        tree = expression_ast(source)
         if not isinstance(tree, ast.GeneratorExp) or not self.builtin_bounds:
             return after
         # A named sum result may remain an object when a replacement helper

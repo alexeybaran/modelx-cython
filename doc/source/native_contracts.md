@@ -18,6 +18,9 @@ Formula-local facts do not cross nested functions, classes, lambdas or
 comprehension scopes. A statement-changing lowering declines observable binding
 effects it cannot preserve, including globals, nonlocals and exception targets.
 Declining an optimization retains ordinary Cython execution.
+Detached expressions retain the implicit parentheses supplied by their source
+context, including multiline operators and comments. Admission shares this
+parsing boundary across arithmetic, reductions and cache-entry facts.
 
 Exact receiver checks preserve Cell subclass dispatch. `EnumDefinitions` marks
 fixed compiled model-code bindings: changing a declared binding or its marker
