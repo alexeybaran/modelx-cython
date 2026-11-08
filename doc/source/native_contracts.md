@@ -89,6 +89,10 @@ Signed literal bindings are checked as complete values against int64 bounds;
 wider Python integers stay on the object path. A proved registered sum may be
 returned or assigned to one local name. Assignment does not convert an arbitrary
 replacement helper's result to the enclosing Cell's return type.
+Native ranges also need a representable final loop increment. Unit strides
+are safe with int64 bounds; other strides require a literal-range proof.
+Unproved strides and boundary overshoots keep the Python generator, including
+its ordinary zero-step error.
 
 Generated variables avoid authored names. A prefix appearing in a formula is
 not itself a reason to reject it. Fallbacks preserve the current helper callable,

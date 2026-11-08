@@ -19,14 +19,22 @@ def compile_model(path, sample):
 def test_generator_literals_preserve_integer_width_and_sign(tmp_path):
     values = {'minimum': -(1 << 63), 'maximum': (1 << 63)-1,
               'above': 1 << 63, 'below': -(1 << 63)-1, 'large': 1 << 80}
+    low, high = -(1 << 63), (1 << 63)-1
+    ranges = {'positive_overshoot': (high-1, high, 2),
+              'negative_overshoot': (low+1, low, -2),
+              'positive_safe': (high-2, high, 2), 'negative_safe': (low+2, low, -2),
+              'empty': (high-1, high-2, 2)}
     model = mx.new_model('LiteralDomains')
     try:
         space = model.new_space('Values', refs={'sum_f64': sum_f64, 'Status':HTTPStatus,
-                                'definitions':EnumDefinitions(('Status',))})
+                                'definitions':EnumDefinitions(('Status',)), 'stride': 2})
         for name, value in values.items():
             space.new_cells(name, f'lambda: sum_f64(k * 1.0 for k in ({value},))')
         space.new_cells('step', f'lambda: sum_f64(k * 1.0 for k in range(0, 2, {1 << 80}))')
         space.new_cells('filtered', f'lambda: sum_f64(k * 1.0 for k in ({1 << 63},) if k > 0)')
+        for name, args in ranges.items():
+            space.new_cells(name, f'lambda: sum_f64(k * 1.0 for k in range{args!r})')
+        space.new_cells('dynamic_stride', f'lambda epoch=0: sum_f64(k * 1.0 for k in range({high-1}, {high}, stride))')
         space.new_cells('authored_enum_prefix', '''def authored_enum_prefix():
     _mx_enum_const_0 = -123
     if _mx_enum_const_0 < 0:
@@ -45,11 +53,13 @@ def test_generator_literals_preserve_integer_width_and_sign(tmp_path):
         model.export(tmp_path/'exported')
     finally:
         model.close()
-    names = (*values, 'step', 'filtered', 'authored_enum_prefix', 'assigned', 'weighted')
+    names = (*values, *ranges, 'dynamic_stride', 'step', 'filtered', 'authored_enum_prefix', 'assigned', 'weighted')
     compile_model(tmp_path, 'from exported import mx_model\n'
                   + '\n'.join(f'mx_model.Values.{name}()' for name in names)
                   + '\nfor epoch in (1,2): mx_model.Values.assigned(epoch); mx_model.Values.weighted(epoch)\n')
     expected = {name: float(value) for name, value in values.items()}
+    expected.update({name: sum(k * 1.0 for k in range(*args)) for name, args in ranges.items()})
+    expected['dynamic_stride'] = float(high-1)
     expected.update(step=0.0, filtered=float(1 << 63), authored_enum_prefix=100,
                     assigned='3.0', weighted=4.5)
     for package in ('exported', 'exported_cy'):
@@ -60,13 +70,18 @@ def test_generator_literals_preserve_integer_width_and_sign(tmp_path):
             '    actual=getattr(mx_model.Values,name)()\n'
             '    assert actual==value,(name,actual,value)\n'], cwd=tmp_path, check=True, timeout=30)
     admission = json.loads((tmp_path/'exported_cy/_mx_admission.json').read_text())
-    for name in ('above', 'below', 'large', 'step', 'filtered'):
+    for name in ('above', 'below', 'large', 'step', 'filtered',
+                 'positive_overshoot', 'negative_overshoot', 'dynamic_stride'):
         assert admission[f'exported_cy._mx_classes._c_Values._f_{name}']['native_reductions'] == 0
-    for name in ('assigned', 'weighted'):
+    for name in ('assigned', 'weighted', 'positive_safe', 'negative_safe', 'empty'):
         assert admission[f'exported_cy._mx_classes._c_Values._f_{name}']['native_reductions'] == 1
     for package in ('exported', 'exported_cy'):
         script=f'''from {package} import mx_model
 s=mx_model.Values
+s.stride=0
+try: s.dynamic_stride(1)
+except ValueError as error: assert str(error)=='range() arg 3 must not be zero'
+else: raise AssertionError('zero range step did not raise')
 class Value:
     def __str__(self): return 'custom result'
 def replacement(values):

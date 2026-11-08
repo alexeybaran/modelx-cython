@@ -37,6 +37,9 @@ def test_known_legacy_upgrade_is_structural_and_preserves_other_code(source):
     lambda code: code.replace('key = (coords, args)', 'key = (args, coords)'),
     lambda code: code + '\ndef _mx_collect_chunk(*args): pass\n',
     lambda code: code + '\n_mx_collect_adapter_version = 17\n',
+    lambda code: code + '\n_mx_collect_native_coords = object()\n',
+    lambda code: code + '\ndef _mx_collect_adapter_version(): pass\n',
+    lambda code: code.replace('scratch = {}', 'scratch = {"authored": True}'),
 ])
 def test_unknown_adapter_keeps_the_general_runtime(change):
     source = change(legacy())
@@ -70,3 +73,16 @@ def test_parallel_worker_setting_requires_an_unambiguous_export():
     for source in ('pass\n', '_mx_parallel_workers = 1\n_mx_parallel_workers = 2\n'):
         with pytest.raises(ValueError, match='collection-enabled'):
             CollectRuntime(source).render(4)
+
+
+def test_legacy_protocol_ignores_python38_index_wrappers(monkeypatch):
+    from modelx_cython.collect_adapter import _legacy
+    class Index(ast.AST):
+        _fields = ('value',)
+        def __init__(self, value): self.value = value
+    tree = ast.parse(legacy())
+    for node in list(ast.walk(tree)):
+        if isinstance(node, ast.Subscript) and not isinstance(node.slice, ast.Slice):
+            node.slice = Index(node.slice)
+    monkeypatch.setattr(ast, 'Index', Index)
+    assert _legacy(tree)

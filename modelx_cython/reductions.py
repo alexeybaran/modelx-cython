@@ -19,6 +19,25 @@ def _call(node, name, argc):
             and not any(isinstance(arg, ast.Starred) for arg in node.args))
 
 
+def safe_range_increment(iterator):
+    """Prove the final C loop increment, including an overshoot of stop."""
+    if len(iterator.args) < 3:
+        return True
+    try:
+        step = ast.literal_eval(iterator.args[2])
+        if type(step) not in (int, bool):
+            return False
+        if step in (-1, 1):
+            return True
+        bounds = [ast.literal_eval(arg) for arg in iterator.args]
+        if not all(primitive_kind(value) in ('longlong', 'bint') for value in bounds):
+            return False
+        values = range(*bounds)
+        return not values or primitive_kind(values[-1] + step) == 'longlong'
+    except (ValueError, TypeError):
+        return False
+
+
 class NativeReductions(FormulaTransformer):
     def __init__(self, cls_info, cells, providers, formula, reserve_fallback, builtin_bounds):
         super().__init__()
@@ -413,7 +432,8 @@ return {fallback}
                     and iterator.func.id == 'range' and not iterator.keywords
                     and 1 <= len(iterator.args) <= 3
                     and all(self.kind(arg, local_types) in ('longlong', 'bint')
-                            for arg in iterator.args)):
+                            for arg in iterator.args)
+                    and safe_range_increment(iterator)):
                 local_types[name] = 'longlong'
             elif isinstance(iterator, ast.Tuple) and len(iterator.elts) == 1:
                 kind = self.kind(iterator.elts[0], local_types)

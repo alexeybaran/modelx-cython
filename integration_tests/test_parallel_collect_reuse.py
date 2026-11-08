@@ -35,7 +35,8 @@ def test_parallel_collect_reuse_merges_completed_chunks_and_retries(tmp_path, le
                  '_mx_collect_native_coords'}
         body = []
         for node in syntax.body:
-            if isinstance(node, cst.FunctionDef) and node.name.value in names:
+            if isinstance(node, cst.FunctionDef) and (node.name.value in names
+                    or node.name.value.startswith('_mx_collect_')):
                 continue
             if (isinstance(node, cst.SimpleStatementLine) and len(node.body) == 1
                     and isinstance(node.body[0], cst.Assign)
