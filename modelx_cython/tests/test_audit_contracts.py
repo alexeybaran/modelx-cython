@@ -121,15 +121,6 @@ def test_helper_capability_shape_is_validated_at_registration(name,value):
         helper_capability(function,name)
 
 
-def test_collection_runtime_adapter_is_checked_before_rewriting():
-    from modelx_cython.serial_collect import _runtime_markers, supports_runtime
-    source='\n'.join(_runtime_markers())
-    assert supports_runtime(source)
-    assert not supports_runtime(source+_runtime_markers()[0])
-    assert not supports_runtime(source.replace('def collect_from_space(base,',
-                                             'def collect_from_space(\n    base,'))
-
-
 def test_cache_hit_optimization_keeps_python38_compatibility(monkeypatch):
     from modelx_cython.cache_hits import expose_entries
     monkeypatch.delattr(ast,'unparse')

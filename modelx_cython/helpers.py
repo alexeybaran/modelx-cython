@@ -36,6 +36,11 @@ def valid_identifier(name):
     return isinstance(name, str) and name.isidentifier() and not keyword.iskeyword(name)
 
 
+def read_resource(package, name):
+    return (resources.files(package).joinpath(name).read_bytes()
+            if hasattr(resources, 'files') else resources.read_binary(package, name))
+
+
 def registered_helper(value):
     contract = value.__dict__.get('__modelx_cython_helper__')
     if contract is None:
@@ -100,9 +105,7 @@ def install(providers, model_path):
             raise ValueError('helper provider must belong to a package')
         for suffix in ('.pyx', '.pxd'):
             target = model_path / (module_name(provider) + suffix)
-            data = (resources.files(package).joinpath(name + suffix).read_bytes()
-                    if hasattr(resources, 'files') else resources.read_binary(package, name + suffix))
-            target.write_bytes(data)
+            target.write_bytes(read_resource(package, name + suffix))
         modules.append(model_path.relative_to(model_path.parent)
                        / (module_name(provider) + '.pyx'))
     return modules

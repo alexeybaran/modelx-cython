@@ -97,6 +97,9 @@ class TransSpec:
       each ordered collect chunk its own reusable receiver. The same policy
       isolation and stable Reference contract applies across workers. Scalar
       chunk totals merge in completion order.
+    * ``"parallel_collect_order"``: ``"completion"`` (default) or ``"domain"``.
+      Domain order gives reproducible chunk merging at a fixed worker count
+      and requires parallel reuse. It does not imply serial sum equivalence.
     * ``"cells_params"`` (deprecated): older form of
       ``"cells_param_size"``; maps a parameter name (or tuple) to a
       dict with a ``"size"`` key.  Consulted only when
@@ -104,10 +107,10 @@ class TransSpec:
 
     A per-cells dict may have:
 
-    * ``"native_numeric_cache"``: explicitly select experimental numeric key
-      storage for an eligible cell. The default dictionary supports compiled
-      model pickling. Setting ``"numeric_cache_capacity"`` also opts in unless
-      ``"native_numeric_cache"`` is false.
+    * ``"native_numeric_cache"``: override automatic selection of native numeric
+      key storage for an eligible cell. Other signatures use dictionaries.
+      Both support compiled model pickling. Setting ``"numeric_cache_capacity"``
+      also opts in unless ``"native_numeric_cache"`` is false.
     * ``"dense_window"``: a sequence of half-open ``(lower, stop)`` pairs
       in parameter order for a dense cache. The physical window must
       fit inside the existing logical bounds. Exact spill keeps the

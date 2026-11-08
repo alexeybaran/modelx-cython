@@ -16,6 +16,7 @@ class SerialCollect:
     reuse: bool
     private_lookups: bool
     parallel_reuse: bool
+    ordered: bool = False
 
 
 def _self_attribute(node):
@@ -64,6 +65,9 @@ def analyze(source, module):
         parallel = spec.get('parallel_collect_reuse', automatic and option == 'reuse')
         if type(parallel) is not bool or (parallel and option != 'reuse'):
             raise ValueError('parallel_collect_reuse requires serial_collect reuse')
+        order = spec.get('parallel_collect_order', 'completion')
+        if order not in ('completion', 'domain') or (order == 'domain' and not parallel):
+            raise ValueError('parallel_collect_order requires parallel reuse and completion or domain')
         if option is None:
             continue
         if option not in ('reduce', 'reuse'):
@@ -71,13 +75,13 @@ def analyze(source, module):
         private = spec.get('serial_private_lookups', automatic and option == 'reuse')
         if type(private) is not bool or (private and option != 'reuse'):
             raise ValueError('serial_private_lookups requires serial_collect reuse')
-        shape = _match(node, cls, option == 'reuse', private, parallel)
+        shape = _match(node, cls, option == 'reuse', private, parallel, order == 'domain')
         if shape is not None:
             result[node.name] = shape
     return result
 
 
-def _match(node, cls, reuse, private_lookups, parallel_reuse):
+def _match(node, cls, reuse, private_lookups, parallel_reuse, ordered=False):
     if (len(node.bases) != 1 or ast.unparse(node.bases[0]) != '_mx_sys.BaseSpace'
             or cls.spaces or cls.is_locked or node.name in cls.visitor.dynamic_ref_classes
             or any(_method(node, hook) is not None or hook in cls.refs
@@ -108,7 +112,7 @@ def _match(node, cls, reuse, private_lookups, parallel_reuse):
             or cls.cells[cell].body_has_closure or cls.cells[cell].called_with_kwargs):
         return None
 
-    return SerialCollect(label, cell, parameter, reuse, private_lookups, parallel_reuse)
+    return SerialCollect(label, cell, parameter, reuse, private_lookups, parallel_reuse, ordered)
 
 
 def _reset_lines(cls):
@@ -197,86 +201,10 @@ def add_methods(cls, node, shape):
                 can_reuse = cst.parse_expression(
                     f'type(self) is {cls.name} and not self._mx_roots and not self._mx_spaces')
                 args += (cst.Arg(keyword=cst.Name('reuse_in_parallel'), value=can_reuse),)
+                if shape.ordered:
+                    args += (cst.Arg(keyword=cst.Name('private_ordered'), value=cst.Name('True')),)
             ret = ret.with_changes(value=ret.value.with_changes(args=args))
             item = item.with_changes(body=item.body.with_changes(
                 body=(stmt.with_changes(body=(ret,)),)))
         methods.append(item)
     return node.with_changes(body=node.body.with_changes(body=(*methods, helper)))
-
-
-def _runtime_markers():
-    """The supported export adapter is checked before emitting its consumers."""
-    signature = 'def collect_from_space(base, domain, loop_name, names, args, cache=None, evaluate=None):'
-    dispatch = '    if evaluate is None:\n'
-    parallel_dispatch = '            result = _mx_collect_parallel(base, coords, loop_name, names, args)'
-    parallel = 'def _mx_collect_parallel(base, coords, loop_name, names, args):'
-    submit = 'executor.submit(_mx_collect_chunk, base, chunk, loop_name, names, args)'
-    merge = '''        # Merge in domain order too, so an earlier shape error precedes a
-        # later worker's formula error. The executor joins all workers on exit.
-        for future in futures:'''
-    chunk = '''def _mx_collect_chunk(base, coords, loop_name, names, args):
-    _mx_collect_context.active = True
-    try:
-        return _mx_collect_evaluate(base, coords, loop_name, names, args)'''
-    return signature, dispatch, parallel_dispatch, parallel, submit, merge, chunk
-
-
-def supports_runtime(source):
-    return all(source.count(marker) == 1 for marker in _runtime_markers())
-
-
-def enable_runtime(path):
-    """Wire the eligible evaluator into the copied export's dispatch and cache."""
-    source = path.read_text(encoding='utf-8')
-    signature, dispatch, parallel_dispatch, parallel, submit, merge, chunk = _runtime_markers()
-    if not supports_runtime(source):
-        raise ValueError('serial_collect requires the supported collect runtime')
-    source = source.replace(signature, '''
-def _mx_collect_native_coords(coords):
-    return all(type(coord) is int and -(1 << 63) <= coord < (1 << 63) for coord in coords)
-
-
-def collect_from_space(base, domain, loop_name, names, args, cache=None, evaluate=None,
-                       evaluate_serial=None, reuse_in_parallel=False):'''.lstrip())
-    source = source.replace(dispatch, '''    if (evaluate_serial is not None and _mx_parallel_workers == 1
-            and not getattr(_mx_collect_context, 'active', False)
-            and sys.gettrace() is None and sys.getprofile() is None):
-        _mx_collect_context.active = True
-        try:
-            result = evaluate_serial(coords)
-        finally:
-            _mx_collect_context.active = False
-        if result is not None:
-            return result if cache is None else cache.setdefault(key, result)
-''' + dispatch)
-    source = source.replace(
-        parallel_dispatch,
-        '''            private = None
-            if (reuse_in_parallel and evaluate_serial is not None
-                    and sys.gettrace() is None and sys.getprofile() is None
-                    and _mx_collect_native_coords(coords)):
-                private = evaluate_serial
-            result = _mx_collect_parallel(base, coords, loop_name, names, args, private)''')
-    source = source.replace(parallel,
-                            'def _mx_collect_parallel(base, coords, loop_name, names, args, private=None):')
-    source = source.replace(submit, submit[:-1] + ', private)')
-    source = source.replace(merge, '''        # Only private scalar chunks may merge in completion order.
-        ordered_futures = futures
-        if private is not None:
-            from concurrent.futures import as_completed
-            futures = as_completed(futures)
-        for future in futures:
-            if private is not None and future.exception() is not None:
-                # Keep successful scalar merging in completion order, but
-                # propagate the first failure in original domain order.
-                for ordered_future in ordered_futures:
-                    ordered_future.result()''')
-    source = source.replace(chunk, '''def _mx_collect_chunk(base, coords, loop_name, names, args, private=None):
-    _mx_collect_context.active = True
-    try:
-        if private is not None:
-            result = private(coords)
-            if result is not None:
-                return result
-        return _mx_collect_evaluate(base, coords, loop_name, names, args)''')
-    path.write_text(source, encoding='utf-8')

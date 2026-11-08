@@ -68,6 +68,9 @@ Prepared resources must be disposable: normal model pickling retains Cell
 caches, while a context reconstructs empty and prepares resources on demand.
 Resources held by contexts must keep their owners alive. Separate compiled
 packages must not confuse their private native resource types.
+Within one compiled Space, each provider owns a distinct context. Multiple
+providers in the same Cell and generated names resembling authored Cell/cache
+names must remain independent.
 
 Exclusive lookup reuse is enabled only on confined collection receivers whose
 References remain stable. Ordinary public receivers retain checked/synchronized
@@ -82,6 +85,10 @@ primitive value types, bindings and fallback are proved. Numeric sums support
 typed range/singleton bindings and typed filters. Mixed int64/float comparisons
 that could lose integer precision are not newly admitted. Unknown filters,
 arbitrary iterators and unsafe captures keep their generator path.
+Signed literal bindings are checked as complete values against int64 bounds;
+wider Python integers stay on the object path. A proved registered sum may be
+returned or assigned to one local name. Assignment does not convert an arbitrary
+replacement helper's result to the enclosing Cell's return type.
 
 Generated variables avoid authored names. A prefix appearing in a formula is
 not itself a reason to reject it. Fallbacks preserve the current helper callable,
@@ -114,6 +121,12 @@ Unsupported export-runtime adapters retain the normal collection path. Successfu
 private scalar chunks may merge in completion order, with ordinary floating
 roundoff; failures are propagated in original domain order. Existing public
 Cell calls, collection APIs and caller scheduling remain the execution boundary.
+The exporter owns the version 1 optional collection adapter. The compiler can
+transplant its generic functions into a structurally recognized legacy export;
+it does not patch source text or supply an independent collection engine.
+`parallel_collect_order="domain"` selects domain-order chunk merging for fixed
+worker reproducibility. Completion order remains the default. Neither option
+promises bitwise equality with a serial fold or a different worker count.
 
 There is no native PGO training or profile-use build. Timing profiles guide
 development, while the existing small model trace supplies types and working-set
