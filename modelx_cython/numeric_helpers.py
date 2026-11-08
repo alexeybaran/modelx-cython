@@ -294,9 +294,18 @@ class NumericReturns(cst.CSTTransformer):
             body=(*body[:-2], *native, guard, fallback_lookup, fallback_result)))
 
     def lookup_context(self, provider):
+        for name, owner in self.contexts.items():
+            if owner == provider:
+                return cst.parse_expression('self.' + name)
         context = f'_v_mx_context_{self.cell.name}'
         if context[len('_v_'):] in self.cls.cells:
             return None
+        # Keep the existing single-provider layout; a second provider owns a
+        # distinct extension type and must never receive the first's context.
+        if context in self.contexts:
+            context += module_name(provider)
+        while context in self.contexts or context in self.cls.refs:
+            context += '_'
         self.contexts[context] = provider
         return cst.parse_expression('self.' + context)
 

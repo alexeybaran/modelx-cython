@@ -10,6 +10,7 @@ import libcst as cst
 from .cell_entries import exact_receiver
 from .helpers import module_name
 from .scopes import FormulaTransformer, has_scope_effects
+from .typedefs import primitive_kind
 
 
 def _call(node, name, argc):
@@ -104,10 +105,18 @@ class NativeReductions(FormulaTransformer):
         return False
 
     def kind(self, node, locals_):
-        if isinstance(node, ast.Constant) and type(node.value) is bool:
-            return 'bint'
-        if isinstance(node, ast.Constant) and type(node.value) in (int, float):
-            return 'double' if type(node.value) is float else 'longlong'
+        if isinstance(node, ast.Constant):
+            return primitive_kind(node.value)
+        if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.UAdd, ast.USub)):
+            # Classify the signed literal as a whole: -2**63 fits, +2**63
+            # does not. A native negation of an unknown int64 can overflow.
+            try:
+                return primitive_kind(ast.literal_eval(node))
+            except (ValueError, TypeError):
+                kind = self.kind(node.operand, locals_)
+                if isinstance(node.op, ast.UAdd) or kind == 'double':
+                    return kind
+                return 'longlong' if kind == 'bint' else None
         if isinstance(node, ast.Name):
             return locals_.get(node.id)
         if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name) and node.value.id == 'self':
@@ -122,8 +131,6 @@ class NativeReductions(FormulaTransformer):
                     and not cell.body_has_closure):
                 result = cell.get_rettype_expr(c_style=True)
                 return {'double': 'double', 'long long': 'longlong', 'bint': 'bint'}.get(result)
-        if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.UAdd, ast.USub)):
-            return self.kind(node.operand, locals_)
         if isinstance(node, ast.BinOp) and isinstance(node.op, (ast.Add, ast.Sub, ast.Mult, ast.Div)):
             left, right = self.kind(node.left, locals_), self.kind(node.right, locals_)
             # Do not introduce native integer arithmetic merely from observations.

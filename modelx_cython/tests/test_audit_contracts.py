@@ -137,6 +137,28 @@ def test_cache_hit_optimization_keeps_python38_compatibility(monkeypatch):
     expose_cache_hits({'unused':object()},{'unused':{'entry':object()}},'auto')
 
 
+def test_unsupported_ast_runtime_keeps_ordinary_collection(monkeypatch):
+    from modelx_cython.serial_collect import analyze
+    monkeypatch.delattr(ast, 'unparse')
+    assert analyze('class Values: pass\n', object()) == {}
+
+
+def test_provider_resources_use_the_legacy_resource_api(monkeypatch, tmp_path):
+    from modelx_cython import helpers
+    monkeypatch.delattr(helpers.resources, 'files')
+    read = []
+    def read_binary(package, resource):
+        read.append((package, resource))
+        return resource.encode()
+    monkeypatch.setattr(helpers.resources, 'read_binary', read_binary)
+    model = tmp_path/'compiled'
+    model.mkdir()
+    modules = helpers.install({'sample.provider'}, model)
+    assert read == [('sample', 'provider.pyx'), ('sample', 'provider.pxd')]
+    assert (model/(helpers.module_name('sample.provider')+'.pyx')).read_bytes()==b'provider.pyx'
+    assert len(modules)==1
+
+
 def test_enum_constants_follow_underlying_integer_not_overridden_conversion():
     from enum import IntEnum
     from modelx_cython.tracer import RuntimeValueInfo

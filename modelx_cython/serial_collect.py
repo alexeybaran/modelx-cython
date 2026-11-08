@@ -46,6 +46,8 @@ def _single_dict(expr):
 
 def analyze(source, module):
     """Recognize the numeric sum shape. Policy isolation is a Space contract."""
+    if not hasattr(ast, 'unparse'):
+        return {}
     options = {name: module.spec.get_spec(cls.fqname)
                for name, cls in module.classes.items()}
     automatic = module.spec.automatic_optimizations
