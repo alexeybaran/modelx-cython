@@ -1,11 +1,9 @@
 """Emit private cache entries for resolved, same-Space numeric Cell calls."""
 
-import ast
 import libcst as cst
 
 from modelx_cython.cell_entries import DenseEntry, FormulaEntry, exact_receiver
 from modelx_cython.consts import CY_MOD, FORMULA_PREF, HAS_PREF, MX_POW, MX_SELF, MX_SYS_MOD
-from .scopes import OPAQUE_SCOPES, binding_names, lexical_nodes
 
 
 _NUMERIC_TYPES = {"bint", "double", "long long"}
@@ -164,52 +162,6 @@ class _Calls(cst.CSTTransformer):
         ])
 
 
-class _ExactBranches(cst.CSTTransformer):
-    """Carry an existing generated type guard into its expression branches."""
-    def __init__(self, owner):
-        self.test = cst.parse_expression(exact_receiver(owner))
-        self.facts = [None]
-
-    def on_visit(self, node):
-        return False if isinstance(node, OPAQUE_SCOPES) else super().on_visit(node)
-
-    def enter(self, node, value):
-        self.facts.append(value if node.test.deep_equals(self.test) else self.facts[-1])
-
-    def visit_If_body(self, node):
-        self.enter(node, True)
-
-    def leave_If_body(self, node):
-        self.facts.pop()
-
-    def visit_IfExp_body(self, node):
-        self.enter(node, True)
-
-    def leave_IfExp_body(self, node):
-        self.facts.pop()
-
-    def visit_IfExp_orelse(self, node):
-        self.enter(node, False)
-
-    def leave_IfExp_orelse(self, node):
-        self.facts.pop()
-
-    def leave_IfExp(self, before, after):
-        if self.facts[-1] is None or not before.test.deep_equals(self.test):
-            return after
-        value = after.body if self.facts[-1] else after.orelse
-        return value.with_changes(lpar=(*after.lpar, *value.lpar),
-                                  rpar=(*value.rpar, *after.rpar))
-
-
-def prune_exact_branches(method, owner):
-    # A local receiver reassignment invalidates an enclosing receiver fact.
-    body = ast.parse(cst.Module([]).code_for_node(method)).body[0].body
-    if MX_SELF in binding_names(lexical_nodes(body)):
-        return method
-    return method.with_changes(body=method.body.visit(_ExactBranches(owner)))
-
-
 def add_inline_entries(module, classes):
     """Move each admitted cache body and report its dense layout to the build."""
     used_names = _Names(module).names
@@ -306,8 +258,7 @@ def add_inline_entries(module, classes):
                     guard_allowed = allows_exact_receiver(method, owner)
                 if guard_allowed:
                     calls = _Calls(owner, entries, getattr(cell, 'exact_reduction_guards', ()))
-                    rewritten = method.with_changes(body=method.body.visit(calls))
-                    methods[index] = prune_exact_branches(rewritten, owner)
+                    methods[index] = method.with_changes(body=method.body.visit(calls))
         body.append(statement.with_changes(body=statement.body.with_changes(body=methods)))
     if functions:
         index = 0

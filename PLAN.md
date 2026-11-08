@@ -1,5 +1,34 @@
 # Evidence-Gated Development Plan
 
+## Local audit closure — 2026-11-08
+
+The cleanup candidate on `experiment/collect-15x` resolves lexical-scope/binding,
+native representation, helper capability, generator admission, collection failure
+ordering and serialization findings. Shared contracts replace inconsistent proof
+logic. `EnumDefinitions` retains its existing fixed/rebuild-required schema:
+construction rejects subclass schema shadowing, ordinary References and Cell
+overrides retain their existing behavior, and formula constants need no runtime
+enum mode. Unsuccessful guard/helper/proof experiments were removed.
+
+Windows 3.12 and free-threaded 3.14 each pass 225 maintained tests (7 skips) and
+128 candidate/helper regressions. Immutable untouched tests each yield 169 passes,
+7 skips and the two disclosed generated-source assertion failures; maintained
+structural assertions and their original runtime oracles pass. Full adjusted
+MYGA/VA report, 2,500-policy, 2,499-transition and 1/4-worker route checks pass.
+
+The preplanned eight serial paired rounds meet both <=2x September API gates:
+MYGA 1.8843 median ratio (upper mean CI 1.9459), VA 1.9499 (upper mean CI 1.9849).
+Four full confirmation rounds bring the campaign to 168 retained trials. VA route
+paired medians are within 0.6% of parity; parallel mean uncertainty is disclosed.
+Native class field declarations and public Cell signatures are preserved. Builds
+use no native PGO or forced-inlining flags. See
+`../september-gap/CLEANUP_AUDIT.md` and `doc/source/native_contracts.md`.
+
+This qualifies the current adjusted MYGA/VA audit envelope, not all regional
+models or a core promotion. The user assigned broader original census and
+pandas/generator coverage to separate cloud work. Preserve source pins and merge
+those changes only through isolated integration and the relevant Windows gates.
+
 ## Experiment update — native cache hits (2026-11-07)
 
 **Superseding direction:** the user requires automatic selection with no

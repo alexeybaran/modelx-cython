@@ -60,6 +60,8 @@ def test_scope_overrides_aliases_and_arithmetic(tmp_path):
         s.new_cells('term','lambda k: 1.0 + k')
         s.new_cells('coded','lambda t, code: t + code')
         s.new_cells('call_code','lambda t: coded(t, Status.OK)').is_cached=False
+        s.new_cells('flag','lambda t: t > 0')
+        s.new_cells('compare_flag','lambda t: flag(t) == Status.OK').is_cached=False
         s.new_cells('count','lambda: 2')
         s.new_cells('nested_enum','''def nested_enum():
     def nested(self):
@@ -95,13 +97,21 @@ def test_scope_overrides_aliases_and_arithmetic(tmp_path):
     a = t * 3
     return a / 12.0 + a
 ''').is_cached=False
+        virtual=model.new_space('VirtualValues',refs={'Status':HTTPStatus})
+        for name in ('matches','condition','compound','comparison_value','coded',
+                     'call_code','flag','compare_flag'):
+            cell=virtual.new_cells(name,s.cells[name].formula.source)
+            cell.is_cached=s.cells[name].is_cached
         model.export(tmp_path/'exported')
     finally:model.close()
     compile_model(tmp_path,'from exported import mx_model\ns=mx_model.Values\n'
         's.term(0);s.count();s.nested_enum();s.nested_helper();s.nested_sum();s.matches(200);'
         's.condition(200);s.compound(200);s.comparison_value(200);'
         's.call_code(1);s.coded(1,201);'
-        's.aliases(1.25);s.long_expression(2);s.hygienic();s.reassigned_tail(2)\n')
+        's.compare_flag(1);'
+        's.aliases(1.25);s.long_expression(2);s.hygienic();s.reassigned_tail(2)\n'
+        'v=mx_model.VirtualValues\nv.matches(200);v.condition(200);v.compound(200);'
+        'v.comparison_value(200);v.call_code(1);v.coded(1,201);v.compare_flag(1)\n')
     admission=json.loads((tmp_path/'exported_cy/_mx_admission.json').read_text())
     info=lambda name:admission[f'exported_cy._mx_classes._c_Values._f_{name}']
     assert info('nested_sum')['native_reductions']==0
@@ -117,25 +127,36 @@ assert s.nested_helper()==7.0
 assert s.nested_sum()==1.0
 assert s.hygienic()==2.0
 assert s.matches(200) is True and s.matches(201) is False
-class Alternate(type(s)):
-    @property
-    def Status(self): return SimpleNamespace(OK=201)
-alternate=Alternate(mx_model)
-assert alternate.matches(200) is False and alternate.matches(201) is True
-assert alternate.condition(200)==0.0 and alternate.condition(201)==1.0
-assert s.call_code(1)==201 and alternate.call_code(1)==202
-class OverrideDependency(Alternate):
+assert s.call_code(1)==201
+class OverrideDependency(type(s)):
     def coded(self, t, code): return 1000+t+code
-assert OverrideDependency(mx_model).call_code(1)==1202
+override=OverrideDependency(mx_model)
+override._mx_copy_refs(s,s)
+assert override.call_code(1)==1201
+if type(s).__module__.startswith('exported_cy'):
+    for parent in (type(s),type('Middle',(type(s),),{})):
+        for name in ('Status','enum_definitions'):
+            invalid=type('ChangedSchema',(parent,),{name:object()})
+            try: invalid(mx_model)
+            except TypeError as actual:
+                assert name in str(actual) and 'rebuild' in str(actual)
+            else: raise AssertionError('changed compiled definition was accepted')
+v=mx_model.VirtualValues
+v.Status=SimpleNamespace(OK=201)
+assert v.matches(200) is False and v.matches(201) is True
+assert v.condition(200)==0.0 and v.condition(201)==1.0
+assert v.call_code(1)==202
+class BoolMember:
+    def __eq__(self, value): return type(value) is bool and value
+v.Status=SimpleNamespace(OK=BoolMember())
+assert v.compare_flag(1) is True
 class EqualityValue:
     def __bool__(self): raise AssertionError('unexpected comparison coercion')
 equality_value=EqualityValue()
 class ReturnsObject:
     def __eq__(self, value): return equality_value
-class ObjectResult(type(s)):
-    @property
-    def Status(self): return SimpleNamespace(OK=ReturnsObject())
-assert ObjectResult(mx_model).comparison_value(200)[0] is equality_value
+v.Status=SimpleNamespace(OK=ReturnsObject())
+assert v.comparison_value(200)[0] is equality_value
 class CountTruth:
     calls=0
     def __bool__(self):
@@ -144,30 +165,22 @@ class CountTruth:
 truth=CountTruth()
 class CountEquality:
     def __eq__(self, value): return truth
-class TruthResult(type(s)):
-    @property
-    def Status(self): return SimpleNamespace(OK=CountEquality())
-truth_result=TruthResult(mx_model)
+v.Status=SimpleNamespace(OK=CountEquality())
 for answer in (False,True):
     truth.answer=answer
     truth.calls=0
-    assert truth_result.compound(200)==float(answer)
+    assert v.compound(200)==float(answer)
     assert truth.calls==1
 class EqualTo200:
     def __eq__(self, value): return value == 200
-class ObjectMember(type(s)):
-    @property
-    def Status(self): return SimpleNamespace(OK=EqualTo200())
-object_member=ObjectMember(mx_model)
-assert object_member.matches(200) is True and object_member.matches(201) is False
+v.Status=SimpleNamespace(OK=EqualTo200())
+assert v.matches(200) is True and v.matches(201) is False
 failure=ValueError('enum comparison')
 class BrokenMember:
     def __eq__(self, value): raise failure
-class Broken(type(s)):
-    @property
-    def Status(self): return SimpleNamespace(OK=BrokenMember())
+v.Status=SimpleNamespace(OK=BrokenMember())
 try:
-    Broken(mx_model).matches(200)
+    v.matches(200)
 except ValueError as actual:
     assert actual is failure
 else:
