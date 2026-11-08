@@ -27,9 +27,8 @@ def test_explicit_numeric_sum(tmp_path):
     subprocess.run([sys.executable, '-m', 'modelx_cython', 'exported',
                     '--sample', 'sample.py', '--no-spec'], cwd=tmp_path, check=True)
     report = json.loads((tmp_path/'exported_cy/_mx_admission.json').read_text())
-    for name in ('total', 'nested'):
+    for name in ('total', 'nested', 'filtered'):
         assert report[f'exported_cy._mx_classes._c_Projection._f_{name}']['native_reductions'] == 1
-    assert report['exported_cy._mx_classes._c_Projection._f_filtered']['native_reductions'] == 0
     probe = textwrap.dedent('''\
         import sys
         from importlib import import_module

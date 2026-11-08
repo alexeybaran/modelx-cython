@@ -75,6 +75,26 @@ def test_parallel_collect_reuse_merges_completed_chunks_and_retries(tmp_path):
             assert error is failure
         else:
             raise AssertionError("failure swallowed")
+        first_failure = ValueError("first domain chunk")
+        later_failure = ValueError("later domain chunk")
+        def multiple_failures(x):
+            if x == 1e16:
+                raise first_failure
+            if x == -1e16:
+                raise later_failure
+            return x
+        def reversed_failures(tasks):
+            for index in (2, 1, 0, 3):
+                yield tasks[index]
+        futures.as_completed = reversed_failures
+        m.Reused.adjust = multiple_failures
+        try:
+            m.Reused.collect()
+        except ValueError as error:
+            assert error is first_failure
+        else:
+            raise AssertionError("first domain failure lost")
+        futures.as_completed = completion_order
         m.Reused.adjust = float
         result = m.Reused.collect()
         assert result.sum.value == 8.0

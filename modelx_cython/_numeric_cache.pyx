@@ -67,6 +67,8 @@ cdef inline void write(NumericCache cache, word a, word b, word c, word value) e
     cdef Entry* grown
     cdef size_t index, i, capacity
     if cache.used * 2 >= cache.capacity:
+        if cache.capacity > ((<size_t>-1) // sizeof(Entry)) // 2:
+            raise MemoryError("numeric cache exceeds addressable storage")
         capacity = cache.capacity * 2
         grown = <Entry*>calloc(capacity, sizeof(Entry))
         if grown == NULL:
@@ -96,9 +98,12 @@ cdef class NumericCache:
         if self.entries == NULL:
             raise MemoryError()
         if primary_capacity:
-            if (primary_capacity < 2 or primary_capacity > 4096
-                    or primary_capacity & (primary_capacity - 1)):
-                raise ValueError("primary capacity must be a power of two from 2 to 4096")
+            # The compiler owns its resource budget. The storage representation
+            # itself requires only a power of two with at least one free slot.
+            if primary_capacity < 2 or primary_capacity & (primary_capacity - 1):
+                raise ValueError("primary capacity must be a power of two of at least 2")
+            if primary_capacity > (<size_t>-1) // sizeof(PrimaryEntry):
+                raise MemoryError("primary cache exceeds addressable storage")
             self.primary = <PrimaryEntry*>calloc(primary_capacity, sizeof(PrimaryEntry))
             if self.primary == NULL:
                 raise MemoryError()

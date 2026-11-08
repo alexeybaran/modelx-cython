@@ -184,6 +184,8 @@ class _Calls(cst.CSTTransformer):
 
 def expose_cache_hits(sources, entries, mode):
     """Only already-private, typed calls inherit their existing hit contract."""
+    if not hasattr(ast, 'unparse'):
+        return
     for module, known in entries.items():
         path = sources[module]
         source = path.read_bytes()

@@ -21,7 +21,7 @@ def primary_capacity(cell):
     inferred = automatic.primary_capacity(cell) if automatic.enabled(cell) and exclusively_owned(cell) else 0
     size = cell._spec.get('numeric_cache_capacity', inferred)
     if type(size) is not int or (size and (
-            not 2 <= size <= 4096 or size & (size - 1) or not exclusively_owned(cell))):
+            not 2 <= size <= automatic.MAX_PRIMARY_ENTRIES or size & (size - 1) or not exclusively_owned(cell))):
         raise ValueError(f'{cell.fqname}: invalid capacity for a private numeric cache')
     return size
 
@@ -35,7 +35,7 @@ def reserved_body(cell, cache, keys, reflexive, bits, result, encode, decode):
     args = ', '.join(words)
     source = (
         ''.join(f'{name}: {ALIAS}.word = {key}\n' for name, key in zip(words, keys))
-        + f'{slot}: _mx_cy.Py_ssize_t\n{bits}: {ALIAS}.word\n'
+        + f'{slot}: _mx_cy.Py_ssize_t = -1\n{bits}: {ALIAS}.word\n'
         + f'if {cache}.reserve({args}, {reflexive}, _mx_cy.address({slot}), '
           f'_mx_cy.address({bits})):\n    return {ALIAS}.{decode}({bits})\n'
         + f'{result}: {cell.get_rettype_expr()} = self._f_{cell.name}({", ".join(cell.params)})\n'

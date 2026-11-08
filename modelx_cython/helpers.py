@@ -9,6 +9,24 @@ import keyword
 
 import libcst as cst
 
+from .scopes import FormulaTransformer
+
+# One registry for tracing, merged References and validation. Tuple lengths
+# describe provider ABI operations, not model or formula source patterns.
+CAPABILITIES = {
+    'reduction': ('reduction', None),
+    'numeric': ('numeric_helper', None),
+    'clamped': ('clamped_helper', None),
+    'clamped_context': ('clamped_context_helper', None),
+    'optional': ('optional_helper', None),
+    'grouped': ('grouped_helper', (2, 3)),
+    'bounded': ('bounded_helper', None),
+    'bound_bounded': ('bound_bounded_helper', None),
+    'bound_grouped': ('bound_grouped_helper', (3,)),
+    'bound_numeric': ('bound_numeric_helper', (3,)),
+}
+REDUCTIONS = frozenset(('f64_sum', 'bool_any', 'bool_all', 'f64_max'))
+
 
 def module_name(provider):
     return '_mx_helper_' + hashlib.sha256(provider.encode()).hexdigest()[:12]
@@ -31,22 +49,24 @@ def registered_helper(value):
     return contract
 
 
-def helper_capability(value, name, grouped=False):
+def helper_capability(value, name):
     capability = value.__dict__.get(f'__modelx_cython_{name}__')
     if capability is None:
         return None
-    if grouped:
-        valid = (isinstance(capability, tuple) and len(capability) in (2, 3)
+    lengths = CAPABILITIES[name][1]
+    if lengths:
+        valid = (isinstance(capability, tuple) and len(capability) in lengths
                  and all(valid_identifier(part) for part in capability))
     else:
         valid = valid_identifier(capability)
-    if not valid:
+    if not valid or name == 'reduction' and capability not in REDUCTIONS:
         raise ValueError(f'invalid helper capability {name!r} on {value.__qualname__}')
     return capability
 
 
-class HelperCalls(cst.CSTTransformer):
+class HelperCalls(FormulaTransformer):
     def __init__(self, refs, used):
+        super().__init__()
         self.refs = refs
         self.used = used
         self.operations = set()

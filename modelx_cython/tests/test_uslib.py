@@ -72,11 +72,35 @@ def test_mx2cy_with_uslib(sample_dir, model):
     translated = work_dir / (model + "_nomx_cy")
     src = (translated / "_mx_classes.py").read_text(encoding="utf-8")
 
-    # every fractional power is rewritten, over all three operand shapes
-    assert ("_mx_sys._mx_pow((1 + self.crediting_rate_ann(t)), (1 / 12))"
-            in src)                                     # cells call
-    assert "_mx_sys._mx_pow((1 + self.guar_rate_ann), (1 / 12))" in src  # ref
-    assert "_mx_sys._mx_pow((1 - self.mort_rate(t)), (1 / 12))" in src
+    # Both ordinary and exact-operand memo entries preserve this power
+    # contract. Match the operands, not the physical cache entry's spelling.
+    import ast
+    powers = [node for node in ast.walk(ast.parse(src)) if isinstance(node, ast.Call)
+              and isinstance(node.func, ast.Attribute)
+              and isinstance(node.func.value, ast.Name) and node.func.value.id == '_mx_sys'
+              and node.func.attr in ('_mx_pow', '_mx_memo_pow')]
+    class PublicOperands(ast.NodeTransformer):
+        def exact_guard(self,node):
+            if isinstance(node,ast.Name):
+                return node.id.startswith(('_mx_exact_receiver','_mx_inbounds_exact'))
+            if isinstance(node,ast.BoolOp):
+                return all(self.exact_guard(value) for value in node.values)
+            return (isinstance(node,ast.Compare) and len(node.ops)==1
+                and isinstance(node.ops[0],ast.Is) and isinstance(node.left,ast.Call)
+                and isinstance(node.left.func,ast.Name) and node.left.func.id=='type'
+                and len(node.left.args)==1 and isinstance(node.left.args[0],ast.Name)
+                and node.left.args[0].id=='self')
+        def visit_IfExp(self,node):
+            # Read the preserved public operand behind a generated exact-type
+            # dispatch; authored conditional arithmetic is not normalized away.
+            return self.visit(node.orelse) if self.exact_guard(node.test) else self.generic_visit(node)
+    def has_power(base):
+        expected = [ast.dump(ast.parse(expr, mode='eval').body) for expr in (base, '1 / 12')]
+        return any([ast.dump(PublicOperands().visit(arg)) for arg in call.args[-2:]] == expected
+                   for call in powers)
+    assert has_power('1 + self.crediting_rate_ann(t)')
+    assert has_power('1 + self.guar_rate_ann')
+    assert has_power('1 - self.mort_rate(t)')
     # an integer exponent never reaches the complex path, so it is left
     # exactly as modelx exported it
     assert ("return (1 + self.inflation_rate) ** (self.policy_year(t) - 1)"

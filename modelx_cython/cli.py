@@ -387,12 +387,15 @@ def main_handler(args: argparse.Namespace, stdout: IO[str], stderr: IO[str]) -> 
         # Phase 3: transform and write out
         from modelx_cython import serial_collect
 
+        runtime_path = model_path / (MX_SYS_MOD + '.py')
+        collect_supported = serial_collect.supports_runtime(runtime_path.read_text(encoding='utf-8'))
+
         helper_providers = set()
         dense_entries = {}
         formula_entries = {}
         serial_enabled = False
         for u in units:
-            serial_shapes = serial_collect.analyze(u.source, u.module_info)
+            serial_shapes = serial_collect.analyze(u.source, u.module_info) if collect_supported else {}
             serial_enabled |= bool(serial_shapes)
             trans = ModuleTransformer(
                 u.source, u.module_info,
@@ -414,7 +417,7 @@ def main_handler(args: argparse.Namespace, stdout: IO[str], stderr: IO[str]) -> 
             modules.append(u.rel_src_path)
 
         if serial_enabled:
-            serial_collect.enable_runtime(model_path / (MX_SYS_MOD + '.py'))
+            serial_collect.enable_runtime(runtime_path)
         modules.extend(install_helpers(helper_providers, model_path))
         if dense_bounds_proofs or dense_miss_binding or dense_one_axis:
             sources = {u.module_info.fqname: u.abs_src_path for u in units}
@@ -661,8 +664,22 @@ def create_setup(model_name: str, modules: Sequence[str], setup_file: pathlib.Pa
     setup_script = textwrap.dedent("""\
     from setuptools import setup
     from Cython.Build import cythonize
+    from Cython.Compiler.PyrexTypes import CArrayType, c_int_type
     import sys
     sys.setrecursionlimit(max(sys.getrecursionlimit(), {recursion_budget}))
+
+    # Some Cython releases compare nested arrays without their inner lengths.
+    # Their temporary allocator can then corrupt multidimensional pickle state.
+    # Correct structural equality only when the installed release has the bug;
+    # Cython's assignment compatibility and generated runtime stay unchanged.
+    if CArrayType(CArrayType(c_int_type, 2), 2) == CArrayType(CArrayType(c_int_type, 5), 2):
+        def _mx_array_type_equal(left, right):
+            if not isinstance(right, CArrayType) or left.size != right.size:
+                return False
+            if left.base_type.is_array:
+                return left.base_type == right.base_type
+            return left.base_type.same_as(right.base_type)
+        CArrayType.__eq__ = _mx_array_type_equal
 
     setup(
         name="{model_name}",
