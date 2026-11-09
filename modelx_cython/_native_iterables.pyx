@@ -3,6 +3,7 @@
 import builtins
 from types import BuiltinFunctionType
 from libc.math cimport fabs
+from modelx_cython._range_state cimport range_init, range_next
 
 
 def _original_builtin(function, name):
@@ -47,32 +48,11 @@ cdef double f64_max_pair(double first, double second) noexcept:
 
 
 cdef void i64_range_init(I64Range* state, long long start, long long stop, long long step) except *:
-    if step == 0:
-        raise ValueError('range() arg 3 must not be zero')
-    state.current = start
-    state.stop = stop
-    state.step = step
-    state.active = start < stop if step > 0 else start > stop
+    range_init(state, start, stop, step)
 
 
 cdef bint i64_range_next(I64Range* state, long long* value) noexcept:
-    cdef unsigned long long distance, magnitude
-    if not state.active:
-        return False
-    value[0] = state.current
-    if state.step > 0:
-        distance = <unsigned long long>state.stop - <unsigned long long>state.current
-        magnitude = <unsigned long long>state.step
-    else:
-        distance = <unsigned long long>state.current - <unsigned long long>state.stop
-        magnitude = <unsigned long long>0 - <unsigned long long>state.step
-    if distance <= magnitude:
-        state.active = False
-    else:
-        # The distance proof guarantees the next value lies strictly inside the
-        # signed-int64 endpoints; the terminating increment is never computed.
-        state.current += state.step
-    return True
+    return range_next(state, value)
 
 
 cdef long long i64_min_pair(long long first, long long second) noexcept:

@@ -575,7 +575,7 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
         """
         from modelx_cython.helpers import HelperCalls
         from modelx_cython.checked_arithmetic import CheckedArithmetic
-        from modelx_cython.numeric_helpers import NumericReturns, ContextualFloat
+        from modelx_cython.numeric_helpers import NumericReturns
         cells.formula_allows_exact_receiver = allows_exact_receiver(node, cls_info.name)
         native_math = self.module.spec._data.get('native_math', self.module.spec.automatic_optimizations)
         if native_math:
@@ -592,37 +592,19 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
         if not hasattr(cls_info, 'native_contexts'):
             cls_info.native_contexts = {}
         cls_info.native_contexts.update(numeric_returns.contexts)
-        from modelx_cython.reductions import NativeReductions
-        builtin_bounds = all(isinstance(binding, BuiltinAssignment)
-                             for name in ("range", "min", "max", "abs") for binding in scope[name])
-        builtin_reductions = {name for name in ('all', 'any', 'bool', 'min', 'max')
-                              if scope[name] and all(isinstance(binding, BuiltinAssignment)
-                                                     for binding in scope[name])}
-        contextual_float = ContextualFloat(
-            cls_info, cells, self.helper_providers, builtin_keys,
-            contexts=numeric_returns.contexts)
-        reductions = NativeReductions(
-            cls_info, cells, self.helper_providers, node, self._reserve_cold_sum, builtin_bounds,
-            builtin_reductions=builtin_reductions, numeric_expressions=contextual_float)
-        contextual_float.scope_safe = reductions.scope_safe
-        contextual_float.original_scope_safe = reductions.scope_safe
-        node = node.visit(reductions)
-        cells.native_reductions = reductions.count
-        cells.exact_reduction_guards = reductions.exact_receiver_guards
-        node = node.visit(contextual_float)
-        cls_info.native_contexts.update(contextual_float.contexts)
-        # Lowered loops have an explicit lexical receiver; authored generator
-        # scopes retain object semantics. This ordering keeps safe constants
-        # in admitted native loops without specializing a shadowed receiver.
+        # Generator operations use explicit provider signatures. Formula/lambda
+        # bodies are compiled by Cython; no application AST reduction recognizer
+        # or contextual payload classifier participates in this path.
+        cells.native_reductions = 0
+        cells.exact_reduction_guards = ()
         enum_comparisons = code_enums.Constants(cls_info, cells, self.module.code_enum_symbols)
         node = node.visit(enum_comparisons)
         cells.native_enum_comparisons = enum_comparisons.comparisons
         cells.native_enum_constants = enum_comparisons.count
         helpers = HelperCalls(cls_info.refs, self.helper_providers)
-        node = node.visit(helpers)
-        self._cold_sums.extend(helper.visit(helpers) for helper in reductions.fallbacks)
-        cells.native_helpers = sorted(helpers.operations | numeric_returns.operations | contextual_float.operations)
-        cells.native_numeric_helpers = sorted(numeric_returns.operations | contextual_float.operations)
+        node = helpers.rewrite(node)
+        cells.native_helpers = sorted(helpers.operations | numeric_returns.operations)
+        cells.native_numeric_helpers = sorted(numeric_returns.operations)
         return rewrite_powers(
             node, self._resolver, self._cells_kinds, self._ref_kinds,
             cls_info.fqname, cells,

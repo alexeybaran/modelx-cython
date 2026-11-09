@@ -8,7 +8,7 @@ from types import FunctionType, ModuleType, SimpleNamespace
 
 import libcst as cst
 
-from .helpers import CAPABILITIES, helper_capability, registered_helper
+from .helpers import CAPABILITIES, helper_capability, helper_parameters, registered_helper
 
 
 def module_helpers(value):
@@ -24,7 +24,8 @@ def module_helpers(value):
             continue
         capabilities = {field: helper_capability(function, suffix)
                         for suffix, (field, _) in CAPABILITIES.items()}
-        result[name] = SimpleNamespace(helper=helper, **capabilities)
+        result[name] = SimpleNamespace(helper=helper, helper_parameters=helper_parameters(function),
+                                       **capabilities)
     return result
 
 

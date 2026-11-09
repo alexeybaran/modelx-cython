@@ -53,6 +53,7 @@ The single `helpers.CAPABILITIES` registry defines optional capability metadata:
 | `reduction` | `f64_sum`, `bool_any`, `bool_all` or `f64_max` |
 | `iteration`, `iteration_f64`, `iteration_str` | Four identifiers: admission function, span type, count function, element function |
 | `scalar_result` | Physical provider ABI: `float64`, `int64`, `bool`, `unicode` or `object` |
+| `call_layout` | `keywords`: receive original keyword-name tuple after the current callable |
 | `numeric` | Numeric-return operation identifier |
 | `clamped`, `clamped_context` | Clamped lookup operation identifiers |
 | `optional` | Guarded membership/value operation identifier |
@@ -67,6 +68,11 @@ References; providers do not need insurance-specific compiler branches.
 numeric type or a proof about a replacement callable. An `int64` provider must
 check its public integer range. An object-preserving mutable dispatcher uses
 `object` even when its canonical internal kernel returns `double`.
+The optional `keywords` call ABI uses the helper's declared Python signature,
+not its body. Missing optional slots receive the provider's declared
+`omitted_argument` token; the original keyword-name tuple excludes these slots.
+Providers preserve original positional/keyword layout when dispatching a
+replacement. Starred or invalid declared call shapes keep ordinary calls.
 
 Numeric contexts implement the common `LookupContext` ABI. They cache prepared
 input resources and indices, never policy results or formula execution state.
@@ -83,16 +89,20 @@ Generalizing such recognition must not skip binding effects or reorder calls.
 
 ## Generators
 
-Registered reductions can lower to ordinary Cython loops when their iterator,
-primitive value types, bindings and fallback are proved. Numeric sums support
-typed range/singleton bindings and typed filters. Mixed int64/float comparisons
-that could lose integer precision are not newly admitted. Unknown filters,
-arbitrary iterators and unsafe captures keep their generator path.
+Generator operations now use explicit expression helpers with declared Cython
+provider signatures. The former AST generator/reduction recognizer and
+contextual lambda classifier are not activated by the compiler pipeline.
+Ordinary Cython compiles authored callbacks; helper binding does not inspect
+their bodies. Lexical binding follows the actual receiver parameter, including
+inside callbacks, and declines shadowed/rebound receivers.
 
-Generated variables avoid authored names. A prefix appearing in a formula is
-not itself a reason to reject it. Fallbacks preserve the current helper callable,
-lazy generator behavior, exceptions and lexical bindings. No general formula or
-pandas interpreter is involved.
+The development vocabulary is documented in lifelib's `EXPRESSION_STREAMS.md`.
+`sum_float` normalizes each contribution with standard float conversion and has
+a separate double accumulation kernel. It is not an automatic replacement for
+ordinary sum. One-shot mapping/filtering and lazy flattening preserve producer
+and consumer exception boundaries. Provider compatibility paths preserve legal
+object behavior but do not count as completed native coverage. Generated code,
+runtime identities and differential evidence must prove each admitted path.
 
 ## Storage and collection
 

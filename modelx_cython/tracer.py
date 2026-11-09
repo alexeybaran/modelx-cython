@@ -357,6 +357,8 @@ class RuntimeValueInfo:
         self.helper = registered_helper(value) if type(value) is FunctionType else None
         from .helper_members import module_helpers
         self.helper_members = module_helpers(value)
+        from .helpers import helper_parameters
+        self.helper_parameters = helper_parameters(value) if self.helper is not None else None
         from .helpers import CAPABILITIES
         from .native_math import callable_operation
         self.math_operation = callable_operation(value)

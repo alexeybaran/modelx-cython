@@ -1,5 +1,12 @@
 # Generator and reduction contracts
 
+**Superseded development design.** The AST reduction recognizer described below
+is no longer activated by the compiler pipeline. The explicit no-AST helper
+design is in lifelib's `EXPRESSION_STREAMS.md`; its canonical typed reducer is
+`sum_float`, with per-contribution float normalization. The earlier `sum_f64`
+contract below differs and must not be silently aliased. Historical tests and
+evidence for this prototype do not qualify the replacement path.
+
 Development status: incomplete native coverage. The baseline is qualified local
 compiler `299d8c10`; generator changes still need full regional native qualification.
 This document distinguishes
