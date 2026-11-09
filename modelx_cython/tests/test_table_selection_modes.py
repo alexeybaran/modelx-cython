@@ -6,13 +6,16 @@ import textwrap
 
 import modelx as mx
 import pandas as pd
+import pytest
 
 from lifelib import pandas_inputs, table_operations, typed_inputs
 from lifelib.table_keys import keys
 
 
-def test_row_column_public_contract_and_cleanup_modes(tmp_path):
-    frame = pd.DataFrame({'age': [42, 43], 'rate': [0.1, 0.2]},
+@pytest.mark.parametrize('raw', [False, True])
+def test_row_column_public_contract_and_cleanup_modes(tmp_path, raw):
+    frame = pd.DataFrame({'age': [42, 43], 'rate': [0.1, 0.2],
+                          'sex': ['M', 'F'], 'active': [True, False]},
                          index=pd.Index([9, 2], name='policy'))
     frame.columns.name = 'field'
     model = mx.new_model('SelectedTables')
@@ -23,7 +26,7 @@ def test_row_column_public_contract_and_cleanup_modes(tmp_path):
             'to_pandas': table_operations.to_pandas, 'keys': keys,
             'lookup_float': typed_inputs.lookup_float})
         p.new_cells('public_input', 'lambda: source')
-        p.new_cells('owned', 'lambda: prepare(public_input(), rows=True)')
+        p.new_cells('owned', f'lambda: prepare(public_input(), rows=True, preserve_scalar_types={raw})')
         p.new_cells('selected', 'lambda key: row(key=key, table=owned())')
         p.new_cells('rate', 'lambda key: lookup_float(selected(key), "rate")')
         p.new_cells('values', 'lambda: column(owned(), "rate")')
@@ -31,13 +34,18 @@ def test_row_column_public_contract_and_cleanup_modes(tmp_path):
         p.new_cells('public_row', 'lambda key: to_pandas(selected(key))')
         p.new_cells('public_report', 'lambda: to_pandas(owned())')
         assert p.rate(9) == 0.1 and p.values() == (0.1, 0.2)
-        assert p.fields(9) == ('age', 'rate')
+        assert p.fields(9) == ('age', 'rate', 'sex', 'active')
         pd.testing.assert_series_equal(p.public_row(9), frame.loc[9], check_exact=True)
         pd.testing.assert_frame_equal(p.public_report(), frame, check_exact=True)
         replacement = frame.assign(rate=[0.3, 0.4])
         p.source = replacement
         assert p.rate(9) == 0.3  # Whole-value replacement is traced live.
         p.source = frame
+        assert p.rate(9) == 0.1
+        prior = p.owned()
+        p.public_input[()] = replacement
+        assert p.rate(9) == 0.3 and p.owned() is not prior
+        p.public_input.clear_all()
         assert p.rate(9) == 0.1
         model.export(tmp_path / 'exported')
     finally:
@@ -58,15 +66,17 @@ p.public_row(9);p.public_report()
         import importlib,pickle,sys
         import pandas as pd
         from lifelib.table_operations import row,column
+        from lifelib import pandas_inputs
+        from lifelib.immutable_inputs import freeze
         from lifelib.immutable_inputs import Record,Table
         from lifelib.table_keys import keys
         m=importlib.import_module(sys.argv[1]).mx_model
         p=m.Projection
         original=p.source.copy(deep=True)
-        p.owned()  # Explicit preparation boundary.
         forbidden={row.__code__,column.__code__,keys.__code__,
+                   pandas_inputs.table.__code__,pandas_inputs._scalar.__code__,freeze.__code__,
                    Record.__getitem__.__code__,Record.__init__.__code__,
-                   Table.__getitem__.__code__}
+                   Table.__getitem__.__code__,Table.__init__.__code__}
         calls=[]
         def profile(frame,event,arg):
             if event=='call' and (frame.f_code in forbidden or
@@ -74,9 +84,10 @@ p.public_row(9);p.public_report()
                 calls.append(frame.f_code.co_name)
         if sys.argv[1].endswith('_cy'):sys.setprofile(profile)
         try:
+            p.owned()  # Mixed preparation and selection are both inside the guard.
             assert p.rate(9)==0.1 and p.rate(2)==0.2
             assert p.values()==(0.1,0.2)
-            assert p.fields(9)==('age','rate')
+            assert p.fields(9)==('age','rate','sex','active')
         finally:sys.setprofile(None)
         assert calls==[],calls
         # Public pandas materialization is outside the calculation guard.
