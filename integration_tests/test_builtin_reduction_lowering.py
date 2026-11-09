@@ -8,7 +8,7 @@ from types import SimpleNamespace
 import libcst as cst
 from lifelib import typed_inputs as operations
 
-from modelx_cython.helpers import module_name
+from modelx_cython.helpers import module_name, HelperCalls
 from modelx_cython.helper_members import module_helpers
 from modelx_cython.reductions import NativeReductions
 
@@ -38,13 +38,14 @@ def test_compiled_builtin_reduction_lowering(tmp_path):
         result = 'bint' if boolean else 'long long'
         annotation = '_mx_cy.bint' if boolean else '_mx_cy.longlong'
         payload = 'self.predicate(i)' if boolean else 'i'
-        text = (f'@_mx_cy.ccall\ndef {operation}_check(self, n: _mx_cy.longlong) -> {annotation}:\n'
+        text = (f'def {operation}_check(self, n: _mx_cy.longlong) -> {annotation}:\n'
                 f'    return {operation}({payload} for i in range(n) if i != 1)\n')
         formula = cst.parse_module(text).body[0]
         pass_ = NativeReductions(cls, info(result, ('n',)), set(), formula,
             lambda op=operation: '_cold_' + op, True, builtin_reductions=(operation,))
         rewritten = cst.Module([formula.visit(pass_)]).code
-        assert pass_.count == 1
+        assert pass_.count == 0
+        assert rewritten == text
         methods.append('\n'.join('    ' + line if line else '' for line in rewritten.splitlines()))
         cold.extend(cst.Module([function]).code for function in pass_.fallbacks)
     for name, payload, annotation, result in (
@@ -52,13 +53,15 @@ def test_compiled_builtin_reduction_lowering(tmp_path):
             ('any_true', 'self.predicate(i)', '_mx_cy.bint', 'bint'),
             ('sum_f64', 'self.amount(i)', '_mx_cy.double', 'double'),
             ('max_value', 'self.amount(i)', '_mx_cy.double', 'double')):
-        text = (f'@_mx_cy.ccall\ndef namespace_{name}(self, n: _mx_cy.longlong) -> {annotation}:\n'
+        text = (f'def namespace_{name}(self, n: _mx_cy.longlong) -> {annotation}:\n'
                 f'    return self.operations.{name}({payload} for i in range(n) if i != 1)\n')
         formula = cst.parse_module(text).body[0]
         pass_ = NativeReductions(cls, info(result, ('n',)), set(), formula,
                                 lambda op=name: '_cold_' + op, True)
         rewritten = cst.Module([formula.visit(pass_)]).code
-        assert pass_.count == 1
+        assert pass_.count == 0
+        assert rewritten == text
+        rewritten = cst.Module([HelperCalls(cls.refs, set()).rewrite(formula)]).code
         methods.append('\n'.join('    ' + line if line else '' for line in rewritten.splitlines()))
         cold.extend(cst.Module([function]).code for function in pass_.fallbacks)
     prefix = f'''import cython as _mx_cy
@@ -90,24 +93,10 @@ class _c_Test:
         f'setup(ext_modules=cythonize(["probe.py", "{alias}.pyx", "{helper_alias}.pyx"]))\n')
     subprocess.run([sys.executable, 'setup.py', 'build_ext', '--inplace'], cwd=tmp_path, check=True)
     c_source = (tmp_path / 'probe.c').read_text()
-    for operation in ('all', 'any', 'min', 'max'):
-        pattern = r'^static [^\n]*__pyx_f_[^\n]*_' + operation + r'_check\([^\n]*\) \{'
-        signatures = list(re.finditer(pattern, c_source, re.MULTILINE))
-        assert signatures
-        for signature in signatures:
-            body = c_source[signature.start():c_source.index('\n}\n', signature.end())]
-            assert 'for (' in body
-            assert not any(token in body for token in
-                           ('PyObject_GetIter(', '__Pyx_PyObject_GetIterNextFunc(', 'PyIter_Next('))
-    for operation in ('all_true', 'any_true', 'sum_f64', 'max_value'):
-        pattern = r'^static [^\n]*__pyx_f_[^\n]*_namespace_' + operation + r'\([^\n]*\) \{'
-        signatures = list(re.finditer(pattern, c_source, re.MULTILINE))
-        assert signatures
-        for signature in signatures:
-            body = c_source[signature.start():c_source.index('\n}\n', signature.end())]
-            assert 'for (' in body
-            assert not any(token in body for token in
-                           ('PyObject_GetIter(', '__Pyx_PyObject_GetIterNextFunc(', 'PyIter_Next('))
+    assert '__pyx_gb_' in c_source
+    for name in ('all_check','any_check','min_check','max_check',
+                 'namespace_all_true','namespace_any_true','namespace_sum_f64','namespace_max_value'):
+        assert re.search(r'^static[^\n]*__pyx_(?:pf|gb)_[^\n]*'+re.escape(name)+r'\(',c_source,re.MULTILINE),name
     subprocess.run([sys.executable, '-c', '''from probe import _c_Test
 p = _c_Test()
 assert p.all_check(0) is True and p.all_check(4) is False

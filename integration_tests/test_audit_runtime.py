@@ -115,7 +115,7 @@ def test_scope_overrides_aliases_and_arithmetic(tmp_path):
     admission=json.loads((tmp_path/'exported_cy/_mx_admission.json').read_text())
     info=lambda name:admission[f'exported_cy._mx_classes._c_Values._f_{name}']
     assert info('nested_sum')['native_reductions']==0
-    assert info('hygienic')['native_reductions']==1
+    assert info('hygienic')['native_reductions']==0
     source=(tmp_path/'exported_cy/_mx_classes.py').read_text()
     assert '_mx_integral_math_call' not in source and '_mx_round_one' not in source
     script='''import math

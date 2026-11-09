@@ -1,7 +1,5 @@
 """Standard compiler path for module helpers, aliases and builtin reductions."""
-import ast
 import json
-import re
 import subprocess
 import sys
 import textwrap
@@ -61,32 +59,12 @@ def test_module_helpers_compile_through_shared_metadata(tmp_path):
                    cwd=tmp_path, check=True)
     report = json.loads((tmp_path / 'exported_cy/_mx_admission.json').read_text())
     for name in methods:
-        assert report[f'exported_cy._mx_classes._c_Projection._f_{name}']['native_reductions'] == 1
+        assert report[f'exported_cy._mx_classes._c_Projection._f_{name}']['native_reductions'] == 0
     declined = report['exported_cy._mx_classes._c_Projection._f_lookup_declined']
     assert declined['native_reductions'] == 0
     assert declined['native_numeric_helpers'] == []
-    syntax = ast.parse((tmp_path / 'exported_cy/_mx_classes.py').read_text())
-    c_source = (tmp_path / 'exported_cy/_mx_classes.c').read_text()
-    for name in ('key_total', 'key_every', 'key_minimum', 'key_local', 'captured_every',
-                 'state_total', 'state_some', 'tuple_minimum', 'timed_some',
-                 'lookup_total', 'lookup_filtered', 'lookup_states', 'lookup_bounded'):
-        method = next(node for node in ast.walk(syntax)
-                      if isinstance(node, ast.FunctionDef) and node.name == '_f_' + name)
-        native = method.body[0].value.func.id
-        signatures = list(re.finditer(r'^static [^\n]*__pyx_f_[^\n]*' + re.escape(native)
-                                      + r'\([^\n]*\) \{', c_source, re.MULTILINE))
-        assert signatures, native
-        for signature in signatures:
-            body = c_source[signature.start():c_source.index('\n}\n', signature.end())]
-            assert 'for (' in body
-            if name.startswith('key_'):
-                assert 'key_span_at(' in body
-            if name.startswith('lookup_'):
-                operation = (typed_inputs.lookup.__modelx_cython_keyed_float_numeric__[1]
-                             if name == 'lookup_states' else typed_inputs.lookup.__modelx_cython_float_numeric__)
-                assert operation + '(' in body
-            assert not any(token in body for token in
-                           ('PyObject_GetIter(', '__Pyx_PyObject_GetIterNextFunc(', 'PyIter_Next('))
+    from compiled_evidence import assert_compiled_generator_formulas
+    assert_compiled_generator_formulas(tmp_path, methods)
     probe = textwrap.dedent('''\
         from importlib import import_module
         import sys

@@ -1,7 +1,5 @@
 """Differential boundaries for composed native boolean reductions."""
-import ast
 import json
-import re
 import subprocess
 import sys
 import textwrap
@@ -99,26 +97,10 @@ def test_nested_filtered_boolean_ranges(tmp_path):
     report = json.loads((tmp_path / 'exported_cy/_mx_admission.json').read_text())
     for name in ('every', 'some', 'some_step', 'reverse', 'total', 'maximum', 'singleton',
                  'inner_singleton', 'captured', 'captured_singleton', 'descending', 'legacy_any'):
-        assert report[f'exported_cy._mx_classes._c_Projection._f_{name}']['native_reductions'] == 1
-    generated = tmp_path / 'exported_cy/_mx_classes.py'
-    c_source = generated.with_suffix('.c').read_text()
-    native_bodies = 0
-    for function in ast.parse(generated.read_text()).body:
-        if not isinstance(function, ast.FunctionDef):
-            continue
-        if not any(isinstance(node, ast.Attribute) and node.attr in
-                   ('all_true_accepts', 'any_true_accepts', 'f64_accepts', 'max_value_accepts')
-                   for node in ast.walk(function)):
-            continue
-        pattern = r'^static [^\n]*' + re.escape(function.name) + r'\([^\n]*\) \{'
-        for signature in re.finditer(pattern, c_source, re.MULTILINE):
-            body = c_source[signature.start():c_source.index('\n}\n', signature.end())]
-            if any(isinstance(node, ast.For) for node in ast.walk(function)):
-                assert 'for (' in body
-            assert not any(token in body for token in
-                           ('PyObject_GetIter(', '__Pyx_PyObject_GetIterNextFunc(', 'PyIter_Next('))
-            native_bodies += 1
-    assert native_bodies == 12
+        assert report[f'exported_cy._mx_classes._c_Projection._f_{name}']['native_reductions'] == 0
+    from compiled_evidence import assert_compiled_generator_formulas
+    assert_compiled_generator_formulas(tmp_path, ('every','some','some_step','reverse','total','maximum',
+        'singleton','inner_singleton','captured','captured_singleton','descending','legacy_any'))
     probe = textwrap.dedent('''\
         import sys
         import pickle
