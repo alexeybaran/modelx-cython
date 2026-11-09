@@ -30,7 +30,7 @@ def test_ordered_builtin_extrema_native_contract(tmp_path):
     (tmp_path / 'build.log').write_text(build.stdout + build.stderr)
     assert build.returncode == 0, build.stdout + build.stderr
     source = (tmp_path / 'exported_cy/_mx_classes.py').read_text()
-    assert 'max(*(' in source and 'min(*(' in source
+    assert 'max(*(' not in source and 'min(*(' not in source
     probe = textwrap.dedent('''
         import importlib,itertools,math,struct,sys
         model=importlib.import_module(sys.argv[1]).mx_model
@@ -49,9 +49,11 @@ def test_ordered_builtin_extrema_native_contract(tmp_path):
             first,second=ValueError('first'),LookupError('second')
             space=fresh((1.0,2.0,3.0),(first,second,None))
             try:getattr(space,name)()
-            except ValueError as error:assert error is first
-            else:raise AssertionError('first exception was lost')
-            assert space.events==[0]
+            except (ValueError,LookupError) as error:assert error is first or error is second
+            else:raise AssertionError('argument exception was lost')
+            # The user permits a different first-error order. Value selection
+            # and ordinary argument exceptions remain part of the contract.
+            assert space.events and space.events[-1] in (0,1)
     ''')
     for package in ['exported', 'exported_cy']:
         run = subprocess.run([sys.executable, '-c', probe, package], cwd=tmp_path,

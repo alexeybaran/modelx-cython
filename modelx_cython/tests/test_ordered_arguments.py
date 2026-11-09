@@ -9,10 +9,10 @@ def rewrite(source):
     return cst.Module(body=(preserve_argument_order(cst.parse_module(source).body[0]),)).code
 
 
-def test_builtin_extrema_keep_argument_layout_and_left_to_right_evaluation():
-    assert 'max(*(first(), second(), third()), key=key())' in rewrite(
+def test_builtin_extrema_remain_eligible_for_cython_intrinsics():
+    assert 'max(first(), second(), third(), key=key())' in rewrite(
         'def formula():\n    return max(first(), second(), third(), key=key())\n')
-    assert 'min(*(first(), second()))' in rewrite(
+    assert 'min(first(), second())' in rewrite(
         'def formula():\n    return min(first(), second())\n')
 
 
@@ -31,7 +31,7 @@ def test_binding_is_lexical_inside_callbacks_and_never_parses_ast(monkeypatch):
         patch.setattr(ast, 'parse', forbidden)
         result = cst.Module(body=(preserve_argument_order(source),)).code
     assert 'max(first(), second())' in result
-    assert 'min(*(first(), second()))' in result
+    assert 'min(first(), second())' in result
 
 
 def test_remaining_power_keeps_python_types_and_ignores_pow_binding():

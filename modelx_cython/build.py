@@ -57,6 +57,7 @@ def create_setup(model_name: str, modules: Sequence[str], setup_file: pathlib.Pa
     from setuptools import setup
     from Cython.Build import cythonize
     from Cython.Compiler.PyrexTypes import CArrayType, c_int_type
+    from modelx_cython.native_extrema import capture_extrema_inputs
     from pathlib import Path
     import modelx_cython
     import sys
@@ -75,9 +76,8 @@ def create_setup(model_name: str, modules: Sequence[str], setup_file: pathlib.Pa
             return left.base_type.same_as(right.base_type)
         CArrayType.__eq__ = _mx_array_type_equal
 
-    setup(
-        name="{model_name}",
-        ext_modules=cythonize([
+    with capture_extrema_inputs():
+        ext_modules = cythonize([
     {modules_str}
             ],
             annotate=True,
@@ -85,7 +85,7 @@ def create_setup(model_name: str, modules: Sequence[str], setup_file: pathlib.Pa
             include_path=[str(Path(modelx_cython.__file__).resolve().parent.parent)],
             compiler_directives={{"freethreading_compatible": True}}
         )
-    )
+    setup(name="{model_name}", ext_modules=ext_modules)
     """)
 
     setup_file.write_text(
