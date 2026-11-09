@@ -617,10 +617,7 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
             cls_info.fqname, cells,
         )
         from modelx_cython.ordered_arguments import preserve_argument_order
-        from modelx_cython.powers import object_power_kind
-        kind = object_power_kind(node, self._resolver, self._cells_kinds, self._ref_kinds,
-                                 cls_info, cells)
-        return preserve_argument_order(node, kind,
+        return preserve_argument_order(node,
             native_result=cells.get_rettype_expr(c_style=True) in ('double', 'long long', 'bint'))
 
     def _bind_declared_helpers(self, node, cls_info, cells, inherited=()):

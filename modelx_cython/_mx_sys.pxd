@@ -50,26 +50,6 @@ cdef inline double _mx_pow(double b, double e) except? -1.0:
     return _mx_c_pow(b, e)
 
 
-cdef inline double _mx_capture_power_base(double value) except? -1.0:
-    return value
-
-
-cdef inline object _mx_object_power(double base, double exponent):
-    """Native finite real power beneath the ordinary object-result ABI.
-
-    Delegate complex, exceptional and nonfinite domains to Python. In
-    particular, this does not inherit _mx_pow's overflow saturation policy.
-    """
-    cdef double result
-    if _mx_c_isfinite(base) and _mx_c_isfinite(exponent):
-        if ((base != 0.0 or exponent >= 0.0)
-                and (base >= 0.0 or exponent == _mx_c_floor(exponent))):
-            result = _mx_c_pow(base, exponent)
-            if _mx_c_isfinite(result):
-                return result
-    return (<object>base) ** (<object>exponent)
-
-
 cdef struct PowerMemo:
     bint ready
     double base

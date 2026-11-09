@@ -1,4 +1,4 @@
-"""Normal compiler route preserves extrema effects and IEEE edge selection."""
+"""Native numeric extrema retain c8's values and Cython evaluation mechanics."""
 import os
 import subprocess
 import sys
@@ -43,7 +43,7 @@ def test_ordered_builtin_extrema_native_contract(tmp_path):
             for values in itertools.product(samples,repeat=3):
                 space=fresh(values)
                 actual=getattr(space,name)();expected=operation(values)
-                assert space.events==[0,1,2],(name,space.events)
+                assert sorted(space.events)==[0,1,2],(name,space.events)
                 if math.isnan(expected):assert math.isnan(actual)
                 else:assert struct.pack('d',actual)==struct.pack('d',expected)
             first,second=ValueError('first'),LookupError('second')

@@ -1,8 +1,8 @@
 """Preserve object power semantics outside the proved native domain.
 
-Boxing unproved power operands retains Python numeric types and exceptions.
-Builtin extrema remain ordinary calls, eligible for Cython's native intrinsic.
-Their inputs are captured at build time, without converting numbers to objects.
+Numeric Cells keep c8's power and extrema mechanics unchanged. Object-result
+Cells and child scopes use ordinary object operators when Cython's native
+promotion would change their scalar-class contract.
 """
 import libcst as cst
 from libcst.metadata import ScopeProvider
@@ -12,9 +12,8 @@ from libcst.metadata.scope_provider import BuiltinAssignment
 class _OrderedArguments(cst.CSTTransformer):
     METADATA_DEPENDENCIES = (ScopeProvider,)
 
-    def __init__(self, kind=None, native_result=False):
+    def __init__(self, native_result=False):
         super().__init__()
-        self.kind = kind
         self.opaque_depth = 0
         self.native_result = native_result
 
@@ -34,6 +33,8 @@ class _OrderedArguments(cst.CSTTransformer):
     def leave_BinaryOperation(self, before, after):
         if not isinstance(before.operator, cst.Power):
             return after
+        if self.native_result and self.opaque_depth == 1:
+            return after
         # The qualified real-power pass has already handled its proved C
         # domain. Preserve Python's remaining integer/mixed/complex power
         # result and error semantics through Cython's ordinary object operator.
@@ -43,16 +44,6 @@ class _OrderedArguments(cst.CSTTransformer):
             return after
         if tuple(scope['_mx_cy']):
             return after
-        from .powers import KIND_FLOAT, KIND_INT
-        if (self.kind is not None and self.opaque_depth == 1
-                and not tuple(scope['_mx_sys'])
-                and self.kind.kind(before.left) == KIND_FLOAT
-                and self.kind.kind(before.right) in (KIND_FLOAT, KIND_INT)):
-            capture = cst.Call(cst.parse_expression('_mx_sys._mx_capture_power_base'),
-                               (cst.Arg(after.left),))
-            return cst.Call(cst.parse_expression('_mx_sys._mx_object_power'),
-                            (cst.Arg(capture), cst.Arg(after.right)),
-                            lpar=after.lpar, rpar=after.rpar)
         def boxed(value):
             return cst.Call(cst.Attribute(cst.Name('_mx_cy'), cst.Name('cast')),
                             (cst.Arg(cst.Name('object')), cst.Arg(value)))
@@ -81,7 +72,7 @@ class _OrderedArguments(cst.CSTTransformer):
         return after.with_changes(args=(cst.Arg(values, star='*'), *keywords))
 
 
-def preserve_argument_order(formula, kind=None, native_result=False):
+def preserve_argument_order(formula, native_result=False):
     """Keep unproved powers on Cython's ordinary Python-object operator."""
     wrapper = cst.MetadataWrapper(cst.Module(body=(formula,)))
-    return wrapper.visit(_OrderedArguments(kind, native_result)).body[0]
+    return wrapper.visit(_OrderedArguments(native_result)).body[0]
