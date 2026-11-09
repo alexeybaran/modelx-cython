@@ -573,7 +573,6 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
         See :mod:`modelx_cython.powers`; the node is returned unchanged
         when no operand pair can be typed.
         """
-        from modelx_cython.helpers import HelperCalls
         from modelx_cython.checked_arithmetic import CheckedArithmetic
         from modelx_cython.numeric_helpers import NumericReturns
         cells.formula_allows_exact_receiver = allows_exact_receiver(node, cls_info.name)
@@ -595,9 +594,7 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
         node = node.visit(enum_comparisons)
         cells.native_enum_comparisons = enum_comparisons.comparisons
         cells.native_enum_constants = enum_comparisons.count
-        helpers = HelperCalls(cls_info.refs, self.helper_providers, cells=cls_info.cells)
-        node = helpers.rewrite(node)
-        cells.native_helpers = sorted(helpers.operations | numeric_returns.operations)
+        node = self._bind_declared_helpers(node, cls_info, cells, numeric_returns.operations)
         cells.native_numeric_helpers = sorted(numeric_returns.operations)
         node = rewrite_powers(
             node, self._resolver, self._cells_kinds, self._ref_kinds,
@@ -605,6 +602,19 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
         )
         from modelx_cython.ordered_arguments import preserve_argument_order
         return preserve_argument_order(node)
+
+    def _bind_declared_helpers(self, node, cls_info, cells, inherited=()):
+        """Bind declared provider symbols in either C functions or compiled defs.
+
+        Keeping a formula as a def preserves Cython's closure/default handling;
+        it does not require calling the Python implementation of its helpers.
+        This stage reads registered signatures and lexical receiver identity only.
+        """
+        from modelx_cython.helpers import HelperCalls
+        helpers = HelperCalls(cls_info.refs, self.helper_providers, cells=cls_info.cells)
+        node = helpers.rewrite(node)
+        cells.native_helpers = sorted(helpers.operations | set(inherited))
+        return node
 
     @property   # cannot use cached_property in Transformer
     def transformed(self):
@@ -996,7 +1006,7 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
                 if cells.formula_is_generator:
                     # yield is not supported inside cdef functions;
                     # leave as a plain Python method
-                    return updated_node
+                    return self._bind_declared_helpers(updated_node, cls_info, cells)
 
                 scope = self.get_metadata(ScopeProvider, original_node.body)
                 if any(isinstance(binding.node, cst.Param)
@@ -1007,7 +1017,7 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
                     # initialized in the closure. A compiled def binds them
                     # through its normal Python argument handling.
                     cells.formula_has_captured_default = True
-                    return updated_node
+                    return self._bind_declared_helpers(updated_node, cls_info, cells)
                 updated_node = self._rewrite_powers(
                     updated_node, cls_info, cells, scope)
 
@@ -1082,7 +1092,7 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
                 if cells.body_has_closure:
                     # closures cannot be compiled inside cpdef functions;
                     # leave as a plain Python method
-                    return updated_node
+                    return self._bind_declared_helpers(updated_node, cls_info, cells)
 
                 if not cells.has_formula_def:
                     # uncached cells: the body is the formula itself
