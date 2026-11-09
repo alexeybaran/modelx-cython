@@ -39,6 +39,7 @@ import sys
 import pathlib
 import random
 import numbers
+import operator
 import itertools
 from enum import IntEnum
 from dataclasses import dataclass
@@ -263,12 +264,19 @@ class RuntimeCellsInfo:     # TODO: Create base class RuntimeBaseMemberInfo
         was_ndim_logged = False
         was_vtype_logged = False
         was_mixed_logged = False
+        integral_double_exact = True
 
         def get_arg_expr(args):
             return ", ".join(f"{k}={str(v)}" for k, v in itertools.islice(args.items(), 1, None))
 
         for tr in traces:
             val = tr.ret_val
+            if isinstance(val, numbers.Integral):
+                try:
+                    integer = operator.index(val)
+                    integral_double_exact &= int(float(integer)) == integer
+                except (TypeError, ValueError, OverflowError):
+                    integral_double_exact = False
             if isinstance(val, np.ndarray):
                 tp = ReturnTypeInfo(
                     val.dtype.type, is_array=True, ndim=val.ndim
@@ -315,13 +323,10 @@ class RuntimeCellsInfo:     # TODO: Create base class RuntimeBaseMemberInfo
                     if issubclass(last_tp.value_type, numbers.Integral) and issubclass(tp.value_type, numbers.Integral):
                         last_tp.value_type = numbers.Integral
                     elif issubclass(last_tp.value_type, numbers.Real) and issubclass(tp.value_type, numbers.Real):
-                        # Empty ordinary sums return an integer zero. A
-                        # scalar int/float union has no lossless double ABI.
-                        if (issubclass(last_tp.value_type, numbers.Integral)
-                                != issubclass(tp.value_type, numbers.Integral)):
-                            last_tp.value_type = object
-                        else:
-                            last_tp.value_type = numbers.Real
+                        # Restore upstream/c8's common numeric-value ABI.
+                        # Exact scalar classes require an object declaration;
+                        # an observed integer must not lose numerical precision.
+                        last_tp.value_type = numbers.Real if integral_double_exact else object
                     else:
                         if not was_vtype_logged:
                             args0 = get_arg_expr(last_args)

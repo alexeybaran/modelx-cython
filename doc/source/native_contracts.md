@@ -31,6 +31,13 @@ string annotations or propagate declarations through helper bodies. Explicit
 `return_type` specifications keep their existing precedence. Unannotated Cells
 retain the normal inference policy; object results remain compiled Cython.
 
+As in upstream modelx-cython, mixed integer/float observations may select one
+native double result/cache ABI: integer zero can become float zero without
+changing its value. Widening declines if an observed integer cannot round-trip
+through double. There is no product setting or size threshold. Use a concrete
+object return declaration when exact scalar classes or pandas dtypes are part
+of the public result contract; forwarding Cells declare that contract too.
+
 Formula-local facts do not cross nested functions, classes, lambdas or
 comprehension scopes. A statement-changing lowering declines observable binding
 effects it cannot preserve, including globals, nonlocals and exception targets.

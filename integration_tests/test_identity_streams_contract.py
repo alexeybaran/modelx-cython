@@ -19,7 +19,7 @@ def test_identity_generator_expressions_through_normal_cli(tmp_path):
         p.new_cells('values', '''def values(n):
     return e.over(cf(t) for t in e.periods(n))
 ''')
-        p.new_cells('total', '''def total(n):
+        p.new_cells('total', '''def total(n) -> object:
     return sum(e.over(cf(t) for t in e.periods(n)))
 ''')
         p.new_cells('filtered', '''def filtered(n):

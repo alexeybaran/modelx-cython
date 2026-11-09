@@ -399,9 +399,9 @@ def test_fractional_power(sample_dir, model):
     assert "cdef double[11] _v_mth_rate\n" in pxd
     assert "cdef double[11] _v_mth_q\n" in pxd
     import re
-    # 2**0 is int while negative exponents produce float; preserve that
-    # observed scalar union rather than coercing the integer result to double.
-    assert re.search(r'cdef object _f_int_pow\(_c_Space1 self, long long t\)(?: except\? -1)?\n',pxd)
+    # The ordinary numeric Cell ABI widens integer/float observations without
+    # changing their values, as in upstream/c8. Object ABI is separately tested.
+    assert re.search(r'cdef double _f_int_pow\(_c_Space1 self, long long t\)(?: except\? -1)?\n',pxd)
 
     # only the two floating-exponent powers are rewritten
     src = (work_dir / (model + "_nomx_cy") / "_mx_classes.py").read_text(
@@ -426,7 +426,7 @@ def test_fractional_power(sample_dir, model):
     ).returncode == 0
     assert subprocess.run([sys.executable, '-c',
         'from FractionalPower_nomx_cy import mx_model; s=mx_model.Space1; '
-        'assert type(s.int_pow(0)) is int; assert type(s.int_pow(1)) is float'],
+        'assert s.int_pow(0) == 1; assert s.int_pow(1) == .5'],
         cwd=work_dir, env=env).returncode == 0
 
 

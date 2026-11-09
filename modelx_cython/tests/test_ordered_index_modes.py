@@ -26,7 +26,7 @@ def test_owned_index_order_duplicates_empty_replacement_and_pickle(tmp_path):
             space.new_cells('keyword_ordered', 'lambda: keys(table=prepared_labels())')
             space.new_cells('count', 'lambda: len(keys(prepared_labels()))')
             if name != 'Text':
-                space.new_cells('total', 'lambda: sum(t for t in keys(prepared_labels()))')
+                space.new_cells('total', 'def total() -> object:\n    return sum(t for t in keys(prepared_labels()))\n')
             assert space.ordered() == tuple(labels)
             assert space.keyword_ordered() == tuple(labels)
             assert space.count() == 3
