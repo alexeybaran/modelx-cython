@@ -7,7 +7,7 @@ import textwrap
 import modelx as mx
 import pandas as pd
 
-from lifelib import pandas_inputs, typed_inputs
+from lifelib import expression_streams, pandas_inputs, typed_inputs
 
 
 def test_explicit_typed_table_helpers_modes(tmp_path):
@@ -19,7 +19,9 @@ def test_explicit_typed_table_helpers_modes(tmp_path):
             index=pd.MultiIndex.from_tuples([('M', 42), ('F', 43)]))
         refs = {'source': source, 'table_ctor': pandas_inputs.table,
                 'record_ctor': pandas_inputs.record, 'predicate': pd.isna,
-                'is_missing': typed_inputs.is_missing, 'empty_value': None}
+                'is_missing': typed_inputs.is_missing, 'empty_value': None,
+                'periods': expression_streams.periods,
+                'sum_float': expression_streams.sum_float, 'events': []}
         refs.update({name: getattr(typed_inputs, name) for name in
                      ('lookup_float', 'lookup_int', 'lookup_bool',
                       'lookup_str', 'lookup_object')})
@@ -37,6 +39,17 @@ def test_explicit_typed_table_helpers_modes(tmp_path):
         space.new_cells('missing_fresh', 'lambda: is_missing(predicate, empty_value)').is_cached = False
         space.new_cells('defaulted',
                         'lambda sex, age: lookup_float(table(), (sex, age), "rate", 7.5)')
+        space.new_cells('record_defaulted',
+                        'lambda: lookup_float(row(), "absent", default=4.5)')
+        space.new_cells('mark', 'lambda name, value: events.append(name) or value').is_cached = False
+        space.new_cells('reordered',
+                        'lambda sex, age: lookup_float(default=mark("default", 7.5), '
+                        'key=mark("key", (sex, age)), source=mark("source", table()), '
+                        'column=mark("column", "rate"))')
+        space.new_cells('composed',
+                        'lambda n: sum_float(periods(n), '
+                        'lambda t: lookup_float(table(), ("M", 42), "rate", default=0.0), '
+                        'where=lambda t: t % 2 == 0 and lookup_bool(row(), "flag"))')
         assert space.float_value('M', 42) == 1.5
         assert type(space.int_value('M', 42)) is int
         assert space.bool_value('M', 42) is True
@@ -45,6 +58,10 @@ def test_explicit_typed_table_helpers_modes(tmp_path):
         assert space.record_value() == 42
         assert space.missing_cached() is True and space.missing_fresh() is True
         assert space.defaulted('X', 1) == 7.5
+        assert space.record_defaulted() == 4.5
+        assert space.reordered('X', 1) == 7.5
+        assert space.events == ['default', 'key', 'source', 'column']
+        assert space.composed(3) == 3.0
         space.source = source.assign(rate=[3.5, 4.5])
         assert space.float_value('M', 42) == 3.5
         model.export(tmp_path / 'exported')
@@ -61,6 +78,8 @@ for sex, age in [('M', 42), ('F', 43)]:
     m.Inputs.defaulted(sex, age)
 m.Inputs.record_value()
 m.Inputs.missing_cached(); m.Inputs.missing_fresh()
+m.Inputs.record_defaulted(); m.Inputs.reordered('X', 1)
+for n in [0, 1, 3]: m.Inputs.composed(n)
 ''')
     build = subprocess.run(
         [sys.executable, '-m', 'modelx_cython', 'exported',
@@ -74,10 +93,13 @@ m.Inputs.missing_cached(); m.Inputs.missing_fresh()
     assert '.lookup_key2_float_f64(' not in source
     assert '.lookup_float_f64(' not in source
     assert '.is_missing(' in source
+    assert '.omitted_argument' in source
+    assert '.sum_float(' in source
 
     probe = textwrap.dedent('''
         import importlib, pickle, sys
         from lifelib import typed_inputs as h
+        from lifelib import expression_streams as g
         from lifelib.immutable_inputs import Record, Table, freeze
         m = importlib.import_module(sys.argv[1]).mx_model
         s = m.Inputs
@@ -90,6 +112,8 @@ m.Inputs.missing_cached(); m.Inputs.missing_fresh()
                           h.is_missing.__code__, __import__('pandas').isna.__code__,
                           Table.lookup.__code__, Table.__getitem__.__code__,
                           Record.__getitem__.__code__, freeze.__code__])
+        forbidden.update([g.periods.__code__, g.sum_float.__code__,
+                          g.over.__code__, g._Over.__next__.__code__])
         calls = []
         def profile(frame, event, arg):
             if event == 'call' and frame.f_code in forbidden:
@@ -106,6 +130,13 @@ m.Inputs.missing_cached(); m.Inputs.missing_fresh()
             assert s.record_value() == 42
             assert s.missing_cached() is True and s.missing_fresh() is True
             assert s.defaulted('X', 1) == 7.5
+            assert s.record_defaulted() == 4.5
+            s.events.clear()
+            assert s.reordered('X', 1) == 7.5
+            assert s.events == ['default', 'key', 'source', 'column']
+            assert s.composed(0) == 0.0
+            assert s.composed(1) == 3.5
+            assert s.composed(3) == 7.0
             try:
                 s.float_value('M', 43)
             except KeyError as error:
@@ -130,6 +161,14 @@ m.Inputs.missing_cached(); m.Inputs.missing_fresh()
         fresh.Inputs.lookup_float = current
         assert fresh.Inputs.float_value('F', 43) == 12.5
         assert events == [('F', 43)]
+        received = []
+        def current_keyword(source, key, *, default):
+            received.append((key, default))
+            return 14.5
+        fresh = type(m)()
+        fresh.Inputs.lookup_float = current_keyword
+        assert fresh.Inputs.record_defaulted() == 14.5
+        assert received == [('absent', 4.5)]
         seen = []
         def current_predicate(value):
             seen.append(value)
