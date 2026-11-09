@@ -24,7 +24,8 @@ def test_grouped_public_report_and_empty_metadata_modes(tmp_path):
         p.new_cells('owned','lambda: prepare(result_cf(), report=True)')
         p.new_cells('grouped','lambda: group_sum(owned(), labels, first=("opening",), last=("closing",))')
         p.new_cells('report','lambda: to_pandas(grouped(), index_name="policy_year")')
-        expected=pd.DataFrame({'opening':[1.0],'closing':[8.0],'flow':[4.0]},index=pd.Index([1],name='policy_year'))
+        expected_flow=frame.groupby([1,1,1,1]).sum().loc[1,'flow']
+        expected=pd.DataFrame({'opening':[1.0],'closing':[8.0],'flow':[expected_flow]},index=pd.Index([1],name='policy_year'))
         expected.columns.name='cashflow'
         pd.testing.assert_frame_equal(p.report(),expected,check_exact=True)
         p.source=frame.assign(flow=[1.0,2.0,3.0,4.0])
@@ -60,13 +61,14 @@ fresh.report()
         try:owned=p.grouped()
         finally:sys.setprofile(None)
         assert calls==[],calls
-        expected=pd.DataFrame({'opening':[1.0],'closing':[8.0],'flow':[4.0]},index=pd.Index([1],name='policy_year'))
+        expected_flow=p.source.groupby(p.labels).sum().loc[1,'flow']
+        expected=pd.DataFrame({'opening':[1.0],'closing':[8.0],'flow':[expected_flow]},index=pd.Index([1],name='policy_year'))
         expected.columns.name='cashflow'
         pd.testing.assert_frame_equal(p.report(),expected,check_exact=True)
         restored=pickle.loads(pickle.dumps(m))
         pd.testing.assert_frame_equal(restored.Projection.report(),expected,check_exact=True)
         p.source=p.source.assign(flow=[1.0,2.0,3.0,4.0])
-        assert p.report()['flow'].iloc[0]==4.0  # Explicit cleanup is required.
+        assert p.report()['flow'].iloc[0]==expected_flow  # Explicit cleanup is required.
         fresh=type(m)().Projection
         fresh.source=p.source
         assert fresh.report()['flow'].iloc[0]==10.0
@@ -80,7 +82,7 @@ fresh.report()
         def current(table,labels,*,first,last):
             return group_sum(table,labels,first=first,last=last)
         replaced.group_sum=current
-        assert replaced.report()['flow'].iloc[0]==4.0
+        assert replaced.report()['flow'].iloc[0]==expected_flow
     ''')
     for name in ['exported','exported_cy']:
         run=subprocess.run([sys.executable,'-c',probe,name],cwd=tmp_path,capture_output=True,text=True,env=dict(os.environ))
