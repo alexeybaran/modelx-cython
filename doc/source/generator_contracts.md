@@ -1,189 +1,142 @@
 # Generator and reduction contracts
 
-**Superseded development design.** The AST reduction recognizer described below
-is no longer activated by the compiler pipeline. The explicit no-AST helper
-design is in lifelib's `EXPRESSION_STREAMS.md`; its canonical typed reducer is
-`sum_float`, with per-contribution float normalization. The earlier `sum_f64`
-contract below differs and must not be silently aliased. Historical tests and
-evidence for this prototype do not qualify the replacement path.
+The compiler basis is the qualified local `c8b0371` checkpoint with exporter
+`b8b7472`. Generator-lane changes remain on their worker branch. Local Windows
+qualification does not qualify these later changes or all regional models, and
+no core promotion is implied.
 
-Development status: incomplete native coverage. The baseline is qualified local
-compiler `299d8c10`; generator changes still need full regional native qualification.
-This document distinguishes
-implemented admission from the remaining design; it is not an acceptance receipt.
+The implementation uses declared helper symbols and ordinary Cython compilation.
+It adds no AST parser, formula/lambda-body classifier or second interpreter.
+The previous reduction recognizer is retired; `NativeReductions` and
+`ContextualFloat` are inactive compatibility bridges. Historical evidence for
+that recognizer does not qualify the current implementation.
 
-## Authoring interface
+## Expression vocabulary
 
-Keep ordinary Python generator/comprehension syntax. Start with the four existing
-expression helpers, whose live/export implementations define their contracts:
+Use one namespace: `from lifelib import expressions as e`. The facade re-exports
+the exact registered function objects and adds no wrappers or second registry.
+Input preparation belongs to `lifelib.pandas_inputs`; pandas output construction
+is an explicit boundary. The detailed live/native provider contract is in
+lifelib's `EXPRESSION_STREAMS.md` and `NATIVE_TABLES.md`.
 
-| Expression | Contract | Actuarial example |
-|---|---|---|
-| `sum_f64(values)` | `sum(values, 0.0)`, including the interpreter's floating summation behavior | `sum_f64(net_cf(t) * disc(t) for t in range(proj_len()))` |
-| `any_true(values)` | `any(values)`; consume through the first truthy item | `any_true(is_shortfall(t) for t in range(proj_len()))` |
-| `all_true(values)` | `all(values)`; consume through the first false item | `all_true(abs(residual(t)) <= tolerance for t in range(proj_len()))` |
-| `max_value(values)` | `max(values)`; first greatest original object; empty iterable raises | `max_value(av_pp(t) for t in range(proj_len()))` |
+| Expression | Meaning |
+|---|---|
+| `e.periods(n)` or `e.periods(start, stop, step)` | Reusable range domain, with ordinary integer/index conversion and zero-step behavior. |
+| `e.over(source, function, where=None, *, unpack=None)` | One-shot lazy map/filter producer. Acquire the source iterator eagerly; unpack each candidate, test its predicate, then evaluate its payload. |
+| `e.flatten(sources)` | Lazy ordered concatenation; acquire inner iterators only as reached. |
+| `e.zip_values((first, second), *, strict=False)` | Dedicated resumable zipped producer over an authored exact tuple of sources; ordinary zip acquisition, advancement, strictness, retries and retained-row lifetimes. |
+| `e.sum_float(source, function=omitted, where=None) -> float` | Float-normalize each passing contribution lazily, then use float-start summation; empty input is float `0.0`. |
 
-These are current one-positional-argument helpers. No `key`, `default` or `start`
-extension is implied. Ordinary `sum(values)` retains its distinct integer start,
-return types, large-integer and mixed-numeric behavior; replacing it with
-`sum_f64` requires a demonstrated compatible model domain. In particular, a
-sample of float results does not justify changing all legal integer inputs.
+```python
+e.sum_float(e.periods(proj_len()),
+            lambda t: net_cf(t) * discount(t))
 
-For saved models, bind a module Reference such as `generators =
-lifelib.typed_inputs` and write `generators.all_true(...)`. Module References
-serialize as imports, preserving regional formulas-only folders; individual
-function References can require embedded pickle data. The compiler resolves
-registered module members through the same capability registry as direct
-References and passes the current member callable to the provider. Module aliases
-and ordinary Reference replacement remain checked. This source-saving contract
-does not add runtime pickle support for module objects: exported Python and
-compiled packages retain the existing module-object pickle limitation. A fresh
-model can be constructed through its normal model class.
+all(e.over(e.periods(proj_len()),
+           lambda t: abs(residual(t)) <= tolerance))
 
-No additional reduction helper is required for builtin `all`, `any`, `min` and
-`max`: proved builtin bindings share the generic primitive lowering and identity
-provider. Integer extrema preserve integer results. Builtin `bool` around a
-boolean reduction is removed only from the admitted fast branch; fallback keeps
-the conversion, including replacement-helper truth effects and exceptions.
-Ordinary `sum`, `next`, `sorted`, general tuple/set/dict construction and pandas
-materialization still have open native-coverage rows.
-Creating a separate helper for each business formula is excluded.
+sum(e.over(e.zip_values((loss_days, probabilities)),
+           lambda days, probability: days * probability, unpack=2))
 
-## Evaluation boundaries
+next(e.over(e.zip_values((ages[:-1], ages[1:])),
+            lambda lower, upper: (lower, upper),
+            where=lambda lower, upper: lower <= age <= upper, unpack=2))
 
-1. Evaluate the consumer callable, then its arguments in source order. A
-   generator expression evaluates its outermost iterator expression immediately.
-   Its payload, filters and subsequent iterators execute only as consumed.
-2. Preserve each filter's order, inner-loop placement, tuple unpacking and
-   short-circuit behavior. An empty outer loop never evaluates inner bounds.
-3. Generator variables have their own scope. They cannot overwrite a same-named
-   outer variable or capture a generated identifier. Captured mutable bindings
-   remain late-bound; moving a closure requires an explicit lexical proof.
-4. A generator is a one-shot iterator. A replacement helper may retain it,
-   partially consume it, consume it twice, or raise its own exception. Such a
-   replacement receives the original lazy generator, not an eager list.
-5. An exception thrown while evaluating the outer iterator is propagated
-   directly. `StopIteration` escaping the generator body becomes
-   `RuntimeError('generator raised StopIteration')`, with that original exception
-   as cause and context. Other exceptions preserve identity and order.
-6. Numeric loops must preserve empty/descending ranges, zero-step errors,
-   arbitrary Python integers, index conversion and overflow behavior. Native
-   machine-integer admission is a proof obligation for every arithmetic
-   intermediate and terminating increment, not just sampled endpoints.
+sum(e.flatten(e.over(e.periods(1, 6), lambda grade:
+    e.over(e.periods(1, waiting_months() + 1),
+           lambda month: pols_waiting(t, grade, month)))))
+```
 
-## Current composed primitive lowering
+Typed shared lookups are `lookup_float`, `lookup_int`, `lookup_bool`,
+`lookup_str` and `lookup_object`. `keys`, `row`, `column`, `group_sum` and
+`to_pandas` compose with the same namespace; their preparation, scalar, missing,
+alignment and public-output contracts belong to the pandas provider.
 
-Registered `all_true`, `any_true`, `sum_f64` and `max_value` can use composed typed loops when all of
-these conditions hold:
+`sum_float` means precisely `sum((float(value) for value in values), 0.0)`
+under the canonical builtin bindings. Optional mapping/filtering precedes that
+normalization. It differs from ordinary `sum(values)` and from the older
+`sum_f64(values) == sum(values, 0.0)` for integer prefixes, NumPy/custom numbers,
+Decimal and empty-result types. These names must not be silently aliased.
+A float-looking sample does not justify changing a model's ordinary sum.
+Regional source adjustments retain the standard consumers.
 
-- The formula returns the reduction directly, has a safe lexical scope and a
-  cold generator fallback, and has a native boolean or double result as appropriate.
-- The receiver is exact and the current callable passes the provider's identity
-  check. A subclass or replacement callable keeps the generator path.
-- Clauses use builtin `range` with primitive proved signed-int64 arguments and
-  any nonzero signed-int64 step, homogeneous literal tuples, or proved singleton bindings. Filters and payloads have proved
-  primitive truth/numeric semantics.
-- Literal tuples preserve order and exact homogeneous bool/int64/float/string
-  values. Their C counter indexes an immutable tuple; string tokens pass as the
-  original objects to compatible typed Cell arguments. Literal str/bytes/None
-  arguments are admitted only for matching string/bytes/object parameters.
-- Generator targets are distinct, hygienically renamed and separate from
-  formula parameters. Unknown captures, unpacking, aliases and iterators decline.
-- Integer arithmetic is not introduced merely because a callee's result was
-  traced as primitive. Mixed int64/float comparisons decline when conversion
-  could change Python comparison results. `abs` is native only for proved
-  double values and the builtin binding.
+## Evaluation and protocol
 
-The fast branch evaluates outer range arguments once before the generator-body
-exception boundary. It evaluates inner bounds and filters on demand inside that
-boundary. Empty identities are `True` for all, `False` for any, and float zero for
-sum. Maximum stores the first value, compares later values strictly, and preserves
-the first NaN and signed-zero tie behavior. Its empty-error boundary delegates to
-the registered callable so the Python release's exact exception message is
-preserved. Sum reuses the existing provider's compensated F64Sum state; no second
-summation algorithm is introduced. The terminating
-increment of a unit-step half-open int64 range is representable. Other steps
-use a C progression state whose unsigned endpoint distance proves the next
-signed value is representable. It stops before computing an out-of-range final
-increment, including a step of `-2**63`. Zero-step errors are eager for the outer
-range and lazy within the PEP479 boundary for inner ranges.
+Consumer callables and arguments retain authored left-to-right evaluation.
+Outer iterator acquisition is eager; payloads, filters and dependent inner
+bounds stay lazy. An empty outer producer never evaluates an inner bound.
+`unpack=N` is explicit because a tuple can itself be one intended argument;
+flat arities two, three and four use bounded unpacking and the original binding
+order before predicates or payloads.
 
-A single immediately preceding double-valued binding can feed composed reductions.
-The original assignment executes eagerly in place; its value is passed into the
-retained fallback rather than recomputed. Scope-proved double Cells and double
-min/max expressions can establish that binding. Multi-argument double min/max
-payloads use strict-comparison C helpers. Cython 3.2.9 extrema intrinsics can
-reorder effectful operands; ordinary nested C calls retain the original operand
-order and first-value ties. A captured min/max assignment records its current
-callable and admission before evaluating operands; its fallback retains the
-original captured object. The native loop unboxes the admitted capture once.
-Unknown, reassigned-parameter and arbitrary-object bindings decline.
+`over` and `flatten` retain standard send/throw/close behavior. Cython owns their
+generator execution and exception normalization. A thin protocol preflight
+corrects observed Cython 3.2.9 rejected-send/invalid-throw state differences;
+it does not construct a second exception or formula interpreter. Source
+exhaustion yields plain `StopIteration`; a body/predicate/unpack/inner-acquisition
+`StopIteration` becomes `RuntimeError('generator raised StopIteration')` with
+the original cause/context. Other exceptions preserve identity. A retained
+producer stays resumable after a consumer-side conversion failure.
 
-Existing bounded max/any mechanisms remain separately admitted. Their
-presence does not imply arbitrary-precision bounds, arbitrary-capture or arbitrary-iterator
-coverage. Object-capable Cython is useful compatibility but does not by itself
-close a primitive native-coverage row.
+The zipped producer is an iterator rather than a generator frame. Source
+exceptions, transient exhaustion and strict mismatches do not automatically
+close it. Strict truth conversion precedes ordered iterator acquisition.
+Aliased iterators share advancement; two uses of a sequence get independent
+cursors. Cached result-row ownership matches builtin zip. Native free-threaded
+3.13 builds are rejected because its supported API cannot establish the required
+unique tuple ownership; the separate 3.14 path requires Windows acceptance.
 
-## Shared namespace and provider metadata
+Standard `all`, `any`, `min`, `max`, `next`, `sum`, `sorted`, `tuple`, `list`,
+`set` and `dict` keep their own short circuit, empty, identity, first-tie, numeric
+and materialization contracts. Eager comprehensions remain eager. The generic
+ordered-argument pass preserves effectful multi-argument extrema order against
+Cython intrinsic reordering. Remaining unproved powers retain Python-number
+operand semantics, including integer zero powers and negative exponents;
+the qualified local proved-real power mechanism remains unchanged.
 
-`helper_members.module_helpers` captures registered functions of an exact module
-without invoking module `__getattr__`. `helper_reference(func, refs)` is the one
-resolver for `self.helper` and `self.namespace.helper`, shared with numeric
-lowering. Records contain provider identifiers and validated capabilities, not
-frozen callable objects. Unknown namespaces and unproved lexical receivers decline.
+Exact CPython generator type/frame/code introspection is outside the inventoried
+pricing contracts. Arbitrary internal helper-global changes require rebuilding;
+ordinary current helper Reference/module-member replacements still use the
+registered callable identity check and authored positional/keyword call shape.
+A surrounding traced Cell retains its independently documented result/cache ABI.
 
-Two capability shapes are agreed with the pandas lane and validated in the sole
-`helpers.CAPABILITIES` registry:
+## Compiler and provider mechanism
 
-| Suffix | Internal field | Contract |
-|---|---|---|
-| `iteration` | `iteration_helper` | Four identifiers: admission operation, owning span class, count operation and signed-int64 key access operation |
-| `float_numeric` | `float_numeric_helper` | Contextual conversion operation receiving current conversion, current helper, context and original arguments |
+`helpers.CAPABILITIES` is the sole registry. Metadata declares provider operation,
+physical result, supported iteration span operations and keyword layout.
+`helper_members` resolves direct and module References without invoking module
+descriptors. The binder reads declared signatures, checks lexical receiver
+identity and emits direct Cython calls. It neither inspects callback bodies nor
+infers a numeric domain from formula text. Ordinary Cython compiles callbacks.
 
-The integer key-span preserves original key order, empty input and owner lifetime.
-Admission never invokes an unsupported callable; fallback must reuse captured
-arguments and must not repeat table expressions. The original outer iterator's
-errors remain eager. Unsupported key domains remain explicit coverage gaps.
-Resources are disposable and private to the compiled provider package.
+The same binder runs in ordinary C-function formulas and retained compiled-def
+paths for captured defaults, yield and uncached closures. Keeping a method as
+a compiled def preserves Cython's closure/default handling without requiring
+its registered helpers to execute Python implementations. Public signatures,
+qualified captured-default guards, enums and cache architecture are preserved.
 
-The reduction pass consumes the iteration capability for an outer keys call,
-composed with inner signed-int64 ranges and singleton bindings. It evaluates the current
-consumer, key producer and table argument once, in that order. Unsupported
-receivers, callables or key domains build the original generator over the already
-captured outer iterable; they never repeat the table expression. The native branch
-uses a Py_ssize_t C counter and signed-int64 key access, without a Python iterator.
-Nested key-span producers remain outside this admission until separately tested.
+Canonical range sources within signed 64-bit bounds use overflow-safe C
+progression state, including descending/nonunit ranges and the minimum signed
+step. Exact tuple/list sources use native index state. Wider numeric domains
+and arbitrary iterators retain semantic compatibility; that compatibility is
+not automatically complete native coverage. `sum_float` uses the shared
+compensated double summation state and an object dispatcher for replacements.
+No PGO, forced-inlining flags or product/Cell-specific compiler branches apply.
 
-Contextual float fallback evaluates `conversion(helper(*args))` in source order.
-It cannot simply coerce a replacement helper's result through a C-double ABI:
-Python `float('2.5')`, for example, has different conversion semantics. Pandas owns
-the contextual numeric/provider implementation; the generator lane owns registry,
-namespace resolution and generator consumption. Registry reservation alone is not
-evidence that either capability is fully implemented or qualified.
+## Source and qualification evidence
 
-## Remaining regional mechanisms
+The offline, guarded CST authoring adjustment converts 520 regional generator
+expressions (521 clauses) to `over`/`flatten`, including thirteen zipped sources.
+It retains before/after source hashes, ordinary consumers, eager comprehensions,
+original powers and all model inputs. Unsupported escaping closures, assignment
+expressions, nested generator objects, asynchronous clauses and unsafe target
+bindings are declined. This source editing utility is not a compiler frontend.
 
-The source census requires ordinary and float-start sums, all/any, min/max,
-filtered extrema over index keys, a nested care-state reduction, tuple/set/sorted
-materialization, a `next` over zipped adjacent ages, and list/dict comprehensions.
-Most list comprehensions construct pandas reports, so ownership and boundary
-contracts must be coordinated with the pandas lane before model edits.
-
-Complete qualification requires a source-level operation row, any source
-adjustment, exact semantic test, generated Cython/C evidence, loaded extension
-identity, full matched financial outputs and same-VM performance evidence for
-every regional model. Unresolved indirect calls and compatibility fallbacks stay
-explicitly open. Windows acceptance and core promotion remain separate.
-
-## Reduction expressions
-
-Assignments, conditions and arithmetic may call a generated C reduction function
-using the same primitive loop emitter as direct returns. Formula parameters are
-already bound and cross this boundary by their existing ABI. Only the final
-result is boxed. A replacement consumer returns its original object to the
-surrounding expression, preserving later truth conversion and arithmetic.
-Unknown local captures decline; authored child scopes retain their semantics.
-Scalar min/max ancestors remain conservative because Cython's intrinsic operand
-ordering requires separate handling. This does not qualify ordinary sum, zipped
-inputs, general materialization, or mixed public result ABIs.
+Native completion requires each original creation/consumption/indirect-helper
+operation to link to its source adjustment, semantic tests, loaded extension,
+generated C body and concrete/transitive producer admission. Source profiling,
+full original financial comparisons and additional default/diagnostic probes
+are separate evidence. Successful compilation, a C file, matching financial
+values or a compatibility branch alone cannot close a native row. Remaining
+pandas producers and unobserved/dynamic targets stay explicit until resolved.
+Matched same-VM performance follows correctness and process quiescence. Windows
+acceptance and user-approved core promotion remain separate gates.
