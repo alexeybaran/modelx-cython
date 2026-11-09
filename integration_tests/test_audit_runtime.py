@@ -117,7 +117,7 @@ def test_scope_overrides_aliases_and_arithmetic(tmp_path):
     assert info('nested_sum')['native_reductions']==0
     assert info('hygienic')['native_reductions']==1
     source=(tmp_path/'exported_cy/_mx_classes.py').read_text()
-    assert '_mx_integral_math_call' in source and '_mx_round_one' in source
+    assert '_mx_integral_math_call' not in source and '_mx_round_one' not in source
     script='''import math
 from types import SimpleNamespace
 from PACKAGE import mx_model

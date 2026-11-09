@@ -1,9 +1,8 @@
 """Map explicitly authored enum definitions to private Cython constants."""
-import ast
-
 import libcst as cst
 
-from .scopes import FormulaTransformer, binding_names, lexical_nodes
+from .scopes import CstFacts, FormulaTransformer, Names, lexical_nodes
+from .syntax import walk
 from .consts import MX_SYS_MOD
 
 
@@ -13,6 +12,7 @@ def storage(name):
 
 def prepare(module):
     module.code_enum_symbols = {}
+    identifiers = Names(module.visitor.wrapper.module)
     for cls in module.classes.values():
         markers = {name: ref.enum_definitions for name,ref in cls.refs.items()
                    if getattr(ref, 'enum_definitions', ())}
@@ -28,7 +28,7 @@ def prepare(module):
                 continue
             for member, value in ref.enum[2].items():
                 if -(1 << 31) <= value < (1 << 31):
-                    symbol = f'_mx_enum_const_{len(module.code_enum_symbols)}'
+                    symbol = identifiers.reserve(f'_mx_enum_const_{len(module.code_enum_symbols)}')
                     module.code_enum_symbols[cls.name, name, member] = symbol, value
 
 
@@ -48,34 +48,28 @@ class Constants(FormulaTransformer):
         self.comparisons = 0
 
     def visit_FunctionDef(self, node):
-        tree = ast.parse(cst.Module([]).code_for_node(node))
-        if any((isinstance(n, ast.Name) and n.id.startswith('_mx_enum_const_'))
-               or (isinstance(n, ast.arg) and n.arg.startswith('_mx_enum_const_'))
-               for n in ast.walk(tree)):
-            return False
         assignments = {}
         invalid = set()
-        nodes = list(lexical_nodes(tree.body[0].body))
-        if 'self' in binding_names(nodes):
+        nodes = list(lexical_nodes(node.body.body))
+        facts = CstFacts(node.body.body)
+        if 'self' in facts.bindings(nodes):
             return False
         for part in nodes:
-            if isinstance(part, ast.Assign):
+            if isinstance(part, cst.Assign):
                 for target in part.targets:
-                    if isinstance(target, ast.Name):
-                        assignments.setdefault(target.id, []).append(part.value)
-            elif isinstance(part, (ast.AugAssign, ast.AnnAssign, ast.NamedExpr)):
-                invalid.update(n.id for n in ast.walk(part.target) if isinstance(n, ast.Name))
-            elif isinstance(part, (ast.For, ast.comprehension)):
-                invalid.update(n.id for n in ast.walk(part.target) if isinstance(n, ast.Name))
-            elif not isinstance(part, (ast.Name, ast.Assign)):
-                invalid.update(binding_names((part,)))
+                    if isinstance(target.target, cst.Name):
+                        assignments.setdefault(target.target.value, []).append(part.value)
+            elif isinstance(part, (cst.AugAssign, cst.AnnAssign, cst.NamedExpr, cst.For, cst.CompFor)):
+                invalid.update(n.value for n in walk(part.target) if isinstance(n, cst.Name))
+            elif not isinstance(part, (cst.Name, cst.Assign)):
+                invalid.update(facts.bindings((part,)))
         for name, values in assignments.items():
-            if name not in invalid and all(isinstance(v, ast.Call) and isinstance(v.func, ast.Attribute)
-                    and isinstance(v.func.value, ast.Name) and v.func.value.id == 'self'
-                    and v.func.attr in self.cls.cells
-                    and not self.cls.cells[v.func.attr].called_with_kwargs
-                    and not self.cls.cells[v.func.attr].body_has_closure
-                    and self.cls.cells[v.func.attr].get_rettype_expr(c_style=True)
+            if name not in invalid and all(isinstance(v, cst.Call) and isinstance(v.func, cst.Attribute)
+                    and isinstance(v.func.value, cst.Name) and v.func.value.value == 'self'
+                    and v.func.attr.value in self.cls.cells
+                    and not self.cls.cells[v.func.attr.value].called_with_kwargs
+                    and not self.cls.cells[v.func.attr.value].body_has_closure
+                    and self.cls.cells[v.func.attr.value].get_rettype_expr(c_style=True)
                     in ('long long','bint') for v in values):
                 self.locals.add(name)
 

@@ -1,48 +1,45 @@
 """Keep range-proven integer expressions in the existing Cython formula."""
-
-import ast
 import math
 
 import libcst as cst
-from .scopes import has_scope_effects
+
+from .scopes import CstFacts, Names, has_scope_effects
+from .syntax import arguments, code, statements
 
 _BOUND = 1 << 25
 
 
 class CheckedArithmetic:
     def __init__(self, cls, cell):
-        self.cls = cls
-        self.cell = cell
-        self.code = cst.Module([]).code_for_node
+        self.cls, self.cell = cls, cell
 
     def native_call(self, expr):
-        if not (isinstance(expr, ast.Call) and isinstance(expr.func, ast.Attribute)
-                and isinstance(expr.func.value, ast.Name) and expr.func.value.id == 'self'
-                and not expr.keywords
-                and all(isinstance(arg, ast.Name) and arg.id in self.parameters
-                        or isinstance(arg, ast.Constant) and type(arg.value) is int
-                        and -_BOUND <= arg.value <= _BOUND for arg in expr.args)):
+        args = arguments(expr)
+        if (args is None or not isinstance(expr.func, cst.Attribute)
+                or not isinstance(expr.func.value, cst.Name) or expr.func.value.value != 'self'
+                or not all(isinstance(arg, cst.Name) and arg.value in self.parameters
+                           or isinstance(arg, cst.Integer) and -_BOUND <= arg.evaluated_value <= _BOUND
+                           for arg in args)):
             return False
-        cell = self.cls.cells.get(expr.func.attr)
+        cell = self.cls.cells.get(expr.func.attr.value)
         return (cell is not None and not cell.is_special() and not cell.called_with_kwargs
                 and not cell.body_has_closure and cell.get_rettype_expr(c_style=True) == 'long long')
 
     def capture(self, expr, local_names=()):
-        if isinstance(expr, ast.Constant) and type(expr.value) is int and -_BOUND <= expr.value <= _BOUND:
-            return str(expr.value), str(expr.value)
-        if self.native_call(expr) or isinstance(expr, ast.Name) and expr.id in (*self.parameters, *local_names):
+        if isinstance(expr, cst.Integer) and -_BOUND <= expr.evaluated_value <= _BOUND:
+            value = str(expr.evaluated_value)
+            return value, value
+        if self.native_call(expr) or isinstance(expr, cst.Name) and expr.value in (*self.parameters, *local_names):
             name = f'{self.prefix}_{self.next_input}'
             self.next_input += 1
-            self.inputs.append((name, ast.unparse(expr)))
+            self.inputs.append((name, code(expr)))
             return name, f'_mx_cy.cast(object, {name})'
-        if not isinstance(expr, ast.BinOp):
+        if not isinstance(expr, cst.BinaryOperation):
             return None
-        operators = {ast.Add: '+', ast.Sub: '-', ast.Mult: '*'}
-        operator = operators.get(type(expr.op))
+        operator = {cst.Add: '+', cst.Subtract: '-', cst.Multiply: '*'}.get(type(expr.operator))
         if operator is None:
             return None
-        left = self.capture(expr.left, local_names)
-        right = self.capture(expr.right, local_names)
+        left, right = self.capture(expr.left, local_names), self.capture(expr.right, local_names)
         if left is None or right is None:
             return None
         return tuple(f'({a} {operator} {b})' for a, b in zip(left, right))
@@ -59,68 +56,68 @@ class CheckedArithmetic:
         )
 
     def integer_interval(self, expr):
-        """Bound every intermediate under the emitted native-input guards.
-
-        Integer intermediates through 2**53 are exact in binary64 and fit
-        signed 64 bits. This proof replaces expression operation-count limits.
-        """
-        if isinstance(expr, ast.Constant) and type(expr.value) is int:
-            return (expr.value, expr.value) if -_BOUND <= expr.value <= _BOUND else None
-        if self.native_call(expr) or isinstance(expr, ast.Name) and expr.id in self.parameters:
+        """Bound every intermediate under the emitted native-input guards."""
+        if isinstance(expr, cst.Integer):
+            value = expr.evaluated_value
+            return (value, value) if -_BOUND <= value <= _BOUND else None
+        if self.native_call(expr) or isinstance(expr, cst.Name) and expr.value in self.parameters:
             return -_BOUND, _BOUND
-        if not isinstance(expr, ast.BinOp):
+        if not isinstance(expr, cst.BinaryOperation):
             return None
         left, right = self.integer_interval(expr.left), self.integer_interval(expr.right)
         if left is None or right is None:
             return None
-        if isinstance(expr.op, ast.Add):
+        if isinstance(expr.operator, cst.Add):
             interval = left[0] + right[0], left[1] + right[1]
-        elif isinstance(expr.op, ast.Sub):
+        elif isinstance(expr.operator, cst.Subtract):
             interval = left[0] - right[1], left[1] - right[0]
-        elif isinstance(expr.op, ast.Mult):
+        elif isinstance(expr.operator, cst.Multiply):
             products = [a * b for a in left for b in right]
             interval = min(products), max(products)
         else:
             return None
         return interval if -(1 << 53) <= interval[0] <= interval[1] <= (1 << 53) else None
 
-    def double_tail(self, body, tree):
-        if len(tree.body) < 3 or not isinstance(tree.body[-1], ast.Return):
+    def double_tail(self, body):
+        if len(body) < 3 or any(not isinstance(line, cst.SimpleStatementLine) or len(line.body) != 1
+                                for line in body[-3:]):
             return body
-        left, right, result = tree.body[-3:]
-        if not all(isinstance(node, ast.Assign) and len(node.targets) == 1
-                   and isinstance(node.targets[0], ast.Name) for node in (left, right)):
+        left, right, result = (line.body[0] for line in body[-3:])
+        if (not isinstance(result, cst.Return) or not all(isinstance(node, cst.Assign)
+                and len(node.targets) == 1 and isinstance(node.targets[0].target, cst.Name)
+                for node in (left, right))):
             return body
-        if left.targets[0].id == right.targets[0].id:
+        first, second = left.targets[0].target.value, right.targets[0].target.value
+        if first == second:
             return body
         expr = result.value
-        if not (isinstance(expr, ast.BinOp) and isinstance(expr.op, ast.Add)
-                and isinstance(expr.left, ast.BinOp) and isinstance(expr.left.op, ast.Div)
-                and isinstance(expr.left.left, ast.Name) and expr.left.left.id == left.targets[0].id
-                and isinstance(expr.right, ast.Name) and expr.right.id == right.targets[0].id
-                and isinstance(expr.left.right, ast.Constant)
-                and type(expr.left.right.value) is float and math.isfinite(expr.left.right.value)
-                and expr.left.right.value > 0):
+        if not (isinstance(expr, cst.BinaryOperation) and isinstance(expr.operator, cst.Add)
+                and isinstance(expr.left, cst.BinaryOperation) and isinstance(expr.left.operator, cst.Divide)
+                and isinstance(expr.left.left, cst.Name) and expr.left.left.value == first
+                and isinstance(expr.right, cst.Name) and expr.right.value == second
+                and isinstance(expr.left.right, cst.Float)
+                and math.isfinite(expr.left.right.evaluated_value) and expr.left.right.evaluated_value > 0):
             return body
-        expressions = (left.value, right.value)
+        expressions = left.value, right.value
         if any(self.integer_interval(value) is None for value in expressions):
             return body
-        captured = [self.capture(expr) for expr in expressions]
+        captured = [self.capture(value) for value in expressions]
         if None in captured or not self.inputs:
             return body
-        divisor = ast.unparse(expr.left.right)
+        divisor = repr(expr.left.right.evaluated_value)
         native = self.statements(captured, lambda a, b: f'{a} / {divisor} + {b}')
         return (*body[:-3], *cst.parse_module(native).body)
 
-    def integer_product(self, body, tree):
-        assigned = {}
-        for node in tree.body:
-            if isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
-                name = node.targets[0].id
-                assigned[name] = self.native_call(node.value)
-        native_locals = {name for name, typed in assigned.items() if typed
-                         and sum(isinstance(n, ast.Name) and n.id == name and isinstance(n.ctx, ast.Store)
-                                 for n in ast.walk(tree)) == 1}
+    def _integer_locals(self, body):
+        stores = CstFacts(body).stores
+        return {node.targets[0].target.value for node in statements(body)
+                if isinstance(node, cst.Assign) and len(node.targets) == 1
+                and isinstance(node.targets[0].target, cst.Name)
+                and stores[node.targets[0].target.value] == 1 and self.native_call(node.value)}
+
+    def integer_product(self, body):
+        native_locals = self._integer_locals(body)
+        owner = self
 
         class Product(cst.CSTTransformer):
             def visit_FunctionDef(inner, node):
@@ -132,42 +129,24 @@ class CheckedArithmetic:
             def leave_SimpleStatementLine(inner, before, after):
                 if len(before.body) != 1 or not isinstance(before.body[0], cst.Return):
                     return after
-                result = before.body[0].value
-                if result is None:
+                expr = before.body[0].value
+                if not (isinstance(expr, cst.BinaryOperation) and isinstance(expr.operator, cst.Multiply)
+                        and isinstance(expr.right, cst.BinaryOperation)
+                        and isinstance(expr.right.operator, cst.Subtract)
+                        and isinstance(expr.right.right, cst.Integer)
+                        and expr.right.right.evaluated_value == 1 and owner.native_call(expr.right.left)
+                        and isinstance(expr.left, cst.Name) and expr.left.value in native_locals):
                     return after
-                expr = ast.parse(self.code(result), mode='eval').body
-                if not (isinstance(expr, ast.BinOp) and isinstance(expr.op, ast.Mult)
-                        and isinstance(expr.right, ast.BinOp) and isinstance(expr.right.op, ast.Sub)
-                        and isinstance(expr.right.right, ast.Constant)
-                        and type(expr.right.right.value) is int and expr.right.right.value == 1
-                        and self.native_call(expr.right.left)
-                        and isinstance(expr.left, ast.Name) and expr.left.id in native_locals):
-                    return after
-                self.inputs = []
-                captured = self.capture(expr, native_locals)
+                owner.inputs = []
+                captured = owner.capture(expr, native_locals)
                 assert captured
-                native = self.statements((captured,), lambda value: value)
+                native = owner.statements((captured,), lambda value: value)
                 return cst.FlattenSentinel(cst.parse_module(native).body)
 
-        visitor = Product()
-        result = cst.Module(body).visit(visitor)
-        return result.body
+        return cst.Module(body).visit(Product()).body
 
-    def divisibility(self, body, tree):
-        if any(isinstance(node, (ast.Import, ast.ImportFrom, ast.ExceptHandler,
-                                 ast.Global, ast.Nonlocal, ast.ClassDef))
-               or isinstance(node, getattr(ast, 'Match', ()))
-               or isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node is not tree
-               for node in ast.walk(tree)):
-            return body
-        stores = [node.id for node in ast.walk(tree)
-                  if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store)]
-        integers = self.parameters | {
-            node.targets[0].id for node in tree.body
-            if isinstance(node, ast.Assign) and len(node.targets) == 1
-            and isinstance(node.targets[0], ast.Name)
-            and stores.count(node.targets[0].id) == 1 and self.native_call(node.value)
-        }
+    def divisibility(self, body):
+        integers = self.parameters | self._integer_locals(body)
 
         class Divisibility(cst.CSTTransformer):
             def visit_Lambda(inner, node):
@@ -181,32 +160,28 @@ class CheckedArithmetic:
             def leave_Comparison(inner, before, after):
                 if len(before.comparisons) != 1:
                     return after
-                expr = ast.parse(self.code(before), mode='eval').body
-                if (not isinstance(expr.ops[0], (ast.Eq, ast.NotEq))
-                        or not isinstance(expr.comparators[0], ast.Constant)
-                        or type(expr.comparators[0].value) is not int
-                        or expr.comparators[0].value != 0
-                        or not isinstance(expr.left, ast.BinOp)
-                        or not isinstance(expr.left.op, ast.Mod)):
+                comparison = before.comparisons[0]
+                expr = before.left
+                if (not isinstance(comparison.operator, (cst.Equal, cst.NotEqual))
+                        or not isinstance(comparison.comparator, cst.Integer)
+                        or comparison.comparator.evaluated_value != 0
+                        or not isinstance(expr, cst.BinaryOperation)
+                        or not isinstance(expr.operator, cst.Modulo)):
                     return after
-                dividend, divisor = expr.left.left, expr.left.right
-                op = '_mx_divisible'
-                if (isinstance(dividend, ast.BinOp) and isinstance(dividend.op, ast.Sub)
-                        and isinstance(dividend.right, ast.Constant)
-                        and type(dividend.right.value) is int and dividend.right.value == 1):
+                dividend, divisor = expr.left, expr.right
+                operation = '_mx_divisible'
+                if (isinstance(dividend, cst.BinaryOperation) and isinstance(dividend.operator, cst.Subtract)
+                        and isinstance(dividend.right, cst.Integer) and dividend.right.evaluated_value == 1):
                     dividend = dividend.left
-                    op = '_mx_divisible_after_decrement'
-                if not all(isinstance(operand, ast.Name) and operand.id in integers
-                           for operand in (dividend, divisor)):
+                    operation = '_mx_divisible_after_decrement'
+                if not all(isinstance(value, cst.Name) and value.value in integers for value in (dividend, divisor)):
                     return after
-                prefix = 'not ' if isinstance(expr.ops[0], ast.NotEq) else ''
-                return cst.parse_expression(f'({prefix}_mx_sys.{op}({dividend.id}, {divisor.id}))')
+                prefix = 'not ' if isinstance(comparison.operator, cst.NotEqual) else ''
+                return cst.parse_expression(f'({prefix}_mx_sys.{operation}({dividend.value}, {divisor.value}))')
 
         return cst.Module(body).visit(Divisibility()).body
 
     def rewrite(self, function):
-        if not hasattr(ast, 'unparse'):
-            return function
         kind = self.cell.get_rettype_expr(c_style=True)
         from modelx_cython import automatic
         divisible = getattr(self.cell, '_spec', {}).get('native_divisibility', automatic.enabled(self.cell))
@@ -217,26 +192,18 @@ class CheckedArithmetic:
                 or self.cell.cls in self.cls.visitor.dynamic_ref_classes
                 or not isinstance(function.body, cst.IndentedBlock)):
             return function
-        tree, = ast.parse(self.code(function)).body
-        if has_scope_effects(tree.body):
+        body = function.body.body
+        if has_scope_effects(body):
             return function
-        assigned = {node.id for node in ast.walk(tree)
-                    if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store)}
+        assigned = CstFacts(body).stores
         self.parameters = {name for name in self.cell.params if name not in assigned
                            and self.cell.get_argtype_expr(name, c_style=True) == 'long long'}
-        self.prefix = '_mx_checked'
-        names = {node.id for node in ast.walk(tree) if isinstance(node, ast.Name)}
-        while any(name.startswith(self.prefix) for name in names):
-            self.prefix += '_'
-        self.inputs = []
-        self.next_input = 0
-        body = function.body.body
+        self.prefix = Names(function).reserve('_mx_checked', family=True)
+        self.inputs, self.next_input = [], 0
         if divisible:
-            body = self.divisibility(body, tree)
+            body = self.divisibility(body)
         if kind == 'double':
-            updated = self.double_tail(body, tree)
+            body = self.double_tail(body)
         elif kind == 'long long':
-            updated = self.integer_product(body, tree)
-        else:
-            updated = body
-        return function.with_changes(body=function.body.with_changes(body=updated))
+            body = self.integer_product(body)
+        return function.with_changes(body=function.body.with_changes(body=body))

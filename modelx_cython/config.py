@@ -22,6 +22,8 @@ cells return type or declaring maximum cells parameter sizes.
 """
 
 from typing import Union, Sequence, Mapping
+from dataclasses import dataclass
+import sys
 from modelx_cython.consts import (
     FILE_PREF,
     GLOBAL_PREF,
@@ -30,11 +32,50 @@ from modelx_cython.consts import (
 )
 
 
+@dataclass(frozen=True)
+class CompilerPolicy:
+    """Resolve dependent diagnostic options once, before code generation."""
+    automatic_optimizations: bool
+    parallel_workers: int
+    dense_bounds_proofs: bool
+    dense_miss_binding: bool
+    dense_one_axis: bool
+    propagate_exact_receiver: bool
+    native_cache_hits: str
+    native_math: bool  # Legacy spec key; scalar calls are compiled by Cython.
+
+    @classmethod
+    def resolve(cls, data):
+        automatic = data.get('automatic_optimizations', True)
+        miss = data.get('dense_miss_binding', automatic or sys.platform == 'win32')
+        values = dict(automatic_optimizations=automatic,
+            parallel_workers=data.get('parallel_workers', 1),
+            dense_bounds_proofs=data.get('dense_bounds_proofs', automatic),
+            dense_miss_binding=miss, dense_one_axis=data.get('dense_one_axis', automatic),
+            propagate_exact_receiver=data.get('propagate_exact_receiver', automatic and miss),
+            native_cache_hits=data.get('native_cache_hits', 'auto' if automatic and miss else 'none'),
+            native_math=data.get('native_math', False))
+        for name, value in values.items():
+            if name not in ('parallel_workers', 'native_cache_hits') and type(value) is not bool:
+                raise ValueError(f'{name} must be a boolean')
+        if type(values['parallel_workers']) is not int or values['parallel_workers'] < 1:
+            raise ValueError('parallel_workers must be a positive integer')
+        if type(values['native_cache_hits']) is not str or values['native_cache_hits'] not in (
+                'none', 'scalar', 'dense', 'both', 'auto'):
+            raise ValueError('native_cache_hits must be none, scalar, dense, both or auto')
+        if not miss:
+            if values['propagate_exact_receiver']:
+                raise ValueError('propagate_exact_receiver requires dense_miss_binding')
+            if values['native_cache_hits'] != 'none':
+                raise ValueError('native_cache_hits requires dense_miss_binding')
+        return cls(**values)
+
+
 class TransSpec:
     """Wrapper around the user-supplied translation-spec dictionary.
 
     The spec is a nested dict (read from the spec file with
-    ``ast.literal_eval``) in which each nesting level describes one
+    a safe literal decoder) in which each nesting level describes one
     space.  A space-level dict may have these keys:
 
     * ``"spaces"``: dict mapping child space names (without prefixes)
@@ -56,6 +97,9 @@ class TransSpec:
       each ordered collect chunk its own reusable receiver. The same policy
       isolation and stable Reference contract applies across workers. Scalar
       chunk totals merge in completion order.
+    * ``"parallel_collect_order"``: ``"completion"`` (default) or ``"domain"``.
+      Domain order gives reproducible chunk merging at a fixed worker count
+      and requires parallel reuse. It does not imply serial sum equivalence.
     * ``"cells_params"`` (deprecated): older form of
       ``"cells_param_size"``; maps a parameter name (or tuple) to a
       dict with a ``"size"`` key.  Consulted only when
@@ -63,10 +107,10 @@ class TransSpec:
 
     A per-cells dict may have:
 
-    * ``"native_numeric_cache"``: explicitly select experimental numeric key
-      storage for an eligible cell. The default dictionary supports compiled
-      model pickling. Setting ``"numeric_cache_capacity"`` also opts in unless
-      ``"native_numeric_cache"`` is false.
+    * ``"native_numeric_cache"``: override automatic selection of native numeric
+      key storage for an eligible cell. Other signatures use dictionaries.
+      Both support compiled model pickling. Setting ``"numeric_cache_capacity"``
+      also opts in unless ``"native_numeric_cache"`` is false.
     * ``"dense_window"``: a sequence of half-open ``(lower, stop)`` pairs
       in parameter order for a dense cache. The physical window must
       fit inside the existing logical bounds. Exact spill keeps the
@@ -92,12 +136,17 @@ class TransSpec:
     The top-level ``"dense_one_axis"`` experiment separates checked and proven
     calls to an existing one-axis dense cache body.
     ``"propagate_exact_receiver"`` carries the receiver fact through those
-    entries and private dense formula calls. ``"native_math"`` enables guarded
-    scalar lowering for ``round``, ``math.floor``, and ``math.ceil``.
-    ``"native_cache_hits"`` opts into direct reads of existing native cache
-    fields at proven private calls: ``"scalar"``, ``"dense"`` or ``"both"``.
-    It defaults to ``"none"`` and requires ``"dense_miss_binding"``. Misses
-    retain their original entry and Cython exception handling.
+    entries and private dense formula calls. The legacy ``"native_math"`` boolean
+    is accepted for existing specs; ordinary ``round``, ``floor`` and ``ceil``
+    calls are compiled by Cython without an additional scalar-math backend.
+    ``"native_cache_hits"`` defaults to ``"auto"`` when automatic optimization
+    and dense miss binding are enabled. It selects scalar hits and already-proven
+    dense hits; explicit alternatives are ``"none"``, ``"scalar"``, ``"dense"``
+    and ``"both"``. Hits require ``"dense_miss_binding"``. Misses retain their
+    original entry and Cython exception handling.
+    ``"automatic_optimizations": False`` disables automatic selection, not all
+    compiler transformations. On Windows, ``"dense_miss_binding"`` independently
+    defaults to true; disable it explicitly for that diagnostic ablation.
 
     Attributes
     ----------
@@ -144,9 +193,8 @@ class TransSpec:
         """
         
         self._data = data
-        self.automatic_optimizations = data.get('automatic_optimizations', True)
-        if type(self.automatic_optimizations) is not bool:
-            raise ValueError('automatic_optimizations must be a boolean')
+        self.policy = CompilerPolicy.resolve(data)
+        self.automatic_optimizations = self.policy.automatic_optimizations
 
     def get_spec(self, object_path: str):
         """Return the space-level spec dict for a dotted object path.

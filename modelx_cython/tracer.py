@@ -368,8 +368,6 @@ class RuntimeValueInfo:
         from .helpers import helper_parameters
         self.helper_parameters = helper_parameters(value) if self.helper is not None else None
         from .helpers import CAPABILITIES
-        from .native_math import callable_operation
-        self.math_operation = callable_operation(value)
         for capability, (name, _) in CAPABILITIES.items():
             setattr(self, name, helper_capability(value, capability)
                     if self.helper is not None else None)

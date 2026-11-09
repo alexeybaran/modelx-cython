@@ -3,9 +3,43 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import cached_property
 from typing import NamedTuple
 
+import libcst as cst
+
 from .consts import MX_SELF
+from .scopes import CstFacts, Names
+
+
+@dataclass(frozen=True)
+class EntryModule:
+    """One immutable syntax tree and its lazily derived entry facts.
+
+    Each lowering returns a new snapshot, so facts cannot survive a rewrite
+    accidentally. The pipeline keeps CST ownership and writes a module once.
+    """
+    syntax: cst.Module
+
+    @cached_property
+    def facts(self):
+        return CstFacts(self.syntax)
+
+    @cached_property
+    def functions(self):
+        return {node.name.value: node for node in self.syntax.body if isinstance(node, cst.FunctionDef)}
+
+    @cached_property
+    def methods(self):
+        return {(cls.name.value, node.name.value): node for cls in self.syntax.body if isinstance(cls, cst.ClassDef)
+                for node in cls.body.body if isinstance(node, cst.FunctionDef)}
+
+    @cached_property
+    def names(self):
+        return Names(self.syntax)
+
+    def replace(self, syntax):
+        return self if syntax is self.syntax else EntryModule(syntax)
 
 
 class DenseAxis(NamedTuple):

@@ -4,7 +4,7 @@ Providers supply a .pyx/.pxd pair. Their Cython functions receive the current
 Python callable first and must preserve its behavior when it is replaced.
 """
 import hashlib
-from importlib.resources import files
+from importlib import resources
 import keyword
 import inspect
 
@@ -44,6 +44,11 @@ def module_name(provider):
 
 def valid_identifier(name):
     return isinstance(name, str) and name.isidentifier() and not keyword.iskeyword(name)
+
+
+def read_resource(package, name):
+    return (resources.files(package).joinpath(name).read_bytes()
+            if hasattr(resources, 'files') else resources.read_binary(package, name))
 
 
 def registered_helper(value):
@@ -223,9 +228,8 @@ def install(providers, model_path):
         if not package:
             raise ValueError('helper provider must belong to a package')
         for suffix in ('.pyx', '.pxd'):
-            source = files(package).joinpath(name + suffix)
             target = model_path / (module_name(provider) + suffix)
-            target.write_bytes(source.read_bytes())
+            target.write_bytes(read_resource(package, name + suffix))
         modules.append(model_path.relative_to(model_path.parent)
                        / (module_name(provider) + '.pyx'))
     return modules

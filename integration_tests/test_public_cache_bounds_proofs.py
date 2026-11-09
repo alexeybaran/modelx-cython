@@ -1,8 +1,9 @@
 """Range proofs must cover both cache entries and every extra formula use."""
 import ast
 import pytest
-from modelx_cython.cell_entries import DenseAxis,DenseEntry
-from modelx_cython.dense_proofs import _attribute_counts,_rewrite
+import libcst as cst
+from modelx_cython.cell_entries import DenseAxis,DenseEntry,EntryModule
+from modelx_cython.dense_proofs import _attribute_counts,prove_entries
 
 
 @pytest.mark.parametrize('public_guard,extra_use,expected',[
@@ -10,15 +11,18 @@ from modelx_cython.dense_proofs import _attribute_counts,_rewrite
     ('-1 <= t < 5',False,False),
     ('0 <= t < 4',True,False),
 ])
-def test_public_cache_range_must_be_checked(public_guard,extra_use,expected):
-    source=f'''class _c_Policy:
+@pytest.mark.parametrize('nested', [False,True])
+def test_public_cache_range_must_be_checked(public_guard,extra_use,expected,nested):
+    call='_mx_cache_entry_0(self, _mx_cache_entry_0(self, t))' if nested else '_mx_cache_entry_0(self, t)'
+    source=f'''# Unicode before a private call must not affect proof attachment: 年
+class _c_Policy:
     @_mx_cy.cfunc
     def _f_value(self, t):
         return float(t)
     @_mx_cy.cfunc
     def _f_derived(self, t):
         if type(self) is _c_Policy:
-            return _mx_cache_entry_0(self, t) + 1.0
+            return {call} + 1.0
         return self.value(t) + 1.0
     def value(self, t):
         if 0 <= t < 4:
@@ -45,6 +49,13 @@ def _mx_cache_entry_1(self, t):
     layouts={f'_mx_cache_entry_{i}':DenseEntry('_c_Policy',formula,
         (DenseAxis('t',0,4,'long long'),),False)
         for i,formula in enumerate(('_f_value','_f_derived'))}
-    tree=ast.parse(source)
-    result=_rewrite(source.encode(),tree,layouts,_attribute_counts(tree))
+    tree=cst.parse_module(source)
+    result=prove_entries(EntryModule(tree),layouts,_attribute_counts(tree)).syntax.bytes
     assert (b'_mx_proven_axes' in result) is expected
+    if expected and nested:
+        result_tree=ast.parse(result)
+        calls=[node for node in ast.walk(result_tree) if isinstance(node,ast.Call)
+               and isinstance(node.func,ast.Name) and node.func.id=='_mx_cache_entry_0']
+        outer=next(node for node in calls if isinstance(node.args[1],ast.Call))
+        assert outer.args[-1].value==0
+        assert outer.args[1].args[-1].value==1

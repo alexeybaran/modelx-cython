@@ -7,7 +7,6 @@ import libcst as cst
 from modelx_cython.enums import Constants
 from modelx_cython.helpers import HelperCalls
 from modelx_cython.reductions import NativeReductions
-from modelx_cython.native_math import NativeMath
 from modelx_cython.helpers import helper_capability
 import pytest
 
@@ -96,19 +95,6 @@ def test_enum_constants_decline_receiver_rebinding():
     assert pass_.count==0
 
 
-@pytest.mark.parametrize('source',[
-    'return self.numbers.floor(x)',
-    'return self.numbers.ceil(x)',
-    'return self.downward(x)',
-])
-def test_native_math_uses_callable_contract_not_reference_name(source):
-    node=cst.parse_module('def formula(self, x):\n    '+source+'\n').body[0]
-    pass_=NativeMath({'downward':SimpleNamespace(math_operation='floor')})
-    result=cst.Module([node.with_changes(body=node.body.visit(pass_))]).code
-    assert '_mx_integral_math_call' in result
-    assert pass_.used
-
-
 @pytest.mark.parametrize('name,value',[
     ('bound_numeric',('ready','value')),
     ('bound_grouped',('probe','value')),
@@ -121,20 +107,36 @@ def test_helper_capability_shape_is_validated_at_registration(name,value):
         helper_capability(function,name)
 
 
-def test_collection_runtime_adapter_is_checked_before_rewriting():
-    from modelx_cython.serial_collect import _runtime_markers, supports_runtime
-    source='\n'.join(_runtime_markers())
-    assert supports_runtime(source)
-    assert not supports_runtime(source+_runtime_markers()[0])
-    assert not supports_runtime(source.replace('def collect_from_space(base,',
-                                             'def collect_from_space(\n    base,'))
-
-
-def test_cache_hit_optimization_keeps_python38_compatibility(monkeypatch):
-    from modelx_cython.cache_hits import expose_cache_hits
+def test_cache_hit_optimization_does_not_depend_on_ast_unparse(monkeypatch):
+    from modelx_cython.cache_hits import expose_entries
+    from modelx_cython.cell_entries import EntryModule
     monkeypatch.delattr(ast,'unparse')
-    # The optimized path is optional. No generated source needs to be opened.
-    expose_cache_hits({'unused':object()},{'unused':{'entry':object()}},'auto')
+    state = EntryModule(cst.parse_module(''))
+    assert expose_entries(state, {'entry':object()}, 'auto').syntax.code == ''
+
+
+def test_collection_admission_reuses_the_existing_syntax_without_ast(monkeypatch):
+    from modelx_cython.serial_collect import analyze
+    monkeypatch.delattr(ast, 'unparse')
+    module = SimpleNamespace(classes={}, spec=SimpleNamespace(automatic_optimizations=True),
+        visitor=SimpleNamespace(wrapper=SimpleNamespace(module=cst.parse_module('class Values: pass\n'))))
+    assert analyze(module) == {}
+
+
+def test_provider_resources_use_the_legacy_resource_api(monkeypatch, tmp_path):
+    from modelx_cython import helpers
+    monkeypatch.delattr(helpers.resources, 'files')
+    read = []
+    def read_binary(package, resource):
+        read.append((package, resource))
+        return resource.encode()
+    monkeypatch.setattr(helpers.resources, 'read_binary', read_binary)
+    model = tmp_path/'compiled'
+    model.mkdir()
+    modules = helpers.install({'sample.provider'}, model)
+    assert read == [('sample', 'provider.pyx'), ('sample', 'provider.pxd')]
+    assert (model/(helpers.module_name('sample.provider')+'.pyx')).read_bytes()==b'provider.pyx'
+    assert len(modules)==1
 
 
 def test_enum_constants_follow_underlying_integer_not_overridden_conversion():

@@ -156,8 +156,10 @@ entries, with growing exact overflow storage. The synchronized path remains
 for shared receivers. Published cache entries survive normal model pickling.
 The ceilings are common resource policies, not domain or correctness limits.
 
-Range proofs, receiver propagation, one-axis checks, guarded arithmetic, native
-math and exact-operand power reuse apply under their existing safety checks.
+Range proofs, receiver propagation, one-axis checks, guarded arithmetic and
+exact-operand power reuse apply under their existing safety checks.
+Scalar `round`, `floor` and `ceil` calls use ordinary Cython compilation. The
+legacy `native_math` boolean is accepted without enabling a separate math backend.
 `native_cache_hits` defaults to `"auto"`: scalar hits and dense hits that already
 have a proven index can read the existing cache fields directly. Every miss
 keeps the original checked call and Cython error handling; public methods and
@@ -173,9 +175,25 @@ inferred from the timing sample. Custom lifecycle hooks and unsupported shapes
 keep ordinary collection. Chunk totals merge as workers finish, so floating
 point totals can differ by roundoff.
 
+Set the Space option `parallel_collect_order="domain"` to merge reused chunks
+in domain order. It requires parallel reuse. The default is `"completion"`.
+Domain order is reproducible for a fixed worker count; changing chunk boundaries
+can still change floating-point sums. Both choices propagate worker failures in
+domain order. Ordinary collection always retains its existing ordered behavior.
+
+Native collection uses the exporter's optional adapter version 1. Known
+pre-versioned exports can receive the exporter-owned adapter during compilation.
+Unknown runtime shapes or versions keep ordinary collection; install an exporter
+with adapter version 1 to enable reuse. No model formula is replaced by this
+adapter.
+
 Individual switches and legacy per-Cell options remain available for controlled
 ablations and compatibility diagnostics. `automatic_optimizations=False`
 disables the automatic policy; explicit options can still request mechanisms.
+This switch controls automatic selection, rather than emulating every upstream
+code-generation detail. On Windows `dense_miss_binding` keeps its historical
+default of `True`; explicitly set it to `False` (and `native_cache_hits="none"`)
+when comparing that diagnostic path.
 `native_cache_hits` also accepts `"none"`, `"scalar"`, `"dense"` and `"both"`;
 non-`"none"` modes require `dense_miss_binding`. Checked dense hits can repeat
 domain work, so the automatic mode admits the existing proven-index form.

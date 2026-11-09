@@ -18,6 +18,12 @@ Formula-local facts do not cross nested functions, classes, lambdas or
 comprehension scopes. A statement-changing lowering declines observable binding
 effects it cannot preserve, including globals, nonlocals and exception targets.
 Declining an optimization retains ordinary Cython execution.
+Detached expressions retain the implicit parentheses supplied by their source
+context, including multiline operators and comments. Arithmetic, reductions and
+cache-entry passes inspect the existing LibCST nodes and binding metadata.
+The compiler has one source frontend; it does not parse formula bodies into a
+second Python AST. LibCST's literal token conversion still uses `literal_eval`
+internally. Cython parses and compiles the resulting Space/Cell package.
 
 Exact receiver checks preserve Cell subclass dispatch. `EnumDefinitions` marks
 fixed compiled model-code bindings: changing a declared binding or its marker
@@ -36,8 +42,10 @@ the normal mutable-Reference contract.
 Integer arithmetic specialization proves bounds for every intermediate. The
 emitted input guards and binary64 exact-integer bound determine safety; operation
 counts do not. Outside the guards, the original boxed arithmetic remains.
-Native math recognizes callable capabilities and checks the current callable's
-identity at runtime, so Reference aliases and replacements retain behavior.
+Scalar `round`, `floor` and `ceil` calls retain their ordinary Cython/Python
+callable semantics, including Reference aliases and replacements. The separate
+guarded scalar-math backend was removed after measured deletion qualification.
+The legacy `native_math` boolean remains accepted by the spec reader.
 
 ## Helper providers
 
@@ -80,6 +88,9 @@ Prepared resources must be disposable: normal model pickling retains Cell
 caches, while a context reconstructs empty and prepares resources on demand.
 Resources held by contexts must keep their owners alive. Separate compiled
 packages must not confuse their private native resource types.
+Within one compiled Space, each provider owns a distinct context. Multiple
+providers in the same Cell and generated names resembling authored Cell/cache
+names must remain independent.
 
 Exclusive lookup reuse is enabled only on confined collection receivers whose
 References remain stable. Ordinary public receivers retain checked/synchronized
@@ -141,6 +152,12 @@ Unsupported export-runtime adapters retain the normal collection path. Successfu
 private scalar chunks may merge in completion order, with ordinary floating
 roundoff; failures are propagated in original domain order. Existing public
 Cell calls, collection APIs and caller scheduling remain the execution boundary.
+The exporter owns the version 1 optional collection adapter. The compiler can
+transplant its generic functions into a structurally recognized legacy export;
+it does not patch source text or supply an independent collection engine.
+`parallel_collect_order="domain"` selects domain-order chunk merging for fixed
+worker reproducibility. Completion order remains the default. Neither option
+promises bitwise equality with a serial fold or a different worker count.
 
 There is no native PGO training or profile-use build. Timing profiles guide
 development, while the existing small model trace supplies types and working-set

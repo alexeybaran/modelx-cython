@@ -1,12 +1,11 @@
 """Separate checked and proven calls to a single dense cache body."""
 
-import ast
-
 import libcst as cst
 
-from .cell_entries import dense_condition
+from .cell_entries import EntryModule, dense_condition
 from .consts import CY_MOD, FORMULA_PREF
 from .dense_formulas import _ExactTests
+from .syntax import same_expression
 
 
 def _unsigned_check(layout):
@@ -41,10 +40,9 @@ def _public_checks(cls, layouts):
                         cst.parse_expression(f'{CY_MOD}.longlong'))
                     and isinstance(method.body, cst.IndentedBlock) and len(method.body.body) == 1):
                 guard, = method.body.body
-                expected = ast.parse(dense_condition(layout.axes), mode='eval').body
+                expected = cst.parse_expression(dense_condition(layout.axes))
                 if (isinstance(guard, cst.If) and isinstance(guard.orelse, cst.Else)
-                        and ast.dump(ast.parse(cst.Module([]).code_for_node(guard.test), mode='eval').body)
-                        == ast.dump(expected)):
+                        and same_expression(guard.test, expected)):
                     method = method.with_changes(body=method.body.with_changes(
                         body=(guard.with_changes(test=check),)))
         methods.append(method)
@@ -69,13 +67,10 @@ class _Calls(cst.CSTTransformer):
         return updated.with_changes(func=target, args=args)
 
 
-def _rewrite(source, layouts, propagate=False):
-    module = cst.parse_module(source)
-    names = {node.id for node in ast.walk(ast.parse(source)) if isinstance(node, ast.Name)}
-    names.update(stmt.name.value for stmt in module.body if isinstance(stmt, cst.FunctionDef))
-    exact = "_mx_inbounds_exact"
-    while exact in names:
-        exact += "_"
+def specialize_entries(state: EntryModule, layouts, propagate=False):
+    module = state.syntax
+    names = state.names
+    exact = names.reserve('_mx_inbounds_exact')
     bodies, rewritten, proved = [], [], {}
     for stmt in module.body:
         if isinstance(stmt, cst.ClassDef) and isinstance(stmt.body, cst.IndentedBlock):
@@ -93,19 +88,16 @@ def _rewrite(source, layouts, propagate=False):
         axis, = layout.axes
         guard, = stmt.body.body
         proof = params[-1].name.value if len(params) == 3 else None
-        expected = ast.parse(dense_condition(layout.axes, proof), mode="eval").body
+        expected = cst.parse_expression(dense_condition(layout.axes, proof))
         if (not isinstance(guard, cst.If) or not isinstance(guard.orelse, cst.Else)
-                or ast.dump(ast.parse(module.code_for_node(guard.test), mode="eval").body) != ast.dump(expected)):
+                or not same_expression(guard.test, expected)):
             rewritten.append(stmt)
             continue
         if proof is None:
             rewritten.append(stmt.with_changes(body=stmt.body.with_changes(
                 body=(guard.with_changes(test=check),))))
             continue
-        name = stmt.name.value + "_inbounds"
-        while name in names:
-            name += "_"
-        names.add(name)
+        name = names.reserve(stmt.name.value + '_inbounds')
         proved[stmt.name.value] = cst.Name(name)
         args = tuple(param.with_changes(comma=cst.MaybeSentinel.DEFAULT) for param in params[:-1])
         signature = stmt.params.with_changes(params=args)
@@ -121,13 +113,4 @@ def _rewrite(source, layouts, propagate=False):
         entry = cst.parse_statement(f"return {name}({args[0].name.value}, {axis.key}{flag})\n")
         rewritten.append(stmt.with_changes(params=signature, body=stmt.body.with_changes(
             body=(guard.with_changes(test=check, body=guard.body.with_changes(body=(entry,))),))))
-    return module.with_changes(body=(*rewritten, *bodies)).visit(_Calls(proved, propagate)).bytes
-
-
-def specialize_one_axis(sources, entries, propagate=False):
-    for name, layouts in entries.items():
-        path = sources[name]
-        original = path.read_bytes()
-        rewritten = _rewrite(original, layouts, propagate)
-        if rewritten != original:
-            path.write_bytes(rewritten)
+    return state.replace(module.with_changes(body=(*rewritten, *bodies)).visit(_Calls(proved, propagate)))
