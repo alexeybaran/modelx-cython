@@ -13,7 +13,8 @@ def test_unregistered_builtin_preserves_source_without_an_ast_frontend(monkeypat
         raise AssertionError("retired generator AST parser")
     with monkeypatch.context() as patch:
         patch.setattr(ast, "parse", forbidden)
-        retired = NativeReductions(SimpleNamespace(refs={}), None, set(), formula.body[0], lambda: '_cold', False)
+        retired = NativeReductions(SimpleNamespace(refs={}), SimpleNamespace(params=()),
+                                   set(), formula.body[0], lambda: '_cold', False)
         result = formula.visit(retired).code
     assert result == source
     assert retired.count == 0 and retired.fallbacks == []

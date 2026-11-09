@@ -594,7 +594,8 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
         cells.exact_reduction_guards = ()
         if has_reduction_contract(node, cls_info.refs):
             builtin_bounds = all(isinstance(binding, BuiltinAssignment)
-                                 for name in ("range", "min", "max", "abs") for binding in scope[name])
+                                 for name in ("range", "min", "max", "abs", "StopIteration", "RuntimeError")
+                                 for binding in scope[name])
             reductions = NativeReductions(
                 cls_info, cells, self.helper_providers, node, self._reserve_cold_sum, builtin_bounds)
             node = node.visit(reductions)

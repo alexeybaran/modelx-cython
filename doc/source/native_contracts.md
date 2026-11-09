@@ -104,6 +104,12 @@ Unknown payloads, unsupported scopes and changed callables retain the ordinary
 compiled generator/object path. Receiver rebinding and frame introspection decline
 statement-changing lowering. This uses the shared CST frontend, not a second
 application AST parser or financial formula implementation.
+The first iterable's bounds/value are acquired outside the generator-body error
+boundary. Inner iteration, filters and yielded Cell calls retain PEP479:
+`StopIteration` becomes `RuntimeError` with the original cause. Ordinary Cython
+exception handling implements this boundary; there is no separate exception
+runtime. Native signature parameters may supply proved range bounds; unknown
+parameter types continue through the object path.
 The optional `keywords` call ABI uses the helper's declared Python signature,
 not its body. Missing optional slots receive the provider's declared
 `omitted_argument` token; the original keyword-name tuple excludes these slots.

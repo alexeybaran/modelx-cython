@@ -73,11 +73,10 @@ def test_generator_literals_preserve_integer_width_and_sign(tmp_path):
     for name in ('above', 'below', 'large', 'step', 'filtered',
                  'positive_overshoot', 'negative_overshoot', 'dynamic_stride'):
         assert admission[f'exported_cy._mx_classes._c_Values._f_{name}']['native_reductions'] == 0
-    # This lane delegates ordinary generators to Cython instead of a custom
-    # reduction recognizer. Keep the complete runtime oracles below, and check
-    # that no formula was accidentally reported as a custom lowering.
+    # These declared float-start consumers have proved native domains. Keep the
+    # complete width/sign/error oracles for the general and specialized paths.
     for name in ('assigned', 'weighted', 'positive_safe', 'negative_safe', 'empty'):
-        assert admission[f'exported_cy._mx_classes._c_Values._f_{name}']['native_reductions'] == 0
+        assert admission[f'exported_cy._mx_classes._c_Values._f_{name}']['native_reductions'] == 1
     generated = (tmp_path/'exported_cy/_mx_classes.py').read_text()
     assert 'for k in range(3)' in generated
     native = (tmp_path/'exported_cy/_mx_classes.c').read_text()

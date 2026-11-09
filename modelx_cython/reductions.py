@@ -69,7 +69,9 @@ class NativeReductions(FormulaTransformer):
         self.captures, self.integer_captures = {}, {}
         self.scope_safe = (not has_scope_effects(formula.body.body)
                            and 'self' not in self.body_facts.stores
-                           and not {'locals', 'vars', 'eval', 'exec'} & self.body_facts.reads)
+                           and not {'locals', 'vars', 'eval', 'exec'} & self.body_facts.reads
+                           and not {'StopIteration', 'RuntimeError'} & (
+                               self.body_facts.stores.keys() | set(cells.params)))
         self.names = Names(formula)
         if isinstance(formula.body, cst.IndentedBlock):
             lines = formula.body.body
@@ -137,7 +139,12 @@ class NativeReductions(FormulaTransformer):
         if isinstance(node, cst.Name):
             if node.value in ('True', 'False', 'None'):
                 return primitive_kind(literal_value(node))
-            return locals_.get(node.value)
+            if node.value in locals_:
+                return locals_[node.value]
+            if node.value in self.cells.params and self.cells.has_typeinfo():
+                return {'double': 'double', 'long long': 'longlong', 'bint': 'bint'}.get(
+                    self.cells.get_argtype_expr(node.value, c_style=True))
+            return None
         if isinstance(node, cst.UnaryOperation) and isinstance(node.operator, (cst.Plus, cst.Minus)):
             try:
                 return primitive_kind(literal_value(node))
@@ -250,9 +257,12 @@ if {guard}:
     if {prefix}_high > {prefix}_limit:
         {prefix}_high = {prefix}_limit
     {prefix}_index: _mx_cy.longlong
-    for {prefix}_index in range({prefix}_low, {prefix}_high):
-        if {predicate}:
-            return True
+    try:
+        for {prefix}_index in range({prefix}_low, {prefix}_high):
+            if {predicate}:
+                return True
+    except StopIteration as {prefix}_error:
+        raise RuntimeError("generator raised StopIteration") from {prefix}_error
     return False
 return {fallback}
 """).body)
@@ -277,7 +287,7 @@ return {fallback}
                     and self.kind(args[0], {}) == 'longlong'
                     and self.cells.get_rettype_expr(c_style=True) == 'bint'):
                 return after
-            iterator, extra_guard = f'range({code(args[0])})', ''
+            iterator, extra_guard = f'range({prefix}_limit)', ''
             if isinstance(predicate, cst.Comparison):
                 if len(predicate.comparisons) != 1:
                     return after
@@ -296,9 +306,13 @@ return {fallback}
                 test = self.indexed_cell(predicate, index, 'bint', counter)
                 if test is None:
                     return after
-            loop = f"""    for {counter} in {iterator}:
-        if not ({test}):
-            return False
+            loop = f"""    {prefix}_limit: _mx_cy.longlong = {code(args[0])}
+    try:
+        for {counter} in {iterator}:
+            if not ({test}):
+                return False
+    except StopIteration as {prefix}_error:
+        raise RuntimeError("generator raised StopIteration") from {prefix}_error
     return True"""
         else:
             value, bounds = self.indexed_cell(predicate, index, 'double', counter), self.descending_window(part.iter)
@@ -311,12 +325,16 @@ return {fallback}
             loop = f"""    {stop}: _mx_cy.longlong = {start} - {offset}
     if {stop} < -1:
         {stop} = -1
-    {best}: _mx_cy.double = {first}
+    {best}: _mx_cy.double
     {item}: _mx_cy.double
-    for {counter} in range({start} - {step}, {stop}, -{step}):
-        {item} = {value}
-        if {item} > {best}:
-            {best} = {item}
+    try:
+        {best} = {first}
+        for {counter} in range({start} - {step}, {stop}, -{step}):
+            {item} = {value}
+            if {item} > {best}:
+                {best} = {item}
+    except StopIteration as {prefix}_error:
+        raise RuntimeError("generator raised StopIteration") from {prefix}_error
     return {best}"""
         count = len(self.fallbacks)
         fallback = self.cold_fallback(source, tree, None, function, boxed_param=boxed_param)
@@ -443,9 +461,28 @@ return {fallback}
                                f'    {alias}.f64_init(_mx_cy.address({prefix}_state))']
         if capture is not None:
             lines.append(f'    {renamed[capture]} = {capture}')
-        indent = '    '
-        for part in _parts(tree):
-            if isinstance(part.iter, cst.Tuple):
+        parts = tuple(_parts(tree))
+        outer = parts[0]
+        bounds = arguments(outer.iter, 'range')
+        if bounds is not None:
+            bound_names = [f'{prefix}_bound_{index}' for index in range(len(bounds))]
+            lines.extend(f'    {name}: _mx_cy.longlong = {code(value)}'
+                         for name, value in zip(bound_names, bounds))
+            outer_iterator = f'range({", ".join(bound_names)})'
+        else:
+            # A generator acquires its first iterable before entering its body.
+            # Keep that evaluation outside the PEP479 boundary as well.
+            lines.append(f'    {outer.target.value} = ({code(outer.iter.elements[0].value)})')
+            outer_iterator = None
+        lines.append('    try:')
+        indent = '        '
+        for index, part in enumerate(parts):
+            if index == 0 and outer_iterator is None:
+                pass
+            elif index == 0:
+                lines.append(indent + f'for {part.target.value} in {outer_iterator}:')
+                indent += '    '
+            elif isinstance(part.iter, cst.Tuple):
                 lines.append(indent + f'{part.target.value} = ({code(part.iter.elements[0].value)})')
             else:
                 lines.append(indent + f'for {part.target.value} in {code(part.iter)}:')
@@ -455,6 +492,8 @@ return {fallback}
                 indent += '    '
         result = code(statement.targets[0].target) + ' = ' if assignment else 'return '
         lines += [indent + f'{alias}.f64_add(_mx_cy.address({prefix}_state), {code(tree.elt)})',
+                  f'    except StopIteration as {prefix}_error:',
+                  f'        raise RuntimeError("generator raised StopIteration") from {prefix}_error',
                   f'    {result}{alias}.f64_result(_mx_cy.address({prefix}_state))',
                   'else:', f'    {result}{fallback}']
         self.providers.add(provider)
