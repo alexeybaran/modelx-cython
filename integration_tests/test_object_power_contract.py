@@ -22,6 +22,10 @@ def test_native_input_object_power_through_normal_cli(tmp_path):
         p.new_cells('object_power', '''def object_power(b, e) -> object:
     return b ** e
 ''')
+        p.new_cells('integer_value', 'lambda n: n')
+        p.new_cells('raw_minimum', '''def raw_minimum(n) -> object:
+    return min(integer_value(n), number(n))
+''')
         model.export(tmp_path/'exported')
     finally:
         model.close()
@@ -29,6 +33,7 @@ def test_native_input_object_power_through_normal_cli(tmp_path):
 p=mx_model.Values
 p.integer_power(2);p.local_power(2)
 p.object_power(2,3);p.object_power(1.25,2.)
+p.raw_minimum(1)
 ''')
     build = subprocess.run([sys.executable, '-m', 'modelx_cython', 'exported',
         '--sample', 'sample.py', '--no-spec'], cwd=tmp_path, env=dict(os.environ),
@@ -57,6 +62,7 @@ for b,e in itertools.product(bases,[-(1<<63),-1000,-3,-1,0,1,2,3,1000,(1<<63)-1]
  p=type(m)().Values;p.base=b
  assert outcome(lambda:p.integer_power(e))==outcome(lambda:b**e),(b,e)
 p=type(m)().Values
+assert p.raw_minimum(1)==1 and type(p.raw_minimum(1)) is int
 for b,e in [(2,1000),(2,-3),(-1.,.5),(complex(1,2),3),(1<<100,2)]:
  assert outcome(lambda:p.object_power(b,e))==outcome(lambda:b**e)
 class Custom:

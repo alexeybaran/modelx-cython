@@ -5,8 +5,9 @@ import libcst as cst
 from modelx_cython.ordered_arguments import preserve_argument_order
 
 
-def rewrite(source):
-    return cst.Module(body=(preserve_argument_order(cst.parse_module(source).body[0]),)).code
+def rewrite(source, native_result=True):
+    return cst.Module(body=(preserve_argument_order(cst.parse_module(source).body[0],
+                                                 native_result=native_result),)).code
 
 
 def test_builtin_extrema_remain_eligible_for_cython_intrinsics():
@@ -31,7 +32,12 @@ def test_binding_is_lexical_inside_callbacks_and_never_parses_ast(monkeypatch):
         patch.setattr(ast, 'parse', forbidden)
         result = cst.Module(body=(preserve_argument_order(source),)).code
     assert 'max(first(), second())' in result
-    assert 'min(first(), second())' in result
+    assert 'min(*(first(), second()))' in result
+
+
+def test_object_result_keeps_selected_mixed_numeric_scalar_class():
+    source = rewrite('def formula(a, b):\n    return min(a, b)\n', native_result=False)
+    assert 'min(*(a, b))' in source
 
 
 def test_remaining_power_keeps_python_types_and_ignores_pow_binding():

@@ -620,7 +620,8 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
         from modelx_cython.powers import object_power_kind
         kind = object_power_kind(node, self._resolver, self._cells_kinds, self._ref_kinds,
                                  cls_info, cells)
-        return preserve_argument_order(node, kind)
+        return preserve_argument_order(node, kind,
+            native_result=cells.get_rettype_expr(c_style=True) in ('double', 'long long', 'bint'))
 
     def _bind_declared_helpers(self, node, cls_info, cells, inherited=()):
         """Bind declared provider symbols in either C functions or compiled defs.

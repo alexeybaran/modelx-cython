@@ -12,10 +12,11 @@ from libcst.metadata.scope_provider import BuiltinAssignment
 class _OrderedArguments(cst.CSTTransformer):
     METADATA_DEPENDENCIES = (ScopeProvider,)
 
-    def __init__(self, kind=None):
+    def __init__(self, kind=None, native_result=False):
         super().__init__()
         self.kind = kind
         self.opaque_depth = 0
+        self.native_result = native_result
 
     def on_visit(self, node):
         from .scopes import OPAQUE_SCOPES
@@ -57,7 +58,30 @@ class _OrderedArguments(cst.CSTTransformer):
                             (cst.Arg(cst.Name('object')), cst.Arg(value)))
         return after.with_changes(left=boxed(after.left), right=boxed(after.right))
 
-def preserve_argument_order(formula, kind=None):
+    def leave_Call(self, before, after):
+        # A numeric Cell already normalizes its result through its native ABI.
+        # Object results/child scopes must keep the selected operand's Python
+        # scalar class: Cython promotes mixed native min/max inputs to double.
+        # This fallback is about the result contract, not first-error order.
+        if self.native_result and self.opaque_depth == 1:
+            return after
+        if not isinstance(before.func, cst.Name) or before.func.value not in ('min', 'max'):
+            return after
+        if any(argument.star for argument in after.args):
+            return after
+        positional = tuple(argument for argument in after.args if argument.keyword is None)
+        if len(positional) < 2:
+            return after
+        scope = self.get_metadata(ScopeProvider, before.func)
+        bindings = tuple(scope[before.func.value])
+        if not bindings or not all(isinstance(binding, BuiltinAssignment) for binding in bindings):
+            return after
+        values = cst.Tuple(tuple(cst.Element(argument.value) for argument in positional))
+        keywords = tuple(argument for argument in after.args if argument.keyword is not None)
+        return after.with_changes(args=(cst.Arg(values, star='*'), *keywords))
+
+
+def preserve_argument_order(formula, kind=None, native_result=False):
     """Keep unproved powers on Cython's ordinary Python-object operator."""
     wrapper = cst.MetadataWrapper(cst.Module(body=(formula,)))
-    return wrapper.visit(_OrderedArguments(kind)).body[0]
+    return wrapper.visit(_OrderedArguments(kind, native_result)).body[0]
