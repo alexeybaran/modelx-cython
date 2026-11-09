@@ -7,6 +7,8 @@ import textwrap
 
 import modelx as mx
 from lifelib import expression_streams as helpers
+from lifelib import expressions, pandas_inputs, typed_inputs
+import pandas as pd
 
 
 def test_explicit_streams_without_legacy_ast_generator_passes(tmp_path):
@@ -14,12 +16,15 @@ def test_explicit_streams_without_legacy_ast_generator_passes(tmp_path):
     try:
         p = model.new_space('Projection', refs={name: getattr(helpers, name) for name in
             ('periods', 'over', 'flatten', 'sum_float')})
+        p.expressions = expressions
+        p.rates = pandas_inputs.table(pd.DataFrame({'rate': [1.0, 0.5]}, index=[0, 1]))
         p.new_cells('cf', 'lambda t: 1.0 + 0.5*t')
         p.new_cells('disc', 'lambda t: 1.0 / (1.0 + 0.01*t)')
         p.new_cells('eligible', 'lambda t: t % 2 == 0')
         p.new_cells('total', 'lambda n: sum_float(periods(n), lambda t: cf(t)*disc(t), where=lambda t: eligible(t))')
         p.new_cells('composed', 'lambda n: sum_float(over(periods(n), lambda t: cf(t)*disc(t)))')
         p.new_cells('generated', 'lambda n: sum_float(cf(t)*disc(t) for t in range(n))')
+        p.new_cells('facade_generated', 'lambda n: expressions.sum_float(cf(t) * expressions.lookup_float(rates, t % 2, "rate") for t in range(n))')
         p.new_cells('filtered_generated', 'lambda n: sum_float(cf(t)*disc(t) for t in range(n) if eligible(t))')
         p.new_cells('bound_callback', 'lambda n: sum_float(periods(n), cf)')
         p.new_cells('method_pairs', '''def method_pairs(n):
@@ -34,7 +39,7 @@ def test_explicit_streams_without_legacy_ast_generator_passes(tmp_path):
         expected = {}
         for n in [0, 1, 3, 10]:
             expected[str(n)] = {name: getattr(p, name)(n) for name in
-                               ('total', 'composed', 'generated', 'filtered_generated', 'bound_callback', 'method_pairs', 'where_only', 'nested')}
+                               ('total', 'composed', 'generated', 'facade_generated', 'filtered_generated', 'bound_callback', 'method_pairs', 'where_only', 'nested')}
         assert p.pairs() == ((1, 2), (3, 4))
         model.export(tmp_path / 'exported')
     finally:
@@ -43,7 +48,7 @@ def test_explicit_streams_without_legacy_ast_generator_passes(tmp_path):
     (tmp_path / 'sample.py').write_text('''from exported import mx_model
 p = mx_model.Projection
 for n in [0,1,3,10]:
-    p.total(n); p.composed(n); p.generated(n); p.filtered_generated(n); p.bound_callback(n); p.method_pairs(n); p.where_only(n); p.nested(n)
+    p.total(n); p.composed(n); p.generated(n); p.facade_generated(n); p.filtered_generated(n); p.bound_callback(n); p.method_pairs(n); p.where_only(n); p.nested(n)
 p.pairs()
 ''')
     runner = textwrap.dedent('''
@@ -66,13 +71,14 @@ p.pairs()
     assert all(cell['native_reductions'] == 0 for cell in report.values())
     probe = textwrap.dedent('''
         import importlib, json, sys
-        from lifelib import expression_streams as h
+        from lifelib import expression_streams as h, expressions as e, typed_inputs as tables
         model = importlib.import_module(sys.argv[1]).mx_model
         expected = json.load(open('expected.json'))
         forbidden = {getattr(h, name).__code__ for name in
                      ('periods','over','flatten','sum_float')}
         forbidden |= {h._Over.__init__.__code__, h._Over.__next__.__code__,
                       h._Flatten.__init__.__code__, h._Flatten.__next__.__code__}
+        forbidden |= {tables.lookup_float.__code__, tables._typed_value.__code__}
         calls = []
         def profile(frame,event,arg):
             if event == 'call' and frame.f_code in forbidden:
@@ -109,6 +115,13 @@ p.pairs()
         p = type(model)().Projection
         p.sum_float = throw_into_generator
         assert p.generated(3) == 42.5
+        original_sum = e.sum_float
+        p = type(model)().Projection
+        try:
+            e.sum_float = lambda values: 17.5 + next(values)
+            assert p.facade_generated(3) == 18.5
+        finally:
+            e.sum_float = original_sum
         root = type(model)()
         class Override(type(root.Projection)):
             def cf(self,t): return 7.5
