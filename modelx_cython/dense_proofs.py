@@ -110,7 +110,7 @@ def _formula_ranges(guard, layout, uses, spill_functions, spill_uses):
     return layout.logical_axes
 
 
-def prove_entries(state: EntryModule, records, uses):
+def prove_entries(state: EntryModule, records, uses, formula_domains_out=None):
     native = {}
     for name, node in state.functions.items():
         if name in records and (guard := _checked_guard(node, records[name])) is not None:
@@ -167,6 +167,8 @@ def prove_entries(state: EntryModule, records, uses):
                     if formula not in formula_domains:
                         domain = state.names.reserve('_mx_dense_domain', family=True)
                         formula_domains[formula] = domain, source_axes
+                        if formula_domains_out is not None:
+                            formula_domains_out[(layout.owner, layout.formula)] = domain, source_axes, name
                     masks[call] = mask, formula_domains[formula][0]
                 else:
                     masks[call] = mask, None

@@ -15,10 +15,11 @@ def lower_entries(modules, dense, formulas, policy):
     result = {}
     for name, state in modules.items():
         layouts, entries = dense.get(name, {}), formulas.get(name, {})
+        domains = {}
         if layouts and policy.dense_bounds_proofs:
-            state = prove_entries(state, layouts, uses)
+            state = prove_entries(state, layouts, uses, domains)
         if entries and policy.dense_miss_binding:
-            state = bind_entries(state, entries, policy.propagate_exact_receiver)
+            state = bind_entries(state, entries, policy.propagate_exact_receiver, domains)
         if layouts and policy.dense_one_axis:
             state = specialize_entries(state, layouts, policy.propagate_exact_receiver)
         if entries and policy.native_cache_hits != 'none':

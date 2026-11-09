@@ -2,10 +2,10 @@
 
 import libcst as cst
 
-from .cell_entries import EntryModule, exact_receiver
+from .cell_entries import EntryModule, dense_condition, exact_receiver
 from .consts import CY_MOD, MX_SELF
 from .scopes import CstFacts, OPAQUE_SCOPES
-from .syntax import walk
+from .syntax import same_expression, walk
 
 
 def _eligible(method, keys, guard_safe):
@@ -54,11 +54,12 @@ class _ExactTests(cst.CSTTransformer):
 
 
 class _Miss(cst.CSTTransformer):
-    def __init__(self, formula, direct, keys, propagate=False):
+    def __init__(self, formula, direct, keys, propagate=False, checked_domain=False):
         self.formula = formula
         self.direct = direct
         self.keys = keys
         self.propagate = propagate
+        self.checked_domain = checked_domain
 
     def leave_Call(self, original, updated):
         target = updated.func
@@ -71,12 +72,14 @@ class _Miss(cst.CSTTransformer):
         args = (cst.Arg(cst.Name(MX_SELF)), *updated.args)
         if self.propagate:
             args += (cst.Arg(cst.Name("True")),)
+        if self.checked_domain:
+            args += (cst.Arg(cst.Name("True")),)
         # Only proven exact-receiver calls enter a private cache function.
         # Public cache methods keep their original virtual formula call.
         return updated.with_changes(func=cst.Name(self.direct), args=args)
 
 
-def bind_entries(state: EntryModule, entries, propagate=False):
+def bind_entries(state: EntryModule, entries, propagate=False, domains=None):
     module = state.syntax
     names = state.names
     exact = names.reserve('_mx_exact_receiver')
@@ -111,6 +114,22 @@ def bind_entries(state: EntryModule, entries, propagate=False):
                     cst.parse_expression(f"{CY_MOD}.bint"))))
                 formula_body = formula_body.visit(_ExactTests(layout.owner, exact))
                 args += ", " + exact_receiver(layout.owner)
+            domain = (domains or {}).get(identity)
+            if domain is not None and domain[2] == entry:
+                flag, axes, _ = domain
+                declaration = cst.parse_statement(
+                    f'{flag}: {CY_MOD}.bint = {dense_condition(axes)}\n')
+                matching = [line for line in formula_body.body if same_expression(line, declaration)]
+                if len(matching) == 1 and CstFacts(formula_body.body).stores[flag] == 1:
+                    formula_body = formula_body.with_changes(body=tuple(
+                        line for line in formula_body.body if line is not matching[0]))
+                    params.append(cst.Param(cst.Name(flag), annotation=cst.Annotation(
+                        cst.parse_expression(f'{CY_MOD}.bint'))))
+                    args += f', ({dense_condition(axes)})'
+                else:
+                    domain = None
+            else:
+                domain = None
             replacements.append(fn.with_changes(
                 name=cst.Name(direct),
                 body=formula_body,
@@ -120,7 +139,7 @@ def bind_entries(state: EntryModule, entries, propagate=False):
             methods[fn] = fn.with_changes(body=fn.body.with_changes(body=(
                 cst.parse_statement(f"return {direct}({args})\n"),
             )))
-            misses[entry] = _Miss(layout.formula, direct, keys, propagate)
+            misses[entry] = _Miss(layout.formula, direct, keys, propagate, domain is not None)
     if not replacements:
         return state
     body = []
