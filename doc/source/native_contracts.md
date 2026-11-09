@@ -95,6 +95,17 @@ contextual lambda classifier are not activated by the compiler pipeline.
 Ordinary Cython compiles authored callbacks; helper binding does not inspect
 their bodies. Lexical binding follows the actual receiver parameter, including
 inside callbacks, and declines shadowed/rebound receivers.
+Ordinary generator syntax is retained when Cython directly emits its native
+generator/loop. A deliberately authored iterator helper is not an automatic
+replacement for the generator object's protocol. Standard Cython introspection
+differences remain disclosed in the expression-stream contract.
+
+Multiargument builtin `min`/`max` arguments are packed before normal star
+expansion. This preserves left-to-right effects and Python's NaN/tie behavior
+when Cython's numeric intrinsic would move an argument. The actual builtin
+remains the consumer; no expression interpreter or extra authoring helper is
+introduced. A Cell used as a callable value obtains its ordinary bound method
+through an object receiver; direct typed calls keep the existing override path.
 
 The development vocabulary is documented in lifelib's `EXPRESSION_STREAMS.md`.
 `sum_float` normalizes each contribution with standard float conversion and has

@@ -11,6 +11,7 @@ import inspect
 import libcst as cst
 
 from .scopes import FormulaTransformer
+from .consts import CY_MOD
 
 # One registry for tracing, merged References and validation. Tuple lengths
 # describe provider ABI operations, not model or formula source patterns.
@@ -89,11 +90,12 @@ def helper_parameters(value):
 
 
 class HelperCalls(FormulaTransformer):
-    def __init__(self, refs, used):
+    def __init__(self, refs, used, cells=()):
         super().__init__()
         self.refs = refs
         self.used = used
         self.operations = set()
+        self.cells = cells
 
     def leave_Call(self, original, updated):
         func = updated.func
@@ -149,7 +151,7 @@ class HelperCalls(FormulaTransformer):
         ScopeProvider identifies the actual receiver parameter. A lambda that
         shadows it, or a formula that rebinds it, retains its ordinary call.
         """
-        binder = _ScopedHelperCalls(self.refs, self.used)
+        binder = _ScopedHelperCalls(self.refs, self.used, self.cells)
         wrapper = cst.MetadataWrapper(cst.Module(body=(formula,)))
         result = wrapper.visit(binder).body[0]
         self.operations.update(binder.operations)
@@ -157,10 +159,11 @@ class HelperCalls(FormulaTransformer):
 
 
 class _ScopedHelperCalls(HelperCalls):
-    METADATA_DEPENDENCIES = (cst.metadata.ScopeProvider,)
+    METADATA_DEPENDENCIES = (cst.metadata.ScopeProvider, cst.metadata.ParentNodeProvider,
+                             cst.metadata.ExpressionContextProvider)
 
-    def __init__(self, refs, used):
-        super().__init__(refs, used)
+    def __init__(self, refs, used, cells):
+        super().__init__(refs, used, cells)
         self.receiver = None
 
     def on_visit(self, node):
@@ -173,16 +176,36 @@ class _ScopedHelperCalls(HelperCalls):
     def on_leave(self, original_node, updated_node):
         return cst.CSTTransformer.on_leave(self, original_node, updated_node)
 
+    def _owns_receiver(self, expression):
+        while isinstance(expression, cst.Attribute):
+            expression = expression.value
+        if not isinstance(expression, cst.Name) or expression.value != 'self':
+            return False
+        scope = self.get_metadata(cst.metadata.ScopeProvider, expression, None)
+        assignments = tuple(scope['self']) if scope is not None else ()
+        return (len(assignments) == 1 and self.receiver is not None
+                and assignments[0].node is self.receiver)
+
+    def leave_Attribute(self, original, updated):
+        if (original.attr.value not in self.cells
+                or not isinstance(original.value, cst.Name)
+                or not self._owns_receiver(original)
+                or self.get_metadata(cst.metadata.ExpressionContextProvider, original, None)
+                   is not cst.metadata.ExpressionContext.LOAD):
+            return updated
+        parent = self.get_metadata(cst.metadata.ParentNodeProvider, original)
+        if isinstance(parent, cst.Call) and parent.func is original:
+            return updated
+        # A Cell used as a value needs its ordinary bound Python callable.
+        # Cython must not coerce a native method pointer into an object tuple.
+        # Direct calls retain the existing typed/override-aware Cell path.
+        receiver = cst.Call(cst.Attribute(cst.Name(CY_MOD), cst.Name('cast')),
+                            (cst.Arg(cst.Name('object')), cst.Arg(updated.value)))
+        return updated.with_changes(value=receiver)
+
     def leave_Call(self, original, updated):
         function = original.func
-        if _declared_reference(function, self.refs) is None:
-            return updated
-        while isinstance(function, cst.Attribute):
-            function = function.value
-        scope = self.get_metadata(cst.metadata.ScopeProvider, function, None)
-        assignments = tuple(scope['self']) if scope is not None else ()
-        if (len(assignments) != 1 or self.receiver is None
-                or assignments[0].node is not self.receiver):
+        if _declared_reference(function, self.refs) is None or not self._owns_receiver(function):
             return updated
         return super().leave_Call(original, updated)
 
