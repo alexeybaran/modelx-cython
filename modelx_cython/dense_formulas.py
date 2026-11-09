@@ -1,6 +1,7 @@
 """Bind proven numeric cache misses without a formula-length eligibility rule."""
 
 import libcst as cst
+from libcst.metadata import ExpressionContext
 
 from .cell_entries import EntryModule, dense_condition, exact_receiver
 from .consts import CY_MOD, MX_SELF
@@ -54,12 +55,11 @@ class _ExactTests(cst.CSTTransformer):
 
 
 class _Miss(cst.CSTTransformer):
-    def __init__(self, formula, direct, keys, propagate=False, checked_domain=False):
+    def __init__(self, formula, direct, keys, propagate=False):
         self.formula = formula
         self.direct = direct
         self.keys = keys
         self.propagate = propagate
-        self.checked_domain = checked_domain
 
     def leave_Call(self, original, updated):
         target = updated.func
@@ -72,11 +72,19 @@ class _Miss(cst.CSTTransformer):
         args = (cst.Arg(cst.Name(MX_SELF)), *updated.args)
         if self.propagate:
             args += (cst.Arg(cst.Name("True")),)
-        if self.checked_domain:
-            args += (cst.Arg(cst.Name("True")),)
         # Only proven exact-receiver calls enter a private cache function.
         # Public cache methods keep their original virtual formula call.
         return updated.with_changes(func=cst.Name(self.direct), args=args)
+
+
+class _CheckedDomain(cst.CSTTransformer):
+    def __init__(self, name):
+        self.name = name
+
+    def leave_IfExp(self, before, after):
+        if isinstance(before.test, cst.Name) and before.test.value == self.name:
+            return after.body
+        return after
 
 
 def bind_entries(state: EntryModule, entries, propagate=False, domains=None):
@@ -115,17 +123,25 @@ def bind_entries(state: EntryModule, entries, propagate=False, domains=None):
                 formula_body = formula_body.visit(_ExactTests(layout.owner, exact))
                 args += ", " + exact_receiver(layout.owner)
             domain = (domains or {}).get(identity)
-            if domain is not None and domain[2] == entry:
+            if propagate and domain is not None and domain[2] == entry:
                 flag, axes, _ = domain
                 declaration = cst.parse_statement(
                     f'{flag}: {CY_MOD}.bint = {dense_condition(axes)}\n')
                 matching = [line for line in formula_body.body if same_expression(line, declaration)]
-                if len(matching) == 1 and CstFacts(formula_body.body).stores[flag] == 1:
+                facts = CstFacts(formula_body.body)
+                reads = {node for node, context in facts.contexts.items()
+                         if isinstance(node, cst.Name) and node.value == flag
+                         and context is ExpressionContext.LOAD}
+                tests = {node.test for node in walk(formula_body)
+                         if isinstance(node, cst.IfExp) and isinstance(node.test, cst.Name)
+                         and node.test.value == flag}
+                if len(matching) == 1 and facts.stores[flag] == 1 and reads and reads == tests:
                     formula_body = formula_body.with_changes(body=tuple(
-                        line for line in formula_body.body if line is not matching[0]))
-                    params.append(cst.Param(cst.Name(flag), annotation=cst.Annotation(
-                        cst.parse_expression(f'{CY_MOD}.bint'))))
-                    args += f', ({dense_condition(axes)})'
+                        line for line in formula_body.body if line is not matching[0])).visit(_CheckedDomain(flag))
+                    # Existing True means exact receiver in its checked native
+                    # domain. Public/cold calls conservatively use virtual,
+                    # checked dependencies; the canonical hot body matches c8.
+                    args = ', '.join((MX_SELF, *keys)) + f', ({exact_receiver(layout.owner)} and ({dense_condition(axes)}))'
                 else:
                     domain = None
             else:
@@ -139,7 +155,7 @@ def bind_entries(state: EntryModule, entries, propagate=False, domains=None):
             methods[fn] = fn.with_changes(body=fn.body.with_changes(body=(
                 cst.parse_statement(f"return {direct}({args})\n"),
             )))
-            misses[entry] = _Miss(layout.formula, direct, keys, propagate, domain is not None)
+            misses[entry] = _Miss(layout.formula, direct, keys, propagate)
     if not replacements:
         return state
     body = []
