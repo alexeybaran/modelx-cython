@@ -6,6 +6,8 @@ import textwrap
 
 import modelx as mx
 import pandas as pd
+import pytest
+from modelx.core.errors import FormulaError
 
 from lifelib import expression_streams, pandas_inputs, typed_inputs
 
@@ -41,6 +43,8 @@ def test_explicit_typed_table_helpers_modes(tmp_path):
                         'lambda sex, age: lookup_float(table(), (sex, age), "rate", 7.5)')
         space.new_cells('record_defaulted',
                         'lambda: lookup_float(row(), "absent", default=4.5)')
+        space.new_cells('invalid_record_column',
+                        'lambda: lookup_float(row(), "rate", column="rate")')
         space.new_cells('mark', 'lambda name, value: events.append(name) or value').is_cached = False
         space.new_cells('reordered',
                         'lambda sex, age: lookup_float(default=mark("default", 7.5), '
@@ -59,6 +63,9 @@ def test_explicit_typed_table_helpers_modes(tmp_path):
         assert space.missing_cached() is True and space.missing_fresh() is True
         assert space.defaulted('X', 1) == 7.5
         assert space.record_defaulted() == 4.5
+        with pytest.raises(FormulaError):
+            space.invalid_record_column()
+        assert mx.get_error().args == ('Record lookup does not accept a column; use default=',)
         assert space.reordered('X', 1) == 7.5
         assert space.events == ['default', 'key', 'source', 'column']
         assert space.composed(3) == 3.0
@@ -79,6 +86,8 @@ for sex, age in [('M', 42), ('F', 43)]:
 m.Inputs.record_value()
 m.Inputs.missing_cached(); m.Inputs.missing_fresh()
 m.Inputs.record_defaulted(); m.Inputs.reordered('X', 1)
+try: m.Inputs.invalid_record_column()
+except TypeError: pass
 for n in [0, 1, 3]: m.Inputs.composed(n)
 ''')
     build = subprocess.run(
@@ -131,6 +140,12 @@ for n in [0, 1, 3]: m.Inputs.composed(n)
             assert s.missing_cached() is True and s.missing_fresh() is True
             assert s.defaulted('X', 1) == 7.5
             assert s.record_defaulted() == 4.5
+            try:
+                s.invalid_record_column()
+            except TypeError as error:
+                assert error.args == ('Record lookup does not accept a column; use default=',)
+            else:
+                raise AssertionError('Record column cannot be a default')
             s.events.clear()
             assert s.reordered('X', 1) == 7.5
             assert s.events == ['default', 'key', 'source', 'column']
