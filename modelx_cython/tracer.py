@@ -249,6 +249,13 @@ class RuntimeCellsInfo:     # TODO: Create base class RuntimeBaseMemberInfo
         """Merge observed return types into one ReturnTypeInfo,
         widening or falling back to ``object`` as described in the
         class docstring."""
+        # A concrete object return annotation declares the Cell result ABI,
+        # independently of the sampled scalar class. Explicit TransSpec result
+        # types keep their existing precedence in CombinedCellsInfo. Strings
+        # are not evaluated and declarations do not propagate to other Cells.
+        if any(trace.func.__annotations__.get('return') is object for trace in traces):
+            return ReturnTypeInfo(object)
+
         last_tp = None
         last_args = None
         has_last = False

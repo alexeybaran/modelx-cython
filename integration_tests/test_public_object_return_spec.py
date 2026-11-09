@@ -10,11 +10,13 @@ import sys
 
 import modelx as mx
 import numpy as np
+import pytest
 
 from lifelib import pandas_inputs, expressions
 
 
-def test_public_object_return_specs_all_modes(tmp_path):
+@pytest.mark.parametrize('use_spec', [False, True])
+def test_public_object_return_specs_all_modes(tmp_path, use_spec):
     import pandas as pd
     frame = pd.DataFrame({'rate': pd.Series([np.float64(.1), np.float64(.2), np.float64(0.)], dtype=object)})
     model = mx.new_model('DeclaredObjectResults')
@@ -65,7 +67,7 @@ p.scalar();p.retained();p.retained("local");p.array();p.arithmetic(0)
     (tmp_path/'return-types.py').write_text(json.dumps(spec,indent=2)+'\n')
     environment = dict(os.environ)
     run = subprocess.run([sys.executable, '-m', 'modelx_cython', 'exported',
-        '--sample', 'sample.py', '--spec', 'return-types.py'], cwd=tmp_path, env=environment,
+        '--sample', 'sample.py', *(['--spec', 'return-types.py'] if use_spec else ['--no-spec'])], cwd=tmp_path, env=environment,
         capture_output=True, text=True)
     (tmp_path/'build.log').write_text(run.stdout+run.stderr)
     assert run.returncode == 0, run.stdout+run.stderr

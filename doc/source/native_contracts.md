@@ -14,6 +14,14 @@ not a mathematical proof about every possible future input. Observed integers
 outside signed 64 bits use objects. Arrays use native views only for a consistent
 supported native-endian buffer format; other formats remain objects.
 
+A concrete `-> object` return annotation declares an object result/cache ABI,
+even when every sampled value is numeric. Use it for identity-preserving raw
+scalar results and on forwarding Cells that require the same contract. The
+compiler reads the function's standard annotation mapping; it does not evaluate
+string annotations or propagate declarations through helper bodies. Explicit
+`return_type` specifications keep their existing precedence. Unannotated Cells
+retain the normal inference policy; object results remain compiled Cython.
+
 Formula-local facts do not cross nested functions, classes, lambdas or
 comprehension scopes. A statement-changing lowering declines observable binding
 effects it cannot preserve, including globals, nonlocals and exception targets.

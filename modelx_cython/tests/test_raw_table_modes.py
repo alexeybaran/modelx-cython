@@ -21,7 +21,9 @@ def test_raw_table_selection_all_modes(tmp_path):
         p.new_cells('public_input', 'lambda: source')
         p.new_cells('owned', 'lambda: prepare(public_input(), rows=True, preserve_scalar_types=True)')
         p.new_cells('rate', 'lambda key: lookup_float(owned(), key, "rate")')
-        p.new_cells('scalar', 'lambda key: lookup_object(row(owned(), key), "rate")')
+        p.new_cells('scalar', '''def scalar(key) -> object:
+    return lookup_object(row(owned(), key), "rate")
+''')
         p.new_cells('opaque', 'lambda key: lookup_object(owned(), key, "opaque")')
         assert p.rate(0) == 0.1 and type(p.scalar(0)) is np.float64
         p.source = frame.assign(rate=[0.3, 0.4])
@@ -34,6 +36,9 @@ def test_raw_table_selection_all_modes(tmp_path):
     (tmp_path/'sample.py').write_text('''from exported import mx_model as m
 p=m.Projection
 p.owned();p.rate(0);p.scalar(0);p.opaque(0)
+try:p.rate(1)
+except TypeError:pass
+else:raise AssertionError('selected opaque value did not raise while sampling')
 ''')
     run = subprocess.run([sys.executable, '-m', 'modelx_cython', 'exported',
                           '--sample', 'sample.py', '--no-spec'], cwd=tmp_path,
