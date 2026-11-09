@@ -123,6 +123,8 @@ class RuntimeCellsInfo:     # TODO: Create base class RuntimeBaseMemberInfo
     returns, collapse to a plain ``object`` return type.  Each kind of
     fallback is logged once, with the arguments of the conflicting
     calls.
+    Scalar integral/nonintegral real mixtures use object results to preserve
+    distinct identities such as ordinary sum's empty integer zero.
 
     Attributes
     ----------
@@ -306,7 +308,13 @@ class RuntimeCellsInfo:     # TODO: Create base class RuntimeBaseMemberInfo
                     if issubclass(last_tp.value_type, numbers.Integral) and issubclass(tp.value_type, numbers.Integral):
                         last_tp.value_type = numbers.Integral
                     elif issubclass(last_tp.value_type, numbers.Real) and issubclass(tp.value_type, numbers.Real):
-                        last_tp.value_type = numbers.Real
+                        # Empty ordinary sums return an integer zero. A
+                        # scalar int/float union has no lossless double ABI.
+                        if (issubclass(last_tp.value_type, numbers.Integral)
+                                != issubclass(tp.value_type, numbers.Integral)):
+                            last_tp.value_type = object
+                        else:
+                            last_tp.value_type = numbers.Real
                     else:
                         if not was_vtype_logged:
                             args0 = get_arg_expr(last_args)
