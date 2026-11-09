@@ -156,8 +156,10 @@ entries, with growing exact overflow storage. The synchronized path remains
 for shared receivers. Published cache entries survive normal model pickling.
 The ceilings are common resource policies, not domain or correctness limits.
 
-Range proofs, receiver propagation, one-axis checks, guarded arithmetic, native
-math and exact-operand power reuse apply under their existing safety checks.
+Range proofs, receiver propagation, one-axis checks, guarded arithmetic and
+exact-operand power reuse apply under their existing safety checks.
+Scalar `round`, `floor` and `ceil` calls use ordinary Cython compilation. The
+legacy `native_math` boolean is accepted without enabling a separate math backend.
 `native_cache_hits` defaults to `"auto"`: scalar hits and dense hits that already
 have a proven index can read the existing cache fields directly. Every miss
 keeps the original checked call and Cython error handling; public methods and

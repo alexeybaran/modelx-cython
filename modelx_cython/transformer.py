@@ -538,7 +538,6 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
         self._cells_kinds = cells_kinds or {}
         self._ref_kinds = ref_kinds or {}
         self._serial_shapes = serial_shapes or {}
-        self._uses_native_math = False
         self.helper_providers = set()
         self.dense_entries = {}
         self.formula_entries = {}
@@ -578,11 +577,6 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
         from modelx_cython.checked_arithmetic import CheckedArithmetic
         from modelx_cython.numeric_helpers import NumericReturns
         cells.formula_allows_exact_receiver = allows_exact_receiver(node, cls_info.name)
-        if self.module.spec.policy.native_math:
-            from modelx_cython.native_math import NativeMath
-            math_calls = NativeMath(cls_info.refs)
-            node = node.with_changes(body=node.body.visit(math_calls))
-            self._uses_native_math |= math_calls.used
         node = CheckedArithmetic(cls_info, cells).rewrite(node)
         builtin_keys = {name for name in ("min", "max")
                         if scope[name] and all(isinstance(binding, BuiltinAssignment)
@@ -639,9 +633,6 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
         if any(shape.reuse for shape in self._serial_shapes.values()):
             stmts.append(cst.parse_statement(
                 'from cython.cimports.libc.string import memset as _mx_collect_memset'))
-        if self._uses_native_math:
-            from modelx_cython.native_math import CANONICAL_BINDINGS
-            stmts.extend(cst.parse_module(CANONICAL_BINDINGS).body)
         from modelx_cython.helpers import module_name
         from modelx_cython.exceptions import NumericExceptions
         for provider in sorted(self.helper_providers):

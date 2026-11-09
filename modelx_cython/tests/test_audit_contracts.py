@@ -7,7 +7,6 @@ import libcst as cst
 from modelx_cython.enums import Constants
 from modelx_cython.helpers import HelperCalls
 from modelx_cython.reductions import NativeReductions
-from modelx_cython.native_math import NativeMath
 from modelx_cython.helpers import helper_capability
 import pytest
 
@@ -94,19 +93,6 @@ def test_enum_constants_decline_receiver_rebinding():
         {('_c_Values','Status','OK'):('_mx_enum_const_0',200)})
     assert cst.parse_module(source).visit(pass_).code==source
     assert pass_.count==0
-
-
-@pytest.mark.parametrize('source',[
-    'return self.numbers.floor(x)',
-    'return self.numbers.ceil(x)',
-    'return self.downward(x)',
-])
-def test_native_math_uses_callable_contract_not_reference_name(source):
-    node=cst.parse_module('def formula(self, x):\n    '+source+'\n').body[0]
-    pass_=NativeMath({'downward':SimpleNamespace(math_operation='floor')})
-    result=cst.Module([node.with_changes(body=node.body.visit(pass_))]).code
-    assert '_mx_integral_math_call' in result
-    assert pass_.used
 
 
 @pytest.mark.parametrize('name,value',[

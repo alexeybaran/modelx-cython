@@ -1,4 +1,4 @@
-"""Check native numeric results against the ordinary Python call."""
+"""Cython's ordinary scalar calls preserve numeric and callable semantics."""
 
 import math
 import subprocess
@@ -11,12 +11,16 @@ import modelx as mx
 def test_native_builtin_math(tmp_path):
     model = mx.new_model('NativeBuiltinMath')
     try:
-        space = model.new_space('Values', refs={'math': math})
+        space = model.new_space('Values', refs={'math': math, 'numbers': math,
+                                              'downward': math.floor})
         for name, formula in (
             ('one', 'lambda x: round(x)'),
             ('digits', 'lambda x, n: round(x, n)'),
             ('down', 'lambda x: math.floor(x)'),
             ('up', 'lambda x: math.ceil(x)'),
+            ('module_down', 'lambda x: numbers.floor(x)'),
+            ('module_up', 'lambda x: numbers.ceil(x)'),
+            ('callable_down', 'lambda x: downward(x)'),
         ):
             space.new_cells(name, formula).is_cached = False
         model.export(tmp_path / 'exported')
@@ -32,17 +36,13 @@ def test_native_builtin_math(tmp_path):
     subprocess.run([sys.executable, '-m', 'modelx_cython', 'exported'],
                    cwd=tmp_path, check=True)
     source = (tmp_path / 'exported_cy/_mx_classes.py').read_text(encoding='utf-8')
-    assert '_mx_round_one(' in source and '_mx_round_digits(' in source
-    assert source.count('_mx_integral_math_call(') == 2
+    assert '_mx_round_one(' not in source and '_mx_round_digits(' not in source
+    assert '_mx_integral_math_call(' not in source
     probe = textwrap.dedent('''\
         import math
         import random
         import struct
         from exported_cy import mx_model
-        from exported_cy import _mx_classes
-        assert _mx_classes._mx_canonical_round is round
-        assert _mx_classes._mx_canonical_floor is math.floor
-        assert _mx_classes._mx_canonical_ceil is math.ceil
         v = mx_model.Values
         rng = random.Random(107)
         edge = [0., -0., 0.5, -0.5, 2.5, -2.5, 2.675, 1.005, 1.015,
@@ -58,7 +58,9 @@ def test_native_builtin_math(tmp_path):
                 actual, expected = v.digits(x, n), round(x, n)
                 assert (math.isnan(actual) and math.isnan(expected)
                         or struct.pack('=d', actual) == struct.pack('=d', expected)), (x, n, actual, expected)
-            for actual, expected in ((v.one, round), (v.down, math.floor), (v.up, math.ceil)):
+            for actual, expected in ((v.one, round), (v.down, math.floor), (v.up, math.ceil),
+                                     (v.module_down, math.floor), (v.module_up, math.ceil),
+                                     (v.callable_down, math.floor)):
                 try:
                     target = expected(x)
                 except (ValueError, OverflowError) as error:
@@ -79,8 +81,14 @@ def test_native_builtin_math(tmp_path):
         assert v.digits(Hook(), 2) == ('round', (2,))
         assert v.down(Hook()) == 'floor'
         assert v.up(Hook()) == 'ceil'
+        assert v.module_down(Hook()) == v.callable_down(Hook()) == 'floor'
+        assert v.module_up(Hook()) == 'ceil'
         from types import SimpleNamespace
         v.math = SimpleNamespace(floor=lambda x: x + 10, ceil=lambda x: x + 20)
         assert v.down(1.5) == 11.5 and v.up(1.5) == 21.5
+        v.numbers = SimpleNamespace(floor=lambda x: x + 30, ceil=lambda x: x + 40)
+        v.downward = lambda x: x + 50
+        assert v.module_down(1.5) == 31.5 and v.module_up(1.5) == 41.5
+        assert v.callable_down(1.5) == 51.5
     ''')
     subprocess.run([sys.executable, '-c', probe], cwd=tmp_path, check=True)

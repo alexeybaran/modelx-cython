@@ -562,7 +562,6 @@ class CombinedRefInfo:
     is_relative: bool = False
     helper = None
     enum = None
-    math_operation = None
     enum_definitions = ()
     enum_safe = False
 
@@ -580,7 +579,6 @@ class CombinedRefInfo:
             setattr(self, field_name, getattr(rt_info, field_name, None))
         if rt_info:
             self.helper = getattr(rt_info, 'helper', None)
-            self.math_operation = getattr(rt_info, 'math_operation', None)
             self.enum = getattr(rt_info, 'enum', None)
             self.enum_definitions = getattr(rt_info, 'enum_definitions', ())
             self.enum_safe = getattr(rt_info, 'enum_safe', False)

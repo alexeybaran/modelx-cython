@@ -42,7 +42,7 @@ class CompilerPolicy:
     dense_one_axis: bool
     propagate_exact_receiver: bool
     native_cache_hits: str
-    native_math: bool
+    native_math: bool  # Legacy spec key; scalar calls are compiled by Cython.
 
     @classmethod
     def resolve(cls, data):
@@ -54,7 +54,7 @@ class CompilerPolicy:
             dense_miss_binding=miss, dense_one_axis=data.get('dense_one_axis', automatic),
             propagate_exact_receiver=data.get('propagate_exact_receiver', automatic and miss),
             native_cache_hits=data.get('native_cache_hits', 'auto' if automatic and miss else 'none'),
-            native_math=data.get('native_math', automatic))
+            native_math=data.get('native_math', False))
         for name, value in values.items():
             if name not in ('parallel_workers', 'native_cache_hits') and type(value) is not bool:
                 raise ValueError(f'{name} must be a boolean')
@@ -136,8 +136,9 @@ class TransSpec:
     The top-level ``"dense_one_axis"`` experiment separates checked and proven
     calls to an existing one-axis dense cache body.
     ``"propagate_exact_receiver"`` carries the receiver fact through those
-    entries and private dense formula calls. ``"native_math"`` enables guarded
-    scalar lowering for ``round``, ``math.floor``, and ``math.ceil``.
+    entries and private dense formula calls. The legacy ``"native_math"`` boolean
+    is accepted for existing specs; ordinary ``round``, ``floor`` and ``ceil``
+    calls are compiled by Cython without an additional scalar-math backend.
     ``"native_cache_hits"`` defaults to ``"auto"`` when automatic optimization
     and dense miss binding are enabled. It selects scalar hits and already-proven
     dense hits; explicit alternatives are ``"none"``, ``"scalar"``, ``"dense"``

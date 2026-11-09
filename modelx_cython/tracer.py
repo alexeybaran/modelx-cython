@@ -356,8 +356,6 @@ class RuntimeValueInfo:
         self.mx_class = mx_class
         self.helper = registered_helper(value) if type(value) is FunctionType else None
         from .helpers import CAPABILITIES
-        from .native_math import callable_operation
-        self.math_operation = callable_operation(value)
         for capability, (name, _) in CAPABILITIES.items():
             setattr(self, name, helper_capability(value, capability)
                     if self.helper is not None else None)

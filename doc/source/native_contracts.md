@@ -42,8 +42,10 @@ the normal mutable-Reference contract.
 Integer arithmetic specialization proves bounds for every intermediate. The
 emitted input guards and binary64 exact-integer bound determine safety; operation
 counts do not. Outside the guards, the original boxed arithmetic remains.
-Native math recognizes callable capabilities and checks the current callable's
-identity at runtime, so Reference aliases and replacements retain behavior.
+Scalar `round`, `floor` and `ceil` calls retain their ordinary Cython/Python
+callable semantics, including Reference aliases and replacements. The separate
+guarded scalar-math backend was removed after measured deletion qualification.
+The legacy `native_math` boolean remains accepted by the spec reader.
 
 ## Helper providers
 
