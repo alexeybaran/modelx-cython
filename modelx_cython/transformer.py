@@ -573,12 +573,11 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
         See :mod:`modelx_cython.powers`; the node is returned unchanged
         when no operand pair can be typed.
         """
-        from modelx_cython.helpers import HelperCalls
         from modelx_cython.checked_arithmetic import CheckedArithmetic
         from modelx_cython.numeric_helpers import NumericReturns
         cells.formula_allows_exact_receiver = allows_exact_receiver(node, cls_info.name)
         node = CheckedArithmetic(cls_info, cells).rewrite(node)
-        builtin_keys = {name for name in ("min", "max")
+        builtin_keys = {name for name in ("min", "max", "float")
                         if scope[name] and all(isinstance(binding, BuiltinAssignment)
                                                for binding in scope[name])}
         numeric_returns = NumericReturns(cls_info, cells, self.helper_providers, builtin_keys)
@@ -586,30 +585,36 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
         if not hasattr(cls_info, 'native_contexts'):
             cls_info.native_contexts = {}
         cls_info.native_contexts.update(numeric_returns.contexts)
-        from modelx_cython.reductions import NativeReductions
-        builtin_bounds = all(isinstance(binding, BuiltinAssignment)
-                             for name in ("range", "min", "max", "abs") for binding in scope[name])
-        reductions = NativeReductions(
-            cls_info, cells, self.helper_providers, node, self._reserve_cold_sum, builtin_bounds)
-        node = node.visit(reductions)
-        cells.native_reductions = reductions.count
-        cells.exact_reduction_guards = reductions.exact_receiver_guards
-        # Lowered loops have an explicit lexical receiver; authored generator
-        # scopes retain object semantics. This ordering keeps safe constants
-        # in admitted native loops without specializing a shadowed receiver.
+        # Generator operations use explicit provider signatures. Formula/lambda
+        # bodies are compiled by Cython; no application AST reduction recognizer
+        # or contextual payload classifier participates in this path.
+        cells.native_reductions = 0
+        cells.exact_reduction_guards = ()
         enum_comparisons = code_enums.Constants(cls_info, cells, self.module.code_enum_symbols)
         node = node.visit(enum_comparisons)
         cells.native_enum_comparisons = enum_comparisons.comparisons
         cells.native_enum_constants = enum_comparisons.count
-        helpers = HelperCalls(cls_info.refs, self.helper_providers)
-        node = node.visit(helpers)
-        self._cold_sums.extend(helper.visit(helpers) for helper in reductions.fallbacks)
-        cells.native_helpers = sorted(helpers.operations | numeric_returns.operations)
+        node = self._bind_declared_helpers(node, cls_info, cells, numeric_returns.operations)
         cells.native_numeric_helpers = sorted(numeric_returns.operations)
-        return rewrite_powers(
+        node = rewrite_powers(
             node, self._resolver, self._cells_kinds, self._ref_kinds,
             cls_info.fqname, cells,
         )
+        from modelx_cython.ordered_arguments import preserve_argument_order
+        return preserve_argument_order(node)
+
+    def _bind_declared_helpers(self, node, cls_info, cells, inherited=()):
+        """Bind declared provider symbols in either C functions or compiled defs.
+
+        Keeping a formula as a def preserves Cython's closure/default handling;
+        it does not require calling the Python implementation of its helpers.
+        This stage reads registered signatures and lexical receiver identity only.
+        """
+        from modelx_cython.helpers import HelperCalls
+        helpers = HelperCalls(cls_info.refs, self.helper_providers, cells=cls_info.cells)
+        node = helpers.rewrite(node)
+        cells.native_helpers = sorted(helpers.operations | set(inherited))
+        return node
 
     @property   # cannot use cached_property in Transformer
     def transformed(self):
@@ -1001,7 +1006,7 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
                 if cells.formula_is_generator:
                     # yield is not supported inside cdef functions;
                     # leave as a plain Python method
-                    return updated_node
+                    return self._bind_declared_helpers(updated_node, cls_info, cells)
 
                 scope = self.get_metadata(ScopeProvider, original_node.body)
                 if any(isinstance(binding.node, cst.Param)
@@ -1012,7 +1017,7 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
                     # initialized in the closure. A compiled def binds them
                     # through its normal Python argument handling.
                     cells.formula_has_captured_default = True
-                    return updated_node
+                    return self._bind_declared_helpers(updated_node, cls_info, cells)
                 updated_node = self._rewrite_powers(
                     updated_node, cls_info, cells, scope)
 
@@ -1087,7 +1092,7 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
                 if cells.body_has_closure:
                     # closures cannot be compiled inside cpdef functions;
                     # leave as a plain Python method
-                    return updated_node
+                    return self._bind_declared_helpers(updated_node, cls_info, cells)
 
                 if not cells.has_formula_def:
                     # uncached cells: the body is the formula itself

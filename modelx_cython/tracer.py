@@ -123,6 +123,8 @@ class RuntimeCellsInfo:     # TODO: Create base class RuntimeBaseMemberInfo
     returns, collapse to a plain ``object`` return type.  Each kind of
     fallback is logged once, with the arguments of the conflicting
     calls.
+    Scalar integral/nonintegral real mixtures use object results to preserve
+    distinct identities such as ordinary sum's empty integer zero.
 
     Attributes
     ----------
@@ -306,7 +308,13 @@ class RuntimeCellsInfo:     # TODO: Create base class RuntimeBaseMemberInfo
                     if issubclass(last_tp.value_type, numbers.Integral) and issubclass(tp.value_type, numbers.Integral):
                         last_tp.value_type = numbers.Integral
                     elif issubclass(last_tp.value_type, numbers.Real) and issubclass(tp.value_type, numbers.Real):
-                        last_tp.value_type = numbers.Real
+                        # Empty ordinary sums return an integer zero. A
+                        # scalar int/float union has no lossless double ABI.
+                        if (issubclass(last_tp.value_type, numbers.Integral)
+                                != issubclass(tp.value_type, numbers.Integral)):
+                            last_tp.value_type = object
+                        else:
+                            last_tp.value_type = numbers.Real
                     else:
                         if not was_vtype_logged:
                             args0 = get_arg_expr(last_args)
@@ -355,6 +363,10 @@ class RuntimeValueInfo:
                       and not -(1 << 63) <= value < (1 << 63) else type(value))
         self.mx_class = mx_class
         self.helper = registered_helper(value) if type(value) is FunctionType else None
+        from .helper_members import module_helpers
+        self.helper_members = module_helpers(value)
+        from .helpers import helper_parameters
+        self.helper_parameters = helper_parameters(value) if self.helper is not None else None
         from .helpers import CAPABILITIES
         for capability, (name, _) in CAPABILITIES.items():
             setattr(self, name, helper_capability(value, capability)
