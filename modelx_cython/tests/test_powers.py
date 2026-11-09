@@ -92,13 +92,16 @@ def test_kind_of_type_expr(type_expr, expected):
 
 
 def test_object_power_local_proofs_reuse_native_types_and_shared_bindings(kind):
+    from types import SimpleNamespace
     from modelx_cython.powers import object_power_kind
     from modelx_cython.ordered_arguments import preserve_argument_order
+    native = SimpleNamespace(is_special=lambda: False, called_with_kwargs=False, body_has_closure=False)
+    cls = SimpleNamespace(fqname=CLS, cells={'rate': native, 'count': native})
 
     def rewritten(body):
         node = cst.parse_module('def formula(t, x):\n' + body).body[0]
         proof = object_power_kind(node, kind._resolver, kind._cells_kinds,
-                                  kind._ref_kinds, CLS, _FakeCells())
+                                  kind._ref_kinds, cls, _FakeCells())
         return cst.Module([preserve_argument_order(node, proof)]).code
 
     assert '_mx_object_power(' in rewritten(
@@ -114,6 +117,12 @@ def test_object_power_local_proofs_reuse_native_types_and_shared_bindings(kind):
     nested = rewritten('    a = self.rate(t) ** x\n    return a ** t\n')
     assert nested.count('_mx_object_power(') == 1
     assert 'return _mx_cy.cast(object, a) **' in nested
+    assert '_mx_object_power(' not in rewritten('    return self.rate(t=t) ** t\n')
+    native.body_has_closure = True
+    assert '_mx_object_power(' not in rewritten('    return self.rate(t) ** t\n')
+    native.body_has_closure = False
+    native.called_with_kwargs = True
+    assert '_mx_object_power(' not in rewritten('    return self.rate(t) ** t\n')
 
 
 class _FakeCells:

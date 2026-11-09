@@ -219,6 +219,21 @@ class OperandKind:
 class ObjectPowerKind(OperandKind):
     """The same native facts, without treating a possibly complex power as real."""
 
+    def __init__(self, *args, native_cells, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._native_cells = native_cells
+
+    def _call_kind(self, expr):
+        chain = _extract_self_chain(expr.func)
+        if not isinstance(chain, list) or len(chain) != 1 or any(
+                arg.keyword or arg.star for arg in expr.args):
+            return KIND_UNKNOWN
+        cell = self._native_cells.get(chain[0])
+        if (cell is None or cell.is_special() or cell.called_with_kwargs
+                or cell.body_has_closure):
+            return KIND_UNKNOWN
+        return super()._call_kind(expr)
+
     def _binop_kind(self, expr):
         if isinstance(expr.operator, cst.Power):
             return KIND_UNKNOWN
@@ -230,7 +245,7 @@ class ObjectPowerKind(OperandKind):
         return super().kind(expr)
 
 
-def object_power_kind(node, resolver, cells_kinds, ref_kinds, cls_fqname, cells):
+def object_power_kind(node, resolver, cells_kinds, ref_kinds, cls, cells):
     """Reuse published numeric ABIs and single-assignment root-local facts.
 
     This selects an object-result power fast path, never a different result ABI.
@@ -246,7 +261,8 @@ def object_power_kind(node, resolver, cells_kinds, ref_kinds, cls_fqname, cells)
         return None
     kinds = {name: kind_of_type_expr(cells.get_argtype_expr(name, c_style=True))
              for name in cells.params} if cells.has_args() and cells.has_typeinfo() else {}
-    kind = ObjectPowerKind(resolver, cells_kinds, ref_kinds, cls_fqname, kinds)
+    kind = ObjectPowerKind(resolver, cells_kinds, ref_kinds, cls.fqname, kinds,
+                           native_cells=cls.cells)
     if has_scope_effects(body):
         return kind
     facts = CstFacts(body)
