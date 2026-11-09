@@ -66,12 +66,8 @@ def test_native_transfers(tmp_path):
         alternate = Alternate(mx_model.Policy)
         assert alternate.derived(1) == 102.0
         for key in (-(1 << 63), -1, 4, (1 << 63) - 1):
-            try:
-                s.value(key)
-            except IndexError:
-                pass
-            else:
-                raise AssertionError(key)
+            assert s.value(key) == s.value(key) == float(key)
+            assert s.derived(key) == float(key) + 1.0
         for t in (-(1 << 63), -7, 0, 7, (1 << 63) - 1):
             for n in (-(1 << 63), -3, -1, 1, 3):
                 assert s.divisible(t, n) == (t % n == 0)

@@ -39,11 +39,8 @@ def test_shifted_dense_and_exact_spill(tmp_path):
             for t in (-1, 0, 3, -5, 9):
                 assert s.value(t) == s.value(t) == float(t)
             assert s.seen == [-1, 0, 3, -5, 9]
-            try:
-                s.legacy(-1)
-            except IndexError:
-                pass
-            else:
-                raise AssertionError('legacy IndexRange changed')
+            # Both shifted and unshifted inferred windows retain cold keys.
+            assert s.legacy(-1) == s.legacy(-1) == -1.0
+            assert s.legacy(9) == s.legacy(9) == 9.0
         ''')
     subprocess.run([sys.executable, '-c', probe], cwd=tmp_path, check=True)

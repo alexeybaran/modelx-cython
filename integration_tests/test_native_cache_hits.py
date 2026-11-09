@@ -65,7 +65,10 @@ def test_native_cache_hit_contract(tmp_path):
         assert s.counter[:2]==[1,2],s.counter
         assert s.scalar()==-1.0 and s.value(0)==-1.0
         assert s.counter[:2]==[1,2]
-        for t in (3,-1,2**63-1,-2**63):
+        # The t specification declares [0,5); u only has a sampled window.
+        assert s.total(3)==-1.0 and s.total(3)==-1.0
+        assert s.value(3)==0.5 and s.counter[:2]==[1,3]
+        for t in (5,-1,2**63-1,-2**63):
             for repeat in range(2):
                 try:s.total(t)
                 except IndexError:pass
