@@ -189,3 +189,14 @@ def test_registered_binding_and_signature_capture_never_parse_formula_ast(monkey
     assert ref.helper_parameters == (('source', False, False), ('function', True, False), ('where', True, False))
     assert "('where',)" in code
     assert f"function = {module_name('sample.provider')}.omitted_argument" in code
+
+
+def test_first_class_cells_use_bound_callables_without_changing_direct_calls():
+    source = '''def formula(self):
+    return (self.term, self.term(1), lambda self: self.term)
+'''
+    binder = HelperCalls({}, set(), cells={'term'})
+    result = cst.Module(body=(binder.rewrite(cst.parse_module(source).body[0]),)).code
+    assert '_mx_cy.cast(object, self).term' in result
+    assert 'self.term(1)' in result
+    assert 'lambda self: self.term' in result

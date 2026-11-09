@@ -19,13 +19,22 @@ def test_explicit_streams_without_legacy_ast_generator_passes(tmp_path):
         p.new_cells('eligible', 'lambda t: t % 2 == 0')
         p.new_cells('total', 'lambda n: sum_float(periods(n), lambda t: cf(t)*disc(t), where=lambda t: eligible(t))')
         p.new_cells('composed', 'lambda n: sum_float(over(periods(n), lambda t: cf(t)*disc(t)))')
+        p.new_cells('generated', 'lambda n: sum_float(cf(t)*disc(t) for t in range(n))')
+        p.new_cells('filtered_generated', 'lambda n: sum_float(cf(t)*disc(t) for t in range(n) if eligible(t))')
+        p.new_cells('bound_callback', 'lambda n: sum_float(periods(n), cf)')
+        p.new_cells('method_pairs', '''def method_pairs(n):
+    total = 0.0
+    for first, second in ((cf, disc), (cf, disc)):
+        total += first(n) + second(n)
+    return total
+''')
         p.new_cells('where_only', 'lambda n: sum_float(periods(n), where=lambda t: eligible(t))')
         p.new_cells('nested', 'lambda n: sum_float(flatten(over(periods(n), lambda g: over(periods(g), lambda z: cf(z)))))')
         p.new_cells('pairs', 'lambda: tuple(over(((1, 2), (3, 4)), lambda a, b: (a, b), unpack=2))')
         expected = {}
         for n in [0, 1, 3, 10]:
             expected[str(n)] = {name: getattr(p, name)(n) for name in
-                               ('total', 'composed', 'where_only', 'nested')}
+                               ('total', 'composed', 'generated', 'filtered_generated', 'bound_callback', 'method_pairs', 'where_only', 'nested')}
         assert p.pairs() == ((1, 2), (3, 4))
         model.export(tmp_path / 'exported')
     finally:
@@ -34,7 +43,7 @@ def test_explicit_streams_without_legacy_ast_generator_passes(tmp_path):
     (tmp_path / 'sample.py').write_text('''from exported import mx_model
 p = mx_model.Projection
 for n in [0,1,3,10]:
-    p.total(n); p.composed(n); p.where_only(n); p.nested(n)
+    p.total(n); p.composed(n); p.generated(n); p.filtered_generated(n); p.bound_callback(n); p.method_pairs(n); p.where_only(n); p.nested(n)
 p.pairs()
 ''')
     runner = textwrap.dedent('''
@@ -84,6 +93,22 @@ p.pairs()
         p = type(model)().Projection
         p.sum_float = current
         assert p.total(3) == 42.5 and len(events) == 1
+        p = type(model)().Projection
+        def consume_generator(values):
+            first = values.send(None)
+            return first + sum(values)
+        p.sum_float = consume_generator
+        assert p.generated(3) == expected['3']['generated']
+        original = ValueError('injected')
+        def throw_into_generator(values):
+            try: values.throw(original)
+            except ValueError as raised: assert raised is original
+            else: raise AssertionError('generator throw did not propagate')
+            assert list(values) == []
+            return 42.5
+        p = type(model)().Projection
+        p.sum_float = throw_into_generator
+        assert p.generated(3) == 42.5
         root = type(model)()
         class Override(type(root.Projection)):
             def cf(self,t): return 7.5

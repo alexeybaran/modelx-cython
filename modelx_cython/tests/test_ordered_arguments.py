@@ -1,0 +1,34 @@
+import ast
+
+import libcst as cst
+
+from modelx_cython.ordered_arguments import preserve_argument_order
+
+
+def rewrite(source):
+    return cst.Module(body=(preserve_argument_order(cst.parse_module(source).body[0]),)).code
+
+
+def test_builtin_extrema_keep_argument_layout_and_left_to_right_evaluation():
+    assert 'max(*(first(), second(), third()), key=key())' in rewrite(
+        'def formula():\n    return max(first(), second(), third(), key=key())\n')
+    assert 'min(*(first(), second()))' in rewrite(
+        'def formula():\n    return min(first(), second())\n')
+
+
+def test_shadowed_and_iterable_extrema_are_unchanged():
+    for source in ['def formula(max):\n    return max(first(), second())\n',
+                   'def formula():\n    return max(values, key=key())\n',
+                   'def formula():\n    return max(*values)\n',
+                   'def formula():\n    return self.max(first(), second())\n']:
+        assert rewrite(source) == source
+
+
+def test_binding_is_lexical_inside_callbacks_and_never_parses_ast(monkeypatch):
+    source = cst.parse_module('def formula():\n    return lambda max: (max(first(), second()), min(first(), second()))\n').body[0]
+    def forbidden(*args, **kwargs): raise AssertionError('AST reduction argument parsing')
+    with monkeypatch.context() as patch:
+        patch.setattr(ast, 'parse', forbidden)
+        result = cst.Module(body=(preserve_argument_order(source),)).code
+    assert 'max(first(), second())' in result
+    assert 'min(*(first(), second()))' in result

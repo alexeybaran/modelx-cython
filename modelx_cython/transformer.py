@@ -601,14 +601,16 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
         node = node.visit(enum_comparisons)
         cells.native_enum_comparisons = enum_comparisons.comparisons
         cells.native_enum_constants = enum_comparisons.count
-        helpers = HelperCalls(cls_info.refs, self.helper_providers)
+        helpers = HelperCalls(cls_info.refs, self.helper_providers, cells=cls_info.cells)
         node = helpers.rewrite(node)
         cells.native_helpers = sorted(helpers.operations | numeric_returns.operations)
         cells.native_numeric_helpers = sorted(numeric_returns.operations)
-        return rewrite_powers(
+        node = rewrite_powers(
             node, self._resolver, self._cells_kinds, self._ref_kinds,
             cls_info.fqname, cells,
         )
+        from modelx_cython.ordered_arguments import preserve_argument_order
+        return preserve_argument_order(node)
 
     @property   # cannot use cached_property in Transformer
     def transformed(self):
