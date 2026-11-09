@@ -28,7 +28,7 @@ def test_explicit_numeric_sum(tmp_path):
                     '--sample', 'sample.py', '--no-spec'], cwd=tmp_path, check=True)
     report = json.loads((tmp_path/'exported_cy/_mx_admission.json').read_text())
     for name in ('total', 'nested', 'filtered'):
-        assert report[f'exported_cy._mx_classes._c_Projection._f_{name}']['native_reductions'] == 0
+        assert report[f'exported_cy._mx_classes._c_Projection._f_{name}']['native_reductions'] == 1
     from compiled_evidence import assert_compiled_generator_formulas
     assert_compiled_generator_formulas(tmp_path, ('total','nested','filtered'))
     probe = textwrap.dedent('''\
@@ -98,7 +98,7 @@ def test_explicit_all_and_max(tmp_path):
                     '--sample', 'sample.py', '--no-spec'], cwd=tmp_path, check=True)
     report = json.loads((tmp_path / 'exported_cy/_mx_admission.json').read_text())
     for name in ('all_short', 'all_empty', 'all_replace', 'maximum'):
-        assert report[f'exported_cy._mx_classes._c_Projection._f_{name}']['native_reductions'] == 0
+        assert report[f'exported_cy._mx_classes._c_Projection._f_{name}']['native_reductions'] == 1
     probe = textwrap.dedent('''\
         import math
         import sys

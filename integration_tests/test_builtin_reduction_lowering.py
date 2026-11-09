@@ -42,7 +42,7 @@ def test_compiled_builtin_reduction_lowering(tmp_path):
                 f'    return {operation}({payload} for i in range(n) if i != 1)\n')
         formula = cst.parse_module(text).body[0]
         pass_ = NativeReductions(cls, info(result, ('n',)), set(), formula,
-            lambda op=operation: '_cold_' + op, True, builtin_reductions=(operation,))
+            lambda op=operation: '_cold_' + op, True)
         rewritten = cst.Module([formula.visit(pass_)]).code
         assert pass_.count == 0
         assert rewritten == text
@@ -58,10 +58,9 @@ def test_compiled_builtin_reduction_lowering(tmp_path):
         formula = cst.parse_module(text).body[0]
         pass_ = NativeReductions(cls, info(result, ('n',)), set(), formula,
                                 lambda op=name: '_cold_' + op, True)
-        rewritten = cst.Module([formula.visit(pass_)]).code
-        assert pass_.count == 0
-        assert rewritten == text
-        rewritten = cst.Module([HelperCalls(cls.refs, set()).rewrite(formula)]).code
+        rewritten_formula = formula.visit(pass_)
+        assert pass_.count == (1 if name == 'sum_f64' else 0)
+        rewritten = cst.Module([HelperCalls(cls.refs, set()).rewrite(rewritten_formula)]).code
         methods.append('\n'.join('    ' + line if line else '' for line in rewritten.splitlines()))
         cold.extend(cst.Module([function]).code for function in pass_.fallbacks)
     prefix = f'''import cython as _mx_cy

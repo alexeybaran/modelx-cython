@@ -585,16 +585,31 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
         if not hasattr(cls_info, 'native_contexts'):
             cls_info.native_contexts = {}
         cls_info.native_contexts.update(numeric_returns.contexts)
-        # Generator operations use explicit provider signatures. Formula/lambda
-        # bodies are compiled by Cython; no application AST reduction recognizer
-        # or contextual payload classifier participates in this path.
+        # Keep the qualified typed kernels behind the common helper contracts.
+        # The same CST/type facts select their native domain; unsupported source
+        # and values keep ordinary object-capable Cython and current callables.
+        from modelx_cython.reductions import NativeReductions, has_reduction_contract
+        reductions = None
         cells.native_reductions = 0
         cells.exact_reduction_guards = ()
+        if has_reduction_contract(node, cls_info.refs):
+            builtin_bounds = all(isinstance(binding, BuiltinAssignment)
+                                 for name in ("range", "min", "max", "abs") for binding in scope[name])
+            reductions = NativeReductions(
+                cls_info, cells, self.helper_providers, node, self._reserve_cold_sum, builtin_bounds)
+            node = node.visit(reductions)
+            cells.native_reductions = reductions.count
+            cells.exact_reduction_guards = reductions.exact_receiver_guards
         enum_comparisons = code_enums.Constants(cls_info, cells, self.module.code_enum_symbols)
         node = node.visit(enum_comparisons)
         cells.native_enum_comparisons = enum_comparisons.comparisons
         cells.native_enum_constants = enum_comparisons.count
         node = self._bind_declared_helpers(node, cls_info, cells, numeric_returns.operations)
+        admitted_helpers = set(cells.native_helpers)
+        for fallback in reductions.fallbacks if reductions is not None else ():
+            self._cold_sums.append(self._bind_declared_helpers(fallback, cls_info, cells, numeric_returns.operations))
+            admitted_helpers.update(cells.native_helpers)
+        cells.native_helpers = sorted(admitted_helpers)
         cells.native_numeric_helpers = sorted(numeric_returns.operations)
         node = rewrite_powers(
             node, self._resolver, self._cells_kinds, self._ref_kinds,

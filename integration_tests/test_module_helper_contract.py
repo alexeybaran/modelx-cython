@@ -59,7 +59,8 @@ def test_module_helpers_compile_through_shared_metadata(tmp_path):
                    cwd=tmp_path, check=True)
     report = json.loads((tmp_path / 'exported_cy/_mx_admission.json').read_text())
     for name in methods:
-        assert report[f'exported_cy._mx_classes._c_Projection._f_{name}']['native_reductions'] == 0
+        assert report[f'exported_cy._mx_classes._c_Projection._f_{name}']['native_reductions'] == (
+            1 if name in ('total', 'alias_total') else 0)
     declined = report['exported_cy._mx_classes._c_Projection._f_lookup_declined']
     assert declined['native_reductions'] == 0
     assert declined['native_numeric_helpers'] == []

@@ -93,6 +93,17 @@ References; providers do not need insurance-specific compiler branches.
 numeric type or a proof about a replacement callable. An `int64` provider must
 check its public integer range. An object-preserving mutable dispatcher uses
 `object` even when its canonical internal kernel returns `double`.
+
+Registered reduction consumers retain the qualified typed-loop kernels beneath
+this same registry. Direct function References, module members and aliases use
+the current callable and its provider identity guard. Only a call with an explicit
+`reduction` capability enters that stage; ordinary generators and the expression
+stream API continue through their normal Cython/provider paths. Known primitive
+payloads/ranges may use the existing numeric accumulator and private Cell entries.
+Unknown payloads, unsupported scopes and changed callables retain the ordinary
+compiled generator/object path. Receiver rebinding and frame introspection decline
+statement-changing lowering. This uses the shared CST frontend, not a second
+application AST parser or financial formula implementation.
 The optional `keywords` call ABI uses the helper's declared Python signature,
 not its body. Missing optional slots receive the provider's declared
 `omitted_argument` token; the original keyword-name tuple excludes these slots.

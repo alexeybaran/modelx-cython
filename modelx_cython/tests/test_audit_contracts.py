@@ -60,6 +60,23 @@ def test_reduction_does_not_type_a_nested_receiver_from_outer_cells():
     assert pass_.count == 0
 
 
+@pytest.mark.parametrize('source', [
+    'def formula(self):\n    self = self.other\n    return self.sum_f64(self.term(k) for k in range(self.count()))\n',
+    'def formula(self):\n    return self.sum_f64(self.term(self) for self in range(self.count()))\n',
+    'def formula(self):\n    self.snapshots.append(locals())\n    return self.sum_f64(self.term(k) for k in range(self.count()))\n',
+])
+def test_typed_reduction_preserves_receiver_binding_and_frame_observation(source):
+    formula = cst.parse_module(source).body[0]
+    cell = native_cell()
+    cell.has_formula_def = True
+    cls = SimpleNamespace(name='_c_Values', refs={'sum_f64': SimpleNamespace(
+        reduction='f64_sum', helper=('sample.provider', 'sum_f64'))},
+        cells={'term': native_cell(params=('k',)), 'count': native_cell('long long')})
+    lowering = NativeReductions(cls, cell, set(), formula, lambda: '_cold', True)
+    assert cst.Module([formula.visit(lowering)]).code == source
+    assert lowering.count == 0
+
+
 def test_enum_constants_do_not_capture_a_comprehension_receiver():
     source='''def formula(self, value):
     return tuple(value == self.Status.OK for self in self.others)
