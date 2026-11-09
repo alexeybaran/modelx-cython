@@ -57,6 +57,7 @@ class DenseEntry:
     exact_spill: bool
     logical_axes: tuple[DenseAxis, ...] = ()
     spill_entry: str | None = None
+    unbounded_spill: bool = False
 
 
 @dataclass(frozen=True)

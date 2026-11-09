@@ -9,7 +9,7 @@ from .syntax import same_expression
 
 
 def _unsigned_check(layout):
-    if (len(layout.axes) != 1 or layout.exact_spill
+    if (len(layout.axes) != 1 or (layout.exact_spill and not layout.unbounded_spill)
             or layout.axes[0].c_type != "long long"):
         return None
     axis, = layout.axes
@@ -57,6 +57,16 @@ class _Calls(cst.CSTTransformer):
     def leave_Call(self, original, updated):
         if not isinstance(original.func, cst.Name) or original.func.value not in self.entries:
             return updated
+        proof = original.args[-1].value
+        if (len(original.args) == 3 and isinstance(proof, cst.IfExp)
+                and isinstance(proof.test, cst.Name) and isinstance(proof.body, cst.Integer)
+                and proof.body.evaluated_value == 1 and isinstance(proof.orelse, cst.Integer)
+                and proof.orelse.evaluated_value == 0):
+            args = (*updated.args[:-2], updated.args[-2].with_changes(comma=cst.MaybeSentinel.DEFAULT))
+            native_args = (*args, cst.Arg(cst.Name('True'))) if self.propagate else args
+            return cst.IfExp(proof.test,
+                updated.with_changes(func=self.entries[original.func.value], args=native_args),
+                updated.with_changes(args=args), lpar=(cst.LeftParen(),), rpar=(cst.RightParen(),))
         if (len(original.args) != 3 or not isinstance(original.args[-1].value, cst.Integer)
                 or original.args[-1].value.evaluated_value not in (0, 1)):
             raise ValueError("unexpected one-axis proof call")

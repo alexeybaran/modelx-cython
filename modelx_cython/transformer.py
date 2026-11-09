@@ -1174,7 +1174,10 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
                                      f'{value} = {f_expr}\n{cache}[{key}] = {value}\nreturn {value}\n')
                             if cells.is_locked:
                                 spill = f'with self.{MX_LOCK}:\n' + textwrap.indent(spill, '    ')
-                            if cells.has_shifted_cache:
+                            if cells.has_inferred_dense_domain:
+                                helper = self._compact_spill(cells, cls_name, spill)
+                                outside = f'return {helper}\n'
+                            elif cells.has_shifted_cache:
                                 outside = spill
                             else:
                                 original = dense_condition(cells.dense_logical_axes)

@@ -488,8 +488,19 @@ class CombinedCellsInfo(LexicalCellsInfo):
                 and self.is_arrayable() and self.dense_axes != self.dense_logical_axes)
 
     @property
+    def has_inferred_dense_domain(self):
+        """A sampled cache window is not an author-declared argument domain."""
+        from modelx_cython import automatic
+        if not automatic.enabled(self):
+            return False
+        spec = self.parent.module.spec.get_spec(self.parent.fqname)
+        sizes = spec.get(TransSpec.CELLS_PARAM_SIZE, spec.get(TransSpec.CELLS_PARAMS, {}))
+        return not any((key if isinstance(key, tuple) else (key,)) == tuple(self.params)
+                       for key in sizes)
+
+    @property
     def has_dense_spill(self):
-        return self.has_compact_cache or self.has_shifted_cache
+        return self.has_inferred_dense_domain or self.has_compact_cache or self.has_shifted_cache
 
     def get_readiness_array_decl_expr(self, c_style=False):
         # Cython pickles unsigned-char arrays as NUL-terminated strings, which

@@ -14,6 +14,15 @@ not a mathematical proof about every possible future input. Observed integers
 outside signed 64 bits use objects. Arrays use native views only for a consistent
 supported native-endian buffer format; other formats remain objects.
 
+With automatic cache selection, sampled integer ranges size the dense hot window,
+not the Cell's legal input domain. Other typed keys use the existing lazy spill
+dictionary belonging to that Cell; published results remain one logical cache.
+Formula-range proofs are conditional on the actual input lying in their proved
+window. An explicit `cells_param_size` contract retains its established checked
+domain, and disabling automatic selection retains the legacy behavior. This
+allows a small representative type trace to serve larger original populations
+without product-specific maximum settings.
+
 A concrete `-> object` return annotation declares an object result/cache ABI,
 even when every sampled value is numeric. Use it for identity-preserving raw
 scalar results and on forwarding Cells that require the same contract. The

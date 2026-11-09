@@ -80,6 +80,16 @@ def _formula_ranges(guard, layout, uses, spill_functions, spill_uses):
     if calls_formula(statements(guard.body)) != 1 or len(fallback) != 1:
         return ()
     fallback, = fallback
+    if layout.unbounded_spill:
+        # These are bounds of the hot cache branch only. The shared formula
+        # also runs through the cold spill; callers must guard these facts.
+        expected_spill = cst.parse_expression(f'{layout.spill_entry}({MX_SELF}, {keys})')
+        spill = spill_functions.get(layout.spill_entry)
+        if (layout.spill_entry and isinstance(fallback, cst.Return)
+                and same_expression(fallback.value, expected_spill) and spill
+                and calls_formula(statements(spill.body)) == 1):
+            return layout.axes
+        return ()
     if not layout.exact_spill:
         return layout.axes if uses[layout.formula] == 1 and isinstance(fallback, cst.Raise) else ()
     if not (layout.spill_entry and layout.logical_axes and uses[layout.formula] == 2
@@ -125,6 +135,7 @@ def prove_entries(state: EntryModule, records, uses):
         ranges_by_entry[name] = _formula_ranges(guard, layout, entry_uses, spill_functions, entry_spills)
 
     masks = {}
+    formula_domains = {}
     for name, (_, guard, layout) in native.items():
         source_axes = ranges_by_entry[name]
         formula = formulas.get((layout.owner, layout.formula))
@@ -152,7 +163,13 @@ def prove_entries(state: EntryModule, records, uses):
                 if interval and axis.lower <= interval[0] < interval[1] <= axis.stop:
                     mask |= 1 << index
             if mask:
-                masks[call] = mask
+                if layout.unbounded_spill:
+                    if formula not in formula_domains:
+                        domain = state.names.reserve('_mx_dense_domain', family=True)
+                        formula_domains[formula] = domain, source_axes
+                    masks[call] = mask, formula_domains[formula][0]
+                else:
+                    masks[call] = mask, None
     if not masks:
         return state
     flag = state.names.reserve('_mx_proven_axes', family=True)
@@ -161,17 +178,30 @@ def prove_entries(state: EntryModule, records, uses):
     class Proofs(cst.CSTTransformer):
         def leave_Call(self, before, after):
             if isinstance(before.func, cst.Name) and before.func.value in targets:
-                return after.with_changes(args=(*after.args, cst.Arg(cst.Integer(str(masks.get(before, 0))))))
+                mask, domain = masks.get(before, (0, None))
+                value = cst.Integer(str(mask))
+                if domain:
+                    value = cst.IfExp(cst.Name(domain), value, cst.Integer('0'))
+                return after.with_changes(args=(*after.args, cst.Arg(value)))
             return after
 
         def leave_FunctionDef(self, before, after):
+            if before in formula_domains:
+                domain, axes = formula_domains[before]
+                declaration = cst.parse_statement(f'{domain}: {CY_MOD}.bint = {dense_condition(axes)}\n')
+                body = list(after.body.body)
+                docstring = (body and isinstance(body[0], cst.SimpleStatementLine)
+                             and len(body[0].body) == 1 and isinstance(body[0].body[0], cst.Expr)
+                             and isinstance(body[0].body[0].value, (cst.SimpleString, cst.ConcatenatedString)))
+                body.insert(int(bool(docstring)), declaration)
+                after = after.with_changes(body=after.body.with_changes(body=tuple(body)))
             name = before.name.value
             if name not in targets:
                 return after
             layout, proved = records[name], ranges_by_entry[name]
             guard = after.body.body[0]
             fallback = guard.orelse
-            if proved and layout.logical_axes:
+            if proved and layout.logical_axes and not layout.unbounded_spill:
                 test = cst.parse_expression(dense_condition(proved, flag))
                 if isinstance(fallback, cst.If):
                     fallback = fallback.with_changes(test=test)
