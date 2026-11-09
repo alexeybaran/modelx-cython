@@ -22,7 +22,7 @@ lifelib's `EXPRESSION_STREAMS.md` and `NATIVE_TABLES.md`.
 | Expression | Meaning |
 |---|---|
 | `e.periods(n)` or `e.periods(start, stop, step)` | Reusable range domain, with ordinary integer/index conversion and zero-step behavior. |
-| `e.over(source, function, where=None, *, unpack=None)` | One-shot lazy map/filter producer. Acquire the source iterator eagerly; unpack each candidate, test its predicate, then evaluate its payload. |
+| `e.over(source, function=omitted, where=None, *, unpack=None)` | One-shot lazy map/filter producer. Acquire the source iterator eagerly; unpack each candidate, test its predicate, then evaluate its payload. |
 | `e.flatten(sources)` | Lazy ordered concatenation; acquire inner iterators only as reached. |
 | `e.zip_values((first, second), *, strict=False)` | Dedicated resumable zipped producer over an authored exact tuple of sources; ordinary zip acquisition, advancement, strictness, retries and retained-row lifetimes. |
 | `e.sum_float(source, function=omitted, where=None) -> float` | Float-normalize each passing contribution lazily, then use float-start summation; empty input is float `0.0`. |
@@ -58,6 +58,33 @@ normalization. It differs from ordinary `sum(values)` and from the older
 Decimal and empty-result types. These names must not be silently aliased.
 A float-looking sample does not justify changing a model's ordinary sum.
 Regional source adjustments retain the standard consumers.
+
+## Identity traversal and raw result declarations
+
+The ABI 2 stream provider also supports `e.over(source)` and where-only
+filtering. It owns a fresh identity generator, even if the source is suspended;
+send values are ignored and throw/close do not forward upstream. Unpacking
+requires an explicit mapper. Explicit `function=None` remains a non-callable
+mapper and fails lazily. Native packages require a fresh rebuild after this
+optional-parameter C signature change.
+
+```python
+sum(e.over(net_cf(t) * discount(t) for t in e.periods(proj_len())))
+```
+
+Cython compiles the original generator body; no mapper callback or body
+recognizer is introduced. `periods` keeps Python range progression for signed
+limits, nonunit steps and wide integers. This syntax has provider/protocol and
+normal CLI evidence; its all-model source materialization remains a separate,
+unqualified candidate at the handover checkpoint.
+
+For a Cell that must retain a raw NumPy scalar/object identity, the existing
+public translation specification supports `return_type: "object"`. Declare
+identity-preserving forwarding Cells as object too. The normal CLI regression
+checks raw scalar identity, warnings, cache hits and pickle using direct function
+References. An automatic source `-> object` inference patch is a review proposal
+only; it has not been applied to architecture-owned return planning. Whole-model
+pickle with module References remains a separate baseline limitation.
 
 ## Evaluation and protocol
 
