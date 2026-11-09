@@ -665,6 +665,8 @@ def create_setup(model_name: str, modules: Sequence[str], setup_file: pathlib.Pa
     from setuptools import setup
     from Cython.Build import cythonize
     from Cython.Compiler.PyrexTypes import CArrayType, c_int_type
+    from pathlib import Path
+    import modelx_cython
     import sys
     sys.setrecursionlimit(max(sys.getrecursionlimit(), {recursion_budget}))
 
@@ -687,6 +689,9 @@ def create_setup(model_name: str, modules: Sequence[str], setup_file: pathlib.Pa
     {modules_str}
             ],
             annotate=True,
+            # PEP660 can expose the compiler through a meta-path finder rather
+            # than sys.path. Cython still needs its packaged header directory.
+            include_path=[str(Path(modelx_cython.__file__).resolve().parent.parent)],
             compiler_directives={{"freethreading_compatible": True}}
         )
     )
