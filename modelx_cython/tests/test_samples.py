@@ -399,14 +399,16 @@ def test_fractional_power(sample_dir, model):
     assert "cdef double[11] _v_mth_rate\n" in pxd
     assert "cdef double[11] _v_mth_q\n" in pxd
     import re
-    assert re.search(r'cdef double _f_int_pow\(_c_Space1 self, long long t\)(?: except\? -1)?\n',pxd)
+    # 2**0 is int while negative exponents produce float; preserve that
+    # observed scalar union rather than coercing the integer result to double.
+    assert re.search(r'cdef object _f_int_pow\(_c_Space1 self, long long t\)(?: except\? -1)?\n',pxd)
 
     # only the two floating-exponent powers are rewritten
     src = (work_dir / (model + "_nomx_cy") / "_mx_classes.py").read_text(
         encoding="utf-8")
     assert "_mx_sys._mx_pow((1 + self.ann_rate(t)), (1 / 12))" in src
     assert "_mx_sys._mx_pow((1 - self.ann_q(t)), (1 / 12))" in src
-    assert "return 2 ** -t" in src
+    assert "return _mx_cy.cast(object, 2) ** _mx_cy.cast(object, -t)" in src
     # uncached_rate has no _f_ method, so its public method carries the
     # formula and goes through the transformer's other rewrite site
     assert "def uncached_rate(" in src
@@ -422,6 +424,10 @@ def test_fractional_power(sample_dir, model):
     assert subprocess.run(
         [sys.executable, str(work_dir / "assert_cy.py")], env=env
     ).returncode == 0
+    assert subprocess.run([sys.executable, '-c',
+        'from FractionalPower_nomx_cy import mx_model; s=mx_model.Space1; '
+        'assert type(s.int_pow(0)) is int; assert type(s.int_pow(1)) is float'],
+        cwd=work_dir, env=env).returncode == 0
 
 
 @pytest.mark.parametrize("sample_dir, model", [["array_usage", "ArrayUsage"]],

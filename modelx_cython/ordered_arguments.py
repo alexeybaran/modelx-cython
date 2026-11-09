@@ -1,8 +1,9 @@
-"""Keep Python argument order for Cython's min/max numeric intrinsics.
+"""Preserve Python evaluation for Cython numeric intrinsics.
 
+Boxing unproved power operands retains Python numeric types and exceptions.
 Packing arguments before ordinary star expansion prevents intrinsic emission
 from moving an effectful argument. The actual builtin remains the consumer;
-there is no numeric approximation, formula analysis or additional public API.
+there is no numeric approximation, alternate formula interpreter or additional public API.
 """
 import libcst as cst
 from libcst.metadata import ScopeProvider
@@ -11,6 +12,23 @@ from libcst.metadata.scope_provider import BuiltinAssignment
 
 class _OrderedArguments(cst.CSTTransformer):
     METADATA_DEPENDENCIES = (ScopeProvider,)
+
+    def leave_BinaryOperation(self, before, after):
+        if not isinstance(before.operator, cst.Power):
+            return after
+        # The qualified real-power pass has already handled its proved C
+        # domain. Preserve Python's remaining integer/mixed/complex power
+        # result and error semantics through Cython's ordinary object operator.
+        scope = self.get_metadata(ScopeProvider, before)
+        bindings = tuple(scope['object'])
+        if not bindings or not all(isinstance(binding, BuiltinAssignment) for binding in bindings):
+            return after
+        if tuple(scope['_mx_cy']):
+            return after
+        def boxed(value):
+            return cst.Call(cst.Attribute(cst.Name('_mx_cy'), cst.Name('cast')),
+                            (cst.Arg(cst.Name('object')), cst.Arg(value)))
+        return after.with_changes(left=boxed(after.left), right=boxed(after.right))
 
     def leave_Call(self, before, after):
         function = before.func

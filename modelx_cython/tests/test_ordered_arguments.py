@@ -32,3 +32,20 @@ def test_binding_is_lexical_inside_callbacks_and_never_parses_ast(monkeypatch):
         result = cst.Module(body=(preserve_argument_order(source),)).code
     assert 'max(first(), second())' in result
     assert 'min(*(first(), second()))' in result
+
+
+def test_remaining_power_keeps_python_types_and_ignores_pow_binding():
+    import cython
+    source = rewrite('def formula(n):\n    return 2 ** -n\n')
+    namespace = {'_mx_cy': cython, 'pow': lambda *args: object()}
+    exec(source, namespace)
+    for n in (-3, 0, 1, 10):
+        expected = 2 ** -n
+        actual = namespace['formula'](n)
+        assert actual == expected and type(actual) is type(expected)
+
+
+def test_power_does_not_capture_shadowed_generated_or_object_names():
+    for source in ['def formula(object, n):\n    return 2 ** -n\n',
+                   'def formula(_mx_cy, n):\n    return 2 ** -n\n']:
+        assert rewrite(source) == source
