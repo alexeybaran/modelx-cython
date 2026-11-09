@@ -91,6 +91,29 @@ def test_kind_of_type_expr(type_expr, expected):
     assert kind_of_type_expr(type_expr) == expected
 
 
+def test_object_power_local_proofs_reuse_native_types_and_shared_bindings(kind):
+    from modelx_cython.powers import object_power_kind
+    from modelx_cython.ordered_arguments import preserve_argument_order
+
+    def rewritten(body):
+        node = cst.parse_module('def formula(t, x):\n' + body).body[0]
+        proof = object_power_kind(node, kind._resolver, kind._cells_kinds,
+                                  kind._ref_kinds, CLS, _FakeCells())
+        return cst.Module([preserve_argument_order(node, proof)]).code
+
+    assert '_mx_object_power(' in rewritten(
+        '    a, b = self.rate(t), self.rate(t)\n    return a ** b\n')
+    for body in [
+        '    a = self.rate(t)\n    a = unknown()\n    return a ** t\n',
+        '    a = unknown()\n    return a ** t\n',
+        '    a = self.rate(t)\n    return lambda a: a ** t\n',
+        '    a = self.rate(t) ** x\n    return a ** t\n',
+        '    a = self.rate(t)\n    for a in values:\n        pass\n    return a ** t\n',
+        '    a = self.rate(t)\n    def change():\n        nonlocal a\n        a = unknown()\n    change()\n    return a ** t\n',
+    ]:
+        assert '_mx_object_power(' not in rewritten(body)
+
+
 class _FakeCells:
     """Stands in for CombinedCellsInfo: only the parameter types and the
     fqname are read by :func:`rewrite_powers`."""

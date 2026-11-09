@@ -12,6 +12,24 @@ from libcst.metadata.scope_provider import BuiltinAssignment
 class _OrderedArguments(cst.CSTTransformer):
     METADATA_DEPENDENCIES = (ScopeProvider,)
 
+    def __init__(self, kind=None):
+        super().__init__()
+        self.kind = kind
+        self.opaque_depth = 0
+
+    def on_visit(self, node):
+        from .scopes import OPAQUE_SCOPES
+        if isinstance(node, OPAQUE_SCOPES):
+            self.opaque_depth += 1
+        return super().on_visit(node)
+
+    def on_leave(self, before, after):
+        result = super().on_leave(before, after)
+        from .scopes import OPAQUE_SCOPES
+        if isinstance(before, OPAQUE_SCOPES):
+            self.opaque_depth -= 1
+        return result
+
     def leave_BinaryOperation(self, before, after):
         if not isinstance(before.operator, cst.Power):
             return after
@@ -24,12 +42,22 @@ class _OrderedArguments(cst.CSTTransformer):
             return after
         if tuple(scope['_mx_cy']):
             return after
+        from .powers import KIND_FLOAT, KIND_INT
+        if (self.kind is not None and self.opaque_depth == 1
+                and not tuple(scope['_mx_sys'])
+                and self.kind.kind(before.left) == KIND_FLOAT
+                and self.kind.kind(before.right) in (KIND_FLOAT, KIND_INT)):
+            capture = cst.Call(cst.parse_expression('_mx_sys._mx_capture_power_base'),
+                               (cst.Arg(after.left),))
+            return cst.Call(cst.parse_expression('_mx_sys._mx_object_power'),
+                            (cst.Arg(capture), cst.Arg(after.right)),
+                            lpar=after.lpar, rpar=after.rpar)
         def boxed(value):
             return cst.Call(cst.Attribute(cst.Name('_mx_cy'), cst.Name('cast')),
                             (cst.Arg(cst.Name('object')), cst.Arg(value)))
         return after.with_changes(left=boxed(after.left), right=boxed(after.right))
 
-def preserve_argument_order(formula):
+def preserve_argument_order(formula, kind=None):
     """Keep unproved powers on Cython's ordinary Python-object operator."""
     wrapper = cst.MetadataWrapper(cst.Module(body=(formula,)))
-    return wrapper.visit(_OrderedArguments()).body[0]
+    return wrapper.visit(_OrderedArguments(kind)).body[0]
