@@ -107,11 +107,13 @@ def test_object_power_local_proofs_reuse_native_types_and_shared_bindings(kind):
         '    a = self.rate(t)\n    a = unknown()\n    return a ** t\n',
         '    a = unknown()\n    return a ** t\n',
         '    a = self.rate(t)\n    return lambda a: a ** t\n',
-        '    a = self.rate(t) ** x\n    return a ** t\n',
         '    a = self.rate(t)\n    for a in values:\n        pass\n    return a ** t\n',
         '    a = self.rate(t)\n    def change():\n        nonlocal a\n        a = unknown()\n    change()\n    return a ** t\n',
     ]:
         assert '_mx_object_power(' not in rewritten(body)
+    nested = rewritten('    a = self.rate(t) ** x\n    return a ** t\n')
+    assert nested.count('_mx_object_power(') == 1
+    assert 'return _mx_cy.cast(object, a) **' in nested
 
 
 class _FakeCells:
