@@ -152,6 +152,15 @@ primary table keeps its half-full policy and grows through overflow storage.
 Low-level allocation additionally checks addressable byte size independently
 of the compiler's budget.
 
+With automatic storage, an inferred sampled extent defines a physical window,
+not a legal argument maximum. When the author has not declared matching
+`cells_param_size`/`cells_params` bounds, cold keys use the existing lazy spill
+dictionary owned by the same Cell. Explicit bounds retain their strict behavior;
+disabling automatic storage retains the legacy inference contract. Dense-window
+range facts inside a shared formula are conditional on its actual input domain,
+so a cold spill cannot borrow hot-window unchecked reads. This requires neither
+all-policy tracing nor per-model maximum settings.
+
 Native numeric stores preserve published entries when pickled, including exact
 result bits; failed reservations remain retryable. Readiness uses normal `bint`
 arrays and standard Cython serialization.
