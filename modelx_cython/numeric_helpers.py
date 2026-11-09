@@ -5,7 +5,7 @@ import libcst as cst
 
 from .cell_entries import exact_receiver
 from .helpers import module_name
-from .scopes import CstFacts, FormulaTransformer, Names, has_scope_effects
+from .scopes import CstFacts, Names, has_scope_effects
 from .syntax import literal_value
 from .typedefs import primitive_kind
 
@@ -430,24 +430,3 @@ class NumericReturns(cst.CSTTransformer):
             func=cst.Attribute(cst.Name(alias), cst.Name(operation)),
             args=(cst.Arg(call.func), cst.Arg(context), *call.args))
         return after.with_changes(value=self.bound_numeric(call, native, ref, provider, context))
-
-
-class ContextualFloat(FormulaTransformer):
-    """Retired experiment bridge; explicit typed helpers use Cython declarations.
-
-    Kept only until the generator owner removes shared pipeline wiring. This
-    bridge parses no formulas and admits no contextual native operation.
-    """
-    def __init__(self, cls, cell, providers, builtin_keys=(), contexts=None, scope_safe=None):
-        super().__init__()
-        self.contexts = {} if contexts is None else contexts
-        self.operations = set()
-
-    def visit_FunctionDef(self, node):
-        return False
-
-    def classify_call(self, node, local_types):
-        return None
-
-    def lower_call(self, node):
-        return None

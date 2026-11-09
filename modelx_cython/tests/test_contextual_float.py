@@ -1,24 +1,10 @@
-"""The retired contextual experiment must not parse or recognize formulas."""
+"""Explicit typed symbol binding uses the shared syntax, without an AST pass."""
 import ast
 from types import SimpleNamespace
 
 import libcst as cst
 
 from modelx_cython.helpers import HelperCalls
-from modelx_cython.numeric_helpers import ContextualFloat
-
-
-def test_retired_contextual_bridge_never_parses_or_admits(monkeypatch):
-    node = cst.parse_module('def amount(self, age):\n    return float(self.lookup(self.table, age, "rate"))\n')
-    def forbidden(*args, **kwargs):
-        raise AssertionError('retired helper recognizer parsed an AST')
-    monkeypatch.setattr(ast, 'parse', forbidden)
-    providers = set()
-    bridge = ContextualFloat(None, None, providers)
-    assert node.visit(bridge).code == node.code
-    assert bridge.classify_call(None, {}) is None
-    assert bridge.lower_call(None) is None
-    assert providers == set() and bridge.operations == set()
 
 
 def test_explicit_typed_symbol_binding_uses_no_ast_parser(monkeypatch):
