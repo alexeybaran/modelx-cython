@@ -23,7 +23,7 @@ def test_row_column_public_contract_and_cleanup_modes(tmp_path):
             'to_pandas': table_operations.to_pandas, 'keys': keys,
             'lookup_float': typed_inputs.lookup_float})
         p.new_cells('public_input', 'lambda: source')
-        p.new_cells('owned', 'lambda: prepare(public_input())')
+        p.new_cells('owned', 'lambda: prepare(public_input(), rows=True)')
         p.new_cells('selected', 'lambda key: row(key=key, table=owned())')
         p.new_cells('rate', 'lambda key: lookup_float(selected(key), "rate")')
         p.new_cells('values', 'lambda: column(owned(), "rate")')
