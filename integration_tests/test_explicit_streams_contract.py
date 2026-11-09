@@ -36,11 +36,13 @@ def test_explicit_streams_without_legacy_ast_generator_passes(tmp_path):
         p.new_cells('where_only', 'lambda n: sum_float(periods(n), where=lambda t: eligible(t))')
         p.new_cells('nested', 'lambda n: sum_float(flatten(over(periods(n), lambda g: over(periods(g), lambda z: cf(z)))))')
         p.new_cells('pairs', 'lambda: tuple(over(((1, 2), (3, 4)), lambda a, b: (a, b), unpack=2))')
+        p.new_cells('zipped', 'lambda n: expressions.sum_float(expressions.over(expressions.zip_values(strict=True, sources=(range(n), range(n))), lambda a,b: a*b, unpack=2))')
         expected = {}
         for n in [0, 1, 3, 10]:
             expected[str(n)] = {name: getattr(p, name)(n) for name in
                                ('total', 'composed', 'generated', 'facade_generated', 'filtered_generated', 'bound_callback', 'method_pairs', 'where_only', 'nested')}
         assert p.pairs() == ((1, 2), (3, 4))
+        assert p.zipped(4) == 14.0 and p.zipped(0) == 0.0
         model.export(tmp_path / 'exported')
     finally:
         model.close()
@@ -50,6 +52,7 @@ p = mx_model.Projection
 for n in [0,1,3,10]:
     p.total(n); p.composed(n); p.generated(n); p.facade_generated(n); p.filtered_generated(n); p.bound_callback(n); p.method_pairs(n); p.where_only(n); p.nested(n)
 p.pairs()
+p.zipped(4);p.zipped(0)
 ''')
     runner = textwrap.dedent('''
         import sys
@@ -75,7 +78,7 @@ p.pairs()
         model = importlib.import_module(sys.argv[1]).mx_model
         expected = json.load(open('expected.json'))
         forbidden = {getattr(h, name).__code__ for name in
-                     ('periods','over','flatten','sum_float')}
+                     ('periods','over','flatten','sum_float','zip_values')}
         forbidden |= {h._Over.__init__.__code__, h._Over.__next__.__code__,
                       h._Flatten.__init__.__code__, h._Flatten.__next__.__code__}
         forbidden |= {tables.lookup_float.__code__, tables._typed_value.__code__}
@@ -90,6 +93,7 @@ p.pairs()
                 for name, value in values.items():
                     assert getattr(p,name)(int(n)) == value
             assert p.pairs() == ((1,2),(3,4))
+            assert p.zipped(4) == 14.0 and p.zipped(0) == 0.0
         finally: sys.setprofile(None)
         assert calls == [], calls
         events=[]
@@ -122,6 +126,16 @@ p.pairs()
             assert p.facade_generated(3) == 18.5
         finally:
             e.sum_float = original_sum
+        original_zip = e.zip_values
+        p = type(model)().Projection
+        try:
+            def current_zip(*, strict, sources):
+                assert strict is True
+                return ((2,3),)
+            e.zip_values = current_zip
+            assert p.zipped(4) == 6.0
+        finally:
+            e.zip_values = original_zip
         root = type(model)()
         class Override(type(root.Projection)):
             def cf(self,t): return 7.5
