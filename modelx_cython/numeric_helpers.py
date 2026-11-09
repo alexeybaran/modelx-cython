@@ -2,14 +2,12 @@
 import ast
 import math
 import re
-from dataclasses import dataclass
 
 import libcst as cst
 
 from .cell_entries import exact_receiver
 from .helpers import module_name
 from .scopes import FormulaTransformer, has_scope_effects, lexical_nodes
-from .helper_members import helper_reference
 
 
 class NumericReturns(cst.CSTTransformer):
@@ -439,177 +437,22 @@ class NumericReturns(cst.CSTTransformer):
         return after.with_changes(value=self.bound_numeric(call, native, ref, provider, context))
 
 
-@dataclass(frozen=True)
-class FloatClassification:
-    """Consumer must prove closure arithmetic in these original arguments."""
-    checked_arguments: tuple
-    result_kind: str = 'double'
-
-
 class ContextualFloat(FormulaTransformer):
-    """Lower explicit float(helper(...)) throughout one admitted formula scope.
+    """Retired experiment bridge; explicit typed helpers use Cython declarations.
 
-    The provider receives both current callable expressions. Its fallback must
-    perform conversion(helper(*args)), not an implicit C-double conversion.
-    Run after generator lowering, so admitted payloads use this same matcher;
-    authored child scopes keep their ordinary evaluation semantics.
+    Kept only until the generator owner removes shared pipeline wiring. This
+    bridge parses no formulas and admits no contextual native operation.
     """
-
     def __init__(self, cls, cell, providers, builtin_keys=(), contexts=None, scope_safe=None):
         super().__init__()
-        self.cls, self.cell, self.providers = cls, cell, providers
-        self.builtin_keys = builtin_keys
         self.contexts = {} if contexts is None else contexts
         self.operations = set()
-        self.scope_safe = bool(scope_safe)
-        self.original_scope_safe = scope_safe
-        self.native_locals = {}
-
-    self_call = staticmethod(NumericReturns.self_call)
-    native_key = NumericReturns.native_key
-    lookup_context = NumericReturns.lookup_context
 
     def visit_FunctionDef(self, node):
-        syntax = ast.parse(cst.Module([]).code_for_node(node)).body[0]
-        self.scope_safe = (not has_scope_effects(syntax.body) if self.original_scope_safe is None
-                           else self.original_scope_safe)
-        # Consume existing Cython declarations, especially generator-emitted
-        # native indices. This does not infer C types from Python annotations
-        # or move bindings; these names already have these types in Cython.
-        self.native_locals = {
-            item.target.id: {'longlong': 'long long', 'bint': 'bint'}[item.annotation.attr]
-            for item in lexical_nodes(syntax.body)
-            if (isinstance(item, ast.AnnAssign) and isinstance(item.target, ast.Name)
-                and isinstance(item.annotation, ast.Attribute)
-                and isinstance(item.annotation.value, ast.Name)
-                and item.annotation.value.id == '_mx_cy'
-                and item.annotation.attr in ('longlong', 'bint'))}
-        return self.scope_safe
-
-    def match_call(self, call):
-        """Classify syntax/capabilities without requesting resources or emission."""
-        if not (self.scope_safe and 'float' in self.builtin_keys
-                and isinstance(call.func, cst.Name) and call.func.value == 'float'
-                and len(call.args) == 1 and not call.args[0].keyword
-                and not call.args[0].star):
-            return None
-        lookup = call.args[0].value
-        if not (isinstance(lookup, cst.Call) and 3 <= len(lookup.args) <= 4
-                and not any(arg.keyword or arg.star for arg in lookup.args)):
-            return None
-        ref = helper_reference(lookup.func, self.cls.refs)
-        operation = getattr(ref, 'float_numeric_helper', None)
-        if not getattr(ref, 'helper', None):
-            return None
-        key = lookup.args[1].value
-        args = lookup.args
-        if not (operation and self.component_kind(key) == 'long long'):
-            operations = getattr(ref, 'keyed_float_numeric_helper', None)
-            tuple_key = isinstance(key, cst.Tuple)
-            if tuple_key:
-                if any(not isinstance(part, cst.Element) for part in key.elements):
-                    return None
-                parts = tuple(part.value for part in key.elements)
-            else:
-                parts = (key,)
-            if not (operations and len(parts) < len(operations)
-                    and all(self.native_component(part) for part in parts)):
-                return None
-            operation = operations[len(parts)]
-            args = (lookup.args[0], *(cst.Arg(part) for part in parts),
-                    cst.Arg(cst.Name('True' if tuple_key else 'False')), *lookup.args[2:])
-        return ref, operation, lookup, args
-
-    def lower_call(self, call):
-        """Return the contextual call, or None when admission is unproven."""
-        match = self.match_call(call)
-        if match is None:
-            return None
-        ref, operation, lookup, args = match
-        provider, original = ref.helper
-        context = self.lookup_context(provider)
-        if context is None:
-            return None
-        self.providers.add(provider)
-        self.operations.add(provider + '.' + original)
-        return call.with_changes(
-            func=cst.Attribute(cst.Name(module_name(provider)), cst.Name(operation)),
-            args=(cst.Arg(call.func), cst.Arg(lookup.func), cst.Arg(context), *args))
+        return False
 
     def classify_call(self, node, local_types):
-        """AST hook for the generator owner, sharing this exact matcher.
-
-        Object arguments are restricted to reads/no-argument calls or literals.
-        The consumer must check ``checked_arguments`` for closure arithmetic
-        before admitting a loop. Classification emits no calls or resources.
-        ``local_types`` are the consumer's proven primitive types, not traces.
-        """
-        if not isinstance(node, ast.Call) or not self.scope_safe:
-            return None
-        previous = self.native_locals
-        self.native_locals = {**previous, **{name: {'longlong': 'long long'}.get(kind, kind)
-                                            for name, kind in local_types.items()}}
-        try:
-            match = self.match_call(cst.parse_expression(ast.unparse(node)))
-        finally:
-            self.native_locals = previous
-        if match is None:
-            return None
-        lookup = node.args[0]
-
-        def object_read(value):
-            if isinstance(value, (ast.Name, ast.Constant)):
-                return True
-            if isinstance(value, ast.Attribute):
-                return object_read(value.value)
-            return (isinstance(value, ast.Call) and isinstance(value.func, ast.Attribute)
-                    and not value.args and not value.keywords and object_read(value.func.value))
-
-        if (not object_read(lookup.args[0]) or not isinstance(lookup.args[2], ast.Constant)
-                or type(lookup.args[2].value) is not str
-                or len(lookup.args) == 4 and not object_read(lookup.args[3])):
-            return None
-        checks = tuple(arg for call in ast.walk(lookup.args[1])
-                       if isinstance(call, ast.Call) and isinstance(call.func, ast.Attribute)
-                       for arg in call.args)
-        return FloatClassification(checks)
-
-    def native_component(self, key):
-        return self.component_kind(key) is not None
-
-    def component_kind(self, key):
-        kinds = ('long long', 'bint', 'str', 'unicode')
-        if isinstance(key, cst.Integer):
-            return 'long long' if -(1 << 63) <= key.evaluated_value < (1 << 63) else None
-        if isinstance(key, cst.SimpleString):
-            return 'str' if type(key.evaluated_value) is str else None
-        if isinstance(key, cst.Name):
-            if key.value in ('True', 'False'):
-                return 'bint'
-            if key.value in self.cell.params:
-                kind = self.cell.get_argtype_expr(key.value, c_style=True)
-                return kind if kind in kinds else None
-            kind = self.native_locals.get(key.value)
-            return kind if kind in kinds else None
-        if (isinstance(key, cst.UnaryOperation) and isinstance(key.expression, cst.Integer)
-                and isinstance(key.operator, (cst.Minus, cst.Plus))):
-            value = key.expression.evaluated_value * (-1 if isinstance(key.operator, cst.Minus) else 1)
-            return 'long long' if -(1 << 63) <= value < (1 << 63) else None
-        if isinstance(key, cst.Attribute) and isinstance(key.value, cst.Name) and key.value.value == 'self':
-            ref = self.cls.refs.get(key.attr.value)
-            kind = ref.get_type_expr(c_style=True) if ref is not None else None
-            return kind if kind in kinds else None
-        if (isinstance(key, cst.Call) and isinstance(key.func, cst.Name)
-                and key.func.value in self.builtin_keys and key.func.value in ('min', 'max')
-                and len(key.args) >= 2 and not any(arg.keyword or arg.star for arg in key.args)):
-            result = {self.component_kind(arg.value) for arg in key.args}
-            return result.pop() if len(result) == 1 else None
-        if self.self_call(key):
-            cell = self.cls.cells.get(key.func.attr.value)
-            if cell is not None and not cell.is_special() and not cell.called_with_kwargs and not cell.body_has_closure:
-                kind = cell.get_rettype_expr(c_style=True)
-                return kind if kind in kinds else None
         return None
 
-    def leave_Call(self, before, after):
-        return self.lower_call(after) or after
+    def lower_call(self, node):
+        return None

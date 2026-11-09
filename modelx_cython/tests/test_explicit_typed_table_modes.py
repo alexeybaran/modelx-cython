@@ -18,7 +18,8 @@ def test_explicit_typed_table_helpers_modes(tmp_path):
              'flag': [True, False], 'label': ['M', 'F']},
             index=pd.MultiIndex.from_tuples([('M', 42), ('F', 43)]))
         refs = {'source': source, 'table_ctor': pandas_inputs.table,
-                'record_ctor': pandas_inputs.record}
+                'record_ctor': pandas_inputs.record, 'predicate': pd.isna,
+                'is_missing': typed_inputs.is_missing, 'empty_value': None}
         refs.update({name: getattr(typed_inputs, name) for name in
                      ('lookup_float', 'lookup_int', 'lookup_bool',
                       'lookup_str', 'lookup_object')})
@@ -32,6 +33,8 @@ def test_explicit_typed_table_helpers_modes(tmp_path):
             space.new_cells(name + '_value',
                             f'lambda sex, age: lookup_{name}(table(), (sex, age), "{column}")')
         space.new_cells('record_value', 'lambda: lookup_int(row(), "age")')
+        space.new_cells('missing_cached', 'lambda: is_missing(predicate, empty_value)')
+        space.new_cells('missing_fresh', 'lambda: is_missing(predicate, empty_value)').is_cached = False
         space.new_cells('defaulted',
                         'lambda sex, age: lookup_float(table(), (sex, age), "rate", 7.5)')
         assert space.float_value('M', 42) == 1.5
@@ -40,6 +43,7 @@ def test_explicit_typed_table_helpers_modes(tmp_path):
         assert space.str_value('M', 42) == 'M'
         assert space.object_value('F', 43) == 'F'
         assert space.record_value() == 42
+        assert space.missing_cached() is True and space.missing_fresh() is True
         assert space.defaulted('X', 1) == 7.5
         space.source = source.assign(rate=[3.5, 4.5])
         assert space.float_value('M', 42) == 3.5
@@ -56,6 +60,7 @@ for sex, age in [('M', 42), ('F', 43)]:
     m.Inputs.object_value(sex, age)
     m.Inputs.defaulted(sex, age)
 m.Inputs.record_value()
+m.Inputs.missing_cached(); m.Inputs.missing_fresh()
 ''')
     build = subprocess.run(
         [sys.executable, '-m', 'modelx_cython', 'exported',
@@ -68,6 +73,7 @@ m.Inputs.record_value()
         assert f'.lookup_{suffix}(' in source
     assert '.lookup_key2_float_f64(' not in source
     assert '.lookup_float_f64(' not in source
+    assert '.is_missing(' in source
 
     probe = textwrap.dedent('''
         import importlib, pickle, sys
@@ -81,6 +87,7 @@ m.Inputs.record_value()
         forbidden = {getattr(h, 'lookup_' + suffix).__code__
                      for suffix in ('float', 'int', 'bool', 'str', 'object')}
         forbidden.update([h._typed_value.__code__, h.lookup.__code__,
+                          h.is_missing.__code__, __import__('pandas').isna.__code__,
                           Table.lookup.__code__, Table.__getitem__.__code__,
                           Record.__getitem__.__code__, freeze.__code__])
         calls = []
@@ -97,6 +104,7 @@ m.Inputs.record_value()
             assert type(s.str_value('M', 42)) is str
             assert s.object_value('F', 43) == 'F'
             assert s.record_value() == 42
+            assert s.missing_cached() is True and s.missing_fresh() is True
             assert s.defaulted('X', 1) == 7.5
             try:
                 s.float_value('M', 43)
@@ -122,6 +130,14 @@ m.Inputs.record_value()
         fresh.Inputs.lookup_float = current
         assert fresh.Inputs.float_value('F', 43) == 12.5
         assert events == [('F', 43)]
+        seen = []
+        def current_predicate(value):
+            seen.append(value)
+            return False
+        s.predicate = current_predicate
+        assert s.missing_cached() is True  # exported/compiled cache is retained
+        assert s.missing_fresh() is False
+        assert seen == [None]
     ''')
     for package in ('exported', 'exported_cy'):
         run = subprocess.run([sys.executable, '-c', probe, package], cwd=tmp_path,
