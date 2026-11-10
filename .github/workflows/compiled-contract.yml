@@ -16,12 +16,12 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: alexeybaran/modelx
-          ref: f65730d1022fe85cae01e516c05acd6b9aaed0d6
+          ref: 02b9e0a6e02a36b712ab520eff8e30cfb4fdc722
           path: dependencies/modelx
       - uses: actions/checkout@v4
         with:
           repository: alexeybaran/lifelib
-          ref: ead64569c34f19b0a9fdba9ad52c6b238a39e01c
+          ref: fae987947543f2462463889a36106a9f4b5376d5
           path: dependencies/lifelib
       - uses: actions/setup-python@v5
         with:
@@ -34,6 +34,6 @@ jobs:
       - name: Qualify compiled contract and helper semantics
         env:
           PYTEST_ADDOPTS: ${{ runner.os == 'Windows' && '--basetemp=C:/contract' || '' }}
-        run: python -m pytest integration_tests dependencies/lifelib/lifelib/tests/test_immutable_inputs.py -q
+        run: python -m pytest integration_tests modelx_cython/tests/helper_contracts dependencies/modelx/modelx/tests/helpers -q
       - name: Verify packaging
         run: python -m pip wheel --no-deps . --wheel-dir dist
