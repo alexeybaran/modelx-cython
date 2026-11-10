@@ -8,8 +8,8 @@ import modelx as mx
 import pandas as pd
 import pytest
 
-from lifelib import pandas_inputs, table_operations, typed_inputs
-from lifelib.table_keys import keys
+from modelx_helpers import pandas_inputs, table_operations, typed_inputs
+from modelx_helpers.table_keys import keys
 
 
 @pytest.mark.parametrize('raw', [False, True])
@@ -65,11 +65,11 @@ p.public_row(9);p.public_report()
     probe = textwrap.dedent('''
         import importlib,pickle,sys
         import pandas as pd
-        from lifelib.table_operations import row,column
-        from lifelib import pandas_inputs
-        from lifelib.immutable_inputs import freeze
-        from lifelib.immutable_inputs import Record,Table
-        from lifelib.table_keys import keys
+        from modelx_helpers.table_operations import row,column
+        from modelx_helpers import pandas_inputs
+        from modelx_helpers.immutable_inputs import freeze
+        from modelx_helpers.immutable_inputs import Record,Table
+        from modelx_helpers.table_keys import keys
         m=importlib.import_module(sys.argv[1]).mx_model
         p=m.Projection
         original=p.source.copy(deep=True)

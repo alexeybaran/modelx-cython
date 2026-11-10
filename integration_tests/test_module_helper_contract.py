@@ -5,8 +5,8 @@ import sys
 import textwrap
 
 import modelx as mx
-from lifelib import typed_inputs
-from lifelib.immutable_inputs import Table
+from modelx_helpers import typed_inputs
+from modelx_helpers.immutable_inputs import Table
 
 
 def test_module_helpers_compile_through_shared_metadata(tmp_path):
@@ -60,7 +60,7 @@ def test_module_helpers_compile_through_shared_metadata(tmp_path):
     report = json.loads((tmp_path / 'exported_cy/_mx_admission.json').read_text())
     for name in methods:
         assert report[f'exported_cy._mx_classes._c_Projection._f_{name}']['native_reductions'] == (
-            1 if name in ('total', 'alias_total') else 0)
+            1 if name in ('total', 'alias_total', 'state_total') else 0)
     declined = report['exported_cy._mx_classes._c_Projection._f_lookup_declined']
     assert declined['native_reductions'] == 0
     assert declined['native_numeric_helpers'] == []
@@ -70,7 +70,7 @@ def test_module_helpers_compile_through_shared_metadata(tmp_path):
         from importlib import import_module
         import sys
         from types import SimpleNamespace
-        from lifelib import typed_inputs
+        from modelx_helpers import typed_inputs
         model = import_module(sys.argv[1]).mx_model
         def fresh(): return type(model)().Projection
         p = fresh()

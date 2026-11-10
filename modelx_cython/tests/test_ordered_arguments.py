@@ -55,3 +55,30 @@ def test_power_does_not_capture_shadowed_generated_or_object_names():
     for source in ['def formula(object, n):\n    return 2 ** -n\n',
                    'def formula(_mx_cy, n):\n    return 2 ** -n\n']:
         assert rewrite(source) == source
+
+
+def test_native_result_boxes_unproved_fractional_power_and_preserves_integer_exponents():
+    from modelx_cython.powers import OperandKind, KIND_INT
+    import cython
+    classifier = OperandKind(None, {}, {}, '', {'n': KIND_INT})
+    source = 'def formula(x, n):\n    q = x ** 0.5\n    return min(1.0, q) + x ** n\n'
+    formula = preserve_argument_order(cst.parse_module(source).body[0],
+                                     native_result=True, operand_kind=classifier)
+    code = cst.Module(body=(formula,)).code
+    assert '_mx_cy.cast(object, x) ** _mx_cy.cast(object, 0.5)' in code
+    assert 'x ** n' in code
+    namespace = {'_mx_cy': cython}
+    exec(code, namespace)
+    assert namespace['formula'](4.0, -1) == 1.25
+    import pytest
+    with pytest.raises(TypeError):
+        namespace['formula'](-4.0, 1)
+
+
+def test_native_return_keeps_existing_cython_conversion_boundary():
+    from modelx_cython.powers import OperandKind
+    classifier = OperandKind(None, {}, {}, '', {})
+    source = 'def formula(x, y):\n    return -2.0 * (x - 1.0) ** y\n'
+    result = preserve_argument_order(cst.parse_module(source).body[0],
+                                    native_result=True, operand_kind=classifier)
+    assert cst.Module(body=(result,)).code == source

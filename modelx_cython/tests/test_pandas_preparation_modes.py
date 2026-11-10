@@ -8,8 +8,8 @@ import textwrap
 import modelx as mx
 import pandas as pd
 
-from lifelib import pandas_inputs
-from lifelib.typed_inputs import lookup
+from modelx_helpers import pandas_inputs
+from modelx_helpers.typed_inputs import lookup
 
 
 def test_preparation_live_exported_compiled_and_cleanup(tmp_path):

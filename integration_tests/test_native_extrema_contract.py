@@ -26,7 +26,7 @@ def ordered(object function):
 ''')
     (tmp_path / 'setup.py').write_text('from setuptools import setup\n'
         'from Cython.Build import cythonize\n'
-        'setup(ext_modules=cythonize(["extrema.pyx", "operations.pyx"]))\n')
+        'setup(ext_modules=cythonize(["extrema.pyx", "operations.pyx"], compiler_directives={"freethreading_compatible": True}))\n')
     result = subprocess.run([sys.executable, 'setup.py', 'build_ext', '--inplace'],
                             cwd=tmp_path, text=True, capture_output=True)
     (tmp_path / 'build.log').write_text(result.stdout + result.stderr)

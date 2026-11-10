@@ -6,7 +6,7 @@ import sys
 from types import SimpleNamespace
 
 import libcst as cst
-from lifelib import typed_inputs as operations
+from modelx_helpers import typed_inputs as operations
 
 from modelx_cython.helpers import module_name, HelperCalls
 from modelx_cython.helper_members import module_helpers
@@ -27,11 +27,11 @@ def test_compiled_builtin_reduction_lowering(tmp_path):
     source = Path(__file__).parents[1] / 'modelx_cython'
     for suffix in ('.pyx', '.pxd'):
         (tmp_path / (alias + suffix)).write_bytes((source / ('_native_iterables' + suffix)).read_bytes())
-    import lifelib
-    helper_alias = module_name('lifelib._native_inputs')
+    from modelx_cython import runtime as native_runtime
+    helper_alias = module_name('modelx_cython.runtime._native_inputs')
     for suffix in ('.pyx', '.pxd'):
         (tmp_path / (helper_alias + suffix)).write_bytes(
-            (Path(lifelib.__file__).parent / ('_native_inputs' + suffix)).read_bytes())
+            (Path(native_runtime.__file__).parent / ('_native_inputs' + suffix)).read_bytes())
     methods, cold = [], []
     for operation in ('all', 'any', 'min', 'max'):
         boolean = operation in ('all', 'any')
@@ -66,7 +66,7 @@ def test_compiled_builtin_reduction_lowering(tmp_path):
     prefix = f'''import cython as _mx_cy
 from cython.cimports import {alias}
 from cython.cimports import {helper_alias}
-from lifelib import typed_inputs as operations
+from modelx_helpers import typed_inputs as operations
 @_mx_cy.cclass
 class _c_Test:
     hook: object
@@ -89,7 +89,7 @@ class _c_Test:
 '''
     (tmp_path / 'probe.py').write_text(prefix + '\n'.join(methods) + '\n' + '\n'.join(cold))
     (tmp_path / 'setup.py').write_text('from setuptools import setup\nfrom Cython.Build import cythonize\n'
-        f'setup(ext_modules=cythonize(["probe.py", "{alias}.pyx", "{helper_alias}.pyx"]))\n')
+        f'setup(ext_modules=cythonize(["probe.py", "{alias}.pyx", "{helper_alias}.pyx"],compiler_directives={{"freethreading_compatible":True}}))\n')
     subprocess.run([sys.executable, 'setup.py', 'build_ext', '--inplace'], cwd=tmp_path, check=True)
     c_source = (tmp_path / 'probe.c').read_text()
     assert '__pyx_gb_' in c_source

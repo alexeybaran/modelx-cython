@@ -1,23 +1,22 @@
 # Generator and reduction contracts
 
-The compiler basis is the qualified local `c8b0371` checkpoint with exporter
-`b8b7472`. Generator-lane changes remain on their worker branch. Local Windows
-qualification does not qualify these later changes or all regional models, and
-no core promotion is implied.
+The regional integration experiment retains the normal modelx-cython Space/Cell
+structure and exporter `b8b7472`. Qualification belongs to the exact source pins
+and evidence receipts; it does not imply core promotion.
 
-The implementation uses declared helper symbols and ordinary Cython compilation.
-It adds no AST parser, formula/lambda-body classifier or second interpreter.
-The previous reduction recognizer is retired; `NativeReductions` and
-`ContextualFloat` are inactive compatibility bridges. Historical evidence for
-that recognizer does not qualify the current implementation.
+Declared helper capabilities use the existing CST and type facts.
+`NativeReductions` is active for its proved numeric domains; general generators
+remain ordinary object-capable Cython. There is no second syntax frontend,
+formula interpreter or dataframe interpreter. Unsupported domains and replaced
+helper callables retain their original generator and public Cell calls.
 
 ## Expression vocabulary
 
-Use one namespace: `from lifelib import expressions as e`. The facade re-exports
+Use one namespace: `from modelx_helpers import expressions as e`. The facade re-exports
 the exact registered function objects and adds no wrappers or second registry.
-Input preparation belongs to `lifelib.pandas_inputs`; pandas output construction
+Input preparation belongs to `modelx_helpers.pandas_inputs`; pandas output construction
 is an explicit boundary. The detailed live/native provider contract is in
-lifelib's `EXPRESSION_STREAMS.md` and `NATIVE_TABLES.md`.
+modelx's `doc/source/helpers/EXPRESSION_STREAMS.md` and `NATIVE_TABLES.md`.
 
 | Expression | Meaning |
 |---|---|
@@ -26,6 +25,7 @@ lifelib's `EXPRESSION_STREAMS.md` and `NATIVE_TABLES.md`.
 | `e.flatten(sources)` | Lazy ordered concatenation; acquire inner iterators only as reached. |
 | `e.zip_values((first, second), *, strict=False)` | Dedicated resumable zipped producer over an authored exact tuple of sources; ordinary zip acquisition, advancement, strictness, retries and retained-row lifetimes. |
 | `e.sum_float(source, function=omitted, where=None) -> float` | Float-normalize each passing contribution lazily, then use float-start summation; empty input is float `0.0`. |
+| `e.sum_values(source)` | Ordinary sum, including integer zero, arbitrary integers and mixed/custom arithmetic. |
 
 ```python
 e.sum_float(e.periods(proj_len()),
@@ -59,6 +59,20 @@ Decimal and empty-result types. These names must not be silently aliased.
 A float-looking sample does not justify changing a model's ordinary sum.
 Regional source adjustments retain the standard consumers.
 
+The registered `ordinary_sum` capability permits a narrower physical path only
+at an already-double Cell return boundary when every yielded contribution is
+proved double. It reuses the existing version-qualified compensated `F64Sum`
+state. Empty integer zero crosses the same existing double return conversion.
+Intermediate assignments, explicit object-return Cells and unproved integer,
+mixed or custom yields keep ordinary summation. No formula-length threshold or
+product setting selects this path.
+
+Numeric reductions admit the established range/singleton domains and immutable
+literal tuples. Newly admitted tuple labels remain Python objects and iterate
+in order; they are not encoded into a new category schema or unrolled by size.
+The canonical callable guard, lazy generator fallback, public cached Cell
+dispatch, subclass overrides and generator exception chaining remain intact.
+
 ## Identity traversal and raw result declarations
 
 The ABI 2 stream provider also supports `e.over(source)` and where-only
@@ -82,9 +96,10 @@ For a Cell that must retain a raw NumPy scalar/object identity, the existing
 public translation specification supports `return_type: "object"`. Declare
 identity-preserving forwarding Cells as object too. The normal CLI regression
 checks raw scalar identity, warnings, cache hits and pickle using direct function
-References. An automatic source `-> object` inference patch is a review proposal
-only; it has not been applied to architecture-owned return planning. Whole-model
-pickle with module References remains a separate baseline limitation.
+References. Concrete `-> object` annotations are also recognized. String
+annotations are not evaluated, object declarations do not propagate through
+forwarding Cells, and an explicit translation specification takes precedence.
+Whole-model pickle with module References remains a separate baseline limitation.
 
 ## Evaluation and protocol
 
@@ -110,14 +125,15 @@ close it. Strict truth conversion precedes ordered iterator acquisition.
 Aliased iterators share advancement; two uses of a sequence get independent
 cursors. Cached result-row ownership matches builtin zip. Native free-threaded
 3.13 builds are rejected because its supported API cannot establish the required
-unique tuple ownership; the separate 3.14 path requires Windows acceptance.
+unique tuple ownership; 3.14 Windows qualification is scoped to exact-pin receipts.
 
 Standard `all`, `any`, `min`, `max`, `next`, `sum`, `sorted`, `tuple`, `list`,
 `set` and `dict` keep their own short circuit, empty, identity, first-tie, numeric
 and materialization contracts. Eager comprehensions remain eager. The generic
-ordered-argument pass preserves effectful multi-argument extrema order against
-Cython intrinsic reordering. Remaining unproved powers retain Python-number
-operand semantics, including integer zero powers and negative exponents;
+argument-preservation pass retains selected scalar classes for object-result
+extrema and Python-number semantics for unproved powers. It does not promise
+the original order of exceptions. Remaining unproved powers include integer
+zero powers and negative exponents;
 the qualified local proved-real power mechanism remains unchanged.
 
 Exact CPython generator type/frame/code introspection is outside the inventoried

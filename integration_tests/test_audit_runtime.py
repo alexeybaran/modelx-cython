@@ -11,8 +11,8 @@ from pathlib import Path
 import modelx as mx
 import numpy as np
 from modelx_cython.cli import create_setup
-from lifelib.typed_inputs import EnumDefinitions, lookup, sum_f64
-from lifelib.immutable_inputs import Table
+from modelx_helpers.typed_inputs import EnumDefinitions, lookup, sum_f64
+from modelx_helpers.immutable_inputs import Table
 
 
 def test_pickle_restores_distinct_multidimensional_native_array_shapes(tmp_path):

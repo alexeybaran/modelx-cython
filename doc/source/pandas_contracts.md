@@ -6,7 +6,7 @@ It is not an all-model native qualification or a core promotion.
 
 ## Authored expressions and modes
 
-Use the existing lifelib `Table` and `Record`, prepared explicitly from public
+Use the existing `modelx_helpers.immutable_inputs.Table` and `Record`, prepared explicitly from public
 pandas input Cells. The same formulas/helpers run in live modelx and exported
 Python. Native providers replace admitted interactions when compiled.
 

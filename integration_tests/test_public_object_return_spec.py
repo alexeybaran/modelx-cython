@@ -12,7 +12,7 @@ import modelx as mx
 import numpy as np
 import pytest
 
-from lifelib import pandas_inputs, expressions
+from modelx_helpers import pandas_inputs, expressions
 
 
 @pytest.mark.parametrize('use_spec', [False, True])

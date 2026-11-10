@@ -7,7 +7,7 @@ import sys
 from http import HTTPStatus
 
 import modelx as mx
-from lifelib.typed_inputs import EnumDefinitions, sum_f64
+from modelx_helpers.typed_inputs import EnumDefinitions, sum_f64
 
 
 def compile_model(path, sample):

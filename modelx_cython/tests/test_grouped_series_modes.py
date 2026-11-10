@@ -8,7 +8,7 @@ import modelx as mx
 import numpy as np
 import pandas as pd
 
-from lifelib import pandas_inputs as inputs, table_operations as ops, typed_inputs as h
+from modelx_helpers import pandas_inputs as inputs, table_operations as ops, typed_inputs as h
 
 
 def test_grouped_column_public_series_modes(tmp_path):
@@ -48,8 +48,8 @@ p.report('M');p.report('F');p.rate('M',42);p.rate('F',40)
     probe = textwrap.dedent('''
         import importlib,pickle,sys
         import pandas as pd
-        from lifelib import table_operations as ops,typed_inputs as h
-        from lifelib.immutable_inputs import Table,Record
+        from modelx_helpers import table_operations as ops,typed_inputs as h
+        from modelx_helpers.immutable_inputs import Table,Record
         m=importlib.import_module(sys.argv[1]).mx_model
         p=m.Projection
         expected=p.source.loc['M']['mort_rate']

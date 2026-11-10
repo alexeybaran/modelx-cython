@@ -5,7 +5,121 @@ import sys
 import textwrap
 
 import modelx as mx
-from lifelib.typed_inputs import all_true, max_value, sum_f64
+from modelx_helpers.typed_inputs import all_true, max_value, sum_f64
+
+
+def test_ordinary_sum_at_double_boundary(tmp_path):
+    from modelx_helpers import expression_streams as streams
+    model = mx.new_model('OrdinaryDoubleReduction')
+    try:
+        s = model.new_space('Projection', refs={'streams': streams,
+            'values': {'A': 1e16, 'B': 1.0, 'C': -1e16, None: 2.0, 1: 3.0}})
+        s.new_cells('term', 'lambda t, k: values[k] + t * 0.0')
+        for name, domain in (('labels', '("A", "B", "C")'),
+                             ('single', '("B",)'), ('mixed', '(None, 1, "B")')):
+            s.new_cells(name, f'lambda t: streams.sum_values(term(t, k) for k in {domain})')
+        for variable in ('state', 'function', 'iterable', 'error', 'bound_0'):
+            s.new_cells('named_' + variable,
+                f'lambda t: streams.sum_values(term(t, {variable}) for {variable} in ("A", "B", "C"))')
+        s.new_cells('captured_state', '''def captured_state(t):
+    state = 0.5
+    return streams.sum_values(term(t, k) * state for k in ("A", "B", "C"))
+''')
+        s.new_cells('empty', '''def empty(t):
+    if t == -1:
+        return 0.0
+    return streams.sum_values(term(t, k) for k in ())
+''')
+        s.new_cells('assigned', '''def assigned(t):
+    result = streams.sum_values(term(t, k) for k in ("A", "B", "C"))
+    return result
+''')
+        s.new_cells('integers', 'lambda t: streams.sum_values(k for k in (1, 2, 3))')
+        s.new_cells('large', 'lambda t: streams.sum_values(k for k in (2**100, 2**100))')
+        s.new_cells('object_total', '''def object_total(t) -> object:
+    return streams.sum_values(term(t, k) for k in ("A", "B", "C"))
+''')
+        s.new_cells('nested_labels', 'lambda t: streams.sum_values(term(t, k) for j in ("outer",) for k in ("A", "B", "C"))')
+        s.new_cells('filtered_labels', 'lambda t: streams.sum_values(term(t, k) for k in ("A", "B", "C") if t >= 0)')
+        s.new_cells('label_filter', 'lambda t: streams.sum_values(term(t, k) for k in ("A", "B", "C") if k != "B")')
+        s.new_cells('literal_key', 'lambda: 1000')
+        s.new_cells('identity_term', 'lambda t, k: 1.0 if k is literal_key() else 0.0')
+        s.new_cells('identity_sum', 'lambda t: streams.sum_values(identity_term(t, k) for k in (1000, 1001))')
+        s.new_cells('identity_assigned', '''def identity_assigned(t):
+    result = streams.sum_values(identity_term(t, k) for k in (1000, 1001))
+    return result
+''')
+        model.export(tmp_path / 'exported')
+    finally:
+        model.close()
+    (tmp_path / 'sample.py').write_text('from exported import mx_model as m\n'
+        'for t in (-1, 0):\n'
+        '    for name in ("labels", "single", "mixed", "empty", "assigned", "integers", "large",\n'
+        '                 "object_total", "nested_labels", "filtered_labels", "label_filter", "identity_sum", "identity_assigned"):\n'
+        '        getattr(m.Projection, name)(t)\n'
+        '    for variable in ("state", "function", "iterable", "error", "bound_0"):\n'
+        '        getattr(m.Projection, "named_" + variable)(t)\n'
+        '    m.Projection.captured_state(t)\n')
+    subprocess.run([sys.executable, '-m', 'modelx_cython', 'exported',
+                    '--sample', 'sample.py', '--no-spec'], cwd=tmp_path, check=True)
+    report = json.loads((tmp_path / 'exported_cy/_mx_admission.json').read_text())
+    for name in ('labels', 'single', 'mixed', 'empty', 'nested_labels', 'filtered_labels', 'identity_sum',
+                 'named_state', 'named_function', 'named_iterable', 'named_error', 'named_bound_0', 'captured_state'):
+        assert report[f'exported_cy._mx_classes._c_Projection._f_{name}']['native_reductions'] == 1
+    for name in ('assigned', 'integers', 'large', 'object_total', 'label_filter', 'identity_assigned'):
+        assert report[f'exported_cy._mx_classes._c_Projection._f_{name}']['native_reductions'] == 0
+    probe = textwrap.dedent('''\
+        import math, sys
+        from importlib import import_module
+        from types import SimpleNamespace
+        from modelx_helpers import expression_streams
+        model = import_module(sys.argv[1]).mx_model
+        s = model.Projection
+        assert s.labels(0) == s.assigned(0) == 1.0
+        assert s.single(0) == 1.0 and s.mixed(0) == 6.0
+        assert s.empty(0) == 0.0
+        assert type(s.integers(0)) is int and s.integers(0) == 6
+        assert type(s.large(0)) is int and s.large(0) == 2**101
+        assert s.nested_labels(0) == s.filtered_labels(0) == 1.0
+        assert s.filtered_labels(-1) == s.label_filter(0) == 0.0
+        assert s.identity_sum(0) == s.identity_assigned(0)
+        for variable in ('state', 'function', 'iterable', 'error', 'bound_0'):
+            assert getattr(s, 'named_' + variable)(0) == 1.0
+        assert s.captured_state(0) == 0.5
+        class Override(type(s)):
+            def term(self, t, k): return 7.5
+        override = Override(model)
+        override._mx_copy_refs(s, s)
+        assert override.labels(0) == 22.5
+        # Native arithmetic must retain the interpreter's compensated result.
+        for t, values in enumerate(((1e16, 1., -1e16), (float('inf'), 1., float('-inf')),
+                                    (-0., -0., -0.), (float('nan'), 1., 2.)), 1):
+            s.values = dict(zip(('A', 'B', 'C'), values))
+            expected = sum(v + t * 0.0 for v in values)
+            actual = s.labels(t)
+            assert math.isnan(actual) if math.isnan(expected) else actual == expected
+            if actual == 0.: assert math.copysign(1., actual) == math.copysign(1., expected)
+        held = []
+        def replacement(source):
+            assert iter(source) is source
+            held.append(source)
+            return 42.0
+        s.values = {'A': 1e16, 'B': 1., 'C': -1e16}
+        s.streams = SimpleNamespace(sum_values=replacement)
+        assert s.labels(10) == 42.0
+        assert list(held.pop()) == [1e16, 1., -1e16]
+        s.streams = expression_streams
+        error = StopIteration('term')
+        class Broken(dict):
+            def __getitem__(self, key): raise error
+        s.values = Broken()
+        try: s.labels(11)
+        except RuntimeError as actual:
+            assert actual.__cause__ is error and actual.__context__ is error
+        else: raise AssertionError('generator StopIteration was not wrapped')
+        ''')
+    for package in ('exported', 'exported_cy'):
+        subprocess.run([sys.executable, '-c', probe, package], cwd=tmp_path, check=True)
 
 
 def test_explicit_numeric_sum(tmp_path):
@@ -34,7 +148,7 @@ def test_explicit_numeric_sum(tmp_path):
     probe = textwrap.dedent('''\
         import sys
         from importlib import import_module
-        from lifelib.typed_inputs import sum_f64
+        from modelx_helpers.typed_inputs import sum_f64
         s = import_module(sys.argv[1]).mx_model.Projection
         assert s.total(0) == s.nested(0) == 1.0
         assert s.filtered(0) == 0.0

@@ -5,7 +5,7 @@ import sys
 import textwrap
 
 import modelx as mx
-from lifelib.typed_inputs import all_true, any_true, max_value, sum_f64
+from modelx_helpers.typed_inputs import all_true, any_true, max_value, sum_f64
 
 
 def test_nested_filtered_boolean_ranges(tmp_path):

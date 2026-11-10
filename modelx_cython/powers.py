@@ -192,6 +192,16 @@ class OperandKind:
             return KIND_UNKNOWN
         if isinstance(expr.operator, cst.Divide):
             return KIND_FLOAT       # true division, whatever the operands
+        if isinstance(expr.operator, cst.Power) and left == right == KIND_INT:
+            # An integral base raised to a negative integer is fractional.
+            # Without a sign proof, its result cannot prove an outer exponent.
+            exponent = expr.right
+            sign = 1
+            if isinstance(exponent, cst.UnaryOperation) and isinstance(exponent.operator, (cst.Plus, cst.Minus)):
+                sign = -1 if isinstance(exponent.operator, cst.Minus) else 1
+                exponent = exponent.expression
+            if not isinstance(exponent, cst.Integer) or sign * exponent.evaluated_value < 0:
+                return KIND_UNKNOWN
         if isinstance(expr.operator, _NUMERIC_OPS):
             return KIND_FLOAT if KIND_FLOAT in (left, right) else KIND_INT
         return KIND_UNKNOWN

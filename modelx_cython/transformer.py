@@ -617,8 +617,13 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
             cls_info.fqname, cells,
         )
         from modelx_cython.ordered_arguments import preserve_argument_order
+        from modelx_cython.powers import OperandKind, kind_of_type_expr
+        param_kinds = {name: kind_of_type_expr(cells.get_argtype_expr(name, c_style=True))
+                       for name in cells.params} if cells.has_args() and cells.has_typeinfo() else {}
         return preserve_argument_order(node,
-            native_result=cells.get_rettype_expr(c_style=True) in ('double', 'long long', 'bint'))
+            native_result=cells.get_rettype_expr(c_style=True) in ('double', 'long long', 'bint'),
+            operand_kind=OperandKind(self._resolver, self._cells_kinds, self._ref_kinds,
+                                     cls_info.fqname, param_kinds))
 
     def _bind_declared_helpers(self, node, cls_info, cells, inherited=()):
         """Bind declared provider symbols in either C functions or compiled defs.

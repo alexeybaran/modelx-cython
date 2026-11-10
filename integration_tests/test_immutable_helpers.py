@@ -6,8 +6,8 @@ import sys
 import textwrap
 
 import modelx as mx
-from lifelib.immutable_inputs import Record, Table
-from lifelib.typed_inputs import lookup, previous
+from modelx_helpers.immutable_inputs import Record, Table
+from modelx_helpers.typed_inputs import lookup, previous
 
 
 def test_helper_reference_assignment(tmp_path):
@@ -38,11 +38,11 @@ def test_helper_reference_assignment(tmp_path):
                     '--sample', 'sample.py', '--no-spec'], cwd=tmp_path, check=True)
     admission = json.loads((tmp_path / 'exported_cy/_mx_admission.json').read_text())
     assert admission['exported_cy._mx_classes._c_Inputs._f_value']['native_helpers'] == [
-        'lifelib._native_inputs.lookup']
+        'modelx_cython.runtime._native_inputs.lookup']
     probe = textwrap.dedent('''\
         import sys
         from importlib import import_module
-        from lifelib.immutable_inputs import Record, Table
+        from modelx_helpers.immutable_inputs import Record, Table
         s = import_module(sys.argv[1]).mx_model.Inputs
         row = s.row()
         assert row is s.row() is s.record
@@ -72,7 +72,7 @@ def test_helper_reference_assignment(tmp_path):
         s.lookup = lambda table, key, column: 456.0
         assert s.fresh(100) == 456.0
         assert s.value(100) == 123.0
-        from lifelib.typed_inputs import lookup
+        from modelx_helpers.typed_inputs import lookup
         s.lookup = lookup
         s.table = {'keys': [100], 'values': [[789.0]], 'columns': ['value']}
         assert s.fresh(100) == 789.0

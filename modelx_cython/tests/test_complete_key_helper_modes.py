@@ -5,8 +5,8 @@ import subprocess
 import sys
 import textwrap
 import modelx as mx
-from lifelib.immutable_inputs import Table
-from lifelib import typed_inputs as tables
+from modelx_helpers.immutable_inputs import Table
+from modelx_helpers import typed_inputs as tables
 
 
 def test_complete_key_expressions_modes_and_native_path(tmp_path):
@@ -40,8 +40,8 @@ m.Rates.defaulted('M',42);m.Rates.defaulted('X',9)
     assert '.lookup_key2_float_f64(' not in source
     probe=textwrap.dedent('''
         import importlib,pickle,sys
-        from lifelib import typed_inputs as h
-        from lifelib.immutable_inputs import Table
+        from modelx_helpers import typed_inputs as h
+        from modelx_helpers.immutable_inputs import Table
         m=importlib.import_module(sys.argv[1]).mx_model
         s=m.Rates
         calls=[]

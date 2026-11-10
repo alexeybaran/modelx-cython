@@ -159,7 +159,7 @@ remains the consumer; no expression interpreter or extra authoring helper is
 introduced. A Cell used as a callable value obtains its ordinary bound method
 through an object receiver; direct typed calls keep the existing override path.
 
-The development vocabulary is documented in lifelib's `EXPRESSION_STREAMS.md`.
+The development vocabulary is documented in modelx's `doc/source/helpers/EXPRESSION_STREAMS.md`.
 `sum_float` normalizes each contribution with standard float conversion and has
 a separate double accumulation kernel. It is not an automatic replacement for
 ordinary sum. One-shot mapping/filtering and lazy flattening preserve producer

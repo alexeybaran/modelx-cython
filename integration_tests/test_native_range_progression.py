@@ -30,7 +30,7 @@ def collect(long long start, long long stop, long long step, Py_ssize_t limit=12
 ''')
     (tmp_path / 'setup.py').write_text('from setuptools import setup\n'
         'from Cython.Build import cythonize\n'
-        'setup(ext_modules=cythonize(["operations.pyx", "progression.pyx"]))\n')
+        'setup(ext_modules=cythonize(["operations.pyx", "progression.pyx"], compiler_directives={"freethreading_compatible": True}))\n')
     result = subprocess.run([sys.executable, 'setup.py', 'build_ext', '--inplace'],
                             cwd=tmp_path, text=True, capture_output=True)
     (tmp_path / 'build.log').write_text(result.stdout + result.stderr)

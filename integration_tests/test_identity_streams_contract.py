@@ -5,7 +5,7 @@ import subprocess
 import sys
 
 import modelx as mx
-from lifelib import expressions
+from modelx_helpers import expressions
 
 
 def test_identity_generator_expressions_through_normal_cli(tmp_path):
@@ -52,12 +52,12 @@ list(p.values(3));p.total(-1);p.total(0);p.total(3);p.filtered(3);p.nested();p.r
     admission=json.loads((tmp_path/'exported_cy/_mx_admission.json').read_text())
     for cell in ['values','total','filtered','nested','retained','ranges']:
         entries=[v for k,v in admission.items() if k.endswith('._f_'+cell)]
-        assert len(entries)==1 and 'lifelib._native_streams.over' in entries[0]['native_helpers']
+        assert len(entries)==1 and 'modelx_cython.runtime._native_streams.over' in entries[0]['native_helpers']
         assert entries[0]['native_reductions']==0
-        assert 'lifelib._native_streams.periods' in entries[0]['native_helpers']
+        assert 'modelx_cython.runtime._native_streams.periods' in entries[0]['native_helpers']
     probe='''import sys
 from exported_cy import mx_model as prototype
-from lifelib import expression_streams as h
+from modelx_helpers import expression_streams as h
 for repetition in range(2):
  p=type(prototype)().Projection
  forbidden={h.over.__code__,h._stream_generator.__code__,h._identity_generator.__code__,h._InputCursor.__next__.__code__}
@@ -85,7 +85,7 @@ for repetition in range(2):
  finally:sys.setprofile(None)
  assert calls==[],calls
 from types import SimpleNamespace
-from lifelib import expressions as e
+from modelx_helpers import expressions as e
 calls=[]
 def current(source,**keywords):
  calls.append(keywords)

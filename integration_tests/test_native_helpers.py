@@ -4,11 +4,11 @@ import subprocess
 import sys
 import textwrap
 
-import lifelib
+from modelx_cython import runtime as native_runtime
 
 
 def test_native_helper_operations(tmp_path):
-    source = Path(lifelib.__file__).parent
+    source = Path(native_runtime.__file__).parent
     for suffix in ('.pyx', '.pxd'):
         (tmp_path / ('native' + suffix)).write_bytes(
             (source / ('_native_inputs' + suffix)).read_bytes())
@@ -41,8 +41,8 @@ def test_native_helper_operations(tmp_path):
         from enum import IntEnum
         from concurrent.futures import ThreadPoolExecutor
         import pickle
-        from lifelib.immutable_inputs import Table, Record
-        from lifelib import typed_inputs as py
+        from modelx_helpers.immutable_inputs import Table, Record
+        from modelx_helpers import typed_inputs as py
         before = getattr(sys, '_is_gil_enabled', lambda: True)()
         import probe
         assert getattr(sys, '_is_gil_enabled', lambda: True)() == before

@@ -164,7 +164,8 @@ class NativeReductions(FormulaTransformer):
                 return {'double': 'double', 'long long': 'longlong', 'bint': 'bint'}.get(cell.get_rettype_expr(c_style=True))
         if isinstance(node, cst.BinaryOperation) and isinstance(node.operator, (cst.Add, cst.Subtract, cst.Multiply, cst.Divide)):
             left, right = self.kind(node.left, locals_), self.kind(node.right, locals_)
-            if left and right and 'double' in (left, right):
+            if (left in ('double', 'longlong', 'bint')
+                    and right in ('double', 'longlong', 'bint') and 'double' in (left, right)):
                 return 'double'
         return None
 
@@ -394,13 +395,18 @@ return {fallback}
         func = value.func
         ref = helper_reference(func, self.cls_info.refs)
         reduction = getattr(ref, 'reduction', None)
-        if reduction not in ('f64_sum', 'bool_any', 'bool_all', 'f64_max') or not ref.helper:
+        if reduction not in ('f64_sum', 'ordinary_sum', 'bool_any', 'bool_all', 'f64_max') or not ref.helper:
             return after
         tree = args[0]
         if not isinstance(tree, cst.GeneratorExp) or not self.builtin_bounds:
             return after
         source = code(tree)
         if assignment and reduction != 'f64_sum':
+            return after
+        if (reduction == 'ordinary_sum'
+                and self.cells.get_rettype_expr(c_style=True) != 'double'):
+            # Ordinary sum keeps integer/mixed/object semantics. Only an existing
+            # double return boundary may normalize empty integer zero to double.
             return after
         if reduction == 'bool_any':
             return self.bounded_any(before, after, func, ref, source, tree)
@@ -426,11 +432,21 @@ return {fallback}
                     and all(self.kind(arg, local_types) in ('longlong', 'bint') for arg in bounds)
                     and safe_range_increment(iterator)):
                 local_types[name] = 'longlong'
-            elif (isinstance(iterator, cst.Tuple) and len(iterator.elements) == 1
-                    and isinstance(iterator.elements[0], cst.Element)):
-                kind = self.kind(iterator.elements[0].value, local_types)
-                if not kind:
-                    return after
+            elif (isinstance(iterator, cst.Tuple)
+                    and all(isinstance(element, cst.Element) for element in iterator.elements)):
+                kind = (self.kind(iterator.elements[0].value, local_types)
+                        if len(iterator.elements) == 1 else None)
+                # Literal domains need no sampled category schema or size limit.
+                # Keep literal objects intact: even a homogeneous numeric domain
+                # can flow into an object-argument Cell. No new loop coercion.
+                if kind is None:
+                    try:
+                        values = [literal_value(element.value) for element in iterator.elements]
+                    except (ValueError, TypeError):
+                        return after
+                    if not all(type(value) in (int, float, bool, str, type(None)) for value in values):
+                        return after
+                    kind = 'object'
                 local_types[name] = kind
             else:
                 return after
@@ -444,7 +460,11 @@ return {fallback}
         fallback = self.cold_fallback(source, tree, capture, f'{prefix}_function')
         if len(self.fallbacks) == count:
             return after
-        renamed = {name: f'{prefix}_{name}' for name in local_types}
+        # Iterator/capture names must not alias the accumulator or call-layout
+        # temporaries (e.g. an authored iterator named `state`).
+        for role in ('function', 'state', 'iterable', 'error', 'bound_0', 'bound_1', 'bound_2'):
+            self.names.reserve(f'{prefix}_{role}')
+        renamed = {name: self.names.reserve(f'{prefix}_{name}') for name in local_types}
         contexts = generator_facts.contexts
 
         class Rename(cst.CSTTransformer):
@@ -469,11 +489,14 @@ return {fallback}
             lines.extend(f'    {name}: _mx_cy.longlong = {code(value)}'
                          for name, value in zip(bound_names, bounds))
             outer_iterator = f'range({", ".join(bound_names)})'
-        else:
+        elif len(outer.iter.elements) == 1:
             # A generator acquires its first iterable before entering its body.
             # Keep that evaluation outside the PEP479 boundary as well.
             lines.append(f'    {outer.target.value} = ({code(outer.iter.elements[0].value)})')
             outer_iterator = None
+        else:
+            lines.append(f'    {prefix}_iterable: object = {code(outer.iter)}')
+            outer_iterator = f'{prefix}_iterable'
         lines.append('    try:')
         indent = '        '
         for index, part in enumerate(parts):
@@ -482,7 +505,7 @@ return {fallback}
             elif index == 0:
                 lines.append(indent + f'for {part.target.value} in {outer_iterator}:')
                 indent += '    '
-            elif isinstance(part.iter, cst.Tuple):
+            elif isinstance(part.iter, cst.Tuple) and len(part.iter.elements) == 1:
                 lines.append(indent + f'{part.target.value} = ({code(part.iter.elements[0].value)})')
             else:
                 lines.append(indent + f'for {part.target.value} in {code(part.iter)}:')

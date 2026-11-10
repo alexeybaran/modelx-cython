@@ -6,7 +6,7 @@ import textwrap
 import pytest
 
 import modelx as mx
-from lifelib.typed_inputs import EnumDefinitions
+from modelx_helpers.typed_inputs import EnumDefinitions
 
 
 @pytest.mark.parametrize('code_owned', [False, True])

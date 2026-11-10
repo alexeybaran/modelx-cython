@@ -7,8 +7,8 @@ import textwrap
 
 import modelx as mx
 import pandas as pd
-from lifelib.pandas_inputs import table as numeric_table
-from lifelib.typed_inputs import lookup
+from modelx_helpers.pandas_inputs import table as numeric_table
+from modelx_helpers.typed_inputs import lookup
 
 
 def test_pandas_provider_public_cache_override_and_pickle(tmp_path):
@@ -32,9 +32,9 @@ def test_pandas_provider_public_cache_override_and_pickle(tmp_path):
         import pickle
         from pathlib import Path
         import pandas as pd
-        from lifelib.pandas_inputs import table as numeric_table
+        from modelx_helpers.pandas_inputs import table as numeric_table
         from exported_cy import mx_model as m
-        from lifelib.typed_inputs import lookup as reference_lookup
+        from modelx_helpers.typed_inputs import lookup as reference_lookup
         import sys
         helper_calls = []
         def profile(frame, event, arg):

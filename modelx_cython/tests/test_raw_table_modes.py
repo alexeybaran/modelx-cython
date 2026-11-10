@@ -8,7 +8,7 @@ import modelx as mx
 import numpy as np
 import pandas as pd
 
-from lifelib import pandas_inputs as inputs, table_operations as ops, typed_inputs as h
+from modelx_helpers import pandas_inputs as inputs, table_operations as ops, typed_inputs as h
 
 
 def test_raw_table_selection_all_modes(tmp_path):
@@ -50,8 +50,8 @@ else:raise AssertionError('selected opaque value did not raise while sampling')
     probe = textwrap.dedent('''
         import importlib,pickle,sys
         import numpy as np
-        from lifelib import pandas_inputs as inputs,table_operations as ops,typed_inputs as h
-        from lifelib.immutable_inputs import Table,Record
+        from modelx_helpers import pandas_inputs as inputs,table_operations as ops,typed_inputs as h
+        from modelx_helpers.immutable_inputs import Table,Record
         m=importlib.import_module(sys.argv[1]).mx_model
         p=m.Projection
         p.owned()  # Mixed input parsing is an explicit compatibility boundary.

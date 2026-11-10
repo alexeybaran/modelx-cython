@@ -7,8 +7,8 @@ import textwrap
 import modelx as mx
 import pandas as pd
 
-from lifelib import pandas_inputs
-from lifelib.table_keys import keys
+from modelx_helpers import pandas_inputs
+from modelx_helpers.table_keys import keys
 
 
 def test_owned_index_order_duplicates_empty_replacement_and_pickle(tmp_path):
@@ -59,8 +59,8 @@ for name in ['Integer','Floating','Text']:
     probe = textwrap.dedent('''
         import importlib,pickle,sys
         import pandas as pd
-        from lifelib.table_keys import keys
-        from lifelib.immutable_inputs import Table,Record
+        from modelx_helpers.table_keys import keys
+        from modelx_helpers.immutable_inputs import Table,Record
         m = importlib.import_module(sys.argv[1]).mx_model
         labels = {'Integer':(4,1,4),'Floating':(4.5,1.5,4.5),
                   'Text':('equity','bond','equity')}

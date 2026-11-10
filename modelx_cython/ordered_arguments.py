@@ -5,17 +5,18 @@ Cells and child scopes use ordinary object operators when Cython's native
 promotion would change their scalar-class contract.
 """
 import libcst as cst
-from libcst.metadata import ScopeProvider
+from libcst.metadata import ScopeProvider, ParentNodeProvider
 from libcst.metadata.scope_provider import BuiltinAssignment
 
 
 class _OrderedArguments(cst.CSTTransformer):
-    METADATA_DEPENDENCIES = (ScopeProvider,)
+    METADATA_DEPENDENCIES = (ScopeProvider, ParentNodeProvider)
 
-    def __init__(self, native_result=False):
+    def __init__(self, native_result=False, operand_kind=None):
         super().__init__()
         self.opaque_depth = 0
         self.native_result = native_result
+        self.operand_kind = operand_kind
 
     def on_visit(self, node):
         from .scopes import OPAQUE_SCOPES
@@ -34,7 +35,20 @@ class _OrderedArguments(cst.CSTTransformer):
         if not isinstance(before.operator, cst.Power):
             return after
         if self.native_result and self.opaque_depth == 1:
-            return after
+            # Proven floating powers were lowered earlier. An integral exponent
+            # retains c8's arithmetic; other unproved powers need the existing
+            # object operator so Cython cannot infer an unordered complex value.
+            from .powers import KIND_INT
+            if self.operand_kind is None or self.operand_kind.kind(before.right) == KIND_INT:
+                return after
+            # A native return already supplies Cython's scalar conversion.
+            # Keep that existing arithmetic path; intermediate values and
+            # comparisons lack this conversion boundary and must stay objects.
+            parent = self.get_metadata(ParentNodeProvider, before)
+            while isinstance(parent, (cst.BinaryOperation, cst.UnaryOperation)):
+                parent = self.get_metadata(ParentNodeProvider, parent)
+            if isinstance(parent, cst.Return):
+                return after
         # The qualified real-power pass has already handled its proved C
         # domain. Preserve Python's remaining integer/mixed/complex power
         # result and error semantics through Cython's ordinary object operator.
@@ -72,7 +86,7 @@ class _OrderedArguments(cst.CSTTransformer):
         return after.with_changes(args=(cst.Arg(values, star='*'), *keywords))
 
 
-def preserve_argument_order(formula, native_result=False):
+def preserve_argument_order(formula, native_result=False, operand_kind=None):
     """Keep unproved powers on Cython's ordinary Python-object operator."""
     wrapper = cst.MetadataWrapper(cst.Module(body=(formula,)))
-    return wrapper.visit(_OrderedArguments(native_result)).body[0]
+    return wrapper.visit(_OrderedArguments(native_result, operand_kind)).body[0]

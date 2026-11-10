@@ -20,10 +20,23 @@ def test_ordered_builtin_extrema_native_contract(tmp_path):
 ''')
         space.new_cells('maximum', 'lambda: max(term(0), term(1), term(2))')
         space.new_cells('minimum', 'lambda: min(term(0), term(1), term(2))')
+        space.new_cells('fractional_share', '''def fractional_share():
+    q = term(0)
+    monthly = 1.0 - (1.0 - q) ** (1.0 / 12.0)
+    return min(1.0, monthly * term(1))
+''')
+        space.new_cells('integer_power', '''def integer_power():
+    q = term(0)
+    return q ** 2
+''')
+        space.new_cells('nested_fractional_power', '''def nested_fractional_power():
+    q = term(0) ** (2 ** -1)
+    return min(1.0, q)
+''')
         model.export(tmp_path / 'exported')
     finally:
         model.close()
-    (tmp_path / 'sample.py').write_text('from exported import mx_model\nm=mx_model.Values\nm.maximum();m.minimum()\n')
+    (tmp_path / 'sample.py').write_text('from exported import mx_model\nm=mx_model.Values\nm.maximum();m.minimum();m.fractional_share();m.integer_power();m.nested_fractional_power()\n')
     build = subprocess.run([sys.executable, '-m', 'modelx_cython', 'exported',
         '--sample', 'sample.py', '--no-spec'], cwd=tmp_path, capture_output=True,
         text=True, env=dict(os.environ))
@@ -39,6 +52,21 @@ def test_ordered_builtin_extrema_native_contract(tmp_path):
             result.values=values;result.events=[];result.failures=failures
             return result
         samples=[float('nan'),float('inf'),float('-inf'),0.0,-0.0,1.0,-1.0]
+        for q in (0.0, 0.25, 1.0):
+            space=fresh((q, 0.5, 0.0))
+            assert space.fractional_share()==min(1.0,(1.0-(1.0-q)**(1.0/12.0))*0.5)
+            assert space.integer_power()==q**2
+            assert space.nested_fractional_power()==min(1.0,q**0.5)
+        space=fresh((-1.0,0.5,0.0))
+        try:space.nested_fractional_power()
+        except TypeError:pass
+        else:raise AssertionError('nested fractional comparison did not raise')
+        # The local power may return complex; its comparison must raise the
+        # original TypeError instead of being rejected by Cython or made real.
+        space=fresh((2.0,0.5,0.0))
+        try:space.fractional_share()
+        except TypeError:pass
+        else:raise AssertionError('complex comparison did not raise')
         for name,operation in [('maximum',max),('minimum',min)]:
             for values in itertools.product(samples,repeat=3):
                 space=fresh(values)

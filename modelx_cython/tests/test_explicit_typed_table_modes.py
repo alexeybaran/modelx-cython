@@ -9,7 +9,7 @@ import pandas as pd
 import pytest
 from modelx.core.errors import FormulaError
 
-from lifelib import expression_streams, pandas_inputs, typed_inputs
+from modelx_helpers import expression_streams, pandas_inputs, typed_inputs
 
 
 def test_explicit_typed_table_helpers_modes(tmp_path):
@@ -107,9 +107,9 @@ for n in [0, 1, 3]: m.Inputs.composed(n)
 
     probe = textwrap.dedent('''
         import importlib, pickle, sys
-        from lifelib import typed_inputs as h
-        from lifelib import expression_streams as g
-        from lifelib.immutable_inputs import Record, Table, freeze
+        from modelx_helpers import typed_inputs as h
+        from modelx_helpers import expression_streams as g
+        from modelx_helpers.immutable_inputs import Record, Table, freeze
         m = importlib.import_module(sys.argv[1]).mx_model
         s = m.Inputs
         # Preparation is an explicit boundary; profile the admitted reads.

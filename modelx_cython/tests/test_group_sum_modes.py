@@ -7,7 +7,7 @@ import textwrap
 import modelx as mx
 import pandas as pd
 
-from lifelib import pandas_inputs, table_operations
+from modelx_helpers import pandas_inputs, table_operations
 
 
 def test_grouped_public_report_and_empty_metadata_modes(tmp_path):
@@ -47,8 +47,8 @@ fresh.report()
     probe=textwrap.dedent('''
         import importlib,pickle,sys
         import pandas as pd
-        from lifelib.table_operations import group_sum,to_pandas
-        from lifelib.pandas_inputs import table
+        from modelx_helpers.table_operations import group_sum,to_pandas
+        from modelx_helpers.pandas_inputs import table
         m=importlib.import_module(sys.argv[1]).mx_model
         p=m.Projection
         p.owned()  # Explicit preparation boundary.

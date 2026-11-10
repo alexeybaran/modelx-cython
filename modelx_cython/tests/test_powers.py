@@ -49,6 +49,11 @@ def kind():
     ("-x", KIND_FLOAT),
     ("(1 - x)", KIND_FLOAT),
     ("t ** 2", KIND_INT),
+    ("t ** +2", KIND_INT),
+    ("t ** -0", KIND_INT),
+    ("2 ** -1", KIND_UNKNOWN),
+    ("2 ** t", KIND_UNKNOWN),
+    ("2 ** (2 ** -1)", KIND_UNKNOWN),
     ("x ** 2", KIND_FLOAT),
     # resolved through the model
     ("self.rate(t)", KIND_FLOAT),

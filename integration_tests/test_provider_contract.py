@@ -4,8 +4,8 @@ import sys
 import modelx as mx
 import pytest
 
-from lifelib.immutable_inputs import Record, Table
-from lifelib.typed_inputs import has_group, lookup, previous, subtable
+from modelx_helpers.immutable_inputs import Record, Table
+from modelx_helpers.typed_inputs import has_group, lookup, previous, subtable
 from modelx_cython.tracer import RuntimeValueInfo
 
 

@@ -17,7 +17,7 @@ authors = [
   { name = "Fumito Hamamura", email = "fumito.ham@gmail.com" },
 ]
 dependencies = [
-    "modelx",
+    "modelx>=0.33.1.dev0",
     "libcst",
     "Cython>=3.2",
     "setuptools",
@@ -75,3 +75,7 @@ attr = "modelx_cython.__version__"
 [tool.setuptools.packages.find]
 include = ["modelx_cython*"]
 exclude = ["doc", "temp*", "modelx_cython.tests*", "samples"]
+
+[tool.setuptools.package-data]
+modelx_cython = ["*.pxd", "*.pyx"]
+"modelx_cython.runtime" = ["*.pxd", "*.pyx", "LICENSE.lifelib.txt"]

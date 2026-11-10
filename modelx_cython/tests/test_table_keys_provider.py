@@ -5,8 +5,8 @@ import subprocess
 import sys
 import textwrap
 import modelx as mx
-from lifelib.immutable_inputs import Table
-from lifelib.table_keys import keys
+from modelx_helpers.immutable_inputs import Table
+from modelx_helpers.table_keys import keys
 
 
 def test_keys_helper_modes_and_current_reference(tmp_path):
@@ -25,7 +25,7 @@ def test_keys_helper_modes_and_current_reference(tmp_path):
     assert build.returncode==0,build.stdout+build.stderr
     probe=textwrap.dedent('''
         import importlib,pickle,sys
-        from lifelib.immutable_inputs import Table
+        from modelx_helpers.immutable_inputs import Table
         m=importlib.import_module(sys.argv[1]).mx_model
         s=m.Inputs
         assert s.ordered()==(9,-3,5)

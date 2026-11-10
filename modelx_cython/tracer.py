@@ -124,8 +124,8 @@ class RuntimeCellsInfo:     # TODO: Create base class RuntimeBaseMemberInfo
     returns, collapse to a plain ``object`` return type.  Each kind of
     fallback is logged once, with the arguments of the conflicting
     calls.
-    Scalar integral/nonintegral real mixtures use object results to preserve
-    distinct identities such as ordinary sum's empty integer zero.
+    Scalar integral/nonintegral real mixtures may widen to double when values
+    are exactly preserved. Explicit object Cell declarations retain scalar types.
 
     Attributes
     ----------

@@ -6,8 +6,8 @@ import sys
 import textwrap
 
 import modelx as mx
-from lifelib import expression_streams as helpers
-from lifelib import expressions, pandas_inputs, typed_inputs
+from modelx_helpers import expression_streams as helpers
+from modelx_helpers import expressions, pandas_inputs, typed_inputs
 import pandas as pd
 
 
@@ -74,7 +74,7 @@ p.zipped(4);p.zipped(0)
     assert all(cell['native_reductions'] == 0 for cell in report.values())
     probe = textwrap.dedent('''
         import importlib, json, sys
-        from lifelib import expression_streams as h, expressions as e, typed_inputs as tables
+        from modelx_helpers import expression_streams as h, expressions as e, typed_inputs as tables
         model = importlib.import_module(sys.argv[1]).mx_model
         expected = json.load(open('expected.json'))
         forbidden = {getattr(h, name).__code__ for name in

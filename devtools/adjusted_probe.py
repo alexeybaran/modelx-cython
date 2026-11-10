@@ -62,7 +62,7 @@ def main(args):
         if type(model.Projection.policy_rows) is dict:
             adapt = lambda value: value
         else:
-            from lifelib.immutable_inputs import freeze
+            from modelx_helpers.immutable_inputs import freeze
             adapt = lambda value: freeze(value) if type(value) is dict else value
         model.Projection.policy_rows = adapt(rows)
         for name, value in payload['references'].items():

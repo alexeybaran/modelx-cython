@@ -6,7 +6,7 @@ from pathlib import Path
 import sys
 import threading
 
-from lifelib.immutable_inputs import freeze
+from modelx_helpers.immutable_inputs import freeze
 from lifelib.libraries.uslib.products.fixed_deferred_annuity import adjusted_myga
 
 

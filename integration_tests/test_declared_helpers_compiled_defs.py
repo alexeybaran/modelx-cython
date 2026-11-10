@@ -5,7 +5,7 @@ import subprocess
 import sys
 
 import modelx as mx
-from lifelib import expressions
+from modelx_helpers import expressions
 
 
 def test_declared_helpers_in_captured_default_and_yield_formulas(tmp_path):
@@ -35,10 +35,10 @@ def test_declared_helpers_in_captured_default_and_yield_formulas(tmp_path):
     report=json.loads((tmp_path/'exported_cy/_mx_admission.json').read_text())
     for suffix in ['._f_total','._f_values']:
         matches=[v for k,v in report.items() if k.endswith(suffix)]
-        assert len(matches)==1 and 'lifelib._native_streams.over' in matches[0]['native_helpers']
+        assert len(matches)==1 and 'modelx_cython.runtime._native_streams.over' in matches[0]['native_helpers']
     probe='''import sys
 from exported_cy import mx_model as model
-from lifelib import expression_streams as h
+from modelx_helpers import expression_streams as h
 for fresh in range(2):
  p=type(model)().Projection
  calls=[]
