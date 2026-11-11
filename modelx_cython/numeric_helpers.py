@@ -451,7 +451,7 @@ class NumericReturns(cst.CSTTransformer):
         refs = {self.cls.fqname: {
             name: kind_of_type_expr(ref.get_type_expr(c_style=True))
             for name, ref in self.cls.refs.items()}}
-        kinds = {name: kind_of_type_expr(self.cell.get_argtype_expr(name, c_style=True))
+        kinds = {name: kind_of_type_expr(self.cell.get_argtype_expr(name, c_style=True, formula=True))
                  for name in self.cell.params}
         classifier = OperandKind(self.resolver, cells, refs, self.cls.fqname, kinds)
         integer_locals = set()
@@ -718,7 +718,7 @@ class NumericReturns(cst.CSTTransformer):
         if isinstance(key, cst.Integer):
             return primitive_kind(literal_value(key)) == 'longlong'
         if isinstance(key, cst.Name) and key.value in self.cell.params:
-            return self.cell.get_argtype_expr(key.value, c_style=True) in integer_types
+            return self.cell.get_argtype_expr(key.value, c_style=True, formula=True) in integer_types
         if (isinstance(key, cst.Attribute) and isinstance(key.value, cst.Name)
                 and key.value.value == 'self'):
             ref = self.cls.refs.get(key.attr.value)
