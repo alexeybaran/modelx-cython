@@ -49,6 +49,11 @@ def kind():
     ("-x", KIND_FLOAT),
     ("(1 - x)", KIND_FLOAT),
     ("t ** 2", KIND_INT),
+    ("t ** +2", KIND_INT),
+    ("t ** -0", KIND_INT),
+    ("2 ** -1", KIND_UNKNOWN),
+    ("2 ** t", KIND_UNKNOWN),
+    ("2 ** (2 ** -1)", KIND_UNKNOWN),
     ("x ** 2", KIND_FLOAT),
     # resolved through the model
     ("self.rate(t)", KIND_FLOAT),
@@ -111,7 +116,7 @@ class _FakeCells:
         return "long long" if arg == "t" else "double"
 
 
-def _rewrite(body: str) -> str:
+def _rewrite(body: str, *, builtin_float=False) -> str:
     resolver = CellsResolver(
         cells_by_class={CLS: {"rate": RATE, "arr": ARR}},
         refs_by_class={CLS: {}},
@@ -124,6 +129,7 @@ def _rewrite(body: str) -> str:
         ref_kinds={CLS: {}},
         cls_fqname=CLS,
         cells=_FakeCells(),
+        builtin_float=builtin_float,
     )
     return cst.Module([]).code_for_node(out)
 
@@ -140,6 +146,17 @@ def _rewrite(body: str) -> str:
 def test_floating_exponent_is_rewritten(body):
     assert "_mx_sys._mx_pow(" in _rewrite(body)
     assert "**" not in _rewrite(body)
+
+
+def test_annotated_float_locals_are_native_only_for_the_builtin():
+    body = "base: float = x\n    years: float = t / 12.0\n    return base ** years"
+    assert "_mx_sys._mx_pow(base, years)" in _rewrite(body, builtin_float=True)
+    assert "base ** years" in _rewrite(body)
+
+
+def test_float_local_rebinding_does_not_prove_the_power():
+    body = "base: float = x\n    base = self.arr(t)\n    return base ** 0.5"
+    assert "base ** 0.5" in _rewrite(body, builtin_float=True)
 
 
 @pytest.mark.parametrize("body", [

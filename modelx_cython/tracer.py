@@ -39,15 +39,18 @@ import sys
 import pathlib
 import random
 import numbers
+import operator
 import itertools
+from enum import IntEnum
 from dataclasses import dataclass
 from contextlib import contextmanager
-from types import FrameType, MemberDescriptorType
+from types import FrameType, MemberDescriptorType, FunctionType
 from typing import Any, Mapping, Iterator, Sequence, Optional, Dict, List
 import logging
 
 import numpy as np
 
+from modelx_cython.helpers import helper_capability, registered_helper
 from modelx_cython.monkeytype_tracing import (
     CallTraceLogger,
     get_func,
@@ -121,6 +124,8 @@ class RuntimeCellsInfo:     # TODO: Create base class RuntimeBaseMemberInfo
     returns, collapse to a plain ``object`` return type.  Each kind of
     fallback is logged once, with the arguments of the conflicting
     calls.
+    Scalar integral/nonintegral real mixtures may widen to double when values
+    are exactly preserved. Explicit object Cell declarations retain scalar types.
 
     Attributes
     ----------
@@ -157,8 +162,29 @@ class RuntimeCellsInfo:     # TODO: Create base class RuntimeBaseMemberInfo
         self.module = traces[0].func.__module__
         self.arg_types = {}
         self.max_args = {}
+        self.min_args = {}
+        self.observed_min_args = {}
+        self.observed_max_args = {}
+        receiver_calls = {}
+        for trace in traces:
+            receiver = id(trace.arg_vals.get(MX_SELF))
+            receiver_calls[receiver] = receiver_calls.get(receiver, 0) + 1
+        self.max_evaluations_per_receiver = max(receiver_calls.values())
+        arrays = [trace.ret_val for trace in traces if isinstance(trace.ret_val, np.ndarray)]
+        formats = {array.dtype.str for array in arrays}
+        self.array_buffer_compatible = (len(formats) == 1 and all(
+            array.ndim > 0 and array.dtype.isnative
+            and array.dtype in (np.dtype('float64'), np.dtype('int64'))
+            for array in arrays)) if arrays else True
+        self.has_negative_args = False
         self._init_arg_types(traces)
         self.ret_type = self._init_ret_type(traces)
+        table_type = 'modelx_helpers.immutable_inputs.Table'
+        self.declared_table_result = all(
+            trace.func.__annotations__.get('return') == table_type
+            and f'{type(trace.ret_val).__module__}.{type(trace.ret_val).__qualname__}' == table_type
+            for trace in traces
+        )
 
     def has_args(self):
         """Return whether the cells method takes arguments.
@@ -174,6 +200,7 @@ class RuntimeCellsInfo:     # TODO: Create base class RuntimeBaseMemberInfo
     def _init_arg_types(self, traces):
         """Merge observed argument types into arg_types and max_args."""
         arg_type_val: Dict[str, dict[type, Any]] = {}
+        wide_arguments = set()
 
         for trace in traces:
 
@@ -181,14 +208,28 @@ class RuntimeCellsInfo:     # TODO: Create base class RuntimeBaseMemberInfo
                 trace.arg_vals.items(), 1, None
             ):  # remove self
                 tp = type(val)
+                integral = issubclass(tp, numbers.Integral)
+                if integral and val < 0:
+                    self.has_negative_args = True
+                if integral:
+                    if not -(1 << 63) <= val < (1 << 63):
+                        wide_arguments.add(arg)
+                    self.min_args[arg] = min(self.min_args.get(arg, 0), val)
+                    value = int(val)
+                    self.observed_min_args[arg] = min(self.observed_min_args.get(arg, value), value)
+                    self.observed_max_args[arg] = max(self.observed_max_args.get(arg, value), value)
                 types = arg_type_val.setdefault(arg, {})
                 if tp not in types:
                     types[tp] = val
-                elif issubclass(tp, numbers.Integral):
+                elif integral:
                     if val > types[tp]:
                         types[tp] = val
 
         for arg, type_val in arg_type_val.items():
+
+            if arg in wide_arguments:
+                self.arg_types[arg] = object
+                continue
 
             if len(type_val) == 1:
                 for tp, val in type_val.items():
@@ -215,6 +256,13 @@ class RuntimeCellsInfo:     # TODO: Create base class RuntimeBaseMemberInfo
         """Merge observed return types into one ReturnTypeInfo,
         widening or falling back to ``object`` as described in the
         class docstring."""
+        # A concrete object return annotation declares the Cell result ABI,
+        # independently of the sampled scalar class. Explicit TransSpec result
+        # types keep their existing precedence in CombinedCellsInfo. Strings
+        # are not evaluated and declarations do not propagate to other Cells.
+        if any(trace.func.__annotations__.get('return') is object for trace in traces):
+            return ReturnTypeInfo(object)
+
         last_tp = None
         last_args = None
         has_last = False
@@ -222,18 +270,26 @@ class RuntimeCellsInfo:     # TODO: Create base class RuntimeBaseMemberInfo
         was_ndim_logged = False
         was_vtype_logged = False
         was_mixed_logged = False
+        integral_double_exact = True
 
         def get_arg_expr(args):
             return ", ".join(f"{k}={str(v)}" for k, v in itertools.islice(args.items(), 1, None))
 
         for tr in traces:
             val = tr.ret_val
+            if isinstance(val, numbers.Integral):
+                try:
+                    integer = operator.index(val)
+                    integral_double_exact &= int(float(integer)) == integer
+                except (TypeError, ValueError, OverflowError):
+                    integral_double_exact = False
             if isinstance(val, np.ndarray):
                 tp = ReturnTypeInfo(
                     val.dtype.type, is_array=True, ndim=val.ndim
                 )
             else:
-                tp = ReturnTypeInfo(type(val))
+                tp = ReturnTypeInfo(object if isinstance(val, numbers.Integral)
+                    and not -(1 << 63) <= val < (1 << 63) else type(val))
 
             if has_last:
                 if last_tp == tp:
@@ -273,7 +329,10 @@ class RuntimeCellsInfo:     # TODO: Create base class RuntimeBaseMemberInfo
                     if issubclass(last_tp.value_type, numbers.Integral) and issubclass(tp.value_type, numbers.Integral):
                         last_tp.value_type = numbers.Integral
                     elif issubclass(last_tp.value_type, numbers.Real) and issubclass(tp.value_type, numbers.Real):
-                        last_tp.value_type = numbers.Real
+                        # Restore upstream/c8's common numeric-value ABI.
+                        # Exact scalar classes require an object declaration;
+                        # an observed integer must not lose numerical precision.
+                        last_tp.value_type = numbers.Real if integral_double_exact else object
                     else:
                         if not was_vtype_logged:
                             args0 = get_arg_expr(last_args)
@@ -318,8 +377,27 @@ class RuntimeValueInfo:
 
     def __init__(self, value, mx_class=''):
         """Record the type of ``value`` and an optional class name."""
-        self.type_ = type(value)
+        self.type_ = (object if isinstance(value, numbers.Integral)
+                      and not -(1 << 63) <= value < (1 << 63) else type(value))
         self.mx_class = mx_class
+        self.helper = registered_helper(value) if type(value) is FunctionType else None
+        from .helper_members import module_helpers
+        self.helper_members = module_helpers(value)
+        from .helpers import helper_parameters
+        self.helper_parameters = helper_parameters(value) if self.helper is not None else None
+        from .helpers import CAPABILITIES
+        for capability, (name, _) in CAPABILITIES.items():
+            setattr(self, name, helper_capability(value, capability)
+                    if self.helper is not None else None)
+        self.enum_definitions = (tuple(value) if isinstance(value, tuple)
+            and vars(type(value)).get('__modelx_cython_enum_definitions__') is True else ())
+        self.enum_safe = (isinstance(value, type) and issubclass(value, IntEnum)
+                          and type(value) is type(IntEnum)
+                          and value.__eq__ is int.__eq__ and value.__ne__ is int.__ne__)
+        self.enum = ((value.__module__, value.__qualname__,
+                      {name: int.__int__(member) for name, member in value.__members__.items()})
+                     if isinstance(value, type) and issubclass(value, IntEnum)
+                     and '<locals>' not in value.__qualname__ else None)
 
     @classmethod
     def init_mxobj(cls, value, module):
@@ -597,7 +675,7 @@ class MxCodeFilter:
                 return True
             elif code.co_name == MX_ASSIGN_REFS:
                 return True
-            elif code.co_name == "__call__":
+            elif code.co_name in ("__call__", "_mx_assign_params", "_mx_copy_params"):
                 return True
 
         return False
@@ -648,6 +726,7 @@ class MxCallTraceLogger(CallTraceLogger):
         self.ref_info = {}
         self.modules = []
         self.param_info = {}  # class name -> {param: RuntimeParamInfo}
+        self._assigned_params = {}
 
     def log(self, trace: CallTrace) -> None:
         """Log a single call trace.
@@ -655,7 +734,25 @@ class MxCallTraceLogger(CallTraceLogger):
         The trace is appended to an internal list keyed by its fully
         qualified function name, for aggregation in :meth:`flush`.
         """
-        self._traces.setdefault(trace.funcname, []).append(trace)
+        name = trace.func.__name__
+        if name == "_mx_assign_params":
+            values = iter(trace.arg_vals.items())
+            _, target = next(values)
+            self._record_params(target, values)
+        elif name == "_mx_copy_params":
+            source, target = trace.arg_vals.values()
+            cls = type(source)
+            params = getattr(sys.modules[cls.__module__], SPACE_PARAMS + "_" + cls.__name__[len(SPACE_PREF):])
+            self._record_params(target, ((param, getattr(source, param)) for param in params))
+        else:
+            self._traces.setdefault(trace.funcname, []).append(trace)
+
+    def _record_params(self, target, values):
+        cls = type(target)
+        params = self._assigned_params.setdefault(cls.__module__ + "." + cls.__name__, {})
+        for name, value in values:
+            if name not in params:
+                params[name] = RuntimeParamInfo.init_mxobj(value, self.module)
 
     def flush(self) -> None:
         """Aggregate the accumulated traces into runtime info objects.
@@ -689,6 +786,12 @@ class MxCallTraceLogger(CallTraceLogger):
 
         self._traces.clear()
         self._get_params()
+        # Collection receivers are absent from the retained ItemSpace tree.
+        for cls, assigned in self._assigned_params.items():
+            params = self.param_info.setdefault(cls, {})
+            for name, info in assigned.items():
+                params.setdefault(name, info)
+        self._assigned_params.clear()
 
         if self.new_name:
             self._update_model_name()

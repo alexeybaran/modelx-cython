@@ -59,10 +59,15 @@ from libcst._nodes.statement import BaseStatement, ClassDef
 from libcst._removal_sentinel import RemovalSentinel
 import libcst.matchers as m
 from libcst.metadata import ParentNodeProvider, ScopeProvider, GlobalScope, ClassScope
+from libcst.metadata.scope_provider import BuiltinAssignment
 
 from modelx_cython.parser import ParentScopeAddin
-from modelx_cython.builder import ModuleInfo, CombinedCellsInfo
+from modelx_cython.builder import ModuleInfo, CombinedCellsInfo, NATIVE_TABLE_PROVIDER
 from modelx_cython.powers import rewrite_powers
+from modelx_cython.inline_entries import add_inline_entries, allows_exact_receiver
+from modelx_cython.cell_entries import dense_condition
+from modelx_cython import numeric_cache
+from modelx_cython import enums as code_enums
 
 from modelx_cython.consts import (
     FORMULA_PREF,
@@ -153,8 +158,21 @@ class PXDGenerator:
         with newlines.
         """
         stmts = []
+        from modelx_cython.helpers import module_name
+        for provider in sorted(numeric_cache.providers(self.module)):
+            stmts.append(f'from {self.package} cimport {module_name(provider)}')
         for ci in self.module.cimports:
             stmts.append(f"cimport {ci}")
+        contexts = {provider for cls in self.module.classes.values()
+                    for provider in getattr(cls, 'native_contexts', {}).values()}
+        if any(c.native_table_result for cls in self.module.classes.values()
+               for c in cls.cells.values()):
+            contexts.add(NATIVE_TABLE_PROVIDER)
+        for provider in sorted(contexts):
+            stmts.append(f'from {self.package} cimport {module_name(provider)}')
+        enum_declarations = code_enums.declarations(self.module)
+        if enum_declarations:
+            stmts.append(enum_declarations)
         return "\n".join(stmts)
 
     @cached_property
@@ -228,7 +246,7 @@ class PXDGenerator:
 
         For each non-special cells with a ``_f_`` formula method: a
         cells with parameters gets a C-array value cache ``_v_<name>``
-        and a ``bint`` flag array ``_has_<name>`` when typed and
+        and a flag array ``_has_<name>`` when typed and
         arrayable, or a single ``cdef dict _v_<name>`` otherwise; a
         cells without parameters gets a scalar ``_v_<name>`` of its
         return type plus a ``bint`` flag ``_has_<name>``.  Uncached
@@ -247,6 +265,15 @@ class PXDGenerator:
 
         cls_info = self.module.classes[cls_name]
         decl_stmts = []
+        if cls_name in self.module.visitor.collect_cache_classes:
+            decl_stmts.append("cdef dict _mx_collect_cache\n")
+        if cls_name in self.module.visitor.dynamic_ref_classes:
+            decl_stmts.append("cdef dict __dict__\n")
+        for name in getattr(cls_info, 'readonly_refs', ()):
+            decl_stmts.append(f'cdef object {code_enums.storage(name)}\n')
+        from modelx_cython.helpers import module_name
+        for name, provider in getattr(cls_info, 'native_contexts', {}).items():
+            decl_stmts.append(f'cdef {module_name(provider)}.LookupContext {name}\n')
         for cells in cls_info.cells.values():
 
             assert cells.module == self.module.fqname
@@ -254,6 +281,8 @@ class PXDGenerator:
 
             if cells.is_special():
                 continue
+            if memo := getattr(cells, 'power_memo', None):
+                decl_stmts.append(f"cdef {MX_SYS_MOD}.PowerMemo {memo}\n")
 
             if not cells.has_formula_def:
                 # uncached cells: the public method is the formula itself
@@ -268,10 +297,13 @@ class PXDGenerator:
                     decl_stmts.append(f"cdef {var_type} {var_name}\n")
 
                     has_name = HAS_PREF + cells.name
-                    has_type = cells.get_array_decl_expr(
-                                rettype_expr=CY_BOOL_T, c_style=True)
+                    has_type = cells.get_readiness_array_decl_expr(c_style=True)
                     decl_stmts.append(f"cdef {has_type} {has_name}\n")
+                    if cells.has_dense_spill:
+                        decl_stmts.append(f"cdef dict _spill_{cells.name}\n")
 
+                elif cells.uses_native_numeric_cache:
+                    decl_stmts.append(f'cdef {numeric_cache.storage(cells)} {VAR_PREF + cells.name}\n')
                 else:
                     decl_stmts.append(f"cdef dict {VAR_PREF + cells.name}\n")
             else:
@@ -308,6 +340,8 @@ class PXDGenerator:
 
             if ref.name in self.module.classes[cls_name].spaces:
                 # declared below as a child space
+                continue
+            if ref.name in getattr(self.module.classes[cls_name], 'readonly_refs', ()):
                 continue
 
             stmt = f"cdef public {ref.get_type_expr(c_style=True)} {ref.name}\n"
@@ -377,12 +411,13 @@ class PXDGenerator:
             if cells.is_special():
                 continue
 
-            if not cells.has_formula_def or cells.formula_is_generator:
+            if (not cells.has_formula_def or cells.formula_is_generator
+                    or cells.formula_has_captured_default):
                 # no _f_ method exists, or it stays a plain Python method
                 continue
 
             if cells and cells.has_typeinfo():
-                rettype = cells.get_rettype_expr(c_style=True)
+                rettype = 'object' if cells.native_table_result else cells.get_rettype_expr(c_style=True)
                 parameters = self._add_param_type_hints(
                     cls_name=cls_name, cells_name=cells.name
                 )
@@ -485,6 +520,7 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
         resolver=None,
         cells_kinds=None,
         ref_kinds=None,
+        serial_shapes=None,
     ) -> None:
         """Parse ``source`` and record the module info and package.
 
@@ -494,24 +530,126 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
         modelx exported it.
         """
         super().__init__()
-        self.wrapper = cst.metadata.MetadataWrapper(cst.parse_module(source))
+        self.wrapper = (module.visitor.wrapper if module.visitor.source == source else
+                        cst.metadata.MetadataWrapper(cst.parse_module(source)))
         self._module_node = self.wrapper.module
+        self._source = source
         self.module = module
         self.package = module.fqname.split(".")[0]
         self._resolver = resolver
         self._cells_kinds = cells_kinds or {}
         self._ref_kinds = ref_kinds or {}
+        self._serial_shapes = serial_shapes or {}
+        self._uses_native_round = False
+        self.helper_providers = set()
+        if any(c.native_table_result for cls in module.classes.values()
+               for c in cls.cells.values()):
+            self.helper_providers.add(NATIVE_TABLE_PROVIDER)
+        self.dense_entries = {}
+        self.formula_entries = {}
+        self.helper_providers.update(numeric_cache.providers(module))
+        code_enums.prepare(module)
 
-    def _rewrite_powers(self, node, cls_info, cells):
+    def _reserve_cold_sum(self):
+        while True:
+            name = f'_mx_cold_sum_{self._next_cold_sum}'
+            self._next_cold_sum += 1
+            if name not in self._source:
+                return name
+
+    def _compact_spill(self, cells, cls_name, source):
+        index = len(self._cold_spills)
+        name = f'_mx_compact_spill_{index}'
+        while name in self._source:
+            name += '_'
+        cells.dense_spill_entry = name
+        params = ', '.join(f'{p}: {cells.get_argtype_expr(p)}' for p in cells.params)
+        result = cells.get_rettype_expr()
+        self._cold_spills.append(cst.parse_statement(
+            f'\n\n@{CY_MOD}.cfunc\n@{CY_MOD}.exceptval(-1, check=True)\n'
+            f'def {name}(self: {cls_name}, {params}) -> {result}:\n'
+            + textwrap.indent(source, '    ')))
+        return f'{name}(self, {", ".join(cells.params)})'
+
+    def _rewrite_powers(self, node, cls_info, cells, scope):
         """Rewrite the provably real ``**`` of one formula body.
 
         See :mod:`modelx_cython.powers`; the node is returned unchanged
         when no operand pair can be typed.
         """
-        return rewrite_powers(
+        from modelx_cython.checked_arithmetic import CheckedArithmetic
+        from modelx_cython.numeric_helpers import NumericReturns
+        cells.formula_allows_exact_receiver = allows_exact_receiver(node, cls_info.name)
+        builtin_keys = {name for name in ("all", "any", "sum", "min", "max", "float", "int", "round", "range")
+                        if scope[name] and all(isinstance(binding, BuiltinAssignment)
+                                               for binding in scope[name])}
+        node = CheckedArithmetic(cls_info, cells, builtin_keys).rewrite(node)
+        if not self.module.spec.policy.native_math:
+            builtin_keys.discard('round')
+        numeric_returns = NumericReturns(cls_info, cells, self.helper_providers, builtin_keys,
+                                         self._resolver)
+        node = node.visit(numeric_returns)
+        if 'round' in builtin_keys and '_mx_canonical_round' not in self._source:
+            from modelx_cython.rounding import NativeRounding
+            rounding = NativeRounding()
+            node = node.with_changes(body=node.body.visit(rounding))
+            self._uses_native_round |= rounding.used
+        if not hasattr(cls_info, 'native_contexts'):
+            cls_info.native_contexts = {}
+        cls_info.native_contexts.update(numeric_returns.contexts)
+        # Keep the qualified typed kernels behind the common helper contracts.
+        # The same CST/type facts select their native domain; unsupported source
+        # and values keep ordinary object-capable Cython and current callables.
+        from modelx_cython.reductions import BUILTIN_REDUCTIONS, NativeReductions, has_reduction_contract
+        reductions = None
+        cells.native_reductions = 0
+        cells.exact_reduction_guards = ()
+        builtin_reductions = builtin_keys & BUILTIN_REDUCTIONS
+        if has_reduction_contract(node, cls_info.refs, builtin_reductions):
+            builtin_bounds = all(isinstance(binding, BuiltinAssignment)
+                                 for name in ("range", "min", "max", "abs", "StopIteration", "RuntimeError")
+                                 for binding in scope[name])
+            reductions = NativeReductions(
+                cls_info, cells, self.helper_providers, node, self._reserve_cold_sum, builtin_bounds, builtin_reductions)
+            node = node.visit(reductions)
+            cells.native_reductions = reductions.count
+            cells.exact_reduction_guards = reductions.exact_receiver_guards
+        enum_comparisons = code_enums.Constants(cls_info, cells, self.module.code_enum_symbols)
+        node = node.visit(enum_comparisons)
+        cells.native_enum_comparisons = enum_comparisons.comparisons
+        cells.native_enum_constants = enum_comparisons.count
+        node = self._bind_declared_helpers(node, cls_info, cells, numeric_returns.operations)
+        admitted_helpers = set(cells.native_helpers)
+        for fallback in reductions.fallbacks if reductions is not None else ():
+            self._cold_sums.append(self._bind_declared_helpers(fallback, cls_info, cells, numeric_returns.operations))
+            admitted_helpers.update(cells.native_helpers)
+        cells.native_helpers = sorted(admitted_helpers)
+        cells.native_numeric_helpers = sorted(numeric_returns.operations)
+        node = rewrite_powers(
             node, self._resolver, self._cells_kinds, self._ref_kinds,
-            cls_info.fqname, cells,
+            cls_info.fqname, cells, builtin_float='float' in builtin_keys,
         )
+        from modelx_cython.ordered_arguments import preserve_argument_order
+        from modelx_cython.powers import OperandKind, kind_of_type_expr
+        param_kinds = {name: kind_of_type_expr(cells.get_argtype_expr(name, c_style=True))
+                       for name in cells.params} if cells.has_args() and cells.has_typeinfo() else {}
+        return preserve_argument_order(node,
+            native_result=cells.get_rettype_expr(c_style=True) in ('double', 'long long', 'bint'),
+            operand_kind=OperandKind(self._resolver, self._cells_kinds, self._ref_kinds,
+                                     cls_info.fqname, param_kinds))
+
+    def _bind_declared_helpers(self, node, cls_info, cells, inherited=()):
+        """Bind declared provider symbols in either C functions or compiled defs.
+
+        Keeping a formula as a def preserves Cython's closure/default handling;
+        it does not require calling the Python implementation of its helpers.
+        This stage reads registered signatures and lexical receiver identity only.
+        """
+        from modelx_cython.helpers import HelperCalls
+        helpers = HelperCalls(cls_info.refs, self.helper_providers, cells=cls_info.cells)
+        node = helpers.rewrite(node)
+        cells.native_helpers = sorted(helpers.operations | set(inherited))
+        return node
 
     @property   # cannot use cached_property in Transformer
     def transformed(self):
@@ -520,6 +658,10 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
         Each access re-runs the transformation by visiting the
         wrapped module with this transformer.
         """
+        self._cold_sums = []
+        self._cold_spills = []
+        self._next_cold_sum = 0
+        self._uses_native_round = False
         return self.wrapper.visit(self)
 
     def leave_Module(self, original_node: Module, updated_node: Module) -> Module:
@@ -529,13 +671,24 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
         # cimports for child spaces
         parent = ".".join(self.module.fqname.split(".")[:-1])
         stmts = []
+        if any(shape.reuse for shape in self._serial_shapes.values()):
+            stmts.append(cst.parse_statement(
+                'from cython.cimports.libc.string import memset as _mx_collect_memset'))
+        from modelx_cython.helpers import module_name
+        from modelx_cython.exceptions import NumericExceptions
+        if self._uses_native_round:
+            from modelx_cython.rounding import ROUND_BINDING
+            stmts.extend(cst.parse_module(ROUND_BINDING).body)
+        for provider in sorted(self.helper_providers):
+            stmts.append(cst.parse_statement(
+                f'from cython.cimports.{self.package} import {module_name(provider)}'))
         for child in self.module.sub_modules:
             stmts.append(cst.parse_statement(
                 f"from cython.cimports.{parent} import {child}",
                 config=updated_node.config_for_parsing,
             ))
 
-        return updated_node.with_changes(
+        module = updated_node.with_changes(
             body=(
                 cst.parse_statement(
                     f"from cython.cimports.{self.package} import {MX_SYS_MOD}",
@@ -548,6 +701,21 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
                 *updated_node.body,
             )
         )
+        scope = self.get_metadata(ScopeProvider, original_node)
+        if not any(assignment.name == "type" for assignment in scope.assignments):
+            # Exact type alone cannot rule out overrides on a receiver with a dict.
+            ordinary = {name: cls for name, cls in self.module.classes.items()
+                        if name not in self.module.visitor.dynamic_ref_classes}
+            module, self.dense_entries, self.formula_entries = add_inline_entries(module, ordinary)
+        if self._cold_sums or self._cold_spills:
+            module = module.with_changes(body=(*module.body, *self._cold_sums, *self._cold_spills))
+        if any(getattr(cell, 'power_memo', None) for cls in self.module.classes.values()
+               for cell in cls.cells.values()):
+            # Native memo structs contain only scalars. Use Cython's standard
+            # serializer; the module directive also works in pure-Python mode.
+            module = module.with_changes(header=(
+                cst.EmptyLine(comment=cst.Comment('# cython: auto_pickle=True')), *module.header))
+        return module.visit(NumericExceptions())
 
     def leave_ClassDef(
         self, original_node: ClassDef, updated_node: ClassDef
@@ -592,12 +760,15 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
                                 HAS_PREF
                                 + cells.name
                                 + ": "
-                                + cells.get_array_decl_expr(
-                                    rettype_expr=f"{CY_MOD}.{CY_BOOL_T}",
-                                ),
+                                + cells.get_readiness_array_decl_expr(),
                                 config=self._module_node.config_for_parsing,
                             )
                         )
+                        if cells.has_dense_spill:
+                            decl_stmts.append(cst.parse_statement(f'_spill_{cells.name}: dict\n'))
+                    elif cells.uses_native_numeric_cache:
+                        decl_stmts.append(cst.parse_statement(
+                            f'{VAR_PREF + cells.name}: {numeric_cache.storage(cells)}\n'))
                     else:
                         decl_stmts.append(
                             cst.parse_statement(
@@ -631,7 +802,7 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
                     continue
 
                 stmt = cst.parse_statement(
-                    f"{ref.name}: {ref.get_type_expr()}",
+                    f"{code_enums.storage(ref.name) if ref.name in getattr(self.module.classes[cls_name], 'readonly_refs', ()) else ref.name}: {ref.get_type_expr()}",
                     config=self._module_node.config_for_parsing,
                 )
                 if is_first:
@@ -661,6 +832,29 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
 
                 decl_stmts.append(stmt)
 
+            from modelx_cython.helpers import module_name
+            for cell in self.module.classes[cls_name].cells.values():
+                if memo := getattr(cell, 'power_memo', None):
+                    decl_stmts.append(cst.parse_statement(f'{memo}: {MX_SYS_MOD}.PowerMemo\n'))
+            contexts = getattr(self.module.classes[cls_name], 'native_contexts', {})
+            for name, provider in contexts.items():
+                decl_stmts.append(cst.parse_statement(f'{name}: {module_name(provider)}.LookupContext\n'))
+            if contexts:
+                body = []
+                for statement in updated_node.body.body:
+                    if isinstance(statement, cst.FunctionDef) and statement.name.value == '__init__':
+                        assignments = [cst.parse_statement(f'self.{name} = {module_name(provider)}.LookupContext()\n')
+                                       for name,provider in contexts.items()]
+                        statement = statement.with_changes(body=statement.body.with_changes(
+                            body=(*statement.body.body, *assignments)))
+                    body.append(statement)
+                updated_node = updated_node.with_changes(body=updated_node.body.with_changes(body=tuple(body)))
+            updated_node = updated_node.with_changes(body=updated_node.body.with_changes(
+                body=code_enums.bind_properties(self.module.classes[cls_name], updated_node.body.body)))
+            if cls_name in self._serial_shapes:
+                from modelx_cython.serial_collect import add_methods
+                updated_node = add_methods(
+                    self.module.classes[cls_name], updated_node, self._serial_shapes[cls_name])
             decorator = cst.Decorator(
                 decorator=cst.Attribute(value=cst.Name(CY_MOD), attr=cst.Name("cclass"))
             )
@@ -834,6 +1028,16 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
             meth_name = original_node.name.value
             cls_info = self.module.classes[cls_name]
 
+            if meth_name == '__init__':
+                initializers = []
+                for cell in cls_info.cells.values():
+                    if cell.uses_native_numeric_cache:
+                        initializers.append(cst.parse_statement(
+                            f'self._v_{cell.name} = {numeric_cache.constructor(cell)}\n'
+                        ))
+                return updated_node.with_changes(body=updated_node.body.with_changes(
+                    body=(*updated_node.body.body, *initializers)))
+
             if meth_name[: len(FORMULA_PREF)] == FORMULA_PREF:
                 # _f_ methods
                 cells = cls_info.cells.get(meth_name[len(FORMULA_PREF):])
@@ -841,10 +1045,20 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
                 if cells.formula_is_generator:
                     # yield is not supported inside cdef functions;
                     # leave as a plain Python method
-                    return updated_node
+                    return self._bind_declared_helpers(updated_node, cls_info, cells)
 
+                scope = self.get_metadata(ScopeProvider, original_node.body)
+                if any(isinstance(binding.node, cst.Param)
+                       and binding.node.default is not None
+                       and any(access.scope is not scope for access in binding.references)
+                       for binding in scope.assignments):
+                    # Cython's pxd-declared optional C arguments are not
+                    # initialized in the closure. A compiled def binds them
+                    # through its normal Python argument handling.
+                    cells.formula_has_captured_default = True
+                    return self._bind_declared_helpers(updated_node, cls_info, cells)
                 updated_node = self._rewrite_powers(
-                    updated_node, cls_info, cells)
+                    updated_node, cls_info, cells, scope)
 
                 decorators = [
                     cst.Decorator(
@@ -855,7 +1069,7 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
                 ]
                 returns = cst.Annotation(
                     annotation=cst.parse_expression(
-                        cells.get_rettype_expr(),
+                        'object' if cells.native_table_result else cells.get_rettype_expr(),
                         config=self._module_node.config_for_parsing,
                     )
                 )
@@ -917,12 +1131,12 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
                 if cells.body_has_closure:
                     # closures cannot be compiled inside cpdef functions;
                     # leave as a plain Python method
-                    return updated_node
+                    return self._bind_declared_helpers(updated_node, cls_info, cells)
 
                 if not cells.has_formula_def:
                     # uncached cells: the body is the formula itself
                     updated_node = self._rewrite_powers(
-                        updated_node, cls_info, cells)
+                        updated_node, cls_info, cells, self.get_metadata(ScopeProvider, original_node.body))
 
                 if cells.called_with_kwargs:
                     # C-level calls are positional-only, so a cells called
@@ -960,7 +1174,9 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
                     if cells.has_typeinfo() and cells.is_arrayable():
 
                         # Construct indented_block to replace the original one
-                        c_idx_expr = ''.join([f"[{p}]" for p in cells.params])
+                        axes = cells.dense_axes
+                        c_idx_expr = ''.join(f'[{axis.key} - ({axis.lower})]' if axis.lower
+                                             else f'[{axis.key}]' for axis in axes)
                         param_expr = f"{', '.join([p for p in cells.params])}"
 
                         has_expr = f"{MX_SELF}.{HAS_PREF}{meth_name}{c_idx_expr}"
@@ -968,10 +1184,7 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
                         f_expr = f"{MX_SELF}.{FORMULA_PREF}{meth_name}({param_expr})"
 
                         args = tuple(cells.params)
-                        size = cls_info.cells_arg_sizes[args]
-
-                        idx_range = " and ".join(
-                            [f"(0 <= {p} < {i})" for p, i in zip(args, size)])
+                        idx_range = dense_condition(axes)
 
                         if cells.is_locked:
                             cache_body = self._locked_body(
@@ -986,11 +1199,35 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
                                     {has_expr} = True
                                     return val
                                 """)
+                        outside = 'raise IndexError("array index out of range")\n'
+                        spill_branch = ''
+                        if cells.has_dense_spill:
+                            key = '(' + ', '.join(args) + (',' if len(args)==1 else '') + ')'
+                            cache = f'self._spill_{meth_name}'
+                            value = 'val'
+                            while value in args:
+                                value += '_'
+                            spill = (f'if {cache} is None:\n    {cache} = {{}}\n'
+                                     f'try:\n    return {cache}[{key}]\n'
+                                     f'except KeyError:\n    pass\n'
+                                     f'{value} = {f_expr}\n{cache}[{key}] = {value}\nreturn {value}\n')
+                            if cells.is_locked:
+                                spill = f'with self.{MX_LOCK}:\n' + textwrap.indent(spill, '    ')
+                            if cells.has_inferred_dense_domain:
+                                helper = self._compact_spill(cells, cls_name, spill)
+                                outside = f'return {helper}\n'
+                            elif cells.has_shifted_cache:
+                                outside = spill
+                            else:
+                                original = dense_condition(cells.dense_logical_axes)
+                                helper = self._compact_spill(cells, cls_name, spill)
+                                spill_branch = f'elif {original}:\n    return {helper}\n'
                         if_stmt = (
                             f"if {idx_range}:\n"
                             + textwrap.indent(cache_body, " " * 4)
+                            + spill_branch
                             + "else:\n"
-                            + '    raise IndexError("array index out of range")\n')
+                            + textwrap.indent(outside, '    '))
                         if_node = cst.parse_statement(
                             if_stmt, config=self._module_node.config_for_parsing
                         )
@@ -1004,6 +1241,9 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
                             returns=returns,
                             body=indented_block,
                         )
+                    elif cells.uses_native_numeric_cache:
+                        return updated_node.with_changes(decorators=decorators,
+                            params=parameters, returns=returns, body=numeric_cache.body(cells))
                     else:
                         if cells.is_locked:
                             # the exported body is already double-checked
@@ -1011,6 +1251,22 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
                             body = updated_node.body
                         else:
                             body = self._add_dict_assign(meth_name, updated_node)
+                        if cells.native_table_result:
+                            constructor = cst.parse_expression(cells.get_rettype_expr())
+                            formula = m.Call(func=m.Attribute(
+                                value=m.Name(MX_SELF), attr=m.Name(FORMULA_PREF + meth_name)))
+                            body = m.replace(body, formula, lambda call, _: cst.Call(
+                                constructor, (cst.Arg(call),)))
+                        key_types = {"bint", "long long", "double"}
+                        if not cells.is_locked:
+                            key_types.add("str")
+                        if (cells.has_typeinfo() and not cells.is_array_returned
+                                and cells.get_rettype_expr(c_style=True)
+                                in {"bint", "long long", "double"}
+                                and all(cells.get_argtype_expr(p, c_style=True)
+                                        in key_types
+                                        for p in cells.params)):
+                            body = self._single_lookup_body(meth_name, body, cells.params)
                         return updated_node.with_changes(
                             decorators=decorators,
                             params=parameters,
@@ -1018,12 +1274,23 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
                             body=body
                         )
                 else:   # No type info, no arg
-                    if cells.is_locked:
+                    flag = f"{MX_SELF}.{HAS_PREF}{meth_name}"
+                    cache = f"{MX_SELF}.{VAR_PREF}{meth_name}"
+                    formula = f"{MX_SELF}.{FORMULA_PREF}{meth_name}()"
+                    if cells.native_table_result:
+                        formula = f'{cells.get_rettype_expr()}({formula})'
+                    if cells.is_locked or cells.native_table_result:
+                        if cells.is_locked:
+                            body = self._locked_body(flag, cache, formula)
+                        else:
+                            body = (f'if {flag}:\n'
+                                    f'    return {cache}\n'
+                                    'else:\n'
+                                    f'    {cache} = {formula}\n'
+                                    f'    {flag} = True\n'
+                                    f'    return {cache}\n')
                         stmts = cst.parse_module(
-                            self._locked_body(
-                                f"{MX_SELF}.{HAS_PREF}{meth_name}",
-                                f"{MX_SELF}.{VAR_PREF}{meth_name}",
-                                f"{MX_SELF}.{FORMULA_PREF}{meth_name}()"),
+                            body,
                             config=self._module_node.config_for_parsing
                         ).body
                         return updated_node.with_changes(
@@ -1040,6 +1307,33 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
 
 
         return updated_node
+
+    @staticmethod
+    def _single_lookup_body(meth_name, body, params=()):
+        cache = f"{MX_SELF}.{VAR_PREF}{meth_name}"
+        module = cst.Module([])
+        value_name = '_mx_cache_value'
+        while value_name in params:
+            value_name += '_'
+
+        class Lookup(cst.CSTTransformer):
+            def leave_If(self, original_node, updated_node):
+                test = updated_node.test
+                if (not isinstance(test, cst.Comparison)
+                        or len(test.comparisons) != 1
+                        or not isinstance(test.comparisons[0].operator, cst.In)
+                        or module.code_for_node(test.comparisons[0].comparator) != cache):
+                    return updated_node
+                key = module.code_for_node(test.left)
+                assignment = cst.parse_statement(
+                    f"{value_name} = {cache}.get({key})\n")
+                hit = cst.parse_statement(f"if {value_name} is not None:\n    return {value_name}\n")
+                return cst.FlattenSentinel((assignment, hit.with_changes(orelse=updated_node.orelse)))
+
+        # A numeric C return cannot contain None, so None is an unambiguous miss.
+        declaration = cst.parse_statement(f"{value_name}: object\n")
+        body = body.visit(Lookup())
+        return body.with_changes(body=(declaration,) + body.body)
 
     @staticmethod
     def _locked_body(has_expr: str, v_expr: str, f_expr: str, indent=0) -> str:

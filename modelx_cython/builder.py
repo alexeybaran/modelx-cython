@@ -43,20 +43,22 @@ except ImportError:  # Python -3.9
 
 from functools import cached_property
 
-from modelx_cython.typedefs import get_type_expr
+from modelx_cython.typedefs import CY_BOOL_T, get_type_expr
 from modelx_cython.config import TransSpec
 from modelx_cython.tracer import RuntimeCellsInfo, MxCallTraceLogger
 from modelx_cython.parser import ModuleVisitor, LexicalCellsInfo, LexicalRefInfo
+from modelx_cython.cell_entries import DenseAxis
 
 from modelx_cython.consts import (
     FORMULA_PREF,
     SPACE_PREF,
     MODULE_PREF,
-    CY_MOD
+    CY_MOD,
 )
 from modelx_cython.typedefs import str_to_type, normalize_type
 
 _logger = logging.getLogger(__name__)
+NATIVE_TABLE_PROVIDER = 'modelx_cython.runtime._native_inputs'
 
 # Policy for array-returning cells with no call sites inside the model
 # (consumed only by external user scripts, which the usage analysis cannot
@@ -138,6 +140,7 @@ class CombinedCellsInfo(LexicalCellsInfo):
     # True if some formula calls this cells with keyword arguments, which
     # C-level (cpdef) calls do not support; set in cli.main_handler
     called_with_kwargs: bool = False
+    formula_has_captured_default: bool = False
 
     def __init__(self, cls_info, lx_info, rt_info, spec) -> None:
         """Merge lexical, runtime and spec info, validating the spec's
@@ -262,7 +265,7 @@ class CombinedCellsInfo(LexicalCellsInfo):
         which is every cells with parameters that has no type
         information.  Its ``_v_`` attribute is a ``cdef dict``.
         """
-        return (self.has_formula_def and self.has_args()
+        return (self.has_formula_def and self.has_args() and not self.uses_native_numeric_cache
                 and not (self.has_typeinfo() and self.is_arrayable()))
 
     @property
@@ -303,6 +306,10 @@ class CombinedCellsInfo(LexicalCellsInfo):
         """
         # A plain property, not cached: `usage` is assigned after
         # construction, between the build and transform phases.
+        if self.has_typeinfo() and not getattr(self._rt, 'array_buffer_compatible', True):
+            if self._force_memoryview:
+                raise ValueError(f'{self.fqname}: memoryview needs one native-endian float64/int64 buffer format')
+            return False
         if self._force_memoryview:
             return True
         if self.usage is None:
@@ -356,6 +363,9 @@ class CombinedCellsInfo(LexicalCellsInfo):
             If True, emit C-style types for .pxd files.
         """
 
+        if self.native_table_result:
+            from modelx_cython.helpers import module_name
+            return f'{module_name(NATIVE_TABLE_PROVIDER)}.NativeTable'
         if self.has_typeinfo():
             typ = get_type_expr(self.norm_type, c_style=c_style)
             if self.is_real_value and self.is_array_returned:
@@ -372,6 +382,24 @@ class CombinedCellsInfo(LexicalCellsInfo):
                 return typ
         else:
             return "object"
+
+    @property
+    def native_table_result(self):
+        """Keep a declared table type on the ordinary Cell cache."""
+        return (self.has_formula_def and not self.is_special()
+                and not self.body_has_closure and not self.formula_is_generator
+                and not self.formula_has_captured_default
+                and not self.called_with_kwargs and not self.has_spec_rettype
+                and getattr(self._rt, 'declared_table_result', False))
+
+    @property
+    def observed_record_result(self):
+        """Use the owned-record provider when the sample observed its record type."""
+        if not self.has_typeinfo():
+            return False
+        result = self._rt.ret_type.value_type
+        return (getattr(result, '__module__', None), getattr(result, '__qualname__', None)) == (
+            'modelx_helpers.immutable_inputs', 'Record')
 
     def is_arg_int(self, arg: str):
         """Return True if the sampled type of parameter ``arg`` is
@@ -398,23 +426,116 @@ class CombinedCellsInfo(LexicalCellsInfo):
         """Return True if results can be cached in a fixed-size C
         array.
 
-        A cells is arrayable when all its parameters are integral and
-        it returns a real-valued scalar (not an array).  Requires
-        parameters and type information.
+        A cells is arrayable when all its parameters are integral,
+        no observed argument is negative, and it returns a real-valued
+        scalar. Requires parameters and type information.
         """
         assert self.has_args() and self.has_typeinfo()
-        if self.is_int_args and self.is_real_value and not self.is_array_returned:
+        if (self.is_int_args and self.is_real_value and not self.is_array_returned
+                and (not self._rt.has_negative_args or self.has_shifted_cache)):
+            from modelx_cython import automatic
+            if automatic.enabled(self) and not automatic.dense_fits(self):
+                return False
             return True
         else:
             return False
 
+    @property
+    def has_shifted_cache(self):
+        if not (self.has_typeinfo() and self.has_args() and self.is_int_args
+                and self.is_real_value and not self.is_array_returned
+                and self._rt.has_negative_args):
+            return False
+        sizes = self.parent.cells_arg_sizes[tuple(self.params)]
+        count = 1
+        for p, size in zip(self.params, sizes):
+            count *= size - getattr(self._rt, 'min_args', {}).get(p, 0)
+        from .automatic import MAX_DENSE_ENTRIES
+        return 0 < count <= MAX_DENSE_ENTRIES
+
+    @property
+    def uses_native_numeric_cache(self):
+        from modelx_cython import automatic
+        requested = self._spec.get('native_numeric_cache',
+                                   'numeric_cache_capacity' in self._spec or automatic.enabled(self))
+        if type(requested) is not bool:
+            raise ValueError(f'{self.fqname}: native_numeric_cache must be a boolean')
+        numeric = {'double', 'long long', 'bint'}
+        return (requested and self.has_formula_def and self.has_typeinfo() and self.has_args()
+                and not self.is_arrayable()
+                and not self.is_array_returned and self.get_rettype_expr(c_style=True) in numeric
+                and all(self.get_argtype_expr(p, c_style=True) in numeric for p in self.params))
+
+    @property
+    def cache_offsets(self):
+        return tuple(axis.lower for axis in self.dense_axes)
+
+    @cached_property
+    def dense_logical_axes(self):
+        sizes = self.parent.cells_arg_sizes[tuple(self.params)]
+        offsets = tuple(getattr(self._rt, 'min_args', {}).get(p, 0)
+                        if self.has_shifted_cache else 0 for p in self.params)
+        return tuple(DenseAxis(key, lower, stop, self.get_argtype_expr(key, c_style=True))
+                     for key, lower, stop in zip(self.params, offsets, sizes))
+
+    @cached_property
+    def dense_axes(self):
+        requested = self._spec.get(TransSpec.DENSE_WINDOW)
+        if requested is None:
+            from modelx_cython import automatic
+            if automatic.enabled(self):
+                return automatic.observed_axes(self, self.dense_logical_axes)
+            return self.dense_logical_axes
+        if not (self.has_formula_def and self.has_args() and self.has_typeinfo()
+                and self.is_arrayable()):
+            raise ValueError(f'{self.fqname}: dense_window requires a dense cache')
+        logical = self.dense_logical_axes
+        if not isinstance(requested, (tuple, list)) or len(requested) != len(logical):
+            raise ValueError(f'{self.fqname}: dense_window needs one pair per axis')
+        axes = []
+        for axis, bounds in zip(logical, requested):
+            if not (isinstance(bounds, (tuple, list)) and len(bounds) == 2
+                    and all(type(value) is int for value in bounds)
+                    and axis.lower <= bounds[0] < bounds[1] <= axis.stop):
+                raise ValueError(f'{self.fqname}: invalid dense_window for {axis.key}')
+            axes.append(DenseAxis(axis.key, bounds[0], bounds[1], axis.c_type))
+        return tuple(axes)
+
+    @property
+    def has_compact_cache(self):
+        if self._spec.get(TransSpec.DENSE_WINDOW) is not None:
+            return self.dense_axes != self.dense_logical_axes
+        from modelx_cython import automatic
+        return (automatic.enabled(self) and self.has_args() and self.has_typeinfo()
+                and self.is_arrayable() and self.dense_axes != self.dense_logical_axes)
+
+    @property
+    def has_inferred_dense_domain(self):
+        """A sampled cache window is not an author-declared argument domain."""
+        from modelx_cython import automatic
+        if not automatic.enabled(self):
+            return False
+        spec = self.parent.module.spec.get_spec(self.parent.fqname)
+        sizes = spec.get(TransSpec.CELLS_PARAM_SIZE, spec.get(TransSpec.CELLS_PARAMS, {}))
+        return not any((key if isinstance(key, tuple) else (key,)) == tuple(self.params)
+                       for key in sizes)
+
+    @property
+    def has_dense_spill(self):
+        return self.has_inferred_dense_domain or self.has_compact_cache or self.has_shifted_cache
+
+    def get_readiness_array_decl_expr(self, c_style=False):
+        # Cython pickles unsigned-char arrays as NUL-terminated strings, which
+        # loses zero flags (and can read beyond the array). Ordinary bint arrays
+        # retain their full shape through the standard compiled-class serializer.
+        element = CY_BOOL_T if c_style else f'{CY_MOD}.{CY_BOOL_T}'
+        return self.get_array_decl_expr(rettype_expr=element, c_style=c_style)
+
     def get_array_decl_expr(self, rettype_expr="", c_style=False):
         """Return the C array declaration expression for the cache.
 
-        Appends one ``[size]`` per parameter to the return type
-        expression (e.g. ``double[10][20]``), taking sizes from the
-        parent class's :attr:`ClassInfo.cells_arg_sizes` entry for
-        this cells' parameter tuple.
+        Appends one ``[size]`` per physical cache axis to the return
+        type expression (e.g. ``double[10][20]``).
 
         Parameters
         ----------
@@ -429,8 +550,7 @@ class CombinedCellsInfo(LexicalCellsInfo):
         if not rettype_expr:
             rettype_expr = self.get_rettype_expr(c_style=c_style)
 
-        sizes = self.parent.cells_arg_sizes[tuple(self.params)]
-        return rettype_expr + "".join([f"[{str(i)}]" for i in sizes])
+        return rettype_expr + "".join(f"[{axis.stop - axis.lower}]" for axis in self.dense_axes)
 
 
 class CombinedRefInfo:
@@ -473,6 +593,10 @@ class CombinedRefInfo:
     mx_class: str = ''
     decl_type_expr: str = ''
     is_relative: bool = False
+    helper = None
+    enum = None
+    enum_definitions = ()
+    enum_safe = False
 
     def __init__(self, module,
                  cls,
@@ -483,7 +607,16 @@ class CombinedRefInfo:
         When ``rt_info`` is falsy, only ``module``, ``cls`` and
         ``name`` are set; the class-level defaults remain in effect.
         """
+        from .helpers import CAPABILITIES
+        self.helper_members = getattr(rt_info, 'helper_members', {})
+        self.helper_parameters = getattr(rt_info, 'helper_parameters', None)
+        for field_name, _ in CAPABILITIES.values():
+            setattr(self, field_name, getattr(rt_info, field_name, None))
         if rt_info:
+            self.helper = getattr(rt_info, 'helper', None)
+            self.enum = getattr(rt_info, 'enum', None)
+            self.enum_definitions = getattr(rt_info, 'enum_definitions', ())
+            self.enum_safe = getattr(rt_info, 'enum_safe', False)
 
             if rt_info.mx_class:
                 if rt_info.mx_class.startswith(module + "."):

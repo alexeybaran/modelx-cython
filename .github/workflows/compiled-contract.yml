@@ -1,0 +1,39 @@
+name: Pinned compiled-model contract
+
+on: [push, pull_request, workflow_dispatch]
+
+jobs:
+  contract:
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        python: ['3.13', '3.14', '3.14t']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: alexeybaran/modelx
+          ref: f65730d1022fe85cae01e516c05acd6b9aaed0d6
+          path: dependencies/modelx
+      - uses: actions/checkout@v4
+        with:
+          repository: alexeybaran/lifelib
+          ref: ead64569c34f19b0a9fdba9ad52c6b238a39e01c
+          path: dependencies/lifelib
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Install pinned feature sources
+        shell: bash
+        run: |
+          python -m pip install -e dependencies/modelx -e dependencies/lifelib
+          python -m pip install -e . pytest pandas openpyxl psutil
+      - name: Qualify compiled contract and helper semantics
+        env:
+          PYTEST_ADDOPTS: ${{ runner.os == 'Windows' && '--basetemp=C:/contract' || '' }}
+        run: python -m pytest integration_tests dependencies/lifelib/lifelib/tests/test_immutable_inputs.py -q
+      - name: Verify packaging
+        run: python -m pip wheel --no-deps . --wheel-dir dist

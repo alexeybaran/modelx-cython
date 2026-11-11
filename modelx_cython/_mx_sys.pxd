@@ -1,5 +1,25 @@
 from libc.math cimport (
     pow as _mx_c_pow, floor as _mx_c_floor, isfinite as _mx_c_isfinite)
+from libc.limits cimport LLONG_MIN
+from libc.string cimport memcmp
+from cpython.object cimport Py_TYPE
+from modelx_cython._rounding cimport _mx_round_one, _mx_round_digits
+cimport cython
+
+
+cdef inline int _mx_check_enum_schema(object receiver, object owner, tuple bindings) except -1:
+    """Declared model-code bindings are fixed until the model is rebuilt."""
+    cdef object actual = <object>Py_TYPE(receiver)
+    cdef object base, name
+    if actual is owner:
+        return 0
+    for base in actual.__mro__:
+        if base is owner:
+            break
+        for name in bindings:
+            if name in base.__dict__:
+                raise TypeError(f"enum definition {name!r} is fixed in this compiled model; rebuild the model to change it")
+    return 0
 
 
 cdef inline double _mx_pow(double b, double e) except? -1.0:
@@ -29,6 +49,40 @@ cdef inline double _mx_pow(double b, double e) except? -1.0:
         if b == 0.0 and e < 0.0:
             raise ZeroDivisionError("0.0 cannot be raised to a negative power")
     return _mx_c_pow(b, e)
+
+
+cdef struct PowerMemo:
+    bint ready
+    double base
+    double exponent
+    double value
+
+
+cdef inline double _mx_memo_pow(PowerMemo* memo, double base, double exponent) except? -1.0:
+    cdef double value
+    if (memo.ready and memcmp(&memo.base, &base, sizeof(double)) == 0
+            and memcmp(&memo.exponent, &exponent, sizeof(double)) == 0):
+        return memo.value
+    value = _mx_pow(base, exponent)
+    if _mx_c_isfinite(base) and _mx_c_isfinite(exponent):
+        memo.base = base
+        memo.exponent = exponent
+        memo.value = value
+        memo.ready = True
+    return value
+
+
+@cython.cdivision(True)
+cdef inline bint _mx_divisible(long long dividend, long long divisor) except? -1:
+    if divisor == 0:
+        raise ZeroDivisionError("integer division or modulo by zero")
+    return divisor == -1 or dividend % divisor == 0
+
+
+cdef inline bint _mx_divisible_after_decrement(long long dividend, long long divisor) except? -1:
+    if dividend == LLONG_MIN:
+        return ((<object>dividend) - 1) % divisor == 0
+    return _mx_divisible(dividend - 1, divisor)
 
 
 cdef extern from *:

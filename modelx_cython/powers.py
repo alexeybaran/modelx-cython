@@ -34,8 +34,9 @@ removes the failure without touching integer arithmetic at all.
 The proof is the conservative classifier below.  Every operand is
 :data:`KIND_FLOAT`, :data:`KIND_INT` or :data:`KIND_UNKNOWN`, and only
 numeric literals, the declaring cells' own parameters, calls to cells
-the resolver reaches, scalar references and arithmetic over those are
-ever known.  Everything else -- local variables, subscripts, module
+the resolver reaches, scalar references, single-assignment locals
+annotated with the builtin ``float``, and arithmetic over those are
+ever known. Everything else -- other locals, subscripts, module
 attributes, and anything inside a construct that binds names of its own,
 where a name can shadow a parameter of the cells -- is unknown, and an
 unknown operand leaves the power exactly as modelx exported it.  A power
@@ -60,6 +61,7 @@ import libcst as cst
 from modelx_cython.consts import CY_MOD, MX_POW, MX_SYS_MOD
 from modelx_cython.typedefs import CY_FLOAT_T, CY_INT_T
 from modelx_cython.usage import RESOLVED, CellsResolver, _extract_self_chain
+from modelx_cython.scopes import CstFacts, OPAQUE_SCOPES as _OPAQUE_SCOPES, lexical_nodes
 
 _logger = logging.getLogger(__name__)
 
@@ -81,10 +83,6 @@ _NUMERIC_OPS = (
 # inside one is ever rewritten.  A nested ``def`` or ``class`` belongs
 # here as much as a comprehension does: modelx exports such a formula
 # verbatim, and its body reaches Cython inside the ``@cfunc`` method.
-_OPAQUE_SCOPES = (
-    cst.ListComp, cst.SetComp, cst.DictComp, cst.GeneratorExp, cst.Lambda,
-    cst.FunctionDef, cst.ClassDef,
-)
 
 
 def kind_of_type_expr(type_expr: str) -> str:
@@ -195,6 +193,16 @@ class OperandKind:
             return KIND_UNKNOWN
         if isinstance(expr.operator, cst.Divide):
             return KIND_FLOAT       # true division, whatever the operands
+        if isinstance(expr.operator, cst.Power) and left == right == KIND_INT:
+            # An integral base raised to a negative integer is fractional.
+            # Without a sign proof, its result cannot prove an outer exponent.
+            exponent = expr.right
+            sign = 1
+            if isinstance(exponent, cst.UnaryOperation) and isinstance(exponent.operator, (cst.Plus, cst.Minus)):
+                sign = -1 if isinstance(exponent.operator, cst.Minus) else 1
+                exponent = exponent.expression
+            if not isinstance(exponent, cst.Integer) or sign * exponent.evaluated_value < 0:
+                return KIND_UNKNOWN
         if isinstance(expr.operator, _NUMERIC_OPS):
             return KIND_FLOAT if KIND_FLOAT in (left, right) else KIND_INT
         return KIND_UNKNOWN
@@ -222,12 +230,13 @@ class OperandKind:
 class _PowerRewriter(cst.CSTTransformer):
     """Replace provably real ``**`` operations with ``_mx_sys._mx_pow``."""
 
-    def __init__(self, operand_kind: OperandKind) -> None:
+    def __init__(self, operand_kind: OperandKind, memo=None) -> None:
         super().__init__()
         self._kind = operand_kind
         self._opaque_depth = 0
         self.rewritten = 0
         self.declined: List[str] = []
+        self.memo = memo
 
     def on_visit(self, node: cst.CSTNode) -> bool:
         if isinstance(node, _OPAQUE_SCOPES):
@@ -256,14 +265,19 @@ class _PowerRewriter(cst.CSTTransformer):
         exponent = self._kind.kind(original_node.right)
         if exponent == KIND_FLOAT and base != KIND_UNKNOWN:
             self.rewritten += 1
+            operation = MX_POW
+            args = [
+                cst.Arg(value=self._as_double(updated_node.left, base)),
+                cst.Arg(value=updated_node.right),
+            ]
+            if self.memo:
+                operation = "_mx_memo_pow"
+                args.insert(0, cst.Arg(cst.parse_expression(f"{CY_MOD}.address(self.{self.memo})")))
             return cst.Call(
                 func=cst.Attribute(
-                    value=cst.Name(MX_SYS_MOD), attr=cst.Name(MX_POW)
+                    value=cst.Name(MX_SYS_MOD), attr=cst.Name(operation)
                 ),
-                args=[
-                    cst.Arg(value=self._as_double(updated_node.left, base)),
-                    cst.Arg(value=updated_node.right),
-                ],
+                args=args,
                 lpar=updated_node.lpar,
                 rpar=updated_node.rpar,
             )
@@ -302,6 +316,8 @@ def rewrite_powers(
     ref_kinds: Mapping[str, Mapping[str, str]],
     cls_fqname: str,
     cells,
+    *,
+    builtin_float=False,
 ) -> cst.FunctionDef:
     """Rewrite the provably real powers in one method body.
 
@@ -318,6 +334,8 @@ def rewrite_powers(
         Fqname of the class the method belongs to.
     cells : CombinedCellsInfo
         The cells the method implements, for its parameter types.
+    builtin_float : bool
+        Whether the formula's lexical float binding is the builtin.
 
     Returns
     -------
@@ -328,14 +346,34 @@ def rewrite_powers(
     """
     if resolver is None:
         return node
+    from modelx_cython import automatic
+    memo = getattr(cells, '_spec', {}).get('memoize_power', automatic.enabled(cells))
+    if type(memo) is not bool:
+        raise ValueError('memoize_power must be a boolean')
+    if memo:
+        from modelx_cython.numeric_cache import exclusively_owned
+        memo = f'_mx_power_{cells.name}' if exclusively_owned(cells) else None
     param_kinds = {}
     if cells.has_args() and cells.has_typeinfo():
         for param in cells.params:
             param_kinds[param] = kind_of_type_expr(
                 cells.get_argtype_expr(param, c_style=True)
             )
+    if builtin_float and isinstance(node.body, cst.IndentedBlock):
+        declarations = [
+            decl.target.value for decl in lexical_nodes(node.body.body)
+            if isinstance(decl, cst.AnnAssign) and isinstance(decl.target, cst.Name)
+            and isinstance(decl.annotation.annotation, cst.Name)
+            and decl.annotation.annotation.value == 'float' and decl.value is not None
+        ]
+        if declarations:
+            facts = CstFacts(node.body.body)
+            # Cython gives an unshadowed float local a double declaration.
+            param_kinds.update((name, KIND_FLOAT) for name in declarations
+                               if facts.stores[name] == 1 and name not in cells.params
+                               and name not in facts.deleted)
     rewriter = _PowerRewriter(
-        OperandKind(resolver, cells_kinds, ref_kinds, cls_fqname, param_kinds)
+        OperandKind(resolver, cells_kinds, ref_kinds, cls_fqname, param_kinds), memo
     )
     updated = node.body.visit(rewriter)
     if rewriter.declined:
@@ -346,4 +384,6 @@ def rewrite_powers(
         )
     if not rewriter.rewritten:
         return node
+    if memo:
+        cells.power_memo = memo
     return node.with_changes(body=updated)

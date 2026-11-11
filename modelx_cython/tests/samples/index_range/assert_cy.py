@@ -1,10 +1,5 @@
-import sys
 from IndexRange_nomx_cy import mx_model
 
 
-try:
-    mx_model.Space1.foo(11)
-except IndexError:
-    sys.exit(0)
-
-sys.exit(1)
+# An inferred window sizes the fast cache; no explicit domain was declared.
+assert mx_model.Space1.foo(11) == 12
