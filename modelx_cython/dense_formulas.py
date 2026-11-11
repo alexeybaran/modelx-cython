@@ -97,6 +97,7 @@ def bind_entries(state: EntryModule, entries, propagate=False, domains=None):
     targets = {(layout.owner, layout.formula): (entry, layout)
                for entry, layout in entries.items() if entry in receiver_types}
     replacements, methods, misses = [], {}, {}
+    origins = state.function_origins.copy()
     for cls in module.body:
         if not isinstance(cls, cst.ClassDef) or not isinstance(cls.body, cst.IndentedBlock):
             continue
@@ -111,6 +112,7 @@ def bind_entries(state: EntryModule, entries, propagate=False, domains=None):
             if not _eligible(fn, keys, layout.guard_safe):
                 continue
             direct = names.reserve(f'_mx_dense_formula_{len(replacements)}')
+            origins[direct] = identity
             receiver, *params = fn.params.params
             receiver = receiver.with_changes(annotation=receiver_types[entry])
             args = ", ".join((MX_SELF, *keys))
@@ -166,4 +168,4 @@ def bind_entries(state: EntryModule, entries, propagate=False, domains=None):
         elif isinstance(stmt, cst.FunctionDef) and stmt.name.value in misses:
             stmt = stmt.with_changes(body=stmt.body.visit(misses[stmt.name.value]))
         body.append(stmt)
-    return state.replace(module.with_changes(body=(*body, *replacements)))
+    return state.replace(module.with_changes(body=(*body, *replacements)), origins)

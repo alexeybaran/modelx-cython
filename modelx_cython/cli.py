@@ -53,7 +53,7 @@ from modelx_cython.admission import describe
 from modelx_cython.cell_entries import EntryModule
 from modelx_cython.entry_pipeline import lower_entries
 from modelx_cython.helpers import install as install_helpers
-from modelx_cython.build import create_setup
+from modelx_cython.build import cell_locations, create_setup
 from modelx_cython.collect_adapter import CollectRuntime
 from modelx_cython.syntax import read_literal
 
@@ -393,10 +393,14 @@ def main_handler(args: argparse.Namespace, stdout: IO[str], stderr: IO[str]) -> 
         runtime_path.write_text(runtime.render(policy.parallel_workers, native=serial_enabled), encoding='utf-8')
         modules.extend(install_helpers(helper_providers, model_path))
         translated_modules = lower_entries(translated_modules, dense_entries, formula_entries, policy)
+        cell_sources = {}
         for u in units:
-            u.abs_src_path.write_text(translated_modules[u.fqname].syntax.code, encoding='utf-8')
+            state = translated_modules[u.fqname]
+            u.abs_src_path.write_text(state.syntax.code, encoding='utf-8')
+            cell_sources[u.rel_src_path.as_posix()] = cell_locations(state, u.module_info)
         create_setup(model_name, modules=modules, setup_file=setup_file, source_root=work_dir,
-                     source_modules=(runtime.syntax, *(state.syntax for state in translated_modules.values())))
+                     source_modules=(runtime.syntax, *(state.syntax for state in translated_modules.values())),
+                     cell_sources=cell_sources)
         (model_path / '_mx_admission.json').write_text(
             json.dumps(describe(module_infos), indent=2), encoding='utf-8')
 

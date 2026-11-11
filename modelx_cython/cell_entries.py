@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from functools import cached_property
 from typing import NamedTuple
 
@@ -20,6 +20,7 @@ class EntryModule:
     accidentally. The pipeline keeps CST ownership and writes a module once.
     """
     syntax: cst.Module
+    function_origins: dict[str, tuple[str, str]] = field(default_factory=dict)
 
     @cached_property
     def facts(self):
@@ -38,8 +39,10 @@ class EntryModule:
     def names(self):
         return Names(self.syntax)
 
-    def replace(self, syntax):
-        return self if syntax is self.syntax else EntryModule(syntax)
+    def replace(self, syntax, function_origins=None):
+        if function_origins is not None:
+            return replace(self, syntax=syntax, function_origins=function_origins)
+        return self if syntax is self.syntax else replace(self, syntax=syntax)
 
 
 class DenseAxis(NamedTuple):
