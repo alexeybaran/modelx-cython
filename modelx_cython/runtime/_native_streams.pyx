@@ -1,6 +1,7 @@
 # cython: freethreading_compatible=True
 """Direct Cython helper ABI. No source, AST, expression tree or formula parser."""
 import builtins
+from types import BuiltinFunctionType
 from cython cimport critical_section
 from libc.limits cimport LLONG_MIN, LLONG_MAX
 from cpython.long cimport PyLong_AsLongLong
@@ -19,9 +20,15 @@ from modelx_cython._call_layout cimport forward_call
 
 cdef object omitted_argument = object()
 cdef object _missing = omitted_argument
+cdef object _sum_values = _SUM_VALUES
+cdef object _builtin_sum = builtins.sum
+if (type(_builtin_sum) is not BuiltinFunctionType or _builtin_sum.__name__ != 'sum'
+        or _builtin_sum.__self__ is not builtins):
+    _builtin_sum = None
 
 cdef bint f64_accepts(object function):
-    return function is _SUM_VALUES and PY_VERSION_HEX >= 0x030c0000
+    return (function is _sum_values or function is _builtin_sum and _builtin_sum is not None
+            ) and PY_VERSION_HEX >= 0x030c0000
 
 cdef extern from *:
     """
@@ -496,7 +503,7 @@ cdef object flatten(object current_callable, tuple keywords, object sources):
 
 
 cdef object sum_values(object current_callable, tuple keywords, object source):
-    if current_callable is not _SUM_VALUES:
+    if current_callable is not _sum_values:
         return _replacement(current_callable, keywords, ('source',), (source,))
     # CPython's C consumer preserves integer-prefix transitions, big integers,
     # NumPy/custom scalar dispatch and release-specific summation behavior.

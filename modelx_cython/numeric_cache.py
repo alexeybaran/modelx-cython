@@ -6,6 +6,33 @@ from .helpers import module_name
 PROVIDER = 'modelx_cython._numeric_cache'
 ALIAS = module_name(PROVIDER)
 TYPE = ALIAS + '.NumericCache'
+WIDE_PROVIDER = 'modelx_cython._wide_numeric_cache'
+WIDE_ALIAS = module_name(WIDE_PROVIDER)
+WIDE_TYPE = WIDE_ALIAS + '.WideNumericCache'
+
+
+def storage(cell):
+    return WIDE_TYPE if len(cell.params) > 3 else TYPE
+
+
+def providers(module):
+    needed = set()
+    for cls in module.classes.values():
+        for cell in cls.cells.values():
+            if not cell.is_special() and cell.uses_native_numeric_cache:
+                needed.add(PROVIDER)
+                if len(cell.params) > 3:
+                    needed.add(WIDE_PROVIDER)
+    return needed
+
+
+def constructor(cell):
+    if len(cell.params) > 3:
+        from . import automatic
+        owned = exclusively_owned(cell)
+        capacity = max(8, automatic.primary_capacity(cell)) if owned and automatic.enabled(cell) else 8
+        return f'{WIDE_TYPE}({len(cell.params)}, {owned}, {capacity})'
+    return f'{TYPE}({primary_capacity(cell) or ""})'
 
 
 def exclusively_owned(cell):
@@ -17,6 +44,10 @@ def exclusively_owned(cell):
 
 
 def primary_capacity(cell):
+    if len(cell.params) > 3:
+        if 'numeric_cache_capacity' in cell._spec:
+            raise ValueError(f'{cell.fqname}: numeric_cache_capacity applies to compact numeric keys')
+        return 0
     from . import automatic
     inferred = automatic.primary_capacity(cell) if automatic.enabled(cell) and exclusively_owned(cell) else 0
     size = cell._spec.get('numeric_cache_capacity', inferred)
@@ -62,13 +93,28 @@ def body(cell):
     floating = cell.get_rettype_expr(c_style=True) == 'double'
     encode = 'value_word' if floating else 'int_word'
     decode = 'word_double' if floating else 'word_int'
-    if primary_capacity(cell):
+    key_setup = ''
+    if len(keys) > 3:
+        key_array = '_mx_cache_key'
+        while key_array in cell.params:
+            key_array += '_'
+        key_hash = '_mx_cache_hash'
+        while key_hash in cell.params:
+            key_hash += '_'
+        key_setup = f'{key_array}: {ALIAS}.word[{len(keys)}]\n{key_hash}: {ALIAS}.word = 0\n'
+        for index, name in enumerate(cell.params):
+            kind = cell.get_argtype_expr(name, c_style=True)
+            key = f'{WIDE_ALIAS}.key_word({name})' if kind == 'double' else f'_mx_cy.cast({ALIAS}.word, {name})'
+            key_setup += (f'{key_array}[{index}] = {key}\n'
+                          f'{key_hash} = {WIDE_ALIAS}.hash_step({key_hash}, {key_array}[{index}], {index})\n')
+        args = f'_mx_cy.address({key_array}[0]), {" and ".join(reflexive) or "True"}, {key_hash}'
+    elif primary_capacity(cell):
         return reserved_body(cell, cache, keys, ' and '.join(reflexive) or 'True',
                              bits, result, encode, decode)
     found = f'if {cache}.get({args}, _mx_cy.address({bits})):\n    return {ALIAS}.{decode}({bits})\n'
     compute = (f'{result} = self._f_{cell.name}({", ".join(cell.params)})\n'
                f'{cache}.put({args}, {ALIAS}.{encode}({result}))\nreturn {result}\n')
-    declarations = f'{bits}: {ALIAS}.word\n{result}: {cell.get_rettype_expr()}\n'
+    declarations = f'{bits}: {ALIAS}.word\n{result}: {cell.get_rettype_expr()}\n' + key_setup
     if cell.is_locked:
         import textwrap
         source = (declarations

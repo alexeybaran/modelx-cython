@@ -3,13 +3,16 @@ from dataclasses import dataclass
 
 import libcst as cst
 
+from .builder import NATIVE_TABLE_PROVIDER
 from .cell_entries import EntryModule
 from .consts import CY_MOD
+from .helpers import module_name
 from .scopes import CstFacts
 from .syntax import arguments, dotted_name, literal_value, same_expression, statements, walk
 from .typedefs import primitive_kind
 
 _NATIVE = {f'{CY_MOD}.{name}' for name in ('bint', 'double', 'longlong')}
+_NATIVE_TABLE = f'{module_name(NATIVE_TABLE_PROVIDER)}.NativeTable'
 
 
 def _pure_index(node, parameters):
@@ -48,9 +51,12 @@ class _Hit:
 
 
 def _layout(fn):
-    if fn.returns is None or dotted_name(fn.returns.annotation) not in _NATIVE:
+    if fn.returns is None:
         return None
     args, body = fn.params.params, statements(fn.body)
+    result = dotted_name(fn.returns.annotation)
+    if result not in _NATIVE and not (len(args) == 1 and result in {_NATIVE_TABLE, 'object', 'str'}):
+        return None
     if (len(args) not in (1, 2, 3) or len(body) != 1 or not isinstance(body[0], cst.If)
             or any(arg.annotation is None for arg in args)):
         return None

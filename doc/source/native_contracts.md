@@ -66,10 +66,11 @@ the normal mutable-Reference contract.
 Integer arithmetic specialization proves bounds for every intermediate. The
 emitted input guards and binary64 exact-integer bound determine safety; operation
 counts do not. Outside the guards, the original boxed arithmetic remains.
-Scalar `round`, `floor` and `ceil` calls retain their ordinary Cython/Python
-callable semantics, including Reference aliases and replacements. The separate
-guarded scalar-math backend was removed after measured deletion qualification.
-The legacy `native_math` boolean remains accepted by the spec reader.
+Lexically resolved builtin `round` calls use guarded binary64 rounding on
+exact floats. The two-argument path admits exact integer precision in
+`[-22, 22]` and falls back to the original callable when the scaled value
+falls outside its exact domain. Other values retain the callable's behavior,
+including `__round__`. `floor` and `ceil` use ordinary Cython compilation.
 
 ## Helper providers
 

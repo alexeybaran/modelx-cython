@@ -58,6 +58,7 @@ from modelx_cython.consts import (
 from modelx_cython.typedefs import str_to_type, normalize_type
 
 _logger = logging.getLogger(__name__)
+NATIVE_TABLE_PROVIDER = 'modelx_cython.runtime._native_inputs'
 
 # Policy for array-returning cells with no call sites inside the model
 # (consumed only by external user scripts, which the usage analysis cannot
@@ -362,6 +363,9 @@ class CombinedCellsInfo(LexicalCellsInfo):
             If True, emit C-style types for .pxd files.
         """
 
+        if self.native_table_result:
+            from modelx_cython.helpers import module_name
+            return f'{module_name(NATIVE_TABLE_PROVIDER)}.NativeTable'
         if self.has_typeinfo():
             typ = get_type_expr(self.norm_type, c_style=c_style)
             if self.is_real_value and self.is_array_returned:
@@ -378,6 +382,24 @@ class CombinedCellsInfo(LexicalCellsInfo):
                 return typ
         else:
             return "object"
+
+    @property
+    def native_table_result(self):
+        """Keep a declared table type on the ordinary Cell cache."""
+        return (self.has_formula_def and not self.is_special()
+                and not self.body_has_closure and not self.formula_is_generator
+                and not self.formula_has_captured_default
+                and not self.called_with_kwargs and not self.has_spec_rettype
+                and getattr(self._rt, 'declared_table_result', False))
+
+    @property
+    def observed_record_result(self):
+        """Use the owned-record provider when the sample observed its record type."""
+        if not self.has_typeinfo():
+            return False
+        result = self._rt.ret_type.value_type
+        return (getattr(result, '__module__', None), getattr(result, '__qualname__', None)) == (
+            'modelx_helpers.immutable_inputs', 'Record')
 
     def is_arg_int(self, arg: str):
         """Return True if the sampled type of parameter ``arg`` is
@@ -440,7 +462,7 @@ class CombinedCellsInfo(LexicalCellsInfo):
             raise ValueError(f'{self.fqname}: native_numeric_cache must be a boolean')
         numeric = {'double', 'long long', 'bint'}
         return (requested and self.has_formula_def and self.has_typeinfo() and self.has_args()
-                and len(self.params) <= 3 and not self.is_arrayable()
+                and not self.is_arrayable()
                 and not self.is_array_returned and self.get_rettype_expr(c_style=True) in numeric
                 and all(self.get_argtype_expr(p, c_style=True) in numeric for p in self.params))
 

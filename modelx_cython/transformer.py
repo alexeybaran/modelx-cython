@@ -62,7 +62,7 @@ from libcst.metadata import ParentNodeProvider, ScopeProvider, GlobalScope, Clas
 from libcst.metadata.scope_provider import BuiltinAssignment
 
 from modelx_cython.parser import ParentScopeAddin
-from modelx_cython.builder import ModuleInfo, CombinedCellsInfo
+from modelx_cython.builder import ModuleInfo, CombinedCellsInfo, NATIVE_TABLE_PROVIDER
 from modelx_cython.powers import rewrite_powers
 from modelx_cython.inline_entries import add_inline_entries, allows_exact_receiver
 from modelx_cython.cell_entries import dense_condition
@@ -158,14 +158,16 @@ class PXDGenerator:
         with newlines.
         """
         stmts = []
-        if any(c.uses_native_numeric_cache for cls in self.module.classes.values()
-               for c in cls.cells.values() if not c.is_special()):
-            stmts.append(f'from {self.package} cimport {numeric_cache.ALIAS}')
+        from modelx_cython.helpers import module_name
+        for provider in sorted(numeric_cache.providers(self.module)):
+            stmts.append(f'from {self.package} cimport {module_name(provider)}')
         for ci in self.module.cimports:
             stmts.append(f"cimport {ci}")
-        from modelx_cython.helpers import module_name
         contexts = {provider for cls in self.module.classes.values()
                     for provider in getattr(cls, 'native_contexts', {}).values()}
+        if any(c.native_table_result for cls in self.module.classes.values()
+               for c in cls.cells.values()):
+            contexts.add(NATIVE_TABLE_PROVIDER)
         for provider in sorted(contexts):
             stmts.append(f'from {self.package} cimport {module_name(provider)}')
         enum_declarations = code_enums.declarations(self.module)
@@ -301,7 +303,7 @@ class PXDGenerator:
                         decl_stmts.append(f"cdef dict _spill_{cells.name}\n")
 
                 elif cells.uses_native_numeric_cache:
-                    decl_stmts.append(f'cdef {numeric_cache.TYPE} {VAR_PREF + cells.name}\n')
+                    decl_stmts.append(f'cdef {numeric_cache.storage(cells)} {VAR_PREF + cells.name}\n')
                 else:
                     decl_stmts.append(f"cdef dict {VAR_PREF + cells.name}\n")
             else:
@@ -415,7 +417,7 @@ class PXDGenerator:
                 continue
 
             if cells and cells.has_typeinfo():
-                rettype = cells.get_rettype_expr(c_style=True)
+                rettype = 'object' if cells.native_table_result else cells.get_rettype_expr(c_style=True)
                 parameters = self._add_param_type_hints(
                     cls_name=cls_name, cells_name=cells.name
                 )
@@ -538,12 +540,14 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
         self._cells_kinds = cells_kinds or {}
         self._ref_kinds = ref_kinds or {}
         self._serial_shapes = serial_shapes or {}
+        self._uses_native_round = False
         self.helper_providers = set()
+        if any(c.native_table_result for cls in module.classes.values()
+               for c in cls.cells.values()):
+            self.helper_providers.add(NATIVE_TABLE_PROVIDER)
         self.dense_entries = {}
         self.formula_entries = {}
-        if any(c.uses_native_numeric_cache for cls in module.classes.values()
-               for c in cls.cells.values() if not c.is_special()):
-            self.helper_providers.add(numeric_cache.PROVIDER)
+        self.helper_providers.update(numeric_cache.providers(module))
         code_enums.prepare(module)
 
     def _reserve_cold_sum(self):
@@ -576,28 +580,37 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
         from modelx_cython.checked_arithmetic import CheckedArithmetic
         from modelx_cython.numeric_helpers import NumericReturns
         cells.formula_allows_exact_receiver = allows_exact_receiver(node, cls_info.name)
-        node = CheckedArithmetic(cls_info, cells).rewrite(node)
-        builtin_keys = {name for name in ("min", "max", "float")
+        builtin_keys = {name for name in ("all", "any", "sum", "min", "max", "float", "int", "round", "range")
                         if scope[name] and all(isinstance(binding, BuiltinAssignment)
                                                for binding in scope[name])}
-        numeric_returns = NumericReturns(cls_info, cells, self.helper_providers, builtin_keys)
+        node = CheckedArithmetic(cls_info, cells, builtin_keys).rewrite(node)
+        if not self.module.spec.policy.native_math:
+            builtin_keys.discard('round')
+        numeric_returns = NumericReturns(cls_info, cells, self.helper_providers, builtin_keys,
+                                         self._resolver)
         node = node.visit(numeric_returns)
+        if 'round' in builtin_keys and '_mx_canonical_round' not in self._source:
+            from modelx_cython.rounding import NativeRounding
+            rounding = NativeRounding()
+            node = node.with_changes(body=node.body.visit(rounding))
+            self._uses_native_round |= rounding.used
         if not hasattr(cls_info, 'native_contexts'):
             cls_info.native_contexts = {}
         cls_info.native_contexts.update(numeric_returns.contexts)
         # Keep the qualified typed kernels behind the common helper contracts.
         # The same CST/type facts select their native domain; unsupported source
         # and values keep ordinary object-capable Cython and current callables.
-        from modelx_cython.reductions import NativeReductions, has_reduction_contract
+        from modelx_cython.reductions import BUILTIN_REDUCTIONS, NativeReductions, has_reduction_contract
         reductions = None
         cells.native_reductions = 0
         cells.exact_reduction_guards = ()
-        if has_reduction_contract(node, cls_info.refs):
+        builtin_reductions = builtin_keys & BUILTIN_REDUCTIONS
+        if has_reduction_contract(node, cls_info.refs, builtin_reductions):
             builtin_bounds = all(isinstance(binding, BuiltinAssignment)
                                  for name in ("range", "min", "max", "abs", "StopIteration", "RuntimeError")
                                  for binding in scope[name])
             reductions = NativeReductions(
-                cls_info, cells, self.helper_providers, node, self._reserve_cold_sum, builtin_bounds)
+                cls_info, cells, self.helper_providers, node, self._reserve_cold_sum, builtin_bounds, builtin_reductions)
             node = node.visit(reductions)
             cells.native_reductions = reductions.count
             cells.exact_reduction_guards = reductions.exact_receiver_guards
@@ -614,7 +627,7 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
         cells.native_numeric_helpers = sorted(numeric_returns.operations)
         node = rewrite_powers(
             node, self._resolver, self._cells_kinds, self._ref_kinds,
-            cls_info.fqname, cells,
+            cls_info.fqname, cells, builtin_float='float' in builtin_keys,
         )
         from modelx_cython.ordered_arguments import preserve_argument_order
         from modelx_cython.powers import OperandKind, kind_of_type_expr
@@ -648,6 +661,7 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
         self._cold_sums = []
         self._cold_spills = []
         self._next_cold_sum = 0
+        self._uses_native_round = False
         return self.wrapper.visit(self)
 
     def leave_Module(self, original_node: Module, updated_node: Module) -> Module:
@@ -662,6 +676,9 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
                 'from cython.cimports.libc.string import memset as _mx_collect_memset'))
         from modelx_cython.helpers import module_name
         from modelx_cython.exceptions import NumericExceptions
+        if self._uses_native_round:
+            from modelx_cython.rounding import ROUND_BINDING
+            stmts.extend(cst.parse_module(ROUND_BINDING).body)
         for provider in sorted(self.helper_providers):
             stmts.append(cst.parse_statement(
                 f'from cython.cimports.{self.package} import {module_name(provider)}'))
@@ -750,7 +767,8 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
                         if cells.has_dense_spill:
                             decl_stmts.append(cst.parse_statement(f'_spill_{cells.name}: dict\n'))
                     elif cells.uses_native_numeric_cache:
-                        decl_stmts.append(cst.parse_statement(f'{VAR_PREF + cells.name}: {numeric_cache.TYPE}\n'))
+                        decl_stmts.append(cst.parse_statement(
+                            f'{VAR_PREF + cells.name}: {numeric_cache.storage(cells)}\n'))
                     else:
                         decl_stmts.append(
                             cst.parse_statement(
@@ -1014,9 +1032,8 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
                 initializers = []
                 for cell in cls_info.cells.values():
                     if cell.uses_native_numeric_cache:
-                        size = numeric_cache.primary_capacity(cell)
                         initializers.append(cst.parse_statement(
-                            f'self._v_{cell.name} = {numeric_cache.TYPE}({size or ""})\n'
+                            f'self._v_{cell.name} = {numeric_cache.constructor(cell)}\n'
                         ))
                 return updated_node.with_changes(body=updated_node.body.with_changes(
                     body=(*updated_node.body.body, *initializers)))
@@ -1052,7 +1069,7 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
                 ]
                 returns = cst.Annotation(
                     annotation=cst.parse_expression(
-                        cells.get_rettype_expr(),
+                        'object' if cells.native_table_result else cells.get_rettype_expr(),
                         config=self._module_node.config_for_parsing,
                     )
                 )
@@ -1234,6 +1251,12 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
                             body = updated_node.body
                         else:
                             body = self._add_dict_assign(meth_name, updated_node)
+                        if cells.native_table_result:
+                            constructor = cst.parse_expression(cells.get_rettype_expr())
+                            formula = m.Call(func=m.Attribute(
+                                value=m.Name(MX_SELF), attr=m.Name(FORMULA_PREF + meth_name)))
+                            body = m.replace(body, formula, lambda call, _: cst.Call(
+                                constructor, (cst.Arg(call),)))
                         key_types = {"bint", "long long", "double"}
                         if not cells.is_locked:
                             key_types.add("str")
@@ -1251,12 +1274,23 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
                             body=body
                         )
                 else:   # No type info, no arg
-                    if cells.is_locked:
+                    flag = f"{MX_SELF}.{HAS_PREF}{meth_name}"
+                    cache = f"{MX_SELF}.{VAR_PREF}{meth_name}"
+                    formula = f"{MX_SELF}.{FORMULA_PREF}{meth_name}()"
+                    if cells.native_table_result:
+                        formula = f'{cells.get_rettype_expr()}({formula})'
+                    if cells.is_locked or cells.native_table_result:
+                        if cells.is_locked:
+                            body = self._locked_body(flag, cache, formula)
+                        else:
+                            body = (f'if {flag}:\n'
+                                    f'    return {cache}\n'
+                                    'else:\n'
+                                    f'    {cache} = {formula}\n'
+                                    f'    {flag} = True\n'
+                                    f'    return {cache}\n')
                         stmts = cst.parse_module(
-                            self._locked_body(
-                                f"{MX_SELF}.{HAS_PREF}{meth_name}",
-                                f"{MX_SELF}.{VAR_PREF}{meth_name}",
-                                f"{MX_SELF}.{FORMULA_PREF}{meth_name}()"),
+                            body,
                             config=self._module_node.config_for_parsing
                         ).body
                         return updated_node.with_changes(

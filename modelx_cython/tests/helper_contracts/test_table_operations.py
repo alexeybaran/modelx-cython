@@ -131,6 +131,21 @@ def test_exact_output_rows_values_and_pickle(native, frame):
             assert actual == column(source, name)
 
 
+def test_legacy_row_metadata_remains_readable(native):
+    frame = pd.DataFrame({'age': [42], 'rate': [0.1]}, index=['policy'])
+    source = inputs.table(frame, rows=True)
+    object.__setattr__(source, '_metadata', source._metadata[:10])
+    legacy = pickle.loads(pickle.dumps(source))
+    for selected in (row(legacy, 'policy'), native.select(row, legacy, 'policy')):
+        pd.testing.assert_series_equal(to_pandas(selected), frame.loc['policy'], check_exact=True)
+
+
+def test_integer_row_lookup_does_not_alias_a_boolean_label(native):
+    source = inputs.table(pd.DataFrame({'rate': [0.1, 0.2]}, index=[False, True]), rows=True)
+    with pytest.raises(KeyError):
+        native.select(row, source, 1)
+
+
 def test_compiled_selection_has_no_python_helper_pandas_or_owner_calls(native):
     source = inputs.table(pd.DataFrame({'age': [42, 43], 'rate': [0.1, 0.2]}), rows=True)
     forbidden = {row.__code__, column.__code__, Table.lookup.__code__,

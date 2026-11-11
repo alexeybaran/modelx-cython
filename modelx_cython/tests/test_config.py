@@ -49,9 +49,10 @@ def test_explicit_policy_overrides_keep_their_existing_dependencies():
     policy=TransSpec({'automatic_optimizations':False,'dense_miss_binding':True,
         'propagate_exact_receiver':True,'native_cache_hits':'both','parallel_workers':4}).policy
     assert policy.propagate_exact_receiver and policy.native_cache_hits=='both'
-    assert policy.parallel_workers==4 and not policy.native_math
+    assert policy.parallel_workers==4 and policy.native_math
 
 
-def test_legacy_math_option_remains_accepted():
-    assert not TransSpec({}).policy.native_math
+def test_guarded_rounding_can_be_disabled():
+    assert TransSpec({}).policy.native_math
     assert TransSpec({'native_math': True}).policy.native_math
+    assert not TransSpec({'native_math': False}).policy.native_math

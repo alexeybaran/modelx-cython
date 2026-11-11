@@ -3,6 +3,7 @@ from libc.math cimport (
 from libc.limits cimport LLONG_MIN
 from libc.string cimport memcmp
 from cpython.object cimport Py_TYPE
+from modelx_cython._rounding cimport _mx_round_one, _mx_round_digits
 cimport cython
 
 

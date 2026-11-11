@@ -1,4 +1,4 @@
-"""Lower registered reductions using existing CST nodes and binding metadata."""
+"""Lower typed reductions using existing CST nodes and binding metadata."""
 from functools import cached_property
 
 import libcst as cst
@@ -11,10 +11,17 @@ from .syntax import arguments, code, literal_value
 from .typedefs import primitive_kind
 
 
-def has_reduction_contract(formula, refs):
-    """Route only explicit declared consumers to the typed kernel stage."""
-    return any(isinstance(node, cst.Call)
-               and getattr(helper_reference(node.func, refs), 'reduction', None) in REDUCTIONS
+BUILTIN_PROVIDER = 'modelx_cython._native_iterables'
+STREAMS_PROVIDER = 'modelx_cython.runtime._native_streams'
+BUILTIN_REDUCTIONS = frozenset(('all', 'any', 'max', 'min', 'sum'))
+
+
+def has_reduction_contract(formula, refs, builtin_reductions=frozenset()):
+    """Find declared consumers and supported built-in generator reductions."""
+    return any(isinstance(node, cst.Call) and (
+               getattr(helper_reference(node.func, refs), 'reduction', None) in REDUCTIONS
+               or isinstance(node.func, cst.Name) and node.func.value in builtin_reductions
+               and len(node.args) in (1, 2) and isinstance(node.args[0].value, cst.GeneratorExp))
                for node in lexical_nodes(formula.body.body))
 
 
@@ -60,11 +67,13 @@ def safe_range_increment(iterator):
 
 
 class NativeReductions(FormulaTransformer):
-    def __init__(self, cls_info, cells, providers, formula, reserve_fallback, builtin_bounds):
+    def __init__(self, cls_info, cells, providers, formula, reserve_fallback, builtin_bounds,
+                 builtin_reductions=frozenset()):
         super().__init__()
         self.cls_info, self.cells, self.providers = cls_info, cells, providers
         self.formula, self.reserve_fallback = formula, reserve_fallback
         self.builtin_bounds = builtin_bounds
+        self.builtin_reductions = builtin_reductions
         self.fallbacks, self.exact_receiver_guards, self.count = [], set(), 0
         self.captures, self.integer_captures = {}, {}
         self.scope_safe = (not has_scope_effects(formula.body.body)
@@ -157,6 +166,11 @@ class NativeReductions(FormulaTransformer):
             ref = self.cls_info.refs.get(node.attr.value)
             if ref is not None:
                 return {float: 'double', int: 'longlong', bool: 'bint'}.get(ref.type_)
+        absolute = arguments(node, 'abs', 1)
+        if (absolute and self.builtin_bounds and 'abs' not in locals_
+                and 'abs' not in self.cells.params and 'abs' not in self.body_facts.stores
+                and self.kind(absolute[0], locals_) == 'double'):
+            return 'double'
         if (arguments(node) is not None and isinstance(node.func, cst.Attribute)
                 and isinstance(node.func.value, cst.Name) and node.func.value.value == 'self'):
             cell = self.cls_info.cells.get(node.func.attr.value)
@@ -169,8 +183,9 @@ class NativeReductions(FormulaTransformer):
                 return 'double'
         return None
 
-    def cold_fallback(self, source, generator, capture, function, capture_type='_mx_cy.double', boxed_param=None):
-        original = f'{function}({source})'
+    def cold_fallback(self, source, generator, capture, function, capture_type='_mx_cy.double',
+                      boxed_param=None, trailing_args=''):
+        original = f'{function}({source}{trailing_args})'
         if not self.cells.has_formula_def or not self.scope_safe:
             return original
         names = CstFacts(generator).reads
@@ -203,7 +218,7 @@ class NativeReductions(FormulaTransformer):
         actuals = ', '.join(['self', function] + [name for name, _ in args])
         return f'{helper}({actuals})'
 
-    def bounded_any(self, before, after, func, ref, source, tree):
+    def bounded_any(self, before, after, func, provider, operation, source, tree):
         capture = self.integer_captures.get(id(before))
         parts = tuple(_parts(tree))
         if not (self.builtin_bounds and capture and capture not in self.cells.params
@@ -235,7 +250,6 @@ class NativeReductions(FormulaTransformer):
                 and arguments(limit, count=0) is not None and self.kind(limit, {}) == 'longlong'):
             return after
         offset = upper.right.evaluated_value
-        provider, operation = ref.helper
         alias, prefix = module_name(provider), self.reserve_prefix()
         function = f'{prefix}_function'
         count = len(self.fallbacks)
@@ -268,7 +282,7 @@ if {guard}:
 return {fallback}
 """).body)
 
-    def single_range(self, after, func, ref, source, tree):
+    def single_range(self, after, func, provider, operation, reduction, source, tree):
         parts = tuple(_parts(tree))
         if len(parts) != 1 or not self.cells.formula_allows_exact_receiver:
             return after
@@ -278,11 +292,10 @@ return {fallback}
         index = part.target.value
         if index in {'self', 'range', 'abs', 'max', *self.cells.params}:
             return after
-        provider, operation = ref.helper
         alias, prefix = module_name(provider), self.reserve_prefix()
         counter, guard, function = f'{prefix}_index', f'{prefix}_native', f'{prefix}_function'
         predicate, boxed_param = tree.elt, None
-        if ref.reduction == 'bool_all':
+        if reduction == 'bool_all':
             args = arguments(part.iter, 'range', 1)
             if not (args is not None and arguments(args[0], count=0) is not None
                     and self.kind(args[0], {}) == 'longlong'
@@ -380,6 +393,61 @@ return {fallback}
             return None
         return start.value, lower.right.evaluated_value, step.expression.evaluated_value
 
+    def minimum(self, after, tree):
+        """Keep the first minimum in a typed range, with the ordinary generator as fallback."""
+        part = tree.for_in
+        bounds = arguments(part.iter, 'range')
+        if (self.cells.get_rettype_expr(c_style=True) != 'double'
+                or not isinstance(part.target, cst.Name)
+                or part.inner_for_in is not None or part.ifs or part.asynchronous is not None
+                or not bounds or len(bounds) > 3 or not safe_range_increment(part.iter)
+                or not all(self.kind(arg, {}) in ('longlong', 'bint') for arg in bounds)):
+            return after
+        index = part.target.value
+        if self.kind(tree.elt, {index: 'longlong'}) != 'double':
+            return after
+        prefix = self.reserve_prefix()
+        function = f'{prefix}_function'
+        count = len(self.fallbacks)
+        fallback = self.cold_fallback(code(tree), tree, None, function)
+        if len(self.fallbacks) == count:
+            return after
+        self.providers.add(BUILTIN_PROVIDER)
+        self.count += 1
+        counter = f'{prefix}_index'
+        contexts = CstFacts(tree.elt).contexts
+
+        class RenameIndex(cst.CSTTransformer):
+            def leave_Name(self, before, after):
+                return after.with_changes(value=counter) if before.value == index and before in contexts else after
+
+        element = code(tree.elt.visit(RenameIndex()))
+        bound_names = [f'{prefix}_bound_{i}' for i in range(len(bounds))]
+        bound_assignments = '\n'.join(f'    {name}: _mx_cy.longlong = {code(value)}'
+                                      for name, value in zip(bound_names, bounds))
+        alias = module_name(BUILTIN_PROVIDER)
+        return cst.FlattenSentinel(cst.parse_module(f"""
+{function}: object = min
+if {exact_receiver(self.cls_info.name)} and {alias}.min_accepts({function}):
+{bound_assignments}
+    {counter}: _mx_cy.longlong
+    {prefix}_seen: _mx_cy.bint = False
+    {prefix}_best: _mx_cy.double = 0.0
+    {prefix}_value: _mx_cy.double
+    try:
+        for {counter} in range({', '.join(bound_names)}):
+            {prefix}_value = {element}
+            if not {prefix}_seen or {prefix}_value < {prefix}_best:
+                {prefix}_best = {prefix}_value
+                {prefix}_seen = True
+    except StopIteration as {prefix}_error:
+        raise RuntimeError("generator raised StopIteration") from {prefix}_error
+    if not {prefix}_seen:
+        return {function}(())
+    return {prefix}_best
+return {fallback}
+""").body)
+
     def leave_SimpleStatementLine(self, before, after):
         if len(before.body) != 1:
             return after
@@ -389,18 +457,35 @@ return {fallback}
                 and isinstance(statement.targets[0].target, cst.Name)):
             return after
         value = statement.value
-        args = arguments(value, count=1)
-        if args is None:
+        args = arguments(value)
+        if not args or not isinstance(args[0], cst.GeneratorExp) or not self.builtin_bounds:
             return after
-        func = value.func
-        ref = helper_reference(func, self.cls_info.refs)
-        reduction = getattr(ref, 'reduction', None)
-        if reduction not in ('f64_sum', 'ordinary_sum', 'bool_any', 'bool_all', 'f64_max') or not ref.helper:
-            return after
-        tree = args[0]
-        if not isinstance(tree, cst.GeneratorExp) or not self.builtin_bounds:
-            return after
+        func, tree = value.func, args[0]
         source = code(tree)
+        builtin = func.value if isinstance(func, cst.Name) and func.value in self.builtin_reductions else None
+        float_start = (builtin == 'sum' and len(args) == 2 and isinstance(args[1], cst.Float)
+                       and args[1].evaluated_value == 0.0)
+        if len(args) != 1 and not float_start:
+            return after
+        if builtin == 'min':
+            return after if assignment else self.minimum(after, tree)
+        if builtin == 'all':
+            return after if assignment else self.single_range(
+                after, func, BUILTIN_PROVIDER, 'all', 'bool_all', source, tree)
+        if builtin == 'any':
+            return after if assignment else self.bounded_any(
+                before, after, func, BUILTIN_PROVIDER, 'any', source, tree)
+        if builtin == 'max':
+            return after if assignment else self.single_range(
+                after, func, BUILTIN_PROVIDER, 'max', 'f64_max', source, tree)
+        ref = helper_reference(func, self.cls_info.refs)
+        if builtin == 'sum':
+            provider, reduction = STREAMS_PROVIDER, 'f64_sum' if float_start else 'ordinary_sum'
+        elif getattr(ref, 'reduction', None) in REDUCTIONS and ref.helper:
+            provider, operation = ref.helper
+            reduction = ref.reduction
+        else:
+            return after
         if assignment and reduction != 'f64_sum':
             return after
         if (reduction == 'ordinary_sum'
@@ -409,9 +494,9 @@ return {fallback}
             # double return boundary may normalize empty integer zero to double.
             return after
         if reduction == 'bool_any':
-            return self.bounded_any(before, after, func, ref, source, tree)
+            return self.bounded_any(before, after, func, provider, operation, source, tree)
         if reduction in ('bool_all', 'f64_max'):
-            return self.single_range(after, func, ref, source, tree)
+            return self.single_range(after, func, provider, operation, reduction, source, tree)
         capture = self.captures.get(id(before))
         if capture == 'range':
             return after
@@ -454,10 +539,10 @@ return {fallback}
                 return after
         if self.kind(tree.elt, local_types) != 'double':
             return after
-        provider, operation = ref.helper
         alias, prefix = module_name(provider), self.reserve_prefix()
         count = len(self.fallbacks)
-        fallback = self.cold_fallback(source, tree, capture, f'{prefix}_function')
+        fallback = self.cold_fallback(source, tree, capture, f'{prefix}_function',
+                                      trailing_args=', 0.0' if float_start else '')
         if len(self.fallbacks) == count:
             return after
         # Iterator/capture names must not alias the accumulator or call-layout

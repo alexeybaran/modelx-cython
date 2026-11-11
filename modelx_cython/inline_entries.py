@@ -1,4 +1,4 @@
-"""Emit private cache entries for resolved, same-Space numeric Cell calls."""
+"""Emit private cache entries for resolved, same-Space native Cell calls."""
 
 import libcst as cst
 
@@ -24,7 +24,8 @@ def _eligible(cell, params):
         and not cell.formula_has_captured_default
         and not cell.body_has_closure
         and not cell.called_with_kwargs
-        and cell.get_rettype_expr(c_style=True) in _NUMERIC_TYPES
+        and (cell.get_rettype_expr(c_style=True) in _NUMERIC_TYPES or cell.native_table_result
+             or not cell.has_args() and cell.get_rettype_expr(c_style=True) in ('object', 'str'))
         and not params.posonly_params
         and not params.kwonly_params
         and not isinstance(params.star_arg, cst.Param)
@@ -58,8 +59,9 @@ def _literal_defaults(cell, params):
 
 
 class _Calls(cst.CSTTransformer):
-    def __init__(self, owner, entries, exact_guards=()):
+    def __init__(self, owner, entries, exact_guards=(), table_receivers=None):
         self.entries = entries
+        self.table_receivers = table_receivers or {}
         self.exact_receiver = cst.parse_expression(exact_receiver(owner))
         self.exact_guards = exact_guards
         self.exact_depth = 0
@@ -105,6 +107,18 @@ class _Calls(cst.CSTTransformer):
 
     def leave_Call(self, original, updated):
         func = updated.func
+        if (not updated.args and isinstance(func, cst.Attribute)
+                and isinstance(func.value, cst.Attribute) and isinstance(func.value.value, cst.Name)
+                and func.value.value.value == MX_SELF):
+            target = self.table_receivers.get((func.value.attr.value, func.attr.value))
+            if target is not None:
+                receiver = cst.Module([]).code_for_node(func.value)
+                return cst.IfExp(
+                    test=cst.parse_expression(
+                        f'type({receiver}) is {target} and '
+                        f'{MX_SYS_MOD}._mx_load_flag({CY_MOD}.address({receiver}._has_{func.attr.value}))'),
+                    body=cst.Attribute(func.value, cst.Name(f'_v_{func.attr.value}')),
+                    orelse=updated, lpar=(cst.LeftParen(),), rpar=(cst.RightParen(),))
         if not (isinstance(func, cst.Attribute) and isinstance(func.value, cst.Name)
                 and func.value.value == MX_SELF and func.attr.value in self.entries):
             return updated
@@ -250,7 +264,16 @@ def add_inline_entries(module, classes):
                 if guard_allowed is None:
                     guard_allowed = allows_exact_receiver(method, owner)
                 if guard_allowed:
-                    calls = _Calls(owner, entries, getattr(cell, 'exact_reduction_guards', ()))
+                    names_in_formula = Names(method).names
+                    table_receivers = {
+                        (ref_name, name): target
+                        for ref_name, ref in classes[owner].refs.items()
+                        if (target := getattr(ref, 'decl_type_expr', None)) in classes
+                        and target not in names_in_formula and classes[target].is_locked
+                        for name, other in classes[target].cells.items()
+                        if other.native_table_result and not other.has_args() and other.has_formula_def
+                    }
+                    calls = _Calls(owner, entries, getattr(cell, 'exact_reduction_guards', ()), table_receivers)
                     methods[index] = method.with_changes(body=method.body.visit(calls))
         body.append(statement.with_changes(body=statement.body.with_changes(body=methods)))
     if functions:

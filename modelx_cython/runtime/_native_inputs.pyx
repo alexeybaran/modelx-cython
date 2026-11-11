@@ -14,6 +14,7 @@ from cpython.float cimport PyFloat_AS_DOUBLE, PyFloat_AsDouble, PyFloat_CheckExa
 from cpython.long cimport PyLong_AsLong, PyLong_AsLongLongAndOverflow, PyLong_Check
 from cpython.number cimport PyNumber_Index
 from cpython.object cimport PyObject_IsTrue
+from cpython.tuple cimport PyTuple_GET_ITEM
 from cpython.version cimport PY_VERSION_HEX
 from cpython.ref cimport PyObject
 from cpython.mem cimport PyMem_Malloc, PyMem_Free
@@ -139,6 +140,8 @@ cdef object lookup(object function, object table, object key, object column, obj
 cdef object previous(object function, object table, object key, object column, object default=_missing):
     cdef TableView data
     cdef Py_ssize_t index
+    if function is _previous and type(table) is NativeTable:
+        table = (<NativeTable>table)._owner
     if function is _previous and type(table) is Table:
         data = view(table)
         if data.integral and type(key) is int and -(1 << 63) <= key < (1 << 63):
@@ -152,6 +155,8 @@ cdef object previous(object function, object table, object key, object column, o
 
 
 cdef object contains(object function, object table, object key):
+    if function is _contains and type(table) is NativeTable:
+        table = (<NativeTable>table)._owner
     if function is _contains and type(table) is Table and table._index_error is not None:
         return indexed_contains(table,key)
     if function is _contains and type(table) is Table:
@@ -175,6 +180,8 @@ cdef object key_at(object function, object table, object index):
 
 cdef object first_key(object function, object table):
     cdef TableView data
+    if function is _first_key and type(table) is NativeTable:
+        table = (<NativeTable>table)._owner
     if function is _first_key and type(table) is Table:
         data = view(table)
         if data.ordered:
@@ -184,6 +191,8 @@ cdef object first_key(object function, object table):
 
 cdef object last_key(object function, object table):
     cdef TableView data
+    if function is _last_key and type(table) is NativeTable:
+        table = (<NativeTable>table)._owner
     if function is _last_key and type(table) is Table:
         data = view(table)
         if data.ordered:
@@ -299,25 +308,38 @@ cdef Py_ssize_t numeric_column(TableView data, object column) except? -1:
     return -1
 
 
+cdef inline Py_ssize_t endpoint_column(const PyObject* data, object column) noexcept:
+    cdef Py_ssize_t last
+    if <PyObject*>column == PyTuple_GET_ITEM((<TableView>data).columns, 0):
+        return 0
+    last = (<TableView>data).width - 1
+    if <PyObject*>column == PyTuple_GET_ITEM((<TableView>data).columns, last):
+        return last
+    return -1
+
+
 cdef object prepared_interpolation(object function, object table, object column, object years,
                                    object lookup_fn, object last_fn, object math_module):
-    cdef TableView data
-    cdef long long col, lower, upper
-    cdef Py_ssize_t lo, hi
+    cdef long long col
     cdef int overflow
-    cdef double position, base, end
     if function is not _prepared_interpolation:
         return function(table, column, years, lookup_fn, last_fn, math_module)
     if (lookup_fn is not _lookup or last_fn is not _last_key
             or math_module is not math or math.floor is not _FLOOR
             or type(table) is not Table or not PyLong_Check(column) or not PyFloat_CheckExact(years)):
         return None
-    position = PyFloat_AS_DOUBLE(years)
-    if not -9223372036854775808.0 <= position < 9223372036854775808.0:
-        return None
     col = PyLong_AsLongLongAndOverflow(column, &overflow)
-    data = view(table)
-    if overflow or not data.numeric or not 0 <= col < data.width:
+    if overflow:
+        return None
+    return interpolate_numeric(view(table), col, PyFloat_AS_DOUBLE(years))
+
+
+cdef object interpolate_numeric(TableView data, long long col, double position):
+    cdef long long lower, upper
+    cdef Py_ssize_t lo, hi
+    cdef double base, end
+    if (not data.numeric or not 0 <= col < data.width
+            or not -9223372036854775808.0 <= position < 9223372036854775808.0):
         return None
     lower = <long long>floor(position)
     upper = data.maximum
@@ -356,11 +378,17 @@ cdef double lookup_f64(object function, LookupContext context, object table,
 
 cdef double previous_f64(object function, LookupContext context, object table,
                          long long key, object column, object default=_missing) except? -1:
-    cdef TableView data
+    cdef TableView data = None
     cdef Py_ssize_t index, col
     if function is _previous:
         col = -1
-        data = context.get(table, column, &col)
+        if type(table) is NativeTable:
+            data = (<NativeTable>table)._numeric_view
+            table = (<NativeTable>table)._owner
+            if data is not None:
+                col = endpoint_column(<PyObject*>data, column)
+        if col < 0:
+            data = context.get(table, column, &col)
         if data is not None and data.numeric:
             index = data.right(key) - 1
             if index < 0:
@@ -408,33 +436,39 @@ cdef double lookup_clamped_context_f64(object function, LookupContext context, o
     return _lookup_clamped_f64(function, context, table, key, last_function, column)
 
 
+cdef inline bint bounded_table_value(const PyObject* data, Py_ssize_t column, long long key,
+                                     double below, double* value) except? -1:
+    cdef Py_ssize_t row, count = (<TableView>data).integers.shape[0]
+    if key < (<TableView>data).integers[0]:
+        value[0] = below
+        return True
+    if key >= (<TableView>data).integers[count - 1]:
+        row = count - 1
+    else:
+        row = (<TableView>data).right(key) - 1
+        if row < 0 or (<TableView>data).integers[row] != key:
+            return False
+    value[0] = (<TableView>data).numbers[
+        (<TableView>data).sorted_positions[row] * (<TableView>data).width + column]
+    return True
+
+
 cdef bint bounded_lookup_f64(object function, object first_fn, object last_fn,
                              LookupContext context, object table, long long key,
                              str column, double below, double* value) except? -1:
     cdef TableView data
-    cdef Py_ssize_t col = -1, row, count
+    cdef Py_ssize_t col = -1
     if function is not _lookup or first_fn is not _first_key or last_fn is not _last_key:
         return False
     data = context.get(table, column, &col)
     if data is None or col < 0:
         return False
-    count = data.integers.shape[0]
-    if not count:
+    if not data.integers.shape[0]:
         return False
     if context._private_owner and context.bounded_data is None:
         context.bounded_data = data
         context.bounded_column = col
-    if key < data.integers[0]:
-        value[0] = below
-        return True
-    if key >= data.integers[count - 1]:
-        row = count - 1
-    else:
-        row = data.right(key) - 1
-        if row < 0 or data.integers[row] != key:
-            return False
-    value[0] = data.numbers[data.sorted_positions[row] * data.width + col]
-    return True
+    return bounded_table_value(<PyObject*>data, col, key, below, value)
 
 
 cdef int optional_lookup_f64(object contains_fn, object lookup_fn, object table,
@@ -577,6 +611,16 @@ cdef int group_context_value(LookupContext context, object sub_fn, object contai
     return group_data_value(<GroupedView>prepared, slot, key, value)
 
 
+cdef object group_slice_context_probe(LookupContext context, object record, long long group,
+                                      str column, Py_ssize_t* slot):
+    return group_context_probe(context, _has_group, record, group, column, slot)
+
+
+cdef int group_slice_context_value(LookupContext context, object prepared, Py_ssize_t slot,
+                                   long long key, double* value) except -1:
+    return group_context_value(context, _subtable, _contains, _lookup, prepared, slot, key, value)
+
+
 cdef bint bound_group_probe(LookupContext context, long long group, Py_ssize_t* slot) except? -1:
     cdef PyObject* data = <PyObject*>context.group_data
     if data == <PyObject*>None:
@@ -629,12 +673,13 @@ cdef object sum_helper(object function, object values):
 
 
 cdef inline void remember_numeric_resource(LookupContext context, object source,
-    object column, TableView data, Py_ssize_t index):
+    object column, TableView data, Py_ssize_t index, object function=None):
     if context._private_owner and data is not None and data.numeric and index >= 0:
         context.numeric_source = source
         context.numeric_column_source = column
         context.numeric_index = index
         context.numeric_data = data
+        context.numeric_function = function
 
 
 cdef bint numeric_resource_ready(LookupContext context, const void* source, const void* column) noexcept:
@@ -643,25 +688,33 @@ cdef bint numeric_resource_ready(LookupContext context, const void* source, cons
             and (column == NULL or column == <const void*>context.numeric_column_source))
 
 
-cdef inline double numeric_resource_value(LookupContext context, long long key, long long column,
-    bint named, bint preceding, bint has_default, double default) except? -1:
-    # The ready predicate proves lifetime/admission. Context retains the source
-    # and immutable view; this borrowed pointer does not own another shared ref.
-    cdef PyObject* data = <PyObject*>context.numeric_data
+cdef bint numeric_binding_ready(LookupContext context, const void* source, const void* column,
+                                object function) noexcept:
+    return function is context.numeric_function and numeric_resource_ready(context, source, column)
+
+
+cdef inline double numeric_table_value(const PyObject* data, long long key, long long column,
+    bint preceding, bint has_default, double default) except? -1:
     cdef Py_ssize_t row = (<TableView>data).right(key) - 1
-    cdef long long col
     if row < 0 or (not preceding and (<TableView>data).integers[row] != key):
         if has_default:
             return default
         if preceding:
             raise ValueError(f'No key at or before {key!r}')
         raise KeyError(key)
-    col = context.numeric_index if named else column
-    if not named and col < 0:
-        col += (<TableView>data).width
-    if col < 0 or col >= (<TableView>data).width:
+    if column < 0:
+        column += (<TableView>data).width
+    if column < 0 or column >= (<TableView>data).width:
         raise IndexError('tuple index out of range')
-    return (<TableView>data).numbers[(<TableView>data).sorted_positions[row] * (<TableView>data).width + col]
+    return (<TableView>data).numbers[(<TableView>data).sorted_positions[row] * (<TableView>data).width + column]
+
+
+cdef inline double numeric_resource_value(LookupContext context, long long key, long long column,
+    bint named, bint preceding, bint has_default, double default) except? -1:
+    # The ready predicate proves lifetime/admission. Context retains the source
+    # and immutable view; this borrowed pointer does not own another shared ref.
+    return numeric_table_value(<PyObject*>context.numeric_data, key,
+                               context.numeric_index if named else column, preceding, has_default, default)
 
 
 cdef double bound_lookup_f64(LookupContext context, long long key, long long column,
@@ -677,22 +730,9 @@ cdef bint bound_bounded_f64(LookupContext context, long long key,
                             double below, double* value) except? -1:
     # Context owns this immutable snapshot. No owning local view is needed.
     cdef PyObject* data = <PyObject*>context.bounded_data
-    cdef Py_ssize_t row, count
     if data == <PyObject*>None:
         return False
-    count = (<TableView>data).integers.shape[0]
-    if key < (<TableView>data).integers[0]:
-        value[0] = below
-        return True
-    if key >= (<TableView>data).integers[count - 1]:
-        row = count - 1
-    else:
-        row = (<TableView>data).right(key) - 1
-        if row < 0 or (<TableView>data).integers[row] != key:
-            return False
-    value[0] = (<TableView>data).numbers[
-        (<TableView>data).sorted_positions[row] * (<TableView>data).width + context.bounded_column]
-    return True
+    return bounded_table_value(data, context.bounded_column, key, below, value)
 
 
 
@@ -703,10 +743,12 @@ cdef double prepare_lookup_f64(object function, LookupContext context, object ta
     cdef Py_ssize_t col = -1
     if context._private_owner:
         context.numeric_data = None
+    if function is _lookup and type(table) is NativeTable:
+        table = (<NativeTable>table)._owner
     value = lookup_f64(function,context,table,key,column,default)
     if context._private_owner and function is _lookup and type(table) is Table:
         data = context.get(table,column,&col)
-        remember_numeric_resource(context,table,column,data,col)
+        remember_numeric_resource(context,table,column,data,col,function)
     return value
 
 
@@ -718,32 +760,39 @@ cdef double prepare_previous_f64(object function, LookupContext context, object 
     cdef Py_ssize_t col = -1
     if context._private_owner:
         context.numeric_data = None
+    if function is _previous and type(table) is NativeTable:
+        table = (<NativeTable>table)._owner
     value = previous_f64(function,context,table,key,column,default)
     if context._private_owner and function is _previous and type(table) is Table:
         data = context.get(table,column,&col)
-        remember_numeric_resource(context,table,column,data,col)
+        remember_numeric_resource(context,table,column,data,col,function)
     return value
 
 # Preserve explicit conversion semantics, including replaced callables.
 from builtins import float as _float_type
 
+cdef inline double _numeric_float_read(const PyObject* data, Py_ssize_t column,
+                                       long long key, object default) except? -1:
+    cdef Py_ssize_t index = (<TableView>data).right(key) - 1
+    if index < 0 or (<TableView>data).integers[index] != key:
+        if default is _missing:
+            raise KeyError(key)
+        if PyFloat_CheckExact(default):
+            return PyFloat_AS_DOUBLE(default)
+        return _float_type(default)
+    return (<TableView>data).numbers[(<TableView>data).sorted_positions[index]
+                                      * (<TableView>data).width + column]
+
 cdef double lookup_float_f64(object conversion, object function, LookupContext context,
                              object table, long long key, object column,
                              object default=_missing) except? -1:
     cdef TableView data
-    cdef Py_ssize_t index, col = -1
+    cdef Py_ssize_t col = -1
     cdef KeyPart part
     if conversion is _float_type and function is _lookup:
         data = context.get(table, column, &col)
-        if data is not None and data.numeric and not data.pandas_at:
-            index = data.right(key) - 1
-            if index < 0 or data.integers[index] != key:
-                if default is _missing:
-                    raise KeyError(key)
-                # float(default) must parse strings, unlike implicit C conversion.
-                return conversion(default)
-            if col >= 0:
-                return data.numbers[data.sorted_positions[index] * data.width + col]
+        if data is not None and data.numeric and not data.pandas_at and col >= 0:
+            return _numeric_float_read(<PyObject*>data, col, key, default)
     key_int(&part, key, False)
     return lookup_keyed_float_f64(conversion, function, context, table, &part,
                                   1, False, column, default)
@@ -1361,7 +1410,26 @@ cdef object indexed_contains(object table, object key):
 
 
 from builtins import int as _typed_int, bool as _typed_bool, str as _typed_str
+from modelx_helpers import typed_inputs as _typed_inputs_module
+from modelx_helpers import pdn as _pdn_module
 from modelx_helpers.typed_inputs import _typed_value as _typed_python_value, _MISSING as _typed_missing
+cdef dict _typed_inputs_bindings = vars(_typed_inputs_module)
+cdef dict _pdn_bindings = vars(_pdn_module)
+import builtins as _round_builtins
+from types import BuiltinFunctionType as _RoundBuiltin
+from modelx_cython._rounding cimport native_round_digits
+
+_canonical_python_round = _round_builtins.round
+if (type(_canonical_python_round) is not _RoundBuiltin
+        or _canonical_python_round.__self__ is not _round_builtins
+        or _canonical_python_round.__name__ != 'round'):
+    _canonical_python_round = None
+
+cdef double checked_round_float(double value, long long digits) except? -1:
+    cdef double result
+    if native_round_digits(value, digits, &result):
+        return result
+    return _canonical_python_round(value, digits)
 cdef object _lookup_float_fn = _native_operations['lookup_float']
 cdef object _lookup_int_fn = _native_operations['lookup_int']
 cdef object _lookup_bool_fn = _native_operations['lookup_bool']
@@ -1414,6 +1482,443 @@ cdef double lookup_float(object function, tuple keywords, object source, object 
     return _float_type(_explicit_value(source,key,column,default))
 
 
+cdef class _InputFloat:
+    pass
+
+
+cdef double record_field_float(object function, LookupContext context, object record,
+                               object key, object namespace=None) except? -1:
+    """Bind the exact immutable scalar used by an ordinary typed row read."""
+    cdef _InputFloat binding, retired
+    if function is _lookup_float_fn and type(record) is Record:
+        if context._private_owner:
+            binding = context.record_float
+        else:
+            with cython.critical_section(context):
+                binding = context.record_float
+        if binding is not None and binding.source is record and binding.key is key:
+            return binding.value
+        value = record._index.get(key, _missing)
+        if type(value) in (float, int) or type(value) in _numpy_float_keys or type(value) in _numpy_integer_keys:
+            binding = _InputFloat()
+            binding.source, binding.key = record, key
+            binding.function = function
+            binding.value = _float_type(value)
+            if context._private_owner:
+                context.record_float = binding
+                context.record_namespace = namespace
+            else:
+                with cython.critical_section(context):
+                    retired = context.record_float
+                    context.record_float = binding
+            return binding.value
+    return lookup_float(function, (), record, key)
+
+
+cdef object read_record_item(object source, object key):
+    if type(source) is Record:
+        return source._index[key]
+    return source[key]
+
+
+cdef double read_cast_record_field_float(object conversion, LookupContext context,
+                                        object source, object key) except? -1:
+    if conversion is _float_type and type(source) is Record:
+        return read_record_field_float(_lookup_float_fn, context, source, key)
+    return conversion(source[key])
+
+
+cdef bint record_cast_ready(LookupContext context, const void* source, const void* key,
+                            object conversion) noexcept:
+    return conversion is _float_type and record_field_ready(context, source, key, None)
+
+
+@cython.boundscheck(False)
+@cython.wraparound(False)
+cdef inline Py_ssize_t _input_column(KeyedView data, object column) except? -2:
+    cdef str label
+    if type(column) is not str:
+        return -1
+    label = <str>column
+    if label == <str>data.columns[0]:
+        return 0
+    if label == <str>data.columns[data.value_width - 1]:
+        return data.value_width - 1
+    try:
+        return data.columns.index(label)
+    except ValueError:
+        return -1
+
+
+cdef inline bint _input_value_at(NativeTable table, Py_ssize_t row, Py_ssize_t index,
+                                 double* result) noexcept:
+    cdef Py_ssize_t position = row * table._input_width + index
+    if not table._input_numeric[position]:
+        return False
+    result[0] = table._input_values[position]
+    return True
+
+
+cdef inline bint _input_value(NativeTable table, Py_ssize_t row, object column, double* result) except -1:
+    cdef Py_ssize_t index = _input_column(<KeyedView>table._indexed_view, column)
+    return index >= 0 and _input_value_at(table, row, index, result)
+
+
+cdef class _NativeTableIndex:
+    cdef object _owner
+
+    def __init__(self, owner):
+        self._owner = owner
+
+    def __contains__(self, key):
+        return contains(_contains, self._owner, key)
+
+    def __iter__(self):
+        return iter(self._owner._keys)
+
+    def __len__(self):
+        return len(self._owner._keys)
+
+    def max_int(self):
+        return _typed_int(last_key(_last_key, self._owner))
+
+    def max_float(self):
+        return _float_type(last_key(_last_key, self._owner))
+
+
+@cython.final
+cdef class NativeTable:
+    """A Cython receiver for a Table owned by an ordinary Cell cache."""
+
+    def __init__(self, owner):
+        cdef TableView data
+        cdef KeyedView indexed
+        if not isinstance(owner, Table):
+            raise TypeError('declared Table Cell returned a different type')
+        self._owner = owner
+        if type(owner) is Table:
+            self._index_view = _NativeTableIndex(owner)
+        if type(owner) is Table and owner._index_error is None:
+            data = view(owner)
+            if data.numeric:
+                self._numeric_view = data
+        elif type(owner) is Table:
+            keys = owner._keys
+            if keys and (type(keys[0]) is int or len(keys) == 1 and type(keys[0]) is str):
+                data = view(owner)
+                if type(keys[0]) is int and not (data.integral and data.contiguous):
+                    return
+                cached = owner._native_cache.get(KeyedView)
+                if cached is None:
+                    cached = owner._native_cache.setdefault(KeyedView, KeyedView(owner))
+                indexed = <KeyedView>cached
+                if indexed.admitted and not indexed.at_multi:
+                    self._indexed_view = indexed
+                    self._input_values = &indexed.values[0]
+                    self._input_numeric = &indexed.numeric[0]
+                    self._input_width = indexed.value_width
+                    if data.integral and data.contiguous:
+                        self._input_keys = data
+                        self._input_positions = &data.sorted_positions[0]
+                        self._input_low = data.first_integer
+                        self._input_high = data.last_integer
+                    else:
+                        self._single_label = keys[0]
+
+    cdef double lookup_float(self, KeyArg0 key, object column, object default=_typed_missing) except? -1:
+        cdef PyObject* data = <PyObject*>self._numeric_view
+        cdef double value
+        cdef Py_ssize_t col, last
+        if KeyArg0 is KeyInteger:
+            if data != <PyObject*>None:
+                # The receiver owns the view throughout the call, as in c8's
+                # bound lookup. Exact labels at either end already have a slot.
+                last = (<TableView>data).width - 1
+                if <PyObject*>column == PyTuple_GET_ITEM((<TableView>data).columns, 0):
+                    col = 0
+                elif <PyObject*>column == PyTuple_GET_ITEM((<TableView>data).columns, last):
+                    col = last
+                else:
+                    col = numeric_column(<TableView>data, column)
+                if col >= 0:
+                    return _numeric_float_read(data, col, key,
+                                               _missing if default is _typed_missing else default)
+            if self._input_keys is not None:
+                if self._input_low <= key <= self._input_high and _input_value(
+                        self, self._input_positions[key - self._input_low],
+                        column, &value):
+                    return value
+        elif KeyArg0 is object:
+            if self._single_label is not None and type(key) is str and <str>key == <str>self._single_label:
+                if _input_value(self, 0, column, &value):
+                    return value
+        if type(self._owner) is Table:
+            return lookup_float(_lookup_float_fn, (), self._owner, <object>key, column, default)
+        if default is _typed_missing:
+            return self._owner.lookup_float(<object>key, column)
+        return self._owner.lookup_float(<object>key, column, default)
+
+    cdef object previous(self, KeyArg0 key, object column):
+        cdef double value
+        if KeyArg0 is KeyInteger:
+            if table_previous_value(self, key, column, &value):
+                return value
+        return self._owner.previous(<object>key, column)
+
+    cdef double interpolate_float(self, object key, object column) except? -1:
+        cdef TableView data
+        if type(self._owner) is Table and PyFloat_CheckExact(key) and math.floor is _FLOOR:
+            data = view(self._owner)
+            value = interpolate_numeric(data, numeric_column(data, column), PyFloat_AS_DOUBLE(key))
+            if value is not None:
+                return value
+        return self._owner.interpolate_float(key, column)
+
+    cpdef object row(self, object key):
+        if type(self._owner) is Table:
+            return row(_row, (), self._owner, key)
+        return self._owner.row(key)
+
+    cpdef object slice(self, object key):
+        if type(self._owner) is Table:
+            return row(_row, (), self._owner, key)
+        return self._owner.slice(key)
+
+    @property
+    def index(self):
+        if self._index_view is None:
+            return self._owner.index
+        return self._index_view
+
+    def __getitem__(self, key):
+        return self._owner[key]
+
+    def __iter__(self):
+        return iter(self._owner)
+
+    def __len__(self):
+        return len(self._owner)
+
+    def __getattr__(self, name):
+        return getattr(self._owner, name)
+
+    def __eq__(self, other):
+        return self._owner == other
+
+    def __copy__(self):
+        return self
+
+    def __deepcopy__(self, memo):
+        return self
+
+    def __reduce__(self):
+        return NativeTable, (self._owner,)
+
+
+Table.register(NativeTable)
+
+
+cdef double table_field_float(LookupContext context, NativeTable table, object key,
+                              object column) except? -1:
+    cdef _InputFloat first, second, binding, retired
+    cdef double value
+    if table._single_label is not None:
+        if context._private_owner:
+            first, second = context.input_first, context.input_second
+        else:
+            with cython.critical_section(context):
+                first, second = context.input_first, context.input_second
+        if first is not None and first.source is table and first.key is key and first.column is column:
+            return first.value
+        if second is not None and second.source is table and second.key is key and second.column is column:
+            return second.value
+        if type(key) is str and <str>key == <str>table._single_label and _input_value(
+                table, 0, column, &value):
+            binding = _InputFloat()
+            binding.source, binding.key, binding.column = table, key, column
+            binding.value = value
+            if context._private_owner:
+                context.input_second = context.input_first
+                context.input_first = binding
+            else:
+                with cython.critical_section(context):
+                    retired = context.input_second
+                    context.input_second = context.input_first
+                    context.input_first = binding
+            return value
+    return table.lookup_float(<object>key, column)
+
+
+@cython.boundscheck(False)
+@cython.wraparound(False)
+cdef bint try_clamped_table_float(NativeTable table, LookupContext context, bint lower, object namespace,
+                                  long long key, object column, double* result) except -1:
+    cdef Py_ssize_t index, row
+    cdef PyObject* snapshot = <PyObject*>table._numeric_view
+    cdef TableView data
+    cdef unsigned char mask = 2 if lower else 1
+    cdef dict bindings
+    if table._input_keys is None and table._numeric_view is None:
+        return False
+    if not (context._private_owner and context.clamped_bindings_ready & mask
+            and context.clamped_namespace is namespace):
+        if namespace is None and not lower:
+            bindings = None
+        elif namespace is _typed_inputs_module:
+            bindings = _typed_inputs_bindings
+        elif namespace is _pdn_module:
+            bindings = _pdn_bindings
+        else:
+            return False
+        if bindings is not None:
+            if (bindings.get('last_key') is not _last_key
+                    or (lower and bindings.get('first_key') is not _first_key)):
+                return False
+        if context._private_owner:
+            context.clamped_bindings_ready |= mask
+    if snapshot != <PyObject*>None:
+        if namespace is None and not lower:
+            index = endpoint_column(snapshot, column)
+            if index >= 0:
+                if key < (<TableView>snapshot).first_integer:
+                    return False
+                return bounded_table_value(snapshot, index, key, 0.0, result)
+        if context._private_owner:
+            data = <TableView>table._numeric_view
+        else:
+            index = -1
+            data = context.get(table._owner, column, &index)
+            if data is None or index < 0:
+                return False
+        if key < data.first_integer and not lower:
+            return False
+        key = min(max(key, data.first_integer), data.last_integer)
+        row = data.right(key) - 1
+        if row < 0 or data.integers[row] != key:
+            return False
+        if context._private_owner:
+            if (context.clamped_source is table and context.clamped_column is column
+                    and context.clamped_namespace is namespace):
+                index = context.clamped_index
+            else:
+                index = numeric_column(data, column)
+                if index < 0:
+                    return False
+                context.clamped_source = table
+                context.clamped_column = column
+                context.clamped_namespace = namespace
+                context.clamped_index = index
+        result[0] = data.numbers[data.sorted_positions[row] * data.width + index]
+        return True
+    if key < table._input_low:
+        if not lower:
+            return False
+        key = table._input_low
+    elif key > table._input_high:
+        key = table._input_high
+    if (context._private_owner and context.clamped_source is table
+            and context.clamped_column is column and context.clamped_namespace is namespace):
+        index = context.clamped_index
+    else:
+        index = _input_column(<KeyedView>table._indexed_view, column)
+        if index < 0:
+            return False
+        if context._private_owner:
+            context.clamped_source = table
+            context.clamped_column = column
+            context.clamped_namespace = namespace
+            context.clamped_index = index
+    return _input_value_at(table, table._input_positions[key - table._input_low], index, result)
+
+
+cdef double prepare_table_method(LookupContext context, NativeTable table,
+                                 long long key, object column, object default=_typed_missing) except? -1:
+    cdef TableView data
+    cdef Py_ssize_t col
+    cdef object owner = table._owner
+    if (context._private_owner and context.numeric_data is not None
+            and owner is context.numeric_source and column is context.numeric_column_source):
+        return _numeric_float_read(<PyObject*>context.numeric_data, context.numeric_index, key,
+                                   _missing if default is _typed_missing else default)
+    cdef double value = table.lookup_float(<KeyInteger>key, column, default)
+    if context._private_owner:
+        context.numeric_data = None
+        if table._numeric_view is not None:
+            data = <TableView>table._numeric_view
+            col = numeric_column(data, column)
+            remember_numeric_resource(context, owner, column, data, col)
+    return value
+
+
+cdef inline bint table_previous_value(NativeTable table, long long key, object column,
+                                     double* value) except -1:
+    cdef PyObject* data = <PyObject*>table._numeric_view
+    cdef Py_ssize_t row, col
+    if data == <PyObject*>None:
+        return False
+    col = endpoint_column(data, column)
+    if col < 0:
+        col = numeric_column(<TableView>data, column)
+    row = (<TableView>data).right(key) - 1
+    if row < 0 or col < 0:
+        return False
+    value[0] = (<TableView>data).numbers[(<TableView>data).sorted_positions[row]
+                                        * (<TableView>data).width + col]
+    return True
+
+
+cdef double read_previous_table_float(NativeTable table, long long key, object column) except? -1:
+    cdef double value
+    if table_previous_value(table, key, column, &value):
+        return value
+    return table._owner.previous(key, column)
+
+
+cdef double read_previous_table_int(NativeTable table, long long key, long long column) except? -1:
+    cdef PyObject* data = <PyObject*>table._numeric_view
+    if data != <PyObject*>None:
+        return numeric_table_value(data, key, column, True, False, 0.0)
+    return table._owner.previous(key, column)
+
+
+cdef double prepare_previous_table_method(LookupContext context, NativeTable table,
+                                          long long key, object column) except? -1:
+    if table._numeric_view is not None:
+        if context._private_owner:
+            return prepare_previous_f64(_previous, context, table._owner, key, column)
+        return previous_f64(_previous, context, table._owner, key, column)
+    if context._private_owner:
+        context.numeric_data = None
+    return table._owner.previous(key, column)
+
+
+cdef bint read_bounded_table_float(NativeTable table, LookupContext context, object first_fn,
+                                   long long key, str column, double below, double* value,
+                                   bint owned_index=False) except? -1:
+    cdef PyObject* data = <PyObject*>table._numeric_view
+    cdef Py_ssize_t last
+    if (table._index_view is None if owned_index else first_fn is not _first_key):
+        return False
+    if data != <PyObject*>None:
+        if <PyObject*>column == PyTuple_GET_ITEM((<TableView>data).columns, 0):
+            return bounded_table_value(data, 0, key, below, value)
+        last = (<TableView>data).width - 1
+        if <PyObject*>column == PyTuple_GET_ITEM((<TableView>data).columns, last):
+            return bounded_table_value(data, last, key, below, value)
+    if context._private_owner:
+        if context.clamped_source is table and context.clamped_column is column:
+            if bound_bounded_f64(context, key, below, value):
+                return True
+        else:
+            context.bounded_data = None
+    if not bounded_lookup_f64(_lookup, _first_key, _last_key, context, table._owner, key, column, below, value):
+        return False
+    if context._private_owner:
+        context.clamped_source = table
+        context.clamped_column = column
+    return True
+
+
 cdef long long lookup_int(object function, tuple keywords, object source, object key, object column=_missing, object default=_missing) except? -1:
     if function is not _lookup_int_fn:
         return forward_call(function, keywords, ('source', 'key', 'column', 'default'),
@@ -1447,27 +1952,46 @@ cdef object lookup_object(object function, tuple keywords, object source, object
     return _explicit_value(source,key,column,default)
 
 
+import pandas as _pandas
 from pandas.core.dtypes.missing import isna as _pandas_isna
 from pandas._libs.missing import NA as _pandas_NA
 from pandas._libs.tslibs.nattype import NaT as _pandas_NaT
+from modelx_helpers.pandas_inputs import isna as _prepared_isna
 cdef object _is_missing_fn = _native_operations['is_missing']
 
 
-cdef bint is_missing(object function, tuple keywords, object predicate, object value) except? -1:
+cdef inline int _scalar_isna(object value) except -2:
     cdef double number
+    if value is None or value is _pandas_NA or value is _pandas_NaT:
+        return 1
+    if type(value) in (int, bool) or type(value) in _numpy_integer_keys or type(value) is _numpy_bool_key:
+        return 0
+    if isinstance(value, (str, bytes)):
+        return 0
+    if type(value) is float or type(value) in _numpy_float_keys:
+        number = PyFloat_AsDouble(value)
+        return number != number
+    return -1
+
+
+cdef object isna(object function, object value):
+    cdef int missing
+    if function is _prepared_isna and _pandas.isna is _pandas_isna:
+        missing = _scalar_isna(value)
+        if missing >= 0:
+            return missing != 0
+    return function(value)
+
+
+cdef bint is_missing(object function, tuple keywords, object predicate, object value) except? -1:
+    cdef int missing
     if function is not _is_missing_fn:
         return forward_call(function, keywords, ('predicate', 'value'),
                             (predicate, value), omitted_argument)
     if predicate is _pandas_isna:
-        if value is None or value is _pandas_NA or value is _pandas_NaT:
-            return True
-        if type(value) in (int, bool) or type(value) in _numpy_integer_keys or type(value) is _numpy_bool_key:
-            return False
-        if isinstance(value, (str, bytes)):
-            return False
-        if type(value) is float or type(value) in _numpy_float_keys:
-            number = PyFloat_AsDouble(value)
-            return number != number
+        missing = _scalar_isna(value)
+        if missing >= 0:
+            return missing
     return _typed_bool(predicate(value))
 
 
@@ -1480,10 +2004,29 @@ from modelx_helpers.table_operations import row as _row, column as _column
 cdef extern from "Python.h":
     object _record_alloc "PyType_GenericAlloc"(PyTypeObject*, Py_ssize_t)
 
+cdef tuple _prepared_row_metadata(tuple metadata, tuple columns, bint preserve_scalar_types):
+    cdef object selected
+    cdef tuple items
+    cdef list records = []
+    cdef Py_ssize_t i
+    for i, values in enumerate(metadata[4]):
+        items = tuple(zip(columns, values))
+        selected = _record_alloc(<PyTypeObject*>Record, 0)
+        PyObject_GenericSetAttr(selected, '_items', items)
+        PyObject_GenericSetAttr(selected, '_index', MappingProxyType(dict(items)))
+        PyObject_GenericSetAttr(selected, '_native_groups', {})
+        PyObject_GenericSetAttr(selected, '_preserve_scalar_types', preserve_scalar_types)
+        PyObject_GenericSetAttr(selected, '_metadata', ('row', metadata[2], metadata[5][i],
+                                                     metadata[8][i], metadata[6], metadata[7]))
+        records.append(selected)
+    # Keep the legacy scalar tuples readable by previously compiled models.
+    return (*metadata, tuple(records))
+
+
 cdef object row(object function, tuple keywords, object table, object key):
     cdef Py_ssize_t position
-    cdef tuple metadata, values, columns, items
-    cdef object result, spec
+    cdef tuple metadata
+    cdef object prepared, index, spec
     if function is not _row or type(table) is not Table:
         return forward_call(function, keywords, ('table', 'key'), (table, key), omitted_argument)
     metadata = table._metadata
@@ -1491,6 +2034,13 @@ cdef object row(object function, tuple keywords, object table, object key):
         raise ValueError('row requires table(..., rows=True) with pandas row metadata')
     if metadata[4] is None:
         raise ValueError('row requires table(..., rows=True)')
+    prepared = metadata[10] if len(metadata) > 10 else None
+    if prepared is not None and type(key) is int:
+        # A matching exact integer label can read the prepared row through
+        # the existing key index. Other domains keep their pandas key rules.
+        index = table._positions.get(key)
+        if index is not None and type(table._keys[index]) is int:
+            return prepared[index]
     if type(key) is bool and table._index_error is not None:
         spec = table._index_error._index
         if not spec.get('row_bool_labels', spec['boolean_modes'][0] == 1):
@@ -1498,17 +2048,9 @@ cdef object row(object function, tuple keywords, object table, object key):
     position = indexed_position(table, key)
     if position < 0:
         return forward_call(function, keywords, ('table', 'key'), (table, key), omitted_argument)
-    values = metadata[4][position]
-    columns = table._columns
-    items = tuple((columns[i], values[i]) for i in range(len(columns)))
-    result = _record_alloc(<PyTypeObject*>Record, 0)
-    PyObject_GenericSetAttr(result, '_items', items)
-    PyObject_GenericSetAttr(result, '_index', MappingProxyType(dict(items)))
-    PyObject_GenericSetAttr(result, '_native_groups', {})
-    PyObject_GenericSetAttr(result, '_preserve_scalar_types', getattr(table, '_preserve_scalar_types', False))
-    PyObject_GenericSetAttr(result, '_metadata', ('row', metadata[2], metadata[5][position],
-                                                metadata[8][position], metadata[6], metadata[7]))
-    return result
+    if prepared is not None:
+        return prepared[position]
+    return _row(table, key)
 
 
 cdef object column(object function, tuple keywords, object table, object name, object report=_missing):
@@ -1786,6 +2328,8 @@ cdef object _native_report_table(object frame, bint with_rows, bint encoded_erro
                 (_group_float64,) * height if with_rows else (), {},
                 flags._allows_duplicate_labels, row_names if with_rows else (),
                 (column_dtype, column_axis._name))
+    if with_rows:
+        metadata = _prepared_row_metadata(metadata, columns, preserve_scalar_types)
     result = _record_alloc(<PyTypeObject*>Table, 0)
     PyObject_GenericSetAttr(result, '_keys', keys)
     PyObject_GenericSetAttr(result, '_values', values)
@@ -2001,6 +2545,8 @@ cdef object _native_frame_table(object frame, bint with_rows, bint with_metadata
             tuple(row_values) if with_rows else None,
             (row_dtype,) * height if with_rows else (), {},
             flags._allows_duplicate_labels, row_names if with_rows else (), axes[5])
+        if with_rows:
+            metadata = _prepared_row_metadata(metadata, columns, preserve_scalar_types)
     return _frame_owner(keys, tuple(values), columns, metadata,
                         encoded_errors, preserve_scalar_types)
 

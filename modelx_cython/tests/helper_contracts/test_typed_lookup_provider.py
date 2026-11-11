@@ -29,6 +29,46 @@ def floating(function,source,key,*args):
     else:value=native.lookup_float(function,(),source,key,args[0],args[1])
     return value
 
+def table_integer(source, long long key, column, default):
+    cdef native.NativeTable table = native.NativeTable(source)
+    return table.lookup_float(key, column, default)
+
+def table_boolean(source, bint key, column):
+    cdef native.NativeTable table = native.NativeTable(source)
+    return table.lookup_float(key, column)
+
+def table_object(source, object key, column):
+    cdef native.NativeTable table = native.NativeTable(source)
+    return table.lookup_float(key, column)
+
+def table_keys(source, key, first, last, contains):
+    cdef native.NativeTable table = native.NativeTable(source)
+    return (native.first_key(first, table), native.last_key(last, table),
+            native.contains(contains, table, key))
+
+def clamped(source, namespace, long long key, column, bint lower):
+    cdef native.NativeTable table = native.NativeTable(source)
+    cdef double result
+    if native.try_clamped_table_float(table, native.LookupContext(), lower, namespace, key, column, &result):
+        return result
+    return None
+
+def record_values(function, sources, key):
+    cdef native.LookupContext context = native.LookupContext()
+    return [native.record_field_float(function, context, source, key) for source in sources]
+
+def repeated_round(values):
+    cdef native.LookupContext context = native.LookupContext()
+    context._mx_enable_private_lookup()
+    return [native.repeated_round_float(context, round, x, digits) for x, digits in values]
+
+def repeated_table_values(source, selections):
+    cdef native.LookupContext context = native.LookupContext()
+    cdef native.NativeTable table = native.NativeTable(source)
+    context._mx_enable_private_lookup()
+    return [native.read_table_field_float(context, table, key, column)
+            for key, column in selections]
+
 def boolean(function,source,key,*args):
     cdef bint value
     if not args:value=native.lookup_bool(function,(),source,key)
@@ -85,6 +125,116 @@ def shared_sum_state(values):
     sys.path.insert(0,str(root))
     try:yield importlib.import_module('probe')
     finally:sys.path.remove(str(root));sys.modules.pop('probe',None);sys.modules.pop('native',None)
+
+
+def test_native_table_method_preserves_integer_default_and_object_keys(native):
+    table = Table((1, 2), ((0.25,), (0.5,)), ('rate',))
+    assert native.table_integer(table, 2, 'rate', '1.25') == 0.5
+    assert native.table_integer(table, 9, 'rate', '1.25') == 1.25
+    wide = 2**90
+    wide_table = Table((wide, ('M', 42)), ((0.75,), (0.125,)), ('rate',))
+    assert native.table_object(wide_table, wide, 'rate') == 0.75
+    assert native.table_object(wide_table, ('M', 42), 'rate') == 0.125
+
+
+def test_native_table_method_preserves_column_and_float_default(native):
+    source = Table((2,), ((0.25, 0.5, 0.75),), ('left', 'middle', 'right'))
+    assert native.table_integer(source, 2, 'left', -1.0) == 0.25
+    assert native.table_integer(source, 2, 'middle', -1.0) == 0.5
+    assert native.table_integer(source, 2, ''.join(('ri', 'ght')), -1.0) == 0.75
+    assert native.table_integer(source, 2, -1, -1.0) == 0.75
+    assert native.table_integer(source, 3, 'right', -1.0) == -1.0
+
+
+def test_native_table_method_keeps_boolean_index_identity(native):
+    import pandas as pd
+    from modelx_helpers.pandas_inputs import table
+
+    source = table(pd.DataFrame({'rate': [0.25]}, index=[1]), indexing='at')
+    with pytest.raises(KeyError):
+        native.table_boolean(source, True, 'rate')
+
+
+def test_native_table_key_operations_use_the_owner(native):
+    import pandas as pd
+    from modelx_helpers.pandas_inputs import table
+
+    source = table(pd.DataFrame({'rate': [0.5, 0.25]}, index=[2, 1]))
+    operations = (h.first_key, h.last_key, h.contains)
+    codes = {operation.__code__ for operation in operations}
+    calls = []
+
+    def profile(frame, event, arg):
+        if event == 'call' and frame.f_code in codes:
+            calls.append(frame.f_code.co_name)
+
+    previous = sys.getprofile()
+    sys.setprofile(profile)
+    try:
+        assert native.table_keys(source, 1, *operations) == (1, 2, True)
+        assert native.table_keys(source, True, *operations) == (1, 2, False)
+    finally:
+        sys.setprofile(previous)
+    assert not calls
+    receiver_types = native.table_keys(source, 1, type, type, lambda value, key: type(value))
+    assert all(receiver_type.__name__ == 'NativeTable' for receiver_type in receiver_types)
+
+
+def test_clamped_table_matches_ordered_index_and_defers_custom_helpers(native, monkeypatch):
+    import pandas as pd
+    from modelx_helpers.pandas_inputs import table
+
+    source = table(pd.DataFrame({'rate': [0.5, 0.25, 0.75],
+                                 'note': ['b', 'a', 'c']}, index=[2, 1, 3]))
+    assert native.clamped(source, h, 0, 'rate', True) == 0.25
+    assert native.clamped(source, h, 0, 'rate', False) is None
+    assert native.clamped(source, h, 4, 'rate', False) == 0.75
+    assert native.clamped(source, h, 2, 'rate', False) == 0.5
+    assert native.clamped(source, h, 2, 'missing', False) is None
+    monkeypatch.setattr(h, 'last_key', lambda table: 2)
+    assert native.clamped(source, h, 4, 'rate', True) is None
+
+
+def test_immutable_record_float_binding_observes_source_changes_and_custom_values(native):
+    import numpy as np
+
+    first = Record({'x': np.float64(1.25)}, preserve_scalar_types=True)
+    second = Record({'x': np.float64(2.5)}, preserve_scalar_types=True)
+    assert native.record_values(h.lookup_float, [first, first, second, first], 'x') == [
+        1.25, 1.25, 2.5, 1.25]
+    assert native.record_values(lambda source, key: 7.0, [first, first], 'x') == [7.0, 7.0]
+
+    class ChangingFloat:
+        calls = 0
+
+        def __float__(self):
+            self.calls += 1
+            return float(self.calls)
+
+    value = ChangingFloat()
+    record = Record({'x': value}, preserve_scalar_types=True)
+    assert native.record_values(h.lookup_float, [record, record], 'x') == [1.0, 2.0]
+
+
+def test_single_row_float_binding_keeps_each_column_separate(native):
+    import pandas as pd
+    from modelx_helpers.pandas_inputs import table
+
+    source = table(pd.DataFrame({'initial': [18.0], 'years': [15], 'note': ['source']},
+                                index=['schedule']))
+    fields = [('schedule', 'initial'), ('schedule', 'years')] * 3
+    assert native.repeated_table_values(source, fields) == [18.0, 15.0] * 3
+    with pytest.raises(KeyError):
+        native.repeated_table_values(source, [*fields, ('other', 'years')])
+
+
+def test_repeated_round_keeps_exact_python_ties_digits_and_signed_zero(native):
+    import struct
+
+    values = [(2.675, 2), (2.675, 2), (2.675, 1), (-0.0, 2), (0.0, 2),
+              (-0.0, 2), (125.0, -1), (125.0, -1), (2.5, 1 << 62)]
+    for actual, (value, digits) in zip(native.repeated_round(values), values):
+        assert struct.pack('d', actual) == struct.pack('d', round(value, digits))
 
 @pytest.mark.parametrize('suffix,entry', [('int','integer'),('float','floating'),('bool','boolean'),('str','text')])
 @pytest.mark.parametrize('value',[True,0,2**53+1,2.5,'2.5','bad',None,float('nan'),2**100])

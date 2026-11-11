@@ -34,8 +34,9 @@ removes the failure without touching integer arithmetic at all.
 The proof is the conservative classifier below.  Every operand is
 :data:`KIND_FLOAT`, :data:`KIND_INT` or :data:`KIND_UNKNOWN`, and only
 numeric literals, the declaring cells' own parameters, calls to cells
-the resolver reaches, scalar references and arithmetic over those are
-ever known.  Everything else -- local variables, subscripts, module
+the resolver reaches, scalar references, single-assignment locals
+annotated with the builtin ``float``, and arithmetic over those are
+ever known. Everything else -- other locals, subscripts, module
 attributes, and anything inside a construct that binds names of its own,
 where a name can shadow a parameter of the cells -- is unknown, and an
 unknown operand leaves the power exactly as modelx exported it.  A power
@@ -60,7 +61,7 @@ import libcst as cst
 from modelx_cython.consts import CY_MOD, MX_POW, MX_SYS_MOD
 from modelx_cython.typedefs import CY_FLOAT_T, CY_INT_T
 from modelx_cython.usage import RESOLVED, CellsResolver, _extract_self_chain
-from modelx_cython.scopes import OPAQUE_SCOPES as _OPAQUE_SCOPES
+from modelx_cython.scopes import CstFacts, OPAQUE_SCOPES as _OPAQUE_SCOPES, lexical_nodes
 
 _logger = logging.getLogger(__name__)
 
@@ -315,6 +316,8 @@ def rewrite_powers(
     ref_kinds: Mapping[str, Mapping[str, str]],
     cls_fqname: str,
     cells,
+    *,
+    builtin_float=False,
 ) -> cst.FunctionDef:
     """Rewrite the provably real powers in one method body.
 
@@ -331,6 +334,8 @@ def rewrite_powers(
         Fqname of the class the method belongs to.
     cells : CombinedCellsInfo
         The cells the method implements, for its parameter types.
+    builtin_float : bool
+        Whether the formula's lexical float binding is the builtin.
 
     Returns
     -------
@@ -354,6 +359,19 @@ def rewrite_powers(
             param_kinds[param] = kind_of_type_expr(
                 cells.get_argtype_expr(param, c_style=True)
             )
+    if builtin_float and isinstance(node.body, cst.IndentedBlock):
+        declarations = [
+            decl.target.value for decl in lexical_nodes(node.body.body)
+            if isinstance(decl, cst.AnnAssign) and isinstance(decl.target, cst.Name)
+            and isinstance(decl.annotation.annotation, cst.Name)
+            and decl.annotation.annotation.value == 'float' and decl.value is not None
+        ]
+        if declarations:
+            facts = CstFacts(node.body.body)
+            # Cython gives an unshadowed float local a double declaration.
+            param_kinds.update((name, KIND_FLOAT) for name in declarations
+                               if facts.stores[name] == 1 and name not in cells.params
+                               and name not in facts.deleted)
     rewriter = _PowerRewriter(
         OperandKind(resolver, cells_kinds, ref_kinds, cls_fqname, param_kinds), memo
     )

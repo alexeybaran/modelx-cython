@@ -179,6 +179,12 @@ class RuntimeCellsInfo:     # TODO: Create base class RuntimeBaseMemberInfo
         self.has_negative_args = False
         self._init_arg_types(traces)
         self.ret_type = self._init_ret_type(traces)
+        table_type = 'modelx_helpers.immutable_inputs.Table'
+        self.declared_table_result = all(
+            trace.func.__annotations__.get('return') == table_type
+            and f'{type(trace.ret_val).__module__}.{type(trace.ret_val).__qualname__}' == table_type
+            for trace in traces
+        )
 
     def has_args(self):
         """Return whether the cells method takes arguments.

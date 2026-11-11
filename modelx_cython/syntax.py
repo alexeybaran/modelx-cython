@@ -41,11 +41,15 @@ def arguments(node, name=None, count=None):
 def literal_value(node):
     """Decode CST literals, never execute names, calls or expressions.
 
-    LibCST owns token decoding (its evaluated_value uses literal_eval).
-    This does not parse formula bodies into a second analysis tree.
+    Decode numeric tokens directly and let LibCST decode string escapes.
     """
-    if isinstance(node, (cst.Integer, cst.Float, cst.Imaginary, cst.SimpleString,
-                         cst.ConcatenatedString)):
+    if isinstance(node, cst.Integer):
+        return int(node.value, 0)
+    if isinstance(node, cst.Float):
+        return float(node.value)
+    if isinstance(node, cst.Imaginary):
+        return complex(node.value)
+    if isinstance(node, (cst.SimpleString, cst.ConcatenatedString)):
         value = node.evaluated_value
         if value is None:
             raise ValueError('formatted strings are not literals')

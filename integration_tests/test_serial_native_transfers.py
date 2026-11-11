@@ -16,6 +16,18 @@ def test_native_transfers(tmp_path):
         space.new_cells('divisible', 'lambda t, n: t % n == 0')
         space.new_cells('offset', 'lambda t, n: (t - 1) % n != 0')
         space.new_cells('factor', 'lambda i, b, e: b ** e')
+        space.new_cells('duration', 'lambda t: t')
+        space.new_cells('fraction', 'def fraction(t):\n    m = duration(t) + 1\n    return (m / 12) * 0.05\n')
+        space.new_cells('horizon', 'lambda: 1200')
+        space.new_cells('piecewise', textwrap.dedent('''\
+            def piecewise(t):
+                year = duration(t)
+                if year >= horizon() // 12 - 1:
+                    return 0.0
+                if year == 1:
+                    return min(year, 9) * 0.25
+                return max(0.1 - (0.04 / 3.0) * (year - 1), 0.06)
+            '''))
         model.export(tmp_path / 'exported')
     finally:
         model.close()
@@ -23,7 +35,8 @@ def test_native_transfers(tmp_path):
     (tmp_path / 'sample.py').write_text(
         'from exported import mx_model\n'
         's = mx_model.Policy[1]\n'
-        's.derived(0); s.derived(3); s.divisible(-7, -3); s.offset(-7, -3); s.factor(0, 4.0, 0.5)\n',
+        's.derived(0); s.derived(3); s.divisible(-7, -3); s.offset(-7, -3); s.factor(0, 4.0, 0.5)\n'
+        's.fraction(1); s.fraction(3); s.piecewise(1); s.piecewise(2)\n',
         encoding='utf-8')
     (tmp_path / 'spec.py').write_text(repr({
         'dense_bounds_proofs': True,
@@ -43,6 +56,9 @@ def test_native_transfers(tmp_path):
     assert '_mx_inbounds_exact' in generated and '_mx_exact_receiver' in generated
     assert '_mx_divisible(' in generated and '_mx_divisible_after_decrement(' in generated
     assert '_mx_memo_pow(' in generated
+    assert '_mx_checked_quotient:' in generated
+    assert 'year: _mx_cy.longlong' in generated
+    assert '_mx_cy.cast(object, year)' in generated
     (tmp_path / 'override.pyx').write_text(textwrap.dedent('''\
         # cython: freethreading_compatible=True
         from exported_cy._mx_classes cimport _c_Policy
@@ -72,6 +88,12 @@ def test_native_transfers(tmp_path):
             for n in (-(1 << 63), -3, -1, 1, 3):
                 assert s.divisible(t, n) == (t % n == 0)
                 assert s.offset(t, n) == ((t - 1) % n != 0)
+        for t in (-(1 << 63), -(1 << 25) - 1, -7, -1, 0, 7, 1 << 25, (1 << 63) - 1):
+            assert s.fraction(t).hex() == (((t + 1) / 12) * 0.05).hex()
+        for t in (-(1 << 63), -(1 << 63) + 1, -7, 0, 1, 2, 99, (1 << 63) - 1):
+            expected = 0.0 if t >= 99 else (min(t, 9) * 0.25 if t == 1
+                                            else max(0.1 - (0.04 / 3.0) * (t - 1), 0.06))
+            assert s.piecewise(t).hex() == expected.hex()
         for operation in (s.divisible, s.offset):
             try:
                 operation(1, 0)

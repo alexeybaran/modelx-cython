@@ -1,4 +1,4 @@
-"""Cython's ordinary scalar calls preserve numeric and callable semantics."""
+"""Guarded native rounding preserves exact scalar and callable semantics."""
 
 import math
 import subprocess
@@ -36,7 +36,7 @@ def test_native_builtin_math(tmp_path):
     subprocess.run([sys.executable, '-m', 'modelx_cython', 'exported'],
                    cwd=tmp_path, check=True)
     source = (tmp_path / 'exported_cy/_mx_classes.py').read_text(encoding='utf-8')
-    assert '_mx_round_one(' not in source and '_mx_round_digits(' not in source
+    assert '_mx_round_one(' in source and '_mx_round_digits(' in source
     assert '_mx_integral_math_call(' not in source
     probe = textwrap.dedent('''\
         import math

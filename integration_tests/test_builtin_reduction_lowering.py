@@ -63,6 +63,17 @@ def test_compiled_builtin_reduction_lowering(tmp_path):
         rewritten = cst.Module([HelperCalls(cls.refs, set()).rewrite(rewritten_formula)]).code
         methods.append('\n'.join('    ' + line if line else '' for line in rewritten.splitlines()))
         cold.extend(cst.Module([function]).code for function in pass_.fallbacks)
+    absolute = cst.parse_module(
+        'def absolute_total(self, n: _mx_cy.longlong) -> _mx_cy.double:\n'
+        '    return self.operations.sum_f64(abs(self.amount(i) - 3.0) for i in range(n))\n'
+    ).body[0]
+    lowering = NativeReductions(cls, info('double', ('n',)), set(), absolute,
+                               lambda: '_cold_absolute_total', True)
+    native = absolute.visit(lowering)
+    assert lowering.count == 1
+    rewritten = cst.Module([HelperCalls(cls.refs, set()).rewrite(native)]).code
+    methods.append('\n'.join('    ' + line if line else '' for line in rewritten.splitlines()))
+    cold.extend(cst.Module([function]).code for function in lowering.fallbacks)
     prefix = f'''import cython as _mx_cy
 from cython.cimports import {alias}
 from cython.cimports import {helper_alias}
@@ -130,6 +141,7 @@ p.set_hook(lambda i: i != 2)
 assert p.namespace_all_true(4) is False
 assert p.namespace_any_true(4) is True
 assert p.namespace_sum_f64(3) == 3.0
+assert p.absolute_total(3) == 4.5
 assert p.namespace_max_value(3) == 2.0
 assert p.namespace_all_true(0) is True
 assert p.namespace_sum_f64(0) == 0.0
