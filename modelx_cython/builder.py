@@ -355,6 +355,12 @@ class CombinedCellsInfo(LexicalCellsInfo):
         """
         self._object_param(arg, reason, formula_only=self.has_formula_def)
 
+    def restore_formula_param_type(self, arg: str) -> None:
+        """Retain the cached input type after lowering its formula rebinding."""
+        del self._formula_object_params[arg]
+        _logger.info("parameter '%s' of %s keeps its native input type after lowering",
+                     arg, self.formula_fqname)
+
     @cached_property
     def norm_type(self) -> type:
         """Normalized Python type of the cells' return value.

@@ -324,7 +324,7 @@ class NumericReturns(cst.CSTTransformer):
                 or not isinstance(after.body, cst.IndentedBlock) or len(after.body.body) < 4):
             return after
         body = after.body.body
-        native_clamp = self.clamped_table_method(body)
+        native_clamp = self.clamped_table_method(body, after)
         if native_clamp is not None:
             return after.with_changes(body=after.body.with_changes(body=native_clamp))
         fields = self.table_fields(body)
@@ -599,7 +599,30 @@ class NumericReturns(cst.CSTTransformer):
             f'{", ".join(map(code, args))}, _mx_cy.address({value}){index_arg}):\n    return {value}\n').body
         return (*body[:-4], *fast, *body[-4:])
 
-    def clamped_table_method(self, body):
+    def incoming_clamp_parameter(self, formula, base, key, clamp):
+        """Find a cached integer input whose terminal clamp can use its original type."""
+        if (formula is None or not self.cell.has_formula_def or not isinstance(base, cst.Name)
+                or base.value not in self.cell.params
+                or self.cell.get_argtype_expr(base.value, c_style=True) != 'long long'
+                or self.cell.get_argtype_expr(base.value, c_style=True, formula=True) != 'object'):
+            return None
+        if not {'eval', 'exec', 'globals', 'locals', 'object', 'vars'}.isdisjoint(Names(formula).names):
+            return None
+
+        from .parser import collect_param_rebinds
+        bindings = collect_param_rebinds(formula, (base.value,)).get(base.value, ())
+        expected_clamps = int(key.value == base.value)
+        if not bindings or sum(value is clamp.value for value in bindings) != expected_clamps:
+            return None
+        for value in bindings:
+            if value is clamp.value:
+                continue
+            cast = arguments(value, 'int', 1) if 'int' in self.builtin_keys else None
+            if not (cast and isinstance(cast[0], cst.Name) and cast[0].value == base.value):
+                return None
+        return base.value
+
+    def clamped_table_method(self, body, formula=None):
         """Use the owned table's native bounds for a typed clamp and scalar read."""
         from .builder import NATIVE_TABLE_PROVIDER
         if 'min' not in self.builtin_keys:
@@ -652,14 +675,29 @@ class NumericReturns(cst.CSTTransformer):
         first = bound(lower[1], 'first_key') if lower else None
         base = lower[0] if lower else upper[0]
         index_bound = isinstance(last, cst.Name) and last.value == 'None'
-        if ((lower and (first is None or not index_bound and not first.deep_equals(last)))
-                or not self.native_key(base, allow_bool=False)):
+        if lower and (first is None or not index_bound and not first.deep_equals(last)):
             return None
+        restored_parameter = None
+        if not self.native_key(base, allow_bool=False):
+            restored_parameter = self.incoming_clamp_parameter(formula, base, key, clamp)
+            if restored_parameter is None:
+                return None
         names = Names(cst.Module(body), used=self.cell.params)
         number, value = (names.reserve('_mx_clamp_' + name) for name in ('key', 'value'))
         module = cst.Module([])
         code = module.code_for_node
-        original_clamp = body[-2].visit(_ReplaceExpression(base, cst.Name(number)))
+        fallback_input = (cst.Name(number) if restored_parameter is None
+                          else cst.parse_expression(f'_mx_cy.cast(object, {number})'))
+        original_clamp = body[-2].visit(_ReplaceExpression(base, fallback_input))
+        fallback_lookup = lookup
+        if restored_parameter is not None:
+            # A Python table can supply a bound wider than the native input.
+            # Keep that key as an object instead of assigning it to the C parameter.
+            fallback_key = cst.Name(names.reserve('_mx_clamp_fallback_key'))
+            original_clamp = original_clamp.with_changes(body=(cst.AnnAssign(
+                fallback_key, cst.Annotation(cst.Name('object')),
+                value=self.single_statement(original_clamp).value),))
+            fallback_lookup = lookup.visit(_ReplaceExpression(lookup.args[0].value, fallback_key))
         alias = module_name(NATIVE_TABLE_PROVIDER)
         operation = 'read_clamped_table_float'
         namespace = first if lower and index_bound else last
@@ -672,8 +710,10 @@ class NumericReturns(cst.CSTTransformer):
             f'{value}: _mx_cy.double\n'
             f'if not {alias}.{operation}({", ".join(args)}):\n'
             f'    {code(original_clamp).strip()}\n'
-            f'    {value} = {code(lookup)}\n').body
+            f'    {value} = {code(fallback_lookup)}\n').body
         ret = body[-1].visit(_ReplaceExpression(lookup, cst.Name(value)))
+        if restored_parameter is not None:
+            self.cell.restore_formula_param_type(restored_parameter)
         return (*body[:-2], *prefix, ret)
 
     def clamped_lookup(self, call, ref):
