@@ -192,7 +192,7 @@ def make_dflt_cells(arg_types, defaults, spec=None, has_formula_def=True,
         "M._mx_classes", "_c_S", "foo", list(params), list(defaults),
         {p: cst.parse_expression(d) for p, d in defaults.items()})
     rt = types.SimpleNamespace(
-        ret_type=ReturnTypeInfo(float), arg_types=arg_types, has_negative_args=False,
+        ret_type=ReturnTypeInfo(float), arg_types=arg_types,
         max_args={p: 3 for p, t in arg_types.items() if t is int})
     cells = CombinedCellsInfo(None, lx, rt, spec or {})
     cells.has_formula_def = has_formula_def

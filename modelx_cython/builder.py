@@ -610,7 +610,8 @@ class CombinedCellsInfo(LexicalCellsInfo):
         """
         assert self.has_args() and self.has_typeinfo()
         if (self.is_int_args and self.is_real_value and not self.is_array_returned
-                and (not self._rt.has_negative_args or self.has_shifted_cache)):
+                and (not getattr(self._rt, 'has_negative_args', False)
+                     or self.has_shifted_cache)):
             from modelx_cython import automatic
             if automatic.enabled(self) and not automatic.dense_fits(self):
                 return False
@@ -622,7 +623,7 @@ class CombinedCellsInfo(LexicalCellsInfo):
     def has_shifted_cache(self):
         if not (self.has_typeinfo() and self.has_args() and self.is_int_args
                 and self.is_real_value and not self.is_array_returned
-                and self._rt.has_negative_args):
+                and getattr(self._rt, 'has_negative_args', False)):
             return False
         sizes = self.parent.cells_arg_sizes[tuple(self.params)]
         count = 1
