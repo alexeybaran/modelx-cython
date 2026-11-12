@@ -121,7 +121,7 @@ cdef class NativeTable:
     cdef long long _input_low, _input_high
     cdef Py_ssize_t _input_width
     cdef double lookup_float(self, KeyArg0 key, object column, object default=*) except? -1
-    cdef double lookup_clamped_float(self, KeyArg0 key, object column, object clamp, object default=*) except? -1
+    cdef double lookup_clamped_float(self, KeyArg0 key, object column, bint clamp_lower=*, object default=*) except? -1
     cdef object previous(self, KeyArg0 key, object column)
     cdef double interpolate_float(self, object key, object column) except? -1
     cpdef object row(self, object key)

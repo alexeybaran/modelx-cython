@@ -1622,24 +1622,32 @@ cdef class NativeTable:
             return self._owner.lookup_float(<object>key, column)
         return self._owner.lookup_float(<object>key, column, default)
 
-    cdef double lookup_clamped_float(self, KeyArg0 key, object column, object clamp,
+    cdef double lookup_clamped_float(self, KeyArg0 key, object column, bint clamp_lower=False,
                                     object default=_typed_missing) except? -1:
-        cdef TableView data
+        cdef PyObject* data = <PyObject*>self._numeric_view
+        cdef Py_ssize_t col
+        cdef double value
         if KeyArg0 is KeyInteger:
-            if type(clamp) is str and (clamp == 'upper' or clamp == 'both'):
-                if self._numeric_view is not None:
-                    data = <TableView>self._numeric_view
-                    if data.integral:
-                        if clamp == 'both' and key < data.first_integer:
-                            key = data.first_integer
-                        return self.lookup_float(<KeyInteger>min(key, data.last_integer), column, default)
-                if self._input_keys is not None:
-                    if clamp == 'both' and key < self._input_low:
-                        key = self._input_low
-                    return self.lookup_float(<KeyInteger>min(key, self._input_high), column, default)
+            if data != <PyObject*>None and (<TableView>data).integral:
+                col = endpoint_column(data, column)
+                if col < 0:
+                    col = numeric_column(<TableView>data, column)
+                if col >= 0:
+                    if clamp_lower and key < (<TableView>data).first_integer:
+                        key = (<TableView>data).first_integer
+                    key = min(key, (<TableView>data).last_integer)
+                    return _numeric_float_read(data, col, key,
+                                               _missing if default is _typed_missing else default)
+            elif self._input_keys is not None:
+                if clamp_lower and key < self._input_low:
+                    key = self._input_low
+                key = min(key, self._input_high)
+                if key >= self._input_low and _input_value(
+                        self, self._input_positions[key - self._input_low], column, &value):
+                    return value
         if default is _typed_missing:
-            return self._owner.lookup_clamped_float(<object>key, column, clamp)
-        return self._owner.lookup_clamped_float(<object>key, column, clamp, default)
+            return self._owner.lookup_clamped_float(<object>key, column, clamp_lower)
+        return self._owner.lookup_clamped_float(<object>key, column, clamp_lower, default)
 
     cdef object previous(self, KeyArg0 key, object column):
         cdef double value
