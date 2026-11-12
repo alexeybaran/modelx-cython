@@ -273,8 +273,8 @@ def test_native_views_leave_unread_object_keys_untouched(native, fault, indexed)
                 raise AssertionError('native admission ordered an unread key')
             return super().__gt__(other)
 
-    spec = (Record({'multi': False, 'pandas_columns': True,
-                    'row_bool_labels': False, 'boolean_modes': (2,)}) if indexed else None)
+    spec = (inputs.table(pd.DataFrame({'rate': [1.5, 2.5]}, index=[1, 23]), indexing='at')._index_error
+            if indexed else None)
     cases = [
         (lambda table: native.table_lookup(helpers.lookup, table, 1, 'rate'), 1.5),
         (lambda table: native.contextual_lookup(helpers.lookup, table, 1, 'rate'), 1.5),
