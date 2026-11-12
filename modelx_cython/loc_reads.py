@@ -29,6 +29,7 @@ table object, with the same meaning as in live modelx and exported Python. The c
 typed and untyped reads, with the reason, goes to the build's admission report.
 """
 
+import os
 import libcst as cst
 
 from .scopes import FormulaTransformer
@@ -287,13 +288,13 @@ class LocReads(FormulaTransformer):
         schema = self._schema(node.func.value.value)
         if schema is None or schema.get('__key__') != 'int':
             return None
-        if name == 'max':
+        if name == 'max' and os.environ.get('MX_CY_PLAIN_READS') != '1':
             # The declared spelling of the last key: later passes recognise a clamp on it.
             return node.with_changes(func=node.func.with_changes(attr=cst.Name('max_int')))
         from .helpers import module_name
         provider = 'modelx_cython.runtime._native_inputs'
         self.providers.add(provider)
-        function = 'table_first_int'
+        function = {'max': 'native_last_int', 'min': 'native_first_int'}[name]
         return cst.Call(func=cst.Attribute(cst.Name(module_name(provider)), cst.Name(function)),
                         args=[cst.Arg(node.func.value.value)])
 
@@ -303,7 +304,7 @@ class LocReads(FormulaTransformer):
                 and not original.args[0].keyword and not original.args[0].star):
             inner = updated.args[0].value
             if (isinstance(inner, cst.Call) and isinstance(inner.func, cst.Attribute)
-                    and inner.func.attr.value in ('max_int', 'table_first_int')):
+                    and inner.func.attr.value in ('max_int', 'native_last_int', 'native_first_int')):
                 return inner               # int() of the C integer bound is the bound
         for name in ('max', 'min'):
             if original.args or not isinstance(func, cst.Attribute) or func.attr.value != name:

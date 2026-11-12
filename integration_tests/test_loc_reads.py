@@ -73,3 +73,82 @@ def test_loc_reads_three_modes(tmp_path):
     assert cell('premium_full_key')['loc_reads_untyped'] == ['full key into a grouped table: no native grouped read']
     assert cell('column_by_name')['loc_reads_typed'] == 1      # a local bound once to a literal
     assert cell('column_computed')['loc_reads_untyped'] == ['column is not a string literal']
+
+
+def _edge_model():
+    model = mx.new_model('LocReadEdges')
+    data = model.new_space('Data', refs={
+        'pdn': pdn,
+        # integer keys with gaps, a text column holding numbers and words, a non-identifier column
+        'gaps': pd.DataFrame({'v': [0.5, 1.5, 2.5, 3.5], 'txt': ['1.25', 'abc', '2', 'x'],
+                              'sc per 1000': [9.0, 8.0, 7.0, 6.0], 'n': [1, 2, 3, 4]},
+                             index=pd.Index([1, 2, 5, 9], name='k')),
+        'named': pd.DataFrame({'v': [10.0, 20.0, 30.0], 'note': ['a', 'b', 'c']},
+                              index=pd.Index(['UL9', 'UL5', 'X'], name='id')),
+        'multi': pd.DataFrame({'plan': ['A', 'A', 'B', 'B'], 'year': [1, 2, 1, 2], 'v': [1.0, 2.0, 3.0, 4.0],
+                               'note': ['p', 'q', 'r', 's']}).set_index(['plan', 'year']),
+        'flags': pd.DataFrame({'v': [100.0, 200.0], 'note': ['t', 'f']}, index=pd.Index([True, False], name='f'))})
+    data.new_cells('gap_table', 'lambda: pdn.table(gaps)')
+    data.new_cells('named_table', 'lambda: pdn.table(named)')
+    data.new_cells('multi_table', 'lambda: pdn.table(multi)')
+    data.new_cells('flag_table', 'lambda: pdn.table(flags)')
+    proj = model.new_space('Projection', refs={'data': data, 'pdn': pdn, 'ids': ('UL9', 'X', 'nope')})
+
+    def probe(name, expression, args='t'):
+        return (f'def {name}({args}):\n    try:\n        return {expression}\n'
+                f'    except KeyError:\n        return -1.0\n    except ValueError:\n        return -2.0\n'
+                f'    except IndexError:\n        return -3.0\n')
+    formulas = {
+        'gap': probe('gap', 'float(data.gap_table().loc[t, "v"])'),
+        'gap_bounds': probe('gap_bounds', 'float(data.gap_table().loc[min(max(t, int(data.gap_table().index.min())), int(data.gap_table().index.max())), "n"])'),
+        'gap_text': probe('gap_text', 'float(data.gap_table().loc[t, "txt"])'),
+        'gap_odd_column': probe('gap_odd_column', 'float(data.gap_table().loc[t, "sc per 1000"])'),
+        'gap_unknown_column': probe('gap_unknown_column', 'float(data.gap_table().loc[t, "nope"])'),
+        'gap_default': 'def gap_default(t):\n    return data.gap_table().lookup_float(t, "v", -7.0)',
+        'gap_text_method': probe('gap_text_method', 'data.gap_table().lookup_float(t, "txt")'),
+        'gap_row': probe('gap_row', 'float(data.gap_table().loc[t]["v"]) + data.gap_table().loc[t]["n"]'),
+        'named': probe('named', 'float(data.named_table().loc[ids[t % 3], "v"])'),
+        'multi': probe('multi', 'float(data.multi_table().loc[("A" if t % 2 else "B", t % 3), "v"])'),
+        'flag': probe('flag', 'float(data.flag_table().loc[t % 2 == 0, "v"])'),
+        'edge_total': ('def edge_total():\n    return sum(gap(t) + gap_bounds(t) + gap_text(t) + gap_odd_column(t)'
+                       ' + gap_unknown_column(t) + gap_default(t) + gap_text_method(t) + gap_row(t) + named(t) + multi(t) + flag(t)'
+                       ' for t in range(11))'),
+    }
+    for name, source in formulas.items():
+        proj.new_cells(name, source)
+    return model
+
+
+def test_loc_read_edges_three_modes(tmp_path):
+    """Gaps, unknown keys and columns, non-numeric cells, defaults, rows and non-integer keys."""
+    model = _edge_model()
+    try:
+        live = model.Projection.edge_total()
+        parts = {name: [model.Projection.cells[name](t) for t in range(11)]
+                 for name in ('gap', 'gap_text', 'gap_text_method', 'gap_default', 'gap_unknown_column',
+                              'gap_row', 'named', 'multi', 'flag')}
+        model.export(tmp_path / 'exported', locked_spaces=['Data'])
+    finally:
+        model.close()
+    # live semantics the compiled reads must reproduce
+    assert parts['gap'][:6] == [-1.0, 0.5, 1.5, -1.0, -1.0, 2.5]           # keys in a gap raise KeyError
+    assert parts['gap_text'][:3] == [-1.0, 1.25, -2.0]                     # float('abc') raises ValueError
+    assert parts['gap_text_method'][:3] == [-1.0, 1.25, -2.0]
+    assert parts['gap_default'][:4] == [-7.0, 0.5, 1.5, -7.0]
+    assert set(parts['gap_unknown_column']) == {-1.0}                      # pandas: unknown column is a KeyError
+    assert parts['named'][:3] == [10.0, 30.0, -1.0]
+    (tmp_path / 'sample.py').write_text('from exported import mx_model as m\nm.Projection.edge_total()\n',
+                                        encoding='utf-8')
+    subprocess.run([sys.executable, '-m', 'modelx_cython', 'exported', '--sample', 'sample.py', '--no-spec'],
+                   cwd=tmp_path, check=True)
+    names = list(parts)
+    script = ('from {0} import mx_model as m; P = m.Projection; '
+              'print(repr([P.edge_total()] + [[getattr(P, n)(t) for t in range(11)] for n in {1!r}]))')
+    for package in ('exported', 'exported_cy'):
+        got = subprocess.run([sys.executable, '-c', script.format(package, names)],
+                             cwd=tmp_path, check=True, capture_output=True, text=True).stdout.strip()
+        assert got == repr([live] + [parts[n] for n in names]), (package, got)
+    admission = json.loads((tmp_path / 'exported_cy/_mx_admission.json').read_text())
+    typed = {name: admission[f'exported_cy._mx_classes._c_Projection._f_{name}']['loc_reads_typed']
+             for name in ('gap', 'gap_bounds', 'gap_odd_column', 'named', 'multi', 'flag')}
+    assert typed == {'gap': 1, 'gap_bounds': 3, 'gap_odd_column': 1, 'named': 1, 'multi': 1, 'flag': 1}

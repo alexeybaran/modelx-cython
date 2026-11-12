@@ -25,6 +25,35 @@ from modelx_cython._call_layout cimport forward_call
 
 __modelx_cython_provider__ = (1, 'modelx_cython.runtime._native_inputs', 'owned-table-1')
 
+# Equality of two exact str objects without Python calls or reference counting. Equal
+# text has equal length and the same canonical storage kind (PEP 393), so memcmp decides.
+cdef extern from *:
+    """
+    #include <string.h>
+    static CYTHON_INLINE int __mx_text_same(PyObject* a, PyObject* b) {
+        Py_ssize_t n;
+        if (a == b) return 1;
+        n = PyUnicode_GET_LENGTH(a);
+        if (n != PyUnicode_GET_LENGTH(b) || PyUnicode_KIND(a) != PyUnicode_KIND(b)) return 0;
+        return memcmp(PyUnicode_DATA(a), PyUnicode_DATA(b), (size_t)n * PyUnicode_KIND(a)) == 0;
+    }
+    """
+    PyObject* _tuple_item "PyTuple_GET_ITEM"(PyObject* items, Py_ssize_t index) noexcept nogil
+
+cdef extern from *:
+    """
+    typedef struct { PyObject* key; Py_ssize_t row; } __mx_key_row;
+    #define __mx_load_key_row(p) __atomic_load_n((p), __ATOMIC_ACQUIRE)
+    #define __mx_store_key_row(p, v) __atomic_store_n((p), (v), __ATOMIC_RELEASE)
+    """
+    ctypedef struct KeyRowMemo "__mx_key_row":
+        PyObject* key
+        Py_ssize_t row
+    KeyRowMemo* _load_key_row "__mx_load_key_row"(KeyRowMemo** slot) noexcept nogil
+    void _store_key_row "__mx_store_key_row"(KeyRowMemo** slot, KeyRowMemo* value) noexcept nogil
+    bint _text_same "__mx_text_same"(PyObject* left, PyObject* right) noexcept nogil
+
+
 cdef object _missing = object()
 cdef object omitted_argument = _missing
 cdef object _lookup = _native_operations['lookup']
@@ -931,6 +960,7 @@ cdef object _original_key(const KeyPart* parts, Py_ssize_t count, bint tuple_key
             values.append(<object>parts[i].text)
     return tuple(values) if tuple_key else values[0]
 
+@cython.final
 cdef class KeyedView:
     cdef signed char[::1] boolean_modes
     cdef object owner
@@ -1046,26 +1076,49 @@ cdef class KeyedView:
                 value = (value ^ <unsigned long long>self.numbers[position]) * <unsigned long long>1099511628211
         return value
 
+    @cython.boundscheck(False)
+    @cython.wraparound(False)
     cdef bint equal(self, Py_ssize_t row, const KeyPart* parts) except -1:
         cdef Py_ssize_t i, position
+        cdef long long kind
+        cdef PyObject* stored
+        cdef bint modes = self.boolean_modes.shape[0] != 0
         for i in range(self.width):
             position = row * self.width + i
-            if self.boolean_modes.shape[0] and self.boolean_modes[i] and (
-                    (parts[i].kind == _KEY_BOOL) != (self.kinds[position] == _KEY_BOOL)):
+            kind = self.kinds[position]
+            if modes and self.boolean_modes[i] and (
+                    (parts[i].kind == _KEY_BOOL) != (kind == _KEY_BOOL)):
                 return False
             if parts[i].kind == _KEY_TEXT:
-                if self.kinds[position] != _KEY_TEXT:
+                if kind != _KEY_TEXT:
                     return False
-                if PyUnicode_Compare(<object>parts[i].text, self.text[position]) != 0:
+                stored = _tuple_item(<PyObject*>self.text, position)
+                if not _text_same(parts[i].text, stored):
                     return False
             elif parts[i].kind == _KEY_FLOAT:
-                if self.kinds[position] != _KEY_FLOAT or parts[i].number != self.numbers[position]:
+                if kind != _KEY_FLOAT or parts[i].number != self.numbers[position]:
                     return False
             else:
-                if self.kinds[position] not in (_KEY_INT, _KEY_BOOL, _KEY_FLOAT_INT) or parts[i].number != self.numbers[position]:
+                if (kind != _KEY_INT and kind != _KEY_BOOL and kind != _KEY_FLOAT_INT) or parts[i].number != self.numbers[position]:
                     return False
         return True
 
+    cdef void fill_index(self, KeyIndex* index) noexcept:
+        """Expose the admitted, non-empty index as raw pointers; the caller keeps self alive."""
+        index.slots = &self.slots[0]
+        index.hashes = &self.hashes[0]
+        index.kinds = &self.kinds[0]
+        index.numbers = &self.numbers[0]
+        index.text = <PyObject*>self.text
+        index.modes_count = self.boolean_modes.shape[0]
+        index.modes = &self.boolean_modes[0] if index.modes_count else NULL
+        index.width = self.width
+        index.mask = self.mask
+        index.rows = self.rows
+        index.tuple_keys = self.tuple_keys
+
+    @cython.boundscheck(False)
+    @cython.wraparound(False)
     cdef Py_ssize_t find(self, const KeyPart* parts, Py_ssize_t count, bint tuple_key) except? -2:
         cdef unsigned long long code
         cdef Py_ssize_t slot, row
@@ -1282,6 +1335,11 @@ cdef void _pack_part(object value, KeyPart* part) except *:
 
 
 cdef bint _pack_key(object key, KeyPart* parts, Py_ssize_t* count, bint* tuple_key) except -1:
+    return _pack_key_into(key, parts, 4, count, tuple_key)
+
+
+cdef bint _pack_key_into(object key, KeyPart* parts, Py_ssize_t capacity, Py_ssize_t* count,
+                         bint* tuple_key) except -1:
     cdef Py_ssize_t i
     tuple_key[0] = type(key) is tuple
     if not tuple_key[0]:
@@ -1289,10 +1347,10 @@ cdef bint _pack_key(object key, KeyPart* parts, Py_ssize_t* count, bint* tuple_k
         _pack_part(key, &parts[0])
         return _native_parts(parts, 1)
     count[0] = len(key)
-    if count[0] > 4:
+    if count[0] > capacity:
         return False
     for i in range(count[0]):
-        _pack_part(key[i], &parts[i])
+        _pack_part(<object>PyTuple_GET_ITEM(key, i), &parts[i])
     return _native_parts(parts, count[0])
 
 
@@ -1603,6 +1661,8 @@ cdef class _NativeTableIndex:
 cpdef long long table_first_int(object table) except? -1:
     """``int(table.index.min())`` as a C integer; integer-keyed tables read their cached view."""
     cdef TableView data
+    if type(table) is NativeTable and (<NativeTable>table)._bounds_ready:
+        return (<NativeTable>table)._int_first
     owner = (<NativeTable>table)._owner if type(table) is NativeTable else table
     if type(owner) is Table:
         data = view(owner)
@@ -1614,6 +1674,8 @@ cpdef long long table_first_int(object table) except? -1:
 cpdef long long table_last_int(object table) except? -1:
     """``int(table.index.max())`` as a C integer; integer-keyed tables read their cached view."""
     cdef TableView data
+    if type(table) is NativeTable and (<NativeTable>table)._bounds_ready:
+        return (<NativeTable>table)._int_last
     owner = (<NativeTable>table)._owner if type(table) is NativeTable else table
     if type(owner) is Table:
         data = view(owner)
@@ -1629,6 +1691,67 @@ cdef long long _mx_exact_index(object value) except? -1:
     return value
 
 
+cdef inline unsigned long long _part_text_hash(PyObject* text) noexcept:
+    # Exact str only (_KEY_TEXT); its hash is cached and cannot fail.
+    return <unsigned long long>PyObject_Hash(<object>text)
+
+
+@cython.cdivision(True)
+cdef inline Py_ssize_t _index_find(const KeyIndex* index, const KeyPart* parts, Py_ssize_t count,
+                                   bint tuple_key) noexcept:
+    """KeyedView.find over raw pointers: the same hash, probe order and equality."""
+    cdef unsigned long long code = 1469598103934665603
+    cdef Py_ssize_t i, slot, row, position
+    cdef long long kind
+    cdef bint same
+    if not index.rows or count != index.width or tuple_key != index.tuple_keys:
+        return -1
+    code = (code ^ <unsigned long long>tuple_key) * <unsigned long long>1099511628211
+    code = (code ^ <unsigned long long>count) * <unsigned long long>1099511628211
+    for i in range(count):
+        if parts[i].kind == _KEY_TEXT:
+            code = (code ^ 3) * <unsigned long long>1099511628211
+            code = (code ^ _part_text_hash(parts[i].text)) * <unsigned long long>1099511628211
+        elif parts[i].kind == _KEY_FLOAT:
+            code = (code ^ 4) * <unsigned long long>1099511628211
+            code = (code ^ <unsigned long long>parts[i].number) * <unsigned long long>1099511628211
+        else:
+            code = (code ^ 1) * <unsigned long long>1099511628211
+            code = (code ^ <unsigned long long>parts[i].number) * <unsigned long long>1099511628211
+    slot = <Py_ssize_t>(code & <unsigned long long>index.mask)
+    while index.slots[slot] >= 0:
+        row = index.slots[slot]
+        if code == index.hashes[slot]:
+            same = True
+            for i in range(count):
+                position = row * count + i
+                kind = index.kinds[position]
+                if index.modes_count and index.modes[i] and (
+                        (parts[i].kind == _KEY_BOOL) != (kind == _KEY_BOOL)):
+                    same = False
+                elif parts[i].kind == _KEY_TEXT:
+                    same = kind == _KEY_TEXT and _text_same(parts[i].text, _tuple_item(index.text, position))
+                elif parts[i].kind == _KEY_FLOAT:
+                    same = kind == _KEY_FLOAT and parts[i].number == index.numbers[position]
+                else:
+                    same = ((kind == _KEY_INT or kind == _KEY_BOOL or kind == _KEY_FLOAT_INT)
+                            and parts[i].number == index.numbers[position])
+                if not same:
+                    break
+            if same:
+                return row
+        slot = (slot + 1) & index.mask
+    return -1
+
+
+from sys import intern as _intern_label
+
+cdef enum:
+    _TEXT_MEMOS = 64
+
+
+
+
 @cython.final
 cdef class NativeTable:
     """A Cython receiver for a Table owned by an ordinary Cell cache."""
@@ -1641,6 +1764,7 @@ cdef class NativeTable:
         self._owner = owner
         if type(owner) is Table:
             self._index_view = _NativeTableIndex(owner)
+            self._resolve(owner)
         if type(owner) is Table and owner._index_error is None:
             data = view(owner)
             if data.numeric:
@@ -1668,10 +1792,174 @@ cdef class NativeTable:
                     else:
                         self._single_label = keys[0]
 
+    cdef void _resolve(self, object owner) except *:
+        """Resolve the owner's read structures into C fields once; the owner is immutable.
+
+        Every typed read then works on these fields only: no Python attribute access, no dict
+        lookup and, for a literal column name, no string comparison on the read path.
+        """
+        cdef TableView data
+        cdef KeyedView cells
+        cache = owner._native_cache
+        names = cache.get(NativeTable)
+        if names is None:
+            names = cache.setdefault(NativeTable, tuple([
+                _intern_label(label) if type(label) is str else label for label in owner._columns]))
+        self._column_names = names
+        cached = cache.get(KeyedView)
+        if cached is None:
+            cached = cache.setdefault(KeyedView, KeyedView(owner))
+        cells = <KeyedView>cached
+        if cells.admitted and cells.rows and cells.value_width == len(self._column_names):
+            self._cells = cells
+            self._cell_values = &cells.values[0]
+            self._cell_numeric = &cells.numeric[0]
+            self._cell_width = cells.value_width
+            self._single_part = cells.width == 1 and not cells.tuple_keys
+            self._text_keys = []
+            cells.fill_index(&self._key_index)
+        keys = owner._keys
+        if keys and type(keys[0]) is int:
+            data = view(owner)
+            if data.integral:
+                # Bounds need only the ordered integer keys; values need the cell arrays too.
+                self._int_view = data
+                self._bounds_ready = True
+                self._int_first = data.first_integer
+                self._int_last = data.last_integer
+                if self._cells is not None and data.integers.shape[0] == cells.rows:
+                    self._int_ready = True
+                    self._int_contiguous = data.contiguous
+                    self._int_sorted = &data.integers[0]
+                    self._int_rows = &data.sorted_positions[0]
+                    self._int_count = data.integers.shape[0]
+
+    cdef Py_ssize_t _column_slot(self, object column) except? -2:
+        """The column's slot, or -1. Identity first (literal names are interned), then exact text."""
+        cdef Py_ssize_t i, width = self._cell_width
+        cdef PyObject* label = <PyObject*>column
+        cdef PyObject* names = <PyObject*>self._column_names
+        for i in range(width):
+            if _tuple_item(names, i) == label:
+                return i
+        if type(column) is str:
+            for i in range(width):
+                if _text_same(_tuple_item(names, i), label):   # Table columns are exact str
+                    return i
+        return -1
+
+    cdef void _remember_text(self, object key, Py_ssize_t row) noexcept:
+        """Publish (key, row) as the last text key read. Entries are immutable and owned by the
+        table until it is freed, and the table holds a reference to each key, so a reader that
+        loads any published pointer sees a complete entry whose key identity cannot be reused.
+        At most _TEXT_MEMOS entries are made per table; later keys use the hashed index only."""
+        cdef KeyRowMemo* entry
+        with cython.critical_section(self):
+            if self._text_count >= _TEXT_MEMOS:
+                return
+            entry = <KeyRowMemo*>PyMem_Malloc(sizeof(KeyRowMemo))
+            if entry == NULL:
+                return
+            entry.key = <PyObject*>key
+            entry.row = row
+            self._text_keys.append(key)
+            self._text_memos[self._text_count] = entry
+            self._text_count += 1
+            _store_key_row(<KeyRowMemo**>&self._last_text, entry)
+
+    def __dealloc__(self):
+        cdef Py_ssize_t i
+        for i in range(self._text_count):
+            PyMem_Free(self._text_memos[i])
+        self._text_count = 0
+
+    @cython.boundscheck(False)
+    @cython.wraparound(False)
+    cdef Py_ssize_t _int_row(self, long long key) noexcept:
+        """The row holding exactly ``key``, or -1 (a key between two rows is absent)."""
+        cdef Py_ssize_t lo = 0, hi = self._int_count, mid
+        if self._int_contiguous:
+            if self._int_first <= key <= self._int_last:
+                return <Py_ssize_t>self._int_rows[key - self._int_first]
+            return -1
+        while lo < hi:
+            mid = lo + (hi - lo) // 2
+            if self._int_sorted[mid] < key:
+                lo = mid + 1
+            else:
+                hi = mid
+        if lo < self._int_count and self._int_sorted[lo] == key:
+            return <Py_ssize_t>self._int_rows[lo]
+        return -1
+
+    cdef Py_ssize_t _keyed_row(self, object key) except? -2:
+        """The row of a hashable key through the owner's hashed view, or -1 when absent or not native."""
+        cdef KeyPart[8] parts
+        cdef KeyPart* wide
+        cdef Py_ssize_t count, row
+        cdef bint tuple_key
+        cdef object owner_key = key
+        if self._cells is None:
+            return -1
+        if _pack_key_into(owner_key, &parts[0], 8, &count, &tuple_key):
+            return _index_find(&self._key_index, &parts[0], count, tuple_key)
+        wide = _pack_wide_key(owner_key, &count) if count > 8 else NULL
+        if wide == NULL:
+            return -1
+        try:
+            row = _index_find(&self._key_index, wide, count, True)
+        finally:
+            PyMem_Free(wide)
+        return row
+
     cdef double lookup_float(self, KeyArg0 key, object column, object default=_typed_missing) except? -1:
         cdef PyObject* data = <PyObject*>self._numeric_view
         cdef double value
-        cdef Py_ssize_t col, last
+        cdef Py_ssize_t col, last, row, position, i
+        cdef KeyPart part
+        cdef KeyRowMemo* memo
+        cdef long long number
+        cdef int overflow = 0
+        # Resolved fields first: a hit is a column slot, a row and a numeric cell. Anything else
+        # (absent key or column, non-numeric cell, default) takes the general route below.
+        col = -1
+        for i in range(self._cell_width):
+            if _tuple_item(<PyObject*>self._column_names, i) == <PyObject*>column:
+                col = i
+                break
+        if col < 0:
+            col = self._column_slot(column)
+        if col >= 0:
+            if KeyArg0 is KeyInteger:
+                if self._int_ready:
+                    row = self._int_row(key)
+                else:
+                    key_int(&part, key, False)
+                    row = _index_find(&self._key_index, &part, 1, False)
+            elif KeyArg0 is bint:
+                key_int(&part, key, True)
+                row = _index_find(&self._key_index, &part, 1, False)
+            elif type(key) is int and self._int_ready:
+                # An exact Python int (e.g. a local Cython kept as an object): the integer index.
+                number = PyLong_AsLongLongAndOverflow(key, &overflow)
+                row = -1 if overflow else self._int_row(number)
+            elif type(key) is str and self._single_part:
+                memo = _load_key_row(<KeyRowMemo**>&self._last_text)
+                if memo != NULL and memo.key == <PyObject*>key:
+                    row = memo.row
+                else:
+                    part.kind = _KEY_TEXT
+                    part.number = 0
+                    part.text = <PyObject*>key
+                    row = _index_find(&self._key_index, &part, 1, False)
+                    if row >= 0:
+                        self._remember_text(key, row)
+            else:
+                row = self._keyed_row(key)
+            if row >= 0:
+                position = row * self._cell_width + col
+                if self._cell_numeric[position]:
+                    return self._cell_values[position]
         if KeyArg0 is KeyInteger:
             if data != <PyObject*>None:
                 # The receiver owns the view throughout the call, as in c8's
@@ -1839,7 +2127,7 @@ cdef bint try_clamped_table_float(NativeTable table, LookupContext context, bint
     cdef TableView data
     cdef unsigned char mask = 2 if lower else 1
     cdef dict bindings
-    if table._input_keys is None and table._numeric_view is None:
+    if not table._int_ready and table._input_keys is None and table._numeric_view is None:
         return False
     if not (context._private_owner and context.clamped_bindings_ready & mask
             and context.clamped_namespace is namespace):
@@ -1857,6 +2145,26 @@ cdef bint try_clamped_table_float(NativeTable table, LookupContext context, bint
                 return False
         if context._private_owner:
             context.clamped_bindings_ready |= mask
+    if table._int_ready:
+        # The NativeTable's resolved integer index and cells; the column slot is remembered
+        # in the context so read_clamped_table_float can answer inline next time.
+        if key < table._int_first:
+            if not lower:
+                return False
+            key = table._int_first
+        elif key > table._int_last:
+            key = table._int_last
+        row = table._int_row(key)
+        index = table._column_slot(column)
+        if row < 0 or index < 0 or not table._cell_numeric[row * table._cell_width + index]:
+            return False
+        if context._private_owner:
+            context.clamped_source = table
+            context.clamped_column = column
+            context.clamped_namespace = namespace
+            context.clamped_index = index
+        result[0] = table._cell_values[row * table._cell_width + index]
+        return True
     if snapshot != <PyObject*>None:
         if namespace is None and not lower:
             index = endpoint_column(snapshot, column)

@@ -103,6 +103,17 @@ cdef struct KeyPart:
     int kind
     long long number
     PyObject* text
+# Raw pointers into an admitted KeyedView's hash index, resolved once by a NativeTable that
+# keeps the view alive. Lookups through it touch no Python object except text key parts.
+cdef struct KeyIndex:
+    const long long* slots
+    const unsigned long long* hashes
+    const long long* kinds
+    const long long* numbers
+    PyObject* text
+    const signed char* modes
+    Py_ssize_t modes_count, width, mask, rows
+    bint tuple_keys
 cdef void key_int(KeyPart*, long long, bint) noexcept
 cdef void key_text(KeyPart*, object) noexcept
 cdef double lookup_keyed_float_f64(object, object, LookupContext, object,
@@ -115,6 +126,28 @@ ctypedef fused KeyArg0:
 
 cdef class NativeTable:
     cdef object _owner, _index_view, _numeric_view, _indexed_view, _single_label, _input_keys
+    # Resolved once at construction from the immutable owner; read without locks.
+    cdef tuple _column_names          # interned labels: a literal column name matches by identity
+    cdef object _cells, _int_view     # KeyedView / TableView keeping the arrays below alive
+    cdef const double* _cell_values
+    cdef const unsigned char* _cell_numeric
+    cdef Py_ssize_t _cell_width
+    cdef bint _bounds_ready, _int_ready, _int_contiguous, _single_part
+    cdef long long _int_first, _int_last
+    cdef const long long* _int_sorted
+    cdef const long long* _int_rows
+    cdef Py_ssize_t _int_count
+    cdef KeyIndex _key_index
+    # Last text key read (see _remember_text): entries are immutable and owned by the table.
+    cdef list _text_keys
+    cdef void* _text_memos[64]
+    cdef Py_ssize_t _text_count
+    cdef void* _last_text
+    cdef void _remember_text(self, object key, Py_ssize_t row) noexcept
+    cdef void _resolve(self, object owner) except *
+    cdef Py_ssize_t _column_slot(self, object column) except? -2
+    cdef Py_ssize_t _int_row(self, long long key) noexcept
+    cdef Py_ssize_t _keyed_row(self, object key) except? -2
     cdef const double* _input_values
     cdef const unsigned char* _input_numeric
     cdef const long long* _input_positions
@@ -190,19 +223,19 @@ cdef inline bint read_clamped_table_float(NativeTable table, LookupContext conte
                                           object column, double* result) except -1:
     cdef Py_ssize_t position
     cdef unsigned char mask = 2 if lower else 1
-    if (table._input_keys is not None and context._private_owner and context.clamped_bindings_ready & mask
+    if (table._int_ready and table._int_contiguous and context._private_owner
+            and context.clamped_bindings_ready & mask
             and context.clamped_source is table and context.clamped_column is column
             and context.clamped_namespace is namespace):
-        if key < table._input_low:
+        if key < table._int_first:
             if not lower:
                 return False
-            key = table._input_low
-        elif key > table._input_high:
-            key = table._input_high
-        position = (table._input_positions[key - table._input_low] * table._input_width
-                    + context.clamped_index)
-        if table._input_numeric[position]:
-            result[0] = table._input_values[position]
+            key = table._int_first
+        elif key > table._int_last:
+            key = table._int_last
+        position = table._int_rows[key - table._int_first] * table._cell_width + context.clamped_index
+        if table._cell_numeric[position]:
+            result[0] = table._cell_values[position]
             return True
         return False
     return try_clamped_table_float(table, context, lower, namespace, key, column, result)
@@ -256,3 +289,16 @@ cdef object table(object function, tuple keywords, object frame, object columns=
 
 cpdef long long table_first_int(object table) except? -1
 cpdef long long table_last_int(object table) except? -1
+
+
+# The bounds of an integer-keyed table, inlined into the calling module: a NativeTable resolved
+# its first and last integer key at construction. Anything else takes the cpdef functions above.
+cdef inline long long native_first_int(object table) except? -1:
+    if type(table) is NativeTable and (<NativeTable>table)._bounds_ready:
+        return (<NativeTable>table)._int_first
+    return table_first_int(table)
+
+cdef inline long long native_last_int(object table) except? -1:
+    if type(table) is NativeTable and (<NativeTable>table)._bounds_ready:
+        return (<NativeTable>table)._int_last
+    return table_last_int(table)
