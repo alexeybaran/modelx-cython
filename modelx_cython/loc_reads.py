@@ -198,29 +198,12 @@ class LocReads(FormulaTransformer):
                 # Records measured slower than the object .loc, so the read stays as written.
                 return None, 'full key into a grouped table: no native grouped read'
             return None, 'receiver is not a traced table'
-        receiver = self._direct(receiver)
         found = {schema.get(name) for name in names}
         if not found <= set(kinds):
             name = sorted(n for n in names if schema.get(n) not in kinds)[0]
             return None, f'column {name!r} has traced kind {schema.get(name)}'
         return cst.Call(func=cst.Attribute(receiver, cst.Name('lookup_float')),
                         args=(cst.Arg(key), cst.Arg(column))), None
-
-    def _direct(self, receiver):
-        """Replace a local bound once to a zero-argument Cell call by that call.
-
-        A Cell call returns its cached value, so reading through the call or through the
-        local is the same object; the direct form is the one later passes lower natively.
-        """
-        if isinstance(receiver, cst.Name) and receiver.value in self._aliases:
-            value = self._aliases[receiver.value]
-            if isinstance(value, cst.Call) and not value.args:
-                chain = _extract_self_chain(value.func)
-                if isinstance(chain, list) and chain:
-                    status, name = self.resolver.resolve_chain(self.space, chain)
-                    if status == RESOLVED and name in getattr(self.resolver, 'cached_cells', ()):
-                        return value
-        return receiver
 
     def _literal_values(self, node, depth=0):
         """The possible values of a column expression built only from string literals.
@@ -304,10 +287,13 @@ class LocReads(FormulaTransformer):
         schema = self._schema(node.func.value.value)
         if schema is None or schema.get('__key__') != 'int':
             return None
+        if name == 'max':
+            # The declared spelling of the last key: later passes recognise a clamp on it.
+            return node.with_changes(func=node.func.with_changes(attr=cst.Name('max_int')))
         from .helpers import module_name
         provider = 'modelx_cython.runtime._native_inputs'
         self.providers.add(provider)
-        function = {'max': 'table_last_int', 'min': 'table_first_int'}[name]
+        function = 'table_first_int'
         return cst.Call(func=cst.Attribute(cst.Name(module_name(provider)), cst.Name(function)),
                         args=[cst.Arg(node.func.value.value)])
 
@@ -317,7 +303,7 @@ class LocReads(FormulaTransformer):
                 and not original.args[0].keyword and not original.args[0].star):
             inner = updated.args[0].value
             if (isinstance(inner, cst.Call) and isinstance(inner.func, cst.Attribute)
-                    and inner.func.attr.value in ('table_last_int', 'table_first_int')):
+                    and inner.func.attr.value in ('max_int', 'table_first_int')):
                 return inner               # int() of the C integer bound is the bound
         for name in ('max', 'min'):
             if original.args or not isinstance(func, cst.Attribute) or func.attr.value != name:
