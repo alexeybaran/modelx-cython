@@ -219,7 +219,7 @@ class CheckedArithmetic:
 
     def _integer_locals(self, body):
         stores = CstFacts(body).stores
-        return {node.targets[0].target.value for node in statements(body)
+        return {node.targets[0].target.value: node for node in statements(body)
                 if isinstance(node, cst.Assign) and len(node.targets) == 1
                 and isinstance(node.targets[0].target, cst.Name)
                 and stores[node.targets[0].target.value] == 1 and self.native_call(node.value)}
@@ -505,38 +505,46 @@ class CheckedArithmetic:
 
         return module.visit(NativeLocal()).body
 
-    def integer_product(self, body):
-        native_locals = self._integer_locals(body)
-        owner = self
+    def exact_integer_returns(self, body):
+        """Keep compound terminal arithmetic native under a proven bound.
 
-        class Product(cst.CSTTransformer):
-            def visit_FunctionDef(inner, node):
-                return False
+        Stage signed Cell results and their locals once. Outside the bound,
+        use exact object arithmetic until the final signed return conversion.
+        """
+        assignments = {node: name for name, node in self._integer_locals(body).items()}
+        if not assignments:
+            return body
+        available, replacements = set(), {}
+        for statement in body:
+            for line in lexical_nodes((statement,)):
+                if not (isinstance(line, cst.SimpleStatementLine) and len(line.body) == 1
+                        and isinstance(line.body[0], cst.Return)):
+                    continue
+                value = line.body[0].value
+                if not (isinstance(value, cst.BinaryOperation)
+                        and any(isinstance(part, cst.BinaryOperation) for part in (value.left, value.right))
+                        and self.integer_interval(value, locals_=available) is not None
+                        and self.integer_interval(value, signed=True, locals_=available) is None):
+                    continue
+                parts = tuple(walk(value))
+                if not (any(isinstance(part, cst.Name) and part.value in available for part in parts)
+                        and any(self.native_call(part) for part in parts)):
+                    continue
+                self.inputs = []
+                captured = self.capture(value, available)
+                assert captured is not None
+                source = self.statements((captured,), lambda result: result)
+                replacements[line] = cst.FlattenSentinel(cst.parse_module(source).body)
+            available.update(assignments[node] for node in statements((statement,)) if node in assignments)
 
-            visit_ClassDef = visit_Lambda = visit_GeneratorExp = visit_FunctionDef
-            visit_ListComp = visit_SetComp = visit_DictComp = visit_FunctionDef
-
+        class ExactReturns(cst.CSTTransformer):
             def leave_SimpleStatementLine(inner, before, after):
-                if len(before.body) != 1 or not isinstance(before.body[0], cst.Return):
-                    return after
-                expr = before.body[0].value
-                if not (isinstance(expr, cst.BinaryOperation) and isinstance(expr.operator, cst.Multiply)
-                        and isinstance(expr.right, cst.BinaryOperation)
-                        and isinstance(expr.right.operator, cst.Subtract)
-                        and isinstance(expr.right.right, cst.Integer)
-                        and expr.right.right.evaluated_value == 1 and owner.native_call(expr.right.left)
-                        and isinstance(expr.left, cst.Name) and expr.left.value in native_locals):
-                    return after
-                owner.inputs = []
-                captured = owner.capture(expr, native_locals)
-                assert captured
-                native = owner.statements((captured,), lambda value: value)
-                return cst.FlattenSentinel(cst.parse_module(native).body)
+                return replacements.get(before, after)
 
-        return cst.Module(body).visit(Product()).body
+        return cst.Module(body).visit(ExactReturns()).body if replacements else body
 
     def divisibility(self, body):
-        integers = self.parameters | self._integer_locals(body)
+        integers = self.parameters | self._integer_locals(body).keys()
 
         class Divisibility(cst.CSTTransformer):
             def visit_Lambda(inner, node):
@@ -599,5 +607,5 @@ class CheckedArithmetic:
             body = self.integer_local(body) if rewritten is body else rewritten
             body = self._range_locals(body)
         elif kind == 'long long':
-            body = self.integer_product(body)
+            body = self.exact_integer_returns(body)
         return function.with_changes(body=function.body.with_changes(body=body))
