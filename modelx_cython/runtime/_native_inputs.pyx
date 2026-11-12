@@ -1693,6 +1693,11 @@ cpdef long long table_last_int(object table) except? -1:
     return _mx_exact_index(owner.index.max())
 
 
+cpdef bint table_contains(object table, object key) except -1:
+    """``key in table.index`` (the general route of native_contains)."""
+    return key in table.index
+
+
 cpdef long long table_max_int(object table) except? -1:
     """``table.index.max_int()`` as a C integer (the general route of native_max_int)."""
     return table.index.max_int()

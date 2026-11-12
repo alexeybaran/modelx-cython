@@ -14,6 +14,8 @@ declared table operations that later passes already lower; nothing else changes.
   identical assignment counts as one). A local bound to a zero-argument cached Cell call is
   replaced by the call in the rewritten read: the call returns the same cached object.
 
+``K in R.index`` becomes the provider's ``native_contains(R, K)`` (the same membership test).
+
 ``float(R.loc[key, "col"])`` loses the ``float()``: the typed read already returns a float.
 For the same reason ``float()`` of an integer column read becomes the float read.
 
@@ -308,6 +310,28 @@ class LocReads(FormulaTransformer):
         function = {'max': 'native_last_int', 'min': 'native_first_int', 'max_int': 'native_max_int'}[name]
         return cst.Call(func=cst.Attribute(cst.Name(module_name(provider)), cst.Name(function)),
                         args=[cst.Arg(node.func.value.value)])
+
+    def leave_Comparison(self, original, updated):
+        """``K in R.index`` / ``K not in R.index`` on a traced table: the provider's membership read."""
+        if len(updated.comparisons) != 1:
+            return updated
+        target = updated.comparisons[0]
+        if not isinstance(target.operator, (cst.In, cst.NotIn)):
+            return updated
+        index = target.comparator
+        if not (isinstance(index, cst.Attribute) and index.attr.value == 'index'
+                and self._schema(index.value) is not None):
+            return updated
+        from .helpers import module_name
+        provider = 'modelx_cython.runtime._native_inputs'
+        self.providers.add(provider)
+        self.typed += 1
+        call = cst.Call(func=cst.Attribute(cst.Name(module_name(provider)), cst.Name('native_contains')),
+                        args=[cst.Arg(index.value), cst.Arg(updated.left)])
+        if isinstance(target.operator, cst.NotIn):
+            return cst.UnaryOperation(operator=cst.Not(), expression=call,
+                                      lpar=updated.lpar, rpar=updated.rpar)
+        return call.with_changes(lpar=updated.lpar, rpar=updated.rpar)
 
     def leave_Call(self, original, updated):
         func = original.func

@@ -116,11 +116,13 @@ def _edge_model():
         # a full key into three group levels and a leaf: missing parts at every level, bool parts
         'deep': probe('deep', 'float(data.deep_table().loc[(("x", "y", "x", "z")[t % 4], (1, 2, True, 1)[t % 4], '
                               '"pq"[t % 2], 1 + t % 2), "v"])'),
+        'gap_in': ('def gap_in(t):\n    tbl = data.gap_table()\n'
+                   '    return (1.0 if t in tbl.index else 0.0) + (10.0 if t not in tbl.index else 0.0)'),
         'walk': ('def walk(t):\n    for _, r in data.named_table().iterrows():\n        if r["v"] > 10.0 * t:\n'
                  '            return float(r["v"]) + len(r["note"])\n    return -5.0'),
         'edge_total': ('def edge_total():\n    return sum(gap(t) + gap_bounds(t) + gap_text(t) + gap_odd_column(t)'
                        ' + gap_unknown_column(t) + gap_default(t) + gap_text_method(t) + gap_row(t) + named(t) + multi(t) + flag(t)'
-                       ' + deep(t) + walk(t)'
+                       ' + deep(t) + walk(t) + gap_in(t)'
                        ' for t in range(11))'),
     }
     for name, source in formulas.items():
@@ -135,7 +137,7 @@ def test_loc_read_edges_three_modes(tmp_path):
         live = model.Projection.edge_total()
         parts = {name: [model.Projection.cells[name](t) for t in range(11)]
                  for name in ('gap', 'gap_text', 'gap_text_method', 'gap_default', 'gap_unknown_column',
-                              'gap_row', 'named', 'multi', 'flag', 'deep', 'walk')}
+                              'gap_row', 'named', 'multi', 'flag', 'deep', 'walk', 'gap_in')}
         model.export(tmp_path / 'exported', locked_spaces=['Data'])
     finally:
         model.close()
@@ -148,6 +150,7 @@ def test_loc_read_edges_three_modes(tmp_path):
     assert parts['named'][:3] == [10.0, 30.0, -1.0]
     assert parts['deep'][:4] == [1.5, 4.5, 1.5, -1.0]       # a bool group part matches the Record label 1
     assert parts['walk'][:4] == [11.0, 21.0, 31.0, -5.0]
+    assert parts['gap_in'][:6] == [10.0, 1.0, 1.0, 10.0, 10.0, 1.0]
     (tmp_path / 'sample.py').write_text('from exported import mx_model as m\nm.Projection.edge_total()\n',
                                         encoding='utf-8')
     subprocess.run([sys.executable, '-m', 'modelx_cython', 'exported', '--sample', 'sample.py', '--no-spec'],
@@ -161,5 +164,6 @@ def test_loc_read_edges_three_modes(tmp_path):
         assert got == repr([live] + [parts[n] for n in names]), (package, got)
     admission = json.loads((tmp_path / 'exported_cy/_mx_admission.json').read_text())
     typed = {name: admission[f'exported_cy._mx_classes._c_Projection._f_{name}']['loc_reads_typed']
-             for name in ('gap', 'gap_bounds', 'gap_odd_column', 'named', 'multi', 'flag', 'deep')}
-    assert typed == {'gap': 1, 'gap_bounds': 3, 'gap_odd_column': 1, 'named': 1, 'multi': 1, 'flag': 1, 'deep': 1}
+             for name in ('gap', 'gap_bounds', 'gap_odd_column', 'named', 'multi', 'flag', 'deep', 'gap_in')}
+    assert typed == {'gap': 1, 'gap_bounds': 3, 'gap_odd_column': 1, 'named': 1, 'multi': 1, 'flag': 1, 'deep': 1,
+                     'gap_in': 2}
