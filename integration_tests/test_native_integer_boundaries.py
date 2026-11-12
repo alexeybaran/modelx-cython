@@ -46,7 +46,7 @@ def integer_domain_build(tmp_path_factory):
 """)
         projection.new_cells("native_operand", "lambda: receive(amount + 1)")
         projection.new_cells("inline_receive", "lambda count: count + 1")
-        projection.new_cells("inline_operand", "lambda: inline_receive(amount * 4)")
+        projection.new_cells("inline_operand", 'lambda: {"count": inline_receive(amount * 4)}')
         policies = model.new_space("Policies", formula="lambda policy: {}")
         policies.new_cells("number", "lambda: policy")
         assert policies[4].number() == 4
@@ -229,12 +229,12 @@ def test_private_native_entry_checks_integer_argument(integer_domain_build):
 
         reference = type(exported)().Outer.Projection
         projection = type(compiled)().Outer.Projection
-        assert reference.inline_operand() == projection.inline_operand() == 121
+        assert reference.inline_operand() == projection.inline_operand() == {"count": 121}
 
         reference = type(exported)().Outer.Projection
         projection = type(compiled)().Outer.Projection
         reference.amount = projection.amount = 1 << 62
-        assert reference.inline_operand() == (1 << 64) + 1
+        assert reference.inline_operand() == {"count": (1 << 64) + 1}
         assert projection.inline_receive(0) == 1
         try:
             projection.inline_operand()
