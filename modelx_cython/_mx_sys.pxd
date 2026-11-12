@@ -4,7 +4,7 @@ from libc.limits cimport LLONG_MAX, LLONG_MIN
 from libc.string cimport memcmp
 from cpython.long cimport PyLong_AsLongLong, PyLong_CheckExact
 from cpython.number cimport PyNumber_Index
-from cpython.object cimport Py_TYPE, PyObject_GenericSetAttr
+from cpython.object cimport Py_TYPE, PyObject_GenericGetAttr, PyObject_GenericSetAttr
 from cpython.unicode cimport PyUnicode_Check, PyUnicode_Compare
 from modelx_cython._rounding cimport _mx_round_one, _mx_round_digits
 cimport cython
@@ -61,6 +61,10 @@ cdef inline bint _mx_ref_name_is(object name, str expected) except? -1:
 
 cdef inline int _mx_generic_setattr(object receiver, object name, object value) except -1:
     return PyObject_GenericSetAttr(receiver, name, value)
+
+
+cdef inline object _mx_generic_getattr(object receiver, object name):
+    return PyObject_GenericGetAttr(receiver, name)
 
 
 cdef inline int _mx_check_enum_schema(object receiver, object owner, tuple bindings) except -1:

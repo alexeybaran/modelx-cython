@@ -24,6 +24,13 @@ def integer_domain_build(tmp_path_factory):
         projection = model.new_space("Outer").new_space(
             "Projection", refs={"payload": {"value": 2}, "amount": 30,
                                 "get_item": operator.getitem})
+        # An object result keeps the argument checks independent of native
+        # result admission and dense cache range checks.
+        projection.new_cells("receive", 'lambda count: {"count": count}')
+        projection.new_cells("receive_default", 'lambda count=4: {"count": count}')
+        projection.new_cells("internal_argument", 'lambda: receive(payload["value"])')
+        projection.new_cells("internal_operand", 'lambda: receive(payload["value"] + 1)')
+        projection.new_cells("internal_keyword", 'lambda: receive_default(count=payload["value"])')
         projection.new_cells("object_result", 'lambda: payload["value"]')
         projection.new_cells("conditional_result", 'lambda: payload["value"] if amount > 0 else 0')
         projection.new_cells("helper_result", 'lambda: get_item(payload, "value")')
@@ -31,6 +38,10 @@ def integer_domain_build(tmp_path_factory):
         policies = model.new_space("Policies", formula="lambda policy: {}")
         policies.new_cells("number", "lambda: policy")
         assert policies[4].number() == 4
+        assert projection.receive(2) == projection.internal_argument() == {"count": 2}
+        assert projection.internal_operand() == {"count": 3}
+        assert projection.receive_default() == {"count": 4}
+        assert projection.internal_keyword() == {"count": 2}
         assert projection.conditional_result() == 2
         assert projection.object_result() == projection.helper_result() == 2
         assert projection.read_amount() == 30
@@ -44,7 +55,13 @@ def integer_domain_build(tmp_path_factory):
 
         projection = mx_model.Outer.Projection
         for count in (0, 2, 6, np.int64(4)):
+            projection.receive(count)
+            projection.receive_default(count)
             mx_model.Policies[count].number()
+        projection.receive_default()
+        projection.internal_argument()
+        projection.internal_operand()
+        projection.internal_keyword()
         projection.object_result()
         projection.conditional_result()
         projection.helper_result()
@@ -58,6 +75,9 @@ def integer_domain_build(tmp_path_factory):
         result, = (row for name, row in report.items() if name.endswith(f"._f_{cell}"))
         return result
 
+    assert admission("receive")["arguments"]["count"] == "long long"
+    assert admission("receive")["return_type"] == "object"
+    assert admission("receive_default")["arguments"]["count"] == "long long"
     for name in ("object_result", "conditional_result", "helper_result", "read_amount"):
         assert admission(name)["return_type"] == "long long"
 
@@ -65,6 +85,7 @@ def integer_domain_build(tmp_path_factory):
         from importlib import import_module
         from importlib.machinery import ExtensionFileLoader
         import math
+        import re
         import sys
 
         import numpy as np
@@ -73,7 +94,14 @@ def integer_domain_build(tmp_path_factory):
 
         case = sys.argv[1]
         prefix = "Outer.Projection."
-        if case == "reference":
+        positional_cases = {"public_argument", "internal_argument", "internal_operand"}
+        keyword_cases = {"public_keyword", "internal_keyword"}
+        receiving_cases = positional_cases | keyword_cases
+        if case in positional_cases:
+            cell_paths = (prefix + "receive",)
+        elif case in keyword_cases:
+            cell_paths = (prefix + "receive_default",)
+        elif case == "reference":
             # An eager setter can name the Reference instead of the consuming Cell.
             cell_paths = (prefix + "amount", prefix + "read_amount")
         else:
@@ -82,41 +110,70 @@ def integer_domain_build(tmp_path_factory):
         classes = import_module(type(compiled.Outer.Projection).__module__)
         assert isinstance(classes.__loader__, ExtensionFileLoader), classes.__file__
 
-        def calculate(model, value):
+        def calculate(model, value, warm_cache=False):
             projection = type(model)().Outer.Projection
+            if warm_cache:
+                if case in keyword_cases:
+                    assert projection.receive_default() == {"count": 4}
+                    projection.receive_default(2)
+                else:
+                    projection.receive(3 if case == "internal_operand" else 2)
+            if case == "public_argument":
+                return projection.receive(value)["count"]
+            if case == "public_keyword":
+                assert projection.receive_default() == {"count": 4}
+                return projection.receive_default(count=value)["count"]
             if case == "reference":
                 projection.amount = value
                 return projection.read_amount()
             projection.payload = {"value": value}
-            return getattr(projection, case)()
+            result = getattr(projection, case)()
+            return result["count"] if case in receiving_cases else result
 
-        valid = (2, np.int64(4), -1, -(1 << 63), np.int64((1 << 63) - 1))
+        def expected(value):
+            return value + 1 if case == "internal_operand" else value
+
+        valid = (2, np.int64(4))
+        if case not in receiving_cases:
+            valid += (-1, -(1 << 63), np.int64((1 << 63) - 1))
         for value in valid:
-            assert calculate(exported, value) == value, (case, value)
-            assert calculate(compiled, value) == value, (case, value)
+            assert calculate(exported, value) == expected(value), (case, value)
+            assert calculate(compiled, value) == expected(value), (case, value)
 
         invalid = (2.5, np.float64(2.5), float("nan"), 1 << 70,
                    -(1 << 70), np.uint64(1 << 63))
         for value in invalid:
+            raw = expected(value)
             exported_result = calculate(exported, value)
-            if math.isnan(value):
+            if math.isnan(raw):
                 assert math.isnan(exported_result), (case, value)
             else:
-                assert exported_result == value, (case, value)
-            detail = f"{case}, value={value!r}"
-            try:
-                actual = calculate(compiled, value)
-            except (TypeError, ValueError, OverflowError) as error:
-                message = str(error)
-                assert any(path in message for path in cell_paths), (detail, message)
-                assert "Rebuild with a wider sample or spec" in message, (detail, message)
-            else:
-                raise AssertionError(f"{detail}: compiled calculation returned {actual!r}")
+                assert exported_result == raw, (case, value)
+            for warm_cache in ((False, True) if case in receiving_cases else (False,)):
+                detail = f"{case}, value={value!r}, warm_cache={warm_cache}"
+                try:
+                    actual = calculate(compiled, value, warm_cache)
+                except (TypeError, ValueError, OverflowError) as error:
+                    message = str(error)
+                    assert any(path in message for path in cell_paths), (detail, message)
+                    assert re.search(
+                        r"\b(?:sample|spec(?:ification)?|return_type|param_type)\b", message, re.I
+                    ), (detail, message)
+                    assert re.search(
+                        r"\b(?:rebuild|recompile|retrace|wider|widen|broader)\b", message, re.I
+                    ), (detail, message)
+                else:
+                    raise AssertionError(f"{detail}: compiled calculation returned {actual!r}")
         """), encoding="utf-8")
     return work
 
 
 @pytest.mark.parametrize("case", [
+    "public_argument",
+    "public_keyword",
+    "internal_argument",
+    "internal_operand",
+    "internal_keyword",
     "object_result",
     "conditional_result",
     "helper_result",

@@ -361,6 +361,8 @@ def main_handler(args: argparse.Namespace, stdout: IO[str], stderr: IO[str]) -> 
         resolver = build_resolver(module_infos)
         admit_forwarded_tables(module_infos, resolver)
         cells_kinds, ref_kinds = build_kind_maps(module_infos)
+        cells_by_name = {cell.fqname: cell for module in module_infos.values()
+                         for cls in module.classes.values() for cell in cls.cells.values()}
         demote_rebound_params(module_infos, resolver, cells_kinds, ref_kinds)
 
         policy = spec.policy
@@ -407,7 +409,8 @@ def main_handler(args: argparse.Namespace, stdout: IO[str], stderr: IO[str]) -> 
         cell_sources = {}
         for u in units:
             state = guard_integer_boundaries(
-                translated_modules[u.fqname], u.module_info, resolver, cells_kinds, ref_kinds
+                translated_modules[u.fqname], u.module_info, resolver, cells_kinds, ref_kinds,
+                cells_by_name,
             )
             translated_modules[u.fqname] = state
             u.abs_src_path.write_text(state.syntax.code, encoding='utf-8')
