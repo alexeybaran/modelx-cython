@@ -145,7 +145,8 @@ class NativeReductions(FormulaTransformer):
             values.append(entry[1])
         start = values[0]
         if all(value == start + index for index, value in enumerate(values)):
-            return cst.parse_expression(f'range({start}, {start + len(values)})')
+            bounds = str(len(values)) if start == 0 else f'{start}, {start + len(values)}'
+            return cst.parse_expression(f'range({bounds})')
         return None
 
     def double_expression(self, node):
