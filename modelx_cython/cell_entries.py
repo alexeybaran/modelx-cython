@@ -21,7 +21,7 @@ class EntryModule:
     """
     syntax: cst.Module
     function_origins: dict[str, tuple[str, str]] = field(default_factory=dict)
-    inbounds_entries: tuple[str, ...] = ()
+    inbounds_entries: dict[str, str] = field(default_factory=dict)
 
     @cached_property
     def facts(self):

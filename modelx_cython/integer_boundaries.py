@@ -102,13 +102,14 @@ def __getattribute__(self, name):
 class _GuardCalls(cst.CSTTransformer):
     METADATA_DEPENDENCIES = (cst.metadata.ScopeProvider,)
 
-    def __init__(self, receiver, integer_params, owner, resolver, entries, cells):
+    def __init__(self, receiver, integer_params, owner, resolver, entries, cells, private_entries):
         self.receiver = receiver
         self.integer_params = integer_params
         self.owner = owner
         self.resolver = resolver
         self.entries = entries
         self.cells = cells
+        self.private_entries = private_entries
 
     def _native_parameter(self, value):
         if not isinstance(value, cst.Name) or value.value not in self.integer_params:
@@ -118,6 +119,9 @@ class _GuardCalls(cst.CSTTransformer):
         return len(bindings) == 1 and bindings[0].node is self.integer_params[value.value]
 
     def leave_Call(self, before, after):
+        if isinstance(before.func, cst.Name) and (entry := self.private_entries.get(before.func.value)):
+            path, params = entry
+            return self._arguments(before, after, path, params, start=1)
         chain = _extract_self_chain(before.func)
         if not isinstance(chain, list) or any(arg.star for arg in before.args):
             return after
@@ -135,21 +139,25 @@ class _GuardCalls(cst.CSTTransformer):
         if cell.called_with_kwargs:
             # A Python-dispatched method goes through the normal attribute gate.
             return after
-        guarded = dict(params)
-        arguments = tuple(arg.with_changes(value=_checked_integer(arg.value, cell.model_path))
+        return self._arguments(before, after, cell.model_path, params)
+
+    def _arguments(self, before, after, path, params, start=0):
+        guarded = {index + start for index, _ in params}
+        arguments = tuple(arg.with_changes(value=_checked_integer(arg.value, path))
                           if index in guarded and arg.keyword is None and not self._native_parameter(old.value)
                           else arg for index, (old, arg) in enumerate(zip(before.args, after.args)))
         return after.with_changes(args=arguments)
 
 
-def _guard_calls(node, cls, resolver, entries, cells):
+def _guard_calls(node, cls, resolver, entries, cells, private_entries):
     params = (*node.params.posonly_params, *node.params.params, *node.params.kwonly_params)
     if not params or params[0].name.value != MX_SELF:
         return node
     integer_params = {param.name.value: param for param in params if param.annotation is not None
                       and param.annotation.annotation.deep_equals(_INTEGER_ANNOTATION)}
     wrapper = cst.MetadataWrapper(cst.Module(body=(node,)), unsafe_skip_copy=True)
-    return wrapper.visit(_GuardCalls(params[0], integer_params, cls.fqname, resolver, entries, cells)).body[0]
+    return wrapper.visit(_GuardCalls(params[0], integer_params, cls.fqname, resolver, entries, cells,
+                                    private_entries)).body[0]
 
 
 def _object_parameters(params, checked):
@@ -416,6 +424,13 @@ def _signed_signatures(state):
 def guard_integer_boundaries(state, module_info, resolver, cells_kinds, ref_kinds, cells):
     """Check formula results, arguments and ItemSpace keys after entry lowering."""
     entries = {name: params for name, cell in cells.items() if (params := integer_parameters(cell))}
+    private_entries = {
+        name: (cell.model_path, params)
+        for cls in module_info.classes.values() for cell in cls.cells.values()
+        if (name := getattr(cell, 'inline_entry', None)) and (params := entries.get(cell.fqname))
+    }
+    private_entries.update({name: private_entries[checked] for name, checked in state.inbounds_entries.items()
+                            if checked in private_entries})
     classes = []
     declarations = []
     call_gate = state.names.reserve('_mx_checked_cell_callable')
@@ -435,7 +450,7 @@ def guard_integer_boundaries(state, module_info, resolver, cells_kinds, ref_kind
                 owner, name = origin
                 cls = module_info.classes[owner]
                 cell = cls.cells[name[len(FORMULA_PREF):]]
-                node = _guard_calls(node, cls, resolver, entries, cells)
+                node = _guard_calls(node, cls, resolver, entries, cells, private_entries)
                 # A complete dense entry calls its private formula only
                 # inside the checked logical domain. A compact cache can
                 # also reach it through the checked spill.
@@ -453,7 +468,7 @@ def guard_integer_boundaries(state, module_info, resolver, cells_kinds, ref_kind
                 continue
             name = method.name.value
             if name.startswith(FORMULA_PREF) and (formula := cls.cells.get(name[len(FORMULA_PREF):])):
-                method = _guard_calls(method, cls, resolver, entries, cells)
+                method = _guard_calls(method, cls, resolver, entries, cells, private_entries)
                 methods.append(_guard_result(method, formula, cls, resolver, cells_kinds, ref_kinds, signatures,
                                              native_helpers.get((cls.name, name), ())))
                 changed = True
@@ -464,7 +479,7 @@ def guard_integer_boundaries(state, module_info, resolver, cells_kinds, ref_kind
                 changed = True
                 continue
             if cell is not None and not cell.has_formula_def:
-                method = _guard_calls(method, cls, resolver, entries, cells)
+                method = _guard_calls(method, cls, resolver, entries, cells, private_entries)
                 method = _guard_result(method, cell, cls, resolver, cells_kinds, ref_kinds, signatures)
                 changed = True
             methods.append(method)

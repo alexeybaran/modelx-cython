@@ -127,4 +127,4 @@ def specialize_entries(state: EntryModule, layouts, propagate=False):
             body=(guard.with_changes(test=check, body=guard.body.with_changes(body=(entry,))),))))
     syntax = module.with_changes(body=(*rewritten, *bodies)).visit(_Calls(proved, propagate))
     return replace(state, syntax=syntax,
-                   inbounds_entries=tuple(target.value for target in proved.values()))
+                   inbounds_entries={target.value: name for name, target in proved.items()})

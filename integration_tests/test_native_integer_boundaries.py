@@ -45,6 +45,8 @@ def integer_domain_build(tmp_path_factory):
     return adjusted + 1
 """)
         projection.new_cells("native_operand", "lambda: receive(amount + 1)")
+        projection.new_cells("inline_receive", "lambda count: count + 1")
+        projection.new_cells("inline_operand", "lambda: inline_receive(amount * 4)")
         policies = model.new_space("Policies", formula="lambda policy: {}")
         policies.new_cells("number", "lambda: policy")
         assert policies[4].number() == 4
@@ -83,6 +85,8 @@ def integer_domain_build(tmp_path_factory):
         projection.negate_amount()
         projection.local_amount()
         projection.native_operand()
+        projection.inline_receive(0)
+        projection.inline_operand()
         """), encoding="utf-8")
     run_python(work, "-m", "modelx_cython", "exported", "--sample", "sample.py", "--no-spec")
 
@@ -95,6 +99,7 @@ def integer_domain_build(tmp_path_factory):
     assert admission("receive")["arguments"]["count"] == "long long"
     assert admission("receive")["return_type"] == "object"
     assert admission("receive_default")["arguments"]["count"] == "long long"
+    assert admission("inline_receive")["inline_entry"]
     for name in ("object_result", "conditional_result", "helper_result", "read_amount"):
         assert admission(name)["return_type"] == "long long"
 
@@ -214,6 +219,29 @@ def test_integer_itemspace_parameter(integer_domain_build):
                 assert "Policies" in str(error) and "wider sample or spec" in str(error)
             else:
                 raise AssertionError(f"ItemSpace accepted an out-of-domain key {bad!r}")
+        """))
+
+
+def test_private_native_entry_checks_integer_argument(integer_domain_build):
+    run_python(integer_domain_build, "-c", textwrap.dedent("""\
+        from exported import mx_model as exported
+        from exported_cy import mx_model as compiled
+
+        reference = type(exported)().Outer.Projection
+        projection = type(compiled)().Outer.Projection
+        assert reference.inline_operand() == projection.inline_operand() == 121
+
+        reference = type(exported)().Outer.Projection
+        projection = type(compiled)().Outer.Projection
+        reference.amount = projection.amount = 1 << 62
+        assert reference.inline_operand() == (1 << 64) + 1
+        assert projection.inline_receive(0) == 1
+        try:
+            projection.inline_operand()
+        except OverflowError as error:
+            assert "Outer.Projection.inline_receive" in str(error)
+        else:
+            raise AssertionError("private entry accepted a wrapped integer argument")
         """))
 
 
