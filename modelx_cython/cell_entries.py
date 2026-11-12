@@ -23,7 +23,6 @@ class EntryModule:
     syntax: cst.Module
     function_origins: dict[str, tuple[str, str]] = field(default_factory=dict)
     inbounds_entries: dict[str, str] = field(default_factory=dict)
-    cache_hits: dict[str, CacheHit] = field(default_factory=dict)
 
     @cached_property
     def facts(self):
@@ -68,6 +67,8 @@ class DenseEntry:
     logical_axes: tuple[DenseAxis, ...] = ()
     spill_entry: str | None = None
     checks_spill_in_helper: bool = False
+    guard: cst.BaseExpression | None = None
+    hit: CacheHit | None = None
 
 
 @dataclass(frozen=True)
@@ -75,7 +76,6 @@ class CacheHit:
     ready: cst.BaseExpression
     value: cst.BaseExpression
     guard: cst.BaseExpression | None = None
-    masked: bool = False
 
     @property
     def kind(self):
@@ -101,12 +101,13 @@ def dense_condition(axes, proof=None, proved_axes=()):
     return " and ".join(checks)
 
 
-def checked_dense_guard(body, layout, proof=None):
+def checked_dense_guard(body, layout):
     """Find the sole guard for the generated dense layout."""
+    if isinstance(body, cst.BaseSuite):
+        body = body.body
     if len(body) != 1 or not isinstance(guard := body[0], cst.If):
         return None
-    expected = cst.parse_expression(dense_condition(layout.axes, proof))
-    return guard if same_expression(guard.test, expected) else None
+    return guard if layout.guard is not None and same_expression(guard.test, layout.guard) else None
 
 
 def cache_hit(body, field, layout=None):

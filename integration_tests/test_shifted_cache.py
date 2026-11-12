@@ -8,8 +8,9 @@ import modelx as mx
 import pytest
 
 
-@pytest.mark.parametrize('compact', [False, True])
-def test_shifted_dense_bounds(tmp_path, compact):
+@pytest.mark.parametrize('window', [None, (-3, 6), (0, 2)],
+                         ids=['sampled', 'explicit-full', 'explicit-compact'])
+def test_shifted_dense_bounds(tmp_path, window):
     model = mx.new_model('ShiftedCaches')
     try:
         for name in ('Plain', 'Locked'):
@@ -31,22 +32,28 @@ def test_shifted_dense_bounds(tmp_path, compact):
         '        s.value(int64(t)); s.previous(int64(t))\n'
         '    s.legacy(0); s.legacy(3)\n')
     spec = ['--no-spec']
-    if compact:
+    if window is not None:
         (tmp_path/'spec.py').write_text(repr({'spaces': {
             name: {'cells_param_size': {'t': 6},
-                   'cells': {cell: {'dense_window': [(0, 2)]} for cell in ('value', 'previous')}}
+                   'cells': {cell: {'dense_window': [window]} for cell in ('value', 'previous')}}
             for name in ('Plain', 'Locked')
         }}), encoding='utf-8')
         spec = ['--spec', 'spec.py']
     subprocess.run([sys.executable, '-m', 'modelx_cython', 'exported',
                     '--sample', 'sample.py', *spec], cwd=tmp_path, check=True)
-    generated = (tmp_path/'exported_cy/_mx_classes.py').read_text()
-    assert ('_spill_value' in generated) is compact
+    stop = 4 if window is None else 6
+    logical = (-3, stop)
+    physical = window or logical
+    compact = physical != logical
+    for suffix in ('py', 'pxd'):
+        generated = (tmp_path/f'exported_cy/_mx_classes.{suffix}').read_text()
+        for cell in ('value', 'previous'):
+            assert (f'_spill_{cell}' in generated) is compact
     report = json.loads((tmp_path/'exported_cy/_mx_admission.json').read_text())
     shifted = report['exported_cy._mx_classes._c_Plain._f_value']
-    assert shifted['dense_offsets'] == ([0] if compact else [-3])
+    assert shifted['dense_offsets'] == [physical[0]]
     assert shifted['exact_spill'] is compact
-    assert shifted['dense_logical_domain'] == [[-3, 6 if compact else 4]]
+    assert shifted['dense_logical_domain'] == [list(logical)]
     probe = textwrap.dedent('''\
         import sys
         from exported_cy import mx_model as m
@@ -75,5 +82,5 @@ def test_shifted_dense_bounds(tmp_path, compact):
             else:
                 raise AssertionError('unsigned sample unexpectedly admitted a negative index')
         ''')
-    subprocess.run([sys.executable, '-c', probe, '6' if compact else '4'],
+    subprocess.run([sys.executable, '-c', probe, str(stop)],
                    cwd=tmp_path, check=True)

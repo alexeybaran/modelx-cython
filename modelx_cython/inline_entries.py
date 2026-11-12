@@ -2,8 +2,8 @@
 
 import libcst as cst
 
-from modelx_cython.cell_entries import DenseEntry, FormulaEntry, cache_hit, exact_receiver
-from modelx_cython.consts import CY_MOD, FORMULA_PREF, HAS_PREF, MX_POW, MX_SELF, MX_SYS_MOD
+from modelx_cython.cell_entries import FormulaEntry, cache_hit, exact_receiver
+from modelx_cython.consts import CY_MOD, FORMULA_PREF, MX_POW, MX_SELF, MX_SYS_MOD
 from modelx_cython.scopes import Names
 from modelx_cython.syntax import statements
 from modelx_cython.typedefs import primitive_kind
@@ -174,7 +174,7 @@ class _Calls(cst.CSTTransformer):
         ])
 
 
-def add_inline_entries(module, classes):
+def add_inline_entries(module, classes, dense_layouts):
     """Move each admitted cache body and report its dense layout to the build."""
     names = Names(module)
     used_names = names.names
@@ -209,19 +209,12 @@ def add_inline_entries(module, classes):
             next_entry += 1
             cell.inline_entry = entry
             entries[cell.name] = entry, len(cell.params), defaults
-            layout = None
-            if cell.has_args() and cell.is_arrayable():
-                spill = getattr(cell, 'dense_spill_entry', None)
-                layout = dense_entries[entry] = DenseEntry(
-                    owner, FORMULA_PREF + cell.name, cell.dense_axes, cell.has_dense_spill,
-                    cell.dense_logical_axes if spill else (), spill,
-                    spill is not None and cell.has_inferred_dense_domain,
-                )
-            hit = None
-            if not cell.has_args() or (layout is not None and len(layout.axes) == 1
-                    and layout.axes[0].c_type == 'long long'
-                    and cell.get_rettype_expr(c_style=True) in _NUMERIC_TYPES):
-                hit = cache_hit(statements(method.body), cell.name, layout)
+            layout = dense_layouts.get((owner, cell.name))
+            if layout is not None:
+                dense_entries[entry] = layout
+                hit = layout.hit if cell.get_rettype_expr(c_style=True) in _NUMERIC_TYPES else None
+            else:
+                hit = cache_hit(statements(method.body), cell.name) if not cell.has_args() else None
             formula_entries[entry] = FormulaEntry(
                 owner, FORMULA_PREF + cell.name, tuple(cell.params),
                 getattr(cell, 'formula_allows_exact_receiver', False), hit,
@@ -246,17 +239,7 @@ def add_inline_entries(module, classes):
             methods.append(method)
 
         if entries:
-            dense = {HAS_PREF + name: cells[name] for name, (entry, _, _) in entries.items()
-                     if entry in dense_entries}
             for index, method in enumerate(methods):
-                if isinstance(method, cst.SimpleStatementLine) and len(method.body) == 1:
-                    field = method.body[0]
-                    if isinstance(field, cst.AnnAssign) and isinstance(field.target, cst.Name):
-                        cell = dense.get(field.target.value)
-                        if cell is not None:
-                            annotation = cst.parse_expression(cell.get_readiness_array_decl_expr())
-                            methods[index] = method.with_changes(body=(field.with_changes(
-                                annotation=cst.Annotation(annotation)),))
                 if not isinstance(method, cst.FunctionDef):
                     continue
                 name = method.name.value

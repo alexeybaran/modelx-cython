@@ -7,7 +7,7 @@ import textwrap
 import libcst as cst
 import modelx as mx
 import pytest
-from modelx_cython.dense_formulas import _eligible
+from modelx_cython.entry_pipeline import _eligible
 
 
 def eligible(body, guard_safe=True):

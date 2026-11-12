@@ -125,11 +125,12 @@ def test_helper_capability_shape_is_validated_at_registration(name,value):
 
 
 def test_cache_hit_optimization_does_not_depend_on_ast_unparse(monkeypatch):
-    from modelx_cython.cache_hits import expose_entries
     from modelx_cython.cell_entries import EntryModule
+    from modelx_cython.config import CompilerPolicy
+    from modelx_cython.entry_pipeline import lower_entries
     monkeypatch.delattr(ast,'unparse')
     state = EntryModule(cst.parse_module(''))
-    assert expose_entries(state, 'auto').syntax.code == ''
+    assert lower_entries({'m': state}, {}, {}, CompilerPolicy.resolve({}))['m'].syntax.code == ''
 
 
 def test_collection_admission_reuses_the_existing_syntax_without_ast(monkeypatch):
