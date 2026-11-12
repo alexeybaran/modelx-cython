@@ -2,8 +2,11 @@
 
 import libcst as cst
 
+from .checked_arithmetic import CheckedArithmetic
 from .consts import CY_MOD, FORMULA_PREF, MX_SELF, MX_SYS_MOD
 from .powers import KIND_FLOAT, OperandKind, kind_of_type_expr
+from .scopes import Names
+from .syntax import walk
 from .usage import RESOLVED, _extract_self_chain
 
 
@@ -138,10 +141,12 @@ def _guard_space_parameters(node, cell):
 
 
 class _GuardReturns(cst.CSTTransformer):
-    def __init__(self, path, kinds, native_helpers):
+    def __init__(self, path, kinds, native_helpers, arithmetic):
         self.path = path
         self.kinds = kinds
         self.native_helpers = native_helpers
+        self.arithmetic = arithmetic
+        self.check_overflow = False
 
     def visit_FunctionDef(self, node):
         return False
@@ -164,6 +169,12 @@ class _GuardReturns(cst.CSTTransformer):
                     and value.func.value in self.native_helpers)
                 or (in_conditional and self.kinds.kind(value) == KIND_FLOAT)):
             return value
+        self.check_overflow |= any(
+            isinstance(part, cst.BinaryOperation)
+            and isinstance(part.operator, (cst.Add, cst.Subtract, cst.Multiply))
+            and self.arithmetic.integer_interval(part, signed=True) is None
+            for part in walk(value)
+        )
         return _checked_integer(value, self.path)
 
 
@@ -173,7 +184,25 @@ def _guard_result(node, cell, cls, resolver, cells_kinds, ref_kinds, native_help
     params = {name: kind_of_type_expr(cell.get_argtype_expr(name, c_style=True, formula=True))
               for name in cell.params}
     kinds = OperandKind(resolver, cells_kinds, ref_kinds, cls.fqname, params)
-    return node.with_changes(body=node.body.visit(_GuardReturns(cell.model_path, kinds, native_helpers)))
+    arithmetic = CheckedArithmetic(cls, cell)
+    arithmetic.parameters = {
+        param.name.value for param in node.params.params
+        if param.annotation is not None and param.annotation.annotation.deep_equals(_INTEGER_ANNOTATION)
+    }
+    guard = _GuardReturns(cell.model_path, kinds, native_helpers, arithmetic)
+    body = node.body.visit(guard)
+    if not guard.check_overflow or not isinstance(body, cst.IndentedBlock):
+        return node.with_changes(body=body)
+    error = Names(node).reserve('_mx_integer_overflow')
+    message = f'{cell.model_path} requires an exact signed 64-bit integer. Rebuild with a wider sample or spec.'
+    handler = cst.parse_statement(
+        f'try:\n    pass\nexcept OverflowError as {error}:\n    raise OverflowError({message!r}) from {error}\n'
+    )
+    doc_end = 1 if node.get_docstring() is not None else 0
+    handler = handler.with_changes(body=cst.IndentedBlock(body=body.body[doc_end:]))
+    decorator = cst.Decorator(cst.parse_expression(f'{CY_MOD}.overflowcheck(True)'))
+    return node.with_changes(decorators=(*node.decorators, decorator),
+                             body=body.with_changes(body=(*body.body[:doc_end], handler)))
 
 
 def guard_integer_boundaries(state, module_info, resolver, cells_kinds, ref_kinds, cells):

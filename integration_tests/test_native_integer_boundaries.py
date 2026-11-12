@@ -35,6 +35,7 @@ def integer_domain_build(tmp_path_factory):
         projection.new_cells("conditional_result", 'lambda: payload["value"] if amount > 0 else 0')
         projection.new_cells("helper_result", 'lambda: get_item(payload, "value")')
         projection.new_cells("read_amount", "lambda: amount")
+        projection.new_cells("increment_amount", "lambda: amount + 1")
         policies = model.new_space("Policies", formula="lambda policy: {}")
         policies.new_cells("number", "lambda: policy")
         assert policies[4].number() == 4
@@ -66,6 +67,7 @@ def integer_domain_build(tmp_path_factory):
         projection.conditional_result()
         projection.helper_result()
         projection.read_amount()
+        projection.increment_amount()
         """), encoding="utf-8")
     run_python(work, "-m", "modelx_cython", "exported", "--sample", "sample.py", "--no-spec")
 
@@ -197,4 +199,24 @@ def test_integer_itemspace_parameter(integer_domain_build):
                 assert "Policies" in str(error) and "wider sample or spec" in str(error)
             else:
                 raise AssertionError(f"ItemSpace accepted an out-of-domain key {bad!r}")
+        """))
+
+
+def test_native_signed_arithmetic_cannot_wrap_result(integer_domain_build):
+    run_python(integer_domain_build, "-c", textwrap.dedent("""\
+        from exported import mx_model as exported
+        from exported_cy import mx_model as compiled
+
+        limit = (1 << 63) - 1
+        reference = type(exported)().Outer.Projection
+        reference.amount = limit
+        assert reference.increment_amount() == limit + 1
+        projection = type(compiled)().Outer.Projection
+        projection.amount = limit
+        try:
+            projection.increment_amount()
+        except OverflowError as error:
+            assert "Outer.Projection.increment_amount" in str(error)
+        else:
+            raise AssertionError("The signed addition wrapped before conversion")
         """))
