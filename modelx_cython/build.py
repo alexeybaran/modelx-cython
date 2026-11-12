@@ -169,7 +169,7 @@ def create_setup(model_name: str, modules: Sequence[str], setup_file: pathlib.Pa
             annotate=True,
             # PEP660 meta-path installs do not add the package root to sys.path.
             include_path=[str(Path(modelx_cython.__file__).resolve().parent.parent)],
-            compiler_directives={{"freethreading_compatible": True}}
+            compiler_directives={{"freethreading_compatible": True{infer}}}
         ),
         cmdclass=provider_build_cache({provider_sources!r})
     )
@@ -180,6 +180,10 @@ def create_setup(model_name: str, modules: Sequence[str], setup_file: pathlib.Pa
             model_name=model_name,
             modules_str=modules_str, recursion_budget=recursion_budget,
             cell_sources=cell_sources,
-            provider_sources={f'{model_name}.{path.stem}': path.as_posix() for path in providers}),
+            provider_sources={f'{model_name}.{path.stem}': path.as_posix() for path in providers},
+            # Experiment switch (backlog C1): Cython type inference for C integers, with overflow
+            # checks so that an overflowing native integer raises instead of wrapping.
+            infer=(', "infer_types": True, "overflowcheck": True'
+                   if __import__('os').environ.get('MX_CY_INFER_TYPES') == '1' else '')),
         encoding="utf-8")
 

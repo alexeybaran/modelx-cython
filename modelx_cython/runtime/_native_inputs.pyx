@@ -1596,6 +1596,38 @@ cdef class _NativeTableIndex:
     def min(self):
         return self._owner.index.min()
 
+    def __getattr__(self, name):
+        return getattr(self._owner.index, name)
+
+
+cpdef long long table_first_int(object table) except? -1:
+    """``int(table.index.min())`` as a C integer; integer-keyed tables read their cached view."""
+    cdef TableView data
+    owner = (<NativeTable>table)._owner if type(table) is NativeTable else table
+    if type(owner) is Table:
+        data = view(owner)
+        if data.integral:
+            return data.first_integer
+    return _mx_exact_index(owner.index.min())
+
+
+cpdef long long table_last_int(object table) except? -1:
+    """``int(table.index.max())`` as a C integer; integer-keyed tables read their cached view."""
+    cdef TableView data
+    owner = (<NativeTable>table)._owner if type(table) is NativeTable else table
+    if type(owner) is Table:
+        data = view(owner)
+        if data.integral:
+            return data.last_integer
+    return _mx_exact_index(owner.index.max())
+
+
+cdef long long _mx_exact_index(object value) except? -1:
+    # Same rule as int() on the key, but a non-integral key raises instead of truncating (S3).
+    if type(value) is float and not value.is_integer():
+        raise TypeError(f'table index bound {value!r} is not an integer')
+    return value
+
 
 @cython.final
 cdef class NativeTable:
@@ -1605,7 +1637,7 @@ cdef class NativeTable:
         cdef TableView data
         cdef KeyedView indexed
         if not isinstance(owner, Table):
-            raise TypeError('declared Table Cell returned a different type')
+            raise TypeError('a Cell traced as returning a Table returned a different type; rebuild with a wider sample, or set return_type to object in the spec')
         self._owner = owner
         if type(owner) is Table:
             self._index_view = _NativeTableIndex(owner)
@@ -1705,6 +1737,10 @@ cdef class NativeTable:
     def loc(self):
         # Object-speed path for reads the compiler did not type; same semantics as Table.loc.
         return self._owner.loc
+
+    def __getattr__(self, name):
+        # Pandas passthrough and any other Table attribute, with Table's own semantics.
+        return getattr(self._owner, name)
 
     def __getitem__(self, key):
         return self._owner[key]

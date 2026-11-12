@@ -1,8 +1,9 @@
 """Type-directed lowering of pandas-spelled table reads.
 
 ``R.loc[key, "column"]`` becomes ``R.lookup_float(key, "column")`` when ``R`` is a table
-whose traced schema gives ``column`` a float kind. ``R.index.max()`` becomes
-``R.index.max_int()`` when the table's keys are integers. The rewritten calls are the
+whose traced schema gives ``column`` a float kind. ``R.index.max()`` and
+``R.index.min()`` (also inside ``int()``) become the provider's C integer reads of the table's
+last and first key when the keys are integers. The rewritten calls are the
 declared table operations that later passes already lower; nothing else changes.
 
 ``R`` is recognised as a table when it is, after following at most a few steps:
@@ -10,7 +11,8 @@ declared table operations that later passes already lower; nothing else changes.
 - a call to a Cell whose traced result is a table, or a grouped table (Records of tables);
 - ``.slice(...)`` applied to such a value;
 - a local name with exactly one assignment in the formula, from such a value (repeating the
-  identical assignment counts as one).
+  identical assignment counts as one). A local bound to a zero-argument Cell call is replaced
+  by the call in the rewritten read: the call returns the same cached object.
 
 ``float(R.loc[key, "col"])`` loses the ``float()``: the typed read already returns a float.
 For the same reason ``float()`` of an integer column read becomes the float read.
@@ -77,8 +79,9 @@ def _names(node):
 
 
 class LocReads(FormulaTransformer):
-    def __init__(self, resolver, space):
+    def __init__(self, resolver, space, providers=None):
         super().__init__()
+        self.providers = providers if providers is not None else set()
         self.resolver = resolver
         self.space = space
         self.typed = 0
@@ -137,7 +140,8 @@ class LocReads(FormulaTransformer):
         if len(elements) != 2 or not all(isinstance(e.slice, cst.Index) for e in elements):
             return None, 'not loc[key, column]'
         key, column = elements[0].slice.value, elements[1].slice.value
-        if not isinstance(column, cst.SimpleString):
+        names = self._literal_values(column)
+        if names is None:
             return None, 'column is not a string literal'
         receiver = target.value
         schema = self._schema(receiver)
@@ -147,11 +151,46 @@ class LocReads(FormulaTransformer):
                 # Records measured slower than the object .loc, so the read stays as written.
                 return None, 'full key into a grouped table: no native grouped read'
             return None, 'receiver is not a traced table'
-        kind = schema.get(column.evaluated_value)
-        if kind not in kinds:
-            return None, f'column {column.evaluated_value!r} has traced kind {kind}'
+        receiver = self._direct(receiver)
+        found = {schema.get(name) for name in names}
+        if not found <= set(kinds):
+            name = sorted(n for n in names if schema.get(n) not in kinds)[0]
+            return None, f'column {name!r} has traced kind {schema.get(name)}'
         return cst.Call(func=cst.Attribute(receiver, cst.Name('lookup_float')),
                         args=(cst.Arg(key), cst.Arg(column))), None
+
+    def _direct(self, receiver):
+        """Replace a local bound once to a zero-argument Cell call by that call.
+
+        A Cell call returns its cached value, so reading through the call or through the
+        local is the same object; the direct form is the one later passes lower natively.
+        """
+        if isinstance(receiver, cst.Name) and receiver.value in self._aliases:
+            value = self._aliases[receiver.value]
+            if isinstance(value, cst.Call) and not value.args:
+                chain = _extract_self_chain(value.func)
+                if isinstance(chain, list) and chain:
+                    status, _ = self.resolver.resolve_chain(self.space, chain)
+                    if status == RESOLVED:
+                        return value
+        return receiver
+
+    def _literal_values(self, node, depth=0):
+        """The possible values of a column expression built only from string literals.
+
+        A literal, a conditional expression between such expressions, or a local assigned
+        once from one. None for anything else.
+        """
+        if depth > 4:
+            return None
+        if isinstance(node, cst.SimpleString):
+            return {node.evaluated_value}
+        if isinstance(node, cst.IfExp):
+            a, b = self._literal_values(node.body, depth + 1), self._literal_values(node.orelse, depth + 1)
+            return a | b if a is not None and b is not None else None
+        if isinstance(node, cst.Name) and node.value in self._aliases:
+            return self._literal_values(self._aliases[node.value], depth + 1)
+        return None
 
     def leave_Subscript(self, original, updated):
         call, reason = self._float_read(updated, ('float',))
@@ -162,8 +201,37 @@ class LocReads(FormulaTransformer):
             self.untyped.append(reason)
         return updated
 
+    def _bound(self, node, name):
+        """R.index.max() / R.index.min() on an integer-keyed table: the provider's C read."""
+        if not (isinstance(node, cst.Call) and not node.args and isinstance(node.func, cst.Attribute)
+                and node.func.attr.value == name and isinstance(node.func.value, cst.Attribute)
+                and node.func.value.attr.value == 'index'):
+            return None
+        schema = self._schema(node.func.value.value)
+        if schema is None or schema.get('__key__') != 'int':
+            return None
+        from .helpers import module_name
+        provider = 'modelx_cython.runtime._native_inputs'
+        self.providers.add(provider)
+        function = {'max': 'table_last_int', 'min': 'table_first_int'}[name]
+        return cst.Call(func=cst.Attribute(cst.Name(module_name(provider)), cst.Name(function)),
+                        args=[cst.Arg(node.func.value.value)])
+
     def leave_Call(self, original, updated):
         func = original.func
+        if (isinstance(func, cst.Name) and func.value == 'int' and len(original.args) == 1
+                and not original.args[0].keyword and not original.args[0].star):
+            inner = updated.args[0].value
+            if (isinstance(inner, cst.Call) and isinstance(inner.func, cst.Attribute)
+                    and inner.func.attr.value in ('table_last_int', 'table_first_int')):
+                return inner               # int() of the C integer bound is the bound
+        for name in ('max', 'min'):
+            if original.args or not isinstance(func, cst.Attribute) or func.attr.value != name:
+                continue
+            bound = self._bound(original, name)
+            if bound is not None:
+                self.typed += 1
+                return bound
         if (isinstance(func, cst.Name) and func.value == 'float' and len(original.args) == 1
                 and not original.args[0].keyword and not original.args[0].star
                 and isinstance(original.args[0].value, cst.Subscript)
@@ -180,11 +248,4 @@ class LocReads(FormulaTransformer):
                 self.untyped.pop()
                 self.typed += 1
                 return call
-        if not (isinstance(func, cst.Attribute) and func.attr.value == 'max' and not original.args
-                and isinstance(func.value, cst.Attribute) and func.value.attr.value == 'index'):
-            return updated
-        schema = self._schema(func.value.value)
-        if schema is None or schema.get('__key__') != 'int':
-            return updated
-        self.typed += 1
-        return updated.with_changes(func=updated.func.with_changes(attr=cst.Name('max_int')))
+        return updated
