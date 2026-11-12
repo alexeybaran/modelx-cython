@@ -41,6 +41,7 @@ def test_numeric_group_labels_first_last_and_missing(native,labels):
 
 
 @pytest.mark.parametrize('values', [[], [1e16,1.0,-1e16,3.0],
+    [1e16, *([1.0] * 128), -1e16],
     [float('inf'),1.0,2.0], [float('inf'),float('-inf'),2.0],
     [float('nan')]*3, [0.0,-0.0,0.0]])
 def test_empty_cancellation_infinities_and_all_missing(native,values):

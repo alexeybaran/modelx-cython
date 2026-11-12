@@ -8,7 +8,7 @@ import pytest
 
 from modelx_helpers import pandas_inputs as inputs, typed_inputs as h
 from modelx_helpers.immutable_inputs import Table, Record, freeze
-from modelx_helpers.table_operations import row, to_pandas
+from modelx_helpers.table_operations import column, row, to_pandas
 from modelx_cython.tests.helper_contracts.test_table_operations import native
 
 
@@ -25,14 +25,16 @@ def frames():
     yield pd.DataFrame({'a': pd.Series([None, pd.NA], dtype=object), 'b': [.1, .2]})
 
 
-def guard(operation):
+def guard(operation, *, preparation=False, single_column_pass=False):
     forbidden = {inputs.table.__code__, inputs._report_metadata.__code__,
                  inputs._scalar.__code__, freeze.__code__, Table.__init__.__code__,
                  Record.__init__.__code__, row.__code__, h.lookup_object.__code__}
+    if single_column_pass:
+        forbidden.add(pd.DataFrame.dtypes.fget.__code__)
     calls = []
     def profile(frame, event, arg):
-        if event == 'call' and (frame.f_code in forbidden or
-                frame.f_globals.get('__name__', '').startswith('pandas')):
+        if event == 'call' and (frame.f_code in forbidden or not preparation
+                and frame.f_globals.get('__name__', '').startswith('pandas')):
             calls.append((frame.f_globals.get('__name__'), frame.f_code.co_name))
     sys.setprofile(profile)
     try:
@@ -53,7 +55,8 @@ def test_public_provider_mixed_storage_exact_contract(native, source, empty, row
     source.columns.name = 'field'
     source.flags.allows_duplicate_labels = False
     expected = inputs.table(source, rows=rows, report=report, preserve_scalar_types=raw)
-    owned = guard(lambda: native.prepare_options(inputs.table, source, rows, report, raw))
+    owned = guard(lambda: native.prepare_options(inputs.table, source, rows, report, raw),
+                  preparation=True, single_column_pass=rows and raw)
     assert type(owned) is Table
     for restored in [owned, pickle.loads(pickle.dumps(owned))]:
         assert restored._preserve_scalar_types is raw
@@ -64,14 +67,10 @@ def test_public_provider_mixed_storage_exact_contract(native, source, empty, row
                     assert actual is value
                 else:
                     assert actual == value or pd.isna(actual) and pd.isna(value)
+        actual = to_pandas(restored)
+        pd.testing.assert_frame_equal(actual, source, check_exact=True, check_flags=rows or report)
         if rows or report:
-            actual = to_pandas(restored)
-            pd.testing.assert_frame_equal(actual, source, check_exact=True)
             assert actual.attrs == source.attrs
-        else:
-            assert restored._metadata is None
-            with pytest.raises(ValueError, match='report=True'):
-                to_pandas(restored)
         if rows:
             for key in tuple(source.index):
                 selected = guard(lambda: native.select(row, restored, key))
@@ -95,7 +94,8 @@ def test_mixed_sparse_integer_axes_errors_and_raw_object_identity(native, indexi
     unused = ['original']
     source = pd.DataFrame({'rate': pd.Series([np.float64(.1), object()], dtype=object).array,
                            'other': [unused, object()]}, index=pd.Index([9, 2], name='policy'))
-    owned = guard(lambda: native.prepare_options(inputs.table, source, True, True, True, indexing))
+    owned = guard(lambda: native.prepare_options(inputs.table, source, True, True, True, indexing),
+                  preparation=True)
     assert guard(lambda: native.raw_value(h.lookup_object, owned, 9, 'other')) is unused
     assert type(guard(lambda: native.raw_value(h.lookup_object, owned, 9, 'rate'))) is np.float64
     unused.append('edited')
@@ -145,3 +145,13 @@ def test_duplicate_axes_preserve_reference_exception_priority(native, opaque, ra
     with pytest.raises(type(expected.value)) as actual:
         native.prepare_options(inputs.table, source, raw=raw)
     assert actual.value.args == expected.value.args
+
+
+def test_native_report_column_restores_owned_object_containers(native):
+    frame = pd.DataFrame({'value': [{'rates': [0.1]}, ('fixed', [0.2])]})
+    owned = native.prepare_options(inputs.table, frame, report=True)
+    expected = pd.Series([{'rates': [0.1]}, ('fixed', [0.2])], name='value')
+    for _ in range(2):
+        result = to_pandas(native.report_values(column, owned, 'value'))
+        pd.testing.assert_series_equal(result, expected, check_exact=True)
+        result.iloc[0]['rates'][0] = 0.9

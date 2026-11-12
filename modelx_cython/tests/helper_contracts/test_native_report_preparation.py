@@ -29,7 +29,7 @@ def test_native_report_preparation_metadata_snapshot_and_pickle(native,frame,wit
     forbidden={pandas_inputs.table.__code__,Table.__init__.__code__,Record.__init__.__code__}
     calls=[]
     def profile(frame,event,arg):
-        if event=='call' and (frame.f_code in forbidden or frame.f_globals.get('__name__','').startswith('pandas')):
+        if event=='call' and frame.f_code in forbidden:
             calls.append(frame.f_code.co_name)
     sys.setprofile(profile)
     try:owned=native.prepare(pandas_inputs.table,frame,with_rows)

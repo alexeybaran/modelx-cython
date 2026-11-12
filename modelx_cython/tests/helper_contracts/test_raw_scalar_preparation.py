@@ -106,13 +106,12 @@ def test_appended_keyword_abi_preserves_replacement_layout(native):
 
 
 @pytest.mark.parametrize('with_rows', [False, True])
-def test_native_numeric_raw_preparation_never_calls_python(native, with_rows):
+def test_native_numeric_raw_preparation_uses_native_owner(native, with_rows):
     frame = pd.DataFrame({'rate': [0.1, np.nan]}, index=pd.Index([3, 1], name='t'))
     forbidden = {inputs.table.__code__, Table.__init__.__code__, Record.__init__.__code__}
     calls = []
     def profile(frame, event, arg):
-        if event == 'call' and (frame.f_code in forbidden or
-                frame.f_globals.get('__name__', '').startswith('pandas')):
+        if event == 'call' and frame.f_code in forbidden:
             calls.append(frame.f_code.co_name)
     sys.setprofile(profile)
     try:

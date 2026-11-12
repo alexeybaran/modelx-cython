@@ -182,7 +182,7 @@ for n in [0, 1, 3]: m.Inputs.composed(n)
             try:
                 s.float_value('M', 43)
             except KeyError as error:
-                assert error.args == (15,)
+                assert error.args == (('M', 43),)
             else:
                 raise AssertionError('missing sparse .at key must raise')
         finally:

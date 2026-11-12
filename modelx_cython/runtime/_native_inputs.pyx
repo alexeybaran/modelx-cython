@@ -2130,10 +2130,26 @@ cdef object column(object function, tuple keywords, object table, object name, o
 
 from modelx_helpers.table_operations import group_sum as _group_sum
 import numpy as _group_numpy
-from pandas.core.groupby import ops as _group_pandas_ops
 cdef object _group_float64 = _group_numpy.dtype('float64')
-cdef object _group_sum_ufunc = getattr(_group_pandas_ops, '_REDUCEAT_UFUNCS', {}).get('sum')
-cdef object _group_reduceat = None if _group_sum_ufunc is None else _group_sum_ufunc.reduceat
+
+
+cdef object _group_reduction():
+    # A monotonic float64 group may use NumPy summation. Observe the installed
+    # pandas behavior on a cancellation case that distinguishes it from the
+    # compensated loop, using the same public groupby API as the Python helper.
+    reduceat = _group_numpy.add.reduceat
+    for units in (2, 128):
+        values = _group_numpy.array([1e16, *([1.0] * units), -1e16], dtype='float64')
+        numpy_total = reduceat(values, [0])[0]
+        if numpy_total == units:
+            continue
+        frame = _pandas.DataFrame({'value': values})
+        pandas_total = frame.groupby(_pandas.Index([0] * len(values))).sum().iat[0, 0]
+        return reduceat if pandas_total == numpy_total else None
+    return None
+
+
+cdef object _group_reduceat = _group_reduction()
 
 
 cdef object group_sum(object function, tuple keywords, object table, object labels,
@@ -2224,10 +2240,8 @@ cdef object group_sum(object function, tuple keywords, object table, object labe
                     compensation[slot] = 0.0
                 totals[slot] = updated
             seen[slot] = 1
-    # pandas 3.1 admits NumPy's segmented C reduction for monotonic group ids
-    # without NaNs in the floating sum block. Other installed pandas versions
-    # use the compensated C loop above. The donor's explicit ufunc capability
-    # is read once at provider import; no formulas or helper bodies are parsed.
+    # For the monotonic nonmissing domain, retain the installed pandas
+    # reduction mode observed during provider initialization.
     summed_columns = [j for j in range(width) if modes[j] == 0]
     if (_group_reduceat is not None and monotonic and not missing_sum
             and size and summed_columns):
@@ -2273,122 +2287,38 @@ cdef object group_sum(object function, tuple keywords, object table, object labe
 
 
 from pandas import DataFrame as _report_frame_type, Index as _report_index_type, RangeIndex as _report_range_type
-from pandas.core.arrays.string_ import StringArray as _report_string_array_type
-from pandas.core.flags import Flags as _report_flags_type
 from modelx_helpers.pandas_inputs import table as _table_constructor
 cdef object _report_int64 = _group_numpy.dtype('int64')
 
 
-cdef object _native_report_table(object frame, bint with_rows, bint preserve_scalar_types):
-    """Copy admitted physical report storage without pandas/Python operations."""
-    cdef object manager, block, data, index, column_axis, column_data, column_storage
-    cdef object index_data, index_spec, index_metadata, column_dtype, flags, result, spec
-    cdef object attrs, value, interval
-    cdef tuple columns, keys, row_names, values, row_values, items, metadata
-    cdef list copied, copied_rows
-    cdef Py_ssize_t i, j, height, width
-    cdef const double[:, :] numbers
-    if type(frame) is not _report_frame_type:
-        return None
-    attrs = frame._attrs
-    flags = frame._flags
-    if type(attrs) is not dict or attrs or type(flags) is not _report_flags_type:
-        return None
-    manager = frame._mgr
-    if len(manager.blocks) != 1:
-        return None
-    block = manager.blocks[0]
-    data = block.values
-    if type(data) is not _group_numpy.ndarray or data.dtype != _group_float64 or data.ndim != 2:
-        return None
-    numbers = data
-    width, height = numbers.shape[0], numbers.shape[1]
-    if not width:
-        return None
-    value = block._mgr_locs.as_array
-    for i in range(width):
-        if value[i] != i:
-            return None
-    column_axis, index = manager.axes[0], manager.axes[1]
-    if type(column_axis) is not _report_index_type:
-        return None
-    column_data = column_axis._data
-    if type(column_data) is _group_numpy.ndarray:
-        column_storage, column_dtype = column_data, column_data.dtype
-    elif type(column_data) is _report_string_array_type:
-        column_storage, column_dtype = column_data._ndarray, column_data._dtype
-    else:
-        return None
-    columns = tuple(column_storage)
-    if len(columns) != width or len(set(columns)) != width:
-        return None
-    for value in columns:
-        if type(value) is not str:
-            return None
-    if type(index) is _report_range_type:
-        interval = index._range
-        keys = tuple(interval)
-        row_names = keys
-        index_metadata = ('range', interval.start, interval.stop, interval.step, index._name)
-    elif type(index) is _report_index_type:
-        index_data = index._data
-        if (type(index_data) is not _group_numpy.ndarray
-                or index_data.dtype.kind == 'b'
-                or height and index_data.dtype != _report_int64):
-            return None
-        keys = tuple(int(value) for value in index_data)
-        row_names = tuple(index_data)
-        index_metadata = ('labels', keys, index._name, index_data.dtype)
-    else:
-        return None
-    if len(keys) != height:
-        return None
-    if len(set(keys)) != height:
-        raise ValueError('duplicate table key')
-    copied, copied_rows = [], []
+@cython.boundscheck(False)
+@cython.wraparound(False)
+cdef tuple _float_frame_rows(object frame, bint with_rows, bint preserve_scalar_types):
+    """Copy the homogeneous float matrix through pandas' public array boundary."""
+    cdef object data = frame.to_numpy(copy=False)
+    cdef const double[:, :] numbers = data
+    cdef Py_ssize_t i, j, height = numbers.shape[0], width = numbers.shape[1]
+    cdef list values = [], row_values = []
+    cdef tuple row = ()
     for i in range(height):
+        if with_rows or preserve_scalar_types:
+            row = tuple([data[i, j] for j in range(width)])
+            if with_rows:
+                row_values.append(row)
         if preserve_scalar_types:
-            copied.append(tuple(data[j, i] for j in range(width)))
+            values.append(row)
         else:
-            copied.append(tuple(numbers[j, i] for j in range(width)))
-        if with_rows:
-            copied_rows.append(tuple(data[j, i] for j in range(width)))
-    values = tuple(copied)
-    row_values = tuple(copied_rows) if with_rows else None
-    items = (('multi', False), ('pandas_columns', True), ('row_bool_labels', False),
-             ('boolean_modes', (2,)))
-    spec = _record_alloc(<PyTypeObject*>Record, 0)
-    PyObject_GenericSetAttr(spec, '_items', items)
-    PyObject_GenericSetAttr(spec, '_index', MappingProxyType(dict(items)))
-    PyObject_GenericSetAttr(spec, '_native_groups', {})
-    PyObject_GenericSetAttr(spec, '_metadata', None)
-    metadata = ('frame', index_metadata, ('labels', columns, column_axis._name, column_dtype),
-                (_group_float64,) * width, row_values,
-                (_group_float64,) * height if with_rows else (), {},
-                flags._allows_duplicate_labels, row_names if with_rows else (),
-                (column_dtype, column_axis._name))
-    if with_rows:
-        metadata = _prepared_row_metadata(metadata, columns, preserve_scalar_types)
-    result = _record_alloc(<PyTypeObject*>Table, 0)
-    PyObject_GenericSetAttr(result, '_keys', keys)
-    PyObject_GenericSetAttr(result, '_values', values)
-    PyObject_GenericSetAttr(result, '_columns', columns)
-    PyObject_GenericSetAttr(result, '_positions', MappingProxyType({key: i for i, key in enumerate(keys)}))
-    PyObject_GenericSetAttr(result, '_ordered', tuple(sorted(keys)))
-    PyObject_GenericSetAttr(result, '_native_cache', {})
-    PyObject_GenericSetAttr(result, '_index_error', spec)
-    PyObject_GenericSetAttr(result, '_metadata', metadata)
-    PyObject_GenericSetAttr(result, '_preserve_scalar_types', preserve_scalar_types)
-    return result
+            values.append(tuple([numbers[i, j] for j in range(width)]))
+    return tuple(values), tuple(row_values) if with_rows else None
 
 
 
 # Physical mixed-column preparation for the existing inputs.table contract.
 from cpython.object cimport PyObject_TypeCheck
-from cpython.long cimport PyLong_Check
+from cpython.long cimport PyLong_Check, PyLong_CheckExact
 from cpython.float cimport PyFloat_Check
-from cpython.unicode cimport PyUnicode_Check
-from cpython.bytes cimport PyBytes_Check
+from cpython.unicode cimport PyUnicode_Check, PyUnicode_CheckExact
+from cpython.bytes cimport PyBytes_Check, PyBytes_CheckExact
 from pandas import StringDtype as _frame_string_dtype_type
 cdef object _frame_object_dtype = _group_numpy.dtype('object')
 cdef tuple _frame_numeric_scalar_types = (_numpy_integer_keys + _numpy_float_keys
@@ -2396,6 +2326,12 @@ cdef tuple _frame_numeric_scalar_types = (_numpy_integer_keys + _numpy_float_key
 
 
 cdef object _frame_normalize(object value):
+    # The public bulk object conversion supplies Python scalars for ordinary
+    # NumPy columns. Avoid checking the NumPy scalar registry for each one.
+    if (value is None or value is True or value is False
+            or PyLong_CheckExact(value) or PyFloat_CheckExact(value)
+            or PyUnicode_CheckExact(value) or PyBytes_CheckExact(value)):
+        return value
     if type(value) in _frame_numeric_scalar_types:
         return value.item()
     if PyObject_TypeCheck(value, <PyTypeObject*>_group_numpy.generic):
@@ -2407,51 +2343,49 @@ cdef object _frame_normalize(object value):
     return _missing
 
 
-cdef object _frame_axes(object manager):
-    cdef object column_axis = manager.axes[0]
-    cdef object index = manager.axes[1]
-    cdef object data, storage, column_dtype, interval, index_metadata, value
+cdef object _frame_axes(object frame, bint with_rows):
+    cdef object column_axis = frame.columns
+    cdef object index = frame.index
+    cdef object data, column_dtype, column_name, index_dtype, index_metadata, value
     cdef tuple columns, keys, row_names
+    cdef dict positions
     if type(column_axis) is not _report_index_type:
         return None
-    data = column_axis._data
-    if type(data) is _group_numpy.ndarray:
-        storage, column_dtype = data, data.dtype
-    elif type(data) is _report_string_array_type:
-        storage, column_dtype = data._ndarray, data._dtype
-    else:
-        return None
-    columns = tuple(storage)
+    columns = tuple(column_axis)
+    column_dtype = column_axis.dtype
+    column_name = column_axis.name
     if not columns or len(set(columns)) != len(columns):
         return None
     for value in columns:
         if type(value) is not str:
             return None
     if type(index) is _report_range_type:
-        interval = index._range
-        keys = tuple(interval)
-        row_names = keys
-        index_metadata = ('range', interval.start, interval.stop, interval.step, index._name)
+        keys = tuple(index)
+        row_names = keys if with_rows else ()
+        index_metadata = ('range', index.start, index.stop, index.step, index.name)
     elif type(index) is _report_index_type:
-        data = index._data
-        if (type(data) is not _group_numpy.ndarray or data.dtype.kind == 'b'
-                or len(data) and data.dtype != _report_int64):
+        index_dtype = index.dtype
+        if (not isinstance(index_dtype, _group_numpy.dtype) or index_dtype.kind == 'b'
+                or len(index) and index_dtype != _report_int64):
             return None
+        data = index.to_numpy(copy=False)
         keys = tuple(int(value) for value in data)
-        row_names = tuple(data)
-        index_metadata = ('labels', keys, index._name, data.dtype)
+        row_names = tuple(data) if with_rows else ()
+        index_metadata = ('labels', keys, index.name, index_dtype)
     else:
         return None
-    if len(set(keys)) != len(keys):
+    positions = {key: i for i, key in enumerate(keys)}
+    if len(positions) != len(keys):
         return None  # Reference preparation preserves conversion/error ordering.
     return (columns, keys, row_names, index_metadata,
-            ('labels', columns, column_axis._name, column_dtype),
-            (column_dtype, column_axis._name))
+            ('labels', columns, column_name, column_dtype),
+            (column_dtype, column_name), positions,
+            keys if type(index) is _report_range_type and index.step > 0 else tuple(sorted(keys)))
 
 
 cdef object _frame_row_dtype(tuple dtypes):
     cdef object first = dtypes[0]
-    cdef object dtype, left_na, right_na
+    cdef object dtype
     cdef bint same = True
     cdef bint all_numpy = True
     cdef bint any_boolean = False
@@ -2470,13 +2404,8 @@ cdef object _frame_row_dtype(tuple dtypes):
             if dtype != first:
                 same = False
         elif type(dtype) is _frame_string_dtype_type and type(first) is _frame_string_dtype_type:
-            left_na, right_na = dtype._na_value, first._na_value
-            if dtype._storage != first._storage:
+            if dtype != first:
                 return _missing
-            if left_na is not right_na:
-                if not (type(left_na) is float and type(right_na) is float
-                        and left_na != left_na and right_na != right_na):
-                    return _missing
         else:
             same = False
     if same:
@@ -2487,10 +2416,10 @@ cdef object _frame_row_dtype(tuple dtypes):
 
 
 cdef object _frame_owner(tuple keys, tuple values, tuple columns, object metadata,
-                         bint preserve_scalar_types):
+                         dict positions, tuple ordered, bint preserve_scalar_types):
     cdef object spec, result
-    cdef tuple items = (('multi', False), ('pandas_columns', True), ('row_bool_labels', False),
-                        ('boolean_modes', (2,)))
+    cdef tuple items = (('multi', False), ('pandas_columns', True),
+        ('row_bool_labels', False), ('boolean_modes', (2,)))
     spec = _record_alloc(<PyTypeObject*>Record, 0)
     PyObject_GenericSetAttr(spec, '_items', items)
     PyObject_GenericSetAttr(spec, '_index', MappingProxyType(dict(items)))
@@ -2501,8 +2430,8 @@ cdef object _frame_owner(tuple keys, tuple values, tuple columns, object metadat
     PyObject_GenericSetAttr(result, '_keys', keys)
     PyObject_GenericSetAttr(result, '_values', values)
     PyObject_GenericSetAttr(result, '_columns', columns)
-    PyObject_GenericSetAttr(result, '_positions', MappingProxyType({key: i for i, key in enumerate(keys)}))
-    PyObject_GenericSetAttr(result, '_ordered', tuple(sorted(keys)))
+    PyObject_GenericSetAttr(result, '_positions', MappingProxyType(positions))
+    PyObject_GenericSetAttr(result, '_ordered', ordered)
     PyObject_GenericSetAttr(result, '_native_cache', {})
     PyObject_GenericSetAttr(result, '_index_error', spec)
     PyObject_GenericSetAttr(result, '_metadata', metadata)
@@ -2510,82 +2439,109 @@ cdef object _frame_owner(tuple keys, tuple values, tuple columns, object metadat
     return result
 
 
+cdef object _frame_columns(object frame):
+    """Read the dtype and array from each public column in one pass."""
+    cdef object column, dtype
+    cdef list arrays = [], dtypes = []
+    for _, column in frame.items():
+        dtype = column.dtype
+        if isinstance(dtype, _group_numpy.dtype) and dtype.kind in ('b', 'i', 'u', 'f', 'c', 'O'):
+            arrays.append(column.to_numpy(copy=False))
+        elif type(dtype) is _frame_string_dtype_type:
+            arrays.append(column.array)
+        else:
+            return None
+        dtypes.append(dtype)
+    return arrays, tuple(dtypes)
+
+
 cdef object _native_frame_table(object frame, bint with_rows, bint with_metadata,
                                 bint preserve_scalar_types):
-    cdef object attrs, flags, manager, axes, block, data, places, dtype, row_dtype
-    cdef object raw, value, metadata
-    cdef tuple columns, keys, row_names, dtypes
-    cdef list descriptors, column_dtypes, values, row_values, copied, selected
-    cdef Py_ssize_t height, width, i, j, offset, position
-    if type(frame) is not _report_frame_type:
+    cdef object axes, dtype, row_dtype, row_type, raw, value, metadata, row_values_tuple, row, column_data
+    cdef tuple columns, keys, row_names, dtypes, values, row_casts
+    cdef list arrays = [], copied_rows, row_values, copied, selected
+    cdef Py_ssize_t height, width, i, j
+    cdef bint homogeneous_float
+    if type(frame) is not _report_frame_type or (with_metadata and frame.attrs):
         return None
-    attrs, flags = frame._attrs, frame._flags
-    if type(attrs) is not dict or attrs or type(flags) is not _report_flags_type:
-        return None
-    manager = frame._mgr
-    axes = _frame_axes(manager)
+    axes = _frame_axes(frame, with_rows)
     if axes is None:
         return None
     columns, keys, row_names = axes[0], axes[1], axes[2]
     width, height = len(columns), len(keys)
-    descriptors, column_dtypes = [None] * width, [None] * width
-    for block in manager.blocks:
-        data = block.values
-        places = block._mgr_locs.as_array
-        if type(data) is _group_numpy.ndarray:
-            if (data.ndim != 2 or data.shape[1] != height or data.shape[0] != len(places)
-                    or data.dtype.kind not in ('b', 'i', 'u', 'f', 'c', 'O')):
-                return None
-            for offset in range(len(places)):
-                position = places[offset]
-                if not 0 <= position < width or descriptors[position] is not None:
-                    return None
-                descriptors[position] = (data, offset, False)
-                column_dtypes[position] = data.dtype
-        elif type(data) is _report_string_array_type:
-            raw = data._ndarray
-            if type(raw) is not _group_numpy.ndarray or raw.ndim != 1 or raw.shape[0] != height or len(places) != 1:
-                return None
-            position = places[0]
-            if not 0 <= position < width or descriptors[position] is not None:
-                return None
-            descriptors[position] = (raw, 0, True)
-            column_dtypes[position] = data._dtype
-        else:
+    if with_rows and preserve_scalar_types:
+        # Raw rows already need each column array. Avoid building and
+        # iterating a second pandas Series solely for its dtype metadata.
+        column_data = _frame_columns(frame)
+        if column_data is None:
             return None
-    if any(value is None for value in descriptors):
-        return None
-    dtypes = tuple(column_dtypes)
-    row_dtype = _frame_row_dtype(dtypes) if with_rows else None
+        arrays, dtypes = column_data
+    else:
+        dtypes = tuple(frame.dtypes)
+    homogeneous_float = not arrays and all(dtype == _group_float64 for dtype in dtypes)
+    row_dtype = _group_float64 if homogeneous_float else (_frame_row_dtype(dtypes) if with_rows else None)
     if row_dtype is _missing:
         return None
-    values, row_values = [], []
-    for i in range(height):
-        copied, selected = [], []
-        for j in range(width):
-            data, offset, value = descriptors[j]
-            raw = data[i] if value else data[offset, i]
+    if homogeneous_float:
+        # Reading a homogeneous frame as one matrix keeps its native
+        # value-copy loop and avoids constructing a Series for every column.
+        values, row_values_tuple = _float_frame_rows(frame, with_rows, preserve_scalar_types)
+    elif (not preserve_scalar_types and (not with_rows or row_dtype is _frame_object_dtype)
+          and all(type(dtype) is _frame_string_dtype_type
+                  or isinstance(dtype, _group_numpy.dtype) and dtype.kind in ('b', 'i', 'u', 'f', 'O')
+                  for dtype in dtypes)):
+        # Object conversion keeps mixed integers and floats exact. Read the
+        # values in one public call without constructing a Series per column.
+        copied_rows, row_values = [], []
+        row_casts = (tuple(dtype.type if isinstance(dtype, _group_numpy.dtype)
+                           and dtype.kind != 'O' else None for dtype in dtypes)
+                     if with_rows else ())
+        for row in frame.to_numpy(dtype=object, copy=False).tolist():
+            copied = []
+            for raw in row:
+                value = _frame_normalize(raw)
+                if value is _missing:
+                    return None
+                copied.append(value)
+            copied_rows.append(tuple(copied))
             if with_rows:
-                if row_dtype is _frame_object_dtype or not isinstance(row_dtype, _group_numpy.dtype):
-                    selected.append(raw)
-                else:
-                    selected.append(row_dtype.type(raw))
-            value = raw if preserve_scalar_types else _frame_normalize(raw)
-            if value is _missing:
+                row_values.append(tuple(raw if cast is None else cast(raw)
+                                        for cast, raw in zip(row_casts, row)))
+        values = tuple(copied_rows)
+        row_values_tuple = tuple(row_values) if with_rows else None
+    else:
+        if not arrays:
+            column_data = _frame_columns(frame)
+            if column_data is None:
                 return None
-            copied.append(value)
-        values.append(tuple(copied))
-        if with_rows:
-            row_values.append(tuple(selected))
-    metadata = ('axes', axes[3], axes[4], dtypes)
+            arrays, dtypes = column_data
+        row_type = (row_dtype.type if with_rows and isinstance(row_dtype, _group_numpy.dtype)
+                    and row_dtype != _frame_object_dtype else None)
+        copied_rows, row_values = [], []
+        for i in range(height):
+            copied, selected = [], []
+            for j in range(width):
+                raw = arrays[j][i]
+                if with_rows:
+                    selected.append(raw if row_type is None or type(raw) is row_type else row_type(raw))
+                value = raw if preserve_scalar_types else _frame_normalize(raw)
+                if value is _missing:
+                    return None
+                copied.append(value)
+            copied_rows.append(tuple(copied))
+            if with_rows:
+                row_values.append(tuple(selected))
+        values = tuple(copied_rows)
+        row_values_tuple = tuple(row_values) if with_rows else None
     if with_metadata:
-        metadata = ('frame', axes[3], axes[4], dtypes,
-            tuple(row_values) if with_rows else None,
+        metadata = ('frame', axes[3], axes[4], dtypes, row_values_tuple,
             (row_dtype,) * height if with_rows else (), {},
-            flags._allows_duplicate_labels, row_names if with_rows else (), axes[5])
+            frame.flags.allows_duplicate_labels, row_names, axes[5])
         if with_rows:
             metadata = _prepared_row_metadata(metadata, columns, preserve_scalar_types)
-    return _frame_owner(keys, tuple(values), columns, metadata, preserve_scalar_types)
+    else:
+        metadata = ('axes', axes[3], axes[4], dtypes)
+    return _frame_owner(keys, values, columns, metadata, axes[6], axes[7], preserve_scalar_types)
 
 
 
@@ -2601,10 +2557,6 @@ cdef object table(object function, tuple keywords, object frame, object columns=
             and (columns is _missing or columns is None)
             and (groups is _missing or type(groups) is tuple and not groups)
             and (indexing is _missing or type(indexing) is str and indexing in ('loc', 'at'))):
-        if rows is True or report is True:
-            prepared = _native_report_table(frame, rows is True, preserve_scalar_types is True)
-            if prepared is not None:
-                return prepared
         prepared = _native_frame_table(frame, rows is True, rows is True or report is True,
                                         preserve_scalar_types is True)
         if prepared is not None:
