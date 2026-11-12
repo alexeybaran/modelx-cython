@@ -10,6 +10,7 @@ import libcst as cst
 
 from .consts import MX_SELF
 from .scopes import CstFacts, Names
+from .syntax import same_expression
 
 
 @dataclass(frozen=True)
@@ -81,6 +82,14 @@ def dense_condition(axes, proof=None, proved_axes=()):
                   if not proved_axes or axes[i] == proved_axes[i] else check
                   for i, check in enumerate(checks)]
     return " and ".join(checks)
+
+
+def checked_dense_guard(body, layout, proof=None):
+    """Find the sole guard for the generated dense layout."""
+    if len(body) != 1 or not isinstance(guard := body[0], cst.If):
+        return None
+    expected = cst.parse_expression(dense_condition(layout.axes, proof))
+    return guard if same_expression(guard.test, expected) else None
 
 
 def exact_receiver(owner):

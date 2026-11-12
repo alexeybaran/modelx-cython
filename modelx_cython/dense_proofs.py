@@ -4,7 +4,7 @@ from collections import Counter
 import libcst as cst
 from libcst.metadata import ExpressionContext
 
-from .cell_entries import EntryModule, dense_condition, exact_receiver
+from .cell_entries import EntryModule, checked_dense_guard, dense_condition, exact_receiver
 from .consts import CY_MOD, FORMULA_PREF, MX_SELF
 from .scopes import CstFacts, OPAQUE_SCOPES
 from .syntax import arguments, dotted_name, same_expression, statements, walk
@@ -17,13 +17,10 @@ def _else_body(node):
 
 
 def _checked_guard(entry, layout):
-    body = statements(entry.body)
-    if len(body) != 1 or not isinstance(body[0], cst.If) or not 0 < len(layout.axes) <= 32:
+    if (not 0 < len(layout.axes) <= 32
+            or [param.name.value for param in entry.params.params] != [MX_SELF, *(axis.key for axis in layout.axes)]):
         return None
-    if [param.name.value for param in entry.params.params] != [MX_SELF, *(axis.key for axis in layout.axes)]:
-        return None
-    expected = cst.parse_expression(dense_condition(layout.axes))
-    return body[0] if same_expression(body[0].test, expected) else None
+    return checked_dense_guard(statements(entry.body), layout)
 
 
 def _argument_range(node, ranges, types, target_type):
