@@ -1,0 +1,290 @@
+"""Read native object declarations beside existing function-provider sources."""
+
+from dataclasses import dataclass
+from importlib import import_module
+import json
+import re
+from types import MappingProxyType
+from typing import Mapping, Optional
+
+from .helpers import read_resource, valid_identifier
+
+
+@dataclass(frozen=True)
+class ProviderMember:
+    signature: str
+    native: str
+
+
+@dataclass(frozen=True)
+class NumericMethod:
+    signature: str
+    read: str
+    prepare: str
+    read_integer: Optional[str] = None
+    read_object: Optional[str] = None
+    read_text: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class NumericBounds:
+    first: str
+    last: str
+    index: str
+    index_max: str
+    bounded: str
+    clamped: str
+
+
+@dataclass(frozen=True)
+class NumericTable:
+    owner_field: str
+    ready: str
+    methods: Mapping[str, NumericMethod]
+    bounds: Optional[NumericBounds] = None
+
+
+@dataclass(frozen=True)
+class NumericRecord:
+    lookup: str
+    read_field: str
+    read_cast: str
+    field_ready: str
+    cast_ready: str
+    bound_read: str
+
+
+@dataclass(frozen=True)
+class GroupedTable:
+    slice_method: str
+    index_field: str
+    lookup_method: str
+    probe: str
+    read: str
+    bound_probe: Optional[str] = None
+    bound_read: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class ProviderType:
+    view_type: Optional[str]
+    bind: Optional[str]
+    members: Mapping[str, ProviderMember]
+    admission: str
+    bind_cell: bool
+    numeric_table: Optional[NumericTable]
+    numeric_record: Optional[NumericRecord]
+    grouped_table: Optional[GroupedTable] = None
+
+
+@dataclass(frozen=True)
+class ProviderManifest:
+    protocol: int
+    provider: str
+    abi: str
+    types: Mapping[str, ProviderType]
+
+
+@dataclass(frozen=True)
+class ProviderBinding:
+    manifest: ProviderManifest
+    declaration: ProviderType
+    type_id: str
+    declared: bool
+
+    @property
+    def identity(self):
+        return self.manifest.provider, self.manifest.abi, self.type_id
+
+
+def observed_provider_binding(traces):
+    """Read a registration only from the exact sampled owner's namespace."""
+    owner = type(traces[0].ret_val)
+    if vars(owner).get('__modelx_cython_type__') is None:
+        return None
+    identity = f'{owner.__module__}.{owner.__qualname__}'
+    declared = True
+    for trace in traces:
+        annotation = trace.func.__annotations__.get('return')
+        if (type(trace.ret_val) is not owner
+                or annotation not in (None, owner, owner.__qualname__, identity)):
+            return None
+        declared &= annotation is not None
+    return owner_provider_binding(owner, declared=declared)
+
+
+def owner_provider_binding(owner, *, declared=False):
+    """Resolve a provider for an already observed exact Python type."""
+    registration = vars(owner).get('__modelx_cython_type__')
+    if registration is None:
+        return None
+    if (not isinstance(registration, tuple) or len(registration) != 4
+            or type(registration[0]) is not int or registration[0] != 1
+            or not _qualified_identifier(registration[3])):
+        identity = f'{owner.__module__}.{owner.__qualname__}'
+        raise ValueError(f'invalid native type registration on {identity}')
+    _, provider, abi, type_id = registration
+    manifest = read_provider_manifest(provider, abi)
+    if manifest is None:
+        return None
+    declaration = manifest.types.get(type_id)
+    if declaration is None:
+        raise ValueError(f'provider {provider!r} does not declare type {type_id!r}')
+    return ProviderBinding(manifest, declaration, type_id, declared)
+
+
+def _qualified_identifier(value):
+    return (isinstance(value, str) and '.' in value
+            and all(valid_identifier(part) for part in value.split('.')))
+
+
+def _valid_abi(value):
+    return isinstance(value, str) and re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]*', value)
+
+
+def _unique_fields(pairs):
+    result = {}
+    for field, value in pairs:
+        if field in result:
+            raise ValueError(f'duplicate field {field!r}')
+        result[field] = value
+    return result
+
+
+def _require_fields(value, label, required, optional=()):
+    if (not isinstance(value, dict) or set(required).difference(value)
+            or set(value).difference(required, optional)):
+        raise ValueError(f'invalid fields for {label}')
+
+
+def _read_numeric_table(type_id, declaration):
+    label = f'{type_id}.numeric_table'
+    _require_fields(declaration, label, ('owner_field', 'ready', 'methods'), ('bounds',))
+    owner_field, ready, methods = (declaration[name] for name in ('owner_field', 'ready', 'methods'))
+    if not (valid_identifier(owner_field) and valid_identifier(ready) and isinstance(methods, dict) and methods):
+        raise ValueError(f'invalid numeric table declaration for {type_id}')
+    entries = {}
+    for name, method in methods.items():
+        signature = method.get('signature') if isinstance(method, dict) else None
+        if signature not in ('lookup_f64', 'previous_f64') or not valid_identifier(name):
+            raise ValueError(f'invalid numeric method signature for {label}.{name}')
+        fields = ('read', 'prepare')
+        if signature == 'previous_f64':
+            fields += ('read_integer', 'read_object')
+        optional = ('read_text',) if signature == 'lookup_f64' else ()
+        _require_fields(method, f'{label}.{name}', ('signature', *fields), optional)
+        if not all(valid_identifier(value) for value in method.values()):
+            raise ValueError(f'invalid native symbol for {label}.{name}')
+        entries[name] = NumericMethod(**method)
+    bounds = None
+    if 'bounds' in declaration:
+        fields = ('first', 'last', 'index', 'index_max', 'bounded', 'clamped')
+        config = declaration['bounds']
+        _require_fields(config, f'{label}.bounds', fields)
+        if not all(valid_identifier(value) for value in config.values()):
+            raise ValueError(f'invalid numeric bounds declaration for {type_id}')
+        bounds = NumericBounds(**config)
+    return NumericTable(owner_field, ready, MappingProxyType(entries), bounds)
+
+
+def _read_type(type_id, declaration):
+    if not _qualified_identifier(type_id):
+        raise ValueError(f'invalid qualified type identity {type_id!r}')
+    _require_fields(declaration, type_id, ('members',),
+                    ('view_type', 'bind', 'admission', 'bind_cell',
+                     'numeric_table', 'numeric_record', 'grouped_table'))
+    view_type = declaration.get('view_type')
+    bind = declaration.get('bind')
+    if ('view_type' in declaration or 'bind' in declaration) and not (
+        valid_identifier(view_type) and valid_identifier(bind)
+    ):
+        raise ValueError(f'{type_id} must declare valid view_type and bind symbols together')
+    admission = declaration.get('admission', 'observed')
+    bind_cell = declaration.get('bind_cell', False)
+    if admission not in ('observed', 'declared_or_forwarded') or type(bind_cell) is not bool:
+        raise ValueError(f'invalid view admission or bind_cell declaration for {type_id}')
+    if view_type is None and (bind_cell or admission != 'observed'):
+        raise ValueError(f'{type_id} cannot configure binding without a view_type')
+    numeric_table = None
+    if 'numeric_table' in declaration:
+        if view_type is None:
+            raise ValueError(f'{type_id} cannot configure numeric_table without a view_type')
+        numeric_table = _read_numeric_table(type_id, declaration['numeric_table'])
+    numeric_record = None
+    if 'numeric_record' in declaration:
+        record = declaration['numeric_record']
+        fields = ('lookup', 'read_field', 'read_cast', 'field_ready', 'cast_ready', 'bound_read')
+        _require_fields(record, f'{type_id}.numeric_record', fields)
+        if not all(valid_identifier(record[field]) for field in fields):
+            raise ValueError(f'invalid numeric Record declaration for {type_id}')
+        numeric_record = NumericRecord(**record)
+    grouped_table = None
+    if 'grouped_table' in declaration:
+        grouped = declaration['grouped_table']
+        _require_fields(grouped, f'{type_id}.grouped_table',
+                        ('slice_method', 'index_field', 'lookup_method', 'probe', 'read'),
+                        ('bound_probe', 'bound_read'))
+        if (not all(valid_identifier(symbol) for symbol in grouped.values())
+                or ('bound_probe' in grouped) != ('bound_read' in grouped)):
+            raise ValueError(f'invalid grouped table declaration for {type_id}')
+        grouped_table = GroupedTable(**grouped)
+
+    declared_members = declaration['members']
+    if not isinstance(declared_members, dict):
+        raise ValueError(f'{type_id} members must be an object')
+    members = {}
+    for name, member in declared_members.items():
+        _require_fields(member, f'{type_id}.{name}', ('signature', 'native'))
+        if not all(valid_identifier(part) for part in (name, member['signature'], member['native'])):
+            raise ValueError(f'invalid member identity or symbol for {type_id}.{name}')
+        members[name] = ProviderMember(member['signature'], member['native'])
+    return ProviderType(view_type, bind, MappingProxyType(members), admission, bind_cell,
+                        numeric_table, numeric_record, grouped_table)
+
+
+def read_provider_manifest(provider: str, expected_abi: str) -> Optional[ProviderManifest]:
+    """Read a provider's optional `<name>.provider.json` resource.
+
+    Missing declarations permit the caller to retain its object path. A
+    present malformed or incompatible declaration raises ValueError. The
+    expected ABI comes from the semantic owner's registration. This reads
+    data in the containing package without importing the provider module.
+    Native signature support and the loaded binary are checked at binding.
+    """
+    if not _qualified_identifier(provider):
+        raise ValueError(f'invalid packaged provider identity {provider!r}')
+    if not _valid_abi(expected_abi):
+        raise ValueError(f'invalid expected ABI identity for provider {provider!r}')
+    package, _, name = provider.rpartition('.')
+    try:
+        owner_package = import_module(package)
+    except ModuleNotFoundError as error:
+        if error.name and (package == error.name or package.startswith(error.name + '.')):
+            return None
+        raise
+    try:
+        payload = read_resource(owner_package, name + '.provider.json')
+    except FileNotFoundError:
+        return None
+
+    try:
+        declaration = json.loads(payload, object_pairs_hook=_unique_fields)
+        _require_fields(declaration, 'manifest', ('protocol', 'provider', 'abi', 'types'))
+        protocol = declaration['protocol']
+        if type(protocol) is not int or protocol != 1:
+            raise ValueError(f'unsupported protocol {protocol!r}, expected 1')
+        if declaration['provider'] != provider:
+            raise ValueError(f'declares provider {declaration["provider"]!r}, expected {provider!r}')
+        abi = declaration['abi']
+        if not _valid_abi(abi):
+            raise ValueError(f'invalid ABI identity {abi!r}')
+        if abi != expected_abi:
+            raise ValueError(f'declares ABI {abi!r}, expected {expected_abi!r}')
+        types = declaration['types']
+        if not isinstance(types, dict) or not types:
+            raise ValueError('types must be a nonempty object')
+        types = {type_id: _read_type(type_id, entry) for type_id, entry in types.items()}
+    except ValueError as error:
+        raise ValueError(f'invalid manifest for provider {provider!r}: {error}') from error
+
+    return ProviderManifest(protocol, provider, abi, MappingProxyType(types))

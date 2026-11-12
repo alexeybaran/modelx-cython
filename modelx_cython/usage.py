@@ -28,6 +28,7 @@ element access counts as unsafe, and call sites that cannot be resolved
 to a cells poison every cells with a matching name.
 """
 
+from collections import defaultdict, deque
 from dataclasses import dataclass, field
 import logging
 import numbers
@@ -43,6 +44,7 @@ from libcst.metadata import (
 )
 
 from modelx_cython.consts import (
+    FORMULA_PREF,
     MODULE_PREF,
     MX_MODEL_MOD,
     MX_SPACE_MOD,
@@ -50,6 +52,7 @@ from modelx_cython.consts import (
     SPACE_PREF,
 )
 from modelx_cython.parser import ParentScopeAddin
+from modelx_cython.syntax import arguments, statements
 
 _logger = logging.getLogger(__name__)
 
@@ -109,11 +112,17 @@ class CellsResolver:
         refs_by_class: Mapping[str, Mapping[str, str]],
         spaces_by_class: Mapping[str, Mapping[str, str]],
         scalar_refs_by_class: Optional[Mapping[str, Set[str]]] = None,
+        locked_scalar_results: Optional[Mapping[str, str]] = None,
+        unlocked_scalar_results: Optional[Mapping[str, str]] = None,
     ) -> None:
         self._cells = cells_by_class
         self._refs = refs_by_class
         self._spaces = spaces_by_class
         self._scalar_refs = scalar_refs_by_class or {}
+        self.locked_scalar_results = locked_scalar_results or {}
+        self.unlocked_scalar_results = unlocked_scalar_results or {}
+        self.provider_results = {}
+        self.observed_provider_results = {}
         self._name_index: Dict[str, List[str]] = {}
         for cells in cells_by_class.values():
             for name, fqname in cells.items():
@@ -522,6 +531,10 @@ def build_resolver(module_infos) -> CellsResolver:
     refs_by_class: Dict[str, Dict[str, str]] = {}
     spaces_by_class: Dict[str, Dict[str, str]] = {}
     scalar_refs_by_class: Dict[str, Set[str]] = {}
+    locked_scalar_results: Dict[str, str] = {}
+    unlocked_scalar_results: Dict[str, str] = {}
+    provider_results = {}
+    observed_provider_results = {}
 
     for fqname, info in module_infos.items():
         pkg, basename = fqname.rsplit(".", 1)
@@ -529,6 +542,17 @@ def build_resolver(module_infos) -> CellsResolver:
             cells_by_class[cls_info.fqname] = {
                 name: cells.fqname for name, cells in cls_info.cells.items()
             }
+            for cells in cls_info.cells.values():
+                binding = getattr(cells, 'native_provider_binding', None)
+                if binding is not None:
+                    provider_results[cells.fqname] = binding
+                observed = getattr(cells, 'observed_provider_type', None)
+                if observed is not None:
+                    observed_provider_results[cells.fqname] = observed
+                if (cells.has_formula_def and not cells.is_special() and not cells.has_args()
+                        and not cells.body_has_closure and not cells.called_with_kwargs):
+                    results = locked_scalar_results if cells.is_locked else unlocked_scalar_results
+                    results[cells.fqname] = cells.get_rettype_expr(c_style=True)
             refs_by_class[cls_info.fqname] = {
                 name: (ref.mx_class or "")
                 for name, ref in cls_info.refs.items()
@@ -547,8 +571,60 @@ def build_resolver(module_infos) -> CellsResolver:
                 attr: child_mod + "." + SPACE_PREF + attr
                 for attr in cls_info.spaces
             }
-    return CellsResolver(cells_by_class, refs_by_class, spaces_by_class,
-                         scalar_refs_by_class)
+    resolver = CellsResolver(cells_by_class, refs_by_class, spaces_by_class,
+                             scalar_refs_by_class, locked_scalar_results, unlocked_scalar_results)
+    resolver.provider_results = provider_results
+    resolver.observed_provider_results = observed_provider_results
+    return resolver
+
+
+def admit_forwarded_views(module_infos, resolver):
+    """Keep the declared representation along resolved, sampled Cell returns."""
+    cells = {cell.fqname: cell for module in module_infos.values()
+             for cls in module.classes.values() for cell in cls.cells.values()
+             if cell.observed_native_binding is not None}
+    if not cells:
+        return
+    dependents = defaultdict(list)
+    for module in module_infos.values():
+        for cls in module.visitor.wrapper.module.body:
+            if not isinstance(cls, cst.ClassDef) or cls.name.value not in module.classes:
+                continue
+            info = module.classes[cls.name.value]
+            for formula in cls.body.body:
+                if not (isinstance(formula, cst.FunctionDef) and formula.returns is None
+                        and formula.name.value.startswith(FORMULA_PREF)):
+                    continue
+                cell = info.cells.get(formula.name.value[len(FORMULA_PREF):])
+                if cell is None or cell.fqname not in cells:
+                    continue
+                body = statements(formula.body)
+                if body and isinstance(body[0], cst.Expr) and isinstance(
+                        body[0].value, (cst.SimpleString, cst.ConcatenatedString)):
+                    body = body[1:]
+                if len(body) != 1 or not isinstance(body[0], cst.Return):
+                    continue
+                call = body[0].value
+                if arguments(call) is None:
+                    continue
+                chain = _extract_self_chain(call.func)
+                if not isinstance(chain, list):
+                    continue
+                status, target = resolver.resolve_chain(info.fqname, chain)
+                if (status == RESOLVED and target in cells
+                        and cells[target].observed_native_binding.identity
+                        == cell.observed_native_binding.identity):
+                    dependents[target].append(cell)
+
+    pending = deque(cell.fqname for cell in cells.values() if cell.native_provider_binding is not None)
+    while pending:
+        for cell in dependents.pop(pending.popleft(), ()):
+            cell.forwarded_native_result = True
+            resolver.provider_results[cell.fqname] = cell.native_provider_binding
+            if not cell.has_args():
+                results = resolver.locked_scalar_results if cell.is_locked else resolver.unlocked_scalar_results
+                results[cell.fqname] = cell.get_rettype_expr(c_style=True)
+            pending.append(cell.fqname)
 
 
 def analyze_usage(units) -> Dict[str, UsageVerdict]:

@@ -1,0 +1,66 @@
+{
+  "protocol": 1,
+  "provider": "modelx_cython.runtime._native_inputs",
+  "abi": "owned-table-1",
+  "types": {
+    "modelx_helpers.immutable_inputs.Table": {
+      "view_type": "NativeTable",
+      "bind": "bind_native_table",
+      "bind_cell": true,
+      "admission": "declared_or_forwarded",
+      "numeric_table": {
+        "owner_field": "_owner",
+        "ready": "numeric_resource_ready",
+        "bounds": {
+          "first": "first_key",
+          "last": "last_key",
+          "index": "index",
+          "index_max": "max_int",
+          "bounded": "read_bounded_table_float",
+          "clamped": "read_clamped_table_float"
+        },
+        "methods": {
+          "lookup_float": {
+            "signature": "lookup_f64",
+            "read": "bound_lookup_f64",
+            "prepare": "prepare_table_method",
+            "read_text": "read_table_field_float"
+          },
+          "previous": {
+            "signature": "previous_f64",
+            "read": "bound_previous_f64",
+            "prepare": "prepare_previous_table_method",
+            "read_integer": "read_previous_table_int",
+            "read_object": "read_previous_table_float"
+          }
+        }
+      },
+      "members": {}
+    },
+    "modelx_helpers.immutable_inputs.Record": {
+      "numeric_record": {
+        "lookup": "lookup_float",
+        "read_field": "read_record_field_float",
+        "read_cast": "read_cast_record_field_float",
+        "field_ready": "record_field_ready",
+        "cast_ready": "record_cast_ready",
+        "bound_read": "bound_record_field"
+      },
+      "grouped_table": {
+        "slice_method": "slice",
+        "index_field": "index",
+        "lookup_method": "lookup_float",
+        "probe": "group_slice_context_probe",
+        "read": "group_slice_context_value",
+        "bound_probe": "bound_group_probe",
+        "bound_read": "bound_group_value"
+      },
+      "members": {
+        "__getitem__": {
+          "signature": "string_label_to_object",
+          "native": "read_record_item"
+        }
+      }
+    }
+  }
+}

@@ -30,14 +30,13 @@ extension modules in place.
 
 import sys
 import os
-import textwrap
 import pathlib
 import shutil
 import runpy
-import ast
 import argparse
 import dataclasses
 import logging
+import json
 import subprocess
 from typing import IO, TYPE_CHECKING, Sequence, Optional, Tuple
 
@@ -48,8 +47,16 @@ from modelx_cython.builder import ModuleInfo
 from modelx_cython.parser import ModuleVisitor
 from modelx_cython.transformer import ModuleTransformer, PXDGenerator
 from modelx_cython.usage import (
-    analyze_usage, apply_verdicts, build_resolver)
+    admit_forwarded_views, analyze_usage, apply_verdicts, build_resolver)
 from modelx_cython.powers import build_kind_maps, demote_rebound_params
+from modelx_cython.admission import describe
+from modelx_cython.cell_entries import EntryModule
+from modelx_cython.entry_pipeline import lower_entries
+from modelx_cython.integer_boundaries import guard_integer_boundaries
+from modelx_cython.helpers import install as install_helpers
+from modelx_cython.build import cell_locations, create_setup
+from modelx_cython.collect_adapter import CollectRuntime
+from modelx_cython.syntax import read_literal
 
 _logger = logging.getLogger(__name__)
 
@@ -218,7 +225,7 @@ def main_handler(args: argparse.Namespace, stdout: IO[str], stderr: IO[str]) -> 
     rotates backups of the output directory, copies the model there,
     copies the bundled ``_mx_sys.pxd`` into it, runs the sample script
     under tracing via :func:`run_sample`, and reads the spec file with
-    :func:`ast.literal_eval` (skipped when ``args.no_spec`` is set; a
+    a safe literal decoder (skipped when ``args.no_spec`` is set; a
     missing spec file re-raises :class:`FileNotFoundError` with a hint
     to use ``--no-spec``).  Translation proper then runs in three
     phases: (1) parse every model/space module and build its
@@ -284,7 +291,7 @@ def main_handler(args: argparse.Namespace, stdout: IO[str], stderr: IO[str]) -> 
             d = {}
         else:
             try:
-                d = ast.literal_eval(pathlib.Path(args.spec).read_text(encoding="utf-8"))
+                d = read_literal(pathlib.Path(args.spec).read_text(encoding="utf-8"))
             except FileNotFoundError as e:
                 raise FileNotFoundError(f"{e}. Add '--no-spec' to omit the spec file.") from e
 
@@ -352,25 +359,69 @@ def main_handler(args: argparse.Namespace, stdout: IO[str], stderr: IO[str]) -> 
         # not provably of its C type is typed object in the formula.
         module_infos = {u.module_info.fqname: u.module_info for u in units}
         resolver = build_resolver(module_infos)
+        admit_forwarded_views(module_infos, resolver)
         cells_kinds, ref_kinds = build_kind_maps(module_infos)
+        cells_by_name = {cell.fqname: cell for module in module_infos.values()
+                         for cls in module.classes.values() for cell in cls.cells.values()}
         demote_rebound_params(module_infos, resolver, cells_kinds, ref_kinds)
 
+        policy = spec.policy
+
         # Phase 3: transform and write out
+        from modelx_cython import serial_collect
+
+        runtime_path = model_path / (MX_SYS_MOD + '.py')
+        runtime = CollectRuntime(runtime_path.read_text(encoding='utf-8'))
+
+        helper_providers = set()
+        object_providers = {}
+        dense_entries = {}
+        formula_entries = {}
+        translated_modules = {}
+        serial_enabled = False
         for u in units:
+            serial_shapes = serial_collect.analyze(u.module_info, hook=runtime.hook) if runtime.supported else {}
+            serial_enabled |= bool(serial_shapes)
             trans = ModuleTransformer(
                 u.source, u.module_info,
                 resolver=resolver,
                 cells_kinds=cells_kinds,
                 ref_kinds=ref_kinds,
+                serial_shapes=serial_shapes,
+                collect_workers=policy.parallel_workers if runtime.hook else None,
             )
             pxd = PXDGenerator(u.module_info)
 
-            u.abs_src_path.write_text(trans.transformed.code, encoding="utf-8")
+            translated_modules[u.fqname] = EntryModule(trans.transformed)
+            helper_providers.update(trans.helper_providers)
+            object_providers.update(trans.object_providers)
+            if trans.dense_entries:
+                dense_entries[u.module_info.fqname] = trans.dense_entries
+            if trans.formula_entries:
+                formula_entries[u.module_info.fqname] = trans.formula_entries
             u.abs_pxd_path.write_text(pxd.code, encoding="utf-8")
             u.abs_init_path.write_text("from . cimport _mx_classes", encoding="utf-8")
             modules.append(u.rel_src_path)
 
-        create_setup(model_name, modules=modules, setup_file=setup_file)
+        if not runtime.hook:
+            runtime_path.write_text(runtime.render(policy.parallel_workers, native=serial_enabled), encoding='utf-8')
+        provider_sources = install_helpers(helper_providers, model_path, object_providers)
+        modules.extend(provider_sources)
+        translated_modules = lower_entries(translated_modules, dense_entries, formula_entries, policy)
+        cell_sources = {}
+        for u in units:
+            state = guard_integer_boundaries(
+                translated_modules[u.fqname], u.module_info, resolver, cells_kinds, ref_kinds,
+                cells_by_name,
+            )
+            translated_modules[u.fqname] = state
+            u.abs_src_path.write_text(state.syntax.code, encoding='utf-8')
+            cell_sources[u.rel_src_path.as_posix()] = cell_locations(state, u.module_info)
+        create_setup(model_name, modules=modules, setup_file=setup_file, source_root=work_dir,
+                     source_modules=(runtime.syntax, *(state.syntax for state in translated_modules.values())),
+                     cell_sources=cell_sources, providers=provider_sources)
+        (model_path / '_mx_admission.json').write_text(
+            json.dumps(describe(module_infos), indent=2), encoding='utf-8')
 
     if args.translate_only:
         return 0
@@ -555,56 +606,6 @@ def main(argv: Sequence[str], stdout: IO[str], stderr: IO[str]) -> int:
     return main_handler(args, stdout, stderr)
 
 
-def create_setup(model_name: str, modules: Sequence[str], setup_file: pathlib.Path):
-    """Write a ``setup.py`` that cythonizes the translated modules.
-
-    The generated script calls :func:`setuptools.setup` with
-    ``name=model_name`` and ``ext_modules`` produced by
-    ``cythonize(..., annotate=True)`` over the given module paths, with
-    the ``freethreading_compatible`` directive set so that importing the
-    compiled model on a free-threaded build of Python does not re-enable
-    the GIL (the directive needs Cython 3.1 or later and does nothing on
-    a build with the GIL).  Any existing file at ``setup_file`` is
-    overwritten.
-
-    Parameters
-    ----------
-    model_name : str
-        Package name of the translated model (e.g. ``<name>_cy``).
-    modules : Sequence[pathlib.PurePath]
-        Paths of the ``.py`` files to compile, relative to the
-        directory where the script is run.  Despite the ``str``
-        annotation, path objects are required, as each is written
-        into the script via its ``as_posix`` method.
-    setup_file : pathlib.Path
-        Path of the ``setup.py`` file to write.
-    """
-
-    modules_str = textwrap.indent(",\n".join(
-        ['"' + s.as_posix() + '"' for s in modules]
-    ), " " * 8)
-
-    setup_script = textwrap.dedent("""\
-    import sys
-    from setuptools import setup
-    from Cython.Build import cythonize
-
-    setup(
-        name="{model_name}",
-        ext_modules=cythonize([
-    {modules_str}
-            ],
-            annotate=True,
-            compiler_directives={{"freethreading_compatible": True}}
-        )
-    )
-    """)
-
-    setup_file.write_text(
-        setup_script.format(
-            model_name=model_name,
-            modules_str=modules_str),
-        encoding="utf-8")
 
 
 def entry_point_main():
