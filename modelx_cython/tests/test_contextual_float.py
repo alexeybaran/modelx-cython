@@ -3,13 +3,15 @@ import ast
 from types import SimpleNamespace
 
 import libcst as cst
+import pytest
 
-from modelx_cython.helpers import HelperCalls
+from modelx_cython.helpers import HelperCalls, module_name
 from modelx_cython.numeric_helpers import NumericReturns
 from modelx_cython.provider_manifest import (
-    NumericBounds, NumericMethod, NumericRecord, NumericTable,
+    GroupedTable, NumericBounds, NumericMethod, NumericRecord, NumericTable,
     ProviderBinding, ProviderMember, read_provider_manifest,
 )
+from modelx_cython.usage import RESOLVED
 
 
 def builtin_table_binding():
@@ -117,3 +119,58 @@ def test_clamped_table_lookup_uses_the_declared_bounds_operations():
 
     assert '.read_clamped(' in result and 'table.price(key, "rate")' in result
     assert lowering.providers == {provider}
+
+
+@pytest.mark.parametrize('source', ['locked', 'unlocked', 'undeclared'])
+def test_grouped_methods_follow_owner_capability(source):
+    node = cst.parse_module('''\
+def amount(self, month):
+    group = self.category(month)
+    if group not in self.data.groups():
+        return 0.0
+    key = self.key(month)
+    table = self.data.groups().choose(group)
+    if key not in table.keys:
+        return 0.0
+    return min(table.price(key, "rate"), self.cap(month))
+''')
+
+    def cell(rettype):
+        return SimpleNamespace(is_special=lambda: False, called_with_kwargs=False, body_has_closure=False,
+                               native_provider_binding=None, params=('month',),
+                               get_rettype_expr=lambda **_: rettype)
+
+    amount = SimpleNamespace(name='amount', cls='Projection', params=('month',), is_locked=False, has_formula_def=True,
+                             formula_allows_exact_receiver=True, get_rettype_expr=lambda **_: 'double')
+    owner = SimpleNamespace(name='_c_Projection', fqname='example.Projection',
+                            cells={'category': cell('long long'), 'key': cell('long long'), 'cap': cell('double')},
+                            refs={'data': SimpleNamespace(decl_type_expr='_c_Data')},
+                            visitor=SimpleNamespace(dynamic_ref_classes=set()))
+    provider = 'example.tariffs'
+    binding = SimpleNamespace(
+        declaration=SimpleNamespace(grouped_table=GroupedTable(
+            'choose', 'keys', 'price', 'probe_tariff', 'read_tariff', 'probe_owned', 'read_owned')),
+        manifest=SimpleNamespace(provider=provider),
+    )
+    name = 'example.Data.groups'
+    resolver = SimpleNamespace(
+        resolve_chain=lambda *_: (RESOLVED, name),
+        observed_provider_results={} if source == 'undeclared' else {name: binding},
+        locked_scalar_results={} if source == 'unlocked' else {name: 'object'},
+        unlocked_scalar_results={name: 'object'} if source == 'unlocked' else {},
+    )
+    providers = set()
+    lowering = NumericReturns(owner, amount, providers, builtin_keys={'min'}, resolver=resolver)
+    result = node.visit(lowering).code
+    if source == 'locked':
+        alias = module_name(provider)
+        for name in ('probe_tariff', 'read_tariff', 'probe_owned', 'read_owned'):
+            assert f'{alias}.{name}(' in result
+        assert 'type(self.data) is _c_Data' in result
+        assert 'table = self.data.groups().choose(group)' in result
+        assert 'return min(table.price(key, "rate"), self.cap(month))' in result
+        assert providers == {provider}
+    else:
+        assert result == node.code
+        assert not providers
+        assert lowering.unlocked_table_reads == ({(name, 'grouped')} if source == 'unlocked' else set())

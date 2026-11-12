@@ -32,7 +32,7 @@ CAPABILITIES = {
     'bounded': ('bounded_helper', None),
     'bound_bounded': ('bound_bounded_helper', None),
     'bound_grouped': ('bound_grouped_helper', (3,)),
-    'bound_numeric': ('bound_numeric_helper', (3,)),
+    'bound_numeric': ('bound_numeric_helper', (3, 4)),
 }
 REDUCTIONS = frozenset(('f64_sum', 'ordinary_sum', 'bool_any', 'bool_all', 'f64_max'))
 SCALAR_RESULTS = frozenset(('float64', 'int64', 'bool', 'unicode', 'object'))

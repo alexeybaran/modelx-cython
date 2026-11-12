@@ -4,7 +4,7 @@ import sys
 import pytest
 
 from modelx_cython.helpers import registered_helper
-from modelx_cython.provider_manifest import ProviderMember, read_provider_manifest
+from modelx_cython.provider_manifest import GroupedTable, ProviderMember, owner_provider_binding, read_provider_manifest
 
 
 PROVIDER = 'rates_demo.compiled.curve_kernel'
@@ -129,6 +129,22 @@ def test_invalid_numeric_table_declaration(declaration, changes, error):
     resource.write_text(json.dumps(document), encoding='utf-8')
     with pytest.raises(ValueError, match=error):
         read_provider_manifest(PROVIDER, ABI)
+
+
+def test_grouped_capability_on_an_exact_owner_without_a_view(declaration):
+    resource, document = declaration
+    grouped = {'slice_method': 'choose', 'index_field': 'keys', 'lookup_method': 'price',
+               'probe': 'probe_tariff', 'read': 'read_tariff'}
+    document['types'][TYPE] = {'members': {}, 'grouped_table': grouped}
+    resource.write_text(json.dumps(document), encoding='utf-8')
+    owner = type('Curve', (), {'__modelx_cython_type__': (1, PROVIDER, ABI, TYPE)})
+
+    assert owner_provider_binding(owner).declaration.grouped_table == GroupedTable(**grouped)
+    assert owner_provider_binding(type('Derived', (owner,), {})) is None
+    grouped['bound_probe'] = 'probe_owned'
+    resource.write_text(json.dumps(document), encoding='utf-8')
+    with pytest.raises(ValueError, match='invalid grouped table declaration'):
+        owner_provider_binding(owner)
 
 
 def test_broken_package_dependency_is_reported(declaration):

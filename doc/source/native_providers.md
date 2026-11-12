@@ -104,6 +104,11 @@ from `prepare` and declare `read_integer(View, long long, long long)` and
 `read_object(View, long long, object)` symbols, both returning `double`.
 These implement the ordinary previous-key lookup for the two column types.
 
+Function helpers can opt into a namespace-aware ready check by adding its
+symbol as the fourth entry in `__modelx_cython_bound_numeric__`. That check
+takes the context, owner and column identity pointers, and the current helper
+callable. It must validate the callable before a bound read can reuse a value.
+
 Lookup methods may declare `read_text` for a string key and a literal column.
 It takes the context, typed view, string key, and string column and returns
 a `double`. A table may also declare `bounds`. Its `first` and `last` name
@@ -130,6 +135,31 @@ behavior. The ready functions take the context, owner and key identity
 pointers, and the current namespace or conversion callable. They return
 `bint noexcept`. The context must retain all owners and values needed for
 `bound_read(LookupContext) -> double` until the binding is replaced.
+
+## Grouped numeric reads
+
+A Python owner can declare `grouped_table` without defining a native view.
+Its `slice_method`, `index_field`, and `lookup_method` entries identify the
+ordinary grouped read. The compiler recognizes membership checks for both
+the group and the selected table key before a capped double result.
+An observed provider can participate through a direct Reference or a Cell
+result in a locked Space. The original methods remain the fallback.
+
+The declaration supplies a `probe(LookupContext, object owner, long long
+group, str column, Py_ssize_t* slot) -> object` symbol. It returns an owned
+prepared view and writes a nonnegative group slot, `-1` for an absent group,
+or `-2` to request the ordinary path. The `read(LookupContext, object
+prepared, Py_ssize_t slot, long long key, double* value) -> int` symbol
+returns `0` for an absent key, `1` after writing the value, or `2` for the
+ordinary path. Exceptions propagate. The probe checks the exact owner
+type and the view keeps the prepared state alive across key evaluation.
+
+Providers can also declare both `bound_probe` and `bound_read` for a stable,
+collect-owned context. The probe takes `(LookupContext, long long group,
+Py_ssize_t* slot) -> bint` and returns true only if the binding is valid.
+The read takes `(LookupContext, Py_ssize_t slot, long long key,
+double* value) -> int` and follows the same status convention. The context
+may reuse this state only under the private ownership contract.
 
 ## Reusing compiled provider binaries
 
