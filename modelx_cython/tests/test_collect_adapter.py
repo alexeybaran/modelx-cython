@@ -1,11 +1,10 @@
-"""The optional exporter ABI tolerates formatting, but not unknown semantics."""
-import ast
-from pathlib import Path
+"""The compiler uses the current exporter protocol without rewriting it."""
+from types import SimpleNamespace
 
 import libcst as cst
 import pytest
 
-from modelx_cython.collect_adapter import CollectRuntime, _native
+from modelx_cython.collect_adapter import CollectRuntime
 from modelx_cython.helpers import read_resource
 
 
@@ -13,78 +12,45 @@ def current():
     return read_resource('modelx.export', '_mx_sys.py').decode('utf-8')
 
 
-def legacy():
-    return (Path(__file__).parent/'samples/collect_v0.txt').read_text(encoding='utf-8')
+def module(source, options=None):
+    return SimpleNamespace(
+        classes={'Projection': SimpleNamespace(fqname='Projection')},
+        spec=SimpleNamespace(get_spec=lambda _: options or {}),
+        visitor=SimpleNamespace(wrapper=SimpleNamespace(module=cst.parse_module(source))),
+    )
 
 
-@pytest.mark.parametrize('source', [legacy])
-def test_known_legacy_upgrade_is_structural_and_preserves_other_code(source):
-    code = source() + '\nclass Authored:\n    value = "unchanged"\n'
-    # The old exact-text adapter rejected both of these harmless edits.
-    code = code.replace('def collect_from_space(base,', 'def collect_from_space(\n    base,')
-    code = code.replace('_mx_parallel_workers = 1', '_mx_parallel_workers  =  1 # exported')
-    adapter = CollectRuntime(code)
-    assert adapter.supported
-    output = adapter.render(4, native=True)
-    assert _native(cst.parse_module(output))
-    assert 'class Authored:\n    value = "unchanged"' in output
-    assert '_mx_parallel_workers  =  4 # exported' in output
-    assert CollectRuntime(output).render(4, native=True) == output
-    assert not _native(cst.parse_module(adapter.render(4)))
-
-
-@pytest.mark.parametrize('change', [
-    lambda code: code.replace('key = (coords, args)', 'key = (args, coords)'),
-    lambda code: code + '\ndef _mx_collect_chunk(*args): pass\n',
-    lambda code: code + '\n_mx_collect_adapter_version = 17\n',
-    lambda code: code + '\n_mx_collect_native_coords = object()\n',
-    lambda code: code + '\ndef _mx_collect_adapter_version(): pass\n',
-    lambda code: code.replace('scratch = {}', 'scratch = {"authored": True}'),
-    lambda code: code.replace('scratch = {}', 'scratch = {"authored": f"{base}" "text"}'),
-])
-def test_unknown_adapter_keeps_the_general_runtime(change):
-    source = change(legacy())
-    adapter = CollectRuntime(source)
-    assert not adapter.supported
-    assert adapter.render() == source
-    with pytest.raises(ValueError, match='unsupported native'):
-        adapter.render(native=True)
-
-
-def test_native_export_requires_no_runtime_transplant():
+def test_current_exporter_runtime_is_kept_verbatim():
     source = current()
-    adapter = CollectRuntime(source)
-    assert adapter.supported and adapter.template is None
-    assert adapter.render(native=True) == source
-    output = adapter.render(7, native=True)
-    tree = cst.parse_module(output)
-    assert tree.code == output
-    assert _native(tree, 2 if adapter.hook else 1)
-    if adapter.hook:
-        assert output == source
+    runtime = CollectRuntime(source)
+    assert runtime.hook
+    runtime.require_current((module('pass\n'),), workers=4)
+    assert runtime.syntax.code == source
 
 
-def test_legacy_export_does_not_read_the_installed_exporter(monkeypatch):
-    from modelx_cython import collect_adapter
-
-    def resource(package, name):
-        assert package == 'modelx_cython'
-        return read_resource(package, name)
-
-    monkeypatch.setattr(collect_adapter, 'read_resource', resource)
-    adapter = CollectRuntime(legacy())
-    assert adapter.supported
-    assert adapter.render() == legacy()
-    assert _native(cst.parse_module(adapter.render(native=True)))
+@pytest.mark.parametrize('marker', ['', '_mx_collect_adapter_version = 1', '_mx_collect_adapter_version = 17'])
+def test_obsolete_collection_entry_requires_reexport(marker):
+    runtime = CollectRuntime(current().replace('_mx_collect_adapter_version = 2', marker))
+    assert not runtime.hook
+    ordinary = module('def collect(self): return 42\n')
+    runtime.require_current((ordinary,), workers=1)
+    collect = module('def collect(self): return _mx_sys.collect_from_space(self)\n')
+    with pytest.raises(ValueError, match='Re-export the model'):
+        runtime.require_current((collect,), workers=1)
 
 
-def test_parallel_worker_setting_requires_an_unambiguous_export():
-    for source in ('pass\n', '_mx_parallel_workers = 1\n_mx_parallel_workers = 2\n'):
-        with pytest.raises(ValueError, match='collection-enabled'):
-            CollectRuntime(source).render(4)
+@pytest.mark.parametrize('options,workers', [({'serial_collect': 'reuse'}, 1), ({}, 4)])
+def test_explicit_collection_options_require_a_current_export(options, workers):
+    runtime = CollectRuntime('pass\n')
+    with pytest.raises(ValueError, match='Re-export the model'):
+        runtime.require_current((module('pass\n', options),), workers)
 
 
-def test_legacy_protocol_uses_cst_and_ignores_parenthesized_layout():
-    from modelx_cython.collect_adapter import _legacy
-    source = legacy().replace('key = (coords, args)', 'key = ((coords, args))')
-    assert _legacy(cst.parse_module(source))
+def test_duplicate_current_hook_does_not_enable_native_collection():
+    runtime = CollectRuntime(current() + '\ndef _mx_collect_chunk(*args): pass\n')
+    assert not runtime.hook
+
+
+def test_current_version_still_requires_the_worker_hook():
+    source = current().replace('workers=None):', 'legacy_workers=None):')
+    assert not CollectRuntime(source).hook
