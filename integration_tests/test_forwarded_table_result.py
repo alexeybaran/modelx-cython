@@ -57,6 +57,8 @@ def object_hop() -> object:
             '''), encoding="utf-8")
         subprocess.run([sys.executable, "-m", "modelx_cython", name, "--no-spec"],
                        cwd=tmp_path, check=True)
+        assert "owned-table-1" in (
+            tmp_path / f"{name}_cy/_mx_provider_guard.py").read_text(encoding="utf-8")
         report = json.loads((tmp_path / f"{name}_cy/_mx_admission.json").read_text(encoding="utf-8"))
         cells = {key.rsplit("._f_", 1)[-1]: row for key, row in report.items()}
         for cell in ("direct", "shared", "direct_source", "first_hop", "second_hop"):
@@ -83,7 +85,8 @@ def object_hop() -> object:
         old = type(left)()
         old.Inputs.owner = Table((0, 1), ((2.0,), (5.0,)), ("rate",))
         table = old.Inputs.direct()
-        owner = table.__modelx_table_owner__()
+        owner = table.__modelx_cython_owner__()
+        assert table.__modelx_table_owner__() is owner
         prepared = tuple(owner._native_cache.items())
         assert prepared
         assert old.Inputs.shared() is table

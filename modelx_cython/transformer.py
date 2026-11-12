@@ -62,7 +62,7 @@ from libcst.metadata import ParentNodeProvider, ScopeProvider, GlobalScope, Clas
 from libcst.metadata.scope_provider import BuiltinAssignment
 
 from modelx_cython.parser import ParentScopeAddin
-from modelx_cython.builder import ModuleInfo, CombinedCellsInfo, NATIVE_TABLE_PROVIDER
+from modelx_cython.builder import ModuleInfo, CombinedCellsInfo
 from modelx_cython.config import TransSpec
 from modelx_cython.powers import rewrite_powers
 from modelx_cython.inline_entries import add_inline_entries, allows_exact_receiver
@@ -183,9 +183,6 @@ class PXDGenerator:
             stmts.append(f"cimport {ci}")
         contexts = {provider for cls in self.module.classes.values()
                     for provider in getattr(cls, 'native_contexts', {}).values()}
-        if any(c.native_table_result for cls in self.module.classes.values()
-               for c in cls.cells.values()):
-            contexts.add(NATIVE_TABLE_PROVIDER)
         contexts.update(c.native_provider_binding.manifest.provider
                         for cls in self.module.classes.values() for c in cls.cells.values()
                         if c.native_provider_binding is not None)
@@ -571,13 +568,11 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
         self._collect_workers = collect_workers
         self._uses_native_round = False
         self.helper_providers = set()
-        self.object_providers = {c.native_provider_binding.manifest.provider: c.native_provider_binding.manifest
-                                 for cls in module.classes.values() for c in cls.cells.values()
-                                 if c.native_provider_binding is not None}
-        self.helper_providers.update(self.object_providers)
-        if any(c.native_table_result for cls in module.classes.values()
-               for c in cls.cells.values()):
-            self.helper_providers.add(NATIVE_TABLE_PROVIDER)
+        cells = [cell for cls in module.classes.values() for cell in cls.cells.values()]
+        self.object_providers = {binding.manifest.provider: binding.manifest
+                                 for cell in cells if (binding := cell.observed_provider_type)}
+        self.helper_providers.update(binding.manifest.provider for cell in cells
+                                     if (binding := cell.native_provider_binding))
         self.dense_entries = {}
         self.formula_entries = {}
         self.helper_providers.update(numeric_cache.providers(module))
@@ -1260,8 +1255,9 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
                     )
                 )
                 binder = cells.native_result_binder
+                binding = cells.native_provider_binding
                 binding_args = ((cst.Arg(cst.SimpleString(repr(cells.method_fqname))),)
-                                if cells.native_table_result else ())
+                                if binding is not None and binding.declaration.bind_cell else ())
                 if cells.has_args():
                     # Add parameter type hints
                     parameters = self._add_param_type_hints(

@@ -202,7 +202,7 @@ class CombinedCellsInfo(LexicalCellsInfo):
     # C-level (cpdef) calls do not support; set in cli.main_handler
     called_with_kwargs: bool = False
     formula_has_captured_default: bool = False
-    forwarded_table_result: bool = False
+    forwarded_native_result: bool = False
 
     def __init__(self, cls_info, lx_info, rt_info, spec) -> None:
         """Merge lexical, runtime and spec info, validating the spec's
@@ -548,9 +548,6 @@ class CombinedCellsInfo(LexicalCellsInfo):
             If True, emit C-style types for .pxd files.
         """
 
-        if self.native_table_result:
-            from modelx_cython.helpers import module_name
-            return f'{module_name(NATIVE_TABLE_PROVIDER)}.NativeTable'
         binding = self.native_provider_binding
         if binding:
             from modelx_cython.helpers import module_name
@@ -580,40 +577,36 @@ class CombinedCellsInfo(LexicalCellsInfo):
                 and not self.called_with_kwargs and not self.has_spec_rettype)
 
     @property
-    def can_return_native_table(self):
-        return self._can_bind_native_result and getattr(self._rt, 'observed_table_result', False)
+    def observed_native_binding(self):
+        binding = self.observed_provider_type
+        if self._can_bind_native_result and binding and binding.declaration.view_type is not None:
+            return binding
+        return None
+
+    @property
+    def observed_provider_type(self):
+        return getattr(self._rt, 'observed_provider_binding', None)
 
     @property
     def native_table_result(self):
-        """Keep a declared or forwarded table type on the ordinary Cell cache."""
-        return self.can_return_native_table and (
-            self.forwarded_table_result or self._rt.declared_table_result)
+        binding = self.native_provider_binding
+        return binding is not None and binding.manifest.provider == NATIVE_TABLE_PROVIDER
 
     @property
     def native_provider_binding(self):
-        if self._can_bind_native_result:
-            return getattr(self._rt, 'observed_provider_binding', None)
+        binding = self.observed_native_binding
+        if binding and (binding.declaration.admission == 'observed'
+                        or binding.declared or self.forwarded_native_result):
+            return binding
         return None
 
     @property
     def native_result_binder(self):
-        if self.native_table_result:
-            from modelx_cython.helpers import module_name
-            return f'{module_name(NATIVE_TABLE_PROVIDER)}.bind_native_table'
         binding = self.native_provider_binding
         if binding:
             from modelx_cython.helpers import module_name
             return f'{module_name(binding.manifest.provider)}.{binding.declaration.bind}'
         return None
-
-    @property
-    def observed_record_result(self):
-        """Use the owned-record provider when the sample observed its record type."""
-        if not self.has_typeinfo():
-            return False
-        result = self._rt.ret_type.value_type
-        return (getattr(result, '__module__', None), getattr(result, '__qualname__', None)) == (
-            'modelx_helpers.immutable_inputs', 'Record')
 
     def is_arg_int(self, arg: str):
         """Return True if the type of parameter ``arg`` (see

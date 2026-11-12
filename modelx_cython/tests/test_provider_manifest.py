@@ -57,6 +57,7 @@ def test_read_independent_provider_manifest(declaration):
     assert (manifest.protocol, manifest.provider, manifest.abi) == (1, PROVIDER, ABI)
     curve = manifest.types[TYPE]
     assert (curve.view_type, curve.bind) == ('CurveReceiver', 'as_receiver')
+    assert (curve.admission, curve.bind_cell) == ('observed', False)
     assert curve.members['rate_at'] == ProviderMember('int64_label_to_float64', 'read_rate')
     assert manifest.types['rates_demo.curves.Labels'].bind is None
     assert PROVIDER not in sys.modules

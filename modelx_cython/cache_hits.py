@@ -47,7 +47,7 @@ class _Hit:
     value: cst.BaseExpression
 
 
-def _layout(fn, scalar_view):
+def _layout(fn, scalar_view=False):
     if fn.returns is None:
         return None
     args, body = fn.params.params, statements(fn.body)

@@ -76,10 +76,18 @@ def test_parameterized_table_result(tmp_path):
 
     (tmp_path / 'sample.py').write_text(
         'from exported import mx_model\n'
+        'from modelx_helpers.immutable_inputs import Record, Table\n'
         's = mx_model.Policy[0]\n'
-        's.amount(2, 0); s.amount(7, 1); s.row_rate(4); s.missing(float("nan"))\n'
-        's.has_row("a", 4); s.previous_amount(2, 0); s.interpolated_amount(2, 0.5)\n'
-        's.float_field(0); s.raw_field(0); s.previous_method(1); s.previous_column(1, 0); s.bounded_method(1)\n',
+        's.amount(2, 0); s.amount(7, 1); s.row_rate(4); s.row_rate(9); s.missing(float("nan"))\n'
+        's.has_row("a", 4); s.previous_amount(2, -1); s.previous_amount(2, 9)\n'
+        's.interpolated_amount(2, 0.5); s.float_field(1); s.raw_field(1)\n'
+        's.previous_method(8); s.previous_column(8, -1); s.previous_column(8, 0)\n'
+        's.bounded_method(-1); s.bounded_method(8)\n'
+        '# Sample keys that the original scenario will reject at the table boundary.\n'
+        'alternate = type(mx_model)().Policy[0]\n'
+        'past = Table((-1,), ((23.0,),), ("rate",))\n'
+        'alternate.schedules = Record({2: past, 7: past, 12: Table((0,), ((1.0,),), ("rate",))})\n'
+        'alternate.previous_method(-1); alternate.amount(2, -1); alternate.amount(12, 0)\n',
         encoding='utf-8')
     subprocess.run([sys.executable, '-m', 'modelx_cython', 'exported', '--sample', 'sample.py', '--no-spec'],
                    cwd=tmp_path, check=True)

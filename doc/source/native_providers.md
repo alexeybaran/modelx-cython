@@ -49,9 +49,20 @@ a clear error when a typed Cell returns a value outside the declared domain.
 The compiler uses a consistent exact owner type observed in the sample to bind
 the result. An explicit `object` return annotation or `return_type` setting
 keeps the Cell on the ordinary result path. A missing optional manifest also
-keeps the ordinary path. The `int64_label_to_float64` member signature currently
+keeps the ordinary path. A view can declare `"admission": "declared_or_forwarded"`
+to require an explicit owner return annotation or a resolved forwarding Cell
+with the same provider, ABI and semantic type. The default is `"observed"`.
+Set `"bind_cell": true` when the binder takes the Cell's qualified name as a
+second argument for diagnostics.
+
+The `int64_label_to_float64` member signature
 lowers a direct member call on a resolvable typed Cell result when the label is
 a signed 64-bit integer literal. Other arguments use the Python-facing method.
+A provider can also declare `__getitem__` with the
+`string_label_to_object` signature for a string-literal item read from a
+Cell result in an assignment. This operation takes the owner and the string
+and returns a Python object. An owner that uses this operation may omit the
+native view and binder.
 
 ## Reusing compiled provider binaries
 

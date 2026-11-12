@@ -1,0 +1,22 @@
+{
+  "protocol": 1,
+  "provider": "modelx_cython.runtime._native_inputs",
+  "abi": "owned-table-1",
+  "types": {
+    "modelx_helpers.immutable_inputs.Table": {
+      "view_type": "NativeTable",
+      "bind": "bind_native_table",
+      "bind_cell": true,
+      "admission": "declared_or_forwarded",
+      "members": {}
+    },
+    "modelx_helpers.immutable_inputs.Record": {
+      "members": {
+        "__getitem__": {
+          "signature": "string_label_to_object",
+          "native": "read_record_item"
+        }
+      }
+    }
+  }
+}

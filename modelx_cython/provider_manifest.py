@@ -21,6 +21,8 @@ class ProviderType:
     view_type: Optional[str]
     bind: Optional[str]
     members: Mapping[str, ProviderMember]
+    admission: str
+    bind_cell: bool
 
 
 @dataclass(frozen=True)
@@ -35,6 +37,12 @@ class ProviderManifest:
 class ProviderBinding:
     manifest: ProviderManifest
     declaration: ProviderType
+    type_id: str
+    declared: bool
+
+    @property
+    def identity(self):
+        return self.manifest.provider, self.manifest.abi, self.type_id
 
 
 def observed_provider_binding(traces):
@@ -44,11 +52,13 @@ def observed_provider_binding(traces):
     if registration is None:
         return None
     identity = f'{owner.__module__}.{owner.__qualname__}'
+    declared = True
     for trace in traces:
         annotation = trace.func.__annotations__.get('return')
         if (type(trace.ret_val) is not owner
                 or annotation not in (None, owner, owner.__qualname__, identity)):
             return None
+        declared &= annotation is not None
     if (not isinstance(registration, tuple) or len(registration) != 4
             or type(registration[0]) is not int or registration[0] != 1
             or not _qualified_identifier(registration[3])):
@@ -60,9 +70,7 @@ def observed_provider_binding(traces):
     declaration = manifest.types.get(type_id)
     if declaration is None:
         raise ValueError(f'provider {provider!r} does not declare type {type_id!r}')
-    if declaration.view_type is None:
-        return None
-    return ProviderBinding(manifest, declaration)
+    return ProviderBinding(manifest, declaration, type_id, declared)
 
 
 def _qualified_identifier(value):
@@ -92,13 +100,19 @@ def _require_fields(value, label, required, optional=()):
 def _read_type(type_id, declaration):
     if not _qualified_identifier(type_id):
         raise ValueError(f'invalid qualified type identity {type_id!r}')
-    _require_fields(declaration, type_id, ('members',), ('view_type', 'bind'))
+    _require_fields(declaration, type_id, ('members',), ('view_type', 'bind', 'admission', 'bind_cell'))
     view_type = declaration.get('view_type')
     bind = declaration.get('bind')
     if ('view_type' in declaration or 'bind' in declaration) and not (
         valid_identifier(view_type) and valid_identifier(bind)
     ):
         raise ValueError(f'{type_id} must declare valid view_type and bind symbols together')
+    admission = declaration.get('admission', 'observed')
+    bind_cell = declaration.get('bind_cell', False)
+    if admission not in ('observed', 'declared_or_forwarded') or type(bind_cell) is not bool:
+        raise ValueError(f'invalid view admission or bind_cell declaration for {type_id}')
+    if view_type is None and (bind_cell or admission != 'observed'):
+        raise ValueError(f'{type_id} cannot configure binding without a view_type')
 
     declared_members = declaration['members']
     if not isinstance(declared_members, dict):
@@ -109,7 +123,7 @@ def _read_type(type_id, declaration):
         if not all(valid_identifier(part) for part in (name, member['signature'], member['native'])):
             raise ValueError(f'invalid member identity or symbol for {type_id}.{name}')
         members[name] = ProviderMember(member['signature'], member['native'])
-    return ProviderType(view_type, bind, MappingProxyType(members))
+    return ProviderType(view_type, bind, MappingProxyType(members), admission, bind_cell)
 
 
 def read_provider_manifest(provider: str, expected_abi: str) -> Optional[ProviderManifest]:

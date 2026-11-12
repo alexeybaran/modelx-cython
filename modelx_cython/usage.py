@@ -572,11 +572,11 @@ def build_resolver(module_infos) -> CellsResolver:
     return resolver
 
 
-def admit_forwarded_tables(module_infos, resolver):
+def admit_forwarded_views(module_infos, resolver):
     """Keep the declared representation along resolved, sampled Cell returns."""
     cells = {cell.fqname: cell for module in module_infos.values()
              for cls in module.classes.values() for cell in cls.cells.values()
-             if cell.can_return_native_table}
+             if cell.observed_native_binding is not None}
     if not cells:
         return
     dependents = defaultdict(list)
@@ -605,13 +605,16 @@ def admit_forwarded_tables(module_infos, resolver):
                 if not isinstance(chain, list):
                     continue
                 status, target = resolver.resolve_chain(info.fqname, chain)
-                if status == RESOLVED and target in cells:
+                if (status == RESOLVED and target in cells
+                        and cells[target].observed_native_binding.identity
+                        == cell.observed_native_binding.identity):
                     dependents[target].append(cell)
 
-    pending = deque(cell.fqname for cell in cells.values() if cell.native_table_result)
+    pending = deque(cell.fqname for cell in cells.values() if cell.native_provider_binding is not None)
     while pending:
         for cell in dependents.pop(pending.popleft(), ()):
-            cell.forwarded_table_result = True
+            cell.forwarded_native_result = True
+            resolver.provider_results[cell.fqname] = cell.native_provider_binding
             if not cell.has_args():
                 results = resolver.locked_scalar_results if cell.is_locked else resolver.unlocked_scalar_results
                 results[cell.fqname] = cell.get_rettype_expr(c_style=True)

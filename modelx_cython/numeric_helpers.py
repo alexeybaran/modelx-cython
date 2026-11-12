@@ -896,8 +896,10 @@ class NumericReturns(cst.CSTTransformer):
         if not isinstance(key, cst.SimpleString) or type(key.evaluated_value) is not str:
             return None
         source = self.cls.cells.get(node.value.func.attr.value)
-        if source is not None and source.observed_record_result:
-            return node.value, key
+        binding = source.observed_provider_type if source is not None else None
+        operation = binding.declaration.members.get('__getitem__') if binding is not None else None
+        if operation is not None and operation.signature == 'string_label_to_object':
+            return node.value, key, binding.manifest.provider, operation.native
 
     def leave_Assign(self, before, after):
         if self.function_depth != 1 or not self.scope_safe:
@@ -905,13 +907,12 @@ class NumericReturns(cst.CSTTransformer):
         read = self.record_subscript(after.value)
         if not read:
             return after
-        from .builder import NATIVE_TABLE_PROVIDER
-        operation = 'read_record_item'
-        self.providers.add(NATIVE_TABLE_PROVIDER)
-        self.operations.add(f'{NATIVE_TABLE_PROVIDER}.{operation}')
-        alias = module_name(NATIVE_TABLE_PROVIDER)
+        receiver, key, provider, operation = read
+        self.providers.add(provider)
+        self.operations.add(f'{provider}.{operation}')
+        alias = module_name(provider)
         return after.with_changes(value=cst.Call(cst.Attribute(cst.Name(alias), cst.Name(operation)),
-                                                 args=tuple(cst.Arg(arg) for arg in read)))
+                                                 args=(cst.Arg(receiver), cst.Arg(key))))
 
     def record_float(self, call, receiver, key, *, cast=False):
         from .builder import NATIVE_TABLE_PROVIDER
@@ -951,8 +952,10 @@ class NumericReturns(cst.CSTTransformer):
         call = after.value
         cast = arguments(call, 'float', 1) if 'float' in self.builtin_keys else None
         record = self.record_subscript(cast[0]) if cast else None
-        if record and self.cell.has_args() and not self.cell.is_locked:
-            return after.with_changes(value=self.record_float(call, *record, cast=True))
+        from .builder import NATIVE_TABLE_PROVIDER
+        if (record and record[2] == NATIVE_TABLE_PROVIDER
+                and self.cell.has_args() and not self.cell.is_locked):
+            return after.with_changes(value=self.record_float(call, *record[:2], cast=True))
         if (isinstance(call, cst.Call) and len(call.args) == 2
                 and not any(arg.keyword or arg.star for arg in call.args)
                 and self.self_call(call.args[0].value) and not call.args[0].value.args

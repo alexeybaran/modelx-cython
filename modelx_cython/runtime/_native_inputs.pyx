@@ -23,6 +23,8 @@ from modelx_helpers.immutable_inputs import Table, Record
 from modelx_helpers.typed_inputs import _FLOOR, _native_operations
 from modelx_cython._call_layout cimport forward_call
 
+__modelx_cython_provider__ = (1, 'modelx_cython.runtime._native_inputs', 'owned-table-1')
+
 cdef object _missing = object()
 cdef object omitted_argument = _missing
 cdef object _lookup = _native_operations['lookup']
@@ -1705,8 +1707,11 @@ cdef class NativeTable:
     def __getattr__(self, name):
         return getattr(self._owner, name)
 
-    def __modelx_table_owner__(self):
+    def __modelx_cython_owner__(self):
         """Expose the semantic owner when passing a view to another package."""
+        return self._owner
+
+    def __modelx_table_owner__(self):
         return self._owner
 
     def __modelx_table_owner_abi__(self):
@@ -1737,7 +1742,8 @@ cdef NativeTable bind_native_table(object value, str cell):
         return NativeTable(value)
     if isinstance(value, Table):
         abi = getattr(value_type, '__modelx_table_owner_abi__', None)
-        owner = getattr(value_type, '__modelx_table_owner__', None)
+        owner = (getattr(value_type, '__modelx_cython_owner__', None)
+                 or getattr(value_type, '__modelx_table_owner__', None))
         if callable(abi) and callable(owner) and abi(value) == 1:
             value = owner(value)
             if Table in type(value).__mro__:
