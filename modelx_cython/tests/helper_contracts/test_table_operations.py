@@ -10,7 +10,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from modelx_helpers import pandas_inputs as inputs
+from modelx_helpers import pandas_inputs as inputs, typed_inputs as helpers
 from modelx_helpers.immutable_inputs import Record, Table
 from modelx_helpers.table_keys import keys
 from modelx_helpers.table_operations import row, column, to_pandas
@@ -60,6 +60,21 @@ def float_default(function, source, key, column, default):
 def legacy_float_default(function, source, long long key, column, default):
     cdef p.LookupContext context = p.LookupContext()
     return p.lookup_key1_float_f64(float, function, context, source, key, False, column, default)
+
+def table_lookup(function, source, key, column, *default):
+    if default:
+        return p.lookup(function, source, key, column, default[0])
+    return p.lookup(function, source, key, column)
+
+def contextual_lookup(function, source, long long key, column):
+    cdef p.LookupContext context = p.LookupContext()
+    return p.lookup_f64(function, context, source, key, column)
+
+def table_key_info(count_function, at_function, source):
+    return p.key_count(count_function, source), p.key_at(at_function, source, 0)
+
+def wrap_table(source):
+    return p.NativeTable(source)
 
 def grouped(function, source, labels, first=(), last=()):
     return p.group_sum(function, ('first', 'last'), source, labels, first=first, last=last)
@@ -229,3 +244,61 @@ def test_boolean_row_key_error_matches_original_loc(native, index, key):
             assert actual.value.args == expected_args
     else:
         pd.testing.assert_series_equal(to_pandas(native.select(row, source, key)), expected, check_exact=True)
+
+
+@pytest.mark.parametrize('fault', ['hash', 'ordering', 'type comparison'])
+@pytest.mark.parametrize('indexed', [False, True])
+def test_native_views_leave_unread_object_keys_untouched(native, fault, indexed):
+    armed = False
+
+    class LabelType(type):
+        def __eq__(self, other):
+            if armed and fault == 'type comparison':
+                raise AssertionError('native admission compared the unread key type')
+            return super().__eq__(other)
+
+    class UnreadKey(int, metaclass=LabelType):
+        def __hash__(self):
+            if armed and fault == 'hash':
+                raise AssertionError('native admission rehashed an unread key')
+            return super().__hash__()
+
+        def __lt__(self, other):
+            if armed and fault == 'ordering':
+                raise AssertionError('native admission ordered an unread key')
+            return super().__lt__(other)
+
+        def __gt__(self, other):
+            if armed and fault == 'ordering':
+                raise AssertionError('native admission ordered an unread key')
+            return super().__gt__(other)
+
+    spec = (Record({'multi': False, 'pandas_columns': True,
+                    'row_bool_labels': False, 'boolean_modes': (2,)}) if indexed else None)
+    cases = [
+        (lambda table: native.table_lookup(helpers.lookup, table, 1, 'rate'), 1.5),
+        (lambda table: native.contextual_lookup(helpers.lookup, table, 1, 'rate'), 1.5),
+        (lambda table: native.legacy_float_default(helpers.lookup, table, 1, 'rate', 0.0), 1.5),
+        (lambda table: native.raw_value(helpers.lookup_object, table, 1, 'rate'), 1.5),
+        (lambda table: 1 in native.wrap_table(table).index, True),
+        (lambda table: native.table_key_info(helpers.key_count, helpers.key_at, table), (2, 1)),
+    ]
+    for operation, expected in cases:
+        armed = False
+        table = Table((1, UnreadKey(23)), ((1.5,), (2.5,)), ('rate',), spec)
+        armed = True
+        assert helpers.lookup(table, 1, 'rate') == 1.5
+        assert operation(table) == expected
+
+
+def test_arbitrary_query_retains_python_default_handling(native):
+    class Query:
+        def __hash__(self):
+            raise KeyError('no label')
+
+    table = Table((1,), ((1.5,),), ('rate',))
+    query = Query()
+    assert native.table_lookup(helpers.lookup, table, query, 'rate', 4.5) == 4.5
+    with pytest.raises(KeyError) as error:
+        native.table_lookup(helpers.lookup, table, query, 'rate')
+    assert error.value.args == ('no label',)
