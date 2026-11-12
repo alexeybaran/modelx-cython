@@ -16,6 +16,7 @@ class CheckedArithmetic:
     def __init__(self, cls, cell, builtin_keys=()):
         self.cls, self.cell = cls, cell
         self.builtin_keys = builtin_keys
+        self.parameter_intervals = {}
 
     def native_call(self, expr):
         args = arguments(expr)
@@ -66,9 +67,19 @@ class CheckedArithmetic:
         if isinstance(expr, cst.Integer):
             value = expr.evaluated_value
             return (value, value) if inputs[0] <= value <= inputs[1] else None
-        if self.native_call(expr) or isinstance(expr, cst.Name) and (
-                expr.value in self.parameters or expr.value in locals_):
+        if self.native_call(expr):
             return inputs
+        if isinstance(expr, cst.Name) and (expr.value in self.parameters or expr.value in locals_):
+            return self.parameter_intervals.get(expr.value, inputs) if signed else inputs
+        if signed and isinstance(expr, cst.UnaryOperation) and isinstance(expr.operator, (cst.Plus, cst.Minus)):
+            if isinstance(expr.expression, cst.Integer):
+                value = expr.expression.evaluated_value
+                value = -value if isinstance(expr.operator, cst.Minus) else value
+                return (value, value) if limits[0] <= value <= limits[1] else None
+            operand = self.integer_interval(expr.expression, signed=True, locals_=locals_)
+            if operand is None or isinstance(expr.operator, cst.Plus):
+                return operand
+            return (-operand[1], -operand[0]) if operand[0] != limits[0] else None
         if not isinstance(expr, cst.BinaryOperation):
             return None
         left = self.integer_interval(expr.left, signed=signed, locals_=locals_)
@@ -79,11 +90,17 @@ class CheckedArithmetic:
             interval = left[0] + right[0], left[1] + right[1]
         elif isinstance(expr.operator, cst.Subtract):
             interval = left[0] - right[1], left[1] - right[0]
-        elif not signed and isinstance(expr.operator, cst.Multiply):
+        elif isinstance(expr.operator, cst.Multiply):
             products = [a * b for a in left for b in right]
             interval = min(products), max(products)
-        elif signed and isinstance(expr.operator, cst.FloorDivide) and right[0] == right[1] > 0:
-            interval = left[0] // right[0], left[1] // right[0]
+        elif signed and isinstance(expr.operator, cst.FloorDivide):
+            if right[0] == right[1] > 0:
+                interval = left[0] // right[0], left[1] // right[0]
+            elif right[0] > 0:
+                interval = min(0, left[0]), max(0, left[1])
+            else:
+                magnitude = max(abs(left[0]), abs(left[1]))
+                interval = -magnitude, magnitude
         else:
             return None
         return interval if limits[0] <= interval[0] <= interval[1] <= limits[1] else None

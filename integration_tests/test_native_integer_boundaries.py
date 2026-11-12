@@ -39,6 +39,7 @@ def integer_domain_build(tmp_path_factory):
         projection.new_cells("decrement_amount", "lambda: amount - 1")
         projection.new_cells("square_amount", "lambda: amount * amount")
         projection.new_cells("divide_amount", "lambda: amount // divisor")
+        projection.new_cells("negate_amount", "lambda: -amount")
         projection.new_cells("native_operand", "lambda: receive(amount + 1)")
         policies = model.new_space("Policies", formula="lambda policy: {}")
         policies.new_cells("number", "lambda: policy")
@@ -75,6 +76,7 @@ def integer_domain_build(tmp_path_factory):
         projection.decrement_amount()
         projection.square_amount()
         projection.divide_amount()
+        projection.negate_amount()
         projection.native_operand()
         """), encoding="utf-8")
     run_python(work, "-m", "modelx_cython", "exported", "--sample", "sample.py", "--no-spec")
@@ -221,6 +223,7 @@ def test_native_signed_arithmetic_cannot_wrap_result(integer_domain_build):
             ("decrement_amount", minimum, minimum + 1),
             ("square_amount", 3037000500, 1 << 31),
             ("divide_amount", minimum, minimum + 1),
+            ("negate_amount", minimum, minimum + 1),
         )
         for cell, overflow, valid in cases:
             reference = type(exported)().Outer.Projection

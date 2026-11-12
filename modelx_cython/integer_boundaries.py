@@ -66,6 +66,17 @@ def _checked_integer(value, path):
     return _boundary_call('_mx_integer_result', path, value)
 
 
+def _overflow_handler(body, path, error, leading_lines=()):
+    message = f'{path} requires an exact signed 64-bit integer. Rebuild with a wider sample or spec.'
+    handler = cst.parse_statement(
+        # Keep Python exceptions and the diagnostics from checked boundaries.
+        f'try:\n    pass\nexcept OverflowError as {error}:\n'
+        f'    if {error}.args != ("value too large",):\n        raise\n'
+        f'    raise OverflowError({message!r}) from {error}\n'
+    )
+    return handler.with_changes(body=cst.IndentedBlock(body=body), leading_lines=leading_lines)
+
+
 def _python_call_gate(cls, entries, names, call_gate):
     """Check Python-bound Cells while preserving their Cython vtable types."""
     routes = {cell.name: (entries[cell.fqname], cell.model_path)
@@ -164,7 +175,7 @@ def _guard_space_parameters(node, cell):
 
 class _GuardIntegers(cst.CSTTransformer):
     def __init__(self, path, kinds, native_helpers, arithmetic, signed_fields,
-                 signed_functions, signed_methods, signed_names, signed_return):
+                 signed_functions, signed_methods, signed_names, signed_return, error):
         self.path = path
         self.kinds = kinds
         self.native_helpers = native_helpers
@@ -175,14 +186,39 @@ class _GuardIntegers(cst.CSTTransformer):
         self.signed_methods = signed_methods
         self.signed_names = signed_names
         self.signed_return = signed_return
+        self.error = error
+        self.in_statement = self.statement_overflow = self.function_handler = False
 
     def on_visit(self, node):
         return not isinstance(node, OPAQUE_SCOPES) and super().on_visit(node)
+
+    def visit_SimpleStatementLine(self, node):
+        self.in_statement = True
+        self.statement_overflow = False
+
+    def leave_SimpleStatementLine(self, before, after):
+        self.in_statement = False
+        if not self.statement_overflow:
+            return after
+        return _overflow_handler((after.with_changes(leading_lines=()),), self.path, self.error,
+                                 after.leading_lines)
 
     def leave_Return(self, before, after):
         if not self.signed_return or after.value is None:
             return after
         return after.with_changes(value=self._checked(after.value))
+
+    def leave_Assign(self, before, after):
+        if not self.signed_return:
+            return after
+        value, _ = self._lower(after.value, self.path)
+        return after.with_changes(value=value)
+
+    def leave_AnnAssign(self, before, after):
+        if not self.signed_return or after.value is None:
+            return after
+        value, _ = self._lower(after.value, self.path)
+        return after.with_changes(value=value)
 
     def leave_Call(self, before, after):
         if (dotted_name(after.func) != _INTEGER_CONVERSION or len(after.args) != 2
@@ -208,6 +244,14 @@ class _GuardIntegers(cst.CSTTransformer):
             body, body_signed = self._signed_expression(value.body, path)
             orelse, else_signed = self._signed_expression(value.orelse, path)
             return value.with_changes(body=body, orelse=orelse), body_signed and else_signed
+        if isinstance(value, cst.UnaryOperation) and isinstance(value.operator, (cst.Plus, cst.Minus)):
+            if self.arithmetic.integer_interval(value, signed=True) is not None:
+                return value, True
+            operand, signed = self._signed_expression(value.expression, path)
+            if signed and isinstance(value.operator, cst.Minus):
+                checked = _boundary_call('_mx_signed_sub', path, cst.Integer('0'), operand)
+                return checked.with_changes(lpar=value.lpar, rpar=value.rpar), True
+            return value.with_changes(expression=operand), signed
         if isinstance(value, cst.Integer):
             return value, value.evaluated_value <= (1 << 63) - 1
         if isinstance(value, cst.Name):
@@ -243,17 +287,24 @@ class _GuardIntegers(cst.CSTTransformer):
 
     def _lower(self, value, path):
         value, signed = self._signed_expression(value, path)
-        self.check_overflow |= any(
+        needs_overflow_check = any(
             isinstance(part, cst.BinaryOperation)
             and isinstance(part.operator, (cst.Add, cst.Subtract, cst.Multiply))
             and not _boxed_arithmetic(part)
             and self.arithmetic.integer_interval(part, signed=True) is None
             for part in walk(value)
         )
+        if needs_overflow_check:
+            self.check_overflow = True
+            if self.in_statement:
+                self.statement_overflow = True
+            else:
+                self.function_handler = True
         return value, signed
 
 
-def _guard_result(node, cell, cls, resolver, cells_kinds, ref_kinds, signatures, native_helpers=()):
+def _guard_result(node, cell, cls, resolver, cells_kinds, ref_kinds, signatures, native_helpers=(),
+                  argument_axes=()):
     signed_return = node.returns is not None and node.returns.annotation.deep_equals(_INTEGER_ANNOTATION)
     if not signed_return and not any(isinstance(part, cst.Call) and dotted_name(part.func) == _INTEGER_CONVERSION
                                      for part in lexical_nodes(node.body.body)):
@@ -268,6 +319,8 @@ def _guard_result(node, cell, cls, resolver, cells_kinds, ref_kinds, signatures,
     }
     facts = CstFacts(node.body.body)
     bindings = facts.bindings(lexical_nodes(node.body.body))
+    arithmetic.parameter_intervals = {axis.key: (axis.lower, axis.stop - 1) for axis in argument_axes
+                                      if axis.key in arithmetic.parameters and axis.key not in bindings}
     fields, functions, methods = signatures
     signed_names = arithmetic.parameters | {
         statement.target.value for statement in lexical_nodes(node.body.body)
@@ -276,24 +329,19 @@ def _guard_result(node, cell, cls, resolver, cells_kinds, ref_kinds, signatures,
     }
     receiver_fields = fields.get(cls.name, {}) if MX_SELF not in bindings else {}
     receiver_methods = methods.get(cls.name, set()) if MX_SELF not in bindings else set()
+    error = Names(node).reserve('_mx_integer_overflow')
     guard = _GuardIntegers(cell.model_path, kinds, native_helpers, arithmetic, receiver_fields,
-                           functions.difference(bindings), receiver_methods, signed_names, signed_return)
+                           functions.difference(bindings), receiver_methods, signed_names, signed_return,
+                           error)
     body = node.body.visit(guard)
     if not guard.check_overflow or not isinstance(body, cst.IndentedBlock):
         return node.with_changes(body=body)
-    error = Names(node).reserve('_mx_integer_overflow')
-    message = f'{cell.model_path} requires an exact signed 64-bit integer. Rebuild with a wider sample or spec.'
-    handler = cst.parse_statement(
-        # Keep Python exceptions and the diagnostics from checked boundaries.
-        f'try:\n    pass\nexcept OverflowError as {error}:\n'
-        f'    if {error}.args != ("value too large",):\n        raise\n'
-        f'    raise OverflowError({message!r}) from {error}\n'
-    )
-    doc_end = 1 if node.get_docstring() is not None else 0
-    handler = handler.with_changes(body=cst.IndentedBlock(body=body.body[doc_end:]))
     decorator = cst.Decorator(cst.parse_expression(f'{CY_MOD}.overflowcheck(True)'))
-    return node.with_changes(decorators=(*node.decorators, decorator),
-                             body=body.with_changes(body=(*body.body[:doc_end], handler)))
+    if guard.function_handler:
+        doc_end = 1 if node.get_docstring() is not None else 0
+        handler = _overflow_handler(body.body[doc_end:], cell.model_path, error)
+        body = body.with_changes(body=(*body.body[:doc_end], handler))
+    return node.with_changes(decorators=(*node.decorators, decorator), body=body)
 
 
 def _signed_signatures(state):
@@ -352,7 +400,12 @@ def guard_integer_boundaries(state, module_info, resolver, cells_kinds, ref_kind
                 cls = module_info.classes[owner]
                 cell = cls.cells[name[len(FORMULA_PREF):]]
                 node = _guard_calls(node, cls, resolver, entries, cells)
-                node = _guard_result(node, cell, cls, resolver, cells_kinds, ref_kinds, signatures)
+                # A complete dense entry calls its private formula only
+                # inside the checked logical domain. A compact cache can
+                # also reach it through the checked spill.
+                axes = cell.dense_axes if cell.is_arrayable() and not cell.has_dense_spill else ()
+                node = _guard_result(node, cell, cls, resolver, cells_kinds, ref_kinds, signatures,
+                                     argument_axes=axes)
                 changed = True
             classes.append(node)
             continue
