@@ -67,7 +67,7 @@ def describe(module_infos):
                     'power_memo': bool(getattr(cell, 'power_memo', None)),
                     'dense_offsets': [int(offset) for offset in cell.cache_offsets]
                     if cache == 'dense' else [],
-                    'exact_spill': bool(cell.has_dense_spill),
+                    'exact_spill': cache == 'dense' and bool(cell.has_dense_spill),
                     'nogil_qualified': False,
                     'native_helpers': getattr(cell, 'native_helpers', []),
                     'native_numeric_helpers': getattr(cell, 'native_numeric_helpers', []),
