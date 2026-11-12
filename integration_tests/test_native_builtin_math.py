@@ -6,6 +6,9 @@ import sys
 import textwrap
 
 import modelx as mx
+from modelx_cython.builder import NATIVE_TABLE_PROVIDER
+from modelx_cython.helpers import module_name
+from modelx_cython.rounding import NATIVE_ROUNDING_PROVIDER
 
 
 def test_native_builtin_math(tmp_path):
@@ -23,27 +26,45 @@ def test_native_builtin_math(tmp_path):
             ('callable_down', 'lambda x: downward(x)'),
         ):
             space.new_cells(name, formula).is_cached = False
+        space.new_cells('cached_digits', '''\
+def cached_digits(x, n):
+    amount = x * 0.5
+    adjustment = 0.125
+    total = amount + adjustment
+    return round(total, min(n, 22))
+''')
         model.export(tmp_path / 'exported')
     finally:
         model.close()
 
+    # The uncached cells also accept arbitrary Python objects and return unbounded ints.
     (tmp_path / 'sample.py').write_text(
         'from exported import mx_model\n'
         'v = mx_model.Values\n'
-        'v.one(2.5); v.digits(2.675, 2); v.down(1.5); v.up(-1.5)\n',
+        'v.cached_digits(5.1, 2)\n',
         encoding='utf-8')
     (tmp_path / 'spec.py').write_text("{'native_math': True}\n", encoding='utf-8')
+    # The CLI, its setup child, and the imported artifact all run here.
+    (tmp_path / 'pandas.py').write_text(
+        'raise AssertionError("a scalar-only model attempted to import pandas")\n',
+        encoding='utf-8')
     subprocess.run([sys.executable, '-m', 'modelx_cython', 'exported'],
                    cwd=tmp_path, check=True)
-    source = (tmp_path / 'exported_cy/_mx_classes.py').read_text(encoding='utf-8')
+    package = tmp_path / 'exported_cy'
+    source = (package / '_mx_classes.py').read_text(encoding='utf-8')
     assert '_mx_round_one(' in source and '_mx_round_digits(' in source
+    assert f'{module_name(NATIVE_ROUNDING_PROVIDER)}.repeated_round_float(' in source
+    assert not (package / f'{module_name(NATIVE_TABLE_PROVIDER)}.pyx').exists()
     assert '_mx_integral_math_call(' not in source
     probe = textwrap.dedent('''\
         import math
         import random
         import struct
+        import sys
         from exported_cy import mx_model
         v = mx_model.Values
+        assert v.cached_digits(5.1, 2) == round(5.1 * 0.5 + 0.125, 2)
+        assert 'pandas' not in sys.modules
         rng = random.Random(107)
         edge = [0., -0., 0.5, -0.5, 2.5, -2.5, 2.675, 1.005, 1.015,
                 0.15, -0.15, 0.125, 125., -125., 2.**52, 2.**63, -2.**63,

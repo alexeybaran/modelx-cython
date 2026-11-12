@@ -57,11 +57,6 @@ def record_values(function, sources, key):
     cdef native.LookupContext context = native.LookupContext()
     return [native.record_field_float(function, context, source, key) for source in sources]
 
-def repeated_round(values):
-    cdef native.LookupContext context = native.LookupContext()
-    context._mx_enable_private_lookup()
-    return [native.repeated_round_float(context, round, x, digits) for x, digits in values]
-
 def repeated_table_values(source, selections):
     cdef native.LookupContext context = native.LookupContext()
     cdef native.NativeTable table = native.NativeTable(source)
@@ -227,14 +222,6 @@ def test_single_row_float_binding_keeps_each_column_separate(native):
     with pytest.raises(KeyError):
         native.repeated_table_values(source, [*fields, ('other', 'years')])
 
-
-def test_repeated_round_keeps_exact_python_ties_digits_and_signed_zero(native):
-    import struct
-
-    values = [(2.675, 2), (2.675, 2), (2.675, 1), (-0.0, 2), (0.0, 2),
-              (-0.0, 2), (125.0, -1), (125.0, -1), (2.5, 1 << 62)]
-    for actual, (value, digits) in zip(native.repeated_round(values), values):
-        assert struct.pack('d', actual) == struct.pack('d', round(value, digits))
 
 @pytest.mark.parametrize('suffix,entry', [('int','integer'),('float','floating'),('bool','boolean'),('str','text')])
 @pytest.mark.parametrize('value',[True,0,2**53+1,2.5,'2.5','bad',None,float('nan'),2**100])

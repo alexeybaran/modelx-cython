@@ -6,6 +6,7 @@ import libcst as cst
 from .cell_entries import exact_receiver
 from .helper_members import helper_reference
 from .helpers import module_name
+from .rounding import NATIVE_ROUNDING_PROVIDER
 from .scopes import CstFacts, Names, has_scope_effects
 from .syntax import arguments, literal_value, walk
 from .typedefs import primitive_kind
@@ -451,7 +452,6 @@ class NumericReturns(cst.CSTTransformer):
         if len(calls) != 1:
             return None
         call, = calls
-        from .builder import NATIVE_TABLE_PROVIDER
         from .powers import OperandKind, KIND_FLOAT, KIND_INT, KIND_UNKNOWN, kind_of_type_expr
         facts = CstFacts(body)
         cells = {cell.fqname: kind_of_type_expr(cell.get_rettype_expr(c_style=True))
@@ -482,12 +482,12 @@ class NumericReturns(cst.CSTTransformer):
                         or isinstance(digits, cst.Name) and digits.value in integer_locals)):
             return None
         operation = 'repeated_round_float'
-        alias = module_name(NATIVE_TABLE_PROVIDER)
+        provider = NATIVE_ROUNDING_PROVIDER
         replacement = call.with_changes(
-            func=cst.Attribute(cst.Name(alias), cst.Name(operation)),
-            args=(cst.Arg(self.lookup_context(NATIVE_TABLE_PROVIDER)), cst.Arg(call.func), *call.args))
-        self.providers.add(NATIVE_TABLE_PROVIDER)
-        self.operations.add(f'{NATIVE_TABLE_PROVIDER}.{operation}')
+            func=cst.Attribute(cst.Name(module_name(provider)), cst.Name(operation)),
+            args=(cst.Arg(self.lookup_context(provider)), cst.Arg(call.func), *call.args))
+        self.providers.add(provider)
+        self.operations.add(f'{provider}.{operation}')
         return (*body[:-1], body[-1].visit(_ReplaceExpression(call, replacement)))
 
     def table_fields(self, body):

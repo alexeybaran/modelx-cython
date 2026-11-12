@@ -12,6 +12,7 @@ from modelx_cython.tracer import (
     RuntimeCellsInfo,
     RuntimeValueInfo,
     instance_attrs,
+    trace_calls,
 )
 from modelx_cython.monkeytype_tracing import CallTrace
 
@@ -25,6 +26,18 @@ FOO = foo.__module__ + ".foo"
 
 def make_trace(ret_val, i):
     return CallTrace(foo, {"self": None, "i": i}, ret_val=ret_val)
+
+
+def test_trace_failure_keeps_original_exception_and_restores_profile():
+    class Logger:
+        def flush(self):
+            pytest.fail('A failed sample cannot be flushed')
+
+    previous = sys.getprofile()
+    with pytest.raises(ModuleNotFoundError, match='model_fixture'):
+        with trace_calls('missing_model', Logger(), 0, MxCodeFilter()):
+            raise ModuleNotFoundError('model_fixture')
+    assert sys.getprofile() is previous
 
 
 def test_records_negative_integral_arguments():

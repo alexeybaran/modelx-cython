@@ -91,7 +91,7 @@ def cythonize_model(modules, *, cell_sources=None, **kwargs):
 
 
 def create_setup(model_name: str, modules: Sequence[str], setup_file: pathlib.Path, source_root=None,
-                 source_modules=None, cell_sources=None):
+                 source_modules=None, cell_sources=None, providers=()):
     """Write a ``setup.py`` that cythonizes the translated modules.
 
     The generated script calls :func:`setuptools.setup` with
@@ -142,6 +142,7 @@ def create_setup(model_name: str, modules: Sequence[str], setup_file: pathlib.Pa
     from Cython.Compiler.PyrexTypes import CArrayType, c_int_type
     from pathlib import Path
     from modelx_cython.build import cythonize_model
+    from modelx_cython.provider_build_cache import provider_build_cache
     import modelx_cython
     import sys
     sys.setrecursionlimit(max(sys.getrecursionlimit(), {recursion_budget}))
@@ -169,7 +170,8 @@ def create_setup(model_name: str, modules: Sequence[str], setup_file: pathlib.Pa
             # PEP660 meta-path installs do not add the package root to sys.path.
             include_path=[str(Path(modelx_cython.__file__).resolve().parent.parent)],
             compiler_directives={{"freethreading_compatible": True}}
-        )
+        ),
+        cmdclass=provider_build_cache({provider_sources!r})
     )
     """)
 
@@ -177,6 +179,7 @@ def create_setup(model_name: str, modules: Sequence[str], setup_file: pathlib.Pa
         setup_script.format(
             model_name=model_name,
             modules_str=modules_str, recursion_budget=recursion_budget,
-            cell_sources=cell_sources),
+            cell_sources=cell_sources,
+            provider_sources={f'{model_name}.{path.stem}': path.as_posix() for path in providers}),
         encoding="utf-8")
 

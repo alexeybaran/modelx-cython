@@ -47,7 +47,7 @@ from modelx_cython.builder import ModuleInfo
 from modelx_cython.parser import ModuleVisitor
 from modelx_cython.transformer import ModuleTransformer, PXDGenerator
 from modelx_cython.usage import (
-    analyze_usage, apply_verdicts, build_resolver)
+    admit_forwarded_tables, analyze_usage, apply_verdicts, build_resolver)
 from modelx_cython.powers import build_kind_maps, demote_rebound_params
 from modelx_cython.admission import describe
 from modelx_cython.cell_entries import EntryModule
@@ -358,6 +358,7 @@ def main_handler(args: argparse.Namespace, stdout: IO[str], stderr: IO[str]) -> 
         # not provably of its C type is typed object in the formula.
         module_infos = {u.module_info.fqname: u.module_info for u in units}
         resolver = build_resolver(module_infos)
+        admit_forwarded_tables(module_infos, resolver)
         cells_kinds, ref_kinds = build_kind_maps(module_infos)
         demote_rebound_params(module_infos, resolver, cells_kinds, ref_kinds)
 
@@ -401,7 +402,8 @@ def main_handler(args: argparse.Namespace, stdout: IO[str], stderr: IO[str]) -> 
 
         if not runtime.hook:
             runtime_path.write_text(runtime.render(policy.parallel_workers, native=serial_enabled), encoding='utf-8')
-        modules.extend(install_helpers(helper_providers, model_path, object_providers))
+        provider_sources = install_helpers(helper_providers, model_path, object_providers)
+        modules.extend(provider_sources)
         translated_modules = lower_entries(translated_modules, dense_entries, formula_entries, policy)
         cell_sources = {}
         for u in units:
@@ -410,7 +412,7 @@ def main_handler(args: argparse.Namespace, stdout: IO[str], stderr: IO[str]) -> 
             cell_sources[u.rel_src_path.as_posix()] = cell_locations(state, u.module_info)
         create_setup(model_name, modules=modules, setup_file=setup_file, source_root=work_dir,
                      source_modules=(runtime.syntax, *(state.syntax for state in translated_modules.values())),
-                     cell_sources=cell_sources)
+                     cell_sources=cell_sources, providers=provider_sources)
         (model_path / '_mx_admission.json').write_text(
             json.dumps(describe(module_infos), indent=2), encoding='utf-8')
 

@@ -28,6 +28,7 @@ element access counts as unsafe, and call sites that cannot be resolved
 to a cells poison every cells with a matching name.
 """
 
+from collections import defaultdict, deque
 from dataclasses import dataclass, field
 import logging
 import numbers
@@ -43,6 +44,7 @@ from libcst.metadata import (
 )
 
 from modelx_cython.consts import (
+    FORMULA_PREF,
     MODULE_PREF,
     MX_MODEL_MOD,
     MX_SPACE_MOD,
@@ -50,6 +52,7 @@ from modelx_cython.consts import (
     SPACE_PREF,
 )
 from modelx_cython.parser import ParentScopeAddin
+from modelx_cython.syntax import arguments, statements
 
 _logger = logging.getLogger(__name__)
 
@@ -567,6 +570,52 @@ def build_resolver(module_infos) -> CellsResolver:
                              scalar_refs_by_class, locked_scalar_results, unlocked_scalar_results)
     resolver.provider_results = provider_results
     return resolver
+
+
+def admit_forwarded_tables(module_infos, resolver):
+    """Keep the declared representation along resolved, sampled Cell returns."""
+    cells = {cell.fqname: cell for module in module_infos.values()
+             for cls in module.classes.values() for cell in cls.cells.values()
+             if cell.can_return_native_table}
+    if not cells:
+        return
+    dependents = defaultdict(list)
+    for module in module_infos.values():
+        for cls in module.visitor.wrapper.module.body:
+            if not isinstance(cls, cst.ClassDef) or cls.name.value not in module.classes:
+                continue
+            info = module.classes[cls.name.value]
+            for formula in cls.body.body:
+                if not (isinstance(formula, cst.FunctionDef) and formula.returns is None
+                        and formula.name.value.startswith(FORMULA_PREF)):
+                    continue
+                cell = info.cells.get(formula.name.value[len(FORMULA_PREF):])
+                if cell is None or cell.fqname not in cells:
+                    continue
+                body = statements(formula.body)
+                if body and isinstance(body[0], cst.Expr) and isinstance(
+                        body[0].value, (cst.SimpleString, cst.ConcatenatedString)):
+                    body = body[1:]
+                if len(body) != 1 or not isinstance(body[0], cst.Return):
+                    continue
+                call = body[0].value
+                if arguments(call) is None:
+                    continue
+                chain = _extract_self_chain(call.func)
+                if not isinstance(chain, list):
+                    continue
+                status, target = resolver.resolve_chain(info.fqname, chain)
+                if status == RESOLVED and target in cells:
+                    dependents[target].append(cell)
+
+    pending = deque(cell.fqname for cell in cells.values() if cell.native_table_result)
+    while pending:
+        for cell in dependents.pop(pending.popleft(), ()):
+            cell.forwarded_table_result = True
+            if not cell.has_args():
+                results = resolver.locked_scalar_results if cell.is_locked else resolver.unlocked_scalar_results
+                results[cell.fqname] = cell.get_rettype_expr(c_style=True)
+            pending.append(cell.fqname)
 
 
 def analyze_usage(units) -> Dict[str, UsageVerdict]:
