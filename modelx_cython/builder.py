@@ -737,7 +737,9 @@ class CombinedCellsInfo(LexicalCellsInfo):
 
     @property
     def has_dense_spill(self):
-        return self.has_inferred_dense_domain or self.has_compact_cache or self.has_shifted_cache
+        return self.has_compact_cache or (
+            self.has_inferred_dense_domain and not self.has_shifted_cache
+        )
 
     def get_readiness_array_decl_expr(self, c_style=False):
         # Cython pickles unsigned-char arrays as NUL-terminated strings, which
