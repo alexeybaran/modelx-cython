@@ -52,3 +52,12 @@ keeps the Cell on the ordinary result path. A missing optional manifest also
 keeps the ordinary path. The `int64_label_to_float64` member signature currently
 lowers a direct member call on a resolvable typed Cell result when the label is
 a signed 64-bit integer literal. Other arguments use the Python-facing method.
+
+## Reusing compiled provider binaries
+
+Set `MODELX_CYTHON_PROVIDER_CACHE` to a build-cache directory to reuse a native
+provider when another build has the same extension identity, source and
+declaration dependencies, Python ABI, Cython version, compiler and flags. The
+build copies the provider binary into the generated model package. The model
+loads that local binary when the build cache is unavailable. Distinct qualified
+extension names have distinct cache entries.

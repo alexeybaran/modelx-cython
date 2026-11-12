@@ -399,7 +399,8 @@ def main_handler(args: argparse.Namespace, stdout: IO[str], stderr: IO[str]) -> 
             modules.append(u.rel_src_path)
 
         runtime_path.write_text(runtime.render(policy.parallel_workers, native=serial_enabled), encoding='utf-8')
-        modules.extend(install_helpers(helper_providers, model_path, object_providers))
+        provider_sources = install_helpers(helper_providers, model_path, object_providers)
+        modules.extend(provider_sources)
         translated_modules = lower_entries(translated_modules, dense_entries, formula_entries, policy)
         cell_sources = {}
         for u in units:
@@ -408,7 +409,7 @@ def main_handler(args: argparse.Namespace, stdout: IO[str], stderr: IO[str]) -> 
             cell_sources[u.rel_src_path.as_posix()] = cell_locations(state, u.module_info)
         create_setup(model_name, modules=modules, setup_file=setup_file, source_root=work_dir,
                      source_modules=(runtime.syntax, *(state.syntax for state in translated_modules.values())),
-                     cell_sources=cell_sources)
+                     cell_sources=cell_sources, providers=provider_sources)
         (model_path / '_mx_admission.json').write_text(
             json.dumps(describe(module_infos), indent=2), encoding='utf-8')
 
