@@ -24,7 +24,7 @@ def _eligible(cell, params):
         and not cell.formula_has_captured_default
         and not cell.body_has_closure
         and not cell.called_with_kwargs
-        and (cell.get_rettype_expr(c_style=True) in _NUMERIC_TYPES or cell.native_table_result
+        and (cell.get_rettype_expr(c_style=True) in _NUMERIC_TYPES or cell.native_provider_binding is not None
              or not cell.has_args() and cell.get_rettype_expr(c_style=True) in ('object', 'str'))
         and not params.posonly_params
         and not params.kwonly_params
@@ -59,10 +59,10 @@ def _literal_defaults(cell, params):
 
 
 class _Calls(cst.CSTTransformer):
-    def __init__(self, owner, entries, exact_guards=(), table_receivers=None):
+    def __init__(self, owner, entries, exact_guards=(), provider_receivers=None):
         self.entries = entries
-        self.table_receivers = table_receivers or {}
-        self.unlocked_table_sources = set()
+        self.provider_receivers = provider_receivers or {}
+        self.unlocked_provider_sources = set()
         self.exact_receiver = cst.parse_expression(exact_receiver(owner))
         self.exact_guards = exact_guards
         self.exact_depth = 0
@@ -111,9 +111,10 @@ class _Calls(cst.CSTTransformer):
         if (not updated.args and isinstance(func, cst.Attribute)
                 and isinstance(func.value, cst.Attribute) and isinstance(func.value.value, cst.Name)
                 and func.value.value.value == MX_SELF):
-            source = self.table_receivers.get((func.value.attr.value, func.attr.value))
+            source = self.provider_receivers.get((func.value.attr.value, func.attr.value))
             if source is not None and not source.is_locked:
-                self.unlocked_table_sources.add(source.fqname)
+                kind = 'table' if source.native_table_result else 'provider'
+                self.unlocked_provider_sources.add((source.fqname, kind))
             elif source is not None:
                 receiver = cst.Module([]).code_for_node(func.value)
                 return cst.IfExp(
@@ -271,17 +272,18 @@ def add_inline_entries(module, classes):
                     guard_allowed = allows_exact_receiver(method, owner)
                 if guard_allowed:
                     names_in_formula = Names(method).names
-                    table_receivers = {
+                    provider_receivers = {
                         (ref_name, name): other
                         for ref_name, ref in classes[owner].refs.items()
                         if (target := getattr(ref, 'decl_type_expr', None)) in classes
                         and target not in names_in_formula
                         for name, other in classes[target].cells.items()
-                        if other.native_table_result and not other.has_args() and other.has_formula_def
+                        if (other.native_provider_binding is not None and not other.has_args()
+                            and other.has_formula_def)
                     }
-                    calls = _Calls(owner, entries, getattr(cell, 'exact_reduction_guards', ()), table_receivers)
+                    calls = _Calls(owner, entries, getattr(cell, 'exact_reduction_guards', ()), provider_receivers)
                     methods[index] = method.with_changes(body=method.body.visit(calls))
-                    cell.unlocked_table_sources = sorted(calls.unlocked_table_sources)
+                    cell.unlocked_provider_sources = sorted(calls.unlocked_provider_sources)
         body.append(statement.with_changes(body=statement.body.with_changes(body=methods)))
     if functions:
         index = 0

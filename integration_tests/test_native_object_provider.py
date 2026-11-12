@@ -103,7 +103,11 @@ def test_independent_provider_and_forwarding(tmp_path, monkeypatch):
         data.new_cells('forwarded_rate', 'lambda: again().rate_at(4)')
         data.new_cells('opaque_rate', 'lambda: opaque().rate_at(4)')
         data.new_cells('variable_rate', 'lambda key: again().rate_at(key)')
+        projection = model.new_space('Projection')
+        projection.data = data
+        projection.new_cells('rate_from_data', 'lambda: data.again().rate_at(4)')
         assert (data.direct_rate(), data.forwarded_rate(), data.opaque_rate()) == (6.5, 6.5, 6.5)
+        assert projection.rate_from_data() == 6.5
         assert 'curve_example.kernel' not in sys.modules
         for name in ('first', 'second'):
             model.export(tmp_path / name, locked_spaces=['Data'])
@@ -112,7 +116,8 @@ def test_independent_provider_and_forwarding(tmp_path, monkeypatch):
                 'data = mx_model.Data\n'
                 'assert data.direct_rate() == data.forwarded_rate() == data.opaque_rate() == 6.5\n'
                 'assert data.variable_rate(4) == 6.5\n'
-                'assert data.bound().rate_at(0) == 9.5\n', encoding='utf-8')
+                'assert data.bound().rate_at(0) == 9.5\n'
+                'assert mx_model.Projection.rate_from_data() == 6.5\n', encoding='utf-8')
     finally:
         model.close()
 
@@ -124,6 +129,7 @@ def test_independent_provider_and_forwarding(tmp_path, monkeypatch):
         assert '.make_view(self._f_forward())' in generated
         assert '.calculate_rate(self.primary(), 4)' in generated
         assert '.calculate_rate(self.again(), 4)' in generated
+        assert '.calculate_rate((self.data._v_again if ' in generated
         assert 'self.opaque().rate_at(4)' in generated
         implementation.write_text(IMPLEMENTATION + '\n# New build identity.\n', encoding='utf-8')
 
@@ -142,6 +148,8 @@ def test_independent_provider_and_forwarding(tmp_path, monkeypatch):
         assert f.primary() is f.forward() is f.again()
         assert f.primary().__modelx_cython_owner__() is f.opaque().__modelx_cython_owner__()
         assert first_provider.preparations == 1 and first_provider.reads == 2
+        assert first.Projection.rate_from_data() == 6.5
+        assert first_provider.preparations == 1 and first_provider.reads == 3
         assert type(f.primary()) is not type(s.primary())
         assert second_provider.preparations == 1
         s.source = f.primary()
