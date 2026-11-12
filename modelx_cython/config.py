@@ -142,9 +142,9 @@ class TransSpec:
     dense hits; explicit alternatives are ``"none"``, ``"scalar"``, ``"dense"``
     and ``"both"``. Hits require ``"dense_miss_binding"``. Misses retain their
     original entry and Cython exception handling.
-    ``"automatic_optimizations": False`` disables automatic selection, not all
-    compiler transformations. On Windows, ``"dense_miss_binding"`` independently
-    defaults to true; disable it explicitly for that diagnostic ablation.
+    ``"automatic_optimizations": False`` disables automatic selection and the
+    default dense entry optimizations on every platform. Individual diagnostic
+    options can override these defaults, subject to their dependencies.
 
     Attributes
     ----------
