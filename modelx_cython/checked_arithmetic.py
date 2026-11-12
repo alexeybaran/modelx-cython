@@ -12,6 +12,49 @@ _SIGNED64 = -(1 << 63), (1 << 63) - 1
 _ARITHMETIC = (cst.Add, cst.Subtract, cst.Multiply, cst.Divide)
 
 
+def local_assignment(node):
+    if (isinstance(node, cst.Assign) and len(node.targets) == 1
+            and isinstance(target := node.targets[0].target, cst.Name)):
+        return target
+    return None
+
+
+def signed_local_assignments(body, name, facts, native_value):
+    """Find all signed definitions and the reads they definitely initialize."""
+    reads = {node for node, context in facts.contexts.items()
+             if isinstance(node, cst.Name) and node.value == name and context is ExpressionContext.LOAD}
+    assignments = {}
+
+    def flow(lines, assigned):
+        for line in lines:
+            evaluated = line.test if isinstance(line, cst.If) else line
+            if not assigned and any(part in reads for part in walk(evaluated)):
+                return None
+            if isinstance(line, cst.If):
+                taken = flow(statements(line.body), assigned)
+                other = line.orelse
+                if isinstance(other, cst.If):
+                    skipped = flow((other,), assigned)
+                elif other is not None:
+                    skipped = flow(statements(other.body), assigned)
+                else:
+                    skipped = assigned
+                if taken is None or skipped is None:
+                    return None
+                assigned = taken and skipped
+            elif (target := local_assignment(line)) is not None and target.value == name:
+                value = native_value(line.value)
+                if value is None:
+                    return None
+                assignments[line] = value
+                assigned = True
+        return assigned
+
+    if flow(statements(body), False) is None or len(assignments) != facts.stores[name]:
+        return {}, reads
+    return assignments, reads
+
+
 def guarded_integer_intervals(test):
     """Read inclusive local bounds from a conjunction of signed comparisons."""
     if isinstance(test, cst.BooleanOperation) and isinstance(test.operator, cst.And):
@@ -219,10 +262,15 @@ class CheckedArithmetic:
 
     def _integer_locals(self, body):
         stores = CstFacts(body).stores
-        return {node.targets[0].target.value: node for node in statements(body)
-                if isinstance(node, cst.Assign) and len(node.targets) == 1
-                and isinstance(node.targets[0].target, cst.Name)
-                and stores[node.targets[0].target.value] == 1 and self.native_call(node.value)}
+        return {target.value: node for node in statements(body)
+                if (target := local_assignment(node)) is not None
+                and stores[target.value] == 1 and self.native_call(node.value)}
+
+    def _native_local(self, body, name, facts):
+        if name in self.cell.params or name in facts.deleted or not facts.stores[name] or facts.stores['self']:
+            return {}, set()
+        return signed_local_assignments(
+            body, name, facts, lambda value: value if self.native_call(value) else None)
 
     def _native_index_argument(self, argument, call):
         args = arguments(call)
@@ -434,12 +482,11 @@ class CheckedArithmetic:
 
     def integer_local(self, body):
         """Keep a Cell's integer local native across comparisons and checked float arithmetic."""
-        assignments = [
-            node for node in statements(body)
-            if isinstance(node, cst.Assign) and len(node.targets) == 1
-            and isinstance(node.targets[0].target, cst.Name) and self.native_call(node.value)
-        ]
-        if not assignments:
+        candidates = dict.fromkeys(
+            target.value for node in lexical_nodes(body)
+            if (target := local_assignment(node)) is not None and self.native_call(node.value)
+        )
+        if not candidates:
             return body
         module = cst.Module(body)
         facts = CstFacts(module)
@@ -449,17 +496,15 @@ class CheckedArithmetic:
             return body
         parents = {child: node for node in walk(module) for child in node.children}
         replacements = {}
-        for assignment in assignments:
-            target = assignment.targets[0].target
-            name = target.value
-            if facts.stores[name] != 1 or name in self.cell.params or name in facts.deleted:
+        declarations = []
+        top_level = set(statements(body))
+        annotation = cst.Annotation(cst.parse_expression('_mx_cy.longlong'))
+        for name in candidates:
+            assignments, reads = self._native_local(body, name, facts)
+            if not assignments or not reads <= visible:
                 continue
             shifts = {}
-            for read, context in facts.contexts.items():
-                if not (isinstance(read, cst.Name) and read.value == name and context is ExpressionContext.LOAD):
-                    continue
-                if read not in visible:
-                    break
+            for read in reads:
                 parent = parents[read]
                 comparison = parents[parent] if isinstance(parent, cst.ComparisonTarget) else parent
                 if isinstance(comparison, cst.Comparison) and len(comparison.comparisons) == 1:
@@ -493,9 +538,12 @@ class CheckedArithmetic:
             else:
                 if shifts:
                     replacements.update(shifts)
-                    replacements[assignment] = cst.AnnAssign(
-                        target=target, annotation=cst.Annotation(cst.parse_expression('_mx_cy.longlong')),
-                        value=assignment.value, semicolon=assignment.semicolon)
+                    if len(assignments) == 1 and (assignment := next(iter(assignments))) in top_level:
+                        replacements[assignment] = cst.AnnAssign(
+                            target=local_assignment(assignment), annotation=annotation,
+                            value=assignment.value, semicolon=assignment.semicolon)
+                    else:
+                        declarations.append(cst.parse_statement(f'{name}: _mx_cy.longlong\n'))
         if not replacements:
             return body
 
@@ -503,7 +551,9 @@ class CheckedArithmetic:
             def on_leave(inner, before, after):
                 return replacements.get(before, after)
 
-        return module.visit(NativeLocal()).body
+        rewritten = module.visit(NativeLocal()).body
+        doc_end = int(module.get_docstring() is not None)
+        return (*rewritten[:doc_end], *declarations, *rewritten[doc_end:])
 
     def exact_integer_returns(self, body):
         """Keep compound terminal arithmetic native under a proven bound.
@@ -543,8 +593,18 @@ class CheckedArithmetic:
 
         return cst.Module(body).visit(ExactReturns()).body if replacements else body
 
-    def divisibility(self, body):
-        integers = self.parameters | self._integer_locals(body).keys()
+    def divisibility(self, body, facts):
+        local_reads = {}
+
+        def signed(value):
+            if not isinstance(value, cst.Name):
+                return False
+            if value.value in self.parameters:
+                return True
+            if value.value not in local_reads:
+                assignments, reads = self._native_local(body, value.value, facts)
+                local_reads[value.value] = reads if assignments else ()
+            return value in local_reads[value.value]
 
         class Divisibility(cst.CSTTransformer):
             def visit_Lambda(inner, node):
@@ -572,7 +632,7 @@ class CheckedArithmetic:
                         and isinstance(dividend.right, cst.Integer) and dividend.right.evaluated_value == 1):
                     dividend = dividend.left
                     operation = '_mx_divisible_after_decrement'
-                if not all(isinstance(value, cst.Name) and value.value in integers for value in (dividend, divisor)):
+                if not (signed(dividend) and signed(divisor)):
                     return after
                 prefix = 'not ' if isinstance(comparison.operator, cst.NotEqual) else ''
                 return cst.parse_expression(f'({prefix}_mx_sys.{operation}({dividend.value}, {divisor.value}))')
@@ -593,13 +653,13 @@ class CheckedArithmetic:
         body = function.body.body
         if has_scope_effects(body):
             return function
-        assigned = CstFacts(body).stores
-        self.parameters = {name for name in self.cell.params if name not in assigned
+        facts = CstFacts(body)
+        self.parameters = {name for name in self.cell.params if name not in facts.stores
                            and self.cell.get_argtype_expr(name, c_style=True, formula=True) == 'long long'}
         self.prefix = Names(function).reserve('_mx_checked', family=True)
         self.inputs, self.next_input = [], 0
         if divisible:
-            body = self.divisibility(body)
+            body = self.divisibility(body, facts)
         if kind == 'double':
             rewritten = self.local_division(body)
             if rewritten is body:

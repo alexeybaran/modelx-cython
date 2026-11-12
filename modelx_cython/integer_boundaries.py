@@ -1,9 +1,10 @@
 """Check integer Cell results and ItemSpace keys at their native boundaries."""
 
 import libcst as cst
-from libcst.metadata import ExpressionContext
 
-from .checked_arithmetic import CheckedArithmetic, guarded_integer_intervals
+from .checked_arithmetic import (
+    CheckedArithmetic, guarded_integer_intervals, local_assignment, signed_local_assignments,
+)
 from .consts import CY_MOD, FORMULA_PREF, MX_SELF, MX_SYS_MOD
 from .powers import KIND_FLOAT, OperandKind, kind_of_type_expr
 from .scopes import CstFacts, Names, OPAQUE_SCOPES, has_scope_effects, lexical_nodes
@@ -349,41 +350,12 @@ def _signed_operand_names(value):
 
 def _signed_local_assignments(body, name, operands, guard, facts):
     """Prove a native local across simple assignments and conditional joins."""
-    assignments = {}
-    reads = {part for part in walk(body) if isinstance(part, cst.Name) and part.value == name
-             and facts.contexts.get(part) is ExpressionContext.LOAD}
+    def native_value(value):
+        expression, signed = guard._signed_expression(value, guard.path)
+        return expression if signed else None
 
-    def flow(lines, assigned):
-        for line in lines:
-            if isinstance(line, cst.If):
-                if not assigned and any(part in reads for part in walk(line.test)):
-                    return None
-                taken = flow(statements(line.body), assigned)
-                other = line.orelse
-                if isinstance(other, cst.If):
-                    skipped = flow((other,), assigned)
-                elif other is not None:
-                    skipped = flow(statements(other.body), assigned)
-                else:
-                    skipped = assigned
-                if taken is None or skipped is None:
-                    return None
-                assigned = taken and skipped
-                continue
-            if not assigned and any(part in reads for part in walk(line)):
-                return None
-            assignment = line.body[0] if isinstance(line, cst.SimpleStatementLine) and len(line.body) == 1 else line
-            if (isinstance(assignment, cst.Assign) and len(assignment.targets) == 1
-                    and isinstance(target := assignment.targets[0].target, cst.Name)
-                    and target.value == name):
-                value, signed = guard._signed_expression(assignment.value, guard.path)
-                if not signed:
-                    return None
-                assignments[assignment] = value
-                assigned = True
-        return assigned
-
-    if flow(body.body, False) is None or len(assignments) != facts.stores[name]:
+    assignments, reads = signed_local_assignments(body, name, facts, native_value)
+    if not assignments:
         return {}
     # A Python-context use could depend on the local's object identity or
     # Python operator semantics. Keep the whole local boxed in that case.
@@ -426,8 +398,7 @@ def _type_signed_locals(body, guard, facts, parameters):
         if not isinstance(line, cst.SimpleStatementLine) or len(line.body) != 1:
             break
         assignment = line.body[0]
-        if (isinstance(assignment, cst.Assign) and len(assignment.targets) == 1
-                and isinstance(target := assignment.targets[0].target, cst.Name)
+        if ((target := local_assignment(assignment)) is not None
                 and target.value in needed and target.value not in seen
                 and facts.stores[target.value] == 1):
             value, signed = guard._signed_expression(assignment.value, guard.path)
