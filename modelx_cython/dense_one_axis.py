@@ -11,7 +11,7 @@ from .syntax import same_expression
 
 
 def _unsigned_check(layout):
-    if (len(layout.axes) != 1 or (layout.exact_spill and not layout.unbounded_spill)
+    if (len(layout.axes) != 1 or (layout.exact_spill and not layout.checks_spill_in_helper)
             or layout.axes[0].c_type != "long long"):
         return None
     axis, = layout.axes
