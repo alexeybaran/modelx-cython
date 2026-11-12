@@ -5,7 +5,7 @@ import libcst as cst
 from .checked_arithmetic import CheckedArithmetic
 from .consts import CY_MOD, FORMULA_PREF, MX_SELF, MX_SYS_MOD
 from .powers import KIND_FLOAT, OperandKind, kind_of_type_expr
-from .scopes import CstFacts, Names, OPAQUE_SCOPES, lexical_nodes
+from .scopes import CstFacts, Names, OPAQUE_SCOPES, has_scope_effects, lexical_nodes
 from .syntax import dotted_name, walk
 from .usage import RESOLVED, _extract_self_chain
 
@@ -303,6 +303,40 @@ class _GuardIntegers(cst.CSTTransformer):
         return value, signed
 
 
+def _type_dominating_locals(body, guard, facts, parameters):
+    """Keep signed locals native when one straight-line assignment supplies them."""
+    if (not isinstance(body, cst.IndentedBlock) or has_scope_effects(body.body)
+            or facts.reads & {'eval', 'exec', 'locals', 'vars', 'globals', '_getframe', 'currentframe'}):
+        return body
+    operands = []
+    for part in lexical_nodes(body.body):
+        if guard.signed_return and isinstance(part, cst.Return) and part.value is not None:
+            operands.append(part.value)
+        if (isinstance(part, cst.Call) and dotted_name(part.func) == _INTEGER_CONVERSION
+                and len(part.args) == 2):
+            operands.append(part.args[0].value)
+    needed = {part.value for value in operands for part in walk(value) if isinstance(part, cst.Name)}
+    if not needed:
+        return body
+    statements = list(body.body)
+    seen = set(parameters)
+    for index, line in enumerate(statements):
+        if not isinstance(line, cst.SimpleStatementLine) or len(line.body) != 1:
+            break
+        assignment = line.body[0]
+        if (isinstance(assignment, cst.Assign) and len(assignment.targets) == 1
+                and isinstance(target := assignment.targets[0].target, cst.Name)
+                and target.value in needed and target.value not in seen
+                and facts.stores[target.value] == 1):
+            value, signed = guard._signed_expression(assignment.value, guard.path)
+            if signed:
+                statements[index] = line.with_changes(body=(
+                    cst.AnnAssign(target, cst.Annotation(_INTEGER_ANNOTATION), value),))
+                guard.signed_names.add(target.value)
+        seen.update(part.value for part in walk(line) if isinstance(part, cst.Name))
+    return body.with_changes(body=statements)
+
+
 def _guard_result(node, cell, cls, resolver, cells_kinds, ref_kinds, signatures, native_helpers=(),
                   argument_axes=()):
     signed_return = node.returns is not None and node.returns.annotation.deep_equals(_INTEGER_ANNOTATION)
@@ -333,7 +367,9 @@ def _guard_result(node, cell, cls, resolver, cells_kinds, ref_kinds, signatures,
     guard = _GuardIntegers(cell.model_path, kinds, native_helpers, arithmetic, receiver_fields,
                            functions.difference(bindings), receiver_methods, signed_names, signed_return,
                            error)
-    body = node.body.visit(guard)
+    parameters = (*node.params.posonly_params, *node.params.params, *node.params.kwonly_params)
+    body = _type_dominating_locals(node.body, guard, facts, (parameter.name.value for parameter in parameters))
+    body = body.visit(guard)
     if not guard.check_overflow or not isinstance(body, cst.IndentedBlock):
         return node.with_changes(body=body)
     decorator = cst.Decorator(cst.parse_expression(f'{CY_MOD}.overflowcheck(True)'))
