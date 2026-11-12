@@ -17,12 +17,29 @@ class ProviderMember:
 
 
 @dataclass(frozen=True)
+class NumericMethod:
+    signature: str
+    read: str
+    prepare: str
+    read_integer: Optional[str] = None
+    read_object: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class NumericTable:
+    owner_field: str
+    ready: str
+    methods: Mapping[str, NumericMethod]
+
+
+@dataclass(frozen=True)
 class ProviderType:
     view_type: Optional[str]
     bind: Optional[str]
     members: Mapping[str, ProviderMember]
     admission: str
     bind_cell: bool
+    numeric_table: Optional[NumericTable]
 
 
 @dataclass(frozen=True)
@@ -97,10 +114,32 @@ def _require_fields(value, label, required, optional=()):
         raise ValueError(f'invalid fields for {label}')
 
 
+def _read_numeric_table(type_id, declaration):
+    label = f'{type_id}.numeric_table'
+    _require_fields(declaration, label, ('owner_field', 'ready', 'methods'))
+    owner_field, ready, methods = (declaration[name] for name in ('owner_field', 'ready', 'methods'))
+    if not (valid_identifier(owner_field) and valid_identifier(ready) and isinstance(methods, dict) and methods):
+        raise ValueError(f'invalid numeric table declaration for {type_id}')
+    entries = {}
+    for name, method in methods.items():
+        signature = method.get('signature') if isinstance(method, dict) else None
+        if signature not in ('lookup_f64', 'previous_f64') or not valid_identifier(name):
+            raise ValueError(f'invalid numeric method signature for {label}.{name}')
+        fields = ('read', 'prepare')
+        if signature == 'previous_f64':
+            fields += ('read_integer', 'read_object')
+        _require_fields(method, f'{label}.{name}', ('signature', *fields))
+        if not all(valid_identifier(method[field]) for field in fields):
+            raise ValueError(f'invalid native symbol for {label}.{name}')
+        entries[name] = NumericMethod(**method)
+    return NumericTable(owner_field, ready, MappingProxyType(entries))
+
+
 def _read_type(type_id, declaration):
     if not _qualified_identifier(type_id):
         raise ValueError(f'invalid qualified type identity {type_id!r}')
-    _require_fields(declaration, type_id, ('members',), ('view_type', 'bind', 'admission', 'bind_cell'))
+    _require_fields(declaration, type_id, ('members',),
+                    ('view_type', 'bind', 'admission', 'bind_cell', 'numeric_table'))
     view_type = declaration.get('view_type')
     bind = declaration.get('bind')
     if ('view_type' in declaration or 'bind' in declaration) and not (
@@ -113,6 +152,11 @@ def _read_type(type_id, declaration):
         raise ValueError(f'invalid view admission or bind_cell declaration for {type_id}')
     if view_type is None and (bind_cell or admission != 'observed'):
         raise ValueError(f'{type_id} cannot configure binding without a view_type')
+    numeric_table = None
+    if 'numeric_table' in declaration:
+        if view_type is None:
+            raise ValueError(f'{type_id} cannot configure numeric_table without a view_type')
+        numeric_table = _read_numeric_table(type_id, declaration['numeric_table'])
 
     declared_members = declaration['members']
     if not isinstance(declared_members, dict):
@@ -123,7 +167,7 @@ def _read_type(type_id, declaration):
         if not all(valid_identifier(part) for part in (name, member['signature'], member['native'])):
             raise ValueError(f'invalid member identity or symbol for {type_id}.{name}')
         members[name] = ProviderMember(member['signature'], member['native'])
-    return ProviderType(view_type, bind, MappingProxyType(members), admission, bind_cell)
+    return ProviderType(view_type, bind, MappingProxyType(members), admission, bind_cell, numeric_table)
 
 
 def read_provider_manifest(provider: str, expected_abi: str) -> Optional[ProviderManifest]:

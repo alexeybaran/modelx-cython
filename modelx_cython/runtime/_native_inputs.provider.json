@@ -8,6 +8,24 @@
       "bind": "bind_native_table",
       "bind_cell": true,
       "admission": "declared_or_forwarded",
+      "numeric_table": {
+        "owner_field": "_owner",
+        "ready": "numeric_resource_ready",
+        "methods": {
+          "lookup_float": {
+            "signature": "lookup_f64",
+            "read": "bound_lookup_f64",
+            "prepare": "prepare_table_method"
+          },
+          "previous": {
+            "signature": "previous_f64",
+            "read": "bound_previous_f64",
+            "prepare": "prepare_previous_table_method",
+            "read_integer": "read_previous_table_int",
+            "read_object": "read_previous_table_float"
+          }
+        }
+      },
       "members": {}
     },
     "modelx_helpers.immutable_inputs.Record": {

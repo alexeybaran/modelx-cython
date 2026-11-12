@@ -12,6 +12,9 @@ from .syntax import arguments, literal_value, walk
 from .typedefs import primitive_kind
 
 
+NATIVE_TABLE_PROVIDER = 'modelx_cython.runtime._native_inputs'
+
+
 class _ReplaceExpression(cst.CSTTransformer):
     def __init__(self, source, replacement):
         self.source, self.replacement = source, replacement
@@ -118,7 +121,6 @@ class NumericReturns(cst.CSTTransformer):
                 and missing.value.value == '0.0'):
             return None
         if methods:
-            from .builder import NATIVE_TABLE_PROVIDER
             comparison = self.not_in(group_guard.test)
             args = arguments(subtable, count=1)
             if not (comparison and args and isinstance(subtable.func, cst.Attribute)
@@ -247,7 +249,6 @@ class NumericReturns(cst.CSTTransformer):
         grouped = self.grouped(body, key, lookup_args[1], cap, None, None, lookup, prefix, declarations,
                                methods=True)
         if grouped is not None:
-            from .builder import NATIVE_TABLE_PROVIDER
             self.providers.add(NATIVE_TABLE_PROVIDER)
             self.operations.add(f'{NATIVE_TABLE_PROVIDER}.group_slice_context_value')
             return (*grouped, guard, result_line)
@@ -432,12 +433,17 @@ class NumericReturns(cst.CSTTransformer):
         self.contexts[context] = provider
         return cst.parse_expression('self.' + context)
 
+    @staticmethod
+    def builtin_table(cell):
+        binding = cell.native_provider_binding
+        return (binding is not None and binding.declaration.numeric_table is not None
+                and binding.manifest.provider == NATIVE_TABLE_PROVIDER)
+
     def table_source(self, value, *, lock_reason=None):
-        from .builder import NATIVE_TABLE_PROVIDER
         cell = self.cls.cells.get(value.func.attr.value) if self.self_call(value) else None
         rettype = module_name(NATIVE_TABLE_PROVIDER) + '.NativeTable'
         table_read = (rettype, lock_reason) if lock_reason is not None else None
-        return ((cell is not None and cell.native_table_result and len(value.args) == len(cell.params))
+        return ((cell is not None and self.builtin_table(cell) and len(value.args) == len(cell.params))
                 or self.locked_result_type(value, table_read=table_read) == rettype)
 
     def rounded_inputs(self, body):
@@ -492,7 +498,6 @@ class NumericReturns(cst.CSTTransformer):
 
     def table_fields(self, body):
         """Bind literal-column reads on a locally assigned native Table."""
-        from .builder import NATIVE_TABLE_PROVIDER
         facts = CstFacts(body)
         sources, text_keys = set(), set()
         replaced = []
@@ -587,7 +592,6 @@ class NumericReturns(cst.CSTTransformer):
         owned_index = (arguments(first[0], 'min', 1) is not None
                        and isinstance(index, cst.Attribute) and index.attr.value == 'index'
                        and index.value.deep_equals(table))
-        from .builder import NATIVE_TABLE_PROVIDER
         if not (clamp and clamp[0].deep_equals(key_name) and clamp[1].deep_equals(high_name)
                 and isinstance(column, cst.SimpleString) and type(column.evaluated_value) is str
                 and (owned_index or (first_arg and first_arg[0].deep_equals(table)
@@ -635,7 +639,6 @@ class NumericReturns(cst.CSTTransformer):
 
     def clamped_table_method(self, body, formula=None):
         """Use the owned table's native bounds for a typed clamp and scalar read."""
-        from .builder import NATIVE_TABLE_PROVIDER
         if 'min' not in self.builtin_keys:
             return None
         source, clamp, result = map(self.single_statement, body[-3:])
@@ -786,14 +789,13 @@ class NumericReturns(cst.CSTTransformer):
                     and cell.get_rettype_expr(c_style=True) in integer_types)
         return self.locked_result_type(key) in integer_types
 
-    def bound_numeric(self, args, native, operations, provider, context=None, member=None):
+    def bound_numeric(self, args, native, operations, provider, context=None, member=None, owner_field=None):
         if not (operations and len(operations) == 3 and self.cell.formula_allows_exact_receiver
                 and not self.cell.is_locked and self.cell.cls not in self.cls.visitor.dynamic_ref_classes):
             return native
         table, key, column = (arg.value for arg in args[:3])
         table_method = context is None
         if member is not None:
-            from .builder import NATIVE_TABLE_PROVIDER
             if (provider, operations[0]) != (NATIVE_TABLE_PROVIDER, 'numeric_resource_ready'):
                 return native
         module = cst.Module([])
@@ -805,12 +807,15 @@ class NumericReturns(cst.CSTTransformer):
         elif self.self_call(table) and not table.args:
             cell = self.cls.cells.get(table.func.attr.value)
             if not (cell is not None and cell.has_formula_def and not cell.has_args()
-                    and not cell.is_locked and not cell.body_has_closure
-                    and (cell.native_table_result if table_method else
-                         (member is not None and cell.native_table_result)
-                         or cell.get_rettype_expr(c_style=True) == 'object')):
+                    and not cell.is_locked and not cell.body_has_closure):
                 return native
-            source = f'self._v_{cell.name}' + ('._owner' if cell.native_table_result else '')
+            if not table_method and self.builtin_table(cell):
+                owner_field = '_owner'
+                if member is None:
+                    return native
+            if owner_field is None and cell.get_rettype_expr(c_style=True) != 'object':
+                return native
+            source = f'self._v_{cell.name}' + (f'.{owner_field}' if owner_field else '')
             ready = f'self._has_{cell.name} and '
         else:
             return native
@@ -858,34 +863,38 @@ class NumericReturns(cst.CSTTransformer):
 
     def bound_table_method(self, call):
         table = call.func.value
-        method = call.func.attr.value
-        if (method not in ('lookup_float', 'previous') or not self.self_call(table)
-                or not 2 <= len(call.args) <= (3 if method == 'lookup_float' else 2)
+        if (not self.self_call(table) or len(call.args) not in (2, 3)
                 or any(arg.keyword or arg.star for arg in call.args)
                 or not self.native_key(call.args[0].value, allow_bool=False)):
             return call
-        from .builder import NATIVE_TABLE_PROVIDER
-        provider = NATIVE_TABLE_PROVIDER
-        args = (cst.Arg(table), *call.args)
-        if method == 'lookup_float':
-            operations = ('numeric_resource_ready', 'bound_lookup_f64', 'prepare_table_method')
-            return call if table.args else self.bound_numeric(args, call, operations, provider)
-        if not self.table_source(table):
+        source = self.cls.cells.get(table.func.attr.value)
+        binding = source.native_provider_binding if source is not None else None
+        numeric = binding.declaration.numeric_table if binding is not None else None
+        method = numeric.methods.get(call.func.attr.value) if numeric is not None else None
+        if method is None or len(table.args) != len(source.params):
             return call
+        provider = binding.manifest.provider
+        operations = (numeric.ready, method.read, method.prepare)
+        args = (cst.Arg(table), *call.args)
+        if method.signature == 'lookup_f64':
+            return call if table.args else self.bound_numeric(
+                args, call, operations, provider, owner_field=numeric.owner_field)
+        if len(call.args) != 2:
+            return call
+        native_args = args
         if self.native_key(call.args[1].value, allow_bool=False):
-            operation = 'read_previous_table_int'
+            operation = method.read_integer
         elif table.args:
-            operation = 'read_previous_table_float'
+            operation = method.read_object
         else:
-            operation = 'prepare_previous_table_method'
-        native_args = ((cst.Arg(self.lookup_context(provider)), *args)
-                       if operation == 'prepare_previous_table_method' else args)
+            operation = method.prepare
+            native_args = (cst.Arg(self.lookup_context(provider)), *args)
         self.providers.add(provider)
         self.operations.add(f'{provider}.{operation}')
         native = cst.Call(cst.Attribute(cst.Name(module_name(provider)), cst.Name(operation)),
                           args=native_args)
-        operations = ('numeric_resource_ready', 'bound_previous_f64', 'prepare_previous_table_method')
-        return native if table.args else self.bound_numeric(args, native, operations, provider)
+        return native if table.args else self.bound_numeric(
+            args, native, operations, provider, owner_field=numeric.owner_field)
 
     def record_subscript(self, node):
         if not (isinstance(node, cst.Subscript) and len(node.slice) == 1
@@ -915,7 +924,6 @@ class NumericReturns(cst.CSTTransformer):
                                                  args=(cst.Arg(receiver), cst.Arg(key))))
 
     def record_float(self, call, receiver, key, *, cast=False):
-        from .builder import NATIVE_TABLE_PROVIDER
         provider = NATIVE_TABLE_PROVIDER
         operation = 'read_cast_record_field_float' if cast else 'read_record_field_float'
         alias = module_name(provider)
@@ -952,7 +960,6 @@ class NumericReturns(cst.CSTTransformer):
         call = after.value
         cast = arguments(call, 'float', 1) if 'float' in self.builtin_keys else None
         record = self.record_subscript(cast[0]) if cast else None
-        from .builder import NATIVE_TABLE_PROVIDER
         if (record and record[2] == NATIVE_TABLE_PROVIDER
                 and self.cell.has_args() and not self.cell.is_locked):
             return after.with_changes(value=self.record_float(call, *record[:2], cast=True))

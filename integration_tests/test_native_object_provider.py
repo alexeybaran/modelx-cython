@@ -26,11 +26,20 @@ class Curve:
         if type(key) is not int:
             raise TypeError('curve key must be an integer')
         return self.level + key
+
+    def price(self, key, column, default):
+        return self.rate_at(key) if column == 'rate' else default
 '''
 DECLARATIONS = '''\
 cdef class CurveView:
     cdef object owner
     cdef double level
+cdef class LookupContext:
+    cdef bint _private_owner
+    cdef object owner, column
+cdef bint prices_ready(LookupContext, const void*, const void*) noexcept
+cdef double bound_price(LookupContext, long long, long long, bint, bint, double) except? -1
+cdef double prime_price(LookupContext, CurveView, long long, object, object) except? -1
 cdef CurveView make_view(object value)
 cdef double calculate_rate(CurveView view, long long key) except? -1
 '''
@@ -41,6 +50,26 @@ from curve_example import Curve
 __modelx_cython_provider__ = (1, 'curve_example.kernel', 'curve-v1')
 preparations = 0
 reads = 0
+price_reads = 0
+
+cdef class LookupContext:
+    def _mx_enable_private_lookup(self):
+        self._private_owner = True
+
+cdef bint prices_ready(LookupContext context, const void* owner, const void* column) noexcept:
+    return <const void*>context.owner == owner and <const void*>context.column == column
+
+cdef double bound_price(LookupContext context, long long key, long long column, bint named,
+                        bint has_default, double default) except? -1:
+    global price_reads
+    price_reads += 1
+    return context.owner.price(key, context.column if named else column, default)
+
+cdef double prime_price(LookupContext context, CurveView view, long long key,
+                        object column, object default) except? -1:
+    context.owner = view.owner
+    context.column = column
+    return view.price(key, column, default)
 
 cdef class CurveView:
     def rate_at(self, key):
@@ -48,6 +77,9 @@ cdef class CurveView:
 
     def __modelx_cython_owner__(self):
         return self.owner
+
+    def price(self, key, column, default):
+        return self.owner.price(key, column, default)
 
 cdef CurveView make_view(object value):
     global preparations
@@ -81,6 +113,9 @@ def test_independent_provider_and_forwarding(tmp_path, monkeypatch):
     manifest = {
         'protocol': 1, 'provider': PROVIDER, 'abi': ABI,
         'types': {TYPE: {'view_type': 'CurveView', 'bind': 'make_view',
+                         'numeric_table': {'owner_field': 'owner', 'ready': 'prices_ready',
+                                           'methods': {'price': {'signature': 'lookup_f64',
+                                                                 'read': 'bound_price', 'prepare': 'prime_price'}}},
                          'members': {'rate_at': {'signature': 'int64_label_to_float64',
                                                  'native': 'calculate_rate'}}}},
     }
@@ -106,6 +141,13 @@ def test_independent_provider_and_forwarding(tmp_path, monkeypatch):
         projection = model.new_space('Projection')
         projection.data = data
         projection.new_cells('rate_from_data', 'lambda: data.again().rate_at(4)')
+        keys = (1, 2)
+        pricing = model.new_space('Pricing', formula='lambda key: None', refs={'data': data, 'keys': keys},
+                                  collect_over={'key': keys},
+                                  collect_outputs='lambda: {"sum": {"total": total()}}')
+        pricing.new_cells('schedule', 'lambda: data.again()')
+        pricing.new_cells('quote', 'lambda month: schedule().price(month, "rate", 0.0)')
+        pricing.new_cells('total', 'lambda: quote(key) + quote(key + 1)')
         assert (data.direct_rate(), data.forwarded_rate(), data.opaque_rate()) == (6.5, 6.5, 6.5)
         assert projection.rate_from_data() == 6.5
         assert 'curve_example.kernel' not in sys.modules
@@ -117,13 +159,16 @@ def test_independent_provider_and_forwarding(tmp_path, monkeypatch):
                 'assert data.direct_rate() == data.forwarded_rate() == data.opaque_rate() == 6.5\n'
                 'assert data.variable_rate(4) == 6.5\n'
                 'assert data.bound().rate_at(0) == 9.5\n'
-                'assert mx_model.Projection.rate_from_data() == 6.5\n', encoding='utf-8')
+                'assert mx_model.Projection.rate_from_data() == 6.5\n'
+                'assert mx_model.Pricing.collect().sum.total == 18.0\n', encoding='utf-8')
     finally:
         model.close()
 
+    (tmp_path / 'spec.py').write_text(
+        repr({'spaces': {'Pricing': {'serial_collect': 'reuse', 'serial_private_lookups': True}}}), encoding='utf-8')
     for name in ('first', 'second'):
         subprocess.run([sys.executable, '-m', 'modelx_cython', name,
-                        '--sample', f'{name}_sample.py', '--no-spec'], cwd=tmp_path, check=True)
+                        '--sample', f'{name}_sample.py', '--spec', 'spec.py'], cwd=tmp_path, check=True)
         generated = (tmp_path / f'{name}_cy/_mx_classes.py').read_text(encoding='utf-8')
         assert '.make_view(self._f_primary())' in generated
         assert '.make_view(self._f_forward())' in generated
@@ -131,6 +176,8 @@ def test_independent_provider_and_forwarding(tmp_path, monkeypatch):
         assert '.calculate_rate(self.again(), 4)' in generated
         assert '.calculate_rate((self.data._v_again if ' in generated
         assert 'self.opaque().rate_at(4)' in generated
+        assert '.prime_price(' in generated and '.bound_price(' in generated
+        assert '.prices_ready(' in generated and 'self._v_schedule.owner' in generated
         implementation.write_text(IMPLEMENTATION + '\n# New build identity.\n', encoding='utf-8')
 
     alias = module_name(PROVIDER)
@@ -150,6 +197,9 @@ def test_independent_provider_and_forwarding(tmp_path, monkeypatch):
         assert first_provider.preparations == 1 and first_provider.reads == 2
         assert first.Projection.rate_from_data() == 6.5
         assert first_provider.preparations == 1 and first_provider.reads == 3
+        assert type(first)().Pricing[1].quote(1) == 3.5 and first_provider.price_reads == 0
+        assert first.Pricing.collect().sum.total == 18.0
+        assert first_provider.price_reads == 2
         assert type(f.primary()) is not type(s.primary())
         assert second_provider.preparations == 1
         s.source = f.primary()
