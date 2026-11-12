@@ -47,7 +47,7 @@ from modelx_cython.builder import ModuleInfo
 from modelx_cython.parser import ModuleVisitor
 from modelx_cython.transformer import ModuleTransformer, PXDGenerator
 from modelx_cython.usage import (
-    analyze_usage, apply_verdicts, build_resolver)
+    admit_forwarded_tables, analyze_usage, apply_verdicts, build_resolver)
 from modelx_cython.powers import build_kind_maps, demote_rebound_params
 from modelx_cython.admission import describe
 from modelx_cython.cell_entries import EntryModule
@@ -358,6 +358,7 @@ def main_handler(args: argparse.Namespace, stdout: IO[str], stderr: IO[str]) -> 
         # not provably of its C type is typed object in the formula.
         module_infos = {u.module_info.fqname: u.module_info for u in units}
         resolver = build_resolver(module_infos)
+        admit_forwarded_tables(module_infos, resolver)
         cells_kinds, ref_kinds = build_kind_maps(module_infos)
         demote_rebound_params(module_infos, resolver, cells_kinds, ref_kinds)
 

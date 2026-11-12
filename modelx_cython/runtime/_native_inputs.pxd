@@ -130,6 +130,8 @@ cdef class NativeTable:
     cpdef object row(self, object key)
     cpdef object slice(self, object key)
 
+cdef NativeTable bind_native_table(object value, str cell)
+
 cdef bint try_clamped_table_float(NativeTable, LookupContext, bint lower, object namespace, long long key,
                                   object column, double* result) except -1
 cdef bint read_bounded_table_float(NativeTable table, LookupContext context, object first_fn,

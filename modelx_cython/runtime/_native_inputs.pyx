@@ -1702,6 +1702,13 @@ cdef class NativeTable:
     def __getattr__(self, name):
         return getattr(self._owner, name)
 
+    def __modelx_table_owner__(self):
+        """Expose the semantic owner when passing a view to another package."""
+        return self._owner
+
+    def __modelx_table_owner_abi__(self):
+        return 1
+
     def __eq__(self, other):
         return self._owner == other
 
@@ -1716,6 +1723,24 @@ cdef class NativeTable:
 
 
 Table.register(NativeTable)
+
+
+cdef NativeTable bind_native_table(object value, str cell):
+    """Bind a Table or keep a local wrapper already owned by another Cell."""
+    value_type = type(value)
+    if value_type is NativeTable:
+        return <NativeTable>value
+    if value_type is Table or Table in value_type.__mro__:
+        return NativeTable(value)
+    if isinstance(value, Table):
+        abi = getattr(value_type, '__modelx_table_owner_abi__', None)
+        owner = getattr(value_type, '__modelx_table_owner__', None)
+        if callable(abi) and callable(owner) and abi(value) == 1:
+            value = owner(value)
+            if Table in type(value).__mro__:
+                return NativeTable(value)
+    raise TypeError(f'{cell} expected a Table result, got {value_type.__name__}. '
+                    "Rebuild with a representative sample or set return_type='object'.")
 
 
 cdef double table_field_float(LookupContext context, NativeTable table, object key,
