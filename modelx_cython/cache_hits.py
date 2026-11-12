@@ -95,25 +95,6 @@ def _layout(fn):
                 tuple((arg.name.value, arg.annotation.annotation) for arg in args), test, value)
 
 
-def _targets(functions, entries):
-    names = set(entries)
-    for name in entries:
-        fn = functions.get(name)
-        body = statements(fn.body) if fn is not None else ()
-        if len(body) != 1 or not isinstance(body[0], cst.If):
-            continue
-        body = statements(body[0].body)
-        if len(body) != 1 or not isinstance(body[0], cst.Return):
-            continue
-        call = body[0].value
-        if isinstance(call, cst.Call) and isinstance(call.func, cst.Name):
-            target = functions.get(call.func.value)
-            if (target is not None and target.params.params and fn.params.params
-                    and same_expression(target.params.params[0].annotation, fn.params.params[0].annotation)):
-                names.add(target.name.value)
-    return names
-
-
 class _Substitute(cst.CSTTransformer):
     def __init__(self, mapping):
         self.mapping = mapping
@@ -192,7 +173,7 @@ class _Calls(cst.CSTTransformer):
 
 def expose_entries(state: EntryModule, known, mode):
     functions = state.functions
-    layouts = {name: layout for name in _targets(functions, known)
+    layouts = {name: layout for name in (*known, *state.inbounds_entries)
                if (fn := functions.get(name)) is not None and (layout := _layout(fn))
                and (mode in (layout.kind, 'both') or mode == 'auto' and (
                    layout.kind == 'scalar' or isinstance(layout.test, cst.Subscript)))}
