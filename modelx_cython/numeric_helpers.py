@@ -24,6 +24,7 @@ class NumericReturns(cst.CSTTransformer):
         self.cls, self.cell, self.providers = cls, cell, providers
         self.contexts = {}
         self.operations = set()
+        self.unlocked_table_reads = set()
         self.builtin_keys = builtin_keys
         self.resolver = resolver
         self.function_depth = 0
@@ -63,7 +64,8 @@ class NumericReturns(cst.CSTTransformer):
         return (isinstance(node, cst.Attribute) and isinstance(node.value, cst.Name)
                 and node.value.value == 'self' and node.attr.value in self.cls.refs)
 
-    def locked_result_type(self, node):
+    def locked_result_type(self, node, *, table_read=None):
+        """Return the locked type and record a matched read missing its source lock."""
         if self.resolver is None or not isinstance(node, cst.Call) or node.args:
             return None
         from .usage import RESOLVED, _extract_self_chain
@@ -72,6 +74,10 @@ class NumericReturns(cst.CSTTransformer):
             return None
         status, name = self.resolver.resolve_chain(self.cls.fqname, chain)
         if status == RESOLVED:
+            if table_read is not None and len(chain) > 1:
+                expected, kind = table_read
+                if self.resolver.unlocked_scalar_results.get(name) == expected:
+                    self.unlocked_table_reads.add((name, kind))
             return self.resolver.locked_scalar_results.get(name)
         return None
 
@@ -140,9 +146,7 @@ class NumericReturns(cst.CSTTransformer):
             code = cst.Module([]).code_for_node
             probe_functions = f'{code(has.func)}, '
             value_functions = ', '.join(code(call.func) for call in (subtable, contains, lookup)) + ', '
-        direct = self.direct_ref(record)
-        if not ((direct or self.locked_result_type(record) == 'object')
-                and isinstance(group, cst.Name)):
+        if not isinstance(group, cst.Name):
             return None
         bindings = [self.single_statement(line) for line in body[:-5]]
         if sum(self.assigns(binding, group.value) and self.typed_cell_call(binding.value, 'long long')
@@ -150,6 +154,9 @@ class NumericReturns(cst.CSTTransformer):
             return None
         module = cst.Module([])
         if CstFacts(body[:-5]).stores[group.value] != 1:
+            return None
+        if (not self.direct_ref(record)
+                and self.locked_result_type(record, table_read=('object', 'grouped')) != 'object'):
             return None
 
         code = module.code_for_node
@@ -424,11 +431,13 @@ class NumericReturns(cst.CSTTransformer):
         self.contexts[context] = provider
         return cst.parse_expression('self.' + context)
 
-    def table_source(self, value):
+    def table_source(self, value, *, lock_reason=None):
         from .builder import NATIVE_TABLE_PROVIDER
         cell = self.cls.cells.get(value.func.attr.value) if self.self_call(value) else None
+        rettype = module_name(NATIVE_TABLE_PROVIDER) + '.NativeTable'
+        table_read = (rettype, lock_reason) if lock_reason is not None else None
         return ((cell is not None and cell.native_table_result and len(value.args) == len(cell.params))
-                or self.locked_result_type(value) == module_name(NATIVE_TABLE_PROVIDER) + '.NativeTable')
+                or self.locked_result_type(value, table_read=table_read) == rettype)
 
     def rounded_inputs(self, body):
         if 'round' not in self.builtin_keys or self.resolver is None:
@@ -558,12 +567,12 @@ class NumericReturns(cst.CSTTransformer):
             return None
         table, key_name, low_name, high_name = (item.targets[0].target for item in (source, key, low, high))
         if (len({name.value for name in (table, key_name, low_name, high_name)}) != 4
-                or not self.table_source(source.value) or not self.typed_cell_call(key.value, 'long long')):
+                or not self.typed_cell_call(key.value, 'long long')):
             return None
         first = arguments(low.value, 'int', 1)
         lookup = self.first_lookup(result.value)
         below = self.single_statement(guard.body.body[0])
-        if not (first and lookup is result.value and lookup.func.value.deep_equals(table)
+        if not (first and lookup and lookup is result.value and lookup.func.value.deep_equals(table)
                 and isinstance(below, cst.Return) and isinstance(below.value, cst.Float)
                 and isinstance(guard.test, cst.Comparison) and len(guard.test.comparisons) == 1
                 and isinstance(guard.test.comparisons[0].operator, cst.LessThan)
@@ -584,6 +593,8 @@ class NumericReturns(cst.CSTTransformer):
                 and (owned_index or (first_arg and first_arg[0].deep_equals(table)
                 and getattr(helper_reference(first[0].func, self.cls.refs), 'helper', None)
                 == (NATIVE_TABLE_PROVIDER, 'first_key')))):
+            return None
+        if not self.table_source(source.value, lock_reason='bounded'):
             return None
         operation = 'read_bounded_table_float'
         self.providers.add(NATIVE_TABLE_PROVIDER)

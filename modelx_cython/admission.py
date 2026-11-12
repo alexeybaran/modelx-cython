@@ -1,5 +1,15 @@
 """Describe actual Cython representations without claiming nogil execution."""
 
+from .consts import FORMULA_PREF, MODULE_PREF, SPACE_PREF
+
+
+def _table_lock_reason(source, kind):
+    _, *parents, _, cls, cell = source.split('.')
+    space = '.'.join([*(name[len(MODULE_PREF):] for name in parents),
+                      cls[len(SPACE_PREF):]])
+    name = cell[len(FORMULA_PREF):]
+    return f'native {kind} table read from {space}.{name} requires {space} in export locked_spaces'
+
 
 def describe(module_infos):
     from modelx_cython.numeric_cache import primary_capacity
@@ -35,6 +45,10 @@ def describe(module_infos):
                     reasons.append('keyword call retains the Python public boundary')
                 if cell.is_locked:
                     reasons.append('exported shared-Space lock retained')
+                reasons.extend(_table_lock_reason(source, 'cached')
+                               for source in getattr(cell, 'unlocked_table_sources', ()))
+                reasons.extend(_table_lock_reason(source, kind)
+                               for source, kind in getattr(cell, 'unlocked_table_reads', ()))
                 result[cell.fqname] = {
                     'formula': 'python-method' if formula_python else 'cython-cfunction',
                     'public_entry': 'python-method' if public_python else 'cython-cpdef',

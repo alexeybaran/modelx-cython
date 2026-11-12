@@ -628,6 +628,7 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
             admitted_helpers.update(cells.native_helpers)
         cells.native_helpers = sorted(admitted_helpers)
         cells.native_numeric_helpers = sorted(numeric_returns.operations)
+        cells.unlocked_table_reads = sorted(numeric_returns.unlocked_table_reads)
         node = rewrite_powers(
             node, self._resolver, self._cells_kinds, self._ref_kinds,
             cls_info.fqname, cells, builtin_float='float' in builtin_keys,

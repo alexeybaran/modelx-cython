@@ -110,12 +110,14 @@ class CellsResolver:
         spaces_by_class: Mapping[str, Mapping[str, str]],
         scalar_refs_by_class: Optional[Mapping[str, Set[str]]] = None,
         locked_scalar_results: Optional[Mapping[str, str]] = None,
+        unlocked_scalar_results: Optional[Mapping[str, str]] = None,
     ) -> None:
         self._cells = cells_by_class
         self._refs = refs_by_class
         self._spaces = spaces_by_class
         self._scalar_refs = scalar_refs_by_class or {}
         self.locked_scalar_results = locked_scalar_results or {}
+        self.unlocked_scalar_results = unlocked_scalar_results or {}
         self._name_index: Dict[str, List[str]] = {}
         for cells in cells_by_class.values():
             for name, fqname in cells.items():
@@ -525,6 +527,7 @@ def build_resolver(module_infos) -> CellsResolver:
     spaces_by_class: Dict[str, Dict[str, str]] = {}
     scalar_refs_by_class: Dict[str, Set[str]] = {}
     locked_scalar_results: Dict[str, str] = {}
+    unlocked_scalar_results: Dict[str, str] = {}
 
     for fqname, info in module_infos.items():
         pkg, basename = fqname.rsplit(".", 1)
@@ -533,9 +536,10 @@ def build_resolver(module_infos) -> CellsResolver:
                 name: cells.fqname for name, cells in cls_info.cells.items()
             }
             for cells in cls_info.cells.values():
-                if (cells.is_locked and not cells.has_args() and not cells.body_has_closure
-                        and not cells.called_with_kwargs):
-                    locked_scalar_results[cells.fqname] = cells.get_rettype_expr(c_style=True)
+                if (cells.has_formula_def and not cells.is_special() and not cells.has_args()
+                        and not cells.body_has_closure and not cells.called_with_kwargs):
+                    results = locked_scalar_results if cells.is_locked else unlocked_scalar_results
+                    results[cells.fqname] = cells.get_rettype_expr(c_style=True)
             refs_by_class[cls_info.fqname] = {
                 name: (ref.mx_class or "")
                 for name, ref in cls_info.refs.items()
@@ -555,7 +559,7 @@ def build_resolver(module_infos) -> CellsResolver:
                 for attr in cls_info.spaces
             }
     return CellsResolver(cells_by_class, refs_by_class, spaces_by_class,
-                         scalar_refs_by_class, locked_scalar_results)
+                         scalar_refs_by_class, locked_scalar_results, unlocked_scalar_results)
 
 
 def analyze_usage(units) -> Dict[str, UsageVerdict]:
