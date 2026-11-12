@@ -547,6 +547,7 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
         cells_kinds=None,
         ref_kinds=None,
         serial_shapes=None,
+        collect_workers=None,
     ) -> None:
         """Parse ``source`` and record the module info and package.
 
@@ -566,6 +567,7 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
         self._cells_kinds = cells_kinds or {}
         self._ref_kinds = ref_kinds or {}
         self._serial_shapes = serial_shapes or {}
+        self._collect_workers = collect_workers
         self._uses_native_round = False
         self.helper_providers = set()
         self.object_providers = {c.native_provider_binding.manifest.provider: c.native_provider_binding.manifest
@@ -906,10 +908,11 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
                 setter = setter.with_changes(leading_lines=(cst.EmptyLine(),))
                 updated_node = updated_node.with_changes(body=updated_node.body.with_changes(
                     body=(*updated_node.body.body, setter)))
-            if cls_name in self._serial_shapes:
+            if cls_name in self._serial_shapes or self._collect_workers is not None:
                 from modelx_cython.serial_collect import add_methods
                 updated_node = add_methods(
-                    self.module.classes[cls_name], updated_node, self._serial_shapes[cls_name])
+                    self.module.classes[cls_name], updated_node, self._serial_shapes.get(cls_name),
+                    workers=self._collect_workers)
             decorator = cst.Decorator(
                 decorator=cst.Attribute(value=cst.Name(CY_MOD), attr=cst.Name("cclass"))
             )

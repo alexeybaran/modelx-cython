@@ -53,7 +53,21 @@ def _single_dict(expr):
     return None, None
 
 
-def analyze(module):
+def collect_contract(node):
+    value = _return_expr(_method(node, '_mx_collect_contract_v2'))
+    try:
+        contract = literal_value(value)
+    except (ValueError, TypeError):
+        return None
+    if (isinstance(contract, tuple) and len(contract) == 4
+            and type(contract[0]) is str and isinstance(contract[1], tuple)
+            and all(type(name) is str for name in contract[1])
+            and type(contract[2]) is str and type(contract[3]) is bool):
+        return contract
+    return None
+
+
+def analyze(module, *, hook=False):
     """Recognize the numeric sum shape. Policy isolation is a Space contract."""
     options = {name: module.spec.get_spec(cls.fqname)
                for name, cls in module.classes.items()}
@@ -81,32 +95,40 @@ def analyze(module):
         private = spec.get('serial_private_lookups', automatic and option == 'reuse')
         if type(private) is not bool or (private and option != 'reuse'):
             raise ValueError('serial_private_lookups requires serial_collect reuse')
-        shape = _match(node, cls, option == 'reuse', private, parallel, order == 'domain')
+        shape = _match(node, cls, option == 'reuse', private, parallel, order == 'domain', hook=hook)
         if shape is not None:
             result[node.name.value] = shape
     return result
 
 
-def _match(node, cls, reuse, private_lookups, parallel_reuse, ordered=False):
+def _match(node, cls, reuse, private_lookups, parallel_reuse, ordered=False, *, hook=False):
     if (len(node.bases) != 1 or dotted_name(node.bases[0].value) != '_mx_sys.BaseSpace'
             or cls.spaces or cls.is_locked or node.name.value in cls.visitor.dynamic_ref_classes
             or any(_method(node, hook) is not None or hook in cls.refs
                    for hook in ('_mx_apply_formula', '_mx_collect_attach', '_mx_collect_release'))):
         return None
-    method = _method(node, '_mx_collect') or _method(node, 'collect')
-    call = _return_expr(method)
-    if (not isinstance(call, cst.Call) or dotted_name(call.func) != '_mx_sys.collect_from_space'
-            or len(call.args) != 6 or any(arg.star for arg in call.args)
-            or any(arg.keyword for arg in call.args[:5])
-            or dotted_name(call.args[0].value) != 'self'
-            or call.args[-1].keyword is None or call.args[-1].keyword.value != 'cache'
-            or dotted_name(call.args[-1].value) != 'self._mx_collect_cache'
-            or any(not isinstance(arg.value, cst.Tuple) or arg.value.elements for arg in call.args[3:5])):
-        return None
-    try:
-        parameter = literal_value(call.args[2].value)
-    except (ValueError, TypeError):
-        return None
+    method_name = 'collect'
+    if hook:
+        contract = collect_contract(node)
+        if contract is None or contract[1]:
+            return None
+        parameter = contract[0]
+    else:
+        method = _method(node, '_mx_collect') or _method(node, 'collect')
+        call = _return_expr(method)
+        if (not isinstance(call, cst.Call) or dotted_name(call.func) != '_mx_sys.collect_from_space'
+                or len(call.args) != 6 or any(arg.star for arg in call.args)
+                or any(arg.keyword for arg in call.args[:5])
+                or dotted_name(call.args[0].value) != 'self'
+                or call.args[-1].keyword is None or call.args[-1].keyword.value != 'cache'
+                or dotted_name(call.args[-1].value) != 'self._mx_collect_cache'
+                or any(not isinstance(arg.value, cst.Tuple) or arg.value.elements for arg in call.args[3:5])):
+            return None
+        try:
+            parameter = literal_value(call.args[2].value)
+        except (ValueError, TypeError):
+            return None
+        method_name = method.name.value
     if (not isinstance(parameter, str) or parameter not in cls.refs
             or cls.refs[parameter].get_type_expr(c_style=True) != 'long long'):
         return None
@@ -122,7 +144,7 @@ def _match(node, cls, reuse, private_lookups, parallel_reuse, ordered=False):
         return None
 
     return SerialCollect(label, cell, parameter, reuse, private_lookups, parallel_reuse,
-                         ordered, method.name.value)
+                         ordered, method_name)
 
 
 def _reset_lines(cls):
@@ -146,8 +168,19 @@ def _reset_lines(cls):
             yield f'root._v_{name} = None'
 
 
-def add_methods(cls, node, shape):
+def add_methods(cls, node, shape, *, workers=None):
     """Add a private evaluator to the existing generated collect entry."""
+    can_reuse = f'type(self) is {cls.name} and not self._mx_roots and not self._mx_spaces'
+    if workers is not None:
+        if collect_contract(node) is None:
+            return node
+        callback = 'self._mx_evaluate_serial_collect' if shape is not None else 'None'
+        parallel = can_reuse if shape is not None and shape.parallel_reuse else 'False'
+        ordered = bool(shape and shape.ordered)
+        options = cst.parse_statement(
+            f'def _mx_collect_options_v2(self):\n    return {workers}, {callback}, {parallel}, {ordered}\n')
+        if shape is None:
+            return node.with_changes(body=node.body.with_changes(body=(*node.body.body, options)))
     lines = [
         'def _mx_evaluate_serial_collect(self, coords):',
         f'    root: {cls.name}',
@@ -199,6 +232,8 @@ def add_methods(cls, node, shape):
         f'    return _mx_sys.CollectResult({{"sum": _mx_sys.CollectResult({{{shape.label!r}: total}})}})',
     ))
     helper = cst.parse_module('\n'.join(lines) + '\n').body[0]
+    if workers is not None:
+        return node.with_changes(body=node.body.with_changes(body=(*node.body.body, helper, options)))
     methods = []
     for item in node.body.body:
         if isinstance(item, cst.FunctionDef) and item.name.value == shape.method:
@@ -208,9 +243,7 @@ def add_methods(cls, node, shape):
                           value=cst.parse_expression('self._mx_evaluate_serial_collect'))
             args = (*ret.value.args, arg)
             if shape.parallel_reuse:
-                can_reuse = cst.parse_expression(
-                    f'type(self) is {cls.name} and not self._mx_roots and not self._mx_spaces')
-                args += (cst.Arg(keyword=cst.Name('reuse_in_parallel'), value=can_reuse),)
+                args += (cst.Arg(keyword=cst.Name('reuse_in_parallel'), value=cst.parse_expression(can_reuse)),)
                 if shape.ordered:
                     args += (cst.Arg(keyword=cst.Name('private_ordered'), value=cst.Name('True')),)
             ret = ret.with_changes(value=ret.value.with_changes(args=args))
