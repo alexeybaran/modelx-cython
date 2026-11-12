@@ -289,6 +289,7 @@ cdef object table(object function, tuple keywords, object frame, object columns=
 
 cpdef long long table_first_int(object table) except? -1
 cpdef long long table_last_int(object table) except? -1
+cpdef long long table_max_int(object table) except? -1
 
 
 # The bounds of an integer-keyed table, inlined into the calling module: a NativeTable resolved
@@ -302,3 +303,9 @@ cdef inline long long native_last_int(object table) except? -1:
     if type(table) is NativeTable and (<NativeTable>table)._bounds_ready:
         return (<NativeTable>table)._int_last
     return table_last_int(table)
+
+cdef inline long long native_max_int(object table) except? -1:
+    """``table.index.max_int()``: int(max(keys)); the resolved last key when every key is an int."""
+    if type(table) is NativeTable and (<NativeTable>table)._bounds_ready:
+        return (<NativeTable>table)._int_last
+    return table_max_int(table)

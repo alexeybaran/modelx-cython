@@ -13,6 +13,13 @@ from .syntax import arguments, literal_value, walk
 from .typedefs import primitive_kind
 
 
+
+# Experiment switch (Task 2 of the plain-read work): MX_CY_NO_TABLE_MATCHERS=1 turns off the
+# statement-shape recognisers for table and record reads in this module (clamp, bounded, grouped,
+# optional, literal-field and Return-statement record/table routes). Reads then take the plain
+# typed route (NativeTable methods and provider members).
+TABLE_MATCHERS_OFF = __import__('os').environ.get('MX_CY_NO_TABLE_MATCHERS') == '1'
+
 class _ReplaceExpression(cst.CSTTransformer):
     def __init__(self, source, replacement):
         self.source, self.replacement = source, replacement
@@ -359,6 +366,10 @@ class NumericReturns(cst.CSTTransformer):
                 or not isinstance(after.body, cst.IndentedBlock) or len(after.body.body) < 4):
             return after
         body = after.body.body
+        if TABLE_MATCHERS_OFF:
+            # Experiment switch: no statement-shape table/record read routes; non-table rewrites stay.
+            rounded = self.rounded_inputs(body)
+            return after if rounded is None else after.with_changes(body=after.body.with_changes(body=rounded))
         native_clamp = self.clamped_table_method(body, after)
         if native_clamp is not None:
             return after.with_changes(body=after.body.with_changes(body=native_clamp))
@@ -1012,6 +1023,8 @@ class NumericReturns(cst.CSTTransformer):
                 or (not self.cell.has_formula_def and self.cell.called_with_kwargs)):
             return after
         call = after.value
+        if TABLE_MATCHERS_OFF:
+            return after
         cast = arguments(call, 'float', 1) if 'float' in self.builtin_keys else None
         record = self.record_subscript(cast[0]) if cast else None
         if (record and record[2].declaration.numeric_record is not None

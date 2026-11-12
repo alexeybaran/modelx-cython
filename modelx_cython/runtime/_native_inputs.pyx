@@ -244,6 +244,8 @@ cdef object key_at(object function, object table, object index):
 
 cdef object first_key(object function, object table):
     cdef TableView data
+    if function is _first_key and type(table) is NativeTable and (<NativeTable>table)._bounds_ready:
+        return (<NativeTable>table)._int_first
     if function is _first_key and type(table) is NativeTable:
         table = (<NativeTable>table)._owner
     if function is _first_key and type(table) is Table:
@@ -255,6 +257,8 @@ cdef object first_key(object function, object table):
 
 cdef object last_key(object function, object table):
     cdef TableView data
+    if function is _last_key and type(table) is NativeTable and (<NativeTable>table)._bounds_ready:
+        return (<NativeTable>table)._int_last
     if function is _last_key and type(table) is NativeTable:
         table = (<NativeTable>table)._owner
     if function is _last_key and type(table) is Table:
@@ -1682,6 +1686,11 @@ cpdef long long table_last_int(object table) except? -1:
         if data.integral:
             return data.last_integer
     return _mx_exact_index(owner.index.max())
+
+
+cpdef long long table_max_int(object table) except? -1:
+    """``table.index.max_int()`` as a C integer (the general route of native_max_int)."""
+    return table.index.max_int()
 
 
 cdef long long _mx_exact_index(object value) except? -1:
