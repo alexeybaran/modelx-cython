@@ -4,11 +4,15 @@ These records contain capabilities, not frozen callable bindings. Emission must
 still evaluate the current member callable and let the provider check identity.
 The shared tracer/merged-Reference wiring is a separately owned integration.
 """
-from types import FunctionType, ModuleType, SimpleNamespace
+from math import erf, exp, isinf, log, sqrt
+from types import BuiltinFunctionType, FunctionType, ModuleType, SimpleNamespace
 
 import libcst as cst
 
 from .helpers import CAPABILITIES, helper_capability, helper_parameters, registered_helper
+
+
+_SCALAR_MATH = {erf: 'float64', exp: 'float64', isinf: 'bool', log: 'float64', sqrt: 'float64'}
 
 
 def module_helpers(value):
@@ -17,6 +21,12 @@ def module_helpers(value):
         return {}
     result = {}
     for name, function in vars(value).copy().items():
+        if type(function) is BuiltinFunctionType and function in _SCALAR_MATH:
+            result[name] = SimpleNamespace(
+                helper=('modelx_cython.runtime._native_math', function.__name__),
+                helper_parameters=None, scalar_result=_SCALAR_MATH[function], reduction=None,
+            )
+            continue
         if type(function) is not FunctionType:
             continue
         helper = registered_helper(function)

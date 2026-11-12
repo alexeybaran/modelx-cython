@@ -1,17 +1,20 @@
 """Check the registered scalar math provider on values, errors and rebinding."""
 
+import math
 import subprocess
 import sys
 import textwrap
 
 import modelx as mx
+import pytest
 from modelx_helpers import numeric_math
 
 
-def test_registered_scalar_math(tmp_path):
+@pytest.mark.parametrize("namespace", [math, numeric_math])
+def test_registered_scalar_math(tmp_path, namespace):
     model = mx.new_model('ScalarMath')
     try:
-        values = model.new_space('Values', refs={'numbers': numeric_math})
+        values = model.new_space('Values', refs={'numbers': namespace})
         for name in ('erf', 'exp', 'isinf', 'log', 'sqrt'):
             values.new_cells(name, f'lambda x: numbers.{name}(x)')
         values.new_cells('composed', 'def composed(x):\n    root = numbers.sqrt(x)\n    return numbers.exp(numbers.log(root) / x)\n')

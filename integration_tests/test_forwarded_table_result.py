@@ -19,6 +19,7 @@ def direct() -> "modelx_helpers.immutable_inputs.Table":
     return owner
 ''')
         inputs.new_cells("shared", "lambda: direct()")
+        inputs.new_cells("unannotated", "lambda: owner")
         calculation = model.new_space("Calculation")
         calculation.inputs = inputs
         calculation.new_cells("direct_source", '''\
@@ -52,6 +53,7 @@ def object_hop() -> object:
             from {name} import mx_model as m
             c = m.Calculation
             assert c.direct_source() is c.first_hop() is c.second_hop() is c.object_hop() is m.Inputs.direct()
+            assert m.Inputs.unannotated() is m.Inputs.owner
             for t, value in enumerate((2.0, 5.0)):
                 assert c.read_direct(t) == c.read_first(t) == c.read_second(t) == value
             '''), encoding="utf-8")
@@ -61,10 +63,16 @@ def object_hop() -> object:
             tmp_path / f"{name}_cy/_mx_provider_guard.py").read_text(encoding="utf-8")
         report = json.loads((tmp_path / f"{name}_cy/_mx_admission.json").read_text(encoding="utf-8"))
         cells = {key.rsplit("._f_", 1)[-1]: row for key, row in report.items()}
+        annotation_reason = (
+            "native provider result requires a matching return annotation or direct forwarding from a typed Cell"
+        )
         for cell in ("direct", "shared", "direct_source", "first_hop", "second_hop"):
             assert cells[cell]["return_type"].endswith(".NativeTable")
             assert cells[cell]["cache"] == "scalar"
+            assert annotation_reason not in cells[cell]["reasons"]
         assert cells["object_hop"]["return_type"] == "object"
+        assert cells["unannotated"]["return_type"] == "object"
+        assert annotation_reason in cells["unannotated"]["reasons"]
         operations = cells["read_direct"]["native_numeric_helpers"]
         assert operations
         assert operations == cells["read_first"]["native_numeric_helpers"]

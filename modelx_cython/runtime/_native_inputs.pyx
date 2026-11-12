@@ -1155,6 +1155,15 @@ cdef double lookup_keyed_float_f64(object conversion, object function, LookupCon
     key = _original_key(parts, count, tuple_key)
     return conversion(function(table, key, column)) if default is _missing else conversion(function(table, key, column, default))
 
+cdef inline void _pack_typed_part(KeyPart* part, KeyArg0 key) noexcept:
+    if KeyArg0 is KeyInteger:
+        key_int(part, key, False)
+    elif KeyArg0 is bint:
+        key_int(part, key, True)
+    else:
+        key_text(part, key)
+
+
 cdef double lookup_key0_float_f64(object conversion, object function, LookupContext context, object table, bint tuple_key, object column, object default=_missing) except? -1:
     cdef KeyPart[1] parts
     key_int(&parts[0], 0, False)
@@ -1162,78 +1171,28 @@ cdef double lookup_key0_float_f64(object conversion, object function, LookupCont
 
 cdef double lookup_key1_float_f64(object conversion, object function, LookupContext context, object table, KeyArg0 key0, bint tuple_key, object column, object default=_missing) except? -1:
     cdef KeyPart[1] parts
-    if KeyArg0 is KeyInteger:
-        key_int(&parts[0], key0, False)
-    elif KeyArg0 is bint:
-        key_int(&parts[0], key0, True)
-    else:
-        key_text(&parts[0], key0)
+    _pack_typed_part(&parts[0], key0)
     return lookup_keyed_float_f64(conversion, function, context, table, &parts[0], 1, tuple_key, column, default)
 
 cdef double lookup_key2_float_f64(object conversion, object function, LookupContext context, object table, KeyArg0 key0, KeyArg1 key1, bint tuple_key, object column, object default=_missing) except? -1:
     cdef KeyPart[2] parts
-    if KeyArg0 is KeyInteger:
-        key_int(&parts[0], key0, False)
-    elif KeyArg0 is bint:
-        key_int(&parts[0], key0, True)
-    else:
-        key_text(&parts[0], key0)
-    if KeyArg1 is KeyInteger:
-        key_int(&parts[1], key1, False)
-    elif KeyArg1 is bint:
-        key_int(&parts[1], key1, True)
-    else:
-        key_text(&parts[1], key1)
+    _pack_typed_part(&parts[0], key0)
+    _pack_typed_part(&parts[1], key1)
     return lookup_keyed_float_f64(conversion, function, context, table, &parts[0], 2, tuple_key, column, default)
 
 cdef double lookup_key3_float_f64(object conversion, object function, LookupContext context, object table, KeyArg0 key0, KeyArg1 key1, KeyArg2 key2, bint tuple_key, object column, object default=_missing) except? -1:
     cdef KeyPart[3] parts
-    if KeyArg0 is KeyInteger:
-        key_int(&parts[0], key0, False)
-    elif KeyArg0 is bint:
-        key_int(&parts[0], key0, True)
-    else:
-        key_text(&parts[0], key0)
-    if KeyArg1 is KeyInteger:
-        key_int(&parts[1], key1, False)
-    elif KeyArg1 is bint:
-        key_int(&parts[1], key1, True)
-    else:
-        key_text(&parts[1], key1)
-    if KeyArg2 is KeyInteger:
-        key_int(&parts[2], key2, False)
-    elif KeyArg2 is bint:
-        key_int(&parts[2], key2, True)
-    else:
-        key_text(&parts[2], key2)
+    _pack_typed_part(&parts[0], key0)
+    _pack_typed_part(&parts[1], key1)
+    _pack_typed_part(&parts[2], key2)
     return lookup_keyed_float_f64(conversion, function, context, table, &parts[0], 3, tuple_key, column, default)
 
 cdef double lookup_key4_float_f64(object conversion, object function, LookupContext context, object table, KeyArg0 key0, KeyArg1 key1, KeyArg2 key2, KeyArg3 key3, bint tuple_key, object column, object default=_missing) except? -1:
     cdef KeyPart[4] parts
-    if KeyArg0 is KeyInteger:
-        key_int(&parts[0], key0, False)
-    elif KeyArg0 is bint:
-        key_int(&parts[0], key0, True)
-    else:
-        key_text(&parts[0], key0)
-    if KeyArg1 is KeyInteger:
-        key_int(&parts[1], key1, False)
-    elif KeyArg1 is bint:
-        key_int(&parts[1], key1, True)
-    else:
-        key_text(&parts[1], key1)
-    if KeyArg2 is KeyInteger:
-        key_int(&parts[2], key2, False)
-    elif KeyArg2 is bint:
-        key_int(&parts[2], key2, True)
-    else:
-        key_text(&parts[2], key2)
-    if KeyArg3 is KeyInteger:
-        key_int(&parts[3], key3, False)
-    elif KeyArg3 is bint:
-        key_int(&parts[3], key3, True)
-    else:
-        key_text(&parts[3], key3)
+    _pack_typed_part(&parts[0], key0)
+    _pack_typed_part(&parts[1], key1)
+    _pack_typed_part(&parts[2], key2)
+    _pack_typed_part(&parts[3], key3)
     return lookup_keyed_float_f64(conversion, function, context, table, &parts[0], 4, tuple_key, column, default)
 
 
