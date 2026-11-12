@@ -66,12 +66,20 @@ def __getattribute__(self, name):
 class _GuardCalls(cst.CSTTransformer):
     METADATA_DEPENDENCIES = (cst.metadata.ScopeProvider,)
 
-    def __init__(self, receiver, owner, resolver, entries, cells):
+    def __init__(self, receiver, integer_params, owner, resolver, entries, cells):
         self.receiver = receiver
+        self.integer_params = integer_params
         self.owner = owner
         self.resolver = resolver
         self.entries = entries
         self.cells = cells
+
+    def _native_parameter(self, value):
+        if not isinstance(value, cst.Name) or value.value not in self.integer_params:
+            return False
+        scope = self.get_metadata(cst.metadata.ScopeProvider, value, None)
+        bindings = tuple(scope[value.value]) if scope is not None else ()
+        return len(bindings) == 1 and bindings[0].node is self.integer_params[value.value]
 
     def leave_Call(self, before, after):
         chain = _extract_self_chain(before.func)
@@ -93,17 +101,19 @@ class _GuardCalls(cst.CSTTransformer):
             return after
         guarded = dict(params)
         arguments = tuple(arg.with_changes(value=_checked_integer(arg.value, cell.model_path))
-                          if index in guarded and arg.keyword is None else arg
-                          for index, arg in enumerate(after.args))
+                          if index in guarded and arg.keyword is None and not self._native_parameter(old.value)
+                          else arg for index, (old, arg) in enumerate(zip(before.args, after.args)))
         return after.with_changes(args=arguments)
 
 
 def _guard_calls(node, cls, resolver, entries, cells):
-    params = (*node.params.posonly_params, *node.params.params)
+    params = (*node.params.posonly_params, *node.params.params, *node.params.kwonly_params)
     if not params or params[0].name.value != MX_SELF:
         return node
+    integer_params = {param.name.value: param for param in params if param.annotation is not None
+                      and param.annotation.annotation.deep_equals(_INTEGER_ANNOTATION)}
     wrapper = cst.MetadataWrapper(cst.Module(body=(node,)), unsafe_skip_copy=True)
-    return wrapper.visit(_GuardCalls(params[0], cls.fqname, resolver, entries, cells)).body[0]
+    return wrapper.visit(_GuardCalls(params[0], integer_params, cls.fqname, resolver, entries, cells)).body[0]
 
 
 def _object_parameters(params, checked):
@@ -128,9 +138,10 @@ def _guard_space_parameters(node, cell):
 
 
 class _GuardReturns(cst.CSTTransformer):
-    def __init__(self, path, kinds):
+    def __init__(self, path, kinds, native_helpers):
         self.path = path
         self.kinds = kinds
+        self.native_helpers = native_helpers
 
     def visit_FunctionDef(self, node):
         return False
@@ -149,18 +160,20 @@ class _GuardReturns(cst.CSTTransformer):
             return value.with_changes(body=self._checked(value.body, in_conditional=True),
                                       orelse=self._checked(value.orelse, in_conditional=True))
         if ((isinstance(value, cst.Integer) and value.evaluated_value < (1 << 63))
+                or (isinstance(value, cst.Call) and isinstance(value.func, cst.Name)
+                    and value.func.value in self.native_helpers)
                 or (in_conditional and self.kinds.kind(value) == KIND_FLOAT)):
             return value
         return _checked_integer(value, self.path)
 
 
-def _guard_result(node, cell, cls, resolver, cells_kinds, ref_kinds):
+def _guard_result(node, cell, cls, resolver, cells_kinds, ref_kinds, native_helpers=()):
     if node.returns is None or not node.returns.annotation.deep_equals(_INTEGER_ANNOTATION):
         return node
     params = {name: kind_of_type_expr(cell.get_argtype_expr(name, c_style=True, formula=True))
               for name in cell.params}
     kinds = OperandKind(resolver, cells_kinds, ref_kinds, cls.fqname, params)
-    return node.with_changes(body=node.body.visit(_GuardReturns(cell.model_path, kinds)))
+    return node.with_changes(body=node.body.visit(_GuardReturns(cell.model_path, kinds, native_helpers)))
 
 
 def guard_integer_boundaries(state, module_info, resolver, cells_kinds, ref_kinds, cells):
@@ -170,6 +183,12 @@ def guard_integer_boundaries(state, module_info, resolver, cells_kinds, ref_kind
     declarations = []
     call_gate = state.names.reserve('_mx_checked_cell_callable')
     changed = False
+    native_helpers = {}
+    for node in state.syntax.body:
+        if (isinstance(node, cst.FunctionDef) and node.returns is not None
+                and node.returns.annotation.deep_equals(_INTEGER_ANNOTATION)
+                and (origin := state.function_origins.get(node.name.value)) is not None):
+            native_helpers.setdefault(origin, set()).add(node.name.value)
     for node in state.syntax.body:
         cls = module_info.classes.get(node.name.value) if isinstance(node, cst.ClassDef) else None
         if cls is None:
@@ -191,7 +210,8 @@ def guard_integer_boundaries(state, module_info, resolver, cells_kinds, ref_kind
             name = method.name.value
             if name.startswith(FORMULA_PREF) and (formula := cls.cells.get(name[len(FORMULA_PREF):])):
                 method = _guard_calls(method, cls, resolver, entries, cells)
-                methods.append(_guard_result(method, formula, cls, resolver, cells_kinds, ref_kinds))
+                methods.append(_guard_result(method, formula, cls, resolver, cells_kinds, ref_kinds,
+                                             native_helpers.get((cls.name, name), ())))
                 changed = True
                 continue
             cell = cls.cells.get(name)
