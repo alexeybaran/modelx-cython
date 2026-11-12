@@ -52,6 +52,12 @@ The sample script must run the model in a single thread: the tracer that
 collects the types of the cells is installed for the thread that runs the
 script only.
 
+Some native table reads use a cached value from another Space. The compiler
+admits those reads when the source Space was exported locked. For resolved
+cached reads and supported bounded and grouped lookups, `_mx_admission.json`
+names the source Cell when its unlocked Space prevents the native read. The
+compiled package evaluates that lookup through the ordinary Cell path.
+
 ## Running the compiled model from threads
 
 ```python
