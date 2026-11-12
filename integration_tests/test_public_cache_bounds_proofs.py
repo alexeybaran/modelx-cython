@@ -3,7 +3,8 @@ import ast
 import pytest
 import libcst as cst
 from modelx_cython.cell_entries import DenseAxis,DenseEntry,EntryModule
-from modelx_cython.dense_proofs import _attribute_counts,prove_entries
+from modelx_cython.config import CompilerPolicy
+from modelx_cython.entry_pipeline import lower_entries
 
 
 @pytest.mark.parametrize('public_guard,extra_use,expected',[
@@ -47,10 +48,11 @@ def _mx_cache_entry_1(self, t):
 '''
     if extra_use:source+='def unchecked(s, t):\n    return s._f_derived(t)\n'
     layouts={f'_mx_cache_entry_{i}':DenseEntry('_c_Policy',formula,
-        (DenseAxis('t',0,4,'long long'),),False)
+        (DenseAxis('t',0,4,'long long'),),False, guard=cst.parse_expression('0 <= t < 4'))
         for i,formula in enumerate(('_f_value','_f_derived'))}
     tree=cst.parse_module(source)
-    result=prove_entries(EntryModule(tree),layouts,_attribute_counts(tree)).syntax.bytes
+    policy = CompilerPolicy.resolve({'automatic_optimizations': False, 'dense_bounds_proofs': True})
+    result = lower_entries({'m': EntryModule(tree)}, {'m': layouts}, {}, policy)['m'].syntax.bytes
     assert (b'_mx_proven_axes' in result) is expected
     if expected and nested:
         result_tree=ast.parse(result)

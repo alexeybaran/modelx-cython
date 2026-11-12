@@ -4,9 +4,9 @@ from dataclasses import replace
 import textwrap
 import pytest
 import libcst as cst
-from modelx_cython import cache_hits as hits
-from modelx_cython.cell_entries import DenseAxis, DenseEntry, EntryModule, cache_hit
-from modelx_cython.dense_one_axis import specialize_entries
+from modelx_cython.cell_entries import DenseAxis, DenseEntry, cache_hit
+from modelx_cython.entry_pipeline import _expose_hits, _hit_layout, _unsigned_check
+from modelx_cython.scopes import FormulaTransformer
 from modelx_cython.syntax import statements
 
 
@@ -24,7 +24,8 @@ else:
 
 
 def dense_layout(key):
-    return DenseEntry('Receiver', '_f_value', (DenseAxis(key, 0, 4, 'long long'),), False)
+    return DenseEntry('Receiver', '_f_value', (DenseAxis(key, 0, 4, 'long long'),), False,
+                      guard=cst.parse_expression(f'0 <= {key} < 4'))
 
 
 def recorded_hit(source, key='t'):
@@ -38,10 +39,22 @@ def rewrite(cache, call, args='self: Receiver, t: _mx_cy.longlong', prelude='', 
     name = '_mx_cache_entry_0'
     hit = recorded_hit(entry(key=key, guard=f'0 <= {key} < 4') if proven else cache, key)
     assert hit is not None
-    state = EntryModule(cst.parse_module(source), cache_hits={name: replace(hit, guard=None) if proven else hit})
+    module = cst.parse_module(source)
+    private, formula = module.body
+    if proven:
+        hit = replace(hit, guard=None)
     if specialize:
-        state = specialize_entries(state, {name: dense_layout(key)})
-    return hits.expose_entries(state, 'both').syntax.code
+        hit = replace(hit, guard=_unsigned_check(dense_layout(key)))
+    expose = _expose_hits(formula.body, formula.params.params,
+                          {name: _hit_layout(private.params.params, hit)})
+    if expose is None:
+        return source
+
+    class Expose(FormulaTransformer):
+        def leave_Call(self, before, after):
+            return expose(after)
+
+    return module.with_changes(body=(private, formula.visit(Expose()))).code
 
 
 def test_checked_hit_keeps_checked_miss():
