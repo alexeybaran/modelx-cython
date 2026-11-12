@@ -22,10 +22,12 @@ Reference and points to a wider sample or spec. Ordinary bound Python calls
 perform this check before dispatch. A separately compiled Cython caller must
 pass values that satisfy the published Cython signature.
 
-Array-backed Cells accept indices within the range covered by the sample,
-including observed negative indices. The `cells_param_size` spec can extend
-the upper bound. An index outside this range raises `IndexError` before
-evaluation. When the physical array covers only part of the accepted range,
+Cached Cells check sampled or declared bounds on exact signed integer
+coordinates before checking the cache or evaluating the formula. Observed
+negative indices are supported. The `cells_param_size` spec can extend the
+exclusive upper bound. An index outside the domain raises `IndexError`.
+Mixed cache keys retain their other argument types and key semantics.
+When a physical array covers only part of the accepted range,
 indices in the rest of that range use the cell's lazy spill dictionary.
 Both storage paths form one logical cache.
 
