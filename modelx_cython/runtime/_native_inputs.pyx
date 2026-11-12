@@ -2138,10 +2138,12 @@ cdef object _group_reduction():
     # pandas behavior on a cancellation case that distinguishes it from the
     # compensated loop, using the same public groupby API as the Python helper.
     reduceat = _group_numpy.add.reduceat
-    for units in (2, 128):
-        values = _group_numpy.array([1e16, *([1.0] * units), -1e16], dtype='float64')
+    cases = (([1e16, 1.0, -1e16, 3.0], 3.0),
+             ([1e16, *([1.0] * 128), -1e16], 128.0))
+    for terms, compensated in cases:
+        values = _group_numpy.array(terms, dtype='float64')
         numpy_total = reduceat(values, [0])[0]
-        if numpy_total == units:
+        if numpy_total == compensated:
             continue
         frame = _pandas.DataFrame({'value': values})
         pandas_total = frame.groupby(_pandas.Index([0] * len(values))).sum().iat[0, 0]
@@ -2219,6 +2221,14 @@ cdef object group_sum(object function, tuple keywords, object table, object labe
         previous_group = group
         if key != key:
             offset += 1
+            if _group_reduceat is not None and not missing_sum:
+                # Pandas checks the whole summed block before dropping rows.
+                for j in range(width):
+                    if modes[j] == 0:
+                        number = source_values[i][source_columns[j]]
+                        if number != number:
+                            missing_sum = True
+                            break
             continue
         for j in range(width):
             number = source_values[i][source_columns[j]]

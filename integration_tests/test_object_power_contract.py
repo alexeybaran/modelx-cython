@@ -10,11 +10,12 @@ def test_native_input_object_power_through_normal_cli(tmp_path):
     model = mx.new_model('ObjectPower')
     try:
         p = model.new_space('Values', refs={'base': 1.25, 'exponent': 2.0})
-        p.new_cells('number', 'lambda n: base')
+        # The power probe passes the full signed exponent range through number.
+        p.new_cells('number', 'lambda n: base', is_cached=False)
         p.new_cells('power_value', 'lambda n: exponent')
         p.new_cells('integer_power', '''def integer_power(n) -> object:
     return number(n) ** n
-''')
+''', is_cached=False)
         p.new_cells('local_power', '''def local_power(n) -> object:
     b, e = number(n), power_value(n)
     return b ** e

@@ -52,6 +52,14 @@ def test_empty_cancellation_infinities_and_all_missing(native,values):
     pd.testing.assert_frame_equal(actual,expected,check_exact=True)
 
 
+def test_dropped_group_with_missing_sum_matches_pandas(native):
+    frame = pd.DataFrame({'flow': [np.nan, 1e16, 1.0, -1e16, 3.0]})
+    labels = [np.nan, 1.0, 1.0, 1.0, 1.0]
+    source = inputs.table(frame, report=True)
+    actual = to_pandas(native.grouped(group_sum, source, labels))
+    pd.testing.assert_frame_equal(actual, reference(frame, labels), check_exact=True)
+
+
 def test_random_order_kahan_matches_pandas_exactly(native):
     rng=np.random.default_rng(1109)
     frame=pd.DataFrame(rng.normal(size=(2000,4))*10.0**rng.integers(-4,7,size=(2000,4)),columns=['a','b','c','d'])

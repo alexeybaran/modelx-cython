@@ -997,12 +997,16 @@ class ClassInfo:
         params = self.logger.param_info.get(self.fqname, None)
         if params:
             for param, rt_info in params.items():
-                self.refs[param] = CombinedRefInfo(
-                    module=self.module.fqname,
-                    cls=self.name,
-                    name=param,
-                    rt_info=rt_info
-                )
+                slot = self.module.fqname, self.name, param
+                parameter = CombinedRefInfo(*slot, rt_info=rt_info)
+                reference = self.refs.get(param)
+                # The base Space and its ItemSpaces share a declaration. A
+                # parameter can replace a Reference of another type there.
+                if (reference is not None and reference.type_ is not None
+                        and reference.get_type_expr(c_style=True)
+                        != parameter.get_type_expr(c_style=True)):
+                    parameter = CombinedRefInfo(*slot, rt_info=None)
+                self.refs[param] = parameter
 
     @cached_property
     def fqname(self):

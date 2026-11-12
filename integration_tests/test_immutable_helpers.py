@@ -34,8 +34,11 @@ def test_helper_reference_assignment(tmp_path):
         'm.Inputs.row(); m.Inputs.rate(); m.Inputs.value(-2); m.Inputs.preceding(8); m.Inputs.fresh(-2)\n'
         'm.Inputs.floored(-10); m.Inputs.capped(20)\n',
         encoding='utf-8')
+    (tmp_path / 'spec.py').write_text(
+        "{'spaces': {'Inputs': {'cells_param_size': {'key': 101}}}}\n",
+        encoding='utf-8')
     subprocess.run([sys.executable, '-m', 'modelx_cython', 'exported',
-                    '--sample', 'sample.py', '--no-spec'], cwd=tmp_path, check=True)
+                    '--sample', 'sample.py', '--spec', 'spec.py'], cwd=tmp_path, check=True)
     admission = json.loads((tmp_path / 'exported_cy/_mx_admission.json').read_text())
     assert admission['exported_cy._mx_classes._c_Inputs._f_value']['native_helpers'] == [
         'modelx_cython.runtime._native_inputs.lookup']
