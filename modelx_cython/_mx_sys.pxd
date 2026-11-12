@@ -61,24 +61,52 @@ cdef inline long long _mx_signed_overflow(str path) except? -1:
     )
 
 
-cdef inline long long _mx_signed_add(long long left, long long right, str path) except? -1:
-    if right > 0 and left > LLONG_MAX - right or right < 0 and left < LLONG_MIN - right:
-        return _mx_signed_overflow(path)
-    return left + right
-
-
-cdef inline long long _mx_signed_sub(long long left, long long right, str path) except? -1:
-    if right > 0 and left < LLONG_MIN + right or right < 0 and left > LLONG_MAX + right:
-        return _mx_signed_overflow(path)
-    return left - right
-
-
 cdef extern from *:
     """
     #include <limits.h>
     #if defined(_MSC_VER) && defined(_M_X64)
     #include <intrin.h>
     #endif
+
+    static CYTHON_INLINE int mx_add_overflow(long long left, long long right,
+                                             long long *result) {
+    #if defined(__GNUC__) || defined(__clang__)
+        return __builtin_add_overflow(left, right, result);
+    #elif defined(_MSC_VER)
+        /* MSVC's signed integers are two's complement. Detect a sign change
+           in the unsigned result without executing a signed overflow. */
+        unsigned long long a = (unsigned long long)left;
+        unsigned long long b = (unsigned long long)right;
+        unsigned long long sum = a + b;
+        *result = (long long)sum;
+        return ((a ^ sum) & (b ^ sum)) > (unsigned long long)LLONG_MAX;
+    #else
+        if ((right > 0 && left > LLONG_MAX - right) ||
+            (right < 0 && left < LLONG_MIN - right))
+            return 1;
+        *result = left + right;
+        return 0;
+    #endif
+    }
+
+    static CYTHON_INLINE int mx_sub_overflow(long long left, long long right,
+                                             long long *result) {
+    #if defined(__GNUC__) || defined(__clang__)
+        return __builtin_sub_overflow(left, right, result);
+    #elif defined(_MSC_VER)
+        unsigned long long a = (unsigned long long)left;
+        unsigned long long b = (unsigned long long)right;
+        unsigned long long difference = a - b;
+        *result = (long long)difference;
+        return ((a ^ b) & (a ^ difference)) > (unsigned long long)LLONG_MAX;
+    #else
+        if ((right > 0 && left < LLONG_MIN + right) ||
+            (right < 0 && left > LLONG_MAX + right))
+            return 1;
+        *result = left - right;
+        return 0;
+    #endif
+    }
 
     static CYTHON_INLINE int mx_mul_overflow(long long left, long long right,
                                              long long *result) {
@@ -98,7 +126,23 @@ cdef extern from *:
     #endif
     }
     """
+    bint _mx_add_overflow "mx_add_overflow"(long long, long long, long long*) noexcept
+    bint _mx_sub_overflow "mx_sub_overflow"(long long, long long, long long*) noexcept
     bint _mx_mul_overflow "mx_mul_overflow"(long long, long long, long long*) noexcept
+
+
+cdef inline long long _mx_signed_add(long long left, long long right, str path) except? -1:
+    cdef long long value
+    if _mx_add_overflow(left, right, &value):
+        return _mx_signed_overflow(path)
+    return value
+
+
+cdef inline long long _mx_signed_sub(long long left, long long right, str path) except? -1:
+    cdef long long value
+    if _mx_sub_overflow(left, right, &value):
+        return _mx_signed_overflow(path)
+    return value
 
 
 cdef inline long long _mx_signed_mul(long long left, long long right, str path) except? -1:
