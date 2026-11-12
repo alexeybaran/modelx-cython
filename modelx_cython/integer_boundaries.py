@@ -2,12 +2,32 @@
 
 import libcst as cst
 
+from .checked_arithmetic import CheckedArithmetic
 from .consts import CY_MOD, FORMULA_PREF, MX_SELF, MX_SYS_MOD
 from .powers import KIND_FLOAT, OperandKind, kind_of_type_expr
+from .scopes import CstFacts, Names, OPAQUE_SCOPES, lexical_nodes
+from .syntax import dotted_name, walk
 from .usage import RESOLVED, _extract_self_chain
 
 
 _INTEGER_ANNOTATION = cst.Attribute(cst.Name(CY_MOD), cst.Name('longlong'))
+_SIGNED_OPERATIONS = {
+    cst.Add: '_mx_signed_add',
+    cst.Subtract: '_mx_signed_sub',
+    cst.Multiply: '_mx_signed_mul',
+    cst.FloorDivide: '_mx_signed_floor',
+}
+_INTEGER_CONVERSION = f'{MX_SYS_MOD}._mx_integer_result'
+_SIGNED_HELPERS = frozenset((*_SIGNED_OPERATIONS.values(), '_mx_integer_result', '_mx_exact_int64'))
+
+
+def _boxed_arithmetic(value):
+    if isinstance(value, cst.Call):
+        return (dotted_name(value.func) == f'{CY_MOD}.cast' and len(value.args) == 2
+                and isinstance(value.args[0].value, cst.Name) and value.args[0].value.value == 'object')
+    return (isinstance(value, cst.BinaryOperation)
+            and type(value.operator) in _SIGNED_OPERATIONS
+            and (_boxed_arithmetic(value.left) or _boxed_arithmetic(value.right)))
 
 
 _CALL_GATE = """\
@@ -36,9 +56,25 @@ def integer_parameters(cell):
                  if cell.get_argtype_expr(name, c_style=True) == 'long long')
 
 
+def _boundary_call(function, path, *values):
+    target = cst.Attribute(cst.Name(MX_SYS_MOD), cst.Name(function))
+    return cst.Call(target, tuple(cst.Arg(value) for value in values) +
+                    (cst.Arg(cst.SimpleString(repr(path))),))
+
+
 def _checked_integer(value, path):
-    target = cst.Attribute(cst.Name(MX_SYS_MOD), cst.Name('_mx_integer_result'))
-    return cst.Call(target, (cst.Arg(value), cst.Arg(cst.SimpleString(repr(path)))))
+    return _boundary_call('_mx_integer_result', path, value)
+
+
+def _overflow_handler(body, path, error, leading_lines=()):
+    message = f'{path} requires an exact signed 64-bit integer. Rebuild with a wider sample or spec.'
+    handler = cst.parse_statement(
+        # Keep Python exceptions and the diagnostics from checked boundaries.
+        f'try:\n    pass\nexcept OverflowError as {error}:\n'
+        f'    if {error}.args != ("value too large",):\n        raise\n'
+        f'    raise OverflowError({message!r}) from {error}\n'
+    )
+    return handler.with_changes(body=cst.IndentedBlock(body=body), leading_lines=leading_lines)
 
 
 def _python_call_gate(cls, entries, names, call_gate):
@@ -137,21 +173,103 @@ def _guard_space_parameters(node, cell):
                                  body=(*statements[:doc_end], *assignments, *statements[doc_end:])))
 
 
-class _GuardReturns(cst.CSTTransformer):
-    def __init__(self, path, kinds, native_helpers):
+class _GuardIntegers(cst.CSTTransformer):
+    def __init__(self, path, kinds, native_helpers, arithmetic, signed_fields,
+                 signed_functions, signed_methods, signed_names, signed_return, error):
         self.path = path
         self.kinds = kinds
         self.native_helpers = native_helpers
+        self.arithmetic = arithmetic
+        self.check_overflow = False
+        self.signed_fields = signed_fields
+        self.signed_functions = signed_functions
+        self.signed_methods = signed_methods
+        self.signed_names = signed_names
+        self.signed_return = signed_return
+        self.error = error
+        self.in_statement = self.statement_overflow = self.function_handler = False
 
-    def visit_FunctionDef(self, node):
-        return False
+    def on_visit(self, node):
+        return not isinstance(node, OPAQUE_SCOPES) and super().on_visit(node)
 
-    visit_ClassDef = visit_FunctionDef
+    def visit_SimpleStatementLine(self, node):
+        self.in_statement = True
+        self.statement_overflow = False
+
+    def leave_SimpleStatementLine(self, before, after):
+        self.in_statement = False
+        if not self.statement_overflow:
+            return after
+        return _overflow_handler((after.with_changes(leading_lines=()),), self.path, self.error,
+                                 after.leading_lines)
 
     def leave_Return(self, before, after):
-        if before.value is None:
+        if not self.signed_return or after.value is None:
             return after
-        return after.with_changes(value=self._checked(before.value))
+        return after.with_changes(value=self._checked(after.value))
+
+    def leave_Assign(self, before, after):
+        if not self.signed_return:
+            return after
+        value, _ = self._lower(after.value, self.path)
+        return after.with_changes(value=value)
+
+    def leave_AnnAssign(self, before, after):
+        if not self.signed_return or after.value is None:
+            return after
+        value, _ = self._lower(after.value, self.path)
+        return after.with_changes(value=value)
+
+    def leave_Call(self, before, after):
+        if (dotted_name(after.func) != _INTEGER_CONVERSION or len(after.args) != 2
+                or not isinstance(after.args[1].value, cst.SimpleString)):
+            return after
+        operand, path = after.args
+        value, signed = self._lower(operand.value, path.value.evaluated_value)
+        if signed:
+            return value.with_changes(lpar=(*after.lpar, *value.lpar), rpar=(*value.rpar, *after.rpar))
+        return after.with_changes(args=(operand.with_changes(value=value), path))
+
+    def _signed_expression(self, value, path):
+        """Lower signed C expressions, leaving object operators on Cython's object path."""
+        if isinstance(value, cst.BinaryOperation) and type(value.operator) in _SIGNED_OPERATIONS:
+            left, left_signed = self._signed_expression(value.left, path)
+            right, right_signed = self._signed_expression(value.right, path)
+            if left_signed and right_signed and self.arithmetic.integer_interval(value, signed=True) is None:
+                operation = _SIGNED_OPERATIONS[type(value.operator)]
+                checked = _boundary_call(operation, path, left, right)
+                return checked.with_changes(lpar=value.lpar, rpar=value.rpar), True
+            return value.with_changes(left=left, right=right), left_signed and right_signed
+        if isinstance(value, cst.IfExp):
+            body, body_signed = self._signed_expression(value.body, path)
+            orelse, else_signed = self._signed_expression(value.orelse, path)
+            return value.with_changes(body=body, orelse=orelse), body_signed and else_signed
+        if isinstance(value, cst.UnaryOperation) and isinstance(value.operator, (cst.Plus, cst.Minus)):
+            if self.arithmetic.integer_interval(value, signed=True) is not None:
+                return value, True
+            operand, signed = self._signed_expression(value.expression, path)
+            if signed and isinstance(value.operator, cst.Minus):
+                checked = _boundary_call('_mx_signed_sub', path, cst.Integer('0'), operand)
+                return checked.with_changes(lpar=value.lpar, rpar=value.rpar), True
+            return value.with_changes(expression=operand), signed
+        if isinstance(value, cst.Integer):
+            return value, value.evaluated_value <= (1 << 63) - 1
+        if isinstance(value, cst.Name):
+            return value, value.value in self.signed_names
+        if isinstance(value, cst.Call):
+            target = value.func
+            if isinstance(target, cst.Name):
+                return value, target.value in self.signed_functions
+            if isinstance(target, cst.Attribute) and isinstance(target.value, cst.Name):
+                return value, (target.value.value == MX_SELF and target.attr.value in self.signed_methods
+                               or target.value.value == MX_SYS_MOD and target.attr.value in _SIGNED_HELPERS)
+        if isinstance(value, cst.Subscript) and any(not isinstance(s.slice, cst.Index) for s in value.slice):
+            return value, False
+        base = value.value if isinstance(value, cst.Subscript) else value
+        if isinstance(base, cst.Attribute) and isinstance(base.value, cst.Name) and base.value.value == MX_SELF:
+            dimensions = len(value.slice) if isinstance(value, cst.Subscript) else 0
+            return value, self.signed_fields.get(base.attr.value) == dimensions
+        return value, False
 
     def _checked(self, value, in_conditional=False):
         if isinstance(value, cst.IfExp):
@@ -164,16 +282,99 @@ class _GuardReturns(cst.CSTTransformer):
                     and value.func.value in self.native_helpers)
                 or (in_conditional and self.kinds.kind(value) == KIND_FLOAT)):
             return value
-        return _checked_integer(value, self.path)
+        value, signed = self._lower(value, self.path)
+        return value if signed else _checked_integer(value, self.path)
+
+    def _lower(self, value, path):
+        value, signed = self._signed_expression(value, path)
+        needs_overflow_check = any(
+            isinstance(part, cst.BinaryOperation)
+            and isinstance(part.operator, (cst.Add, cst.Subtract, cst.Multiply))
+            and not _boxed_arithmetic(part)
+            and self.arithmetic.integer_interval(part, signed=True) is None
+            for part in walk(value)
+        )
+        if needs_overflow_check:
+            self.check_overflow = True
+            if self.in_statement:
+                self.statement_overflow = True
+            else:
+                self.function_handler = True
+        return value, signed
 
 
-def _guard_result(node, cell, cls, resolver, cells_kinds, ref_kinds, native_helpers=()):
-    if node.returns is None or not node.returns.annotation.deep_equals(_INTEGER_ANNOTATION):
+def _guard_result(node, cell, cls, resolver, cells_kinds, ref_kinds, signatures, native_helpers=(),
+                  argument_axes=()):
+    signed_return = node.returns is not None and node.returns.annotation.deep_equals(_INTEGER_ANNOTATION)
+    if not signed_return and not any(isinstance(part, cst.Call) and dotted_name(part.func) == _INTEGER_CONVERSION
+                                     for part in lexical_nodes(node.body.body)):
         return node
     params = {name: kind_of_type_expr(cell.get_argtype_expr(name, c_style=True, formula=True))
               for name in cell.params}
     kinds = OperandKind(resolver, cells_kinds, ref_kinds, cls.fqname, params)
-    return node.with_changes(body=node.body.visit(_GuardReturns(cell.model_path, kinds, native_helpers)))
+    arithmetic = CheckedArithmetic(cls, cell)
+    arithmetic.parameters = {
+        param.name.value for param in node.params.params
+        if param.annotation is not None and param.annotation.annotation.deep_equals(_INTEGER_ANNOTATION)
+    }
+    facts = CstFacts(node.body.body)
+    bindings = facts.bindings(lexical_nodes(node.body.body))
+    arithmetic.parameter_intervals = {axis.key: (axis.lower, axis.stop - 1) for axis in argument_axes
+                                      if axis.key in arithmetic.parameters and axis.key not in bindings}
+    fields, functions, methods = signatures
+    signed_names = arithmetic.parameters | {
+        statement.target.value for statement in lexical_nodes(node.body.body)
+        if isinstance(statement, cst.AnnAssign) and isinstance(statement.target, cst.Name)
+        and statement.annotation.annotation.deep_equals(_INTEGER_ANNOTATION)
+    }
+    receiver_fields = fields.get(cls.name, {}) if MX_SELF not in bindings else {}
+    receiver_methods = methods.get(cls.name, set()) if MX_SELF not in bindings else set()
+    error = Names(node).reserve('_mx_integer_overflow')
+    guard = _GuardIntegers(cell.model_path, kinds, native_helpers, arithmetic, receiver_fields,
+                           functions.difference(bindings), receiver_methods, signed_names, signed_return,
+                           error)
+    body = node.body.visit(guard)
+    if not guard.check_overflow or not isinstance(body, cst.IndentedBlock):
+        return node.with_changes(body=body)
+    decorator = cst.Decorator(cst.parse_expression(f'{CY_MOD}.overflowcheck(True)'))
+    if guard.function_handler:
+        doc_end = 1 if node.get_docstring() is not None else 0
+        handler = _overflow_handler(body.body[doc_end:], cell.model_path, error)
+        body = body.with_changes(body=(*body.body[:doc_end], handler))
+    return node.with_changes(decorators=(*node.decorators, decorator), body=body)
+
+
+def _signed_signatures(state):
+    def signed_result(node):
+        return (node.returns is not None and node.returns.annotation.deep_equals(_INTEGER_ANNOTATION)
+                and any(dotted_name(item.decorator) in {f'{CY_MOD}.cfunc', f'{CY_MOD}.ccall'}
+                        for item in node.decorators))
+
+    functions = {name for name, node in state.functions.items() if signed_result(node)}
+    methods = {}
+    for (owner, name), node in state.methods.items():
+        if signed_result(node):
+            methods.setdefault(owner, set()).add(name)
+    fields = {}
+    for owner in state.syntax.body:
+        if not isinstance(owner, cst.ClassDef) or not isinstance(owner.body, cst.IndentedBlock):
+            continue
+        declared = fields[owner.name.value] = {}
+        for line in owner.body.body:
+            if not isinstance(line, cst.SimpleStatementLine):
+                continue
+            for declaration in line.body:
+                if not isinstance(declaration, cst.AnnAssign) or not isinstance(declaration.target, cst.Name):
+                    continue
+                annotation = declaration.annotation.annotation
+                dimensions = 0
+                if isinstance(annotation, cst.Subscript) and all(isinstance(s.slice, cst.Index)
+                                                                  for s in annotation.slice):
+                    dimensions = len(annotation.slice)
+                    annotation = annotation.value
+                if annotation.deep_equals(_INTEGER_ANNOTATION):
+                    declared[declaration.target.value] = dimensions
+    return fields, functions, methods
 
 
 def guard_integer_boundaries(state, module_info, resolver, cells_kinds, ref_kinds, cells):
@@ -183,6 +384,7 @@ def guard_integer_boundaries(state, module_info, resolver, cells_kinds, ref_kind
     declarations = []
     call_gate = state.names.reserve('_mx_checked_cell_callable')
     changed = False
+    signatures = _signed_signatures(state)
     native_helpers = {}
     for node in state.syntax.body:
         if (isinstance(node, cst.FunctionDef) and node.returns is not None
@@ -198,7 +400,12 @@ def guard_integer_boundaries(state, module_info, resolver, cells_kinds, ref_kind
                 cls = module_info.classes[owner]
                 cell = cls.cells[name[len(FORMULA_PREF):]]
                 node = _guard_calls(node, cls, resolver, entries, cells)
-                node = _guard_result(node, cell, cls, resolver, cells_kinds, ref_kinds)
+                # A complete dense entry calls its private formula only
+                # inside the checked logical domain. A compact cache can
+                # also reach it through the checked spill.
+                axes = cell.dense_axes if cell.is_arrayable() and not cell.has_dense_spill else ()
+                node = _guard_result(node, cell, cls, resolver, cells_kinds, ref_kinds, signatures,
+                                     argument_axes=axes)
                 changed = True
             classes.append(node)
             continue
@@ -210,7 +417,7 @@ def guard_integer_boundaries(state, module_info, resolver, cells_kinds, ref_kind
             name = method.name.value
             if name.startswith(FORMULA_PREF) and (formula := cls.cells.get(name[len(FORMULA_PREF):])):
                 method = _guard_calls(method, cls, resolver, entries, cells)
-                methods.append(_guard_result(method, formula, cls, resolver, cells_kinds, ref_kinds,
+                methods.append(_guard_result(method, formula, cls, resolver, cells_kinds, ref_kinds, signatures,
                                              native_helpers.get((cls.name, name), ())))
                 changed = True
                 continue
@@ -221,7 +428,7 @@ def guard_integer_boundaries(state, module_info, resolver, cells_kinds, ref_kind
                 continue
             if cell is not None and not cell.has_formula_def:
                 method = _guard_calls(method, cls, resolver, entries, cells)
-                method = _guard_result(method, cell, cls, resolver, cells_kinds, ref_kinds)
+                method = _guard_result(method, cell, cls, resolver, cells_kinds, ref_kinds, signatures)
                 changed = True
             methods.append(method)
         added, gates = _python_call_gate(cls, entries, state.names, call_gate)

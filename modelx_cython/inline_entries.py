@@ -241,7 +241,7 @@ def add_inline_entries(module, classes):
                     dense_entries[entry] = DenseEntry(owner, FORMULA_PREF + name,
                                                       cell.dense_axes, cell.has_dense_spill,
                                                       cell.dense_logical_axes if spill else (), spill,
-                                                      cell.has_inferred_dense_domain)
+                                                      spill is not None and cell.has_inferred_dense_domain)
                     dense[HAS_PREF + name] = cell
             for index, method in enumerate(methods):
                 if isinstance(method, cst.SimpleStatementLine) and len(method.body) == 1:
