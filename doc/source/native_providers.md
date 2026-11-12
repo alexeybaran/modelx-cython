@@ -64,6 +64,46 @@ Cell result in an assignment. This operation takes the owner and the string
 and returns a Python object. An owner that uses this operation may omit the
 native view and binder.
 
+## Bound numeric methods
+
+A typed view can declare `numeric_table` to bind numeric reads on the
+private receiver used by native `collect`. The `methods` keys are the
+Python-facing method names. Each entry names its own native symbols.
+
+```json
+{
+  "owner_field": "owner",
+  "ready": "prices_ready",
+  "methods": {
+    "price": {
+      "signature": "lookup_f64",
+      "read": "bound_price",
+      "prepare": "prime_price"
+    }
+  }
+}
+```
+
+The view exposes `owner_field` as a Cython object field holding the Python
+owner. The provider declares a default-constructible `LookupContext`
+extension type with a Cython `bint _private_owner` field. The field starts
+false. The optional `_mx_enable_private_lookup()` hook enables private
+binding when `collect` owns the receiver. The ordinary view method remains
+the fallback for lookup outside this context.
+
+The `ready` function takes `(LookupContext, const void* owner,
+const void* column) -> bint noexcept`. It checks owner identity and either
+column identity for a named column or a null pointer for a numeric column.
+The context retains the owner and any column or prepared state used by the
+bound read. The `read` function takes `(LookupContext, long long key,
+long long column, bint named, bint has_default, double default) -> double`.
+The `prepare` function takes `(LookupContext, View, long long key,
+object column, object default=*) -> double`. It prepares state and performs
+the initial lookup. For a `previous_f64` method, omit the default parameter
+from `prepare` and declare `read_integer(View, long long, long long)` and
+`read_object(View, long long, object)` symbols, both returning `double`.
+These implement the ordinary previous-key lookup for the two column types.
+
 ## Reusing compiled provider binaries
 
 Set `MODELX_CYTHON_PROVIDER_CACHE` to a build-cache directory to reuse a native

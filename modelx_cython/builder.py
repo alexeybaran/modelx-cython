@@ -61,7 +61,6 @@ from modelx_cython.consts import (
 from modelx_cython.typedefs import str_to_type, normalize_type
 
 _logger = logging.getLogger(__name__)
-NATIVE_TABLE_PROVIDER = 'modelx_cython.runtime._native_inputs'
 
 # Policy for array-returning cells with no call sites inside the model
 # (consumed only by external user scripts, which the usage analysis cannot
@@ -590,7 +589,7 @@ class CombinedCellsInfo(LexicalCellsInfo):
     @property
     def native_table_result(self):
         binding = self.native_provider_binding
-        return binding is not None and binding.manifest.provider == NATIVE_TABLE_PROVIDER
+        return binding is not None and binding.declaration.numeric_table is not None
 
     @property
     def native_provider_binding(self):

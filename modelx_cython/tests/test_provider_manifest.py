@@ -114,6 +114,23 @@ def test_duplicate_fields_are_rejected(declaration):
         read_provider_manifest(PROVIDER, ABI)
 
 
+@pytest.mark.parametrize(('changes', 'error'), [
+    ({'owner_field': 'owner.value'}, 'invalid numeric table declaration'),
+    ({'methods': {'rate_at': {'signature': 'previous_f64', 'read': 'read', 'prepare': 'prime'}}},
+     'invalid fields'),
+])
+def test_invalid_numeric_table_declaration(declaration, changes, error):
+    resource, document = declaration
+    document['types'][TYPE]['numeric_table'] = {
+        'owner_field': 'owner', 'ready': 'ready',
+        'methods': {'rate_at': {'signature': 'lookup_f64', 'read': 'read', 'prepare': 'prime'}},
+        **changes,
+    }
+    resource.write_text(json.dumps(document), encoding='utf-8')
+    with pytest.raises(ValueError, match=error):
+        read_provider_manifest(PROVIDER, ABI)
+
+
 def test_broken_package_dependency_is_reported(declaration):
     resource, _ = declaration
     (resource.parent / '__init__.py').write_text(
