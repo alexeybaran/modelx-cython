@@ -908,7 +908,7 @@ class NumericReturns(cst.CSTTransformer):
         binding = source.observed_provider_type if source is not None else None
         operation = binding.declaration.members.get('__getitem__') if binding is not None else None
         if operation is not None and operation.signature == 'string_label_to_object':
-            return node.value, key, binding.manifest.provider, operation.native
+            return node.value, key, binding, operation.native
 
     def leave_Assign(self, before, after):
         if self.function_depth != 1 or not self.scope_safe:
@@ -916,16 +916,18 @@ class NumericReturns(cst.CSTTransformer):
         read = self.record_subscript(after.value)
         if not read:
             return after
-        receiver, key, provider, operation = read
+        receiver, key, binding, operation = read
+        provider = binding.manifest.provider
         self.providers.add(provider)
         self.operations.add(f'{provider}.{operation}')
         alias = module_name(provider)
         return after.with_changes(value=cst.Call(cst.Attribute(cst.Name(alias), cst.Name(operation)),
                                                  args=(cst.Arg(receiver), cst.Arg(key))))
 
-    def record_float(self, call, receiver, key, *, cast=False):
-        provider = NATIVE_TABLE_PROVIDER
-        operation = 'read_cast_record_field_float' if cast else 'read_record_field_float'
+    def record_float(self, call, receiver, key, binding, *, cast=False):
+        provider = binding.manifest.provider
+        numeric = binding.declaration.numeric_record
+        operation = numeric.read_cast if cast else numeric.read_field
         alias = module_name(provider)
         context = self.lookup_context(provider)
         self.providers.add(provider)
@@ -944,12 +946,12 @@ class NumericReturns(cst.CSTTransformer):
         if not bound:
             return native
         code = cst.Module([]).code_for_node
-        ready, guard = ('record_cast_ready', call.func) if cast else ('record_field_ready', namespace)
+        ready, guard = (numeric.cast_ready, call.func) if cast else (numeric.field_ready, namespace)
         condition = cst.parse_expression(
             f'{exact_receiver(self.cls.name)} and self._has_{source.name} and '
             f'{alias}.{ready}({code(context)}, _mx_cy.cast(_mx_cy.p_void, self._v_{source.name}), '
             f'_mx_cy.cast(_mx_cy.p_void, {code(key)}), {code(guard)})')
-        result = cst.parse_expression(f'{alias}.bound_record_field({code(context)})')
+        result = cst.parse_expression(f'{alias}.{numeric.bound_read}({code(context)})')
         return cst.IfExp(test=condition, body=result, orelse=native,
                          lpar=(cst.LeftParen(),), rpar=(cst.RightParen(),))
 
@@ -960,18 +962,22 @@ class NumericReturns(cst.CSTTransformer):
         call = after.value
         cast = arguments(call, 'float', 1) if 'float' in self.builtin_keys else None
         record = self.record_subscript(cast[0]) if cast else None
-        if (record and record[2] == NATIVE_TABLE_PROVIDER
+        if (record and record[2].declaration.numeric_record is not None
                 and self.cell.has_args() and not self.cell.is_locked):
-            return after.with_changes(value=self.record_float(call, *record[:2], cast=True))
+            return after.with_changes(value=self.record_float(call, *record[:3], cast=True))
         if (isinstance(call, cst.Call) and len(call.args) == 2
                 and not any(arg.keyword or arg.star for arg in call.args)
                 and self.self_call(call.args[0].value) and not call.args[0].value.args
                 and isinstance(call.args[1].value, cst.SimpleString)
                 and type(call.args[1].value.evaluated_value) is str
-                and self.cell.has_args() and not self.cell.is_locked
-                and getattr(helper_reference(call.func, self.cls.refs), 'helper', None)
-                == ('modelx_cython.runtime._native_inputs', 'lookup_float')):
-            return after.with_changes(value=self.record_float(call, *(arg.value for arg in call.args)))
+                and self.cell.has_args() and not self.cell.is_locked):
+            receiver, key = (arg.value for arg in call.args)
+            source = self.cls.cells.get(receiver.func.attr.value)
+            binding = source.observed_provider_type if source is not None else None
+            numeric = binding.declaration.numeric_record if binding is not None else None
+            helper = helper_reference(call.func, self.cls.refs)
+            if numeric is not None and getattr(helper, 'helper', None) == (binding.manifest.provider, numeric.lookup):
+                return after.with_changes(value=self.record_float(call, receiver, key, binding))
         if isinstance(call, cst.Call) and isinstance(call.func, cst.Attribute) and self.self_call(call.func.value):
             return after.with_changes(value=self.bound_table_method(call))
         if not (isinstance(call, cst.Call) and 3 <= len(call.args) <= 4

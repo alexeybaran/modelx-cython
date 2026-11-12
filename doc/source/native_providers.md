@@ -104,6 +104,23 @@ from `prepare` and declare `read_integer(View, long long, long long)` and
 `read_object(View, long long, object)` symbols, both returning `double`.
 These implement the ordinary previous-key lookup for the two column types.
 
+## Numeric Record fields
+
+A Record can declare `numeric_record` with the `lookup`, `read_field`,
+`read_cast`, `field_ready`, `cast_ready`, and `bound_read` symbols. The
+compiler uses `read_cast` for `float(record["column"])` when the Record also
+declares the string-label `__getitem__` member. It uses `read_field` for
+a two-argument call to a Python helper registered with this provider and
+the `lookup` operation. Unregistered calls keep their existing dispatch.
+
+Both read functions take the current Python callable, `LookupContext`,
+the Record owner, and the string key. `read_field` also takes an optional
+helper namespace. They return a `double` and preserve the current callable's
+behavior. The ready functions take the context, owner and key identity
+pointers, and the current namespace or conversion callable. They return
+`bint noexcept`. The context must retain all owners and values needed for
+`bound_read(LookupContext) -> double` until the binding is replaced.
+
 ## Reusing compiled provider binaries
 
 Set `MODELX_CYTHON_PROVIDER_CACHE` to a build-cache directory to reuse a native

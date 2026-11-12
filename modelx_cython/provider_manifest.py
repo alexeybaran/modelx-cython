@@ -33,6 +33,16 @@ class NumericTable:
 
 
 @dataclass(frozen=True)
+class NumericRecord:
+    lookup: str
+    read_field: str
+    read_cast: str
+    field_ready: str
+    cast_ready: str
+    bound_read: str
+
+
+@dataclass(frozen=True)
 class ProviderType:
     view_type: Optional[str]
     bind: Optional[str]
@@ -40,6 +50,7 @@ class ProviderType:
     admission: str
     bind_cell: bool
     numeric_table: Optional[NumericTable]
+    numeric_record: Optional[NumericRecord]
 
 
 @dataclass(frozen=True)
@@ -139,7 +150,7 @@ def _read_type(type_id, declaration):
     if not _qualified_identifier(type_id):
         raise ValueError(f'invalid qualified type identity {type_id!r}')
     _require_fields(declaration, type_id, ('members',),
-                    ('view_type', 'bind', 'admission', 'bind_cell', 'numeric_table'))
+                    ('view_type', 'bind', 'admission', 'bind_cell', 'numeric_table', 'numeric_record'))
     view_type = declaration.get('view_type')
     bind = declaration.get('bind')
     if ('view_type' in declaration or 'bind' in declaration) and not (
@@ -157,6 +168,14 @@ def _read_type(type_id, declaration):
         if view_type is None:
             raise ValueError(f'{type_id} cannot configure numeric_table without a view_type')
         numeric_table = _read_numeric_table(type_id, declaration['numeric_table'])
+    numeric_record = None
+    if 'numeric_record' in declaration:
+        record = declaration['numeric_record']
+        fields = ('lookup', 'read_field', 'read_cast', 'field_ready', 'cast_ready', 'bound_read')
+        _require_fields(record, f'{type_id}.numeric_record', fields)
+        if not all(valid_identifier(record[field]) for field in fields):
+            raise ValueError(f'invalid numeric Record declaration for {type_id}')
+        numeric_record = NumericRecord(**record)
 
     declared_members = declaration['members']
     if not isinstance(declared_members, dict):
@@ -167,7 +186,8 @@ def _read_type(type_id, declaration):
         if not all(valid_identifier(part) for part in (name, member['signature'], member['native'])):
             raise ValueError(f'invalid member identity or symbol for {type_id}.{name}')
         members[name] = ProviderMember(member['signature'], member['native'])
-    return ProviderType(view_type, bind, MappingProxyType(members), admission, bind_cell, numeric_table)
+    return ProviderType(view_type, bind, MappingProxyType(members), admission, bind_cell,
+                        numeric_table, numeric_record)
 
 
 def read_provider_manifest(provider: str, expected_abi: str) -> Optional[ProviderManifest]:

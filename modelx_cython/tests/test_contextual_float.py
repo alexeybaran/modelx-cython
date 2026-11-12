@@ -6,7 +6,7 @@ import libcst as cst
 
 from modelx_cython.helpers import HelperCalls
 from modelx_cython.numeric_helpers import NumericReturns
-from modelx_cython.provider_manifest import ProviderBinding, read_provider_manifest
+from modelx_cython.provider_manifest import NumericRecord, ProviderBinding, ProviderMember, read_provider_manifest
 
 
 def builtin_table_binding():
@@ -72,3 +72,23 @@ def test_clamped_table_lookup_keeps_a_reassigned_receiver():
     ).body
     assert lowering.clamped_table_method(body) is None
     assert not lowering.providers
+
+
+def test_record_cast_uses_the_declared_provider_operations():
+    provider = 'rates_extension.kernel'
+    numeric = NumericRecord('lookup', 'read_value', 'cast_value', 'field_current', 'cast_current', 'read_bound')
+    binding = SimpleNamespace(manifest=SimpleNamespace(provider=provider), declaration=SimpleNamespace(
+        numeric_record=numeric, members={'__getitem__': ProviderMember('string_label_to_object', 'select')}))
+    record = SimpleNamespace(name='record', observed_provider_type=binding,
+                             has_formula_def=True, is_locked=False, get_rettype_expr=lambda **_: 'object')
+    owner = SimpleNamespace(name='_c_Projection', cells={'record': record}, refs={})
+    cell = SimpleNamespace(name='amount', params=('t',), has_args=lambda: True, is_locked=False,
+                           has_formula_def=True, formula_allows_exact_receiver=True,
+                           get_rettype_expr=lambda **_: 'double')
+    node = cst.parse_module('def amount(self, t):\n    return float(self.record()["rate"])\n')
+    providers = set()
+
+    result = node.visit(NumericReturns(owner, cell, providers, builtin_keys={'float'})).code
+
+    assert '.cast_current(' in result and '.read_bound(' in result and '.cast_value(float,' in result
+    assert providers == {provider}

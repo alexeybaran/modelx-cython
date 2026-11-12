@@ -29,6 +29,14 @@
       "members": {}
     },
     "modelx_helpers.immutable_inputs.Record": {
+      "numeric_record": {
+        "lookup": "lookup_float",
+        "read_field": "read_record_field_float",
+        "read_cast": "read_cast_record_field_float",
+        "field_ready": "record_field_ready",
+        "cast_ready": "record_cast_ready",
+        "bound_read": "bound_record_field"
+      },
       "members": {
         "__getitem__": {
           "signature": "string_label_to_object",
