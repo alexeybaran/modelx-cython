@@ -11,7 +11,8 @@ def test_checked_native_range(tmp_path):
     model = mx.new_model('CheckedNativeRange')
     try:
         values = model.new_space('Values')
-        values.new_cells('term', 'lambda index: float(index)')
+        # Uncached Cells admit signed arguments across the full native range.
+        values.new_cells('term', 'lambda index: float(index)', is_cached=False)
         values.new_cells('step', 'lambda: 3')
         values.new_cells('add', textwrap.dedent('''\
             def add(origin, stop):
@@ -19,14 +20,14 @@ def test_checked_native_range(tmp_path):
                 for index in range(origin + 1, stop):
                     total += term(index) * ((index - origin) / 12.0)
                 return total
-            '''))
+            '''), is_cached=False)
         values.new_cells('add_from_one', textwrap.dedent('''\
             def add_from_one(stop):
                 total: float = 0.0
                 for slot in range(1, stop):
                     total += term(slot)
                 return total
-            '''))
+            '''), is_cached=False)
         values.new_cells('weighted', textwrap.dedent('''\
             def weighted(origin, stop, limit):
                 step_size = step()
@@ -36,14 +37,14 @@ def test_checked_native_range(tmp_path):
                     if number * step_size <= limit:
                         total += term(month) * ((month - origin) / 12.0)
                 return total
-            '''))
+            '''), is_cached=False)
         values.new_cells('square', textwrap.dedent('''\
             def square(origin, stop):
                 total = 0.0
                 for squared_index in range(origin + 1, stop):
                     total += float(squared_index * squared_index)
                 return total
-            '''))
+            '''), is_cached=False)
         values.new_cells('shadowed', textwrap.dedent('''\
             def shadowed(origin, stop):
                 range = lambda a, b: (a,)
@@ -51,7 +52,7 @@ def test_checked_native_range(tmp_path):
                 for shadowed_index in range(origin + 1, stop):
                     total += term(shadowed_index)
                 return total
-            '''))
+            '''), is_cached=False)
         model.export(tmp_path / 'exported')
     finally:
         model.close()

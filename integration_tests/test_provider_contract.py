@@ -38,7 +38,7 @@ def test_helper_contract_through_model_export(tmp_path):
         model.close()
     (tmp_path / "sample.py").write_text(
         "from exported import mx_model\np = mx_model.Projection\n"
-        "p.exact(-3); p.exact(-2); p.before(-4); p.before(8); p.group('west')\n",
+        "p.exact(-3); p.exact(10); p.before(-4); p.before(10); p.group('west')\n",
         encoding="utf-8",
     )
     subprocess.run([sys.executable, "-m", "modelx_cython", "exported",
@@ -50,6 +50,7 @@ p = mx_model.Projection
 assert p.exact(-3) == -3.0 and p.exact(-2) == -99.0
 assert p.before(-4) == -99.0 and p.before(8) == 4.0
 assert p.group("west") and not p.group("east")
+p = type(mx_model)().Projection
 seen = []
 def replacement(table, key, column, default):
     seen.append((key, column, default))
