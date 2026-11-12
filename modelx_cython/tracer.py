@@ -184,10 +184,12 @@ class RuntimeCellsInfo:     # TODO: Create base class RuntimeBaseMemberInfo
         self._init_arg_types(traces)
         self.ret_type = self._init_ret_type(traces)
         table_type = 'modelx_helpers.immutable_inputs.Table'
-        self.declared_table_result = all(
-            trace.func.__annotations__.get('return') == table_type
-            and f'{type(trace.ret_val).__module__}.{type(trace.ret_val).__qualname__}' == table_type
+        self.observed_table_result = all(
+            f'{type(trace.ret_val).__module__}.{type(trace.ret_val).__qualname__}' == table_type
             for trace in traces
+        )
+        self.declared_table_result = self.observed_table_result and all(
+            trace.func.__annotations__.get('return') == table_type for trace in traces
         )
         from .provider_manifest import observed_provider_binding
         self.observed_provider_binding = observed_provider_binding(traces)

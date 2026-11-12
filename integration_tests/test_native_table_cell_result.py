@@ -84,7 +84,7 @@ def test_parameterized_table_result(tmp_path):
     subprocess.run([sys.executable, '-m', 'modelx_cython', 'exported', '--sample', 'sample.py', '--no-spec'],
                    cwd=tmp_path, check=True)
     generated = (tmp_path / 'exported_cy/_mx_classes.py').read_text(encoding='utf-8')
-    assert '.NativeTable(self._f_schedule(account))' in generated
+    assert '.bind_native_table(self._f_schedule(account),' in generated
     assert '.read_clamped_table_float(' in generated
     assert '.isna(self.pdn.isna, value)' in generated
     assert '.previous_f64(self.pdn.previous,' in generated

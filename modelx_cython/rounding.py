@@ -6,6 +6,9 @@ from .scopes import OPAQUE_SCOPES
 from .syntax import arguments
 
 
+NATIVE_ROUNDING_PROVIDER = 'modelx_cython.runtime._native_rounding'
+
+
 ROUND_BINDING = """\
 import builtins as _mx_round_builtins
 from types import BuiltinFunctionType as _mx_round_builtin_type

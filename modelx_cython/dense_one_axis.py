@@ -1,5 +1,7 @@
 """Separate checked and proven calls to a single dense cache body."""
 
+from dataclasses import replace
+
 import libcst as cst
 
 from .cell_entries import EntryModule, dense_condition
@@ -123,4 +125,6 @@ def specialize_entries(state: EntryModule, layouts, propagate=False):
         entry = cst.parse_statement(f"return {name}({args[0].name.value}, {axis.key}{flag})\n")
         rewritten.append(stmt.with_changes(params=signature, body=stmt.body.with_changes(
             body=(guard.with_changes(test=check, body=guard.body.with_changes(body=(entry,))),))))
-    return state.replace(module.with_changes(body=(*rewritten, *bodies)).visit(_Calls(proved, propagate)))
+    syntax = module.with_changes(body=(*rewritten, *bodies)).visit(_Calls(proved, propagate))
+    return replace(state, syntax=syntax,
+                   inbounds_entries=tuple(target.value for target in proved.values()))

@@ -13,13 +13,25 @@ cdef extern from "Python.h":
     bint PyExceptionInstance_Check(object value) noexcept
     bint PyTraceBack_Check(object value) noexcept
 from cpython.object cimport Py_TYPE
-from modelx_helpers.expression_streams import _PERIODS, _OVER, _FLATTEN, _SUM_VALUES, _SUM_FLOAT, _FLOAT, _NO_CALLBACK, _DOMAIN_MISSING, _ZIP_VALUES
 from modelx_cython._float_sum_state cimport F64Sum, f64_init, f64_add, f64_result
 from modelx_cython._range_state cimport I64Range, range_init, range_next
 from modelx_cython._call_layout cimport forward_call
 
 cdef object omitted_argument = object()
 cdef object _missing = omitted_argument
+try:
+    from modelx_helpers.expression_streams import (
+        _PERIODS, _OVER, _FLATTEN, _SUM_VALUES, _SUM_FLOAT, _FLOAT,
+        _NO_CALLBACK, _DOMAIN_MISSING, _ZIP_VALUES,
+    )
+except ModuleNotFoundError as error:
+    if error.name not in ('modelx_helpers', 'modelx_helpers.expression_streams'):
+        raise
+    # Builtin reductions use this provider even in an upstream-only model.
+    # The registered helper paths still require their original callable.
+    _PERIODS = _OVER = _FLATTEN = _SUM_VALUES = _SUM_FLOAT = _ZIP_VALUES = object()
+    _NO_CALLBACK, _DOMAIN_MISSING = object(), object()
+    _FLOAT = builtins.float
 cdef object _sum_values = _SUM_VALUES
 cdef object _builtin_sum = builtins.sum
 if (type(_builtin_sum) is not BuiltinFunctionType or _builtin_sum.__name__ != 'sum'

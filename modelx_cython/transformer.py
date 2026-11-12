@@ -86,7 +86,24 @@ from modelx_cython.consts import (
     is_user_defined,
 )
 
-from modelx_cython.typedefs import CY_BOOL_T
+from modelx_cython.syntax import dotted_name, literal_value
+from modelx_cython.typedefs import CY_BOOL_T, CY_INT_T, primitive_kind
+
+
+def _integer_reference_paths(cls_info):
+    """Return qualified names of writable References stored as C integers."""
+    lexical_refs = cls_info.visitor.ref_info.get(cls_info.name, {})
+    fixed_refs = getattr(cls_info, 'readonly_refs', ())
+    owners = [part[len(MODULE_PREF):] for part in cls_info.module.fqname.split('.')[1:-1]]
+    owners.append(cls_info.name[len(SPACE_PREF):])
+    return {
+        name: '.'.join((*owners, name))
+        for name in lexical_refs
+        if name not in cls_info.spaces
+        and name not in fixed_refs
+        and cls_info.refs[name].get_type_expr(c_style=True) == CY_INT_T
+    }
+
 
 class PXDGenerator:
     """Generate a Cython ``.pxd`` declaration file for a model module.
@@ -317,11 +334,11 @@ class PXDGenerator:
         return "".join(decl_stmts)
 
     def public_var_defs(self, cls_name):
-        """``cdef public`` declarations for refs and child spaces.
+        """Externally readable declarations for refs and child spaces.
 
-        Emits one typed ``cdef public`` line per ref (skipping refs
-        that name a child space, which are declared below), followed
-        by one line per child space typed as
+        A signed integer Reference uses a readonly descriptor so that
+        Python writes use the checked attribute setter. Child spaces
+        are declared as
         ``<module>._mx_classes._c_<space>``, where ``<module>`` is the
         class's own submodule (``_m_`` plus the class name suffix).
 
@@ -336,18 +353,21 @@ class PXDGenerator:
             Concatenated declaration lines.
         """
 
+        cls_info = self.module.classes[cls_name]
+        integer_refs = _integer_reference_paths(cls_info)
         decl_stmts = []
-        for ref in self.module.classes[cls_name].refs.values():
+        for ref in cls_info.refs.values():
 
             assert ref.module == self.module.fqname and ref.cls == cls_name
 
-            if ref.name in self.module.classes[cls_name].spaces:
+            if ref.name in cls_info.spaces:
                 # declared below as a child space
                 continue
-            if ref.name in getattr(self.module.classes[cls_name], 'readonly_refs', ()):
+            if ref.name in getattr(cls_info, 'readonly_refs', ()):
                 continue
 
-            stmt = f"cdef public {ref.get_type_expr(c_style=True)} {ref.name}\n"
+            visibility = "readonly" if ref.name in integer_refs else "public"
+            stmt = f"cdef {visibility} {ref.get_type_expr(c_style=True)} {ref.name}\n"
             decl_stmts.append(stmt)
 
         # Declare child spaces
@@ -527,6 +547,7 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
         cells_kinds=None,
         ref_kinds=None,
         serial_shapes=None,
+        collect_workers=None,
     ) -> None:
         """Parse ``source`` and record the module info and package.
 
@@ -546,6 +567,7 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
         self._cells_kinds = cells_kinds or {}
         self._ref_kinds = ref_kinds or {}
         self._serial_shapes = serial_shapes or {}
+        self._collect_workers = collect_workers
         self._uses_native_round = False
         self.helper_providers = set()
         self.object_providers = {c.native_provider_binding.manifest.provider: c.native_provider_binding.manifest
@@ -620,7 +642,8 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
                                  for name in ("range", "min", "max", "abs", "StopIteration", "RuntimeError")
                                  for binding in scope[name])
             reductions = NativeReductions(
-                cls_info, cells, self.helper_providers, node, self._reserve_cold_sum, builtin_bounds, builtin_reductions)
+                cls_info, cells, self.helper_providers, node, self._reserve_cold_sum, builtin_bounds,
+                builtin_reductions, self.module.code_enum_symbols)
             node = node.visit(reductions)
             cells.native_reductions = reductions.count
             cells.exact_reduction_guards = reductions.exact_receiver_guards
@@ -869,10 +892,27 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
                 updated_node = updated_node.with_changes(body=updated_node.body.with_changes(body=tuple(body)))
             updated_node = updated_node.with_changes(body=updated_node.body.with_changes(
                 body=code_enums.bind_properties(self.module.classes[cls_name], updated_node.body.body)))
-            if cls_name in self._serial_shapes:
+            integer_refs = _integer_reference_paths(cls_info)
+            if integer_refs:
+                lines = ['def __setattr__(self, name, value):']
+                for name, path in integer_refs.items():
+                    lines.extend((
+                        f'    if {MX_SYS_MOD}._mx_ref_name_is(name, {name!r}):',
+                        f'        self.{name} = {MX_SYS_MOD}._mx_exact_int64(value, {path!r})',
+                        '        return',
+                    ))
+                lines.append(f'    {MX_SYS_MOD}._mx_generic_setattr(self, name, value)')
+                setter = cst.parse_statement(
+                    '\n'.join(lines) + '\n', config=self._module_node.config_for_parsing
+                )
+                setter = setter.with_changes(leading_lines=(cst.EmptyLine(),))
+                updated_node = updated_node.with_changes(body=updated_node.body.with_changes(
+                    body=(*updated_node.body.body, setter)))
+            if cls_name in self._serial_shapes or self._collect_workers is not None:
                 from modelx_cython.serial_collect import add_methods
                 updated_node = add_methods(
-                    self.module.classes[cls_name], updated_node, self._serial_shapes[cls_name])
+                    self.module.classes[cls_name], updated_node, self._serial_shapes.get(cls_name),
+                    workers=self._collect_workers)
             decorator = cst.Decorator(
                 decorator=cst.Attribute(value=cst.Name(CY_MOD), attr=cst.Name("cclass"))
             )
@@ -1016,6 +1056,41 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
         ``_mx_copy_refs`` method bodies."""
         return updated_node.with_changes(value="base_")
 
+    def _guard_reference_assignments(self, cls_info, method):
+        """Check generated integer Reference writes with an object source."""
+        integer_refs = _integer_reference_paths(cls_info)
+        if not integer_refs:
+            return method
+        guard = cst.parse_expression(f'{MX_SYS_MOD}._mx_exact_int64')
+        single_assignment = m.SimpleStatementLine(body=(m.Assign(targets=(m.AssignTarget(),)),))
+        body = []
+        for line in method.body.body:
+            if not m.matches(line, single_assignment):
+                body.append(line)
+                continue
+            assignment = line.body[0]
+            target = dotted_name(assignment.targets[0].target) or ''
+            receiver, _, name = target.rpartition('.')
+            if receiver != MX_SELF or name not in integer_refs:
+                body.append(line)
+                continue
+
+            value = assignment.value
+            if method.name.value == MX_COPY_REFS and dotted_name(value) == f'base_.{name}':
+                body.append(line)
+                continue
+            try:
+                literal = literal_value(value)
+            except ValueError:
+                literal = None
+            if primitive_kind(literal) == 'longlong':
+                body.append(line)
+                continue
+            path = cst.SimpleString(repr(integer_refs[name]))
+            checked = cst.Call(guard, (cst.Arg(value), cst.Arg(path)))
+            body.append(line.with_changes(body=(assignment.with_changes(value=checked),)))
+        return method.with_changes(body=method.body.with_changes(body=tuple(body)))
+
     @m.call_if_inside(m.ClassDef())
     @m.leave(m.FunctionDef())
     def update_method(self, original_node, updated_node):
@@ -1059,6 +1134,9 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
                         ))
                 return updated_node.with_changes(body=updated_node.body.with_changes(
                     body=(*updated_node.body.body, *initializers)))
+
+            if meth_name in (MX_ASSIGN_REFS, MX_COPY_REFS):
+                updated_node = self._guard_reference_assignments(cls_info, updated_node)
 
             if meth_name[: len(FORMULA_PREF)] == FORMULA_PREF:
                 # _f_ methods
@@ -1180,6 +1258,9 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
                         config=self._module_node.config_for_parsing,
                     )
                 )
+                binder = cells.native_result_binder
+                binding_args = ((cst.Arg(cst.SimpleString(repr(cells.method_fqname))),)
+                                if cells.native_table_result else ())
                 if cells.has_args():
                     # Add parameter type hints
                     parameters = self._add_param_type_hints(
@@ -1273,13 +1354,12 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
                             body = updated_node.body
                         else:
                             body = self._add_dict_assign(meth_name, updated_node)
-                        binder = cells.native_result_binder
                         if binder:
                             constructor = cst.parse_expression(binder)
                             formula = m.Call(func=m.Attribute(
                                 value=m.Name(MX_SELF), attr=m.Name(FORMULA_PREF + meth_name)))
                             body = m.replace(body, formula, lambda call, _: cst.Call(
-                                constructor, (cst.Arg(call),)))
+                                constructor, (cst.Arg(call), *binding_args)))
                         key_types = {"bint", "long long", "double"}
                         if not cells.is_locked:
                             key_types.add("str")
@@ -1300,9 +1380,9 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
                     flag = f"{MX_SELF}.{HAS_PREF}{meth_name}"
                     cache = f"{MX_SELF}.{VAR_PREF}{meth_name}"
                     formula = f"{MX_SELF}.{FORMULA_PREF}{meth_name}()"
-                    binder = cells.native_result_binder
                     if binder:
-                        formula = f'{binder}({formula})'
+                        path = f', {cells.method_fqname!r}' if binding_args else ''
+                        formula = f'{binder}({formula}{path})'
                     if cells.is_locked or binder:
                         if cells.is_locked:
                             body = self._locked_body(flag, cache, formula)

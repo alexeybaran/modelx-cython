@@ -202,6 +202,7 @@ class CombinedCellsInfo(LexicalCellsInfo):
     # C-level (cpdef) calls do not support; set in cli.main_handler
     called_with_kwargs: bool = False
     formula_has_captured_default: bool = False
+    forwarded_table_result: bool = False
 
     def __init__(self, cls_info, lx_info, rt_info, spec) -> None:
         """Merge lexical, runtime and spec info, validating the spec's
@@ -411,6 +412,12 @@ class CombinedCellsInfo(LexicalCellsInfo):
         """
         return bool(self._rt)
 
+    @cached_property
+    def model_path(self):
+        """Dotted Cell name as it appears in the exported model."""
+        spaces = [part[len(MODULE_PREF):] for part in self.module.split('.')[1:-1]]
+        return '.'.join((*spaces, self.cls[len(SPACE_PREF):], self.name))
+
     def has_args(self):
         """Return True if the cells has one or more parameters."""
         return bool(self.params)
@@ -573,9 +580,14 @@ class CombinedCellsInfo(LexicalCellsInfo):
                 and not self.called_with_kwargs and not self.has_spec_rettype)
 
     @property
+    def can_return_native_table(self):
+        return self._can_bind_native_result and getattr(self._rt, 'observed_table_result', False)
+
+    @property
     def native_table_result(self):
-        """Keep a declared table type on the ordinary Cell cache."""
-        return self._can_bind_native_result and getattr(self._rt, 'declared_table_result', False)
+        """Keep a declared or forwarded table type on the ordinary Cell cache."""
+        return self.can_return_native_table and (
+            self.forwarded_table_result or self._rt.declared_table_result)
 
     @property
     def native_provider_binding(self):
@@ -586,7 +598,8 @@ class CombinedCellsInfo(LexicalCellsInfo):
     @property
     def native_result_binder(self):
         if self.native_table_result:
-            return self.get_rettype_expr()
+            from modelx_cython.helpers import module_name
+            return f'{module_name(NATIVE_TABLE_PROVIDER)}.bind_native_table'
         binding = self.native_provider_binding
         if binding:
             from modelx_cython.helpers import module_name
