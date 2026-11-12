@@ -2,9 +2,10 @@
 
 import libcst as cst
 
-from modelx_cython.cell_entries import DenseEntry, FormulaEntry, exact_receiver
+from modelx_cython.cell_entries import DenseEntry, FormulaEntry, cache_hit, exact_receiver
 from modelx_cython.consts import CY_MOD, FORMULA_PREF, HAS_PREF, MX_POW, MX_SELF, MX_SYS_MOD
 from modelx_cython.scopes import Names
+from modelx_cython.syntax import statements
 from modelx_cython.typedefs import primitive_kind
 
 
@@ -208,10 +209,22 @@ def add_inline_entries(module, classes):
             next_entry += 1
             cell.inline_entry = entry
             entries[cell.name] = entry, len(cell.params), defaults
+            layout = None
+            if cell.has_args() and cell.is_arrayable():
+                spill = getattr(cell, 'dense_spill_entry', None)
+                layout = dense_entries[entry] = DenseEntry(
+                    owner, FORMULA_PREF + cell.name, cell.dense_axes, cell.has_dense_spill,
+                    cell.dense_logical_axes if spill else (), spill,
+                    spill is not None and cell.has_inferred_dense_domain,
+                )
+            hit = None
+            if not cell.has_args() or (layout is not None and len(layout.axes) == 1
+                    and layout.axes[0].c_type == 'long long'
+                    and cell.get_rettype_expr(c_style=True) in _NUMERIC_TYPES):
+                hit = cache_hit(statements(method.body), cell.name, layout)
             formula_entries[entry] = FormulaEntry(
                 owner, FORMULA_PREF + cell.name, tuple(cell.params),
-                getattr(cell, 'formula_allows_exact_receiver', False),
-                scalar_view=bool(cell.native_result_binder),
+                getattr(cell, 'formula_allows_exact_receiver', False), hit,
             )
             params = method.params
             # The public method always has a receiver. Internal calls prove
@@ -233,17 +246,8 @@ def add_inline_entries(module, classes):
             methods.append(method)
 
         if entries:
-            dense = {}
-            for name in entries:
-                cell = cells[name]
-                if cell.has_args() and cell.is_arrayable():
-                    entry = entries[name][0]
-                    spill = getattr(cell, 'dense_spill_entry', None)
-                    dense_entries[entry] = DenseEntry(owner, FORMULA_PREF + name,
-                                                      cell.dense_axes, cell.has_dense_spill,
-                                                      cell.dense_logical_axes if spill else (), spill,
-                                                      spill is not None and cell.has_inferred_dense_domain)
-                    dense[HAS_PREF + name] = cell
+            dense = {HAS_PREF + name: cells[name] for name, (entry, _, _) in entries.items()
+                     if entry in dense_entries}
             for index, method in enumerate(methods):
                 if isinstance(method, cst.SimpleStatementLine) and len(method.body) == 1:
                     field = method.body[0]

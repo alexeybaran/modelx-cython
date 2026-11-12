@@ -1275,8 +1275,7 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
 
                         # Construct indented_block to replace the original one
                         axes = cells.dense_axes
-                        c_idx_expr = ''.join(f'[{axis.key} - ({axis.lower})]' if axis.lower
-                                             else f'[{axis.key}]' for axis in axes)
+                        c_idx_expr = ''.join(f'[{axis.index_expr}]' for axis in axes)
                         param_expr = f"{', '.join([p for p in cells.params])}"
 
                         has_expr = f"{MX_SELF}.{HAS_PREF}{meth_name}{c_idx_expr}"

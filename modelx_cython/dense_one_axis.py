@@ -81,6 +81,7 @@ def specialize_entries(state: EntryModule, layouts, propagate=False):
     names = state.names
     exact = names.reserve('_mx_inbounds_exact')
     bodies, rewritten, proved = [], [], {}
+    hits = state.cache_hits.copy()
     for stmt in module.body:
         if isinstance(stmt, cst.ClassDef) and isinstance(stmt.body, cst.IndentedBlock):
             rewritten.append(_public_checks(stmt, layouts))
@@ -99,10 +100,14 @@ def specialize_entries(state: EntryModule, layouts, propagate=False):
             continue
         axis, = layout.axes
         if proof is None:
+            if stmt.name.value in hits:
+                hits[stmt.name.value] = replace(hits[stmt.name.value], guard=check)
             rewritten.append(stmt.with_changes(body=stmt.body.with_changes(
                 body=(guard.with_changes(test=check),))))
             continue
         name = names.reserve(stmt.name.value + '_inbounds')
+        if (hit := hits.pop(stmt.name.value, None)) is not None:
+            hits[name] = replace(hit, guard=None, masked=False)
         proved[stmt.name.value] = cst.Name(name)
         args = tuple(param.with_changes(comma=cst.MaybeSentinel.DEFAULT) for param in params[:-1])
         signature = stmt.params.with_changes(params=args)
@@ -119,5 +124,5 @@ def specialize_entries(state: EntryModule, layouts, propagate=False):
         rewritten.append(stmt.with_changes(params=signature, body=stmt.body.with_changes(
             body=(guard.with_changes(test=check, body=guard.body.with_changes(body=(entry,))),))))
     syntax = module.with_changes(body=(*rewritten, *bodies)).visit(_Calls(proved, propagate))
-    return replace(state, syntax=syntax,
+    return replace(state, syntax=syntax, cache_hits=hits,
                    inbounds_entries={target.value: name for name, target in proved.items()})

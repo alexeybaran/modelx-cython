@@ -8,9 +8,9 @@ from typing import NamedTuple
 
 import libcst as cst
 
-from .consts import MX_SELF
+from .consts import HAS_PREF, MX_SELF, VAR_PREF
 from .scopes import CstFacts, Names
-from .syntax import same_expression
+from .syntax import same_expression, statements
 
 
 @dataclass(frozen=True)
@@ -23,6 +23,7 @@ class EntryModule:
     syntax: cst.Module
     function_origins: dict[str, tuple[str, str]] = field(default_factory=dict)
     inbounds_entries: dict[str, str] = field(default_factory=dict)
+    cache_hits: dict[str, CacheHit] = field(default_factory=dict)
 
     @cached_property
     def facts(self):
@@ -53,6 +54,10 @@ class DenseAxis(NamedTuple):
     stop: int
     c_type: str
 
+    @property
+    def index_expr(self):
+        return f'{self.key} - ({self.lower})' if self.lower else self.key
+
 
 @dataclass(frozen=True)
 class DenseEntry:
@@ -66,13 +71,25 @@ class DenseEntry:
 
 
 @dataclass(frozen=True)
+class CacheHit:
+    ready: cst.BaseExpression
+    value: cst.BaseExpression
+    guard: cst.BaseExpression | None = None
+    masked: bool = False
+
+    @property
+    def kind(self):
+        return 'dense' if isinstance(self.ready, cst.Subscript) else 'scalar'
+
+
+@dataclass(frozen=True)
 class FormulaEntry:
     """A proven private numeric call target, independent of cache geometry."""
     owner: str
     formula: str
     keys: tuple[str, ...]
     guard_safe: bool
-    scalar_view: bool
+    hit: CacheHit | None
 
 
 def dense_condition(axes, proof=None, proved_axes=()):
@@ -90,6 +107,28 @@ def checked_dense_guard(body, layout, proof=None):
         return None
     expected = cst.parse_expression(dense_condition(layout.axes, proof))
     return guard if same_expression(guard.test, expected) else None
+
+
+def cache_hit(body, field, layout=None):
+    """Record the generated field read alongside its checked entry layout."""
+    guard, index = None, ''
+    if layout is not None:
+        axis, = layout.axes
+        guard = checked_dense_guard(body, layout)
+        if guard is None:
+            return None
+        body = statements(guard.body)
+        index = f'[{axis.index_expr}]'
+    if len(body) != 1 or not isinstance(branch := body[0], cst.If):
+        return None
+    hit = statements(branch.body)
+    if len(hit) != 1 or not isinstance(hit[0], cst.Return):
+        return None
+    ready = cst.parse_expression(f'{MX_SELF}.{HAS_PREF}{field}{index}')
+    value = cst.parse_expression(f'{MX_SELF}.{VAR_PREF}{field}{index}')
+    if not (same_expression(branch.test, ready) and same_expression(hit[0].value, value)):
+        return None
+    return CacheHit(branch.test, hit[0].value, guard.test if guard is not None else None)
 
 
 def exact_receiver(owner):

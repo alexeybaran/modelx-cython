@@ -1,9 +1,13 @@
 """Safety boundaries for the native field-read optimization."""
 import ast
+from dataclasses import replace
 import textwrap
 import pytest
 import libcst as cst
 from modelx_cython import cache_hits as hits
+from modelx_cython.cell_entries import DenseAxis, DenseEntry, EntryModule, cache_hit
+from modelx_cython.dense_one_axis import specialize_entries
+from modelx_cython.syntax import statements
 
 
 def entry(key='t', guard=None, index=None, flag=False):
@@ -19,12 +23,25 @@ else:
     return f'def _mx_cache_entry_0({arguments}) -> _mx_cy.double:\n'+textwrap.indent(body,'    ')
 
 
-def rewrite(cache, call, args='self: Receiver, t: _mx_cy.longlong', prelude=''):
+def dense_layout(key):
+    return DenseEntry('Receiver', '_f_value', (DenseAxis(key, 0, 4, 'long long'),), False)
+
+
+def recorded_hit(source, key='t'):
+    method, = cst.parse_module(source).body
+    return cache_hit(statements(method.body), 'value', dense_layout(key))
+
+
+def rewrite(cache, call, args='self: Receiver, t: _mx_cy.longlong', prelude='', *,
+            key='t', proven=False, specialize=False):
     source=cache+f'\ndef _mx_dense_formula_0({args}) -> _mx_cy.double:\n'+textwrap.indent(prelude+f'return {call}\n','    ')
-    syntax=cst.parse_module(source)
-    functions={fn.name.value:fn for fn in syntax.body if isinstance(fn,cst.FunctionDef)}
-    layout=hits._layout(functions['_mx_cache_entry_0']);assert layout
-    return syntax.visit(hits._Calls(functions,{'_mx_cache_entry_0':layout})).code
+    name = '_mx_cache_entry_0'
+    hit = recorded_hit(entry(key=key, guard=f'0 <= {key} < 4') if proven else cache, key)
+    assert hit is not None
+    state = EntryModule(cst.parse_module(source), cache_hits={name: replace(hit, guard=None) if proven else hit})
+    if specialize:
+        state = specialize_entries(state, {name: dense_layout(key)})
+    return hits.expose_entries(state, 'both').syntax.code
 
 
 def test_checked_hit_keeps_checked_miss():
@@ -37,7 +54,7 @@ def test_checked_hit_keeps_checked_miss():
 
 
 def test_proven_entry_inherits_existing_hit_without_new_domain():
-    result=rewrite(entry(flag=True),'_mx_cache_entry_0(self, t, True)')
+    result=rewrite(entry(flag=True),'_mx_cache_entry_0(self, t, True)', proven=True)
     expr=ast.parse(result).body[-1].body[-1].value
     assert isinstance(expr,ast.IfExp) and ast.unparse(expr.test)=='self._has_value[t]'
     assert ast.unparse(expr.orelse)=='_mx_cache_entry_0(self, t, True)'
@@ -61,12 +78,12 @@ def test_arguments_with_effects_coercions_or_unknown_receiver_are_unchanged(call
 
 @pytest.mark.parametrize('guard',['check(t)','self.limit > t','0 <= t / 2 < 4','0 <= other < 4'])
 def test_effectful_or_unknown_domain_is_not_copied(guard):
-    assert hits._layout(cst.parse_module(entry(guard=guard)).body[0]) is None
+    assert recorded_hit(entry(guard=guard)) is None
 
 
 def test_mismatched_value_index_is_rejected():
-    source=entry().replace('return self._v_value[t]','return self._v_value[t + 1]')
-    assert hits._layout(cst.parse_module(source).body[0]) is None
+    source=entry(guard='0 <= t < 4').replace('return self._v_value[t]','return self._v_value[t + 1]')
+    assert recorded_hit(source) is None
 
 
 @pytest.mark.parametrize('prelude',[
@@ -81,8 +98,8 @@ def test_cython_alias_rebinding_is_rejected(prelude):
 
 
 def test_attribute_names_are_not_parameter_references():
-    cache=entry(key='cast',guard='(_mx_cy.cast(_mx_cy.ulonglong, cast) - _mx_cy.cast(_mx_cy.ulonglong, 0)) < 4')
-    result=rewrite(cache,'_mx_cache_entry_0(self, t)')
+    cache=entry(key='cast',guard='0 <= cast < 4')
+    result=rewrite(cache,'_mx_cache_entry_0(self, t)', key='cast', specialize=True)
     expr=ast.parse(result).body[-1].body[-1].value
     assert isinstance(expr,ast.IfExp)
     assert '_mx_cy.cast(_mx_cy.ulonglong, t)' in ast.unparse(expr.test)

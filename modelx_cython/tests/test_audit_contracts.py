@@ -129,7 +129,7 @@ def test_cache_hit_optimization_does_not_depend_on_ast_unparse(monkeypatch):
     from modelx_cython.cell_entries import EntryModule
     monkeypatch.delattr(ast,'unparse')
     state = EntryModule(cst.parse_module(''))
-    assert expose_entries(state, {'entry':object()}, 'auto').syntax.code == ''
+    assert expose_entries(state, 'auto').syntax.code == ''
 
 
 def test_collection_admission_reuses_the_existing_syntax_without_ast(monkeypatch):

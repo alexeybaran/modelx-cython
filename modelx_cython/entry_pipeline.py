@@ -1,5 +1,6 @@
 """Lower private Cell entries over shared syntax/facts, without disk rewrites."""
 from collections import Counter
+from dataclasses import replace
 
 from .dense_proofs import _attribute_counts, prove_entries
 from .dense_formulas import bind_entries
@@ -15,6 +16,7 @@ def lower_entries(modules, dense, formulas, policy):
     result = {}
     for name, state in modules.items():
         layouts, entries = dense.get(name, {}), formulas.get(name, {})
+        state = replace(state, cache_hits={key: entry.hit for key, entry in entries.items() if entry.hit})
         domains = {}
         if layouts and policy.dense_bounds_proofs:
             state = prove_entries(state, layouts, uses, domains)
@@ -23,6 +25,6 @@ def lower_entries(modules, dense, formulas, policy):
         if layouts and policy.dense_one_axis:
             state = specialize_entries(state, layouts, policy.propagate_exact_receiver)
         if entries and policy.native_cache_hits != 'none':
-            state = expose_entries(state, entries, policy.native_cache_hits)
+            state = expose_entries(state, policy.native_cache_hits)
         result[name] = state
     return result

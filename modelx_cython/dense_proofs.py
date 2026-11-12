@@ -1,5 +1,6 @@
 """Reuse ranges that generated dense entries already check before a miss."""
 from collections import Counter
+from dataclasses import replace
 
 import libcst as cst
 from libcst.metadata import ExpressionContext
@@ -213,4 +214,6 @@ def prove_entries(state: EntryModule, records, uses, formula_domains_out=None):
             return after.with_changes(params=after.params.with_changes(params=(*after.params.params, parameter)),
                                       body=after.body.with_changes(body=(guard,)))
 
-    return state.replace(state.syntax.visit(Proofs()))
+    hits = {name: replace(hit, masked=True) if name in targets else hit
+            for name, hit in state.cache_hits.items()}
+    return replace(state, syntax=state.syntax.visit(Proofs()), cache_hits=hits)
