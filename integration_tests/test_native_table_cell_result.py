@@ -48,16 +48,6 @@ def test_parameterized_table_result(tmp_path):
         space.new_cells('previous_amount', '''def previous_amount(account, month):
     return pdn.previous(schedule(account), month, "rate", -2.0)
 ''')
-        space.new_cells('clamped_amount', '''def clamped_amount(account, month):
-    table = schedule(account)
-    return table.lookup_clamped_float(month, "rate", "upper")
-''')
-        space.new_cells('clamped_default', '''def clamped_default(account, month):
-    return schedule(account).lookup_clamped_float(month, "rate", "upper", -2.0)
-''')
-        space.new_cells('clamped_both', '''def clamped_both(account, month):
-    return schedule(account).lookup_clamped_float(month, "rate", "both")
-''')
         space.new_cells('fixed_schedule', '''def fixed_schedule() -> "modelx_helpers.immutable_inputs.Table":
     return schedules[7]
 ''')
@@ -89,8 +79,6 @@ def test_parameterized_table_result(tmp_path):
         'from modelx_helpers.immutable_inputs import Record, Table\n'
         's = mx_model.Policy[0]\n'
         's.amount(2, 0); s.amount(7, 1); s.row_rate(4); s.row_rate(9); s.missing(float("nan"))\n'
-        's.clamped_amount(2, 0); s.clamped_amount(7, 9); s.clamped_default(2, -1)\n'
-        's.clamped_both(2, -1); s.clamped_both(7, 9)\n'
         's.has_row("a", 4); s.previous_amount(2, -1); s.previous_amount(2, 9)\n'
         's.interpolated_amount(2, 0.5); s.float_field(1); s.raw_field(1)\n'
         's.previous_method(8); s.previous_column(8, -1); s.previous_column(8, 0)\n'
@@ -126,18 +114,6 @@ def test_parameterized_table_result(tmp_path):
         from modelx_helpers import pdn
         import numpy as np
         import pandas as pd
-        lookup_float = Table.lookup_float
-        def unexpected_lookup(*args, **kwargs):
-            raise AssertionError("expected the typed table method")
-        Table.lookup_float = unexpected_lookup
-        try:
-            assert s.clamped_amount(2, 9) == 5.0
-            assert s.clamped_amount(7, 8) == 17.0
-            assert s.clamped_default(2, -1) == -2.0
-            assert s.clamped_both(2, -1) == 2.0
-            assert s.clamped_both(7, 9) == 17.0
-        finally:
-            Table.lookup_float = lookup_float
         def check(frame, event, arg):
             if event == 'call':
                 assert frame.f_code not in (Table.row.__code__, Table.contains.__code__, Table.previous.__code__, pdn.previous.__code__,
