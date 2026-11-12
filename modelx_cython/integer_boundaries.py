@@ -458,11 +458,10 @@ def guard_integer_boundaries(state, module_info, resolver, cells_kinds, ref_kind
                 cls = module_info.classes[owner]
                 cell = cls.cells[name[len(FORMULA_PREF):]]
                 node = _guard_calls(node, cls, resolver, entries, cells, private_entries)
-                # A complete dense entry calls its private formula only
-                # inside the checked logical domain. A compact cache can
-                # also reach it through the checked spill.
-                axes = (cell.dense_axes if cell.has_args() and cell.has_typeinfo()
-                        and cell.is_arrayable() and not cell.has_dense_spill else ())
+                # Physical cache misses and compact spill entries both check
+                # the logical domain before reaching the private formula.
+                axes = (cell.dense_logical_axes if cell.has_args() and cell.has_typeinfo()
+                        and cell.is_arrayable() else ())
                 node = _guard_result(node, cell, cls, resolver, cells_kinds, ref_kinds, signatures,
                                      argument_axes=axes)
                 changed = True

@@ -19,6 +19,7 @@ def test_shifted_dense_bounds(tmp_path, compact):
                     seen.append(t)
                     return t * 1.0
                 '''))
+            s.new_cells('previous', 'lambda t: t - 1')
             s.new_cells('legacy', 'lambda t: t * 1.0')
         model.export(tmp_path/'exported', locked_spaces=['Locked'])
     finally:
@@ -26,13 +27,14 @@ def test_shifted_dense_bounds(tmp_path, compact):
     (tmp_path/'sample.py').write_text('from exported import mx_model as m\n'
         'from numpy import int64\n'
         'for s in (m.Plain, m.Locked):\n'
-        '    for t in (-3, 0, 3): s.value(int64(t))\n'
+        '    for t in (-3, 0, 3):\n'
+        '        s.value(int64(t)); s.previous(int64(t))\n'
         '    s.legacy(0); s.legacy(3)\n')
     spec = ['--no-spec']
     if compact:
         (tmp_path/'spec.py').write_text(repr({'spaces': {
             name: {'cells_param_size': {'t': 6},
-                   'cells': {'value': {'dense_window': [(0, 2)]}}}
+                   'cells': {cell: {'dense_window': [(0, 2)]} for cell in ('value', 'previous')}}
             for name in ('Plain', 'Locked')
         }}), encoding='utf-8')
         spec = ['--spec', 'spec.py']
@@ -55,14 +57,16 @@ def test_shifted_dense_bounds(tmp_path, compact):
             indices = [-3, -1, 0, 3] + ([5] if stop == 6 else [])
             for t in indices:
                 assert s.value(t) == s.value(t) == float(t)
-            for t in (-4, stop):
-                try:
-                    s.value(t)
-                except IndexError as error:
-                    assert f'{name}.value' in str(error) and f't in [-3, {stop})' in str(error)
-                    assert 'cells_param_size' in str(error)
-                else:
-                    raise AssertionError('invalid signed index reached the formula')
+                assert s.previous(t) == t - 1
+            for cell in ('value', 'previous'):
+                for t in (-4, stop, -(1 << 63)):
+                    try:
+                        getattr(s, cell)(t)
+                    except IndexError as error:
+                        assert f'{name}.{cell}' in str(error) and f't in [-3, {stop})' in str(error)
+                        assert 'cells_param_size' in str(error)
+                    else:
+                        raise AssertionError('invalid signed index reached the formula')
             assert s.seen == indices
             try:
                 s.legacy(-1)
