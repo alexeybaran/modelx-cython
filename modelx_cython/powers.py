@@ -38,11 +38,10 @@ the resolver reaches, scalar references, single-assignment locals
 annotated with the builtin ``float``, and arithmetic over those are
 ever known. Everything else -- other locals, subscripts, module
 attributes, and anything inside a construct that binds names of its own,
-where a name can shadow a parameter of the cells -- is unknown, and an
-unknown operand leaves the power exactly as modelx exported it.  A power
-that is left alone therefore behaves as it does without this pass:
-usually it compiles, and where it is compared it still fails, which is a
-loud error rather than a wrong number.
+where a name can shadow a parameter of the cells -- is unknown. This pass
+leaves powers with unknown operands for ordinary Cell lowering. The object
+operator in :mod:`~modelx_cython.ordered_arguments` preserves Python power
+semantics where Cython would otherwise infer a complex intermediate.
 
 The same classifier decides, in :func:`demote_rebound_params`, whether a
 parameter that a formula binds again keeps its C type there: only if
