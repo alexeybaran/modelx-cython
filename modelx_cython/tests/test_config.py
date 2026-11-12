@@ -52,6 +52,13 @@ def test_explicit_policy_overrides_keep_their_existing_dependencies():
     assert policy.parallel_workers==4 and policy.native_math
 
 
+def test_disabling_automatic_selection_disables_implicit_dense_entries():
+    policy = TransSpec({'automatic_optimizations': False}).policy
+    assert not policy.dense_miss_binding
+    assert not policy.propagate_exact_receiver
+    assert policy.native_cache_hits == 'none'
+
+
 def test_guarded_rounding_can_be_disabled():
     assert TransSpec({}).policy.native_math
     assert TransSpec({'native_math': True}).policy.native_math

@@ -215,12 +215,12 @@ Unsupported export-runtime adapters retain the normal collection path. Successfu
 private scalar chunks may merge in completion order, with ordinary floating
 roundoff; failures are propagated in original domain order. Existing public
 Cell calls, collection APIs and caller scheduling remain the execution boundary.
-The exporter owns the version 1 optional collection adapter. The compiler can
-transplant its generic functions into a structurally recognized legacy export;
-it does not patch source text or supply an independent collection engine.
-`parallel_collect_order="domain"` selects domain-order chunk merging for fixed
-worker reproducibility. Completion order remains the default. Neither option
-promises bitwise equality with a serial fold or a different worker count.
+The exporter owns the version 2 collection dispatcher and the compiler binds
+its evaluator through a declared Space hook. Generic workers detach outputs
+and fold them in policy order. For admitted native scalar reductions,
+`parallel_collect_order="domain"` fixes the merge order for a given worker
+count. The default merges chunks as they finish. Scalar roundoff depends on
+the addition order and the chunk boundaries.
 
 There is no native PGO training or profile-use build. Timing profiles guide
 development, while the existing small model trace supplies types and working-set

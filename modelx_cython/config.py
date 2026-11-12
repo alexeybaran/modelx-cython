@@ -23,7 +23,6 @@ cells return type or declaring maximum cells parameter sizes.
 
 from typing import Union, Sequence, Mapping
 from dataclasses import dataclass
-import sys
 from modelx_cython.consts import (
     FILE_PREF,
     GLOBAL_PREF,
@@ -47,7 +46,7 @@ class CompilerPolicy:
     @classmethod
     def resolve(cls, data):
         automatic = data.get('automatic_optimizations', True)
-        miss = data.get('dense_miss_binding', automatic or sys.platform == 'win32')
+        miss = data.get('dense_miss_binding', automatic)
         values = dict(automatic_optimizations=automatic,
             parallel_workers=data.get('parallel_workers', 1),
             dense_bounds_proofs=data.get('dense_bounds_proofs', automatic),

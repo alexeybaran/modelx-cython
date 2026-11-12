@@ -181,19 +181,16 @@ Domain order is reproducible for a fixed worker count; changing chunk boundaries
 can still change floating-point sums. Both choices propagate worker failures in
 domain order. Ordinary collection always retains its existing ordered behavior.
 
-Native collection uses the exporter's optional adapter version 1. Known
-pre-versioned exports can receive the exporter-owned adapter during compilation.
-Unknown runtime shapes or versions keep ordinary collection; install an exporter
-with adapter version 1 to enable reuse. No model formula is replaced by this
-adapter.
+Native collection uses the exporter's version 2 evaluator hook. The compiler
+adds the native evaluator and its worker policy to the generated Space. The
+exporter owns validation, dispatch and the result cache. Known legacy exports
+use the bundled version 1 compatibility adapter.
 
 Individual switches and legacy per-Cell options remain available for controlled
 ablations and compatibility diagnostics. `automatic_optimizations=False`
-disables the automatic policy; explicit options can still request mechanisms.
-This switch controls automatic selection, rather than emulating every upstream
-code-generation detail. On Windows `dense_miss_binding` keeps its historical
-default of `True`; explicitly set it to `False` (and `native_cache_hits="none"`)
-when comparing that diagnostic path.
+disables automatic selection and the default dense miss binding on each
+platform. Set `dense_miss_binding=True` to request that mechanism in an
+otherwise manual configuration.
 `native_cache_hits` also accepts `"none"`, `"scalar"`, `"dense"` and `"both"`;
 non-`"none"` modes require `dense_miss_binding`. Checked dense hits can repeat
 domain work, so the automatic mode admits the existing proven-index form.
