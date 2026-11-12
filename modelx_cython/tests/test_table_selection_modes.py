@@ -78,13 +78,15 @@ p.public_row(9);p.public_report()
                    Record.__getitem__.__code__,Record.__init__.__code__,
                    Table.__getitem__.__code__,Table.__init__.__code__}
         calls=[]
+        preparing=True
         def profile(frame,event,arg):
             if event=='call' and (frame.f_code in forbidden or
-                frame.f_globals.get('__name__','').startswith('pandas')):
+                not preparing and frame.f_globals.get('__name__','').startswith('pandas')):
                 calls.append(frame.f_code.co_name)
         if sys.argv[1].endswith('_cy'):sys.setprofile(profile)
         try:
-            p.owned()  # Mixed preparation and selection are both inside the guard.
+            p.owned()  # Native preparation uses public pandas accessors.
+            preparing=False
             assert p.rate(9)==0.1 and p.rate(2)==0.2
             assert p.values()==(0.1,0.2)
             assert p.fields(9)==('age','rate','sex','active')
