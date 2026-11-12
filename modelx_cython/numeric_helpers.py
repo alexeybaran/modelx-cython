@@ -839,13 +839,14 @@ class NumericReturns(cst.CSTTransformer):
                     and cell.get_rettype_expr(c_style=True) in integer_types)
         return self.locked_result_type(key) in integer_types
 
-    def bound_numeric(self, args, native, operations, provider, context=None, member=None, owner_field=None):
-        if not (operations and len(operations) in (3, 4) and self.cell.formula_allows_exact_receiver
+    def bound_numeric(self, args, native, operations, provider, context=None, member=None,
+                      owner_field=None, namespace_ready=None):
+        if not (operations and len(operations) == 3 and self.cell.formula_allows_exact_receiver
                 and not self.cell.is_locked and self.cell.cls not in self.cls.visitor.dynamic_ref_classes):
             return native
         table, key, column = (arg.value for arg in args[:3])
         table_method = context is None
-        if member is not None and len(operations) != 4:
+        if member is not None and namespace_ready is None:
             return native
         module = cst.Module([])
         code = module.code_for_node
@@ -896,7 +897,7 @@ class NumericReturns(cst.CSTTransformer):
         else:
             prepare = native.with_changes(func=operation)
         column_pointer = f'_mx_cy.cast(_mx_cy.p_void, {code(column)})' if named else '_mx_cy.NULL'
-        ready_operation = operations[0] if member is None else operations[3]
+        ready_operation = operations[0] if member is None else namespace_ready
         member_arg = '' if member is None else f', {code(member)}'
         test = cst.parse_expression(
             f'{exact_receiver(self.cls.name)} and ({ready}{alias}.{ready_operation}('
@@ -1055,4 +1056,7 @@ class NumericReturns(cst.CSTTransformer):
             args=(cst.Arg(call.func), cst.Arg(context), *call.args))
         member = None if isinstance(call.func.value, cst.Name) else call.func
         operations = getattr(ref, 'bound_numeric_helper', None)
-        return after.with_changes(value=self.bound_numeric(call.args, native, operations, provider, context, member))
+        namespace_ready = getattr(ref, 'bound_numeric_namespace_helper', None)
+        value = self.bound_numeric(call.args, native, operations, provider, context, member,
+                                   namespace_ready=namespace_ready)
+        return after.with_changes(value=value)

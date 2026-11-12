@@ -78,6 +78,8 @@ def test_shared_iteration_and_contextual_float_capabilities_reach_namespaces():
     lookup.__modelx_cython_iteration__ = ('keys_span', 'KeySpan', 'key_span_count', 'key_span_at')
     lookup.__modelx_cython_float_numeric__ = 'lookup_float_f64'
     lookup.__modelx_cython_keyed_float_numeric__ = tuple(f'lookup_key{i}_float_f64' for i in range(5))
+    lookup.__modelx_cython_bound_numeric__ = ('ready', 'read', 'prepare')
+    lookup.__modelx_cython_bound_numeric_namespace__ = 'namespace_ready'
     module = ModuleType('sample.owned')
     module.lookup = lookup
     traced = RuntimeValueInfo(module)
@@ -86,6 +88,8 @@ def test_shared_iteration_and_contextual_float_capabilities_reach_namespaces():
     assert record.iteration_helper == ('keys_span', 'KeySpan', 'key_span_count', 'key_span_at')
     assert record.float_numeric_helper == 'lookup_float_f64'
     assert record.keyed_float_numeric_helper == tuple(f'lookup_key{i}_float_f64' for i in range(5))
+    assert record.bound_numeric_helper == ('ready', 'read', 'prepare')
+    assert record.bound_numeric_namespace_helper == 'namespace_ready'
 
 
 @pytest.mark.parametrize('capability,value', [
