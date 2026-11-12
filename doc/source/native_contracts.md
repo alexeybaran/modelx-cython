@@ -31,6 +31,10 @@ string annotations or propagate declarations through helper bodies. Explicit
 `return_type` specifications keep their existing precedence. Unannotated Cells
 retain the normal inference policy; object results remain compiled Cython.
 
+For an uncached Cell, a concrete `object` parameter annotation keeps the
+argument as a Python object even when the sample only uses scalar values.
+The compiler does not evaluate string parameter annotations.
+
 As in upstream modelx-cython, mixed integer/float observations may select one
 native double result/cache ABI: integer zero can become float zero without
 changing its value. Widening declines if an observed integer cannot round-trip

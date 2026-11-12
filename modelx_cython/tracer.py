@@ -205,6 +205,9 @@ class RuntimeCellsInfo:     # TODO: Create base class RuntimeBaseMemberInfo
         """Merge observed argument types into arg_types and max_args."""
         arg_type_val: Dict[str, dict[type, Any]] = {}
         wide_arguments = set()
+        # Public Cell formulas are uncached. Preserve an authored object
+        # argument there even when the sample supplies only one scalar type.
+        annotations = traces[0].func.__annotations__ if is_user_defined(self.name) else {}
 
         for trace in traces:
 
@@ -231,7 +234,7 @@ class RuntimeCellsInfo:     # TODO: Create base class RuntimeBaseMemberInfo
 
         for arg, type_val in arg_type_val.items():
 
-            if arg in wide_arguments:
+            if annotations.get(arg) is object or arg in wide_arguments:
                 self.arg_types[arg] = object
                 continue
 
