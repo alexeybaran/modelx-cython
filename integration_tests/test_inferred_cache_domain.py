@@ -28,15 +28,17 @@ m.Projection.tupled(0, 0)
 ''')
     args=['--no-spec']
     if explicit:
-        (tmp_path/'spec.py').write_text(repr({'spaces':{'Projection':{'cells_param_size':{'t':6,('t','k'):(4,1)}}}}))
+        (tmp_path/'spec.py').write_text(repr({'spaces':{'Projection':{
+            'cells_param_size':{'t':6,('t','k'):(4,1)},
+            'cells':{'value':{'dense_window':[(0,4)]}}
+        }}}))
         args=['--spec','spec.py']
     build=subprocess.run([sys.executable,'-B','-m','modelx_cython','exported','--sample','sample.py',*args],
                          cwd=tmp_path,env=dict(os.environ),capture_output=True,text=True)
     (tmp_path/'build.log').write_text(build.stdout+build.stderr)
     assert build.returncode==0,build.stdout+build.stderr
-    if not explicit:
-        generated = (tmp_path/'exported_cy'/'_mx_classes.pxd').read_text()
-        assert '_spill_value' not in generated
+    generated = (tmp_path/'exported_cy'/'_mx_classes.pxd').read_text()
+    assert ('_spill_value' in generated) is explicit
     probe='''import pickle,sys
 from exported_cy import mx_model as m
 p=m.Projection
@@ -68,6 +70,7 @@ p.fail = False
 assert p.value(2) == 6.0
 q = pickle.loads(pickle.dumps(p))
 assert q.value(1) == 2.0 and q.value(2) == 6.0
+assert q.value(stop - 1) == 2.0 * (stop - 1)
 
 class Derived(type(p)):
     def value(self, t):

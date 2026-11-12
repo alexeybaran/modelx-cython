@@ -709,12 +709,14 @@ class CombinedCellsInfo(LexicalCellsInfo):
         return tuple(axes)
 
     @property
-    def has_compact_cache(self):
-        if self._spec.get(TransSpec.DENSE_WINDOW) is not None:
-            return self.dense_axes != self.dense_logical_axes
-        from modelx_cython import automatic
-        return (automatic.enabled(self) and self.has_args() and self.has_typeinfo()
-                and self.is_arrayable() and self.dense_axes != self.dense_logical_axes)
+    def has_dense_spill(self):
+        """Whether the dense array leaves some admitted keys to a spill store."""
+        if self._spec.get(TransSpec.DENSE_WINDOW) is None:
+            from modelx_cython import automatic
+            if not (automatic.enabled(self) and self.has_args() and self.has_typeinfo()
+                    and self.is_arrayable()):
+                return False
+        return self.dense_axes != self.dense_logical_axes
 
     @property
     def has_inferred_dense_domain(self):
@@ -726,10 +728,6 @@ class CombinedCellsInfo(LexicalCellsInfo):
         sizes = spec.get(TransSpec.CELLS_PARAM_SIZE, spec.get(TransSpec.CELLS_PARAMS, {}))
         return not any((key if isinstance(key, tuple) else (key,)) == tuple(self.params)
                        for key in sizes)
-
-    @property
-    def has_dense_spill(self):
-        return self.has_compact_cache
 
     def get_readiness_array_decl_expr(self, c_style=False):
         # Cython pickles unsigned-char arrays as NUL-terminated strings, which
