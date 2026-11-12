@@ -441,10 +441,25 @@ class NumericReturns(cst.CSTTransformer):
 
     def table_source(self, value, *, lock_reason=None):
         cell = self.cls.cells.get(value.func.attr.value) if self.self_call(value) else None
-        rettype = module_name(NATIVE_TABLE_PROVIDER) + '.NativeTable'
-        table_read = (rettype, lock_reason) if lock_reason is not None else None
-        return ((cell is not None and self.builtin_table(cell) and len(value.args) == len(cell.params))
-                or self.locked_result_type(value, table_read=table_read) == rettype)
+        binding = cell.native_provider_binding if cell is not None else None
+        if (binding is not None and binding.declaration.numeric_table is not None
+                and len(value.args) == len(cell.params)):
+            return binding
+        if self.resolver is None or not isinstance(value, cst.Call) or value.args:
+            return None
+        from .usage import RESOLVED, _extract_self_chain
+        chain = _extract_self_chain(value.func)
+        if not isinstance(chain, list):
+            return None
+        status, name = self.resolver.resolve_chain(self.cls.fqname, chain)
+        binding = self.resolver.provider_results.get(name) if status == RESOLVED else None
+        if binding is None or binding.declaration.numeric_table is None:
+            return None
+        if name in self.resolver.locked_scalar_results:
+            return binding
+        if lock_reason is not None and len(chain) > 1 and name in self.resolver.unlocked_scalar_results:
+            self.unlocked_table_reads.add((name, lock_reason))
+        return None
 
     def rounded_inputs(self, body):
         if 'round' not in self.builtin_keys or self.resolver is None:
@@ -499,7 +514,7 @@ class NumericReturns(cst.CSTTransformer):
     def table_fields(self, body):
         """Bind literal-column reads on a locally assigned native Table."""
         facts = CstFacts(body)
-        sources, text_keys = set(), set()
+        sources, text_keys = {}, set()
         replaced = []
         changed = False
         for line in body:
@@ -507,27 +522,29 @@ class NumericReturns(cst.CSTTransformer):
             if isinstance(statement, cst.Assign) and len(statement.targets) == 1:
                 target, value = statement.targets[0].target, statement.value
                 if (isinstance(target, cst.Name) and target.value not in self.cell.params
-                        and facts.stores[target.value] == 1 and self.table_source(value)):
-                    sources.add(target.value)
+                        and facts.stores[target.value] == 1 and (binding := self.table_source(value))):
+                    sources[target.value] = binding
                 elif (isinstance(target, cst.Name) and target.value not in self.cell.params
                         and facts.stores[target.value] == 1 and self.typed_cell_call(value, 'str')):
                     text_keys.add(target.value)
                 elif (isinstance(value, cst.Call) and isinstance(value.func, cst.Attribute)
-                        and value.func.attr.value == 'lookup_float'
                         and isinstance(value.func.value, cst.Name) and value.func.value.value in sources
                         and len(value.args) == 2 and not any(arg.keyword or arg.star for arg in value.args)
                         and isinstance(value.args[0].value, cst.Name) and value.args[0].value.value in text_keys
                         and isinstance(value.args[1].value, cst.SimpleString)
                         and type(value.args[1].value.evaluated_value) is str):
-                    operation = 'read_table_field_float'
-                    alias = module_name(NATIVE_TABLE_PROVIDER)
-                    self.providers.add(NATIVE_TABLE_PROVIDER)
-                    self.operations.add(f'{NATIVE_TABLE_PROVIDER}.{operation}')
-                    line = line.with_changes(body=(statement.with_changes(value=value.with_changes(
-                        func=cst.Attribute(cst.Name(alias), cst.Name(operation)),
-                        args=(cst.Arg(self.lookup_context(NATIVE_TABLE_PROVIDER)),
-                              cst.Arg(value.func.value), *value.args))),))
-                    changed = True
+                    binding = sources[value.func.value.value]
+                    method = binding.declaration.numeric_table.methods.get(value.func.attr.value)
+                    if method is not None and method.read_text is not None:
+                        provider, operation = binding.manifest.provider, method.read_text
+                        alias = module_name(provider)
+                        self.providers.add(provider)
+                        self.operations.add(f'{provider}.{operation}')
+                        line = line.with_changes(body=(statement.with_changes(value=value.with_changes(
+                            func=cst.Attribute(cst.Name(alias), cst.Name(operation)),
+                            args=(cst.Arg(self.lookup_context(provider)),
+                                  cst.Arg(value.func.value), *value.args))),))
+                        changed = True
             replaced.append(line)
         return tuple(replaced) if changed else None
 
@@ -546,17 +563,17 @@ class NumericReturns(cst.CSTTransformer):
                 and not any(arg.keyword or arg.star for arg in expression.args)):
             left, right = (arg.value for arg in expression.args)
             return self.first_lookup(right if isinstance(left, (cst.Integer, cst.Float)) else left)
-        if (isinstance(function, cst.Attribute) and function.attr.value == 'lookup_float'
+        if (isinstance(function, cst.Attribute)
                 and isinstance(function.value, cst.Name) and len(expression.args) == 2
                 and not any(arg.keyword or arg.star for arg in expression.args)):
             return expression
         return None
 
     @staticmethod
-    def index_max_int(node, table):
+    def index_max_int(node, table, bounds):
         return (isinstance(node, cst.Call) and not node.args and isinstance(node.func, cst.Attribute)
-                and node.func.attr.value == 'max_int' and isinstance(node.func.value, cst.Attribute)
-                and node.func.value.attr.value == 'index' and node.func.value.value.deep_equals(table))
+                and node.func.attr.value == bounds.index_max and isinstance(node.func.value, cst.Attribute)
+                and node.func.value.attr.value == bounds.index and node.func.value.value.deep_equals(table))
 
     def bounded_table_method(self, body):
         """Bind the existing below-range default and upper clamp on an owned Table."""
@@ -582,35 +599,43 @@ class NumericReturns(cst.CSTTransformer):
                 and isinstance(guard.test, cst.Comparison) and len(guard.test.comparisons) == 1
                 and isinstance(guard.test.comparisons[0].operator, cst.LessThan)
                 and guard.test.left.deep_equals(key_name)
-                and guard.test.comparisons[0].comparator.deep_equals(low_name)
-                and self.index_max_int(high.value, table)):
+                and guard.test.comparisons[0].comparator.deep_equals(low_name)):
             return None
         clamp = arguments(lookup.args[0].value, 'min', 2)
         column = lookup.args[1].value
+        if not (clamp and clamp[0].deep_equals(key_name) and clamp[1].deep_equals(high_name)
+                and isinstance(column, cst.SimpleString) and type(column.evaluated_value) is str):
+            return None
+        binding = self.table_source(source.value, lock_reason='bounded')
+        if binding is None:
+            return None
+        numeric = binding.declaration.numeric_table
+        bounds = numeric.bounds
+        method = numeric.methods.get(lookup.func.attr.value)
+        if (bounds is None or method is None or method.signature != 'lookup_f64'
+                or not self.index_max_int(high.value, table, bounds)):
+            return None
+        provider = binding.manifest.provider
         first_arg = arguments(first[0], count=1)
         index = first_arg[0] if first_arg else None
         owned_index = (arguments(first[0], 'min', 1) is not None
-                       and isinstance(index, cst.Attribute) and index.attr.value == 'index'
+                       and isinstance(index, cst.Attribute) and index.attr.value == bounds.index
                        and index.value.deep_equals(table))
-        if not (clamp and clamp[0].deep_equals(key_name) and clamp[1].deep_equals(high_name)
-                and isinstance(column, cst.SimpleString) and type(column.evaluated_value) is str
-                and (owned_index or (first_arg and first_arg[0].deep_equals(table)
+        if not (owned_index or (first_arg and first_arg[0].deep_equals(table)
                 and getattr(helper_reference(first[0].func, self.cls.refs), 'helper', None)
-                == (NATIVE_TABLE_PROVIDER, 'first_key')))):
+                == (provider, bounds.first))):
             return None
-        if not self.table_source(source.value, lock_reason='bounded'):
-            return None
-        operation = 'read_bounded_table_float'
-        self.providers.add(NATIVE_TABLE_PROVIDER)
-        self.operations.add(f'{NATIVE_TABLE_PROVIDER}.{operation}')
+        operation = bounds.bounded
+        self.providers.add(provider)
+        self.operations.add(f'{provider}.{operation}')
         code = cst.Module([]).code_for_node
         value = Names(cst.Module(body), used=self.cell.params).reserve('_mx_bounded_value')
-        args = (table, self.lookup_context(NATIVE_TABLE_PROVIDER),
+        args = (table, self.lookup_context(provider),
                 cst.Name('None') if owned_index else first[0].func, key_name, column, below.value)
         index_arg = ', True' if owned_index else ''
         fast = cst.parse_module(
             f'{value}: _mx_cy.double\n'
-            f'if {module_name(NATIVE_TABLE_PROVIDER)}.{operation}('
+            f'if {module_name(provider)}.{operation}('
             f'{", ".join(map(code, args))}, _mx_cy.address({value}){index_arg}):\n    return {value}\n').body
         return (*body[:-4], *fast, *body[-4:])
 
@@ -648,10 +673,15 @@ class NumericReturns(cst.CSTTransformer):
                 and isinstance(clamp.targets[0].target, cst.Name)):
             return None
         table, key = source.targets[0].target, clamp.targets[0].target
-        if table.value == key.value or not self.table_source(source.value):
+        binding = self.table_source(source.value)
+        if table.value == key.value or binding is None:
             return None
+        numeric = binding.declaration.numeric_table
+        bounds, provider = numeric.bounds, binding.manifest.provider
         lookup = self.first_lookup(result.value)
-        if not (lookup and lookup.func.value.deep_equals(table)
+        method = numeric.methods.get(lookup.func.attr.value) if lookup else None
+        if not (bounds is not None and method is not None and method.signature == 'lookup_f64'
+                and lookup.func.value.deep_equals(table)
                 and lookup.args[0].value.deep_equals(key)
                 and isinstance(lookup.args[1].value, cst.SimpleString)
                 and type(lookup.args[1].value.evaluated_value) is str
@@ -667,14 +697,14 @@ class NumericReturns(cst.CSTTransformer):
             return ()
 
         def bound(node, operation):
-            if operation == 'last_key' and self.index_max_int(node, table):
+            if operation == bounds.last and self.index_max_int(node, table, bounds):
                 return cst.Name('None')
             args = call_args(node, 'int', 1)
             if not args or not isinstance(args[0], cst.Call):
                 return None
             call = args[0]
             ref = helper_reference(call.func, self.cls.refs)
-            if (getattr(ref, 'helper', None) == (NATIVE_TABLE_PROVIDER, operation)
+            if (getattr(ref, 'helper', None) == (provider, operation)
                     and isinstance(call.func, cst.Attribute)
                     and isinstance(call.func.value, cst.Attribute)
                     and len(call.args) == 1 and not (call.args[0].keyword or call.args[0].star)
@@ -683,10 +713,10 @@ class NumericReturns(cst.CSTTransformer):
             return None
 
         upper = call_args(clamp.value, 'min', 2)
-        if not upper or (last := bound(upper[1], 'last_key')) is None:
+        if not upper or (last := bound(upper[1], bounds.last)) is None:
             return None
         lower = call_args(upper[0], 'max', 2)
-        first = bound(lower[1], 'first_key') if lower else None
+        first = bound(lower[1], bounds.first) if lower else None
         base = lower[0] if lower else upper[0]
         index_bound = isinstance(last, cst.Name) and last.value == 'None'
         if lower and (first is None or not index_bound and not first.deep_equals(last)):
@@ -712,13 +742,13 @@ class NumericReturns(cst.CSTTransformer):
                 fallback_key, cst.Annotation(cst.Name('object')),
                 value=self.single_statement(original_clamp).value),))
             fallback_lookup = lookup.visit(_ReplaceExpression(lookup.args[0].value, fallback_key))
-        alias = module_name(NATIVE_TABLE_PROVIDER)
-        operation = 'read_clamped_table_float'
+        alias = module_name(provider)
+        operation = bounds.clamped
         namespace = first if lower and index_bound else last
-        args = [code(table), code(self.lookup_context(NATIVE_TABLE_PROVIDER)), str(bool(lower)), code(namespace), number,
+        args = [code(table), code(self.lookup_context(provider)), str(bool(lower)), code(namespace), number,
                 code(lookup.args[1].value), f'_mx_cy.address({value})']
-        self.providers.add(NATIVE_TABLE_PROVIDER)
-        self.operations.add(f'{NATIVE_TABLE_PROVIDER}.{operation}')
+        self.providers.add(provider)
+        self.operations.add(f'{provider}.{operation}')
         prefix = cst.parse_module(
             f'{number}: _mx_cy.longlong = {code(base)}\n'
             f'{value}: _mx_cy.double\n'

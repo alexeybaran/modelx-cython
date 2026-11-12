@@ -23,6 +23,17 @@ class NumericMethod:
     prepare: str
     read_integer: Optional[str] = None
     read_object: Optional[str] = None
+    read_text: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class NumericBounds:
+    first: str
+    last: str
+    index: str
+    index_max: str
+    bounded: str
+    clamped: str
 
 
 @dataclass(frozen=True)
@@ -30,6 +41,7 @@ class NumericTable:
     owner_field: str
     ready: str
     methods: Mapping[str, NumericMethod]
+    bounds: Optional[NumericBounds] = None
 
 
 @dataclass(frozen=True)
@@ -127,7 +139,7 @@ def _require_fields(value, label, required, optional=()):
 
 def _read_numeric_table(type_id, declaration):
     label = f'{type_id}.numeric_table'
-    _require_fields(declaration, label, ('owner_field', 'ready', 'methods'))
+    _require_fields(declaration, label, ('owner_field', 'ready', 'methods'), ('bounds',))
     owner_field, ready, methods = (declaration[name] for name in ('owner_field', 'ready', 'methods'))
     if not (valid_identifier(owner_field) and valid_identifier(ready) and isinstance(methods, dict) and methods):
         raise ValueError(f'invalid numeric table declaration for {type_id}')
@@ -139,11 +151,20 @@ def _read_numeric_table(type_id, declaration):
         fields = ('read', 'prepare')
         if signature == 'previous_f64':
             fields += ('read_integer', 'read_object')
-        _require_fields(method, f'{label}.{name}', ('signature', *fields))
-        if not all(valid_identifier(method[field]) for field in fields):
+        optional = ('read_text',) if signature == 'lookup_f64' else ()
+        _require_fields(method, f'{label}.{name}', ('signature', *fields), optional)
+        if not all(valid_identifier(value) for value in method.values()):
             raise ValueError(f'invalid native symbol for {label}.{name}')
         entries[name] = NumericMethod(**method)
-    return NumericTable(owner_field, ready, MappingProxyType(entries))
+    bounds = None
+    if 'bounds' in declaration:
+        fields = ('first', 'last', 'index', 'index_max', 'bounded', 'clamped')
+        config = declaration['bounds']
+        _require_fields(config, f'{label}.bounds', fields)
+        if not all(valid_identifier(value) for value in config.values()):
+            raise ValueError(f'invalid numeric bounds declaration for {type_id}')
+        bounds = NumericBounds(**config)
+    return NumericTable(owner_field, ready, MappingProxyType(entries), bounds)
 
 
 def _read_type(type_id, declaration):

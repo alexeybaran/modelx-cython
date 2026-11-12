@@ -6,7 +6,10 @@ import libcst as cst
 
 from modelx_cython.helpers import HelperCalls
 from modelx_cython.numeric_helpers import NumericReturns
-from modelx_cython.provider_manifest import NumericRecord, ProviderBinding, ProviderMember, read_provider_manifest
+from modelx_cython.provider_manifest import (
+    NumericBounds, NumericMethod, NumericRecord, NumericTable,
+    ProviderBinding, ProviderMember, read_provider_manifest,
+)
 
 
 def builtin_table_binding():
@@ -92,3 +95,25 @@ def test_record_cast_uses_the_declared_provider_operations():
 
     assert '.cast_current(' in result and '.read_bound(' in result and '.cast_value(float,' in result
     assert providers == {provider}
+
+
+def test_clamped_table_lookup_uses_the_declared_bounds_operations():
+    provider = 'rates_extension.kernel'
+    methods = {'price': NumericMethod('lookup_f64', 'bound_price', 'prime_price')}
+    bounds = NumericBounds('first', 'last', 'keys', 'maximum', 'read_bounded', 'read_clamped')
+    binding = SimpleNamespace(manifest=SimpleNamespace(provider=provider), declaration=SimpleNamespace(
+        numeric_table=NumericTable('owner', 'ready', methods, bounds)))
+    owner = SimpleNamespace(cells={'schedule': SimpleNamespace(native_provider_binding=binding, params=())},
+                            refs={})
+    cell = SimpleNamespace(name='amount', params=('age',), get_argtype_expr=lambda *_, **__: 'long long')
+    lowering = NumericReturns(owner, cell, set(), builtin_keys={'min'})
+    source = cst.parse_module(
+        'table = self.schedule()\n'
+        'key = min(age, table.keys.maximum())\n'
+        'return table.price(key, "rate")\n'
+    )
+
+    result = source.with_changes(body=lowering.clamped_table_method(source.body)).code
+
+    assert '.read_clamped(' in result and 'table.price(key, "rate")' in result
+    assert lowering.providers == {provider}

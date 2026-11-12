@@ -11,11 +11,20 @@
       "numeric_table": {
         "owner_field": "_owner",
         "ready": "numeric_resource_ready",
+        "bounds": {
+          "first": "first_key",
+          "last": "last_key",
+          "index": "index",
+          "index_max": "max_int",
+          "bounded": "read_bounded_table_float",
+          "clamped": "read_clamped_table_float"
+        },
         "methods": {
           "lookup_float": {
             "signature": "lookup_f64",
             "read": "bound_lookup_f64",
-            "prepare": "prepare_table_method"
+            "prepare": "prepare_table_method",
+            "read_text": "read_table_field_float"
           },
           "previous": {
             "signature": "previous_f64",

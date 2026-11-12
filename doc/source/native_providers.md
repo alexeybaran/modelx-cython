@@ -104,6 +104,16 @@ from `prepare` and declare `read_integer(View, long long, long long)` and
 `read_object(View, long long, object)` symbols, both returning `double`.
 These implement the ordinary previous-key lookup for the two column types.
 
+Lookup methods may declare `read_text` for a string key and a literal column.
+It takes the context, typed view, string key, and string column and returns
+a `double`. A table may also declare `bounds`. Its `first` and `last` name
+registered Python bound helpers, and `index` and `index_max` name the index
+attribute and its upper-bound method. The `bounded` and `clamped` symbols
+implement the corresponding proven read shapes with a `double*` output.
+They return a `bint` indicating whether the native operation supplied a value.
+When the native operation declines, the generated formula retains its original
+lookup and bounds operations.
+
 ## Numeric Record fields
 
 A Record can declare `numeric_record` with the `lookup`, `read_field`,
