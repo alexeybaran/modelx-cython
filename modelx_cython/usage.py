@@ -123,6 +123,7 @@ class CellsResolver:
         self.unlocked_scalar_results = unlocked_scalar_results or {}
         self.provider_results = {}
         self.observed_provider_results = {}
+        self.table_schemas = {}
         self._name_index: Dict[str, List[str]] = {}
         for cells in cells_by_class.values():
             for name, fqname in cells.items():
@@ -535,6 +536,7 @@ def build_resolver(module_infos) -> CellsResolver:
     unlocked_scalar_results: Dict[str, str] = {}
     provider_results = {}
     observed_provider_results = {}
+    table_schemas = {}
 
     for fqname, info in module_infos.items():
         pkg, basename = fqname.rsplit(".", 1)
@@ -546,6 +548,8 @@ def build_resolver(module_infos) -> CellsResolver:
                 binding = getattr(cells, 'native_provider_binding', None)
                 if binding is not None:
                     provider_results[cells.fqname] = binding
+                if getattr(cells, 'table_column_kinds', None):
+                    table_schemas[cells.fqname] = cells.table_column_kinds
                 observed = getattr(cells, 'observed_provider_type', None)
                 if observed is not None:
                     observed_provider_results[cells.fqname] = observed
@@ -575,6 +579,7 @@ def build_resolver(module_infos) -> CellsResolver:
                              scalar_refs_by_class, locked_scalar_results, unlocked_scalar_results)
     resolver.provider_results = provider_results
     resolver.observed_provider_results = observed_provider_results
+    resolver.table_schemas = table_schemas
     return resolver
 
 

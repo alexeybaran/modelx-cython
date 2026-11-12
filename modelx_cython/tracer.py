@@ -185,6 +185,7 @@ class RuntimeCellsInfo:     # TODO: Create base class RuntimeBaseMemberInfo
         self.ret_type = self._init_ret_type(traces)
         from .provider_manifest import observed_provider_binding
         self.observed_provider_binding = observed_provider_binding(traces)
+        self.table_column_kinds = _table_column_kinds(traces)
 
     def has_args(self):
         """Return whether the cells method takes arguments.
@@ -575,6 +576,69 @@ def instance_attrs(obj: Any) -> Iterator[tuple]:
                 yield name, getattr(obj, name)
             except AttributeError:  # slot never assigned
                 pass
+
+
+def _scalar_kind(value):
+    if type(value) is bool:
+        return 'bool'
+    if isinstance(value, numbers.Integral) and not isinstance(value, bool):
+        return 'int'
+    if isinstance(value, numbers.Real) and not isinstance(value, numbers.Integral):
+        return 'float'
+    if type(value) is str:
+        return 'str'
+    return None
+
+
+def _leaf_tables(value, depth=0):
+    """The tables of a table result, or of a grouped result (Records of tables)."""
+    if all(type(getattr(value, name, None)) is tuple for name in ('_columns', '_values', '_keys')):
+        return [value]
+    if depth < 8 and hasattr(value, '_items') and callable(getattr(value, 'values', None)):
+        leaves = []
+        for item in value.values():
+            found = _leaf_tables(item, depth + 1)
+            if not found:
+                return None     # a Record of scalars (a row) is not a grouped table
+            leaves.extend(found)
+        return leaves or None
+    return None
+
+
+def _table_column_kinds(traces):
+    """Column and key kinds of a traced table result, from the complete sampled values.
+
+    The sample records each returned table in full, so the kinds describe the data the
+    build saw, not a guess about future inputs. For a grouped result the kinds are merged
+    over its leaf tables. A column whose kind differs between tables or traces, or holds
+    mixed values, has no kind. Returns None for results that are not tables.
+    """
+    kinds = None
+    grouped = False     # number of group levels, False for a plain table, None if inconsistent
+    for trace in traces:
+        leaves = _leaf_tables(trace.ret_val)
+        if not leaves:
+            return None
+        depth, value = 0, trace.ret_val
+        while value is not leaves[0] and depth < 8 and callable(getattr(value, 'values', None)):
+            value, depth = next(iter(value.values())), depth + 1
+        grouped = depth if grouped in (False, depth) else None
+        for table in leaves:
+            observed = {}
+            for position, column in enumerate(table._columns):
+                found = {_scalar_kind(row[position]) for row in table._values}
+                observed[column] = found.pop() if len(found) == 1 else None
+            found = {_scalar_kind(key) for key in table._keys}
+            observed['__key__'] = found.pop() if len(found) == 1 else None
+            if kinds is None:
+                kinds = observed
+            else:
+                kinds = {name: (kind if observed.get(name, kind) == kind else None)
+                         for name, kind in {**observed, **kinds}.items()}
+    if kinds is None or grouped is None:
+        return None
+    kinds['__grouped__'] = grouped or 0
+    return kinds
 
 
 class MxCallTracer(CallTracer):

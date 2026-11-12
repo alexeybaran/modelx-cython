@@ -1590,6 +1590,12 @@ cdef class _NativeTableIndex:
     def max_float(self):
         return _float_type(last_key(_last_key, self._owner))
 
+    def max(self):
+        return self._owner.index.max()
+
+    def min(self):
+        return self._owner.index.min()
+
 
 @cython.final
 cdef class NativeTable:
@@ -1694,6 +1700,11 @@ cdef class NativeTable:
         if self._index_view is None:
             return self._owner.index
         return self._index_view
+
+    @property
+    def loc(self):
+        # Object-speed path for reads the compiler did not type; same semantics as Table.loc.
+        return self._owner.loc
 
     def __getitem__(self, key):
         return self._owner[key]

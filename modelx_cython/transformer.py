@@ -606,6 +606,13 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
         when no operand pair can be typed.
         """
         from modelx_cython.checked_arithmetic import CheckedArithmetic
+        cells.loc_reads_typed, cells.loc_reads_untyped = 0, []
+        if (self._resolver is not None and getattr(self._resolver, 'table_schemas', None)
+                and all(isinstance(binding, BuiltinAssignment) for binding in scope['float'])):
+            from modelx_cython.loc_reads import LocReads
+            loc_reads = LocReads(self._resolver, cls_info.fqname)
+            node = node.visit(loc_reads)
+            cells.loc_reads_typed, cells.loc_reads_untyped = loc_reads.typed, loc_reads.untyped
         from modelx_cython.numeric_helpers import NumericReturns
         cells.formula_allows_exact_receiver = allows_exact_receiver(node, cls_info.name)
         builtin_keys = {name for name in ("all", "any", "sum", "min", "max", "float", "int", "round", "range")

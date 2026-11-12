@@ -587,6 +587,10 @@ class CombinedCellsInfo(LexicalCellsInfo):
         return getattr(self._rt, 'observed_provider_binding', None)
 
     @property
+    def table_column_kinds(self):
+        return getattr(self._rt, 'table_column_kinds', None)
+
+    @property
     def native_table_result(self):
         binding = self.native_provider_binding
         return binding is not None and binding.declaration.numeric_table is not None
