@@ -80,7 +80,7 @@ class CollectRuntime:
         legacy = (not Names(self.syntax).names.intersection(
             {_VERSION, '_mx_collect_native_coords'}) and _legacy(self.syntax))
         if legacy:
-            source = read_resource(__package__, '_collect_v1.py').decode('utf-8')
+            source = read_resource(__package__, '_collect_v1.txt').decode('utf-8')
             self.template = cst.parse_module(source)
             self.supported = True
 

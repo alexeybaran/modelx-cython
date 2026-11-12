@@ -1,4 +1,4 @@
-"""Frozen v1 collection entry points for compatible pre-versioned exports."""
+# Frozen v1 collection entry points for compatible pre-versioned exports.
 
 _mx_collect_adapter_version = 1
 

@@ -77,5 +77,5 @@ include = ["modelx_cython*"]
 exclude = ["doc", "temp*", "modelx_cython.tests*", "samples"]
 
 [tool.setuptools.package-data]
-modelx_cython = ["*.pxd", "*.pyx"]
+modelx_cython = ["*.pxd", "*.pyx", "_collect_v1.txt"]
 "modelx_cython.runtime" = ["*.pxd", "*.pyx", "LICENSE.lifelib.txt"]
