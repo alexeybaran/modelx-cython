@@ -353,7 +353,7 @@ class CheckedArithmetic:
         for loop in loops:
             counter = loop.target.value
             start, stop = arguments(loop.iter)
-            known = self.parameters | self._integer_locals(body[:body.index(loop)])
+            known = self.parameters | self._integer_locals(body[:body.index(loop)]).keys()
             if (counter in self.cell.params or facts.stores[counter] != 1
                     or not isinstance(stop, cst.Name) or stop.value not in known
                     or facts.stores[stop.value] > 1):
