@@ -20,8 +20,9 @@ For the same reason ``float()`` of an integer column read becomes the float read
 ``R.loc[key]["col"]`` and ``row["col"]`` with ``row = R.loc[key]`` assigned once (key a local
 or a cached Cell call) are read as ``R.loc[key, "col"]``: the same value for a unique index.
 
-``G.loc[(g1, ..., gn, key), "col"]`` on a grouped table stays an object read: no generic native
-grouped read exists yet (backlog C2/C3), and slicing per call was slower than the object read.
+``G.loc[(g1, ..., gn, key), "col"]`` on a grouped table becomes the provider's
+``grouped_lookup_float(G, key, "col")``: a hashed read of a full-key table flattened once per
+grouped Record, with the object ``G.loc`` read for every key it does not hit.
 
 The decision uses the receiver's traced type, the traced column kind and a literal column
 name. Every other use of ``.loc`` is left as written and runs as an ordinary call on the
@@ -194,10 +195,19 @@ class LocReads(FormulaTransformer):
         receiver = target.value
         schema = self._schema(receiver)
         if schema is None:
-            if self._schema(receiver, sliced=-1) is not None:
-                # No generic native grouped read exists yet; slicing per call through the Python
-                # Records measured slower than the object .loc, so the read stays as written.
-                return None, 'full key into a grouped table: no native grouped read'
+            grouped = self._schema(receiver, sliced=-1)
+            if grouped is not None:
+                # A full key into a grouped table: the provider's flattened full-key read, which
+                # falls back to the object G.loc read for anything it does not hit.
+                found = {grouped.get(name) for name in names}
+                if not found <= set(kinds):
+                    name = sorted(n for n in names if grouped.get(n) not in kinds)[0]
+                    return None, f'column {name!r} has traced kind {grouped.get(name)}'
+                from .helpers import module_name
+                provider = 'modelx_cython.runtime._native_inputs'
+                self.providers.add(provider)
+                return cst.Call(func=cst.Attribute(cst.Name(module_name(provider)), cst.Name('grouped_lookup_float')),
+                                args=(cst.Arg(receiver), cst.Arg(key), cst.Arg(column))), None
             return None, 'receiver is not a traced table'
         found = {schema.get(name) for name in names}
         if not found <= set(kinds):
@@ -322,7 +332,7 @@ class LocReads(FormulaTransformer):
                 and isinstance(original.args[0].value, cst.Subscript)
                 and isinstance(updated.args[0].value, cst.Call)
                 and isinstance(updated.args[0].value.func, cst.Attribute)
-                and updated.args[0].value.func.attr.value == 'lookup_float'):
+                and updated.args[0].value.func.attr.value in ('lookup_float', 'grouped_lookup_float')):
             return updated.args[0].value
         if (isinstance(func, cst.Name) and func.value == 'float' and len(updated.args) == 1
                 and not updated.args[0].keyword and not updated.args[0].star

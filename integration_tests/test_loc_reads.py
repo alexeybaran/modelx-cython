@@ -70,7 +70,7 @@ def test_loc_reads_three_modes(tmp_path):
     assert cell('band')['loc_reads_typed'] == 1            # float() of an integer column
     assert cell('premium')['loc_reads_typed'] == 1         # through slice() of a grouped table
     assert cell('band_int')['loc_reads_untyped'] == ["column 'band' has traced kind int"]
-    assert cell('premium_full_key')['loc_reads_untyped'] == ['full key into a grouped table: no native grouped read']
+    assert cell('premium_full_key')['loc_reads_typed'] == 1   # the provider's flattened full-key read
     assert cell('column_by_name')['loc_reads_typed'] == 1      # a local bound once to a literal
     assert cell('column_computed')['loc_reads_untyped'] == ['column is not a string literal']
 
@@ -87,11 +87,14 @@ def _edge_model():
                               index=pd.Index(['UL9', 'UL5', 'X'], name='id')),
         'multi': pd.DataFrame({'plan': ['A', 'A', 'B', 'B'], 'year': [1, 2, 1, 2], 'v': [1.0, 2.0, 3.0, 4.0],
                                'note': ['p', 'q', 'r', 's']}).set_index(['plan', 'year']),
-        'flags': pd.DataFrame({'v': [100.0, 200.0], 'note': ['t', 'f']}, index=pd.Index([True, False], name='f'))})
+        'flags': pd.DataFrame({'v': [100.0, 200.0], 'note': ['t', 'f']}, index=pd.Index([True, False], name='f')),
+        'deep': pd.DataFrame({'a': ['x', 'x', 'y', 'y'], 'b': [1, 1, 2, 2], 'c': ['p', 'q', 'p', 'q'],
+                              'year': [1, 2, 1, 2], 'v': [1.5, 2.5, 3.5, 4.5]}).set_index(['a', 'b', 'c', 'year'])})
     data.new_cells('gap_table', 'lambda: pdn.table(gaps)')
     data.new_cells('named_table', 'lambda: pdn.table(named)')
     data.new_cells('multi_table', 'lambda: pdn.table(multi)')
     data.new_cells('flag_table', 'lambda: pdn.table(flags)')
+    data.new_cells('deep_table', 'lambda: pdn.table(deep, columns=("v",), groups=("a", "b", "c"))')
     proj = model.new_space('Projection', refs={'data': data, 'pdn': pdn, 'ids': ('UL9', 'X', 'nope')})
 
     def probe(name, expression, args='t'):
@@ -110,8 +113,14 @@ def _edge_model():
         'named': probe('named', 'float(data.named_table().loc[ids[t % 3], "v"])'),
         'multi': probe('multi', 'float(data.multi_table().loc[("A" if t % 2 else "B", t % 3), "v"])'),
         'flag': probe('flag', 'float(data.flag_table().loc[t % 2 == 0, "v"])'),
+        # a full key into three group levels and a leaf: missing parts at every level, bool parts
+        'deep': probe('deep', 'float(data.deep_table().loc[(("x", "y", "x", "z")[t % 4], (1, 2, True, 1)[t % 4], '
+                              '"pq"[t % 2], 1 + t % 2), "v"])'),
+        'walk': ('def walk(t):\n    for _, r in data.named_table().iterrows():\n        if r["v"] > 10.0 * t:\n'
+                 '            return float(r["v"]) + len(r["note"])\n    return -5.0'),
         'edge_total': ('def edge_total():\n    return sum(gap(t) + gap_bounds(t) + gap_text(t) + gap_odd_column(t)'
                        ' + gap_unknown_column(t) + gap_default(t) + gap_text_method(t) + gap_row(t) + named(t) + multi(t) + flag(t)'
+                       ' + deep(t) + walk(t)'
                        ' for t in range(11))'),
     }
     for name, source in formulas.items():
@@ -126,7 +135,7 @@ def test_loc_read_edges_three_modes(tmp_path):
         live = model.Projection.edge_total()
         parts = {name: [model.Projection.cells[name](t) for t in range(11)]
                  for name in ('gap', 'gap_text', 'gap_text_method', 'gap_default', 'gap_unknown_column',
-                              'gap_row', 'named', 'multi', 'flag')}
+                              'gap_row', 'named', 'multi', 'flag', 'deep', 'walk')}
         model.export(tmp_path / 'exported', locked_spaces=['Data'])
     finally:
         model.close()
@@ -137,6 +146,8 @@ def test_loc_read_edges_three_modes(tmp_path):
     assert parts['gap_default'][:4] == [-7.0, 0.5, 1.5, -7.0]
     assert set(parts['gap_unknown_column']) == {-1.0}                      # pandas: unknown column is a KeyError
     assert parts['named'][:3] == [10.0, 30.0, -1.0]
+    assert parts['deep'][:4] == [1.5, 4.5, 1.5, -1.0]       # a bool group part matches the Record label 1
+    assert parts['walk'][:4] == [11.0, 21.0, 31.0, -5.0]
     (tmp_path / 'sample.py').write_text('from exported import mx_model as m\nm.Projection.edge_total()\n',
                                         encoding='utf-8')
     subprocess.run([sys.executable, '-m', 'modelx_cython', 'exported', '--sample', 'sample.py', '--no-spec'],
@@ -150,5 +161,5 @@ def test_loc_read_edges_three_modes(tmp_path):
         assert got == repr([live] + [parts[n] for n in names]), (package, got)
     admission = json.loads((tmp_path / 'exported_cy/_mx_admission.json').read_text())
     typed = {name: admission[f'exported_cy._mx_classes._c_Projection._f_{name}']['loc_reads_typed']
-             for name in ('gap', 'gap_bounds', 'gap_odd_column', 'named', 'multi', 'flag')}
-    assert typed == {'gap': 1, 'gap_bounds': 3, 'gap_odd_column': 1, 'named': 1, 'multi': 1, 'flag': 1}
+             for name in ('gap', 'gap_bounds', 'gap_odd_column', 'named', 'multi', 'flag', 'deep')}
+    assert typed == {'gap': 1, 'gap_bounds': 3, 'gap_odd_column': 1, 'named': 1, 'multi': 1, 'flag': 1, 'deep': 1}
