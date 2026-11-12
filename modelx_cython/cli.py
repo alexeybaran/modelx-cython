@@ -52,6 +52,7 @@ from modelx_cython.powers import build_kind_maps, demote_rebound_params
 from modelx_cython.admission import describe
 from modelx_cython.cell_entries import EntryModule
 from modelx_cython.entry_pipeline import lower_entries
+from modelx_cython.integer_boundaries import guard_integer_boundaries
 from modelx_cython.helpers import install as install_helpers
 from modelx_cython.build import cell_locations, create_setup
 from modelx_cython.collect_adapter import CollectRuntime
@@ -405,7 +406,10 @@ def main_handler(args: argparse.Namespace, stdout: IO[str], stderr: IO[str]) -> 
         translated_modules = lower_entries(translated_modules, dense_entries, formula_entries, policy)
         cell_sources = {}
         for u in units:
-            state = translated_modules[u.fqname]
+            state = guard_integer_boundaries(
+                translated_modules[u.fqname], u.module_info, resolver, cells_kinds, ref_kinds
+            )
+            translated_modules[u.fqname] = state
             u.abs_src_path.write_text(state.syntax.code, encoding='utf-8')
             cell_sources[u.rel_src_path.as_posix()] = cell_locations(state, u.module_info)
         create_setup(model_name, modules=modules, setup_file=setup_file, source_root=work_dir,
