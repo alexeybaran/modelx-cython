@@ -6,7 +6,6 @@ import sys
 import textwrap
 
 import modelx as mx
-from modelx_cython.builder import NATIVE_TABLE_PROVIDER
 from modelx_cython.helpers import module_name
 from modelx_cython.rounding import NATIVE_ROUNDING_PROVIDER
 
@@ -54,7 +53,7 @@ def cached_digits(x, n):
     source = (package / '_mx_classes.py').read_text(encoding='utf-8')
     assert '_mx_round_one(' in source and '_mx_round_digits(' in source
     assert f'{module_name(NATIVE_ROUNDING_PROVIDER)}.repeated_round_float(' in source
-    assert not (package / f'{module_name(NATIVE_TABLE_PROVIDER)}.pyx').exists()
+    assert not (package / f"{module_name('modelx_cython.runtime._native_inputs')}.pyx").exists()
     assert '_mx_integral_math_call(' not in source
     probe = textwrap.dedent('''\
         import math

@@ -13,11 +13,13 @@ def test_native_transfers(tmp_path):
         space = model.new_space('Policy', formula='lambda key: None')
         space.new_cells('value', 'lambda t: float(t)')
         space.new_cells('derived', 'lambda t: value(t) + 1.0')
-        space.new_cells('divisible', 'lambda t, n: t % n == 0')
-        space.new_cells('offset', 'lambda t, n: (t - 1) % n != 0')
+        # Arithmetic probes below exercise the full signed range.
+        space.new_cells('divisible', 'lambda t, n: t % n == 0', is_cached=False)
+        space.new_cells('offset', 'lambda t, n: (t - 1) % n != 0', is_cached=False)
         space.new_cells('factor', 'lambda i, b, e: b ** e')
-        space.new_cells('duration', 'lambda t: t')
-        space.new_cells('fraction', 'def fraction(t):\n    m = duration(t) + 1\n    return (m / 12) * 0.05\n')
+        space.new_cells('duration', 'lambda t: t', is_cached=False)
+        space.new_cells('fraction', 'def fraction(t):\n    m = duration(t) + 1\n    return (m / 12) * 0.05\n',
+                        is_cached=False)
         space.new_cells('horizon', 'lambda: 1200')
         space.new_cells('piecewise', textwrap.dedent('''\
             def piecewise(t):
@@ -27,7 +29,7 @@ def test_native_transfers(tmp_path):
                 if year == 1:
                     return min(year, 9) * 0.25
                 return max(0.1 - (0.04 / 3.0) * (year - 1), 0.06)
-            '''))
+            '''), is_cached=False)
         model.export(tmp_path / 'exported')
     finally:
         model.close()
@@ -81,9 +83,14 @@ def test_native_transfers(tmp_path):
         assert [s.derived(i) for i in range(4)] == [1.0, 2.0, 3.0, 4.0]
         alternate = Alternate(mx_model.Policy)
         assert alternate.derived(1) == 102.0
-        for key in (-(1 << 63), -1, 4, (1 << 63) - 1):
-            assert s.value(key) == s.value(key) == float(key)
-            assert s.derived(key) == float(key) + 1.0
+        for operation in (s.value, s.derived):
+            for key in (-(1 << 63), -1, 4, (1 << 63) - 1):
+                try:
+                    operation(key)
+                except IndexError:
+                    pass
+                else:
+                    raise AssertionError('out-of-domain cache index reached the formula')
         for t in (-(1 << 63), -7, 0, 7, (1 << 63) - 1):
             for n in (-(1 << 63), -3, -1, 1, 3):
                 assert s.divisible(t, n) == (t % n == 0)
