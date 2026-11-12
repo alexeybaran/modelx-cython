@@ -1415,21 +1415,6 @@ from modelx_helpers import pdn as _pdn_module
 from modelx_helpers.typed_inputs import _typed_value as _typed_python_value, _MISSING as _typed_missing
 cdef dict _typed_inputs_bindings = vars(_typed_inputs_module)
 cdef dict _pdn_bindings = vars(_pdn_module)
-import builtins as _round_builtins
-from types import BuiltinFunctionType as _RoundBuiltin
-from modelx_cython._rounding cimport native_round_digits
-
-_canonical_python_round = _round_builtins.round
-if (type(_canonical_python_round) is not _RoundBuiltin
-        or _canonical_python_round.__self__ is not _round_builtins
-        or _canonical_python_round.__name__ != 'round'):
-    _canonical_python_round = None
-
-cdef double checked_round_float(double value, long long digits) except? -1:
-    cdef double result
-    if native_round_digits(value, digits, &result):
-        return result
-    return _canonical_python_round(value, digits)
 cdef object _lookup_float_fn = _native_operations['lookup_float']
 cdef object _lookup_int_fn = _native_operations['lookup_int']
 cdef object _lookup_bool_fn = _native_operations['lookup_bool']

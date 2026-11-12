@@ -1,5 +1,4 @@
-from libc.math cimport fabs, isfinite
-from libc.string cimport memcmp
+from libc.math cimport fabs
 from modelx_cython._float_sum_state cimport F64Sum, f64_init, f64_add, f64_result
 
 cdef object lookup(object function, object table, object key, object column, object default=*)
@@ -46,9 +45,6 @@ cdef class LookupContext:
     cdef unsigned char clamped_bindings_ready
     cdef object clamped_source, clamped_column, clamped_namespace
     cdef Py_ssize_t clamped_index
-    cdef bint round_ready
-    cdef double round_input, round_result
-    cdef long long round_digits
     cdef object get(self, object table, object column, Py_ssize_t* index)
 cdef double lookup_f64(object function, LookupContext context, object table,
                        long long key, object column, object default=*) except? -1
@@ -144,24 +140,6 @@ cdef double read_previous_table_int(NativeTable table, long long key, long long 
 cdef double record_field_float(object function, LookupContext, object record, object key,
                                object namespace=*) except? -1
 cdef double table_field_float(LookupContext, NativeTable, object key, object column) except? -1
-cdef double checked_round_float(double value, long long digits) except? -1
-cdef object _canonical_python_round
-
-cdef inline double repeated_round_float(LookupContext context, object function, double value,
-                                         long long digits) except? -1:
-    cdef double result
-    if function is not _canonical_python_round or _canonical_python_round is None:
-        return function(value, digits)
-    if (context._private_owner and context.round_ready and context.round_digits == digits
-            and memcmp(&context.round_input, &value, sizeof(double)) == 0):
-        return context.round_result
-    result = checked_round_float(value, digits)
-    if context._private_owner and isfinite(value):
-        context.round_input = value
-        context.round_digits = digits
-        context.round_result = result
-        context.round_ready = True
-    return result
 
 cdef class _InputFloat:
     cdef object source, key, column, function
