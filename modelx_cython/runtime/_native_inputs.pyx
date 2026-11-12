@@ -42,6 +42,21 @@ cdef object _max_value = _native_operations['max_value']
 cdef object _prepared_interpolation = _native_operations['prepared_interpolation']
 
 
+cdef inline bint _table_view_part(object value) noexcept:
+    kind = type(value)
+    return (kind is int or kind is bool or kind is str or kind is float
+            or kind is bytes or kind is complex or value is None)
+
+
+cdef inline bint _table_view_key(object value) noexcept:
+    if type(value) is tuple:
+        for part in <tuple>value:
+            if not _table_view_part(part):
+                return False
+        return True
+    return _table_view_part(value)
+
+
 cdef class TableView:
     cdef bint pandas_at
     cdef tuple keys, values, columns, ordered
@@ -57,17 +72,28 @@ cdef class TableView:
     cdef double[::1] numbers
 
     def __init__(self, table):
+        cdef object key
+        cdef bint all_integers = True
         self.pandas_at = table._index_error is not None
         self.keys = table._keys
         self.values = table._values
         self.columns = table._columns
-        self.positions = dict(zip(self.keys, range(len(self.keys))))
+        # Hashing or ordering an unsupported label would run user code during
+        # view construction, even when the eventual lookup reads another row.
+        for key in self.keys:
+            if type(key) is not int:
+                all_integers = False
+                if not _table_view_key(key):
+                    return
         self.column_positions = dict(zip(self.columns, range(len(self.columns))))
+        self.positions = dict(zip(self.keys, range(len(self.keys))))
         self.ordered = table._ordered
         if self.ordered:
-            self.minimum, self.maximum = min(self.keys), max(self.keys)
-            self.integral = all(type(key) is int and -(1 << 63) <= key < (1 << 63)
-                                for key in self.keys)
+            if all_integers:
+                self.minimum, self.maximum = self.ordered[0], self.ordered[-1]
+                self.integral = -(1 << 63) <= self.minimum and self.maximum < (1 << 63)
+            else:
+                self.minimum, self.maximum = min(self.keys), max(self.keys)
             if self.integral:
                 self.integers = array('q', self.ordered)
                 self.sorted_positions = array('q', [self.positions[key] for key in self.ordered])
@@ -126,14 +152,16 @@ cdef object lookup(object function, object table, object key, object column, obj
     if function is _lookup and type(table) is Table and table._index_error is not None:
         return indexed_lookup(table,key,column,default)
     if (function is _lookup and type(table) is Table
-            and (type(column) in (str, int) or isinstance(column, IntEnum))):
+            and (type(column) in (str, int) or isinstance(column, IntEnum))
+            and _table_view_key(key)):
         data = view(table)
-        position = data.positions.get(key)
-        if position is not None:
-            return data.value(position, column)
-        if default is not _missing:
-            return default
-        raise KeyError(key)
+        if data.positions is not None:
+            position = data.positions.get(key)
+            if position is not None:
+                return data.value(position, column)
+            if default is not _missing:
+                return default
+            raise KeyError(key)
     return function(table, key, column) if default is _missing else function(table, key, column, default)
 
 
@@ -142,9 +170,10 @@ cdef object previous(object function, object table, object key, object column, o
     cdef Py_ssize_t index
     if function is _previous and type(table) is NativeTable:
         table = (<NativeTable>table)._owner
-    if function is _previous and type(table) is Table:
+    if (function is _previous and type(table) is Table
+            and type(key) is int and -(1 << 63) <= key < (1 << 63)):
         data = view(table)
-        if data.integral and type(key) is int and -(1 << 63) <= key < (1 << 63):
+        if data.integral:
             index = data.right(key) - 1
             if index >= 0:
                 return data.value(data.sorted_positions[index], column)
@@ -155,18 +184,22 @@ cdef object previous(object function, object table, object key, object column, o
 
 
 cdef object contains(object function, object table, object key):
+    cdef TableView data
     if function is _contains and type(table) is NativeTable:
         table = (<NativeTable>table)._owner
     if function is _contains and type(table) is Table and table._index_error is not None:
         return indexed_contains(table,key)
     if function is _contains and type(table) is Table:
-        return key in view(table).positions
+        data = view(table)
+        if data.positions is not None:
+            return key in data.positions
+        return key in table._positions
     return function(table, key)
 
 
 cdef object key_count(object function, object table):
     if function is _key_count and type(table) is Table:
-        return len(view(table).keys)
+        return len(table._keys)
     return function(table)
 
 
@@ -174,7 +207,7 @@ cdef object key_at(object function, object table, object index):
     if function is _key_at and type(table) is Table:
         if index < 0:
             raise IndexError(index)
-        return view(table).keys[index]
+        return table._keys[index]
     return function(table, index)
 
 
@@ -950,12 +983,13 @@ cdef class KeyedView:
             if len(parts) != self.width:
                 return
             for part in parts:
-                if type(part) is str:
+                kind = type(part)
+                if kind is str:
                     kinds.append(_KEY_TEXT); numbers.append(0); texts.append(part)
-                elif type(part) in (int, bool) and -(1 << 63) <= part < (1 << 63):
-                    kinds.append(_KEY_BOOL if type(part) is bool else _KEY_INT)
+                elif (kind is int or kind is bool) and -(1 << 63) <= part < (1 << 63):
+                    kinds.append(_KEY_BOOL if kind is bool else _KEY_INT)
                     numbers.append(part); texts.append(None)
-                elif type(part) is float:
+                elif kind is float:
                     key_text(&packed, part)
                     if packed.kind == _KEY_OBJECT:
                         return
@@ -971,7 +1005,8 @@ cdef class KeyedView:
         numbers, valid = [], []
         for input_row in self.raw_values:
             for value in input_row:
-                if type(value) in (float, int, bool, str):
+                kind = type(value)
+                if kind is float or kind is int or kind is bool or kind is str:
                     try:
                         converted = _key_float(value)
                     except (ValueError, OverflowError):
@@ -1240,22 +1275,32 @@ cdef LookupContext _indexed_context(object table):
     return context
 
 
+cdef inline bint _key_type_is_one_of(object kind, tuple supported) noexcept:
+    for candidate in supported:
+        if kind is candidate:
+            return True
+    return False
+
+
 cdef void _pack_part(object value, KeyPart* part) except *:
     cdef int overflow = 0
     cdef long long number
-    if type(value) in (int, bool) and -(1 << 63) <= value < (1 << 63):
-        key_int(part, value, type(value) is bool)
-    elif type(value) is _numpy_bool_key:
+    kind = type(value)
+    if (kind is int or kind is bool) and -(1 << 63) <= value < (1 << 63):
+        key_int(part, value, kind is bool)
+    elif kind is str or kind is float:
+        key_text(part, value)
+    elif kind is _numpy_bool_key:
         key_int(part, PyObject_IsTrue(value), True)
         part.text = <PyObject*>value
-    elif type(value) in _numpy_integer_keys:
+    elif _key_type_is_one_of(kind, _numpy_integer_keys):
         number = PyLong_AsLongLongAndOverflow(PyNumber_Index(value), &overflow)
         if overflow:
             key_text(part, value)
         else:
             key_int(part, number, False)
             part.text = <PyObject*>value
-    elif type(value) in _numpy_float_keys:
+    elif _key_type_is_one_of(kind, _numpy_float_keys):
         _key_real(part, PyFloat_AsDouble(value), value)
     else:
         key_text(part, value)
