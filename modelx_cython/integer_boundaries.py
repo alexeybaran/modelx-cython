@@ -19,6 +19,15 @@ _SIGNED_OPERATIONS = {
 }
 
 
+def _boxed_arithmetic(value):
+    if isinstance(value, cst.Call):
+        return (dotted_name(value.func) == f'{CY_MOD}.cast' and len(value.args) == 2
+                and isinstance(value.args[0].value, cst.Name) and value.args[0].value.value == 'object')
+    return (isinstance(value, cst.BinaryOperation)
+            and type(value.operator) in _SIGNED_OPERATIONS
+            and (_boxed_arithmetic(value.left) or _boxed_arithmetic(value.right)))
+
+
 _CALL_GATE = """\
 @{cy}.cfunc
 def {name}(method: object, params: tuple, path: str) -> object:
@@ -221,6 +230,7 @@ class _GuardReturns(cst.CSTTransformer):
         self.check_overflow |= any(
             isinstance(part, cst.BinaryOperation)
             and isinstance(part.operator, (cst.Add, cst.Subtract, cst.Multiply))
+            and not _boxed_arithmetic(part)
             and self.arithmetic.integer_interval(part, signed=True) is None
             for part in walk(value)
         )

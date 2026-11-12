@@ -73,10 +73,39 @@ cdef inline long long _mx_signed_sub(long long left, long long right, str path) 
     return left - right
 
 
+cdef extern from *:
+    """
+    #include <limits.h>
+    #if defined(_MSC_VER) && defined(_M_X64)
+    #include <intrin.h>
+    #endif
+
+    static CYTHON_INLINE int mx_mul_overflow(long long left, long long right,
+                                             long long *result) {
+    #if defined(__GNUC__) || defined(__clang__)
+        return __builtin_mul_overflow(left, right, result);
+    #elif defined(_MSC_VER) && defined(_M_X64)
+        long long high;
+        *result = _mul128(left, right, &high);
+        return high != (*result < 0 ? -1 : 0);
+    #else
+        if (left > 0 ? (right > 0 ? left > LLONG_MAX / right : right < LLONG_MIN / left)
+                     : (left < 0 && (right > 0 ? left < LLONG_MIN / right
+                                              : right < 0 && left < LLONG_MAX / right)))
+            return 1;
+        *result = left * right;
+        return 0;
+    #endif
+    }
+    """
+    bint _mx_mul_overflow "mx_mul_overflow"(long long, long long, long long*) noexcept
+
+
 cdef inline long long _mx_signed_mul(long long left, long long right, str path) except? -1:
-    if -2147483648 <= left <= 2147483647 and -2147483648 <= right <= 2147483647:
-        return left * right
-    return _mx_exact_int64((<object>left) * right, path)
+    cdef long long value
+    if _mx_mul_overflow(left, right, &value):
+        return _mx_signed_overflow(path)
+    return value
 
 
 cdef inline long long _mx_signed_floor(long long left, long long right, str path) except? -1:
