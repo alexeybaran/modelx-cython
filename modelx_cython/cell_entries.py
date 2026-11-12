@@ -71,6 +71,7 @@ class FormulaEntry:
     formula: str
     keys: tuple[str, ...]
     guard_safe: bool
+    scalar_view: bool
 
 
 def dense_condition(axes, proof=None, proved_axes=()):

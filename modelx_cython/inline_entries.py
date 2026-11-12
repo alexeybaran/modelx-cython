@@ -207,8 +207,11 @@ def add_inline_entries(module, classes):
             next_entry += 1
             cell.inline_entry = entry
             entries[cell.name] = entry, len(cell.params), defaults
-            formula_entries[entry] = FormulaEntry(owner, FORMULA_PREF + cell.name,
-                tuple(cell.params), getattr(cell, 'formula_allows_exact_receiver', False))
+            formula_entries[entry] = FormulaEntry(
+                owner, FORMULA_PREF + cell.name, tuple(cell.params),
+                getattr(cell, 'formula_allows_exact_receiver', False),
+                scalar_view=bool(cell.native_result_binder),
+            )
             params = method.params
             # The public method always has a receiver. Internal calls prove
             # the exact receiver before entering this private C function.

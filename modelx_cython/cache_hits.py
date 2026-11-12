@@ -3,16 +3,13 @@ from dataclasses import dataclass
 
 import libcst as cst
 
-from .builder import NATIVE_TABLE_PROVIDER
 from .cell_entries import EntryModule
 from .consts import CY_MOD
-from .helpers import module_name
 from .scopes import CstFacts
 from .syntax import arguments, dotted_name, literal_value, same_expression, statements, walk
 from .typedefs import primitive_kind
 
 _NATIVE = {f'{CY_MOD}.{name}' for name in ('bint', 'double', 'longlong')}
-_NATIVE_TABLE = f'{module_name(NATIVE_TABLE_PROVIDER)}.NativeTable'
 
 
 def _pure_index(node, parameters):
@@ -50,12 +47,12 @@ class _Hit:
     value: cst.BaseExpression
 
 
-def _layout(fn):
+def _layout(fn, scalar_view):
     if fn.returns is None:
         return None
     args, body = fn.params.params, statements(fn.body)
     result = dotted_name(fn.returns.annotation)
-    if result not in _NATIVE and not (len(args) == 1 and result in {_NATIVE_TABLE, 'object', 'str'}):
+    if result not in _NATIVE and not (len(args) == 1 and (scalar_view or result in {'object', 'str'})):
         return None
     if (len(args) not in (1, 2, 3) or len(body) != 1 or not isinstance(body[0], cst.If)
             or any(arg.annotation is None for arg in args)):
@@ -174,7 +171,8 @@ class _Calls(cst.CSTTransformer):
 def expose_entries(state: EntryModule, known, mode):
     functions = state.functions
     layouts = {name: layout for name in (*known, *state.inbounds_entries)
-               if (fn := functions.get(name)) is not None and (layout := _layout(fn))
+               if (fn := functions.get(name)) is not None
+               and (layout := _layout(fn, name in known and known[name].scalar_view))
                and (mode in (layout.kind, 'both') or mode == 'auto' and (
                    layout.kind == 'scalar' or isinstance(layout.test, cst.Subscript)))}
     return state.replace(state.syntax.visit(_Calls(functions, layouts)))
