@@ -620,7 +620,8 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
                                  for name in ("range", "min", "max", "abs", "StopIteration", "RuntimeError")
                                  for binding in scope[name])
             reductions = NativeReductions(
-                cls_info, cells, self.helper_providers, node, self._reserve_cold_sum, builtin_bounds, builtin_reductions)
+                cls_info, cells, self.helper_providers, node, self._reserve_cold_sum, builtin_bounds,
+                builtin_reductions, self.module.code_enum_symbols)
             node = node.visit(reductions)
             cells.native_reductions = reductions.count
             cells.exact_reduction_guards = reductions.exact_receiver_guards
