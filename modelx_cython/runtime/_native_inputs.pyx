@@ -72,23 +72,29 @@ cdef class TableView:
     cdef double[::1] numbers
 
     def __init__(self, table):
+        cdef object key
+        cdef bint all_integers = True
         self.pandas_at = table._index_error is not None
         self.keys = table._keys
         self.values = table._values
         self.columns = table._columns
-        self.column_positions = dict(zip(self.columns, range(len(self.columns))))
-        ordered = table._ordered
-        self.integral = bool(ordered) and all(
-            type(key) is int and -(1 << 63) <= key < (1 << 63) for key in self.keys)
         # Hashing or ordering an unsupported label would run user code during
         # view construction, even when the eventual lookup reads another row.
-        if not self.integral and not all(_table_view_key(key) for key in self.keys):
-            return
+        for key in self.keys:
+            if type(key) is not int:
+                all_integers = False
+                if not _table_view_key(key):
+                    return
+        self.column_positions = dict(zip(self.columns, range(len(self.columns))))
         self.positions = dict(zip(self.keys, range(len(self.keys))))
-        self.ordered = ordered
+        self.ordered = table._ordered
         if self.ordered:
-            if self.integral:
+            if all_integers:
                 self.minimum, self.maximum = self.ordered[0], self.ordered[-1]
+                self.integral = -(1 << 63) <= self.minimum and self.maximum < (1 << 63)
+            else:
+                self.minimum, self.maximum = min(self.keys), max(self.keys)
+            if self.integral:
                 self.integers = array('q', self.ordered)
                 self.sorted_positions = array('q', [self.positions[key] for key in self.ordered])
                 self.first_integer = self.minimum
@@ -99,8 +105,6 @@ cdef class TableView:
                 if self.numeric:
                     self.width = len(self.columns)
                     self.numbers = array('d', [value for row in self.values for value in row])
-            else:
-                self.minimum, self.maximum = min(self.keys), max(self.keys)
 
     @cython.boundscheck(False)
     @cython.wraparound(False)
