@@ -226,7 +226,7 @@ class _GuardReturns(cst.CSTTransformer):
                     and value.func.value in self.native_helpers)
                 or (in_conditional and self.kinds.kind(value) == KIND_FLOAT)):
             return value
-        value, _ = self._signed_expression(value)
+        value, signed = self._signed_expression(value)
         self.check_overflow |= any(
             isinstance(part, cst.BinaryOperation)
             and isinstance(part.operator, (cst.Add, cst.Subtract, cst.Multiply))
@@ -234,7 +234,7 @@ class _GuardReturns(cst.CSTTransformer):
             and self.arithmetic.integer_interval(part, signed=True) is None
             for part in walk(value)
         )
-        return _checked_integer(value, self.path)
+        return value if signed else _checked_integer(value, self.path)
 
 
 def _guard_result(node, cell, cls, resolver, cells_kinds, ref_kinds, signatures, native_helpers=()):
