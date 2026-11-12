@@ -1,5 +1,6 @@
 """Native integer boundaries reject lossy conversions with rebuild guidance."""
 
+import ast
 import json
 import operator
 import subprocess
@@ -23,7 +24,7 @@ def integer_domain_build(tmp_path_factory):
     try:
         projection = model.new_space("Outer").new_space(
             "Projection", refs={"payload": {"value": 2}, "amount": 30, "divisor": -1, "shift": 1,
-                                "get_item": operator.getitem})
+                                "get_item": operator.getitem, "reads": []})
         # An object result keeps the argument checks independent of native
         # result admission and dense cache range checks.
         projection.new_cells("receive", 'lambda count: {"count": count}')
@@ -35,6 +36,13 @@ def integer_domain_build(tmp_path_factory):
         projection.new_cells("conditional_result", 'lambda: payload["value"] if amount > 0 else 0')
         projection.new_cells("helper_result", 'lambda: get_item(payload, "value")')
         projection.new_cells("read_amount", "lambda: amount")
+        projection.new_cells("read_divisor", """def read_divisor():
+    reads.append(divisor)
+    return divisor
+""").is_cached = False
+        for name, result in (("terminal_product", "multiplier * (read_divisor() - 1)"),
+                             ("reordered_product", "(read_divisor() - 1) * multiplier")):
+            projection.new_cells(name, f"def {name}():\n    multiplier = read_amount()\n    return {result}\n")
         projection.new_cells("increment_amount", "lambda: amount + 1")
         projection.new_cells("decrement_amount", "lambda: amount - 1")
         projection.new_cells("square_amount", "lambda: amount * amount")
@@ -46,6 +54,39 @@ def integer_domain_build(tmp_path_factory):
         projection.new_cells("local_amount", """def local_amount():
     adjusted = amount - 1
     return adjusted + 1
+""")
+        projection.new_cells("reassigned_local", """def reassigned_local():
+    adjusted = amount
+    adjusted = adjusted - 1
+    return adjusted + 1
+""")
+        projection.new_cells("conditional_local", """def conditional_local():
+    if divisor < 0:
+        adjusted = amount - 1
+    else:
+        adjusted = amount + 1
+    return adjusted
+""")
+        projection.new_cells("mixed_local", """def mixed_local():
+    if divisor < 0:
+        adjusted = amount
+    else:
+        adjusted = payload["value"]
+    return adjusted
+""")
+        projection.new_cells("possibly_unbound_local", """def possibly_unbound_local():
+    if divisor < 0:
+        adjusted = amount
+    elif divisor == 0:
+        adjusted = amount
+    return adjusted
+""")
+        projection.new_cells("python_context_local", """def python_context_local():
+    adjusted = amount
+    adjusted = adjusted + 1
+    if adjusted is payload["value"]:
+        return 0
+    return adjusted
 """)
         projection.new_cells("native_operand", "lambda: receive(amount + 1)")
         projection.new_cells("inline_receive", "lambda count: count + 1")
@@ -82,6 +123,8 @@ def integer_domain_build(tmp_path_factory):
         projection.conditional_result()
         projection.helper_result()
         projection.read_amount()
+        projection.terminal_product()
+        projection.reordered_product()
         projection.increment_amount()
         projection.decrement_amount()
         projection.square_amount()
@@ -91,6 +134,11 @@ def integer_domain_build(tmp_path_factory):
         projection.remainder()
         projection.negate_amount()
         projection.local_amount()
+        projection.reassigned_local()
+        projection.conditional_local()
+        projection.mixed_local()
+        projection.possibly_unbound_local()
+        projection.python_context_local()
         projection.native_operand()
         projection.inline_receive(0)
         projection.inline_operand()
@@ -303,6 +351,93 @@ def test_native_signed_arithmetic_cannot_wrap_result(integer_domain_build):
             assert "Outer.Projection.local_amount" in str(error)
         else:
             raise AssertionError("The native local accepted an overflowing intermediate")
+        """))
+
+
+def test_signed_local_flow(integer_domain_build):
+    generated = (integer_domain_build / "exported_cy/_m_Outer/_mx_classes.py").read_text(encoding="utf-8")
+    methods = {node.name: node for node in ast.walk(ast.parse(generated)) if isinstance(node, ast.FunctionDef)}
+
+    def native_local(cell):
+        formula = methods[f"_f_{cell}"]
+        if (len(formula.body) == 1 and isinstance(formula.body[0], ast.Return)
+                and isinstance(call := formula.body[0].value, ast.Call) and isinstance(call.func, ast.Name)):
+            formula = methods.get(call.func.id, formula)
+        return any(isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name)
+                   and node.target.id == "adjusted" and ast.unparse(node.annotation) == "_mx_cy.longlong"
+                   for node in ast.walk(formula))
+
+    assert native_local("reassigned_local")
+    assert native_local("conditional_local")
+    assert not native_local("mixed_local")
+    assert not native_local("possibly_unbound_local")
+    assert not native_local("python_context_local")
+    run_python(integer_domain_build, "-c", textwrap.dedent("""\
+        from exported import mx_model as exported
+        from exported_cy import mx_model as compiled
+
+        maximum, minimum = (1 << 63) - 1, -(1 << 63)
+        for amount, divisor in ((minimum + 1, -1), (maximum - 1, 1)):
+            reference = type(exported)().Outer.Projection
+            projection = type(compiled)().Outer.Projection
+            reference.amount = projection.amount = amount
+            reference.divisor = projection.divisor = divisor
+            assert reference.reassigned_local() == projection.reassigned_local() == amount
+            assert reference.conditional_local() == projection.conditional_local()
+
+        for cell, amount, divisor in (("reassigned_local", minimum, -1),
+                                      ("conditional_local", minimum, -1),
+                                      ("conditional_local", maximum, 1)):
+            projection = type(compiled)().Outer.Projection
+            projection.amount, projection.divisor = amount, divisor
+            try:
+                getattr(projection, cell)()
+            except OverflowError as error:
+                assert f"Outer.Projection.{cell}" in str(error)
+            else:
+                raise AssertionError(f"{cell} accepted an overflowing intermediate")
+
+        projection = type(compiled)().Outer.Projection
+        projection.divisor, projection.payload = 1, {"value": 3}
+        assert projection.mixed_local() == 3
+        projection = type(compiled)().Outer.Projection
+        projection.divisor, projection.payload = 1, {"value": 3.5}
+        try:
+            projection.mixed_local()
+        except TypeError as error:
+            assert "Outer.Projection.mixed_local" in str(error)
+        else:
+            raise AssertionError("mixed local truncated an object result")
+        """))
+
+
+def test_terminal_product_checks_the_final_signed_result(integer_domain_build):
+    generated = (integer_domain_build / "exported_cy/_m_Outer/_mx_classes.py").read_text(encoding="utf-8")
+    assert generated.count("cast(object, _mx_checked_") == 4
+    run_python(integer_domain_build, "-c", textwrap.dedent("""\
+        from exported import mx_model as exported
+        from exported_cy import mx_model as compiled
+
+        minimum = -(1 << 63)
+        for name in ('terminal_product', 'reordered_product'):
+            for amount, divisor in ((2, 3), (0, minimum), (1, minimum + 1)):
+                reference = type(exported)().Outer.Projection
+                projection = type(compiled)().Outer.Projection
+                reference.amount = projection.amount = amount
+                reference.divisor = projection.divisor = divisor
+                reference.reads, projection.reads = [], []
+                assert getattr(projection, name)() == getattr(reference, name)() == amount * (divisor - 1)
+                assert projection.reads == reference.reads == [divisor]
+
+            projection = type(compiled)().Outer.Projection
+            projection.amount, projection.divisor, projection.reads = 1, minimum, []
+            try:
+                getattr(projection, name)()
+            except OverflowError as error:
+                assert f"Outer.Projection.{name}" in str(error)
+            else:
+                raise AssertionError(f"{name} accepted a result below the signed range")
+            assert projection.reads == [minimum]
         """))
 
 
