@@ -677,13 +677,27 @@ class CombinedCellsInfo(LexicalCellsInfo):
     def cache_offsets(self):
         return tuple(axis.lower for axis in self.dense_axes)
 
+    def _logical_axes(self, sizes):
+        minimums = getattr(self._rt, 'min_args', {})
+        return tuple(DenseAxis(key, minimums.get(key, 0), stop,
+                               self.get_argtype_expr(key, c_style=True))
+                     for key, stop in sizes.items())
+
     @cached_property
     def dense_logical_axes(self):
         sizes = self.parent.cells_arg_sizes[tuple(self.params)]
-        offsets = tuple(getattr(self._rt, 'min_args', {}).get(p, 0)
-                        if self.has_shifted_cache else 0 for p in self.params)
-        return tuple(DenseAxis(key, lower, stop, self.get_argtype_expr(key, c_style=True))
-                     for key, lower, stop in zip(self.params, offsets, sizes))
+        return self._logical_axes(dict(zip(self.params, sizes)))
+
+    @property
+    def associative_logical_axes(self):
+        """Only exact signed parameters are bounded associative coordinates."""
+        coordinates = [p for p in self.params if self.get_argtype_expr(p, c_style=True) == CY_INT_T]
+        if not coordinates:
+            return ()
+        signature = tuple(self.params)
+        sizes = (dict(zip(signature, self.parent.cells_arg_sizes[signature]))
+                 if self.is_int_args else self.parent.associative_arg_sizes.get(signature, {}))
+        return self._logical_axes({p: sizes[p] for p in coordinates})
 
     @cached_property
     def dense_axes(self):
@@ -900,12 +914,10 @@ class ClassInfo:
         Annotated only; never assigned.  Space parameters are stored
         in ``refs`` instead.
     _cells_max_args : dict
-        Maps a tuple of parameter names to the maximum argument
-        values observed across all traced cells sharing that
-        parameter tuple.
-    _max_arg_cells : dict
-        Maps a parameter tuple to ``{param: cells fqname}`` recording
-        which cells produced each maximum, for logging.
+        Maps a tuple of integral parameter names to observed maxima
+        and the Cells that produced them, for dense array sizing.
+    _associative_max_args : dict
+        The same observations grouped by full parameter signature.
     """
 
     name: str
@@ -916,8 +928,6 @@ class ClassInfo:
     refs:   dict  # name -> CombinedRefInfo
     spaces: list
     params: dict  # name -> CombinedRefInfo
-    _cells_max_args: Dict[Tuple[str], Tuple[int]]
-    _max_arg_cells: Dict[Tuple[str], Dict[str, str]]  # {(arg,) : {arg: fqname}}
 
     def __init__(self, name, module):
         """Build the cells, space, ref and parameter tables for the
@@ -929,7 +939,7 @@ class ClassInfo:
         self.logger = module.logger
         self.cells = {}
         self._cells_max_args = {}
-        self._max_arg_cells = {}    # keep cells fqname for logging
+        self._associative_max_args = {}
         self.refs = {}
         self.spaces = []
         self._init_cells()
@@ -955,19 +965,19 @@ class ClassInfo:
                 lx_info, rt_info,
                 self.module.spec.get_spec(self.fqname).get(TransSpec.CELLS, {}).get(name, {})
             )
-            if rt_info and not uncached:
-                args = tuple(rt_info.max_args)
-                maxes = tuple(rt_info.max_args.values())
-                if args not in self._cells_max_args:
-                    self._cells_max_args[args] = maxes
-                    self._max_arg_cells[args] = {k: lx_info.fqname for k in args}
-                else:
-                    d = dict(zip(args, self._cells_max_args[args]))
-                    for k, v in rt_info.max_args.items():
-                        if v > d[k]:
-                            d[k] = v
-                            self._max_arg_cells[args][k] = lx_info.fqname
-                    self._cells_max_args[args] = tuple(d.values())
+            if rt_info and not uncached and rt_info.max_args:
+                self._record_max_args(self._cells_max_args, tuple(rt_info.max_args),
+                                      rt_info.max_args, lx_info.fqname)
+                if not lx_info.is_special():
+                    self._record_max_args(self._associative_max_args, tuple(lx_info.params),
+                                          rt_info.max_args, lx_info.fqname)
+
+    @staticmethod
+    def _record_max_args(observed, signature, maxima, cell):
+        bounds = observed.setdefault(signature, {})
+        for key, maximum in maxima.items():
+            if key not in bounds or maximum > bounds[key][0]:
+                bounds[key] = maximum, cell
 
     def _init_spaces(self):
         """Copy the child space names found by the visitor."""
@@ -1045,39 +1055,37 @@ class ClassInfo:
         from the spec get their sizes solely from the observed maxima
         plus one.
         """
-        # params = self.module.spec.get_spec(self.fqname).get(TransSpec.CELLS_PARAMS, {})
+        sizes = self._cache_sizes(self._cells_max_args)
+        return {keys: tuple(values[key] for key in keys) for keys, values in sizes.items()}
 
+    @cached_property
+    def associative_arg_sizes(self):
+        return self._cache_sizes(self._associative_max_args)
+
+    def _cache_sizes(self, observed):
+        spec = self.module.spec.get_spec(self.fqname)
         sizes = {}
-        if TransSpec.CELLS_PARAM_SIZE in self.module.spec.get_spec(self.fqname):
-            params = self.module.spec.get_spec(self.fqname)[TransSpec.CELLS_PARAM_SIZE]
-            # Tuplize 1-arg
-            for k, v in params.items():
-                if isinstance(k, tuple):
-                    sizes[k] = v
-                else:
-                    sizes[(k,)] = (v,)
+        declared = spec.get(TransSpec.CELLS_PARAM_SIZE)
+        if declared is None:
+            declared = {keys: config[TransSpec.SIZE]
+                        for keys, config in spec.get(TransSpec.CELLS_PARAMS, {}).items()
+                        if TransSpec.SIZE in config}
+        for keys, stops in declared.items():
+            if not isinstance(keys, tuple):
+                keys, stops = (keys,), (stops,)
+            sizes[keys] = dict(zip(keys, stops))
 
-        elif TransSpec.CELLS_PARAMS in self.module.spec.get_spec(self.fqname):  # deprecated
-            params = self.module.spec.get_spec(self.fqname)[TransSpec.CELLS_PARAMS]
-            # Tuplize 1-arg
-            for k, v in params.items():
-                if TransSpec.SIZE in v:
-                    if isinstance(k, tuple):
-                        sizes[k] = v[TransSpec.SIZE]
-                    else:
-                        sizes[(k,)] = (v[TransSpec.SIZE],)
-
-        for args, maxes in self._cells_max_args.items():
-            if args in sizes:
-                d = dict(zip(args, sizes[args]))
-                for k, v in zip(args, maxes):
-                    if v + 1 > d[k]:
-                        _logger.info(f"Specified max size of {d[k]} for cells parameter {k} in {self.name} is replaced by {v + 1} from {self._max_arg_cells[args][k]}")
-                        d[k] = v + 1
-                sizes[args] = tuple(d.values())
-            else:
-                sizes[args] = tuple(i + 1 for i in maxes)
-
+        for keys, maxima in observed.items():
+            bounds = sizes.setdefault(keys, {})
+            for key, (maximum, cell) in maxima.items():
+                stop = maximum + 1
+                if key in bounds and stop <= bounds[key]:
+                    continue
+                if key in bounds:
+                    _logger.info(
+                        f"Specified max size of {bounds[key]} for cells parameter {key} "
+                        f"in {self.name} is replaced by {stop} from {cell}")
+                bounds[key] = stop
         return sizes
 
 

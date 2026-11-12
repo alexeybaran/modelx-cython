@@ -22,8 +22,14 @@ def test_numeric_keys(tmp_path):
         model.export(tmp_path/'exported', locked_spaces=['Locked'])
     finally:
         model.close()
-    (tmp_path/'sample.py').write_text('from exported import mx_model as m\n'
-        'for s in (m.Plain, m.Locked): s.value(1.5, 1); s.value(0.0, 1); s.integer(1.5)\n')
+    (tmp_path/'sample.py').write_text(textwrap.dedent('''\
+        from exported import mx_model as m
+        for s in (m.Plain, m.Locked):
+            s.value(1.5, 1)
+            s.value(0.0, 1)
+            s.value(0.0, 2)
+            s.integer(1.5)
+        '''))
     subprocess.run([sys.executable, '-m', 'modelx_cython', 'exported',
                     '--sample', 'sample.py', '--no-spec'], cwd=tmp_path, check=True)
     probe = textwrap.dedent('''\

@@ -88,12 +88,13 @@ def test_long_and_hash_formula_contracts(tmp_path):
         assert fresh.hash_total(1,0.25)==1.25
         assert fresh.value(1)==1.0
         assert fresh.counter[0]==before+2
-        for call in (lambda:fresh.value(7), lambda:fresh.hash_total(7,0.25)):
+        for call, cell in ((lambda:fresh.value(7), 'Policy.value'),
+                           (lambda:fresh.hash_total(7,0.25), 'Policy.hash_total')):
             for _ in range(2):
                 try:
                     call()
                 except IndexError as error:
-                    assert 'Policy.value' in str(error)
+                    assert cell in str(error)
                 else:
                     raise AssertionError('out-of-range dependency was evaluated')
         assert fresh.counter[0]==before+2

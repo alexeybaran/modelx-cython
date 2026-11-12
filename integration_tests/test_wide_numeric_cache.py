@@ -24,7 +24,10 @@ def test_wide_numeric_cache(tmp_path):
     (tmp_path / 'sample.py').write_text(
         'from exported import mx_model\n'
         'mx_model.Policy[0].value(1, 2.0, 3, 4.0, 5, 6.0)\n', encoding='utf-8')
-    subprocess.run([sys.executable, '-m', 'modelx_cython', 'exported', '--sample', 'sample.py', '--no-spec'],
+    (tmp_path / 'spec.py').write_text(repr({'spaces': {'Policy': {'cells_param_size': {
+        ('a', 'b', 'c', 'd', 'e', 'f'): (257, 0, 4, 0, 6, 0),
+    }}}}), encoding='utf-8')
+    subprocess.run([sys.executable, '-m', 'modelx_cython', 'exported', '--sample', 'sample.py', '--spec', 'spec.py'],
                    cwd=tmp_path, check=True)
     source = (tmp_path / 'exported_cy/_mx_classes.py').read_text(encoding='utf-8')
     assert '.WideNumericCache(6, True, 8)' in source
