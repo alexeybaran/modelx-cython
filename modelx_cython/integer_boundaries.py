@@ -1,6 +1,7 @@
 """Check integer Cell results and ItemSpace keys at their native boundaries."""
 
 import libcst as cst
+from libcst.metadata import ExpressionContext
 
 from .checked_arithmetic import CheckedArithmetic, guarded_integer_intervals
 from .consts import CY_MOD, FORMULA_PREF, MX_SELF, MX_SYS_MOD
@@ -332,11 +333,82 @@ class _GuardIntegers(cst.CSTTransformer):
         return value, signed
 
 
-def _type_dominating_locals(body, guard, facts, parameters):
-    """Keep signed locals native when one straight-line assignment supplies them."""
+def _signed_operand_names(value):
+    """Find the name uses that signed expression lowering treats as C operands."""
+    if isinstance(value, cst.Name):
+        yield value
+    elif isinstance(value, cst.BinaryOperation) and type(value.operator) in _SIGNED_OPERATIONS:
+        yield from _signed_operand_names(value.left)
+        yield from _signed_operand_names(value.right)
+    elif isinstance(value, cst.UnaryOperation) and isinstance(value.operator, (cst.Plus, cst.Minus)):
+        yield from _signed_operand_names(value.expression)
+    elif isinstance(value, cst.IfExp):
+        yield from _signed_operand_names(value.body)
+        yield from _signed_operand_names(value.orelse)
+
+
+def _signed_local_assignments(body, name, operands, guard, facts):
+    """Prove a native local across simple assignments and conditional joins."""
+    assignments = {}
+    reads = {part for part in walk(body) if isinstance(part, cst.Name) and part.value == name
+             and facts.contexts.get(part) is ExpressionContext.LOAD}
+
+    def flow(lines, assigned):
+        for line in lines:
+            if isinstance(line, cst.If):
+                if not assigned and any(part in reads for part in walk(line.test)):
+                    return None
+                taken = flow(statements(line.body), assigned)
+                other = line.orelse
+                if isinstance(other, cst.If):
+                    skipped = flow((other,), assigned)
+                elif other is not None:
+                    skipped = flow(statements(other.body), assigned)
+                else:
+                    skipped = assigned
+                if taken is None or skipped is None:
+                    return None
+                assigned = taken and skipped
+                continue
+            if not assigned and any(part in reads for part in walk(line)):
+                return None
+            assignment = line.body[0] if isinstance(line, cst.SimpleStatementLine) and len(line.body) == 1 else line
+            if (isinstance(assignment, cst.Assign) and len(assignment.targets) == 1
+                    and isinstance(target := assignment.targets[0].target, cst.Name)
+                    and target.value == name):
+                value, signed = guard._signed_expression(assignment.value, guard.path)
+                if not signed:
+                    return None
+                assignments[assignment] = value
+                assigned = True
+        return assigned
+
+    if flow(body.body, False) is None or len(assignments) != facts.stores[name]:
+        return {}
+    # A Python-context use could depend on the local's object identity or
+    # Python operator semantics. Keep the whole local boxed in that case.
+    safe_reads = set()
+    for value in (*operands, *(assignment.value for assignment in assignments)):
+        local_reads = reads.intersection(_signed_operand_names(value))
+        if local_reads and guard._signed_expression(value, guard.path)[1]:
+            safe_reads.update(local_reads)
+    return assignments if reads <= safe_reads else {}
+
+
+class _SignedLocalValues(cst.CSTTransformer):
+    def __init__(self, assignments):
+        self.assignments = assignments
+
+    def leave_Assign(self, before, after):
+        value = self.assignments.get(before)
+        return after if value is None else after.with_changes(value=value)
+
+
+def _type_signed_locals(body, guard, facts, parameters):
+    """Keep provably signed locals native and preserve existing prefix admission."""
     if (not isinstance(body, cst.IndentedBlock) or has_scope_effects(body.body)
             or facts.reads & {'eval', 'exec', 'locals', 'vars', 'globals', '_getframe', 'currentframe'}):
-        return body
+        return body, ()
     operands = []
     for part in lexical_nodes(body.body):
         if guard.signed_return and isinstance(part, cst.Return) and part.value is not None:
@@ -346,9 +418,10 @@ def _type_dominating_locals(body, guard, facts, parameters):
             operands.append(part.args[0].value)
     needed = {part.value for value in operands for part in walk(value) if isinstance(part, cst.Name)}
     if not needed:
-        return body
+        return body, ()
     statements = list(body.body)
-    seen = set(parameters)
+    parameters = set(parameters)
+    seen = parameters.copy()
     for index, line in enumerate(statements):
         if not isinstance(line, cst.SimpleStatementLine) or len(line.body) != 1:
             break
@@ -363,7 +436,22 @@ def _type_dominating_locals(body, guard, facts, parameters):
                     cst.AnnAssign(target, cst.Annotation(_INTEGER_ANNOTATION), value),))
                 guard.signed_names.add(target.value)
         seen.update(part.value for part in walk(line) if isinstance(part, cst.Name))
-    return body.with_changes(body=statements)
+    declarations, assignments = [], {}
+    for name in sorted(needed - parameters - guard.signed_names):
+        if facts.stores[name] < 2:
+            continue
+        guard.signed_names.add(name)
+        values = _signed_local_assignments(body, name, operands, guard, facts)
+        if not values:
+            guard.signed_names.remove(name)
+            continue
+        declarations.append(cst.SimpleStatementLine((cst.AnnAssign(
+            cst.Name(name), cst.Annotation(_INTEGER_ANNOTATION)),)))
+        assignments.update(values)
+    body = body.with_changes(body=statements)
+    if assignments:
+        body = body.visit(_SignedLocalValues(assignments))
+    return body, tuple(declarations)
 
 
 def _guard_result(node, cell, cls, resolver, cells_kinds, ref_kinds, signatures, native_helpers=(),
@@ -397,15 +485,19 @@ def _guard_result(node, cell, cls, resolver, cells_kinds, ref_kinds, signatures,
                            functions.difference(bindings), receiver_methods, signed_names, signed_return,
                            error)
     parameters = (*node.params.posonly_params, *node.params.params, *node.params.kwonly_params)
-    body = _type_dominating_locals(node.body, guard, facts, (parameter.name.value for parameter in parameters))
+    body, declarations = _type_signed_locals(
+        node.body, guard, facts, (parameter.name.value for parameter in parameters))
     body = body.visit(guard)
+    if declarations:
+        doc_end = 1 if node.get_docstring() is not None else 0
+        body = body.with_changes(body=(*body.body[:doc_end], *declarations, *body.body[doc_end:]))
     if not guard.check_overflow or not isinstance(body, cst.IndentedBlock):
         return node.with_changes(body=body)
     decorator = cst.Decorator(cst.parse_expression(f'{CY_MOD}.overflowcheck(True)'))
     if guard.function_handler:
-        doc_end = 1 if node.get_docstring() is not None else 0
-        handler = _overflow_handler(body.body[doc_end:], cell.model_path, error)
-        body = body.with_changes(body=(*body.body[:doc_end], handler))
+        prefix = len(declarations) + (1 if node.get_docstring() is not None else 0)
+        handler = _overflow_handler(body.body[prefix:], cell.model_path, error)
+        body = body.with_changes(body=(*body.body[:prefix], handler))
     return node.with_changes(decorators=(*node.decorators, decorator), body=body)
 
 
