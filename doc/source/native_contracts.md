@@ -14,6 +14,14 @@ not a mathematical proof about every possible future input. Observed integers
 outside signed 64 bits use objects. Arrays use native views only for a consistent
 supported native-endian buffer format; other formats remain objects.
 
+Signed 64-bit Cell parameters and results, integer References, and integer
+ItemSpace keys use the Python index protocol when a value crosses from Python
+into native storage. A value such as `2.0` raises `TypeError`. An integer outside
+the signed range raises `OverflowError`. The message names the Cell or
+Reference and points to a wider sample or spec. Ordinary bound Python calls
+perform this check before dispatch. A separately compiled Cython caller must
+pass values that satisfy the published Cython signature.
+
 With automatic cache selection, sampled integer ranges size the dense hot window,
 not the Cell's legal input domain. Other typed keys use the existing lazy spill
 dictionary belonging to that Cell; published results remain one logical cache.

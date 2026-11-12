@@ -1,10 +1,70 @@
 from libc.math cimport (
     pow as _mx_c_pow, floor as _mx_c_floor, isfinite as _mx_c_isfinite)
-from libc.limits cimport LLONG_MIN
+from libc.limits cimport LLONG_MAX, LLONG_MIN
 from libc.string cimport memcmp
-from cpython.object cimport Py_TYPE
+from cpython.long cimport PyLong_AsLongLong, PyLong_CheckExact
+from cpython.number cimport PyNumber_Index
+from cpython.object cimport Py_TYPE, PyObject_GenericGetAttr, PyObject_GenericSetAttr
+from cpython.unicode cimport PyUnicode_Check, PyUnicode_Compare
 from modelx_cython._rounding cimport _mx_round_one, _mx_round_digits
 cimport cython
+
+
+cdef inline long long _mx_exact_int64(object value, str path) except? -1:
+    """Cross a signed 64-bit boundary through the Python index protocol."""
+    try:
+        if PyLong_CheckExact(value):
+            return PyLong_AsLongLong(value)
+        return PyLong_AsLongLong(PyNumber_Index(value))
+    except TypeError as error:
+        raise TypeError(
+            f"{path} requires an exact signed 64-bit integer. Rebuild with a wider sample or spec."
+        ) from error
+    except OverflowError as error:
+        raise OverflowError(
+            f"{path} requires an exact signed 64-bit integer. Rebuild with a wider sample or spec."
+        ) from error
+
+
+ctypedef unsigned long _mx_native_ulong
+ctypedef unsigned long long _mx_native_ulonglong
+
+ctypedef fused _mx_integer_source:
+    object
+    long long
+    _mx_native_ulong
+    _mx_native_ulonglong
+    double
+
+
+cdef inline long long _mx_integer_result(_mx_integer_source value, str path) except? -1:
+    """Check Python objects and other C scalars before storing a signed result."""
+    if _mx_integer_source is object:
+        return _mx_exact_int64(value, path)
+    elif _mx_integer_source is double:
+        raise TypeError(
+            f"{path} requires an exact signed 64-bit integer. Rebuild with a wider sample or spec."
+        )
+    elif _mx_integer_source is _mx_native_ulong or _mx_integer_source is _mx_native_ulonglong:
+        if value > LLONG_MAX:
+            raise OverflowError(
+                f"{path} requires an exact signed 64-bit integer. Rebuild with a wider sample or spec."
+            )
+        return <long long>value
+    else:
+        return value
+
+
+cdef inline bint _mx_ref_name_is(object name, str expected) except? -1:
+    return PyUnicode_Check(name) and PyUnicode_Compare(name, expected) == 0
+
+
+cdef inline int _mx_generic_setattr(object receiver, object name, object value) except -1:
+    return PyObject_GenericSetAttr(receiver, name, value)
+
+
+cdef inline object _mx_generic_getattr(object receiver, object name):
+    return PyObject_GenericGetAttr(receiver, name)
 
 
 cdef inline int _mx_check_enum_schema(object receiver, object owner, tuple bindings) except -1:

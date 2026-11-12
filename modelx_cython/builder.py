@@ -412,6 +412,12 @@ class CombinedCellsInfo(LexicalCellsInfo):
         """
         return bool(self._rt)
 
+    @cached_property
+    def model_path(self):
+        """Dotted Cell name as it appears in the exported model."""
+        spaces = [part[len(MODULE_PREF):] for part in self.module.split('.')[1:-1]]
+        return '.'.join((*spaces, self.cls[len(SPACE_PREF):], self.name))
+
     def has_args(self):
         """Return True if the cells has one or more parameters."""
         return bool(self.params)
