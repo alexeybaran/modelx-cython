@@ -55,20 +55,19 @@ cdef inline long long _mx_integer_result(_mx_integer_source value, str path) exc
         return value
 
 
-cdef inline long long _mx_signed_overflow(str path) except? -1:
-    raise OverflowError(
-        f"{path} requires an exact signed 64-bit integer. Rebuild with a wider sample or spec."
-    )
-
-
 cdef extern from *:
     """
     #include <limits.h>
+    #if defined(_MSC_VER)
+    #define MX_SIGNED_INLINE __forceinline
+    #else
+    #define MX_SIGNED_INLINE CYTHON_INLINE
+    #endif
     #if defined(_MSC_VER) && defined(_M_X64)
     #include <intrin.h>
     #endif
 
-    static CYTHON_INLINE int mx_add_overflow(long long left, long long right,
+    static MX_SIGNED_INLINE int mx_add_overflow(long long left, long long right,
                                              long long *result) {
     #if defined(__GNUC__) || defined(__clang__)
         return __builtin_add_overflow(left, right, result);
@@ -89,7 +88,7 @@ cdef extern from *:
     #endif
     }
 
-    static CYTHON_INLINE int mx_sub_overflow(long long left, long long right,
+    static MX_SIGNED_INLINE int mx_sub_overflow(long long left, long long right,
                                              long long *result) {
     #if defined(__GNUC__) || defined(__clang__)
         return __builtin_sub_overflow(left, right, result);
@@ -108,7 +107,7 @@ cdef extern from *:
     #endif
     }
 
-    static CYTHON_INLINE int mx_mul_overflow(long long left, long long right,
+    static MX_SIGNED_INLINE int mx_mul_overflow(long long left, long long right,
                                              long long *result) {
     #if defined(__GNUC__) || defined(__clang__)
         return __builtin_mul_overflow(left, right, result);
@@ -125,31 +124,33 @@ cdef extern from *:
         return 0;
     #endif
     }
+    static long long mx_signed_overflow(PyObject *path) {
+        PyErr_Format(PyExc_OverflowError,
+                     "%U requires an exact signed 64-bit integer. Rebuild with a wider sample or spec.",
+                     path);
+        return -1;
+    }
+
+    static MX_SIGNED_INLINE long long mx_signed_add(long long left, long long right, PyObject *path) {
+        long long value;
+        return mx_add_overflow(left, right, &value) ? mx_signed_overflow(path) : value;
+    }
+
+    static MX_SIGNED_INLINE long long mx_signed_sub(long long left, long long right, PyObject *path) {
+        long long value;
+        return mx_sub_overflow(left, right, &value) ? mx_signed_overflow(path) : value;
+    }
+
+    static MX_SIGNED_INLINE long long mx_signed_mul(long long left, long long right, PyObject *path) {
+        long long value;
+        return mx_mul_overflow(left, right, &value) ? mx_signed_overflow(path) : value;
+    }
+    #undef MX_SIGNED_INLINE
     """
-    bint _mx_add_overflow "mx_add_overflow"(long long, long long, long long*) noexcept
-    bint _mx_sub_overflow "mx_sub_overflow"(long long, long long, long long*) noexcept
-    bint _mx_mul_overflow "mx_mul_overflow"(long long, long long, long long*) noexcept
-
-
-cdef inline long long _mx_signed_add(long long left, long long right, str path) except? -1:
-    cdef long long value
-    if _mx_add_overflow(left, right, &value):
-        return _mx_signed_overflow(path)
-    return value
-
-
-cdef inline long long _mx_signed_sub(long long left, long long right, str path) except? -1:
-    cdef long long value
-    if _mx_sub_overflow(left, right, &value):
-        return _mx_signed_overflow(path)
-    return value
-
-
-cdef inline long long _mx_signed_mul(long long left, long long right, str path) except? -1:
-    cdef long long value
-    if _mx_mul_overflow(left, right, &value):
-        return _mx_signed_overflow(path)
-    return value
+    long long _mx_signed_overflow "mx_signed_overflow"(str path) except? -1
+    long long _mx_signed_add "mx_signed_add"(long long, long long, str path) except? -1
+    long long _mx_signed_sub "mx_signed_sub"(long long, long long, str path) except? -1
+    long long _mx_signed_mul "mx_signed_mul"(long long, long long, str path) except? -1
 
 
 cdef inline long long _mx_signed_floor(long long left, long long right, str path) except? -1:
