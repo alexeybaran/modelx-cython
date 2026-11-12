@@ -22,7 +22,7 @@ def integer_domain_build(tmp_path_factory):
     model = mx.new_model("IntegerDomains")
     try:
         projection = model.new_space("Outer").new_space(
-            "Projection", refs={"payload": {"value": 2}, "amount": 30,
+            "Projection", refs={"payload": {"value": 2}, "amount": 30, "divisor": -1,
                                 "get_item": operator.getitem})
         # An object result keeps the argument checks independent of native
         # result admission and dense cache range checks.
@@ -36,6 +36,9 @@ def integer_domain_build(tmp_path_factory):
         projection.new_cells("helper_result", 'lambda: get_item(payload, "value")')
         projection.new_cells("read_amount", "lambda: amount")
         projection.new_cells("increment_amount", "lambda: amount + 1")
+        projection.new_cells("decrement_amount", "lambda: amount - 1")
+        projection.new_cells("square_amount", "lambda: amount * amount")
+        projection.new_cells("divide_amount", "lambda: amount // divisor")
         policies = model.new_space("Policies", formula="lambda policy: {}")
         policies.new_cells("number", "lambda: policy")
         assert policies[4].number() == 4
@@ -68,6 +71,9 @@ def integer_domain_build(tmp_path_factory):
         projection.helper_result()
         projection.read_amount()
         projection.increment_amount()
+        projection.decrement_amount()
+        projection.square_amount()
+        projection.divide_amount()
         """), encoding="utf-8")
     run_python(work, "-m", "modelx_cython", "exported", "--sample", "sample.py", "--no-spec")
 
@@ -207,16 +213,26 @@ def test_native_signed_arithmetic_cannot_wrap_result(integer_domain_build):
         from exported import mx_model as exported
         from exported_cy import mx_model as compiled
 
-        limit = (1 << 63) - 1
-        reference = type(exported)().Outer.Projection
-        reference.amount = limit
-        assert reference.increment_amount() == limit + 1
-        projection = type(compiled)().Outer.Projection
-        projection.amount = limit
-        try:
-            projection.increment_amount()
-        except OverflowError as error:
-            assert "Outer.Projection.increment_amount" in str(error)
-        else:
-            raise AssertionError("The signed addition wrapped before conversion")
+        maximum, minimum = (1 << 63) - 1, -(1 << 63)
+        cases = (
+            ("increment_amount", maximum, maximum - 1),
+            ("decrement_amount", minimum, minimum + 1),
+            ("square_amount", 3037000500, 1 << 31),
+            ("divide_amount", minimum, minimum + 1),
+        )
+        for cell, overflow, valid in cases:
+            reference = type(exported)().Outer.Projection
+            projection = type(compiled)().Outer.Projection
+            reference.amount = projection.amount = valid
+            assert getattr(projection, cell)() == getattr(reference, cell)()
+            reference = type(exported)().Outer.Projection
+            projection = type(compiled)().Outer.Projection
+            reference.amount = projection.amount = overflow
+            assert not minimum <= getattr(reference, cell)() <= maximum
+            try:
+                getattr(projection, cell)()
+            except OverflowError as error:
+                assert f"Outer.Projection.{cell}" in str(error)
+            else:
+                raise AssertionError(f"{cell} wrapped before conversion")
         """))

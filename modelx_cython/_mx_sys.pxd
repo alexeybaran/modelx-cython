@@ -55,6 +55,36 @@ cdef inline long long _mx_integer_result(_mx_integer_source value, str path) exc
         return value
 
 
+cdef inline long long _mx_signed_overflow(str path) except? -1:
+    raise OverflowError(
+        f"{path} requires an exact signed 64-bit integer. Rebuild with a wider sample or spec."
+    )
+
+
+cdef inline long long _mx_signed_add(long long left, long long right, str path) except? -1:
+    if right > 0 and left > LLONG_MAX - right or right < 0 and left < LLONG_MIN - right:
+        return _mx_signed_overflow(path)
+    return left + right
+
+
+cdef inline long long _mx_signed_sub(long long left, long long right, str path) except? -1:
+    if right > 0 and left < LLONG_MIN + right or right < 0 and left > LLONG_MAX + right:
+        return _mx_signed_overflow(path)
+    return left - right
+
+
+cdef inline long long _mx_signed_mul(long long left, long long right, str path) except? -1:
+    if -2147483648 <= left <= 2147483647 and -2147483648 <= right <= 2147483647:
+        return left * right
+    return _mx_exact_int64((<object>left) * right, path)
+
+
+cdef inline long long _mx_signed_floor(long long left, long long right, str path) except? -1:
+    if right == -1 and left == LLONG_MIN:
+        return _mx_signed_overflow(path)
+    return left // right
+
+
 cdef inline bint _mx_ref_name_is(object name, str expected) except? -1:
     return PyUnicode_Check(name) and PyUnicode_Compare(name, expected) == 0
 
