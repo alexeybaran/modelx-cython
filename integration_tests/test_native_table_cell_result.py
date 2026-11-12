@@ -50,13 +50,13 @@ def test_parameterized_table_result(tmp_path):
 ''')
         space.new_cells('clamped_amount', '''def clamped_amount(account, month):
     table = schedule(account)
-    return table.lookup_clamped_float(month, "rate")
+    return table.lookup_clamped_float(month, "rate", "upper")
 ''')
         space.new_cells('clamped_default', '''def clamped_default(account, month):
-    return schedule(account).lookup_clamped_float(month, "rate", False, -2.0)
+    return schedule(account).lookup_clamped_float(month, "rate", "upper", -2.0)
 ''')
         space.new_cells('clamped_both', '''def clamped_both(account, month):
-    return schedule(account).lookup_clamped_float(month, "rate", True)
+    return schedule(account).lookup_clamped_float(month, "rate", "both")
 ''')
         space.new_cells('fixed_schedule', '''def fixed_schedule() -> "modelx_helpers.immutable_inputs.Table":
     return schedules[7]
