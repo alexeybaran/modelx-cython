@@ -11,11 +11,14 @@ declared table operations that later passes already lower; nothing else changes.
 - a call to a Cell whose traced result is a table, or a grouped table (Records of tables);
 - ``.slice(...)`` applied to such a value;
 - a local name with exactly one assignment in the formula, from such a value (repeating the
-  identical assignment counts as one). A local bound to a zero-argument Cell call is replaced
-  by the call in the rewritten read: the call returns the same cached object.
+  identical assignment counts as one). A local bound to a zero-argument cached Cell call is
+  replaced by the call in the rewritten read: the call returns the same cached object.
 
 ``float(R.loc[key, "col"])`` loses the ``float()``: the typed read already returns a float.
 For the same reason ``float()`` of an integer column read becomes the float read.
+
+``R.loc[key]["col"]`` and ``row["col"]`` with ``row = R.loc[key]`` assigned once (key a local
+or a cached Cell call) are read as ``R.loc[key, "col"]``: the same value for a unique index.
 
 ``G.loc[(g1, ..., gn, key), "col"]`` on a grouped table stays an object read: no generic native
 grouped read exists yet (backlog C2/C3), and slicing per call was slower than the object read.
@@ -87,6 +90,7 @@ class LocReads(FormulaTransformer):
         self.typed = 0
         self.untyped = []
         self._aliases = {}
+        self._row_locals = set()
 
     def visit_FunctionDef(self, node):
         if not self._aliases:
@@ -94,7 +98,49 @@ class LocReads(FormulaTransformer):
             node.body.visit(scan)
             self._aliases = {name: value for name, value in scan.values.items()
                              if scan.counts.get(name) == 1 and value is not None}
+            self._row_locals = self._replaceable_rows(node.body)
         return True
+
+    def _replaceable_rows(self, body):
+        """Locals ``row = R.loc[key]`` whose every use is ``row["literal"]`` on a traced table.
+
+        Their reads are rewritten to ``R.loc[key, "col"]``, so the row itself is never needed.
+        """
+        candidates = {}
+        for name, value in self._aliases.items():
+            if (isinstance(value, cst.Subscript) and isinstance(value.value, cst.Attribute)
+                    and value.value.attr.value == 'loc' and len(value.slice) == 1
+                    and isinstance(value.slice[0].slice, cst.Index)
+                    and self._pure_key(value.slice[0].slice.value)
+                    and self._schema(value.value.value) is not None):
+                candidates[name] = 0
+        if not candidates:
+            return set()
+        uses, column_reads = dict.fromkeys(candidates, 0), dict.fromkeys(candidates, 0)
+
+        class Uses(cst.CSTVisitor):
+            def visit_Name(self, node):
+                if node.value in uses:
+                    uses[node.value] += 1
+
+            def visit_Subscript(self, node):
+                if (isinstance(node.value, cst.Name) and node.value.value in column_reads
+                        and len(node.slice) == 1 and isinstance(node.slice[0].slice, cst.Index)
+                        and isinstance(node.slice[0].slice.value, cst.SimpleString)):
+                    column_reads[node.value.value] += 1
+        body.visit(Uses())
+        # every Name occurrence except the single assignment target is a literal column read
+        return {name for name in candidates if uses[name] == column_reads[name] + 1}
+
+    def leave_SimpleStatementLine(self, original, updated):
+        body = [statement for statement in updated.body
+                if not (isinstance(statement, cst.Assign) and len(statement.targets) == 1
+                        and isinstance(statement.targets[0].target, cst.Name)
+                        and statement.targets[0].target.value in self._row_locals)]
+        if len(body) == len(updated.body):
+            return updated
+        self.typed += 0
+        return updated.with_changes(body=body) if body else cst.RemovalSentinel.REMOVE
 
     def _schema(self, receiver, depth=0, sliced=0):
         """The traced schema of the table this expression evaluates to, if any.
@@ -170,8 +216,8 @@ class LocReads(FormulaTransformer):
             if isinstance(value, cst.Call) and not value.args:
                 chain = _extract_self_chain(value.func)
                 if isinstance(chain, list) and chain:
-                    status, _ = self.resolver.resolve_chain(self.space, chain)
-                    if status == RESOLVED:
+                    status, name = self.resolver.resolve_chain(self.space, chain)
+                    if status == RESOLVED and name in getattr(self.resolver, 'cached_cells', ()):
                         return value
         return receiver
 
@@ -192,7 +238,51 @@ class LocReads(FormulaTransformer):
             return self._literal_values(self._aliases[node.value], depth + 1)
         return None
 
+    def _pure_key(self, node):
+        """A key expression that can be evaluated again with the same result."""
+        if isinstance(node, (cst.Name, cst.Integer, cst.SimpleString)):
+            return True
+        if isinstance(node, cst.Tuple):
+            return all(self._pure_key(e.value) for e in node.elements)
+        if isinstance(node, cst.Call) and not any(a.keyword or a.star for a in node.args):
+            chain = _extract_self_chain(node.func)
+            if isinstance(chain, list) and chain:
+                status, name = self.resolver.resolve_chain(self.space, chain)
+                return (status == RESOLVED and name in getattr(self.resolver, 'cached_cells', ())
+                        and all(self._pure_key(a.value) for a in node.args))
+        return False
+
+    def _row_read(self, node):
+        """``R.loc[key]["col"]``, or ``row["col"]`` with ``row = R.loc[key]`` assigned once,
+        as the equivalent ``R.loc[key, "col"]``; None for anything else."""
+        if not (len(node.slice) == 1 and isinstance(node.slice[0].slice, cst.Index)
+                and isinstance(node.slice[0].slice.value, cst.SimpleString)):
+            return None
+        row = node.value
+        if isinstance(row, cst.Name) and row.value in self._aliases:
+            row = self._aliases[row.value]
+        if not (isinstance(row, cst.Subscript) and isinstance(row.value, cst.Attribute)
+                and row.value.attr.value == 'loc' and len(row.slice) == 1
+                and isinstance(row.slice[0].slice, cst.Index) and self._pure_key(row.slice[0].slice.value)):
+            return None
+        return row.with_changes(slice=[cst.SubscriptElement(cst.Index(row.slice[0].slice.value), comma=cst.Comma()),
+                                       cst.SubscriptElement(node.slice[0].slice)])
+
     def leave_Subscript(self, original, updated):
+        whole = self._row_read(updated)
+        if whole is not None:
+            call, reason = self._float_read(whole, ('float',))
+            if call is not None:
+                self.typed += 1
+                return call
+            if reason is not None and 'traced kind int' in reason:
+                self.untyped.append(reason)
+                return whole        # float() around it may still type it as a float read
+            if isinstance(updated.value, cst.Name) and updated.value.value in self._row_locals:
+                if reason is not None:
+                    self.untyped.append(reason)
+                return whole        # the row local is removed, so read the cell directly
+            return updated
         call, reason = self._float_read(updated, ('float',))
         if call is not None:
             self.typed += 1

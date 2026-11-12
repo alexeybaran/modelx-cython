@@ -758,7 +758,12 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
             # Native memo structs contain only scalars. Use Cython's standard
             # serializer; the module directive also works in pure-Python mode.
             module = module.with_changes(header=(
-                cst.EmptyLine(comment=cst.Comment('# cython: auto_pickle=True')), *module.header))
+                cst.EmptyLine(comment=cst.Comment(
+                    '# cython: auto_pickle=True'
+                    # Experiment switch (backlog C1): C integer type inference with overflow checks,
+                    # for the generated model module only; providers keep their own directives.
+                    + (', infer_types=True, overflowcheck=True'
+                       if __import__('os').environ.get('MX_CY_INFER_TYPES') == '1' else ''))), *module.header))
         return module.visit(NumericExceptions())
 
     def leave_ClassDef(

@@ -33,8 +33,9 @@ def _model():
                     '    return float(sched.loc[t, "premium_pp"])'),
         'premium_full_key': 'def premium_full_key(t):\n    return float(data.prem_table().loc[(plan, t), "premium_pp"])',
         'column_by_name': 'def column_by_name(t):\n    name = "mort_rate"\n    return float(data.mort_table().loc[30 + t, name])',
+        'column_computed': 'def column_computed(t):\n    return float(data.mort_table().loc[30 + t, "mort_" + "rate"])',
         'total': ('def total():\n    return sum(rate(t) + capped(t + 5) + band(t) + band_int(t) + premium(1 + t % 3)'
-                  ' + premium_full_key(1 + t % 3) + column_by_name(t) for t in range(5))'),
+                  ' + premium_full_key(1 + t % 3) + column_by_name(t) + column_computed(t) for t in range(5))'),
     }
     for name, source in formulas.items():
         proj.new_cells(name, source)
@@ -64,4 +65,5 @@ def test_loc_reads_three_modes(tmp_path):
     assert cell('premium')['loc_reads_typed'] == 1         # through slice() of a grouped table
     assert cell('band_int')['loc_reads_untyped'] == ["column 'band' has traced kind int"]
     assert cell('premium_full_key')['loc_reads_untyped'] == ['full key into a grouped table: no native grouped read']
-    assert cell('column_by_name')['loc_reads_untyped'] == ['column is not a string literal']
+    assert cell('column_by_name')['loc_reads_typed'] == 1      # a local bound once to a literal
+    assert cell('column_computed')['loc_reads_untyped'] == ['column is not a string literal']
