@@ -1027,8 +1027,8 @@ def trace_calls(
 
     A context manager that installs an :class:`MxCallTracer` as the
     profile function via :func:`sys.setprofile` for the duration of
-    the ``with`` block.  On exit, the previous profile function is
-    restored and ``logger.flush()`` is called.
+    the ``with`` block. The previous profile function is restored on exit.
+    A successful trace is then flushed to the logger.
 
     Parameters
     ----------
@@ -1056,4 +1056,4 @@ def trace_calls(
         yield
     finally:
         sys.setprofile(old_trace)
-        logger.flush()
+    logger.flush()
