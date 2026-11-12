@@ -110,6 +110,10 @@ class CheckedArithmetic:
             else:
                 magnitude = max(abs(left[0]), abs(left[1]))
                 interval = -magnitude, magnitude
+        elif signed and isinstance(expr.operator, cst.Modulo):
+            if left[0] == limits[0] and right[0] <= -1 <= right[1]:
+                return None
+            interval = min(0, right[0] + 1), max(0, right[1] - 1)
         else:
             return None
         return interval if limits[0] <= interval[0] <= interval[1] <= limits[1] else None

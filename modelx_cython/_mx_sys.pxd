@@ -158,6 +158,36 @@ cdef inline long long _mx_signed_floor(long long left, long long right, str path
     return left // right
 
 
+cdef inline long long _mx_signed_remainder(long long left, long long right, str path) except? -1:
+    # C remainder shares division's overflow at LLONG_MIN % -1.
+    if right == -1:
+        return 0
+    return left % right
+
+
+cdef inline long long _mx_signed_left_shift(long long value, long long count, str path) except? -1:
+    if count < 0:
+        raise ValueError("negative shift count")
+    if count >= 63:
+        if value == 0:
+            return 0
+        if count == 63 and value == -1:
+            return LLONG_MIN
+        return _mx_signed_overflow(path)
+    return _mx_signed_mul(value, (<long long>1) << count, path)
+
+
+cdef inline long long _mx_signed_right_shift(long long value, long long count, str path) except? -1:
+    if count < 0:
+        raise ValueError("negative shift count")
+    if count >= 63:
+        return -1 if value < 0 else 0
+    # Only shift nonnegative C values. Python rounds negative shifts down.
+    if value < 0:
+        return -1 - ((-1 - value) >> count)
+    return value >> count
+
+
 cdef inline bint _mx_ref_name_is(object name, str expected) except? -1:
     return PyUnicode_Check(name) and PyUnicode_Compare(name, expected) == 0
 

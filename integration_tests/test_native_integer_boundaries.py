@@ -22,7 +22,7 @@ def integer_domain_build(tmp_path_factory):
     model = mx.new_model("IntegerDomains")
     try:
         projection = model.new_space("Outer").new_space(
-            "Projection", refs={"payload": {"value": 2}, "amount": 30, "divisor": -1,
+            "Projection", refs={"payload": {"value": 2}, "amount": 30, "divisor": -1, "shift": 1,
                                 "get_item": operator.getitem})
         # An object result keeps the argument checks independent of native
         # result admission and dense cache range checks.
@@ -39,6 +39,9 @@ def integer_domain_build(tmp_path_factory):
         projection.new_cells("decrement_amount", "lambda: amount - 1")
         projection.new_cells("square_amount", "lambda: amount * amount")
         projection.new_cells("divide_amount", "lambda: amount // divisor")
+        projection.new_cells("left_shift", "lambda: amount << shift")
+        projection.new_cells("right_shift", "lambda: amount >> shift")
+        projection.new_cells("remainder", "lambda: amount % divisor")
         projection.new_cells("negate_amount", "lambda: -amount")
         projection.new_cells("local_amount", """def local_amount():
     adjusted = amount - 1
@@ -47,6 +50,7 @@ def integer_domain_build(tmp_path_factory):
         projection.new_cells("native_operand", "lambda: receive(amount + 1)")
         projection.new_cells("inline_receive", "lambda count: count + 1")
         projection.new_cells("inline_operand", 'lambda: {"count": inline_receive(amount * 4)}')
+        projection.new_cells("shift_argument", 'lambda: {"count": inline_receive(amount << shift)}')
         policies = model.new_space("Policies", formula="lambda policy: {}")
         policies.new_cells("number", "lambda: policy")
         assert policies[4].number() == 4
@@ -82,11 +86,15 @@ def integer_domain_build(tmp_path_factory):
         projection.decrement_amount()
         projection.square_amount()
         projection.divide_amount()
+        projection.left_shift()
+        projection.right_shift()
+        projection.remainder()
         projection.negate_amount()
         projection.local_amount()
         projection.native_operand()
         projection.inline_receive(0)
         projection.inline_operand()
+        projection.shift_argument()
         """), encoding="utf-8")
     run_python(work, "-m", "modelx_cython", "exported", "--sample", "sample.py", "--no-spec")
 
@@ -295,4 +303,45 @@ def test_native_signed_arithmetic_cannot_wrap_result(integer_domain_build):
             assert "Outer.Projection.local_amount" in str(error)
         else:
             raise AssertionError("The native local accepted an overflowing intermediate")
+        """))
+
+
+@pytest.mark.parametrize("cell, amount, other, expected", [
+    ("left_shift", 1 << 62, 1, "overflow"),
+    ("left_shift", 30, -1, "negative shift"),
+    ("left_shift", -3, 2, -12),
+    ("left_shift", -1, 63, -(1 << 63)),
+    ("left_shift", 0, 64, 0),
+    ("left_shift", 1, 64, "overflow"),
+    ("right_shift", -30, -1, "negative shift"),
+    ("right_shift", -(1 << 63), 1, -(1 << 62)),
+    ("right_shift", -30, 64, -1),
+    ("right_shift", 30, 64, 0),
+    ("shift_argument", 30, 1, {"count": 61}),
+    ("shift_argument", 1 << 62, 2, "overflow"),
+    ("remainder", -(1 << 63), -1, 0),
+    ("remainder", -30, 7, 5),
+    ("remainder", 30, 0, "division by zero"),
+])
+def test_native_signed_shift_and_remainder(integer_domain_build, cell, amount, other, expected):
+    run_python(integer_domain_build, "-c", textwrap.dedent(f"""\
+        from exported_cy import mx_model
+
+        projection = mx_model.Outer.Projection
+        projection.amount = {amount}
+        projection.shift = projection.divisor = {other}
+        cell = {cell!r}
+        expected = {expected!r}
+        try:
+            actual = getattr(projection, cell)()
+        except OverflowError as error:
+            assert expected == "overflow", str(error)
+            name = "inline_receive" if cell == "shift_argument" else cell
+            assert f"Outer.Projection.{{name}}" in str(error)
+        except ValueError as error:
+            assert expected == "negative shift" and str(error) == "negative shift count"
+        except ZeroDivisionError:
+            assert expected == "division by zero"
+        else:
+            assert actual == expected, (cell, actual, expected)
         """))

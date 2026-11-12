@@ -16,6 +16,9 @@ _SIGNED_OPERATIONS = {
     cst.Subtract: '_mx_signed_sub',
     cst.Multiply: '_mx_signed_mul',
     cst.FloorDivide: '_mx_signed_floor',
+    cst.Modulo: '_mx_signed_remainder',
+    cst.LeftShift: '_mx_signed_left_shift',
+    cst.RightShift: '_mx_signed_right_shift',
 }
 _INTEGER_CONVERSION = f'{MX_SYS_MOD}._mx_integer_result'
 _SIGNED_HELPERS = frozenset((*_SIGNED_OPERATIONS.values(), '_mx_integer_result', '_mx_exact_int64'))
