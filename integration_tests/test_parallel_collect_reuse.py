@@ -45,7 +45,9 @@ def test_parallel_collect_reuse_merges_completed_chunks_and_retries(tmp_path, le
                         {'_mx_collect_adapter_version', '_mx_parallel_workers'}):
                 continue
             body.append(node)
-        runtime.write_text(syntax.with_changes(body=(*body, *old.body)).code, encoding='utf-8')
+        legacy_import = cst.parse_statement('from copy import deepcopy\n')
+        runtime.write_text(syntax.with_changes(body=(legacy_import, *body, *old.body)).code,
+                           encoding='utf-8')
     spec = {"parallel_workers": 4, "spaces": {
         "Reused": {"serial_collect": "reuse", "parallel_collect_reuse": True},
         "Ordered": {"serial_collect": "reuse", "parallel_collect_reuse": True,
@@ -59,7 +61,12 @@ def test_parallel_collect_reuse_merges_completed_chunks_and_retries(tmp_path, le
     subprocess.run([sys.executable, "-m", "modelx_cython", "exported",
                     "--sample", "sample.py", "--spec", "spec.py"], cwd=tmp_path, check=True)
     generated = (tmp_path / "exported_cy/_mx_classes.py").read_text(encoding="utf-8")
-    assert "reuse_in_parallel" in generated
+    if legacy_export:
+        assert "reuse_in_parallel" in generated
+    else:
+        assert "reuse_in_parallel" not in generated
+        assert "def _mx_collect_options_v2(self):" in generated
+        assert (tmp_path / 'exported/_mx_sys.py').read_bytes() == (tmp_path / 'exported_cy/_mx_sys.py').read_bytes()
     probe = textwrap.dedent("""\
         from concurrent import futures
         import sys
@@ -88,9 +95,15 @@ def test_parallel_collect_reuse_merges_completed_chunks_and_retries(tmp_path, le
             for index in (2, 0, 1, 3):
                 yield tasks[index]
 
-        assert m.Ordinary.collect().sum.value == 9.0
+        from exported_cy import _mx_sys
+        assert m.Ordinary.collect().sum.value == (
+            10.0 if _mx_sys._mx_collect_adapter_version == 2 else 9.0)
         futures.ThreadPoolExecutor = Observer
         futures.as_completed = completion_order
+        if _mx_sys._mx_collect_adapter_version == 2:
+            serial_model = type(m)()
+            serial_model._mx_collect_set_workers_v2(1)
+            assert serial_model.Ordered.collect().sum.value == 10.0
         assert m.Ordered.collect().sum.value == 9.0
         failure = LookupError("retry")
         def broken(x):

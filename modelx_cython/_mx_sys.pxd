@@ -114,13 +114,14 @@ cdef class BaseParent(BaseMxObject):
     cdef public BaseParent _parent
     cdef public BaseModel _model
     cdef public str _name
-    # The threading.RLock shared by the locked Spaces of the model, or None.
+    # The reentrant lock shared by the locked Spaces of the model, or None.
     # Declared on the common base of the model and of the Spaces: a locked
     # Space reads it through its typed _model field and through itself.
     cdef public object _mx_lock
 
 cdef class BaseModel(BaseParent):
-    pass
+    cdef public object _mx_collect_workers_override
+    cdef public object _mx_collect_dispatch_state
 
 cdef class BaseSpace(BaseParent):
 

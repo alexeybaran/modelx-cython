@@ -1,7 +1,7 @@
 """Versioned optional collection capability; ordinary exports stay usable.
 
-The exporter owns the runtime. Only the known pre-versioned implementation
-may be upgraded, by copying its three generic functions from that exporter.
+The exporter owns the runtime. The known pre-versioned implementation may
+be upgraded with the original v1 entry points bundled with the compiler.
 """
 import hashlib
 
@@ -62,9 +62,9 @@ def _legacy(tree):
     return hashlib.sha256(repr(semantic_key(functions)).encode()).hexdigest() == _LEGACY
 
 
-def _native(tree):
+def _native(tree, version=1):
     functions = _functions(tree)
-    return (_version(tree) == 1 and all(len(nodes) == 1 for nodes in functions.values())
+    return (_version(tree) == version and all(len(nodes) == 1 for nodes in functions.values())
             and all(all(name in [arg.name.value for arg in functions[function][0].params.params]
                         for name in arguments) for function, arguments in _ARGUMENTS.items()))
 
@@ -73,22 +73,20 @@ class CollectRuntime:
     def __init__(self, source):
         self.syntax = cst.parse_module(source)
         self.template = None
-        self.supported = _native(self.syntax)
+        self.hook = _native(self.syntax, 2)
+        self.supported = self.hook or _native(self.syntax)
         if self.supported or _version(self.syntax) != 0:
             return
         legacy = (not Names(self.syntax).names.intersection(
             {_VERSION, '_mx_collect_native_coords'}) and _legacy(self.syntax))
         if legacy:
-            try:
-                source = read_resource('modelx.export', '_mx_sys.py').decode('utf-8')
-            except (ImportError, FileNotFoundError):
-                return
-            template = cst.parse_module(source)
-            if _native(template):
-                self.template = template
-                self.supported = True
+            source = read_resource(__package__, '_collect_v1.txt').decode('utf-8')
+            self.template = cst.parse_module(source)
+            self.supported = True
 
     def render(self, workers=1, native=False):
+        if self.hook:
+            return self.syntax.code
         if native and not self.supported:
             raise ValueError('unsupported native collection adapter')
         settings = _assignments(self.syntax, _WORKERS)
