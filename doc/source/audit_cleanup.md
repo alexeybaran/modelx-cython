@@ -65,14 +65,12 @@ The entry pipeline uses shared in-memory syntax and facts, eliminating four disk
 rewrite/reparse loops. Build generation and the probed Cython array-equality
 compatibility repair are isolated from optimization policy.
 
-The exporter owns optional collection adapter version 1. The compiler recognizes
-the complete eight-function legacy protocol structurally and transplants only
-the three changed exporter-owned functions. Unknown versions, changed protocols,
-name collisions and unfamiliar formatted strings retain ordinary collection.
-Seven exact-string runtime replacements and a compiler-owned runtime copy are
-unnecessary. Explicit domain-order merging provides reproducibility at a fixed
-worker count; completion order remains the default. Neither promises bitwise
-serial floating-point equivalence.
+The exporter owns collection protocol version 2. The compiler leaves its
+runtime intact and supplies the evaluator and worker policy through the hook.
+Older collection exports require re-exporting with current modelx. Explicit
+domain-order merging is reproducible at a fixed worker count. Completion order
+remains the default for reused chunks, and parallel grouping can change
+floating-point roundoff.
 
 Deletion screening retained all 96 trials and unchanged package hashes. Removing
 terminal helper fusion made MYGA serial collection 1.577 times slower and four-worker
@@ -112,7 +110,7 @@ The old `native_math` boolean remains accepted for spec compatibility.
 | Repeated planning, entry reparsing and scope logic | Immutable policy, existing entry records, one CST frontend, metadata, shared names and in-memory entry pipeline. Public dispatch and checked fallbacks remain. |
 | Helper-internal coupling | Provider owns data/lookup implementation and contexts. Compiler shares capability/binding contracts; the measured fusion deletion is rejected. No new helper vocabulary or table interpreter. |
 | Reducer generalization | Shared iterator, type, binding, naming and fallback checks; return and single-assignment sums; ordinary Cython generators for declined cases. |
-| Brittle exporter replacement and ordering | Exporter-owned v1 adapter, complete legacy protocol fingerprint and ordinary fallback; explicit domain-order option with tested failure order and lifecycle. |
+| Brittle exporter replacement and ordering | Exporter-owned v2 hook with an explicit domain-order option and tested failure order and lifecycle. |
 | Weak-default attribution | Independent deletion experiments retain necessary fusion, proofs, reservations, hits and one-axis specialization. Scalar math passes four-model deletion qualification and is removed. |
 | Independent compatibility corpus | Original behavioral oracles plus compositional wide values, providers, aliases, overrides, changed References, cancellation, exceptions and populated pickle tests. |
 | Source-assertion mismatch | Immutable tests remain unchanged and their two failures are disclosed. Maintained structural checks retain their runtime assertions; generated text layout is not a public execution contract. |

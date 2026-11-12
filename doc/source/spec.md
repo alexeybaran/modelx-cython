@@ -183,8 +183,8 @@ domain order. Ordinary collection always retains its existing ordered behavior.
 
 Native collection uses the exporter's version 2 evaluator hook. The compiler
 adds the native evaluator and its worker policy to the generated Space. The
-exporter owns validation, dispatch and the result cache. Known legacy exports
-use the bundled version 1 compatibility adapter.
+exporter owns validation, dispatch and the result cache. Re-export collection
+models with current modelx before translating older export formats.
 
 Individual switches and legacy per-Cell options remain available for controlled
 ablations and compatibility diagnostics. `automatic_optimizations=False`

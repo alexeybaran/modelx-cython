@@ -1,15 +1,11 @@
 import subprocess
 import sys
 import textwrap
-from pathlib import Path
 
 import modelx as mx
-import libcst as cst
-import pytest
 
 
-@pytest.mark.parametrize('legacy_export', [False, True])
-def test_parallel_collect_reuse_merges_completed_chunks_and_retries(tmp_path, legacy_export):
+def test_parallel_collect_reuse_merges_completed_chunks_and_retries(tmp_path):
     model = mx.new_model("PrivateCollect")
     try:
         values = (1e16, 1.0, -1e16, 1.0, 2.0, 3.0, 4.0, -0.0)
@@ -24,30 +20,6 @@ def test_parallel_collect_reuse_merges_completed_chunks_and_retries(tmp_path, le
         model.export(tmp_path / "exported")
     finally:
         model.close()
-    if legacy_export:
-        # Rebuild the known unversioned export with its original generic
-        # functions, retaining this model's own exported data and classes.
-        runtime = tmp_path/'exported/_mx_sys.py'
-        syntax = cst.parse_module(runtime.read_text(encoding='utf-8'))
-        old = cst.parse_module((Path(__file__).parents[1]/
-            'modelx_cython/tests/samples/collect_v0.txt').read_text(encoding='utf-8'))
-        names = {'collect_from_space', '_mx_collect_parallel', '_mx_collect_chunk',
-                 '_mx_collect_native_coords'}
-        body = []
-        for node in syntax.body:
-            if isinstance(node, cst.FunctionDef) and (node.name.value in names
-                    or node.name.value.startswith('_mx_collect_')):
-                continue
-            if (isinstance(node, cst.SimpleStatementLine) and len(node.body) == 1
-                    and isinstance(node.body[0], cst.Assign)
-                    and isinstance(node.body[0].targets[0].target, cst.Name)
-                    and node.body[0].targets[0].target.value in
-                        {'_mx_collect_adapter_version', '_mx_parallel_workers'}):
-                continue
-            body.append(node)
-        legacy_import = cst.parse_statement('from copy import deepcopy\n')
-        runtime.write_text(syntax.with_changes(body=(legacy_import, *body, *old.body)).code,
-                           encoding='utf-8')
     spec = {"parallel_workers": 4, "spaces": {
         "Reused": {"serial_collect": "reuse", "parallel_collect_reuse": True},
         "Ordered": {"serial_collect": "reuse", "parallel_collect_reuse": True,
@@ -61,12 +33,9 @@ def test_parallel_collect_reuse_merges_completed_chunks_and_retries(tmp_path, le
     subprocess.run([sys.executable, "-m", "modelx_cython", "exported",
                     "--sample", "sample.py", "--spec", "spec.py"], cwd=tmp_path, check=True)
     generated = (tmp_path / "exported_cy/_mx_classes.py").read_text(encoding="utf-8")
-    if legacy_export:
-        assert "reuse_in_parallel" in generated
-    else:
-        assert "reuse_in_parallel" not in generated
-        assert "def _mx_collect_options_v2(self):" in generated
-        assert (tmp_path / 'exported/_mx_sys.py').read_bytes() == (tmp_path / 'exported_cy/_mx_sys.py').read_bytes()
+    assert "reuse_in_parallel" not in generated
+    assert "def _mx_collect_options_v2(self):" in generated
+    assert (tmp_path / 'exported/_mx_sys.py').read_bytes() == (tmp_path / 'exported_cy/_mx_sys.py').read_bytes()
     probe = textwrap.dedent("""\
         from concurrent import futures
         import sys
@@ -96,14 +65,13 @@ def test_parallel_collect_reuse_merges_completed_chunks_and_retries(tmp_path, le
                 yield tasks[index]
 
         from exported_cy import _mx_sys
-        assert m.Ordinary.collect().sum.value == (
-            10.0 if _mx_sys._mx_collect_adapter_version == 2 else 9.0)
+        assert _mx_sys._mx_collect_adapter_version == 2
+        assert m.Ordinary.collect().sum.value == 10.0
         futures.ThreadPoolExecutor = Observer
         futures.as_completed = completion_order
-        if _mx_sys._mx_collect_adapter_version == 2:
-            serial_model = type(m)()
-            serial_model._mx_collect_set_workers_v2(1)
-            assert serial_model.Ordered.collect().sum.value == 10.0
+        serial_model = type(m)()
+        serial_model._mx_collect_set_workers_v2(1)
+        assert serial_model.Ordered.collect().sum.value == 10.0
         assert m.Ordered.collect().sum.value == 9.0
         failure = LookupError("retry")
         def broken(x):
@@ -152,3 +120,32 @@ def test_parallel_collect_reuse_merges_completed_chunks_and_retries(tmp_path, le
         assert gil() == before
     """)
     subprocess.run([sys.executable, "-c", probe], cwd=tmp_path, check=True, timeout=90)
+
+
+def test_obsolete_collect_export_requests_reexport(tmp_path):
+    model = mx.new_model("Obsolete")
+    try:
+        keys = (0, 1)
+        projection = model.new_space(
+            "Projection", formula="lambda key: None", refs={"keys": keys},
+            collect_over={"key": keys}, collect_outputs='lambda: {"sum": {"value": value()}}',
+        )
+        projection.new_cells("value", "lambda: float(key)")
+        model.export(tmp_path / "exported")
+    finally:
+        model.close()
+    runtime = tmp_path / "exported/_mx_sys.py"
+    source = runtime.read_text(encoding="utf-8")
+    marker = "_mx_collect_adapter_version = 2"
+    assert marker in source
+    runtime.write_text(source.replace(marker, "_mx_collect_adapter_version = 1"), encoding="utf-8")
+    (tmp_path / "sample.py").write_text(
+        "from exported import mx_model\nmx_model.Projection.collect()\n", encoding="utf-8",
+    )
+    result = subprocess.run(
+        [sys.executable, "-m", "modelx_cython", "exported", "--sample", "sample.py",
+         "--no-spec", "--translate-only"],
+        cwd=tmp_path, capture_output=True, text=True,
+    )
+    assert result.returncode != 0
+    assert "Re-export the model with current modelx" in result.stderr

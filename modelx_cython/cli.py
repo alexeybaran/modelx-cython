@@ -372,16 +372,15 @@ def main_handler(args: argparse.Namespace, stdout: IO[str], stderr: IO[str]) -> 
 
         runtime_path = model_path / (MX_SYS_MOD + '.py')
         runtime = CollectRuntime(runtime_path.read_text(encoding='utf-8'))
+        runtime.require_current((u.module_info for u in units), policy.parallel_workers)
 
         helper_providers = set()
         object_providers = {}
         dense_entries = {}
         formula_entries = {}
         translated_modules = {}
-        serial_enabled = False
         for u in units:
-            serial_shapes = serial_collect.analyze(u.module_info, hook=runtime.hook) if runtime.supported else {}
-            serial_enabled |= bool(serial_shapes)
+            serial_shapes = serial_collect.analyze(u.module_info) if runtime.hook else {}
             trans = ModuleTransformer(
                 u.source, u.module_info,
                 resolver=resolver,
@@ -403,8 +402,6 @@ def main_handler(args: argparse.Namespace, stdout: IO[str], stderr: IO[str]) -> 
             u.abs_init_path.write_text("from . cimport _mx_classes", encoding="utf-8")
             modules.append(u.rel_src_path)
 
-        if not runtime.hook:
-            runtime_path.write_text(runtime.render(policy.parallel_workers, native=serial_enabled), encoding='utf-8')
         provider_sources = install_helpers(helper_providers, model_path, object_providers)
         modules.extend(provider_sources)
         translated_modules = lower_entries(translated_modules, dense_entries, formula_entries, policy)

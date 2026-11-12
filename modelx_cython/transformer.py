@@ -905,7 +905,7 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
                 setter = setter.with_changes(leading_lines=(cst.EmptyLine(),))
                 updated_node = updated_node.with_changes(body=updated_node.body.with_changes(
                     body=(*updated_node.body.body, setter)))
-            if cls_name in self._serial_shapes or self._collect_workers is not None:
+            if self._collect_workers is not None:
                 from modelx_cython.serial_collect import add_methods
                 updated_node = add_methods(
                     self.module.classes[cls_name], updated_node, self._serial_shapes.get(cls_name),
