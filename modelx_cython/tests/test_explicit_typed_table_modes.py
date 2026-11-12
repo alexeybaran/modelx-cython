@@ -9,7 +9,7 @@ import pandas as pd
 import pytest
 from modelx.core.errors import FormulaError
 
-from modelx_helpers import expression_streams, pandas_inputs, typed_inputs
+from modelx_helpers import expression_streams, pandas_inputs, pdn, typed_inputs
 
 
 def test_explicit_typed_table_helpers_modes(tmp_path):
@@ -18,7 +18,7 @@ def test_explicit_typed_table_helpers_modes(tmp_path):
         source = pd.DataFrame(
             {'rate': [1.5, 2.5], 'age': [42, 43],
              'flag': [True, False], 'label': ['M', 'F']},
-            index=pd.MultiIndex.from_tuples([('M', 42), ('F', 43)]))
+            index=pd.MultiIndex.from_tuples([('M', 42), ('F', 43)], names=['sex', 'age']))
         refs = {'source': source, 'table_ctor': pandas_inputs.table,
                 'record_ctor': pandas_inputs.record, 'predicate': pd.isna,
                 'is_missing': typed_inputs.is_missing, 'empty_value': None,
@@ -30,7 +30,20 @@ def test_explicit_typed_table_helpers_modes(tmp_path):
         space = model.new_space('Inputs', refs=refs)
         space.new_cells('raw', 'lambda: source')
         space.new_cells('table', 'lambda: table_ctor(raw(), indexing="at")')
+        space.new_cells('native_table', '''
+def native_table() -> "modelx_helpers.immutable_inputs.Table":
+    return table()
+''')
+        space.new_cells('report_table', '''
+def report_table() -> "modelx_helpers.immutable_inputs.Table":
+    return table_ctor(raw(), report=True)
+''')
+        space.new_cells('forwarded', 'lambda: native_table()')
+        space.new_cells('grouped_table', 'lambda: table_ctor(raw(), groups=("sex",))')
         space.new_cells('row', 'lambda: record_ctor(raw().iloc[0])')
+        for name in ('table', 'native_table', 'report_table', 'forwarded', 'grouped_table'):
+            pd.testing.assert_frame_equal(pdn.to_pandas(getattr(space, name)()), source)
+        pd.testing.assert_series_equal(pdn.to_pandas(space.row()), source.iloc[0])
         for name, column in [('float', 'rate'), ('int', 'age'),
                              ('bool', 'flag'), ('str', 'label'),
                              ('object', 'label')]:
@@ -84,6 +97,8 @@ for sex, age in [('M', 42), ('F', 43)]:
     m.Inputs.object_value(sex, age)
     m.Inputs.defaulted(sex, age)
 m.Inputs.record_value()
+m.Inputs.native_table(); m.Inputs.report_table()
+m.Inputs.forwarded(); m.Inputs.grouped_table()
 m.Inputs.missing_cached(); m.Inputs.missing_fresh()
 m.Inputs.record_defaulted(); m.Inputs.reordered('X', 1)
 try: m.Inputs.invalid_record_column()
@@ -107,6 +122,8 @@ for n in [0, 1, 3]: m.Inputs.composed(n)
 
     probe = textwrap.dedent('''
         import importlib, pickle, sys
+        import pandas as pd
+        from modelx_helpers import pdn
         from modelx_helpers import typed_inputs as h
         from modelx_helpers import expression_streams as g
         from modelx_helpers.immutable_inputs import Record, Table, freeze
@@ -115,6 +132,16 @@ for n in [0, 1, 3]: m.Inputs.composed(n)
         # Preparation is an explicit boundary; profile the admitted reads.
         assert isinstance(s.raw(), __import__('pandas').DataFrame)
         s.table(); s.row()
+        if sys.argv[1].endswith('_cy'):
+            assert hasattr(s.native_table(), '__modelx_table_owner__')
+            assert hasattr(s.report_table(), '__modelx_table_owner__')
+        for name in ('table', 'native_table', 'report_table', 'forwarded', 'grouped_table'):
+            value = getattr(s, name)()
+            output = pdn.to_pandas(value)
+            pd.testing.assert_frame_equal(output, s.raw())
+            output.iloc[0, 0] = 99.0
+            pd.testing.assert_frame_equal(pdn.to_pandas(value), s.raw())
+        pd.testing.assert_series_equal(pdn.to_pandas(s.row()), s.raw().iloc[0])
         forbidden = {getattr(h, 'lookup_' + suffix).__code__
                      for suffix in ('float', 'int', 'bool', 'str', 'object')}
         forbidden.update([h._typed_value.__code__, h.lookup.__code__,

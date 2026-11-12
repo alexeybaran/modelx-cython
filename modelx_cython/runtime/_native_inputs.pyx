@@ -2112,7 +2112,7 @@ cdef object column(object function, tuple keywords, object table, object name, o
     cdef Py_ssize_t position, i
     cdef tuple columns, values
     cdef list result
-    cdef object metadata, carrier, items
+    cdef object metadata, carrier, items, series_metadata, containers
     if (function is not _column or type(table) is not Table
             or not (report is _missing or report is True or report is False)):
         return forward_call(function, keywords, ('table', 'name', 'report'), (table, name, report), omitted_argument)
@@ -2136,8 +2136,12 @@ cdef object column(object function, tuple keywords, object table, object name, o
     PyObject_GenericSetAttr(carrier, '_index', MappingProxyType(dict(items)))
     PyObject_GenericSetAttr(carrier, '_native_groups', {})
     PyObject_GenericSetAttr(carrier, '_preserve_scalar_types', getattr(table, '_preserve_scalar_types', False))
-    PyObject_GenericSetAttr(carrier, '_metadata', ('series', metadata[1], metadata[3][position],
-                                                 name, metadata[6], metadata[7]))
+    series_metadata = ('series', metadata[1], metadata[3][position], name, metadata[6], metadata[7])
+    if len(metadata) > 11:
+        containers = {i: row[position] for i, row in metadata[11].items() if position in row}
+        if containers:
+            series_metadata = (*series_metadata, containers)
+    PyObject_GenericSetAttr(carrier, '_metadata', series_metadata)
     return carrier
 
 
@@ -2594,7 +2598,7 @@ cdef object _native_frame_table(object frame, bint with_rows, bint with_metadata
         values.append(tuple(copied))
         if with_rows:
             row_values.append(tuple(selected))
-    metadata = None
+    metadata = ('axes', axes[3], axes[4], dtypes)
     if with_metadata:
         metadata = ('frame', axes[3], axes[4], dtypes,
             tuple(row_values) if with_rows else None,
