@@ -51,8 +51,8 @@ from libc.math cimport isnan as _c_isnan
 cdef object _pandas_isna = None
 
 
-cdef bint isna(object function, object value) except -1:
-    """pandas.isna for a scalar: a float is checked natively, None is missing, else the function."""
+cdef object isna(object function, object value):
+    """pandas.isna: a float or None is decided natively; anything else is the function's own result."""
     global _pandas_isna
     if _pandas_isna is None:
         pandas = _sys.modules.get('pandas')
@@ -60,7 +60,7 @@ cdef bint isna(object function, object value) except -1:
             _pandas_isna = pandas.isna
     if function is _pandas_isna and _pandas_isna is not None:
         if type(value) is float:
-            return _c_isnan(<double>value)
+            return bool(_c_isnan(<double>value))
         if value is None:
             return True
-    return bool(function(value))
+    return function(value)

@@ -22,7 +22,8 @@ def _model():
                               'premium_pp': [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]}).set_index(['plan', 'year'])})
     data.new_cells('mort_table', 'lambda: pdn.table(mort)')
     data.new_cells('prem_table', 'lambda: pdn.table(prem, columns=("premium_pp",), groups=("plan",))')
-    proj = model.new_space('Projection', refs={'data': data, 'pdn': pdn, 'plan': 'B'})
+    import math
+    proj = model.new_space('Projection', refs={'data': data, 'pdn': pdn, 'plan': 'B', 'math': math, 'pd': pd})
     formulas = {
         'rate': 'def rate(t):\n    return float(data.mort_table().loc[30 + t, "mort_rate"])',
         'capped': ('def capped(t):\n    tbl = data.mort_table()\n    tbl = data.mort_table()\n'
@@ -34,8 +35,13 @@ def _model():
         'premium_full_key': 'def premium_full_key(t):\n    return float(data.prem_table().loc[(plan, t), "premium_pp"])',
         'column_by_name': 'def column_by_name(t):\n    name = "mort_rate"\n    return float(data.mort_table().loc[30 + t, name])',
         'column_computed': 'def column_computed(t):\n    return float(data.mort_table().loc[30 + t, "mort_" + "rate"])',
+        # guards: a key reassigned after the row is taken, a two-argument math call, isna on a Series
+        'reassigned': ('def reassigned(t):\n    k = 30 + t\n    row = data.mort_table().loc[k]\n    k = k + 1\n'
+                       '    return float(row["mort_rate"])'),
+        'log_base': 'def log_base(t):\n    return math.log(8.0 + t, 2.0) + math.log(2.0 + t)',
+        'isna_count': 'def isna_count(t):\n    return float(pd.isna(pd.Series([1.0, float("nan"), t])).sum()) + pd.isna(float("nan"))',
         'total': ('def total():\n    return sum(rate(t) + capped(t + 5) + band(t) + band_int(t) + premium(1 + t % 3)'
-                  ' + premium_full_key(1 + t % 3) + column_by_name(t) + column_computed(t) for t in range(5))'),
+                  ' + premium_full_key(1 + t % 3) + column_by_name(t) + column_computed(t) + reassigned(t) + log_base(t) + isna_count(t) for t in range(5))'),
     }
     for name, source in formulas.items():
         proj.new_cells(name, source)

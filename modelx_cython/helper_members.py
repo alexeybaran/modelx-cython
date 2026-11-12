@@ -23,12 +23,14 @@ def module_helpers(value):
     result = {}
     if value is sys.modules.get('pandas'):
         return {'isna': SimpleNamespace(helper=('modelx_cython.runtime._native_math', 'isna'), helper_parameters=None,
-                                        **{field: ('bool' if suffix == 'scalar_result' else None)
+                                        helper_arity=1,
+                                        **{field: ('object' if suffix == 'scalar_result' else None)
                                            for suffix, (field, _) in CAPABILITIES.items()})}
     if value is math:
         # The standard math module: the compiler's own native math provider implements these
         # with identity checks against math.<name>, so a replaced function keeps its behaviour.
         return {name: SimpleNamespace(helper=('modelx_cython.runtime._native_math', name), helper_parameters=None,
+                                      helper_arity=1,
                                       **{field: (result if suffix == 'scalar_result' else None)
                                          for suffix, (field, _) in CAPABILITIES.items()})
                 for name, result in _NATIVE_MATH.items()}

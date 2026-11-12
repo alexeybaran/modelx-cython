@@ -200,6 +200,10 @@ def _read_type(type_id, declaration):
     ):
         raise ValueError(f'{type_id} must declare valid view_type and bind symbols together')
     admission = declaration.get('admission', 'observed')
+    if admission == 'declared_or_forwarded' and __import__('os').environ.get('MX_CY_OBSERVED_TABLES') == '1':
+        # Experiment switch (backlog D2): admit traced table results without a return annotation.
+        # Off by default: it moves unannotated tables off their existing native helper routes.
+        admission = 'observed'
     bind_cell = declaration.get('bind_cell', False)
     if admission not in ('observed', 'declared_or_forwarded') or type(bind_cell) is not bool:
         raise ValueError(f'invalid view admission or bind_cell declaration for {type_id}')

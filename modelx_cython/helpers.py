@@ -110,6 +110,9 @@ class HelperCalls(FormulaTransformer):
         layout = getattr(ref, 'call_layout', None)
         if not contract or any(arg.star for arg in updated.args):
             return updated
+        arity = getattr(ref, 'helper_arity', None)
+        if arity is not None and (len(updated.args) != arity or any(arg.keyword for arg in updated.args)):
+            return updated      # e.g. math.log(x, base): keep the ordinary call
         if layout != 'keywords' and any(arg.keyword for arg in updated.args):
             return updated
         parameters = getattr(ref, 'helper_parameters', None)

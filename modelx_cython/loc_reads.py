@@ -98,6 +98,7 @@ class LocReads(FormulaTransformer):
             node.body.visit(scan)
             self._aliases = {name: value for name, value in scan.values.items()
                              if scan.counts.get(name) == 1 and value is not None}
+            self._assign_counts = dict(scan.counts)
             self._row_locals = self._replaceable_rows(node.body)
         return True
 
@@ -240,7 +241,10 @@ class LocReads(FormulaTransformer):
 
     def _pure_key(self, node):
         """A key expression that can be evaluated again with the same result."""
-        if isinstance(node, (cst.Name, cst.Integer, cst.SimpleString)):
+        if isinstance(node, cst.Name):
+            # a parameter or a local assigned at most once keeps its value for the whole formula
+            return getattr(self, '_assign_counts', {}).get(node.value, 0) <= 1
+        if isinstance(node, (cst.Integer, cst.SimpleString)):
             return True
         if isinstance(node, cst.Tuple):
             return all(self._pure_key(e.value) for e in node.elements)
