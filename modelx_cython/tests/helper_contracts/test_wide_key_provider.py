@@ -152,8 +152,11 @@ def test_reference_domain_oracles(width, mode):
         assert h.contains(source, query)
         assert operations.to_pandas(operations.row(source, query)).equals(frame.loc[query])
     absent = (*key_at(width, 0)[:-1], key_at(width, 1)[-1])
-    same_outcome(lambda: float(getattr(frame, mode)[absent, 'rate']),
-                 lambda: h.lookup_float(source, absent, 'rate'))
+    with pytest.raises(KeyError):
+        getattr(frame, mode)[absent, 'rate']
+    with pytest.raises(KeyError) as error:
+        h.lookup_float(source, absent, 'rate')
+    assert error.value.args == (absent,)
     same_outcome(lambda: float(getattr(frame, mode)[absent, 'missing']),
                  lambda: h.lookup_float(source, absent, 'missing'))
 
@@ -180,7 +183,7 @@ def test_wide_success_uses_native_lookup_position_contains_and_rows(native_wide,
 
 @pytest.mark.parametrize('width', [5, 17])
 @pytest.mark.parametrize('mode', ['loc', 'at'])
-def test_wide_error_encoding_column_priority_and_defaults(native_wide, width, mode):
+def test_wide_lookup_errors_column_priority_and_defaults(native_wide, width, mode):
     frame, source = framed(width, mode)
     existing = key_at(width, 0)
     absent = (*existing[:-1], key_at(width, 1)[-1])  # Every level exists; full row does not.

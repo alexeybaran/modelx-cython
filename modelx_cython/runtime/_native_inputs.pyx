@@ -930,10 +930,7 @@ cdef object _original_key(const KeyPart* parts, Py_ssize_t count, bint tuple_key
     return tuple(values) if tuple_key else values[0]
 
 cdef class KeyedView:
-    cdef tuple at_levels, at_offsets
     cdef signed char[::1] boolean_modes
-    cdef long long at_bias
-    cdef bint at_multi, encoded_errors
     cdef object owner
     cdef tuple text, columns, raw_values
     cdef long long[::1] numbers, kinds, slots
@@ -947,22 +944,11 @@ cdef class KeyedView:
         cdef KeyPart packed
         self.admitted = False
         self.owner = table
-        self.at_levels = ()
-        self.at_offsets = ()
-        self.at_multi = False
-        self.encoded_errors = True
-        self.at_bias = 0
         spec = table._index_error
         if spec is not None:
             spec = spec._index
         self.pandas_columns = False if spec is None else spec.get('pandas_columns', False)
         self.boolean_modes = array('b', () if spec is None else spec['boolean_modes'])
-        if spec is not None:
-            self.at_multi = spec['multi']
-            self.encoded_errors = spec.get('encoded_errors', True)
-            self.at_bias = spec['bias']
-            self.at_offsets = spec['offsets']
-            self.at_levels = tuple(KeyedView(level) for level in spec['level_tables'])
         keys = table._keys
         self.rows = len(keys)
         self.columns = table._columns
@@ -975,6 +961,10 @@ cdef class KeyedView:
             return
         self.tuple_keys = type(keys[0]) is tuple
         self.width = len(keys[0]) if self.tuple_keys else 1
+        if self.tuple_keys and spec is not None and not spec['multi']:
+            # A plain object Index can contain tuple labels. Pandas treats
+            # these as scalar keys and does not validate their components.
+            self.boolean_modes = array('b')
         kinds, numbers, texts, row_hashes = [], [], [], []
         for key in keys:
             if (type(key) is tuple) != self.tuple_keys:
@@ -1088,23 +1078,6 @@ cdef class KeyedView:
             slot = (slot + 1) & self.mask
         return -1
 
-    cdef object error_key(self, const KeyPart* parts, Py_ssize_t count, bint tuple_key):
-        cdef Py_ssize_t i, position
-        cdef KeyedView level
-        if not self.encoded_errors or not self.at_multi or not tuple_key or count != len(self.at_levels):
-            return _original_key(parts, count, tuple_key)
-        encoded = 0
-        for i in range(count):
-            if (self.boolean_modes[i] == 1 and parts[i].kind != _KEY_BOOL or
-                    self.boolean_modes[i] == 2 and parts[i].kind == _KEY_BOOL):
-                return _original_key(parts, count, tuple_key)
-            level = self.at_levels[i]
-            position = level.find(&parts[i], 1, False)
-            if position < 0:
-                return _original_key(parts, count, tuple_key)
-            encoded |= (position + self.at_bias) << self.at_offsets[i]
-        return encoded
-
 cdef class KeyedCache:
     cdef object source, column
     cdef KeyedView data
@@ -1162,7 +1135,7 @@ cdef double lookup_keyed_float_f64(object conversion, object function, LookupCon
             row = data.find(parts, count, tuple_key)
             if row < 0:
                 if default is _missing:
-                    raise KeyError(data.error_key(parts, count, tuple_key))
+                    raise KeyError(_original_key(parts, count, tuple_key))
                 return conversion(default)
             if cache.index < 0:
                 if cache.column_kind == 1:
@@ -1360,7 +1333,7 @@ cdef object _wide_indexed_lookup(object table, object key, object column, object
                 row = data.find(parts, count, True)
                 if row < 0:
                     if default is _missing:
-                        raise KeyError(data.error_key(parts, count, True))
+                        raise KeyError(key)
                     return default
                 return data.raw_values[row][cache.index]
         return _lookup(table, key, column) if default is _missing else _lookup(table, key, column, default)
@@ -1381,7 +1354,7 @@ cdef Py_ssize_t _wide_indexed_position(object table, object key) except? -2:
             if data is not None:
                 position = data.find(parts, count, True)
                 if position < 0:
-                    raise KeyError(data.error_key(parts, count, True))
+                    raise KeyError(key)
                 return position
         return -1
     finally:
@@ -1417,7 +1390,7 @@ cdef object indexed_lookup(object table, object key, object column, object defau
             row = data.find(&parts[0], count, tuple_key)
             if row < 0:
                 if default is _missing:
-                    raise KeyError(data.error_key(&parts[0], count, tuple_key))
+                    raise KeyError(key)
                 return default
             return data.raw_values[row][cache.index]
     return _wide_indexed_lookup(table, key, column, default)
@@ -1435,7 +1408,7 @@ cdef Py_ssize_t indexed_position(object table, object key) except? -2:
         if data is not None:
             position = data.find(&parts[0], count, tuple_key)
             if position < 0:
-                raise KeyError(data.error_key(&parts[0], count, tuple_key))
+                raise KeyError(key)
             return position
     return _wide_indexed_position(table, key)
 
@@ -1642,7 +1615,7 @@ cdef class NativeTable:
                 if cached is None:
                     cached = owner._native_cache.setdefault(KeyedView, KeyedView(owner))
                 indexed = <KeyedView>cached
-                if indexed.admitted and not indexed.at_multi:
+                if indexed.admitted and not owner._index_error['multi']:
                     self._indexed_view = indexed
                     self._input_values = &indexed.values[0]
                     self._input_numeric = &indexed.numeric[0]
@@ -2008,11 +1981,15 @@ cdef object lookup_object(object function, tuple keywords, object source, object
 
 
 import pandas as _pandas
-from pandas.core.dtypes.missing import isna as _pandas_isna
-from pandas._libs.missing import NA as _pandas_NA
-from pandas._libs.tslibs.nattype import NaT as _pandas_NaT
+from pandas import NA as _pandas_NA, NaT as _pandas_NaT
 from modelx_helpers.pandas_inputs import isna as _prepared_isna
 cdef object _is_missing_fn = _native_operations['is_missing']
+cdef object _pandas_isna = _pandas.isna
+_isna_origin = getattr(_pandas_isna, '__module__', None)
+if (_pandas_isna is not getattr(_pandas, 'isnull', None)
+        or not isinstance(_isna_origin, str) or _isna_origin.partition('.')[0] != 'pandas'):
+    # A replacement installed before import must retain its own semantics.
+    _pandas_isna = object()
 
 
 cdef inline int _scalar_isna(object value) except -2:
@@ -2296,8 +2273,7 @@ from modelx_helpers.pandas_inputs import table as _table_constructor
 cdef object _report_int64 = _group_numpy.dtype('int64')
 
 
-cdef object _native_report_table(object frame, bint with_rows, bint encoded_errors,
-                                 bint preserve_scalar_types):
+cdef object _native_report_table(object frame, bint with_rows, bint preserve_scalar_types):
     """Copy admitted physical report storage without pandas/Python operations."""
     cdef object manager, block, data, index, column_axis, column_data, column_storage
     cdef object index_data, index_spec, index_metadata, column_dtype, flags, result, spec
@@ -2373,10 +2349,8 @@ cdef object _native_report_table(object frame, bint with_rows, bint encoded_erro
             copied_rows.append(tuple(data[j, i] for j in range(width)))
     values = tuple(copied)
     row_values = tuple(copied_rows) if with_rows else None
-    # Scalar integer axes need no MultiIndex engine encoding or level tables.
-    items = (('multi', False), ('encoded_errors', encoded_errors), ('pandas_columns', True),
-             ('row_bool_labels', False), ('levels', (keys,)),
-             ('level_tables', ()), ('offsets', (0,)), ('boolean_modes', (2,)), ('bias', 0))
+    items = (('multi', False), ('pandas_columns', True), ('row_bool_labels', False),
+             ('boolean_modes', (2,)))
     spec = _record_alloc(<PyTypeObject*>Record, 0)
     PyObject_GenericSetAttr(spec, '_items', items)
     PyObject_GenericSetAttr(spec, '_index', MappingProxyType(dict(items)))
@@ -2507,11 +2481,10 @@ cdef object _frame_row_dtype(tuple dtypes):
 
 
 cdef object _frame_owner(tuple keys, tuple values, tuple columns, object metadata,
-                         bint encoded_errors, bint preserve_scalar_types):
+                         bint preserve_scalar_types):
     cdef object spec, result
-    cdef tuple items = (('multi', False), ('encoded_errors', encoded_errors),
-        ('pandas_columns', True), ('row_bool_labels', False), ('levels', (keys,)),
-        ('level_tables', ()), ('offsets', (0,)), ('boolean_modes', (2,)), ('bias', 0))
+    cdef tuple items = (('multi', False), ('pandas_columns', True), ('row_bool_labels', False),
+                        ('boolean_modes', (2,)))
     spec = _record_alloc(<PyTypeObject*>Record, 0)
     PyObject_GenericSetAttr(spec, '_items', items)
     PyObject_GenericSetAttr(spec, '_index', MappingProxyType(dict(items)))
@@ -2532,7 +2505,7 @@ cdef object _frame_owner(tuple keys, tuple values, tuple columns, object metadat
 
 
 cdef object _native_frame_table(object frame, bint with_rows, bint with_metadata,
-                                bint encoded_errors, bint preserve_scalar_types):
+                                bint preserve_scalar_types):
     cdef object attrs, flags, manager, axes, block, data, places, dtype, row_dtype
     cdef object raw, value, metadata
     cdef tuple columns, keys, row_names, dtypes
@@ -2606,8 +2579,7 @@ cdef object _native_frame_table(object frame, bint with_rows, bint with_metadata
             flags._allows_duplicate_labels, row_names if with_rows else (), axes[5])
         if with_rows:
             metadata = _prepared_row_metadata(metadata, columns, preserve_scalar_types)
-    return _frame_owner(keys, tuple(values), columns, metadata,
-                        encoded_errors, preserve_scalar_types)
+    return _frame_owner(keys, tuple(values), columns, metadata, preserve_scalar_types)
 
 
 
@@ -2624,12 +2596,11 @@ cdef object table(object function, tuple keywords, object frame, object columns=
             and (groups is _missing or type(groups) is tuple and not groups)
             and (indexing is _missing or type(indexing) is str and indexing in ('loc', 'at'))):
         if rows is True or report is True:
-            prepared = _native_report_table(frame, rows is True, indexing == 'at',
-                                             preserve_scalar_types is True)
+            prepared = _native_report_table(frame, rows is True, preserve_scalar_types is True)
             if prepared is not None:
                 return prepared
         prepared = _native_frame_table(frame, rows is True, rows is True or report is True,
-                                        indexing == 'at', preserve_scalar_types is True)
+                                        preserve_scalar_types is True)
         if prepared is not None:
             return prepared
     return forward_call(function, keywords, ('frame', 'columns', 'groups', 'indexing', 'rows', 'report', 'preserve_scalar_types'),

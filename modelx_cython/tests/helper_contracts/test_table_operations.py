@@ -197,7 +197,9 @@ def test_replacement_layout_and_errors(native):
         with pytest.raises(KeyError) as error: operation(source, 'absent')
         assert error.value.args == ('absent',)
     with pytest.raises(ValueError, match='metadata'): row(Table([3], [[0.1]], ['rate']), 3)
-    with pytest.raises(TypeError): to_pandas(Record({'rate': 0.1}))
+    expected = pd.Series([0.1], index=pd.Index(['rate'], dtype=object), dtype=object)
+    pd.testing.assert_series_equal(to_pandas(Record({'rate': 0.1})), expected)
+    with pytest.raises(TypeError): to_pandas({'rate': 0.1})
 
 
 def test_output_mutation_does_not_change_owned_snapshot():
@@ -213,8 +215,7 @@ def test_output_mutation_does_not_change_owned_snapshot():
 def test_row_snapshots_are_explicit_and_follow_selected_columns(native):
     frame = pd.DataFrame({'age': [42], 'rate': [0.1]})
     lookup_only = inputs.table(frame)
-    assert lookup_only._metadata is None
-    with pytest.raises(ValueError, match='report=True'): to_pandas(lookup_only)
+    pd.testing.assert_frame_equal(to_pandas(lookup_only), frame, check_exact=True)
     report_only = inputs.table(frame, report=True)
     assert report_only._metadata[4] is None
     pd.testing.assert_frame_equal(to_pandas(report_only), frame, check_exact=True)
@@ -302,3 +303,16 @@ def test_arbitrary_query_retains_python_default_handling(native):
     with pytest.raises(KeyError) as error:
         native.table_lookup(helpers.lookup, table, query, 'rate')
     assert error.value.args == ('no label',)
+
+
+def test_tuple_labels_in_plain_index_use_scalar_key_semantics(native):
+    from modelx_helpers.typed_inputs import lookup_object
+
+    frame = pd.DataFrame({'value': [10, 20]},
+                         index=pd.Index([('M', 1), ('F', 2)], tupleize_cols=False))
+    source = inputs.table(frame, indexing='at')
+    for key in [('M', 1), ('M', True), ('F', np.int64(2))]:
+        assert native.raw_value(lookup_object, source, key, 'value') == source.lookup(key, 'value')
+    with pytest.raises(KeyError) as error:
+        native.raw_value(lookup_object, source, ('M', 2), 'value')
+    assert error.value.args == (('M', 2),)

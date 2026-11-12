@@ -15,7 +15,7 @@ from .test_keyed_float_lookup_provider import native
     ([('M',True),('F',False)],('M',1)),
     ([('M',True),('F',False)],('M',True)),
 ])
-def test_at_full_key_error_encoding_and_boolean_semantics(native,keys,query):
+def test_at_full_key_selection_and_boolean_semantics(native,keys,query):
     import pandas as pd
     from modelx_helpers import pandas_inputs
     frame=pd.DataFrame({'rate':[1.5,2.5]},index=pd.MultiIndex.from_tuples(keys))
@@ -24,11 +24,11 @@ def test_at_full_key_error_encoding_and_boolean_semantics(native,keys,query):
         table=pandas_inputs.table(source,indexing='at')
         for restored in [table,pickle.loads(pickle.dumps(table))]:
             try:expected=float(source.at[query,'rate'])
-            except Exception as error:
-                with pytest.raises(type(error)) as actual:native.invoke(float,h.lookup,restored,query,'rate')
-                assert actual.value.args==error.args
-                with pytest.raises(type(error)) as actual:float(h.lookup(restored,query,'rate'))
-                assert actual.value.args==error.args
+            except KeyError:
+                with pytest.raises(KeyError) as actual:native.invoke(float,h.lookup,restored,query,'rate')
+                assert actual.value.args == (query,)
+                with pytest.raises(KeyError) as actual:float(h.lookup(restored,query,'rate'))
+                assert actual.value.args == (query,)
             else:
                 assert native.invoke(float,h.lookup,restored,query,'rate')==expected
                 assert float(h.lookup(restored,query,'rate'))==expected
@@ -46,6 +46,6 @@ def test_at_native_error_path_has_no_python_lookup(native):
     sys.setprofile(profile)
     try:
         with pytest.raises(KeyError) as error:native.fused(float,h.lookup,table,('M',43),'rate')
-        assert error.value.args==(15,)
+        assert error.value.args == (('M', 43),)
     finally:sys.setprofile(None)
     assert calls==[]

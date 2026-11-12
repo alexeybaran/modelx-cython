@@ -275,7 +275,7 @@ def test_defaults_replacement_pickle_and_at_error(native):
     owned=table(frame,indexing='at')
     assert native.floating(h.lookup_float,pickle.loads(pickle.dumps(owned)),('M',42),'rate')==1.5
     with pytest.raises(KeyError) as error:native.floating(h.lookup_float,owned,('M',43),'rate')
-    assert error.value.args==(15,)
+    assert error.value.args == (('M', 43),)
 
 
 def test_keyword_default_and_replacement_preserve_original_call_layout(native):
@@ -465,11 +465,14 @@ def test_missing_predicate_current_callable_and_numpy_scalars(native):
     assert events[-1] == ('helper',4)
 
 
-def test_predicate_replaced_before_provider_import_is_not_admitted(native):
-    source = '''import pandas as pd
+@pytest.mark.parametrize('replace_alias', [False, True])
+def test_predicate_replaced_before_provider_import_is_not_admitted(native, replace_alias):
+    source = f'''import pandas as pd
 def replacement(value):
     return False
 pd.isna = replacement
+if {replace_alias}:
+    pd.isnull = replacement
 from modelx_helpers import typed_inputs as h
 import probe
 assert probe.missing(h.is_missing, pd.isna, None) is False
@@ -504,6 +507,7 @@ def test_record_subclasses_keep_the_python_compatibility_contract(native,suffix,
     ([('M', 42), ('F', 43)], [('M', 42), ('M', 43), ('M', True)]),
 ])
 def test_indexer_metadata_preserves_boolean_keys_and_sparse_errors(native,indexing,keys,queries):
+    import numpy as np
     import pandas as pd
     from modelx_helpers import pandas_inputs
     index = pd.MultiIndex.from_tuples(keys) if isinstance(keys[0], tuple) else pd.Index(keys)
@@ -514,9 +518,14 @@ def test_indexer_metadata_preserves_boolean_keys_and_sparse_errors(native,indexi
             for query in queries:
                 try: expected = float(getattr(source, indexing)[query, 'rate'])
                 except Exception as error:
+                    args = error.args
+                    if (indexing == 'at' and isinstance(index, pd.MultiIndex)
+                            and isinstance(error, KeyError) and len(args) == 1
+                            and isinstance(args[0], (int, np.integer))):
+                        args = (query,)
                     for call in [h.lookup_float, lambda *a: native.floating(h.lookup_float, *a)]:
                         with pytest.raises(type(error)) as actual: call(table, query, 'rate')
-                        assert actual.value.args == error.args
+                        assert actual.value.args == args
                 else:
                     assert h.lookup_float(table, query, 'rate') == expected
                     assert native.floating(h.lookup_float, table, query, 'rate') == expected
