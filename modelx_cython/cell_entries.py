@@ -68,6 +68,8 @@ class DenseEntry:
     logical_axes: tuple[DenseAxis, ...] = ()
     spill_entry: str | None = None
     checks_spill_in_helper: bool = False
+    guard: cst.BaseExpression | None = None
+    hit: CacheHit | None = None
 
 
 @dataclass(frozen=True)
@@ -105,7 +107,9 @@ def checked_dense_guard(body, layout, proof=None):
     """Find the sole guard for the generated dense layout."""
     if len(body) != 1 or not isinstance(guard := body[0], cst.If):
         return None
-    expected = cst.parse_expression(dense_condition(layout.axes, proof))
+    expected = layout.guard if proof is None else None
+    if expected is None:
+        expected = cst.parse_expression(dense_condition(layout.axes, proof))
     return guard if same_expression(guard.test, expected) else None
 
 

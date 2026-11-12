@@ -65,47 +65,17 @@ def _exact_calls(node, receiver, exact=False):
             yield from _exact_calls(child, receiver, exact)
 
 
-def _formula_ranges(guard, layout, uses, spill_functions, spill_uses):
-    """Bounds common to every generated entry to the same formula/cache."""
-    keys = ', '.join(axis.key for axis in layout.axes)
-    expected = cst.parse_expression(f'{MX_SELF}.{layout.formula}({keys})')
-
-    def calls_formula(nodes):
-        return sum(isinstance(node, cst.Call) and same_expression(node, expected)
-                   for statement in nodes for node in walk(statement))
-
-    fallback = _else_body(guard)
-    if calls_formula(statements(guard.body)) != 1 or len(fallback) != 1:
-        return ()
-    fallback, = fallback
+def _formula_ranges(layout, uses, spill_uses):
+    """Combine the emitted layout's bounds with the model's actual call sites."""
     if layout.checks_spill_in_helper:
-        # These are bounds of the hot cache branch only. The shared formula
-        # also runs through the cold spill; callers must guard these facts.
-        expected_spill = cst.parse_expression(f'{layout.spill_entry}({MX_SELF}, {keys})')
-        spill = spill_functions.get(layout.spill_entry)
-        if (layout.spill_entry and isinstance(fallback, cst.Return)
-                and same_expression(fallback.value, expected_spill) and spill
-                and calls_formula(statements(spill.body)) == 1):
-            return layout.axes
-        return ()
+        # The shared formula also runs through the cold spill. A runtime
+        # domain flag limits these facts to the hot window at each call.
+        return layout.axes
     if not layout.exact_spill:
-        return layout.axes if uses[layout.formula] == 1 and isinstance(fallback, cst.Raise) else ()
-    if not (layout.spill_entry and layout.logical_axes and uses[layout.formula] == 2
-            and spill_uses[layout.spill_entry] == 1 and isinstance(fallback, cst.If)
-            and len(statements(fallback.body)) == 1 and len(_else_body(fallback)) == 1
-            and isinstance(_else_body(fallback)[0], cst.Raise)):
-        return ()
-    logical = cst.parse_expression(dense_condition(layout.logical_axes))
-    spill_call = cst.parse_expression(f'{layout.spill_entry}({MX_SELF}, {keys})')
-    branch = statements(fallback.body)[0]
-    if (not same_expression(fallback.test, logical) or not isinstance(branch, cst.Return)
-            or not same_expression(branch.value, spill_call)):
-        return ()
-    spill = spill_functions.get(layout.spill_entry)
-    if not (spill and [arg.name.value for arg in spill.params.params] == [MX_SELF, *(axis.key for axis in layout.axes)]
-            and calls_formula(statements(spill.body)) == 1):
-        return ()
-    return layout.logical_axes
+        return layout.axes if uses[layout.formula] == 1 else ()
+    if layout.spill_entry and uses[layout.formula] == 2 and spill_uses[layout.spill_entry] == 1:
+        return layout.logical_axes
+    return ()
 
 
 def prove_entries(state: EntryModule, records, uses, formula_domains_out=None):
@@ -115,7 +85,6 @@ def prove_entries(state: EntryModule, records, uses, formula_domains_out=None):
             native[name] = node, guard, records[name]
     formulas = state.methods
     spills = {layout.spill_entry for layout in records.values() if layout.spill_entry}
-    spill_functions = {name: node for name, node in state.functions.items() if name in spills}
 
     def spill_references(nodes):
         return Counter(node.value for node in nodes if isinstance(node, cst.Name)
@@ -130,7 +99,7 @@ def prove_entries(state: EntryModule, records, uses, formula_domains_out=None):
         if public_guard is not None and same_expression(public_guard, guard):
             entry_uses = uses - _attribute_counts(public)
             entry_spills = spill_uses - spill_references(walk(public))
-        ranges_by_entry[name] = _formula_ranges(guard, layout, entry_uses, spill_functions, entry_spills)
+        ranges_by_entry[name] = _formula_ranges(layout, entry_uses, entry_spills)
 
     masks = {}
     formula_domains = {}

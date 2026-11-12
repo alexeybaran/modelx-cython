@@ -66,7 +66,7 @@ from modelx_cython.builder import ModuleInfo, CombinedCellsInfo
 from modelx_cython.config import TransSpec
 from modelx_cython.powers import rewrite_powers
 from modelx_cython.inline_entries import add_inline_entries, allows_exact_receiver
-from modelx_cython.cell_entries import dense_condition
+from modelx_cython.cell_entries import CacheHit, DenseEntry, dense_condition
 from modelx_cython import numeric_cache
 from modelx_cython import enums as code_enums
 
@@ -590,14 +590,13 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
         name = f'_mx_compact_spill_{index}'
         while name in self._source:
             name += '_'
-        cells.dense_spill_entry = name
         params = ', '.join(f'{p}: {cells.get_argtype_expr(p)}' for p in cells.params)
         result = cells.get_rettype_expr()
         self._cold_spills.append(cst.parse_statement(
             f'\n\n@{CY_MOD}.cfunc\n@{CY_MOD}.exceptval(-1, check=True)\n'
             f'def {name}(self: {cls_name}, {params}) -> {result}:\n'
             + textwrap.indent(source, '    ')))
-        return f'{name}(self, {", ".join(cells.params)})'
+        return name, f'{name}(self, {", ".join(cells.params)})'
 
     def _rewrite_powers(self, node, cls_info, cells, scope):
         """Rewrite the provably real ``**`` of one formula body.
@@ -697,6 +696,7 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
         """
         self._cold_sums = []
         self._cold_spills = []
+        self._dense_layouts = {}
         self._next_cold_sum = 0
         self._uses_native_round = False
         return self.wrapper.visit(self)
@@ -743,7 +743,8 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
             # Exact type alone cannot rule out overrides on a receiver with a dict.
             ordinary = {name: cls for name, cls in self.module.classes.items()
                         if name not in self.module.visitor.dynamic_ref_classes}
-            module, self.dense_entries, self.formula_entries = add_inline_entries(module, ordinary)
+            module, self.dense_entries, self.formula_entries = add_inline_entries(
+                module, ordinary, self._dense_layouts)
         if self._cold_sums or self._cold_spills:
             module = module.with_changes(body=(*module.body, *self._cold_sums, *self._cold_spills))
         if any(getattr(cell, 'power_memo', None) for cls in self.module.classes.values()
@@ -1306,6 +1307,7 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
                                    f'Sample the required indices or set {TransSpec.CELLS_PARAM_SIZE!r} in the spec.')
                         outside = f'raise IndexError({message!r})\n'
                         spill_branch = ''
+                        spill_entry = None
                         if cells.has_dense_spill:
                             key = '(' + ', '.join(args) + (',' if len(args)==1 else '') + ')'
                             cache = f'self._spill_{meth_name}'
@@ -1322,12 +1324,12 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
                                 spill = (f'if not ({logical_guard}):\n'
                                          + textwrap.indent(outside, '    ') + spill)
                             if cells.has_inferred_dense_domain:
-                                helper = self._compact_spill(cells, cls_name, spill)
+                                spill_entry, helper = self._compact_spill(cells, cls_name, spill)
                                 outside = f'return {helper}\n'
                             elif cells.has_shifted_cache:
                                 outside = spill
                             else:
-                                helper = self._compact_spill(cells, cls_name, spill)
+                                spill_entry, helper = self._compact_spill(cells, cls_name, spill)
                                 spill_branch = f'elif {logical_guard}:\n    return {helper}\n'
                         if_stmt = (
                             f"if {idx_range}:\n"
@@ -1337,6 +1339,16 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
                             + textwrap.indent(outside, '    '))
                         if_node = cst.parse_statement(
                             if_stmt, config=self._module_node.config_for_parsing
+                        )
+                        hit = None
+                        if not cells.is_locked and len(axes) == 1 and axes[0].c_type == 'long long':
+                            hit = CacheHit(cst.parse_expression(has_expr),
+                                           cst.parse_expression(v_expr), if_node.test)
+                        self._dense_layouts[cls_name, meth_name] = DenseEntry(
+                            cls_name, FORMULA_PREF + meth_name, axes, cells.has_dense_spill,
+                            logical_axes if spill_entry else (), spill_entry,
+                            spill_entry is not None and cells.has_inferred_dense_domain,
+                            if_node.test, hit,
                         )
                         indented_block = cst.ensure_type(
                             updated_node.body, cst.IndentedBlock
