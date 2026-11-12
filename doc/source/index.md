@@ -32,6 +32,7 @@ installation
 tutorial
 cli
 spec
+native_providers
 freethreading
 implementation
 releases

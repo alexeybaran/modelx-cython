@@ -544,6 +544,10 @@ class CombinedCellsInfo(LexicalCellsInfo):
         if self.native_table_result:
             from modelx_cython.helpers import module_name
             return f'{module_name(NATIVE_TABLE_PROVIDER)}.NativeTable'
+        binding = self.native_provider_binding
+        if binding:
+            from modelx_cython.helpers import module_name
+            return f'{module_name(binding.manifest.provider)}.{binding.declaration.view_type}'
         if self.has_typeinfo():
             typ = get_type_expr(self.norm_type, c_style=c_style)
             if self.is_real_value and self.is_array_returned:
@@ -562,13 +566,32 @@ class CombinedCellsInfo(LexicalCellsInfo):
             return "object"
 
     @property
-    def native_table_result(self):
-        """Keep a declared table type on the ordinary Cell cache."""
+    def _can_bind_native_result(self):
         return (self.has_formula_def and not self.is_special()
                 and not self.body_has_closure and not self.formula_is_generator
                 and not self.formula_has_captured_default
-                and not self.called_with_kwargs and not self.has_spec_rettype
-                and getattr(self._rt, 'declared_table_result', False))
+                and not self.called_with_kwargs and not self.has_spec_rettype)
+
+    @property
+    def native_table_result(self):
+        """Keep a declared table type on the ordinary Cell cache."""
+        return self._can_bind_native_result and getattr(self._rt, 'declared_table_result', False)
+
+    @property
+    def native_provider_binding(self):
+        if self._can_bind_native_result:
+            return getattr(self._rt, 'observed_provider_binding', None)
+        return None
+
+    @property
+    def native_result_binder(self):
+        if self.native_table_result:
+            return self.get_rettype_expr()
+        binding = self.native_provider_binding
+        if binding:
+            from modelx_cython.helpers import module_name
+            return f'{module_name(binding.manifest.provider)}.{binding.declaration.bind}'
+        return None
 
     @property
     def observed_record_result(self):

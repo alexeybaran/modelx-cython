@@ -118,6 +118,7 @@ class CellsResolver:
         self._scalar_refs = scalar_refs_by_class or {}
         self.locked_scalar_results = locked_scalar_results or {}
         self.unlocked_scalar_results = unlocked_scalar_results or {}
+        self.provider_results = {}
         self._name_index: Dict[str, List[str]] = {}
         for cells in cells_by_class.values():
             for name, fqname in cells.items():
@@ -528,6 +529,7 @@ def build_resolver(module_infos) -> CellsResolver:
     scalar_refs_by_class: Dict[str, Set[str]] = {}
     locked_scalar_results: Dict[str, str] = {}
     unlocked_scalar_results: Dict[str, str] = {}
+    provider_results = {}
 
     for fqname, info in module_infos.items():
         pkg, basename = fqname.rsplit(".", 1)
@@ -536,6 +538,9 @@ def build_resolver(module_infos) -> CellsResolver:
                 name: cells.fqname for name, cells in cls_info.cells.items()
             }
             for cells in cls_info.cells.values():
+                binding = getattr(cells, 'native_provider_binding', None)
+                if binding is not None:
+                    provider_results[cells.fqname] = binding
                 if (cells.has_formula_def and not cells.is_special() and not cells.has_args()
                         and not cells.body_has_closure and not cells.called_with_kwargs):
                     results = locked_scalar_results if cells.is_locked else unlocked_scalar_results
@@ -558,8 +563,10 @@ def build_resolver(module_infos) -> CellsResolver:
                 attr: child_mod + "." + SPACE_PREF + attr
                 for attr in cls_info.spaces
             }
-    return CellsResolver(cells_by_class, refs_by_class, spaces_by_class,
-                         scalar_refs_by_class, locked_scalar_results, unlocked_scalar_results)
+    resolver = CellsResolver(cells_by_class, refs_by_class, spaces_by_class,
+                             scalar_refs_by_class, locked_scalar_results, unlocked_scalar_results)
+    resolver.provider_results = provider_results
+    return resolver
 
 
 def analyze_usage(units) -> Dict[str, UsageVerdict]:
