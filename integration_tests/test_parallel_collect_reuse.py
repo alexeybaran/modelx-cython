@@ -45,7 +45,9 @@ def test_parallel_collect_reuse_merges_completed_chunks_and_retries(tmp_path, le
                         {'_mx_collect_adapter_version', '_mx_parallel_workers'}):
                 continue
             body.append(node)
-        runtime.write_text(syntax.with_changes(body=(*body, *old.body)).code, encoding='utf-8')
+        legacy_import = cst.parse_statement('from copy import deepcopy\n')
+        runtime.write_text(syntax.with_changes(body=(legacy_import, *body, *old.body)).code,
+                           encoding='utf-8')
     spec = {"parallel_workers": 4, "spaces": {
         "Reused": {"serial_collect": "reuse", "parallel_collect_reuse": True},
         "Ordered": {"serial_collect": "reuse", "parallel_collect_reuse": True,
@@ -93,10 +95,11 @@ def test_parallel_collect_reuse_merges_completed_chunks_and_retries(tmp_path, le
             for index in (2, 0, 1, 3):
                 yield tasks[index]
 
-        assert m.Ordinary.collect().sum.value == 9.0
+        from exported_cy import _mx_sys
+        assert m.Ordinary.collect().sum.value == (
+            10.0 if _mx_sys._mx_collect_adapter_version == 2 else 9.0)
         futures.ThreadPoolExecutor = Observer
         futures.as_completed = completion_order
-        from exported_cy import _mx_sys
         if _mx_sys._mx_collect_adapter_version == 2:
             serial_model = type(m)()
             serial_model._mx_collect_set_workers_v2(1)

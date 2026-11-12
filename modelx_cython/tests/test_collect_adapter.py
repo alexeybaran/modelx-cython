@@ -64,12 +64,18 @@ def test_native_export_requires_no_runtime_transplant():
         assert output == source
 
 
-def test_legacy_export_with_older_modelx_keeps_ordinary_collection(monkeypatch):
+def test_legacy_export_does_not_read_the_installed_exporter(monkeypatch):
     from modelx_cython import collect_adapter
-    monkeypatch.setattr(collect_adapter, 'read_resource', lambda *args: legacy().encode())
+
+    def resource(package, name):
+        assert package == 'modelx_cython'
+        return read_resource(package, name)
+
+    monkeypatch.setattr(collect_adapter, 'read_resource', resource)
     adapter = CollectRuntime(legacy())
-    assert not adapter.supported
+    assert adapter.supported
     assert adapter.render() == legacy()
+    assert _native(cst.parse_module(adapter.render(native=True)))
 
 
 def test_parallel_worker_setting_requires_an_unambiguous_export():
