@@ -17,6 +17,7 @@ class SerialCollect:
     private_lookups: bool
     parallel_reuse: bool
     ordered: bool = False
+    method: str = 'collect'
 
 
 def _self_attribute(node):
@@ -92,7 +93,8 @@ def _match(node, cls, reuse, private_lookups, parallel_reuse, ordered=False):
             or any(_method(node, hook) is not None or hook in cls.refs
                    for hook in ('_mx_apply_formula', '_mx_collect_attach', '_mx_collect_release'))):
         return None
-    call = _return_expr(_method(node, 'collect'))
+    method = _method(node, '_mx_collect') or _method(node, 'collect')
+    call = _return_expr(method)
     if (not isinstance(call, cst.Call) or dotted_name(call.func) != '_mx_sys.collect_from_space'
             or len(call.args) != 6 or any(arg.star for arg in call.args)
             or any(arg.keyword for arg in call.args[:5])
@@ -119,7 +121,8 @@ def _match(node, cls, reuse, private_lookups, parallel_reuse, ordered=False):
             or cls.cells[cell].body_has_closure or cls.cells[cell].called_with_kwargs):
         return None
 
-    return SerialCollect(label, cell, parameter, reuse, private_lookups, parallel_reuse, ordered)
+    return SerialCollect(label, cell, parameter, reuse, private_lookups, parallel_reuse,
+                         ordered, method.name.value)
 
 
 def _reset_lines(cls):
@@ -198,7 +201,7 @@ def add_methods(cls, node, shape):
     helper = cst.parse_module('\n'.join(lines) + '\n').body[0]
     methods = []
     for item in node.body.body:
-        if isinstance(item, cst.FunctionDef) and item.name.value == 'collect':
+        if isinstance(item, cst.FunctionDef) and item.name.value == shape.method:
             stmt = item.body.body[0]
             ret = stmt.body[0]
             arg = cst.Arg(keyword=cst.Name('evaluate_serial'),
