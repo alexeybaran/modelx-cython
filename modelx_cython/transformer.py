@@ -168,6 +168,9 @@ class PXDGenerator:
         if any(c.native_table_result for cls in self.module.classes.values()
                for c in cls.cells.values()):
             contexts.add(NATIVE_TABLE_PROVIDER)
+        contexts.update(c.native_provider_binding.manifest.provider
+                        for cls in self.module.classes.values() for c in cls.cells.values()
+                        if c.native_provider_binding is not None)
         for provider in sorted(contexts):
             stmts.append(f'from {self.package} cimport {module_name(provider)}')
         enum_declarations = code_enums.declarations(self.module)
@@ -420,7 +423,7 @@ class PXDGenerator:
                 continue
 
             if cells and cells.has_typeinfo():
-                rettype = 'object' if cells.native_table_result else cells.get_rettype_expr(c_style=True)
+                rettype = 'object' if cells.native_result_binder else cells.get_rettype_expr(c_style=True)
                 parameters = self._add_param_type_hints(
                     cls_name=cls_name, cells_name=cells.name, formula=True
                 )
@@ -545,6 +548,10 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
         self._serial_shapes = serial_shapes or {}
         self._uses_native_round = False
         self.helper_providers = set()
+        self.object_providers = {c.native_provider_binding.manifest.provider: c.native_provider_binding.manifest
+                                 for cls in module.classes.values() for c in cls.cells.values()
+                                 if c.native_provider_binding is not None}
+        self.helper_providers.update(self.object_providers)
         if any(c.native_table_result for cls in module.classes.values()
                for c in cls.cells.values()):
             self.helper_providers.add(NATIVE_TABLE_PROVIDER)
@@ -621,7 +628,14 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
         node = node.visit(enum_comparisons)
         cells.native_enum_comparisons = enum_comparisons.comparisons
         cells.native_enum_constants = enum_comparisons.count
-        node = self._bind_declared_helpers(node, cls_info, cells, numeric_returns.operations)
+        operations = set(numeric_returns.operations)
+        if (self._resolver is not None and self._resolver.provider_results
+                and cells.formula_allows_exact_receiver):
+            from .provider_members import ProviderMemberCalls
+            members = ProviderMemberCalls(self._resolver, cls_info.fqname, self.helper_providers)
+            node = node.visit(members)
+            operations.update(members.operations)
+        node = self._bind_declared_helpers(node, cls_info, cells, operations)
         admitted_helpers = set(cells.native_helpers)
         for fallback in reductions.fallbacks if reductions is not None else ():
             self._cold_sums.append(self._bind_declared_helpers(fallback, cls_info, cells, numeric_returns.operations))
@@ -1077,7 +1091,7 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
                 ]
                 returns = cst.Annotation(
                     annotation=cst.parse_expression(
-                        'object' if cells.native_table_result else cells.get_rettype_expr(),
+                        'object' if cells.native_result_binder else cells.get_rettype_expr(),
                         config=self._module_node.config_for_parsing,
                     )
                 )
@@ -1259,8 +1273,9 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
                             body = updated_node.body
                         else:
                             body = self._add_dict_assign(meth_name, updated_node)
-                        if cells.native_table_result:
-                            constructor = cst.parse_expression(cells.get_rettype_expr())
+                        binder = cells.native_result_binder
+                        if binder:
+                            constructor = cst.parse_expression(binder)
                             formula = m.Call(func=m.Attribute(
                                 value=m.Name(MX_SELF), attr=m.Name(FORMULA_PREF + meth_name)))
                             body = m.replace(body, formula, lambda call, _: cst.Call(
@@ -1285,9 +1300,10 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
                     flag = f"{MX_SELF}.{HAS_PREF}{meth_name}"
                     cache = f"{MX_SELF}.{VAR_PREF}{meth_name}"
                     formula = f"{MX_SELF}.{FORMULA_PREF}{meth_name}()"
-                    if cells.native_table_result:
-                        formula = f'{cells.get_rettype_expr()}({formula})'
-                    if cells.is_locked or cells.native_table_result:
+                    binder = cells.native_result_binder
+                    if binder:
+                        formula = f'{binder}({formula})'
+                    if cells.is_locked or binder:
                         if cells.is_locked:
                             body = self._locked_body(flag, cache, formula)
                         else:

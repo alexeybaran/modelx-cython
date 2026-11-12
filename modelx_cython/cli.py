@@ -370,6 +370,7 @@ def main_handler(args: argparse.Namespace, stdout: IO[str], stderr: IO[str]) -> 
         runtime = CollectRuntime(runtime_path.read_text(encoding='utf-8'))
 
         helper_providers = set()
+        object_providers = {}
         dense_entries = {}
         formula_entries = {}
         translated_modules = {}
@@ -388,6 +389,7 @@ def main_handler(args: argparse.Namespace, stdout: IO[str], stderr: IO[str]) -> 
 
             translated_modules[u.fqname] = EntryModule(trans.transformed)
             helper_providers.update(trans.helper_providers)
+            object_providers.update(trans.object_providers)
             if trans.dense_entries:
                 dense_entries[u.module_info.fqname] = trans.dense_entries
             if trans.formula_entries:
@@ -397,7 +399,7 @@ def main_handler(args: argparse.Namespace, stdout: IO[str], stderr: IO[str]) -> 
             modules.append(u.rel_src_path)
 
         runtime_path.write_text(runtime.render(policy.parallel_workers, native=serial_enabled), encoding='utf-8')
-        modules.extend(install_helpers(helper_providers, model_path))
+        modules.extend(install_helpers(helper_providers, model_path, object_providers))
         translated_modules = lower_entries(translated_modules, dense_entries, formula_entries, policy)
         cell_sources = {}
         for u in units:

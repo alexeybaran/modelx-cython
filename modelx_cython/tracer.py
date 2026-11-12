@@ -189,6 +189,8 @@ class RuntimeCellsInfo:     # TODO: Create base class RuntimeBaseMemberInfo
             and f'{type(trace.ret_val).__module__}.{type(trace.ret_val).__qualname__}' == table_type
             for trace in traces
         )
+        from .provider_manifest import observed_provider_binding
+        self.observed_provider_binding = observed_provider_binding(traces)
 
     def has_args(self):
         """Return whether the cells method takes arguments.
