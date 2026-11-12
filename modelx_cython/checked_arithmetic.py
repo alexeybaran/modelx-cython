@@ -17,6 +17,7 @@ class CheckedArithmetic:
         self.cls, self.cell = cls, cell
         self.builtin_keys = builtin_keys
         self.parameter_intervals = {}
+        self.signed_atom = None
 
     def native_call(self, expr):
         args = arguments(expr)
@@ -71,6 +72,14 @@ class CheckedArithmetic:
             return inputs
         if isinstance(expr, cst.Name) and (expr.value in self.parameters or expr.value in locals_):
             return self.parameter_intervals.get(expr.value, inputs) if signed else inputs
+        if signed and self.signed_atom is not None and self.signed_atom(expr):
+            return inputs
+        if signed and isinstance(expr, cst.IfExp):
+            yes = self.integer_interval(expr.body, signed=True, locals_=locals_)
+            no = self.integer_interval(expr.orelse, signed=True, locals_=locals_)
+            if yes is not None and no is not None:
+                return min(yes[0], no[0]), max(yes[1], no[1])
+            return None
         if signed and isinstance(expr, cst.UnaryOperation) and isinstance(expr.operator, (cst.Plus, cst.Minus)):
             if isinstance(expr.expression, cst.Integer):
                 value = expr.expression.evaluated_value

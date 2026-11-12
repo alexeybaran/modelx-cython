@@ -196,6 +196,7 @@ class _GuardIntegers(cst.CSTTransformer):
         self.signed_return = signed_return
         self.error = error
         self.in_statement = self.statement_overflow = self.function_handler = False
+        self.arithmetic.signed_atom = self._signed_atom
 
     def on_visit(self, node):
         return not isinstance(node, OPAQUE_SCOPES) and super().on_visit(node)
@@ -262,22 +263,25 @@ class _GuardIntegers(cst.CSTTransformer):
             return value.with_changes(expression=operand), signed
         if isinstance(value, cst.Integer):
             return value, value.evaluated_value <= (1 << 63) - 1
+        return value, self._signed_atom(value)
+
+    def _signed_atom(self, value):
         if isinstance(value, cst.Name):
-            return value, value.value in self.signed_names
+            return value.value in self.signed_names
         if isinstance(value, cst.Call):
             target = value.func
             if isinstance(target, cst.Name):
-                return value, target.value in self.signed_functions
+                return target.value in self.signed_functions
             if isinstance(target, cst.Attribute) and isinstance(target.value, cst.Name):
-                return value, (target.value.value == MX_SELF and target.attr.value in self.signed_methods
-                               or target.value.value == MX_SYS_MOD and target.attr.value in _SIGNED_HELPERS)
+                return (target.value.value == MX_SELF and target.attr.value in self.signed_methods
+                        or target.value.value == MX_SYS_MOD and target.attr.value in _SIGNED_HELPERS)
         if isinstance(value, cst.Subscript) and any(not isinstance(s.slice, cst.Index) for s in value.slice):
-            return value, False
+            return False
         base = value.value if isinstance(value, cst.Subscript) else value
         if isinstance(base, cst.Attribute) and isinstance(base.value, cst.Name) and base.value.value == MX_SELF:
             dimensions = len(value.slice) if isinstance(value, cst.Subscript) else 0
-            return value, self.signed_fields.get(base.attr.value) == dimensions
-        return value, False
+            return self.signed_fields.get(base.attr.value) == dimensions
+        return False
 
     def _checked(self, value, in_conditional=False):
         if isinstance(value, cst.IfExp):
