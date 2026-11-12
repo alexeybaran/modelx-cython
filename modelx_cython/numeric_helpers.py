@@ -6,6 +6,7 @@ import libcst as cst
 from .cell_entries import exact_receiver
 from .helper_members import helper_reference
 from .helpers import module_name
+from .provider_manifest import owner_provider_binding
 from .rounding import NATIVE_ROUNDING_PROVIDER
 from .scopes import CstFacts, Names, has_scope_effects
 from .syntax import arguments, literal_value, walk
@@ -101,9 +102,25 @@ class NumericReturns(cst.CSTTransformer):
             return None
         return f'type(self.{chain[0]}) is {kind} and '
 
+    def grouped_owner_binding(self, node):
+        if self.direct_ref(node):
+            owner = getattr(self.cls.refs[node.attr.value], 'type_', None)
+            return owner_provider_binding(owner) if owner is not None else None
+        if self.resolver is None or not isinstance(node, cst.Call) or node.args:
+            return None
+        from .usage import RESOLVED, _extract_self_chain
+        chain = _extract_self_chain(node.func)
+        if isinstance(chain, list):
+            status, name = self.resolver.resolve_chain(self.cls.fqname, chain)
+            if status == RESOLVED:
+                return self.resolver.observed_provider_results.get(name)
+        return None
+
     def grouped(self, body, key, column, cap, lookup_ref, contains, lookup, prefix, declarations,
-                *, methods=False):
-        operations = (('group_slice_context_probe', 'group_slice_context_value') if methods
+                *, method_binding=None):
+        capability = method_binding.declaration.grouped_table if method_binding is not None else None
+        methods = capability is not None
+        operations = ((capability.probe, capability.read) if methods
                       else getattr(lookup_ref, 'grouped_helper', None))
         if not (getattr(self.cell, 'formula_allows_exact_receiver', False)
                 and operations
@@ -124,12 +141,12 @@ class NumericReturns(cst.CSTTransformer):
             comparison = self.not_in(group_guard.test)
             args = arguments(subtable, count=1)
             if not (comparison and args and isinstance(subtable.func, cst.Attribute)
-                    and subtable.func.attr.value == 'slice'):
+                    and subtable.func.attr.value == capability.slice_method):
                 return None
             group, record = comparison
             if not (subtable.func.value.deep_equals(record) and args[0].deep_equals(group)):
                 return None
-            provider = NATIVE_TABLE_PROVIDER
+            provider = method_binding.manifest.provider
             probe_functions = value_functions = ''
         else:
             if not (isinstance(group_guard.test, cst.UnaryOperation)
@@ -182,8 +199,11 @@ class NumericReturns(cst.CSTTransformer):
         value_code = f'{status} = {get}({context_arg if methods else ""}{value_args})\n'
         resource_guard = f'{code(record)} is {saved}'
         admission = ''
-        bound_operations = (('bound_group_probe', 'bound_group_value', operations[1]) if methods
-                            else getattr(lookup_ref, 'bound_grouped_helper', None))
+        if methods:
+            bound_operations = ((capability.bound_probe, capability.bound_read, capability.read)
+                                if capability.bound_probe is not None else None)
+        else:
+            bound_operations = getattr(lookup_ref, 'bound_grouped_helper', None)
         stable_guard = self.stable_input_guard(record, body)
         if stable_guard is not None and context_arg and bound_operations and len(bound_operations) == 3:
             bound_probe, bound_value, admit_value = (f'{alias}.{name}' for name in bound_operations)
@@ -232,25 +252,34 @@ class NumericReturns(cst.CSTTransformer):
         lookup, cap = args
         key, index = absence
         lookup_args = arguments(lookup, count=2)
-        if not (lookup_args and isinstance(lookup.func, cst.Attribute) and lookup.func.attr.value == 'lookup_float'
-                and isinstance(index, cst.Attribute) and index.attr.value == 'index'
+        if not (lookup_args and isinstance(lookup.func, cst.Attribute)
+                and isinstance(index, cst.Attribute)
                 and isinstance(index.value, cst.Name) and index.value.deep_equals(lookup.func.value)
                 and isinstance(key, cst.Name) and key.deep_equals(lookup_args[0])
                 and isinstance(lookup_args[1], cst.SimpleString)
                 and self.typed_cell_call(cap, 'double')):
             return None
         key_binding = self.single_statement(key_line)
+        table_binding = self.single_statement(table_line)
         if not (self.assigns(key_binding, key.value) and self.typed_cell_call(key_binding.value, 'long long')
-                and self.assigns(self.single_statement(table_line), index.value.value)):
+                and self.assigns(table_binding, index.value.value)
+                and isinstance(table_binding.value, cst.Call)
+                and isinstance(table_binding.value.func, cst.Attribute)):
+            return None
+        binding = self.grouped_owner_binding(table_binding.value.func.value)
+        capability = binding.declaration.grouped_table if binding is not None else None
+        if not (capability is not None and index.attr.value == capability.index_field
+                and lookup.func.attr.value == capability.lookup_method):
             return None
         prefix = Names(cst.Module(body)).reserve('_mx_optional', family=True)
         declarations = cst.parse_module(
             f'{prefix}_value: _mx_cy.double\n{prefix}_status: _mx_cy.int\n').body
         grouped = self.grouped(body, key, lookup_args[1], cap, None, None, lookup, prefix, declarations,
-                               methods=True)
+                               method_binding=binding)
         if grouped is not None:
-            self.providers.add(NATIVE_TABLE_PROVIDER)
-            self.operations.add(f'{NATIVE_TABLE_PROVIDER}.group_slice_context_value')
+            provider = binding.manifest.provider
+            self.providers.add(provider)
+            self.operations.add(f'{provider}.{capability.read}')
             return (*grouped, guard, result_line)
         return None
 

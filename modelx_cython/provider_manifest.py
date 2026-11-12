@@ -33,6 +33,17 @@ class NumericTable:
 
 
 @dataclass(frozen=True)
+class GroupedTable:
+    slice_method: str
+    index_field: str
+    lookup_method: str
+    probe: str
+    read: str
+    bound_probe: Optional[str] = None
+    bound_read: Optional[str] = None
+
+
+@dataclass(frozen=True)
 class ProviderType:
     view_type: Optional[str]
     bind: Optional[str]
@@ -40,6 +51,7 @@ class ProviderType:
     admission: str
     bind_cell: bool
     numeric_table: Optional[NumericTable]
+    grouped_table: Optional[GroupedTable] = None
 
 
 @dataclass(frozen=True)
@@ -65,8 +77,7 @@ class ProviderBinding:
 def observed_provider_binding(traces):
     """Read a registration only from the exact sampled owner's namespace."""
     owner = type(traces[0].ret_val)
-    registration = vars(owner).get('__modelx_cython_type__')
-    if registration is None:
+    if vars(owner).get('__modelx_cython_type__') is None:
         return None
     identity = f'{owner.__module__}.{owner.__qualname__}'
     declared = True
@@ -76,9 +87,18 @@ def observed_provider_binding(traces):
                 or annotation not in (None, owner, owner.__qualname__, identity)):
             return None
         declared &= annotation is not None
+    return owner_provider_binding(owner, declared=declared)
+
+
+def owner_provider_binding(owner, *, declared=False):
+    """Resolve a provider for an already observed exact Python type."""
+    registration = vars(owner).get('__modelx_cython_type__')
+    if registration is None:
+        return None
     if (not isinstance(registration, tuple) or len(registration) != 4
             or type(registration[0]) is not int or registration[0] != 1
             or not _qualified_identifier(registration[3])):
+        identity = f'{owner.__module__}.{owner.__qualname__}'
         raise ValueError(f'invalid native type registration on {identity}')
     _, provider, abi, type_id = registration
     manifest = read_provider_manifest(provider, abi)
@@ -139,7 +159,7 @@ def _read_type(type_id, declaration):
     if not _qualified_identifier(type_id):
         raise ValueError(f'invalid qualified type identity {type_id!r}')
     _require_fields(declaration, type_id, ('members',),
-                    ('view_type', 'bind', 'admission', 'bind_cell', 'numeric_table'))
+                    ('view_type', 'bind', 'admission', 'bind_cell', 'numeric_table', 'grouped_table'))
     view_type = declaration.get('view_type')
     bind = declaration.get('bind')
     if ('view_type' in declaration or 'bind' in declaration) and not (
@@ -157,6 +177,16 @@ def _read_type(type_id, declaration):
         if view_type is None:
             raise ValueError(f'{type_id} cannot configure numeric_table without a view_type')
         numeric_table = _read_numeric_table(type_id, declaration['numeric_table'])
+    grouped_table = None
+    if 'grouped_table' in declaration:
+        grouped = declaration['grouped_table']
+        _require_fields(grouped, f'{type_id}.grouped_table',
+                        ('slice_method', 'index_field', 'lookup_method', 'probe', 'read'),
+                        ('bound_probe', 'bound_read'))
+        if (not all(valid_identifier(symbol) for symbol in grouped.values())
+                or ('bound_probe' in grouped) != ('bound_read' in grouped)):
+            raise ValueError(f'invalid grouped table declaration for {type_id}')
+        grouped_table = GroupedTable(**grouped)
 
     declared_members = declaration['members']
     if not isinstance(declared_members, dict):
@@ -167,7 +197,8 @@ def _read_type(type_id, declaration):
         if not all(valid_identifier(part) for part in (name, member['signature'], member['native'])):
             raise ValueError(f'invalid member identity or symbol for {type_id}.{name}')
         members[name] = ProviderMember(member['signature'], member['native'])
-    return ProviderType(view_type, bind, MappingProxyType(members), admission, bind_cell, numeric_table)
+    return ProviderType(view_type, bind, MappingProxyType(members), admission, bind_cell,
+                        numeric_table, grouped_table=grouped_table)
 
 
 def read_provider_manifest(provider: str, expected_abi: str) -> Optional[ProviderManifest]:

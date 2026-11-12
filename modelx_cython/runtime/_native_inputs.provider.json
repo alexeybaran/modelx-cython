@@ -29,6 +29,15 @@
       "members": {}
     },
     "modelx_helpers.immutable_inputs.Record": {
+      "grouped_table": {
+        "slice_method": "slice",
+        "index_field": "index",
+        "lookup_method": "lookup_float",
+        "probe": "group_slice_context_probe",
+        "read": "group_slice_context_value",
+        "bound_probe": "bound_group_probe",
+        "bound_read": "bound_group_value"
+      },
       "members": {
         "__getitem__": {
           "signature": "string_label_to_object",
