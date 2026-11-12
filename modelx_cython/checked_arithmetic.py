@@ -19,6 +19,21 @@ def local_assignment(node):
     return None
 
 
+def single_statement(line):
+    if isinstance(line, cst.SimpleStatementLine) and len(line.body) == 1:
+        return line.body[0]
+    return None
+
+
+def local_quotient(expr, divisor_type):
+    if (not isinstance(expr, cst.BinaryOperation) or not isinstance(expr.operator, cst.Divide)
+            or not isinstance(expr.left, cst.Name) or not isinstance(expr.right, divisor_type)):
+        return None
+    divisor = expr.right.evaluated_value
+    valid = 0 < divisor <= _BOUND if divisor_type is cst.Integer else 0 < divisor < math.inf
+    return (expr.left.value, divisor) if valid else None
+
+
 def signed_local_assignments(body, name, facts, native_value):
     """Find all signed definitions and the reads they definitely initialize."""
     reads = {node for node, context in facts.contexts.items()
@@ -97,35 +112,44 @@ class CheckedArithmetic:
         return (cell is not None and not cell.is_special() and not cell.called_with_kwargs
                 and not cell.body_has_closure and cell.get_rettype_expr(c_style=True) == 'long long')
 
-    def capture(self, expr, local_names=()):
+    def capture(self, expr, inputs, local_names):
         if isinstance(expr, cst.Integer) and -_BOUND <= expr.evaluated_value <= _BOUND:
             value = str(expr.evaluated_value)
             return value, value
         if self.native_call(expr) or isinstance(expr, cst.Name) and expr.value in (*self.parameters, *local_names):
             name = f'{self.prefix}_{self.next_input}'
             self.next_input += 1
-            self.inputs.append((name, code(expr)))
+            inputs.append((name, code(expr)))
             return name, f'_mx_cy.cast(object, {name})'
         if not isinstance(expr, cst.BinaryOperation):
             return None
         operator = {cst.Add: '+', cst.Subtract: '-', cst.Multiply: '*'}.get(type(expr.operator))
         if operator is None:
             return None
-        left, right = self.capture(expr.left, local_names), self.capture(expr.right, local_names)
+        left = self.capture(expr.left, inputs, local_names)
+        right = self.capture(expr.right, inputs, local_names)
         if left is None or right is None:
             return None
         return tuple(f'({a} {operator} {b})' for a, b in zip(left, right))
 
-    def statements(self, expressions, combine):
-        bounds = ' and '.join(f'-{_BOUND} <= {name} <= {_BOUND}' for name, _ in self.inputs)
-        assert bounds
-        native, boxed = zip(*expressions)
-        return (
-            ''.join(f'{name}: _mx_cy.longlong = {source}\n' for name, source in self.inputs)
-            + f'if {bounds}:\n'
-            + f'    return {combine(*native)}\n'
-            + f'return {combine(*boxed)}\n'
-        )
+    def guarded_region(self, expressions, render, *, locals_=(), target=None):
+        """Capture signed inputs in order and keep exact arithmetic on a miss."""
+        if any(self.integer_interval(value, locals_=locals_) is None for value in expressions):
+            return ()
+        inputs = []
+        captured = [self.capture(value, inputs, locals_) for value in expressions]
+        if None in captured or not inputs:
+            return ()
+        bounds = ' and '.join(f'-{_BOUND} <= {name} <= {_BOUND}' for name, _ in inputs)
+        native, boxed = zip(*captured)
+        hot, cold = render(native, True), render(boxed, False)
+        source = ''.join(f'{name}: _mx_cy.longlong = {value}\n' for name, value in inputs)
+        if target is None:
+            source += f'if {bounds}:\n    return {hot}\nreturn {cold}\n'
+        else:
+            source += (f'{target}: _mx_cy.double\nif {bounds}:\n    {target} = {hot}\n'
+                       f'else:\n    {target} = {cold}\n')
+        return cst.parse_module(source).body
 
     def integer_interval(self, expr, *, signed=False, locals_=()):
         """Bound each intermediate under a checked or signed-native input domain."""
@@ -184,81 +208,59 @@ class CheckedArithmetic:
             return None
         return interval if limits[0] <= interval[0] <= interval[1] <= limits[1] else None
 
-    def double_tail(self, body):
-        if len(body) < 3 or any(not isinstance(line, cst.SimpleStatementLine) or len(line.body) != 1
-                                for line in body[-3:]):
+    def guarded_float_return(self, body):
+        """Lower a terminal quotient from its adjacent, ordered definitions."""
+        if len(body) < 2 or not isinstance(result := single_statement(body[-1]), cst.Return):
             return body
-        left, right, result = (line.body[0] for line in body[-3:])
-        if (not isinstance(result, cst.Return) or not all(isinstance(node, cst.Assign)
-                and len(node.targets) == 1 and isinstance(node.targets[0].target, cst.Name)
-                for node in (left, right))):
-            return body
-        first, second = left.targets[0].target.value, right.targets[0].target.value
-        if first == second:
-            return body
-        expr = result.value
-        if not (isinstance(expr, cst.BinaryOperation) and isinstance(expr.operator, cst.Add)
-                and isinstance(expr.left, cst.BinaryOperation) and isinstance(expr.left.operator, cst.Divide)
-                and isinstance(expr.left.left, cst.Name) and expr.left.left.value == first
-                and isinstance(expr.right, cst.Name) and expr.right.value == second
-                and isinstance(expr.left.right, cst.Float)
-                and math.isfinite(expr.left.right.evaluated_value) and expr.left.right.evaluated_value > 0):
-            return body
-        expressions = left.value, right.value
-        if any(self.integer_interval(value) is None for value in expressions):
-            return body
-        captured = [self.capture(value) for value in expressions]
-        if None in captured or not self.inputs:
-            return body
-        divisor = repr(expr.left.right.evaluated_value)
-        native = self.statements(captured, lambda a, b: f'{a} / {divisor} + {b}')
-        return (*body[:-3], *cst.parse_module(native).body)
-
-    def local_division(self, body):
-        """Keep a terminal local integer quotient in the native float expression."""
-        if len(body) < 2 or any(not isinstance(line, cst.SimpleStatementLine) or len(line.body) != 1
-                                for line in body[-2:]):
-            return body
-        assignment, result = (line.body[0] for line in body[-2:])
-        if (not isinstance(assignment, cst.Assign) or len(assignment.targets) != 1
-                or not isinstance(assignment.targets[0].target, cst.Name)
-                or not isinstance(result, cst.Return) or result.value is None):
-            return body
-        name = assignment.targets[0].target.value
-        if (name in self.cell.params or self.integer_interval(assignment.value) is None
-                or CstFacts(body).stores[name] != 1):
+        assignment = single_statement(body[-2])
+        target = local_assignment(assignment)
+        if target is None or result.value is None:
             return body
         nodes = tuple(walk(result.value))
-        if sum(isinstance(node, cst.Name) and node.value == name for node in nodes) != 1:
-            return body
-        division = next((node for node in nodes
-                         if isinstance(node, cst.BinaryOperation) and isinstance(node.operator, cst.Divide)
-                         and isinstance(node.left, cst.Name) and node.left.value == name
-                         and isinstance(node.right, cst.Integer)
-                         and 0 < node.right.evaluated_value <= _BOUND), None)
-        if division is None:
-            return body
-        captured = self.capture(assignment.value)
-        if captured is None or not self.inputs:
-            return body
-        numerator, boxed = captured
-        divisor = division.right.evaluated_value
-        quotient = f'{self.prefix}_quotient'
-        bounds = ' and '.join(f'-{_BOUND} <= {local} <= {_BOUND}' for local, _ in self.inputs)
-        prefix = cst.parse_module(
-            ''.join(f'{local}: _mx_cy.longlong = {source}\n' for local, source in self.inputs)
-            + f'{quotient}: _mx_cy.double\n'
-            + f'if {bounds}:\n'
-            + f'    {quotient} = {numerator} / {divisor}.0\n'
-            + f'else:\n'
-            + f'    {quotient} = {boxed} / {divisor}\n'
-        ).body
+        name = target.value
+        if (name not in self.cell.params
+                and sum(isinstance(node, cst.Name) and node.value == name for node in nodes) == 1):
+            for node in nodes:
+                term = local_quotient(node, cst.Integer)
+                if term is None or term[0] != name or CstFacts(body).stores[name] != 1:
+                    continue
+                quotient = f'{self.prefix}_quotient'
+                divisor = term[1]
 
-        class Quotient(cst.CSTTransformer):
-            def leave_BinaryOperation(inner, before, after):
-                return cst.Name(quotient) if before is division else after
+                def render(values, native):
+                    denominator = f'{divisor}.0' if native else divisor
+                    return f'{values[0]} / {denominator}'
 
-        return (*body[:-2], *prefix, body[-1].visit(Quotient()))
+                region = self.guarded_region((assignment.value,), render, target=quotient)
+                if region:
+                    class Quotient(cst.CSTTransformer):
+                        def leave_BinaryOperation(inner, before, after):
+                            return cst.Name(quotient) if before is node else after
+
+                    return (*body[:-2], *region, body[-1].visit(Quotient()))
+                break
+        first = single_statement(body[-3]) if len(body) >= 3 else None
+        other_target = local_assignment(first)
+        result = result.value
+        if (other_target is None or other_target.value == name
+                or not isinstance(result, cst.BinaryOperation) or not isinstance(result.operator, cst.Add)):
+            return body
+        names = other_target.value, name
+        for division, other in ((result.left, result.right), (result.right, result.left)):
+            term = local_quotient(division, cst.Float)
+            if (term is None or not isinstance(other, cst.Name)
+                    or {term[0], other.value} != set(names)):
+                continue
+
+            def render(values, _):
+                terms = dict(zip(names, values))
+                parts = f'{terms[term[0]]} / {term[1]!r}', terms[other.value]
+                return ' + '.join(parts if division is result.left else reversed(parts))
+
+            region = self.guarded_region((first.value, assignment.value), render)
+            if region:
+                return (*body[:-3], *region)
+        return body
 
     def _integer_locals(self, body):
         stores = CstFacts(body).stores
@@ -567,24 +569,20 @@ class CheckedArithmetic:
         available, replacements = set(), {}
         for statement in body:
             for line in lexical_nodes((statement,)):
-                if not (isinstance(line, cst.SimpleStatementLine) and len(line.body) == 1
-                        and isinstance(line.body[0], cst.Return)):
+                if not isinstance(result := single_statement(line), cst.Return):
                     continue
-                value = line.body[0].value
+                value = result.value
                 if not (isinstance(value, cst.BinaryOperation)
-                        and any(isinstance(part, cst.BinaryOperation) for part in (value.left, value.right))
-                        and self.integer_interval(value, locals_=available) is not None
-                        and self.integer_interval(value, signed=True, locals_=available) is None):
+                        and any(isinstance(part, cst.BinaryOperation) for part in (value.left, value.right))):
                     continue
                 parts = tuple(walk(value))
                 if not (any(isinstance(part, cst.Name) and part.value in available for part in parts)
-                        and any(self.native_call(part) for part in parts)):
+                        and any(self.native_call(part) for part in parts)
+                        and self.integer_interval(value, signed=True, locals_=available) is None):
                     continue
-                self.inputs = []
-                captured = self.capture(value, available)
-                assert captured is not None
-                source = self.statements((captured,), lambda result: result)
-                replacements[line] = cst.FlattenSentinel(cst.parse_module(source).body)
+                region = self.guarded_region((value,), lambda values, _: values[0], locals_=available)
+                if region:
+                    replacements[line] = cst.FlattenSentinel(region)
             available.update(assignments[node] for node in statements((statement,)) if node in assignments)
 
         class ExactReturns(cst.CSTTransformer):
@@ -657,13 +655,11 @@ class CheckedArithmetic:
         self.parameters = {name for name in self.cell.params if name not in facts.stores
                            and self.cell.get_argtype_expr(name, c_style=True, formula=True) == 'long long'}
         self.prefix = Names(function).reserve('_mx_checked', family=True)
-        self.inputs, self.next_input = [], 0
+        self.next_input = 0
         if divisible:
             body = self.divisibility(body, facts)
         if kind == 'double':
-            rewritten = self.local_division(body)
-            if rewritten is body:
-                rewritten = self.double_tail(body)
+            rewritten = self.guarded_float_return(body)
             body = self.integer_local(body) if rewritten is body else rewritten
             body = self._range_locals(body)
         elif kind == 'long long':
