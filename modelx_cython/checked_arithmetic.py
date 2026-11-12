@@ -5,11 +5,34 @@ import libcst as cst
 from libcst.metadata import ExpressionContext
 
 from .scopes import CstFacts, Names, has_scope_effects, lexical_nodes
-from .syntax import arguments, code, statements, walk
+from .syntax import arguments, code, literal_value, statements, walk
 
 _BOUND = 1 << 25
 _SIGNED64 = -(1 << 63), (1 << 63) - 1
 _ARITHMETIC = (cst.Add, cst.Subtract, cst.Multiply, cst.Divide)
+
+
+def guarded_integer_intervals(test):
+    """Read inclusive local bounds from a conjunction of signed comparisons."""
+    if isinstance(test, cst.BooleanOperation) and isinstance(test.operator, cst.And):
+        left = guarded_integer_intervals(test.left)
+        right = guarded_integer_intervals(test.right)
+        if left and right:
+            return {**left, **right}
+        return {}
+    if (not isinstance(test, cst.Comparison) or len(test.comparisons) != 2
+            or not all(isinstance(part.operator, cst.LessThanEqual) for part in test.comparisons)):
+        return {}
+    middle, upper = (part.comparator for part in test.comparisons)
+    if not isinstance(middle, cst.Name):
+        return {}
+    try:
+        low, high = literal_value(test.left), literal_value(upper)
+    except (TypeError, ValueError):
+        return {}
+    if type(low) is int and type(high) is int and _SIGNED64[0] <= low <= high <= _SIGNED64[1]:
+        return {middle.value: (low, high)}
+    return {}
 
 
 class CheckedArithmetic:
@@ -73,7 +96,7 @@ class CheckedArithmetic:
         if isinstance(expr, cst.Name) and (expr.value in self.parameters or expr.value in locals_):
             return self.parameter_intervals.get(expr.value, inputs) if signed else inputs
         if signed and self.signed_atom is not None and self.signed_atom(expr):
-            return inputs
+            return self.parameter_intervals.get(expr.value, inputs) if isinstance(expr, cst.Name) else inputs
         if signed and isinstance(expr, cst.IfExp):
             yes = self.integer_interval(expr.body, signed=True, locals_=locals_)
             no = self.integer_interval(expr.orelse, signed=True, locals_=locals_)

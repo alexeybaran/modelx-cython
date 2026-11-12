@@ -2,11 +2,11 @@
 
 import libcst as cst
 
-from .checked_arithmetic import CheckedArithmetic
+from .checked_arithmetic import CheckedArithmetic, guarded_integer_intervals
 from .consts import CY_MOD, FORMULA_PREF, MX_SELF, MX_SYS_MOD
 from .powers import KIND_FLOAT, OperandKind, kind_of_type_expr
 from .scopes import CstFacts, Names, OPAQUE_SCOPES, has_scope_effects, lexical_nodes
-from .syntax import dotted_name, walk
+from .syntax import dotted_name, statements, walk
 from .usage import RESOLVED, _extract_self_chain
 
 
@@ -198,11 +198,25 @@ class _GuardIntegers(cst.CSTTransformer):
         self.signed_names = signed_names
         self.signed_return = signed_return
         self.error = error
+        self.outer_intervals = []
         self.in_statement = self.statement_overflow = self.function_handler = False
         self.arithmetic.signed_atom = self._signed_atom
 
     def on_visit(self, node):
         return not isinstance(node, OPAQUE_SCOPES) and super().on_visit(node)
+
+    def visit_If_body(self, node):
+        self.outer_intervals.append(self.arithmetic.parameter_intervals)
+        body = statements(node.body)
+        if (len(body) != 1 or not isinstance(body[0], cst.Return) or has_scope_effects(body)
+                or any(isinstance(part, cst.Call) for part in walk(body[0]))):
+            return
+        bounded = guarded_integer_intervals(node.test)
+        if bounded and bounded.keys() <= self.signed_names:
+            self.arithmetic.parameter_intervals = {**self.arithmetic.parameter_intervals, **bounded}
+
+    def leave_If_body(self, node):
+        self.arithmetic.parameter_intervals = self.outer_intervals.pop()
 
     def visit_SimpleStatementLine(self, node):
         self.in_statement = True

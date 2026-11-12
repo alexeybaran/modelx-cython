@@ -190,3 +190,24 @@ def test_arithmetic_rewrite_preserves_global_assignment_effects():
     assert (namespace['a'],namespace['b'])==(4,4)
 
 
+@pytest.mark.parametrize('operator,checked_branch', [('and', False), ('or', True)])
+def test_signed_branch_bounds_apply_only_inside_a_proven_return(operator, checked_branch):
+    from modelx_cython.checked_arithmetic import CheckedArithmetic
+    from modelx_cython.integer_boundaries import _GuardIntegers
+
+    arithmetic = CheckedArithmetic(SimpleNamespace(cells={}), None)
+    arithmetic.parameters = {'left', 'right'}
+    guard = _GuardIntegers(
+        'Projection.amount', None, (), arithmetic, {}, set(), set(),
+        arithmetic.parameters, True, '_overflow',
+    )
+    node = cst.parse_module(
+        f'if -32 <= left <= 32 {operator} -32 <= right <= 32:\n'
+        '    return left * (right - 1)\n'
+        'return left * (right - 1)\n'
+    )
+    result = node.visit(guard)
+    assert ('_mx_signed_mul' in result.code_for_node(result.body[0])) == checked_branch
+    assert '_mx_signed_mul' in result.code_for_node(result.body[1])
+
+
