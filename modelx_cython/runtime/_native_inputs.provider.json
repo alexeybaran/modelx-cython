@@ -7,7 +7,7 @@
       "view_type": "NativeTable",
       "bind": "bind_native_table",
       "bind_cell": true,
-      "admission": "observed",
+      "admission": "declared_or_forwarded",
       "numeric_table": {
         "owner_field": "_owner",
         "ready": "numeric_resource_ready",
