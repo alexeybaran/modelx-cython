@@ -59,7 +59,9 @@ def test_native_export_requires_no_runtime_transplant():
     output = adapter.render(7, native=True)
     tree = cst.parse_module(output)
     assert tree.code == output
-    assert _native(cst.parse_module(output))
+    assert _native(tree, 2 if adapter.hook else 1)
+    if adapter.hook:
+        assert output == source
 
 
 def test_legacy_export_with_older_modelx_keeps_ordinary_collection(monkeypatch):

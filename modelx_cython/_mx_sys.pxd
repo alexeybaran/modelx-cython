@@ -120,7 +120,7 @@ cdef class BaseParent(BaseMxObject):
     cdef public object _mx_lock
 
 cdef class BaseModel(BaseParent):
-    pass
+    cdef public object _mx_collect_workers_override
 
 cdef class BaseSpace(BaseParent):
 
