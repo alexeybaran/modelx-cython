@@ -85,7 +85,7 @@ class Constants(FormulaTransformer):
     def integer(self, node):
         if isinstance(node, cst.Name):
             return node.value in self.locals or (node.value in self.cell.params and
-                self.cell.get_argtype_expr(node.value, c_style=True) in ('long long','bint'))
+                self.cell.get_argtype_expr(node.value, c_style=True, formula=True) in ('long long','bint'))
         if (isinstance(node, cst.Call) and isinstance(node.func, cst.Attribute)
                 and isinstance(node.func.value, cst.Name) and node.func.value.value == 'self'):
             cell = self.cls.cells.get(node.func.attr.value)

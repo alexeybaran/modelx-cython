@@ -258,7 +258,7 @@ class CheckedArithmetic:
                                                       cst.GreaterThan, cst.GreaterThanEqual))
                     or not isinstance(operand, cst.Name) or operand.value not in self.cell.params
                     or facts.stores[operand.value]
-                    or self.cell.get_argtype_expr(operand.value, c_style=True) != 'double'):
+                    or self.cell.get_argtype_expr(operand.value, c_style=True, formula=True) != 'double'):
                 continue
             operator = code(comparison.operator).strip()
             value = self._checked_range_expression(
@@ -534,7 +534,7 @@ class CheckedArithmetic:
             return function
         assigned = CstFacts(body).stores
         self.parameters = {name for name in self.cell.params if name not in assigned
-                           and self.cell.get_argtype_expr(name, c_style=True) == 'long long'}
+                           and self.cell.get_argtype_expr(name, c_style=True, formula=True) == 'long long'}
         self.prefix = Names(function).reserve('_mx_checked', family=True)
         self.inputs, self.next_input = [], 0
         if divisible:

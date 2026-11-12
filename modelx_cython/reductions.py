@@ -152,7 +152,7 @@ class NativeReductions(FormulaTransformer):
                 return locals_[node.value]
             if node.value in self.cells.params and self.cells.has_typeinfo():
                 return {'double': 'double', 'long long': 'longlong', 'bint': 'bint'}.get(
-                    self.cells.get_argtype_expr(node.value, c_style=True))
+                    self.cells.get_argtype_expr(node.value, c_style=True, formula=True))
             return None
         if isinstance(node, cst.UnaryOperation) and isinstance(node.operator, (cst.Plus, cst.Minus)):
             try:
@@ -204,10 +204,11 @@ class NativeReductions(FormulaTransformer):
         args = []
         for name in self.cells.params:
             if name in names:
-                kind = self.cells.get_argtype_expr(name, c_style=True)
+                kind = self.cells.get_argtype_expr(name, c_style=True, formula=True)
                 if kind not in ('double', 'long long', 'bint', 'object'):
                     return original
-                args.append((name, 'object' if name == boxed_param else self.cells.get_argtype_expr(name)))
+                args.append((name, 'object' if name == boxed_param else
+                             self.cells.get_argtype_expr(name, formula=True)))
         if capture is not None:
             args.append((capture, capture_type))
         helper = self.reserve_fallback()
@@ -381,7 +382,7 @@ return {fallback}
             return None
         start, limit, step = args
         if not (isinstance(start, cst.Name) and start.value in self.cells.params
-                and self.cells.get_argtype_expr(start.value, c_style=True) == 'long long'
+                and self.cells.get_argtype_expr(start.value, c_style=True, formula=True) == 'long long'
                 and _call(limit, 'max', 2) and _literal_int(limit.args[0].value, -1)
                 and isinstance(step, cst.UnaryOperation) and isinstance(step.operator, cst.Minus)):
             return None

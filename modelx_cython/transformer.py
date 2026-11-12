@@ -358,12 +358,14 @@ class PXDGenerator:
         return "".join(decl_stmts)
 
     def _add_param_type_hints(
-        self, cls_name: str, cells_name: str
+        self, cls_name: str, cells_name: str, formula=False
     ) -> str:
         """Build the C-style parameter list for a cells method.
 
         Starts with ``<cls_name> self``; parameter types come from the
-        traced type info when available, otherwise ``object``.
+        traced type info when available, otherwise ``object``; with
+        ``formula``, they are the types of the ``_f_`` method (see
+        :meth:`~modelx_cython.builder.CombinedCellsInfo.arg_type`).
         Parameters with default values are suffixed with ``=*``, as
         required in ``.pxd`` declarations.
         """
@@ -375,7 +377,8 @@ class PXDGenerator:
         # marked with '=*' as required for pxd declarations.
         if cells and cells.has_typeinfo() and cells.has_args():
             for param in cells.params:
-                type_ = cells.get_argtype_expr(param, c_style=True)
+                type_ = cells.get_argtype_expr(
+                    param, c_style=True, formula=formula)
                 default = "=*" if param in cells.params_with_defaults else ""
                 params.append(f"{type_} {param}{default}")
         else:
@@ -419,14 +422,14 @@ class PXDGenerator:
             if cells and cells.has_typeinfo():
                 rettype = 'object' if cells.native_table_result else cells.get_rettype_expr(c_style=True)
                 parameters = self._add_param_type_hints(
-                    cls_name=cls_name, cells_name=cells.name
+                    cls_name=cls_name, cells_name=cells.name, formula=True
                 )
                 decl_stmts.append(
                     f"cdef {rettype} {FORMULA_PREF + cells.name}({parameters})\n"
                 )
             else:
                 parameters = self._add_param_type_hints(
-                    cls_name=cls_name, cells_name=cells.name
+                    cls_name=cls_name, cells_name=cells.name, formula=True
                 )
                 decl_stmts.append(
                     f"cdef object {FORMULA_PREF + cells.name}({parameters})\n"
@@ -631,7 +634,7 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
         )
         from modelx_cython.ordered_arguments import preserve_argument_order
         from modelx_cython.powers import OperandKind, kind_of_type_expr
-        param_kinds = {name: kind_of_type_expr(cells.get_argtype_expr(name, c_style=True))
+        param_kinds = {name: kind_of_type_expr(cells.get_argtype_expr(name, c_style=True, formula=True))
                        for name in cells.params} if cells.has_args() and cells.has_typeinfo() else {}
         return preserve_argument_order(node,
             native_result=cells.get_rettype_expr(c_style=True) in ('double', 'long long', 'bint'),
@@ -952,13 +955,16 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
         the traced types (falling back to ``object`` when no type
         information was sampled) added to the non-self parameters,
         looking up the cells by the method name with any ``_f_``
-        prefix stripped."""
+        prefix stripped; an ``_f_`` method gets the types of the
+        formula (see
+        :meth:`~modelx_cython.builder.CombinedCellsInfo.arg_type`)."""
         param_list = list(funcdef.params.params + funcdef.params.posonly_params)[
             1:
         ]  # remove self
 
         name = funcdef.name.value
-        if name[:len(FORMULA_PREF)] == FORMULA_PREF:
+        formula = name[:len(FORMULA_PREF)] == FORMULA_PREF
+        if formula:
             name = name[len(FORMULA_PREF):]
 
         cells = self.module.classes[cls_name].cells[name]
@@ -967,12 +973,13 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
         updated_params = [funcdef.params.params[0]]  # add self first
         for param in param_list:
             param_name = param.name.value
-            if cells.get_argtype_expr(param_name):
+            type_expr = cells.get_argtype_expr(param_name, formula=formula)
+            if type_expr:
                 updated_params.append(
                     param.with_changes(
                         annotation=cst.Annotation(
                             annotation=cst.parse_expression(
-                                cells.get_argtype_expr(param_name),
+                                type_expr,
                                 config=self._module_node.config_for_parsing,
                             )
                         )
