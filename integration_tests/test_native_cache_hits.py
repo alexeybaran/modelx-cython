@@ -31,7 +31,7 @@ def test_native_cache_hit_contract(tmp_path):
         s.new_cells('retry_total','lambda t: retry(t) + retry(t)')
         model.export(tmp_path/'exported')
     finally:model.close()
-    (tmp_path/'sample.py').write_text('from exported import mx_model\ns=mx_model.Policy[1]\nfor t in range(3):s.total(t);s.retry_total(t)\n')
+    (tmp_path/'sample.py').write_text('from exported import mx_model\ns=mx_model.Policy[1]\nfor t in range(3):s.total(t);s.retry_total(t)\ns.value(3)\n')
     (tmp_path/'spec.py').write_text(repr({'dense_miss_binding':True,'propagate_exact_receiver':True,
         'dense_one_axis':True,'dense_bounds_proofs':True,'native_cache_hits':'both',
         'spaces':{'Policy':{'cells_param_size':{'t':5}}}}))

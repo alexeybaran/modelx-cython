@@ -1,13 +1,15 @@
-"""Observed negative bounds size a cache without closing its key domain."""
+"""Sampled negative indices stay valid in both full and compact caches."""
 import json
 import subprocess
 import sys
 import textwrap
 
 import modelx as mx
+import pytest
 
 
-def test_shifted_dense_and_exact_spill(tmp_path):
+@pytest.mark.parametrize('compact', [False, True])
+def test_shifted_dense_bounds(tmp_path, compact):
     model = mx.new_model('ShiftedCaches')
     try:
         for name in ('Plain', 'Locked'):
@@ -24,23 +26,50 @@ def test_shifted_dense_and_exact_spill(tmp_path):
     (tmp_path/'sample.py').write_text('from exported import mx_model as m\n'
         'from numpy import int64\n'
         'for s in (m.Plain, m.Locked):\n'
-        '    for t in (-1, 0, 3): s.value(int64(t))\n'
+        '    for t in (-3, 0, 3): s.value(int64(t))\n'
         '    s.legacy(0); s.legacy(3)\n')
+    spec = ['--no-spec']
+    if compact:
+        (tmp_path/'spec.py').write_text(repr({'spaces': {
+            name: {'cells_param_size': {'t': 6},
+                   'cells': {'value': {'dense_window': [(0, 2)]}}}
+            for name in ('Plain', 'Locked')
+        }}), encoding='utf-8')
+        spec = ['--spec', 'spec.py']
     subprocess.run([sys.executable, '-m', 'modelx_cython', 'exported',
-                    '--sample', 'sample.py', '--no-spec'], cwd=tmp_path, check=True)
+                    '--sample', 'sample.py', *spec], cwd=tmp_path, check=True)
     generated = (tmp_path/'exported_cy/_mx_classes.py').read_text()
-    assert '_spill_value' in generated
+    assert ('_spill_value' in generated) is compact
     report = json.loads((tmp_path/'exported_cy/_mx_admission.json').read_text())
     shifted = report['exported_cy._mx_classes._c_Plain._f_value']
-    assert shifted['dense_offsets'] == [-1] and shifted['exact_spill'] is True
+    assert shifted['dense_offsets'] == ([0] if compact else [-3])
+    assert shifted['exact_spill'] is compact
+    assert shifted['dense_logical_domain'] == [[-3, 6 if compact else 4]]
     probe = textwrap.dedent('''\
+        import sys
         from exported_cy import mx_model as m
-        for s in (m.Plain, m.Locked):
-            for t in (-1, 0, 3, -5, 9):
+
+        stop = int(sys.argv[1])
+        for name in ('Plain', 'Locked'):
+            s = getattr(m, name)
+            indices = [-3, -1, 0, 3] + ([5] if stop == 6 else [])
+            for t in indices:
                 assert s.value(t) == s.value(t) == float(t)
-            assert s.seen == [-1, 0, 3, -5, 9]
-            # Both shifted and unshifted inferred windows retain cold keys.
-            assert s.legacy(-1) == s.legacy(-1) == -1.0
-            assert s.legacy(9) == s.legacy(9) == 9.0
+            for t in (-4, stop):
+                try:
+                    s.value(t)
+                except IndexError as error:
+                    assert f'{name}.value' in str(error) and f't in [-3, {stop})' in str(error)
+                    assert 'cells_param_size' in str(error)
+                else:
+                    raise AssertionError('invalid signed index reached the formula')
+            assert s.seen == indices
+            try:
+                s.legacy(-1)
+            except IndexError as error:
+                assert f'{name}.legacy' in str(error)
+            else:
+                raise AssertionError('unsigned sample unexpectedly admitted a negative index')
         ''')
-    subprocess.run([sys.executable, '-c', probe], cwd=tmp_path, check=True)
+    subprocess.run([sys.executable, '-c', probe, '6' if compact else '4'],
+                   cwd=tmp_path, check=True)

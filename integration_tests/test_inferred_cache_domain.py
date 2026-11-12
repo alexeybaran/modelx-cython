@@ -1,4 +1,4 @@
-"""Representative traces size storage; they do not bound valid Cell arguments."""
+"""Sample and spec bounds govern both public and private dense calls."""
 import os
 import subprocess
 import sys
@@ -7,12 +7,12 @@ import pytest
 
 
 @pytest.mark.parametrize('explicit', [False, True])
-def test_inferred_dense_spill_preserves_cache_errors_and_overrides(tmp_path, explicit):
+def test_dense_bounds_preserve_cache_errors_and_overrides(tmp_path, explicit):
     model=mx.new_model('InferredDomain')
     try:
         p=model.new_space('Projection', refs={'factor': 2., 'fail': True})
         p.new_cells('value', '''def value(t):
-    if t == 9 and fail:
+    if t == 2 and fail:
         raise ValueError('retry')
     return factor*t
 ''')
@@ -21,12 +21,14 @@ def test_inferred_dense_spill_preserves_cache_errors_and_overrides(tmp_path, exp
         model.export(tmp_path/'exported')
     finally:model.close()
     (tmp_path/'sample.py').write_text('''from exported import mx_model as m
-for t in range(3):
- m.Projection.value(t);m.Projection.forward(t);m.Projection.tupled(t, 0)
+m.Projection.value(0)
+m.Projection.forward(0)
+m.Projection.forward(2)
+m.Projection.tupled(0, 0)
 ''')
     args=['--no-spec']
     if explicit:
-        (tmp_path/'spec.py').write_text(repr({'spaces':{'Projection':{'cells_param_size':{'t':4,('t','k'):(4,1)}}}}))
+        (tmp_path/'spec.py').write_text(repr({'spaces':{'Projection':{'cells_param_size':{'t':6,('t','k'):(4,1)}}}}))
         args=['--spec','spec.py']
     build=subprocess.run([sys.executable,'-B','-m','modelx_cython','exported','--sample','sample.py',*args],
                          cwd=tmp_path,env=dict(os.environ),capture_output=True,text=True)
@@ -35,31 +37,42 @@ for t in range(3):
     probe='''import pickle,sys
 from exported_cy import mx_model as m
 p=m.Projection
-if sys.argv[1]=='True':
- for key in (-1, 4, 12):
-  try:p.value(key)
-  except IndexError:pass
-  else:raise AssertionError('explicit range was not enforced')
+stop = 6 if sys.argv[1] == 'True' else 4
+
+def rejects_index(call, cell, bounds):
+    try:
+        call()
+    except IndexError as error:
+        assert cell in str(error) and bounds in str(error) and 'cells_param_size' in str(error)
+    else:
+        raise AssertionError('out-of-range index was evaluated')
+
+assert p.value(stop - 1) == 2.0 * (stop - 1)
+for key in (-1, stop, 1 << 60):
+    rejects_index(lambda: p.value(key), 'Projection.value', f't in [0, {stop})')
+rejects_index(lambda: p.forward(stop - 1), 'Projection.value', f't in [0, {stop})')
+rejects_index(lambda: p.tupled(0, 1), 'Projection.tupled', 'k in [0, 1)')
+assert p.value(1) == 2.0
+p.factor = 3.0
+assert p.value(1) == 2.0
+try:
+    p.value(2)
+except ValueError as error:
+    assert error.args == ('retry',)
 else:
- for key in (-4, 7, 12, 1<<60):
-  assert p.value(key)==2.*key
-  assert p.forward(key)==2.*(key+1)
-  assert p.tupled(key, -2)==2.*key-2
- assert p.value(8)==16.
- p.factor=3.
- assert p.value(8)==16.
- try:p.value(9)
- except ValueError as error:assert error.args==('retry',)
- else:raise AssertionError('error not raised')
- p.fail=False
- assert p.value(9)==27.
- q=pickle.loads(pickle.dumps(p))
- assert q.value(8)==16. and q.value(9)==27.
- class Derived(type(p)):
-  def value(self,t):return 7.*t
- d=Derived(m);d._mx_copy_refs(p,m)
- assert d.value(12)==84.
- assert d.forward(12)==91.
+    raise AssertionError('formula error was swallowed')
+p.fail = False
+assert p.value(2) == 6.0
+q = pickle.loads(pickle.dumps(p))
+assert q.value(1) == 2.0 and q.value(2) == 6.0
+
+class Derived(type(p)):
+    def value(self, t):
+        return 7.0 * t
+
+d = Derived(m)
+d._mx_copy_refs(p, m)
+assert d.forward(2) == 21.0
 '''
     result=subprocess.run([sys.executable,'-B','-c',probe,str(explicit)],cwd=tmp_path,
                           env=dict(os.environ),capture_output=True,text=True)

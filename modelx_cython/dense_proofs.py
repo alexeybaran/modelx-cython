@@ -80,7 +80,7 @@ def _formula_ranges(guard, layout, uses, spill_functions, spill_uses):
     if calls_formula(statements(guard.body)) != 1 or len(fallback) != 1:
         return ()
     fallback, = fallback
-    if layout.unbounded_spill:
+    if layout.checks_spill_in_helper:
         # These are bounds of the hot cache branch only. The shared formula
         # also runs through the cold spill; callers must guard these facts.
         expected_spill = cst.parse_expression(f'{layout.spill_entry}({MX_SELF}, {keys})')
@@ -163,7 +163,7 @@ def prove_entries(state: EntryModule, records, uses, formula_domains_out=None):
                 if interval and axis.lower <= interval[0] < interval[1] <= axis.stop:
                     mask |= 1 << index
             if mask:
-                if layout.unbounded_spill:
+                if layout.checks_spill_in_helper:
                     if formula not in formula_domains:
                         domain = state.names.reserve('_mx_dense_domain', family=True)
                         formula_domains[formula] = domain, source_axes
@@ -203,7 +203,7 @@ def prove_entries(state: EntryModule, records, uses, formula_domains_out=None):
             layout, proved = records[name], ranges_by_entry[name]
             guard = after.body.body[0]
             fallback = guard.orelse
-            if proved and layout.logical_axes and not layout.unbounded_spill:
+            if proved and layout.logical_axes and not layout.checks_spill_in_helper:
                 test = cst.parse_expression(dense_condition(proved, flag))
                 if isinstance(fallback, cst.If):
                     fallback = fallback.with_changes(test=test)

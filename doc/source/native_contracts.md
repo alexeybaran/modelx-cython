@@ -22,14 +22,12 @@ Reference and points to a wider sample or spec. Ordinary bound Python calls
 perform this check before dispatch. A separately compiled Cython caller must
 pass values that satisfy the published Cython signature.
 
-With automatic cache selection, sampled integer ranges size the dense hot window,
-not the Cell's legal input domain. Other typed keys use the existing lazy spill
-dictionary belonging to that Cell; published results remain one logical cache.
-Formula-range proofs are conditional on the actual input lying in their proved
-window. An explicit `cells_param_size` contract retains its established checked
-domain, and disabling automatic selection retains the legacy behavior. This
-allows a small representative type trace to serve larger original populations
-without product-specific maximum settings.
+Array-backed Cells accept indices within the range covered by the sample,
+including observed negative indices. The `cells_param_size` spec can extend
+the upper bound. An index outside this range raises `IndexError` before
+evaluation. When the physical array covers only part of the accepted range,
+indices in the rest of that range use the cell's lazy spill dictionary.
+Both storage paths form one logical cache.
 
 A concrete `-> object` return annotation declares an object result/cache ABI,
 even when every sampled value is numeric. Use it for identity-preserving raw

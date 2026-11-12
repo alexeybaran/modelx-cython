@@ -88,10 +88,14 @@ def test_long_and_hash_formula_contracts(tmp_path):
         assert fresh.hash_total(1,0.25)==1.25
         assert fresh.value(1)==1.0
         assert fresh.counter[0]==before+2
-        # Inferred sampling windows spill; they do not declare legal bounds.
-        for call,expected in ((lambda:fresh.value(7),7.0),(lambda:fresh.hash_total(7,0.25),7.25)):
+        for call in (lambda:fresh.value(7), lambda:fresh.hash_total(7,0.25)):
             for _ in range(2):
-                assert call()==expected
-        assert fresh.counter[0]==before+3
+                try:
+                    call()
+                except IndexError as error:
+                    assert 'Policy.value' in str(error)
+                else:
+                    raise AssertionError('out-of-range dependency was evaluated')
+        assert fresh.counter[0]==before+2
         assert s.untyped(1)=={'value':1}
         ''')],cwd=tmp_path,check=True)

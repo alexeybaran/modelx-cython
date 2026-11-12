@@ -726,7 +726,7 @@ class CombinedCellsInfo(LexicalCellsInfo):
 
     @property
     def has_inferred_dense_domain(self):
-        """A sampled cache window is not an author-declared argument domain."""
+        """Whether the logical cache domain comes from the sample."""
         from modelx_cython import automatic
         if not automatic.enabled(self):
             return False

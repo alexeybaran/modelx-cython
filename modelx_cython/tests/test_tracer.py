@@ -48,6 +48,16 @@ def test_records_negative_integral_arguments():
     assert not RuntimeCellsInfo([make_trace(0, 8)]).has_negative_args
 
 
+@pytest.mark.parametrize("value", [np.int64(-(1 << 63)), np.int64((1 << 63) - 1),
+                                   np.uint64((1 << 63) - 1)])
+def test_integral_sample_bounds_use_python_integers(value):
+    info = RuntimeCellsInfo([make_trace(0, value)])
+
+    assert type(info.min_args["i"]) is int
+    assert type(info.max_args["i"]) is int
+    assert info.max_args["i"] + 1 == int(value) + 1
+
+
 @pytest.mark.parametrize("ret_vals", [
     [np.array([1.0, 2.0]), 3],
     [3, np.array([1.0, 2.0])],

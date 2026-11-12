@@ -59,7 +59,8 @@ def test_ordinary_sum_at_double_boundary(tmp_path):
         '        getattr(m.Projection, name)(t)\n'
         '    for variable in ("state", "function", "iterable", "error", "bound_0"):\n'
         '        getattr(m.Projection, "named_" + variable)(t)\n'
-        '    m.Projection.captured_state(t)\n')
+        '    m.Projection.captured_state(t)\n'
+        'm.Projection.labels(11)\n')
     subprocess.run([sys.executable, '-m', 'modelx_cython', 'exported',
                     '--sample', 'sample.py', '--no-spec'], cwd=tmp_path, check=True)
     report = json.loads((tmp_path / 'exported_cy/_mx_admission.json').read_text())
@@ -209,7 +210,8 @@ def test_builtin_minimum_of_typed_range(tmp_path):
     (tmp_path / 'sample.py').write_text('from exported import mx_model\n'
         'mx_model.Projection.minimum(2, 0)\nmx_model.Projection.shadowed(2)\n'
         'mx_model.Projection.all_positive()\nmx_model.Projection.total(2)\n'
-        'mx_model.Projection.any_positive(0)\nmx_model.Projection.maximum(1)\n'
+        'mx_model.Projection.any_positive(0)\nmx_model.Projection.any_positive(2)\n'
+        'mx_model.Projection.maximum(1)\nmx_model.Projection.minimum(2, 6)\n'
         'mx_model.Projection.float_total(2)\n', encoding='utf-8')
     subprocess.run([sys.executable, '-m', 'modelx_cython', 'exported',
                     '--sample', 'sample.py', '--no-spec'], cwd=tmp_path, check=True)

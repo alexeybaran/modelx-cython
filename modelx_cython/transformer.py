@@ -63,6 +63,7 @@ from libcst.metadata.scope_provider import BuiltinAssignment
 
 from modelx_cython.parser import ParentScopeAddin
 from modelx_cython.builder import ModuleInfo, CombinedCellsInfo, NATIVE_TABLE_PROVIDER
+from modelx_cython.config import TransSpec
 from modelx_cython.powers import rewrite_powers
 from modelx_cython.inline_entries import add_inline_entries, allows_exact_receiver
 from modelx_cython.cell_entries import dense_condition
@@ -1302,7 +1303,13 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
                                     {has_expr} = True
                                     return val
                                 """)
-                        outside = 'raise IndexError("array index out of range")\n'
+                        logical_axes = cells.dense_logical_axes
+                        logical_guard = dense_condition(logical_axes)
+                        bounds = ', '.join(f'{axis.key} in [{axis.lower}, {axis.stop})'
+                                           for axis in logical_axes)
+                        message = (f'{cells.model_path}: argument index out of range. Expected {bounds}. '
+                                   f'Sample the required indices or set {TransSpec.CELLS_PARAM_SIZE!r} in the spec.')
+                        outside = f'raise IndexError({message!r})\n'
                         spill_branch = ''
                         if cells.has_dense_spill:
                             key = '(' + ', '.join(args) + (',' if len(args)==1 else '') + ')'
@@ -1316,15 +1323,17 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
                                      f'{value} = {f_expr}\n{cache}[{key}] = {value}\nreturn {value}\n')
                             if cells.is_locked:
                                 spill = f'with self.{MX_LOCK}:\n' + textwrap.indent(spill, '    ')
+                            if cells.has_inferred_dense_domain or cells.has_shifted_cache:
+                                spill = (f'if not ({logical_guard}):\n'
+                                         + textwrap.indent(outside, '    ') + spill)
                             if cells.has_inferred_dense_domain:
                                 helper = self._compact_spill(cells, cls_name, spill)
                                 outside = f'return {helper}\n'
                             elif cells.has_shifted_cache:
                                 outside = spill
                             else:
-                                original = dense_condition(cells.dense_logical_axes)
                                 helper = self._compact_spill(cells, cls_name, spill)
-                                spill_branch = f'elif {original}:\n    return {helper}\n'
+                                spill_branch = f'elif {logical_guard}:\n    return {helper}\n'
                         if_stmt = (
                             f"if {idx_range}:\n"
                             + textwrap.indent(cache_body, " " * 4)

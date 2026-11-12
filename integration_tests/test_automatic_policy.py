@@ -1,4 +1,4 @@
-"""Automatic storage preserves cold-domain keys and published cache state."""
+"""Automatic storage preserves valid cold indices and published cache state."""
 import json
 import subprocess
 import sys
@@ -38,6 +38,13 @@ def test_default_policy_needs_no_cell_tuning(tmp_path):
         # Keys not observed for this Cell remain in its original logical domain.
         assert s.narrow(0)==0.0 and s.narrow(7)==7.0
         assert s.narrow(7)==7.0 and s.seen[0]==3
+        try:
+            s.narrow(21)
+        except IndexError as error:
+            assert 'Policy.narrow' in str(error) and 'cells_param_size' in str(error)
+        else:
+            raise AssertionError('automatic compact storage admitted an out-of-range index')
+        assert s.seen[0]==3
         assert s.keyed(0.0)==-1.0 and s.keyed(-0.0)==-1.0
         assert s.keyed(0.5)==-0.5 and s.keyed(0.75)==-0.25
         assert s.seen[1]==3

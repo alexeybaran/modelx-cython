@@ -220,15 +220,15 @@ class RuntimeCellsInfo:     # TODO: Create base class RuntimeBaseMemberInfo
             ):  # remove self
                 tp = type(val)
                 integral = issubclass(tp, numbers.Integral)
-                if integral and val < 0:
-                    self.has_negative_args = True
                 if integral:
+                    val = operator.index(val)
+                    if val < 0:
+                        self.has_negative_args = True
                     if not -(1 << 63) <= val < (1 << 63):
                         wide_arguments.add(arg)
                     self.min_args[arg] = min(self.min_args.get(arg, 0), val)
-                    value = int(val)
-                    self.observed_min_args[arg] = min(self.observed_min_args.get(arg, value), value)
-                    self.observed_max_args[arg] = max(self.observed_max_args.get(arg, value), value)
+                    self.observed_min_args[arg] = min(self.observed_min_args.get(arg, val), val)
+                    self.observed_max_args[arg] = max(self.observed_max_args.get(arg, val), val)
                 types = arg_type_val.setdefault(arg, {})
                 if tp not in types:
                     types[tp] = val

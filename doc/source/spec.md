@@ -47,14 +47,13 @@ not listed use no spec.
 ### `cells_param_size`
 
 Declares the sizes of the per-cells cache arrays allocated for cells with
-integer parameters.  A cells whose parameters are all integers and whose
-values are numeric scalars (not arrays) is backed by a fixed-size C array
-indexed by its parameters, so the translator must know each parameter's
-maximum size at translation time.
+integer parameters. For an array-backed cell, the translator needs an
+upper bound for each integer parameter at translation time.
 
 The value is a dict that maps a parameter name — or a tuple of parameter
-names for cells with multiple parameters — to the array size, or tuple of
-sizes.  A size of `n` means the parameter takes values in `range(n)`:
+names for cells with multiple parameters — to an exclusive upper bound,
+or a tuple of bounds. The lower bound is zero or the lowest negative
+value observed for the cell and parameter:
 
 ```python
 {"cells_param_size":
@@ -68,9 +67,10 @@ tuple.
 If the sample run passes an argument value equal to or larger than the
 declared size, the size is automatically raised to the observed maximum
 plus one, and the adjustment is logged at `INFO` level.  For parameter
-tuples with no spec entry, sizes are derived entirely from the observed
-maximum values.  Calling a compiled cells with an index outside the
-declared range raises {py:exc}`IndexError`.
+tuples with no spec entry, the upper bound is the observed maximum plus
+one. Calling an array-backed cell outside its accepted range raises
+{py:exc}`IndexError`. To extend the negative range, include the required
+negative indices in the sample.
 
 ### `cells`
 
