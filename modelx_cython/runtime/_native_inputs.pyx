@@ -1745,17 +1745,18 @@ cdef double table_field_float(LookupContext context, NativeTable table, object k
 @cython.boundscheck(False)
 @cython.wraparound(False)
 cdef bint try_clamped_table_float(NativeTable table, LookupContext context, bint lower, object namespace,
-                                  long long key, object column, double* result) except -1:
+                                  long long key, object column, double* result, bint explicit) except -1:
     cdef Py_ssize_t index, row
     cdef PyObject* snapshot = <PyObject*>table._numeric_view
     cdef TableView data
-    cdef unsigned char mask = 2 if lower else 1
+    # Explicit calls have no separately replaceable bound helper.
+    cdef unsigned char mask = (2 if lower else 1) << (2 if explicit else 0)
     cdef dict bindings
     if table._input_keys is None and table._numeric_view is None:
         return False
     if not (context._private_owner and context.clamped_bindings_ready & mask
             and context.clamped_namespace is namespace):
-        if namespace is None and not lower:
+        if explicit or (namespace is None and not lower):
             bindings = None
         elif namespace is _typed_inputs_module:
             bindings = _typed_inputs_bindings

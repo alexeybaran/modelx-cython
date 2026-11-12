@@ -353,12 +353,17 @@ class NumericReturns(cst.CSTTransformer):
     def leave_FunctionDef(self, before, after):
         """Fuse a terminal membership check with its guarded numeric consumer."""
         self.function_depth -= 1
-        if (self.function_depth or not self.scope_safe or 'min' not in self.builtin_keys or self.cell.is_locked
+        if (self.function_depth or not self.scope_safe or self.cell.is_locked
                 or self.cell.cls in self.cls.visitor.dynamic_ref_classes
                 or self.cell.get_rettype_expr(c_style=True) != 'double'
-                or not isinstance(after.body, cst.IndentedBlock) or len(after.body.body) < 4):
+                or not isinstance(after.body, cst.IndentedBlock)):
             return after
         body = after.body.body
+        explicit_clamp = self.explicit_clamped_table_method(body)
+        if explicit_clamp is not None:
+            return after.with_changes(body=after.body.with_changes(body=explicit_clamp))
+        if 'min' not in self.builtin_keys or len(body) < 4:
+            return after
         native_clamp = self.clamped_table_method(body, after)
         if native_clamp is not None:
             return after.with_changes(body=after.body.with_changes(body=native_clamp))
@@ -568,13 +573,13 @@ class NumericReturns(cst.CSTTransformer):
             replaced.append(line)
         return tuple(replaced) if changed else None
 
-    def first_lookup(self, expression):
+    def first_lookup(self, expression, *, allow_options=False):
         """Find an initial table read without moving an effectful operand."""
         if isinstance(expression, cst.BinaryOperation) and isinstance(
                 expression.operator, (cst.Add, cst.Subtract, cst.Multiply, cst.Divide)):
             operand = (expression.right if isinstance(expression.left, (cst.Integer, cst.Float))
                        else expression.left)
-            return self.first_lookup(operand)
+            return self.first_lookup(operand, allow_options=allow_options)
         if not isinstance(expression, cst.Call):
             return None
         function = expression.func
@@ -582,10 +587,12 @@ class NumericReturns(cst.CSTTransformer):
                 and function.value in self.builtin_keys and len(expression.args) == 2
                 and not any(arg.keyword or arg.star for arg in expression.args)):
             left, right = (arg.value for arg in expression.args)
-            return self.first_lookup(right if isinstance(left, (cst.Integer, cst.Float)) else left)
+            operand = right if isinstance(left, (cst.Integer, cst.Float)) else left
+            return self.first_lookup(operand, allow_options=allow_options)
         if (isinstance(function, cst.Attribute)
-                and isinstance(function.value, cst.Name) and len(expression.args) == 2
-                and not any(arg.keyword or arg.star for arg in expression.args)):
+                and isinstance(function.value, cst.Name)
+                and (allow_options or (len(expression.args) == 2
+                     and not any(arg.keyword or arg.star for arg in expression.args)))):
             return expression
         return None
 
@@ -681,6 +688,79 @@ class NumericReturns(cst.CSTTransformer):
             if not (cast and isinstance(cast[0], cst.Name) and cast[0].value == base.value):
                 return None
         return base.value
+
+    def explicit_clamped_table_method(self, body):
+        """Lower an explicit clamp on a directly bound native table receiver."""
+        if len(body) < 2:
+            return None
+        source, result = map(self.single_statement, body[-2:])
+        if not isinstance(result, cst.Return):
+            return None
+        lookup = self.first_lookup(result.value, allow_options=True)
+        if lookup is None or not self.assigns(source, lookup.func.value.value):
+            return None
+        binding = self.table_source(source.value)
+        if binding is None:
+            return None
+        explicit = binding.declaration.numeric_table.explicit_clamp
+        args = lookup.args
+        if (explicit is None or lookup.func.attr.value != explicit.method or not 2 <= len(args) <= 4
+                or any(arg.star for arg in args) or any(arg.keyword is not None for arg in args[:2])):
+            return None
+        key, column = (arg.value for arg in args[:2])
+        if (not self.native_key(key, allow_bool=False) or not isinstance(column, cst.SimpleString)
+                or type(column.evaluated_value) is not str):
+            return None
+        option_names = ('clamp_lower', 'default')
+        options = {}
+        for position, arg in enumerate(args[2:]):
+            name = arg.keyword.value if arg.keyword is not None else option_names[position]
+            if name not in option_names or name in options:
+                return None
+            options[name] = arg.value
+        lower = options.get('clamp_lower', cst.Name('False'))
+        if not isinstance(lower, cst.Name) or lower.value not in ('True', 'False'):
+            return None
+        if 'default' in options:
+            try:
+                default = literal_value(options['default'])
+            except (ValueError, TypeError, SyntaxError):
+                return None
+            if type(default) not in (type(None), bool, int, float, str, bytes):
+                return None
+
+        provider = binding.manifest.provider
+        alias = module_name(provider)
+        names = Names(cst.Module(body), used=self.cell.params)
+        if alias in names.names:
+            return None
+        context = self.lookup_context(provider)
+        number = cst.Name(names.reserve('_mx_clamp_key'))
+        value = cst.Name(names.reserve('_mx_clamp_value'))
+        table = lookup.func.value
+
+        def native(operation, *operands):
+            return cst.Call(cst.Attribute(cst.Name(alias), cst.Name(operation)),
+                            tuple(cst.Arg(operand) for operand in operands))
+
+        def fallback(call):
+            return cst.IndentedBlock((cst.SimpleStatementLine((
+                cst.Assign((cst.AssignTarget(value),), call),)),))
+
+        declare = cst.parse_statement(f'{value.value}: _mx_cy.double\n')
+        bind_key = cst.SimpleStatementLine((
+            cst.AnnAssign(number, cst.Annotation(cst.parse_expression('_mx_cy.longlong')), key),))
+        read = native(explicit.read, table, context, lower, number, column,
+                      cst.parse_expression(f'_mx_cy.address({value.value})'))
+        typed_fallback = lookup.with_changes(args=(args[0].with_changes(value=number), *args[1:]))
+        # A substituted owner may define an effectful method lookup. Keep its
+        # original call, including evaluation order, when the view is ineligible.
+        guard = cst.If(native(explicit.ready, table), cst.IndentedBlock((
+            bind_key, cst.If(cst.UnaryOperation(cst.Not(), read), fallback(typed_fallback)))),
+            orelse=cst.Else(fallback(lookup)))
+        self.providers.add(provider)
+        self.operations.add(f'{provider}.{explicit.read}')
+        return (*body[:-1], declare, guard, body[-1].visit(_ReplaceExpression(lookup, value)))
 
     def clamped_table_method(self, body, formula=None):
         """Use the owned table's native bounds for a typed clamp and scalar read."""

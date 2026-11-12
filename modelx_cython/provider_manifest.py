@@ -37,11 +37,19 @@ class NumericBounds:
 
 
 @dataclass(frozen=True)
+class ExplicitClamp:
+    method: str
+    ready: str
+    read: str
+
+
+@dataclass(frozen=True)
 class NumericTable:
     owner_field: str
     ready: str
     methods: Mapping[str, NumericMethod]
     bounds: Optional[NumericBounds] = None
+    explicit_clamp: Optional[ExplicitClamp] = None
 
 
 @dataclass(frozen=True)
@@ -159,7 +167,7 @@ def _require_fields(value, label, required, optional=()):
 
 def _read_numeric_table(type_id, declaration):
     label = f'{type_id}.numeric_table'
-    _require_fields(declaration, label, ('owner_field', 'ready', 'methods'), ('bounds',))
+    _require_fields(declaration, label, ('owner_field', 'ready', 'methods'), ('bounds', 'explicit_clamp'))
     owner_field, ready, methods = (declaration[name] for name in ('owner_field', 'ready', 'methods'))
     if not (valid_identifier(owner_field) and valid_identifier(ready) and isinstance(methods, dict) and methods):
         raise ValueError(f'invalid numeric table declaration for {type_id}')
@@ -184,7 +192,14 @@ def _read_numeric_table(type_id, declaration):
         if not all(valid_identifier(value) for value in config.values()):
             raise ValueError(f'invalid numeric bounds declaration for {type_id}')
         bounds = NumericBounds(**config)
-    return NumericTable(owner_field, ready, MappingProxyType(entries), bounds)
+    explicit = None
+    if 'explicit_clamp' in declaration:
+        config = declaration['explicit_clamp']
+        _require_fields(config, f'{label}.explicit_clamp', ('method', 'ready', 'read'))
+        if not all(valid_identifier(value) for value in config.values()):
+            raise ValueError(f'invalid explicit clamp declaration for {type_id}')
+        explicit = ExplicitClamp(**config)
+    return NumericTable(owner_field, ready, MappingProxyType(entries), bounds, explicit)
 
 
 def _read_type(type_id, declaration):

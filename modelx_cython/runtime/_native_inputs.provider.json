@@ -19,6 +19,11 @@
           "bounded": "read_bounded_table_float",
           "clamped": "read_clamped_table_float"
         },
+        "explicit_clamp": {
+          "method": "lookup_clamped_float",
+          "ready": "explicit_clamp_ready",
+          "read": "read_explicit_clamp"
+        },
         "methods": {
           "lookup_float": {
             "signature": "lookup_f64",

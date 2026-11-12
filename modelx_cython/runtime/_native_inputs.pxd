@@ -129,7 +129,7 @@ cdef class NativeTable:
 cdef NativeTable bind_native_table(object value, str cell)
 
 cdef bint try_clamped_table_float(NativeTable, LookupContext, bint lower, object namespace, long long key,
-                                  object column, double* result) except -1
+                                  object column, double* result, bint explicit) except -1
 cdef bint read_bounded_table_float(NativeTable table, LookupContext context, object first_fn,
                                    long long key, str column, double below, double* value,
                                    bint owned_index=*) except? -1
@@ -185,11 +185,11 @@ cdef inline double read_table_field_float(LookupContext context, NativeTable sou
         return table_field_float(context, source, key, column)
     return source.lookup_float(<object>key, column)
 
-cdef inline bint read_clamped_table_float(NativeTable table, LookupContext context,
-                                          bint lower, object namespace, long long key,
-                                          object column, double* result) except -1:
+cdef inline bint _read_clamped_table_float(NativeTable table, LookupContext context,
+                                           bint lower, object namespace, long long key,
+                                           object column, double* result, bint explicit) except -1:
     cdef Py_ssize_t position
-    cdef unsigned char mask = 2 if lower else 1
+    cdef unsigned char mask = (2 if lower else 1) << (2 if explicit else 0)
     if (table._input_keys is not None and context._private_owner and context.clamped_bindings_ready & mask
             and context.clamped_source is table and context.clamped_column is column
             and context.clamped_namespace is namespace):
@@ -205,7 +205,21 @@ cdef inline bint read_clamped_table_float(NativeTable table, LookupContext conte
             result[0] = table._input_values[position]
             return True
         return False
-    return try_clamped_table_float(table, context, lower, namespace, key, column, result)
+    return try_clamped_table_float(table, context, lower, namespace, key, column, result, explicit)
+
+cdef inline bint read_clamped_table_float(NativeTable table, LookupContext context,
+                                          bint lower, object namespace, long long key,
+                                          object column, double* result) except -1:
+    return _read_clamped_table_float(table, context, lower, namespace, key, column, result, False)
+
+cdef inline bint explicit_clamp_ready(NativeTable table) noexcept:
+    # Only the exact semantic owner receives these native resources.
+    return table is not None and (table._input_keys is not None or table._numeric_view is not None)
+
+cdef inline bint read_explicit_clamp(NativeTable table, LookupContext context,
+                                      bint lower, long long key, object column,
+                                      double* result) except -1:
+    return _read_clamped_table_float(table, context, lower, None, key, column, result, True)
 
 cdef double prepare_table_method(LookupContext, NativeTable, long long key, object column,
                                  object default=*) except? -1
