@@ -39,7 +39,7 @@ cdef class F64Vec:
         return 'F64Vec(%r)' % (list(self),)
 
     def __reduce__(self):
-        return (vec_of, (list(self),))
+        return (_vec_from_sequence, (list(self),))
 
 
 cdef F64Vec vec_new(Py_ssize_t n):
@@ -78,3 +78,8 @@ cdef F64Vec vec_of(object value):
 
 cdef int _vec_index_error() except -1:
     raise IndexError("list index out of range")
+
+
+def _vec_from_sequence(items):
+    """Unpickling: an F64Vec holding the given floats."""
+    return vec_of(items)
