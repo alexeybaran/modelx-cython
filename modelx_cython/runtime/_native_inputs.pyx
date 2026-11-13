@@ -1043,6 +1043,14 @@ cdef class KeyedCache:
 cdef Py_ssize_t _owned_position(object table, object key) except? -2:
     cdef object spec = table._index_error
     cdef object position
+    cache = table._native_cache
+    rectangular = cache.get(_rectangular_storage)
+    contiguous = cache.get(_contiguous_storage)
+    if rectangular is not None or contiguous is not None:
+        try:
+            return table._compact_position(key, rectangular, contiguous)
+        except KeyError:
+            return -1
     if spec is not None:
         spec = spec._index
         if not _valid_index_key(key, spec):
@@ -1058,6 +1066,9 @@ cdef object _read_owned_table(object table, object key, object column, object de
     cdef object name
     cdef Py_ssize_t position
     cdef tuple columns = table._columns
+    cache = table._native_cache
+    if _rectangular_storage in cache or _contiguous_storage in cache:
+        return _lookup(table, key, column) if default is _missing else _lookup(table, key, column, default)
     if spec is not None and type(column) is str and spec._index.get('pandas_columns', False):
         name = column
         try:
@@ -1325,11 +1336,13 @@ cdef class RectangularView:
     cdef tuple positions, widths
     cdef object column
 
-    def __init__(self, tuple axes, data, column):
+    def __init__(self, tuple storage, column):
+        axes, data = storage[:2]
         self.numbers = data
         self.column = column
         self.widths = tuple(map(len, axes))
-        self.positions = tuple(dict(zip(labels, range(len(labels)))) for labels in axes)
+        self.positions = (storage[2] if len(storage) == 3 else
+                          tuple(dict(zip(labels, range(len(labels)))) for labels in axes))
 
     cdef inline bint read(self, object key, object column, double* value) except -1:
         cdef Py_ssize_t row = 0, axis, width = len(self.widths)
@@ -1341,7 +1354,7 @@ cdef class RectangularView:
             part = (<tuple>key)[axis]
             if not PyLong_CheckExact(part) and not PyUnicode_CheckExact(part):
                 return False
-            digit = (<dict>self.positions[axis]).get(part)
+            digit = self.positions[axis].get(part)
             if digit is None:
                 return False
             row = row * <Py_ssize_t>self.widths[axis] + <Py_ssize_t>digit
@@ -2579,7 +2592,7 @@ cdef void _prepare_tables(object value) except *:
         rectangular = cache.get(_rectangular_storage)
         if rectangular is not None:
             if RectangularView not in cache:
-                cache.setdefault(RectangularView, RectangularView(*rectangular, value._columns[0]))
+                cache.setdefault(RectangularView, RectangularView(rectangular, value._columns[0]))
             return
         if value._keys and type(value._keys[0]) is int and TableView not in cache:
             cache.setdefault(TableView, TableView(value))
