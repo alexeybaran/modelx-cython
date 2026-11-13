@@ -64,6 +64,9 @@ def describe(module_infos):
                     if cache == 'dense' else [],
                     'dense_logical_domain': [[int(axis.lower), int(axis.stop)] for axis in cell.dense_logical_axes]
                     if cache == 'dense' else [],
+                    'associative_logical_domain': {
+                        axis.key: [int(axis.lower), int(axis.stop)] for axis in cell.associative_logical_axes
+                    } if cache in ('native-numeric-keys', 'dictionary') else {},
                     'numeric_primary_capacity': primary_capacity(cell)
                     if cache == 'native-numeric-keys' else 0,
                     'power_memo': bool(getattr(cell, 'power_memo', None)),

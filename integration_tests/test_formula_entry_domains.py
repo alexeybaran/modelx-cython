@@ -1,5 +1,6 @@
 """Direct-call admission covers long/dense/scalar/hash cases with one contract."""
 import ast
+import json
 import subprocess
 import sys
 import textwrap
@@ -35,6 +36,11 @@ def test_long_and_hash_formula_contracts(tmp_path):
     (tmp_path/'spec.py').write_text(repr(dict(dense_miss_binding=True,propagate_exact_receiver=True,
         spaces={'Policy':{'cells':{'hash_total':{'numeric_cache_capacity':8}}}})))
     subprocess.run([sys.executable,'-B','-m','modelx_cython','exported'],cwd=tmp_path,check=True)
+    admission = json.loads((tmp_path/'exported_cy/_mx_admission.json').read_bytes())
+    cells = {name.rsplit('._f_', 1)[-1]: entry for name, entry in admission.items()}
+    assert cells['hash_total']['associative_logical_domain'] == {'t': [0, 4]}
+    assert cells['untyped']['associative_logical_domain'] == {'t': [0, 4]}
+    assert cells['value']['associative_logical_domain'] == {}
     tree=ast.parse((tmp_path/'exported_cy/_mx_classes.py').read_text())
     functions={n.name:n for n in ast.walk(tree) if isinstance(n,ast.FunctionDef)}
     for name in ('_f_long_total','_f_hash_total'):

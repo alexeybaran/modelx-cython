@@ -27,6 +27,8 @@ coordinates before checking the cache or evaluating the formula. Observed
 negative indices are supported. The `cells_param_size` spec can extend the
 exclusive upper bound. An index outside the domain raises `IndexError`.
 Mixed cache keys retain their other argument types and key semantics.
+The admission report lists the checked coordinates and half-open bounds for
+numeric and dictionary caches in `associative_logical_domain`.
 When a physical array covers only part of the accepted range,
 indices in the rest of that range use the cell's lazy spill dictionary.
 Both storage paths form one logical cache.
