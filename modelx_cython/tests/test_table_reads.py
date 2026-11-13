@@ -527,6 +527,15 @@ def test_table_valued_result_is_reported_not_built():
     assert reads.declined[id(sites[0].node)].startswith('table-valued selection used as a value')
 
 
+def test_column_local_of_literals_reads_by_its_common_kind():
+    text, reads, _ = lower(base_model(), 'def _f_x(self, t):\n'
+                           '    column = ("mort_rate" if t > 2 else "band")\n'
+                           '    same = "mort_rate" if t else "mort_rate"\n'
+                           '    return self.mort_table().loc[30, column] + float(self.mort_table().loc[31, same])\n')
+    assert '_mx_h0.obj(_mx_h0.row_1(30), _mx_h0.col(column))' in text
+    assert '_mx_h0.f64(_mx_h0.row_1(31), _mx_h0.col(same))' in text and reads.typed == 2
+
+
 def test_untraced_and_key_count_mismatch():
     model = base_model()
     model.cells['mort_table'].schema = None
@@ -537,6 +546,16 @@ def test_untraced_and_key_count_mismatch():
     assert reasons[0].startswith('receiver has no traced table schema')
     assert reasons[1].startswith('4 key parts on a table of 3 levels')
     assert reasons[2].startswith('2 key parts on a table of 3 levels')
+
+
+def test_a_local_without_lowered_reads_is_left_as_written():
+    source = ('def _f_x(self, t):\n'
+              '    table = self.mort_table()\n'
+              '    mp = self.model_point()\n'
+              '    key = min(t, table.index.max_int())\n'
+              '    return table.lookup_float(key, "mort_rate"), [k for k in table.index], mp\n')
+    text, reads, _ = lower(base_model(), source)
+    assert text == source and reads.typed == 0
 
 
 def test_helper_names_never_collide_with_formula_names():
@@ -602,6 +621,9 @@ VALUE_FORMULAS = {
                   '    return sub.index[sub.index.searchsorted(t, side="right")], sub.index.searchsorted(t),'
                   ' sub.index.searchsorted(t, side="left"), sub.index[t % 4], sub.index[-1 - t % 4]', range(-1, 10)),
     'column_view': ('return self.gap_table()["v"][t] + self.gap_table()["n"][t]', range(0, 10)),
+    'column_choice': ('column = ("mort_rate" if t % 2 else "band")\n'
+                      '    return float(self.mort_table().loc[30 + t % 10, column]), self.mort_table().loc[31, column]',
+                      range(4)),
     'record': ('mp = self.model_point()\n'
                '    return float(mp["premium"]) * t + int(self.model_point()["age"]), mp["tag"], mp["nope"]', range(2)),
     'compr': ('tbl = self.gap_table()\n'
@@ -662,7 +684,7 @@ PROTOTYPE = {
                '    return tbl.loc[min(30 + t, tbl.index.max()), "mort_rate"]', 2),
     'band': ('return float(self.mort_table().loc[30 + t % 10, "band"])', 1),
     'band_int': ('return int(self.mort_table().loc[30 + t % 10, "band"])', 1),
-    'column_by_name': ('name = "mort_rate"\n    return float(self.mort_table().loc[30 + t % 10, name])', 0),
+    'column_by_name': ('name = "mort_rate"\n    return float(self.mort_table().loc[30 + t % 10, name])', 1),
     'column_computed': ('return float(self.mort_table().loc[30 + t % 10, "mort_" + "rate"])', 0),
     'reassigned': ('k = 30 + t % 10\n    row = self.mort_table().loc[k]\n    k = k + 1\n'
                    '    return float(row["mort_rate"])', 2),

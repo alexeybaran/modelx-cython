@@ -348,10 +348,12 @@ class TableReads:
         self.formula = _Formula(node)
         node.visit(self.formula)
         self._params = set(getattr(self.cells, 'params', ()) or ())
-        kept, escaped = {}, set()
+        kept, escaped, first_reasons = {}, set(), {}
         for _ in range(12):     # locals that cannot be lowered or escape: grow to a fixed point
             attempt = _Lowering(self, kept, escaped)
             new = node.visit(attempt)
+            for key, reason in attempt.reasons.items():     # the most specific reason comes first
+                first_reasons.setdefault(key, reason)
             more_kept, more_escaped = attempt.escapes()
             if set(more_kept) <= set(kept) and more_escaped <= escaped:
                 break
@@ -362,7 +364,7 @@ class TableReads:
         for site in self.sites:
             if id(site.node) in self.lowered:
                 continue
-            reason = attempt.reasons.get(id(site.node)) or attempt.default_reason(site)
+            reason = first_reasons.get(id(site.node)) or attempt.default_reason(site)
             if reason:
                 self.declined[id(site.node)] = reason
         if not attempt.changed:
@@ -588,8 +590,11 @@ class _Lowering(cst.CSTTransformer):
         for name, (kind, _) in self.locals.items():
             if name in self.kept:
                 continue
-            loads = [(node, nested) for node, nested in self.f.loads.get(name, ())
-                     if id(node) not in self.consumed]
+            every = self.f.loads.get(name, ())
+            if kind in ('table', 'record') and not any(id(node) in self.consumed for node, _ in every):
+                kept.setdefault(name, 'no read through it is lowered')     # left exactly as written
+                continue
+            loads = [(node, nested) for node, nested in every if id(node) not in self.consumed]
             if not loads:
                 continue
             use = self._use(loads[0][0])
@@ -890,12 +895,37 @@ class _Lowering(cst.CSTTransformer):
         result.note = f'{where}, {count} part{"s" if count > 1 else ""}: ' + '; '.join(notes)
         return result, None
 
+    def column_values(self, expr, depth=0):
+        """The possible values of a column expression built only from string literals: a
+        literal, a conditional between such expressions, or a local assigned only such
+        expressions. None for anything else."""
+        if depth > 4:
+            return None
+        name = _literal_str(expr)
+        if name is not None:
+            return {name}
+        if isinstance(expr, cst.IfExp):
+            a, b = self.column_values(expr.body, depth + 1), self.column_values(expr.orelse, depth + 1)
+            return a | b if a is not None and b is not None else None
+        if isinstance(expr, cst.Name) and expr.value not in self.f.other and expr.value not in self.o._params:
+            values = self.f.values.get(expr.value)
+            found = set()
+            for value in values or ():
+                more = self.column_values(value, depth + 1)
+                if more is None:
+                    return None
+                found |= more
+            return found or None
+        return None
+
     def column_read(self, ref, row, column, column_original):
-        """``H.f64/i64/obj(row, H.col("c"))`` for a literal column: (node, info) or (None, reason)."""
-        name = _literal_str(column_original)
-        if name is None:
+        """``H.f64/i64/obj(row, H.col("c"))`` for a column whose possible values are string
+        literals of one kind: (node, info) or (None, reason)."""
+        names = self.column_values(column_original)
+        if names is None:
             return None, 'column is not a string literal (rule 5); ' + PYTHON
-        kind = ref.schema.columns.get(name)
+        kinds = {ref.schema.columns.get(name) for name in names}
+        kind = kinds.pop() if len(kinds) == 1 else None
         method = {'float': 'f64', 'int': 'i64'}.get(kind, 'obj')
         col = _method(ref.handle, 'col', column)
         return _method(ref.handle, method, row, col), (method, kind, ref.handle, row, col)
