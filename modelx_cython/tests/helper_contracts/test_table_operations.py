@@ -1,5 +1,6 @@
 """Exact public contracts and native row/column selection over existing owners."""
 import importlib
+import math
 from pathlib import Path
 import pickle
 import subprocess
@@ -71,6 +72,9 @@ def table_lookup(function, source, key, column, *default):
 def contextual_lookup(function, source, long long key, column):
     cdef p.LookupContext context = p.LookupContext()
     return p.lookup_f64(function, context, source, key, column)
+
+def interpolate(function, source, lookup, last_key, math):
+    return p.prepared_interpolation(function, source, 0, 1.25, lookup, last_key, math)
 
 def table_key_info(count_function, at_function, source):
     return p.key_count(count_function, source), p.key_at(at_function, source, 0)
@@ -297,6 +301,13 @@ def test_native_views_leave_unread_object_keys_untouched(native, fault, indexed)
 def test_contextual_lookup_does_not_build_integer_view(native):
     table = Table((1, 2), ((1.5,), (2.5,)), ('rate',))
     assert native.contextual_lookup(helpers.lookup, table, 1, 'rate') == 1.5
+    assert not table._native_cache
+
+
+def test_external_table_interpolation_uses_original_helper(native):
+    table = Table((1, 2), ((1.5,), (2.5,)), ('rate',))
+    assert native.interpolate(helpers.prepared_interpolation, table,
+                              helpers.lookup, helpers.last_key, math) == 1.75
     assert not table._native_cache
 
 
