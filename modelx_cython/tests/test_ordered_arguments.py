@@ -82,3 +82,39 @@ def test_native_return_keeps_existing_cython_conversion_boundary():
     result = preserve_argument_order(cst.parse_module(source).body[0],
                                     native_result=True, operand_kind=classifier)
     assert cst.Module(body=(result,)).code == source
+
+
+def test_typed_extrema_become_c_comparisons_in_object_scopes():
+    """W1.4: all-double or all-C-integer operands keep their class without boxing."""
+    from types import SimpleNamespace
+    from modelx_cython.powers import KIND_FLOAT, KIND_INT, KIND_UNKNOWN
+    kinds = {'x': KIND_FLOAT, 'y': KIND_FLOAT, 'i': KIND_INT, 'j': KIND_INT}
+
+    class Kinds:
+        def kind(self, node):
+            if isinstance(node, cst.Name):
+                return kinds.get(node.value, KIND_UNKNOWN)
+            if isinstance(node, cst.Float):
+                return KIND_FLOAT
+            if isinstance(node, cst.Integer):
+                return KIND_INT
+            return KIND_UNKNOWN
+
+    def lowered(source, native_result=False):
+        cells, providers = SimpleNamespace(), set()
+        node = preserve_argument_order(cst.parse_module(source).body[0], native_result=native_result,
+                                       operand_kind=Kinds(), cells=cells, providers=providers)
+        return cst.Module(body=(node,)).code, cells, providers
+
+    code, cells, providers = lowered('def formula(x, y):\n    return max(0.0, x, y)\n')
+    assert '.max_f64(_mx_helper_' in code and '.max_f64(0.0, x), y)' in code
+    assert cells.minmax_native == 1 and cells.minmax_untyped == [] and providers
+    code, cells, _ = lowered('def formula(i, j):\n    return min(i, j)\n')
+    assert '.min_i64(i, j)' in code
+    code, cells, _ = lowered('def formula(i, x):\n    return min(i, x)\n')
+    assert 'min(*(i, x))' in code and cells.minmax_native == 0
+    assert [(e['form'], e['line']) for e in cells.minmax_untyped] == [('min', 2)]
+    code, cells, _ = lowered('def formula(x, y):\n    return [max(x, y) for _ in range(2)]\n', True)
+    assert '.max_f64(x, y)' in code           # a child scope of a native-result cell
+    code, cells, _ = lowered('def formula(x, y):\n    return max(x, y)\n', True)
+    assert 'return max(x, y)' in code and cells.minmax_native == 0   # Cython's intrinsic, as before

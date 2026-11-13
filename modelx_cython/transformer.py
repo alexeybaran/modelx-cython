@@ -718,7 +718,8 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
         return preserve_argument_order(node,
             native_result=cells.get_rettype_expr(c_style=True) in ('double', 'long long', 'bint'),
             operand_kind=OperandKind(self._resolver, self._cells_kinds, self._ref_kinds,
-                                     cls_info.fqname, param_kinds))
+                                     cls_info.fqname, param_kinds),
+            cells=cells, providers=self.helper_providers)
 
     def _table_reads(self, node, cls_info, cells):
         """M1 hook (W1.1): lower table reads (W1.3, ``table_reads.TableReads``) and report the
