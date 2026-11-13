@@ -317,6 +317,7 @@ class VectorLowering(cst.CSTTransformer):
         self.decls = []
         self.comp_scalars = []          # stack of {name: scalar kind} inside expanded loops
         self.range_names = set()
+        self.ref_scalars = {}
         self.scope_stack = []           # per enclosing comprehension/lambda: expanded here
 
     # ---------------------------------------------------------------- kinds
@@ -411,6 +412,8 @@ class VectorLowering(cst.CSTTransformer):
             if e is not None and _index(node) is not None:
                 return FLOAT if e == 'V' else INT
             return None
+        if isinstance(node, cst.Attribute) and _is_name(node.value, 'self'):
+            return self.ref_scalars.get(node.attr.value)
         if isinstance(node, cst.Call):
             f = node.func
             if isinstance(f, cst.Attribute) and _is_name(f.value, 'self'):
@@ -1146,6 +1149,38 @@ def range_loop_locals(body, builtins):
     return sorted(name for name, k in kinds.items() if k == {'range'})
 
 
+def derived_index_locals(facts, loops, params):
+    """Locals every assignment of which is an int64 literal, a range loop local or another
+    such local, or one of those ``// c`` or ``% c`` for a positive literal c: their values
+    lie between the loop bounds and the literals, so a C ``long long`` cannot overflow."""
+    candidates = {name for name, items in facts.assigns.items()
+                  if name not in loops and name not in params and name not in facts.comp_targets
+                  and items and all(item[0] == 'value' for item in items)}
+
+    def ok(expr, known):
+        if isinstance(expr, cst.Integer) or _int_literal(expr) is not None:
+            v = _int_literal(expr)
+            return v is not None and -(1 << 63) <= v < (1 << 63)
+        if isinstance(expr, cst.Name):
+            return expr.value in known
+        if (isinstance(expr, cst.BinaryOperation) and isinstance(expr.operator, (cst.FloorDivide, cst.Modulo))
+                and isinstance(expr.right, cst.Integer) and int(expr.right.value, 0) > 0):
+            return ok(expr.left, known)
+        return False
+
+    found = set()
+    changed = True
+    while changed:
+        changed = False
+        known = loops | found
+        for name in candidates - found:
+            if all(ok(item[1], known) for item in facts.assigns[name]):
+                found.add(name)
+                changed = True
+    # every assignment must be in the formula itself, not only proven from names bound later
+    return sorted(found)
+
+
 def _declare_at_top(node, decls):
     if not decls:
         return node
@@ -1155,7 +1190,7 @@ def _declare_at_top(node, decls):
     return node.with_changes(body=node.body.with_changes(body=[*stmts[:start], *decls, *stmts[start:]]))
 
 
-def lower(node, cls_info, cells, scope, counter, module):
+def lower(node, cls_info, cells, scope, counter, module, ref_kinds=None):
     """Lower the vector forms of one ``_f_`` FunctionDef of ``module``; returns the new node.
 
     Runs only in modules with vector cells (``module_uses_vectors``); elsewhere the node is
@@ -1168,17 +1203,23 @@ def lower(node, cls_info, cells, scope, counter, module):
                 if scope[name] and all(isinstance(b, BuiltinAssignment) for b in scope[name])}
     loops = [name for name in range_loop_locals(node.body, builtins) if name not in cells.params]
     lowering = VectorLowering(cls_info, cells, builtins, counter)
+    from .powers import KIND_FLOAT, KIND_INT
+    lowering.ref_scalars = {name: {KIND_FLOAT: FLOAT, KIND_INT: INT}.get(kind)
+                            for name, kind in (ref_kinds or {}).items()}
     lowering.analyse(node.body)
+    derived = derived_index_locals(lowering.facts, set(loops), cells.params)
     lowering.range_locals = set(loops)
     lowering.expanding = set()
     lowering.vector_fors = set()
     lowering.sum_gens, lowering.sum_calls = _statement_sums(node.body, lowering)
     lowering.sum_slices, lowering.alloc_slices = _vector_slices(node.body, lowering)
-    decls = [_stmt(f'{name}: {CY_MOD}.longlong\n') for name in loops]
+    decls = [_stmt(f'{name}: {CY_MOD}.longlong\n') for name in loops + derived]
     touches = (any(lowering.env.values()) or cells.vector_shape or any(
         isinstance(n, cst.Attribute) and n.attr.value in lowering.shapes for n in _walk(node.body))
         or any(isinstance(n, cst.Power) for n in _walk(node.body)))
     report['range_loop_locals'] = loops
+    if derived:
+        report['derived_index_locals'] = derived
     if not touches:
         return _declare_at_top(node, decls)
     body = node.body.visit(lowering)

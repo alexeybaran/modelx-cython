@@ -653,7 +653,8 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
         from modelx_cython.checked_arithmetic import CheckedArithmetic
         from modelx_cython.numeric_helpers import NumericReturns
         from modelx_cython import vectors
-        node = vectors.lower(node, cls_info, cells, scope, self._vector_counter, self.module)
+        node = vectors.lower(node, cls_info, cells, scope, self._vector_counter, self.module,
+                             self._ref_kinds.get(cls_info.fqname, {}))
         node = self._table_reads(node, cls_info, cells)
         if not self.module.spec.policy.table_recognisers:
             NumericReturns = _without_table_recognisers(NumericReturns)
