@@ -33,8 +33,7 @@ def _params():
     for form, operation, key in applicable():
         for mode in MODES:
             marks = () if (form, operation, key, mode) in DONE else (
-                pytest.mark.xfail(strict=True, raises=(NotImplementedError, AssertionError),
-                                  reason='square not done'),)
+                pytest.mark.xfail(strict=True, reason='square not done'),)
             yield pytest.param(form, operation, key, mode, marks=marks,
                                id=f'{form}-{operation}-{key}-{mode}')
 

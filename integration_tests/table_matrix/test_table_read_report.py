@@ -10,6 +10,7 @@ from modelx_helpers.immutable_inputs import Table
 import pytest
 
 PREFIX = 'exported_cy._m_Portfolio._mx_classes._c_Projection._f_'
+INPUTS = 'exported_cy._m_Portfolio._mx_classes._c_MarketInputs._f_'
 # Round-2's helper index has no first(): the forwarding test adds one, in every process.
 PATCH = ('from modelx_helpers import immutable_inputs as _ii\n'
          '_ii._TableIndex.first = lambda self: min(self._table._keys)\n')
@@ -24,7 +25,24 @@ def _model(tmp_path):
 def curve() -> "modelx_helpers.immutable_inputs.Table":
     return rates
 ''')
+        source.new_cells('upper', '''\
+def upper(t):
+    \"\"\"Round-2 clamp shape (four statements).\"\"\"
+    table = curve()
+    t = min(t, table.index.max_int())
+    return table.lookup_float(t, "rate")
+''')
         projection = portfolio.new_space('Projection', refs={'market': source})
+        projection.new_cells('nested', '''\
+def nested(t):
+    check = lambda k: k in market.curve().index
+    return check(t)
+''')
+        projection.new_cells('captured', '''\
+def captured(t, k=2):
+    check = lambda: k in market.curve().index
+    return check() and t > 0
+''')
         projection.new_cells('listed', 'lambda t: t in market.curve().index')
         projection.new_cells('count', '''\
 def count():
@@ -47,7 +65,9 @@ def first(t):
         PATCH + 'from exported import mx_model\n'
         'p = mx_model.Portfolio.Projection\n'
         'assert p.listed(1) and not p.listed(4) and p.count() == 3 and p.seen(4) == 3\n'
-        'assert p.first(1) == 2\n', encoding='utf-8')
+        'assert p.first(1) == 2 and p.nested(2) and not p.nested(0) and p.captured(1)\n'
+        'u = mx_model.Portfolio.MarketInputs.upper\n'
+        'assert [u(t) for t in range(1, 6)] == [0.05, 0.06, 0.07, 0.07, 0.07]\n', encoding='utf-8')
 
 
 def _translate(tmp_path, spec=None, translate_only=True):
@@ -59,7 +79,8 @@ def _translate(tmp_path, spec=None, translate_only=True):
         args += ['--spec', 'spec.py']
     if translate_only:
         args.append('--translate-only')
-    done = subprocess.run(args, cwd=tmp_path, check=True, capture_output=True, text=True)
+    done = subprocess.run(args, cwd=tmp_path, capture_output=True, text=True)
+    assert done.returncode == 0, done.stdout + done.stderr
     report = json.loads((tmp_path / 'exported_cy/_mx_admission.json').read_text(encoding='utf-8'))
     return report, done.stdout + done.stderr
 
@@ -79,8 +100,18 @@ def test_untyped_reads_are_reported_and_per_step_ones_warned(tmp_path):
     assert [(e['kind'], e['line'], e['per_step']) for e in seen] == [('index', 2, True)]
     first = report[PREFIX + 'first']['table_reads_untyped']
     assert [e['read'] for e in first] == ['table.index.first()']
+    nested = report[PREFIX + 'nested']['table_reads_untyped']        # inside a closure
+    assert [(e['read'], e['per_step']) for e in nested] == [('self.market.curve().index', True)]
+    captured = report[PREFIX + 'captured']['table_reads_untyped']    # formula kept as Python
+    assert [(e['read'], e['per_step']) for e in captured] == [('self.market.curve().index', True)]
+    assert captured[0]['reason'].startswith('formula kept as a Python method (captured default)')
+    upper = report[INPUTS + 'upper']
+    assert 'modelx_cython.runtime._native_inputs.read_clamped_table_float' in upper['native_numeric_helpers']
+    assert [e['read'] for e in upper['table_reads_untyped']] == ['table.index.max_int()']
+    assert upper['table_reads_untyped'][0]['reason'].startswith(
+        'not lowered to a typed handle read; the formula also has round-2 native reads ('), upper
     warned = [line for line in output.splitlines() if 'per-step table read is not typed:' in line]
-    assert len(warned) == 3 and not any('_f_count' in line for line in warned), output
+    assert len(warned) == 6 and not any('_f_count' in line for line in warned), output
     assert any(f'{PREFIX}listed: per-step table read is not typed: self.market.curve().index '
                '(formula line 2): not lowered to a typed handle read; runs as a Python call'
                in line for line in warned), output
@@ -92,9 +123,25 @@ def test_untyped_reads_are_reported_and_per_step_ones_warned(tmp_path):
 
 def test_spec_keys_infer_types_and_table_recognisers(tmp_path):
     _model(tmp_path)
-    _translate(tmp_path, {'infer_types': True, 'table_recognisers': False})
+    report, _ = _translate(tmp_path, {'infer_types': True, 'table_recognisers': False})
     classes = (tmp_path / 'exported_cy/_m_Portfolio/_mx_classes.py').read_text(encoding='utf-8')
     assert classes.startswith('# cython: infer_types=True, overflowcheck=True\n'), classes[:200]
+    upper = report[INPUTS + 'upper']     # the round-2 clamp recogniser is off
+    assert not any('clamped' in name for name in upper['native_numeric_helpers']), upper
+    assert upper['table_reads_untyped'][0]['reason'] == (
+        'not lowered to a typed handle read; runs as a Python call')
+    assert 'read_clamped_table_float' not in classes
+
+
+def test_table_recognisers_off_builds_and_matches(tmp_path):
+    _model(tmp_path)
+    _translate(tmp_path, {'table_recognisers': False}, translate_only=False)
+    check = subprocess.run([sys.executable, '-c', PATCH + '''
+from exported_cy import mx_model
+u = mx_model.Portfolio.MarketInputs.upper
+assert [u(t) for t in range(1, 6)] == [0.05, 0.06, 0.07, 0.07, 0.07]
+'''], cwd=tmp_path, capture_output=True, text=True)
+    assert check.returncode == 0, check.stdout + check.stderr
 
 
 @pytest.mark.parametrize('value', ['yes', 1])

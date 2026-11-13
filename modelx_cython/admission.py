@@ -95,6 +95,7 @@ TABLE_READ_ATTRS = ('loc', 'at', 'index', 'iterrows')
 NOT_LOWERED = 'not lowered to a typed handle read; runs as a Python call'
 ROUND2_FALLBACK = ('not lowered to a typed handle read; the formula also has round-2 native reads '
                    '({operations}), which fall back to this Python read where they do not apply')
+KEPT_PYTHON = 'formula kept as a Python method ({why}): runs as a Python call'
 TABLE_READ_WARNING = '{cell}: per-step table read is not typed: {read} (formula line {line}): {reason}'
 
 

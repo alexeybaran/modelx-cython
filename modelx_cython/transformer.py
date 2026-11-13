@@ -745,6 +745,17 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
                                      for site in sites if id(site.node) not in lowering.lowered]
         return node
 
+    def _table_reads_kept(self, node, cls_info, cells, why):
+        """List the table reads of a formula kept as a Python method (no lowering)."""
+        cells.table_reads_typed, cells.table_reads_untyped, cells.table_reads_keys = 0, [], []
+        if self._resolver is None or not (self._resolver.table_results or cls_info.refs):
+            return node
+        from modelx_cython.admission import KEPT_PYTHON, table_read_sites
+        cells.table_reads_untyped = [site.entry(cells.has_args(), KEPT_PYTHON.format(why=why))
+                                     for site in table_read_sites(node, self._resolver, cls_info)]
+        self._table_reads_report(cells, ())
+        return node
+
     @staticmethod
     def _table_reads_report(cells, round2_operations):
         """Settle the reasons once the round-2 recognisers have run; warn per step."""
@@ -1234,6 +1245,7 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
                 if cells.formula_is_generator:
                     # yield is not supported inside cdef functions;
                     # leave as a plain Python method
+                    updated_node = self._table_reads_kept(updated_node, cls_info, cells, 'generator')
                     return self._bind_declared_helpers(updated_node, cls_info, cells)
 
                 scope = self.get_metadata(ScopeProvider, original_node.body)
@@ -1245,6 +1257,7 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
                     # initialized in the closure. A compiled def binds them
                     # through its normal Python argument handling.
                     cells.formula_has_captured_default = True
+                    updated_node = self._table_reads_kept(updated_node, cls_info, cells, 'captured default')
                     return self._bind_declared_helpers(updated_node, cls_info, cells)
                 updated_node = self._rewrite_powers(
                     updated_node, cls_info, cells, scope)
@@ -1320,6 +1333,7 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
                 if cells.body_has_closure:
                     # closures cannot be compiled inside cpdef functions;
                     # leave as a plain Python method
+                    updated_node = self._table_reads_kept(updated_node, cls_info, cells, 'closure')
                     return self._bind_declared_helpers(updated_node, cls_info, cells)
 
                 if not cells.has_formula_def:
