@@ -300,7 +300,14 @@ def test_explicit_all_and_max(tmp_path):
         from exported import mx_model
         p = mx_model.Projection
         p.all_short(); p.all_empty(); p.all_replace()
-        p.zero(); p.term(-100000); p.maximum(-100000); p.maximum(0); p.maximum(5)
+        p.zero(); p.maximum(-100000); p.maximum(0); p.maximum(5); p.maximum(6)
+        upper = (1 << 63) - 1
+        p.maximum(upper); p.term(-(1 << 63))
+        for key in (-1, -(1 << 63)):
+            try:
+                p.maximum(key)
+            except ValueError:
+                pass
         '''), encoding='utf-8')
     subprocess.run([sys.executable, '-m', 'modelx_cython', 'exported',
                     '--sample', 'sample.py', '--no-spec'], cwd=tmp_path, check=True)
