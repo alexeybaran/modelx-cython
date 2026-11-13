@@ -67,6 +67,12 @@ def integer_domain_build(tmp_path_factory):
         adjusted = amount + 1
     return adjusted
 """)
+        projection.new_cells("single_assignment_after_guard", """def single_assignment_after_guard():
+    if divisor == 0:
+        return 0
+    adjusted = amount
+    return adjusted + 1
+""")
         projection.new_cells("mixed_local", """def mixed_local():
     if divisor < 0:
         adjusted = amount
@@ -136,6 +142,7 @@ def integer_domain_build(tmp_path_factory):
         projection.local_amount()
         projection.reassigned_local()
         projection.conditional_local()
+        projection.single_assignment_after_guard()
         projection.mixed_local()
         projection.possibly_unbound_local()
         projection.python_context_local()
@@ -369,6 +376,7 @@ def test_signed_local_flow(integer_domain_build):
 
     assert native_local("reassigned_local")
     assert native_local("conditional_local")
+    assert native_local("single_assignment_after_guard")
     assert not native_local("mixed_local")
     assert not native_local("possibly_unbound_local")
     assert not native_local("python_context_local")
@@ -384,10 +392,12 @@ def test_signed_local_flow(integer_domain_build):
             reference.divisor = projection.divisor = divisor
             assert reference.reassigned_local() == projection.reassigned_local() == amount
             assert reference.conditional_local() == projection.conditional_local()
+            assert reference.single_assignment_after_guard() == projection.single_assignment_after_guard()
 
         for cell, amount, divisor in (("reassigned_local", minimum, -1),
                                       ("conditional_local", minimum, -1),
-                                      ("conditional_local", maximum, 1)):
+                                      ("conditional_local", maximum, 1),
+                                      ("single_assignment_after_guard", maximum, 1)):
             projection = type(compiled)().Outer.Projection
             projection.amount, projection.divisor = amount, divisor
             try:

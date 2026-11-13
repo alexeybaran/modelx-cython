@@ -1,13 +1,14 @@
 """Check integer Cell results and ItemSpace keys at their native boundaries."""
 
 import libcst as cst
-from libcst.metadata import ExpressionContext
 
-from .checked_arithmetic import CheckedArithmetic, guarded_integer_intervals
+from .checked_arithmetic import (
+    CheckedArithmetic, guarded_integer_intervals, range_bounds, signed_local_assignments,
+)
 from .consts import CY_MOD, FORMULA_PREF, MX_SELF, MX_SYS_MOD
 from .powers import KIND_FLOAT, OperandKind, kind_of_type_expr
 from .scopes import CstFacts, Names, OPAQUE_SCOPES, has_scope_effects, lexical_nodes
-from .syntax import dotted_name, statements, walk
+from .syntax import dotted_name, local_assignment, statements, walk
 from .usage import RESOLVED, _extract_self_chain
 
 
@@ -106,19 +107,26 @@ def __getattribute__(self, name):
 class _GuardCalls(cst.CSTTransformer):
     METADATA_DEPENDENCIES = (cst.metadata.ScopeProvider,)
 
-    def __init__(self, receiver, integer_params, owner, resolver, entries, cells, private_entries):
+    def __init__(self, receiver, integer_params, counter_reads, owner, resolver, entries, cells, private_entries):
         self.receiver = receiver
         self.integer_params = integer_params
+        self.counter_reads = counter_reads
         self.owner = owner
         self.resolver = resolver
         self.entries = entries
         self.cells = cells
         self.private_entries = private_entries
 
-    def _native_parameter(self, value):
-        if not isinstance(value, cst.Name) or value.value not in self.integer_params:
+    def _native_argument(self, value):
+        if not isinstance(value, cst.Name):
             return False
         scope = self.get_metadata(cst.metadata.ScopeProvider, value, None)
+        if value in self.counter_reads:
+            receiver_scope = self.get_metadata(cst.metadata.ScopeProvider, self.receiver, None)
+            if scope is receiver_scope:
+                return True
+        if value.value not in self.integer_params:
+            return False
         bindings = tuple(scope[value.value]) if scope is not None else ()
         return len(bindings) == 1 and bindings[0].node is self.integer_params[value.value]
 
@@ -148,19 +156,37 @@ class _GuardCalls(cst.CSTTransformer):
     def _arguments(self, before, after, path, params, start=0):
         guarded = {index + start for index, _ in params}
         arguments = tuple(arg.with_changes(value=_checked_integer(arg.value, path))
-                          if index in guarded and arg.keyword is None and not self._native_parameter(old.value)
+                          if index in guarded and arg.keyword is None and not self._native_argument(old.value)
                           else arg for index, (old, arg) in enumerate(zip(before.args, after.args)))
         return after.with_changes(args=arguments)
 
 
-def _guard_calls(node, cls, resolver, entries, cells, private_entries):
+def _signed_counter_reads(node, counters):
+    """Carry admitted counter types only into the body of the declaring loop."""
+    reads = set()
+    for line, loop in zip(node.body.body, node.body.body[1:]):
+        if range_bounds(loop) is None or loop.target.value not in counters:
+            continue
+        if not (isinstance(line, cst.SimpleStatementLine) and len(line.body) == 1
+                and isinstance(decl := line.body[0], cst.AnnAssign)
+                and isinstance(decl.target, cst.Name) and decl.target.value == loop.target.value
+                and decl.value is None and decl.annotation.annotation.deep_equals(_INTEGER_ANNOTATION)):
+            continue
+        reads.update(part for part in lexical_nodes((loop.body,))
+                     if isinstance(part, cst.Name) and part.value == loop.target.value)
+    return reads
+
+
+def _guard_calls(node, cls, cell, resolver, entries, cells, private_entries):
     params = (*node.params.posonly_params, *node.params.params, *node.params.kwonly_params)
     if not params or params[0].name.value != MX_SELF:
         return node
     integer_params = {param.name.value: param for param in params if param.annotation is not None
                       and param.annotation.annotation.deep_equals(_INTEGER_ANNOTATION)}
+    counters = getattr(cell, 'signed_range_counters', ())
+    counter_reads = _signed_counter_reads(node, counters) if counters else ()
     wrapper = cst.MetadataWrapper(cst.Module(body=(node,)), unsafe_skip_copy=True)
-    return wrapper.visit(_GuardCalls(params[0], integer_params, cls.fqname, resolver, entries, cells,
+    return wrapper.visit(_GuardCalls(params[0], integer_params, counter_reads, cls.fqname, resolver, entries, cells,
                                     private_entries)).body[0]
 
 
@@ -349,41 +375,12 @@ def _signed_operand_names(value):
 
 def _signed_local_assignments(body, name, operands, guard, facts):
     """Prove a native local across simple assignments and conditional joins."""
-    assignments = {}
-    reads = {part for part in walk(body) if isinstance(part, cst.Name) and part.value == name
-             and facts.contexts.get(part) is ExpressionContext.LOAD}
+    def native_value(value):
+        expression, signed = guard._signed_expression(value, guard.path)
+        return expression if signed else None
 
-    def flow(lines, assigned):
-        for line in lines:
-            if isinstance(line, cst.If):
-                if not assigned and any(part in reads for part in walk(line.test)):
-                    return None
-                taken = flow(statements(line.body), assigned)
-                other = line.orelse
-                if isinstance(other, cst.If):
-                    skipped = flow((other,), assigned)
-                elif other is not None:
-                    skipped = flow(statements(other.body), assigned)
-                else:
-                    skipped = assigned
-                if taken is None or skipped is None:
-                    return None
-                assigned = taken and skipped
-                continue
-            if not assigned and any(part in reads for part in walk(line)):
-                return None
-            assignment = line.body[0] if isinstance(line, cst.SimpleStatementLine) and len(line.body) == 1 else line
-            if (isinstance(assignment, cst.Assign) and len(assignment.targets) == 1
-                    and isinstance(target := assignment.targets[0].target, cst.Name)
-                    and target.value == name):
-                value, signed = guard._signed_expression(assignment.value, guard.path)
-                if not signed:
-                    return None
-                assignments[assignment] = value
-                assigned = True
-        return assigned
-
-    if flow(body.body, False) is None or len(assignments) != facts.stores[name]:
+    assignments, reads = signed_local_assignments(body, name, facts, native_value)
+    if not assignments:
         return {}
     # A Python-context use could depend on the local's object identity or
     # Python operator semantics. Keep the whole local boxed in that case.
@@ -426,8 +423,7 @@ def _type_signed_locals(body, guard, facts, parameters):
         if not isinstance(line, cst.SimpleStatementLine) or len(line.body) != 1:
             break
         assignment = line.body[0]
-        if (isinstance(assignment, cst.Assign) and len(assignment.targets) == 1
-                and isinstance(target := assignment.targets[0].target, cst.Name)
+        if ((target := local_assignment(assignment)) is not None
                 and target.value in needed and target.value not in seen
                 and facts.stores[target.value] == 1):
             value, signed = guard._signed_expression(assignment.value, guard.path)
@@ -438,7 +434,7 @@ def _type_signed_locals(body, guard, facts, parameters):
         seen.update(part.value for part in walk(line) if isinstance(part, cst.Name))
     declarations, assignments = [], {}
     for name in sorted(needed - parameters - guard.signed_names):
-        if facts.stores[name] < 2:
+        if not facts.stores[name]:
             continue
         guard.signed_names.add(name)
         values = _signed_local_assignments(body, name, operands, guard, facts)
@@ -563,7 +559,7 @@ def guard_integer_boundaries(state, module_info, resolver, cells_kinds, ref_kind
                 owner, name = origin
                 cls = module_info.classes[owner]
                 cell = cls.cells[name[len(FORMULA_PREF):]]
-                node = _guard_calls(node, cls, resolver, entries, cells, private_entries)
+                node = _guard_calls(node, cls, cell, resolver, entries, cells, private_entries)
                 # Physical cache misses and compact spill entries both check
                 # the logical domain before reaching the private formula.
                 axes = (cell.dense_logical_axes if cell.has_args() and cell.has_typeinfo()
@@ -580,7 +576,7 @@ def guard_integer_boundaries(state, module_info, resolver, cells_kinds, ref_kind
                 continue
             name = method.name.value
             if name.startswith(FORMULA_PREF) and (formula := cls.cells.get(name[len(FORMULA_PREF):])):
-                method = _guard_calls(method, cls, resolver, entries, cells, private_entries)
+                method = _guard_calls(method, cls, formula, resolver, entries, cells, private_entries)
                 methods.append(_guard_result(method, formula, cls, resolver, cells_kinds, ref_kinds, signatures,
                                              native_helpers.get((cls.name, name), ())))
                 changed = True
@@ -591,7 +587,7 @@ def guard_integer_boundaries(state, module_info, resolver, cells_kinds, ref_kind
                 changed = True
                 continue
             if cell is not None and not cell.has_formula_def:
-                method = _guard_calls(method, cls, resolver, entries, cells, private_entries)
+                method = _guard_calls(method, cls, cell, resolver, entries, cells, private_entries)
                 method = _guard_result(method, cell, cls, resolver, cells_kinds, ref_kinds, signatures)
                 changed = True
             methods.append(method)
