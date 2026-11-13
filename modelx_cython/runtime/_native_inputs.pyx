@@ -547,14 +547,6 @@ cdef object prepare_group(object record, str column):
     return GroupedView(groups, keys, offsets, values)
 
 
-cdef object group_view(object record, str column):
-    cdef dict cache = record._native_groups
-    prepared = cache.get(column, _missing)
-    if prepared is _missing:
-        prepared = cache.setdefault(column, prepare_group(record, column))
-    return prepared
-
-
 cdef Py_ssize_t group_slot(GroupedView data, long long group) except? -2:
     cdef Py_ssize_t i
     for i in range(data.groups.shape[0]):
@@ -576,7 +568,7 @@ cdef object group_probe(object has_fn, object record, long long group, str colum
     if has_fn is not _has_group or type(record) is not Record:
         slot[0] = -2
         return None
-    return probe_group(group_view(record, column), group, slot)
+    return probe_group(record._native_groups.get(column), group, slot)
 
 
 cdef object group_context_probe(LookupContext context, object has_fn, object record,
@@ -594,7 +586,7 @@ cdef object group_context_probe(LookupContext context, object has_fn, object rec
     if type(record) is not Record:
         slot[0] = -2
         return None
-    prepared = group_view(record, column)
+    prepared = record._native_groups.get(column)
     context.grouped = (record, column, prepared)
     return probe_group(prepared, group, slot)
 
@@ -2480,15 +2472,21 @@ cdef object _native_frame_table(object frame, bint with_rows, bint with_metadata
 
 
 
-cdef void _prepare_keyed_tables(object value) except *:
-    """Install keyed views while executing an explicit table constructor."""
+cdef void _prepare_tables(object value) except *:
+    """Install table resources while executing an explicit table constructor."""
     if type(value) is Table:
         cache = value._native_cache
         if KeyedView not in cache:
             cache.setdefault(KeyedView, KeyedView(value))
     elif type(value) is Record:
-        for _, child in value._items:
-            _prepare_keyed_tables(child)
+        children = value._items
+        for _, child in children:
+            _prepare_tables(child)
+        if children and type(children[0][1]) is Table:
+            for column in children[0][1]._columns:
+                prepared = prepare_group(value, column)
+                if prepared is not None:
+                    value._native_groups[column] = prepared
 
 
 cdef object table(object function, tuple keywords, object frame, object columns=_missing,
@@ -2506,10 +2504,10 @@ cdef object table(object function, tuple keywords, object frame, object columns=
         prepared = _native_frame_table(frame, rows is True, rows is True or report is True,
                                         preserve_scalar_types is True)
         if prepared is not None:
-            _prepare_keyed_tables(prepared)
+            _prepare_tables(prepared)
             return prepared
     prepared = forward_call(function, keywords, ('frame', 'columns', 'groups', 'indexing', 'rows', 'report', 'preserve_scalar_types'),
                             (frame, columns, groups, indexing, rows, report, preserve_scalar_types), omitted_argument)
     if function is _table_constructor:
-        _prepare_keyed_tables(prepared)
+        _prepare_tables(prepared)
     return prepared
