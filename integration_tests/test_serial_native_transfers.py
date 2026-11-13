@@ -38,7 +38,8 @@ def test_native_transfers(tmp_path):
         'from exported import mx_model\n'
         's = mx_model.Policy[1]\n'
         's.derived(0); s.derived(3); s.divisible(-7, -3); s.offset(-7, -3); s.factor(0, 4.0, 0.5)\n'
-        's.fraction(1); s.fraction(3); s.piecewise(1); s.piecewise(2)\n',
+        's.fraction(1); s.fraction(3); s.piecewise(1); s.piecewise(2)\n'
+        's.factor(4, 4.0, 0.5)\n',
         encoding='utf-8')
     (tmp_path / 'spec.py').write_text(repr({
         'dense_bounds_proofs': True,
