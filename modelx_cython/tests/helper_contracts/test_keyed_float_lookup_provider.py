@@ -19,6 +19,18 @@ from cpython.ref cimport PyObject
 cdef native.LookupContext _context = native.LookupContext()
 def prepare(function, frame):
     return native.table(function, (), frame)
+def prepare_grouped(function, frame):
+    return native.table(function, ('groups',), frame,
+                        columns=native.omitted_argument, groups=('group',))
+def grouped_read(has_group, subtable, contains, lookup, source, long long group, long long key, str column):
+    cdef Py_ssize_t slot
+    cdef double value
+    view = native.group_probe(has_group, source, group, column, &slot)
+    if slot < 0:
+        return slot
+    if native.group_value(subtable, contains, lookup, view, slot, key, &value) == 1:
+        return value
+    return None
 def invoke(conversion, function, table, key, column, *default):
     cdef native.KeyPart[8] parts
     cdef Py_ssize_t i, n
@@ -121,6 +133,22 @@ def test_lookup_does_not_prepare_unrelated_rows(native):
     assert not table._native_cache
     assert native.invoke(float, h.lookup, table, ('M', 42), 'rate') == 1.5
     assert not table._native_cache
+
+
+def test_grouped_probe_uses_only_explicit_preparation(native):
+    import pandas as pd
+    from modelx_helpers import pdn
+
+    index = pd.MultiIndex.from_tuples([(1, 2), (2, 3)], names=('group', 'row'))
+    frame = pd.DataFrame({'rate': [1.5, 2.5]}, index=index)
+    plain = pdn.table(frame, groups=('group',))
+    prepared = native.prepare_grouped(pdn.table, frame)
+    operations = h.has_group, h.subtable, h.contains, h.lookup
+    assert native.grouped_read(*operations, plain, 1, 2, 'rate') == -2
+    assert not plain._native_groups
+    assert native.grouped_read(*operations, prepared, 1, 2, 'rate') == 1.5
+    assert native.grouped_read(*operations, prepared, 1, 3, 'rate') is None
+    assert native.grouped_read(*operations, prepared, 3, 2, 'rate') == -1
 
 
 def test_unicode_subclass_keeps_original_fallback_object(native):
