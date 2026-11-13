@@ -103,11 +103,18 @@ class _FakeCells:
     fqname = formula_fqname = CLS + "._f_target"
     params = ("t", "x")
 
+    def __init__(self, return_type="object"):
+        self.return_type = return_type
+
     def has_args(self):
         return True
 
     def has_typeinfo(self):
         return True
+
+    def get_rettype_expr(self, c_style=False):
+        assert c_style
+        return self.return_type
 
     def get_argtype_expr(self, arg, c_style=False, formula=False):
         # the C-style spelling is what kind_of_type_expr matches, so a
@@ -118,9 +125,10 @@ class _FakeCells:
         return "long long" if arg == "t" else "double"
 
 
-def _rewrite(body: str, *, builtin_float=False) -> str:
+def _rewrite(body: str, *, builtin_float=False, return_type="object") -> str:
     resolver = CellsResolver(
-        cells_by_class={CLS: {"rate": RATE, "arr": ARR}},
+        cells_by_class={CLS: {"rate": RATE, "mort_rate": RATE, "lapse_rate": RATE,
+                              "transfer_rate": RATE, "arr": ARR}},
         refs_by_class={CLS: {}},
         spaces_by_class={CLS: {}},
     )
@@ -130,7 +138,7 @@ def _rewrite(body: str, *, builtin_float=False) -> str:
         cells_kinds={RATE: KIND_FLOAT, ARR: KIND_UNKNOWN},
         ref_kinds={CLS: {}},
         cls_fqname=CLS,
-        cells=_FakeCells(),
+        cells=_FakeCells(return_type),
         builtin_float=builtin_float,
     )
     return cst.Module([]).code_for_node(out)
@@ -159,6 +167,44 @@ def test_annotated_float_locals_are_native_only_for_the_builtin():
 def test_float_local_rebinding_does_not_prove_the_power():
     body = "base: float = x\n    base = self.arr(t)\n    return base ** 0.5"
     assert "base ** 0.5" in _rewrite(body, builtin_float=True)
+
+
+@pytest.mark.parametrize("local, cell, zero_guard", [
+    ("q", "mort_rate", ""),
+    ("w", "lapse_rate", "    if w <= 0.0:\n        return 0.0\n"),
+    ("th", "transfer_rate", "    if th <= 0.0:\n        return 0.0\n"),
+])
+def test_double_cell_local_feeds_native_return_power(local, cell, zero_guard):
+    body = (f"{local} = self.{cell}(t)\n"
+            f"{zero_guard}"
+            f"    if {local} >= 1.0:\n"
+            "        return 1.0 if self.is_anniv(t) else 0.0\n"
+            f"    return 1.0 - (1.0 - {local}) ** (1.0 / 12.0)")
+    out = _rewrite(body, return_type="double")
+    assert f"_mx_sys._mx_pow((1.0 - {local}), (1.0 / 12.0))" in out
+    assert out.count(f"self.{cell}(t)") == 1
+    assert f"if {local} >= 1.0:" in out
+    assert "**" not in out
+    assert "**" in _rewrite(body)
+
+
+@pytest.mark.parametrize("body", [
+    "base = self.rate(t)\n    root = base ** 0.5\n    return root",
+    "base = self.rate(t)\n    return max(0.0, base ** 0.5)",
+    "base = self.rate(t)\n    return self.arr(t) + base ** 0.5",
+    "base = self.rate(t)\n    return base ** -t",
+    "base = self.rate(t)\n    base = self.arr(t)\n    return base ** 0.5",
+    "base = self.arr(t)\n    return base ** 0.5",
+    "base = x\n    return base ** 0.5",
+    "if t:\n        return base ** 0.5\n    base = self.rate(t)\n    return 0.0",
+    "if t:\n        base = self.rate(t)\n    return base ** 0.5",
+    "self = other\n    base = self.rate(t)\n    return base ** 0.5",
+    "base = self.rate(t)\n    return sum(base ** 0.5 for base in (x,))",
+])
+def test_cell_local_power_keeps_unproved_uses(body):
+    out = _rewrite(body, return_type="double")
+    assert "_mx_sys._mx_pow(" not in out
+    assert "**" in out
 
 
 @pytest.mark.parametrize("body", [
