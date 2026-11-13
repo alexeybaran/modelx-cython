@@ -973,7 +973,8 @@ cdef class KeyedView:
                 slot = (slot + 1) & self.mask
             self.slots[slot] = row
             self.hashes[slot] = code
-        # Copy existing doubles. Convert all other scalars only when selected.
+        # These slots serve explicit float reads. Keep the original objects
+        # for ordinary selection and materialization.
         cdef Array numbers = clone(array('d'), self.rows * self.value_width, False)
         cdef Array valid = clone(array('B'), self.rows * self.value_width, True)
         offset = 0
@@ -981,6 +982,9 @@ cdef class KeyedView:
             for value in input_row:
                 if PyFloat_CheckExact(value):
                     numbers.data.as_doubles[offset] = PyFloat_AS_DOUBLE(value)
+                    valid.data.as_uchars[offset] = 1
+                elif type(value) in _numpy_integer_keys:
+                    numbers.data.as_doubles[offset] = PyFloat_AsDouble(value)
                     valid.data.as_uchars[offset] = 1
                 offset += 1
         self.values = numbers
@@ -1464,22 +1468,23 @@ cdef class NativeTable:
         if type(owner) is Table:
             self._index_view = _NativeTableIndex(owner)
             self._numeric_view = None
-        if type(owner) is Table and owner._index_error is None:
-            data = view(owner)
-            if data is not None and data.numeric:
-                self._numeric_view = data
-        elif type(owner) is Table:
+        if type(owner) is Table:
             keys = owner._keys
             if keys and (type(keys[0]) is int or len(keys) == 1 and type(keys[0]) is str):
                 data = view(owner)
+                spec = owner._index_error
+                if spec is None and data is not None and data.numeric:
+                    self._numeric_view = data
+                    return
+                if spec is not None and spec._index['multi']:
+                    return
                 cached = owner._native_cache.get(KeyedView)
-                if (not owner._index_error._index['multi'] and data is not None
-                        and data.integral and data.contiguous):
+                if data is not None and data.integral and data.contiguous:
                     self._input_keys = data
                     self._input_positions = &data.sorted_positions[0]
                     self._input_low = data.first_integer
                     self._input_high = data.last_integer
-                if cached is not None and not owner._index_error._index['multi']:
+                if cached is not None:
                     indexed = <KeyedView>cached
                     if not indexed.admitted:
                         return
