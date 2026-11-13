@@ -90,9 +90,10 @@ def describe(module_infos):
 # ---------------------------------------------------------------- M1 table reads (W1.1)
 TABLE_TYPE = 'modelx_helpers.immutable_inputs.Table'
 TABLE_READ_ATTRS = ('loc', 'at', 'index', 'iterrows')
-NOT_LOWERED = 'not lowered to a typed handle read'
-TABLE_READ_WARNING = ('{cell}: per-step table read is not typed and runs as a Python call on every '
-                      'step: {read} (formula line {line}): {reason}')
+NOT_LOWERED = 'not lowered to a typed handle read; runs as a Python call'
+ROUND2_FALLBACK = ('not lowered to a typed handle read; the formula also has round-2 native reads '
+                   '({operations}), which fall back to this Python read where they do not apply')
+TABLE_READ_WARNING = '{cell}: per-step table read is not typed: {read} (formula line {line}): {reason}'
 
 
 def untyped_read_warning(cell, entry):

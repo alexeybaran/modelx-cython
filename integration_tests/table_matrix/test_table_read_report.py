@@ -71,7 +71,7 @@ def test_untyped_reads_are_reported_and_per_step_ones_warned(tmp_path):
     assert listed['table_reads_typed'] == 0 and listed['table_reads_keys'] == []
     assert listed['table_reads_untyped'] == [{
         'read': 'self.market.curve().index', 'kind': 'index', 'line': 2, 'per_step': True,
-        'reason': 'not lowered to a typed handle read'}]
+        'reason': 'not lowered to a typed handle read; runs as a Python call'}]
     count = report[PREFIX + 'count']['table_reads_untyped']
     assert [(e['read'], e['kind'], e['line'], e['per_step']) for e in count] == [
         ('table.index', 'index', 3, False)]
@@ -79,11 +79,11 @@ def test_untyped_reads_are_reported_and_per_step_ones_warned(tmp_path):
     assert [(e['kind'], e['line'], e['per_step']) for e in seen] == [('index', 2, True)]
     first = report[PREFIX + 'first']['table_reads_untyped']
     assert [e['read'] for e in first] == ['table.index.first()']
-    warned = [line for line in output.splitlines() if 'per-step table read is not typed' in line]
+    warned = [line for line in output.splitlines() if 'per-step table read is not typed:' in line]
     assert len(warned) == 3 and not any('_f_count' in line for line in warned), output
-    assert any(f'{PREFIX}listed: per-step table read is not typed and runs as a Python call on '
-               'every step: self.market.curve().index (formula line 2): '
-               'not lowered to a typed handle read' in line for line in warned), output
+    assert any(f'{PREFIX}listed: per-step table read is not typed: self.market.curve().index '
+               '(formula line 2): not lowered to a typed handle read; runs as a Python call'
+               in line for line in warned), output
     # an unrelated cell carries the keys too, empty
     assert report[PREFIX[:-3] + '_f_seen']['table_reads_typed'] == 0
     classes = (tmp_path / 'exported_cy/_m_Portfolio/_mx_classes.py').read_text(encoding='utf-8')

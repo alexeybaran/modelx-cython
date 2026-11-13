@@ -661,6 +661,7 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
         numeric_returns = NumericReturns(cls_info, cells, self.helper_providers, builtin_keys,
                                          self._resolver)
         node = node.visit(numeric_returns)
+        self._table_reads_report(cells, numeric_returns.operations)
         if 'round' in builtin_keys and '_mx_canonical_round' not in self._source:
             from modelx_cython.rounding import NativeRounding
             rounding = NativeRounding()
@@ -729,7 +730,7 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
         cells.table_reads_typed, cells.table_reads_untyped, cells.table_reads_keys = 0, [], []
         if self._resolver is None or not (self._resolver.table_results or cls_info.refs):
             return node
-        from modelx_cython.admission import table_read_sites, untyped_read_warning
+        from modelx_cython.admission import table_read_sites
         sites = table_read_sites(node, self._resolver, cls_info)
         if not sites:
             return node
@@ -742,10 +743,21 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
         cells.table_reads_keys = list(lowering.keys)
         cells.table_reads_untyped = [site.entry(per_step, lowering.declined.get(id(site.node)))
                                      for site in sites if id(site.node) not in lowering.lowered]
+        return node
+
+    @staticmethod
+    def _table_reads_report(cells, round2_operations):
+        """Settle the reasons once the round-2 recognisers have run; warn per step."""
+        from modelx_cython.admission import NOT_LOWERED, ROUND2_FALLBACK, untyped_read_warning
+        if round2_operations:
+            reason = ROUND2_FALLBACK.format(operations=', '.join(
+                sorted(name.rsplit('.', 1)[-1] for name in round2_operations)))
+            for entry in cells.table_reads_untyped:
+                if entry['reason'] == NOT_LOWERED:
+                    entry['reason'] = reason
         for entry in cells.table_reads_untyped:
             if entry['per_step']:
                 _logger.warning(untyped_read_warning(cells.fqname, entry))
-        return node
 
     def _bind_declared_helpers(self, node, cls_info, cells, inherited=()):
         """Bind declared provider symbols in either C functions or compiled defs.
