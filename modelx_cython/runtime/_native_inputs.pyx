@@ -994,25 +994,15 @@ cdef class KeyedView:
                 slot = (slot + 1) & self.mask
             self.slots[slot] = row
             self.hashes[slot] = code
-        # Conversion belongs to this explicit float-context resource. Exact
-        # immutable builtins have no user conversion effects. Defer errors and
-        # other objects until the selected value is actually requested.
+        # Copy existing doubles. Convert all other scalars only when selected.
         cdef Array numbers = clone(array('d'), self.rows * self.value_width, False)
         cdef Array valid = clone(array('B'), self.rows * self.value_width, True)
         offset = 0
         for input_row in self.raw_values:
             for value in input_row:
-                kind = type(value)
-                if kind is float:
+                if PyFloat_CheckExact(value):
                     numbers.data.as_doubles[offset] = PyFloat_AS_DOUBLE(value)
                     valid.data.as_uchars[offset] = 1
-                elif kind is int or kind is bool or kind is str:
-                    try:
-                        numbers.data.as_doubles[offset] = _key_float(value)
-                    except (ValueError, OverflowError):
-                        pass
-                    else:
-                        valid.data.as_uchars[offset] = 1
                 offset += 1
         self.values = numbers
         self.numeric = valid
@@ -1479,11 +1469,18 @@ cdef inline Py_ssize_t _input_column(KeyedView data, object column) except? -2:
 
 
 cdef inline bint _input_value_at(NativeTable table, Py_ssize_t row, Py_ssize_t index,
-                                 double* result) noexcept:
+                                 double* result) except -1:
     cdef Py_ssize_t position = row * table._input_width + index
-    if not table._input_numeric[position]:
+    if table._input_numeric[position]:
+        result[0] = table._input_values[position]
+        return True
+    cdef object scalar = (<KeyedView>table._indexed_view).raw_values[row][index]
+    if type(scalar) is not int and type(scalar) is not bool and type(scalar) is not str:
         return False
-    result[0] = table._input_values[position]
+    try:
+        result[0] = _key_float(scalar)
+    except (ValueError, OverflowError):
+        return False
     return True
 
 
