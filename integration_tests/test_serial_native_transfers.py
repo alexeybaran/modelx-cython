@@ -16,6 +16,13 @@ def test_native_transfers(tmp_path):
         # Arithmetic probes below exercise the full signed range.
         space.new_cells('divisible', 'lambda t, n: t % n == 0', is_cached=False)
         space.new_cells('offset', 'lambda t, n: (t - 1) % n != 0', is_cached=False)
+        space.new_cells('periodic', textwrap.dedent('''\
+            def periodic(t, n, advance):
+                step = 12 // duration(n)
+                if advance:
+                    return t % step == 0
+                return (t + 1) % step == 0
+            '''), is_cached=False)
         space.new_cells('factor', 'lambda i, b, e: b ** e')
         space.new_cells('duration', 'lambda t: t', is_cached=False)
         space.new_cells('fraction', 'def fraction(t):\n    m = duration(t) + 1\n    return (m / 12) * 0.05\n',
@@ -38,7 +45,8 @@ def test_native_transfers(tmp_path):
         'from exported import mx_model\n'
         's = mx_model.Policy[1]\n'
         's.derived(0); s.derived(3); s.divisible(-7, -3); s.offset(-7, -3); s.factor(0, 4.0, 0.5)\n'
-        's.fraction(1); s.fraction(3); s.piecewise(1); s.piecewise(2)\n',
+        's.fraction(1); s.fraction(3); s.piecewise(1); s.piecewise(2); s.periodic(1, 4, False)\n'
+        's.factor(4, 4.0, 0.5)\n',
         encoding='utf-8')
     (tmp_path / 'spec.py').write_text(repr({
         'dense_bounds_proofs': True,
@@ -57,6 +65,7 @@ def test_native_transfers(tmp_path):
     assert '_inbounds(' in generated
     assert '_mx_inbounds_exact' in generated and '_mx_exact_receiver' in generated
     assert '_mx_divisible(' in generated and '_mx_divisible_after_decrement(' in generated
+    assert 'step: _mx_cy.longlong' in generated and '_mx_divisible_after_increment(t, step)' in generated
     assert '_mx_memo_pow(' in generated
     assert '_mx_checked_quotient:' in generated
     assert 'year: _mx_cy.longlong' in generated
@@ -68,6 +77,9 @@ def test_native_transfers(tmp_path):
         cdef class Alternate(_c_Policy):
             cdef double _f_value(self, long long t) except? -1:
                 return 100.0 + t
+
+            cpdef long long duration(self, long long t) except? -1:
+                return 3
         '''), encoding='utf-8')
     (tmp_path / 'setup_override.py').write_text(
         'from setuptools import setup\n'
@@ -95,6 +107,17 @@ def test_native_transfers(tmp_path):
             for n in (-(1 << 63), -3, -1, 1, 3):
                 assert s.divisible(t, n) == (t % n == 0)
                 assert s.offset(t, n) == ((t - 1) % n != 0)
+            for n in (-(1 << 63), -3, -1, 1, 3, 12):
+                for advance in (True, False):
+                    assert s.periodic(t, n, advance) == ((t + (not advance)) % (12 // n) == 0)
+        assert alternate.periodic(3, 4, False) == ((3 + 1) % (12 // 3) == 0)
+        for n in (0, 13):
+            try:
+                s.periodic(1, n, False)
+            except ZeroDivisionError:
+                pass
+            else:
+                raise AssertionError('zero divisor was accepted')
         for t in (-(1 << 63), -(1 << 25) - 1, -7, -1, 0, 7, 1 << 25, (1 << 63) - 1):
             assert s.fraction(t).hex() == (((t + 1) / 12) * 0.05).hex()
         for t in (-(1 << 63), -(1 << 63) + 1, -7, 0, 1, 2, 99, (1 << 63) - 1):

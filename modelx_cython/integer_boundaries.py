@@ -3,7 +3,8 @@
 import libcst as cst
 
 from .checked_arithmetic import (
-    CheckedArithmetic, guarded_integer_intervals, range_bounds, signed_local_assignments,
+    CheckedArithmetic, divisibility_enabled, divisibility_operands, guarded_integer_intervals,
+    range_bounds, signed_local_assignments,
 )
 from .consts import CY_MOD, FORMULA_PREF, MX_SELF, MX_SYS_MOD
 from .powers import KIND_FLOAT, OperandKind, kind_of_type_expr
@@ -401,6 +402,52 @@ class _SignedLocalValues(cst.CSTTransformer):
         return after if value is None else after.with_changes(value=value)
 
 
+def _signed_divisibility(body, facts, guard, parameters):
+    """Admit locals whose only uses are signed zero-remainder comparisons."""
+    if (has_scope_effects(body.body)
+            or facts.reads & {'eval', 'exec', 'locals', 'vars', 'globals', '_getframe', 'currentframe'}):
+        return body, ()
+    probes = {node: operands for node in lexical_nodes(body.body)
+              if (operands := divisibility_operands(node)) is not None
+              and all(isinstance(value, cst.Name) for value in operands[:2])}
+    uses = {value for operands in probes.values() for value in operands[:2]}
+    native = guard.signed_names - {name for name in parameters if facts.stores[name]}
+    declarations = []
+    for name in sorted({value.value for value in uses} - set(parameters) - native):
+        if not facts.stores[name]:
+            continue
+        assignments, reads = signed_local_assignments(
+            body, name, facts,
+            lambda value: value if guard.arithmetic.integer_interval(value, signed=True) is not None else None,
+        )
+        if not assignments or not reads <= uses:
+            continue
+        # Each comparison must be able to preserve the local's signed value.
+        if not all(operand.value in native or operand.value == name
+                   for operands in probes.values() if any(value in reads for value in operands[:2])
+                   for operand in operands[:2]):
+            continue
+        native.add(name)
+        declarations.append(cst.SimpleStatementLine((
+            cst.AnnAssign(cst.Name(name), cst.Annotation(_INTEGER_ANNOTATION)),)))
+
+    replacements = {}
+    for probe, (dividend, divisor, operation, negate) in probes.items():
+        if not {dividend.value, divisor.value} <= native:
+            continue
+        call = cst.Call(cst.Attribute(cst.Name(MX_SYS_MOD), cst.Name(operation)),
+                        (cst.Arg(dividend), cst.Arg(divisor)))
+        if negate:
+            call = cst.UnaryOperation(cst.Not(), call)
+        replacements[probe] = call.with_changes(lpar=probe.lpar, rpar=probe.rpar)
+
+    class LowerDivisibility(cst.CSTTransformer):
+        def leave_Comparison(self, before, after):
+            return replacements.get(before, after)
+
+    return body.visit(LowerDivisibility()) if replacements else body, tuple(declarations)
+
+
 def _type_signed_locals(body, guard, facts, parameters):
     """Keep provably signed locals native and preserve existing prefix admission."""
     if (not isinstance(body, cst.IndentedBlock) or has_scope_effects(body.body)
@@ -459,8 +506,12 @@ def _type_signed_locals(body, guard, facts, parameters):
 def _guard_result(node, cell, cls, resolver, cells_kinds, ref_kinds, signatures, native_helpers=(),
                   argument_axes=()):
     signed_return = node.returns is not None and node.returns.annotation.deep_equals(_INTEGER_ANNOTATION)
-    if not signed_return and not any(isinstance(part, cst.Call) and dotted_name(part.func) == _INTEGER_CONVERSION
-                                     for part in lexical_nodes(node.body.body)):
+    divisibility = (node.returns is not None and dotted_name(node.returns.annotation) == f'{CY_MOD}.bint'
+                    and not cell.is_locked and not cell.body_has_closure and divisibility_enabled(cell)
+                    and any(divisibility_operands(part) is not None for part in lexical_nodes(node.body.body)))
+    if not signed_return and not divisibility and not any(
+            isinstance(part, cst.Call) and dotted_name(part.func) == _INTEGER_CONVERSION
+            for part in lexical_nodes(node.body.body)):
         return node
     params = {name: kind_of_type_expr(cell.get_argtype_expr(name, c_style=True, formula=True))
               for name in cell.params}
@@ -486,9 +537,12 @@ def _guard_result(node, cell, cls, resolver, cells_kinds, ref_kinds, signatures,
     guard = _GuardIntegers(cell.model_path, kinds, native_helpers, arithmetic, receiver_fields,
                            functions.difference(bindings), receiver_methods, signed_names, signed_return,
                            error)
-    parameters = (*node.params.posonly_params, *node.params.params, *node.params.kwonly_params)
-    body, declarations = _type_signed_locals(
-        node.body, guard, facts, (parameter.name.value for parameter in parameters))
+    parameters = tuple(parameter.name.value for parameter in
+                       (*node.params.posonly_params, *node.params.params, *node.params.kwonly_params))
+    if divisibility:
+        body, declarations = _signed_divisibility(node.body, facts, guard, parameters)
+    else:
+        body, declarations = _type_signed_locals(node.body, guard, facts, parameters)
     body = body.visit(guard)
     if declarations:
         doc_end = 1 if node.get_docstring() is not None else 0
