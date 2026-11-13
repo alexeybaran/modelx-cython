@@ -455,3 +455,82 @@ def test_record_field_reads_any_position(tmp_path):
     for name in names:
         body = _formula_py(py, name)
         assert 'read_record_item(' in body and '()["' not in body and 'rec["' not in body, name
+
+
+def _prefix_model():
+    model = mx.new_model('PrefixReads')
+    rows = [('M', 'A', 1), ('M', 'A', 2), ('M', 'A', 4), ('M', 'A', 5), ('M', 'B', 2), ('M', 'B', 3),
+            ('F', 'A', 1), ('F', 'A', 2), ('F', 'A', 3), ('F', 'A', 4), ('F', 'A', 5), ('F', 'A', 6)]
+    frame = pd.DataFrame({'v': [float(i) for i in range(len(rows))], 'w': [0.5 * i for i in range(len(rows))]},
+                         index=pd.MultiIndex.from_tuples(rows, names=['s', 'c', 'y']))
+    ints = pd.DataFrame({'v': [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]},
+                        index=pd.MultiIndex.from_tuples([(0, 0), (0, 1), (0, 2), (0, 3), (1, 2), (1, 5)], names=['a', 'y']))
+    data = model.new_space('Data', refs={'pdn': pdn, 'frame': frame, 'ints': ints})
+    data.new_cells('table', 'lambda: pdn.table(frame)')
+    data.new_cells('int_table', 'lambda: pdn.table(ints)')
+    proj = model.new_space('Projection', refs={'data': data})
+    proj.new_cells('tbl', 'def tbl():\n    return data.table()')
+    proj.new_cells('itbl', 'def itbl():\n    return data.int_table()')
+    proj.new_cells('sx', 'def sx(t):\n    return ("M", "F", "M", "X")[t % 4]')
+    proj.new_cells('cl', 'def cl(t):\n    return ("A", "A", "B", "A")[t % 4]')
+    proj.new_cells('ka', 'def ka(t):\n    return t % 3')
+    proj.new_cells('hsub', 'def hsub():\n    return tbl().loc[("M", "A")]')
+    guard = '    except KeyError:\n        return -1.0'
+    forms = {
+        'p_alias': f'def p_alias(t):\n    try:\n        sub = tbl().loc[(sx(t), cl(t))]\n        return float(sub.loc[t % 7, "v"])\n{guard}',
+        'p_renamed': (f'def p_renamed(t):\n    sel = (sx(t), cl(t))\n    x = 1.0\n    try:\n        rates = tbl().loc[sel]\n'
+                      f'        x += 1.0\n        return rates.loc[t % 7, "w"] + x\n{guard}'),
+        'p_all': (f'def p_all(t):\n    try:\n        sub = tbl().loc[(sx(t), cl(t))]\n        if t in sub.index:\n'
+                  f'            return float(sub.loc[t, "v"]) + sub.index.max() - sub.index.min()\n        return -2.0\n{guard}'),
+        'p_two': f'def p_two(t):\n    try:\n        sub = tbl().loc[(sx(t), cl(t))]\n        return float(sub.loc[t % 7, "v"]) + float(sub.loc[t % 5, "w"])\n{guard}',
+        'p_chain': f'def p_chain(t):\n    try:\n        return float(tbl().loc[(sx(t), cl(t))].loc[t % 7, "v"])\n{guard}',
+        'p_asof': f'def p_asof(t):\n    try:\n        sub = tbl().loc[(sx(t), cl(t))]\n        return float(sub.loc[sub.index.asof(t), "v"])\n{guard}',
+        'p_int': (f'def p_int(t):\n    try:\n        sub = itbl().loc[ka(t)]\n'
+                  f'        return float(sub.loc[sub.index.asof(t), "v"]) + int(sub.index.max())\n{guard}'),
+        'p_view': f'def p_view(t):\n    try:\n        return float(tbl().loc[(sx(t), cl(t))]["v"][t])\n{guard}',
+        'p_kept': f'def p_kept(t):\n    try:\n        sub = tbl().loc[(sx(t), cl(t))]\n        return float(len(sub)) + float(sub.loc[t % 7, "v"])\n{guard}',
+        'p_hoist': f'def p_hoist(t):\n    try:\n        return float(hsub().loc[hsub().index.asof(t), "v"]) + hsub().index.max()\n{guard}',
+    }
+    for name, source in forms.items():
+        proj.new_cells(name, source)
+    proj.new_cells('total', 'def total():\n    return sum(' + ' + '.join(f'{n}(t)' for n in forms) + ' for t in range(9))')
+    return model, tuple(forms)
+
+
+def test_prefix_selection_three_modes(tmp_path):
+    """Decision 12: T.loc[prefix] bound once or chained, read by full key, bounds, membership, asof."""
+    import os
+    model, names = _prefix_model()
+    try:
+        live = model.Projection.total()
+        parts = {n: [model.Projection.cells[n](t) for t in range(9)] for n in names}
+        model.export(tmp_path / 'exported', locked_spaces=['Data'])
+    finally:
+        model.close()
+    assert parts['p_alias'][:4] == [-1.0, 6.0, 4.0, -1.0]      # (M, A, 0) absent; t=3 prefix X absent
+    assert parts['p_asof'][:3] == [-1.0, 6.0, 4.0]             # below the first key: NaN, then KeyError
+    assert -2.0 in parts['p_all'] and parts['p_view'] == parts['p_view']
+    (tmp_path / 'sample.py').write_text('from exported import mx_model as m\nm.Projection.total()\n', encoding='utf-8')
+    env = dict(os.environ, MX_CY_OBSERVED_TABLES='1', MX_CY_NO_TABLE_MATCHERS='1', MX_CY_INFER_TYPES='1')
+    subprocess.run([sys.executable, '-m', 'modelx_cython', 'exported', '--sample', 'sample.py', '--no-spec'],
+                   cwd=tmp_path, check=True, env=env)
+    script = ('from {0} import mx_model as m; P = m.Projection; '
+              'print(repr([P.total()] + [[getattr(P, n)(t) for t in range(9)] for n in {1!r}]))')
+    for package in ('exported', 'exported_cy'):
+        got = subprocess.run([sys.executable, '-c', script.format(package, names)],
+                             cwd=tmp_path, check=True, capture_output=True, text=True).stdout.strip()
+        assert got == repr([live] + [parts[n] for n in names]), (package, got)
+    py = tmp_path / 'exported_cy/_mx_classes.py'
+    calls = {'p_alias': ['lookup_float_3('], 'p_renamed': ['lookup_float_3('], 'p_two': ['lookup_float_3('],
+             'p_all': ['native_prefix_op_2(', 'lookup_float_3('], 'p_chain': ['lookup_float_3('],
+             'p_asof': ['native_prefix_asof_2(', 'lookup_float_3('], 'p_int': ['native_prefix_asof_1(', 'native_prefix_op_1(']}
+    for name, wanted in calls.items():
+        body = _formula_py(py, name)
+        for call in wanted:
+            assert call in body, (name, call)
+        assert '.loc[' not in body, (name, body)              # the selection is never built
+    assert _formula_py(py, 'p_alias').count('lookup_float_3(') == 1
+    assert '.loc[' in _formula_py(py, 'p_kept') and '.loc[' in _formula_py(py, 'p_view')
+    admission = json.loads((tmp_path / 'exported_cy/_mx_admission.json').read_text())
+    kept = admission['exported_cy._mx_classes._c_Projection._f_p_kept']
+    assert any('sub = T.loc[prefix] kept' in line for line in json.dumps(kept).split('", "')), kept

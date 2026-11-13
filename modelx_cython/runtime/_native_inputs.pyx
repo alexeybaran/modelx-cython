@@ -1962,6 +1962,172 @@ cdef bint parts_contains(object table, const long long* numbers, PyObject** obje
     return _parts_key(numbers, objects, count) in table.index
 
 
+@cython.final
+cdef class _PrefixRuns:
+    """The runs of a tuple-keyed table by the prefix of every level but the last, resolved once.
+
+    Built only when every stored prefix part is an exact int or str and every last-level label an
+    exact int: run r holds the rows sharing one prefix, its last-level labels in stored order
+    (keys, labels), their min and max, and whether they increase. Prefixes are found through an
+    open-addressing hash with the keyed index's part hash; equality reads the keyed index arrays.
+    """
+    cdef Py_ssize_t width, levels, mask
+    cdef long long[::1] slots, run_row, run_start, run_length, run_low, run_high, keys
+    cdef unsigned char[::1] run_ordered
+    cdef unsigned long long[::1] hashes
+    cdef tuple labels
+    cdef bint ready
+
+    def __init__(self, KeyedView cells, owner):
+        cdef Py_ssize_t row, slot, i, position
+        cdef unsigned long long code
+        self.ready = False
+        self.levels = cells.width
+        self.width = cells.width - 1
+        groups = {}
+        for row, key in enumerate(owner._keys):
+            last = key[-1]
+            if type(last) is not int or not -(1 << 63) <= last < (1 << 63):
+                return
+            for i in range(self.width):
+                if cells.kinds[row * self.levels + i] != _KEY_INT and cells.kinds[row * self.levels + i] != _KEY_TEXT:
+                    return
+            groups.setdefault(key[:-1], []).append(row)
+        rows, starts, lengths, lows, highs, ordered, keys, labels = [], [], [], [], [], [], [], []
+        for members in groups.values():
+            run = [owner._keys[row][-1] for row in members]
+            rows.append(members[0]); starts.append(len(keys)); lengths.append(len(run))
+            lows.append(min(run)); highs.append(max(run))
+            ordered.append(all(a < b for a, b in zip(run, run[1:])))
+            keys.extend(run); labels.extend(run)
+        self.run_row, self.run_start, self.run_length = array('q', rows), array('q', starts), array('q', lengths)
+        self.run_low, self.run_high, self.keys = array('q', lows), array('q', highs), array('q', keys)
+        self.run_ordered, self.labels = array('B', ordered), tuple(labels)
+        capacity = 8
+        while capacity < len(rows) * 2:
+            capacity *= 2
+        self.slots, self.hashes, self.mask = array('q', [-1] * capacity), array('Q', [0] * capacity), capacity - 1
+        for i in range(len(rows)):
+            code = 1469598103934665603
+            for position in range(rows[i] * self.levels, rows[i] * self.levels + self.width):
+                if cells.kinds[position] == _KEY_TEXT:
+                    code = (code ^ <unsigned long long>PyObject_Hash(cells.text[position])) * <unsigned long long>1099511628211
+                else:
+                    code = (code ^ <unsigned long long>cells.numbers[position]) * <unsigned long long>1099511628211
+            slot = <Py_ssize_t>(code & <unsigned long long>self.mask)
+            while self.slots[slot] >= 0:
+                slot = (slot + 1) & self.mask
+            self.slots[slot], self.hashes[slot] = i, code
+        self.ready = True
+
+    @cython.boundscheck(False)
+    @cython.wraparound(False)
+    cdef Py_ssize_t find(self, const KeyIndex* index, const KeyPart* parts) noexcept:
+        """The run of a prefix of exact int / text parts, or -1 (no stored prefix equals it)."""
+        cdef unsigned long long code = 1469598103934665603
+        cdef Py_ssize_t i, slot, run, position
+        for i in range(self.width):
+            if parts[i].kind == _KEY_TEXT:
+                code = (code ^ _part_text_hash(parts[i].text)) * <unsigned long long>1099511628211
+            else:
+                code = (code ^ <unsigned long long>parts[i].number) * <unsigned long long>1099511628211
+        slot = <Py_ssize_t>(code & <unsigned long long>self.mask)
+        while self.slots[slot] >= 0:
+            run = self.slots[slot]
+            if code == self.hashes[slot]:
+                for i in range(self.width):
+                    position = self.run_row[run] * self.levels + i
+                    if parts[i].kind == _KEY_TEXT:
+                        if index.kinds[position] != _KEY_TEXT or not _text_same(parts[i].text, _tuple_item(index.text, position)):
+                            break
+                    elif index.kinds[position] != _KEY_INT or parts[i].number != index.numbers[position]:
+                        break
+                else:
+                    return run
+            slot = (slot + 1) & self.mask
+        return -1
+
+    @cython.boundscheck(False)
+    @cython.wraparound(False)
+    cdef Py_ssize_t below(self, Py_ssize_t run, long long key) noexcept:
+        """In an increasing run: the count of its labels <= key (0 below the first)."""
+        cdef Py_ssize_t lo = self.run_start[run], hi = lo + self.run_length[run], first = lo, mid
+        while lo < hi:
+            mid = lo + (hi - lo) // 2
+            if key < self.keys[mid]:
+                hi = mid
+            else:
+                lo = mid + 1
+        return lo - first
+
+
+cdef Py_ssize_t _prefix_run(object table, const long long* numbers, PyObject** objects, Py_ssize_t count) except? -2:
+    """The run of an unpacked prefix in a resolved table, or -1 (the caller runs the original)."""
+    cdef KeyPart parts[6]
+    cdef Py_ssize_t i
+    if type(table) is not NativeTable or (<NativeTable>table)._prefix_runs is None:
+        return -1
+    runs = <_PrefixRuns>(<NativeTable>table)._prefix_runs
+    if count != runs.width:
+        return -1
+    for i in range(count):
+        if objects[i] == NULL:
+            key_int(&parts[i], numbers[i], False)
+        elif not _pack_value(objects[i], &parts[i]):
+            _pack_part(<object>objects[i], &parts[i])
+            if parts[i].kind != _KEY_INT and parts[i].kind != _KEY_TEXT:
+                return -1
+    return runs.find(&(<NativeTable>table)._key_index, &parts[0])
+
+
+cdef object _prefix_selection(object table, const long long* numbers, PyObject** objects, Py_ssize_t count):
+    """The original ``T.loc[p]``: a one-part prefix is the part itself, as written."""
+    if count == 1:
+        return table.loc[<object>objects[0] if objects[0] != NULL else numbers[0]]
+    return table.loc[_parts_key(numbers, objects, count)]
+
+
+cdef long long prefix_op(object table, const long long* numbers, PyObject** objects, Py_ssize_t count,
+                         int op, long long key) except? -1:
+    """``T.loc[p].index.min()`` (op 0), ``.max()`` (op 1), ``key in T.loc[p].index`` (op 2).
+
+    Native when the prefix is found in the resolved runs; otherwise (any other table or part, an
+    absent prefix) the original expression on the original objects, so its result or error."""
+    cdef Py_ssize_t run = _prefix_run(table, numbers, objects, count), below
+    cdef _PrefixRuns runs
+    if run >= 0:
+        runs = <_PrefixRuns>(<NativeTable>table)._prefix_runs
+        if op == 0:
+            return runs.run_low[run]
+        if op == 1:
+            return runs.run_high[run]
+        if runs.run_ordered[run]:
+            below = runs.below(run, key)
+            return below > 0 and runs.keys[runs.run_start[run] + below - 1] == key
+    index = _prefix_selection(table, numbers, objects, count).index
+    if op == 0:
+        return _mx_exact_index(index.min())
+    if op == 1:
+        return _mx_exact_index(index.max())
+    return key in index
+
+
+cdef object prefix_asof(object table, const long long* numbers, PyObject** objects, Py_ssize_t count,
+                        long long key):
+    """``T.loc[p].index.asof(key)``: the stored label at the last key <= key, NaN below the first
+    (as native_asof), when the run increases; otherwise the original expression."""
+    cdef Py_ssize_t run = _prefix_run(table, numbers, objects, count), below
+    cdef _PrefixRuns runs
+    if run >= 0:
+        runs = <_PrefixRuns>(<NativeTable>table)._prefix_runs
+        if runs.run_ordered[run]:
+            below = runs.below(run, key)
+            if below == 0:
+                return _asof_nan
+            return <object>_tuple_item(<PyObject*>runs.labels, runs.run_start[run] + below - 1)
+    return _prefix_selection(table, numbers, objects, count).index.asof(key)
+
+
 from sys import intern as _intern_label
 
 
@@ -2034,6 +2200,10 @@ cdef class NativeTable:
             self._single_part = cells.width == 1 and not cells.tuple_keys
             cells.fill_index(&self._key_index)
             self._all_int_keys = cells.tuple_keys and all(kind == _KEY_INT for kind in cells.kinds)
+            if cells.tuple_keys and cells.width >= 2:
+                runs = _PrefixRuns(cells, owner)
+                if runs.ready:
+                    self._prefix_runs = runs
         keys = owner._keys
         if keys and type(keys[0]) is int:
             data = view(owner)
@@ -3230,3 +3400,67 @@ cdef object table(object function, tuple keywords, object frame, object columns=
             return prepared
     return forward_call(function, keywords, ('frame', 'columns', 'groups', 'indexing', 'rows', 'report', 'preserve_scalar_types'),
                         (frame, columns, groups, indexing, rows, report, preserve_scalar_types), omitted_argument)
+
+
+# Partial-key selection (Decision 12): each specialisation only places its parts and calls the
+# shared function, which reads the resolved prefix runs or runs the original expression.
+
+cdef long long native_prefix_op_1(object table, P0 p0, int op, long long k) except? -1:
+    cdef long long numbers[1]
+    cdef PyObject* items[1]
+    _place(p0, &numbers[0], &items[0])
+    return prefix_op(table, numbers, items, 1, op, k)
+
+cdef object native_prefix_asof_1(object table, P0 p0, long long k):
+    cdef long long numbers[1]
+    cdef PyObject* items[1]
+    _place(p0, &numbers[0], &items[0])
+    return prefix_asof(table, numbers, items, 1, k)
+
+cdef long long native_prefix_op_2(object table, P0 p0, P1 p1, int op, long long k) except? -1:
+    cdef long long numbers[2]
+    cdef PyObject* items[2]
+    _place(p0, &numbers[0], &items[0]); _place(p1, &numbers[1], &items[1])
+    return prefix_op(table, numbers, items, 2, op, k)
+
+cdef object native_prefix_asof_2(object table, P0 p0, P1 p1, long long k):
+    cdef long long numbers[2]
+    cdef PyObject* items[2]
+    _place(p0, &numbers[0], &items[0]); _place(p1, &numbers[1], &items[1])
+    return prefix_asof(table, numbers, items, 2, k)
+
+cdef long long native_prefix_op_3(object table, P0 p0, P1 p1, P2 p2, int op, long long k) except? -1:
+    cdef long long numbers[3]
+    cdef PyObject* items[3]
+    _place(p0, &numbers[0], &items[0]); _place(p1, &numbers[1], &items[1]); _place(p2, &numbers[2], &items[2])
+    return prefix_op(table, numbers, items, 3, op, k)
+
+cdef object native_prefix_asof_3(object table, P0 p0, P1 p1, P2 p2, long long k):
+    cdef long long numbers[3]
+    cdef PyObject* items[3]
+    _place(p0, &numbers[0], &items[0]); _place(p1, &numbers[1], &items[1]); _place(p2, &numbers[2], &items[2])
+    return prefix_asof(table, numbers, items, 3, k)
+
+cdef long long native_prefix_op_4(object table, P0 p0, P1 p1, P2 p2, P3 p3, int op, long long k) except? -1:
+    cdef long long numbers[4]
+    cdef PyObject* items[4]
+    _place(p0, &numbers[0], &items[0]); _place(p1, &numbers[1], &items[1]); _place(p2, &numbers[2], &items[2]); _place(p3, &numbers[3], &items[3])
+    return prefix_op(table, numbers, items, 4, op, k)
+
+cdef object native_prefix_asof_4(object table, P0 p0, P1 p1, P2 p2, P3 p3, long long k):
+    cdef long long numbers[4]
+    cdef PyObject* items[4]
+    _place(p0, &numbers[0], &items[0]); _place(p1, &numbers[1], &items[1]); _place(p2, &numbers[2], &items[2]); _place(p3, &numbers[3], &items[3])
+    return prefix_asof(table, numbers, items, 4, k)
+
+cdef long long native_prefix_op_5(object table, P0 p0, P1 p1, P2 p2, P3 p3, P4 p4, int op, long long k) except? -1:
+    cdef long long numbers[5]
+    cdef PyObject* items[5]
+    _place(p0, &numbers[0], &items[0]); _place(p1, &numbers[1], &items[1]); _place(p2, &numbers[2], &items[2]); _place(p3, &numbers[3], &items[3]); _place(p4, &numbers[4], &items[4])
+    return prefix_op(table, numbers, items, 5, op, k)
+
+cdef object native_prefix_asof_5(object table, P0 p0, P1 p1, P2 p2, P3 p3, P4 p4, long long k):
+    cdef long long numbers[5]
+    cdef PyObject* items[5]
+    _place(p0, &numbers[0], &items[0]); _place(p1, &numbers[1], &items[1]); _place(p2, &numbers[2], &items[2]); _place(p3, &numbers[3], &items[3]); _place(p4, &numbers[4], &items[4])
+    return prefix_asof(table, numbers, items, 5, k)

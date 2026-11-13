@@ -91,8 +91,9 @@ def plain_reads():
 
 
 class LocReads(FormulaTransformer):
-    def __init__(self, resolver, space, providers=None):
+    def __init__(self, resolver, space, providers=None, param_types=None):
         super().__init__()
+        self.param_types = param_types or {}
         self.providers = providers if providers is not None else set()
         self.resolver = resolver
         self.space = space
@@ -123,7 +124,7 @@ class LocReads(FormulaTransformer):
                     and value.value.attr.value == 'loc' and len(value.slice) == 1
                     and isinstance(value.slice[0].slice, cst.Index)
                     and self._pure_key(value.slice[0].slice.value)
-                    and self._schema(value.value.value) is not None):
+                    and self._schema(value.value.value) is not None and self._prefix(value) is None):
                 candidates[name] = 0
         if not candidates:
             return set()
@@ -197,9 +198,18 @@ class LocReads(FormulaTransformer):
         if not (isinstance(target, cst.Attribute) and target.attr.value in ('loc', 'at')):
             return None, None
         elements = node.slice
+        if len(elements) == 1 and self._prefix(node) is not None:
+            return None, None       # the selection itself: its uses are lowered
         if len(elements) != 2 or not all(isinstance(e.slice, cst.Index) for e in elements):
             return None, 'not loc[key, column]'
         key, column = elements[0].slice.value, elements[1].slice.value
+        prefix = self._prefix(target.value)
+        if prefix is not None:
+            if isinstance(key, cst.Tuple):
+                return None, None
+            # T.loc[p].loc[k, c] is T.loc[(p..., k), c]: the same row of a unique index
+            target = target.with_changes(value=prefix[0])
+            key = cst.Tuple([cst.Element(item) for item in (*prefix[1], key)])
         names = self._literal_values(column)
         if names is None and not any_column:
             return None, 'column is not a string literal'
@@ -257,11 +267,16 @@ class LocReads(FormulaTransformer):
         if items is None or not 2 <= len(items) <= 6 or any(
                 not isinstance(item, cst.Element) or isinstance(item, cst.StarredElement) for item in items):
             return None
+        values = [item.value if local is None else cst.Subscript(
+            value=local, slice=[cst.SubscriptElement(cst.Index(cst.Integer(str(position))))])
+            for position, item in enumerate(items)]
+        return self._parts(values, [item.value for item in items], where)
+
+    def _parts(self, values, sources, where):
+        """Each part bare when its source is a known non-bool integer, else cast to object."""
         parts, notes = [], []
-        for position, item in enumerate(items):
-            value = item.value if local is None else cst.Subscript(
-                value=local, slice=[cst.SubscriptElement(cst.Index(cst.Integer(str(position))))])
-            why = self._int_part(item.value)
+        for value, source in zip(values, sources):
+            why = self._int_part(source)
             if why is None:
                 value = cst.parse_expression('_mx_cy.cast(object, 0)').with_changes(
                     args=[cst.Arg(cst.Name('object')), cst.Arg(value)])
@@ -271,6 +286,79 @@ class LocReads(FormulaTransformer):
             parts.append(value)
         self.key_parts.append(f'{where}, {len(parts)} parts: ' + '; '.join(notes))
         return parts
+
+    # Partial-key selection (Decision 12). ``T.loc[p]`` with p selecting every level but the last
+    # of a traced table with an integer last level, written inline or bound once to a local, is
+    # never built: its reads go to the full key, its bounds, membership and asof to the provider.
+    def _prefix(self, node, depth=0):
+        """(T, prefix part expressions) when ``node`` is such a selection, else None."""
+        if not plain_reads():
+            return None
+        if isinstance(node, cst.Name) and node.value in self._aliases and depth < 1:
+            return self._prefix(self._aliases[node.value], depth + 1)
+        if not (isinstance(node, cst.Subscript) and isinstance(node.value, cst.Attribute)
+                and node.value.attr.value == 'loc' and len(node.slice) == 1
+                and isinstance(node.slice[0].slice, cst.Index)):
+            return None
+        p = node.slice[0].slice.value
+        schema = self._schema(node.value.value)
+        if schema is None or not self._pure_key(p) or schema.get('__last_key__') != 'int':
+            return None
+        items = p
+        if isinstance(p, cst.Name) and isinstance(self._aliases.get(p.value), cst.Tuple):
+            items = self._aliases[p.value]
+        if isinstance(items, cst.Tuple):
+            if any(not isinstance(e, cst.Element) or isinstance(e, cst.StarredElement) for e in items.elements):
+                return None
+            parts = [e.value for e in items.elements]
+            if items is not p and not all(self._pure_key(part) for part in parts):
+                parts = [cst.Subscript(value=p, slice=[cst.SubscriptElement(cst.Index(cst.Integer(str(i))))])
+                         for i in range(len(parts))]
+        else:
+            parts = [p]
+        if not 1 <= len(parts) <= 5 or schema.get('__levels__') != len(parts) + 1:
+            return None
+        return node.value.value, parts
+
+    def _c_int(self, node):
+        """A known non-bool C integer: an integer literal or cell (as _int_part), or a parameter
+        traced as an integer and never assigned in the formula."""
+        if self._int_part(node) is not None:
+            return True
+        return (isinstance(node, cst.Name) and node.value in self.param_types
+                and self.param_types[node.value] in self._INT_RESULTS
+                and getattr(self, '_assign_counts', {}).get(node.value, 0) == 0)
+
+    def _prefix_call(self, function, prefix, where, *tail):
+        parts = self._parts(prefix[1], prefix[1], where)
+        self.typed += 1
+        return self._provider_call(f'{function}_{len(parts)}', [prefix[0], *parts, *tail])
+
+    def leave_FunctionDef(self, original, updated):
+        """Drop ``sub = T.loc[p]`` when every use of ``sub`` was lowered; else say which stays."""
+        names = [name for name, value in self._aliases.items() if self._prefix(value) is not None]
+        if not names:
+            return updated
+        left = {name: 0 for name in names}
+
+        class Uses(cst.CSTVisitor):
+            def visit_Name(self, node):
+                if node.value in left:
+                    left[node.value] += 1
+        updated.body.visit(Uses())
+        dropped = {name for name in names if left[name] == 1}
+        for name in sorted(set(names) - dropped):
+            self.untyped.append(f'{name} = T.loc[prefix] kept: a use of {name} is not lowered')
+
+        class Drop(cst.CSTTransformer):
+            def leave_SimpleStatementLine(self, original, updated):
+                body = [s for s in updated.body if not (
+                    isinstance(s, cst.Assign) and len(s.targets) == 1
+                    and isinstance(s.targets[0].target, cst.Name) and s.targets[0].target.value in dropped)]
+                if len(body) == len(updated.body):
+                    return updated
+                return updated.with_changes(body=body) if body else cst.RemovalSentinel.REMOVE
+        return updated.with_changes(body=updated.body.visit(Drop())) if dropped else updated
 
     def _provider_call(self, function, args):
         from .helpers import module_name
@@ -320,6 +408,9 @@ class LocReads(FormulaTransformer):
                 and isinstance(node.slice[0].slice.value, cst.SimpleString)):
             return None
         row = node.value
+        if self._prefix(row) is not None:
+            self.untyped.append('column view T.loc[prefix][col]: object read')
+            return None
         if isinstance(row, cst.Name) and row.value in self._aliases:
             row = self._aliases[row.value]
         if not (isinstance(row, cst.Subscript) and isinstance(row.value, cst.Attribute)
@@ -388,6 +479,11 @@ class LocReads(FormulaTransformer):
                 and node.func.attr.value == name and isinstance(node.func.value, cst.Attribute)
                 and node.func.value.attr.value == 'index'):
             return None
+        prefix = self._prefix(node.func.value.value)
+        if prefix is not None and name in ('min', 'max'):
+            self.typed -= 1     # the caller counts it
+            return self._prefix_call('native_prefix_op', prefix, f'T.loc[prefix].index.{name}()',
+                                     cst.Integer('0' if name == 'min' else '1'), cst.Integer('0'))
         schema = self._schema(node.func.value.value)
         if schema is None or schema.get('__key__') != 'int':
             return None
@@ -409,6 +505,16 @@ class LocReads(FormulaTransformer):
         if not isinstance(target.operator, (cst.In, cst.NotIn)):
             return updated
         index = target.comparator
+        prefix = self._prefix(index.value) if isinstance(index, cst.Attribute) and index.attr.value == 'index' else None
+        if prefix is not None:
+            if not self._c_int(updated.left):
+                self.untyped.append('k in T.loc[prefix].index: k is not a known C integer')
+                return updated
+            call = self._prefix_call('native_prefix_op', prefix, 'k in T.loc[prefix].index',
+                                     cst.Integer('2'), updated.left)
+            if isinstance(target.operator, cst.NotIn):
+                return cst.UnaryOperation(operator=cst.Not(), expression=call, lpar=updated.lpar, rpar=updated.rpar)
+            return call.with_changes(lpar=updated.lpar, rpar=updated.rpar)
         if not (isinstance(index, cst.Attribute) and index.attr.value == 'index'
                 and self._schema(index.value) is not None):
             return updated
@@ -434,6 +540,13 @@ class LocReads(FormulaTransformer):
                 and isinstance(node.func, cst.Attribute) and node.func.attr.value == 'asof'
                 and isinstance(node.func.value, cst.Attribute) and node.func.value.attr.value == 'index'):
             return None
+        prefix = self._prefix(node.func.value.value)
+        if prefix is not None:
+            if not self._c_int(node.args[0].value):
+                self.untyped.append('T.loc[prefix].index.asof(k): k is not a known C integer')
+                return None
+            return self._prefix_call('native_prefix_asof', prefix, 'T.loc[prefix].index.asof(k)',
+                                     node.args[0].value)
         schema = self._schema(node.func.value.value)
         if schema is None or schema.get('__key__') != 'int':
             return None
@@ -449,8 +562,9 @@ class LocReads(FormulaTransformer):
                 and not original.args[0].keyword and not original.args[0].star):
             inner = updated.args[0].value
             if (isinstance(inner, cst.Call) and isinstance(inner.func, cst.Attribute)
-                    and inner.func.attr.value in ('max_int', 'native_last_int', 'native_first_int',
-                                                  'native_max_int')):
+                    and (inner.func.attr.value in ('max_int', 'native_last_int', 'native_first_int',
+                                                   'native_max_int')
+                         or inner.func.attr.value.startswith('native_prefix_op_'))):
                 return inner               # int() of the C integer bound is the bound
         # Without the clamp recognisers the declared spelling index.max_int() has no other native route.
         names = ('max', 'min', 'max_int') if os.environ.get('MX_CY_NO_TABLE_MATCHERS') == '1' else ('max', 'min')

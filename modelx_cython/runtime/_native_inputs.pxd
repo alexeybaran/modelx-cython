@@ -138,6 +138,7 @@ cdef class NativeTable:
     cdef const long long* _int_rows
     cdef Py_ssize_t _int_count
     cdef KeyIndex _key_index
+    cdef object _prefix_runs          # _PrefixRuns of a tuple-keyed table, or None
     cdef void _resolve(self, object owner) except *
     cdef Py_ssize_t _column_slot(self, object column) except? -2
     cdef Py_ssize_t _int_row(self, long long key) noexcept
@@ -346,3 +347,17 @@ cdef double lookup_float_5(object table, P0 p0, P1 p1, P2 p2, P3 p3, P4 p4, obje
 cdef bint native_contains_5(P0 p0, P1 p1, P2 p2, P3 p3, P4 p4, object table) except -1
 cdef double lookup_float_6(object table, P0 p0, P1 p1, P2 p2, P3 p3, P4 p4, P5 p5, object column) except? -1
 cdef bint native_contains_6(P0 p0, P1 p1, P2 p2, P3 p3, P4 p4, P5 p5, object table) except -1
+
+# Partial-key selection (Decision 12): ``T.loc[p].index.min()`` (op 0), ``.max()`` (op 1) and
+# ``k in T.loc[p].index`` (op 2) for a prefix of every level but the last, and
+# ``T.loc[p].index.asof(k)``. k is a C integer (0 when unused).
+cdef long long native_prefix_op_1(object table, P0 p0, int op, long long k) except? -1
+cdef object native_prefix_asof_1(object table, P0 p0, long long k)
+cdef long long native_prefix_op_2(object table, P0 p0, P1 p1, int op, long long k) except? -1
+cdef object native_prefix_asof_2(object table, P0 p0, P1 p1, long long k)
+cdef long long native_prefix_op_3(object table, P0 p0, P1 p1, P2 p2, int op, long long k) except? -1
+cdef object native_prefix_asof_3(object table, P0 p0, P1 p1, P2 p2, long long k)
+cdef long long native_prefix_op_4(object table, P0 p0, P1 p1, P2 p2, P3 p3, int op, long long k) except? -1
+cdef object native_prefix_asof_4(object table, P0 p0, P1 p1, P2 p2, P3 p3, long long k)
+cdef long long native_prefix_op_5(object table, P0 p0, P1 p1, P2 p2, P3 p3, P4 p4, int op, long long k) except? -1
+cdef object native_prefix_asof_5(object table, P0 p0, P1 p1, P2 p2, P3 p3, P4 p4, long long k)
