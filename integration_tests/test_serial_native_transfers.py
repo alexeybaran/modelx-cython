@@ -59,7 +59,7 @@ def test_native_transfers(tmp_path):
     assert '_mx_inbounds_exact' in generated and '_mx_exact_receiver' in generated
     assert '_mx_divisible(' in generated and '_mx_divisible_after_decrement(' in generated
     assert '_mx_memo_pow(' in generated
-    assert '_mx_checked_quotient:' in generated
+    assert '_mx_cy.cast(_mx_cy.double, (_mx_cy.cast(object, _mx_checked_0) + 1) / 12)' in generated
     assert 'year: _mx_cy.longlong' in generated
     assert '_mx_cy.cast(object, year)' in generated
     (tmp_path / 'override.pyx').write_text(textwrap.dedent('''\

@@ -150,7 +150,7 @@ class CheckedArithmetic:
             return None
         return tuple(f'({a} {operator} {b})' for a, b in zip(left, right))
 
-    def guarded_region(self, expressions, render, *, locals_=(), target=None):
+    def guarded_expression(self, expressions, render, *, locals_=()):
         """Capture signed inputs in order and keep exact arithmetic on a miss."""
         if any(self.integer_interval(value, locals_=locals_) is None for value in expressions):
             return ()
@@ -161,13 +161,15 @@ class CheckedArithmetic:
         bounds = ' and '.join(f'-{_BOUND} <= {name} <= {_BOUND}' for name, _ in inputs)
         native, boxed = zip(*captured)
         hot, cold = render(native, True), render(boxed, False)
-        source = ''.join(f'{name}: _mx_cy.longlong = {value}\n' for name, value in inputs)
-        if target is None:
-            source += f'if {bounds}:\n    return {hot}\nreturn {cold}\n'
-        else:
-            source += (f'{target}: _mx_cy.double\nif {bounds}:\n    {target} = {hot}\n'
-                       f'else:\n    {target} = {cold}\n')
-        return cst.parse_module(source).body
+        declarations = ''.join(f'{name}: _mx_cy.longlong = {value}\n' for name, value in inputs)
+        return cst.parse_module(declarations).body, bounds, hot, cold
+
+    def guarded_region(self, expressions, render, *, locals_=()):
+        guarded = self.guarded_expression(expressions, render, locals_=locals_)
+        if not guarded:
+            return ()
+        declarations, bounds, hot, cold = guarded
+        return (*declarations, *cst.parse_module(f'if {bounds}:\n    return {hot}\nreturn {cold}\n').body)
 
     def integer_interval(self, expr, *, signed=False, locals_=()):
         """Bound each intermediate under a checked or signed-native input domain."""
@@ -236,26 +238,29 @@ class CheckedArithmetic:
             return body
         nodes = tuple(walk(result.value))
         name = target.value
+        visible = set(lexical_nodes((body[-1],)))
         if (name not in self.cell.params
-                and sum(isinstance(node, cst.Name) and node.value == name for node in nodes) == 1):
+                and sum(isinstance(node, cst.Name) and node.value == name for node in walk(cst.Module(body))) == 2):
             for node in nodes:
                 term = local_quotient(node, cst.Integer)
-                if term is None or term[0] != name or CstFacts(body).stores[name] != 1:
+                if term is None or term[0] != name or node not in visible:
                     continue
-                quotient = f'{self.prefix}_quotient'
                 divisor = term[1]
 
                 def render(values, native):
                     denominator = f'{divisor}.0' if native else divisor
                     return f'{values[0]} / {denominator}'
 
-                region = self.guarded_region((assignment.value,), render, target=quotient)
-                if region:
+                guarded = self.guarded_expression((assignment.value,), render)
+                if guarded:
+                    declarations, bounds, hot, cold = guarded
+                    quotient = cst.parse_expression(
+                        f'({hot} if {bounds} else _mx_cy.cast(_mx_cy.double, {cold}))')
                     class Quotient(cst.CSTTransformer):
                         def leave_BinaryOperation(inner, before, after):
-                            return cst.Name(quotient) if before is node else after
+                            return quotient if before is node else after
 
-                    return (*body[:-2], *region, body[-1].visit(Quotient()))
+                    return (*body[:-2], *declarations, body[-1].visit(Quotient()))
                 break
         first = single_statement(body[-3]) if len(body) >= 3 else None
         other_target = local_assignment(first)
