@@ -29,7 +29,10 @@ class ProviderMemberCalls(FormulaTransformer):
         if not (isinstance(member, cst.Attribute) and isinstance(member.value, cst.Call)):
             return updated
         chain = _extract_self_chain(member.value.func)
-        if not chain:
+        # Only a non-empty self-rooted chain can name a provider result; an
+        # unresolved base (an attribute chain not rooted at self) or a
+        # non-attribute callee is not a provider member call.
+        if not isinstance(chain, list) or not chain:
             return updated
         resolved, name = self.resolver.resolve_chain(self.space, chain)
         binding = self.resolver.provider_results.get(name) if resolved == RESOLVED else None
