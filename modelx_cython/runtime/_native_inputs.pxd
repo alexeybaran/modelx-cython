@@ -109,6 +109,7 @@ ctypedef fused KeyArg0:
 
 cdef class NativeTable:
     cdef object _owner, _index_view, _numeric_view, _indexed_view, _single_label, _input_keys
+    cdef object _contiguous_view
     cdef const double* _input_values
     cdef const unsigned char* _input_numeric
     cdef const long long* _input_positions

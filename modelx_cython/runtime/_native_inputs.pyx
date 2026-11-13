@@ -45,6 +45,7 @@ cdef object _all_true = _native_operations['all_true']
 cdef object _max_value = _native_operations['max_value']
 cdef object _prepared_interpolation = _native_operations['prepared_interpolation']
 cdef object _rectangular_storage = getattr(_immutable_inputs, '_RECTANGULAR_STORAGE', object())
+cdef object _contiguous_storage = getattr(_immutable_inputs, '_CONTIGUOUS_STORAGE', object())
 
 
 cdef inline bint _table_view_part(object value) noexcept:
@@ -1346,13 +1347,49 @@ cdef class RectangularView:
         return True
 
 
+cdef class ContiguousView:
+    cdef long long low, high
+    cdef const long long[:, ::1] integers
+    cdef const double[:, ::1] floats
+    cdef tuple columns
+    cdef bint integral
+
+    def __init__(self, long long low, data, tuple columns):
+        self.low = low
+        self.high = low + (data.shape[0] - 1)
+        self.columns = columns
+        self.integral = data.dtype == _key_numpy.dtype('int64')
+        if self.integral:
+            self.integers = data
+        else:
+            self.floats = data
+
+    cdef inline bint read(self, long long key, object column, double* value) except -1:
+        cdef Py_ssize_t pos, row
+        if key < self.low or key > self.high or type(column) is not str:
+            return False
+        if <PyObject*>column == PyTuple_GET_ITEM(self.columns, 0):
+            pos = 0
+        else:
+            try:
+                pos = self.columns.index(column)
+            except ValueError:
+                return False
+        row = <Py_ssize_t>(key - self.low)
+        value[0] = <double>self.integers[row, pos] if self.integral else self.floats[row, pos]
+        return True
+
+
 cdef double lookup_float(object function, tuple keywords, object source, object key, object column=_missing, object default=_missing) except? -1:
     cdef KeyPart[4] small
     cdef KeyPart* parts
     cdef Py_ssize_t count
     cdef bint tuple_key
     cdef RectangularView rectangular
+    cdef ContiguousView contiguous
     cdef double value
+    cdef int overflow
+    cdef long long integer
     if function is not _lookup_float_fn:
         return forward_call(function, keywords, ('source', 'key', 'column', 'default'),
                             (source, key, column, default), omitted_argument)
@@ -1366,6 +1403,11 @@ cdef double lookup_float(object function, tuple keywords, object source, object 
         rectangular = source._native_cache.get(RectangularView)
         if rectangular is not None and rectangular.read(key, column, &value):
             return value
+        contiguous = source._native_cache.get(ContiguousView)
+        if contiguous is not None and PyLong_CheckExact(key):
+            integer = PyLong_AsLongLongAndOverflow(key, &overflow)
+            if not overflow and contiguous.read(integer, column, &value):
+                return value
         parts = _pack_key(key, &small[0], &count, &tuple_key)
         if parts != NULL:
             try:
@@ -1505,6 +1547,9 @@ cdef class NativeTable:
         if type(owner) is Table:
             self._index_view = _NativeTableIndex(owner)
             self._numeric_view = None
+            self._contiguous_view = owner._native_cache.get(ContiguousView)
+            if _contiguous_storage in owner._native_cache:
+                return
             if _rectangular_storage in owner._native_cache:
                 return
         if type(owner) is Table:
@@ -1539,6 +1584,8 @@ cdef class NativeTable:
         cdef double value
         cdef Py_ssize_t col, last
         if KeyArg0 is KeyInteger:
+            if self._contiguous_view is not None and (<ContiguousView>self._contiguous_view).read(key, column, &value):
+                return value
             if data != <PyObject*>None:
                 # The receiver owns the view throughout the call, as in c8's
                 # bound lookup. Exact labels at either end already have a slot.
@@ -2519,6 +2566,12 @@ cdef void _prepare_tables(object value) except *:
     """Install table resources while executing an explicit table constructor."""
     if type(value) is Table:
         cache = value._native_cache
+        contiguous = cache.get(_contiguous_storage)
+        if contiguous is not None:
+            first, numbers = contiguous
+            if ContiguousView not in cache and -(1 << 63) <= first <= first + len(numbers) - 1 < (1 << 63):
+                cache.setdefault(ContiguousView, ContiguousView(first, numbers, value._columns))
+            return
         rectangular = cache.get(_rectangular_storage)
         if rectangular is not None:
             if RectangularView not in cache:
@@ -2531,7 +2584,9 @@ cdef void _prepare_tables(object value) except *:
     elif type(value) is Record:
         for _, child in value._items:
             _prepare_tables(child)
-        _prepare_group_record(value)
+        if value._items and not all(type(child) is Table and _contiguous_storage in child._native_cache
+                                   for _, child in value._items):
+            _prepare_group_record(value)
 
 
 cdef object group_record(object function, object tables):
