@@ -185,9 +185,11 @@ class LocReads(FormulaTransformer):
             return None     # a grouped container is a table only when every group level is sliced
         return schema
 
-    def _float_read(self, node, kinds):
+    def _float_read(self, node, kinds, any_column=False):
         """The typed read for ``R.loc[key, "col"]`` if R is a table and col has one of kinds.
 
+        With any_column (only inside an explicit ``float()``), the column may be any expression and
+        of any traced kind: ``lookup_float`` is ``float()`` of the stored value.
         Returns (call, None) or (None, reason).
         """
         target = node.value
@@ -199,7 +201,7 @@ class LocReads(FormulaTransformer):
             return None, 'not loc[key, column]'
         key, column = elements[0].slice.value, elements[1].slice.value
         names = self._literal_values(column)
-        if names is None:
+        if names is None and not any_column:
             return None, 'column is not a string literal'
         receiver = target.value
         schema = self._schema(receiver)
@@ -208,7 +210,7 @@ class LocReads(FormulaTransformer):
                 # Grouped Records are a layout option; a full-key read is native on a flat table.
                 return None, 'full key into a grouped table: declare the table without groups= to read it by full key'
             return None, 'receiver is not a traced table'
-        found = {schema.get(name) for name in names}
+        found = set(kinds) if any_column else {schema.get(name) for name in names}
         if not found <= set(kinds):
             name = sorted(n for n in names if schema.get(n) not in kinds)[0]
             return None, f'column {name!r} has traced kind {schema.get(name)}'
@@ -425,7 +427,23 @@ class LocReads(FormulaTransformer):
                                       lpar=updated.lpar, rpar=updated.rpar)
         return call.with_changes(lpar=updated.lpar, rpar=updated.rpar)
 
+    def _asof(self, node):
+        """``R.index.asof(k)`` on an integer-keyed traced table: the provider's predecessor label."""
+        if not (plain_reads() and isinstance(node, cst.Call) and len(node.args) == 1
+                and not node.args[0].keyword and not node.args[0].star
+                and isinstance(node.func, cst.Attribute) and node.func.attr.value == 'asof'
+                and isinstance(node.func.value, cst.Attribute) and node.func.value.attr.value == 'index'):
+            return None
+        schema = self._schema(node.func.value.value)
+        if schema is None or schema.get('__key__') != 'int':
+            return None
+        self.typed += 1
+        return self._provider_call('native_asof', [node.func.value.value, node.args[0].value])
+
     def leave_Call(self, original, updated):
+        asof = self._asof(updated)
+        if asof is not None:
+            return asof
         func = original.func
         if (isinstance(func, cst.Name) and func.value == 'int' and len(original.args) == 1
                 and not original.args[0].keyword and not original.args[0].star):
@@ -455,8 +473,12 @@ class LocReads(FormulaTransformer):
                 and isinstance(updated.args[0].value, cst.Subscript)):
             # float() of an integer column read is the float read of that column.
             call, _ = self._float_read(updated.args[0].value, ('int',))
+            if call is None and plain_reads():
+                # float() of a read with a variable column, or of any column kind: the same float read
+                call, _ = self._float_read(updated.args[0].value, (), any_column=True)
             if call is not None:
-                self.untyped.pop()
+                if self.untyped:
+                    self.untyped.pop()
                 self.typed += 1
                 return call
         return updated

@@ -1721,6 +1721,42 @@ cpdef long long table_last_int(object table) except? -1:
     return _mx_exact_index(owner.index.max())
 
 
+cdef object native_asof(object table, KeyArg0 key):
+    """``table.index.asof(key)`` on a resolved integer index stored in increasing order: the stored
+    label at the last key <= key (the label object itself), NaN below the first key, as the helper
+    and pandas. Anything else runs ``table.index.asof(key)``."""
+    cdef NativeTable native
+    cdef long long number
+    cdef int overflow = 0
+    cdef Py_ssize_t lo = 0, hi, mid
+    if type(table) is NativeTable and (<NativeTable>table)._keys_increasing:
+        native = <NativeTable>table
+        if KeyArg0 is KeyInteger:
+            number = key
+        elif KeyArg0 is object:
+            if type(key) is not int:
+                return table.index.asof(key)
+            number = PyLong_AsLongLongAndOverflow(key, &overflow)
+            if overflow:
+                return table.index.asof(key)
+        else:
+            return table.index.asof(<object>key)
+        hi = native._int_count
+        while lo < hi:
+            mid = lo + (hi - lo) // 2
+            if number < native._int_sorted[mid]:
+                hi = mid
+            else:
+                lo = mid + 1
+        if lo == 0:
+            return _asof_nan
+        return <object>_tuple_item(<PyObject*>(<TableView>native._int_view).ordered, lo - 1)
+    return table.index.asof(<object>key)
+
+
+cdef object _asof_nan = float('nan')
+
+
 cpdef bint table_contains(object table, object key) except -1:
     """``key in table.index`` (the general route of native_contains).
 
@@ -2007,6 +2043,8 @@ cdef class NativeTable:
                 self._bounds_ready = True
                 self._int_first = data.first_integer
                 self._int_last = data.last_integer
+                # Stored in increasing order (pandas Index.asof requires a monotonic index).
+                self._keys_increasing = data.ordered == owner._keys
                 if self._cells is not None and data.integers.shape[0] == cells.rows:
                     self._int_ready = True
                     self._int_contiguous = data.contiguous

@@ -229,6 +229,11 @@ _VARIANTS = {
     'text_inline': 'def text_inline(t):\n    return float(data.named_table().loc[pid(), "v"])',
     'text_alias': 'def text_alias(t):\n    tbl = data.named_table()\n    k = pid()\n    return float(tbl.loc[k, "v"])',
     'text_row': 'def text_row(t):\n    row = data.named_table().loc[pid()]\n    return float(row["v"])',
+    # predecessor label (pandas Index.asof): below the first key it is NaN and the read raises KeyError
+    'asof_lit': ('def asof_lit(t):\n    tbl = data.mort_table()\n    try:\n'
+                 '        return float(tbl.loc[tbl.index.asof(t + 3), "mort_rate"])\n    except KeyError:\n        return -1.0'),
+    'asof_var': ('def asof_var(t):\n    try:\n        return float(data.mort_table().loc[data.mort_table().index.asof(t + 3), pick()])\n'
+                 '    except KeyError:\n        return -1.0'),
     # membership: with an experiment switch it is the provider's native_contains
     'int_in': 'def int_in(t):\n    tbl = data.mort_table()\n    return 1.0 if t in tbl.index else 0.0',
 }
@@ -246,6 +251,7 @@ def _variants_model(n_t=11):
     data.new_cells('named_table', 'lambda: pdn.table(named)')
     proj = model.new_space('Projection', refs={'data': data, 'pdn': pdn, 'n_t': n_t})
     proj.new_cells('pid', 'lambda: "UL5"')
+    proj.new_cells('pick', 'lambda: "mort_rate"')
     for name, source in _VARIANTS.items():
         proj.new_cells(name, source)
     proj.new_cells('total', 'def total():\n    return sum(' + ' + '.join(f'{n}(t)' for n in _VARIANTS)
@@ -280,8 +286,11 @@ def test_spelling_variants_recognisers_off(tmp_path):
         assert float(got) == live, (package, got, live)
     py, c = tmp_path / 'exported_cy/_mx_classes.py', tmp_path / 'exported_cy/_mx_classes.c'
     assert 'native_contains(' in _formula_py(py, 'int_in')
+    for name in ('asof_lit', 'asof_var'):
+        body = _formula_py(py, name)
+        assert 'native_asof(' in body and '.lookup_float(' in body and '.loc[' not in body, name
     for name in _VARIANTS:
-        if name == 'int_in':
+        if name in ('int_in', 'asof_lit', 'asof_var'):
             continue
         body = _formula_c(py, c, name)
         # fuse_0: the C long long key overload; fuse_2: the object (text) key overload

@@ -132,7 +132,7 @@ cdef class NativeTable:
     cdef const double* _cell_values
     cdef const unsigned char* _cell_numeric
     cdef Py_ssize_t _cell_width
-    cdef bint _bounds_ready, _int_ready, _int_contiguous, _single_part, _all_int_keys
+    cdef bint _bounds_ready, _int_ready, _int_contiguous, _single_part, _all_int_keys, _keys_increasing
     cdef long long _int_first, _int_last
     cdef const long long* _int_sorted
     cdef const long long* _int_rows
@@ -286,6 +286,7 @@ cpdef long long table_first_int(object table) except? -1
 cpdef long long table_last_int(object table) except? -1
 cpdef long long table_max_int(object table) except? -1
 cpdef bint table_contains(object table, object key) except -1
+cdef object native_asof(object table, KeyArg0 key)
 
 
 # The bounds of an integer-keyed table, inlined into the calling module: a NativeTable resolved
