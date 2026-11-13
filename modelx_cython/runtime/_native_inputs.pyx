@@ -1179,146 +1179,92 @@ cdef void _pack_part(object value, KeyPart* part) except *:
         key_text(part, value)
 
 
-cdef bint _pack_key(object key, KeyPart* parts, Py_ssize_t* count, bint* tuple_key) except -1:
+cdef KeyPart* _pack_key(object key, KeyPart* small, Py_ssize_t* count,
+                         bint* tuple_key) except? NULL:
+    cdef KeyPart* parts = small
     cdef Py_ssize_t i
     tuple_key[0] = type(key) is tuple
     if not tuple_key[0]:
         count[0] = 1
-        _pack_part(key, &parts[0])
-        return _native_parts(parts, 1)
+        _pack_part(key, small)
+        return small if _native_parts(small, 1) else NULL
     count[0] = len(key)
     if count[0] > 4:
-        return False
-    for i in range(count[0]):
-        _pack_part(key[i], &parts[i])
-    return _native_parts(parts, count[0])
-
-
-cdef KeyPart* _pack_wide_key(object key, Py_ssize_t* count) except? NULL:
-    """Spill only wider tuples; reuse the existing primitive key contract."""
-    cdef KeyPart* parts
-    cdef Py_ssize_t i
-    if type(key) is not tuple or len(key) <= 4:
-        return NULL
-    count[0] = len(key)
-    if count[0] > _key_sys.maxsize // sizeof(KeyPart):
-        raise MemoryError()
-    parts = <KeyPart*>PyMem_Malloc(count[0] * sizeof(KeyPart))
-    if parts == NULL:
-        raise MemoryError()
+        if count[0] > _key_sys.maxsize // sizeof(KeyPart):
+            raise MemoryError()
+        parts = <KeyPart*>PyMem_Malloc(count[0] * sizeof(KeyPart))
+        if parts == NULL:
+            raise MemoryError()
     try:
         for i in range(count[0]):
-            _pack_part(key[i], &parts[i])
+            _pack_part((<tuple>key)[i], &parts[i])
         if _native_parts(parts, count[0]):
             return parts
     except:
-        PyMem_Free(parts)
+        if parts != small:
+            PyMem_Free(parts)
         raise
-    PyMem_Free(parts)
+    if parts != small:
+        PyMem_Free(parts)
     return NULL
 
 
-cdef tuple _wide_indexed_row(object table, object key, object column, bint needs_column):
-    """Search with borrowed key parts while the key argument remains alive."""
-    cdef Py_ssize_t count
-    cdef KeyPart* parts = _pack_wide_key(key, &count)
-    cdef KeyedCache cache
-    if parts == NULL:
-        return None
-    try:
-        cache = _keyed_cache(_indexed_context(table), table, column)
-        if cache.data is not None and (not needs_column or cache.index >= 0):
-            return cache, cache.data.find(parts, count, True)
-        if not needs_column:
-            return None, _owned_position(table, key)
-        if type(column) is str or type(column) is int or type(column) is bool:
-            return None, -1
-    finally:
-        PyMem_Free(parts)
-    return None
-
-
-cdef object _wide_indexed_lookup(object table, object key, object column, object default):
-    cdef KeyedCache cache
-    cdef Py_ssize_t row
-    cdef tuple found = _wide_indexed_row(table, key, column, True)
-    if found is not None:
-        cache, row = found
-        if cache is None:
-            return _read_owned_table(table, key, column, default)
-        if row >= 0:
-            return cache.data.raw_values[row][cache.index]
-        if default is _missing:
-            raise KeyError(key)
-        return default
-    return _lookup(table, key, column) if default is _missing else _lookup(table, key, column, default)
-
-
-cdef Py_ssize_t _wide_indexed_position(object table, object key) except? -2:
-    cdef tuple found = _wide_indexed_row(table, key, 0, False)
-    if found is None:
-        return -1
-    if found[1] < 0:
-        raise KeyError(key)
-    return found[1]
-
 cdef object indexed_lookup(object table, object key, object column, object default=_missing):
-    cdef KeyPart[4] parts
-    cdef Py_ssize_t count, row
+    cdef KeyPart[4] small
+    cdef Py_ssize_t count, position
     cdef bint tuple_key
+    cdef KeyPart* parts = _pack_key(key, &small[0], &count, &tuple_key)
+    cdef bint packed = parts != NULL
     cdef KeyedCache cache
     cdef KeyedView data
-    if _pack_key(key, &parts[0], &count, &tuple_key):
-        cache = _keyed_cache(_indexed_context(table), table, column)
-        data = cache.data
-        if data is not None and cache.index >= 0:
-            row = data.find(&parts[0], count, tuple_key)
-            if row < 0:
+    if packed:
+        try:
+            cache = _keyed_cache(_indexed_context(table), table, column)
+            data = cache.data
+            if data is not None and cache.index >= 0:
+                position = data.find(parts, count, tuple_key)
+                if position >= 0:
+                    return data.raw_values[position][cache.index]
                 if default is _missing:
                     raise KeyError(key)
                 return default
-            return data.raw_values[row][cache.index]
-    if type(key) is not tuple or len(key) <= 4:
-        if type(column) is str or type(column) is int or type(column) is bool:
-            return _read_owned_table(table, key, column, default)
-    return _wide_indexed_lookup(table, key, column, default)
+        finally:
+            if parts != &small[0]:
+                PyMem_Free(parts)
+    if (packed or count <= 4) and (type(column) is str or type(column) is int or type(column) is bool):
+        return _read_owned_table(table, key, column, default)
+    return _lookup(table, key, column) if default is _missing else _lookup(table, key, column, default)
+
+
+cdef Py_ssize_t _indexed_key_position(object table, object key) except? -3:
+    cdef KeyPart[4] small
+    cdef Py_ssize_t count
+    cdef bint tuple_key
+    cdef KeyPart* parts = _pack_key(key, &small[0], &count, &tuple_key)
+    cdef KeyedView data
+    if parts == NULL:
+        return -2
+    try:
+        data = table._native_cache.get(KeyedView)
+        if data is not None and data.admitted:
+            return data.find(parts, count, tuple_key)
+        return _owned_position(table, key)
+    finally:
+        if parts != &small[0]:
+            PyMem_Free(parts)
+
 
 cdef Py_ssize_t indexed_position(object table, object key) except? -2:
     """Native unique-row position, or -1 when the key domain is not admitted."""
-    cdef KeyPart[4] parts
-    cdef Py_ssize_t count, position
-    cdef bint tuple_key
-    cdef KeyedCache cache
-    cdef KeyedView data
-    if _pack_key(key, &parts[0], &count, &tuple_key):
-        cache = _keyed_cache(_indexed_context(table), table, 0)
-        data = cache.data
-        position = (_owned_position(table, key) if data is None
-                    else data.find(&parts[0], count, tuple_key))
-        if position < 0:
-            raise KeyError(key)
-        return position
-    return _wide_indexed_position(table, key)
+    cdef Py_ssize_t position = _indexed_key_position(table, key)
+    if position == -1:
+        raise KeyError(key)
+    return -1 if position == -2 else position
 
 
 cdef object indexed_contains(object table, object key):
-    cdef KeyPart[4] parts
-    cdef Py_ssize_t count
-    cdef bint tuple_key
-    cdef KeyedCache cache
-    cdef KeyedView data
-    cdef tuple found
-    if _pack_key(key, &parts[0], &count, &tuple_key):
-        cache = _keyed_cache(_indexed_context(table), table, 0)
-        data = cache.data
-        if data is not None:
-            return data.find(&parts[0], count, tuple_key) >= 0
-        return _owned_position(table, key) >= 0
-    if type(key) is tuple and len(key) > 4:
-        found = _wide_indexed_row(table, key, 0, False)
-        if found is not None:
-            return found[1] >= 0
-    return _contains(table, key)
+    cdef Py_ssize_t position = _indexed_key_position(table, key)
+    return _contains(table, key) if position == -2 else position >= 0
 
 
 from builtins import int as _typed_int, bool as _typed_bool, str as _typed_str
@@ -1363,7 +1309,8 @@ cdef object _explicit_value(object source, object key, object column, object def
 
 
 cdef double lookup_float(object function, tuple keywords, object source, object key, object column=_missing, object default=_missing) except? -1:
-    cdef KeyPart[4] parts
+    cdef KeyPart[4] small
+    cdef KeyPart* parts
     cdef Py_ssize_t count
     cdef bint tuple_key
     if function is not _lookup_float_fn:
@@ -1373,9 +1320,19 @@ cdef double lookup_float(object function, tuple keywords, object source, object 
         column = _missing
     if default is _typed_missing:
         default = _missing
-    if type(source) is Table and column is not _missing and _pack_key(key,&parts[0],&count,&tuple_key):
-        return lookup_keyed_float_f64(_float_type,_lookup,_indexed_context(source),source,
-                                      &parts[0],count,tuple_key,column,default)
+    if type(source) is Table and column is not _missing:
+        parts = _pack_key(key, &small[0], &count, &tuple_key)
+        if parts != NULL:
+            try:
+                return lookup_keyed_float_f64(_float_type, _lookup, _indexed_context(source), source,
+                                              parts, count, tuple_key, column, default)
+            finally:
+                if parts != &small[0]:
+                    PyMem_Free(parts)
+        if count <= 4 and (type(column) is str or type(column) is int or type(column) is bool):
+            return _float_type(_read_owned_table(source, key, column, default))
+        return _float_type(_lookup(source, key, column) if default is _missing
+                           else _lookup(source, key, column, default))
     return _float_type(_explicit_value(source,key,column,default))
 
 
