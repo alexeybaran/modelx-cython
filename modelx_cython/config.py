@@ -45,8 +45,9 @@ class CompilerPolicy:
     # M1 (W1.1), temporary until M4: False turns off the round-2 statement-shape recognisers
     # for table and record reads, so reads take the typed-handle route.
     table_recognisers: bool = True
-    # M1 (W1.1): '# cython: infer_types=True, overflowcheck=True' on generated model modules.
-    infer_types: bool = False
+    # M1 (W1.1, default on since W1.5): '# cython: infer_types=True, overflowcheck=True'
+    # on generated model modules.
+    infer_types: bool = True
     # M1 (W1.3): lower pandas-spelled table reads to typed handle reads (table_reads.py).
     # On by default since the runtime handles (W1.2) landed (D45).
     typed_table_reads: bool = True
@@ -63,7 +64,7 @@ class CompilerPolicy:
             native_cache_hits=data.get('native_cache_hits', 'auto' if automatic and miss else 'none'),
             native_math=data.get('native_math', True),
             table_recognisers=data.get('table_recognisers', True),
-            infer_types=data.get('infer_types', False),
+            infer_types=data.get('infer_types', True),
             typed_table_reads=data.get('typed_table_reads', True))
         for name, value in values.items():
             if name not in ('parallel_workers', 'native_cache_hits') and type(value) is not bool:
@@ -154,8 +155,10 @@ class TransSpec:
     builtin rounding by default.
     ``"table_recognisers"`` (default true; temporary, removed in M4): false turns
     off the round-2 statement-shape recognisers for table and record reads.
-    ``"infer_types"`` (default false): C type inference with overflow checks
-    (``# cython: infer_types=True, overflowcheck=True``) in generated model modules.
+    ``"infer_types"`` (default true): C type inference with overflow checks
+    (``# cython: infer_types=True, overflowcheck=True``) in generated model modules;
+    false keeps Cython's default (no inference of C types for untyped locals, no
+    overflow checks).
     ``"typed_table_reads"`` (default true; false keeps reads as Python calls): lower
     ``.loc``/``.at``/``.index`` reads on traced tables to typed handle reads.
     ``"native_cache_hits"`` defaults to ``"auto"`` when automatic optimization
