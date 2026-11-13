@@ -97,7 +97,7 @@ def _edge_model():
     data.new_cells('multi_table', 'lambda: pdn.table(multi)')
     data.new_cells('flag_table', 'lambda: pdn.table(flags)')
     data.new_cells('deep_table', 'lambda: pdn.table(deep, columns=("v",), groups=("a", "b", "c"))')
-    # key types: value-like int/str subclasses pack by value, anything else keeps the original route
+    # key types: enum members and other subclass objects as key parts must give the live values in every mode
     data.new_cells('ienum', 'lambda: enum.IntEnum("I", {"A": 1, "B": 2, "C": 5})')
     data.new_cells('senum', 'lambda: enum.StrEnum("S", {"U": "UL9", "W": "nope"})')
     data.new_cells('penum', 'lambda: enum.Enum("P", {"A": 2})')

@@ -1306,39 +1306,27 @@ cdef inline bint _key_type_is_one_of(object kind, tuple supported) noexcept:
 
 cdef extern from "Python.h":
     ctypedef struct _TypeSlots "PyTypeObject":
-        unsigned long tp_flags
-        void* tp_hash
-        void* tp_richcompare
+        pass
     ctypedef struct _ObjectHead "PyObject":
         _TypeSlots* ob_type
     _TypeSlots _long_type "PyLong_Type"
     _TypeSlots _unicode_type "PyUnicode_Type"
-    _TypeSlots _bool_type "PyBool_Type"
-    unsigned long _LONG_SUBCLASS "Py_TPFLAGS_LONG_SUBCLASS"
-    unsigned long _UNICODE_SUBCLASS "Py_TPFLAGS_UNICODE_SUBCLASS"
     long long _long_value "PyLong_AsLongLongAndOverflow"(PyObject* value, int* overflow) noexcept
 
 
-cdef inline bint _value_like(_TypeSlots* kind, _TypeSlots* base) noexcept nogil:
-    # A subclass (IntEnum, StrEnum) whose hashing and comparison are the base type's own: dicts and
-    # pandas indexes treat its instances as the base value, so the key part packs by value.
-    return kind.tp_hash == base.tp_hash and kind.tp_richcompare == base.tp_richcompare
-
-
 cdef inline bint _pack_value(PyObject* value, KeyPart* part) noexcept:
-    """Pack an exact or value-like int/str part from a borrowed pointer: no dispatch chain and no
-    reference counting. False leaves every other part (bool, float, numpy, objects, int beyond
-    64 bits) to _pack_part."""
+    """Pack an exact int or exact str part from a borrowed pointer: no dispatch chain and no
+    reference counting. False leaves every other part (bool, float, numpy, subclasses such as enum
+    members, other objects, int beyond 64 bits) to _pack_part, unchanged."""
     cdef _TypeSlots* kind = (<_ObjectHead*>value).ob_type
     cdef int overflow = 0
     cdef long long number
-    if kind == &_unicode_type or (kind.tp_flags & _UNICODE_SUBCLASS and _value_like(kind, &_unicode_type)):
+    if kind == &_unicode_type:
         part.kind = _KEY_TEXT
         part.number = 0
         part.text = value
         return True
-    if kind == &_long_type or (kind != &_bool_type and kind.tp_flags & _LONG_SUBCLASS
-                               and _value_like(kind, &_long_type)):
+    if kind == &_long_type:
         number = _long_value(value, &overflow)
         if overflow:
             return False
