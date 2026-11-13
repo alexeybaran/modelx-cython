@@ -407,13 +407,19 @@ def _type_signed_locals(body, guard, facts, parameters):
             or facts.reads & {'eval', 'exec', 'locals', 'vars', 'globals', '_getframe', 'currentframe'}):
         return body, ()
     operands = []
+    identity_names = set()
     for part in lexical_nodes(body.body):
         if guard.signed_return and isinstance(part, cst.Return) and part.value is not None:
             operands.append(part.value)
         if (isinstance(part, cst.Call) and dotted_name(part.func) == _INTEGER_CONVERSION
                 and len(part.args) == 2):
             operands.append(part.args[0].value)
+    for part in walk(body):
+        if isinstance(part, cst.Comparison) and any(
+                isinstance(item.operator, (cst.Is, cst.IsNot)) for item in part.comparisons):
+            identity_names.update(item.value for item in walk(part) if isinstance(item, cst.Name))
     needed = {part.value for value in operands for part in walk(value) if isinstance(part, cst.Name)}
+    needed.difference_update(identity_names)
     if not needed:
         return body, ()
     statements = list(body.body)
