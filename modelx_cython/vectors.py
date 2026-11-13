@@ -626,7 +626,9 @@ class VectorLowering(cst.CSTTransformer):
             if index is not None:
                 self.lowered += 1
                 return self.call('get', e, updated.value, index)
-            if id(original) not in self.sum_slices and id(original) not in self.alloc_slices:
+            if _slice(original) is None:
+                self.fallback(original, 'slice of a vector with a step: a list through the sequence protocol')
+            elif id(original) not in self.sum_slices and id(original) not in self.alloc_slices:
                 self.fallback(original, 'slice of a vector outside sum or an assignment: '
                                         'a list through the sequence protocol')
             return updated
