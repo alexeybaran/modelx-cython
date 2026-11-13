@@ -46,8 +46,13 @@ class Constants(FormulaTransformer):
         self.locals = set()
         self.count = 0
         self.comparisons = 0
+        self.untyped = []           # expression forms left as Python (admission report)
+        self.memberships = 0        # ``in`` / ``not in`` over member tuples lowered
+        self.lines = None
 
     def visit_FunctionDef(self, node):
+        from .reductions import formula_lines
+        self.lines = formula_lines(node)
         assignments = {}
         invalid = set()
         nodes = list(lexical_nodes(node.body.body))
@@ -73,6 +78,11 @@ class Constants(FormulaTransformer):
                     in ('long long','bint') for v in values):
                 self.locals.add(name)
 
+    def leave_FunctionDef(self, before, after):
+        self.cell.enum_untyped = list(self.untyped)
+        self.cell.enum_memberships = self.memberships
+        return after
+
     def member(self, node):
         if (isinstance(node, cst.Attribute) and isinstance(node.value, cst.Attribute)
                 and isinstance(node.value.value, cst.Name) and node.value.value.value == 'self'):
@@ -93,15 +103,66 @@ class Constants(FormulaTransformer):
                     and cell.get_rettype_expr(c_style=True) in ('long long','bint'))
         return False
 
+    def members(self, node):
+        """Every element of a literal tuple as a build-time constant, else None.
+
+        ``x in (E.A, E.B)`` on a typed integer ``x`` then compiles to a chain of
+        C ``==`` with ``x`` evaluated once (Cython's literal-tuple membership).
+        IntEnum members compare as their int values (``enum_safe``), so the
+        result is the one the tuple of member objects gives.
+        """
+        if not isinstance(node, cst.Tuple) or not node.elements:
+            return None
+        count, elements = self.count, []
+        for element in node.elements:
+            member = self.member(element.value) if isinstance(element, cst.Element) else None
+            if member is None or member is element.value:
+                self.count = count
+                return None
+            elements.append(element.with_changes(value=member))
+        return node.with_changes(elements=elements)
+
     def leave_Comparison(self, before, after):
-        if len(after.comparisons) == 1 and self.integer(after.left):
-            comp = after.comparisons[0]
+        if len(after.comparisons) != 1:
+            return after
+        comp = after.comparisons[0]
+        if self.integer(after.left):
             if isinstance(comp.operator, (cst.Equal,cst.NotEqual)):
                 member = self.member(comp.comparator)
                 if member is not comp.comparator:
                     self.comparisons += 1
                 return after.with_changes(comparisons=(comp.with_changes(comparator=member),))
+            if isinstance(comp.operator, (cst.In, cst.NotIn)):
+                members = self.members(comp.comparator)
+                if members is None:
+                    if self.member_tuple(comp.comparator):
+                        self.decline(before, 'a tuple element is not a member of a declared enum')
+                    return after
+                self.comparisons += len(members.elements)
+                self.memberships += 1
+                return after.with_changes(comparisons=(comp.with_changes(comparator=members),))
+        elif isinstance(comp.operator, (cst.Equal, cst.NotEqual)) and self.integer(comp.comparator):
+            # ``E.A == x``: a member on the left has no evaluation to reorder.
+            member = self.member(after.left)
+            if member is not after.left:
+                self.comparisons += 1
+                return after.with_changes(left=member)
+        elif isinstance(comp.operator, (cst.In, cst.NotIn)) and self.member_tuple(comp.comparator):
+            self.decline(before, 'the left operand is not a typed integer (an object or untraced value)')
         return after
+
+    def member_tuple(self, node):
+        """A literal tuple holding at least one ``self.<Ref>.<name>`` of a declared enum."""
+        return isinstance(node, cst.Tuple) and any(
+            isinstance(element, cst.Element) and isinstance(element.value, cst.Attribute)
+            and isinstance(element.value.value, cst.Attribute)
+            and isinstance(element.value.value.value, cst.Name) and element.value.value.value.value == 'self'
+            and any(key[:2] == (self.cls.name, element.value.value.attr.value) for key in self.symbols)
+            for element in node.elements)
+
+    def decline(self, node, reason):
+        from .reductions import untyped_entry
+        self.untyped.append(untyped_entry(self.lines, node, 'in', reason))
 
     def leave_Call(self, before, after):
         func = after.func

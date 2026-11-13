@@ -11,6 +11,26 @@ from .syntax import arguments, code, literal_value
 from .typedefs import primitive_kind
 
 
+def formula_lines(formula):
+    """Map a node of ``formula`` to its line in it (1 = the ``def`` line; 0 if not found)."""
+    from libcst.metadata import MetadataWrapper, PositionProvider
+    try:
+        positions = MetadataWrapper(cst.Module(body=[formula]), unsafe_skip_copy=True).resolve(PositionProvider)
+        first = positions[formula.name].start.line
+    except Exception:        # a formula assembled by an earlier pass may not round-trip
+        return lambda node: 0
+    return lambda node: positions[node].start.line - first + 1 if node in positions else 0
+
+
+def untyped_entry(lines, node, form, reason):
+    """One admission entry of an expression form left to the interpreter (W1.4)."""
+    import re
+    text = re.sub(r'\s*#[^\'"\n]*$', '', cst.Module(body=[]).code_for_node(node), flags=re.M)
+    text = ' '.join(text.split()).replace('( ', '(').replace('[ ', '[')
+    return {'expr': text if len(text) <= 160 else text[:157] + '...', 'form': form,
+            'line': lines(node) if lines is not None else 0, 'reason': reason}
+
+
 BUILTIN_PROVIDER = 'modelx_cython._native_iterables'
 STREAMS_PROVIDER = 'modelx_cython.runtime._native_streams'
 BUILTIN_REDUCTIONS = frozenset(('all', 'any', 'max', 'min', 'sum'))
