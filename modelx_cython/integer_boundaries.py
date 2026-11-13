@@ -389,6 +389,15 @@ def _signed_local_assignments(body, name, operands, guard, facts):
         local_reads = reads.intersection(_signed_operand_names(value))
         if local_reads and guard._signed_expression(value, guard.path)[1]:
             safe_reads.update(local_reads)
+    for part in lexical_nodes(body.body):
+        if isinstance(part, cst.Comparison) and len(part.comparisons) == 1:
+            comparison, = part.comparisons
+            if isinstance(comparison.operator, (cst.Equal, cst.NotEqual, cst.LessThan,
+                                               cst.LessThanEqual, cst.GreaterThan, cst.GreaterThanEqual)):
+                sides = part.left, comparison.comparator
+                if all(guard._signed_atom(value) or isinstance(value, cst.Integer)
+                       and value.evaluated_value < 1 << 63 for value in sides):
+                    safe_reads.update(reads.intersection(sides))
     return assignments if reads <= safe_reads else {}
 
 
