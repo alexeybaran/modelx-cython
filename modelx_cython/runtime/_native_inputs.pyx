@@ -142,11 +142,7 @@ cdef class TableView:
 
 
 cdef TableView view(object table):
-    cdef dict cache = table._native_cache
-    result = cache.get(TableView)
-    if result is None:
-        result = cache.setdefault(TableView, TableView(table))
-    return <TableView>result
+    return <TableView>table._native_cache.get(TableView)
 
 
 cdef object lookup(object function, object table, object key, object column, object default=_missing):
@@ -167,7 +163,7 @@ cdef object previous(object function, object table, object key, object column, o
     if (function is _previous and type(table) is Table
             and type(key) is int and -(1 << 63) <= key < (1 << 63)):
         data = view(table)
-        if data.integral:
+        if data is not None and data.integral:
             index = data.right(key) - 1
             if index >= 0:
                 return data.value(data.sorted_positions[index], column)
@@ -207,8 +203,9 @@ cdef object first_key(object function, object table):
         table = (<NativeTable>table)._owner
     if function is _first_key and type(table) is Table:
         data = view(table)
-        if data.ordered:
+        if data is not None and data.ordered:
             return data.minimum
+        return min(table._keys)
     return function(table)
 
 
@@ -218,8 +215,9 @@ cdef object last_key(object function, object table):
         table = (<NativeTable>table)._owner
     if function is _last_key and type(table) is Table:
         data = view(table)
-        if data.ordered:
+        if data is not None and data.ordered:
             return data.maximum
+        return max(table._keys)
     return function(table)
 
 
@@ -361,7 +359,7 @@ cdef object interpolate_numeric(TableView data, long long col, double position):
     cdef long long lower, upper
     cdef Py_ssize_t lo, hi
     cdef double base, end
-    if (not data.numeric or not 0 <= col < data.width
+    if (data is None or not data.numeric or not 0 <= col < data.width
             or not -9223372036854775808.0 <= position < 9223372036854775808.0):
         return None
     lower = <long long>floor(position)
@@ -499,7 +497,7 @@ cdef int optional_lookup_f64(object contains_fn, object lookup_fn, object table,
     cdef Py_ssize_t index, col
     if contains_fn is _contains and lookup_fn is _lookup and type(table) is Table:
         data = view(table)
-        if data.numeric:
+        if data is not None and data.numeric:
             index = data.right(key) - 1
             if index < 0 or data.integers[index] != key:
                 return 0
@@ -1508,18 +1506,18 @@ cdef class NativeTable:
         self._owner = owner
         if type(owner) is Table:
             self._index_view = _NativeTableIndex(owner)
+            self._numeric_view = None
         if type(owner) is Table and owner._index_error is None:
             data = view(owner)
-            if data.numeric:
+            if data is not None and data.numeric:
                 self._numeric_view = data
         elif type(owner) is Table:
             keys = owner._keys
             if keys and (type(keys[0]) is int or len(keys) == 1 and type(keys[0]) is str):
                 data = view(owner)
-                if type(keys[0]) is int and not (data.integral and data.contiguous):
-                    return
                 cached = owner._native_cache.get(KeyedView)
-                if not owner._index_error._index['multi'] and data.integral and data.contiguous:
+                if (not owner._index_error._index['multi'] and data is not None
+                        and data.integral and data.contiguous):
                     self._input_keys = data
                     self._input_positions = &data.sorted_positions[0]
                     self._input_low = data.first_integer
@@ -1532,7 +1530,7 @@ cdef class NativeTable:
                     self._input_values = &indexed.values[0]
                     self._input_numeric = &indexed.numeric[0]
                     self._input_width = indexed.value_width
-                    if self._input_keys is None:
+                    if self._input_keys is None and len(keys) == 1 and type(keys[0]) is str:
                         self._single_label = keys[0]
 
     cdef double lookup_float(self, KeyArg0 key, object column, object default=_typed_missing) except? -1:
@@ -1579,9 +1577,10 @@ cdef class NativeTable:
         cdef TableView data
         if type(self._owner) is Table and PyFloat_CheckExact(key) and math.floor is _FLOOR:
             data = view(self._owner)
-            value = interpolate_numeric(data, numeric_column(data, column), PyFloat_AS_DOUBLE(key))
-            if value is not None:
-                return value
+            if data is not None:
+                value = interpolate_numeric(data, numeric_column(data, column), PyFloat_AS_DOUBLE(key))
+                if value is not None:
+                    return value
         return self._owner.interpolate_float(key, column)
 
     cpdef object row(self, object key):
@@ -1693,12 +1692,23 @@ cdef double table_field_float(LookupContext context, NativeTable table, object k
 cdef bint try_clamped_table_float(NativeTable table, LookupContext context, bint lower, object namespace,
                                   long long key, object column, double* result) except -1:
     cdef Py_ssize_t index, row
+    cdef long long low, high
     cdef PyObject* snapshot = <PyObject*>table._numeric_view
     cdef TableView data
     cdef unsigned char mask = 2 if lower else 1
     cdef dict bindings
-    if table._input_keys is None and table._numeric_view is None:
-        return False
+    if table._input_keys is not None:
+        low, high = table._input_low, table._input_high
+    elif snapshot == <PyObject*>None:
+        if type(table._owner) is not Table or table._owner._index_error is None:
+            return False
+        bounds = table._owner._ordered
+        if not bounds:
+            return False
+        first, last = bounds[0], bounds[len(bounds) - 1]
+        if type(first) is not int or type(last) is not int or not -(1 << 63) <= first <= last < (1 << 63):
+            return False
+        low, high = first, last
     if not (context._private_owner and context.clamped_bindings_ready & mask
             and context.clamped_namespace is namespace):
         if namespace is None and not lower:
@@ -1749,20 +1759,20 @@ cdef bint try_clamped_table_float(NativeTable table, LookupContext context, bint
                 context.clamped_index = index
         result[0] = data.numbers[data.sorted_positions[row] * data.width + index]
         return True
-    if key < table._input_low:
+    if key < low:
         if not lower:
             return False
-        key = table._input_low
-    elif key > table._input_high:
-        key = table._input_high
-    if table._indexed_view is None:
+        key = low
+    elif key > high:
+        key = high
+    if table._input_keys is None or table._indexed_view is None:
         if type(column) is str:
             if column not in table._owner._columns:
                 return False
         elif (type(column) is not int and type(column) is not bool
                 or not -len(table._owner._columns) <= column < len(table._owner._columns)):
             return False
-        scalar = _read_owned_table(table._owner, key, column, _missing)
+        scalar = _read_owned_table(table._owner, key, column, None)
         if type(scalar) is float:
             result[0] = PyFloat_AS_DOUBLE(scalar)
             return True
@@ -2494,6 +2504,8 @@ cdef void _prepare_tables(object value) except *:
     """Install table resources while executing an explicit table constructor."""
     if type(value) is Table:
         cache = value._native_cache
+        if value._keys and type(value._keys[0]) is int and TableView not in cache:
+            cache.setdefault(TableView, TableView(value))
         if KeyedView not in cache:
             cache.setdefault(KeyedView, KeyedView(value))
     elif type(value) is Record:
