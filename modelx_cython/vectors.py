@@ -217,6 +217,11 @@ class _Facts(cst.CSTVisitor):
             self.returns.append(node.value)
         if isinstance(node.value, cst.ListComp):
             self.statement_comps.add(id(node.value))
+        if isinstance(node.value, cst.Tuple) and all(
+                isinstance(e.value, (cst.Name, cst.Integer, cst.Float, cst.ListComp)) for e in node.value.elements):
+            # no other element has effects, so building a comprehension first keeps the order
+            self.statement_comps.update(id(e.value) for e in node.value.elements
+                                        if isinstance(e.value, cst.ListComp))
 
     def visit_AugAssign(self, node):
         if isinstance(node.target, cst.Name):
@@ -241,9 +246,8 @@ class _Facts(cst.CSTVisitor):
                 self.add(name, ('other',))
 
     def visit_CompFor(self, node):
-        for name in _names(node.target):
-            self.add(name, ('other',))
-            self.comp_targets.add(name)
+        # a comprehension target is local to the comprehension (language level 3)
+        self.comp_targets.update(_names(node.target))
 
     def visit_NamedExpr(self, node):
         self.add(node.target.value, ('other',))
@@ -312,6 +316,8 @@ class VectorLowering(cst.CSTTransformer):
         self.bounds_hoisted, self.bounds_checked, self.powers = 0, 0, 0
         self.decls = []
         self.comp_scalars = []          # stack of {name: scalar kind} inside expanded loops
+        self.range_names = set()
+        self.scope_stack = []           # per enclosing comprehension/lambda: expanded here
 
     # ---------------------------------------------------------------- kinds
     def cell_scalar(self, name):
@@ -431,10 +437,14 @@ class VectorLowering(cst.CSTTransformer):
             return [a.value for a in iterator.args]
         return None
 
-    def range_args(self, iterator):
+    def range_args(self, iterator, names=False):
+        """The arguments of ``range(a[, b])``; with ``names``, a local bound only to one
+        gives ``[NAME.start, NAME.stop]`` (read once, step 1)."""
         if (isinstance(iterator, cst.Call) and _is_name(iterator.func, 'range') and 'range' in self.builtins
                 and _plain_args(iterator, 1, 2)):
             return [a.value for a in iterator.args]
+        if names and _is_name(iterator) and iterator.value in self.range_names:
+            return [_expr(f'{iterator.value}.start'), _expr(f'{iterator.value}.stop')]
         return None
 
     def targets(self, target, count):
@@ -454,7 +464,7 @@ class VectorLowering(cst.CSTTransformer):
         vecs = self.iter_vectors(comp.iter)
         if vecs is not None:
             return self.targets(comp.target, len(vecs)) is not None
-        return self.range_args(comp.iter) is not None and isinstance(comp.target, cst.Name)
+        return self.range_args(comp.iter, True) is not None and isinstance(comp.target, cst.Name)
 
     def loop_scalars(self, comp):
         """Scalar kinds of a comprehension's (or loop's) targets."""
@@ -462,7 +472,7 @@ class VectorLowering(cst.CSTTransformer):
         if vecs is not None:
             names = self.targets(comp.target, len(vecs)) or []
             return {name: FLOAT if self.elem(v) == 'V' else INT for name, v in zip(names, vecs)}
-        if self.range_args(comp.iter) is not None and isinstance(comp.target, cst.Name):
+        if self.range_args(comp.iter, True) is not None and isinstance(comp.target, cst.Name):
             return {comp.target.value: INT}
         return {}
 
@@ -480,11 +490,16 @@ class VectorLowering(cst.CSTTransformer):
         self.facts = facts
         self.statement_comps = facts.statement_comps
         assigns = facts.assigns
+        self.range_names = {name for name, items in assigns.items() if name not in facts.comp_targets
+                            and len(items) == 1 and items[0][0] == 'value'
+                            and self.range_args(items[0][1]) is not None}
         returned = self.returned_kinds(facts)
         changed, rounds = True, 0
         while changed and rounds < 50:
             changed, rounds = False, rounds + 1
             for name, items in assigns.items():
+                if name in facts.comp_targets:
+                    continue        # also bound inside a comprehension: never typed
                 new = self.vector_kind(name, items, returned)
                 if self.env.get(name) != new:
                     self.env[name] = new
@@ -631,49 +646,51 @@ class VectorLowering(cst.CSTTransformer):
 
     def in_lowered_scope(self, node):
         """Powers are rewritten where every name resolves to the formula's own bindings:
-        outside comprehensions, or inside a comprehension this lowering expands."""
-        return self.comp_depth == 0 or self.comp_scalars
+        outside comprehensions, or inside comprehensions this lowering expands."""
+        return all(self.scope_stack)
 
     def visit_ListComp(self, node):
-        self.comp_depth += 1
-        if id(node) in self.statement_comps and self.comp_ok(node):
+        expand = id(node) in self.statement_comps and self.comp_ok(node)
+        self.scope_stack.append(expand)
+        if expand:
             self.comp_scalars.append(self.loop_scalars(node.for_in))
             self.expanding.add(id(node))
         return True
 
     def visit_GeneratorExp(self, node):
-        self.comp_depth += 1
-        if id(node) in self.sum_gens:
+        expand = id(node) in self.sum_gens
+        self.scope_stack.append(expand)
+        if expand:
             self.comp_scalars.append(self.loop_scalars(node.for_in))
             self.expanding.add(id(node))
         return True
 
     def visit_SetComp(self, node):
-        self.comp_depth += 1
+        self.scope_stack.append(False)
         return True
 
     def visit_DictComp(self, node):
-        self.comp_depth += 1
+        self.scope_stack.append(False)
         return True
 
     def visit_Lambda(self, node):
-        self.comp_depth += 1
+        self.scope_stack.append(False)
         return True
 
     def leave_SetComp(self, original, updated):
-        self.comp_depth -= 1
+        self.scope_stack.pop()
         return updated
 
     def leave_DictComp(self, original, updated):
-        self.comp_depth -= 1
+        self.scope_stack.pop()
         return updated
 
     def leave_Lambda(self, original, updated):
-        self.comp_depth -= 1
+        self.scope_stack.pop()
         return updated
 
     def leave_GeneratorExp(self, original, updated):
-        self.comp_depth -= 1
+        self.scope_stack.pop()
         if id(original) in self.expanding:
             self.comp_scalars.pop()
         elif self.iter_vectors(original.for_in.iter):
@@ -681,7 +698,7 @@ class VectorLowering(cst.CSTTransformer):
         return updated
 
     def leave_ListComp(self, original, updated):
-        self.comp_depth -= 1
+        self.scope_stack.pop()
         if id(original) in self.expanding:
             self.comp_scalars.pop()
         if id(original) not in self.expanding and self.iter_vectors(original.for_in.iter):
@@ -869,7 +886,7 @@ class VectorLowering(cst.CSTTransformer):
                 renames[name] = new
                 body.append(f'{new} = {x}.data[{i}]')
             return pre, f'for {i} in range({n}):', body, renames, n, i
-        args = [_code(a) for a in self.range_args(comp_u.iter)]
+        args = [_code(a) for a in self.range_args(comp_u.iter, True)]
         lo, hi = (('0', args[0]) if len(args) == 1 else (args[0], args[1]))
         lo_t, hi_t = self.temp(f'{tag}lo'), self.temp(f'{tag}hi')
         self.declare(lo_t, f'{CY_MOD}.longlong')
@@ -1097,10 +1114,6 @@ def range_loop_locals(body, builtins):
         def visit_Param(inner, node):
             kinds.setdefault(node.name.value, set()).add('other')
 
-        def visit_CompFor(inner, node):
-            for n in _names(node.target):
-                kinds.setdefault(n, set()).add('other')
-
         def visit_Global(inner, node):
             for n in node.names:
                 kinds.setdefault(n.name.value, set()).add('other')
@@ -1157,7 +1170,6 @@ def lower(node, cls_info, cells, scope, counter, module):
     lowering = VectorLowering(cls_info, cells, builtins, counter)
     lowering.analyse(node.body)
     lowering.range_locals = set(loops)
-    lowering.comp_depth = 0
     lowering.expanding = set()
     lowering.vector_fors = set()
     lowering.sum_gens, lowering.sum_calls = _statement_sums(node.body, lowering)
