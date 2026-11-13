@@ -80,7 +80,7 @@ class CacheHit:
 
     @property
     def kind(self):
-        return 'dense' if isinstance(self.ready, cst.Subscript) else 'scalar'
+        return 'dense' if isinstance(self.value, cst.Subscript) else 'scalar'
 
 
 @dataclass(frozen=True)

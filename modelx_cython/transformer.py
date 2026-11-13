@@ -300,6 +300,8 @@ class PXDGenerator:
 
         cls_info = self.module.classes[cls_name]
         decl_stmts = []
+        if getattr(cls_info, 'dense_cache_generations', False):
+            decl_stmts.append('cdef unsigned int _mx_dense_generation\n')
         if cls_name in self.module.visitor.collect_cache_classes:
             decl_stmts.append("cdef dict _mx_collect_cache\n")
         if cls_name in self.module.visitor.dynamic_ref_classes:
@@ -786,6 +788,9 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
         ):
             cls_info = self.module.classes[cls_name]
             decl_stmts = []
+            generations = getattr(cls_info, 'dense_cache_generations', False)
+            if generations:
+                decl_stmts.append(cst.parse_statement(f'_mx_dense_generation: {CY_MOD}.uint\n'))
             for cells in cls_info.cells.values():
 
                 assert cells.module == self.module.fqname
@@ -894,12 +899,14 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
             contexts = getattr(self.module.classes[cls_name], 'native_contexts', {})
             for name, provider in contexts.items():
                 decl_stmts.append(cst.parse_statement(f'{name}: {module_name(provider)}.LookupContext\n'))
-            if contexts:
+            if contexts or generations:
                 body = []
                 for statement in updated_node.body.body:
                     if isinstance(statement, cst.FunctionDef) and statement.name.value == '__init__':
                         assignments = [cst.parse_statement(f'self.{name} = {module_name(provider)}.LookupContext()\n')
                                        for name,provider in contexts.items()]
+                        if generations:
+                            assignments.append(cst.parse_statement('self._mx_dense_generation = 1\n'))
                         statement = statement.with_changes(body=statement.body.with_changes(
                             body=(*statement.body.body, *assignments)))
                     body.append(statement)
@@ -1297,6 +1304,9 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
                         param_expr = f"{', '.join([p for p in cells.params])}"
 
                         has_expr = f"{MX_SELF}.{HAS_PREF}{meth_name}{c_idx_expr}"
+                        generations = getattr(cells.parent, 'dense_cache_generations', False)
+                        ready = f'{has_expr} == self._mx_dense_generation' if generations else has_expr
+                        mark = 'self._mx_dense_generation' if generations else 'True'
                         v_expr = f"{MX_SELF}.{VAR_PREF}{meth_name}{c_idx_expr}"
                         f_expr = f"{MX_SELF}.{FORMULA_PREF}{meth_name}({param_expr})"
 
@@ -1308,12 +1318,12 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
                                 has_expr, v_expr, f_expr, indent=4)
                         else:
                             cache_body = textwrap.dedent(f"""\
-                                if {has_expr}:
+                                if {ready}:
                                     return {v_expr}
                                 else:
                                     val = {f_expr}
                                     {v_expr} = val
-                                    {has_expr} = True
+                                    {has_expr} = {mark}
                                     return val
                                 """)
                         logical_axes = cells.dense_logical_axes
@@ -1355,7 +1365,7 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
                         )
                         hit = None
                         if not cells.is_locked and len(axes) == 1 and axes[0].c_type == 'long long':
-                            hit = CacheHit(cst.parse_expression(has_expr),
+                            hit = CacheHit(cst.parse_expression(ready),
                                            cst.parse_expression(v_expr), if_node.test)
                         self._dense_layouts[cls_name, meth_name] = DenseEntry(
                             cls_name, FORMULA_PREF + meth_name, axes, cells.has_dense_spill,

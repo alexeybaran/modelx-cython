@@ -1,6 +1,6 @@
 """Emit an opt-in scalar reduction through ordinary compiled leaf Cells."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import libcst as cst
 
@@ -17,6 +17,7 @@ class SerialCollect:
     private_lookups: bool
     parallel_reuse: bool
     ordered: bool = False
+    generations: bool = False
 
 
 def _self_attribute(node):
@@ -96,6 +97,12 @@ def analyze(module):
             raise ValueError('serial_private_lookups requires serial_collect reuse')
         shape = _match(node, cls, option == 'reuse', private, parallel, order == 'domain')
         if shape is not None:
+            generations = spec.get('dense_cache_generations', False)
+            if type(generations) is not bool or (generations and not shape.reuse):
+                raise ValueError('dense_cache_generations requires serial_collect reuse')
+            if generations:
+                shape = replace(shape, generations=True)
+                cls.dense_cache_generations = True
             result[node.name.value] = shape
     return result
 
@@ -127,7 +134,9 @@ def _match(node, cls, reuse, private_lookups, parallel_reuse, ordered=False):
     return SerialCollect(label, cell, parameter, reuse, private_lookups, parallel_reuse, ordered)
 
 
-def _reset_lines(cls):
+def _reset_lines(cls, generations=False):
+    if generations:
+        yield 'root._mx_dense_generation += 1'
     for name, cell in cls.cells.items():
         if memo := getattr(cell, 'power_memo', None):
             yield f'root.{memo}.ready = False'
@@ -139,13 +148,16 @@ def _reset_lines(cls):
                 yield f'root._v_{name} = None'
         elif cell.has_typeinfo() and cell.is_arrayable():
             flags = f'root._has_{name}'
-            yield f'_mx_collect_memset({CY_MOD}.address({flags}), 0, {CY_MOD}.sizeof({flags}))'
+            clear = f'_mx_collect_memset({CY_MOD}.address({flags}), 0, {CY_MOD}.sizeof({flags}))'
+            yield f'if root._mx_dense_generation == 0: {clear}' if generations else clear
             if cell.has_dense_spill:
                 yield f'root._spill_{name} = None'
         elif cell.uses_native_numeric_cache:
             yield f'root._v_{name}.reset()'
         else:
             yield f'root._v_{name} = None'
+    if generations:
+        yield 'if root._mx_dense_generation == 0: root._mx_dense_generation = 1'
 
 
 def add_methods(cls, node, shape, *, workers):
@@ -187,7 +199,7 @@ def add_methods(cls, node, shape, *, workers):
         '            if not first:',
     ))
     if shape.reuse:
-        lines.extend('                ' + line for line in _reset_lines(cls))
+        lines.extend('                ' + line for line in _reset_lines(cls, shape.generations))
     else:
         lines.extend((
             '                root._mx_cells.clear()',

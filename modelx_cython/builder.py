@@ -748,7 +748,10 @@ class CombinedCellsInfo(LexicalCellsInfo):
         # Cython pickles unsigned-char arrays as NUL-terminated strings, which
         # loses zero flags (and can read beyond the array). Ordinary bint arrays
         # retain their full shape through the standard compiled-class serializer.
-        element = CY_BOOL_T if c_style else f'{CY_MOD}.{CY_BOOL_T}'
+        if getattr(self.parent, 'dense_cache_generations', False):
+            element = 'unsigned int' if c_style else f'{CY_MOD}.uint'
+        else:
+            element = CY_BOOL_T if c_style else f'{CY_MOD}.{CY_BOOL_T}'
         return self.get_array_decl_expr(rettype_expr=element, c_style=c_style)
 
     def get_array_decl_expr(self, rettype_expr="", c_style=False):
