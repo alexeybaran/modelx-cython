@@ -167,3 +167,77 @@ def test_loc_read_edges_three_modes(tmp_path):
              for name in ('gap', 'gap_bounds', 'gap_odd_column', 'named', 'multi', 'flag', 'deep', 'gap_in')}
     assert typed == {'gap': 1, 'gap_bounds': 3, 'gap_odd_column': 1, 'named': 1, 'multi': 1, 'flag': 1, 'deep': 1,
                      'gap_in': 2}
+
+
+# Equivalent spellings of one integer clamp read and one text-key read, compiled with the statement
+# recognisers off: each must end in the same typed NativeTable read (C integer key for the clamp).
+_VARIANTS = {
+    # integer clamp read
+    'int_nested': 'def int_nested(t):\n    tbl = data.mort_table()\n'
+                  '    return float(tbl.loc[min(max(t, int(tbl.index.min())), int(tbl.index.max())), "mort_rate"])',
+    'int_hoisted': 'def int_hoisted(t):\n    tbl = data.mort_table()\n    lo = int(tbl.index.min())\n'
+                   '    hi = int(tbl.index.max())\n    return float(tbl.loc[min(max(t, lo), hi), "mort_rate"])',
+    'int_reordered': 'def int_reordered(t):\n    m = data.mort_table()\n    upper = int(m.index.max())\n'
+                     '    lower = int(m.index.min())\n    k = max(t, lower)\n    k2 = min(k, upper)\n'
+                     '    return float(m.loc[k2, "mort_rate"])',
+    'int_inline': 'def int_inline(t):\n    return float(data.mort_table().loc[min(max(t, int(data.mort_table().index.min())), '
+                  'int(data.mort_table().index.max())), "mort_rate"])',
+    'int_row': 'def int_row(t):\n    tbl = data.mort_table()\n    a = min(max(t, int(tbl.index.min())), int(tbl.index.max()))\n'
+               '    row = tbl.loc[a]\n    return float(row["mort_rate"])',
+    # text-key read
+    'text_inline': 'def text_inline(t):\n    return float(data.named_table().loc[pid(), "v"])',
+    'text_alias': 'def text_alias(t):\n    tbl = data.named_table()\n    k = pid()\n    return float(tbl.loc[k, "v"])',
+    'text_row': 'def text_row(t):\n    row = data.named_table().loc[pid()]\n    return float(row["v"])',
+}
+
+
+def _variants_model(n_t=11):
+    model = mx.new_model('SpellingVariants')
+    data = model.new_space('Data', refs={
+        'pdn': pdn,
+        'mort': pd.DataFrame({'mort_rate': [0.01 * i for i in range(1, 11)], 'note': list('abcdefghij')},
+                             index=pd.Index(range(30, 40), name='age')),
+        'named': pd.DataFrame({'v': [10.0, 20.0, 30.0], 'note': ['a', 'b', 'c']},
+                              index=pd.Index(['UL9', 'UL5', 'X'], name='id'))})
+    data.new_cells('mort_table', 'lambda: pdn.table(mort)')
+    data.new_cells('named_table', 'lambda: pdn.table(named)')
+    proj = model.new_space('Projection', refs={'data': data, 'pdn': pdn, 'n_t': n_t})
+    proj.new_cells('pid', 'lambda: "UL5"')
+    for name, source in _VARIANTS.items():
+        proj.new_cells(name, source)
+    proj.new_cells('total', 'def total():\n    return sum(' + ' + '.join(f'{n}(t)' for n in _VARIANTS)
+                   + ' for t in range(25, 25 + n_t))')
+    return model
+
+
+def _formula_c(classes_py, classes_c, cell):
+    import re
+    py = classes_py.read_text()
+    dense = re.search(r"def _f_%s\(self[^\n]*\n\s+return (_mx_dense_formula_\d+)\(" % cell, py).group(1)
+    c = classes_c.read_text()
+    start = re.search(r"\n(?:static )?(?:CYTHON_INLINE )?\w+ __pyx_f_\w+_%s\([^;{]*\{" % dense, c).start()
+    return c[start:c.index('\n}\n', start)]
+
+
+def test_spelling_variants_recognisers_off(tmp_path):
+    import os
+    model = _variants_model()
+    try:
+        live = model.Projection.total()
+        model.export(tmp_path / 'exported', locked_spaces=['Data'])
+    finally:
+        model.close()
+    (tmp_path / 'sample.py').write_text('from exported import mx_model as m\nm.Projection.total()\n', encoding='utf-8')
+    env = dict(os.environ, MX_CY_OBSERVED_TABLES='1', MX_CY_NO_TABLE_MATCHERS='1', MX_CY_PLAIN_READS='1')
+    subprocess.run([sys.executable, '-m', 'modelx_cython', 'exported', '--sample', 'sample.py', '--no-spec'],
+                   cwd=tmp_path, check=True, env=env)
+    for package in ('exported', 'exported_cy'):
+        got = subprocess.run([sys.executable, '-c', f'from {package} import mx_model as m; print(repr(m.Projection.total()))'],
+                             cwd=tmp_path, check=True, capture_output=True, text=True).stdout.strip()
+        assert float(got) == live, (package, got, live)
+    py, c = tmp_path / 'exported_cy/_mx_classes.py', tmp_path / 'exported_cy/_mx_classes.c'
+    for name in _VARIANTS:
+        body = _formula_c(py, c, name)
+        # fuse_0: the C long long key overload; fuse_2: the object (text) key overload
+        expected = '__pyx_fuse_0lookup_float' if name.startswith('int') else '__pyx_fuse_2lookup_float'
+        assert expected in body, (name, 'typed read not reached')
