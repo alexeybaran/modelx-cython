@@ -1729,24 +1729,24 @@ cdef long long _asof_key(object label) except? -1:
     return _mx_exact_index(label)
 
 
+@cython.cdivision(True)
 cdef long long native_asof_key(object table, long long key) except? -1:
     """``table.index.asof(key)`` used directly as the row key of a read (Decision 13.2): the last key
     <= key of a resolved integer index stored in increasing order; below the first key, KeyError(nan)
     as the read of the NaN label raises. Anything else runs ``table.index.asof(key)``."""
-    cdef NativeTable native
+    cdef const long long* keys
     cdef Py_ssize_t lo = 0, hi, mid
-    if type(table) is NativeTable and (<NativeTable>table)._keys_increasing:
-        native = <NativeTable>table
-        hi = native._int_count
+    if type(table) is NativeTable and (<NativeTable>table)._keys_increasing and (<NativeTable>table)._int_ready:
+        keys, hi = (<NativeTable>table)._int_sorted, (<NativeTable>table)._int_count
         while lo < hi:
             mid = lo + (hi - lo) // 2
-            if key < native._int_sorted[mid]:
+            if key < keys[mid]:
                 hi = mid
             else:
                 lo = mid + 1
         if lo == 0:
             raise KeyError(_asof_nan)
-        return native._int_sorted[lo - 1]
+        return keys[lo - 1]
     return _asof_key(table.index.asof(key))
 
 
@@ -2051,6 +2051,7 @@ cdef inline Py_ssize_t _prefix_find(const PrefixIndex* runs, const KeyIndex* ind
     return -1
 
 
+@cython.cdivision(True)
 cdef inline Py_ssize_t _prefix_below(const PrefixIndex* runs, Py_ssize_t run, long long key) noexcept:
     """In an increasing run: the count of its labels <= key (0 below the first)."""
     cdef Py_ssize_t lo = runs.run_start[run], hi = lo + runs.run_length[run], first = lo, mid
@@ -2119,6 +2120,43 @@ cdef long long prefix_op(object table, const long long* numbers, PyObject** obje
     if op == 1:
         return _mx_exact_index(index.max())
     return key in index
+
+
+_PREFIX_CHILDREN = tuple(('prefix_children', n) for n in range(8))
+
+
+@cython.final
+cdef class _NativeLoc:
+    """``T.loc`` of a multi-level table: a partial key already selected returns the helper's shared
+    child Table from its memo (Decision 13.3, the helper's own fast path read from C); anything
+    else is ``Table.loc[item]``."""
+    cdef object _owner
+
+    def __init__(self, owner):
+        self._owner = owner
+
+    def __getitem__(self, item):
+        cdef Py_ssize_t i
+        owner = self._owner
+        if type(item) is tuple:
+            if len(item) == 2 and type(item[1]) is str and item[1] in owner._columns:
+                return owner.loc[item]
+            key = item
+        else:
+            key = (item,)
+        if len(key) < 8:
+            entry = (<dict>owner._native_cache).get(_PREFIX_CHILDREN[len(key)])
+            if entry is not None:
+                child = (<dict>(<tuple>entry)[0]).get(key)
+                if child is not None:
+                    modes = <tuple>(<tuple>entry)[1]
+                    for i in range(len(modes)):
+                        mode = modes[i]
+                        if mode and (type(key[i]) is bool or type(key[i]) is _key_numpy.bool_) != (mode == 1):
+                            break
+                    else:
+                        return child
+        return owner.loc[item]
 
 
 from sys import intern as _intern_label
@@ -2433,6 +2471,8 @@ cdef class NativeTable:
     @property
     def loc(self):
         # Object-speed path for reads the compiler did not type; same semantics as Table.loc.
+        if self._prefix_runs is not None:
+            return _NativeLoc(self._owner)
         return self._owner.loc
 
     def __getattr__(self, name):
