@@ -1,5 +1,6 @@
 """Direct-call admission covers long/dense/scalar/hash cases with one contract."""
 import ast
+import json
 import subprocess
 import sys
 import textwrap
@@ -35,6 +36,11 @@ def test_long_and_hash_formula_contracts(tmp_path):
     (tmp_path/'spec.py').write_text(repr(dict(dense_miss_binding=True,propagate_exact_receiver=True,
         spaces={'Policy':{'cells':{'hash_total':{'numeric_cache_capacity':8}}}})))
     subprocess.run([sys.executable,'-B','-m','modelx_cython','exported'],cwd=tmp_path,check=True)
+    admission = json.loads((tmp_path/'exported_cy/_mx_admission.json').read_bytes())
+    cells = {name.rsplit('._f_', 1)[-1]: entry for name, entry in admission.items()}
+    assert cells['hash_total']['associative_logical_domain'] == {'t': [0, 4]}
+    assert cells['untyped']['associative_logical_domain'] == {'t': [0, 4]}
+    assert cells['value']['associative_logical_domain'] == {}
     tree=ast.parse((tmp_path/'exported_cy/_mx_classes.py').read_text())
     functions={n.name:n for n in ast.walk(tree) if isinstance(n,ast.FunctionDef)}
     for name in ('_f_long_total','_f_hash_total'):
@@ -88,12 +94,13 @@ def test_long_and_hash_formula_contracts(tmp_path):
         assert fresh.hash_total(1,0.25)==1.25
         assert fresh.value(1)==1.0
         assert fresh.counter[0]==before+2
-        for call in (lambda:fresh.value(7), lambda:fresh.hash_total(7,0.25)):
+        for call, cell in ((lambda:fresh.value(7), 'Policy.value'),
+                           (lambda:fresh.hash_total(7,0.25), 'Policy.hash_total')):
             for _ in range(2):
                 try:
                     call()
                 except IndexError as error:
-                    assert 'Policy.value' in str(error)
+                    assert cell in str(error)
                 else:
                     raise AssertionError('out-of-range dependency was evaluated')
         assert fresh.counter[0]==before+2

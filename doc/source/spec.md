@@ -46,9 +46,8 @@ not listed use no spec.
 
 ### `cells_param_size`
 
-Declares the sizes of the per-cells cache arrays allocated for cells with
-integer parameters. For an array-backed cell, the translator needs an
-upper bound for each integer parameter at translation time.
+Declares exclusive upper bounds for cached integer coordinates. For an
+array-backed cell, the translator also uses the bounds to size its storage.
 
 The value is a dict that maps a parameter name — or a tuple of parameter
 names for cells with multiple parameters — to an exclusive upper bound,
@@ -61,16 +60,17 @@ value observed for the cell and parameter:
       ("i", "j"): (3, 6)}}   # cells with parameters (i, j)
 ```
 
-The entry applies to every cells in the space with that exact parameter
-tuple.
+The entry applies to each cached Cell in the space with that exact parameter
+tuple. In a mixed signature, only native signed integer coordinates use
+the declared bounds. Other keys keep their own lookup semantics.
 
 If the sample run passes an argument value equal to or larger than the
 declared size, the size is automatically raised to the observed maximum
 plus one, and the adjustment is logged at `INFO` level.  For parameter
 tuples with no spec entry, the upper bound is the observed maximum plus
-one. Calling an array-backed cell outside its accepted range raises
-{py:exc}`IndexError`. To extend the negative range, include the required
-negative indices in the sample.
+one. Calling a cached Cell with an integer coordinate outside its accepted
+range raises {py:exc}`IndexError`. To extend the negative range, include
+the required negative indices in the sample.
 
 ### `cells`
 
@@ -148,6 +148,12 @@ may reduce physical storage when its saved data/readiness bytes cover the added
 pointer and cold dictionary. This never narrows the logical key domain:
 keys in that domain outside the physical window retain exact spill storage. A nearly full
 window stays full, preserving its simple range proofs.
+
+For an eligible cached Cell, `dense_window` may declare a half-open physical
+window for each parameter, in parameter order. An explicit window may exceed
+the automatic size ceiling and must fit inside the logical domain. This
+setting changes storage for a cached Cell. The modelx cache flag still
+determines whether the Cell caches results.
 
 Eligible native numeric associative keys/results use the native store; other
 signatures retain Python dictionaries. An exclusively owned receiver gets a

@@ -112,8 +112,9 @@ class TransSpec:
       also opts in unless ``"native_numeric_cache"`` is false.
     * ``"dense_window"``: a sequence of half-open ``(lower, stop)`` pairs
       in parameter order for a dense cache. The physical window must
-      fit inside the existing logical bounds. Exact spill keeps the
-      original logical domain available.
+      fit inside the existing logical bounds. A declared window overrides
+      the automatic dense storage size ceiling for an eligible cached Cell.
+      Exact spill keeps the original logical domain available.
     * ``"native_divisibility"``: enable the checked Cython zero-remainder
       comparison for proven signed-integer operands.
     * ``"memoize_power"``: enable a one-entry exact-operand memo for the

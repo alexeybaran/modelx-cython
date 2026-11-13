@@ -106,6 +106,23 @@ def _integer_reference_paths(cls_info):
     }
 
 
+def _outside_logical_domain(cell, axes):
+    bounds = ', '.join(f'{axis.key} in [{axis.lower}, {axis.stop})' for axis in axes)
+    message = (f'{cell.model_path}: argument index out of range. Expected {bounds}. '
+               f'Sample the required indices or set {TransSpec.CELLS_PARAM_SIZE!r} in the spec.')
+    return f'raise IndexError({message!r})\n'
+
+
+def _guard_associative_cache(cell, body):
+    axes = cell.associative_logical_axes if cell.has_typeinfo() else ()
+    condition = dense_condition(axes)
+    if not condition or condition == "True":
+        return body
+    outside = textwrap.indent(_outside_logical_domain(cell, axes), '    ')
+    guard = cst.parse_statement(f'if not ({condition}):\n{outside}')
+    return body.with_changes(body=(guard, *body.body))
+
+
 class PXDGenerator:
     """Generate a Cython ``.pxd`` declaration file for a model module.
 
@@ -1301,11 +1318,7 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
                                 """)
                         logical_axes = cells.dense_logical_axes
                         logical_guard = dense_condition(logical_axes)
-                        bounds = ', '.join(f'{axis.key} in [{axis.lower}, {axis.stop})'
-                                           for axis in logical_axes)
-                        message = (f'{cells.model_path}: argument index out of range. Expected {bounds}. '
-                                   f'Sample the required indices or set {TransSpec.CELLS_PARAM_SIZE!r} in the spec.')
-                        outside = f'raise IndexError({message!r})\n'
+                        outside = _outside_logical_domain(cells, logical_axes)
                         spill_branch = ''
                         spill_entry = None
                         if cells.has_dense_spill:
@@ -1361,8 +1374,7 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
                             body=indented_block,
                         )
                     elif cells.uses_native_numeric_cache:
-                        return updated_node.with_changes(decorators=decorators,
-                            params=parameters, returns=returns, body=numeric_cache.body(cells))
+                        body = numeric_cache.body(cells)
                     else:
                         if cells.is_locked:
                             # the exported body is already double-checked
@@ -1386,12 +1398,12 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
                                         in key_types
                                         for p in cells.params)):
                             body = self._single_lookup_body(meth_name, body, cells.params)
-                        return updated_node.with_changes(
-                            decorators=decorators,
-                            params=parameters,
-                            returns=returns,
-                            body=body
-                        )
+                    return updated_node.with_changes(
+                        decorators=decorators,
+                        params=parameters,
+                        returns=returns,
+                        body=_guard_associative_cache(cells, body)
+                    )
                 else:   # No type info, no arg
                     flag = f"{MX_SELF}.{HAS_PREF}{meth_name}"
                     cache = f"{MX_SELF}.{VAR_PREF}{meth_name}"
