@@ -94,6 +94,7 @@ class LocReads(FormulaTransformer):
         self.untyped = []
         self._aliases = {}
         self._row_locals = set()
+        self.key_parts = []
 
     def visit_FunctionDef(self, node):
         if not self._aliases:
@@ -204,8 +205,70 @@ class LocReads(FormulaTransformer):
         if not found <= set(kinds):
             name = sorted(n for n in names if schema.get(n) not in kinds)[0]
             return None, f'column {name!r} has traced kind {schema.get(name)}'
+        parts = self._key_parts(key, 'loc[key, column]')
+        if parts is not None:
+            return self._provider_call(f'lookup_float_{len(parts)}',
+                                       [receiver, *parts, column]), None
+        if schema.get('__key__') is None and not isinstance(key, cst.Tuple):
+            self.key_parts.append('key is not a tuple expression: object key read')
         return cst.Call(func=cst.Attribute(receiver, cst.Name('lookup_float')),
                         args=(cst.Arg(key), cst.Arg(column))), None
+
+    # Multi-part keys (Decisions 5 and 6). The key is a tuple display, or a local assigned once to
+    # one (its items are then read back as key[i], so no part is evaluated again). A part goes to
+    # the provider bare, so Cython may pass it as a C integer, only when it is known to be a
+    # non-bool integer; every other part is cast to object, so a C bint arrives as a Python bool.
+    _INT_RESULTS = frozenset(('long long', 'long', 'int', 'short'))
+
+    def _int_part(self, node, depth=0):
+        """Why ``node`` is a non-bool integer, or None."""
+        if isinstance(node, cst.Integer):
+            return 'integer literal'
+        if (isinstance(node, cst.UnaryOperation) and isinstance(node.operator, cst.Minus)
+                and isinstance(node.expression, cst.Integer)):
+            return 'integer literal'
+        if isinstance(node, cst.Name) and node.value in self._aliases and depth < 4:
+            return self._int_part(self._aliases[node.value], depth + 1)
+        if isinstance(node, cst.Call) and not any(a.keyword or a.star for a in node.args):
+            chain = _extract_self_chain(node.func)
+            if isinstance(chain, list) and chain:
+                status, name = self.resolver.resolve_chain(self.space, chain)
+                result = getattr(self.resolver, 'cell_rettypes', {}).get(name) if status == RESOLVED else None
+                if result in self._INT_RESULTS:
+                    return f'cell {chain[-1]} returns {result}'
+        return None
+
+    def _key_parts(self, key, where):
+        """The provider arguments for a tuple-expression key of 2..6 parts, or None."""
+        items, local = None, None
+        if isinstance(key, cst.Tuple):
+            items = key.elements
+        elif isinstance(key, cst.Name) and isinstance(self._aliases.get(key.value), cst.Tuple):
+            items, local = self._aliases[key.value].elements, key
+        if items is None or not 2 <= len(items) <= 6 or any(
+                not isinstance(item, cst.Element) or isinstance(item, cst.StarredElement) for item in items):
+            return None
+        parts, notes = [], []
+        for position, item in enumerate(items):
+            value = item.value if local is None else cst.Subscript(
+                value=local, slice=[cst.SubscriptElement(cst.Index(cst.Integer(str(position))))])
+            why = self._int_part(item.value)
+            if why is None:
+                value = cst.parse_expression('_mx_cy.cast(object, 0)').with_changes(
+                    args=[cst.Arg(cst.Name('object')), cst.Arg(value)])
+                notes.append('object (not a known non-bool integer)')
+            else:
+                notes.append(f'int ({why})')
+            parts.append(value)
+        self.key_parts.append(f'{where}, {len(parts)} parts: ' + '; '.join(notes))
+        return parts
+
+    def _provider_call(self, function, args):
+        from .helpers import module_name
+        provider = 'modelx_cython.runtime._native_inputs'
+        self.providers.add(provider)
+        return cst.Call(func=cst.Attribute(cst.Name(module_name(provider)), cst.Name(function)),
+                        args=[cst.Arg(arg) for arg in args])
 
     def _literal_values(self, node, depth=0):
         """The possible values of a column expression built only from string literals.
@@ -311,12 +374,13 @@ class LocReads(FormulaTransformer):
         if not (isinstance(index, cst.Attribute) and index.attr.value == 'index'
                 and self._schema(index.value) is not None):
             return updated
-        from .helpers import module_name
-        provider = 'modelx_cython.runtime._native_inputs'
-        self.providers.add(provider)
         self.typed += 1
-        call = cst.Call(func=cst.Attribute(cst.Name(module_name(provider)), cst.Name('native_contains')),
-                        args=[cst.Arg(index.value), cst.Arg(updated.left)])
+        parts = self._key_parts(updated.left, 'key in index')
+        if parts is not None:
+            # the parts come first, as in the source; the table last
+            call = self._provider_call(f'native_contains_{len(parts)}', [*parts, index.value])
+        else:
+            call = self._provider_call('native_contains', [index.value, updated.left])
         if isinstance(target.operator, cst.NotIn):
             return cst.UnaryOperation(operator=cst.Not(), expression=call,
                                       lpar=updated.lpar, rpar=updated.rpar)
@@ -345,7 +409,7 @@ class LocReads(FormulaTransformer):
                 and isinstance(original.args[0].value, cst.Subscript)
                 and isinstance(updated.args[0].value, cst.Call)
                 and isinstance(updated.args[0].value.func, cst.Attribute)
-                and updated.args[0].value.func.attr.value == 'lookup_float'):
+                and updated.args[0].value.func.attr.value.startswith('lookup_float')):
             return updated.args[0].value
         if (isinstance(func, cst.Name) and func.value == 'float' and len(updated.args) == 1
                 and not updated.args[0].keyword and not updated.args[0].star

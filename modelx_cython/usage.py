@@ -125,6 +125,7 @@ class CellsResolver:
         self.observed_provider_results = {}
         self.table_schemas = {}
         self.cached_cells = set()
+        self.cell_rettypes = {}
         self._name_index: Dict[str, List[str]] = {}
         for cells in cells_by_class.values():
             for name, fqname in cells.items():
@@ -539,6 +540,7 @@ def build_resolver(module_infos) -> CellsResolver:
     observed_provider_results = {}
     table_schemas = {}
     cached_cells = set()
+    cell_rettypes = {}
 
     for fqname, info in module_infos.items():
         pkg, basename = fqname.rsplit(".", 1)
@@ -554,6 +556,8 @@ def build_resolver(module_infos) -> CellsResolver:
                     table_schemas[cells.fqname] = cells.table_column_kinds
                 if getattr(cells, 'has_formula_def', False):
                     cached_cells.add(cells.fqname)
+                    if not cells.is_special() and cells.has_typeinfo():
+                        cell_rettypes[cells.fqname] = cells.get_rettype_expr(c_style=True)
                 observed = getattr(cells, 'observed_provider_type', None)
                 if observed is not None:
                     observed_provider_results[cells.fqname] = observed
@@ -585,6 +589,7 @@ def build_resolver(module_infos) -> CellsResolver:
     resolver.observed_provider_results = observed_provider_results
     resolver.table_schemas = table_schemas
     resolver.cached_cells = cached_cells
+    resolver.cell_rettypes = cell_rettypes
     return resolver
 
 

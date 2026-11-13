@@ -270,3 +270,114 @@ def test_spelling_variants_recognisers_off(tmp_path):
         # fuse_0: the C long long key overload; fuse_2: the object (text) key overload
         expected = '__pyx_fuse_0lookup_float' if name.startswith('int') else '__pyx_fuse_2lookup_float'
         assert expected in body, (name, 'typed read not reached')
+
+
+def _formula_py(classes_py, cell):
+    import re
+    src = classes_py.read_text()
+    dense = re.search(r"def _f_%s\(self[^\n]*\n\s+return (_mx_dense_formula_\d+)\(" % cell, src).group(1)
+    start = src.index('def %s(' % dense)
+    end = src.find('\n@', start)
+    return src[start:end]
+
+
+def _int_key_model():
+    import itertools
+    model = mx.new_model('IntKeys')
+    two = pd.DataFrame([(a, b, 10.0 * a + b) for a in (1, 2) for b in (0, 1, 2)],
+                       columns=['a', 'b', 'v']).set_index(['a', 'b'])
+    three = pd.DataFrame([(a, b, c, 100.0 * a + 10 * b + c) for a in (1, 2) for b in (0, 1, 2) for c in (5, 7)],
+                         columns=['a', 'b', 'c', 'v']).set_index(['a', 'b', 'c'])
+    five = pd.DataFrame([(*k, float(sum(k))) for k in itertools.product((1, 2), (0, 1), (3, 4), (5, 6), (8, 9))],
+                        columns=['a', 'b', 'c', 'd', 'e', 'v']).set_index(['a', 'b', 'c', 'd', 'e'])
+    mixed = pd.DataFrame({'p': ['x', 'y'], 'b': [1, 2], 'v': [1.0, 2.0]}).set_index(['p', 'b'])
+    bools = pd.DataFrame({'f': [True, False, True], 'b': [0, 1, 1], 'v': [5.0, 6.0, 7.0]}).set_index(['f', 'b'])
+    zero_one = pd.DataFrame({'a': [0, 1, 1], 'b': [0, 1, 2], 'v': [8.0, 9.0, 10.0]}).set_index(['a', 'b'])
+    data = model.new_space('Data', refs={'pdn': pdn, 'two': two, 'three': three, 'five': five, 'mixed': mixed,
+                                         'bools': bools, 'zero_one': zero_one})
+    for name in ('two', 'three', 'five', 'mixed', 'bools', 'zero_one'):
+        data.new_cells(name + '_table', f'lambda: pdn.table({name})')
+    proj = model.new_space('Projection', refs={'data': data})
+    proj.new_cells('ka', 'def ka(t):\n    return 1 + t % 3')        # 3 is absent at the first level
+    proj.new_cells('kb', 'def kb(t):\n    return t % 3')
+    proj.new_cells('flag', 'def flag(t):\n    return t % 2 == 0')
+    def probe(name, body):
+        return (f'def {name}(t):\n    try:\n' + ''.join(f'        {line}\n' for line in body.splitlines())
+                + '    except KeyError:\n        return -1.0\n')
+    formulas = {
+        'k2_literal': probe('k2_literal', 'return float(data.two_table().loc[(ka(t), kb(t)), "v"])'),
+        'k2_local': probe('k2_local', 'key = (ka(t), kb(t))\nreturn float(data.two_table().loc[key, "v"])'),
+        'k2_hoisted': probe('k2_hoisted', 'key = (ka(t), kb(t))\ntbl = data.two_table()\nscale = 2.0\n'
+                                          'return scale * float(tbl.loc[key, "v"])'),
+        'k2_renamed': probe('k2_renamed', 'other = 1.0\npair = (ka(t), kb(t))\nreturn other * float(data.two_table().loc[pair, "v"])'),
+        'k2_in_and_read': ('def k2_in_and_read(t):\n    key = (ka(t), kb(t))\n    tbl = data.two_table()\n'
+                           '    return float(tbl.loc[key, "v"]) if key in tbl.index else -5.0'),
+        'k2_in': ('def k2_in(t):\n    return 1.0 if (ka(t), kb(t)) in data.two_table().index else 0.0'),
+        'k3_local': probe('k3_local', 'key = (ka(t), kb(t), 5 + 2 * (t % 2))\nreturn float(data.three_table().loc[key, "v"])'),
+        'k5_literal': probe('k5_literal', 'return float(data.five_table().loc[(ka(t), 1, 3, 5, 8), "v"])'),
+        'k2_text_level': probe('k2_text_level', 'return float(data.mixed_table().loc[(ka(t), kb(t)), "v"])'),
+        'k2_str_part': probe('k2_str_part', 'return float(data.mixed_table().loc[(("x", "y")[t % 2], 1 + t % 3), "v"])'),
+        'k2_pyint_part': probe('k2_pyint_part', 'n = int(("1", "2", "3")[t % 3])\nreturn float(data.two_table().loc[(n, kb(t)), "v"])'),
+        # bool parts: a bool-traced cell, a comparison and a bool local, on an int level and on a bool level
+        'b_cell_int': probe('b_cell_int', 'return float(data.zero_one_table().loc[(flag(t), kb(t)), "v"])'),
+        'b_cmp_int': probe('b_cmp_int', 'return float(data.zero_one_table().loc[(t > 3, kb(t)), "v"])'),
+        'b_local_int': probe('b_local_int', 'z = t > 5\nreturn float(data.zero_one_table().loc[(z, kb(t)), "v"])'),
+        'b_in_int': 'def b_in_int(t):\n    return 1.0 if (flag(t), kb(t)) in data.zero_one_table().index else 0.0',
+        'b_cell_bool': probe('b_cell_bool', 'return float(data.bools_table().loc[(flag(t), kb(t) % 2), "v"])'),
+        'b_cmp_bool': probe('b_cmp_bool', 'return float(data.bools_table().loc[(t > 3, kb(t) % 2), "v"])'),
+    }
+    names = tuple(formulas)
+    formulas['total'] = 'def total():\n    return sum(' + ' + '.join(f'{n}(t)' for n in names) + ' for t in range(12))'
+    for name, source in formulas.items():
+        proj.new_cells(name, source)
+    return model, names
+
+
+def test_int_tuple_keys_three_modes(tmp_path):
+    """Tuple-expression keys: unpacked parts, C integers only when known non-bool integers."""
+    import os
+    model, names = _int_key_model()
+    try:
+        live = model.Projection.total()
+        parts = {n: [model.Projection.cells[n](t) for t in range(12)] for n in names}
+        model.export(tmp_path / 'exported', locked_spaces=['Data'])
+    finally:
+        model.close()
+    assert parts['k2_literal'][:4] == [10.0, 21.0, -1.0, 10.0]           # (3, 2) is absent: KeyError
+    assert parts['k2_in'][:3] == [1.0, 1.0, 0.0]
+    assert parts['k2_in_and_read'][:3] == [10.0, 21.0, -5.0]
+    assert set(parts['k2_text_level']) == {-1.0}                         # int parts, text level: no row
+    assert parts['b_cell_int'][:2] == [-1.0, -1.0]                       # pandas int level: True is not 1
+    assert set(parts['b_in_int']) == {0.0}
+    assert parts['b_cell_bool'][:2] == [5.0, 6.0]
+    (tmp_path / 'sample.py').write_text('from exported import mx_model as m\nm.Projection.total()\n', encoding='utf-8')
+    env = dict(os.environ, MX_CY_OBSERVED_TABLES='1', MX_CY_PLAIN_READS='1', MX_CY_INFER_TYPES='1')
+    subprocess.run([sys.executable, '-m', 'modelx_cython', 'exported', '--sample', 'sample.py', '--no-spec'],
+                   cwd=tmp_path, check=True, env=env)
+    script = ('from {0} import mx_model as m; P = m.Projection; '
+              'print(repr([P.total()] + [[getattr(P, n)(t) for t in range(12)] for n in {1!r}]))')
+    for package in ('exported', 'exported_cy'):
+        got = subprocess.run([sys.executable, '-c', script.format(package, names)],
+                             cwd=tmp_path, check=True, capture_output=True, text=True).stdout.strip()
+        assert got == repr([live] + [parts[n] for n in names]), (package, got)
+    py = tmp_path / 'exported_cy/_mx_classes.py'
+    calls = {'k2_literal': 'lookup_float_2(', 'k2_local': 'lookup_float_2(', 'k2_hoisted': 'lookup_float_2(',
+             'k2_renamed': 'lookup_float_2(', 'k2_in_and_read': 'native_contains_2(', 'k2_in': 'native_contains_2(',
+             'k3_local': 'lookup_float_3(', 'k5_literal': 'lookup_float_5(', 'k2_text_level': 'lookup_float_2(',
+             'k2_str_part': 'lookup_float_2(', 'k2_pyint_part': 'lookup_float_2(', 'b_cell_int': 'lookup_float_2(',
+             'b_cmp_int': 'lookup_float_2(', 'b_local_int': 'lookup_float_2(', 'b_in_int': 'native_contains_2(',
+             'b_cell_bool': 'lookup_float_2(', 'b_cmp_bool': 'lookup_float_2('}
+    for name, call in calls.items():
+        body = _formula_py(py, name)
+        assert call in body, (name, call)
+        boxed = '_mx_cy.cast(object' in body
+        assert boxed == name.startswith(('b_', 'k2_str', 'k2_pyint', 'k3_local')), (name, 'part boxing')
+    assert 'lookup_float_2(' in _formula_py(py, 'k2_in_and_read')
+    c = tmp_path / 'exported_cy/_mx_classes.c'
+    # C integer parts reach the all-integer specialisations; a bool part arrives as an object
+    assert '__pyx_fuse_0_0__pyx_f_' in _formula_c(py, c, 'k2_literal')
+    assert '__pyx_fuse_0_0_0_0_0__pyx_f_' in _formula_c(py, c, 'k5_literal')
+    assert '__pyx_fuse_1_0__pyx_f_' in _formula_c(py, c, 'b_cell_int')
+    admission = json.loads((tmp_path / 'exported_cy/_mx_admission.json').read_text())
+    keys = admission['exported_cy._mx_classes._c_Projection._f_k2_literal']['loc_reads_keys']
+    assert keys == ['loc[key, column], 2 parts: int (cell ka returns long long); int (cell kb returns long long)']

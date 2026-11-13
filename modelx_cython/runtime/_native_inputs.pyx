@@ -1828,6 +1828,116 @@ cdef inline Py_ssize_t _index_find(const KeyIndex* index, const KeyPart* parts, 
     return -1
 
 
+cdef Py_ssize_t int_parts_row(const KeyIndex* index, const long long* parts, Py_ssize_t count) noexcept:
+    """The row of a tuple key of C integers in an all-integer keyed index, or -1.
+
+    Same hash and slots as _index_find for int parts, comparing numbers only. Every label part
+    of an all-integer index is an int (no bool, float or text level, so no bool label mode), and
+    a C integer part equals an int label exactly when the numbers are equal, as in the table's
+    dict and pandas lookups. Every label sits on the probe chain of its hash, so reaching an
+    empty slot without a match means no label equals the key: the miss is definite. A key of
+    another arity matches no label.
+    """
+    cdef unsigned long long code = 1469598103934665603
+    cdef Py_ssize_t i, slot, row
+    if not index.rows or count != index.width or not index.tuple_keys:
+        return -1
+    code = (code ^ <unsigned long long>1) * <unsigned long long>1099511628211
+    code = (code ^ <unsigned long long>count) * <unsigned long long>1099511628211
+    for i in range(count):
+        code = (code ^ 1) * <unsigned long long>1099511628211
+        code = (code ^ <unsigned long long>parts[i]) * <unsigned long long>1099511628211
+    slot = <Py_ssize_t>(code & <unsigned long long>index.mask)
+    while index.slots[slot] >= 0:
+        row = index.slots[slot]
+        if code == index.hashes[slot]:
+            for i in range(count):
+                if index.numbers[row * count + i] != parts[i]:
+                    break
+            else:
+                return row
+        slot = (slot + 1) & index.mask
+    return -1
+
+
+cdef object _parts_key(const long long* numbers, PyObject** objects, Py_ssize_t count):
+    """The original key tuple: object parts as given, C integer parts as Python ints."""
+    cdef Py_ssize_t i
+    items = []
+    for i in range(count):
+        if objects[i] != NULL:
+            items.append(<object>objects[i])
+        else:
+            items.append(numbers[i])
+    return tuple(items)
+
+
+cdef Py_ssize_t _parts_row(NativeTable table, const long long* numbers, PyObject** objects,
+                           Py_ssize_t count, bint* exact_miss) except? -2:
+    """Row of an unpacked multi-part key in the table's keyed index, or -1.
+
+    exact_miss is set when a miss is definite: every part an int or text part (Decision 3
+    exactness: such parts equal only labels of the same kind rules the admitted index uses).
+    Bool, float and other parts are not read natively (the caller runs the original read)."""
+    cdef KeyPart parts[6]
+    cdef Py_ssize_t i
+    cdef bint all_int = True
+    exact_miss[0] = False
+    for i in range(count):
+        if objects[i] != NULL:
+            all_int = False
+            break
+    if all_int and table._all_int_keys:
+        exact_miss[0] = True
+        return int_parts_row(&table._key_index, numbers, count)
+    if table._cells is None:
+        return -1
+    for i in range(count):
+        if objects[i] == NULL:
+            key_int(&parts[i], numbers[i], False)
+        elif not _pack_value(objects[i], &parts[i]):
+            _pack_part(<object>objects[i], &parts[i])
+            if parts[i].kind != _KEY_INT and parts[i].kind != _KEY_TEXT:
+                return -1
+    exact_miss[0] = True
+    return _index_find(&table._key_index, &parts[0], count, True)
+
+
+cdef double parts_lookup_float(object table, const long long* numbers, PyObject** objects,
+                               Py_ssize_t count, object column) except? -1:
+    """``T.lookup_float((p1, ..., pn), column)`` from unpacked parts; a miss or a non-numeric
+    cell runs the original read with the original key tuple."""
+    cdef Py_ssize_t col, row, position
+    cdef bint exact
+    cdef NativeTable native
+    if type(table) is NativeTable:
+        native = <NativeTable>table
+        col = native._column_slot(column)
+        if col >= 0:
+            row = _parts_row(native, numbers, objects, count, &exact)
+            if row >= 0:
+                position = row * native._cell_width + col
+                if native._cell_numeric[position]:
+                    return native._cell_values[position]
+        return native.lookup_float(<object>_parts_key(numbers, objects, count), column)
+    return table.lookup_float(_parts_key(numbers, objects, count), column)
+
+
+cdef bint parts_contains(object table, const long long* numbers, PyObject** objects,
+                         Py_ssize_t count) except -1:
+    """``(p1, ..., pn) in T.index`` from unpacked parts: a hit is True, a definite miss is False,
+    anything else runs the original membership test with the original key tuple."""
+    cdef Py_ssize_t row
+    cdef bint exact
+    if type(table) is NativeTable:
+        row = _parts_row(<NativeTable>table, numbers, objects, count, &exact)
+        if row >= 0:
+            return True
+        if exact:
+            return False
+    return _parts_key(numbers, objects, count) in table.index
+
+
 from sys import intern as _intern_label
 
 
@@ -1899,6 +2009,7 @@ cdef class NativeTable:
             self._cell_width = cells.value_width
             self._single_part = cells.width == 1 and not cells.tuple_keys
             cells.fill_index(&self._key_index)
+            self._all_int_keys = cells.tuple_keys and all(kind == _KEY_INT for kind in cells.kinds)
         keys = owner._keys
         if keys and type(keys[0]) is int:
             data = view(owner)
@@ -2173,6 +2284,75 @@ cdef class NativeTable:
 
 Table.register(NativeTable)
 
+
+# Unpacked multi-part key reads: each specialisation only places its parts and calls the shared
+# function. loc_reads passes a part bare only when it is a known non-bool integer (Decision 6).
+cdef inline void _place(PartArg value, long long* number, PyObject** item) noexcept:
+    if PartArg is object:
+        number[0], item[0] = 0, <PyObject*>value
+    else:
+        number[0], item[0] = value, NULL
+
+
+cdef double lookup_float_2(object table, P0 p0, P1 p1, object column) except? -1:
+    cdef long long numbers[2]
+    cdef PyObject* items[2]
+    _place(p0, &numbers[0], &items[0]); _place(p1, &numbers[1], &items[1])
+    return parts_lookup_float(table, numbers, items, 2, column)
+
+cdef bint native_contains_2(P0 p0, P1 p1, object table) except -1:
+    cdef long long numbers[2]
+    cdef PyObject* items[2]
+    _place(p0, &numbers[0], &items[0]); _place(p1, &numbers[1], &items[1])
+    return parts_contains(table, numbers, items, 2)
+
+cdef double lookup_float_3(object table, P0 p0, P1 p1, P2 p2, object column) except? -1:
+    cdef long long numbers[3]
+    cdef PyObject* items[3]
+    _place(p0, &numbers[0], &items[0]); _place(p1, &numbers[1], &items[1]); _place(p2, &numbers[2], &items[2])
+    return parts_lookup_float(table, numbers, items, 3, column)
+
+cdef bint native_contains_3(P0 p0, P1 p1, P2 p2, object table) except -1:
+    cdef long long numbers[3]
+    cdef PyObject* items[3]
+    _place(p0, &numbers[0], &items[0]); _place(p1, &numbers[1], &items[1]); _place(p2, &numbers[2], &items[2])
+    return parts_contains(table, numbers, items, 3)
+
+cdef double lookup_float_4(object table, P0 p0, P1 p1, P2 p2, P3 p3, object column) except? -1:
+    cdef long long numbers[4]
+    cdef PyObject* items[4]
+    _place(p0, &numbers[0], &items[0]); _place(p1, &numbers[1], &items[1]); _place(p2, &numbers[2], &items[2]); _place(p3, &numbers[3], &items[3])
+    return parts_lookup_float(table, numbers, items, 4, column)
+
+cdef bint native_contains_4(P0 p0, P1 p1, P2 p2, P3 p3, object table) except -1:
+    cdef long long numbers[4]
+    cdef PyObject* items[4]
+    _place(p0, &numbers[0], &items[0]); _place(p1, &numbers[1], &items[1]); _place(p2, &numbers[2], &items[2]); _place(p3, &numbers[3], &items[3])
+    return parts_contains(table, numbers, items, 4)
+
+cdef double lookup_float_5(object table, P0 p0, P1 p1, P2 p2, P3 p3, P4 p4, object column) except? -1:
+    cdef long long numbers[5]
+    cdef PyObject* items[5]
+    _place(p0, &numbers[0], &items[0]); _place(p1, &numbers[1], &items[1]); _place(p2, &numbers[2], &items[2]); _place(p3, &numbers[3], &items[3]); _place(p4, &numbers[4], &items[4])
+    return parts_lookup_float(table, numbers, items, 5, column)
+
+cdef bint native_contains_5(P0 p0, P1 p1, P2 p2, P3 p3, P4 p4, object table) except -1:
+    cdef long long numbers[5]
+    cdef PyObject* items[5]
+    _place(p0, &numbers[0], &items[0]); _place(p1, &numbers[1], &items[1]); _place(p2, &numbers[2], &items[2]); _place(p3, &numbers[3], &items[3]); _place(p4, &numbers[4], &items[4])
+    return parts_contains(table, numbers, items, 5)
+
+cdef double lookup_float_6(object table, P0 p0, P1 p1, P2 p2, P3 p3, P4 p4, P5 p5, object column) except? -1:
+    cdef long long numbers[6]
+    cdef PyObject* items[6]
+    _place(p0, &numbers[0], &items[0]); _place(p1, &numbers[1], &items[1]); _place(p2, &numbers[2], &items[2]); _place(p3, &numbers[3], &items[3]); _place(p4, &numbers[4], &items[4]); _place(p5, &numbers[5], &items[5])
+    return parts_lookup_float(table, numbers, items, 6, column)
+
+cdef bint native_contains_6(P0 p0, P1 p1, P2 p2, P3 p3, P4 p4, P5 p5, object table) except -1:
+    cdef long long numbers[6]
+    cdef PyObject* items[6]
+    _place(p0, &numbers[0], &items[0]); _place(p1, &numbers[1], &items[1]); _place(p2, &numbers[2], &items[2]); _place(p3, &numbers[3], &items[3]); _place(p4, &numbers[4], &items[4]); _place(p5, &numbers[5], &items[5])
+    return parts_contains(table, numbers, items, 6)
 
 cdef NativeTable bind_native_table(object value, str cell):
     """Bind a Table or keep a local wrapper already owned by another Cell."""

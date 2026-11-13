@@ -73,6 +73,7 @@ def describe(module_infos):
                     'native_numeric_helpers': getattr(cell, 'native_numeric_helpers', []),
                     'loc_reads_typed': getattr(cell, 'loc_reads_typed', 0),
                     'loc_reads_untyped': getattr(cell, 'loc_reads_untyped', []),
+                    'loc_reads_keys': getattr(cell, 'loc_reads_keys', []),
                     'native_reductions': getattr(cell, 'native_reductions', 0),
                     'native_enum_comparisons': getattr(cell, 'native_enum_comparisons', 0),
                     'native_enum_constants': getattr(cell, 'native_enum_constants', 0),

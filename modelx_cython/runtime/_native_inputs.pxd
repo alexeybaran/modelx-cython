@@ -132,7 +132,7 @@ cdef class NativeTable:
     cdef const double* _cell_values
     cdef const unsigned char* _cell_numeric
     cdef Py_ssize_t _cell_width
-    cdef bint _bounds_ready, _int_ready, _int_contiguous, _single_part
+    cdef bint _bounds_ready, _int_ready, _int_contiguous, _single_part, _all_int_keys
     cdef long long _int_first, _int_last
     cdef const long long* _int_sorted
     cdef const long long* _int_rows
@@ -312,3 +312,36 @@ cdef inline bint native_contains(object table, KeyArg0 key) except -1:
         if type(table) is NativeTable and (<NativeTable>table)._int_ready:
             return (<NativeTable>table)._int_row(key) >= 0
     return table_contains(table, <object>key)
+
+# Unpacked multi-part keys (2..6 parts): each part a C integer or an object.
+ctypedef fused PartArg:
+    KeyInteger
+    object
+ctypedef fused P0:
+    KeyInteger
+    object
+ctypedef fused P1:
+    KeyInteger
+    object
+ctypedef fused P2:
+    KeyInteger
+    object
+ctypedef fused P3:
+    KeyInteger
+    object
+ctypedef fused P4:
+    KeyInteger
+    object
+ctypedef fused P5:
+    KeyInteger
+    object
+cdef double lookup_float_2(object table, P0 p0, P1 p1, object column) except? -1
+cdef bint native_contains_2(P0 p0, P1 p1, object table) except -1
+cdef double lookup_float_3(object table, P0 p0, P1 p1, P2 p2, object column) except? -1
+cdef bint native_contains_3(P0 p0, P1 p1, P2 p2, object table) except -1
+cdef double lookup_float_4(object table, P0 p0, P1 p1, P2 p2, P3 p3, object column) except? -1
+cdef bint native_contains_4(P0 p0, P1 p1, P2 p2, P3 p3, object table) except -1
+cdef double lookup_float_5(object table, P0 p0, P1 p1, P2 p2, P3 p3, P4 p4, object column) except? -1
+cdef bint native_contains_5(P0 p0, P1 p1, P2 p2, P3 p3, P4 p4, object table) except -1
+cdef double lookup_float_6(object table, P0 p0, P1 p1, P2 p2, P3 p3, P4 p4, P5 p5, object column) except? -1
+cdef bint native_contains_6(P0 p0, P1 p1, P2 p2, P3 p3, P4 p4, P5 p5, object table) except -1
