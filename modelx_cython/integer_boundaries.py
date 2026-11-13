@@ -3,7 +3,7 @@
 import libcst as cst
 
 from .checked_arithmetic import (
-    CheckedArithmetic, guarded_integer_intervals, range_bounds, signed_local_assignments,
+    CheckedArithmetic, guarded_integer_intervals, signed_local_assignments,
 )
 from .consts import CY_MOD, FORMULA_PREF, MX_SELF, MX_SYS_MOD
 from .powers import KIND_FLOAT, OperandKind, kind_of_type_expr
@@ -107,21 +107,30 @@ def __getattribute__(self, name):
 class _GuardCalls(cst.CSTTransformer):
     METADATA_DEPENDENCIES = (cst.metadata.ScopeProvider,)
 
-    def __init__(self, receiver, integer_params, counter_reads, owner, resolver, entries, cells, private_entries):
+    def __init__(self, receiver, integer_params, counters, owner, resolver, entries, cells, private_entries):
         self.receiver = receiver
         self.integer_params = integer_params
-        self.counter_reads = counter_reads
+        self.counters = counters
+        self.loop_targets = []
         self.owner = owner
         self.resolver = resolver
         self.entries = entries
         self.cells = cells
         self.private_entries = private_entries
 
+    def visit_For_body(self, node):
+        self.loop_targets.append(node.target.value if isinstance(node.target, cst.Name) else None)
+
+    def leave_For_body(self, node):
+        self.loop_targets.pop()
+
     def _native_argument(self, value):
         if not isinstance(value, cst.Name):
             return False
         scope = self.get_metadata(cst.metadata.ScopeProvider, value, None)
-        if value in self.counter_reads:
+        # Range analysis already proved the only store and that its reads
+        # stay in the loop body. Check the receiver scope after entry lowering.
+        if value.value in self.counters and value.value in self.loop_targets:
             receiver_scope = self.get_metadata(cst.metadata.ScopeProvider, self.receiver, None)
             if scope is receiver_scope:
                 return True
@@ -161,22 +170,6 @@ class _GuardCalls(cst.CSTTransformer):
         return after.with_changes(args=arguments)
 
 
-def _signed_counter_reads(node, counters):
-    """Carry admitted counter types only into the body of the declaring loop."""
-    reads = set()
-    for line, loop in zip(node.body.body, node.body.body[1:]):
-        if range_bounds(loop) is None or loop.target.value not in counters:
-            continue
-        if not (isinstance(line, cst.SimpleStatementLine) and len(line.body) == 1
-                and isinstance(decl := line.body[0], cst.AnnAssign)
-                and isinstance(decl.target, cst.Name) and decl.target.value == loop.target.value
-                and decl.value is None and decl.annotation.annotation.deep_equals(_INTEGER_ANNOTATION)):
-            continue
-        reads.update(part for part in lexical_nodes((loop.body,))
-                     if isinstance(part, cst.Name) and part.value == loop.target.value)
-    return reads
-
-
 def _guard_calls(node, cls, cell, resolver, entries, cells, private_entries):
     params = (*node.params.posonly_params, *node.params.params, *node.params.kwonly_params)
     if not params or params[0].name.value != MX_SELF:
@@ -184,9 +177,8 @@ def _guard_calls(node, cls, cell, resolver, entries, cells, private_entries):
     integer_params = {param.name.value: param for param in params if param.annotation is not None
                       and param.annotation.annotation.deep_equals(_INTEGER_ANNOTATION)}
     counters = getattr(cell, 'signed_range_counters', ())
-    counter_reads = _signed_counter_reads(node, counters) if counters else ()
     wrapper = cst.MetadataWrapper(cst.Module(body=(node,)), unsafe_skip_copy=True)
-    return wrapper.visit(_GuardCalls(params[0], integer_params, counter_reads, cls.fqname, resolver, entries, cells,
+    return wrapper.visit(_GuardCalls(params[0], integer_params, counters, cls.fqname, resolver, entries, cells,
                                     private_entries)).body[0]
 
 
