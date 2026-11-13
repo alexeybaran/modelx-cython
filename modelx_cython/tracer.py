@@ -630,6 +630,11 @@ def _table_column_kinds(traces):
                 observed[column] = found.pop() if len(found) == 1 else None
             found = {_scalar_kind(key) for key in table._keys}
             observed['__key__'] = found.pop() if len(found) == 1 else None
+            # key levels: the width of tuple keys (1 for scalar keys); the last level's kind
+            widths = {len(key) if type(key) is tuple else 1 for key in table._keys}
+            observed['__levels__'] = widths.pop() if len(widths) == 1 else None
+            found = {_scalar_kind(key[-1]) for key in table._keys if type(key) is tuple}
+            observed['__last_key__'] = found.pop() if len(found) == 1 else None
             if kinds is None:
                 kinds = observed
             else:
