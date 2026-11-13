@@ -17,9 +17,10 @@ def _unsigned_check(layout):
     span = axis.stop - axis.lower
     if not 0 < span < 1 << 64:
         return None
-    return cst.parse_expression(
-        f"({CY_MOD}.cast({CY_MOD}.ulonglong, {axis.key}) - "
-        f"{CY_MOD}.cast({CY_MOD}.ulonglong, {axis.lower})) < {span}")
+    # Signed subtraction first, then the cast: the unsigned difference of two casts trips
+    # Cython's overflow check whenever key < lower (always for a negative lower bound).
+    offset = f"{axis.key} - ({axis.lower})" if axis.lower else axis.key
+    return cst.parse_expression(f"{CY_MOD}.cast({CY_MOD}.ulonglong, {offset}) < {span}")
 
 
 def _public_checks(cls, layouts):
