@@ -614,7 +614,12 @@ def table_schema(traces):
         if schema is None:
             schema = found
         elif found != schema:
-            return None
+            # kinds must agree; a differing row count (W1.H 'rows') is kept as None
+            if not (isinstance(found, dict) and isinstance(schema, dict)
+                    and {k: v for k, v in found.items() if k != 'rows'}
+                    == {k: v for k, v in schema.items() if k != 'rows'}):
+                return None
+            schema = {**schema, 'rows': None}
     return schema
 
 
