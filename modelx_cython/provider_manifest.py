@@ -66,6 +66,13 @@ class GroupedTable:
 
 
 @dataclass(frozen=True)
+class TypedHandle:
+    """M1 typed handle of a provider type: the cdef class and the function that builds it."""
+    type: str
+    build: str
+
+
+@dataclass(frozen=True)
 class ProviderType:
     view_type: Optional[str]
     bind: Optional[str]
@@ -75,6 +82,7 @@ class ProviderType:
     numeric_table: Optional[NumericTable]
     numeric_record: Optional[NumericRecord]
     grouped_table: Optional[GroupedTable] = None
+    handle: Optional[TypedHandle] = None
 
 
 @dataclass(frozen=True)
@@ -193,7 +201,7 @@ def _read_type(type_id, declaration):
         raise ValueError(f'invalid qualified type identity {type_id!r}')
     _require_fields(declaration, type_id, (),
                     ('view_type', 'bind', 'admission', 'bind_cell', 'members',
-                     'numeric_table', 'numeric_record', 'grouped_table'))
+                     'numeric_table', 'numeric_record', 'grouped_table', 'handle'))
     view_type = declaration.get('view_type')
     bind = declaration.get('bind')
     if ('view_type' in declaration or 'bind' in declaration) and not (
@@ -225,6 +233,10 @@ def _read_type(type_id, declaration):
         if ('bound_probe' in grouped) != ('bound_read' in grouped):
             raise ValueError(f'invalid grouped table declaration for {type_id}')
 
+    handle = None
+    if 'handle' in declaration:
+        handle = _read_symbols(TypedHandle, declaration['handle'], f'{type_id}.handle', ('type', 'build'))
+
     declared_members = declaration.get('members', {})
     if not isinstance(declared_members, dict):
         raise ValueError(f'{type_id} members must be an object')
@@ -235,7 +247,7 @@ def _read_type(type_id, declaration):
             raise ValueError(f'invalid member identity or symbol for {type_id}.{name}')
         members[name] = ProviderMember(member['signature'], member['native'])
     return ProviderType(view_type, bind, MappingProxyType(members), admission, bind_cell,
-                        numeric_table, numeric_record, grouped_table)
+                        numeric_table, numeric_record, grouped_table, handle)
 
 
 def read_provider_manifest(provider: str, expected_abi: str) -> Optional[ProviderManifest]:

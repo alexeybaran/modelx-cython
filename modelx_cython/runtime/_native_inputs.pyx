@@ -1550,6 +1550,16 @@ cdef class _NativeTableIndex:
     def max_float(self):
         return _float_type(last_key(_last_key, self._owner))
 
+    # M1 forwarding (W1.1): the target-syntax index vocabulary (min, max, asof, searchsorted,
+    # index[i], ...) runs on the helper's own index until the typed handles lower it (W1.2/W1.3).
+    def __getattr__(self, name):
+        if name.startswith('_'):
+            raise AttributeError(name)
+        return getattr(self._owner.index, name)
+
+    def __getitem__(self, key):
+        return self._owner.index[key]
+
 
 @cython.final
 cdef class NativeTable:
@@ -2635,3 +2645,139 @@ cdef object table(object function, tuple keywords, object frame, object columns=
     if function is _table_constructor:
         _prepare_tables(prepared)
     return prepared
+
+
+# ---- M1 typed table handles: W1.1 stubs (interface in _native_inputs.pxd; bodies W1.2) ----
+# Every stub raises NotImplementedError except searchsorted_right (noexcept: returns -1).
+# Nothing calls them until W1.3's lowering emits handle reads.
+
+cdef object _handle_pending(str what):
+    return NotImplementedError(f'TableHandle.{what}: typed table handles are not built yet (W1.2)')
+
+
+@cython.final
+cdef class TableHandle:
+    def __init__(self, owner):
+        raise _handle_pending('__init__')
+
+    cdef Py_ssize_t col(self, object name) except -2:
+        raise _handle_pending('col')
+
+    cdef Py_ssize_t row_1(self, TableKey p0) except -2:
+        raise _handle_pending('row_1')
+
+    cdef Py_ssize_t row_2(self, TableKey p0, TableKey p1) except -2:
+        raise _handle_pending('row_2')
+
+    cdef Py_ssize_t row_3(self, TableKey p0, TableKey p1, TableKey p2) except -2:
+        raise _handle_pending('row_3')
+
+    cdef Py_ssize_t row_4(self, TableKey p0, TableKey p1, TableKey p2, TableKey p3) except -2:
+        raise _handle_pending('row_4')
+
+    cdef Py_ssize_t row_5(self, TableKey p0, TableKey p1, TableKey p2, TableKey p3, TableKey p4) except -2:
+        raise _handle_pending('row_5')
+
+    cdef Py_ssize_t row_6(self, TableKey p0, TableKey p1, TableKey p2, TableKey p3, TableKey p4, TableKey p5) except -2:
+        raise _handle_pending('row_6')
+
+    cdef bint has_1(self, TableKey p0) except -1:
+        raise _handle_pending('has_1')
+
+    cdef bint has_2(self, TableKey p0, TableKey p1) except -1:
+        raise _handle_pending('has_2')
+
+    cdef bint has_3(self, TableKey p0, TableKey p1, TableKey p2) except -1:
+        raise _handle_pending('has_3')
+
+    cdef bint has_4(self, TableKey p0, TableKey p1, TableKey p2, TableKey p3) except -1:
+        raise _handle_pending('has_4')
+
+    cdef bint has_5(self, TableKey p0, TableKey p1, TableKey p2, TableKey p3, TableKey p4) except -1:
+        raise _handle_pending('has_5')
+
+    cdef bint has_6(self, TableKey p0, TableKey p1, TableKey p2, TableKey p3, TableKey p4, TableKey p5) except -1:
+        raise _handle_pending('has_6')
+
+    cdef double f64(self, Py_ssize_t row, Py_ssize_t col) except? -1:
+        raise _handle_pending('f64')
+
+    cdef long long i64(self, Py_ssize_t row, Py_ssize_t col) except? -1:
+        raise _handle_pending('i64')
+
+    cdef object obj(self, Py_ssize_t row, Py_ssize_t col):
+        raise _handle_pending('obj')
+
+    cdef long long first_int(self) except? -1:
+        raise _handle_pending('first_int')
+
+    cdef long long last_int(self) except? -1:
+        raise _handle_pending('last_int')
+
+    cdef object first_key(self):
+        raise _handle_pending('first_key')
+
+    cdef object last_key(self):
+        raise _handle_pending('last_key')
+
+    cdef long long asof_int(self, long long k) except? -1:
+        raise _handle_pending('asof_int')
+
+    cdef Py_ssize_t asof_row(self, long long k) except -2:
+        raise _handle_pending('asof_row')
+
+    cdef Py_ssize_t searchsorted_right(self, long long k) noexcept:
+        return -1
+
+    cdef long long key_int(self, Py_ssize_t i) except? -1:
+        raise _handle_pending('key_int')
+
+    cdef TableHandle sub_1(self, TableKey p0):
+        raise _handle_pending('sub_1')
+
+    cdef TableHandle sub_2(self, TableKey p0, TableKey p1):
+        raise _handle_pending('sub_2')
+
+    cdef TableHandle sub_3(self, TableKey p0, TableKey p1, TableKey p2):
+        raise _handle_pending('sub_3')
+
+    cdef TableHandle sub_4(self, TableKey p0, TableKey p1, TableKey p2, TableKey p3):
+        raise _handle_pending('sub_4')
+
+    cdef TableHandle sub_5(self, TableKey p0, TableKey p1, TableKey p2, TableKey p3, TableKey p4):
+        raise _handle_pending('sub_5')
+
+    cdef object row_record(self, Py_ssize_t row):
+        raise _handle_pending('row_record')
+
+    cdef TableHandle column_view(self, Py_ssize_t col):
+        raise _handle_pending('column_view')
+
+
+@cython.final
+cdef class RecordHandle:
+    def __init__(self, owner):
+        raise NotImplementedError('RecordHandle: typed record handles are not built yet (W1.2)')
+
+    cdef Py_ssize_t field(self, object name) except -2:
+        raise NotImplementedError('RecordHandle.field (W1.2)')
+
+    cdef double f64(self, Py_ssize_t slot) except? -1:
+        raise NotImplementedError('RecordHandle.f64 (W1.2)')
+
+    cdef long long i64(self, Py_ssize_t slot) except? -1:
+        raise NotImplementedError('RecordHandle.i64 (W1.2)')
+
+    cdef object obj(self, Py_ssize_t slot):
+        raise NotImplementedError('RecordHandle.obj (W1.2)')
+
+
+cdef TableHandle table_handle(object value):
+    """The handle of a bound table: NativeTable.handle, else a new handle (W1.2)."""
+    if type(value) is NativeTable and (<NativeTable>value).handle is not None:
+        return (<NativeTable>value).handle
+    return TableHandle(value)
+
+
+cdef RecordHandle record_handle(object value):
+    return RecordHandle(value)

@@ -1,3 +1,4 @@
+cimport cython
 from libc.math cimport fabs
 from modelx_cython._float_sum_state cimport F64Sum, f64_init, f64_add, f64_result
 
@@ -107,7 +108,75 @@ ctypedef fused KeyArg0:
     bint
     object
 
+# ---- M1 typed table handles (interface fixed by W1.1; bodies W1.2) --------------------
+# K = TableKey: a key part is a C long long (int, enum member, bool) or an object (str, other).
+# n = 1..6 key parts. Errors are the original pandas errors (KeyError(original key) etc.).
+ctypedef fused TableKey:
+    long long
+    object
+
+cdef enum TableScheme:
+    TABLE_DENSE = 1     # int range, row = key - base
+    TABLE_SORTED = 2    # sorted int keys
+    TABLE_HASHED = 3    # packed KeyPart hash index (KeyedView scheme)
+    TABLE_PRODUCT = 4   # rectangular: one index per axis
+
+@cython.final
+cdef class TableHandle:
+    # Immutable after __init__; built once per bound table, children eagerly (D25 Q2).
+    cdef readonly object owner      # helper Table (Python fallbacks, pickling)
+    cdef int scheme
+    cdef Py_ssize_t rows, width, levels, base   # base/rows: a sub-table views its parent's arrays
+    cdef Py_ssize_t col(self, object name) except -2               # identity, then ==; KeyError(name)
+    cdef Py_ssize_t row_1(self, TableKey p0) except -2              # KeyError(original key)
+    cdef Py_ssize_t row_2(self, TableKey p0, TableKey p1) except -2
+    cdef Py_ssize_t row_3(self, TableKey p0, TableKey p1, TableKey p2) except -2
+    cdef Py_ssize_t row_4(self, TableKey p0, TableKey p1, TableKey p2, TableKey p3) except -2
+    cdef Py_ssize_t row_5(self, TableKey p0, TableKey p1, TableKey p2, TableKey p3,
+                          TableKey p4) except -2
+    cdef Py_ssize_t row_6(self, TableKey p0, TableKey p1, TableKey p2, TableKey p3,
+                          TableKey p4, TableKey p5) except -2
+    cdef bint has_1(self, TableKey p0) except -1
+    cdef bint has_2(self, TableKey p0, TableKey p1) except -1
+    cdef bint has_3(self, TableKey p0, TableKey p1, TableKey p2) except -1
+    cdef bint has_4(self, TableKey p0, TableKey p1, TableKey p2, TableKey p3) except -1
+    cdef bint has_5(self, TableKey p0, TableKey p1, TableKey p2, TableKey p3, TableKey p4) except -1
+    cdef bint has_6(self, TableKey p0, TableKey p1, TableKey p2, TableKey p3, TableKey p4,
+                    TableKey p5) except -1
+    cdef double f64(self, Py_ssize_t row, Py_ssize_t col) except? -1     # float column
+    cdef long long i64(self, Py_ssize_t row, Py_ssize_t col) except? -1  # int / bool / enum column
+    cdef object obj(self, Py_ssize_t row, Py_ssize_t col)                # str and other columns
+    cdef long long first_int(self) except? -1                    # index.min()
+    cdef long long last_int(self) except? -1                     # index.max()
+    cdef object first_key(self)                                  # non-integer keys
+    cdef object last_key(self)
+    cdef long long asof_int(self, long long k) except? -1        # KeyError(k) below the first key (D25a)
+    cdef Py_ssize_t asof_row(self, long long k) except -2
+    cdef Py_ssize_t searchsorted_right(self, long long k) noexcept  # D25b
+    cdef long long key_int(self, Py_ssize_t i) except? -1        # sub.index[i]; IndexError, negative i
+    cdef TableHandle sub_1(self, TableKey p0)                     # n < levels; shared child, KeyError
+    cdef TableHandle sub_2(self, TableKey p0, TableKey p1)
+    cdef TableHandle sub_3(self, TableKey p0, TableKey p1, TableKey p2)
+    cdef TableHandle sub_4(self, TableKey p0, TableKey p1, TableKey p2, TableKey p3)
+    cdef TableHandle sub_5(self, TableKey p0, TableKey p1, TableKey p2, TableKey p3, TableKey p4)
+    cdef object row_record(self, Py_ssize_t row)                 # row local that escapes
+    cdef TableHandle column_view(self, Py_ssize_t col)           # D13 column selection T["c"]
+
+@cython.final
+cdef class RecordHandle:
+    # A Record (model_point()), fields resolved once; f64/i64/obj by slot.
+    cdef readonly object owner
+    cdef Py_ssize_t field(self, object name) except -2
+    cdef double f64(self, Py_ssize_t slot) except? -1
+    cdef long long i64(self, Py_ssize_t slot) except? -1
+    cdef object obj(self, Py_ssize_t slot)
+
+cdef TableHandle table_handle(object value)      # NativeTable.handle or a new handle
+cdef RecordHandle record_handle(object value)
+# ---- end of the M1 handle interface ------------------------------------------------------
+
 cdef class NativeTable:
+    cdef readonly TableHandle handle    # D25 Q8: embedded; None until W1.2 builds it
     cdef object _owner, _index_view, _numeric_view, _indexed_view, _single_label, _input_keys
     cdef object _contiguous_view
     cdef const double* _input_values
