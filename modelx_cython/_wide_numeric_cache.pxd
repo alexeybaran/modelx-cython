@@ -20,7 +20,7 @@ cdef inline word mix(word value) noexcept:
     return value ^ (value >> 31)
 
 cdef inline word hash_step(word state, word key, size_t offset) noexcept:
-    return mix(state ^ mix(key + offset + 1))
+    return state ^ mix(key + (<word>offset + 1) * <word>0x9e3779b97f4a7c15)
 
 cdef class WideNumericCache:
     cdef word* entries
