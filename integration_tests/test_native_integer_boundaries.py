@@ -94,6 +94,12 @@ def integer_domain_build(tmp_path_factory):
         return 0
     return adjusted
 """)
+        projection.new_cells("single_assignment_python_context", """def single_assignment_python_context():
+    adjusted = amount
+    if adjusted is payload["value"]:
+        return 0
+    return adjusted
+""")
         projection.new_cells("native_operand", "lambda: receive(amount + 1)")
         projection.new_cells("inline_receive", "lambda count: count + 1")
         projection.new_cells("inline_operand", 'lambda: {"count": inline_receive(amount * 4)}')
@@ -146,6 +152,7 @@ def integer_domain_build(tmp_path_factory):
         projection.mixed_local()
         projection.possibly_unbound_local()
         projection.python_context_local()
+        projection.single_assignment_python_context()
         projection.native_operand()
         projection.inline_receive(0)
         projection.inline_operand()
@@ -380,6 +387,7 @@ def test_signed_local_flow(integer_domain_build):
     assert not native_local("mixed_local")
     assert not native_local("possibly_unbound_local")
     assert not native_local("python_context_local")
+    assert not native_local("single_assignment_python_context")
     run_python(integer_domain_build, "-c", textwrap.dedent("""\
         from exported import mx_model as exported
         from exported_cy import mx_model as compiled

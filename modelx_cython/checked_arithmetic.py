@@ -54,6 +54,8 @@ def local_quotient(expr, divisor_type):
 
 def signed_local_assignments(body, name, facts, native_value):
     """Find all signed definitions and the reads they definitely initialize."""
+    if not facts.stores[name] or name in facts.deleted:
+        return {}, set()
     reads = {node for node, context in facts.contexts.items()
              if isinstance(node, cst.Name) and node.value == name and context is ExpressionContext.LOAD}
     assignments = {}
@@ -61,7 +63,7 @@ def signed_local_assignments(body, name, facts, native_value):
     def flow(lines, assigned):
         for line in lines:
             evaluated = line.test if isinstance(line, cst.If) else line
-            if not assigned and any(part in reads for part in walk(evaluated)):
+            if not assigned and not reads.isdisjoint(walk(evaluated)):
                 return None
             if isinstance(line, cst.If):
                 taken = flow(statements(line.body), assigned)
@@ -287,7 +289,7 @@ class CheckedArithmetic:
                 and stores[target.value] == 1 and self.native_call(node.value)}
 
     def _native_local(self, body, name, facts):
-        if name in self.cell.params or name in facts.deleted or not facts.stores[name] or facts.stores['self']:
+        if name in self.cell.params or facts.stores['self']:
             return {}, set()
         return signed_local_assignments(
             body, name, facts, lambda value: value if self.native_call(value) else None)

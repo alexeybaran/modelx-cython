@@ -402,7 +402,7 @@ class _SignedLocalValues(cst.CSTTransformer):
 
 
 def _type_signed_locals(body, guard, facts, parameters):
-    """Keep provably signed locals native and preserve existing prefix admission."""
+    """Use one signed proof for straight-line and conditional local definitions."""
     if (not isinstance(body, cst.IndentedBlock) or has_scope_effects(body.body)
             or facts.reads & {'eval', 'exec', 'locals', 'vars', 'globals', '_getframe', 'currentframe'}):
         return body, ()
@@ -418,24 +418,22 @@ def _type_signed_locals(body, guard, facts, parameters):
         return body, ()
     statements = list(body.body)
     parameters = set(parameters)
-    seen = parameters.copy()
     for index, line in enumerate(statements):
         if not isinstance(line, cst.SimpleStatementLine) or len(line.body) != 1:
             break
         assignment = line.body[0]
         if ((target := local_assignment(assignment)) is not None
-                and target.value in needed and target.value not in seen
+                and target.value in needed and target.value not in parameters
                 and facts.stores[target.value] == 1):
-            value, signed = guard._signed_expression(assignment.value, guard.path)
-            if signed:
-                statements[index] = line.with_changes(body=(
-                    cst.AnnAssign(target, cst.Annotation(_INTEGER_ANNOTATION), value),))
-                guard.signed_names.add(target.value)
-        seen.update(part.value for part in walk(line) if isinstance(part, cst.Name))
+            guard.signed_names.add(target.value)
+            values = _signed_local_assignments(body, target.value, operands, guard, facts)
+            if values:
+                statements[index] = line.with_changes(body=(cst.AnnAssign(
+                    target, cst.Annotation(_INTEGER_ANNOTATION), values[assignment]),))
+            else:
+                guard.signed_names.remove(target.value)
     declarations, assignments = [], {}
     for name in sorted(needed - parameters - guard.signed_names):
-        if not facts.stores[name]:
-            continue
         guard.signed_names.add(name)
         values = _signed_local_assignments(body, name, operands, guard, facts)
         if not values:
