@@ -118,6 +118,18 @@ cdef class TableView:
                 lo = mid + 1
         return lo
 
+    cdef inline Py_ssize_t position(self, long long key, bint preceding, bint clamp) noexcept:
+        cdef Py_ssize_t row
+        if clamp and key >= self.last_integer:
+            return self.integers.shape[0] - 1
+        row = self.right(key) - 1
+        if row >= 0 and (preceding or self.integers[row] == key):
+            return row
+        return -1
+
+    cdef inline double number_at(self, Py_ssize_t row, Py_ssize_t column) noexcept:
+        return self.numbers[self.sorted_positions[row] * self.width + column]
+
     cdef object value(self, Py_ssize_t row, object column):
         cdef Py_ssize_t col
         if type(column) is str:
@@ -156,7 +168,7 @@ cdef object previous(object function, object table, object key, object column, o
             and type(key) is int and -(1 << 63) <= key < (1 << 63)):
         data = view(table)
         if data is not None and data.integral:
-            index = data.right(key) - 1
+            index = data.position(key, True, False)
             if index >= 0:
                 return data.value(data.sorted_positions[index], column)
             if default is not _missing:
@@ -382,13 +394,13 @@ cdef double lookup_f64(object function, LookupContext context, object table,
         col = -1
         data = context.get(table, column, &col)
         if data is not None and data.numeric:
-            index = data.right(key) - 1
-            if index < 0 or data.integers[index] != key:
+            index = data.position(key, False, False)
+            if index < 0:
                 if default is _missing:
                     raise KeyError(key)
                 return default
             if col >= 0:
-                return data.numbers[data.sorted_positions[index] * data.width + col]
+                return data.number_at(index, col)
     return lookup(function, table, key, column) if default is _missing else lookup(function, table, key, column, default)
 
 
@@ -406,13 +418,13 @@ cdef double previous_f64(object function, LookupContext context, object table,
         if col < 0:
             data = context.get(table, column, &col)
         if data is not None and data.numeric:
-            index = data.right(key) - 1
+            index = data.position(key, True, False)
             if index < 0:
                 if default is _missing:
                     raise ValueError(f'No key at or before {key!r}')
                 return default
             if col >= 0:
-                return data.numbers[data.sorted_positions[index] * data.width + col]
+                return data.number_at(index, col)
     return previous(function, table, key, column) if default is _missing else previous(function, table, key, column, default)
 
 
@@ -420,7 +432,6 @@ cdef inline double _lookup_clamped_f64(object function, LookupContext context, o
                                        long long key, object last_function, object column) except? -1:
     cdef TableView data = None
     cdef Py_ssize_t index, col
-    cdef long long upper
     if function is _lookup and last_function is _last_key:
         col = -1
         if context is not None:
@@ -428,16 +439,13 @@ cdef inline double _lookup_clamped_f64(object function, LookupContext context, o
         elif type(table) is Table:
             data = view(table)
         if data is not None and data.numeric:
-            upper = data.last_integer
-            if upper < key:
-                key = upper
-            index = data.right(key) - 1
-            if index < 0 or data.integers[index] != key:
+            index = data.position(key, False, True)
+            if index < 0:
                 raise KeyError(key)
             if context is None:
                 col = numeric_column(data, column)
             if col >= 0:
-                return data.numbers[data.sorted_positions[index] * data.width + col]
+                return data.number_at(index, col)
     return lookup(function, table, min(key, last_key(last_function, table)), column)
 
 
@@ -453,18 +461,14 @@ cdef double lookup_clamped_context_f64(object function, LookupContext context, o
 
 cdef inline bint bounded_table_value(const PyObject* data, Py_ssize_t column, long long key,
                                      double below, double* value) except? -1:
-    cdef Py_ssize_t row, count = (<TableView>data).integers.shape[0]
+    cdef Py_ssize_t row
     if key < (<TableView>data).integers[0]:
         value[0] = below
         return True
-    if key >= (<TableView>data).integers[count - 1]:
-        row = count - 1
-    else:
-        row = (<TableView>data).right(key) - 1
-        if row < 0 or (<TableView>data).integers[row] != key:
-            return False
-    value[0] = (<TableView>data).numbers[
-        (<TableView>data).sorted_positions[row] * (<TableView>data).width + column]
+    row = (<TableView>data).position(key, False, True)
+    if row < 0:
+        return False
+    value[0] = (<TableView>data).number_at(row, column)
     return True
 
 
@@ -494,12 +498,12 @@ cdef int optional_lookup_f64(object contains_fn, object lookup_fn, object table,
     if contains_fn is _contains and lookup_fn is _lookup and type(table) is Table:
         data = view(table)
         if data is not None and data.numeric:
-            index = data.right(key) - 1
-            if index < 0 or data.integers[index] != key:
+            index = data.position(key, False, False)
+            if index < 0:
                 return 0
             col = numeric_column(data, column)
             if col >= 0:
-                result[0] = data.numbers[data.sorted_positions[index] * data.width + col]
+                result[0] = data.number_at(index, col)
                 return 1
     return 2
 
@@ -708,8 +712,8 @@ cdef bint numeric_binding_ready(LookupContext context, const void* source, const
 
 cdef inline double numeric_table_value(const PyObject* data, long long key, long long column,
     bint preceding, bint has_default, double default) except? -1:
-    cdef Py_ssize_t row = (<TableView>data).right(key) - 1
-    if row < 0 or (not preceding and (<TableView>data).integers[row] != key):
+    cdef Py_ssize_t row = (<TableView>data).position(key, preceding, False)
+    if row < 0:
         if has_default:
             return default
         if preceding:
@@ -719,7 +723,7 @@ cdef inline double numeric_table_value(const PyObject* data, long long key, long
         column += (<TableView>data).width
     if column < 0 or column >= (<TableView>data).width:
         raise IndexError('tuple index out of range')
-    return (<TableView>data).numbers[(<TableView>data).sorted_positions[row] * (<TableView>data).width + column]
+    return (<TableView>data).number_at(row, column)
 
 
 cdef inline double numeric_resource_value(LookupContext context, long long key, long long column,
@@ -786,15 +790,14 @@ from builtins import float as _float_type
 
 cdef inline double _numeric_float_read(const PyObject* data, Py_ssize_t column,
                                        long long key, object default) except? -1:
-    cdef Py_ssize_t index = (<TableView>data).right(key) - 1
-    if index < 0 or (<TableView>data).integers[index] != key:
+    cdef Py_ssize_t index = (<TableView>data).position(key, False, False)
+    if index < 0:
         if default is _missing:
             raise KeyError(key)
         if PyFloat_CheckExact(default):
             return PyFloat_AS_DOUBLE(default)
         return _float_type(default)
-    return (<TableView>data).numbers[(<TableView>data).sorted_positions[index]
-                                      * (<TableView>data).width + column]
+    return (<TableView>data).number_at(index, column)
 
 # Primitive full-key lookup over the existing owned Table.
 from cpython.object cimport PyObject_Hash
@@ -1719,8 +1722,8 @@ cdef bint try_clamped_table_float(NativeTable table, LookupContext context, bint
         if key < data.first_integer and not lower:
             return False
         key = min(max(key, data.first_integer), data.last_integer)
-        row = data.right(key) - 1
-        if row < 0 or data.integers[row] != key:
+        row = data.position(key, False, False)
+        if row < 0:
             return False
         if context._private_owner:
             if (context.clamped_source is table and context.clamped_column is column
@@ -1734,7 +1737,7 @@ cdef bint try_clamped_table_float(NativeTable table, LookupContext context, bint
                 context.clamped_column = column
                 context.clamped_namespace = namespace
                 context.clamped_index = index
-        result[0] = data.numbers[data.sorted_positions[row] * data.width + index]
+        result[0] = data.number_at(row, index)
         return True
     if key < low:
         if not lower:
@@ -1803,11 +1806,10 @@ cdef inline bint table_previous_value(NativeTable table, long long key, object c
     col = endpoint_column(data, column)
     if col < 0:
         col = numeric_column(<TableView>data, column)
-    row = (<TableView>data).right(key) - 1
+    row = (<TableView>data).position(key, True, False)
     if row < 0 or col < 0:
         return False
-    value[0] = (<TableView>data).numbers[(<TableView>data).sorted_positions[row]
-                                        * (<TableView>data).width + col]
+    value[0] = (<TableView>data).number_at(row, col)
     return True
 
 
