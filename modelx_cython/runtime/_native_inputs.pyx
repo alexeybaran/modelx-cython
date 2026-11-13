@@ -2222,6 +2222,7 @@ cdef object group_sum(object function, tuple keywords, object table, object labe
 
 
 from pandas import DataFrame as _report_frame_type, Index as _report_index_type, RangeIndex as _report_range_type
+from pandas import MultiIndex as _report_multi_index_type
 from modelx_helpers.pandas_inputs import table as _table_constructor
 cdef object _report_int64 = _group_numpy.dtype('int64')
 
@@ -2351,10 +2352,10 @@ cdef object _frame_row_dtype(tuple dtypes):
 
 
 cdef object _frame_owner(tuple keys, tuple values, tuple columns, object metadata,
-                         dict positions, tuple ordered, bint preserve_scalar_types):
+                         dict positions, tuple ordered, bint preserve_scalar_types, tuple modes=(2,)):
     cdef object spec, result
-    cdef tuple items = (('multi', False), ('pandas_columns', True),
-        ('row_bool_labels', False), ('boolean_modes', (2,)))
+    cdef tuple items = (('multi', len(modes) > 1), ('pandas_columns', True),
+        ('row_bool_labels', False), ('boolean_modes', modes))
     spec = _record_alloc(<PyTypeObject*>Record, 0)
     PyObject_GenericSetAttr(spec, '_items', items)
     PyObject_GenericSetAttr(spec, '_index', MappingProxyType(dict(items)))
@@ -2491,10 +2492,57 @@ cdef void _prepare_keyed_tables(object value) except *:
             _prepare_keyed_tables(child)
 
 
+cdef object _single_float_multiindex_table(object frame, object columns):
+    """Prepare an explicit float column without materializing a temporary frame."""
+    cdef object index, series, level, label, codes, axis, kind, metadata
+    cdef Py_ssize_t location
+    cdef list levels = []
+    cdef tuple keys, values, names
+    cdef dict positions
+    if type(frame) is not _report_frame_type or type(columns) is not tuple or len(columns) != 1:
+        return None
+    label = columns[0]
+    axis, index = frame.columns, frame.index
+    if (type(label) is not str or type(axis) is not _report_index_type
+            or not axis.is_unique or type(index) is not _report_multi_index_type or index.nlevels < 2):
+        return None
+    location = axis.get_indexer(columns)[0]
+    if location < 0:
+        return None
+    series = frame[label]
+    if series.dtype != _group_float64:
+        return None
+    for level, codes in zip(index.levels, index.codes):
+        if type(level) not in (_report_index_type, _report_range_type) or (codes < 0).any():
+            return None
+        names = tuple(level)
+        for label in names:
+            kind = type(label)
+            if kind is not str and kind is not int:
+                return None
+        levels.append(_group_numpy.array(names, dtype=object)[codes].tolist())
+    keys = tuple(zip(*levels))
+    positions = dict(zip(keys, range(len(keys))))
+    if len(positions) != len(keys):
+        return None
+    values = tuple((value,) for value in series.to_numpy(copy=False).tolist())
+    metadata = ('axes', index.copy(deep=True), axis.take([location]), (series.dtype,))
+    return _frame_owner(keys, values, columns, metadata, positions, tuple(sorted(keys)),
+                        False, (2,) * len(levels))
+
+
 cdef object table(object function, tuple keywords, object frame, object columns=_missing,
                   object groups=_missing, object indexing=_missing, object rows=_missing,
                   object report=_missing, object preserve_scalar_types=_missing):
     cdef object prepared
+    if (function is _table_constructor and (groups is _missing or type(groups) is tuple and not groups)
+            and (rows is _missing or rows is False) and (report is _missing or report is False)
+            and (preserve_scalar_types is _missing or preserve_scalar_types is False)
+            and (indexing is _missing or type(indexing) is str and indexing in ('loc', 'at'))):
+        prepared = _single_float_multiindex_table(frame, columns)
+        if prepared is not None:
+            _prepare_keyed_tables(prepared)
+            return prepared
     if (function is _table_constructor
             and (preserve_scalar_types is _missing or preserve_scalar_types is False
                  or preserve_scalar_types is True)
