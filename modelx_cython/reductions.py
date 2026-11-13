@@ -6,7 +6,7 @@ import libcst as cst
 from .cell_entries import exact_receiver
 from .helpers import REDUCTIONS, module_name
 from .helper_members import helper_reference
-from .scopes import CstFacts, FormulaTransformer, Names, has_scope_effects, lexical_nodes
+from .scopes import CstFacts, FormulaTransformer, Names, OPAQUE_SCOPES as OPAQUE, has_scope_effects, lexical_nodes
 from .syntax import arguments, code, literal_value
 from .typedefs import primitive_kind
 
@@ -37,12 +37,22 @@ BUILTIN_REDUCTIONS = frozenset(('all', 'any', 'max', 'min', 'sum'))
 
 
 def has_reduction_contract(formula, refs, builtin_reductions=frozenset()):
-    """Find declared consumers and supported built-in generator reductions."""
+    """Find declared consumers and supported built-in reductions of one iterable."""
     return any(isinstance(node, cst.Call) and (
                getattr(helper_reference(node.func, refs), 'reduction', None) in REDUCTIONS
                or isinstance(node.func, cst.Name) and node.func.value in builtin_reductions
-               and len(node.args) in (1, 2) and isinstance(node.args[0].value, cst.GeneratorExp))
+               and _one_iterable(node))
                for node in lexical_nodes(formula.body.body))
+
+
+def _one_iterable(call):
+    """``R(iterable)`` (and ``sum(iterable, start)``): the built-in reduction form (W1.4)."""
+    if not call.args or any(arg.star for arg in call.args) or call.args[0].keyword is not None:
+        return False
+    if len(call.args) == 1:
+        return True
+    return (len(call.args) == 2 and call.func.value == 'sum'
+            and (call.args[1].keyword is None or call.args[1].keyword.value == 'start'))
 
 
 def _call(node, name, count):
@@ -86,7 +96,395 @@ def safe_range_increment(iterator):
         return False
 
 
-class NativeReductions(FormulaTransformer):
+class _Unsupported(Exception):
+    """A form the general reduction lowering leaves to the interpreter (the reason)."""
+
+
+_ATOMIC = (cst.Name, cst.Attribute, cst.Integer, cst.Float, cst.SimpleString)
+_UNROLL_LIMIT = 32            # literal-tuple instances unrolled per reduction
+_EMPTY = '{name}() iterable argument is empty'
+_COMPARE = {'min': '<', 'max': '>'}
+
+
+class _Substitute(cst.CSTTransformer):
+    """Replace generator variables (by name, read or store context) with nodes."""
+    def __init__(self, mapping, contexts):
+        super().__init__()
+        self.mapping, self.contexts = mapping, contexts
+
+    def leave_Name(self, before, after):
+        if before.value not in self.mapping or before not in self.contexts:
+            return after
+        value = self.mapping[before.value]
+        if after.lpar or not isinstance(value, _ATOMIC):
+            value = value.with_changes(lpar=(cst.LeftParen(),), rpar=(cst.RightParen(),))
+        return value
+
+
+def _names(target):
+    if isinstance(target, cst.Name):
+        return [target.value]
+    if isinstance(target, (cst.Tuple, cst.List)) and target.elements and all(
+            isinstance(element, cst.Element) and isinstance(element.value, cst.Name)
+            for element in target.elements):
+        return [element.value.value for element in target.elements]
+    raise _Unsupported('a generator target that is not a name or a tuple of names')
+
+
+class GeneralReductions:
+    """W1.4: built-in sum/min/max/all/any over one iterable as native loops.
+
+    Applies where the specialised lowerings above decline. The iterable is a generator
+    or list comprehension (any number of ``for``/``if`` clauses over ``range`` with C
+    integer bounds, a literal tuple, which is unrolled, or any other iterable: a cell
+    value, a tuple-valued cell, ``zip``), or a direct iterable argument. The result is
+    the built-in's: ``sum`` through ``_float_sum_state.PySum`` (CPython 3.14 branch by
+    branch), ``min``/``max`` keep the first extreme and raise on empty input, ``all``/
+    ``any`` short-circuit as the generator would. Generator variables are renamed;
+    StopIteration raised in a generator body becomes RuntimeError as in a generator.
+    The statement is ``return R(...)``, ``x = R(...)`` or ``x op= R(...)``.
+    """
+
+    def general(self, before, after):
+        if len(before.body) != 1 or not self.builtin_bounds:
+            return after
+        statement = before.body[0]
+        if isinstance(statement, cst.Return) and statement.value is not None:
+            mode, target = 'return', None
+        elif (isinstance(statement, cst.Assign) and len(statement.targets) == 1
+                and isinstance(statement.targets[0].target, cst.Name)):
+            mode, target = 'assign', statement.targets[0].target.value
+        elif isinstance(statement, cst.AugAssign) and isinstance(statement.target, cst.Name):
+            mode, target = 'augassign', statement.target.value
+        else:
+            return after
+        call = statement.value
+        if not self.builtin_site(call) or id(call) in self.general_done:
+            return after
+        try:
+            text = self.lower_general(statement, call, mode, target)
+        except _Unsupported as reason:
+            self.general_declined[id(call)] = (call, f'{reason}: built-in call')
+            return after
+        self.general_done.add(id(call))
+        self.general_count += 1
+        self.providers.add(STREAMS_PROVIDER)
+        return cst.FlattenSentinel(cst.parse_module(text).body)
+
+    # ---------------------------------------------------------------- analysis
+    def lower_general(self, statement, call, mode, target):
+        name = call.func.value
+        source = call.args[0].value
+        start = call.args[1].value if len(call.args) == 2 else None
+        prefix = self.reserve_prefix()
+        if isinstance(source, (cst.GeneratorExp, cst.ListComp)):
+            generator = isinstance(source, cst.GeneratorExp)
+            parts = [(part.target, part.iter, [condition.test for condition in part.ifs])
+                     for part in _parts(source)]
+            if any(part.asynchronous is not None for part in _parts(source)):
+                raise _Unsupported('an asynchronous generator')
+            element, facts = source.elt, CstFacts(source)
+            inner = [element, *(test for _, _, tests in parts for test in tests),
+                     *(iterator for _, iterator, _ in parts[1:])]
+            if any(isinstance(node, OPAQUE) for part in inner for node in lexical_nodes((part,))
+                   if node is not part) or any(isinstance(part, OPAQUE) for part in inner):
+                raise _Unsupported('a nested function or comprehension in the generator')
+        else:
+            generator, facts = False, None
+            item = cst.Name(f'{prefix}_item')
+            parts, element = [(item, source, [])], item
+        bound, renamed = [], {}
+        for index, (part_target, iterator, tests) in enumerate(parts):
+            names = _names(part_target)
+            if set(names) & set(bound) or len(set(names)) != len(names):
+                raise _Unsupported('a generator variable bound twice')
+            if index and facts is not None and set(CstFacts(iterator).reads) & set(names):
+                raise _Unsupported('an iterable that reads its own variable')
+            bound.extend(names)
+            for name_ in names:
+                renamed[name_] = f'{prefix}_v_{name_}' if facts is not None else name_
+        if facts is not None:
+            later = {}
+            for index, (part_target, iterator, tests) in enumerate(parts):
+                for name_ in _names(part_target):
+                    later[name_] = index
+            for index, (part_target, iterator, tests) in enumerate(parts):
+                reads = set(CstFacts(iterator).reads) if index else set()
+                for test in tests:
+                    reads |= set(CstFacts(test).reads)
+                if any(later.get(name_, -1) > index or (later.get(name_, -1) == index and name_ in
+                       (set(CstFacts(iterator).reads) if index else set())) for name_ in reads):
+                    raise _Unsupported('a variable read before its for clause binds it')
+        if start is not None and name != 'sum':
+            raise _Unsupported('a second argument')
+        self.general_state = dict(prefix=prefix, name=name, generator=generator, facts=facts,
+                                  renamed=renamed, mode=mode, target=target,
+                                  local_types={}, kinds=set(), alias=module_name(STREAMS_PROVIDER))
+        return self.emit_general(statement, call, parts, element, start)
+
+    def substituted(self, node, mapping):
+        state = self.general_state
+        if state['facts'] is None or not mapping:
+            return node
+        return node.visit(_Substitute(mapping, state['facts'].contexts))
+
+    def element_kind(self, node):
+        kind = self.kind(node, self.general_state['local_types'])
+        return kind if kind in ('double', 'longlong', 'bint') else None
+
+    # ---------------------------------------------------------------- emission
+    def emit_general(self, statement, call, parts, element, start):
+        state = self.general_state
+        p, name, alias = state['prefix'], state['name'], state['alias']
+        # all/any stop at the deciding item, except over a list comprehension, which
+        # evaluates every element before the built-in sees the list.
+        early = name in ('all', 'any') and not isinstance(call.args[0].value, cst.ListComp)
+        state['exit_return'] = early and state['mode'] == 'return'
+        state['flag_exit'] = early and not state['exit_return']
+        prologue, declarations = [], []
+        # The outermost iterable is evaluated where the generator is created.
+        classes = [self.classify(index, part) for index, part in enumerate(parts)]
+        instances = 1
+        for kind_, data in classes:
+            if kind_ == 'tuple':
+                instances *= len(data)
+        if instances > _UNROLL_LIMIT:
+            classes = [('iter', part[1]) if kind_ == 'tuple' else (kind_, data)
+                       for (kind_, data), part in zip(classes, parts)]
+        outer_kind, outer = classes[0]
+        mapping0 = {}
+        if outer_kind == 'range':
+            names = [f'{p}_bound_{i}' for i in range(len(outer))]
+            prologue += [f'{n}: _mx_cy.longlong = {code(value)}' for n, value in zip(names, outer)]
+            classes[0] = ('range', [cst.Name(n) for n in names])
+        elif outer_kind == 'tuple':
+            classes[0] = ('tuple', self.tuple_temps(outer, prologue, {}, 0))
+        else:
+            iterator = code(outer)
+            if state['facts'] is None:          # a direct iterable: iter() as the built-in does
+                iterator = f'iter({iterator})'
+            prologue.append(f'{p}_iterable = ({iterator})')
+            classes[0] = ('iter', cst.Name(f'{p}_iterable'))
+        # Body
+        body = self.emit_level(0, parts, classes, element, mapping0, '')
+        kinds = state['kinds']
+        # Start, state and result
+        if name == 'sum':
+            if start is None:
+                init = f'{alias}.sum_init(_mx_cy.address({p}_state))'
+                float_start = False
+            else:
+                init, float_start = self.sum_start(start)
+            declarations.append(f'{p}_state: {alias}.PySum')
+            nonempty = outer_kind == 'tuple' and not any(tests for _, _, tests in parts) and all(
+                kind_ == 'tuple' for kind_, _ in classes)
+            exact_float = kinds == {'double'} and (float_start or nonempty)
+            if state['mode'] == 'return' and self.cells.get_rettype_expr(c_style=True) == 'double':
+                exact_float = True
+            result = (f'{alias}.sum_result_f64(_mx_cy.address({p}_state))' if exact_float
+                      else f'{alias}.sum_result(_mx_cy.address({p}_state))')
+            prologue.append(init)
+        elif name in ('min', 'max'):
+            typed = next(iter(kinds)) if len(kinds) == 1 and None not in kinds else None
+            declarations.append(f'{p}_seen: _mx_cy.bint = False')
+            if typed:
+                declarations += [f'{p}_best: _mx_cy.{typed}', f'{p}_value: _mx_cy.{typed}']
+            else:
+                declarations += [f'{p}_best: object = None', f'{p}_value: object']
+            result = f'{p}_best'
+        else:
+            declarations.append(f'{p}_result: _mx_cy.bint = {name == "all"}')
+            if state['flag_exit']:
+                declarations.append(f'{p}_done: _mx_cy.bint = False')
+            result = f'{p}_result'
+        declarations += state.get('typed_vars', [])
+        lines = declarations + prologue
+        if state['generator']:
+            lines += ['try:'] + ['    ' + line for line in body] + [
+                f'except StopIteration as {p}_error:',
+                f'    raise RuntimeError("generator raised StopIteration") from {p}_error']
+        else:
+            lines += body
+        if name in ('min', 'max'):
+            lines += [f'if not {p}_seen:', f'    raise ValueError({_EMPTY.format(name=name)!r})']
+        if state['mode'] == 'return':
+            final = f'return {result}'
+        elif state['mode'] == 'assign':
+            final = f'{state["target"]} = {result}'
+        else:
+            final = f'{state["target"]} {code(statement.operator).strip()} {result}'
+        lines.append(final)
+        if name == 'sum':
+            lines = (lines[:len(declarations)] + lines[len(declarations):len(declarations) + len(prologue)]
+                     + ['try:'] + ['    ' + line for line in lines[len(declarations) + len(prologue):]]
+                     + ['finally:', f'    {alias}.sum_clear(_mx_cy.address({p}_state))'])
+        return '\n'.join(lines) + '\n'
+
+    def sum_start(self, start):
+        p, alias = self.general_state['prefix'], self.general_state['alias']
+        address = f'_mx_cy.address({p}_state)'
+        try:
+            value = literal_value(start)
+        except (ValueError, TypeError):
+            value = start
+            try:
+                if isinstance(start, cst.UnaryOperation) and isinstance(start.operator, cst.Minus):
+                    value = -literal_value(start.expression)
+            except (ValueError, TypeError):
+                value = start
+        if type(value) is float:
+            return f'{alias}.sum_init_f64({address}, {value!r})', True
+        if type(value) is int and primitive_kind(value) == 'longlong':
+            return f'{alias}.sum_init_ll({address}, {value!r})', False
+        kind = self.kind(start, {})
+        if kind == 'double':
+            return f'{alias}.sum_init_f64({address}, ({code(start)}))', True
+        if kind == 'longlong':
+            return f'{alias}.sum_init_ll({address}, ({code(start)}))', False
+        return f'{alias}.sum_init_object({address}, ({code(start)}))', False
+
+    def classify(self, index, part):
+        part_target, iterator, _ = part
+        bounds = arguments(iterator, 'range')
+        if (bounds is not None and 1 <= len(bounds) <= 3 and isinstance(part_target, cst.Name)
+                and 'range' not in self.body_facts.stores and 'range' not in self.cells.params
+                and safe_range_increment(iterator)
+                and (index or all(self.kind(bound, {}) in ('longlong', 'bint') for bound in bounds))):
+            return 'range', list(bounds)
+        if (isinstance(iterator, cst.Tuple) and iterator.elements
+                and all(isinstance(element, cst.Element) for element in iterator.elements)):
+            values = [element.value for element in iterator.elements]
+            if isinstance(part_target, cst.Name) or all(
+                    isinstance(value, cst.Tuple) and len(value.elements) == len(_names(part_target))
+                    and all(isinstance(item, cst.Element) for item in value.elements) for value in values):
+                return 'tuple', values
+        return 'iter', iterator
+
+    def constant(self, node):
+        if isinstance(node, (cst.Integer, cst.Float, cst.SimpleString)):
+            return True
+        if isinstance(node, cst.UnaryOperation) and isinstance(node.operator, cst.Minus):
+            return isinstance(node.expression, (cst.Integer, cst.Float))
+        if isinstance(node, cst.Name) and node.value in ('True', 'False', 'None'):
+            return True
+        return (isinstance(node, cst.Attribute) and isinstance(node.value, cst.Attribute)
+                and isinstance(node.value.value, cst.Name) and node.value.value.value == 'self'
+                and (self.cls_info.name, node.value.attr.value, node.attr.value) in self.enum_symbols)
+
+    def tuple_temps(self, values, lines, mapping, level):
+        """Evaluate a literal tuple's elements in order; constants are substituted."""
+        p = self.general_state['prefix']
+        result = []
+        for index, value in enumerate(values):
+            value = self.substituted(value, mapping)
+            items = value.elements if isinstance(value, cst.Tuple) else None
+            if self.constant(value) or (items is not None and all(self.constant(item.value) for item in items)):
+                result.append(value)
+                continue
+            if items is not None:
+                parts = []
+                for position, item in enumerate(items):
+                    if self.constant(item.value):
+                        parts.append(item.value)
+                    else:
+                        temp = f'{p}_t{level}_{index}_{position}'
+                        lines.append(f'{temp} = ({code(item.value)})')
+                        parts.append(cst.Name(temp))
+                result.append(cst.Tuple([cst.Element(part) for part in parts]))
+            else:
+                temp = f'{p}_t{level}_{index}'
+                lines.append(f'{temp} = ({code(value)})')
+                result.append(cst.Name(temp))
+        return result
+
+    def emit_level(self, level, parts, classes, element, mapping, indent):
+        state = self.general_state
+        part_target, _, tests = parts[level]
+        kind_, data = classes[level]
+        lines, p = [], state['prefix']
+        names = _names(part_target)
+        if kind_ == 'range' and level and not all(
+                self.kind(self.substituted(bound, mapping), state['local_types']) in ('longlong', 'bint')
+                for bound in data):
+            kind_, data = 'iter', parts[level][1]          # bounds not C integers: a range object
+        if kind_ == 'range':
+            variable = state['renamed'][names[0]]
+            if variable not in state['local_types']:
+                state['local_types'][variable] = 'longlong'
+                state.setdefault('typed_vars', []).append(f'{variable}: _mx_cy.longlong')
+            bounds = ', '.join(code(self.substituted(bound, mapping)) for bound in data)
+            lines.append(f'{indent}for {variable} in range({bounds}):')
+            inner = dict(mapping, **{names[0]: cst.Name(variable)})
+            lines += self.emit_body(level, parts, classes, element, inner, indent + '    ', tests)
+        elif kind_ == 'iter':
+            iterator = data if level == 0 else self.substituted(data, mapping)
+            variables = [state['renamed'][n] for n in names]
+            target = (variables[0] if isinstance(part_target, cst.Name)
+                      else ', '.join(variables) + (',' if len(variables) == 1 else ''))
+            lines.append(f'{indent}for {target} in ({code(iterator)}):')
+            inner = dict(mapping, **{n: cst.Name(v) for n, v in zip(names, variables)})
+            lines += self.emit_body(level, parts, classes, element, inner, indent + '    ', tests)
+        else:
+            values = data
+            wrap = state['flag_exit']
+            if level:
+                values = self.tuple_temps(values, lines, mapping, level)
+                lines[:] = [indent + line for line in lines]
+            block = []
+            body_indent = indent + ('    ' if wrap else '')
+            for value in values:
+                if isinstance(part_target, cst.Name):
+                    inner = dict(mapping, **{names[0]: value})
+                else:
+                    inner = dict(mapping, **{n: item.value for n, item in zip(names, value.elements)})
+                block += self.emit_body(level, parts, classes, element, inner, body_indent, tests,
+                                        loop=False)
+            if wrap:
+                lines += [f'{indent}while True:'] + block + [f'{indent}    break']
+            else:
+                lines += block
+        return lines
+
+    def emit_body(self, level, parts, classes, element, mapping, indent, tests, loop=True):
+        state = self.general_state
+        lines = []
+        for test in tests:
+            lines.append(f'{indent}if ({code(self.substituted(test, mapping))}):')
+            indent += '    '
+        if level + 1 < len(parts):
+            lines += self.emit_level(level + 1, parts, classes, element, mapping, indent)
+            if state['flag_exit']:
+                lines.append(f'{indent}if {state["prefix"]}_done:')
+                lines.append(f'{indent}    break')
+            return lines
+        return lines + [indent + line for line in self.action(self.substituted(element, mapping))]
+
+    def action(self, element):
+        state = self.general_state
+        p, name, alias = state['prefix'], state['name'], state['alias']
+        kind = self.element_kind(element)
+        state['kinds'].add(kind)
+        value = code(element)
+        if name == 'sum':
+            add = {'double': 'sum_add_f64', 'longlong': 'sum_add_ll', 'bint': 'sum_add_bint'}.get(
+                kind, 'sum_add_object')
+            return [f'{alias}.{add}(_mx_cy.address({p}_state), ({value}))']
+        if name in ('min', 'max'):
+            return [f'{p}_value = ({value})',
+                    f'if not {p}_seen or {p}_value {_COMPARE[name]} {p}_best:',
+                    f'    {p}_best = {p}_value',
+                    f'    {p}_seen = True']
+        hit = 'False' if name == 'all' else 'True'
+        test = f'not ({value})' if name == 'all' else f'({value})'
+        if state['exit_return']:
+            return [f'if {test}:', f'    return {hit}']
+        if state['flag_exit']:
+            return [f'if {test}:', f'    {p}_result = {hit}', f'    {p}_done = True', '    break']
+        return [f'if {test}:', f'    {p}_result = {hit}']
+
+
+
+class NativeReductions(GeneralReductions, FormulaTransformer):
     def __init__(self, cls_info, cells, providers, formula, reserve_fallback, builtin_bounds,
                  builtin_reductions=frozenset(), enum_symbols=None):
         super().__init__()
@@ -96,6 +494,8 @@ class NativeReductions(FormulaTransformer):
         self.builtin_reductions = builtin_reductions
         self.enum_symbols = enum_symbols or {}
         self.fallbacks, self.exact_receiver_guards, self.count = [], set(), 0
+        self.general_count, self.general_done, self.general_declined = 0, set(), {}
+        self.general_sites, self.general_lines = [], None
         self.captures, self.integer_captures = {}, {}
         self.scope_safe = (not has_scope_effects(formula.body.body)
                            and 'self' not in self.body_facts.stores
@@ -186,7 +586,29 @@ class NativeReductions(FormulaTransformer):
         return self.names.reserve(f'_mx_reduce_{self.count}', family=True)
 
     def visit_FunctionDef(self, node):
+        self.general_sites = [n for n in lexical_nodes(node.body.body) if self.builtin_site(n)]
+        self.general_lines = formula_lines(node)
+        if not self.scope_safe:
+            for site in self.general_sites:
+                self.general_declined.setdefault(id(site), (site, 'the formula rebinds names or '
+                                                 'has nested definitions: built-in call'))
         return self.scope_safe
+
+    def leave_FunctionDef(self, before, after):
+        untyped = []
+        for site in self.general_sites:
+            if id(site) in self.general_done:
+                continue
+            node, reason = self.general_declined.get(id(site), (site, None))
+            untyped.append(untyped_entry(self.general_lines, node, site.func.value, reason or
+                           'not the whole value of a return or assignment statement: built-in call'))
+        self.cells.reductions_native = self.general_count
+        self.cells.reductions_untyped = untyped
+        return after
+
+    def builtin_site(self, node):
+        return (isinstance(node, cst.Call) and isinstance(node.func, cst.Name)
+                and node.func.value in self.builtin_reductions and _one_iterable(node))
 
     def native_truth(self, node, locals_):
         if self.kind(node, locals_) in ('double', 'longlong', 'bint'):
@@ -236,6 +658,14 @@ class NativeReductions(FormulaTransformer):
                 and 'abs' not in self.cells.params and 'abs' not in self.body_facts.stores
                 and self.kind(absolute[0], locals_) == 'double'):
             return 'double'
+        if isinstance(node, cst.Call) and isinstance(node.func, cst.Attribute) and isinstance(
+                node.func.value, cst.Attribute):
+            member = helper_reference(node.func, self.cls_info.refs)
+            if getattr(member, 'module_math', None) and len(node.args) == 1:
+                if member.scalar_result == 'int64':      # floor/ceil: C integer of a typed argument
+                    argument = self.kind(node.args[0].value, locals_)
+                    return 'longlong' if argument in ('double', 'longlong', 'bint') else None
+                return {'float64': 'double', 'bool': 'bint'}.get(member.scalar_result)
         if (arguments(node) is not None and isinstance(node.func, cst.Attribute)
                 and isinstance(node.func.value, cst.Name) and node.func.value.value == 'self'):
             cell = self.cls_info.cells.get(node.func.attr.value)
@@ -515,6 +945,14 @@ return {fallback}
 """).body)
 
     def leave_SimpleStatementLine(self, before, after):
+        result = self._specialized(before, after)
+        if result is not after:
+            if len(before.body) == 1 and isinstance(getattr(before.body[0], 'value', None), cst.Call):
+                self.general_done.add(id(before.body[0].value))
+            return result
+        return self.general(before, after)
+
+    def _specialized(self, before, after):
         if len(before.body) != 1:
             return after
         statement = before.body[0]
