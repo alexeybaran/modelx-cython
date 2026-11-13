@@ -63,7 +63,7 @@ cdef inline bint _table_view_key(object value) noexcept:
 cdef class TableView:
     cdef bint pandas_at
     cdef tuple keys, values, columns, ordered
-    cdef dict positions, column_positions
+    cdef dict column_positions
     cdef long long[::1] integers
     cdef long long[::1] sorted_positions
     cdef object minimum, maximum
@@ -89,7 +89,6 @@ cdef class TableView:
                 if not _table_view_key(key):
                     return
         self.column_positions = dict(zip(self.columns, range(len(self.columns))))
-        self.positions = dict(zip(self.keys, range(len(self.keys))))
         self.ordered = table._ordered
         if self.ordered:
             if all_integers:
@@ -99,7 +98,7 @@ cdef class TableView:
                 self.minimum, self.maximum = min(self.keys), max(self.keys)
             if self.integral:
                 self.integers = array('q', self.ordered)
-                self.sorted_positions = array('q', [self.positions[key] for key in self.ordered])
+                self.sorted_positions = array('q', [table._positions[key] for key in self.ordered])
                 self.first_integer = self.minimum
                 self.last_integer = self.maximum
                 # Table guarantees unique keys. Compute the span as Python ints.
@@ -151,20 +150,12 @@ cdef TableView view(object table):
 
 
 cdef object lookup(object function, object table, object key, object column, object default=_missing):
-    cdef TableView data
     if function is _lookup and type(table) is Table and table._index_error is not None:
         return indexed_lookup(table,key,column,default)
     if (function is _lookup and type(table) is Table
             and (type(column) in (str, int) or isinstance(column, IntEnum))
             and _table_view_key(key)):
-        data = view(table)
-        if data.positions is not None:
-            position = data.positions.get(key)
-            if position is not None:
-                return data.value(position, column)
-            if default is not _missing:
-                return default
-            raise KeyError(key)
+        return _read_owned_table(table, key, column, default)
     return function(table, key, column) if default is _missing else function(table, key, column, default)
 
 
@@ -187,15 +178,11 @@ cdef object previous(object function, object table, object key, object column, o
 
 
 cdef object contains(object function, object table, object key):
-    cdef TableView data
     if function is _contains and type(table) is NativeTable:
         table = (<NativeTable>table)._owner
     if function is _contains and type(table) is Table and table._index_error is not None:
         return indexed_contains(table,key)
     if function is _contains and type(table) is Table:
-        data = view(table)
-        if data.positions is not None:
-            return key in data.positions
         return key in table._positions
     return function(table, key)
 
