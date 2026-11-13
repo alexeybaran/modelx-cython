@@ -294,6 +294,12 @@ def test_native_views_leave_unread_object_keys_untouched(native, fault, indexed)
         assert operation(table) == expected
 
 
+def test_contextual_lookup_does_not_build_integer_view(native):
+    table = Table((1, 2), ((1.5,), (2.5,)), ('rate',))
+    assert native.contextual_lookup(helpers.lookup, table, 1, 'rate') == 1.5
+    assert not table._native_cache
+
+
 def test_arbitrary_query_retains_python_default_handling(native):
     class Query:
         def __hash__(self):

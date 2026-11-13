@@ -96,7 +96,7 @@ def object_hop() -> object:
         owner = table.__modelx_cython_owner__()
         assert table.__modelx_table_owner__() is owner
         prepared = tuple(owner._native_cache.items())
-        assert prepared
+        assert not prepared
         assert old.Inputs.shared() is table
         assert old.Calculation.direct_source() is old.Calculation.first_hop() is table
         assert old.Calculation.second_hop() is table
