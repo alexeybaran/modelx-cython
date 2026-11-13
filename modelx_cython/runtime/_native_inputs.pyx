@@ -897,22 +897,26 @@ cdef bint _native_parts(const KeyPart* parts, Py_ssize_t count) noexcept:
             return False
     return True
 
+cdef inline unsigned long long _hash_step(unsigned long long value, unsigned long long item) noexcept:
+    return (value ^ item) * <unsigned long long>1099511628211
+
+
+cdef inline unsigned long long _hash_start(Py_ssize_t count, bint tuple_key) noexcept:
+    return _hash_step(_hash_step(1469598103934665603, tuple_key), count)
+
+
+cdef inline unsigned long long _hash_part(unsigned long long value, int kind,
+                                         long long number, PyObject* text) except? 0:
+    if kind == _KEY_TEXT:
+        return _hash_step(_hash_step(value, 3), <unsigned long long>PyObject_Hash(<object>text))
+    return _hash_step(_hash_step(value, 4 if kind == _KEY_FLOAT else 1), <unsigned long long>number)
+
+
 cdef unsigned long long _parts_hash(const KeyPart* parts, Py_ssize_t count, bint tuple_key) except? 0:
-    cdef unsigned long long value = 1469598103934665603
+    cdef unsigned long long value = _hash_start(count, tuple_key)
     cdef Py_ssize_t i
-    value = (value ^ <unsigned long long>tuple_key) * <unsigned long long>1099511628211
-    value = (value ^ <unsigned long long>count) * <unsigned long long>1099511628211
     for i in range(count):
-        if parts[i].kind == _KEY_TEXT:
-            value = (value ^ 3) * <unsigned long long>1099511628211
-            value = (value ^ <unsigned long long>PyObject_Hash(<object>parts[i].text)) * <unsigned long long>1099511628211
-        elif parts[i].kind == _KEY_FLOAT:
-            value = (value ^ 4) * <unsigned long long>1099511628211
-            value = (value ^ <unsigned long long>parts[i].number) * <unsigned long long>1099511628211
-        else:
-            # bool and int have equal-key semantics in the existing Table.
-            value = (value ^ 1) * <unsigned long long>1099511628211
-            value = (value ^ <unsigned long long>parts[i].number) * <unsigned long long>1099511628211
+        value = _hash_part(value, parts[i].kind, parts[i].number, parts[i].text)
     return value
 
 cdef object _original_key(const KeyPart* parts, Py_ssize_t count, bint tuple_key):
@@ -944,6 +948,8 @@ cdef class KeyedView:
 
     def __init__(self, table):
         cdef KeyPart packed
+        cdef int overflow
+        cdef long long integer
         self.admitted = False
         self.owner = table
         spec = table._index_error
@@ -967,7 +973,7 @@ cdef class KeyedView:
             # A plain object Index can contain tuple labels. Pandas treats
             # these as scalar keys and does not validate their components.
             self.boolean_modes = array('b')
-        kinds, numbers, texts, row_hashes = [], [], [], []
+        kinds, numbers, texts = [], [], []
         for key in keys:
             if (type(key) is tuple) != self.tuple_keys:
                 return
@@ -978,9 +984,12 @@ cdef class KeyedView:
                 kind = type(part)
                 if kind is str:
                     kinds.append(_KEY_TEXT); numbers.append(0); texts.append(part)
-                elif (kind is int or kind is bool) and -(1 << 63) <= part < (1 << 63):
+                elif kind is int or kind is bool:
+                    integer = PyLong_AsLongLongAndOverflow(part, &overflow)
+                    if overflow:
+                        return
                     kinds.append(_KEY_BOOL if kind is bool else _KEY_INT)
-                    numbers.append(part); texts.append(None)
+                    numbers.append(integer); texts.append(None)
                 elif kind is float:
                     key_text(&packed, part)
                     if packed.kind == _KEY_OBJECT:
@@ -998,7 +1007,10 @@ cdef class KeyedView:
         for input_row in self.raw_values:
             for value in input_row:
                 kind = type(value)
-                if kind is float or kind is int or kind is bool or kind is str:
+                if kind is float:
+                    numbers.append(value); valid.append(1)
+                    continue
+                if kind is int or kind is bool or kind is str:
                     try:
                         converted = _key_float(value)
                     except (ValueError, OverflowError):
@@ -1029,21 +1041,12 @@ cdef class KeyedView:
         self.admitted = True
 
     cdef unsigned long long row_hash(self, Py_ssize_t row) except? 0:
-        cdef unsigned long long value = 1469598103934665603
+        cdef unsigned long long value = _hash_start(self.width, self.tuple_keys)
         cdef Py_ssize_t i, position
-        value = (value ^ <unsigned long long>self.tuple_keys) * <unsigned long long>1099511628211
-        value = (value ^ <unsigned long long>self.width) * <unsigned long long>1099511628211
         for i in range(self.width):
             position = row * self.width + i
-            if self.kinds[position] == _KEY_TEXT:
-                value = (value ^ 3) * <unsigned long long>1099511628211
-                value = (value ^ <unsigned long long>PyObject_Hash(self.text[position])) * <unsigned long long>1099511628211
-            elif self.kinds[position] == _KEY_FLOAT:
-                value = (value ^ 4) * <unsigned long long>1099511628211
-                value = (value ^ <unsigned long long>self.numbers[position]) * <unsigned long long>1099511628211
-            else:
-                value = (value ^ 1) * <unsigned long long>1099511628211
-                value = (value ^ <unsigned long long>self.numbers[position]) * <unsigned long long>1099511628211
+            value = _hash_part(value, <int>self.kinds[position], self.numbers[position],
+                               <PyObject*>PyTuple_GET_ITEM(self.text, position))
         return value
 
     cdef bint equal(self, Py_ssize_t row, const KeyPart* parts) except -1:
@@ -1440,11 +1443,6 @@ cdef double lookup_float(object function, tuple keywords, object source, object 
         column = _missing
     if default is _typed_missing:
         default = _missing
-    if type(source) is Table and type(key) is tuple and column is not _missing:
-        # This API already receives an assembled Python key. Reuse the owner's
-        # exact index. The primitive-key API still uses its native index.
-        return _float_type(_lookup(source, key, column) if default is _missing
-                           else _lookup(source, key, column, default))
     if type(source) is Table and column is not _missing and _pack_key(key,&parts[0],&count,&tuple_key):
         return lookup_keyed_float_f64(_float_type,_lookup,_indexed_context(source),source,
                                       &parts[0],count,tuple_key,column,default)
