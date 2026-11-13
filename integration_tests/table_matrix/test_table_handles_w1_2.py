@@ -1,0 +1,115 @@
+"""W1.2 typed handles beyond the matrix: binding, sharing, six-level keys, counted fallbacks.
+
+Uses the matrix session build (table_matrix_cases_w1_2.build): a compiled model whose Data
+cells build their tables through the compiled pdn.table, and the handle driver.
+"""
+import importlib
+
+import numpy as np
+import pandas as pd
+import pytest
+
+from modelx_helpers import pdn
+from table_matrix_cases_w1_2 import build
+
+
+@pytest.fixture(scope='module')
+def b(tmp_path_factory):
+    return build(tmp_path_factory)
+
+
+def _provider(b):
+    return importlib.import_module(b.provider)
+
+
+def test_handle_is_built_once_per_table_and_bound(b):
+    provider = _provider(b)
+    first, second = b.compiled.base('R3'), b.compiled.base('R3')
+    assert type(first).__name__ == 'NativeTable' and first.handle is not None
+    owner = first.__modelx_table_owner__()
+    assert owner._native_cache[provider.TableHandle] is first.handle      # set at preparation
+    assert second.handle is first.handle
+    assert provider.table_handle_of(first) is first.handle
+    rebound = provider.NativeTable(owner) if hasattr(provider, 'NativeTable') else None
+    if rebound is not None:
+        assert rebound.handle is first.handle                          # a later bind finds it
+
+
+def test_children_are_shared_views(b):
+    d, native = b.driver, b.compiled.base('F2')
+    h = native.handle
+    assert h.scheme_name == 'hashed' and h.shape == (6, 2, 3, 0)
+    one = d.sub(native, (1,), True)
+    assert one is d.sub(native, (1,), True)                              # eager, not rebuilt
+    assert one in h.children and one.prefix == (1,)
+    assert d.sub(native, (1, 'y'), False) is d.sub(one, ('y',), False)
+    assert one.helper() is native.__modelx_table_owner__().loc[1]     # the helper's own memo child
+    r = d.sub(b.compiled.base('R3'), (0,), True)
+    assert r.scheme_name == 'product' and r.shape[3] == 6                 # a view at row 6
+    c = d.sub(r, ('x',), False)
+    assert c.scheme_name == 'dense' and c.shape == (3, 1, 1, 9)
+    memory = h.memory()
+    assert memory['handles'] == 1 + 2 + 4                                  # root, 2 + 4 prefixes
+
+
+def test_six_level_keys(b):
+    provider, d = _provider(b), b.driver
+    index = pd.MultiIndex.from_tuples([(a, 'x', c, 'y', e, f) for a in (0, 1) for c in (2, 3)
+                                       for e in (4, 5) for f in (6, 7)])
+    frame = pd.DataFrame({'q': np.arange(len(index), dtype=float)}, index=index)
+    h = provider.TableHandle(pdn.table(frame))
+    for position, key in enumerate(index):
+        assert d.loc(h, key, 'q', False) == position
+        ints = tuple(part for part in key if type(part) is int)
+        assert d.contains(h, key, False)
+    assert d.loc(d.sub(h, (1, 'x', 3, 'y', 5), False), (6,), 'q', True) == frame.loc[(1, 'x', 3, 'y', 5, 6), 'q']
+    assert d.loc(d.sub(h, (1, 'x', 3, 'y'), False), (5, 7), 'q', True) == frame.loc[(1, 'x', 3, 'y', 5, 7), 'q']
+    assert d.contains(h, (1, 'x', 3, 'y', 5), False) and not d.contains(h, (1, 'x', 3, 'z', 5), False)
+    with pytest.raises(KeyError) as error:
+        d.loc(h, (1, 'x', 3, 'y', 5, 8), 'q', False)
+    assert error.value.args == ((1, 'x', 3, 'y', 5, 8),)
+    with pytest.raises(KeyError) as error:
+        d.sub(h, (1, 'x', 9), False)
+    assert error.value.args == ((1, 'x', 9),)
+    all_int = pd.DataFrame({'q': np.arange(64.0)},
+                           index=pd.MultiIndex.from_product([[0, 1]] * 6))
+    g = provider.TableHandle(pdn.table(all_int))
+    assert g.scheme_name == 'product'
+    assert d.loc(g, (1, 0, 1, 0, 1, 1), 'q', True) == 43.0
+    assert d.contains(g, (1, 0, 1, 0, 1), True) and not d.contains(g, (1, 0, 2), True)
+    assert d.loc(d.sub(g, (1, 0, 1, 0, 1), True), (1,), 'q', True) == 43.0
+
+
+def test_python_fallbacks_are_counted(b):
+    provider, d = _provider(b), b.driver
+    source = pdn.table(pd.DataFrame({'q': [1.0, 2.0, 3.0]}, index=[30, 10, 20]))
+    unordered = provider.TableHandle(source)
+    assert unordered.scheme_name == 'sorted'
+    before = provider.handle_fallbacks()
+    assert d.loc(unordered, (10,), 'q', True) == 2.0
+    for x in (5, 10, 15, 25, 35):                                     # bisect in row order, as the helper
+        assert d.searchsorted(unordered, x) == source.index.searchsorted(x, side='right')
+    assert provider.handle_fallbacks() == before                     # native
+    record = d.row_record(b.compiled.base('G'), (20,), True)          # a row that escapes
+    assert record['n'] == 2 and provider.handle_fallbacks() == before + 1
+    with pytest.raises(Exception):
+        d.asof(unordered, 25)                                         # pandas decides (not monotonic)
+    assert provider.handle_fallbacks() == before + 2
+
+
+def test_unbound_tables_and_records(b):
+    provider, d = _provider(b), b.driver
+    table = pdn.table(pd.DataFrame({'q': [1.5, 2.5]}, index=[4, 5]))
+    before = provider.handle_fallbacks()
+    assert d.loc(table, (5,), 'q', True) == 2.5                       # helper Table: found by cache
+    assert provider.handle_fallbacks() == before + 1
+    handle = provider.table_handle_of(table)
+    assert handle is table._native_cache[provider.TableHandle]
+    record = b.compiled.point()
+    before = provider.handle_fallbacks()
+    assert d.field(record, 'q') == 0.75 and d.field_int(record, 'n') == 1
+    assert d.field_obj(record, 's') == 'MALE'
+    assert provider.handle_fallbacks() == before
+    with pytest.raises(KeyError) as error:
+        d.field(record, 'missing')
+    assert error.value.args == ('missing',)
