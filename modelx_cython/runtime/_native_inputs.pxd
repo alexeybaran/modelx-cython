@@ -138,12 +138,6 @@ cdef class NativeTable:
     cdef const long long* _int_rows
     cdef Py_ssize_t _int_count
     cdef KeyIndex _key_index
-    # Last text key read (see _remember_text): entries are immutable and owned by the table.
-    cdef list _text_keys
-    cdef void* _text_memos[64]
-    cdef Py_ssize_t _text_count
-    cdef void* _last_text
-    cdef void _remember_text(self, object key, Py_ssize_t row) noexcept
     cdef void _resolve(self, object owner) except *
     cdef Py_ssize_t _column_slot(self, object column) except? -2
     cdef Py_ssize_t _int_row(self, long long key) noexcept

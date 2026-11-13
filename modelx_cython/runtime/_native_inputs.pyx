@@ -40,17 +40,6 @@ cdef extern from *:
     """
     PyObject* _tuple_item "PyTuple_GET_ITEM"(PyObject* items, Py_ssize_t index) noexcept nogil
 
-cdef extern from *:
-    """
-    typedef struct { PyObject* key; Py_ssize_t row; } __mx_key_row;
-    #define __mx_load_key_row(p) __atomic_load_n((p), __ATOMIC_ACQUIRE)
-    #define __mx_store_key_row(p, v) __atomic_store_n((p), (v), __ATOMIC_RELEASE)
-    """
-    ctypedef struct KeyRowMemo "__mx_key_row":
-        PyObject* key
-        Py_ssize_t row
-    KeyRowMemo* _load_key_row "__mx_load_key_row"(KeyRowMemo** slot) noexcept nogil
-    void _store_key_row "__mx_store_key_row"(KeyRowMemo** slot, KeyRowMemo* value) noexcept nogil
     bint _text_same "__mx_text_same"(PyObject* left, PyObject* right) noexcept nogil
 
 
@@ -1773,8 +1762,6 @@ cdef inline Py_ssize_t _index_find(const KeyIndex* index, const KeyPart* parts, 
 
 from sys import intern as _intern_label
 
-cdef enum:
-    _TEXT_MEMOS = 64
 
 
 
@@ -1843,7 +1830,6 @@ cdef class NativeTable:
             self._cell_numeric = &cells.numeric[0]
             self._cell_width = cells.value_width
             self._single_part = cells.width == 1 and not cells.tuple_keys
-            self._text_keys = []
             cells.fill_index(&self._key_index)
         keys = owner._keys
         if keys and type(keys[0]) is int:
@@ -1874,31 +1860,6 @@ cdef class NativeTable:
                 if _text_same(_tuple_item(names, i), label):   # Table columns are exact str
                     return i
         return -1
-
-    cdef void _remember_text(self, object key, Py_ssize_t row) noexcept:
-        """Publish (key, row) as the last text key read. Entries are immutable and owned by the
-        table until it is freed, and the table holds a reference to each key, so a reader that
-        loads any published pointer sees a complete entry whose key identity cannot be reused.
-        At most _TEXT_MEMOS entries are made per table; later keys use the hashed index only."""
-        cdef KeyRowMemo* entry
-        with cython.critical_section(self):
-            if self._text_count >= _TEXT_MEMOS:
-                return
-            entry = <KeyRowMemo*>PyMem_Malloc(sizeof(KeyRowMemo))
-            if entry == NULL:
-                return
-            entry.key = <PyObject*>key
-            entry.row = row
-            self._text_keys.append(key)
-            self._text_memos[self._text_count] = entry
-            self._text_count += 1
-            _store_key_row(<KeyRowMemo**>&self._last_text, entry)
-
-    def __dealloc__(self):
-        cdef Py_ssize_t i
-        for i in range(self._text_count):
-            PyMem_Free(self._text_memos[i])
-        self._text_count = 0
 
     @cython.boundscheck(False)
     @cython.wraparound(False)
@@ -1978,7 +1939,6 @@ cdef class NativeTable:
         cdef double value
         cdef Py_ssize_t col, last, row, position, i
         cdef KeyPart part
-        cdef KeyRowMemo* memo
         cdef long long number
         cdef int overflow = 0
         # Resolved fields first: a hit is a column slot, a row and a numeric cell. Anything else
@@ -2005,16 +1965,10 @@ cdef class NativeTable:
                 number = PyLong_AsLongLongAndOverflow(key, &overflow)
                 row = -1 if overflow else self._int_row(number)
             elif type(key) is str and self._single_part:
-                memo = _load_key_row(<KeyRowMemo**>&self._last_text)
-                if memo != NULL and memo.key == <PyObject*>key:
-                    row = memo.row
-                else:
-                    part.kind = _KEY_TEXT
-                    part.number = 0
-                    part.text = <PyObject*>key
-                    row = _index_find(&self._key_index, &part, 1, False)
-                    if row >= 0:
-                        self._remember_text(key, row)
+                part.kind = _KEY_TEXT
+                part.number = 0
+                part.text = <PyObject*>key
+                row = _index_find(&self._key_index, &part, 1, False)
             else:
                 row = self._keyed_row(key)
             if row >= 0:
@@ -2252,54 +2206,18 @@ cdef class GroupedIndex:
 
 
 cdef extern from "Python.h":
-    ctypedef struct _MemberDef "PyMemberDef":
-        Py_ssize_t offset
-    ctypedef struct _MemberDescr "PyMemberDescrObject":
-        _MemberDef* d_member
     ctypedef struct PyTupleObject:
         PyObject* ob_item[1]
     Py_ssize_t PyTuple_GET_SIZE(object)
 
-cdef Py_ssize_t _record_groups_offset = (<_MemberDescr*><PyObject*>Record.__dict__['_native_groups']).d_member.offset
-
-
-# Grouped Records seen by grouped_lookup_float, by identity: write-once slots of (record, index)
-# pairs. The list keeps both alive for the life of the process (at most 64 grouped tables), so
-# a published identity cannot be reused; further Records use their own _native_groups dict.
-cdef GroupEntry* _grouped_records[64]
-cdef list _grouped_records_owned = []
-cdef object _grouped_records_lock = __import__('threading').Lock()
-
 
 cdef GroupedIndex _grouped_index(object record):
-    cdef Py_ssize_t slot = <Py_ssize_t>((<size_t><PyObject*>record >> 4) & 63), probe, i
-    cdef GroupEntry* entry
-    for probe in range(4):
-        entry = _load_entry(&_grouped_records[(slot + probe) & 63])
-        if entry == NULL:
-            break
-        if entry.parts[0] == <PyObject*>record:
-            return <GroupedIndex>entry.leaf
-    cdef PyObject* groups = (<PyObject**>(<char*><PyObject*>record + _record_groups_offset))[0]
-    if groups == NULL or type(<object>groups) is not dict:
+    groups = record._native_groups
+    if type(groups) is not dict:
         return None
     found = (<dict>groups).get(GroupedIndex)
     if found is None:
         found = (<dict>groups).setdefault(GroupedIndex, GroupedIndex())
-    with _grouped_records_lock:
-        for probe in range(4):
-            i = (slot + probe) & 63
-            if _grouped_records[i] == NULL:
-                entry = <GroupEntry*>PyMem_Malloc(sizeof(GroupEntry))
-                if entry != NULL:
-                    entry.count = 1
-                    entry.parts[0] = <PyObject*>record
-                    entry.leaf = <PyObject*>found
-                    _grouped_records_owned.append((record, found))
-                    _store_entry(&_grouped_records[i], entry)
-                break
-            if _grouped_records[i].parts[0] == <PyObject*>record:
-                break
     return <GroupedIndex>found
 
 
