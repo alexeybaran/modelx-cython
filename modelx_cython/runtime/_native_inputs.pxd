@@ -121,12 +121,55 @@ cdef enum TableScheme:
     TABLE_HASHED = 3    # packed KeyPart hash index (KeyedView scheme)
     TABLE_PRODUCT = 4   # rectangular: one index per axis
 
+# Private handle storage (W1.2). A key part normalised for comparison: kinds
+# 0 never matches, 1 int (bools too, flagged), 2 non-integral float, 3 str, 4 missing (NaN/None
+# under a pandas index spec), 5 any other object (compared with ==, counted as a fallback).
+cdef struct HandlePart:
+    unsigned char kind
+    unsigned char boolean
+    long long i
+    double f
+    PyObject* o             # borrowed: the handle keeps the label alive
+    Py_hash_t h
+
+# A key index over `count` keys of `nparts` parts each: DENSE (ints first..last in order),
+# SORTED (ascending ints, row of each) or HASHED (open addressing over stored parts).
+cdef struct HandleKeys:
+    int scheme
+    Py_ssize_t count, nparts, pstride, poff
+    long long first, last
+    const long long* skeys
+    const Py_ssize_t* srows
+    const HandlePart* parts     # key r, part j: parts[r * pstride + poff + j]
+    const Py_ssize_t* slots     # row + 1, 0 empty
+    size_t mask
+    const unsigned char* modes  # pandas boolean label mode per part: 0 any, 1 bool only, 2 no bool
+
 @cython.final
 cdef class TableHandle:
     # Immutable after __init__; built once per bound table, children eagerly (D25 Q2).
     cdef readonly object owner      # helper Table (Python fallbacks, pickling)
     cdef int scheme
     cdef Py_ssize_t rows, width, levels, base   # base/rows: a sub-table views its parent's arrays
+    # private (W1.2): everything below is set by the constructor and never written afterwards
+    cdef object _hold               # buffers, part arrays, labels: kept alive for the C pointers
+    cdef tuple _prefix              # prefix from the root table (() for a root)
+    cdef tuple _columns
+    cdef tuple _children            # depth-1 sub-tables, by axis position (PRODUCT) or child slot
+    cdef tuple _labels              # row labels (row forms), for row_record and errors
+    cdef object _first_obj, _last_obj   # index.min()/max() as objects; _no_extreme when none
+    cdef object _array              # contiguous ndarray when cells need Python indexing
+    cdef HandleKeys _keys           # full-key index (DENSE, SORTED, HASHED)
+    cdef HandleKeys _ckeys          # HASHED: first part of each child -> child slot
+    cdef HandleKeys* _axes          # PRODUCT: one index per remaining level
+    cdef const Py_ssize_t* _spans   # PRODUCT: rows per position of each remaining level
+    cdef const unsigned char* _ckind    # per root column: 1 float, 2 int, 3 bool, 4 object
+    cdef const double* _dbl         # root arrays, row-major: (base + row) * _stride + _colbase + col
+    cdef const long long* _int
+    cdef PyObject** _obj
+    cdef Py_ssize_t _stride, _colbase
+    cdef bint _spec_missing, _int_keys, _increasing, _preserve
+    cdef const long long* _okeys    # single-level int keys in row order
     cdef Py_ssize_t col(self, object name) except -2               # identity, then ==; KeyError(name)
     cdef Py_ssize_t row_1(self, TableKey p0) except -2              # KeyError(original key)
     cdef Py_ssize_t row_2(self, TableKey p0, TableKey p1) except -2
@@ -166,6 +209,7 @@ cdef class TableHandle:
 cdef class RecordHandle:
     # A Record (model_point()), fields resolved once; f64/i64/obj by slot.
     cdef readonly object owner
+    cdef tuple _items               # private (W1.2): the Record's own (name, value) pairs
     cdef Py_ssize_t field(self, object name) except -2
     cdef double f64(self, Py_ssize_t slot) except? -1
     cdef long long i64(self, Py_ssize_t slot) except? -1

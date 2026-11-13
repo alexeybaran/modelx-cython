@@ -2647,137 +2647,1440 @@ cdef object table(object function, tuple keywords, object frame, object columns=
     return prepared
 
 
-# ---- M1 typed table handles: W1.1 stubs (interface in _native_inputs.pxd; bodies W1.2) ----
-# Every stub raises NotImplementedError except searchsorted_right (noexcept: returns -1).
-# Nothing calls them until W1.3's lowering emits handle reads.
+# ---- M1 typed table handles (W1.2; interface in _native_inputs.pxd, M1-INTERFACE.md) -----
+# A TableHandle is built once per helper Table object from the helper's storage contract
+# (`table_storage`, W1.H), with every sub-table of every key prefix built eagerly as a view of
+# the same arrays (D25 Q2). Nothing is written after construction, so reads take no lock, and
+# no read touches a Python attribute, method or dict of a shared object: keys are normalised
+# into C parts and looked up in C indexes, values are read from C arrays. The few reads that
+# must run Python code (exotic label objects, asof on an index not in increasing order, cells
+# of object arrays, row_record) are counted in `handle_fallbacks()`.
 
-cdef object _handle_pending(str what):
-    return NotImplementedError(f'TableHandle.{what}: typed table handles are not built yet (W1.2)')
+from cpython.bool cimport PyBool_Check
+from cpython.float cimport PyFloat_Check, PyFloat_FromDouble
+from cpython.long cimport PyLong_FromLongLong, PyLong_AsDouble
+from cpython.unicode cimport PyUnicode_Check
+from cpython.tuple cimport PyTuple_Check, PyTuple_GET_SIZE
+from cpython.object cimport PyObject_TypeCheck, PyTypeObject
+from cpython.number cimport PyNumber_Float, PyNumber_Long
+from cpython.bytearray cimport PyByteArray_AS_STRING
+from cpython.sequence cimport PySequence_Fast_ITEMS
+from libc.math cimport isnan, isinf
+from libc.string cimport memcpy
+
+cdef extern from *:
+    """
+    #if defined(_MSC_VER)
+    #include <intrin.h>
+    static volatile __int64 mx_handle_fallbacks_ = 0;
+    static void mx_handle_fallback(void) { _InterlockedIncrement64(&mx_handle_fallbacks_); }
+    static long long mx_handle_fallback_count(void) { return (long long)mx_handle_fallbacks_; }
+    #else
+    static long long mx_handle_fallbacks_ = 0;
+    static void mx_handle_fallback(void) { __atomic_fetch_add(&mx_handle_fallbacks_, 1, __ATOMIC_RELAXED); }
+    static long long mx_handle_fallback_count(void) { return __atomic_load_n(&mx_handle_fallbacks_, __ATOMIC_RELAXED); }
+    #endif
+    static inline Py_hash_t mx_mix64(unsigned long long x) {
+        x ^= x >> 30; x *= 0xbf58476d1ce4e5b9ULL; x ^= x >> 27; x *= 0x94d049bb133111ebULL; x ^= x >> 31;
+        return (Py_hash_t)(x >> 1);
+    }
+    static inline Py_hash_t mx_hash_double(double d) {
+        unsigned long long u; memcpy(&u, &d, sizeof(u)); return mx_mix64(u ^ 0x9e3779b97f4a7c15ULL);
+    }
+    static inline Py_hash_t mx_hash_step(Py_hash_t acc, Py_hash_t h) {
+        return (Py_hash_t)(((unsigned long long)acc ^ (unsigned long long)h) * 1000003ULL);
+    }
+    """
+    void mx_handle_fallback() noexcept nogil
+    long long mx_handle_fallback_count() noexcept nogil
+    Py_hash_t mx_mix64(unsigned long long x) noexcept nogil
+    Py_hash_t mx_hash_double(double d) noexcept nogil
+    Py_hash_t mx_hash_step(Py_hash_t acc, Py_hash_t h) noexcept nogil
+
+cdef extern from "Python.h":
+    # PyObject* spellings: no reference counting on shared labels during a read.
+    int mx_unicode_compare "PyUnicode_Compare"(PyObject* left, PyObject* right)
+    int mx_rich_equal "PyObject_RichCompareBool"(PyObject* left, PyObject* right, int op) except -1
+    PyObject* mx_tuple_item "PyTuple_GET_ITEM"(PyObject* tuple, Py_ssize_t i) noexcept nogil
+    Py_ssize_t mx_tuple_size "PyTuple_GET_SIZE"(PyObject* tuple) noexcept nogil
+    ctypedef struct PyMemberDef:
+        Py_ssize_t offset
+    ctypedef struct PyMemberDescrObject:
+        PyMemberDef* d_member
+
+cdef enum:
+    HK_NONE = 0         # never matches (an int beyond 64 bits, an unhashable object)
+    HK_INT = 1
+    HK_FLOAT = 2
+    HK_STR = 3
+    HK_MISSING = 4      # NaN, None, pd.NA, pd.NaT under a pandas index spec
+    HK_OBJ = 5          # any other label object: == and hash (counted fallback)
+
+cdef enum:
+    HC_F64 = 1
+    HC_I64 = 2
+    HC_BOOL = 3
+    HC_OBJ = 4
+
+cdef enum:
+    HB_NO = 0
+    HB_BOOL = 1
+    HB_CINT = 2         # a C integer part: a bool on a bool-only level when 0 or 1
+
+cdef object _table_storage_fn = getattr(_immutable_inputs, 'table_storage', None)
+cdef object _no_extreme = object()
+cdef PyTypeObject* _np_integer_type = <PyTypeObject*>_group_numpy.integer
+cdef PyTypeObject* _np_floating_type = <PyTypeObject*>_group_numpy.floating
+cdef PyTypeObject* _np_bool_type = <PyTypeObject*>_group_numpy.bool_
+cdef object _np_float64 = _group_numpy.dtype('float64')
+cdef object _np_int64 = _group_numpy.dtype('int64')
+cdef object _pd_na = getattr(_pandas, 'NA', _missing)
+cdef object _pd_nat = getattr(_pandas, 'NaT', _missing)
+cdef Py_ssize_t _record_items_offset = -1
+
+
+cdef Py_ssize_t _slot_offset(object owner_type, str name):
+    """Byte offset of a __slots__ member, so a hot read takes the immutable field directly."""
+    descr = owner_type.__dict__.get(name)
+    if descr is None or type(descr).__name__ != 'member_descriptor':
+        return -1
+    return (<PyMemberDescrObject*><PyObject*>descr).d_member.offset
+
+
+_record_items_offset = _slot_offset(Record, '_items')
+
+
+def handle_fallbacks():
+    """Number of handle reads that ran Python code (W1.2 debug counter, process-wide)."""
+    return mx_handle_fallback_count()
+
+
+# ---- key parts ------------------------------------------------------------------------
+
+cdef inline int _part_object(HandlePart* q, object k) except -1:
+    q.kind = HK_OBJ
+    q.boolean = HB_NO
+    q.o = <PyObject*>k
+    try:
+        q.h = hash(k)
+    except TypeError:           # unhashable: never a label (the helper raises KeyError too)
+        q.kind = HK_NONE
+    return 0
+
+
+cdef inline int _part_double(HandlePart* q, double d, object original, bint spec) except -1:
+    q.boolean = HB_NO
+    if isnan(d):
+        if spec:
+            q.kind = HK_MISSING
+            q.h = 0x5bd1e995
+            return 0
+        return _part_object(q, original)
+    if d == floor(d) and -9223372036854775808.0 <= d < 9223372036854775808.0:
+        q.kind = HK_INT
+        q.i = <long long>d
+        q.h = mx_mix64(<unsigned long long>q.i)
+    else:
+        q.kind = HK_FLOAT
+        q.f = d
+        q.h = mx_hash_double(d)
+    return 0
+
+
+cdef int _part_from(HandlePart* q, object k, bint spec) except -1:
+    """Normalise a key part as pandas compares labels: equal numbers match whatever their type
+    (int, IntEnum, numpy scalar, integral float), bools carry a flag for the boolean label
+    modes, NaN/None/NA/NaT are one missing label under an index spec."""
+    cdef int overflow = 0
+    cdef long long v
+    q.boolean = HB_NO
+    if PyLong_Check(k):
+        if PyBool_Check(k):
+            q.kind = HK_INT
+            q.boolean = HB_BOOL
+            q.i = 1 if k is True else 0
+            q.h = mx_mix64(<unsigned long long>q.i)
+            return 0
+        v = PyLong_AsLongLongAndOverflow(k, &overflow)
+        if overflow:
+            q.kind = HK_NONE
+            return 0
+        q.kind = HK_INT
+        q.i = v
+        q.h = mx_mix64(<unsigned long long>v)
+        return 0
+    if PyFloat_Check(k):
+        return _part_double(q, PyFloat_AS_DOUBLE(k), k, spec)
+    if PyUnicode_Check(k):
+        q.kind = HK_STR
+        q.o = <PyObject*>k
+        q.h = hash(k)
+        return 0
+    if k is None:
+        if spec:
+            q.kind = HK_MISSING
+            q.h = 0x5bd1e995
+            return 0
+        return _part_object(q, k)
+    if PyObject_TypeCheck(k, _np_bool_type):
+        q.kind = HK_INT
+        q.boolean = HB_BOOL
+        q.i = 1 if PyObject_IsTrue(k) else 0
+        q.h = mx_mix64(<unsigned long long>q.i)
+        return 0
+    if PyObject_TypeCheck(k, _np_integer_type):
+        return _part_from(q, PyNumber_Index(k), spec)
+    if PyObject_TypeCheck(k, _np_floating_type):
+        return _part_double(q, PyFloat_AsDouble(k), k, spec)
+    if spec and (k is _pd_na or k is _pd_nat):
+        q.kind = HK_MISSING
+        q.h = 0x5bd1e995
+        return 0
+    return _part_object(q, k)
+
+
+cdef inline void _part_cint(HandlePart* q, long long v) noexcept:
+    q.kind = HK_INT
+    q.boolean = HB_CINT
+    q.i = v
+    q.h = mx_mix64(<unsigned long long>v)
+
+
+cdef inline int _set_part(HandlePart* q, TableKey p, bint spec) except -1:
+    if TableKey is object:
+        return _part_from(q, p, spec)
+    else:
+        _part_cint(q, p)
+        return 0
+
+
+cdef inline object _original(TableKey p):
+    if TableKey is object:
+        return p
+    else:
+        return PyLong_FromLongLong(p)
+
+
+cdef inline bint _mode_ok(const HandlePart* q, unsigned char mode) noexcept:
+    if mode == 0 or q.kind == HK_MISSING:
+        return True
+    if q.boolean == HB_CINT:
+        return mode == 2 or q.i == 0 or q.i == 1
+    if mode == 1:
+        return q.boolean == HB_BOOL
+    return q.boolean == HB_NO
+
+
+cdef inline int _part_eq(const HandlePart* a, const HandlePart* q) except -1:
+    if a.kind != q.kind or a.h != q.h:
+        return 0
+    if a.kind == HK_INT:
+        return a.i == q.i
+    if a.kind == HK_FLOAT:
+        return a.f == q.f
+    if a.kind == HK_STR:
+        return a.o == q.o or mx_unicode_compare(a.o, q.o) == 0
+    if a.kind == HK_MISSING:
+        return 1
+    if a.kind == HK_OBJ:
+        if a.o == q.o:
+            return 1
+        mx_handle_fallback()
+        return mx_rich_equal(a.o, q.o, 2)       # Py_EQ
+    return 0
+
+
+cdef inline Py_hash_t _hparts_hash(const HandlePart* parts, Py_ssize_t n) noexcept nogil:
+    cdef Py_hash_t h = 0x345678
+    cdef Py_ssize_t j
+    for j in range(n):
+        h = mx_hash_step(h, parts[j].h)
+    return mx_mix64(<unsigned long long>h)
+
+
+cdef Py_ssize_t _keys_find(const HandleKeys* k, const HandlePart* q) except -2:
+    """Row (or axis position) of the key q (k.nparts parts) in k; -1 when absent."""
+    cdef Py_ssize_t j, lo, hi, mid, r
+    cdef unsigned long long offset
+    cdef size_t i
+    cdef const HandlePart* stored
+    cdef long long v
+    cdef int same
+    for j in range(k.nparts):
+        if q[j].kind == HK_NONE or not _mode_ok(&q[j], k.modes[j]):
+            return -1
+    if k.scheme == TABLE_DENSE:
+        if q[0].kind != HK_INT:
+            return -1
+        # unsigned difference: no signed overflow at +-2**63 or below a negative first key (D15)
+        offset = <unsigned long long>q[0].i - <unsigned long long>k.first
+        return <Py_ssize_t>offset if offset < <unsigned long long>k.count else -1
+    if k.scheme == TABLE_SORTED:
+        if q[0].kind != HK_INT:
+            return -1
+        v = q[0].i
+        lo = 0
+        hi = k.count
+        while lo < hi:
+            mid = lo + (hi - lo) // 2
+            if k.skeys[mid] < v:
+                lo = mid + 1
+            else:
+                hi = mid
+        if lo < k.count and k.skeys[lo] == v:
+            return k.srows[lo]
+        return -1
+    if k.count == 0:
+        return -1
+    i = <size_t>_hparts_hash(q, k.nparts) & k.mask
+    while True:
+        r = k.slots[i]
+        if r == 0:
+            return -1
+        r -= 1
+        stored = &k.parts[r * k.pstride + k.poff]
+        same = 1
+        for j in range(k.nparts):
+            if not _part_eq(&stored[j], &q[j]):
+                same = 0
+                break
+        if same:
+            return r
+        i = (i + 1) & k.mask
+
+
+# ---- construction ------------------------------------------------------------------------
+
+cdef void* _alloc(list hold, Py_ssize_t nbytes) except NULL:
+    """Zeroed memory owned by a bytearray in `hold` (never resized, so the pointer stays valid)."""
+    cdef object buffer = bytearray(nbytes if nbytes > 0 else 1)
+    hold.append(buffer)
+    return <void*>PyByteArray_AS_STRING(buffer)
+
+
+cdef const unsigned char* _modes(list hold, object spec, Py_ssize_t levels, unsigned char default) except NULL:
+    cdef unsigned char* modes = <unsigned char*>_alloc(hold, levels)
+    cdef Py_ssize_t j
+    found = spec['boolean_modes'] if spec is not None else ()
+    for j in range(levels):
+        modes[j] = <unsigned char>found[j] if j < len(found) else default
+    return modes
+
+
+cdef void _hash_index(HandleKeys* k, list hold) except *:
+    """Open-addressing slots over k's stored keys (unique, as table keys are)."""
+    cdef size_t size = 8, i
+    cdef Py_ssize_t r
+    cdef Py_ssize_t* slots
+    while size < <size_t>(2 * k.count):
+        size <<= 1
+    slots = <Py_ssize_t*>_alloc(hold, <Py_ssize_t>(size * sizeof(Py_ssize_t)))
+    for r in range(k.count):
+        i = <size_t>_hparts_hash(&k.parts[r * k.pstride + k.poff], k.nparts) & (size - 1)
+        while slots[i] != 0:
+            i = (i + 1) & (size - 1)
+        slots[i] = r + 1
+    k.slots = slots
+    k.mask = size - 1
+
+
+cdef void _index_single(TableHandle t, HandleKeys* k, list hold, const HandlePart* parts,
+                        Py_ssize_t count, Py_ssize_t pstride, Py_ssize_t poff,
+                        const unsigned char* modes, object labels) except *:
+    """A one-level key index: DENSE when the keys are consecutive ascending ints, SORTED for
+    other ints, HASHED otherwise. Sets t's int-key facts and index extremes (as the helper's
+    index.min()/max(): the smallest and largest label)."""
+    cdef Py_ssize_t r
+    cdef bint ints = True, increasing = True
+    cdef long long* okeys
+    cdef long long* skeys
+    cdef Py_ssize_t* srows
+    k.count = count
+    k.nparts = 1
+    k.pstride = pstride
+    k.poff = poff
+    k.parts = parts
+    k.modes = modes
+    for r in range(count):
+        if parts[r * pstride + poff].kind != HK_INT or parts[r * pstride + poff].boolean != HB_NO:
+            ints = False
+            break
+    t._int_keys = ints and count > 0
+    if t._int_keys:
+        okeys = <long long*>_alloc(hold, count * sizeof(long long))
+        for r in range(count):
+            okeys[r] = parts[r * pstride + poff].i
+            if r and okeys[r] <= okeys[r - 1]:
+                increasing = False
+        t._okeys = okeys
+        t._increasing = increasing
+        if increasing and <unsigned long long>okeys[count - 1] - <unsigned long long>okeys[0] == <unsigned long long>(count - 1):
+            k.scheme = TABLE_DENSE
+            k.first = okeys[0]
+            k.last = okeys[count - 1]
+        else:
+            k.scheme = TABLE_SORTED
+            values = [okeys[r] for r in range(count)]
+            order = sorted(range(count), key=values.__getitem__)
+            skeys = <long long*>_alloc(hold, count * sizeof(long long))
+            srows = <Py_ssize_t*>_alloc(hold, count * sizeof(Py_ssize_t))
+            for r in range(count):
+                srows[r] = order[r]
+                skeys[r] = okeys[srows[r]]
+            k.skeys = skeys
+            k.srows = srows
+            k.first = skeys[0]
+            k.last = skeys[count - 1]
+        t._first_obj = PyLong_FromLongLong(k.first)
+        t._last_obj = PyLong_FromLongLong(k.last)
+    else:
+        k.scheme = TABLE_HASHED
+        _hash_index(k, hold)
+        t._first_obj, t._last_obj = _extremes(labels)
+
+
+cdef tuple _extremes(object labels):
+    """(min, max) of the labels as the helper's index.min()/max(); NaN when empty."""
+    if not len(labels):
+        return float('nan'), float('nan')
+    try:
+        return min(labels), max(labels)
+    except TypeError:
+        return _no_extreme, _no_extreme
+
+
+cdef HandlePart* _label_parts(list hold, object labels, bint spec) except NULL:
+    cdef Py_ssize_t r, count = len(labels)
+    cdef HandlePart* parts = <HandlePart*>_alloc(hold, count * sizeof(HandlePart))
+    hold.append(labels)                 # the parts borrow str and object labels
+    for r in range(count):
+        _part_from(&parts[r], labels[r], spec)
+    return parts
+
+
+cdef TableHandle _empty_like(TableHandle source):
+    """A new handle sharing source's data arrays and identity (keys and children unset)."""
+    cdef TableHandle t = TableHandle.__new__(TableHandle)
+    t.owner = source.owner
+    t._hold = source._hold
+    t._prefix = source._prefix
+    t._columns = source._columns
+    t.width = source.width
+    t._ckind = source._ckind
+    t._dbl = source._dbl
+    t._int = source._int
+    t._obj = source._obj
+    t._array = source._array
+    t._stride = source._stride
+    t._colbase = source._colbase
+    t._spec_missing = source._spec_missing
+    t._preserve = source._preserve
+    t._first_obj = _no_extreme
+    t._last_obj = _no_extreme
+    t._children = ()
+    return t
+
+
+cdef TableHandle _clone(TableHandle source):
+    cdef TableHandle t = _empty_like(source)
+    t.scheme = source.scheme
+    t.rows = source.rows
+    t.levels = source.levels
+    t.base = source.base
+    t._children = source._children
+    t._labels = source._labels
+    t._first_obj = source._first_obj
+    t._last_obj = source._last_obj
+    t._keys = source._keys
+    t._ckeys = source._ckeys
+    t._axes = source._axes
+    t._spans = source._spans
+    t._int_keys = source._int_keys
+    t._increasing = source._increasing
+    t._okeys = source._okeys
+    return t
+
+
+cdef void _product_children(TableHandle t, list hold, tuple axes, list axis_handles) except *:
+    """Eager depth-1 children of a PRODUCT handle: by position on its first axis."""
+    cdef Py_ssize_t position
+    cdef TableHandle child, axis
+    cdef list children = []
+    for position in range(len(axes[0])):
+        child = _empty_like(t)
+        child._prefix = t._prefix + (axes[0][position],)
+        child.base = t.base + position * t._spans[0]
+        child.rows = t._spans[0]
+        child.levels = t.levels - 1
+        if child.levels > 1:
+            child.scheme = TABLE_PRODUCT
+            child._axes = t._axes + 1
+            child._spans = t._spans + 1
+            child._labels = axes[1:]
+            child._first_obj, child._last_obj = _product_extremes(axes[1:])
+            _product_children(child, hold, axes[1:], axis_handles[1:])
+        else:
+            axis = <TableHandle>axis_handles[1]
+            child.scheme = axis._keys.scheme
+            child._keys = axis._keys
+            child._labels = axis._labels
+            child._int_keys = axis._int_keys
+            child._increasing = axis._increasing
+            child._okeys = axis._okeys
+            child._first_obj = axis._first_obj
+            child._last_obj = axis._last_obj
+        children.append(child)
+    t._children = tuple(children)
+
+
+cdef tuple _product_extremes(tuple axes):
+    try:
+        return tuple(min(axis) for axis in axes), tuple(max(axis) for axis in axes)
+    except (TypeError, ValueError):
+        return _no_extreme, _no_extreme
+
+
+cdef void _rows_children(TableHandle t, list hold, HandlePart* parts, Py_ssize_t levels,
+                         Py_ssize_t depth, tuple labels, const unsigned char* modes) except *:
+    """Eager children of a multi-level row-stored handle at key depth `depth`: rows are laid out
+    so that each prefix is one run, so a child is the run [start, start + count) of t."""
+    cdef Py_ssize_t start = 0, end, r, count
+    cdef TableHandle child
+    cdef list children = []
+    cdef list firsts = []
+    cdef HandlePart* heads
+    cdef const HandlePart* row_parts = parts + t.base * levels
+    while start < t.rows:
+        end = start + 1
+        while end < t.rows and _part_eq(&row_parts[end * levels + depth],
+                                         &row_parts[start * levels + depth]):
+            end += 1
+        count = end - start
+        child = _empty_like(t)
+        child._prefix = t._prefix + (labels[t.base + start][depth],)
+        child.base = t.base + start
+        child.rows = count
+        child.levels = t.levels - 1
+        if child.levels > 1:
+            child.scheme = TABLE_HASHED
+            child._keys.scheme = TABLE_HASHED
+            child._keys.count = count
+            child._keys.nparts = child.levels
+            child._keys.pstride = levels
+            child._keys.poff = depth + 1
+            child._keys.parts = parts + child.base * levels
+            child._keys.modes = modes + depth + 1
+            _hash_index(&child._keys, hold)
+            child._labels = tuple(labels[child.base + r][depth + 1:] for r in range(count))
+            child._first_obj, child._last_obj = _extremes(child._labels)
+            _rows_children(child, hold, parts, levels, depth + 1, labels, modes)
+        else:
+            child._labels = tuple(labels[child.base + r][depth + 1] for r in range(count))
+            _index_single(child, &child._keys, hold, parts + child.base * levels, count,
+                          levels, depth + 1, modes + depth + 1, child._labels)
+            child.scheme = child._keys.scheme
+        children.append(child)
+        firsts.append(start)
+        start = end
+    t._children = tuple(children)
+    heads = <HandlePart*>_alloc(hold, len(firsts) * sizeof(HandlePart))
+    for r in range(len(firsts)):
+        heads[r] = row_parts[<Py_ssize_t>firsts[r] * levels + depth]
+    t._ckeys.scheme = TABLE_HASHED
+    t._ckeys.count = len(firsts)
+    t._ckeys.nparts = 1
+    t._ckeys.pstride = 1
+    t._ckeys.poff = 0
+    t._ckeys.parts = heads
+    t._ckeys.modes = modes + depth
+    _hash_index(&t._ckeys, hold)
+
+
+cdef object _canonical(const HandlePart* q, object label):
+    """A Python value equal for exactly the parts _part_eq calls equal (for grouping)."""
+    if q.kind == HK_INT:
+        return (1, q.i)
+    if q.kind == HK_FLOAT:
+        return (2, q.f)
+    if q.kind == HK_STR:
+        return (3, <object>q.o)
+    if q.kind == HK_MISSING:
+        return (4,)
+    return (5, label)
+
+
+cdef list _hierarchical_order(list rows, Py_ssize_t depth, Py_ssize_t levels, list canon):
+    """Rows grouped by part `depth` in first-appearance order, recursively: every key prefix
+    becomes one run; rows keep their relative order within a run."""
+    cdef dict groups
+    cdef list result
+    if depth >= levels - 1 or len(rows) < 2:
+        return rows
+    groups = {}
+    for r in rows:
+        groups.setdefault(canon[r][depth], []).append(r)
+    if len(groups) == 1:
+        return _hierarchical_order(rows, depth + 1, levels, canon)
+    result = []
+    for group in groups.values():
+        result.extend(_hierarchical_order(group, depth + 1, levels, canon))
+    return result
+
+
+cdef void _row_columns(TableHandle t, list hold, tuple values, list order, Py_ssize_t width) except *:
+    """Typed column arrays of a row-stored table in handle row order: a float, int or bool
+    column gets a C array; every cell also stays available as the stored object."""
+    cdef Py_ssize_t rows = len(order), r, c, i
+    cdef unsigned char* kinds = <unsigned char*>_alloc(hold, width)
+    cdef double* numbers = NULL
+    cdef long long* integers = NULL
+    cdef int overflow = 0
+    cdef bint any_float = False, any_int = False
+    cdef unsigned char kind, this
+    for c in range(width):
+        kind = HC_F64
+        for r in range(rows):
+            value = values[<Py_ssize_t>order[r]][c]
+            if type(value) is float:
+                this = HC_F64
+            elif type(value) is bool:
+                this = HC_BOOL
+            elif type(value) is int:
+                PyLong_AsLongLongAndOverflow(value, &overflow)
+                this = HC_OBJ if overflow else HC_I64
+            else:
+                this = HC_OBJ
+            if r == 0:
+                kind = this
+            elif this != kind:
+                kind = HC_OBJ
+            if kind == HC_OBJ:
+                break
+        kinds[c] = kind
+        any_float = any_float or kind == HC_F64
+        any_int = any_int or kind == HC_I64 or kind == HC_BOOL
+    if any_float:
+        numbers = <double*>_alloc(hold, rows * width * sizeof(double))
+    if any_int:
+        integers = <long long*>_alloc(hold, rows * width * sizeof(long long))
+    flat = tuple([values[<Py_ssize_t>order[r]][c] for r in range(rows) for c in range(width)])
+    hold.append(flat)
+    for r in range(rows):
+        for c in range(width):
+            i = r * width + c
+            value = flat[i]
+            if kinds[c] == HC_F64:
+                numbers[i] = PyFloat_AS_DOUBLE(value)
+            elif kinds[c] == HC_I64 or kinds[c] == HC_BOOL:
+                integers[i] = PyLong_AsLongLongAndOverflow(value, &overflow)
+    t._ckind = kinds
+    t._dbl = numbers
+    t._int = integers
+    t._obj = PySequence_Fast_ITEMS(flat) if rows and width else NULL
+    t._stride = width
+
+
+cdef void _init_contiguous(TableHandle t, list hold, tuple storage) except *:
+    cdef Py_ssize_t rows, c
+    cdef const double[:, ::1] numbers
+    cdef const long long[:, ::1] integers
+    cdef unsigned char* kinds
+    cdef HandlePart* parts
+    start, data, spec = storage[1], storage[2], storage[4]
+    rows = len(data)
+    if not -(1 << 63) <= start <= start + rows - 1 < (1 << 63):
+        raise OverflowError('contiguous table keys exceed 64-bit integers')
+    t.levels = 1
+    t.rows = rows
+    kinds = <unsigned char*>_alloc(hold, t.width)
+    if data.dtype == _np_float64 and data.ndim == 2:
+        array = _group_numpy.ascontiguousarray(data)
+        hold.append(array)
+        numbers = array
+        t._dbl = &numbers[0, 0] if rows else NULL
+        kind = HC_F64
+    elif data.dtype == _np_int64 and data.ndim == 2:
+        array = _group_numpy.ascontiguousarray(data)
+        hold.append(array)
+        integers = array
+        t._int = &integers[0, 0] if rows else NULL
+        kind = HC_I64
+    else:
+        kind = HC_OBJ
+        t._array = data
+    for c in range(t.width):
+        kinds[c] = kind
+    if t._preserve:
+        t._array = data             # obj() returns the stored numpy scalar, as the helper
+    t._ckind = kinds
+    t._stride = t.width
+    # DENSE keys start .. start + rows - 1; contiguous tables reject bool keys (helper _find_row)
+    t.scheme = TABLE_DENSE
+    t._keys.scheme = TABLE_DENSE
+    t._keys.count = rows
+    t._keys.nparts = 1
+    t._keys.first = start
+    t._keys.last = start + rows - 1
+    t._keys.modes = _modes(hold, spec, 1, 2)
+    t._int_keys = rows > 0
+    t._increasing = True
+    t._first_obj = start
+    t._last_obj = start + rows - 1
+
+
+cdef void _init_rectangular(TableHandle t, list hold, tuple storage) except *:
+    cdef Py_ssize_t levels, j
+    cdef const double[::1] numbers
+    cdef unsigned char* kinds
+    cdef HandleKeys* axes_keys
+    cdef Py_ssize_t* spans
+    cdef TableHandle axis
+    cdef const unsigned char* modes
+    axes, data, spec = tuple(storage[1]), storage[2], storage[4]
+    levels = len(axes)
+    t.levels = levels
+    array = _group_numpy.ascontiguousarray(data, dtype=_np_float64).reshape(-1)
+    hold.append(array)
+    numbers = array
+    t._dbl = &numbers[0] if len(array) else NULL
+    kinds = <unsigned char*>_alloc(hold, 1)
+    kinds[0] = HC_F64
+    t._ckind = kinds
+    t._stride = 1
+    t.rows = len(array)
+    modes = _modes(hold, spec, levels, 0)
+    axes_keys = <HandleKeys*>_alloc(hold, levels * sizeof(HandleKeys))
+    spans = <Py_ssize_t*>_alloc(hold, levels * sizeof(Py_ssize_t))
+    axis_handles = []
+    for j in range(levels):
+        labels = tuple(axes[j])
+        axis = TableHandle.__new__(TableHandle)
+        axis._labels = labels
+        _index_single(axis, &axis._keys, hold, _label_parts(hold, labels, t._spec_missing),
+                      len(labels), 1, 0, modes + j, labels)
+        axes_keys[j] = axis._keys
+        axis_handles.append(axis)
+    hold.append(tuple(axis_handles))
+    spans[levels - 1] = 1
+    for j in range(levels - 2, -1, -1):
+        spans[j] = spans[j + 1] * len(axes[j + 1])
+    t.scheme = TABLE_PRODUCT
+    t._axes = axes_keys
+    t._spans = spans
+    t._labels = axes
+    t._first_obj, t._last_obj = _product_extremes(axes)
+    _product_children(t, hold, axes, axis_handles)
+
+
+cdef void _init_rows(TableHandle t, list hold, tuple storage) except *:
+    cdef Py_ssize_t levels, rows, r, j
+    cdef HandlePart* original
+    cdef HandlePart* parts
+    cdef const unsigned char* modes
+    keys, values, spec = storage[1], storage[2], storage[5]
+    rows = len(keys)
+    if spec is not None:
+        levels = len(spec['boolean_modes']) if spec['multi'] else 1
+    else:
+        levels = len(keys[0]) if keys and type(keys[0]) is tuple else 1
+    t.levels = levels
+    t.rows = rows
+    modes = _modes(hold, spec, levels, 0)
+    if levels == 1:
+        _row_columns(t, hold, values, list(range(rows)), t.width)
+        t._labels = tuple(keys)
+        _index_single(t, &t._keys, hold, _label_parts(hold, t._labels, t._spec_missing),
+                      rows, 1, 0, modes, t._labels)
+        t.scheme = t._keys.scheme
+        return
+    hold.append(keys)
+    original = <HandlePart*>_alloc(hold, rows * levels * sizeof(HandlePart))
+    canon = []
+    for r in range(rows):
+        key = keys[r]
+        if type(key) is not tuple or len(key) != levels:
+            raise TypeError('multi-level table key is not a tuple of one part per level')
+        for j in range(levels):
+            _part_from(&original[r * levels + j], key[j], t._spec_missing)
+        canon.append(tuple(_canonical(&original[r * levels + j], key[j]) for j in range(levels)))
+    order = _hierarchical_order(list(range(rows)), 0, levels, canon)
+    parts = <HandlePart*>_alloc(hold, rows * levels * sizeof(HandlePart))
+    for r in range(rows):
+        memcpy(&parts[r * levels], &original[<Py_ssize_t>order[r] * levels], levels * sizeof(HandlePart))
+    _row_columns(t, hold, values, order, t.width)
+    t._labels = tuple([keys[<Py_ssize_t>order[r]] for r in range(rows)])
+    t.scheme = TABLE_HASHED
+    t._keys.scheme = TABLE_HASHED
+    t._keys.count = rows
+    t._keys.nparts = levels
+    t._keys.pstride = levels
+    t._keys.poff = 0
+    t._keys.parts = parts
+    t._keys.modes = modes
+    _hash_index(&t._keys, hold)
+    t._first_obj, t._last_obj = _extremes(keys)
+    _rows_children(t, hold, parts, levels, 0, t._labels, modes)
+
+
+cdef double _object_f64(PyObject* value) except? -1:
+    """float(value) for a stored cell object."""
+    if PyFloat_Check(<object>value):
+        return PyFloat_AS_DOUBLE(<object>value)
+    if PyLong_Check(<object>value):
+        return PyLong_AsDouble(<object>value)
+    mx_handle_fallback()
+    return PyFloat_AS_DOUBLE(PyNumber_Float(<object>value))
+
+
+cdef long long _double_i64(double value) except? -1:
+    """int(value) for a float cell, in a C long long."""
+    if isnan(value):
+        raise ValueError('cannot convert float NaN to integer')
+    if isinf(value):
+        raise OverflowError('cannot convert float infinity to integer')
+    if not -9223372036854775808.0 <= value < 9223372036854775808.0:
+        raise OverflowError('Python int too large to convert to C long long')
+    return <long long>value
+
+
+cdef long long _object_i64(PyObject* value) except? -1:
+    cdef int overflow = 0
+    cdef long long result
+    if PyLong_Check(<object>value):
+        result = PyLong_AsLongLongAndOverflow(<object>value, &overflow)
+    elif PyFloat_Check(<object>value):
+        return _double_i64(PyFloat_AS_DOUBLE(<object>value))
+    else:
+        mx_handle_fallback()
+        result = PyLong_AsLongLongAndOverflow(PyNumber_Long(<object>value), &overflow)
+    if overflow:
+        raise OverflowError('Python int too large to convert to C long long')
+    return result
+
+
+cdef inline Py_ssize_t _h_cell(TableHandle self, Py_ssize_t row, Py_ssize_t col) except -1:
+    if <size_t>row >= <size_t>self.rows or <size_t>col >= <size_t>self.width:
+        raise IndexError(f'table cell ({row}, {col}) is out of range')
+    return (self.base + row) * self._stride + self._colbase + col
+
+cdef Py_ssize_t _h_row(TableHandle self, const HandlePart* q, Py_ssize_t n) except -2:
+    cdef Py_ssize_t j, position, row = 0
+    if n != self.levels:
+        return -1
+    if self.scheme == TABLE_PRODUCT:
+        for j in range(n):
+            position = _keys_find(&self._axes[j], &q[j])
+            if position < 0:
+                return -1
+            row += position * self._spans[j]
+        return row
+    return _keys_find(&self._keys, q)
+
+cdef TableHandle _h_child(TableHandle self, const HandlePart* q):
+    cdef Py_ssize_t position
+    if self.levels < 2:
+        return None
+    if self.scheme == TABLE_PRODUCT:
+        position = _keys_find(&self._axes[0], q)
+    else:
+        position = _keys_find(&self._ckeys, q)
+    if position < 0:
+        return None
+    return <TableHandle>PyTuple_GET_ITEM(self._children, position)
+
+cdef TableHandle _h_sub(TableHandle self, const HandlePart* q, Py_ssize_t n):
+    cdef TableHandle handle = self
+    cdef Py_ssize_t j
+    if n >= self.levels:
+        raise TypeError(f'sub_{n} needs fewer key parts than the {self.levels} levels of the table')
+    for j in range(n):
+        handle = _h_child(handle, &q[j])
+        if handle is None:
+            return None
+    if handle._colbase != self._colbase or handle.width != self.width:
+        handle = _column_of(handle, self._colbase, self._columns)
+    return handle
+
+cdef bint _h_has(TableHandle self, const HandlePart* q, Py_ssize_t n) except -1:
+    cdef TableHandle handle = self
+    cdef Py_ssize_t j
+    if n == self.levels:
+        return _h_row(self, q, n) >= 0
+    if n > self.levels or n == 0:
+        return False
+    if self.scheme == TABLE_PRODUCT:
+        for j in range(n):
+            if _keys_find(&self._axes[j], &q[j]) < 0:
+                return False
+        return True
+    for j in range(n):
+        handle = _h_child(handle, &q[j])
+        if handle is None:
+            return False
+    return True
+
+cdef int _h_unpack(TableHandle self, object key, HandlePart* q) except -1:
+    """A whole tuple key passed as one part of a multi-level table: its parts, else 0."""
+    cdef Py_ssize_t j, n
+    if not (PyTuple_Check(key) and self.levels > 1):
+        return 0
+    n = PyTuple_GET_SIZE(key)
+    if n == 0 or n > 6:
+        return 0
+    for j in range(n):
+        _part_from(&q[j], <object>PyTuple_GET_ITEM(key, j), self._spec_missing)
+    return <int>n
+
+cdef int _h_int_index(TableHandle self, str what) except -1:
+    if self.levels != 1 or not self._int_keys:
+        raise TypeError(f'{what} needs a one-level table with integer keys')
+    return 0
+
+cdef object _h_label(TableHandle self, Py_ssize_t row):
+    cdef Py_ssize_t j, position
+    if self.scheme == TABLE_PRODUCT:
+        parts = []
+        for j in range(self.levels):
+            position = (row // self._spans[j]) % self._axes[j].count
+            parts.append(self._labels[j][position])
+        return tuple(parts)
+    if self._labels is None:
+        return self._keys.first + row
+    return self._labels[row]
+
+cdef inline PyObject* _h_value(RecordHandle self, Py_ssize_t slot) except NULL:
+    if <size_t>slot >= <size_t>PyTuple_GET_SIZE(self._items):
+        raise IndexError(f'record slot {slot} is out of range')
+    return mx_tuple_item(mx_tuple_item(<PyObject*>self._items, slot), 1)
 
 
 @cython.final
 cdef class TableHandle:
+    """Typed read handle of one helper Table (or of one of its sub-tables): see the pxd."""
+
     def __init__(self, owner):
-        raise _handle_pending('__init__')
+        cdef list hold = []
+        if type(owner) is NativeTable:
+            owner = (<NativeTable>owner)._owner
+        if _table_storage_fn is None:
+            raise TypeError('typed table handles need modelx_helpers.immutable_inputs.table_storage')
+        storage = tuple(_table_storage_fn(owner))
+        self.owner = owner
+        self._hold = hold
+        self._prefix = ()
+        self._columns = tuple(storage[-2])
+        self.width = len(self._columns)
+        self._spec_missing = storage[-1] is not None
+        self._preserve = bool(getattr(owner, '_preserve_scalar_types', False))
+        self._first_obj = _no_extreme
+        self._last_obj = _no_extreme
+        self._children = ()
+        if storage[0] == 'contiguous':
+            _init_contiguous(self, hold, storage)
+        elif storage[0] == 'rectangular':
+            _init_rectangular(self, hold, storage)
+        elif storage[0] == 'rows':
+            _init_rows(self, hold, storage)
+        else:
+            raise TypeError(f'unknown table storage {storage[0]!r}')
+
+    # -- columns and cells ------------------------------------------------------------------
 
     cdef Py_ssize_t col(self, object name) except -2:
-        raise _handle_pending('col')
+        cdef Py_ssize_t j
+        for j in range(self.width):
+            if <PyObject*>name == PyTuple_GET_ITEM(self._columns, j):
+                return j
+        if PyUnicode_Check(name):
+            for j in range(self.width):
+                if mx_unicode_compare(<PyObject*>name, PyTuple_GET_ITEM(self._columns, j)) == 0:
+                    return j
+        raise KeyError(name)
 
-    cdef Py_ssize_t row_1(self, TableKey p0) except -2:
-        raise _handle_pending('row_1')
-
-    cdef Py_ssize_t row_2(self, TableKey p0, TableKey p1) except -2:
-        raise _handle_pending('row_2')
-
-    cdef Py_ssize_t row_3(self, TableKey p0, TableKey p1, TableKey p2) except -2:
-        raise _handle_pending('row_3')
-
-    cdef Py_ssize_t row_4(self, TableKey p0, TableKey p1, TableKey p2, TableKey p3) except -2:
-        raise _handle_pending('row_4')
-
-    cdef Py_ssize_t row_5(self, TableKey p0, TableKey p1, TableKey p2, TableKey p3, TableKey p4) except -2:
-        raise _handle_pending('row_5')
-
-    cdef Py_ssize_t row_6(self, TableKey p0, TableKey p1, TableKey p2, TableKey p3, TableKey p4, TableKey p5) except -2:
-        raise _handle_pending('row_6')
-
-    cdef bint has_1(self, TableKey p0) except -1:
-        raise _handle_pending('has_1')
-
-    cdef bint has_2(self, TableKey p0, TableKey p1) except -1:
-        raise _handle_pending('has_2')
-
-    cdef bint has_3(self, TableKey p0, TableKey p1, TableKey p2) except -1:
-        raise _handle_pending('has_3')
-
-    cdef bint has_4(self, TableKey p0, TableKey p1, TableKey p2, TableKey p3) except -1:
-        raise _handle_pending('has_4')
-
-    cdef bint has_5(self, TableKey p0, TableKey p1, TableKey p2, TableKey p3, TableKey p4) except -1:
-        raise _handle_pending('has_5')
-
-    cdef bint has_6(self, TableKey p0, TableKey p1, TableKey p2, TableKey p3, TableKey p4, TableKey p5) except -1:
-        raise _handle_pending('has_6')
 
     cdef double f64(self, Py_ssize_t row, Py_ssize_t col) except? -1:
-        raise _handle_pending('f64')
+        cdef Py_ssize_t i = _h_cell(self, row, col)
+        cdef unsigned char kind = self._ckind[self._colbase + col]
+        if kind == HC_F64:
+            return self._dbl[i]
+        if kind == HC_I64 or kind == HC_BOOL:
+            return <double>self._int[i]
+        if self._obj != NULL:
+            return _object_f64(self._obj[i])
+        mx_handle_fallback()
+        return float(self._array[self.base + row, self._colbase + col])
 
     cdef long long i64(self, Py_ssize_t row, Py_ssize_t col) except? -1:
-        raise _handle_pending('i64')
+        cdef Py_ssize_t i = _h_cell(self, row, col)
+        cdef unsigned char kind = self._ckind[self._colbase + col]
+        if kind == HC_I64 or kind == HC_BOOL:
+            return self._int[i]
+        if kind == HC_F64:
+            return _double_i64(self._dbl[i])
+        if self._obj != NULL:
+            return _object_i64(self._obj[i])
+        mx_handle_fallback()
+        return int(self._array[self.base + row, self._colbase + col])
 
     cdef object obj(self, Py_ssize_t row, Py_ssize_t col):
-        raise _handle_pending('obj')
+        cdef Py_ssize_t i = _h_cell(self, row, col)
+        cdef unsigned char kind = self._ckind[self._colbase + col]
+        if self._obj != NULL:
+            return <object>self._obj[i]
+        if self._array is not None:
+            mx_handle_fallback()
+            if self._preserve:
+                return self._array[self.base + row, self._colbase + col]
+            return self._array.item(self.base + row, self._colbase + col)
+        if kind == HC_F64:
+            return PyFloat_FromDouble(self._dbl[i])
+        if kind == HC_BOOL:
+            return self._int[i] != 0
+        return PyLong_FromLongLong(self._int[i])
 
-    cdef long long first_int(self) except? -1:
-        raise _handle_pending('first_int')
+    # -- keys -----------------------------------------------------------------------------
 
-    cdef long long last_int(self) except? -1:
-        raise _handle_pending('last_int')
 
-    cdef object first_key(self):
-        raise _handle_pending('first_key')
 
-    cdef object last_key(self):
-        raise _handle_pending('last_key')
 
-    cdef long long asof_int(self, long long k) except? -1:
-        raise _handle_pending('asof_int')
 
-    cdef Py_ssize_t asof_row(self, long long k) except -2:
-        raise _handle_pending('asof_row')
 
-    cdef Py_ssize_t searchsorted_right(self, long long k) noexcept:
-        return -1
+    cdef Py_ssize_t row_1(self, TableKey p0) except -2:
+        cdef HandlePart q[6]
+        cdef Py_ssize_t row, n = 0
+        if TableKey is object:
+            n = _h_unpack(self, p0, q)
+        if n == 0:
+            _set_part(&q[0], p0, self._spec_missing)
+            n = 1
+        row = _h_row(self, q, n)
+        if row < 0:
+            raise KeyError(_original(p0))
+        return row
 
-    cdef long long key_int(self, Py_ssize_t i) except? -1:
-        raise _handle_pending('key_int')
+    cdef Py_ssize_t row_2(self, TableKey p0, TableKey p1) except -2:
+        cdef HandlePart q[2]
+        cdef Py_ssize_t row
+        _set_part(&q[0], p0, self._spec_missing)
+        _set_part(&q[1], p1, self._spec_missing)
+        row = _h_row(self, q, 2)
+        if row < 0:
+            raise KeyError((_original(p0), _original(p1)))
+        return row
+
+    cdef Py_ssize_t row_3(self, TableKey p0, TableKey p1, TableKey p2) except -2:
+        cdef HandlePart q[3]
+        cdef Py_ssize_t row
+        _set_part(&q[0], p0, self._spec_missing)
+        _set_part(&q[1], p1, self._spec_missing)
+        _set_part(&q[2], p2, self._spec_missing)
+        row = _h_row(self, q, 3)
+        if row < 0:
+            raise KeyError((_original(p0), _original(p1), _original(p2)))
+        return row
+
+    cdef Py_ssize_t row_4(self, TableKey p0, TableKey p1, TableKey p2, TableKey p3) except -2:
+        cdef HandlePart q[4]
+        cdef Py_ssize_t row
+        _set_part(&q[0], p0, self._spec_missing)
+        _set_part(&q[1], p1, self._spec_missing)
+        _set_part(&q[2], p2, self._spec_missing)
+        _set_part(&q[3], p3, self._spec_missing)
+        row = _h_row(self, q, 4)
+        if row < 0:
+            raise KeyError((_original(p0), _original(p1), _original(p2), _original(p3)))
+        return row
+
+    cdef Py_ssize_t row_5(self, TableKey p0, TableKey p1, TableKey p2, TableKey p3, TableKey p4) except -2:
+        cdef HandlePart q[5]
+        cdef Py_ssize_t row
+        _set_part(&q[0], p0, self._spec_missing)
+        _set_part(&q[1], p1, self._spec_missing)
+        _set_part(&q[2], p2, self._spec_missing)
+        _set_part(&q[3], p3, self._spec_missing)
+        _set_part(&q[4], p4, self._spec_missing)
+        row = _h_row(self, q, 5)
+        if row < 0:
+            raise KeyError((_original(p0), _original(p1), _original(p2), _original(p3),
+                            _original(p4)))
+        return row
+
+    cdef Py_ssize_t row_6(self, TableKey p0, TableKey p1, TableKey p2, TableKey p3, TableKey p4, TableKey p5) except -2:
+        cdef HandlePart q[6]
+        cdef Py_ssize_t row
+        _set_part(&q[0], p0, self._spec_missing)
+        _set_part(&q[1], p1, self._spec_missing)
+        _set_part(&q[2], p2, self._spec_missing)
+        _set_part(&q[3], p3, self._spec_missing)
+        _set_part(&q[4], p4, self._spec_missing)
+        _set_part(&q[5], p5, self._spec_missing)
+        row = _h_row(self, q, 6)
+        if row < 0:
+            raise KeyError((_original(p0), _original(p1), _original(p2), _original(p3),
+                            _original(p4), _original(p5)))
+        return row
+
+    cdef bint has_1(self, TableKey p0) except -1:
+        cdef HandlePart q[6]
+        cdef Py_ssize_t n = 0
+        if TableKey is object:
+            n = _h_unpack(self, p0, q)
+        if n == 0:
+            _set_part(&q[0], p0, self._spec_missing)
+            n = 1
+        return _h_has(self, q, n)
+
+    cdef bint has_2(self, TableKey p0, TableKey p1) except -1:
+        cdef HandlePart q[2]
+        _set_part(&q[0], p0, self._spec_missing)
+        _set_part(&q[1], p1, self._spec_missing)
+        return _h_has(self, q, 2)
+
+    cdef bint has_3(self, TableKey p0, TableKey p1, TableKey p2) except -1:
+        cdef HandlePart q[3]
+        _set_part(&q[0], p0, self._spec_missing)
+        _set_part(&q[1], p1, self._spec_missing)
+        _set_part(&q[2], p2, self._spec_missing)
+        return _h_has(self, q, 3)
+
+    cdef bint has_4(self, TableKey p0, TableKey p1, TableKey p2, TableKey p3) except -1:
+        cdef HandlePart q[4]
+        _set_part(&q[0], p0, self._spec_missing)
+        _set_part(&q[1], p1, self._spec_missing)
+        _set_part(&q[2], p2, self._spec_missing)
+        _set_part(&q[3], p3, self._spec_missing)
+        return _h_has(self, q, 4)
+
+    cdef bint has_5(self, TableKey p0, TableKey p1, TableKey p2, TableKey p3, TableKey p4) except -1:
+        cdef HandlePart q[5]
+        _set_part(&q[0], p0, self._spec_missing)
+        _set_part(&q[1], p1, self._spec_missing)
+        _set_part(&q[2], p2, self._spec_missing)
+        _set_part(&q[3], p3, self._spec_missing)
+        _set_part(&q[4], p4, self._spec_missing)
+        return _h_has(self, q, 5)
+
+    cdef bint has_6(self, TableKey p0, TableKey p1, TableKey p2, TableKey p3, TableKey p4, TableKey p5) except -1:
+        cdef HandlePart q[6]
+        _set_part(&q[0], p0, self._spec_missing)
+        _set_part(&q[1], p1, self._spec_missing)
+        _set_part(&q[2], p2, self._spec_missing)
+        _set_part(&q[3], p3, self._spec_missing)
+        _set_part(&q[4], p4, self._spec_missing)
+        _set_part(&q[5], p5, self._spec_missing)
+        return _h_has(self, q, 6)
 
     cdef TableHandle sub_1(self, TableKey p0):
-        raise _handle_pending('sub_1')
+        cdef HandlePart q[1]
+        _set_part(&q[0], p0, self._spec_missing)
+        child = _h_sub(self, q, 1)
+        if child is None:
+            raise KeyError(_original(p0))
+        return child
 
     cdef TableHandle sub_2(self, TableKey p0, TableKey p1):
-        raise _handle_pending('sub_2')
+        cdef HandlePart q[2]
+        _set_part(&q[0], p0, self._spec_missing)
+        _set_part(&q[1], p1, self._spec_missing)
+        child = _h_sub(self, q, 2)
+        if child is None:
+            raise KeyError((_original(p0), _original(p1)))
+        return child
 
     cdef TableHandle sub_3(self, TableKey p0, TableKey p1, TableKey p2):
-        raise _handle_pending('sub_3')
+        cdef HandlePart q[3]
+        _set_part(&q[0], p0, self._spec_missing)
+        _set_part(&q[1], p1, self._spec_missing)
+        _set_part(&q[2], p2, self._spec_missing)
+        child = _h_sub(self, q, 3)
+        if child is None:
+            raise KeyError((_original(p0), _original(p1), _original(p2)))
+        return child
 
     cdef TableHandle sub_4(self, TableKey p0, TableKey p1, TableKey p2, TableKey p3):
-        raise _handle_pending('sub_4')
+        cdef HandlePart q[4]
+        _set_part(&q[0], p0, self._spec_missing)
+        _set_part(&q[1], p1, self._spec_missing)
+        _set_part(&q[2], p2, self._spec_missing)
+        _set_part(&q[3], p3, self._spec_missing)
+        child = _h_sub(self, q, 4)
+        if child is None:
+            raise KeyError((_original(p0), _original(p1), _original(p2), _original(p3)))
+        return child
 
     cdef TableHandle sub_5(self, TableKey p0, TableKey p1, TableKey p2, TableKey p3, TableKey p4):
-        raise _handle_pending('sub_5')
+        cdef HandlePart q[5]
+        _set_part(&q[0], p0, self._spec_missing)
+        _set_part(&q[1], p1, self._spec_missing)
+        _set_part(&q[2], p2, self._spec_missing)
+        _set_part(&q[3], p3, self._spec_missing)
+        _set_part(&q[4], p4, self._spec_missing)
+        child = _h_sub(self, q, 5)
+        if child is None:
+            raise KeyError((_original(p0), _original(p1), _original(p2), _original(p3),
+                            _original(p4)))
+        return child
+
+    # -- index ------------------------------------------------------------------------------
+
+
+    cdef long long first_int(self) except? -1:
+        if self.rows == 0:
+            raise ValueError('cannot convert float NaN to integer')
+        _h_int_index(self, 'index.min()')
+        return self._keys.first
+
+    cdef long long last_int(self) except? -1:
+        if self.rows == 0:
+            raise ValueError('cannot convert float NaN to integer')
+        _h_int_index(self, 'index.max()')
+        return self._keys.last
+
+    cdef object first_key(self):
+        if self._first_obj is _no_extreme:
+            mx_handle_fallback()
+            return self.helper().index.min()
+        return self._first_obj
+
+    cdef object last_key(self):
+        if self._last_obj is _no_extreme:
+            mx_handle_fallback()
+            return self.helper().index.max()
+        return self._last_obj
+
+    cdef Py_ssize_t asof_row(self, long long k) except -2:
+        """Row of index.asof(k): the last key <= k; KeyError(k) below the first key (D25a)."""
+        cdef Py_ssize_t lo = 0, hi, mid
+        if self.levels == 1 and self._int_keys:
+            if self._keys.scheme == TABLE_DENSE:
+                if k >= self._keys.last:
+                    return self.rows - 1
+                if k < self._keys.first:
+                    raise KeyError(k)
+                return <Py_ssize_t>(<unsigned long long>k - <unsigned long long>self._keys.first)
+            if self._increasing:
+                hi = self.rows
+                while lo < hi:
+                    mid = lo + (hi - lo) // 2
+                    if k < self._okeys[mid]:
+                        hi = mid
+                    else:
+                        lo = mid + 1
+                if lo == 0:
+                    raise KeyError(k)
+                return lo - 1
+        mx_handle_fallback()        # labels not in increasing order: the helper (pandas) answers
+        return self.row_1(<object>self.helper().index.asof(k))
+
+    cdef long long asof_int(self, long long k) except? -1:
+        cdef Py_ssize_t row
+        if self.levels == 1 and self._int_keys:
+            if self._keys.scheme == TABLE_DENSE:
+                if k >= self._keys.last:
+                    return self._keys.last
+                if k < self._keys.first:
+                    raise KeyError(k)
+                return k
+            if self._increasing:
+                return self._okeys[self.asof_row(k)]
+        mx_handle_fallback()
+        return self.helper().index.asof(k)
+
+    cdef Py_ssize_t searchsorted_right(self, long long k) noexcept:
+        """index.searchsorted(k, side="right") on a one-level int index; -1 when not applicable
+        (the read is then not typed). Bisects the keys in row order, as the helper."""
+        cdef Py_ssize_t lo = 0, hi, mid
+        if self.levels != 1 or not self._int_keys:
+            return -1
+        if self._keys.scheme == TABLE_DENSE:
+            if k < self._keys.first:
+                return 0
+            if k >= self._keys.last:
+                return self.rows
+            return <Py_ssize_t>(<unsigned long long>k - <unsigned long long>self._keys.first) + 1
+        hi = self.rows
+        while lo < hi:
+            mid = lo + (hi - lo) // 2
+            if k < self._okeys[mid]:
+                hi = mid
+            else:
+                lo = mid + 1
+        return lo
+
+    cdef long long key_int(self, Py_ssize_t i) except? -1:
+        cdef Py_ssize_t position = i + self.rows if i < 0 else i
+        _h_int_index(self, 'index[i]')
+        if not 0 <= position < self.rows:
+            raise IndexError(f'index {i} is out of bounds for axis 0 with size {self.rows}')
+        if self._keys.scheme == TABLE_DENSE:
+            return self._keys.first + position
+        return self._okeys[position]
+
+    # -- escapes ----------------------------------------------------------------------------
+
 
     cdef object row_record(self, Py_ssize_t row):
-        raise _handle_pending('row_record')
+        """The row as the helper's Record (T.loc[k]): a Python object, built by the helper."""
+        if <size_t>row >= <size_t>self.rows:
+            raise IndexError(f'table row {row} is out of range')
+        mx_handle_fallback()
+        record = self.helper().loc[_h_label(self, row)]
+        if self._colbase or self.width != len(record):
+            return record[self._columns[0]] if self.width == 1 else record
+        return record
 
     cdef TableHandle column_view(self, Py_ssize_t col):
-        raise _handle_pending('column_view')
+        if <size_t>col >= <size_t>self.width:
+            raise IndexError(f'table column {col} is out of range')
+        return _column_of(self, self._colbase + col, (self._columns[col],))
+
+    # -- Python side (tests, receipts) -------------------------------------------------------
+
+    def helper(self):
+        """The helper Table this handle reads (a sub-table is materialised by the helper's memo)."""
+        if not self._prefix:
+            return self.owner
+        return self.owner.loc[self._prefix if len(self._prefix) > 1 else self._prefix[0]]
+
+    @property
+    def scheme_name(self):
+        return {TABLE_DENSE: 'dense', TABLE_SORTED: 'sorted', TABLE_HASHED: 'hashed',
+                TABLE_PRODUCT: 'product'}.get(self.scheme, '?')
+
+    @property
+    def shape(self):
+        return (self.rows, self.width, self.levels, self.base)
+
+    @property
+    def prefix(self):
+        return self._prefix
+
+    @property
+    def children(self):
+        return self._children
+
+    def memory(self):
+        """Bytes held for this handle tree: arrays (shared by all handles of the table), handle
+        objects of the eager sub-tables, and their count."""
+        import sys as _sys
+        arrays = 0
+        for item in self._hold:
+            if type(item) is bytearray:
+                arrays += len(<bytearray>item)
+            elif type(item) is tuple:
+                arrays += _sys.getsizeof(item)
+        count, objects, tuples = 0, 0, 0
+        stack = [self]
+        while stack:
+            handle = <TableHandle>stack.pop()
+            count += 1
+            objects += _sys.getsizeof(handle)
+            if handle is not self and handle._labels is not None:
+                tuples += _sys.getsizeof(handle._labels)
+            stack.extend(handle._children)
+        return {'handles': count, 'handle_objects': objects, 'child_label_tuples': tuples,
+                'arrays': arrays}
+
+
+cdef TableHandle _column_of(TableHandle source, Py_ssize_t colbase, tuple columns):
+    cdef TableHandle view = _clone(source)
+    view._colbase = colbase
+    view._columns = columns
+    view.width = len(columns)
+    return view
 
 
 @cython.final
 cdef class RecordHandle:
+    """Typed field reads of one helper Record: field(name) once, then f64/i64/obj by slot."""
+
     def __init__(self, owner):
-        raise NotImplementedError('RecordHandle: typed record handles are not built yet (W1.2)')
+        _record_init(self, owner)
 
     cdef Py_ssize_t field(self, object name) except -2:
-        raise NotImplementedError('RecordHandle.field (W1.2)')
+        cdef Py_ssize_t j, n = PyTuple_GET_SIZE(self._items)
+        cdef PyObject* key
+        for j in range(n):
+            if <PyObject*>name == mx_tuple_item(mx_tuple_item(<PyObject*>self._items, j), 0):
+                return j
+        for j in range(n):
+            key = mx_tuple_item(mx_tuple_item(<PyObject*>self._items, j), 0)
+            if PyUnicode_Check(name) and PyUnicode_Check(<object>key):
+                if mx_unicode_compare(<PyObject*>name, key) == 0:
+                    return j
+            elif not PyUnicode_Check(name) and not PyUnicode_Check(<object>key):
+                if mx_rich_equal(<PyObject*>name, key, 2):
+                    mx_handle_fallback()
+                    return j
+        raise KeyError(name)
+
 
     cdef double f64(self, Py_ssize_t slot) except? -1:
-        raise NotImplementedError('RecordHandle.f64 (W1.2)')
+        return _object_f64(_h_value(self, slot))
 
     cdef long long i64(self, Py_ssize_t slot) except? -1:
-        raise NotImplementedError('RecordHandle.i64 (W1.2)')
+        return _object_i64(_h_value(self, slot))
 
     cdef object obj(self, Py_ssize_t slot):
-        raise NotImplementedError('RecordHandle.obj (W1.2)')
+        return <object>_h_value(self, slot)
+
+
+cdef void _record_init(RecordHandle handle, object owner) except *:
+    cdef PyObject* items
+    handle.owner = owner
+    if isinstance(owner, Record) and _record_items_offset >= 0:
+        # the Record's own immutable pairs, read from its slot (no attribute lookup)
+        items = (<PyObject**>(<char*><PyObject*>owner + _record_items_offset))[0]
+        if items != NULL and PyTuple_Check(<object>items):
+            handle._items = <tuple>items
+            return
+    if isinstance(owner, Record):
+        handle._items = owner._items
+        return
+    mx_handle_fallback()
+    handle._items = tuple(owner.items())
+
+
+cdef object _bound_handle(object owner):
+    """The handle of a helper Table, built once per table object and kept in its native cache
+    (at preparation for tables built by compiled code, else at the first bind)."""
+    cdef dict cache = owner._native_cache
+    handle = cache.get(TableHandle)
+    if handle is None:
+        handle = cache.setdefault(TableHandle, TableHandle(owner))
+    return handle
+
+
+cdef object _try_bound_handle(object owner):
+    """_bound_handle, or None when this table has no handle form (a bind never fails on it)."""
+    if _table_storage_fn is None:
+        return None
+    try:
+        return _bound_handle(owner)
+    except Exception:
+        return None
 
 
 cdef TableHandle table_handle(object value):
-    """The handle of a bound table: NativeTable.handle, else a new handle (W1.2)."""
-    if type(value) is NativeTable and (<NativeTable>value).handle is not None:
-        return (<NativeTable>value).handle
-    return TableHandle(value)
+    """The handle of a bound table: NativeTable.handle, else the table's own handle."""
+    if type(value) is NativeTable:
+        if (<NativeTable>value).handle is not None:
+            return (<NativeTable>value).handle
+        value = (<NativeTable>value)._owner
+    elif type(value) is TableHandle:
+        return <TableHandle>value
+    mx_handle_fallback()        # not a bound table: the handle is found through its cache
+    if not isinstance(value, Table):
+        raise TypeError(f'expected a Table, got {type(value).__name__}')
+    return _bound_handle(value)
 
 
 cdef RecordHandle record_handle(object value):
-    return RecordHandle(value)
+    cdef RecordHandle handle = RecordHandle.__new__(RecordHandle)
+    _record_init(handle, value)
+    return handle
+
+
+def table_handle_of(value):
+    """Python access to table_handle (tests and receipts)."""
+    return table_handle(value)
