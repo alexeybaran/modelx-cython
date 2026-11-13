@@ -76,16 +76,21 @@ class _OrderedArguments(cst.CSTTransformer):
         from .powers import KIND_FLOAT, KIND_INT
         if self.operand_kind is None or self.providers is None:
             return None
-        kinds = {self.operand_kind.kind(argument.value) for argument in positional}
-        if kinds == {KIND_FLOAT}:
-            suffix = '_f64'
-        elif kinds == {KIND_INT}:
-            suffix = '_i64'
-        else:
-            return None
+        order = [self.operand_kind.kind(argument.value) for argument in positional]
+        kinds = set(order)
         from .helper_members import MATH_PROVIDER
         from .helpers import module_name
-        function = cst.Attribute(cst.Name(module_name(MATH_PROVIDER)), cst.Name(before.func.value + suffix))
+        name = lambda suffix: cst.Attribute(cst.Name(module_name(MATH_PROVIDER)),
+                                            cst.Name(before.func.value + suffix))
+        if kinds == {KIND_FLOAT}:
+            function = name('_f64')
+        elif kinds == {KIND_INT}:
+            function = name('_i64')
+        elif kinds == {KIND_FLOAT, KIND_INT} and len(order) == 2:
+            # one double and one C integer: exact comparison, the selected operand's class
+            function = name('_f64_i64' if order[0] == KIND_FLOAT else '_i64_f64')
+        else:
+            return None
         result = positional[0].value
         for argument in positional[1:]:
             result = cst.Call(function, (cst.Arg(result), cst.Arg(argument.value)))
@@ -124,8 +129,8 @@ class _OrderedArguments(cst.CSTTransformer):
         if self.providers is not None:
             from .reductions import untyped_entry
             self.untyped.append(untyped_entry(self.line_of, before, before.func.value,
-                'operands are not all double or all C integers: called as the built-in '
-                'to keep the result class' if not keywords else 'keyword arguments: built-in call'))
+                'operands are not all typed (double or C integer; mixed only for two): called as '
+                'the built-in to keep the result class' if not keywords else 'keyword arguments: built-in call'))
         values = cst.Tuple(tuple(cst.Element(argument.value) for argument in positional))
         return after.with_changes(args=(cst.Arg(values, star='*'), *keywords))
 

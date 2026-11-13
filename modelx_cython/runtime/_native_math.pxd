@@ -46,3 +46,37 @@ cdef inline long long min_i64(long long a, long long b) noexcept:
 
 cdef inline long long max_i64(long long a, long long b) noexcept:
     return b if b > a else a
+
+# Mixed operands (one double, one C integer): Python compares them exactly and returns
+# the selected operand with its own class, so only the result is an object.
+from libc.math cimport floor as _floor
+
+cdef inline int _order_f64_i64(double d, long long i) noexcept:
+    """-1, 0 or 1 as d is below, equal to or above i (exactly); 2 when d is nan."""
+    cdef double whole
+    cdef long long w
+    if d != d:
+        return 2
+    if d < -9223372036854775808.0:
+        return -1
+    if d >= 9223372036854775808.0:
+        return 1
+    whole = _floor(d)
+    w = <long long>whole
+    if w < i:
+        return -1
+    if w > i:
+        return 1
+    return 0 if d == whole else 1
+
+cdef inline object min_f64_i64(double a, long long b):
+    return b if _order_f64_i64(a, b) == 1 else a          # b < a
+
+cdef inline object min_i64_f64(long long a, double b):
+    return b if _order_f64_i64(b, a) == -1 else a         # b < a
+
+cdef inline object max_f64_i64(double a, long long b):
+    return b if _order_f64_i64(a, b) == -1 else a         # b > a
+
+cdef inline object max_i64_f64(long long a, double b):
+    return b if _order_f64_i64(b, a) == 1 else a          # b > a

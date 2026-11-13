@@ -112,7 +112,9 @@ def test_typed_extrema_become_c_comparisons_in_object_scopes():
     code, cells, _ = lowered('def formula(i, j):\n    return min(i, j)\n')
     assert '.min_i64(i, j)' in code
     code, cells, _ = lowered('def formula(i, x):\n    return min(i, x)\n')
-    assert 'min(*(i, x))' in code and cells.minmax_native == 0
+    assert '.min_i64_f64(i, x)' in code and cells.minmax_native == 1
+    code, cells, _ = lowered('def formula(i, x, y):\n    return min(i, x, y)\n')
+    assert 'min(*(i, x, y))' in code and cells.minmax_native == 0
     assert [(e['form'], e['line']) for e in cells.minmax_untyped] == [('min', 2)]
     code, cells, _ = lowered('def formula(x, y):\n    return [max(x, y) for _ in range(2)]\n', True)
     assert '.max_f64(x, y)' in code           # a child scope of a native-result cell
