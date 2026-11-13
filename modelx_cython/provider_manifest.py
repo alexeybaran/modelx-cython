@@ -191,8 +191,8 @@ def _read_numeric_table(type_id, declaration):
 def _read_type(type_id, declaration):
     if not _qualified_identifier(type_id):
         raise ValueError(f'invalid qualified type identity {type_id!r}')
-    _require_fields(declaration, type_id, ('members',),
-                    ('view_type', 'bind', 'admission', 'bind_cell',
+    _require_fields(declaration, type_id, (),
+                    ('view_type', 'bind', 'admission', 'bind_cell', 'members',
                      'numeric_table', 'numeric_record', 'grouped_table'))
     view_type = declaration.get('view_type')
     bind = declaration.get('bind')
@@ -225,7 +225,7 @@ def _read_type(type_id, declaration):
         if ('bound_probe' in grouped) != ('bound_read' in grouped):
             raise ValueError(f'invalid grouped table declaration for {type_id}')
 
-    declared_members = declaration['members']
+    declared_members = declaration.get('members', {})
     if not isinstance(declared_members, dict):
         raise ValueError(f'{type_id} members must be an object')
     members = {}

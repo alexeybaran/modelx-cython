@@ -34,8 +34,7 @@
             "read_object": "read_previous_table_float"
           }
         }
-      },
-      "members": {}
+      }
     },
     "modelx_helpers.immutable_inputs.Record": {
       "numeric_record": {
