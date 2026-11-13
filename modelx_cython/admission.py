@@ -1,5 +1,7 @@
 """Describe actual Cython representations without claiming nogil execution."""
 
+import re
+
 from .consts import FORMULA_PREF, MODULE_PREF, SPACE_PREF
 
 
@@ -234,7 +236,8 @@ def table_read_sites(node, resolver, cls_info):
                 shown = parent
             else:
                 break
-        text = ' '.join(module.code_for_node(shown).split())
+        text = re.sub(r'\s*#[^\'"\n]*$', '', module.code_for_node(shown), flags=re.M)    # comments
+        text = ' '.join(text.replace('( ', '(').replace('[ ', '[').split()).replace('( ', '(').replace('[ ', '[')
         result.append(TableReadSite(expr, kind, text, positions[expr].start.line - first + 1))
     result.sort(key=lambda site: site.line)
     return result
