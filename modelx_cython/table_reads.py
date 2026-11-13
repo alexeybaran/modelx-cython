@@ -341,7 +341,7 @@ class TableReads:
         return self.enabled() and not getattr(self.policy, 'table_recognisers', True)
 
     def lower(self, node):
-        if not self.enabled() or self.resolver is None:
+        if not self.enabled() or self.resolver is None or not (self.sites or self.records_enabled()):
             return node
         from .helpers import module_name
         self.module = module_name(PROVIDER)

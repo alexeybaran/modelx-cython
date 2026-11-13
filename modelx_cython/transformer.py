@@ -732,8 +732,8 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
             return node
         from modelx_cython.admission import table_read_sites
         sites = table_read_sites(node, self._resolver, cls_info)
-        if not sites:
-            return node
+        if not sites and not getattr(self.module.spec.policy, 'typed_table_reads', False):
+            return node     # with typed reads on, record field reads (no sites) are lowered too
         from modelx_cython.table_reads import TableReads
         lowering = TableReads(self._resolver, cls_info, cells, self.helper_providers,
                               self.module.spec.policy, sites)
