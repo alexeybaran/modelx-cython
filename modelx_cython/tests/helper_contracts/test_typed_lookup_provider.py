@@ -53,6 +53,17 @@ def clamped(source, namespace, long long key, column, bint lower):
         return result
     return None
 
+def private_clamped(source, namespace, long long key, column):
+    cdef native.NativeTable table = native.NativeTable(source)
+    cdef native.LookupContext context = native.LookupContext()
+    cdef double result
+    context._mx_enable_private_lookup()
+    return [result if native.read_clamped_table_float(
+        table, context, True, namespace, key, column, &result) else None for _ in range(2)]
+
+def prepare(function, frame):
+    return native.table(function, (), frame)
+
 def record_values(function, sources, key):
     cdef native.LookupContext context = native.LookupContext()
     return [native.record_field_float(function, context, source, key) for source in sources]
@@ -186,6 +197,9 @@ def test_clamped_table_matches_ordered_index_and_defers_custom_helpers(native, m
     assert native.clamped(source, h, 4, 'rate', False) == 0.75
     assert native.clamped(source, h, 2, 'rate', False) == 0.5
     assert native.clamped(source, h, 2, 'missing', False) is None
+    assert native.private_clamped(source, h, 0, 'rate') == [0.25, 0.25]
+    prepared = native.prepare(table, pd.DataFrame({'rate': ['0.5', '0.25', '0.75']}, index=[2, 1, 3]))
+    assert native.private_clamped(prepared, h, 0, 'rate') == [0.25, 0.25]
     monkeypatch.setattr(h, 'last_key', lambda table: 2)
     assert native.clamped(source, h, 4, 'rate', True) is None
 

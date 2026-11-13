@@ -184,7 +184,8 @@ cdef inline bint read_clamped_table_float(NativeTable table, LookupContext conte
                                           object column, double* result) except -1:
     cdef Py_ssize_t position
     cdef unsigned char mask = 2 if lower else 1
-    if (table._input_keys is not None and context._private_owner and context.clamped_bindings_ready & mask
+    if (table._input_numeric != NULL and table._input_keys is not None and context._private_owner
+            and context.clamped_bindings_ready & mask
             and context.clamped_source is table and context.clamped_column is column
             and context.clamped_namespace is namespace):
         if key < table._input_low:
@@ -198,7 +199,6 @@ cdef inline bint read_clamped_table_float(NativeTable table, LookupContext conte
         if table._input_numeric[position]:
             result[0] = table._input_values[position]
             return True
-        return False
     return try_clamped_table_float(table, context, lower, namespace, key, column, result)
 
 cdef double prepare_table_method(LookupContext, NativeTable, long long key, object column,
