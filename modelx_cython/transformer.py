@@ -64,6 +64,7 @@ from libcst.metadata.scope_provider import BuiltinAssignment
 from modelx_cython.parser import ParentScopeAddin
 from modelx_cython.builder import ModuleInfo, CombinedCellsInfo
 from modelx_cython.config import TransSpec
+from modelx_cython.exceptions import NumericExceptions, numeric_exception_spec
 from modelx_cython.powers import rewrite_powers
 from modelx_cython.inline_entries import add_inline_entries, allows_exact_receiver
 from modelx_cython.cell_entries import CacheHit, DenseEntry, dense_condition
@@ -463,7 +464,7 @@ class PXDGenerator:
                     cls_name=cls_name, cells_name=cells.name, formula=True
                 )
                 decl_stmts.append(
-                    f"cdef {rettype} {FORMULA_PREF + cells.name}({parameters})\n"
+                    f"cdef {rettype} {FORMULA_PREF + cells.name}({parameters}){numeric_exception_spec(rettype)}\n"
                 )
             else:
                 parameters = self._add_param_type_hints(
@@ -511,7 +512,7 @@ class PXDGenerator:
                     cls_name=cls_name, cells_name=cells.name
                 )
                 decl_stmts.append(
-                    f"cpdef {rettype} {cells.name}({parameters})\n"
+                    f"cpdef {rettype} {cells.name}({parameters}){numeric_exception_spec(rettype)}\n"
                 )
             else:
                 parameters = self._add_param_type_hints(
@@ -729,7 +730,6 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
             stmts.append(cst.parse_statement(
                 'from cython.cimports.libc.string import memset as _mx_collect_memset'))
         from modelx_cython.helpers import module_name
-        from modelx_cython.exceptions import NumericExceptions
         if self._uses_native_round:
             from modelx_cython.rounding import ROUND_BINDING
             stmts.extend(cst.parse_module(ROUND_BINDING).body)
