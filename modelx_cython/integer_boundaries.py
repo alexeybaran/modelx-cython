@@ -1,6 +1,7 @@
 """Check integer Cell results and ItemSpace keys at their native boundaries."""
 
 import libcst as cst
+from libcst.metadata import ExpressionContext
 
 from .checked_arithmetic import (
     CheckedArithmetic, guarded_integer_intervals, range_bounds, signed_local_assignments,
@@ -422,6 +423,25 @@ def _type_signed_locals(body, guard, facts, parameters):
     needed.difference_update(identity_names)
     if not needed:
         return body, ()
+    # Carry result demand through ordered definitions in the straight-line
+    # prefix. Later assignments still need the definite-definition analysis.
+    prefix = []
+    for line in body.body:
+        if not isinstance(line, cst.SimpleStatementLine) or len(line.body) != 1:
+            break
+        assignment = line.body[0]
+        if local_assignment(assignment) is not None:
+            prefix.append(assignment)
+    original_needed = needed.copy()
+    operand_reads = {read for value in (*operands, *(item.value for item in prefix))
+                     for read in _signed_operand_names(value)}
+    escaped = {part.value for part in walk(body) if isinstance(part, cst.Name)
+               and part.value not in needed and part not in operand_reads
+               and facts.contexts.get(part) == ExpressionContext.LOAD}
+    for assignment in reversed(prefix):
+        if local_assignment(assignment).value in needed:
+            needed.update(node.value for node in _signed_operand_names(assignment.value)
+                          if node.value not in identity_names and node.value not in escaped)
     statements = list(body.body)
     parameters = set(parameters)
     seen = parameters.copy()
@@ -433,7 +453,8 @@ def _type_signed_locals(body, guard, facts, parameters):
                 and target.value in needed and target.value not in seen
                 and facts.stores[target.value] == 1):
             value, signed = guard._signed_expression(assignment.value, guard.path)
-            if signed:
+            if signed and (target.value in original_needed
+                           or guard.arithmetic.integer_interval(assignment.value, signed=True) is not None):
                 statements[index] = line.with_changes(body=(
                     cst.AnnAssign(target, cst.Annotation(_INTEGER_ANNOTATION), value),))
                 guard.signed_names.add(target.value)

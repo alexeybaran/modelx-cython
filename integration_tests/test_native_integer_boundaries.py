@@ -60,6 +60,11 @@ def integer_domain_build(tmp_path_factory):
     adjusted = adjusted - 1
     return adjusted + 1
 """)
+        projection.new_cells("chained_local", """def chained_local():
+    first = amount
+    adjusted = first + 1
+    return adjusted
+""")
         projection.new_cells("conditional_local", """def conditional_local():
     if divisor < 0:
         adjusted = amount - 1
@@ -148,6 +153,7 @@ def integer_domain_build(tmp_path_factory):
         projection.negate_amount()
         projection.local_amount()
         projection.reassigned_local()
+        projection.chained_local()
         projection.conditional_local()
         projection.single_assignment_after_guard()
         projection.mixed_local()
@@ -373,16 +379,18 @@ def test_signed_local_flow(integer_domain_build):
     generated = (integer_domain_build / "exported_cy/_m_Outer/_mx_classes.py").read_text(encoding="utf-8")
     methods = {node.name: node for node in ast.walk(ast.parse(generated)) if isinstance(node, ast.FunctionDef)}
 
-    def native_local(cell):
+    def native_local(cell, name="adjusted"):
         formula = methods[f"_f_{cell}"]
         if (len(formula.body) == 1 and isinstance(formula.body[0], ast.Return)
                 and isinstance(call := formula.body[0].value, ast.Call) and isinstance(call.func, ast.Name)):
             formula = methods.get(call.func.id, formula)
         return any(isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name)
-                   and node.target.id == "adjusted" and ast.unparse(node.annotation) == "_mx_cy.longlong"
+                   and node.target.id == name and ast.unparse(node.annotation) == "_mx_cy.longlong"
                    for node in ast.walk(formula))
 
     assert native_local("reassigned_local")
+    assert native_local("chained_local", "first")
+    assert native_local("chained_local")
     assert native_local("conditional_local")
     assert native_local("single_assignment_after_guard")
     assert not native_local("mixed_local")
@@ -400,6 +408,7 @@ def test_signed_local_flow(integer_domain_build):
             reference.amount = projection.amount = amount
             reference.divisor = projection.divisor = divisor
             assert reference.reassigned_local() == projection.reassigned_local() == amount
+            assert reference.chained_local() == projection.chained_local() == amount + 1
             assert reference.conditional_local() == projection.conditional_local()
             assert reference.single_assignment_after_guard() == projection.single_assignment_after_guard()
             assert reference.prefix_identity_local() == projection.prefix_identity_local() == amount + 1
