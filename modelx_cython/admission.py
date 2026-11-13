@@ -87,6 +87,7 @@ def describe(module_infos):
                     'native_expressions': sum(getattr(cell, key, 0) for key in (
                         'reductions_native', 'enum_memberships', 'minmax_native', 'math_native')),
                     'expressions_untyped': expressions_untyped(cell),
+                    **({'vectors': cell.vector_report} if getattr(cell, 'vector_report', None) else {}),
                     'reasons': reasons or ['original Cython representation'],
                 }
     return result

@@ -385,6 +385,15 @@ class CombinedCellsInfo(LexicalCellsInfo):
             return object
 
     @cached_property
+    def vector_shape(self):
+        """'V' (list of floats), 'I' (list of int64) or ('T', kinds) (tuple of such
+        lists) when every traced return value had that shape (``tracer.vector_shape``),
+        else None. Cells with a spec return type, special methods and formulas kept
+        as Python methods are never vector cells (``vectors.py``)."""
+        from modelx_cython.vectors import cell_vector_shape
+        return cell_vector_shape(self)
+
+    @cached_property
     def is_real_value(self):
         """Whether the normalized return type is numeric.
 
@@ -551,6 +560,9 @@ class CombinedCellsInfo(LexicalCellsInfo):
         if binding:
             from modelx_cython.helpers import module_name
             return f'{module_name(binding.manifest.provider)}.{binding.declaration.view_type}'
+        if self.vector_shape in ('V', 'I'):
+            from modelx_cython.vectors import vector_type
+            return vector_type(self.vector_shape)
         if self.has_typeinfo():
             typ = get_type_expr(self.norm_type, c_style=c_style)
             if self.is_real_value and self.is_array_returned:

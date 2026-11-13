@@ -219,7 +219,8 @@ class PXDGenerator:
         """
         stmts = []
         from modelx_cython.helpers import module_name
-        for provider in sorted(numeric_cache.providers(self.module)):
+        from modelx_cython import vectors
+        for provider in sorted(numeric_cache.providers(self.module) | vectors.providers(self.module)):
             stmts.append(f'from {self.package} cimport {module_name(provider)}')
         for ci in self.module.cimports:
             stmts.append(f"cimport {ci}")
@@ -618,6 +619,9 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
         self.dense_entries = {}
         self.formula_entries = {}
         self.helper_providers.update(numeric_cache.providers(module))
+        from modelx_cython import vectors
+        self.helper_providers.update(vectors.providers(module))
+        self._vector_counter = [0]
         code_enums.prepare(module)
 
     def _reserve_cold_sum(self):
@@ -648,6 +652,8 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
         """
         from modelx_cython.checked_arithmetic import CheckedArithmetic
         from modelx_cython.numeric_helpers import NumericReturns
+        from modelx_cython import vectors
+        node = vectors.lower(node, cls_info, cells, scope, self._vector_counter, self.module)
         node = self._table_reads(node, cls_info, cells)
         if not self.module.spec.policy.table_recognisers:
             NumericReturns = _without_table_recognisers(NumericReturns)
