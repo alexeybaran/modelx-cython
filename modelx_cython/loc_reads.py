@@ -203,6 +203,7 @@ class LocReads(FormulaTransformer):
         if len(elements) != 2 or not all(isinstance(e.slice, cst.Index) for e in elements):
             return None, 'not loc[key, column]'
         key, column = elements[0].slice.value, elements[1].slice.value
+        key = self._asof_key(key)
         prefix = self._prefix(target.value)
         if prefix is not None:
             if isinstance(key, cst.Tuple):
@@ -238,6 +239,7 @@ class LocReads(FormulaTransformer):
     # the provider bare, so Cython may pass it as a C integer, only when it is known to be a
     # non-bool integer; every other part is cast to object, so a C bint arrives as a Python bool.
     _INT_RESULTS = frozenset(('long long', 'long', 'int', 'short'))
+    _ASOF_KEYS = frozenset(['native_asof_key'] + [f'native_prefix_op_{n}' for n in range(1, 6)])
 
     def _int_part(self, node, depth=0):
         """Why ``node`` is a non-bool integer, or None."""
@@ -248,6 +250,15 @@ class LocReads(FormulaTransformer):
             return 'integer literal'
         if isinstance(node, cst.Name) and node.value in self._aliases and depth < 4:
             return self._int_part(self._aliases[node.value], depth + 1)
+        if (plain_reads() and isinstance(node, cst.Name) and node.value in self.param_types
+                and self.param_types[node.value] in self._INT_RESULTS
+                and getattr(self, '_assign_counts', {}).get(node.value, 0) == 0):
+            return f'parameter {node.value} is {self.param_types[node.value]}'     # Decision 13.1
+        if (isinstance(node, cst.Call) and isinstance(node.func, cst.Attribute)
+                and node.func.attr.value in self._ASOF_KEYS
+                and not (node.func.attr.value.startswith('native_prefix_op_')
+                         and getattr(node.args[-2].value, 'value', None) == '2')):
+            return 'asof predecessor key'
         if isinstance(node, cst.Call) and not any(a.keyword or a.star for a in node.args):
             chain = _extract_self_chain(node.func)
             if isinstance(chain, list) and chain:
@@ -320,15 +331,6 @@ class LocReads(FormulaTransformer):
             return None
         return node.value.value, parts
 
-    def _c_int(self, node):
-        """A known non-bool C integer: an integer literal or cell (as _int_part), or a parameter
-        traced as an integer and never assigned in the formula."""
-        if self._int_part(node) is not None:
-            return True
-        return (isinstance(node, cst.Name) and node.value in self.param_types
-                and self.param_types[node.value] in self._INT_RESULTS
-                and getattr(self, '_assign_counts', {}).get(node.value, 0) == 0)
-
     def _prefix_call(self, function, prefix, where, *tail):
         parts = self._parts(prefix[1], prefix[1], where)
         self.typed += 1
@@ -336,6 +338,17 @@ class LocReads(FormulaTransformer):
 
     def leave_FunctionDef(self, original, updated):
         """Drop ``sub = T.loc[p]`` when every use of ``sub`` was lowered; else say which stays."""
+        reader = self
+
+        class Asof(cst.CSTVisitor):
+            def visit_Call(self, node):
+                if (plain_reads() and isinstance(node.func, cst.Attribute) and node.func.attr.value == 'asof'
+                        and isinstance(node.func.value, cst.Attribute) and node.func.value.attr.value == 'index'
+                        and (reader._prefix(node.func.value.value) is not None
+                             or reader._schema(node.func.value.value) is not None)):
+                    reader.untyped.append('index.asof(k) not used directly as the row key of a read '
+                                          '(or k not a known C integer): original expression')
+        updated.body.visit(Asof())
         names = [name for name, value in self._aliases.items() if self._prefix(value) is not None]
         if not names:
             return updated
@@ -507,7 +520,7 @@ class LocReads(FormulaTransformer):
         index = target.comparator
         prefix = self._prefix(index.value) if isinstance(index, cst.Attribute) and index.attr.value == 'index' else None
         if prefix is not None:
-            if not self._c_int(updated.left):
+            if self._int_part(updated.left) is None:
                 self.untyped.append('k in T.loc[prefix].index: k is not a known C integer')
                 return updated
             call = self._prefix_call('native_prefix_op', prefix, 'k in T.loc[prefix].index',
@@ -533,30 +546,27 @@ class LocReads(FormulaTransformer):
                                       lpar=updated.lpar, rpar=updated.rpar)
         return call.with_changes(lpar=updated.lpar, rpar=updated.rpar)
 
-    def _asof(self, node):
-        """``R.index.asof(k)`` on an integer-keyed traced table: the provider's predecessor label."""
-        if not (plain_reads() and isinstance(node, cst.Call) and len(node.args) == 1
-                and not node.args[0].keyword and not node.args[0].star
-                and isinstance(node.func, cst.Attribute) and node.func.attr.value == 'asof'
-                and isinstance(node.func.value, cst.Attribute) and node.func.value.attr.value == 'index'):
-            return None
-        prefix = self._prefix(node.func.value.value)
+    def _asof_key(self, key):
+        """``X.index.asof(k)`` written directly as the row key of a read (Decision 13.2): the C integer
+        predecessor search, raising KeyError(nan) below the first key as the read of NaN does."""
+        if not (plain_reads() and isinstance(key, cst.Call) and len(key.args) == 1
+                and not key.args[0].keyword and not key.args[0].star
+                and isinstance(key.func, cst.Attribute) and key.func.attr.value == 'asof'
+                and isinstance(key.func.value, cst.Attribute) and key.func.value.attr.value == 'index'
+                and self._int_part(key.args[0].value) is not None):
+            return key
+        receiver, k = key.func.value.value, key.args[0].value
+        prefix = self._prefix(receiver)
         if prefix is not None:
-            if not self._c_int(node.args[0].value):
-                self.untyped.append('T.loc[prefix].index.asof(k): k is not a known C integer')
-                return None
-            return self._prefix_call('native_prefix_asof', prefix, 'T.loc[prefix].index.asof(k)',
-                                     node.args[0].value)
-        schema = self._schema(node.func.value.value)
+            return self._prefix_call('native_prefix_op', prefix, 'T.loc[prefix].index.asof(k) as row key',
+                                     cst.Integer('3'), k)
+        schema = self._schema(receiver)
         if schema is None or schema.get('__key__') != 'int':
-            return None
+            return key
         self.typed += 1
-        return self._provider_call('native_asof', [node.func.value.value, node.args[0].value])
+        return self._provider_call('native_asof_key', [receiver, k])
 
     def leave_Call(self, original, updated):
-        asof = self._asof(updated)
-        if asof is not None:
-            return asof
         func = original.func
         if (isinstance(func, cst.Name) and func.value == 'int' and len(original.args) == 1
                 and not original.args[0].keyword and not original.args[0].star):

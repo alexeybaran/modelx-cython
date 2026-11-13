@@ -231,7 +231,10 @@ _VARIANTS = {
     'text_row': 'def text_row(t):\n    row = data.named_table().loc[pid()]\n    return float(row["v"])',
     # predecessor label (pandas Index.asof): below the first key it is NaN and the read raises KeyError
     'asof_lit': ('def asof_lit(t):\n    tbl = data.mort_table()\n    try:\n'
-                 '        return float(tbl.loc[tbl.index.asof(t + 3), "mort_rate"])\n    except KeyError:\n        return -1.0'),
+                 '        return float(tbl.loc[tbl.index.asof(t), "mort_rate"])\n    except KeyError:\n        return -1.0'),
+    # the predecessor label kept in a local: not directly a row key, so the original expression
+    'asof_alias': ('def asof_alias(t):\n    tbl = data.mort_table()\n    k = tbl.index.asof(t)\n    try:\n'
+                   '        return float(tbl.loc[k, "mort_rate"])\n    except KeyError:\n        return -1.0'),
     'asof_var': ('def asof_var(t):\n    try:\n        return float(data.mort_table().loc[data.mort_table().index.asof(t + 3), pick()])\n'
                  '    except KeyError:\n        return -1.0'),
     # membership: with an experiment switch it is the provider's native_contains
@@ -286,11 +289,14 @@ def test_spelling_variants_recognisers_off(tmp_path):
         assert float(got) == live, (package, got, live)
     py, c = tmp_path / 'exported_cy/_mx_classes.py', tmp_path / 'exported_cy/_mx_classes.c'
     assert 'native_contains(' in _formula_py(py, 'int_in')
-    for name in ('asof_lit', 'asof_var'):
+    # Decision 13.2: asof directly as the row key with a C integer k is the C predecessor search
+    body = _formula_py(py, 'asof_lit')
+    assert 'native_asof_key(' in body and '.lookup_float(' in body and '.loc[' not in body
+    for name in ('asof_var', 'asof_alias'):     # k = t + 3 is not a known C integer; a kept label
         body = _formula_py(py, name)
-        assert 'native_asof(' in body and '.lookup_float(' in body and '.loc[' not in body, name
+        assert 'native_asof_key(' not in body and '.index.asof(' in body, name
     for name in _VARIANTS:
-        if name in ('int_in', 'asof_lit', 'asof_var'):
+        if name in ('int_in', 'asof_lit', 'asof_var', 'asof_alias'):
             continue
         body = _formula_c(py, c, name)
         # fuse_0: the C long long key overload; fuse_2: the object (text) key overload
@@ -523,13 +529,15 @@ def test_prefix_selection_three_modes(tmp_path):
     py = tmp_path / 'exported_cy/_mx_classes.py'
     calls = {'p_alias': ['lookup_float_3('], 'p_renamed': ['lookup_float_3('], 'p_two': ['lookup_float_3('],
              'p_all': ['native_prefix_op_2(', 'lookup_float_3('], 'p_chain': ['lookup_float_3('],
-             'p_asof': ['native_prefix_asof_2(', 'lookup_float_3('], 'p_int': ['native_prefix_asof_1(', 'native_prefix_op_1(']}
+             'p_asof': ['native_prefix_op_2(', 'lookup_float_3('], 'p_int': ['native_prefix_op_1(', 'lookup_float_2(']}
     for name, wanted in calls.items():
         body = _formula_py(py, name)
         for call in wanted:
             assert call in body, (name, call)
         assert '.loc[' not in body, (name, body)              # the selection is never built
     assert _formula_py(py, 'p_alias').count('lookup_float_3(') == 1
+    assert '_mx_cy.cast(object, t)' not in _formula_py(py, 'p_all')        # Decision 13.1: an int parameter is bare
+    assert 'native_asof_key(' in _formula_py(py, 'p_hoist')
     assert '.loc[' in _formula_py(py, 'p_kept') and '.loc[' in _formula_py(py, 'p_view')
     admission = json.loads((tmp_path / 'exported_cy/_mx_admission.json').read_text())
     kept = admission['exported_cy._mx_classes._c_Projection._f_p_kept']

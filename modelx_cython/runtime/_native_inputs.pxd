@@ -302,7 +302,7 @@ cpdef long long table_first_int(object table) except? -1
 cpdef long long table_last_int(object table) except? -1
 cpdef long long table_max_int(object table) except? -1
 cpdef bint table_contains(object table, object key) except -1
-cdef object native_asof(object table, KeyArg0 key)
+cdef long long native_asof_key(object table, long long key) except? -1
 
 
 # The bounds of an integer-keyed table, inlined into the calling module: a NativeTable resolved
@@ -364,15 +364,10 @@ cdef double lookup_float_6(object table, P0 p0, P1 p1, P2 p2, P3 p3, P4 p4, P5 p
 cdef bint native_contains_6(P0 p0, P1 p1, P2 p2, P3 p3, P4 p4, P5 p5, object table) except -1
 
 # Partial-key selection (Decision 12): ``T.loc[p].index.min()`` (op 0), ``.max()`` (op 1) and
-# ``k in T.loc[p].index`` (op 2) for a prefix of every level but the last, and
-# ``T.loc[p].index.asof(k)``. k is a C integer (0 when unused).
+# ``k in T.loc[p].index`` (op 2) and ``T.loc[p].index.asof(k)`` as the row key of a read (op 3), for a
+# prefix of every level but the last. k is a C integer (0 when unused).
 cdef long long native_prefix_op_1(object table, P0 p0, int op, long long k) except? -1
-cdef object native_prefix_asof_1(object table, P0 p0, long long k)
 cdef long long native_prefix_op_2(object table, P0 p0, P1 p1, int op, long long k) except? -1
-cdef object native_prefix_asof_2(object table, P0 p0, P1 p1, long long k)
 cdef long long native_prefix_op_3(object table, P0 p0, P1 p1, P2 p2, int op, long long k) except? -1
-cdef object native_prefix_asof_3(object table, P0 p0, P1 p1, P2 p2, long long k)
 cdef long long native_prefix_op_4(object table, P0 p0, P1 p1, P2 p2, P3 p3, int op, long long k) except? -1
-cdef object native_prefix_asof_4(object table, P0 p0, P1 p1, P2 p2, P3 p3, long long k)
 cdef long long native_prefix_op_5(object table, P0 p0, P1 p1, P2 p2, P3 p3, P4 p4, int op, long long k) except? -1
-cdef object native_prefix_asof_5(object table, P0 p0, P1 p1, P2 p2, P3 p3, P4 p4, long long k)

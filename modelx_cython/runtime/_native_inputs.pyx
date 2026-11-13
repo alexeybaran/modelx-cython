@@ -1721,37 +1721,33 @@ cpdef long long table_last_int(object table) except? -1:
     return _mx_exact_index(owner.index.max())
 
 
-cdef object native_asof(object table, KeyArg0 key):
-    """``table.index.asof(key)`` on a resolved integer index stored in increasing order: the stored
-    label at the last key <= key (the label object itself), NaN below the first key, as the helper
-    and pandas. Anything else runs ``table.index.asof(key)``."""
+cdef long long _asof_key(object label) except? -1:
+    """The predecessor label as the row key of a read: NaN (below the first key) raises the KeyError
+    the read ``T.loc[NaN, c]`` raises; an integer label is the key."""
+    if label != label:
+        raise KeyError(label)
+    return _mx_exact_index(label)
+
+
+cdef long long native_asof_key(object table, long long key) except? -1:
+    """``table.index.asof(key)`` used directly as the row key of a read (Decision 13.2): the last key
+    <= key of a resolved integer index stored in increasing order; below the first key, KeyError(nan)
+    as the read of the NaN label raises. Anything else runs ``table.index.asof(key)``."""
     cdef NativeTable native
-    cdef long long number
-    cdef int overflow = 0
     cdef Py_ssize_t lo = 0, hi, mid
     if type(table) is NativeTable and (<NativeTable>table)._keys_increasing:
         native = <NativeTable>table
-        if KeyArg0 is KeyInteger:
-            number = key
-        elif KeyArg0 is object:
-            if type(key) is not int:
-                return table.index.asof(key)
-            number = PyLong_AsLongLongAndOverflow(key, &overflow)
-            if overflow:
-                return table.index.asof(key)
-        else:
-            return table.index.asof(<object>key)
         hi = native._int_count
         while lo < hi:
             mid = lo + (hi - lo) // 2
-            if number < native._int_sorted[mid]:
+            if key < native._int_sorted[mid]:
                 hi = mid
             else:
                 lo = mid + 1
         if lo == 0:
-            return _asof_nan
-        return <object>_tuple_item(<PyObject*>(<TableView>native._int_view).ordered, lo - 1)
-    return table.index.asof(<object>key)
+            raise KeyError(_asof_nan)
+        return native._int_sorted[lo - 1]
+    return _asof_key(table.index.asof(key))
 
 
 cdef object _asof_nan = float('nan')
@@ -2095,7 +2091,8 @@ cdef object _prefix_selection(object table, const long long* numbers, PyObject**
 
 cdef long long prefix_op(object table, const long long* numbers, PyObject** objects, Py_ssize_t count,
                          int op, long long key) except? -1:
-    """``T.loc[p].index.min()`` (op 0), ``.max()`` (op 1), ``key in T.loc[p].index`` (op 2).
+    """``T.loc[p].index.min()`` (op 0), ``.max()`` (op 1), ``key in T.loc[p].index`` (op 2), and
+    ``T.loc[p].index.asof(key)`` as the row key of a read (op 3, as native_asof_key).
 
     Native when the prefix is found in the resolved runs; otherwise (any other table or part, an
     absent prefix) the original expression on the original objects, so its result or error."""
@@ -2109,29 +2106,19 @@ cdef long long prefix_op(object table, const long long* numbers, PyObject** obje
             return runs.run_high[run]
         if runs.run_ordered[run]:
             below = _prefix_below(runs, run, key)
+            if op == 3:
+                if below == 0:
+                    raise KeyError(_asof_nan)
+                return runs.keys[runs.run_start[run] + below - 1]
             return below > 0 and runs.keys[runs.run_start[run] + below - 1] == key
     index = _prefix_selection(table, numbers, objects, count).index
+    if op == 3:
+        return _asof_key(index.asof(key))
     if op == 0:
         return _mx_exact_index(index.min())
     if op == 1:
         return _mx_exact_index(index.max())
     return key in index
-
-
-cdef object prefix_asof(object table, const long long* numbers, PyObject** objects, Py_ssize_t count,
-                        long long key):
-    """``T.loc[p].index.asof(key)``: the stored label at the last key <= key, NaN below the first
-    (as native_asof), when the run increases; otherwise the original expression."""
-    cdef Py_ssize_t run = _prefix_run(table, numbers, objects, count), below
-    cdef const PrefixIndex* runs
-    if run >= 0:
-        runs = &(<NativeTable>table)._prefix
-        if runs.run_ordered[run]:
-            below = _prefix_below(runs, run, key)
-            if below == 0:
-                return _asof_nan
-            return <object>_tuple_item(runs.labels, runs.run_start[run] + below - 1)
-    return _prefix_selection(table, numbers, objects, count).index.asof(key)
 
 
 from sys import intern as _intern_label
@@ -2207,8 +2194,10 @@ cdef class NativeTable:
             cells.fill_index(&self._key_index)
             self._all_int_keys = cells.tuple_keys and all(kind == _KEY_INT for kind in cells.kinds)
             if cells.tuple_keys and cells.width >= 2:
-                runs = _PrefixRuns(cells, owner)
-                if runs.ready:
+                runs = cache.get(_PrefixRuns)
+                if runs is None:
+                    runs = cache.setdefault(_PrefixRuns, _PrefixRuns(cells, owner))
+                if (<_PrefixRuns>runs).ready:
                     self._prefix_runs = runs
                     (<_PrefixRuns>runs).fill(&self._prefix)
         keys = owner._keys
@@ -3418,11 +3407,6 @@ cdef long long native_prefix_op_1(object table, P0 p0, int op, long long k) exce
     _place(p0, &numbers[0], &items[0])
     return prefix_op(table, numbers, items, 1, op, k)
 
-cdef object native_prefix_asof_1(object table, P0 p0, long long k):
-    cdef long long numbers[1]
-    cdef PyObject* items[1]
-    _place(p0, &numbers[0], &items[0])
-    return prefix_asof(table, numbers, items, 1, k)
 
 cdef long long native_prefix_op_2(object table, P0 p0, P1 p1, int op, long long k) except? -1:
     cdef long long numbers[2]
@@ -3430,11 +3414,6 @@ cdef long long native_prefix_op_2(object table, P0 p0, P1 p1, int op, long long 
     _place(p0, &numbers[0], &items[0]); _place(p1, &numbers[1], &items[1])
     return prefix_op(table, numbers, items, 2, op, k)
 
-cdef object native_prefix_asof_2(object table, P0 p0, P1 p1, long long k):
-    cdef long long numbers[2]
-    cdef PyObject* items[2]
-    _place(p0, &numbers[0], &items[0]); _place(p1, &numbers[1], &items[1])
-    return prefix_asof(table, numbers, items, 2, k)
 
 cdef long long native_prefix_op_3(object table, P0 p0, P1 p1, P2 p2, int op, long long k) except? -1:
     cdef long long numbers[3]
@@ -3442,11 +3421,6 @@ cdef long long native_prefix_op_3(object table, P0 p0, P1 p1, P2 p2, int op, lon
     _place(p0, &numbers[0], &items[0]); _place(p1, &numbers[1], &items[1]); _place(p2, &numbers[2], &items[2])
     return prefix_op(table, numbers, items, 3, op, k)
 
-cdef object native_prefix_asof_3(object table, P0 p0, P1 p1, P2 p2, long long k):
-    cdef long long numbers[3]
-    cdef PyObject* items[3]
-    _place(p0, &numbers[0], &items[0]); _place(p1, &numbers[1], &items[1]); _place(p2, &numbers[2], &items[2])
-    return prefix_asof(table, numbers, items, 3, k)
 
 cdef long long native_prefix_op_4(object table, P0 p0, P1 p1, P2 p2, P3 p3, int op, long long k) except? -1:
     cdef long long numbers[4]
@@ -3454,11 +3428,6 @@ cdef long long native_prefix_op_4(object table, P0 p0, P1 p1, P2 p2, P3 p3, int 
     _place(p0, &numbers[0], &items[0]); _place(p1, &numbers[1], &items[1]); _place(p2, &numbers[2], &items[2]); _place(p3, &numbers[3], &items[3])
     return prefix_op(table, numbers, items, 4, op, k)
 
-cdef object native_prefix_asof_4(object table, P0 p0, P1 p1, P2 p2, P3 p3, long long k):
-    cdef long long numbers[4]
-    cdef PyObject* items[4]
-    _place(p0, &numbers[0], &items[0]); _place(p1, &numbers[1], &items[1]); _place(p2, &numbers[2], &items[2]); _place(p3, &numbers[3], &items[3])
-    return prefix_asof(table, numbers, items, 4, k)
 
 cdef long long native_prefix_op_5(object table, P0 p0, P1 p1, P2 p2, P3 p3, P4 p4, int op, long long k) except? -1:
     cdef long long numbers[5]
@@ -3466,8 +3435,3 @@ cdef long long native_prefix_op_5(object table, P0 p0, P1 p1, P2 p2, P3 p3, P4 p
     _place(p0, &numbers[0], &items[0]); _place(p1, &numbers[1], &items[1]); _place(p2, &numbers[2], &items[2]); _place(p3, &numbers[3], &items[3]); _place(p4, &numbers[4], &items[4])
     return prefix_op(table, numbers, items, 5, op, k)
 
-cdef object native_prefix_asof_5(object table, P0 p0, P1 p1, P2 p2, P3 p3, P4 p4, long long k):
-    cdef long long numbers[5]
-    cdef PyObject* items[5]
-    _place(p0, &numbers[0], &items[0]); _place(p1, &numbers[1], &items[1]); _place(p2, &numbers[2], &items[2]); _place(p3, &numbers[3], &items[3]); _place(p4, &numbers[4], &items[4])
-    return prefix_asof(table, numbers, items, 5, k)
