@@ -13,6 +13,7 @@ cdef extern from "Python.h":
     bint PyExceptionInstance_Check(object value) noexcept
     bint PyTraceBack_Check(object value) noexcept
 from cpython.object cimport Py_TYPE
+from cpython.array cimport array, clone
 from modelx_cython._float_sum_state cimport F64Sum, f64_init, f64_add, f64_result
 from modelx_cython._range_state cimport I64Range, range_init, range_next
 from modelx_cython._call_layout cimport forward_call
@@ -34,6 +35,15 @@ except ModuleNotFoundError as error:
     _FLOAT = builtins.float
 cdef object _sum_values = _SUM_VALUES
 cdef object _builtin_sum = builtins.sum
+cdef object _sum_nonzero_products = None
+cdef object _shift_scale = None
+try:
+    from modelx_helpers.expression_streams import _SHIFT_SCALE, _SUM_NONZERO_PRODUCTS
+except ImportError:
+    pass
+else:
+    _shift_scale = _SHIFT_SCALE
+    _sum_nonzero_products = _SUM_NONZERO_PRODUCTS
 if (type(_builtin_sum) is not BuiltinFunctionType or _builtin_sum.__name__ != 'sum'
         or _builtin_sum.__self__ is not builtins):
     _builtin_sum = None
@@ -41,6 +51,24 @@ if (type(_builtin_sum) is not BuiltinFunctionType or _builtin_sum.__name__ != 's
 cdef bint f64_accepts(object function):
     return (function is _sum_values or function is _builtin_sum and _builtin_sum is not None
             ) and PY_VERSION_HEX >= 0x030c0000
+
+
+cdef double sum_nonzero_products(object function, object values, object weights) except? -1.0:
+    cdef const double[:] left, right
+    cdef F64Sum state
+    cdef Py_ssize_t index, size
+    cdef double value
+    if (function is not _sum_nonzero_products or type(values) is not array
+            or type(weights) is not array or values.typecode != 'd' or weights.typecode != 'd'):
+        return function(values, weights)
+    left, right = values, weights
+    size = min(left.shape[0], right.shape[0])
+    f64_init(&state)
+    for index in range(size):
+        value = left[index]
+        if value != 0.0:
+            f64_add(&state, value * right[index])
+    return f64_result(&state)
 
 cdef extern from *:
     """
@@ -546,6 +574,24 @@ cdef double sum_float_kernel(Stream stream) except *:
             raise RuntimeError('generator raised StopIteration') from error
         f64_add(&state, contribution)
     return f64_result(&state)
+
+
+cdef object shift_scale(object function, object values, object weights, object first):
+    cdef const double[:] left, right
+    cdef array result
+    cdef double[:] output
+    cdef Py_ssize_t index, size
+    if (function is not _shift_scale or type(values) is not array
+            or type(weights) is not array or values.typecode != 'd' or weights.typecode != 'd'):
+        return function(values, weights, first)
+    left, right = values, weights
+    size = min(max(0, left.shape[0] - 1), right.shape[0])
+    result = clone(<array>values, size + 1, False)
+    output = result
+    output[0] = first
+    for index in range(size):
+        output[index + 1] = left[index] * right[index]
+    return result
 
 
 def _identity(value):
