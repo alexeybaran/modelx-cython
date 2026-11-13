@@ -753,17 +753,19 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
             module, self.dense_entries, self.formula_entries = add_inline_entries(module, ordinary)
         if self._cold_sums or self._cold_spills:
             module = module.with_changes(body=(*module.body, *self._cold_sums, *self._cold_spills))
+        directives = []
         if any(getattr(cell, 'power_memo', None) for cls in self.module.classes.values()
                for cell in cls.cells.values()):
             # Native memo structs contain only scalars. Use Cython's standard
             # serializer; the module directive also works in pure-Python mode.
+            directives.append('auto_pickle=True')
+        if __import__('os').environ.get('MX_CY_INFER_TYPES') == '1':
+            # Experiment switch (backlog C1): C integer type inference with overflow checks,
+            # for every generated model module; providers keep their own directives.
+            directives.append('infer_types=True, overflowcheck=True')
+        if directives:
             module = module.with_changes(header=(
-                cst.EmptyLine(comment=cst.Comment(
-                    '# cython: auto_pickle=True'
-                    # Experiment switch (backlog C1): C integer type inference with overflow checks,
-                    # for the generated model module only; providers keep their own directives.
-                    + (', infer_types=True, overflowcheck=True'
-                       if __import__('os').environ.get('MX_CY_INFER_TYPES') == '1' else ''))), *module.header))
+                cst.EmptyLine(comment=cst.Comment('# cython: ' + ', '.join(directives))), *module.header))
         return module.visit(NumericExceptions())
 
     def leave_ClassDef(
