@@ -21,6 +21,7 @@ def test_parameterized_table_result(tmp_path):
             7: Table((0, 1, 2), ((11.0,), (13.0,), (17.0,)), ('rate',)),
         })
         space.rows = pdn.table(pd.DataFrame({'rate': [2.0, 5.0]}, index=[4, 9]), rows=True)
+        space.schedule_frame = pd.DataFrame({'rate': [2.0, 5.0]}, index=[0, 1])
         index = pd.MultiIndex.from_tuples([('a', 4), ('a', 9), ('b', 3)])
         space.compound_rows = pdn.table(pd.DataFrame({'rate': [2.0, 5.0, 1.0]}, index=index))
         space.new_cells('row_table', '''def row_table() -> "modelx_helpers.immutable_inputs.Table":
@@ -48,6 +49,8 @@ def test_parameterized_table_result(tmp_path):
         space.new_cells('previous_amount', '''def previous_amount(account, month):
     return pdn.previous(schedule(account), month, "rate", -2.0)
 ''')
+        space.new_cells('prepared_schedule', 'lambda: pdn.table(schedule_frame)')
+        space.new_cells('prepared_previous', 'lambda month: pdn.previous(prepared_schedule(), month, "rate", -2.0)')
         space.new_cells('fixed_schedule', '''def fixed_schedule() -> "modelx_helpers.immutable_inputs.Table":
     return schedules[7]
 ''')
@@ -80,6 +83,7 @@ def test_parameterized_table_result(tmp_path):
         's = mx_model.Policy[0]\n'
         's.amount(2, 0); s.amount(7, 1); s.row_rate(4); s.row_rate(9); s.missing(float("nan"))\n'
         's.has_row("a", 4); s.previous_amount(2, -1); s.previous_amount(2, 9)\n'
+        's.prepared_previous(-1); s.prepared_previous(9)\n'
         's.interpolated_amount(2, 0.5); s.float_field(1); s.raw_field(1)\n'
         's.previous_method(8); s.previous_column(8, -1); s.previous_column(8, 0)\n'
         's.bounded_method(-1); s.bounded_method(8)\n'
@@ -126,17 +130,22 @@ def test_parameterized_table_result(tmp_path):
             assert s.missing(0.0) is False
             assert s.has_row('a', 4) is True and s.has_row('a', 3) is False
             assert s.has_row('b', 3) is True and s.has_row('c', 3) is False
-            assert s.previous_amount(2, -1) == -2.0
-            assert s.previous_amount(2, 8) == 5.0
-            assert s.previous_amount(7, 1) == 13.0
-            assert s.previous_method(8) == 17.0
-            assert s.previous_column(8, -1) == s.previous_column(8, 0) == 17.0
+            assert s.prepared_previous(-1) == -2.0
+            assert s.prepared_previous(8) == 5.0
             assert s.bounded_method(-1) == 2.5 and s.bounded_method(8) == 17.0
             assert s.interpolated_amount(2, 0.5) == 3.5
             assert s.interpolated_amount(7, 8.5) == 17.0
             assert s.float_field(1) == s.raw_field(1) == 2.0
         finally:
             sys.setprofile(None)
+        owner = s.schedule(2).__modelx_table_owner__()
+        assert not owner._native_cache
+        assert s.previous_amount(2, -1) == -2.0
+        assert s.previous_amount(2, 8) == 5.0
+        assert s.previous_amount(7, 1) == 13.0
+        assert s.previous_method(8) == 17.0
+        assert s.previous_column(8, -1) == s.previous_column(8, 0) == 17.0
+        assert not owner._native_cache
         try:
             s.previous_method(-1)
         except ValueError as error:
