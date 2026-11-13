@@ -6,6 +6,8 @@ import sys
 import textwrap
 
 import modelx as mx
+import pandas as pd
+from modelx_helpers import pdn
 from modelx_helpers.immutable_inputs import Table
 
 
@@ -14,6 +16,11 @@ def test_native_table_forwarding(tmp_path):
     try:
         inputs = model.new_space("Inputs")
         inputs.owner = Table((0, 1), ((2.0,), (5.0,)), ("rate",))
+        inputs.pdn = pdn
+        inputs.source_frame = pd.DataFrame({"rate": [2.0, 5.0]}, index=[0, 1])
+        inputs.new_cells("constructed", "lambda: pdn.table(source_frame)")
+        inputs.new_cells("forwarded_constructor", "lambda: constructed()")
+        inputs.new_cells("conditional_constructor", "lambda groups: pdn.table(source_frame, groups=groups)")
         inputs.new_cells("direct", '''\
 def direct() -> "modelx_helpers.immutable_inputs.Table":
     return owner
@@ -54,6 +61,8 @@ def object_hop() -> object:
             c = m.Calculation
             assert c.direct_source() is c.first_hop() is c.second_hop() is c.object_hop() is m.Inputs.direct()
             assert m.Inputs.unannotated() is m.Inputs.owner
+            assert m.Inputs.constructed() is m.Inputs.forwarded_constructor()
+            assert m.Inputs.conditional_constructor(()).lookup_float(0, "rate") == 2.0
             for t, value in enumerate((2.0, 5.0)):
                 assert c.read_direct(t) == c.read_first(t) == c.read_second(t) == value
             '''), encoding="utf-8")
@@ -72,6 +81,9 @@ def object_hop() -> object:
             assert annotation_reason not in cells[cell]["reasons"]
         assert cells["object_hop"]["return_type"] == "object"
         assert cells["unannotated"]["return_type"] == "object"
+        assert cells["constructed"]["return_type"].endswith(".NativeTable")
+        assert cells["forwarded_constructor"]["return_type"].endswith(".NativeTable")
+        assert cells["conditional_constructor"]["return_type"] == "object"
         assert annotation_reason in cells["unannotated"]["reasons"]
         operations = cells["read_direct"]["native_numeric_helpers"]
         assert operations

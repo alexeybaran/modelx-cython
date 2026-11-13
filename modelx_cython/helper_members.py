@@ -9,7 +9,7 @@ from types import BuiltinFunctionType, FunctionType, ModuleType, SimpleNamespace
 
 import libcst as cst
 
-from .helpers import CAPABILITIES, helper_capability, helper_parameters, registered_helper
+from .helpers import CAPABILITIES, helper_capability, helper_parameters, helper_result_type, registered_helper
 
 
 _SCALAR_MATH = {erf: 'float64', exp: 'float64', isinf: 'bool', log: 'float64', sqrt: 'float64'}
@@ -35,6 +35,7 @@ def module_helpers(value):
         capabilities = {field: helper_capability(function, suffix)
                         for suffix, (field, _) in CAPABILITIES.items()}
         result[name] = SimpleNamespace(helper=helper, helper_parameters=helper_parameters(function),
+                                       helper_result_type=helper_result_type(function),
                                        **capabilities)
     return result
 
