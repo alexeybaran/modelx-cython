@@ -46,6 +46,9 @@ def prepare_keywords(function, frame):
 def prepare_options(function, frame, rows=False, report=False, raw=False, indexing='loc'):
     return p.table(function, ('rows', 'report', 'preserve_scalar_types', 'indexing'), frame, columns=p.omitted_argument, groups=p.omitted_argument, rows=rows, report=report, preserve_scalar_types=raw, indexing=indexing)
 
+def prepare_column(function, frame, column):
+    return p.table(function, ('columns',), frame, columns=(column,))
+
 def prepare_raw(function, frame, rows=False):
     return p.table(function, ('rows', 'report', 'preserve_scalar_types'), frame, columns=p.omitted_argument, groups=p.omitted_argument, indexing=p.omitted_argument, rows=rows, report=True, preserve_scalar_types=True)
 
@@ -322,6 +325,32 @@ def test_arbitrary_query_retains_python_default_handling(native):
     with pytest.raises(KeyError) as error:
         native.table_lookup(helpers.lookup, table, query, 'rate')
     assert error.value.args == ('no label',)
+
+
+def test_rectangular_numeric_table_keeps_object_and_report_semantics(native):
+    from modelx_helpers.immutable_inputs import _RECTANGULAR_STORAGE
+    from modelx_helpers.typed_inputs import lookup_float
+
+    index = pd.MultiIndex.from_product([['F', 'M'], [0, 1]], names=['group', 'age'])
+    frame = pd.DataFrame({'rate': [-0.0, 1.5, 2.0, 3.0], 'note': ['x'] * 4}, index=index)
+    expected = frame[['rate']].copy()
+    table = native.prepare_column(inputs.table, frame, 'rate')
+    assert _RECTANGULAR_STORAGE in table._native_cache
+    frame.loc[('M', 1), 'rate'] = 99.0
+    assert native.float_value(lookup_float, table, ('M', 1), 'rate') == 3.0
+    assert math.copysign(1.0, native.float_value(lookup_float, table, ('F', 0), 'rate')) < 0.0
+    assert native.float_value(lookup_float, table, ('M', np.int64(1)), 'rate') == 3.0
+    assert native.float_default(lookup_float, table, ('M', True), 'rate', 12.0) == 12.0
+    with pytest.raises(KeyError) as error:
+        native.float_default(lookup_float, table, ('none', 1), 'missing', 12.0)
+    assert error.value.args == ('missing',)
+    pd.testing.assert_frame_equal(to_pandas(table), expected)
+    pd.testing.assert_frame_equal(to_pandas(pickle.loads(pickle.dumps(table))), expected)
+    irregular = expected.iloc[[2, 0, 3, 1]]
+    selected = native.prepare_column(inputs.table, irregular, 'rate')
+    assert _RECTANGULAR_STORAGE not in selected._native_cache
+    assert native.float_value(lookup_float, selected, ('M', 1), 'rate') == 3.0
+    pd.testing.assert_frame_equal(to_pandas(selected), irregular)
 
 
 def test_tuple_labels_in_plain_index_use_scalar_key_semantics(native):
