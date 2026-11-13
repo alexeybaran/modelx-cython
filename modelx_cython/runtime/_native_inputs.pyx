@@ -1332,11 +1332,13 @@ cdef class RectangularView:
         self.positions = tuple(dict(zip(labels, range(len(labels)))) for labels in axes)
 
     cdef inline bint read(self, object key, object column, double* value) except -1:
-        cdef Py_ssize_t row = 0, axis
+        cdef Py_ssize_t row = 0, axis, width = len(self.widths)
+        cdef object part, digit
         if ((column is not self.column and (type(column) is not str or column != self.column))
-                or type(key) is not tuple or len(key) != len(self.widths)):
+                or type(key) is not tuple or len(key) != width):
             return False
-        for axis, part in enumerate(<tuple>key):
+        for axis in range(width):
+            part = (<tuple>key)[axis]
             if not PyLong_CheckExact(part) and not PyUnicode_CheckExact(part):
                 return False
             digit = (<dict>self.positions[axis]).get(part)
@@ -1364,6 +1366,8 @@ cdef class ContiguousView:
         else:
             self.floats = data
 
+    @cython.boundscheck(False)
+    @cython.wraparound(False)
     cdef inline bint read(self, long long key, object column, double* value) except -1:
         cdef Py_ssize_t pos, row
         if key < self.low or key > self.high or type(column) is not str:
