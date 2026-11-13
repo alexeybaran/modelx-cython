@@ -22,6 +22,8 @@ def prepare(function, frame):
 def prepare_grouped(function, frame):
     return native.table(function, ('groups',), frame,
                         columns=native.omitted_argument, groups=('group',))
+def prepare_group_record(function, tables):
+    return native.group_record(function, tables)
 def grouped_read(has_group, subtable, contains, lookup, source, long long group, long long key, str column):
     cdef Py_ssize_t slot
     cdef double value
@@ -149,6 +151,22 @@ def test_grouped_probe_uses_only_explicit_preparation(native):
     assert native.grouped_read(*operations, prepared, 1, 2, 'rate') == 1.5
     assert native.grouped_read(*operations, prepared, 1, 3, 'rate') is None
     assert native.grouped_read(*operations, prepared, 3, 2, 'rate') == -1
+
+
+def test_explicit_group_record_owns_remapped_enum_keys(native):
+    from enum import IntEnum
+    from modelx_helpers import pdn
+
+    class Group(IntEnum):
+        initial = 1
+
+    child = Table((2,), ((1.5,),), ('rate',))
+    prepared = native.prepare_group_record(pdn.group_record, {Group.initial: child})
+    assert next(iter(prepared)) is Group.initial
+    assert prepared.slice(Group.initial) is child
+    operations = h.has_group, h.subtable, h.contains, h.lookup
+    assert native.grouped_read(*operations, prepared, Group.initial, 2, 'rate') == 1.5
+    assert native.grouped_read(*operations, prepared, Group.initial, 3, 'rate') is None
 
 
 def test_unicode_subclass_keeps_original_fallback_object(native):
