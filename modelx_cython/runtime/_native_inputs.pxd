@@ -114,6 +114,20 @@ cdef struct KeyIndex:
     const signed char* modes
     Py_ssize_t modes_count, width, mask, rows
     bint tuple_keys
+# Raw pointers into a table's _PrefixRuns (Decision 12), resolved once by the NativeTable that
+# keeps the runs alive: runs of the rows sharing every key level but the last.
+cdef struct PrefixIndex:
+    const long long* slots
+    const unsigned long long* hashes
+    const long long* run_row
+    const long long* run_start
+    const long long* run_length
+    const long long* run_low
+    const long long* run_high
+    const long long* keys
+    const unsigned char* run_ordered
+    PyObject* labels
+    Py_ssize_t width, levels, mask
 cdef void key_int(KeyPart*, long long, bint) noexcept
 cdef void key_text(KeyPart*, object) noexcept
 cdef double lookup_keyed_float_f64(object, object, LookupContext, object,
@@ -139,6 +153,7 @@ cdef class NativeTable:
     cdef Py_ssize_t _int_count
     cdef KeyIndex _key_index
     cdef object _prefix_runs          # _PrefixRuns of a tuple-keyed table, or None
+    cdef PrefixIndex _prefix          # its arrays, valid while _prefix_runs is not None
     cdef void _resolve(self, object owner) except *
     cdef Py_ssize_t _column_slot(self, object column) except? -2
     cdef Py_ssize_t _int_row(self, long long key) noexcept

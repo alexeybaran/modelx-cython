@@ -2020,55 +2020,61 @@ cdef class _PrefixRuns:
             self.slots[slot], self.hashes[slot] = i, code
         self.ready = True
 
-    @cython.boundscheck(False)
-    @cython.wraparound(False)
-    cdef Py_ssize_t find(self, const KeyIndex* index, const KeyPart* parts) noexcept:
-        """The run of a prefix of exact int / text parts, or -1 (no stored prefix equals it)."""
-        cdef unsigned long long code = 1469598103934665603
-        cdef Py_ssize_t i, slot, run, position
-        for i in range(self.width):
-            if parts[i].kind == _KEY_TEXT:
-                code = (code ^ _part_text_hash(parts[i].text)) * <unsigned long long>1099511628211
-            else:
-                code = (code ^ <unsigned long long>parts[i].number) * <unsigned long long>1099511628211
-        slot = <Py_ssize_t>(code & <unsigned long long>self.mask)
-        while self.slots[slot] >= 0:
-            run = self.slots[slot]
-            if code == self.hashes[slot]:
-                for i in range(self.width):
-                    position = self.run_row[run] * self.levels + i
-                    if parts[i].kind == _KEY_TEXT:
-                        if index.kinds[position] != _KEY_TEXT or not _text_same(parts[i].text, _tuple_item(index.text, position)):
-                            break
-                    elif index.kinds[position] != _KEY_INT or parts[i].number != index.numbers[position]:
+    cdef void fill(self, PrefixIndex* index) noexcept:
+        """Expose the runs as raw pointers; the caller keeps self alive."""
+        index.slots, index.hashes, index.mask = &self.slots[0], &self.hashes[0], self.mask
+        index.run_row, index.run_start, index.run_length = &self.run_row[0], &self.run_start[0], &self.run_length[0]
+        index.run_low, index.run_high, index.keys = &self.run_low[0], &self.run_high[0], &self.keys[0]
+        index.run_ordered, index.labels = &self.run_ordered[0], <PyObject*>self.labels
+        index.width, index.levels = self.width, self.levels
+
+
+cdef inline Py_ssize_t _prefix_find(const PrefixIndex* runs, const KeyIndex* index, const KeyPart* parts) noexcept:
+    """The run of a prefix of exact int / text parts, or -1 (no stored prefix equals it)."""
+    cdef unsigned long long code = 1469598103934665603
+    cdef Py_ssize_t i, slot, run, position
+    for i in range(runs.width):
+        if parts[i].kind == _KEY_TEXT:
+            code = (code ^ _part_text_hash(parts[i].text)) * <unsigned long long>1099511628211
+        else:
+            code = (code ^ <unsigned long long>parts[i].number) * <unsigned long long>1099511628211
+    slot = <Py_ssize_t>(code & <unsigned long long>runs.mask)
+    while runs.slots[slot] >= 0:
+        run = runs.slots[slot]
+        if code == runs.hashes[slot]:
+            for i in range(runs.width):
+                position = runs.run_row[run] * runs.levels + i
+                if parts[i].kind == _KEY_TEXT:
+                    if index.kinds[position] != _KEY_TEXT or not _text_same(parts[i].text, _tuple_item(index.text, position)):
                         break
-                else:
-                    return run
-            slot = (slot + 1) & self.mask
-        return -1
-
-    @cython.boundscheck(False)
-    @cython.wraparound(False)
-    cdef Py_ssize_t below(self, Py_ssize_t run, long long key) noexcept:
-        """In an increasing run: the count of its labels <= key (0 below the first)."""
-        cdef Py_ssize_t lo = self.run_start[run], hi = lo + self.run_length[run], first = lo, mid
-        while lo < hi:
-            mid = lo + (hi - lo) // 2
-            if key < self.keys[mid]:
-                hi = mid
+                elif index.kinds[position] != _KEY_INT or parts[i].number != index.numbers[position]:
+                    break
             else:
-                lo = mid + 1
-        return lo - first
+                return run
+        slot = (slot + 1) & runs.mask
+    return -1
 
 
-cdef Py_ssize_t _prefix_run(object table, const long long* numbers, PyObject** objects, Py_ssize_t count) except? -2:
+cdef inline Py_ssize_t _prefix_below(const PrefixIndex* runs, Py_ssize_t run, long long key) noexcept:
+    """In an increasing run: the count of its labels <= key (0 below the first)."""
+    cdef Py_ssize_t lo = runs.run_start[run], hi = lo + runs.run_length[run], first = lo, mid
+    while lo < hi:
+        mid = lo + (hi - lo) // 2
+        if key < runs.keys[mid]:
+            hi = mid
+        else:
+            lo = mid + 1
+    return lo - first
+
+
+cdef inline Py_ssize_t _prefix_run(object table, const long long* numbers, PyObject** objects,
+                                   Py_ssize_t count) except? -2:
     """The run of an unpacked prefix in a resolved table, or -1 (the caller runs the original)."""
     cdef KeyPart parts[6]
     cdef Py_ssize_t i
     if type(table) is not NativeTable or (<NativeTable>table)._prefix_runs is None:
         return -1
-    runs = <_PrefixRuns>(<NativeTable>table)._prefix_runs
-    if count != runs.width:
+    if count != (<NativeTable>table)._prefix.width:
         return -1
     for i in range(count):
         if objects[i] == NULL:
@@ -2077,7 +2083,7 @@ cdef Py_ssize_t _prefix_run(object table, const long long* numbers, PyObject** o
             _pack_part(<object>objects[i], &parts[i])
             if parts[i].kind != _KEY_INT and parts[i].kind != _KEY_TEXT:
                 return -1
-    return runs.find(&(<NativeTable>table)._key_index, &parts[0])
+    return _prefix_find(&(<NativeTable>table)._prefix, &(<NativeTable>table)._key_index, &parts[0])
 
 
 cdef object _prefix_selection(object table, const long long* numbers, PyObject** objects, Py_ssize_t count):
@@ -2094,15 +2100,15 @@ cdef long long prefix_op(object table, const long long* numbers, PyObject** obje
     Native when the prefix is found in the resolved runs; otherwise (any other table or part, an
     absent prefix) the original expression on the original objects, so its result or error."""
     cdef Py_ssize_t run = _prefix_run(table, numbers, objects, count), below
-    cdef _PrefixRuns runs
+    cdef const PrefixIndex* runs
     if run >= 0:
-        runs = <_PrefixRuns>(<NativeTable>table)._prefix_runs
+        runs = &(<NativeTable>table)._prefix
         if op == 0:
             return runs.run_low[run]
         if op == 1:
             return runs.run_high[run]
         if runs.run_ordered[run]:
-            below = runs.below(run, key)
+            below = _prefix_below(runs, run, key)
             return below > 0 and runs.keys[runs.run_start[run] + below - 1] == key
     index = _prefix_selection(table, numbers, objects, count).index
     if op == 0:
@@ -2117,14 +2123,14 @@ cdef object prefix_asof(object table, const long long* numbers, PyObject** objec
     """``T.loc[p].index.asof(key)``: the stored label at the last key <= key, NaN below the first
     (as native_asof), when the run increases; otherwise the original expression."""
     cdef Py_ssize_t run = _prefix_run(table, numbers, objects, count), below
-    cdef _PrefixRuns runs
+    cdef const PrefixIndex* runs
     if run >= 0:
-        runs = <_PrefixRuns>(<NativeTable>table)._prefix_runs
+        runs = &(<NativeTable>table)._prefix
         if runs.run_ordered[run]:
-            below = runs.below(run, key)
+            below = _prefix_below(runs, run, key)
             if below == 0:
                 return _asof_nan
-            return <object>_tuple_item(<PyObject*>runs.labels, runs.run_start[run] + below - 1)
+            return <object>_tuple_item(runs.labels, runs.run_start[run] + below - 1)
     return _prefix_selection(table, numbers, objects, count).index.asof(key)
 
 
@@ -2204,6 +2210,7 @@ cdef class NativeTable:
                 runs = _PrefixRuns(cells, owner)
                 if runs.ready:
                     self._prefix_runs = runs
+                    (<_PrefixRuns>runs).fill(&self._prefix)
         keys = owner._keys
         if keys and type(keys[0]) is int:
             data = view(owner)
