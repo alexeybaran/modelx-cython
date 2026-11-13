@@ -587,6 +587,18 @@ class CombinedCellsInfo(LexicalCellsInfo):
         return getattr(self._rt, 'observed_provider_binding', None)
 
     @property
+    def table_schema(self):
+        """M1: key and column kinds of a traced helper Table result (tracer.table_schema)."""
+        return getattr(self._rt, 'table_schema', None)
+
+    @property
+    def table_result(self):
+        """M1: the provider type id when every sampled result is that provider type's
+        exact owner (a helper Table or Record), whether or not it is bound natively."""
+        binding = self.observed_provider_type
+        return binding.type_id if binding is not None else None
+
+    @property
     def native_table_result(self):
         binding = self.native_provider_binding
         return binding is not None and binding.declaration.numeric_table is not None

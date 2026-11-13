@@ -185,6 +185,7 @@ class RuntimeCellsInfo:     # TODO: Create base class RuntimeBaseMemberInfo
         self.ret_type = self._init_ret_type(traces)
         from .provider_manifest import observed_provider_binding
         self.observed_provider_binding = observed_provider_binding(traces)
+        self.table_schema = table_schema(traces)
 
     def has_args(self):
         """Return whether the cells method takes arguments.
@@ -576,6 +577,45 @@ def instance_attrs(obj: Any) -> Iterator[tuple]:
                 yield name, getattr(obj, name)
             except AttributeError:  # slot never assigned
                 pass
+
+
+# M1 (W1.1): schema of a traced helper Table result, through the helper's contract.
+TABLE_TYPES = ('modelx_helpers.immutable_inputs.Table',)
+
+
+def table_schema(traces):
+    """Key-level and column kinds of a traced helper Table result, or None.
+
+    Read through the live helper's ``table_schema(t)`` (W1.H contract, M1 design section 3),
+    which returns the kinds without expanding compact storage. The tracer never reads table
+    storage itself. None when the result is not a helper Table, when the helper does not
+    provide the contract yet (round-2 helper), or when the sampled tables disagree.
+    """
+    if not traces:
+        return None
+    owner = type(traces[0].ret_val)
+    if f'{owner.__module__}.{owner.__qualname__}' not in TABLE_TYPES:
+        return None
+    contract = getattr(sys.modules.get(owner.__module__), 'table_schema', None)
+    if not callable(contract):
+        return None     # DEPENDENCY W1.H: modelx_helpers.immutable_inputs.table_schema
+    schema, seen = None, set()
+    for trace in traces:
+        value = trace.ret_val
+        if type(value) is not owner:
+            return None
+        if id(value) in seen:
+            continue
+        seen.add(id(value))
+        try:
+            found = contract(value)
+        except (TypeError, ValueError):
+            return None
+        if schema is None:
+            schema = found
+        elif found != schema:
+            return None
+    return schema
 
 
 class MxCallTracer(CallTracer):

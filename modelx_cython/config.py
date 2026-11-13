@@ -42,6 +42,11 @@ class CompilerPolicy:
     propagate_exact_receiver: bool
     native_cache_hits: str
     native_math: bool  # Guarded builtin rounding.
+    # M1 (W1.1), temporary until M4: False turns off the round-2 statement-shape recognisers
+    # for table and record reads, so reads take the typed-handle route.
+    table_recognisers: bool = True
+    # M1 (W1.1): '# cython: infer_types=True, overflowcheck=True' on generated model modules.
+    infer_types: bool = False
 
     @classmethod
     def resolve(cls, data):
@@ -53,7 +58,9 @@ class CompilerPolicy:
             dense_miss_binding=miss, dense_one_axis=data.get('dense_one_axis', automatic),
             propagate_exact_receiver=data.get('propagate_exact_receiver', automatic and miss),
             native_cache_hits=data.get('native_cache_hits', 'auto' if automatic and miss else 'none'),
-            native_math=data.get('native_math', True))
+            native_math=data.get('native_math', True),
+            table_recognisers=data.get('table_recognisers', True),
+            infer_types=data.get('infer_types', False))
         for name, value in values.items():
             if name not in ('parallel_workers', 'native_cache_hits') and type(value) is not bool:
                 raise ValueError(f'{name} must be a boolean')
@@ -138,6 +145,10 @@ class TransSpec:
     ``"propagate_exact_receiver"`` carries the receiver fact through those
     entries and private dense formula calls. ``"native_math"`` enables guarded
     builtin rounding by default.
+    ``"table_recognisers"`` (default true; temporary, removed in M4): false turns
+    off the round-2 statement-shape recognisers for table and record reads.
+    ``"infer_types"`` (default false): C type inference with overflow checks
+    (``# cython: infer_types=True, overflowcheck=True``) in generated model modules.
     ``"native_cache_hits"`` defaults to ``"auto"`` when automatic optimization
     and dense miss binding are enabled. It selects scalar hits and already-proven
     dense hits; explicit alternatives are ``"none"``, ``"scalar"``, ``"dense"``

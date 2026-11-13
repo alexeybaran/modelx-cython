@@ -50,6 +50,7 @@ try:
 except ImportError: # Python -3.9
     NoneType = type(None)
 
+import logging
 import textwrap
 from functools import cached_property
 import libcst as cst
@@ -122,6 +123,30 @@ def _guard_associative_cache(cell, body):
     guard = cst.parse_statement(f'if not ({condition}):\n{outside}')
     return body.with_changes(body=(guard, *body.body))
 
+
+
+_logger = logging.getLogger(__name__)
+
+
+def _without_table_recognisers(base):
+    """NumericReturns without the round-2 statement-shape recognisers for table and record
+    reads (spec ``"table_recognisers": false``, temporary until M4). Rounded-input rewrites
+    and record-item assignments stay; reads then run as written (typed handles in M1)."""
+    class NumericReturnsWithoutTableRecognisers(base):
+        def leave_FunctionDef(self, before, after):
+            self.function_depth -= 1
+            if (self.function_depth or not self.scope_safe or 'min' not in self.builtin_keys
+                    or self.cell.is_locked or self.cell.cls in self.cls.visitor.dynamic_ref_classes
+                    or self.cell.get_rettype_expr(c_style=True) != 'double'
+                    or not isinstance(after.body, cst.IndentedBlock) or len(after.body.body) < 4):
+                return after
+            rounded = self.rounded_inputs(after.body.body)
+            return after if rounded is None else after.with_changes(
+                body=after.body.with_changes(body=rounded))
+
+        def leave_Return(self, before, after):
+            return after
+    return NumericReturnsWithoutTableRecognisers
 
 class PXDGenerator:
     """Generate a Cython ``.pxd`` declaration file for a model module.
@@ -623,6 +648,9 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
         """
         from modelx_cython.checked_arithmetic import CheckedArithmetic
         from modelx_cython.numeric_helpers import NumericReturns
+        node = self._table_reads(node, cls_info, cells)
+        if not self.module.spec.policy.table_recognisers:
+            NumericReturns = _without_table_recognisers(NumericReturns)
         cells.formula_allows_exact_receiver = allows_exact_receiver(node, cls_info.name)
         builtin_keys = {name for name in ("all", "any", "sum", "min", "max", "float", "int", "round", "range")
                         if scope[name] and all(isinstance(binding, BuiltinAssignment)
@@ -690,6 +718,34 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
             native_result=cells.get_rettype_expr(c_style=True) in ('double', 'long long', 'bint'),
             operand_kind=OperandKind(self._resolver, self._cells_kinds, self._ref_kinds,
                                      cls_info.fqname, param_kinds))
+
+    def _table_reads(self, node, cls_info, cells):
+        """M1 hook (W1.1): lower table reads (W1.3, ``table_reads.TableReads``) and report the
+        rest in the admission report, with a build warning for each per-step untyped read.
+
+        Runs once per formula before the round-2 recognisers. Returns ``node`` itself when
+        nothing is lowered.
+        """
+        cells.table_reads_typed, cells.table_reads_untyped, cells.table_reads_keys = 0, [], []
+        if self._resolver is None or not (self._resolver.table_results or cls_info.refs):
+            return node
+        from modelx_cython.admission import table_read_sites, untyped_read_warning
+        sites = table_read_sites(node, self._resolver, cls_info)
+        if not sites:
+            return node
+        from modelx_cython.table_reads import TableReads
+        lowering = TableReads(self._resolver, cls_info, cells, self.helper_providers,
+                              self.module.spec.policy, sites)
+        node = lowering.lower(node)
+        per_step = cells.has_args()
+        cells.table_reads_typed = lowering.typed
+        cells.table_reads_keys = list(lowering.keys)
+        cells.table_reads_untyped = [site.entry(per_step, lowering.declined.get(id(site.node)))
+                                     for site in sites if id(site.node) not in lowering.lowered]
+        for entry in cells.table_reads_untyped:
+            if entry['per_step']:
+                _logger.warning(untyped_read_warning(cells.fqname, entry))
+        return node
 
     def _bind_declared_helpers(self, node, cls_info, cells, inherited=()):
         """Bind declared provider symbols in either C functions or compiled defs.
@@ -764,12 +820,19 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
                 module, ordinary, self._dense_layouts)
         if self._cold_sums or self._cold_spills:
             module = module.with_changes(body=(*module.body, *self._cold_sums, *self._cold_spills))
+        directives = []
         if any(getattr(cell, 'power_memo', None) for cls in self.module.classes.values()
                for cell in cls.cells.values()):
             # Native memo structs contain only scalars. Use Cython's standard
             # serializer; the module directive also works in pure-Python mode.
+            directives.append('auto_pickle=True')
+        if self.module.spec.policy.infer_types:
+            # M1 (spec key infer_types): C integer inference with overflow checks in
+            # generated model modules; providers keep their own directives.
+            directives.append('infer_types=True, overflowcheck=True')
+        if directives:
             module = module.with_changes(header=(
-                cst.EmptyLine(comment=cst.Comment('# cython: auto_pickle=True')), *module.header))
+                cst.EmptyLine(comment=cst.Comment('# cython: ' + ', '.join(directives))), *module.header))
         return module.visit(NumericExceptions())
 
     def leave_ClassDef(

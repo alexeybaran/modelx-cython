@@ -124,10 +124,25 @@ class CellsResolver:
         self.unlocked_scalar_results = unlocked_scalar_results or {}
         self.provider_results = {}
         self.observed_provider_results = {}
+        # M1 (W1.1) facts for typed table reads: cells fqname -> helper table_schema(t),
+        # cells fqname -> provider type id of a traced helper Table/Record result,
+        # cells with a cached formula; cell_rettype() reads the final C return type.
+        self.table_schemas = {}
+        self.table_results = {}
+        self.cached_cells = set()
+        self._cell_infos = {}
         self._name_index: Dict[str, List[str]] = {}
         for cells in cells_by_class.values():
             for name, fqname in cells.items():
                 self._name_index.setdefault(name, []).append(fqname)
+
+    def cell_rettype(self, fqname: str) -> Optional[str]:
+        """C return type of a typed, non-special cell, read when asked (it depends on
+        provider admission, which runs after the resolver is built); None otherwise."""
+        cells = self._cell_infos.get(fqname)
+        if cells is None or cells.is_special() or not cells.has_typeinfo():
+            return None
+        return cells.get_rettype_expr(c_style=True)
 
     def resolve_chain(
         self, cls_fqname: str, chain: Sequence[str]
@@ -536,6 +551,7 @@ def build_resolver(module_infos) -> CellsResolver:
     unlocked_scalar_results: Dict[str, str] = {}
     provider_results = {}
     observed_provider_results = {}
+    table_schemas, table_results, cached_cells, cell_infos = {}, {}, set(), {}
 
     for fqname, info in module_infos.items():
         pkg, basename = fqname.rsplit(".", 1)
@@ -550,6 +566,15 @@ def build_resolver(module_infos) -> CellsResolver:
                 observed = getattr(cells, 'observed_provider_type', None)
                 if observed is not None:
                     observed_provider_results[cells.fqname] = observed
+                schema = getattr(cells, 'table_schema', None)
+                if schema is not None:
+                    table_schemas[cells.fqname] = schema
+                result = getattr(cells, 'table_result', None)
+                if result is not None:
+                    table_results[cells.fqname] = result
+                if cells.has_formula_def:
+                    cached_cells.add(cells.fqname)
+                    cell_infos[cells.fqname] = cells
                 if (cells.has_formula_def and not cells.is_special() and not cells.has_args()
                         and not cells.body_has_closure and not cells.called_with_kwargs):
                     results = locked_scalar_results if cells.is_locked else unlocked_scalar_results
@@ -576,6 +601,10 @@ def build_resolver(module_infos) -> CellsResolver:
                              scalar_refs_by_class, locked_scalar_results, unlocked_scalar_results)
     resolver.provider_results = provider_results
     resolver.observed_provider_results = observed_provider_results
+    resolver.table_schemas = table_schemas
+    resolver.table_results = table_results
+    resolver.cached_cells = cached_cells
+    resolver._cell_infos = cell_infos
     return resolver
 
 
