@@ -193,10 +193,6 @@ def table_read_sites(node, resolver, cls_info):
                 if name in found.rows or not receiver(value, local - {name}):
                     rows.add(name)      # .loc/.at result or iterrows row: may be a row
 
-    module = cst.Module(body=[node])
-    wrapper = MetadataWrapper(module, unsafe_skip_copy=True)
-    positions = wrapper.resolve(PositionProvider)
-    first = positions[node.name].start.line
     sites = []
 
     class Sites(cst.CSTVisitor):
@@ -209,7 +205,13 @@ def table_read_sites(node, resolver, cls_info):
                 sites.append((expr, 'row' if isinstance(expr.value, cst.Name)
                               and expr.value.value in rows else 'column'))
 
-    wrapper.module.visit(Sites())
+    node.visit(Sites())
+    if not sites:
+        return []
+    module = cst.Module(body=[node])
+    wrapper = MetadataWrapper(module, unsafe_skip_copy=True)     # same node objects
+    positions = wrapper.resolve(PositionProvider)
+    first = positions[node.name].start.line
     parents = {}
 
     class Parents(cst.CSTVisitor):
@@ -218,7 +220,7 @@ def table_read_sites(node, resolver, cls_info):
                 parents[id(grandchild)] = child
             return True
 
-    wrapper.module.visit(Parents())
+    node.visit(Parents())
     result = []
     for expr, kind in sites:
         shown = expr
