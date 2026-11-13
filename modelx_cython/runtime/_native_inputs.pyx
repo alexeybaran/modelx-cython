@@ -20,7 +20,7 @@ from cpython.version cimport PY_VERSION_HEX
 from cpython.ref cimport PyObject
 from cpython.mem cimport PyMem_Malloc, PyMem_Free
 cimport cython
-from modelx_helpers.immutable_inputs import Table, Record
+from modelx_helpers.immutable_inputs import Table, Record, _index_key, _valid_index_key
 from modelx_helpers.typed_inputs import _FLOOR, _native_operations
 from modelx_cython._call_layout cimport forward_call
 
@@ -1061,6 +1061,43 @@ cdef class KeyedCache:
     cdef Py_ssize_t index
     cdef int column_kind
 
+cdef Py_ssize_t _owned_position(object table, object key) except? -2:
+    cdef object spec = table._index_error
+    cdef object position
+    if spec is not None:
+        spec = spec._index
+        if not _valid_index_key(key, spec):
+            return -1
+        key = _index_key(key, spec)
+    position = table._positions.get(key)
+    return -1 if position is None else position
+
+
+cdef object _read_owned_table(object table, object key, object column, object default):
+    """Select one row through the index already owned by the Python table."""
+    cdef object spec = table._index_error
+    cdef object name
+    cdef Py_ssize_t position
+    cdef tuple columns = table._columns
+    if spec is not None and type(column) is str and spec._index.get('pandas_columns', False):
+        name = column
+        try:
+            column = columns.index(name)
+        except ValueError:
+            raise KeyError(name) from None
+    try:
+        position = _owned_position(table, key)
+        if position < 0:
+            raise KeyError(key)
+    except KeyError:
+        if default is _missing:
+            raise
+        return default
+    if type(column) is str:
+        column = columns.index(column)
+    return table._values[position][column]
+
+
 cdef KeyedCache _keyed_cache(LookupContext context, object table, object column):
     cdef KeyedCache cache
     cdef KeyedView data
@@ -1080,10 +1117,7 @@ cdef KeyedCache _keyed_cache(LookupContext context, object table, object column)
         cache.column_kind = 0
         if type(table) is Table:
             data = table._native_cache.get(KeyedView)
-            if data is None:
-                data = KeyedView(table)
-                table._native_cache[KeyedView] = data
-            if data.admitted:
+            if data is not None and data.admitted:
                 cache.data = data
                 if type(column) is str:
                     cache.column_kind = 1
@@ -1127,6 +1161,8 @@ cdef double lookup_keyed_float_f64(object conversion, object function, LookupCon
             # on precisely the selected original scalar, preserving its error
             # or user-defined conversion without calling Python lookup.
             return conversion(data.raw_values[row][cache.index])
+        if type(table) is Table and (type(column) is str or type(column) is int or type(column) is bool):
+            return conversion(_read_owned_table(table, _original_key(parts, count, tuple_key), column, default))
     key = _original_key(parts, count, tuple_key)
     return conversion(function(table, key, column)) if default is _missing else conversion(function(table, key, column, default))
 
@@ -1224,6 +1260,10 @@ cdef tuple _wide_indexed_row(object table, object key, object column, bint needs
         cache = _keyed_cache(_indexed_context(table), table, column)
         if cache.data is not None and (not needs_column or cache.index >= 0):
             return cache, cache.data.find(parts, count, True)
+        if not needs_column:
+            return None, _owned_position(table, key)
+        if type(column) is str or type(column) is int or type(column) is bool:
+            return None, -1
     finally:
         PyMem_Free(parts)
     return None
@@ -1235,6 +1275,8 @@ cdef object _wide_indexed_lookup(object table, object key, object column, object
     cdef tuple found = _wide_indexed_row(table, key, column, True)
     if found is not None:
         cache, row = found
+        if cache is None:
+            return _read_owned_table(table, key, column, default)
         if row >= 0:
             return cache.data.raw_values[row][cache.index]
         if default is _missing:
@@ -1267,6 +1309,9 @@ cdef object indexed_lookup(object table, object key, object column, object defau
                     raise KeyError(key)
                 return default
             return data.raw_values[row][cache.index]
+    if type(key) is not tuple or len(key) <= 4:
+        if type(column) is str or type(column) is int or type(column) is bool:
+            return _read_owned_table(table, key, column, default)
     return _wide_indexed_lookup(table, key, column, default)
 
 cdef Py_ssize_t indexed_position(object table, object key) except? -2:
@@ -1279,11 +1324,11 @@ cdef Py_ssize_t indexed_position(object table, object key) except? -2:
     if _pack_key(key, &parts[0], &count, &tuple_key):
         cache = _keyed_cache(_indexed_context(table), table, 0)
         data = cache.data
-        if data is not None:
-            position = data.find(&parts[0], count, tuple_key)
-            if position < 0:
-                raise KeyError(key)
-            return position
+        position = (_owned_position(table, key) if data is None
+                    else data.find(&parts[0], count, tuple_key))
+        if position < 0:
+            raise KeyError(key)
+        return position
     return _wide_indexed_position(table, key)
 
 
@@ -1299,6 +1344,7 @@ cdef object indexed_contains(object table, object key):
         data = cache.data
         if data is not None:
             return data.find(&parts[0], count, tuple_key) >= 0
+        return _owned_position(table, key) >= 0
     if type(key) is tuple and len(key) > 4:
         found = _wide_indexed_row(table, key, 0, False)
         if found is not None:
@@ -1491,20 +1537,20 @@ cdef class NativeTable:
                 if type(keys[0]) is int and not (data.integral and data.contiguous):
                     return
                 cached = owner._native_cache.get(KeyedView)
-                if cached is None:
-                    cached = owner._native_cache.setdefault(KeyedView, KeyedView(owner))
-                indexed = <KeyedView>cached
-                if indexed.admitted and not owner._index_error['multi']:
+                if not owner._index_error._index['multi'] and data.integral and data.contiguous:
+                    self._input_keys = data
+                    self._input_positions = &data.sorted_positions[0]
+                    self._input_low = data.first_integer
+                    self._input_high = data.last_integer
+                if cached is not None and not owner._index_error._index['multi']:
+                    indexed = <KeyedView>cached
+                    if not indexed.admitted:
+                        return
                     self._indexed_view = indexed
                     self._input_values = &indexed.values[0]
                     self._input_numeric = &indexed.numeric[0]
                     self._input_width = indexed.value_width
-                    if data.integral and data.contiguous:
-                        self._input_keys = data
-                        self._input_positions = &data.sorted_positions[0]
-                        self._input_low = data.first_integer
-                        self._input_high = data.last_integer
-                    else:
+                    if self._input_keys is None:
                         self._single_label = keys[0]
 
     cdef double lookup_float(self, KeyArg0 key, object column, object default=_typed_missing) except? -1:
@@ -1525,7 +1571,7 @@ cdef class NativeTable:
                 if col >= 0:
                     return _numeric_float_read(data, col, key,
                                                _missing if default is _typed_missing else default)
-            if self._input_keys is not None:
+            if self._indexed_view is not None and self._input_keys is not None:
                 if self._input_low <= key <= self._input_high and _input_value(
                         self, self._input_positions[key - self._input_low],
                         column, &value):
@@ -1727,6 +1773,24 @@ cdef bint try_clamped_table_float(NativeTable table, LookupContext context, bint
         key = table._input_low
     elif key > table._input_high:
         key = table._input_high
+    if table._indexed_view is None:
+        if type(column) is str:
+            if column not in table._owner._columns:
+                return False
+        elif (type(column) is not int and type(column) is not bool
+                or not -len(table._owner._columns) <= column < len(table._owner._columns)):
+            return False
+        scalar = _read_owned_table(table._owner, key, column, _missing)
+        if type(scalar) is float:
+            result[0] = PyFloat_AS_DOUBLE(scalar)
+            return True
+        if type(scalar) is int or type(scalar) is bool or type(scalar) is str:
+            try:
+                result[0] = _float_type(scalar)
+            except (ValueError, OverflowError):
+                return False
+            return True
+        return False
     if (context._private_owner and context.clamped_source is table
             and context.clamped_column is column and context.clamped_namespace is namespace):
         index = context.clamped_index
@@ -2432,6 +2496,17 @@ cdef object _native_frame_table(object frame, bint with_rows, bint with_metadata
 
 
 
+cdef void _prepare_keyed_tables(object value) except *:
+    """Install keyed views while executing an explicit table constructor."""
+    if type(value) is Table:
+        cache = value._native_cache
+        if KeyedView not in cache:
+            cache.setdefault(KeyedView, KeyedView(value))
+    elif type(value) is Record:
+        for _, child in value._items:
+            _prepare_keyed_tables(child)
+
+
 cdef object table(object function, tuple keywords, object frame, object columns=_missing,
                   object groups=_missing, object indexing=_missing, object rows=_missing,
                   object report=_missing, object preserve_scalar_types=_missing):
@@ -2447,6 +2522,10 @@ cdef object table(object function, tuple keywords, object frame, object columns=
         prepared = _native_frame_table(frame, rows is True, rows is True or report is True,
                                         preserve_scalar_types is True)
         if prepared is not None:
+            _prepare_keyed_tables(prepared)
             return prepared
-    return forward_call(function, keywords, ('frame', 'columns', 'groups', 'indexing', 'rows', 'report', 'preserve_scalar_types'),
-                        (frame, columns, groups, indexing, rows, report, preserve_scalar_types), omitted_argument)
+    prepared = forward_call(function, keywords, ('frame', 'columns', 'groups', 'indexing', 'rows', 'report', 'preserve_scalar_types'),
+                            (frame, columns, groups, indexing, rows, report, preserve_scalar_types), omitted_argument)
+    if function is _table_constructor:
+        _prepare_keyed_tables(prepared)
+    return prepared
