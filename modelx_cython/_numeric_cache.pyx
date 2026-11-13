@@ -33,14 +33,6 @@ cdef long long word_int(word value) noexcept:
     return <long long>value
 
 
-cdef inline word mix(word value) noexcept:
-    value ^= value >> 30
-    value *= <word>0xbf58476d1ce4e5b9
-    value ^= value >> 27
-    value *= <word>0x94d049bb133111eb
-    return value ^ (value >> 31)
-
-
 cdef inline size_t start_slot(size_t capacity, word a, word b, word c) noexcept:
     return (mix(a) ^ mix(b + <word>0x9e3779b97f4a7c15)
             ^ mix(c + <word>0x517cc1b727220a95)) & (capacity - 1)

@@ -1,7 +1,6 @@
-from libc.stdint cimport uint64_t
 from libc.stddef cimport size_t
+from modelx_cython._numeric_hash cimport mix, word
 
-ctypedef uint64_t word
 cdef struct Entry:
     word a
     word b
