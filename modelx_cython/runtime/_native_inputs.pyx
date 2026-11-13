@@ -523,6 +523,8 @@ cdef class GroupedView:
 
 cdef object prepare_group(object record, str column):
     groups, keys, offsets, values = [], [], [0], []
+    cdef object key, scalar, ordered, positions
+    cdef tuple rows
     for group, table in record._items:
         kind = type(group)
         if kind is not int and not (
@@ -533,16 +535,20 @@ cdef object prepare_group(object record, str column):
         number = int.__index__(group)
         if not -(1 << 63) <= number < (1 << 63) or type(table) is not Table:
             return None
-        if column not in table._columns or not all(
-                type(key) is int and -(1 << 63) <= key < (1 << 63) for key in table._keys):
+        ordered = table._ordered
+        if ordered is None or column not in table._columns:
             return None
         col = table._columns.index(column)
-        if not all(type(row[col]) is float for row in table._values):
-            return None
+        positions, rows = table._positions, table._values
         groups.append(number)
-        for key, row in sorted(zip(table._keys, table._values)):
+        for key in ordered:
+            if not PyLong_CheckExact(key) or not -(1 << 63) <= key < (1 << 63):
+                return None
+            scalar = rows[positions[key]][col]
+            if not PyFloat_CheckExact(scalar):
+                return None
             keys.append(key)
-            values.append(row[col])
+            values.append(scalar)
         offsets.append(len(keys))
     return GroupedView(groups, keys, offsets, values)
 
@@ -2475,6 +2481,15 @@ cdef object _native_frame_table(object frame, bint with_rows, bint with_metadata
 
 
 
+cdef void _prepare_group_record(object value) except *:
+    children = value._items
+    if children and type(children[0][1]) is Table:
+        for column in children[0][1]._columns:
+            prepared = prepare_group(value, column)
+            if prepared is not None:
+                value._native_groups[column] = prepared
+
+
 cdef void _prepare_tables(object value) except *:
     """Install table resources while executing an explicit table constructor."""
     if type(value) is Table:
@@ -2482,20 +2497,15 @@ cdef void _prepare_tables(object value) except *:
         if KeyedView not in cache:
             cache.setdefault(KeyedView, KeyedView(value))
     elif type(value) is Record:
-        children = value._items
-        for _, child in children:
+        for _, child in value._items:
             _prepare_tables(child)
-        if children and type(children[0][1]) is Table:
-            for column in children[0][1]._columns:
-                prepared = prepare_group(value, column)
-                if prepared is not None:
-                    value._native_groups[column] = prepared
+        _prepare_group_record(value)
 
 
 cdef object group_record(object function, object tables):
     cdef object prepared = function(tables)
-    if function is _group_constructor:
-        _prepare_tables(prepared)
+    if function is _group_constructor and type(prepared) is Record:
+        _prepare_group_record(prepared)
     return prepared
 
 
