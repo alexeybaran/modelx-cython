@@ -389,6 +389,15 @@ def _signed_local_assignments(body, name, operands, guard, facts):
         local_reads = reads.intersection(_signed_operand_names(value))
         if local_reads and guard._signed_expression(value, guard.path)[1]:
             safe_reads.update(local_reads)
+    for part in lexical_nodes(body.body):
+        if isinstance(part, cst.Comparison) and len(part.comparisons) == 1:
+            comparison, = part.comparisons
+            if isinstance(comparison.operator, (cst.Equal, cst.NotEqual, cst.LessThan,
+                                               cst.LessThanEqual, cst.GreaterThan, cst.GreaterThanEqual)):
+                sides = part.left, comparison.comparator
+                if all(guard._signed_atom(value) or isinstance(value, cst.Integer)
+                       and value.evaluated_value < 1 << 63 for value in sides):
+                    safe_reads.update(reads.intersection(sides))
     return assignments if reads <= safe_reads else {}
 
 
@@ -402,42 +411,36 @@ class _SignedLocalValues(cst.CSTTransformer):
 
 
 def _type_signed_locals(body, guard, facts, parameters):
-    """Keep provably signed locals native and preserve existing prefix admission."""
+    """Use one signed proof for straight-line and conditional local definitions."""
     if (not isinstance(body, cst.IndentedBlock) or has_scope_effects(body.body)
             or facts.reads & {'eval', 'exec', 'locals', 'vars', 'globals', '_getframe', 'currentframe'}):
         return body, ()
     operands = []
-    identity_names = set()
     for part in lexical_nodes(body.body):
         if guard.signed_return and isinstance(part, cst.Return) and part.value is not None:
             operands.append(part.value)
         if (isinstance(part, cst.Call) and dotted_name(part.func) == _INTEGER_CONVERSION
                 and len(part.args) == 2):
             operands.append(part.args[0].value)
-    for part in walk(body):
-        if isinstance(part, cst.Comparison) and any(
-                isinstance(item.operator, (cst.Is, cst.IsNot)) for item in part.comparisons):
-            identity_names.update(item.value for item in walk(part) if isinstance(item, cst.Name))
     needed = {part.value for value in operands for part in walk(value) if isinstance(part, cst.Name)}
-    needed.difference_update(identity_names)
     if not needed:
         return body, ()
     statements = list(body.body)
     parameters = set(parameters)
-    seen = parameters.copy()
     for index, line in enumerate(statements):
         if not isinstance(line, cst.SimpleStatementLine) or len(line.body) != 1:
             break
         assignment = line.body[0]
         if ((target := local_assignment(assignment)) is not None
-                and target.value in needed and target.value not in seen
+                and target.value in needed and target.value not in parameters
                 and facts.stores[target.value] == 1):
-            value, signed = guard._signed_expression(assignment.value, guard.path)
-            if signed:
-                statements[index] = line.with_changes(body=(
-                    cst.AnnAssign(target, cst.Annotation(_INTEGER_ANNOTATION), value),))
-                guard.signed_names.add(target.value)
-        seen.update(part.value for part in walk(line) if isinstance(part, cst.Name))
+            guard.signed_names.add(target.value)
+            values = _signed_local_assignments(body, target.value, operands, guard, facts)
+            if values:
+                statements[index] = line.with_changes(body=(cst.AnnAssign(
+                    target, cst.Annotation(_INTEGER_ANNOTATION), values[assignment]),))
+            else:
+                guard.signed_names.remove(target.value)
     declarations, assignments = [], {}
     for name in sorted(needed - parameters - guard.signed_names):
         if not facts.stores[name]:
