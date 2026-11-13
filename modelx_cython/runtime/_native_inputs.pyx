@@ -906,6 +906,7 @@ cdef class KeyedView:
     cdef unsigned char[::1] numeric
     cdef Py_ssize_t width, value_width, rows, mask
     cdef bint tuple_keys, admitted, pandas_columns
+    cdef TableView contiguous_keys
 
     def __cinit__(self, table):
         cdef KeyPart* parts
@@ -931,6 +932,9 @@ cdef class KeyedView:
             return
         self.tuple_keys = type(self.keys[0]) is tuple
         self.width = len(self.keys[0]) if self.tuple_keys else 1
+        integer_view = view(table)
+        if integer_view is not None and (<TableView>integer_view).contiguous:
+            self.contiguous_keys = integer_view
         if self.tuple_keys and spec is not None and not spec['multi']:
             # A plain object Index can contain tuple labels. Pandas treats
             # these as scalar keys and does not validate their components.
@@ -938,41 +942,42 @@ cdef class KeyedView:
         if (self.width and self.rows > _key_sys.maxsize // sizeof(KeyPart) // self.width
                 or self.rows > _key_sys.maxsize // sizeof(double) // self.value_width):
             raise MemoryError()
-        self.parts = <KeyPart*>PyMem_Malloc(max(1, self.rows * self.width) * sizeof(KeyPart))
-        if self.parts == NULL:
-            raise MemoryError()
-        capacity = 8
-        while capacity < self.rows * 2:
-            capacity *= 2
-        if capacity > _key_sys.maxsize // 8:
-            return
-        self.slots = array('q', [-1] * capacity)
-        self.hashes = array('Q', [0] * capacity)
-        self.mask = capacity - 1
-        for row in range(self.rows):
-            key = self.keys[row]
-            if (type(key) is tuple) != self.tuple_keys:
+        if self.contiguous_keys is None:
+            self.parts = <KeyPart*>PyMem_Malloc(max(1, self.rows * self.width) * sizeof(KeyPart))
+            if self.parts == NULL:
+                raise MemoryError()
+            capacity = 8
+            while capacity < self.rows * 2:
+                capacity *= 2
+            if capacity > _key_sys.maxsize // 8:
                 return
-            if self.tuple_keys and len(key) != self.width:
-                return
-            parts = self.parts + row * self.width
-            for i in range(self.width):
-                part = (<tuple>key)[i] if self.tuple_keys else key
-                kind = type(part)
-                if kind is int or kind is bool:
-                    key_int(&parts[i], PyLong_AsLongLongAndOverflow(part, &overflow), kind is bool)
-                    if overflow:
-                        return
-                else:
-                    key_text(&parts[i], part)
-                    if parts[i].kind == _KEY_OBJECT:
-                        return
-            code = _parts_hash(parts, self.width, self.tuple_keys)
-            slot = <Py_ssize_t>(code & <unsigned long long>self.mask)
-            while self.slots[slot] >= 0:
-                slot = (slot + 1) & self.mask
-            self.slots[slot] = row
-            self.hashes[slot] = code
+            self.slots = array('q', [-1] * capacity)
+            self.hashes = array('Q', [0] * capacity)
+            self.mask = capacity - 1
+            for row in range(self.rows):
+                key = self.keys[row]
+                if (type(key) is tuple) != self.tuple_keys:
+                    return
+                if self.tuple_keys and len(key) != self.width:
+                    return
+                parts = self.parts + row * self.width
+                for i in range(self.width):
+                    part = (<tuple>key)[i] if self.tuple_keys else key
+                    kind = type(part)
+                    if kind is int or kind is bool:
+                        key_int(&parts[i], PyLong_AsLongLongAndOverflow(part, &overflow), kind is bool)
+                        if overflow:
+                            return
+                    else:
+                        key_text(&parts[i], part)
+                        if parts[i].kind == _KEY_OBJECT:
+                            return
+                code = _parts_hash(parts, self.width, self.tuple_keys)
+                slot = <Py_ssize_t>(code & <unsigned long long>self.mask)
+                while self.slots[slot] >= 0:
+                    slot = (slot + 1) & self.mask
+                self.slots[slot] = row
+                self.hashes[slot] = code
         # Copy existing doubles. Convert all other scalars only when selected.
         cdef Array numbers = clone(array('d'), self.rows * self.value_width, False)
         cdef Array valid = clone(array('B'), self.rows * self.value_width, True)
@@ -1014,6 +1019,14 @@ cdef class KeyedView:
         cdef unsigned long long code
         cdef Py_ssize_t slot, row
         if not self.rows or count != self.width or tuple_key != self.tuple_keys:
+            return -1
+        if self.contiguous_keys is not None:
+            if (parts[0].kind in (_KEY_INT, _KEY_FLOAT_INT, _KEY_BOOL)
+                    and (parts[0].kind != _KEY_BOOL
+                         or not self.boolean_modes.shape[0] or not self.boolean_modes[0])
+                    and self.contiguous_keys.first_integer <= parts[0].number <= self.contiguous_keys.last_integer):
+                return self.contiguous_keys.sorted_positions[
+                    parts[0].number - self.contiguous_keys.first_integer]
             return -1
         code = _parts_hash(parts, count, tuple_key)
         slot = <Py_ssize_t>(code & <unsigned long long>self.mask)
