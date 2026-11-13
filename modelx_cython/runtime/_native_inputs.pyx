@@ -405,9 +405,8 @@ cdef double lookup_f64(object function, LookupContext context, object table,
                 if default is _missing:
                     raise KeyError(key)
                 return default
-            if index >= 0 and data.integers[index] == key:
-                if col >= 0:
-                    return data.numbers[data.sorted_positions[index] * data.width + col]
+            if col >= 0:
+                return data.numbers[data.sorted_positions[index] * data.width + col]
     return lookup(function, table, key, column) if default is _missing else lookup(function, table, key, column, default)
 
 
@@ -430,9 +429,8 @@ cdef double previous_f64(object function, LookupContext context, object table,
                 if default is _missing:
                     raise ValueError(f'No key at or before {key!r}')
                 return default
-            if index >= 0:
-                if col >= 0:
-                    return data.numbers[data.sorted_positions[index] * data.width + col]
+            if col >= 0:
+                return data.numbers[data.sorted_positions[index] * data.width + col]
     return previous(function, table, key, column) if default is _missing else previous(function, table, key, column, default)
 
 
