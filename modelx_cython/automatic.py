@@ -4,10 +4,9 @@ from .cell_entries import DenseAxis
 import ctypes
 import sys
 
-# Shared resource policies, independent of model/Cell names. At double plus
-# bint-readiness storage the dense ceiling is 768 KiB per Cell on Windows. Associative
-# storage retains the existing growing overflow table beyond its primary cap.
-MAX_DENSE_ENTRIES = 65536
+# Pilot the September dense geometry with up to 24 MiB of double values and
+# readiness per Cell. Associative caches still retain the growing overflow table.
+MAX_DENSE_ENTRIES = 2097152
 MAX_PRIMARY_ENTRIES = 4096
 
 
