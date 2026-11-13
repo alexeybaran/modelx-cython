@@ -15,6 +15,19 @@ def statements(suite):
                  (item.body if isinstance(item, cst.SimpleStatementLine) else (item,)))
 
 
+def single_statement(line):
+    if isinstance(line, cst.SimpleStatementLine) and len(line.body) == 1:
+        return line.body[0]
+    return None
+
+
+def local_assignment(node):
+    if (isinstance(node, cst.Assign) and len(node.targets) == 1
+            and isinstance(target := node.targets[0].target, cst.Name)):
+        return target
+    return None
+
+
 def walk(node):
     yield node
     for child in node.children:

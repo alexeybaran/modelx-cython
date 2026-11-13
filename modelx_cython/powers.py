@@ -67,12 +67,11 @@ import libcst as cst
 import libcst.matchers as m
 from libcst.metadata import ExpressionContext
 
-from modelx_cython.checked_arithmetic import local_assignment, single_statement
 from modelx_cython.consts import CY_MOD, MX_POW, MX_SELF, MX_SYS_MOD
 from modelx_cython.typedefs import CY_FLOAT_T, CY_INT_T
 from modelx_cython.usage import RESOLVED, CellsResolver, _extract_self_chain
 from modelx_cython.scopes import CstFacts, OPAQUE_SCOPES as _OPAQUE_SCOPES, has_scope_effects, lexical_nodes
-from modelx_cython.syntax import walk
+from modelx_cython.syntax import local_assignment, single_statement, walk
 
 _logger = logging.getLogger(__name__)
 

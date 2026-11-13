@@ -7,7 +7,10 @@ import libcst as cst
 from libcst.metadata import ExpressionContext
 
 from .scopes import CstFacts, Names, has_scope_effects, lexical_nodes
-from .syntax import arguments, code, dotted_name, literal_value, statements, walk
+from .syntax import (
+    arguments, code, dotted_name, literal_value, local_assignment, single_statement,
+    statements, walk,
+)
 
 _BOUND = 1 << 25
 _SIGNED64 = -(1 << 63), (1 << 63) - 1
@@ -27,22 +30,9 @@ class _RangeInduction(NamedTuple):
                 and dotted_name(expr.left) == self.counter and dotted_name(expr.right) == self.origin)
 
 
-def local_assignment(node):
-    if (isinstance(node, cst.Assign) and len(node.targets) == 1
-            and isinstance(target := node.targets[0].target, cst.Name)):
-        return target
-    return None
-
-
 def _signed_assignment(assignment, value):
     return cst.AnnAssign(local_assignment(assignment), cst.Annotation(cst.parse_expression('_mx_cy.longlong')),
                          value, semicolon=assignment.semicolon)
-
-
-def single_statement(line):
-    if isinstance(line, cst.SimpleStatementLine) and len(line.body) == 1:
-        return line.body[0]
-    return None
 
 
 def range_bounds(loop):

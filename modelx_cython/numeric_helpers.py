@@ -9,7 +9,7 @@ from .helpers import module_name
 from .provider_manifest import owner_provider_binding
 from .rounding import NATIVE_ROUNDING_PROVIDER
 from .scopes import CstFacts, Names, has_scope_effects
-from .syntax import arguments, literal_value, walk
+from .syntax import arguments, literal_value, local_assignment, single_statement, walk
 from .typedefs import primitive_kind
 
 
@@ -51,16 +51,9 @@ class NumericReturns(cst.CSTTransformer):
                 and not cell.body_has_closure and cell.get_rettype_expr(c_style=True) == rettype)
 
     @staticmethod
-    def single_statement(line):
-        if isinstance(line, cst.SimpleStatementLine) and len(line.body) == 1:
-            return line.body[0]
-        return None
-
-    @staticmethod
     def assigns(node, name):
-        return (isinstance(node, cst.Assign) and len(node.targets) == 1
-                and isinstance(node.targets[0].target, cst.Name)
-                and node.targets[0].target.value == name)
+        target = local_assignment(node)
+        return target is not None and target.value == name
 
     def direct_ref(self, node):
         return (isinstance(node, cst.Attribute) and isinstance(node.value, cst.Name)
@@ -125,12 +118,12 @@ class NumericReturns(cst.CSTTransformer):
                 and len(body) >= 6):
             return None
         group_guard, key_line, table_line = body[-5:-2]
-        subtable = self.single_statement(table_line).value
+        subtable = single_statement(table_line).value
         if not (isinstance(group_guard, cst.If) and group_guard.orelse is None
                 and isinstance(group_guard.body, cst.IndentedBlock)
                 and len(group_guard.body.body) == 1):
             return None
-        missing = self.single_statement(group_guard.body.body[0])
+        missing = single_statement(group_guard.body.body[0])
         if not (isinstance(missing, cst.Return) and isinstance(missing.value, cst.Float)
                 and missing.value.value == '0.0'):
             return None
@@ -165,7 +158,7 @@ class NumericReturns(cst.CSTTransformer):
             value_functions = ', '.join(code(call.func) for call in (subtable, contains, lookup)) + ', '
         if not isinstance(group, cst.Name):
             return None
-        bindings = [self.single_statement(line) for line in body[:-5]]
+        bindings = [single_statement(line) for line in body[:-5]]
         if sum(self.assigns(binding, group.value) and self.typed_cell_call(binding.value, 'long long')
                for binding in bindings) != 1:
             return None
@@ -235,14 +228,14 @@ class NumericReturns(cst.CSTTransformer):
     def grouped_table_method(self, body):
         """Recognize the existing grouped read through slice and index methods."""
         key_line, table_line, guard, result_line = body[-4:]
-        result = self.single_statement(result_line)
+        result = single_statement(result_line)
         if not (isinstance(result, cst.Return) and isinstance(guard, cst.If)
                 and guard.orelse is None and isinstance(guard.body, cst.IndentedBlock)
                 and len(guard.body.body) == 1):
             return None
         args = arguments(result.value, 'min', 2)
         absence = self.not_in(guard.test)
-        absent = self.single_statement(guard.body.body[0])
+        absent = single_statement(guard.body.body[0])
         if not (args and absence and isinstance(absent, cst.Return)
                 and isinstance(absent.value, cst.Float) and absent.value.evaluated_value == 0.0):
             return None
@@ -256,8 +249,8 @@ class NumericReturns(cst.CSTTransformer):
                 and isinstance(lookup_args[1], cst.SimpleString)
                 and self.typed_cell_call(cap, 'double')):
             return None
-        key_binding = self.single_statement(key_line)
-        table_binding = self.single_statement(table_line)
+        key_binding = single_statement(key_line)
+        table_binding = single_statement(table_line)
         if not (self.assigns(key_binding, key.value) and self.typed_cell_call(key_binding.value, 'long long')
                 and self.assigns(table_binding, index.value.value)
                 and isinstance(table_binding.value, cst.Call)
@@ -286,7 +279,7 @@ class NumericReturns(cst.CSTTransformer):
             return None
         key_line, lower_line, upper_line, guard, result_line = body[-5:]
         key, lower, upper, result = map(
-            self.single_statement, (key_line, lower_line, upper_line, result_line))
+            single_statement, (key_line, lower_line, upper_line, result_line))
         if not (isinstance(result, cst.Return) and self.self_call(result.value)
                 and len(result.value.args) == 3
                 and all(isinstance(stmt, cst.Assign) and len(stmt.targets) == 1
@@ -317,7 +310,7 @@ class NumericReturns(cst.CSTTransformer):
                 and isinstance(guard.test.comparisons[0].operator, cst.LessThan)
                 and guard.test.comparisons[0].comparator.deep_equals(lo)):
             return None
-        below = self.single_statement(guard.body.body[0])
+        below = single_statement(guard.body.body[0])
         if not (isinstance(below, cst.Return) and isinstance(below.value, cst.Float)):
             return None
         provider, _ = ref.helper
@@ -378,7 +371,7 @@ class NumericReturns(cst.CSTTransformer):
         if grouped is not None:
             return after.with_changes(body=after.body.with_changes(body=grouped))
         key_binding, table_binding, guard, result = body[-4:]
-        result = self.single_statement(result)
+        result = single_statement(result)
         if not (isinstance(guard, cst.If) and guard.orelse is None
                 and isinstance(guard.body, cst.IndentedBlock) and len(guard.body.body) == 1
                 and isinstance(guard.test, cst.UnaryOperation) and isinstance(guard.test.operator, cst.Not)
@@ -387,7 +380,7 @@ class NumericReturns(cst.CSTTransformer):
                 and len(result.value.args) == 2
                 and all(not arg.keyword and not arg.star for arg in result.value.args)):
             return after
-        absent = self.single_statement(guard.body.body[0])
+        absent = single_statement(guard.body.body[0])
         contains = guard.test.expression
         lookup, cap = (arg.value for arg in result.value.args)
         if not (isinstance(absent, cst.Return) and isinstance(absent.value, cst.Float)
@@ -401,9 +394,9 @@ class NumericReturns(cst.CSTTransformer):
                 and table.value == checked_table.value and key.value == checked_key.value
                 and isinstance(column, cst.SimpleString) and key.value != table.value):
             return after
-        key_binding = self.single_statement(key_binding)
+        key_binding = single_statement(key_binding)
         if (not self.assigns(key_binding, key.value) or not self.typed_cell_call(key_binding.value, 'long long')
-                or not self.assigns(self.single_statement(table_binding), table.value)):
+                or not self.assigns(single_statement(table_binding), table.value)):
             return after
         lookup_ref = self.cls.refs.get(lookup.func.attr.value)
         contains_ref = self.cls.refs.get(contains.func.attr.value)
@@ -484,7 +477,7 @@ class NumericReturns(cst.CSTTransformer):
     def rounded_inputs(self, body):
         if 'round' not in self.builtin_keys or self.resolver is None:
             return None
-        result = self.single_statement(body[-1])
+        result = single_statement(body[-1])
         if not isinstance(result, cst.Return):
             return None
         expression = result.value
@@ -506,7 +499,7 @@ class NumericReturns(cst.CSTTransformer):
         classifier = OperandKind(self.resolver, cells, refs, self.cls.fqname, kinds)
         integer_locals = set()
         for line in body[:-1]:
-            statement = self.single_statement(line)
+            statement = single_statement(line)
             if (isinstance(statement, cst.Assign) and len(statement.targets) == 1
                     and isinstance(statement.targets[0].target, cst.Name)):
                 name = statement.targets[0].target.value
@@ -538,7 +531,7 @@ class NumericReturns(cst.CSTTransformer):
         replaced = []
         changed = False
         for line in body:
-            statement = self.single_statement(line)
+            statement = single_statement(line)
             if isinstance(statement, cst.Assign) and len(statement.targets) == 1:
                 target, value = statement.targets[0].target, statement.value
                 if (isinstance(target, cst.Name) and target.value not in self.cell.params
@@ -599,9 +592,9 @@ class NumericReturns(cst.CSTTransformer):
         """Bind the existing below-range default and upper clamp on an owned Table."""
         if len(body) < 6 or 'int' not in self.builtin_keys:
             return None
-        source, key, low, high = map(self.single_statement, body[-6:-2])
+        source, key, low, high = map(single_statement, body[-6:-2])
         guard, result_line = body[-2:]
-        result = self.single_statement(result_line)
+        result = single_statement(result_line)
         if not (isinstance(result, cst.Return) and isinstance(guard, cst.If) and guard.orelse is None
                 and isinstance(guard.body, cst.IndentedBlock) and len(guard.body.body) == 1
                 and all(isinstance(item, cst.Assign) and len(item.targets) == 1
@@ -613,7 +606,7 @@ class NumericReturns(cst.CSTTransformer):
             return None
         first = arguments(low.value, 'int', 1)
         lookup = self.first_lookup(result.value)
-        below = self.single_statement(guard.body.body[0])
+        below = single_statement(guard.body.body[0])
         if not (first and lookup and lookup is result.value and lookup.func.value.deep_equals(table)
                 and isinstance(below, cst.Return) and isinstance(below.value, cst.Float)
                 and isinstance(guard.test, cst.Comparison) and len(guard.test.comparisons) == 1
@@ -686,7 +679,7 @@ class NumericReturns(cst.CSTTransformer):
         """Use the owned table's native bounds for a typed clamp and scalar read."""
         if 'min' not in self.builtin_keys:
             return None
-        source, clamp, result = map(self.single_statement, body[-3:])
+        source, clamp, result = map(single_statement, body[-3:])
         if not (isinstance(result, cst.Return) and isinstance(clamp, cst.Assign)
                 and isinstance(source, cst.Assign) and len(source.targets) == len(clamp.targets) == 1
                 and isinstance(source.targets[0].target, cst.Name)
@@ -760,7 +753,7 @@ class NumericReturns(cst.CSTTransformer):
             fallback_key = cst.Name(names.reserve('_mx_clamp_fallback_key'))
             original_clamp = original_clamp.with_changes(body=(cst.AnnAssign(
                 fallback_key, cst.Annotation(cst.Name('object')),
-                value=self.single_statement(original_clamp).value),))
+                value=single_statement(original_clamp).value),))
             fallback_lookup = lookup.visit(_ReplaceExpression(lookup.args[0].value, fallback_key))
         alias = module_name(provider)
         operation = bounds.clamped
