@@ -27,7 +27,7 @@ def test_scalar_column_errors_match_pandas_and_ignore_defaults(native, indexing,
                           lambda: h.lookup_float(source, key, 'absent', default=7.0),
                           lambda: native.float_value(h.lookup_float, source, key, 'absent'),
                           lambda: native.float_default(h.lookup_float, source, key, 'absent', 7.0),
-                          lambda: native.legacy_float_default(h.lookup, source, key, 'absent', 7.0)]
+                          lambda: native.packed_float_default(h.lookup, source, key, 'absent', 7.0)]
             for operation in operations:
                 with pytest.raises(KeyError) as actual:
                     operation()
@@ -82,5 +82,5 @@ def test_bare_table_and_legacy_pickle_column_contract_is_unchanged(native):
             h.lookup_float(value, 1, 'absent', default=7.0)
         assert h.lookup_float(value, 9, 'absent', default=7.0) == 7.0
         with pytest.raises(ValueError):
-            native.legacy_float_default(h.lookup, value, 1, 'absent', 7.0)
-        assert native.legacy_float_default(h.lookup, value, 9, 'absent', 7.0) == 7.0
+            native.packed_float_default(h.lookup, value, 1, 'absent', 7.0)
+        assert native.packed_float_default(h.lookup, value, 9, 'absent', 7.0) == 7.0

@@ -31,7 +31,11 @@ m.Rates.amount('M',42);m.Rates.amount('F',43)
 m.Rates.flag(True);m.Rates.flag(False)
 m.Rates.defaulted('M',42);m.Rates.defaulted('X',9)
 ''')
-    build=subprocess.run([sys.executable,'-m','modelx_cython','exported','--sample','sample.py','--no-spec'],
+    # The replacement scenarios use ages 44 and 45 after the sample stops at 43.
+    (tmp_path/'spec.py').write_text(repr({'spaces': {'Rates': {
+        'cells_param_size': {('sex', 'age'): (1, 46)},
+    }}}))
+    build=subprocess.run([sys.executable,'-m','modelx_cython','exported','--sample','sample.py','--spec','spec.py'],
                          cwd=tmp_path,capture_output=True,text=True,env=dict(os.environ))
     (tmp_path/'build.log').write_text(build.stdout+build.stderr)
     assert build.returncode==0,build.stdout+build.stderr
