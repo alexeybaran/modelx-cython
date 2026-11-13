@@ -17,6 +17,8 @@ def native(tmp_path_factory):
     (root/'probe.pyx').write_text('''cimport native
 from cpython.ref cimport PyObject
 cdef native.LookupContext _context = native.LookupContext()
+def prepare(function, frame):
+    return native.table(function, (), frame)
 def invoke(conversion, function, table, key, column, *default):
     cdef native.KeyPart[8] parts
     cdef Py_ssize_t i, n
@@ -97,14 +99,28 @@ def test_complete_key_and_component_lifetimes(native):
 
 
 def test_collision_many_keys_and_column_context_switch(native):
+    import pandas as pd
+    from modelx_helpers import pdn
+
     keys=tuple(('α'+str(i%9),i,i%2==0) for i in range(1000))
-    table=Table(keys,[(float(i),float(-i)) for i in range(len(keys))],('rate','other'))
+    frame=pd.DataFrame({'rate': [float(i) for i in range(len(keys))],
+                        'other': [float(-i) for i in range(len(keys))]},
+                       index=pd.MultiIndex.from_tuples(keys))
+    table=native.prepare(pdn.table, frame)
+    assert any(type(view).__name__ == 'KeyedView' for view in table._native_cache.values())
     for i in range(0,len(keys),13):
         assert native.invoke(float,h.lookup,table,keys[i],'rate')==float(i)
         assert native.invoke(float,h.lookup,table,keys[i],'other')==float(-i)
     for i in range(100):
         other=Table(keys,[(float(i),)]*len(keys),('rate',))
         assert native.invoke(float,h.lookup,other,keys[i],'rate')==float(i)
+
+
+def test_lookup_does_not_prepare_unrelated_rows(native):
+    table = Table((('M', 42), ('F', 43)), ((1.5,), ('unread',)), ('rate',))
+    assert not table._native_cache
+    assert native.invoke(float, h.lookup, table, ('M', 42), 'rate') == 1.5
+    assert not table._native_cache
 
 
 def test_unicode_subclass_keeps_original_fallback_object(native):
