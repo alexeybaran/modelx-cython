@@ -160,9 +160,10 @@ def _unsigned_check(layout):
     axis, = layout.axes
     span = axis.stop - axis.lower
     if 0 < span < 1 << 64:
-        return cst.parse_expression(
-            f"({CY_MOD}.cast({CY_MOD}.ulonglong, {axis.key}) - "
-            f"{CY_MOD}.cast({CY_MOD}.ulonglong, {axis.lower})) < {span}")
+        # D15: subtract signed, then cast. The difference of two unsigned casts trips
+        # Cython's overflow check whenever key < lower (always for a negative lower bound).
+        offset = f"{axis.key} - ({axis.lower})" if axis.lower else axis.key
+        return cst.parse_expression(f"{CY_MOD}.cast({CY_MOD}.ulonglong, {offset}) < {span}")
     return None
 
 
