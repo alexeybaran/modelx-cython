@@ -21,6 +21,8 @@ cdef object over(object current_callable, tuple keywords, object source, object 
 cdef object flatten(object current_callable, tuple keywords, object sources)
 cdef object sum_values(object current_callable, tuple keywords, object source)
 cdef bint f64_accepts(object function)
+cdef double sum_nonzero_products(object function, object values, object weights) except? -1.0
+cdef object shift_scale(object function, object values, object weights, object first)
 
 cdef double sum_float_kernel(Stream source) except *
 cdef object sum_float(object current_callable, tuple keywords, object source, object function=*, object where=*)

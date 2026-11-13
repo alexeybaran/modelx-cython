@@ -6,6 +6,7 @@ subclasses and replaced function References call the original supplied function.
 Views belong to their Table and contain no formula or policy state.
 """
 from array import array
+from cpython.array cimport array as Array, clone
 from enum import IntEnum
 import math
 from libc.math cimport fabs, isfinite, floor
@@ -405,9 +406,8 @@ cdef double lookup_f64(object function, LookupContext context, object table,
                 if default is _missing:
                     raise KeyError(key)
                 return default
-            if index >= 0 and data.integers[index] == key:
-                if col >= 0:
-                    return data.numbers[data.sorted_positions[index] * data.width + col]
+            if col >= 0:
+                return data.numbers[data.sorted_positions[index] * data.width + col]
     return lookup(function, table, key, column) if default is _missing else lookup(function, table, key, column, default)
 
 
@@ -430,9 +430,8 @@ cdef double previous_f64(object function, LookupContext context, object table,
                 if default is _missing:
                     raise ValueError(f'No key at or before {key!r}')
                 return default
-            if index >= 0:
-                if col >= 0:
-                    return data.numbers[data.sorted_positions[index] * data.width + col]
+            if col >= 0:
+                return data.numbers[data.sorted_positions[index] * data.width + col]
     return previous(function, table, key, column) if default is _missing else previous(function, table, key, column, default)
 
 
@@ -818,20 +817,6 @@ cdef inline double _numeric_float_read(const PyObject* data, Py_ssize_t column,
     return (<TableView>data).numbers[(<TableView>data).sorted_positions[index]
                                       * (<TableView>data).width + column]
 
-cdef double lookup_float_f64(object conversion, object function, LookupContext context,
-                             object table, long long key, object column,
-                             object default=_missing) except? -1:
-    cdef TableView data
-    cdef Py_ssize_t col = -1
-    cdef KeyPart part
-    if conversion is _float_type and function is _lookup:
-        data = context.get(table, column, &col)
-        if data is not None and data.numeric and not data.pandas_at and col >= 0:
-            return _numeric_float_read(<PyObject*>data, col, key, default)
-    key_int(&part, key, False)
-    return lookup_keyed_float_f64(conversion, function, context, table, &part,
-                                  1, False, column, default)
-
 # Primitive full-key lookup over the existing owned Table.
 from cpython.object cimport PyObject_Hash
 from cpython.unicode cimport PyUnicode_Compare
@@ -933,82 +918,50 @@ cdef object _original_key(const KeyPart* parts, Py_ssize_t count, bint tuple_key
 
 cdef class KeyedView:
     cdef signed char[::1] boolean_modes
-    cdef object owner
-    cdef tuple text, columns, raw_values
-    cdef long long[::1] numbers, kinds, slots
+    # The original tuple keeps every object referenced by parts alive.
+    cdef tuple keys, columns, raw_values
+    cdef KeyPart* parts
+    cdef long long[::1] slots
     cdef unsigned long long[::1] hashes
     cdef double[::1] values
     cdef unsigned char[::1] numeric
     cdef Py_ssize_t width, value_width, rows, mask
     cdef bint tuple_keys, admitted, pandas_columns
 
-    def __init__(self, table):
-        cdef KeyPart packed
-        self.admitted = False
-        self.owner = table
+    def __cinit__(self, table):
+        cdef KeyPart* parts
+        cdef Py_ssize_t row, slot, offset, i, capacity
+        cdef unsigned long long code
+        cdef int overflow
+        cdef object key, part, kind, value
+        cdef tuple input_row
         spec = table._index_error
         if spec is not None:
             spec = spec._index
         self.pandas_columns = False if spec is None else spec.get('pandas_columns', False)
         self.boolean_modes = array('b', () if spec is None else spec['boolean_modes'])
-        keys = table._keys
-        self.rows = len(keys)
+        self.keys = table._keys
+        self.rows = len(self.keys)
         self.columns = table._columns
         self.raw_values = table._values
         self.value_width = len(self.columns)
         self.width = 0
         self.tuple_keys = False
-        if not keys:
+        if not self.keys:
             self.admitted = True
             return
-        self.tuple_keys = type(keys[0]) is tuple
-        self.width = len(keys[0]) if self.tuple_keys else 1
+        self.tuple_keys = type(self.keys[0]) is tuple
+        self.width = len(self.keys[0]) if self.tuple_keys else 1
         if self.tuple_keys and spec is not None and not spec['multi']:
             # A plain object Index can contain tuple labels. Pandas treats
             # these as scalar keys and does not validate their components.
             self.boolean_modes = array('b')
-        kinds, numbers, texts, row_hashes = [], [], [], []
-        for key in keys:
-            if (type(key) is tuple) != self.tuple_keys:
-                return
-            parts = key if self.tuple_keys else (key,)
-            if len(parts) != self.width:
-                return
-            for part in parts:
-                kind = type(part)
-                if kind is str:
-                    kinds.append(_KEY_TEXT); numbers.append(0); texts.append(part)
-                elif (kind is int or kind is bool) and -(1 << 63) <= part < (1 << 63):
-                    kinds.append(_KEY_BOOL if kind is bool else _KEY_INT)
-                    numbers.append(part); texts.append(None)
-                elif kind is float:
-                    key_text(&packed, part)
-                    if packed.kind == _KEY_OBJECT:
-                        return
-                    kinds.append(packed.kind); numbers.append(packed.number); texts.append(part)
-                else:
-                    return
-        self.kinds = array('q', kinds)
-        self.numbers = array('q', numbers)
-        self.text = tuple(texts)
-        # Conversion belongs to this explicit float-context resource. Exact
-        # immutable builtins have no user conversion effects. Defer errors and
-        # other objects until the selected value is actually requested.
-        numbers, valid = [], []
-        for input_row in self.raw_values:
-            for value in input_row:
-                kind = type(value)
-                if kind is float or kind is int or kind is bool or kind is str:
-                    try:
-                        converted = _key_float(value)
-                    except (ValueError, OverflowError):
-                        pass
-                    else:
-                        numbers.append(converted); valid.append(1)
-                        continue
-                numbers.append(0.0); valid.append(0)
-        self.values = array('d', numbers)
-        self.numeric = array('B', valid)
+        if (self.width and self.rows > _key_sys.maxsize // sizeof(KeyPart) // self.width
+                or self.rows > _key_sys.maxsize // sizeof(double) // self.value_width):
+            raise MemoryError()
+        self.parts = <KeyPart*>PyMem_Malloc(max(1, self.rows * self.width) * sizeof(KeyPart))
+        if self.parts == NULL:
+            raise MemoryError()
         capacity = 8
         while capacity < self.rows * 2:
             capacity *= 2
@@ -1017,52 +970,74 @@ cdef class KeyedView:
         self.slots = array('q', [-1] * capacity)
         self.hashes = array('Q', [0] * capacity)
         self.mask = capacity - 1
-        cdef Py_ssize_t row, slot
-        cdef unsigned long long code
         for row in range(self.rows):
-            code = self.row_hash(row)
+            key = self.keys[row]
+            if (type(key) is tuple) != self.tuple_keys:
+                return
+            if self.tuple_keys and len(key) != self.width:
+                return
+            parts = self.parts + row * self.width
+            for i in range(self.width):
+                part = (<tuple>key)[i] if self.tuple_keys else key
+                kind = type(part)
+                if kind is int or kind is bool:
+                    key_int(&parts[i], PyLong_AsLongLongAndOverflow(part, &overflow), kind is bool)
+                    if overflow:
+                        return
+                else:
+                    key_text(&parts[i], part)
+                    if parts[i].kind == _KEY_OBJECT:
+                        return
+            code = _parts_hash(parts, self.width, self.tuple_keys)
             slot = <Py_ssize_t>(code & <unsigned long long>self.mask)
             while self.slots[slot] >= 0:
                 slot = (slot + 1) & self.mask
             self.slots[slot] = row
             self.hashes[slot] = code
+        # Conversion belongs to this explicit float-context resource. Exact
+        # immutable builtins have no user conversion effects. Defer errors and
+        # other objects until the selected value is actually requested.
+        cdef Array numbers = clone(array('d'), self.rows * self.value_width, False)
+        cdef Array valid = clone(array('B'), self.rows * self.value_width, True)
+        offset = 0
+        for input_row in self.raw_values:
+            for value in input_row:
+                kind = type(value)
+                if kind is float:
+                    numbers.data.as_doubles[offset] = PyFloat_AS_DOUBLE(value)
+                    valid.data.as_uchars[offset] = 1
+                elif kind is int or kind is bool or kind is str:
+                    try:
+                        numbers.data.as_doubles[offset] = _key_float(value)
+                    except (ValueError, OverflowError):
+                        pass
+                    else:
+                        valid.data.as_uchars[offset] = 1
+                offset += 1
+        self.values = numbers
+        self.numeric = valid
         self.admitted = True
 
-    cdef unsigned long long row_hash(self, Py_ssize_t row) except? 0:
-        cdef unsigned long long value = 1469598103934665603
-        cdef Py_ssize_t i, position
-        value = (value ^ <unsigned long long>self.tuple_keys) * <unsigned long long>1099511628211
-        value = (value ^ <unsigned long long>self.width) * <unsigned long long>1099511628211
-        for i in range(self.width):
-            position = row * self.width + i
-            if self.kinds[position] == _KEY_TEXT:
-                value = (value ^ 3) * <unsigned long long>1099511628211
-                value = (value ^ <unsigned long long>PyObject_Hash(self.text[position])) * <unsigned long long>1099511628211
-            elif self.kinds[position] == _KEY_FLOAT:
-                value = (value ^ 4) * <unsigned long long>1099511628211
-                value = (value ^ <unsigned long long>self.numbers[position]) * <unsigned long long>1099511628211
-            else:
-                value = (value ^ 1) * <unsigned long long>1099511628211
-                value = (value ^ <unsigned long long>self.numbers[position]) * <unsigned long long>1099511628211
-        return value
+    def __dealloc__(self):
+        PyMem_Free(self.parts)
 
     cdef bint equal(self, Py_ssize_t row, const KeyPart* parts) except -1:
-        cdef Py_ssize_t i, position
+        cdef Py_ssize_t i
+        cdef const KeyPart* stored = self.parts + row * self.width
         for i in range(self.width):
-            position = row * self.width + i
             if self.boolean_modes.shape[0] and self.boolean_modes[i] and (
-                    (parts[i].kind == _KEY_BOOL) != (self.kinds[position] == _KEY_BOOL)):
+                    (parts[i].kind == _KEY_BOOL) != (stored[i].kind == _KEY_BOOL)):
                 return False
             if parts[i].kind == _KEY_TEXT:
-                if self.kinds[position] != _KEY_TEXT:
-                    return False
-                if PyUnicode_Compare(<object>parts[i].text, self.text[position]) != 0:
+                if (stored[i].kind != _KEY_TEXT
+                        or (parts[i].text != stored[i].text
+                            and PyUnicode_Compare(<object>parts[i].text, <object>stored[i].text) != 0)):
                     return False
             elif parts[i].kind == _KEY_FLOAT:
-                if self.kinds[position] != _KEY_FLOAT or parts[i].number != self.numbers[position]:
+                if stored[i].kind != _KEY_FLOAT or parts[i].number != stored[i].number:
                     return False
             else:
-                if self.kinds[position] not in (_KEY_INT, _KEY_BOOL, _KEY_FLOAT_INT) or parts[i].number != self.numbers[position]:
+                if stored[i].kind not in (_KEY_INT, _KEY_BOOL, _KEY_FLOAT_INT) or parts[i].number != stored[i].number:
                     return False
         return True
 
@@ -1155,47 +1130,6 @@ cdef double lookup_keyed_float_f64(object conversion, object function, LookupCon
     key = _original_key(parts, count, tuple_key)
     return conversion(function(table, key, column)) if default is _missing else conversion(function(table, key, column, default))
 
-cdef inline void _pack_typed_part(KeyPart* part, KeyArg0 key) noexcept:
-    if KeyArg0 is KeyInteger:
-        key_int(part, key, False)
-    elif KeyArg0 is bint:
-        key_int(part, key, True)
-    else:
-        key_text(part, key)
-
-
-cdef double lookup_key0_float_f64(object conversion, object function, LookupContext context, object table, bint tuple_key, object column, object default=_missing) except? -1:
-    cdef KeyPart[1] parts
-    key_int(&parts[0], 0, False)
-    return lookup_keyed_float_f64(conversion, function, context, table, &parts[0], 0, tuple_key, column, default)
-
-cdef double lookup_key1_float_f64(object conversion, object function, LookupContext context, object table, KeyArg0 key0, bint tuple_key, object column, object default=_missing) except? -1:
-    cdef KeyPart[1] parts
-    _pack_typed_part(&parts[0], key0)
-    return lookup_keyed_float_f64(conversion, function, context, table, &parts[0], 1, tuple_key, column, default)
-
-cdef double lookup_key2_float_f64(object conversion, object function, LookupContext context, object table, KeyArg0 key0, KeyArg1 key1, bint tuple_key, object column, object default=_missing) except? -1:
-    cdef KeyPart[2] parts
-    _pack_typed_part(&parts[0], key0)
-    _pack_typed_part(&parts[1], key1)
-    return lookup_keyed_float_f64(conversion, function, context, table, &parts[0], 2, tuple_key, column, default)
-
-cdef double lookup_key3_float_f64(object conversion, object function, LookupContext context, object table, KeyArg0 key0, KeyArg1 key1, KeyArg2 key2, bint tuple_key, object column, object default=_missing) except? -1:
-    cdef KeyPart[3] parts
-    _pack_typed_part(&parts[0], key0)
-    _pack_typed_part(&parts[1], key1)
-    _pack_typed_part(&parts[2], key2)
-    return lookup_keyed_float_f64(conversion, function, context, table, &parts[0], 3, tuple_key, column, default)
-
-cdef double lookup_key4_float_f64(object conversion, object function, LookupContext context, object table, KeyArg0 key0, KeyArg1 key1, KeyArg2 key2, KeyArg3 key3, bint tuple_key, object column, object default=_missing) except? -1:
-    cdef KeyPart[4] parts
-    _pack_typed_part(&parts[0], key0)
-    _pack_typed_part(&parts[1], key1)
-    _pack_typed_part(&parts[2], key2)
-    _pack_typed_part(&parts[3], key3)
-    return lookup_keyed_float_f64(conversion, function, context, table, &parts[0], 4, tuple_key, column, default)
-
-
 cdef class IndexedContext:
     pass
 
@@ -1279,64 +1213,43 @@ cdef KeyPart* _pack_wide_key(object key, Py_ssize_t* count) except? NULL:
     return NULL
 
 
-cdef object _wide_indexed_lookup(object table, object key, object column, object default):
-    # Own the tuple until every borrowed Unicode component has been consumed.
-    cdef object owner = key
-    cdef Py_ssize_t count, row
-    cdef KeyPart* parts = _pack_wide_key(owner, &count)
+cdef tuple _wide_indexed_row(object table, object key, object column, bint needs_column):
+    """Search with borrowed key parts while the key argument remains alive."""
+    cdef Py_ssize_t count
+    cdef KeyPart* parts = _pack_wide_key(key, &count)
     cdef KeyedCache cache
-    cdef KeyedView data
+    if parts == NULL:
+        return None
     try:
-        if parts != NULL:
-            cache = _keyed_cache(_indexed_context(table), table, column)
-            data = cache.data
-            if data is not None and cache.index >= 0:
-                row = data.find(parts, count, True)
-                if row < 0:
-                    if default is _missing:
-                        raise KeyError(key)
-                    return default
-                return data.raw_values[row][cache.index]
-        return _lookup(table, key, column) if default is _missing else _lookup(table, key, column, default)
+        cache = _keyed_cache(_indexed_context(table), table, column)
+        if cache.data is not None and (not needs_column or cache.index >= 0):
+            return cache, cache.data.find(parts, count, True)
     finally:
         PyMem_Free(parts)
+    return None
+
+
+cdef object _wide_indexed_lookup(object table, object key, object column, object default):
+    cdef KeyedCache cache
+    cdef Py_ssize_t row
+    cdef tuple found = _wide_indexed_row(table, key, column, True)
+    if found is not None:
+        cache, row = found
+        if row >= 0:
+            return cache.data.raw_values[row][cache.index]
+        if default is _missing:
+            raise KeyError(key)
+        return default
+    return _lookup(table, key, column) if default is _missing else _lookup(table, key, column, default)
 
 
 cdef Py_ssize_t _wide_indexed_position(object table, object key) except? -2:
-    cdef object owner = key
-    cdef Py_ssize_t count, position
-    cdef KeyPart* parts = _pack_wide_key(owner, &count)
-    cdef KeyedCache cache
-    cdef KeyedView data
-    try:
-        if parts != NULL:
-            cache = _keyed_cache(_indexed_context(table), table, 0)
-            data = cache.data
-            if data is not None:
-                position = data.find(parts, count, True)
-                if position < 0:
-                    raise KeyError(key)
-                return position
+    cdef tuple found = _wide_indexed_row(table, key, 0, False)
+    if found is None:
         return -1
-    finally:
-        PyMem_Free(parts)
-
-
-cdef object _wide_indexed_contains(object table, object key):
-    cdef object owner = key
-    cdef Py_ssize_t count
-    cdef KeyPart* parts = _pack_wide_key(owner, &count)
-    cdef KeyedCache cache
-    cdef KeyedView data
-    try:
-        if parts != NULL:
-            cache = _keyed_cache(_indexed_context(table), table, 0)
-            data = cache.data
-            if data is not None:
-                return data.find(parts, count, True) >= 0
-        return _contains(table, key)
-    finally:
-        PyMem_Free(parts)
+    if found[1] < 0:
+        raise KeyError(key)
+    return found[1]
 
 cdef object indexed_lookup(object table, object key, object column, object default=_missing):
     cdef KeyPart[4] parts
@@ -1380,12 +1293,17 @@ cdef object indexed_contains(object table, object key):
     cdef bint tuple_key
     cdef KeyedCache cache
     cdef KeyedView data
+    cdef tuple found
     if _pack_key(key, &parts[0], &count, &tuple_key):
         cache = _keyed_cache(_indexed_context(table), table, 0)
         data = cache.data
         if data is not None:
             return data.find(&parts[0], count, tuple_key) >= 0
-    return _wide_indexed_contains(table, key)
+    if type(key) is tuple and len(key) > 4:
+        found = _wide_indexed_row(table, key, 0, False)
+        if found is not None:
+            return found[1] >= 0
+    return _contains(table, key)
 
 
 from builtins import int as _typed_int, bool as _typed_bool, str as _typed_str

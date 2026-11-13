@@ -57,9 +57,11 @@ def float_value(function, source, key, column):
 def float_default(function, source, key, column, default):
     return p.lookup_float(function, ('default',), source, key, column, default=default)
 
-def legacy_float_default(function, source, long long key, column, default):
+def packed_float_default(function, source, long long key, column, default):
     cdef p.LookupContext context = p.LookupContext()
-    return p.lookup_key1_float_f64(float, function, context, source, key, False, column, default)
+    cdef p.KeyPart part
+    p.key_int(&part, key, False)
+    return p.lookup_keyed_float_f64(float, function, context, source, &part, 1, False, column, default)
 
 def table_lookup(function, source, key, column, *default):
     if default:
@@ -279,7 +281,7 @@ def test_native_views_leave_unread_object_keys_untouched(native, fault, indexed)
     cases = [
         (lambda table: native.table_lookup(helpers.lookup, table, 1, 'rate'), 1.5),
         (lambda table: native.contextual_lookup(helpers.lookup, table, 1, 'rate'), 1.5),
-        (lambda table: native.legacy_float_default(helpers.lookup, table, 1, 'rate', 0.0), 1.5),
+        (lambda table: native.packed_float_default(helpers.lookup, table, 1, 'rate', 0.0), 1.5),
         (lambda table: native.raw_value(helpers.lookup_object, table, 1, 'rate'), 1.5),
         (lambda table: 1 in native.wrap_table(table).index, True),
         (lambda table: native.table_key_info(helpers.key_count, helpers.key_at, table), (2, 1)),

@@ -45,7 +45,7 @@ def test_at_native_error_path_has_no_python_lookup(native):
         if event=='call' and frame.f_code in forbidden:calls.append(frame.f_code.co_name)
     sys.setprofile(profile)
     try:
-        with pytest.raises(KeyError) as error:native.fused(float,h.lookup,table,('M',43),'rate')
+        with pytest.raises(KeyError) as error:native.invoke(float,h.lookup,table,('M',43),'rate')
         assert error.value.args == (('M', 43),)
     finally:sys.setprofile(None)
     assert calls==[]

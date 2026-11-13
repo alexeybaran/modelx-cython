@@ -33,7 +33,6 @@ def invoke(conversion, function, table, key, column, *default):
         return native.lookup_keyed_float_f64(conversion,function,_context,table,&parts[0],n,type(key) is tuple,column,default[0])
     return native.lookup_keyed_float_f64(conversion,function,_context,table,&parts[0],n,type(key) is tuple,column)
 ''')
-    (root/'probe.pyx').write_text((root/'probe.pyx').read_text()+'\ndef fused(conversion,function,table,key,column):\n    cdef long long integer\n    cdef bint boolean\n    cdef object text, text2\n    if len(key)==0:\n        return native.lookup_key0_float_f64(conversion,function,_context,table,True,column)\n    if len(key)==1:\n        if type(key[0]) is bool:\n            boolean=key[0]\n            return native.lookup_key1_float_f64(conversion,function,_context,table,boolean,True,column)\n        text=key[0]\n        return native.lookup_key1_float_f64(conversion,function,_context,table,text,True,column)\n    if len(key)==2:\n        text=key[0];integer=key[1]\n        return native.lookup_key2_float_f64(conversion,function,_context,table,text,integer,True,column)\n    if len(key)==3:\n        text=key[0]\n        if type(key[1]) is bool:\n            boolean=key[1];integer=key[2]\n            return native.lookup_key3_float_f64(conversion,function,_context,table,text,boolean,integer,True,column)\n        integer=key[1];boolean=key[2]\n        return native.lookup_key3_float_f64(conversion,function,_context,table,text,integer,boolean,True,column)\n    text=key[0];text2=key[1];integer=key[2];boolean=key[3]\n    return native.lookup_key4_float_f64(conversion,function,_context,table,text,text2,integer,boolean,True,column)\n')
     (root/'setup.py').write_text("from setuptools import setup\nfrom Cython.Build import cythonize\nsetup(ext_modules=cythonize(['native.pyx','probe.pyx'],compiler_directives={'language_level':3,'freethreading_compatible':True}))\n")
     r=subprocess.run([sys.executable,'setup.py','build_ext','--inplace'],cwd=root,capture_output=True,text=True)
     (root/'build.log').write_text(r.stdout+r.stderr);assert r.returncode==0,r.stdout+r.stderr
@@ -86,13 +85,13 @@ def test_current_helper_default_and_zero_python_fast_path(native):
     assert len(calls)==1
 
 
-def test_fused_arity_and_component_lifetimes(native):
+def test_complete_key_and_component_lifetimes(native):
     for key in [(),('α',),(True,),('α',2),('α',False,3),('α','😀',3,True)]:
         table=Table((key,),((1.5,),),('rate',))
-        assert native.fused(float,h.lookup,table,key,'rate')==1.5
+        assert native.invoke(float,h.lookup,table,key,'rate')==1.5
         seen=[]
         def replaced(table,key,column):seen.append(key);return '2.5'
-        assert native.fused(float,replaced,table,key,'rate')==2.5
+        assert native.invoke(float,replaced,table,key,'rate')==2.5
         assert len(seen)==1 and seen[0]==key
         assert tuple(map(type,seen[0]))==tuple(map(type,key))
 
@@ -101,21 +100,21 @@ def test_collision_many_keys_and_column_context_switch(native):
     keys=tuple(('α'+str(i%9),i,i%2==0) for i in range(1000))
     table=Table(keys,[(float(i),float(-i)) for i in range(len(keys))],('rate','other'))
     for i in range(0,len(keys),13):
-        assert native.fused(float,h.lookup,table,keys[i],'rate')==float(i)
-        assert native.fused(float,h.lookup,table,keys[i],'other')==float(-i)
+        assert native.invoke(float,h.lookup,table,keys[i],'rate')==float(i)
+        assert native.invoke(float,h.lookup,table,keys[i],'other')==float(-i)
     for i in range(100):
         other=Table(keys,[(float(i),)]*len(keys),('rate',))
-        assert native.fused(float,h.lookup,other,keys[i],'rate')==float(i)
+        assert native.invoke(float,h.lookup,other,keys[i],'rate')==float(i)
 
 
 def test_unicode_subclass_keeps_original_fallback_object(native):
     class Text(str):pass
     query=(Text('M'),42)
     table=Table((('M',42),),((1.5,),),('rate',))
-    assert native.fused(float,h.lookup,table,query,'rate')==1.5
+    assert native.invoke(float,h.lookup,table,query,'rate')==1.5
     seen=[]
     def replacement(table,key,column):seen.append(key);return 2.5
-    assert native.fused(float,replacement,table,query,'rate')==2.5
+    assert native.invoke(float,replacement,table,query,'rate')==2.5
     assert seen[0][0] is query[0]
 
 
@@ -124,7 +123,7 @@ def test_shared_context_concurrent_tables(native):
     def worker(number):
         table=Table((('M',number),),((float(number),),),('rate',))
         for _ in range(100):
-            assert native.fused(float,h.lookup,table,('M',number),'rate')==float(number)
+            assert native.invoke(float,h.lookup,table,('M',number),'rate')==float(number)
         return number
     with ThreadPoolExecutor(max_workers=4) as executor:
         assert list(executor.map(worker,range(30)))==list(range(30))
@@ -137,7 +136,7 @@ def test_admitted_row_read_never_delegates_to_python_lookup(native,value):
         if event=='call' and frame.f_code is h.lookup.__code__:calls.append('lookup')
     sys.setprofile(profile)
     try:
-        try:actual=native.fused(float,h.lookup,table,('M',42),'rate')
+        try:actual=native.invoke(float,h.lookup,table,('M',42),'rate')
         except (TypeError,ValueError,OverflowError):pass
     finally:sys.setprofile(None)
     assert calls==[]
@@ -149,7 +148,7 @@ def test_missing_singletons_keep_conversion_errors_and_pickle(native):
         table=Table((('M',42),),((value,),),('rate',))
         assert pickle.loads(pickle.dumps(table))['values'][0][0] is value
         with pytest.raises(TypeError) as expected:float(h.lookup(table,('M',42),'rate'))
-        with pytest.raises(TypeError) as actual:native.fused(float,h.lookup,table,('M',42),'rate')
+        with pytest.raises(TypeError) as actual:native.invoke(float,h.lookup,table,('M',42),'rate')
         assert actual.value.args==expected.value.args
 
 
