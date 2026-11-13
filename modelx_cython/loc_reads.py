@@ -191,7 +191,8 @@ class LocReads(FormulaTransformer):
         Returns (call, None) or (None, reason).
         """
         target = node.value
-        if not (isinstance(target, cst.Attribute) and target.attr.value == 'loc'):
+        # ``R.at[key, column]`` is the scalar spelling of the same read
+        if not (isinstance(target, cst.Attribute) and target.attr.value in ('loc', 'at')):
             return None, None
         elements = node.slice
         if len(elements) != 2 or not all(isinstance(e.slice, cst.Index) for e in elements):
@@ -326,7 +327,37 @@ class LocReads(FormulaTransformer):
         return row.with_changes(slice=[cst.SubscriptElement(cst.Index(row.slice[0].slice.value), comma=cst.Comma()),
                                        cst.SubscriptElement(node.slice[0].slice)])
 
+    def _record_field(self, node):
+        """``rec["field"]`` on a call of a Cell traced as returning a Record (or a local bound once to
+        one): the provider's declared member read, in any expression position. Only with the
+        statement recognisers off; with them on, their routes keep handling these reads."""
+        if not (os.environ.get('MX_CY_NO_TABLE_MATCHERS') == '1' and len(node.slice) == 1
+                and isinstance(node.slice[0].slice, cst.Index)
+                and isinstance(node.slice[0].slice.value, cst.SimpleString)
+                and type(node.slice[0].slice.value.evaluated_value) is str):
+            return None
+        receiver = node.value
+        source = self._aliases.get(receiver.value) if isinstance(receiver, cst.Name) else receiver
+        if not isinstance(source, cst.Call) or source.args:
+            return None
+        chain = _extract_self_chain(source.func)
+        if not isinstance(chain, list) or not chain:
+            return None
+        status, name = self.resolver.resolve_chain(self.space, chain)
+        binding = getattr(self.resolver, 'observed_provider_results', {}).get(name) if status == RESOLVED else None
+        member = binding.declaration.members.get('__getitem__') if binding is not None else None
+        if member is None or member.signature != 'string_label_to_object':
+            return None
+        from .helpers import module_name
+        self.providers.add(binding.manifest.provider)
+        return cst.Call(func=cst.Attribute(cst.Name(module_name(binding.manifest.provider)), cst.Name(member.native)),
+                        args=[cst.Arg(receiver), cst.Arg(node.slice[0].slice.value)])
+
     def leave_Subscript(self, original, updated):
+        field = self._record_field(updated)
+        if field is not None:
+            self.typed += 1
+            return field
         whole = self._row_read(updated)
         if whole is not None:
             call, reason = self._float_read(whole, ('float',))

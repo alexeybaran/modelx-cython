@@ -134,6 +134,9 @@ def _edge_model():
                      '    return ((1.0 in g.index) + 2 * (True in g.index) + 4 * (3 in g.index) + 8 * (("A",) in m.index)'
                      ' + 16 * (("A", 1, 2) in m.index) + 32 * (("A", 1) in m.index) + 64 * (data.ienum()(5) in g.index)'
                      ' + 128 * (data.senum()("UL9") in data.named_table().index) + 256 * ("UL9" in g.index))'),
+        'at_read': probe('at_read', 'float(data.gap_table().at[t, "v"])'),
+        'at_varcol': probe('at_varcol', 'float(data.gap_table().at[t, ("v", "sc per 1000")[t % 2]])'),
+        'at_multi': probe('at_multi', 'float(data.multi_table().at[("A" if t % 2 else "B", t % 3), "v"])'),
         'prev': probe('prev', 'data.gap_table().previous(t, ("v", "sc per 1000", 0, -2)[t % 4])'),
         'gap_in': ('def gap_in(t):\n    tbl = data.gap_table()\n'
                    '    return (1.0 if t in tbl.index else 0.0) + (10.0 if t not in tbl.index else 0.0)'),
@@ -142,7 +145,8 @@ def _edge_model():
         'edge_total': ('def edge_total():\n    return sum(gap(t) + gap_bounds(t) + gap_text(t) + gap_odd_column(t)'
                        ' + gap_unknown_column(t) + gap_default(t) + gap_text_method(t) + gap_row(t) + named(t) + multi(t) + flag(t)'
                        ' + deep(t) + walk(t) + gap_in(t) + key_int_enum(t) + key_str_enum(t) + key_plain_enum(t)'
-                       ' + key_hash_override(t) + key_eq_override(t) + in_kinds(t) + prev(t)'
+                       ' + key_hash_override(t) + key_eq_override(t) + in_kinds(t) + prev(t) + at_read(t)'
+                       ' + at_varcol(t) + at_multi(t)'
                        ' for t in range(11))'),
     }
     for name, source in formulas.items():
@@ -159,7 +163,7 @@ def test_loc_read_edges_three_modes(tmp_path):
                  for name in ('gap', 'gap_text', 'gap_text_method', 'gap_default', 'gap_unknown_column',
                               'gap_row', 'named', 'multi', 'flag', 'deep', 'walk', 'gap_in', 'key_int_enum',
                               'key_str_enum', 'key_plain_enum', 'key_hash_override', 'key_eq_override',
-                              'in_kinds', 'prev')}
+                              'in_kinds', 'prev', 'at_read', 'at_varcol', 'at_multi')}
         model.export(tmp_path / 'exported', locked_spaces=['Data'])
     finally:
         model.close()
@@ -196,6 +200,11 @@ def test_loc_read_edges_three_modes(tmp_path):
              for name in ('gap', 'gap_bounds', 'gap_odd_column', 'named', 'multi', 'flag', 'deep', 'gap_in')}
     assert typed == {'gap': 1, 'gap_bounds': 3, 'gap_odd_column': 1, 'named': 1, 'multi': 1, 'flag': 1, 'deep': 0,
                      'gap_in': 0}
+    # .at[key, column] is the same read as .loc[key, column]
+    py_classes = tmp_path / 'exported_cy/_mx_classes.py'
+    for loc_name, at_name, call in (('gap', 'at_read', '.lookup_float('), ('multi', 'at_multi', 'lookup_float_2(')):
+        assert call in _formula_py(py_classes, loc_name) and call in _formula_py(py_classes, at_name), at_name
+    assert parts['at_read'] == parts['gap'] and parts['at_multi'] == parts['multi']
     # no experiment switch: a scalar membership test is left as written for the statement recognisers
     gap_in = _formula_py(tmp_path / 'exported_cy/_mx_classes.py', 'gap_in')
     assert 'native_contains' not in gap_in and ' in tbl.index' in gap_in
@@ -389,3 +398,51 @@ def test_int_tuple_keys_three_modes(tmp_path):
     admission = json.loads((tmp_path / 'exported_cy/_mx_admission.json').read_text())
     keys = admission['exported_cy._mx_classes._c_Projection._f_k2_literal']['loc_reads_keys']
     assert keys == ['loc[key, column], 2 parts: int (cell ka returns long long); int (cell kb returns long long)']
+
+
+def _record_field_model():
+    model = mx.new_model('RecordFieldReads')
+    points = pd.DataFrame({'a': [1.5, -2.5], 'b': [3.0, 4.0], 'tag': ['x', 'y']}, index=pd.Index([1, 2], name='point_id'))
+    data = model.new_space('Data', refs={'pdn': pdn, 'points': points})
+    data.new_cells('point_table', 'lambda: pdn.table(points)')
+    proj = model.new_space('Projection', refs={'data': data})
+    proj.new_cells('mp', 'def mp():\n    return data.point_table().loc[1 + len(str(data))  % 1]')
+    forms = {
+        'f_ret': 'def f_ret(t):\n    return float(mp()["a"])',
+        'f_assign': 'def f_assign(t):\n    x = mp()["a"]\n    return float(x) + t',
+        'f_arith': 'def f_arith(t):\n    return mp()["a"] * 2.0 + mp()["b"] + t',
+        'f_cond': 'def f_cond(t):\n    if mp()["a"] > 0:\n        return 1.0 + t\n    return 0.0',
+        'f_alias': 'def f_alias(t):\n    rec = mp()\n    return rec["b"] - t',
+        'f_missing': 'def f_missing(t):\n    try:\n        return float(mp()["nope"])\n    except KeyError:\n        return -1.0',
+    }
+    for name, source in forms.items():
+        proj.new_cells(name, source)
+    proj.new_cells('total', 'def total():\n    return sum(' + ' + '.join(f'{n}(t)' for n in forms) + ' for t in range(4))')
+    return model, tuple(forms)
+
+
+def test_record_field_reads_any_position(tmp_path):
+    """With the recognisers off, rec["field"] on a traced Record cell is the provider member read in any position."""
+    import os
+    model, names = _record_field_model()
+    try:
+        live = model.Projection.total()
+        parts = {n: [model.Projection.cells[n](t) for t in range(4)] for n in names}
+        model.export(tmp_path / 'exported', locked_spaces=['Data'])
+    finally:
+        model.close()
+    assert parts['f_missing'] == [-1.0] * 4
+    (tmp_path / 'sample.py').write_text('from exported import mx_model as m\nm.Projection.total()\n', encoding='utf-8')
+    env = dict(os.environ, MX_CY_OBSERVED_TABLES='1', MX_CY_PLAIN_READS='1', MX_CY_NO_TABLE_MATCHERS='1')
+    subprocess.run([sys.executable, '-m', 'modelx_cython', 'exported', '--sample', 'sample.py', '--no-spec'],
+                   cwd=tmp_path, check=True, env=env)
+    script = ('from {0} import mx_model as m; P = m.Projection; '
+              'print(repr([P.total()] + [[getattr(P, n)(t) for t in range(4)] for n in {1!r}]))')
+    for package in ('exported', 'exported_cy'):
+        got = subprocess.run([sys.executable, '-c', script.format(package, names)],
+                             cwd=tmp_path, check=True, capture_output=True, text=True).stdout.strip()
+        assert got == repr([live] + [parts[n] for n in names]), (package, got)
+    py = tmp_path / 'exported_cy/_mx_classes.py'
+    for name in names:
+        body = _formula_py(py, name)
+        assert 'read_record_item(' in body and '()["' not in body and 'rec["' not in body, name
