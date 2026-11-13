@@ -84,7 +84,8 @@ def analyze(module):
         parallel = spec.get('parallel_collect_reuse', automatic and option == 'reuse')
         if type(parallel) is not bool or (parallel and option != 'reuse'):
             raise ValueError('parallel_collect_reuse requires serial_collect reuse')
-        order = spec.get('parallel_collect_order', 'completion')
+        # D18: parallel reuse merges chunk totals in domain order unless the spec asks for completion.
+        order = spec.get('parallel_collect_order', 'domain' if parallel is True else 'completion')
         if order not in ('completion', 'domain') or (order == 'domain' and not parallel):
             raise ValueError('parallel_collect_order requires parallel reuse and completion or domain')
         if option is None:

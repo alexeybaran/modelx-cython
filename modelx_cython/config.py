@@ -102,10 +102,13 @@ class TransSpec:
     * ``"parallel_collect_reuse"``: with ``"serial_collect": "reuse"``, give
       each ordered collect chunk its own reusable receiver. The same policy
       isolation and stable Reference contract applies across workers. Scalar
-      chunk totals merge in completion order.
-    * ``"parallel_collect_order"``: ``"completion"`` (default) or ``"domain"``.
-      Domain order gives reproducible chunk merging at a fixed worker count
-      and requires parallel reuse. It does not imply serial sum equivalence.
+      chunk totals merge in domain order unless ``"parallel_collect_order"``
+      says ``"completion"``.
+    * ``"parallel_collect_order"``: ``"domain"`` (default with parallel reuse)
+      or ``"completion"``. Domain order gives reproducible chunk merging at a
+      fixed worker count and requires parallel reuse. It does not imply serial
+      sum equivalence: the four-worker total can differ from the one-worker
+      total in the last bits. Completion order merges each chunk as it finishes.
     * ``"cells_params"`` (deprecated): older form of
       ``"cells_param_size"``; maps a parameter name (or tuple) to a
       dict with a ``"size"`` key.  Consulted only when
