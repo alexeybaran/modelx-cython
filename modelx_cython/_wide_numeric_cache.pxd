@@ -28,4 +28,7 @@ cdef class WideNumericCache:
     cdef bint private_owner
     cdef bint get(self, const word* key, bint reflexive, word hash_value, word* value) except? -1
     cdef void put(self, const word* key, bint reflexive, word hash_value, word value) except *
+    cdef bint reserve(self, const word* key, bint reflexive, word hash_value,
+                      Py_ssize_t* slot, word* value) noexcept
+    cdef void publish(self, const word* key, word hash_value, Py_ssize_t slot, word value) except *
     cpdef reset(self)
