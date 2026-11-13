@@ -1571,6 +1571,9 @@ cdef class NativeTable:
         if not isinstance(owner, Table):
             raise TypeError('declared Table Cell returned a different type')
         self._owner = owner
+        # M1 (W1.2): the typed handle built once per table object (at preparation when compiled
+        # code built the table, else here at its first bind); None when the table has no handle form
+        self.handle = _try_bound_handle(owner)
         if type(owner) is Table:
             self._index_view = _NativeTableIndex(owner)
             self._numeric_view = None
@@ -2592,6 +2595,7 @@ cdef void _prepare_group_record(object value) except *:
 cdef void _prepare_tables(object value) except *:
     """Install table resources while executing an explicit table constructor."""
     if type(value) is Table:
+        _try_bound_handle(value)        # M1 (W1.2): the typed handle, before the table is shared
         cache = value._native_cache
         contiguous = cache.get(_contiguous_storage)
         if contiguous is not None:
