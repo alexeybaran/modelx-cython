@@ -47,6 +47,8 @@ class Constants(FormulaTransformer):
         self.count = 0
         self.comparisons = 0
         self.untyped = []           # expression forms left as Python (admission report)
+        self.rebinds_self = False
+        self.member_fields = 0
         self.memberships = 0        # ``in`` / ``not in`` over member tuples lowered
         self.lines = None
 
@@ -57,7 +59,8 @@ class Constants(FormulaTransformer):
         invalid = set()
         nodes = list(lexical_nodes(node.body.body))
         facts = CstFacts(node.body.body)
-        if 'self' in facts.bindings(nodes):
+        self.rebinds_self = 'self' in facts.bindings(nodes)
+        if self.rebinds_self:
             return False
         for part in nodes:
             if isinstance(part, cst.Assign):
@@ -81,6 +84,13 @@ class Constants(FormulaTransformer):
     def leave_FunctionDef(self, before, after):
         self.cell.enum_untyped = list(self.untyped)
         self.cell.enum_memberships = self.memberships
+        if self.lines is None or self.rebinds_self:
+            return after
+        # W1.4: a member left as an object (an object position) is read from the definition's
+        # C field, not through the Space property: self._mx_definition_<Ref>.<member>.
+        fields = _MemberFields(self.cls.name, self.symbols)
+        after = after.with_changes(body=after.body.visit(fields))
+        self.member_fields = fields.count
         return after
 
     def member(self, node):
@@ -93,6 +103,13 @@ class Constants(FormulaTransformer):
         return node
 
     def integer(self, node):
+        if isinstance(node, cst.Integer):
+            return node.evaluated_value < (1 << 63)
+        if isinstance(node, cst.UnaryOperation) and isinstance(node.operator, cst.Minus):
+            return self.integer(node.expression)
+        if isinstance(node, cst.BinaryOperation) and isinstance(
+                node.operator, (cst.Add, cst.Subtract, cst.Multiply, cst.FloorDivide, cst.Modulo)):
+            return self.integer(node.left) and self.integer(node.right)
         if isinstance(node, cst.Name):
             return node.value in self.locals or (node.value in self.cell.params and
                 self.cell.get_argtype_expr(node.value, c_style=True, formula=True) in ('long long','bint'))
@@ -182,6 +199,26 @@ class Constants(FormulaTransformer):
         if (self.cell.get_rettype_expr(c_style=True) in ('long long','bint','double')
                 and (self.cell.has_formula_def or not self.cell.called_with_kwargs)):
             return after.with_changes(value=self.member(after.value))
+        return after
+
+
+class _MemberFields(cst.CSTTransformer):
+    """``self.<Ref>.<member>`` of a declared enum -> ``self.<storage>.<member>`` (lexical scope)."""
+    def __init__(self, cls_name, symbols):
+        super().__init__()
+        self.refs = {ref for owner, ref, _ in symbols if owner == cls_name}
+        self.count = 0
+
+    def on_visit(self, node):
+        from .scopes import OPAQUE_SCOPES
+        return not isinstance(node, OPAQUE_SCOPES) and super().on_visit(node)
+
+    def leave_Attribute(self, before, after):
+        inner = after.value
+        if (isinstance(inner, cst.Attribute) and isinstance(inner.value, cst.Name)
+                and inner.value.value == 'self' and inner.attr.value in self.refs):
+            self.count += 1
+            return after.with_changes(value=inner.with_changes(attr=cst.Name(storage(inner.attr.value))))
         return after
 
 
