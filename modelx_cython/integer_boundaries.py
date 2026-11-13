@@ -3,12 +3,12 @@
 import libcst as cst
 
 from .checked_arithmetic import (
-    CheckedArithmetic, guarded_integer_intervals, local_assignment, range_bounds, signed_local_assignments,
+    CheckedArithmetic, guarded_integer_intervals, range_bounds, signed_local_assignments,
 )
 from .consts import CY_MOD, FORMULA_PREF, MX_SELF, MX_SYS_MOD
 from .powers import KIND_FLOAT, OperandKind, kind_of_type_expr
 from .scopes import CstFacts, Names, OPAQUE_SCOPES, has_scope_effects, lexical_nodes
-from .syntax import dotted_name, statements, walk
+from .syntax import dotted_name, local_assignment, statements, walk
 from .usage import RESOLVED, _extract_self_chain
 
 
@@ -434,7 +434,7 @@ def _type_signed_locals(body, guard, facts, parameters):
         seen.update(part.value for part in walk(line) if isinstance(part, cst.Name))
     declarations, assignments = [], {}
     for name in sorted(needed - parameters - guard.signed_names):
-        if facts.stores[name] < 2:
+        if not facts.stores[name]:
             continue
         guard.signed_names.add(name)
         values = _signed_local_assignments(body, name, operands, guard, facts)
