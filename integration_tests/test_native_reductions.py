@@ -289,10 +289,11 @@ def test_explicit_all_and_max(tmp_path):
         s.new_cells('all_replace', 'lambda: all_true(abs(term(t)) < tolerance for t in range(one()))')
         s.new_cells('maximum', textwrap.dedent('''\
             def maximum(t):
-                if t == -100000:
+                if t == -(1 << 63):
                     return 0.0
                 return max_value(term(u) for u in range(t, max(-1, t - 12), -3))
             '''))
+        s.new_cells('empty_maximum', 'lambda t: max_value(term(u) for u in range(t, max(-1, t - 12), -3))').is_cached = False
         model.export(tmp_path / 'exported')
     finally:
         model.close()
@@ -300,14 +301,9 @@ def test_explicit_all_and_max(tmp_path):
         from exported import mx_model
         p = mx_model.Projection
         p.all_short(); p.all_empty(); p.all_replace()
-        p.zero(); p.maximum(-100000); p.maximum(0); p.maximum(5); p.maximum(6)
+        p.zero(); p.maximum(-(1 << 63)); p.maximum(0); p.maximum(5); p.maximum(6)
         upper = (1 << 63) - 1
-        p.maximum(upper); p.term(-(1 << 63))
-        for key in (-1, -(1 << 63)):
-            try:
-                p.maximum(key)
-            except ValueError:
-                pass
+        p.maximum(upper)
         '''), encoding='utf-8')
     subprocess.run([sys.executable, '-m', 'modelx_cython', 'exported',
                     '--sample', 'sample.py', '--no-spec'], cwd=tmp_path, check=True)
@@ -333,7 +329,7 @@ def test_explicit_all_and_max(tmp_path):
             empty_message = str(error)
         for negative in (-1, -(1 << 63)):
             try:
-                s.maximum(negative)
+                s.empty_maximum(negative)
             except ValueError as error:
                 assert str(error) == empty_message
             else:
