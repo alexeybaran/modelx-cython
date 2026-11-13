@@ -21,6 +21,7 @@ from cpython.ref cimport PyObject
 from cpython.mem cimport PyMem_Malloc, PyMem_Free
 cimport cython
 from modelx_helpers.immutable_inputs import Table, Record, _index_key, _valid_index_key
+from modelx_helpers import immutable_inputs as _immutable_inputs
 from modelx_helpers.typed_inputs import _FLOOR, _native_operations
 from modelx_cython._call_layout cimport forward_call
 
@@ -43,6 +44,7 @@ cdef object _any_true = _native_operations['any_true']
 cdef object _all_true = _native_operations['all_true']
 cdef object _max_value = _native_operations['max_value']
 cdef object _prepared_interpolation = _native_operations['prepared_interpolation']
+cdef object _rectangular_storage = getattr(_immutable_inputs, '_RECTANGULAR_STORAGE', object())
 
 
 cdef inline bint _table_view_part(object value) noexcept:
@@ -1317,11 +1319,40 @@ cdef object _explicit_value(object source, object key, object column, object def
     return _typed_python_value(source, key, column, default)
 
 
+cdef class RectangularView:
+    cdef const double[::1] numbers
+    cdef tuple positions, widths
+    cdef object column
+
+    def __init__(self, tuple axes, data, column):
+        self.numbers = data
+        self.column = column
+        self.widths = tuple(map(len, axes))
+        self.positions = tuple(dict(zip(labels, range(len(labels)))) for labels in axes)
+
+    cdef inline bint read(self, object key, object column, double* value) except -1:
+        cdef Py_ssize_t row = 0, axis
+        if ((column is not self.column and (type(column) is not str or column != self.column))
+                or type(key) is not tuple or len(key) != len(self.widths)):
+            return False
+        for axis, part in enumerate(<tuple>key):
+            if not PyLong_CheckExact(part) and not PyUnicode_CheckExact(part):
+                return False
+            digit = (<dict>self.positions[axis]).get(part)
+            if digit is None:
+                return False
+            row = row * <Py_ssize_t>self.widths[axis] + <Py_ssize_t>digit
+        value[0] = self.numbers[row]
+        return True
+
+
 cdef double lookup_float(object function, tuple keywords, object source, object key, object column=_missing, object default=_missing) except? -1:
     cdef KeyPart[4] small
     cdef KeyPart* parts
     cdef Py_ssize_t count
     cdef bint tuple_key
+    cdef RectangularView rectangular
+    cdef double value
     if function is not _lookup_float_fn:
         return forward_call(function, keywords, ('source', 'key', 'column', 'default'),
                             (source, key, column, default), omitted_argument)
@@ -1332,6 +1363,9 @@ cdef double lookup_float(object function, tuple keywords, object source, object 
     if type(source) is NativeTable and type((<NativeTable>source)._owner) is Table:
         source = (<NativeTable>source)._owner
     if type(source) is Table and column is not _missing:
+        rectangular = source._native_cache.get(RectangularView)
+        if rectangular is not None and rectangular.read(key, column, &value):
+            return value
         parts = _pack_key(key, &small[0], &count, &tuple_key)
         if parts != NULL:
             try:
@@ -1471,6 +1505,8 @@ cdef class NativeTable:
         if type(owner) is Table:
             self._index_view = _NativeTableIndex(owner)
             self._numeric_view = None
+            if _rectangular_storage in owner._native_cache:
+                return
         if type(owner) is Table:
             keys = owner._keys
             if keys and (type(keys[0]) is int or len(keys) == 1 and type(keys[0]) is str):
@@ -2483,6 +2519,11 @@ cdef void _prepare_tables(object value) except *:
     """Install table resources while executing an explicit table constructor."""
     if type(value) is Table:
         cache = value._native_cache
+        rectangular = cache.get(_rectangular_storage)
+        if rectangular is not None:
+            if RectangularView not in cache:
+                cache.setdefault(RectangularView, RectangularView(*rectangular, value._columns[0]))
+            return
         if value._keys and type(value._keys[0]) is int and TableView not in cache:
             cache.setdefault(TableView, TableView(value))
         if KeyedView not in cache:
