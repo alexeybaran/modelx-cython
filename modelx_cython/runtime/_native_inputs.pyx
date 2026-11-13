@@ -1440,6 +1440,11 @@ cdef double lookup_float(object function, tuple keywords, object source, object 
         column = _missing
     if default is _typed_missing:
         default = _missing
+    if type(source) is Table and type(key) is tuple and column is not _missing:
+        # This API already receives an assembled Python key. Reuse the owner's
+        # exact index. The primitive-key API still uses its native index.
+        return _float_type(_lookup(source, key, column) if default is _missing
+                           else _lookup(source, key, column, default))
     if type(source) is Table and column is not _missing and _pack_key(key,&parts[0],&count,&tuple_key):
         return lookup_keyed_float_f64(_float_type,_lookup,_indexed_context(source),source,
                                       &parts[0],count,tuple_key,column,default)
