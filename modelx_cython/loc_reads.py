@@ -84,6 +84,12 @@ def _names(node):
     return found
 
 
+def plain_reads():
+    """The experiment switches (MX_CY_PLAIN_READS=1 or MX_CY_NO_TABLE_MATCHERS=1) under which reads take the
+    plain typed route. With neither set, the statement recognisers see the declared spellings unchanged."""
+    return os.environ.get('MX_CY_PLAIN_READS') == '1' or os.environ.get('MX_CY_NO_TABLE_MATCHERS') == '1'
+
+
 class LocReads(FormulaTransformer):
     def __init__(self, resolver, space, providers=None):
         super().__init__()
@@ -352,8 +358,7 @@ class LocReads(FormulaTransformer):
         schema = self._schema(node.func.value.value)
         if schema is None or schema.get('__key__') != 'int':
             return None
-        if (name == 'max' and os.environ.get('MX_CY_PLAIN_READS') != '1'
-                and os.environ.get('MX_CY_NO_TABLE_MATCHERS') != '1'):
+        if name == 'max' and not plain_reads():
             # The declared spelling of the last key: later passes recognise a clamp on it.
             return node.with_changes(func=node.func.with_changes(attr=cst.Name('max_int')))
         from .helpers import module_name
@@ -379,8 +384,11 @@ class LocReads(FormulaTransformer):
         if parts is not None:
             # the parts come first, as in the source; the table last
             call = self._provider_call(f'native_contains_{len(parts)}', [*parts, index.value])
-        else:
+        elif plain_reads():
             call = self._provider_call('native_contains', [index.value, updated.left])
+        else:
+            self.typed -= 1
+            return updated      # the recognisers match the scalar membership test as written
         if isinstance(target.operator, cst.NotIn):
             return cst.UnaryOperation(operator=cst.Not(), expression=call,
                                       lpar=updated.lpar, rpar=updated.rpar)

@@ -195,7 +195,10 @@ def test_loc_read_edges_three_modes(tmp_path):
     typed = {name: admission[f'exported_cy._mx_classes._c_Projection._f_{name}']['loc_reads_typed']
              for name in ('gap', 'gap_bounds', 'gap_odd_column', 'named', 'multi', 'flag', 'deep', 'gap_in')}
     assert typed == {'gap': 1, 'gap_bounds': 3, 'gap_odd_column': 1, 'named': 1, 'multi': 1, 'flag': 1, 'deep': 0,
-                     'gap_in': 2}
+                     'gap_in': 0}
+    # no experiment switch: a scalar membership test is left as written for the statement recognisers
+    gap_in = _formula_py(tmp_path / 'exported_cy/_mx_classes.py', 'gap_in')
+    assert 'native_contains' not in gap_in and ' in tbl.index' in gap_in
 
 
 # Equivalent spellings of one integer clamp read and one text-key read, compiled with the statement
@@ -217,6 +220,8 @@ _VARIANTS = {
     'text_inline': 'def text_inline(t):\n    return float(data.named_table().loc[pid(), "v"])',
     'text_alias': 'def text_alias(t):\n    tbl = data.named_table()\n    k = pid()\n    return float(tbl.loc[k, "v"])',
     'text_row': 'def text_row(t):\n    row = data.named_table().loc[pid()]\n    return float(row["v"])',
+    # membership: with an experiment switch it is the provider's native_contains
+    'int_in': 'def int_in(t):\n    tbl = data.mort_table()\n    return 1.0 if t in tbl.index else 0.0',
 }
 
 
@@ -265,7 +270,10 @@ def test_spelling_variants_recognisers_off(tmp_path):
                              cwd=tmp_path, check=True, capture_output=True, text=True).stdout.strip()
         assert float(got) == live, (package, got, live)
     py, c = tmp_path / 'exported_cy/_mx_classes.py', tmp_path / 'exported_cy/_mx_classes.c'
+    assert 'native_contains(' in _formula_py(py, 'int_in')
     for name in _VARIANTS:
+        if name == 'int_in':
+            continue
         body = _formula_c(py, c, name)
         # fuse_0: the C long long key overload; fuse_2: the object (text) key overload
         expected = '__pyx_fuse_0lookup_float' if name.startswith('int') else '__pyx_fuse_2lookup_float'
