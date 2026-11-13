@@ -141,13 +141,13 @@ cdef class NativeTable:
     cdef void _resolve(self, object owner) except *
     cdef Py_ssize_t _column_slot(self, object column) except? -2
     cdef Py_ssize_t _int_row(self, long long key) noexcept
-    cdef Py_ssize_t _keyed_row(self, object key, bint no_bool=*) except? -2
+    cdef Py_ssize_t _keyed_row(self, object key) except? -2
     cdef const double* _input_values
     cdef const unsigned char* _input_numeric
     cdef const long long* _input_positions
     cdef long long _input_low, _input_high
     cdef Py_ssize_t _input_width
-    cdef bint try_float(self, object key, object column, double* value, bint no_bool=*) except -1
+    cdef bint try_float(self, object key, object column, double* value) except -1
     cdef double lookup_float(self, KeyArg0 key, object column, object default=*) except? -1
     cdef object previous(self, KeyArg0 key, object column)
     cdef double interpolate_float(self, object key, object column) except? -1
@@ -155,7 +155,6 @@ cdef class NativeTable:
     cpdef object slice(self, object key)
 
 cdef NativeTable bind_native_table(object value, str cell)
-cdef double grouped_lookup_float(object source, object key, object column) except? -1
 
 cdef bint try_clamped_table_float(NativeTable, LookupContext, bint lower, object namespace, long long key,
                                   object column, double* result) except -1

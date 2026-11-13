@@ -70,7 +70,8 @@ def test_loc_reads_three_modes(tmp_path):
     assert cell('band')['loc_reads_typed'] == 1            # float() of an integer column
     assert cell('premium')['loc_reads_typed'] == 1         # through slice() of a grouped table
     assert cell('band_int')['loc_reads_untyped'] == ["column 'band' has traced kind int"]
-    assert cell('premium_full_key')['loc_reads_typed'] == 1   # the provider's flattened full-key read
+    assert cell('premium_full_key')['loc_reads_untyped'] == [
+        'full key into a grouped table: declare the table without groups= to read it by full key']
     assert cell('column_by_name')['loc_reads_typed'] == 1      # a local bound once to a literal
     assert cell('column_computed')['loc_reads_untyped'] == ['column is not a string literal']
 
@@ -165,7 +166,7 @@ def test_loc_read_edges_three_modes(tmp_path):
     admission = json.loads((tmp_path / 'exported_cy/_mx_admission.json').read_text())
     typed = {name: admission[f'exported_cy._mx_classes._c_Projection._f_{name}']['loc_reads_typed']
              for name in ('gap', 'gap_bounds', 'gap_odd_column', 'named', 'multi', 'flag', 'deep', 'gap_in')}
-    assert typed == {'gap': 1, 'gap_bounds': 3, 'gap_odd_column': 1, 'named': 1, 'multi': 1, 'flag': 1, 'deep': 1,
+    assert typed == {'gap': 1, 'gap_bounds': 3, 'gap_odd_column': 1, 'named': 1, 'multi': 1, 'flag': 1, 'deep': 0,
                      'gap_in': 2}
 
 

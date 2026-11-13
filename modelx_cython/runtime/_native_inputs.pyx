@@ -1699,14 +1699,6 @@ cdef long long _mx_exact_index(object value) except? -1:
     return value
 
 
-cdef inline bint _bool_part(const KeyPart* parts, Py_ssize_t count) noexcept:
-    cdef Py_ssize_t i
-    for i in range(count):
-        if parts[i].kind == _KEY_BOOL:
-            return True
-    return False
-
-
 cdef inline unsigned long long _part_text_hash(PyObject* text) noexcept:
     # Exact str only (_KEY_TEXT); its hash is cached and cannot fail.
     return <unsigned long long>PyObject_Hash(<object>text)
@@ -1880,7 +1872,7 @@ cdef class NativeTable:
             return <Py_ssize_t>self._int_rows[lo]
         return -1
 
-    cdef Py_ssize_t _keyed_row(self, object key, bint no_bool=False) except? -2:
+    cdef Py_ssize_t _keyed_row(self, object key) except? -2:
         """The row of a hashable key through the owner's hashed view, or -1 when absent or not native."""
         cdef KeyPart[8] parts
         cdef KeyPart* wide
@@ -1890,22 +1882,19 @@ cdef class NativeTable:
         if self._cells is None:
             return -1
         if _pack_key_into(owner_key, &parts[0], 8, &count, &tuple_key):
-            if no_bool and _bool_part(&parts[0], count):
-                return -1
             return _index_find(&self._key_index, &parts[0], count, tuple_key)
         wide = _pack_wide_key(owner_key, &count) if count > 8 else NULL
         if wide == NULL:
             return -1
         try:
-            row = -1 if no_bool and _bool_part(wide, count) else _index_find(&self._key_index, wide, count, True)
+            row = _index_find(&self._key_index, wide, count, True)
         finally:
             PyMem_Free(wide)
         return row
 
-    cdef bint try_float(self, object key, object column, double* value, bint no_bool=False) except -1:
+    cdef bint try_float(self, object key, object column, double* value) except -1:
         """Hit-only typed read of an object key: True and the value for a resolved column, a row
-        and a numeric cell; False otherwise, leaving every other case to the caller's own route.
-        With no_bool, a key with a bool part is not read here (its meaning is the caller's)."""
+        and a numeric cell; False otherwise, leaving every other case to the caller's own route."""
         cdef Py_ssize_t col = -1, row, position, i
         cdef long long number
         cdef int overflow = 0
@@ -1925,7 +1914,7 @@ cdef class NativeTable:
             if col < 0:
                 return False
         if row == -2:
-            row = self._keyed_row(key, no_bool)
+            row = self._keyed_row(key)
             if row < 0:
                 return False
         position = row * self._cell_width + col
@@ -2081,169 +2070,6 @@ cdef class NativeTable:
 
 
 Table.register(NativeTable)
-
-
-cdef extern from *:
-    """
-    #define __MX_GROUP_PARTS 8
-    #define __MX_GROUP_SLOTS 512
-    typedef struct { Py_ssize_t count; PyObject* parts[__MX_GROUP_PARTS]; PyObject* leaf; } __mx_group_entry;
-    #define __mx_load_entry(p) __atomic_load_n((p), __ATOMIC_ACQUIRE)
-    #define __mx_store_entry(p, v) __atomic_store_n((p), (v), __ATOMIC_RELEASE)
-    """
-    enum: _GROUP_PARTS "__MX_GROUP_PARTS"
-    enum: _GROUP_SLOTS "__MX_GROUP_SLOTS"
-    ctypedef struct GroupEntry "__mx_group_entry":
-        Py_ssize_t count
-        PyObject* parts[8]
-        PyObject* leaf
-    GroupEntry* _load_entry "__mx_load_entry"(GroupEntry** slot) noexcept nogil
-    void _store_entry "__mx_store_entry"(GroupEntry** slot, GroupEntry* value) noexcept nogil
-
-
-cdef inline Py_ssize_t _group_slot(PyObject** parts, Py_ssize_t count) noexcept:
-    cdef unsigned long long code = 1469598103934665603
-    cdef Py_ssize_t i
-    for i in range(count):
-        code = (code ^ <unsigned long long>(<size_t>parts[i] >> 4)) * <unsigned long long>1099511628211
-    return <Py_ssize_t>(code & (_GROUP_SLOTS - 1))
-
-
-# The helper classes as C-level references: a module global would be a dict lookup per read.
-cdef object _record_type = Record
-cdef object _table_type = Table
-
-
-@cython.final
-cdef class GroupedIndex:
-    """Native group levels of one grouped Record, kept in ``Record._native_groups``.
-
-    Maps the identity of the group-label objects of a full key (``G.loc[(g1, ..., gn, key), col]``)
-    to the leaf table those labels select. An entry is created by walking the Record levels with
-    their own dict lookups, holds strong references to its label objects and leaf (so an identity
-    can never be reused while the entry exists), is published once into a write-once slot and is
-    freed only with the index. A full table simply stops taking new entries.
-    """
-    cdef GroupEntry* _slots[512]
-    cdef list _owned
-    cdef Py_ssize_t _depth
-
-    def __cinit__(self):
-        self._owned = []
-        self._depth = -1
-
-    def __dealloc__(self):
-        cdef Py_ssize_t i
-        for i in range(_GROUP_SLOTS):
-            if self._slots[i] != NULL:
-                PyMem_Free(self._slots[i])
-                self._slots[i] = NULL
-
-    cdef PyObject* find(self, tuple key, Py_ssize_t* depth) noexcept:
-        """The leaf NativeTable for the key's group labels by identity, or NULL."""
-        cdef Py_ssize_t count = self._depth, slot, i, probe
-        cdef GroupEntry* entry
-        cdef PyObject** parts
-        cdef bint same
-        if count <= 0 or count >= PyTuple_GET_SIZE(key) or count > _GROUP_PARTS:
-            return NULL
-        parts = &(<PyTupleObject*>key).ob_item[0]
-        slot = _group_slot(parts, count)
-        for probe in range(8):
-            entry = _load_entry(&self._slots[(slot + probe) & (_GROUP_SLOTS - 1)])
-            if entry == NULL:
-                return NULL
-            if entry.count == count:
-                same = True
-                for i in range(count):
-                    if entry.parts[i] != parts[i]:
-                        same = False
-                        break
-                if same:
-                    depth[0] = count
-                    return entry.leaf
-        return NULL
-
-    cdef object walk(self, object record, tuple key, Py_ssize_t* depth):
-        """Follow the Record levels with the Records' own lookups; remember the leaf by identity."""
-        cdef Py_ssize_t count = 0, n = PyTuple_GET_SIZE(key), slot, probe, i
-        cdef GroupEntry* entry
-        value = record
-        while count < n and type(value) is _record_type:
-            value = (<object>value)._index.get(key[count], _missing)
-            if value is _missing:
-                return None
-            count += 1
-        if type(value) is not _table_type or count == n:
-            return None
-        cache = value._native_cache
-        leaf = cache.get(GroupedIndex)
-        if leaf is None:
-            leaf = cache.setdefault(GroupedIndex, NativeTable(value))
-        depth[0] = count
-        if count > _GROUP_PARTS:
-            return leaf
-        with cython.critical_section(self):
-            if self._depth < 0:
-                self._depth = count
-            if self._depth == count and len(self._owned) < 4 * _GROUP_SLOTS:
-                slot = _group_slot(&(<PyTupleObject*>key).ob_item[0], count)
-                for probe in range(8):
-                    i = (slot + probe) & (_GROUP_SLOTS - 1)
-                    if self._slots[i] == NULL:
-                        entry = <GroupEntry*>PyMem_Malloc(sizeof(GroupEntry))
-                        if entry == NULL:
-                            break
-                        entry.count = count
-                        for slot in range(count):
-                            entry.parts[slot] = <PyObject*>key[slot]
-                            self._owned.append(key[slot])
-                        entry.leaf = <PyObject*>leaf
-                        self._owned.append(leaf)
-                        _store_entry(&self._slots[i], entry)
-                        break
-        return leaf
-
-
-cdef extern from "Python.h":
-    ctypedef struct PyTupleObject:
-        PyObject* ob_item[1]
-    Py_ssize_t PyTuple_GET_SIZE(object)
-
-
-cdef GroupedIndex _grouped_index(object record):
-    groups = record._native_groups
-    if type(groups) is not dict:
-        return None
-    found = (<dict>groups).get(GroupedIndex)
-    if found is None:
-        found = (<dict>groups).setdefault(GroupedIndex, GroupedIndex())
-    return <GroupedIndex>found
-
-
-cdef double grouped_lookup_float(object source, object key, object column) except? -1:
-    """``float(G.loc[key, column])`` for a grouped Record G and a full tuple key.
-
-    The group labels select the leaf table (by identity through GroupedIndex, else by walking
-    the Records); a hit in the leaf (resolved column, row, numeric cell, no bool leaf part)
-    returns the converted stored value. Anything else runs the original ``G.loc`` read.
-    """
-    cdef double value
-    cdef GroupedIndex index
-    cdef PyObject* leaf
-    cdef Py_ssize_t depth = 0, n
-    cdef object leaf_key
-    if type(source) is _record_type and type(key) is tuple:
-        index = _grouped_index(source)
-        if index is not None:
-            leaf = index.find(<tuple>key, &depth)
-            found = <object>leaf if leaf != NULL else index.walk(source, <tuple>key, &depth)
-            if found is not None:
-                n = PyTuple_GET_SIZE(key)
-                leaf_key = <object>_tuple_item(<PyObject*>key, depth) if n - depth == 1 else (<tuple>key)[depth:]
-                if (<NativeTable>found).try_float(leaf_key, column, &value, True):
-                    return value
-    return _float_type(source.loc[key, column])
 
 
 cdef NativeTable bind_native_table(object value, str cell):
