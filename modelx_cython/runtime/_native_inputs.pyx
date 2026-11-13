@@ -72,7 +72,7 @@ cdef class TableView:
     cdef Py_ssize_t width
     cdef double[::1] numbers
 
-    def __init__(self, table):
+    def __init__(self, table, double[::1] numbers, bint values_prepared):
         cdef object key
         cdef tuple keys = table._keys
         cdef tuple ordered
@@ -95,10 +95,12 @@ cdef class TableView:
         self.last_integer = high
         # Table guarantees unique keys. Compute the span as Python ints.
         self.contiguous = high - low == len(ordered) - 1
-        self.numeric = all(type(value) is float for row in self.values for value in row)
+        if not values_prepared and all(type(value) is float for row in self.values for value in row):
+            numbers = array('d', [value for row in self.values for value in row])
+        self.numeric = numbers is not None
         if self.numeric:
             self.width = len(self.columns)
-            self.numbers = array('d', [value for row in self.values for value in row])
+            self.numbers = numbers
 
     @cython.boundscheck(False)
     @cython.wraparound(False)
@@ -905,7 +907,7 @@ cdef class KeyedView:
     cdef double[::1] values
     cdef unsigned char[::1] numeric
     cdef Py_ssize_t width, value_width, rows, mask
-    cdef bint tuple_keys, admitted, pandas_columns
+    cdef bint tuple_keys, admitted, pandas_columns, all_floats
 
     def __cinit__(self, table):
         cdef KeyPart* parts
@@ -976,12 +978,15 @@ cdef class KeyedView:
         # Copy existing doubles. Convert all other scalars only when selected.
         cdef Array numbers = clone(array('d'), self.rows * self.value_width, False)
         cdef Array valid = clone(array('B'), self.rows * self.value_width, True)
+        self.all_floats = True
         offset = 0
         for input_row in self.raw_values:
             for value in input_row:
                 if PyFloat_CheckExact(value):
                     numbers.data.as_doubles[offset] = PyFloat_AS_DOUBLE(value)
                     valid.data.as_uchars[offset] = 1
+                else:
+                    self.all_floats = False
                 offset += 1
         self.values = numbers
         self.numeric = valid
@@ -2474,12 +2479,15 @@ cdef void _prepare_group_record(object value) except *:
 
 cdef void _prepare_tables(object value) except *:
     """Install table resources while executing an explicit table constructor."""
+    cdef KeyedView indexed
     if type(value) is Table:
         cache = value._native_cache
+        indexed = cache.get(KeyedView)
+        if indexed is None:
+            indexed = cache.setdefault(KeyedView, KeyedView(value))
         if value._keys and type(value._keys[0]) is int and TableView not in cache:
-            cache.setdefault(TableView, TableView(value))
-        if KeyedView not in cache:
-            cache.setdefault(KeyedView, KeyedView(value))
+            cache.setdefault(TableView, TableView(value, indexed.values if indexed.all_floats else None,
+                                                   indexed.admitted))
     elif type(value) is Record:
         for _, child in value._items:
             _prepare_tables(child)
