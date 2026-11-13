@@ -94,6 +94,13 @@ def integer_domain_build(tmp_path_factory):
         return 0
     return adjusted
 """)
+        projection.new_cells("prefix_identity_local", """def prefix_identity_local():
+    adjusted = amount
+    saved = [adjusted]
+    if adjusted is saved[0]:
+        return adjusted + 1
+    return adjusted
+""")
         projection.new_cells("native_operand", "lambda: receive(amount + 1)")
         projection.new_cells("inline_receive", "lambda count: count + 1")
         projection.new_cells("inline_operand", 'lambda: {"count": inline_receive(amount * 4)}')
@@ -146,6 +153,7 @@ def integer_domain_build(tmp_path_factory):
         projection.mixed_local()
         projection.possibly_unbound_local()
         projection.python_context_local()
+        projection.prefix_identity_local()
         projection.native_operand()
         projection.inline_receive(0)
         projection.inline_operand()
@@ -380,6 +388,7 @@ def test_signed_local_flow(integer_domain_build):
     assert not native_local("mixed_local")
     assert not native_local("possibly_unbound_local")
     assert not native_local("python_context_local")
+    assert not native_local("prefix_identity_local")
     run_python(integer_domain_build, "-c", textwrap.dedent("""\
         from exported import mx_model as exported
         from exported_cy import mx_model as compiled
@@ -393,6 +402,7 @@ def test_signed_local_flow(integer_domain_build):
             assert reference.reassigned_local() == projection.reassigned_local() == amount
             assert reference.conditional_local() == projection.conditional_local()
             assert reference.single_assignment_after_guard() == projection.single_assignment_after_guard()
+            assert reference.prefix_identity_local() == projection.prefix_identity_local() == amount + 1
 
         for cell, amount, divisor in (("reassigned_local", minimum, -1),
                                       ("conditional_local", minimum, -1),
