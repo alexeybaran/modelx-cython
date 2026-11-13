@@ -394,8 +394,8 @@ class _SignedLocalValues(cst.CSTTransformer):
         return after if value is None else after.with_changes(value=value)
 
 
-def _signed_divisibility(body, facts, guard, parameters):
-    """Admit locals whose only uses are signed zero-remainder comparisons."""
+def _signed_divisibility(body, facts, guard, parameters, declare_locals):
+    """Lower proven signed reads and declare locals whose uses all stay native."""
     if (has_scope_effects(body.body)
             or facts.reads & {'eval', 'exec', 'locals', 'vars', 'globals', '_getframe', 'currentframe'}):
         return body, ()
@@ -404,15 +404,29 @@ def _signed_divisibility(body, facts, guard, parameters):
               and all(isinstance(value, cst.Name) for value in operands[:2])}
     uses = {value for operands in probes.values() for value in operands[:2]}
     native = guard.signed_names - {name for name in parameters if facts.stores[name]}
+    proven_reads = {value for value in uses if value.value in native}
     declarations = []
+
+    def signed_atom(value):
+        if isinstance(value, cst.IfExp):
+            return signed_atom(value.body) and signed_atom(value.orelse)
+        if isinstance(value, cst.Name):
+            return value.value in native
+        return guard._signed_atom(value)
+
     for name in sorted({value.value for value in uses} - set(parameters) - native):
         if not facts.stores[name]:
             continue
         assignments, reads = signed_local_assignments(
             body, name, facts,
-            lambda value: value if guard.arithmetic.integer_interval(value, signed=True) is not None else None,
+            lambda value: value if signed_atom(value) or declare_locals
+            and guard.arithmetic.integer_interval(value, signed=True) is not None else None,
         )
-        if not assignments or not reads <= uses:
+        if not assignments:
+            continue
+        if all(signed_atom(value) for value in assignments.values()):
+            proven_reads.update(reads & uses)
+        if not declare_locals or not reads <= uses:
             continue
         # Each comparison must be able to preserve the local's signed value.
         if not all(operand.value in native or operand.value == name
@@ -425,13 +439,15 @@ def _signed_divisibility(body, facts, guard, parameters):
 
     replacements = {}
     for probe, (dividend, divisor, operation, negate) in probes.items():
-        if not {dividend.value, divisor.value} <= native:
+        boxed_proof = dividend in proven_reads and divisor in proven_reads
+        if not boxed_proof and not {dividend.value, divisor.value} <= native:
             continue
         call = cst.Call(cst.Attribute(cst.Name(MX_SYS_MOD), cst.Name(operation)),
                         (cst.Arg(dividend), cst.Arg(divisor)))
         if negate:
             call = cst.UnaryOperation(cst.Not(), call)
-        replacements[probe] = call.with_changes(lpar=probe.lpar, rpar=probe.rpar)
+        parentheses = ((cst.LeftParen(),), (cst.RightParen(),)) if boxed_proof else (probe.lpar, probe.rpar)
+        replacements[probe] = call.with_changes(lpar=parentheses[0], rpar=parentheses[1])
 
     class LowerDivisibility(cst.CSTTransformer):
         def leave_Comparison(self, before, after):
@@ -498,8 +514,8 @@ def _type_signed_locals(body, guard, facts, parameters):
 def _guard_result(node, cell, cls, resolver, cells_kinds, ref_kinds, signatures, native_helpers=(),
                   argument_axes=()):
     signed_return = node.returns is not None and node.returns.annotation.deep_equals(_INTEGER_ANNOTATION)
-    divisibility = (node.returns is not None and dotted_name(node.returns.annotation) == f'{CY_MOD}.bint'
-                    and not cell.is_locked and not cell.body_has_closure and divisibility_enabled(cell)
+    divisibility = (not cell.is_locked and not cell.body_has_closure
+                    and cell.cls not in cls.visitor.dynamic_ref_classes and divisibility_enabled(cell)
                     and any(divisibility_operands(part) is not None for part in lexical_nodes(node.body.body)))
     if not signed_return and not divisibility and not any(
             isinstance(part, cst.Call) and dotted_name(part.func) == _INTEGER_CONVERSION
@@ -531,10 +547,14 @@ def _guard_result(node, cell, cls, resolver, cells_kinds, ref_kinds, signatures,
                            error)
     parameters = tuple(parameter.name.value for parameter in
                        (*node.params.posonly_params, *node.params.params, *node.params.kwonly_params))
+    body, declarations = node.body, ()
+    declare_divisibility = (divisibility and node.returns is not None
+                            and dotted_name(node.returns.annotation) == f'{CY_MOD}.bint')
     if divisibility:
-        body, declarations = _signed_divisibility(node.body, facts, guard, parameters)
-    else:
-        body, declarations = _type_signed_locals(node.body, guard, facts, parameters)
+        body, declarations = _signed_divisibility(body, facts, guard, parameters, declare_divisibility)
+    if not declare_divisibility:
+        body, declarations = _type_signed_locals(body, guard, facts if body is node.body else CstFacts(body.body),
+                                                 parameters)
     body = body.visit(guard)
     if declarations:
         doc_end = 1 if node.get_docstring() is not None else 0

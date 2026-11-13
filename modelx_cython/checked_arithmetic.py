@@ -629,45 +629,10 @@ class CheckedArithmetic:
 
         return cst.Module(body).visit(ExactReturns()).body if replacements else body
 
-    def divisibility(self, body, facts):
-        local_reads = {}
-
-        def signed(value):
-            if not isinstance(value, cst.Name):
-                return False
-            if value.value in self.parameters:
-                return True
-            if value.value not in local_reads:
-                assignments, reads = self._native_local(body, value.value, facts)
-                local_reads[value.value] = reads if assignments else ()
-            return value in local_reads[value.value]
-
-        class Divisibility(cst.CSTTransformer):
-            def visit_Lambda(inner, node):
-                return False
-
-            def visit_FunctionDef(inner, node):
-                return False
-
-            visit_ListComp = visit_SetComp = visit_DictComp = visit_GeneratorExp = visit_Lambda
-
-            def leave_Comparison(inner, before, after):
-                operands = divisibility_operands(before)
-                if operands is None:
-                    return after
-                dividend, divisor, operation, negate = operands
-                if not (signed(dividend) and signed(divisor)):
-                    return after
-                prefix = 'not ' if negate else ''
-                return cst.parse_expression(f'({prefix}_mx_sys.{operation}({dividend.value}, {divisor.value}))')
-
-        return cst.Module(body).visit(Divisibility()).body
-
     def rewrite(self, function):
         self.cell.signed_range_counters = frozenset()
         kind = self.cell.get_rettype_expr(c_style=True)
-        divisible = divisibility_enabled(self.cell)
-        if ((kind not in ('double', 'long long') and not divisible)
+        if (kind not in ('double', 'long long')
                 or self.cell.is_locked or self.cell.body_has_closure
                 or self.cell.cls in self.cls.visitor.dynamic_ref_classes
                 or not isinstance(function.body, cst.IndentedBlock)):
@@ -680,8 +645,6 @@ class CheckedArithmetic:
                            and self.cell.get_argtype_expr(name, c_style=True, formula=True) == 'long long'}
         self.prefix = Names(function).reserve('_mx_checked', family=True)
         self.next_input = 0
-        if divisible:
-            body = self.divisibility(body, facts)
         if kind == 'double':
             rewritten = self.guarded_float_return(body)
             body = self.integer_local(body) if rewritten is body else rewritten
