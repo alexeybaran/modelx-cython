@@ -44,7 +44,7 @@ operator in :mod:`~modelx_cython.ordered_arguments` preserves Python power
 semantics where Cython would otherwise infer a complex intermediate.
 
 A native double return can also use a uniquely assigned local from a
-resolved double Cell. That local proof applies only to arithmetic directly
+resolved double Cell or Reference. That local proof applies only to arithmetic directly
 feeding the return, where Cython already requires a real result.
 
 The same classifier decides, in :func:`demote_rebound_params`, whether a
@@ -325,7 +325,7 @@ class _PowerRewriter(cst.CSTTransformer):
 
 
 def _native_return_locals(body, facts, operand_kind, parameters):
-    """Prove a local from one dominating, resolved double Cell call."""
+    """Prove a local from one dominating double Cell or Reference read."""
     if (facts.stores[MX_SELF] or has_scope_effects(body)
             or facts.reads & {'locals', 'vars', 'eval', 'exec', '_getframe', 'currentframe'}):
         return {}
@@ -335,7 +335,7 @@ def _native_return_locals(body, facts, operand_kind, parameters):
         if ((target := local_assignment(assignment)) is not None
                 and target.value not in seen and facts.stores[target.value] == 1
                 and target.value not in facts.deleted
-                and isinstance(assignment.value, cst.Call)
+                and isinstance(assignment.value, (cst.Call, cst.Attribute))
                 and operand_kind.kind(assignment.value) == KIND_FLOAT):
             result[target.value] = KIND_FLOAT
         seen.update(part.value for part in walk(line) if isinstance(part, cst.Name)

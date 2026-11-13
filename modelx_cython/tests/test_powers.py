@@ -136,7 +136,7 @@ def _rewrite(body: str, *, builtin_float=False, return_type="object") -> str:
     out = rewrite_powers(
         func, resolver,
         cells_kinds={RATE: KIND_FLOAT, ARR: KIND_UNKNOWN},
-        ref_kinds={CLS: {}},
+        ref_kinds={CLS: {"discount_rate": KIND_FLOAT}},
         cls_fqname=CLS,
         cells=_FakeCells(return_type),
         builtin_float=builtin_float,
@@ -184,6 +184,16 @@ def test_double_cell_local_feeds_native_return_power(local, cell, zero_guard):
     assert f"_mx_sys._mx_pow((1.0 - {local}), (1.0 / 12.0))" in out
     assert out.count(f"self.{cell}(t)") == 1
     assert f"if {local} >= 1.0:" in out
+    assert "**" not in out
+    assert "**" in _rewrite(body)
+
+
+def test_double_reference_local_feeds_native_return_power():
+    body = ("j = self.discount_rate\n"
+            "    if j == 0.0:\n        return 0.0\n"
+            "    return (1.0 - (1.0 + j) ** (-t / 12.0)) / ((1.0 + j) ** (1.0 / 12.0) - 1.0)")
+    out = _rewrite(body, return_type="double")
+    assert out.count("_mx_sys._mx_pow(") == 2
     assert "**" not in out
     assert "**" in _rewrite(body)
 
