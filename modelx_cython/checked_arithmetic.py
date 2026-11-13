@@ -52,6 +52,36 @@ def local_quotient(expr, divisor_type):
     return (expr.left.value, divisor) if valid else None
 
 
+def divisibility_operands(node):
+    if not isinstance(node, cst.Comparison) or len(node.comparisons) != 1:
+        return None
+    comparison, = node.comparisons
+    remainder = node.left
+    if (not isinstance(comparison.operator, (cst.Equal, cst.NotEqual))
+            or not isinstance(comparison.comparator, cst.Integer)
+            or comparison.comparator.evaluated_value != 0
+            or not isinstance(remainder, cst.BinaryOperation)
+            or not isinstance(remainder.operator, cst.Modulo)):
+        return None
+    dividend = remainder.left
+    operation = '_mx_divisible'
+    if (isinstance(dividend, cst.BinaryOperation)
+            and isinstance(dividend.right, cst.Integer) and dividend.right.evaluated_value == 1):
+        if isinstance(dividend.operator, cst.Subtract):
+            operation, dividend = '_mx_divisible_after_decrement', dividend.left
+        elif isinstance(dividend.operator, cst.Add):
+            operation, dividend = '_mx_divisible_after_increment', dividend.left
+    return dividend, remainder.right, operation, isinstance(comparison.operator, cst.NotEqual)
+
+
+def divisibility_enabled(cell):
+    from . import automatic
+    enabled = getattr(cell, '_spec', {}).get('native_divisibility', automatic.enabled(cell))
+    if type(enabled) is not bool:
+        raise ValueError('native_divisibility must be a boolean')
+    return enabled
+
+
 def signed_local_assignments(body, name, facts, native_value):
     """Find all signed definitions and the reads they definitely initialize."""
     reads = {node for node, context in facts.contexts.items()
@@ -622,25 +652,13 @@ class CheckedArithmetic:
             visit_ListComp = visit_SetComp = visit_DictComp = visit_GeneratorExp = visit_Lambda
 
             def leave_Comparison(inner, before, after):
-                if len(before.comparisons) != 1:
+                operands = divisibility_operands(before)
+                if operands is None:
                     return after
-                comparison = before.comparisons[0]
-                expr = before.left
-                if (not isinstance(comparison.operator, (cst.Equal, cst.NotEqual))
-                        or not isinstance(comparison.comparator, cst.Integer)
-                        or comparison.comparator.evaluated_value != 0
-                        or not isinstance(expr, cst.BinaryOperation)
-                        or not isinstance(expr.operator, cst.Modulo)):
-                    return after
-                dividend, divisor = expr.left, expr.right
-                operation = '_mx_divisible'
-                if (isinstance(dividend, cst.BinaryOperation) and isinstance(dividend.operator, cst.Subtract)
-                        and isinstance(dividend.right, cst.Integer) and dividend.right.evaluated_value == 1):
-                    dividend = dividend.left
-                    operation = '_mx_divisible_after_decrement'
+                dividend, divisor, operation, negate = operands
                 if not (signed(dividend) and signed(divisor)):
                     return after
-                prefix = 'not ' if isinstance(comparison.operator, cst.NotEqual) else ''
+                prefix = 'not ' if negate else ''
                 return cst.parse_expression(f'({prefix}_mx_sys.{operation}({dividend.value}, {divisor.value}))')
 
         return cst.Module(body).visit(Divisibility()).body
@@ -648,10 +666,7 @@ class CheckedArithmetic:
     def rewrite(self, function):
         self.cell.signed_range_counters = frozenset()
         kind = self.cell.get_rettype_expr(c_style=True)
-        from modelx_cython import automatic
-        divisible = getattr(self.cell, '_spec', {}).get('native_divisibility', automatic.enabled(self.cell))
-        if type(divisible) is not bool:
-            raise ValueError('native_divisibility must be a boolean')
+        divisible = divisibility_enabled(self.cell)
         if ((kind not in ('double', 'long long') and not divisible)
                 or self.cell.is_locked or self.cell.body_has_closure
                 or self.cell.cls in self.cls.visitor.dynamic_ref_classes

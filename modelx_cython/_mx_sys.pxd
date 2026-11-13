@@ -279,6 +279,12 @@ cdef inline bint _mx_divisible_after_decrement(long long dividend, long long div
     return _mx_divisible(dividend - 1, divisor)
 
 
+cdef inline bint _mx_divisible_after_increment(long long dividend, long long divisor) except? -1:
+    if dividend == LLONG_MAX:
+        return ((<object>dividend) + 1) % divisor == 0
+    return _mx_divisible(dividend + 1, divisor)
+
+
 cdef extern from *:
     """
     /* Acquire/release accessors for the _has_ flags of locked Spaces.
