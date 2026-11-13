@@ -138,6 +138,14 @@ not its body. Missing optional slots receive the provider's declared
 Providers preserve original positional/keyword layout when dispatching a
 replacement. Starred or invalid declared call shapes keep ordinary calls.
 
+A constructor helper can declare `__modelx_cython_result_type__` as a qualified
+provider owner type. A pair of that type and a parameter name limits admission
+to calls that omit the parameter or pass an empty tuple. The parameter must have
+an empty tuple default and use the keyword call ABI. A Cell that directly returns
+the call can use the registered native view when the traced owner matches.
+The binder still checks each returned value, and a Cell can declare `object`
+to retain an object return type.
+
 Numeric contexts implement the common `LookupContext` ABI. They cache prepared
 input resources and indices, never policy results or formula execution state.
 Prepared resources must be disposable: normal model pickling retains Cell

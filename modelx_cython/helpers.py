@@ -93,6 +93,25 @@ def helper_parameters(value):
                  for p in parameters)
 
 
+def helper_result_type(value):
+    """Read an owner type and optional parameter that must retain its empty default."""
+    identity = vars(value).get('__modelx_cython_result_type__')
+    if identity is None:
+        return None
+    conditional = type(identity) is tuple
+    if conditional and len(identity) == 2:
+        owner, parameter = identity
+        declared = inspect.signature(value).parameters.get(parameter) if valid_identifier(parameter) else None
+    else:
+        owner, parameter, declared = identity, None, None
+    if (not isinstance(owner, str) or '.' not in owner
+            or not all(valid_identifier(part) for part in owner.split('.'))
+            or conditional and (declared is None or type(declared.default) is not tuple
+                                or declared.default or helper_parameters(value) is None)):
+        raise ValueError(f'invalid native helper result type on {value.__qualname__}')
+    return owner, parameter
+
+
 class HelperCalls(FormulaTransformer):
     def __init__(self, refs, used, cells=()):
         super().__init__()
