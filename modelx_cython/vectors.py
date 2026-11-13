@@ -471,14 +471,93 @@ def _names(target):
     return []
 
 
+def range_loop_locals(body, builtins):
+    """Names bound only as the target of ``for NAME in range(...)`` (builtin range)."""
+    kinds = {}
+
+    class Collect(cst.CSTVisitor):
+        def visit_For(inner, node):
+            ok = (isinstance(node.target, cst.Name) and 'range' in builtins
+                  and isinstance(node.iter, cst.Call) and _is_name(node.iter.func, 'range')
+                  and node.asynchronous is None)
+            for n in _names(node.target):
+                kinds.setdefault(n, set()).add('range' if ok else 'other')
+
+        def visit_AssignTarget(inner, node):
+            for n in _names(node.target):
+                kinds.setdefault(n, set()).add('other')
+
+        def visit_AugAssign(inner, node):
+            for n in _names(node.target):
+                kinds.setdefault(n, set()).add('other')
+
+        def visit_AnnAssign(inner, node):
+            for n in _names(node.target):
+                kinds.setdefault(n, set()).add('other')
+
+        def visit_NamedExpr(inner, node):
+            kinds.setdefault(node.target.value, set()).add('other')
+
+        def visit_Param(inner, node):
+            kinds.setdefault(node.name.value, set()).add('other')
+
+        def visit_CompFor(inner, node):
+            for n in _names(node.target):
+                kinds.setdefault(n, set()).add('other')
+
+        def visit_Global(inner, node):
+            for n in node.names:
+                kinds.setdefault(n.name.value, set()).add('other')
+
+        def visit_Nonlocal(inner, node):
+            for n in node.names:
+                kinds.setdefault(n.name.value, set()).add('other')
+
+        def visit_FunctionDef(inner, node):
+            return False        # nested functions keep their own locals
+
+        def visit_Lambda(inner, node):
+            return False
+
+        def visit_With(inner, node):
+            for item in node.items:
+                if item.asname is not None:
+                    for n in _names(item.asname.name):
+                        kinds.setdefault(n, set()).add('other')
+
+        def visit_ExceptHandler(inner, node):
+            if node.name is not None:
+                kinds.setdefault(node.name.name.value, set()).add('other')
+
+    body.visit(Collect())
+    return sorted(name for name, k in kinds.items() if k == {'range'})
+
+
+def _declare_at_top(node, decls):
+    if not decls:
+        return node
+    stmts = list(node.body.body)
+    start = 1 if stmts and isinstance(stmts[0], cst.SimpleStatementLine) and isinstance(
+        stmts[0].body[0], cst.Expr) and isinstance(stmts[0].body[0].value, (cst.SimpleString, cst.ConcatenatedString)) else 0
+    return node.with_changes(body=node.body.with_changes(body=[*stmts[:start], *decls, *stmts[start:]]))
+
+
 def lower(node, cls_info, cells, scope, counter):
-    """Lower the vector forms of one ``_f_`` FunctionDef; returns the new node."""
+    """Lower the vector forms of one ``_f_`` FunctionDef; returns the new node.
+
+    Also (general rule, any formula): a local bound only by ``for x in range(...)`` is declared a
+    C ``long long`` (Cython checks the conversion of the bounds and overflow)."""
     from libcst.metadata import BuiltinAssignment
-    shapes = {c.vector_shape for c in cls_info.cells.values()}
-    if not enabled() or shapes == {None}:
+    if not enabled():
         return node
     builtins = {name for name in ('sum', 'len', 'zip', 'range')
                 if scope[name] and all(isinstance(b, BuiltinAssignment) for b in scope[name])}
+    loops = range_loop_locals(node.body, builtins)
+    node = _declare_at_top(node, [_stmt(f'{name}: {CY_MOD}.longlong\n') for name in loops])
+    cells.range_loop_locals = loops
+    shapes = {c.vector_shape for c in cls_info.cells.values()}
+    if shapes == {None}:
+        return node
     lowering = VectorLowering(cls_info, cells, builtins, counter)
     lowering.analyse(node.body)
     if not any(v for v in lowering.env.values()) and not cells.vector_shape and not any(
@@ -487,13 +566,9 @@ def lower(node, cls_info, cells, scope, counter):
     body = node.body.visit(lowering)
     vector_locals = sorted(name for name, k in lowering.env.items() if k == 'V')
     decls = [_stmt(f'{name}: {VECTOR_TYPE}\n') for name in vector_locals] + lowering.decls
-    stmts = list(body.body)
-    start = 1 if stmts and isinstance(stmts[0], cst.SimpleStatementLine) and isinstance(
-        stmts[0].body[0], cst.Expr) and isinstance(stmts[0].body[0].value, (cst.SimpleString, cst.ConcatenatedString)) else 0
-    body = body.with_changes(body=[*stmts[:start], *decls, *stmts[start:]])
     cells.vector_lowered = lowering.lowered
     cells.vector_fallbacks = lowering.fallbacks
-    return node.with_changes(body=body)
+    return _declare_at_top(node.with_changes(body=body), decls)
 
 
 def _walk(node):

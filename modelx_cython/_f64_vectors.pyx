@@ -17,7 +17,7 @@ cdef class F64Vec:
         cdef Py_ssize_t i
         if isinstance(key, slice):
             return [self.data[i] for i in range(*key.indices(self.n))]
-        return vec_get(self, key)
+        return _vec_get_slow(self, key)
 
     def __iter__(self):
         cdef Py_ssize_t i
@@ -76,8 +76,21 @@ cdef F64Vec vec_of(object value):
     return v
 
 
-cdef int _vec_index_error() except -1:
-    raise IndexError("list index out of range")
+cdef double _vec_get_slow(F64Vec v, long long i) except? -1.0:
+    if i < 0:
+        i += v.n
+    if i < 0 or i >= v.n:
+        raise IndexError("list index out of range")
+    return v.data[i]
+
+
+cdef int _vec_set_slow(F64Vec v, long long i, double value) except -1:
+    if i < 0:
+        i += v.n
+    if i < 0 or i >= v.n:
+        raise IndexError("list assignment index out of range")
+    v.data[i] = value
+    return 0
 
 
 def _vec_from_sequence(items):

@@ -18,32 +18,24 @@ cdef class F64Vec:
 cdef F64Vec vec_new(Py_ssize_t n)
 cdef F64Vec vec_full(Py_ssize_t n, double value)
 cdef F64Vec vec_of(object value)
-cdef int _vec_index_error() except -1
 
 
-cdef inline Py_ssize_t vec_index(F64Vec v, long long i) except -1:
-    if i < 0:
-        i += v.n
-    if i < 0 or i >= v.n:
-        _vec_index_error()
-    return <Py_ssize_t>i
+cdef double _vec_get_slow(F64Vec v, long long i) except? -1.0
+cdef int _vec_set_slow(F64Vec v, long long i, double value) except -1
 
 
 cdef inline double vec_get(F64Vec v, long long i) except? -1.0:
-    if i < 0:
-        i += v.n
-    if i < 0 or i >= v.n:
-        _vec_index_error()
-    return v.data[i]
+    """v[i] with Python index semantics; the in-range test is one unsigned compare."""
+    if <unsigned long long>i < <unsigned long long>v.n:
+        return v.data[i]
+    return _vec_get_slow(v, i)
 
 
 cdef inline int vec_set(F64Vec v, long long i, double value) except -1:
-    if i < 0:
-        i += v.n
-    if i < 0 or i >= v.n:
-        _vec_index_error()
-    v.data[i] = value
-    return 0
+    if <unsigned long long>i < <unsigned long long>v.n:
+        v.data[i] = value
+        return 0
+    return _vec_set_slow(v, i, value)
 
 
 cdef inline double vec_sum_range(F64Vec v, long long a, long long b) noexcept:
