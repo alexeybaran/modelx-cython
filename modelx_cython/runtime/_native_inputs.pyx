@@ -1279,64 +1279,43 @@ cdef KeyPart* _pack_wide_key(object key, Py_ssize_t* count) except? NULL:
     return NULL
 
 
-cdef object _wide_indexed_lookup(object table, object key, object column, object default):
-    # Own the tuple until every borrowed Unicode component has been consumed.
-    cdef object owner = key
-    cdef Py_ssize_t count, row
-    cdef KeyPart* parts = _pack_wide_key(owner, &count)
+cdef tuple _wide_indexed_row(object table, object key, object column, bint needs_column):
+    """Search with borrowed key parts while the key argument remains alive."""
+    cdef Py_ssize_t count
+    cdef KeyPart* parts = _pack_wide_key(key, &count)
     cdef KeyedCache cache
-    cdef KeyedView data
+    if parts == NULL:
+        return None
     try:
-        if parts != NULL:
-            cache = _keyed_cache(_indexed_context(table), table, column)
-            data = cache.data
-            if data is not None and cache.index >= 0:
-                row = data.find(parts, count, True)
-                if row < 0:
-                    if default is _missing:
-                        raise KeyError(key)
-                    return default
-                return data.raw_values[row][cache.index]
-        return _lookup(table, key, column) if default is _missing else _lookup(table, key, column, default)
+        cache = _keyed_cache(_indexed_context(table), table, column)
+        if cache.data is not None and (not needs_column or cache.index >= 0):
+            return cache, cache.data.find(parts, count, True)
     finally:
         PyMem_Free(parts)
+    return None
+
+
+cdef object _wide_indexed_lookup(object table, object key, object column, object default):
+    cdef KeyedCache cache
+    cdef Py_ssize_t row
+    cdef tuple found = _wide_indexed_row(table, key, column, True)
+    if found is not None:
+        cache, row = found
+        if row >= 0:
+            return cache.data.raw_values[row][cache.index]
+        if default is _missing:
+            raise KeyError(key)
+        return default
+    return _lookup(table, key, column) if default is _missing else _lookup(table, key, column, default)
 
 
 cdef Py_ssize_t _wide_indexed_position(object table, object key) except? -2:
-    cdef object owner = key
-    cdef Py_ssize_t count, position
-    cdef KeyPart* parts = _pack_wide_key(owner, &count)
-    cdef KeyedCache cache
-    cdef KeyedView data
-    try:
-        if parts != NULL:
-            cache = _keyed_cache(_indexed_context(table), table, 0)
-            data = cache.data
-            if data is not None:
-                position = data.find(parts, count, True)
-                if position < 0:
-                    raise KeyError(key)
-                return position
+    cdef tuple found = _wide_indexed_row(table, key, 0, False)
+    if found is None:
         return -1
-    finally:
-        PyMem_Free(parts)
-
-
-cdef object _wide_indexed_contains(object table, object key):
-    cdef object owner = key
-    cdef Py_ssize_t count
-    cdef KeyPart* parts = _pack_wide_key(owner, &count)
-    cdef KeyedCache cache
-    cdef KeyedView data
-    try:
-        if parts != NULL:
-            cache = _keyed_cache(_indexed_context(table), table, 0)
-            data = cache.data
-            if data is not None:
-                return data.find(parts, count, True) >= 0
-        return _contains(table, key)
-    finally:
-        PyMem_Free(parts)
+    if found[1] < 0:
+        raise KeyError(key)
+    return found[1]
 
 cdef object indexed_lookup(object table, object key, object column, object default=_missing):
     cdef KeyPart[4] parts
@@ -1380,12 +1359,17 @@ cdef object indexed_contains(object table, object key):
     cdef bint tuple_key
     cdef KeyedCache cache
     cdef KeyedView data
+    cdef tuple found
     if _pack_key(key, &parts[0], &count, &tuple_key):
         cache = _keyed_cache(_indexed_context(table), table, 0)
         data = cache.data
         if data is not None:
             return data.find(&parts[0], count, tuple_key) >= 0
-    return _wide_indexed_contains(table, key)
+    if type(key) is tuple and len(key) > 4:
+        found = _wide_indexed_row(table, key, 0, False)
+        if found is not None:
+            return found[1] >= 0
+    return _contains(table, key)
 
 
 from builtins import int as _typed_int, bool as _typed_bool, str as _typed_str

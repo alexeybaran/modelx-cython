@@ -157,6 +157,13 @@ def _require_fields(value, label, required, optional=()):
         raise ValueError(f'invalid fields for {label}')
 
 
+def _read_symbols(cls, value, label, required, optional=()):
+    _require_fields(value, label, required, optional)
+    if not all(valid_identifier(symbol) for symbol in value.values()):
+        raise ValueError(f'invalid native symbol for {label}')
+    return cls(**value)
+
+
 def _read_numeric_table(type_id, declaration):
     label = f'{type_id}.numeric_table'
     _require_fields(declaration, label, ('owner_field', 'ready', 'methods'), ('bounds',))
@@ -172,18 +179,12 @@ def _read_numeric_table(type_id, declaration):
         if signature == 'previous_f64':
             fields += ('read_integer', 'read_object')
         optional = ('read_text',) if signature == 'lookup_f64' else ()
-        _require_fields(method, f'{label}.{name}', ('signature', *fields), optional)
-        if not all(valid_identifier(value) for value in method.values()):
-            raise ValueError(f'invalid native symbol for {label}.{name}')
-        entries[name] = NumericMethod(**method)
+        entries[name] = _read_symbols(NumericMethod, method, f'{label}.{name}',
+                                      ('signature', *fields), optional)
     bounds = None
     if 'bounds' in declaration:
         fields = ('first', 'last', 'index', 'index_max', 'bounded', 'clamped')
-        config = declaration['bounds']
-        _require_fields(config, f'{label}.bounds', fields)
-        if not all(valid_identifier(value) for value in config.values()):
-            raise ValueError(f'invalid numeric bounds declaration for {type_id}')
-        bounds = NumericBounds(**config)
+        bounds = _read_symbols(NumericBounds, declaration['bounds'], f'{label}.bounds', fields)
     return NumericTable(owner_field, ready, MappingProxyType(entries), bounds)
 
 
@@ -212,22 +213,17 @@ def _read_type(type_id, declaration):
         numeric_table = _read_numeric_table(type_id, declaration['numeric_table'])
     numeric_record = None
     if 'numeric_record' in declaration:
-        record = declaration['numeric_record']
         fields = ('lookup', 'read_field', 'read_cast', 'field_ready', 'cast_ready', 'bound_read')
-        _require_fields(record, f'{type_id}.numeric_record', fields)
-        if not all(valid_identifier(record[field]) for field in fields):
-            raise ValueError(f'invalid numeric Record declaration for {type_id}')
-        numeric_record = NumericRecord(**record)
+        numeric_record = _read_symbols(NumericRecord, declaration['numeric_record'],
+                                       f'{type_id}.numeric_record', fields)
     grouped_table = None
     if 'grouped_table' in declaration:
         grouped = declaration['grouped_table']
-        _require_fields(grouped, f'{type_id}.grouped_table',
-                        ('slice_method', 'index_field', 'lookup_method', 'probe', 'read'),
-                        ('bound_probe', 'bound_read'))
-        if (not all(valid_identifier(symbol) for symbol in grouped.values())
-                or ('bound_probe' in grouped) != ('bound_read' in grouped)):
+        grouped_table = _read_symbols(
+            GroupedTable, grouped, f'{type_id}.grouped_table',
+            ('slice_method', 'index_field', 'lookup_method', 'probe', 'read'), ('bound_probe', 'bound_read'))
+        if ('bound_probe' in grouped) != ('bound_read' in grouped):
             raise ValueError(f'invalid grouped table declaration for {type_id}')
-        grouped_table = GroupedTable(**grouped)
 
     declared_members = declaration['members']
     if not isinstance(declared_members, dict):
