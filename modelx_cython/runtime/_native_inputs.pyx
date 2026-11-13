@@ -1351,6 +1351,9 @@ cdef double lookup_float(object function, tuple keywords, object source, object 
     cdef KeyPart[4] parts
     cdef Py_ssize_t count
     cdef bint tuple_key
+    cdef object spec, part, position
+    cdef tuple modes, columns
+    cdef Py_ssize_t i
     if function is not _lookup_float_fn:
         return forward_call(function, keywords, ('source', 'key', 'column', 'default'),
                             (source, key, column, default), omitted_argument)
@@ -1358,6 +1361,33 @@ cdef double lookup_float(object function, tuple keywords, object source, object 
         column = _missing
     if default is _typed_missing:
         default = _missing
+    if type(source) is Table and type(key) is tuple and type(column) is str:
+        spec = source._index_error
+        if type(spec) is Record and spec._index.get('multi') and spec._index.get('pandas_columns'):
+            modes = spec._index['boolean_modes']
+            if len(key) == len(modes):
+                for i in range(len(modes)):
+                    part = (<tuple>key)[i]
+                    if type(part) is str or type(part) is int:
+                        if modes[i] == 1:
+                            break
+                    elif type(part) is bool:
+                        if modes[i] == 2:
+                            break
+                    else:
+                        break
+                else:
+                    columns = source._columns
+                    try:
+                        i = columns.index(column)
+                    except ValueError:
+                        raise KeyError(column) from None
+                    position = source._positions.get(key)
+                    if position is not None:
+                        return _float_type(source._values[position][i])
+                    if default is _missing:
+                        raise KeyError(key)
+                    return _float_type(default)
     if type(source) is Table and column is not _missing and _pack_key(key,&parts[0],&count,&tuple_key):
         return lookup_keyed_float_f64(_float_type,_lookup,_indexed_context(source),source,
                                       &parts[0],count,tuple_key,column,default)
