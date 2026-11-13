@@ -118,7 +118,8 @@ class PyRecord:
 
 RUNTIME = {M: SimpleNamespace(table_handle=PyHandle, record_handle=PyRecord,
                               TableHandle=PyHandle, RecordHandle=PyRecord),
-           '_mx_cy': SimpleNamespace(cast=lambda type_, value: value, Py_ssize_t=int)}
+           '_mx_cy': SimpleNamespace(cast=lambda type_, value: int(value) if type_ == 'longlong' else value,
+                                     longlong='longlong', Py_ssize_t=int)}
 
 
 # ---------------------------------------------------------------------- a fake model
@@ -344,7 +345,7 @@ def test_tuple_keys_part_by_part_and_casts():
                            ' + self.r_table().loc[(self.flag(t), self.Sex.F), "q"]\n')
     assert '_mx_h0.row_3(self.sex(), self.plan(), self.year(t))' in text
     assert '_mx_h1.row_2(_mx_cy.cast(object, self.rate(t)), _mx_cy.cast(object, k))' in text
-    assert '_mx_h1.row_2(_mx_cy.cast(object, self.flag(t)), self.Sex.F)' in text
+    assert '_mx_h1.row_2(_mx_cy.cast(object, self.flag(t)), _mx_cy.cast(_mx_cy.longlong, self.Sex.F))' in text
     assert reads.keys[0] == ('loc[key, column], 3 parts: int (cell sex returns long long); '
                              'object (cell plan returns object); int (cell year returns long long)')
     assert reads.keys[2].endswith('; enum member')
@@ -375,7 +376,7 @@ def test_index_min_max_and_the_clamp():
         f'_mx_h_tbl: {M}.TableHandle',
         f'_mx_h_tbl = {M}.table_handle(self.mort_table())',
         'a = min(max(self.age(t), _mx_h_tbl.first_int()), _mx_h_tbl.last_int())']
-    assert '_mx_h_tbl.f64(_mx_h_tbl.row_1(a), _mx_h_tbl.col("mort_rate"))' in text
+    assert '_mx_h_tbl.f64(_mx_h_tbl.row_1(_mx_cy.cast(_mx_cy.longlong, a)), _mx_h_tbl.col("mort_rate"))' in text
     assert '_mx_h0.last_key()' in text and 'tbl = ' not in text.replace('_mx_h_tbl = ', '')
     assert reads.keys[0] == 'loc[key, column], 1 part: int (local a is assigned integers)'
 
@@ -532,8 +533,8 @@ def test_column_local_of_literals_reads_by_its_common_kind():
                            '    column = ("mort_rate" if t > 2 else "band")\n'
                            '    same = "mort_rate" if t else "mort_rate"\n'
                            '    return self.mort_table().loc[30, column] + float(self.mort_table().loc[31, same])\n')
-    assert '_mx_h0.obj(_mx_h0.row_1(30), _mx_h0.col(column))' in text
-    assert '_mx_h0.f64(_mx_h0.row_1(31), _mx_h0.col(same))' in text and reads.typed == 2
+    assert '_mx_h0.obj(_mx_h0.row_1(_mx_cy.cast(_mx_cy.longlong, 30)), _mx_h0.col(column))' in text
+    assert '_mx_h0.f64(_mx_h0.row_1(_mx_cy.cast(_mx_cy.longlong, 31)), _mx_h0.col(same))' in text and reads.typed == 2
 
 
 def test_untraced_and_key_count_mismatch():

@@ -58,6 +58,7 @@ INT_TYPES = frozenset(('long long', 'long', 'int', 'short', 'Py_ssize_t', 'size_
 UNSAFE_BARE = frozenset(('double', 'float', 'bint'))
 SKIPPED_SCOPES = (cst.FunctionDef, cst.Lambda, cst.ClassDef)
 COMPREHENSIONS = (cst.ListComp, cst.SetComp, cst.DictComp, cst.GeneratorExp)
+LONG_LONG_METHODS = frozenset(('first_int', 'last_int', 'asof_int', 'key_int', 'i64'))
 C_INT_METHODS = frozenset(('first_int', 'last_int', 'asof_int', 'key_int', 'searchsorted_right', 'i64'))
 
 PYTHON = 'runs as a Python call'
@@ -537,6 +538,12 @@ class TableReads:
             return f'{"int" if kind in INT_TYPES else "object"} (cell {cell} returns {kind})'
         return None
 
+    def exact_long_long(self, expr):
+        """``expr`` is statically a C ``long long`` (a cell result or a parameter)."""
+        if isinstance(expr, cst.Name):
+            return self.param_type(expr.value) == 'long long'
+        return isinstance(expr, cst.Call) and self.call_rettype(expr)[0] == 'long long'
+
     def scalar(self, expr):
         """``expr`` is certainly a single key part (not a tuple)."""
         if self.bare_ok(expr) or isinstance(expr, cst.Float):
@@ -890,6 +897,12 @@ class _Lowering(cst.CSTTransformer):
                 read = _call(cst.Attribute(cst.Name('_mx_cy'), cst.Name('cast')), cst.Name('object'), read)
                 notes.append('object (cast: not known to be a C integer or an object)')
             else:
+                exact = self.o.exact_long_long(source) or (info is not None and info[0] in LONG_LONG_METHODS)
+                if (why.startswith('int') or why == 'enum member') and not exact:
+                    # the fused key takes exactly long long or object: a C long literal, a
+                    # Py_ssize_t or a Python int is converted (an enum member is its value)
+                    read = _call(cst.Attribute(cst.Name('_mx_cy'), cst.Name('cast')),
+                                 cst.Attribute(cst.Name('_mx_cy'), cst.Name('longlong')), read)
                 notes.append(why)
             result.append(read)
         result.note = f'{where}, {count} part{"s" if count > 1 else ""}: ' + '; '.join(notes)
