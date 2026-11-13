@@ -235,8 +235,8 @@ class ModuleVisitor(m.MatcherDecoratableVisitor, ParentScopeAddin):
     cimports : list
         Always left empty by this visitor.
     formula_defs : dict
-        Maps each space class name to the set of cells names for
-        which a ``_f_<name>`` formula method exists in the source.
+        Maps each space class name to its Cells' ``_f_<name>`` formula nodes,
+        keyed by Cell name.
         Cells that modelx exports as uncached have no ``_f_`` method.
     closure_funcs : dict
         Maps each space class name to the set of cells method names
@@ -277,7 +277,7 @@ class ModuleVisitor(m.MatcherDecoratableVisitor, ParentScopeAddin):
         self.classes = []
         self.spaces = {}  # Parent class name to list of child space names
         self.cimports = []
-        self.formula_defs = {}  # {class_name: set of cells names with _f_ defs}
+        self.formula_defs = {}
         self.closure_funcs = {}  # {class_name: set of method names containing closures}
         self.generator_funcs = {}  # {class_name: set of method names containing yield}
         self.param_rebinds = {}  # {class_name: {method name: {param: [binding]}}}
@@ -431,8 +431,7 @@ class ModuleVisitor(m.MatcherDecoratableVisitor, ParentScopeAddin):
             if original_node.name.value[: len(FORMULA_PREF)] == FORMULA_PREF:
                 # _f_ methods
                 name = original_node.name.value
-                self.formula_defs.setdefault(cls_name, set()).add(
-                    name[len(FORMULA_PREF):])
+                self.formula_defs.setdefault(cls_name, {})[name[len(FORMULA_PREF):]] = original_node
                 if self._is_generator(original_node):
                     self.generator_funcs.setdefault(cls_name, set()).add(name)
                 self._collect_rebinds(cls_name, original_node)
