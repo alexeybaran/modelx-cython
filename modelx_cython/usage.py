@@ -51,6 +51,8 @@ from modelx_cython.consts import (
     SPACE_PREF,
 )
 from modelx_cython.parser import ParentScopeAddin
+from modelx_cython.helper_members import helper_reference
+from modelx_cython.scopes import CstFacts
 from modelx_cython.syntax import arguments, statements
 
 _logger = logging.getLogger(__name__)
@@ -577,12 +579,31 @@ def build_resolver(module_infos) -> CellsResolver:
     return resolver
 
 
+def _declares_result(helper, call, binding):
+    result = getattr(helper, 'helper_result_type', None)
+    if (result is None or result[0] != binding.type_id
+            or helper.helper[0] != binding.manifest.provider or any(arg.star for arg in call.args)):
+        return False
+    if result[1] is None:
+        return True
+    name = result[1]
+    positional = [key for key, _, keyword_only in helper.helper_parameters if not keyword_only]
+    values = [arg.value for arg in call.args if arg.keyword and arg.keyword.value == name]
+    if name in positional:
+        args = [arg.value for arg in call.args if arg.keyword is None]
+        index = positional.index(name)
+        if index < len(args):
+            values.append(args[index])
+    return not values or len(values) == 1 and isinstance(values[0], cst.Tuple) and not values[0].elements
+
+
 def admit_forwarded_views(module_infos, resolver):
-    """Keep the declared representation along resolved, sampled Cell returns."""
+    """Follow native result contracts through direct Cell returns."""
     cells = {cell.fqname: cell for module in module_infos.values()
              for cls in module.classes.values() for cell in cls.cells.values()
              if cell.observed_native_binding is not None}
     dependents = defaultdict(list)
+    pending = deque(cell for cell in cells.values() if cell.native_provider_binding is not None)
     for cell in cells.values():
         info = cell.parent
         formula = info.visitor.formula_defs[info.name][cell.name]
@@ -595,10 +616,15 @@ def admit_forwarded_views(module_infos, resolver):
         if len(body) != 1 or not isinstance(body[0], cst.Return):
             continue
         call = body[0].value
-        if arguments(call) is None:
+        if not isinstance(call, cst.Call):
             continue
         chain = _extract_self_chain(call.func)
-        if not isinstance(chain, list):
+        if not isinstance(chain, list) or CstFacts(formula.body.body).stores[MX_SELF]:
+            continue
+        if _declares_result(helper_reference(call.func, info.refs), call, cell.observed_native_binding):
+            pending.append(cell)
+            continue
+        if arguments(call) is None:
             continue
         status, target = resolver.resolve_chain(info.fqname, chain)
         if (status == RESOLVED and target in cells
@@ -606,15 +632,15 @@ def admit_forwarded_views(module_infos, resolver):
                 == cell.observed_native_binding.identity):
             dependents[target].append(cell)
 
-    pending = deque(cell.fqname for cell in cells.values() if cell.native_provider_binding is not None)
     while pending:
-        for cell in dependents.pop(pending.popleft(), ()):
+        cell = pending.popleft()
+        if cell.fqname not in resolver.provider_results:
             cell.forwarded_native_result = True
             resolver.provider_results[cell.fqname] = cell.native_provider_binding
             if not cell.has_args():
                 results = resolver.locked_scalar_results if cell.is_locked else resolver.unlocked_scalar_results
                 results[cell.fqname] = cell.get_rettype_expr(c_style=True)
-            pending.append(cell.fqname)
+        pending.extend(dependents.pop(cell.fqname, ()))
 
 
 def analyze_usage(units) -> Dict[str, UsageVerdict]:
