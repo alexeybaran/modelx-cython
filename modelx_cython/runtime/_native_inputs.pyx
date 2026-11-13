@@ -1334,6 +1334,8 @@ cdef object _explicit_value(object source, object key, object column, object def
                 raise KeyError(key)
             return default
         return value
+    if type(source) is NativeTable and type((<NativeTable>source)._owner) is Table:
+        source = (<NativeTable>source)._owner
     if type(source) is Table:
         if column is _missing:
             raise TypeError('Table lookup requires a column')
@@ -1358,6 +1360,8 @@ cdef double lookup_float(object function, tuple keywords, object source, object 
         column = _missing
     if default is _typed_missing:
         default = _missing
+    if type(source) is NativeTable and type((<NativeTable>source)._owner) is Table:
+        source = (<NativeTable>source)._owner
     if type(source) is Table and column is not _missing and _pack_key(key,&parts[0],&count,&tuple_key):
         return lookup_keyed_float_f64(_float_type,_lookup,_indexed_context(source),source,
                                       &parts[0],count,tuple_key,column,default)
