@@ -2435,18 +2435,27 @@ cdef object _native_frame_table(object frame, bint with_rows, bint with_metadata
 cdef object table(object function, tuple keywords, object frame, object columns=_missing,
                   object groups=_missing, object indexing=_missing, object rows=_missing,
                   object report=_missing, object preserve_scalar_types=_missing):
-    cdef object prepared
+    cdef object selected, prepared
     if (function is _table_constructor
             and (preserve_scalar_types is _missing or preserve_scalar_types is False
                  or preserve_scalar_types is True)
             and (rows is _missing or rows is True or rows is False)
             and (report is _missing or report is True or report is False)
-            and (columns is _missing or columns is None)
             and (groups is _missing or type(groups) is tuple and not groups)
             and (indexing is _missing or type(indexing) is str and indexing in ('loc', 'at'))):
-        prepared = _native_frame_table(frame, rows is True, rows is True or report is True,
-                                        preserve_scalar_types is True)
-        if prepared is not None:
-            return prepared
+        selected = frame
+        if columns is not _missing and columns is not None:
+            if (type(frame) is _report_frame_type and type(columns) is tuple and columns
+                    and all(type(name) is str for name in columns)
+                    and len(set(columns)) == len(columns) and frame.columns.is_unique):
+                if tuple(frame.columns) != columns:
+                    selected = frame.loc[:, list(columns)]
+            else:
+                selected = None
+        if selected is not None:
+            prepared = _native_frame_table(selected, rows is True, rows is True or report is True,
+                                            preserve_scalar_types is True)
+            if prepared is not None:
+                return prepared
     return forward_call(function, keywords, ('frame', 'columns', 'groups', 'indexing', 'rows', 'report', 'preserve_scalar_types'),
                         (frame, columns, groups, indexing, rows, report, preserve_scalar_types), omitted_argument)

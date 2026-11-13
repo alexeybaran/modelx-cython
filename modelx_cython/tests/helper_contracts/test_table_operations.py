@@ -45,6 +45,11 @@ def prepare_keywords(function, frame):
 def prepare_options(function, frame, rows=False, report=False, raw=False, indexing='loc'):
     return p.table(function, ('rows', 'report', 'preserve_scalar_types', 'indexing'), frame, columns=p.omitted_argument, groups=p.omitted_argument, rows=rows, report=report, preserve_scalar_types=raw, indexing=indexing)
 
+def prepare_columns(function, frame, columns, rows=False, raw=False):
+    return p.table(function, ('columns', 'rows', 'preserve_scalar_types'), frame,
+                   columns=columns, groups=p.omitted_argument, indexing=p.omitted_argument,
+                   rows=rows, report=p.omitted_argument, preserve_scalar_types=raw)
+
 def prepare_raw(function, frame, rows=False):
     return p.table(function, ('rows', 'report', 'preserve_scalar_types'), frame, columns=p.omitted_argument, groups=p.omitted_argument, indexing=p.omitted_argument, rows=rows, report=True, preserve_scalar_types=True)
 
@@ -229,6 +234,24 @@ def test_row_snapshots_are_explicit_and_follow_selected_columns(native):
     assert type(row(selected, 0)['age']) is np.int64
     with pytest.raises(ValueError, match='leave at least'):
         inputs.table(frame.rename_axis('t'), groups=('t',), rows=True)
+
+
+@pytest.mark.parametrize('raw', [False, True])
+def test_native_table_preserves_column_selection_and_errors(native, raw):
+    frame = pd.DataFrame({'age': [42], 'rate': [0.1], 'label': ['A']})
+    for columns in [('rate', 'age'), ('age',), ('age', 'rate', 'label')]:
+        for rows in (False, True):
+            expected = inputs.table(frame, columns=columns, rows=rows, preserve_scalar_types=raw)
+            actual = native.prepare_columns(inputs.table, frame, columns, rows, raw)
+            pd.testing.assert_frame_equal(to_pandas(actual), to_pandas(expected), check_exact=True)
+            if rows:
+                pd.testing.assert_series_equal(to_pandas(row(actual, 0)), to_pandas(row(expected, 0)))
+    for columns in [('missing',), ('age', 'age'), ()]:
+        with pytest.raises((KeyError, ValueError)) as expected:
+            inputs.table(frame, columns=columns, preserve_scalar_types=raw)
+        with pytest.raises(type(expected.value)) as actual:
+            native.prepare_columns(inputs.table, frame, columns, raw=raw)
+        assert actual.value.args == expected.value.args
 
 
 @pytest.mark.parametrize('index', [pd.Index([1, 2]), pd.Index([False, True]),
