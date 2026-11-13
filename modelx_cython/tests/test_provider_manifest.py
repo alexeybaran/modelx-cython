@@ -65,6 +65,15 @@ def test_read_independent_provider_manifest(declaration):
         curve.members['another'] = curve.members['rate_at']
 
 
+def test_native_type_can_declare_only_a_view_and_binder(declaration):
+    resource, document = declaration
+    document['types'][TYPE].pop('members')
+    resource.write_text(json.dumps(document), encoding='utf-8')
+    curve = read_provider_manifest(PROVIDER, ABI).types[TYPE]
+    assert (curve.view_type, curve.bind) == ('CurveReceiver', 'as_receiver')
+    assert not curve.members
+
+
 def test_function_provider_does_not_need_a_manifest(declaration):
     def plain_lookup(value):
         return value

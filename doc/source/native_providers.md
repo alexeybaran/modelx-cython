@@ -55,6 +55,9 @@ with the same provider, ABI and semantic type. The default is `"observed"`.
 Set `"bind_cell": true` when the binder takes the Cell's qualified name as a
 second argument for diagnostics.
 
+Providers that use the Cython view methods directly can omit `members`. Each
+additional capability is an opt-in to its own lowering.
+
 The `int64_label_to_float64` member signature
 lowers a direct member call on a resolvable typed Cell result when the label is
 a signed 64-bit integer literal. Other arguments use the Python-facing method.
