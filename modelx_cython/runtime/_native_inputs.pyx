@@ -2215,6 +2215,9 @@ cdef object group_sum(object function, tuple keywords, object table, object labe
 
 from pandas import DataFrame as _report_frame_type, Index as _report_index_type, RangeIndex as _report_range_type
 from modelx_helpers.pandas_inputs import table as _table_constructor
+# Older modelx installs can still supply the existing table helpers.
+from modelx_helpers import pandas_inputs as _pandas_inputs
+cdef object _group_constructor = getattr(_pandas_inputs, 'group_record', None)
 cdef object _report_int64 = _group_numpy.dtype('int64')
 
 
@@ -2487,6 +2490,13 @@ cdef void _prepare_tables(object value) except *:
                 prepared = prepare_group(value, column)
                 if prepared is not None:
                     value._native_groups[column] = prepared
+
+
+cdef object group_record(object function, object tables):
+    cdef object prepared = function(tables)
+    if function is _group_constructor:
+        _prepare_tables(prepared)
+    return prepared
 
 
 cdef object table(object function, tuple keywords, object frame, object columns=_missing,
