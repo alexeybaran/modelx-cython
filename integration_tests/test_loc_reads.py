@@ -78,8 +78,9 @@ def test_loc_reads_three_modes(tmp_path):
 
 def _edge_model():
     model = mx.new_model('LocReadEdges')
+    import enum
     data = model.new_space('Data', refs={
-        'pdn': pdn,
+        'pdn': pdn, 'enum': enum,
         # integer keys with gaps, a text column holding numbers and words, a non-identifier column
         'gaps': pd.DataFrame({'v': [0.5, 1.5, 2.5, 3.5], 'txt': ['1.25', 'abc', '2', 'x'],
                               'sc per 1000': [9.0, 8.0, 7.0, 6.0], 'n': [1, 2, 3, 4]},
@@ -96,6 +97,13 @@ def _edge_model():
     data.new_cells('multi_table', 'lambda: pdn.table(multi)')
     data.new_cells('flag_table', 'lambda: pdn.table(flags)')
     data.new_cells('deep_table', 'lambda: pdn.table(deep, columns=("v",), groups=("a", "b", "c"))')
+    # key types: value-like int/str subclasses pack by value, anything else keeps the original route
+    data.new_cells('ienum', 'lambda: enum.IntEnum("I", {"A": 1, "B": 2, "C": 5})')
+    data.new_cells('senum', 'lambda: enum.StrEnum("S", {"U": "UL9", "W": "nope"})')
+    data.new_cells('penum', 'lambda: enum.Enum("P", {"A": 2})')
+    data.new_cells('hashed', 'lambda: type("H", (int,), {"__module__": "edges", "__hash__": lambda self: int.__hash__(self)})')
+    data.new_cells('eqstr', 'lambda: type("E", (str,), {"__module__": "edges", "__eq__": lambda self, o: str.__eq__(self, o), '
+                            '"__hash__": lambda self: str.__hash__(self)})')
     proj = model.new_space('Projection', refs={'data': data, 'pdn': pdn, 'ids': ('UL9', 'X', 'nope')})
 
     def probe(name, expression, args='t'):
@@ -117,13 +125,24 @@ def _edge_model():
         # a full key into three group levels and a leaf: missing parts at every level, bool parts
         'deep': probe('deep', 'float(data.deep_table().loc[(("x", "y", "x", "z")[t % 4], (1, 2, True, 1)[t % 4], '
                               '"pq"[t % 2], 1 + t % 2), "v"])'),
+        'key_int_enum': probe('key_int_enum', 'float(data.gap_table().loc[data.ienum()((1, 2, 5)[t % 3]), "v"])'),
+        'key_str_enum': probe('key_str_enum', 'float(data.named_table().loc[data.senum()(("UL9", "nope")[t % 2]), "v"])'),
+        'key_plain_enum': probe('key_plain_enum', 'float(data.gap_table().loc[data.penum()(2), "v"])'),
+        'key_hash_override': probe('key_hash_override', 'float(data.gap_table().loc[data.hashed()(1 + t % 3), "v"])'),
+        'key_eq_override': probe('key_eq_override', 'float(data.named_table().loc[data.eqstr()("UL5"), "v"])'),
+        'in_kinds': ('def in_kinds(t):\n    g = data.gap_table()\n    m = data.multi_table()\n'
+                     '    return ((1.0 in g.index) + 2 * (True in g.index) + 4 * (3 in g.index) + 8 * (("A",) in m.index)'
+                     ' + 16 * (("A", 1, 2) in m.index) + 32 * (("A", 1) in m.index) + 64 * (data.ienum()(5) in g.index)'
+                     ' + 128 * (data.senum()("UL9") in data.named_table().index) + 256 * ("UL9" in g.index))'),
+        'prev': probe('prev', 'data.gap_table().previous(t, ("v", "sc per 1000", 0, -2)[t % 4])'),
         'gap_in': ('def gap_in(t):\n    tbl = data.gap_table()\n'
                    '    return (1.0 if t in tbl.index else 0.0) + (10.0 if t not in tbl.index else 0.0)'),
         'walk': ('def walk(t):\n    for _, r in data.named_table().iterrows():\n        if r["v"] > 10.0 * t:\n'
                  '            return float(r["v"]) + len(r["note"])\n    return -5.0'),
         'edge_total': ('def edge_total():\n    return sum(gap(t) + gap_bounds(t) + gap_text(t) + gap_odd_column(t)'
                        ' + gap_unknown_column(t) + gap_default(t) + gap_text_method(t) + gap_row(t) + named(t) + multi(t) + flag(t)'
-                       ' + deep(t) + walk(t) + gap_in(t)'
+                       ' + deep(t) + walk(t) + gap_in(t) + key_int_enum(t) + key_str_enum(t) + key_plain_enum(t)'
+                       ' + key_hash_override(t) + key_eq_override(t) + in_kinds(t) + prev(t)'
                        ' for t in range(11))'),
     }
     for name, source in formulas.items():
@@ -138,7 +157,9 @@ def test_loc_read_edges_three_modes(tmp_path):
         live = model.Projection.edge_total()
         parts = {name: [model.Projection.cells[name](t) for t in range(11)]
                  for name in ('gap', 'gap_text', 'gap_text_method', 'gap_default', 'gap_unknown_column',
-                              'gap_row', 'named', 'multi', 'flag', 'deep', 'walk', 'gap_in')}
+                              'gap_row', 'named', 'multi', 'flag', 'deep', 'walk', 'gap_in', 'key_int_enum',
+                              'key_str_enum', 'key_plain_enum', 'key_hash_override', 'key_eq_override',
+                              'in_kinds', 'prev')}
         model.export(tmp_path / 'exported', locked_spaces=['Data'])
     finally:
         model.close()
@@ -152,6 +173,13 @@ def test_loc_read_edges_three_modes(tmp_path):
     assert parts['deep'][:4] == [1.5, 4.5, 1.5, -1.0]       # a bool group part matches the Record label 1
     assert parts['walk'][:4] == [11.0, 21.0, 31.0, -5.0]
     assert parts['gap_in'][:6] == [10.0, 1.0, 1.0, 10.0, 10.0, 1.0]
+    assert parts['key_int_enum'][:3] == [0.5, 1.5, 2.5]
+    assert parts['key_str_enum'][:2] == [10.0, -1.0]
+    assert parts['key_plain_enum'][0] == -1.0
+    assert parts['key_hash_override'][:3] == [0.5, 1.5, -1.0]
+    assert parts['key_eq_override'][0] == 20.0
+    assert parts['in_kinds'][0] == 1 + 32 + 64 + 128          # True is not the label 1 in a pandas int index
+    assert parts['prev'][:6] == [-2.0, 9.0, 1.5, 8.0, 1.5, 7.0]     # last key <= t; variable column
     (tmp_path / 'sample.py').write_text('from exported import mx_model as m\nm.Projection.edge_total()\n',
                                         encoding='utf-8')
     subprocess.run([sys.executable, '-m', 'modelx_cython', 'exported', '--sample', 'sample.py', '--no-spec'],

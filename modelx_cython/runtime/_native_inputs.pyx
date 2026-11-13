@@ -39,6 +39,7 @@ cdef extern from *:
     }
     """
     PyObject* _tuple_item "PyTuple_GET_ITEM"(PyObject* items, Py_ssize_t index) noexcept nogil
+    Py_ssize_t PyTuple_GET_SIZE(object items) noexcept
 
     bint _text_same "__mx_text_same"(PyObject* left, PyObject* right) noexcept nogil
 
@@ -1303,9 +1304,56 @@ cdef inline bint _key_type_is_one_of(object kind, tuple supported) noexcept:
     return False
 
 
+cdef extern from "Python.h":
+    ctypedef struct _TypeSlots "PyTypeObject":
+        unsigned long tp_flags
+        void* tp_hash
+        void* tp_richcompare
+    ctypedef struct _ObjectHead "PyObject":
+        _TypeSlots* ob_type
+    _TypeSlots _long_type "PyLong_Type"
+    _TypeSlots _unicode_type "PyUnicode_Type"
+    _TypeSlots _bool_type "PyBool_Type"
+    unsigned long _LONG_SUBCLASS "Py_TPFLAGS_LONG_SUBCLASS"
+    unsigned long _UNICODE_SUBCLASS "Py_TPFLAGS_UNICODE_SUBCLASS"
+    long long _long_value "PyLong_AsLongLongAndOverflow"(PyObject* value, int* overflow) noexcept
+
+
+cdef inline bint _value_like(_TypeSlots* kind, _TypeSlots* base) noexcept nogil:
+    # A subclass (IntEnum, StrEnum) whose hashing and comparison are the base type's own: dicts and
+    # pandas indexes treat its instances as the base value, so the key part packs by value.
+    return kind.tp_hash == base.tp_hash and kind.tp_richcompare == base.tp_richcompare
+
+
+cdef inline bint _pack_value(PyObject* value, KeyPart* part) noexcept:
+    """Pack an exact or value-like int/str part from a borrowed pointer: no dispatch chain and no
+    reference counting. False leaves every other part (bool, float, numpy, objects, int beyond
+    64 bits) to _pack_part."""
+    cdef _TypeSlots* kind = (<_ObjectHead*>value).ob_type
+    cdef int overflow = 0
+    cdef long long number
+    if kind == &_unicode_type or (kind.tp_flags & _UNICODE_SUBCLASS and _value_like(kind, &_unicode_type)):
+        part.kind = _KEY_TEXT
+        part.number = 0
+        part.text = value
+        return True
+    if kind == &_long_type or (kind != &_bool_type and kind.tp_flags & _LONG_SUBCLASS
+                               and _value_like(kind, &_long_type)):
+        number = _long_value(value, &overflow)
+        if overflow:
+            return False
+        part.kind = _KEY_INT
+        part.number = number
+        part.text = NULL
+        return True
+    return False
+
+
 cdef void _pack_part(object value, KeyPart* part) except *:
     cdef int overflow = 0
     cdef long long number
+    if _pack_value(<PyObject*>value, part):
+        return
     kind = type(value)
     if kind is int:
         number = PyLong_AsLongLongAndOverflow(value, &overflow)
@@ -1342,13 +1390,16 @@ cdef bint _pack_key_into(object key, KeyPart* parts, Py_ssize_t capacity, Py_ssi
     tuple_key[0] = type(key) is tuple
     if not tuple_key[0]:
         count[0] = 1
+        if _pack_value(<PyObject*>key, &parts[0]):
+            return True
         _pack_part(key, &parts[0])
         return _native_parts(parts, 1)
-    count[0] = len(key)
+    count[0] = PyTuple_GET_SIZE(key)
     if count[0] > capacity:
         return False
     for i in range(count[0]):
-        _pack_part(<object>PyTuple_GET_ITEM(key, i), &parts[i])
+        if not _pack_value(_tuple_item(<PyObject*>key, i), &parts[i]):
+            _pack_part(<object>_tuple_item(<PyObject*>key, i), &parts[i])
     return _native_parts(parts, count[0])
 
 
@@ -1683,7 +1734,32 @@ cpdef long long table_last_int(object table) except? -1:
 
 
 cpdef bint table_contains(object table, object key) except -1:
-    """``key in table.index`` (the general route of native_contains)."""
+    """``key in table.index`` (the general route of native_contains).
+
+    On a NativeTable with an admitted keyed index, a found row answers True: the index's equality
+    is the table's own (int/bool/float-integral parts equal by value, text by text, pandas boolean
+    label modes respected). A miss answers False natively only when every packed part is an int
+    or text part (exact, or a value-like int/str subclass): such a part can equal only labels the
+    admitted index holds with the same kind rules, and a wrong arity or tuple-ness cannot match a
+    label in the table or in its pandas index. Any other miss (bool, float, wide or non-native
+    parts) runs ``key in table.index``.
+    """
+    cdef KeyPart[8] parts
+    cdef Py_ssize_t count, row, i
+    cdef bint tuple_key, exact
+    cdef object owner_key = key
+    if type(table) is NativeTable and (<NativeTable>table)._cells is not None:
+        if _pack_key_into(owner_key, &parts[0], 8, &count, &tuple_key):
+            row = _index_find(&(<NativeTable>table)._key_index, &parts[0], count, tuple_key)
+            if row >= 0:
+                return True
+            exact = True
+            for i in range(count):
+                if parts[i].kind != _KEY_INT and parts[i].kind != _KEY_TEXT:
+                    exact = False
+                    break
+            if exact:
+                return False
     return key in table.index
 
 
@@ -1943,6 +2019,10 @@ cdef class NativeTable:
             if KeyArg0 is KeyInteger:
                 if self._int_ready:
                     row = self._int_row(key)
+                    if row < 0 and type(default) is float:
+                        # A definite miss in the integer index (the column exists): the default,
+                        # which float() would return unchanged.
+                        return PyFloat_AS_DOUBLE(default)
                 else:
                     key_int(&part, key, False)
                     row = _index_find(&self._key_index, &part, 1, False)
@@ -1995,9 +2075,31 @@ cdef class NativeTable:
 
     cdef object previous(self, KeyArg0 key, object column):
         cdef double value
+        cdef Py_ssize_t lo = 0, hi, mid, col, width
+        cdef PyObject* stored
         if KeyArg0 is KeyInteger:
             if table_previous_value(self, key, column, &value):
                 return value
+            if self._int_ready:
+                # Table.previous: the stored value at the last key <= key (bisect_right - 1).
+                width = self._cell_width
+                col = self._column_slot(column)
+                if col < 0 and type(column) is int and -width <= <object>column < width:
+                    col = <Py_ssize_t>column
+                    if col < 0:
+                        col += width
+                if col >= 0:
+                    hi = self._int_count
+                    while lo < hi:
+                        mid = lo + (hi - lo) // 2
+                        if key < self._int_sorted[mid]:
+                            hi = mid
+                        else:
+                            lo = mid + 1
+                    if lo > 0:
+                        stored = _tuple_item(<PyObject*>(<KeyedView>self._cells).raw_values,
+                                             <Py_ssize_t>self._int_rows[lo - 1])
+                        return <object>_tuple_item(stored, col)
         return self._owner.previous(<object>key, column)
 
     cdef double interpolate_float(self, object key, object column) except? -1:
