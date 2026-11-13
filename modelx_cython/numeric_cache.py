@@ -108,6 +108,17 @@ def body(cell):
             key_setup += (f'{key_array}[{index}] = {key}\n'
                           f'{key_hash} = {WIDE_ALIAS}.hash_step({key_hash}, {key_array}[{index}], {index})\n')
         args = f'_mx_cy.address({key_array}[0]), {" and ".join(reflexive) or "True"}, {key_hash}'
+        if exclusively_owned(cell):
+            slot = key_array + '_slot'
+            while slot in cell.params:
+                slot += '_'
+            source = (key_setup + f'{bits}: {ALIAS}.word\n{slot}: _mx_cy.Py_ssize_t\n'
+                      + f'if {cache}.reserve({args}, _mx_cy.address({slot}), '
+                        f'_mx_cy.address({bits})):\n    return {ALIAS}.{decode}({bits})\n'
+                      + f'{result}: {cell.get_rettype_expr()} = self._f_{cell.name}({", ".join(cell.params)})\n'
+                      + f'{cache}.publish(_mx_cy.address({key_array}[0]), {key_hash}, '
+                        f'{slot}, {ALIAS}.{encode}({result}))\nreturn {result}\n')
+            return cst.IndentedBlock(body=cst.parse_module(source).body)
     elif primary_capacity(cell):
         return reserved_body(cell, cache, keys, ' and '.join(reflexive) or 'True',
                              bits, result, encode, decode)

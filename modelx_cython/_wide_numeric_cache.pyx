@@ -99,6 +99,39 @@ cdef class WideNumericCache:
         with cython.critical_section(self):
             write(self, key, hash_value, value)
 
+    cdef bint reserve(self, const word* key, bint reflexive, word hash_value,
+                      Py_ssize_t* slot, word* value) noexcept:
+        cdef word* row
+        slot[0] = -1
+        if not reflexive:
+            return False
+        row = position(self.entries, self.capacity, self.width, self.stride, key, hash_value)
+        if row[self.width + 2]:
+            value[0] = row[self.width]
+            return True
+        # Reserve no mutable state. The calculation may raise or recurse.
+        slot[0] = (row - self.entries) // self.stride
+        return False
+
+    cdef void publish(self, const word* key, word hash_value, Py_ssize_t slot, word value) except *:
+        cdef word* row
+        if slot < 0:
+            return
+        # Reuse an empty home slot. Recursive growth and collision chains use
+        # the normal insertion path, including its full key comparison.
+        if self.used * 2 >= self.capacity or <size_t>slot != (hash_value & (self.capacity - 1)):
+            write(self, key, hash_value, value)
+            return
+        row = self.entries + slot * self.stride
+        if row[self.width + 2]:
+            write(self, key, hash_value, value)
+            return
+        self.used += 1
+        memcpy(row, key, self.width * sizeof(word))
+        row[self.width] = value
+        row[self.width + 1] = hash_value
+        row[self.width + 2] = 1
+
     cpdef reset(self):
         with cython.critical_section(self):
             memset(self.entries, 0, self.capacity * self.stride * sizeof(word))
