@@ -90,6 +90,32 @@ def cythonize_model(modules, *, cell_sources=None, **kwargs):
         raise
 
 
+# Generated model modules are compiled without floating-point contraction, so a compiler
+# never fuses a * b + c into one FMA and element expressions round as Python does.
+# GCC contracts by default where the target has FMA (e.g. aarch64), Clang within one
+# expression; MSVC's default /fp:precise does not contract (2022 and later).
+FP_CONTRACT_OFF = '-ffp-contract=off'
+
+
+def fp_contract_off(cmdclass, providers=()):
+    """Return ``cmdclass`` with a ``build_ext`` that compiles model modules with
+    :data:`FP_CONTRACT_OFF` on GCC-style compilers. Provider modules keep their own
+    options (and their build-cache identity)."""
+    from setuptools.command.build_ext import build_ext
+
+    providers = frozenset(providers)
+
+    class ModelFloatingPoint(cmdclass.get('build_ext', build_ext)):
+        def build_extension(self, extension):
+            args = list(extension.extra_compile_args or ())
+            if (extension.name not in providers and FP_CONTRACT_OFF not in args
+                    and self.compiler.compiler_type in ('unix', 'mingw32', 'cygwin')):
+                extension.extra_compile_args = [*args, FP_CONTRACT_OFF]
+            return super().build_extension(extension)
+
+    return {**cmdclass, 'build_ext': ModelFloatingPoint}
+
+
 def create_setup(model_name: str, modules: Sequence[str], setup_file: pathlib.Path, source_root=None,
                  source_modules=None, cell_sources=None, providers=()):
     """Write a ``setup.py`` that cythonizes the translated modules.
@@ -122,6 +148,7 @@ def create_setup(model_name: str, modules: Sequence[str], setup_file: pathlib.Pa
     # native members. Provision its visitor stack from generated class shape,
     # rather than requiring a model-specific recursion setting from the user.
     source_root = pathlib.Path(source_root) if source_root is not None else setup_file.parent
+    providers = tuple(providers)
     recursion_budget = sys.getrecursionlimit()
     if source_modules is None:
         source_modules = (cst.parse_module(source.read_text(encoding='utf-8'))
@@ -141,7 +168,7 @@ def create_setup(model_name: str, modules: Sequence[str], setup_file: pathlib.Pa
     from setuptools import setup
     from Cython.Compiler.PyrexTypes import CArrayType, c_int_type
     from pathlib import Path
-    from modelx_cython.build import cythonize_model
+    from modelx_cython.build import cythonize_model, fp_contract_off
     from modelx_cython.provider_build_cache import provider_build_cache
     import modelx_cython
     import sys
@@ -171,7 +198,7 @@ def create_setup(model_name: str, modules: Sequence[str], setup_file: pathlib.Pa
             include_path=[str(Path(modelx_cython.__file__).resolve().parent.parent)],
             compiler_directives={{"freethreading_compatible": True}}
         ),
-        cmdclass=provider_build_cache({provider_sources!r})
+        cmdclass=fp_contract_off(provider_build_cache({provider_sources!r}), {provider_names!r})
     )
     """)
 
@@ -180,6 +207,7 @@ def create_setup(model_name: str, modules: Sequence[str], setup_file: pathlib.Pa
             model_name=model_name,
             modules_str=modules_str, recursion_budget=recursion_budget,
             cell_sources=cell_sources,
-            provider_sources={f'{model_name}.{path.stem}': path.as_posix() for path in providers}),
+            provider_sources={f'{model_name}.{path.stem}': path.as_posix() for path in providers},
+            provider_names=sorted(f'{model_name}.{path.stem}' for path in providers)),
         encoding="utf-8")
 
