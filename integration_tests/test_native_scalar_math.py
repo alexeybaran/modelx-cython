@@ -30,7 +30,7 @@ def test_registered_scalar_math(tmp_path, namespace):
                    cwd=tmp_path, check=True)
     source = (tmp_path / 'exported_cy/_mx_classes.py').read_text(encoding='utf-8')
     for name in ('erf', 'exp', 'isinf', 'log', 'sqrt'):
-        assert f'.{name}(self.numbers.{name}, x)' in source
+        assert f'.m_{name}(self.numbers, x)' in source   # W1.4: bound at build time
     probe = textwrap.dedent('''\
         import math
         from types import SimpleNamespace

@@ -48,3 +48,159 @@ cdef double sqrt(object function, MathArgument value) except? -1.0:
         if (function is builtin_sqrt or function is python_sqrt) and value >= 0.0:
             return c_sqrt(value)
     return function(value)
+
+
+# ---------------------------------------------------------------- build-time resolution (W1.4)
+# ``math.<fn>(x)`` on a module Reference is bound at build time: the call passes the
+# Reference (a C field of the Space), never ``self.math.<fn>``, so no Python attribute
+# is read per step. The C function runs while the Reference is the module the build
+# resolved; a replaced Reference keeps its own member, looked up then. Results and
+# errors are those of the module: the C path is taken only where libm and CPython agree
+# (finite results of float or C-integer arguments; the module raises otherwise).
+import math as _math_module
+from libc.math cimport floor as c_floor, ceil as c_ceil
+from cpython.float cimport PyFloat_CheckExact, PyFloat_AS_DOUBLE
+
+try:
+    import modelx_helpers.numeric_math as _numeric_math_module
+except ModuleNotFoundError as error:
+    if error.name not in ('modelx_helpers', 'modelx_helpers.numeric_math'):
+        raise
+    _numeric_math_module = _math_module
+
+cdef object math_module = _math_module
+cdef object numeric_math_module = _numeric_math_module
+cdef object _math_floor = _math_module.floor
+cdef object _math_ceil = _math_module.ceil
+cdef tuple _constant_names = ('inf', 'nan', 'pi', 'e', 'tau')
+cdef tuple _constant_values = (_math_module.inf, _math_module.nan, _math_module.pi,
+                               _math_module.e, _math_module.tau)
+cdef double _I64_BOUND = 9223372036854775808.0     # 2**63
+
+
+cdef inline bint _real(MathValue value, double* out) noexcept:
+    """The double the module would compute with, when its C path applies."""
+    if MathValue is object:
+        if PyFloat_CheckExact(value):
+            out[0] = PyFloat_AS_DOUBLE(value)
+            return True
+        return False
+    else:
+        out[0] = <double>value        # PyLong_AsDouble rounds a C integer the same way
+        return True
+
+
+cdef inline bint _scalar_math(object namespace) noexcept:
+    return namespace is math_module or namespace is numeric_math_module
+
+
+cdef double m_erf(object namespace, MathValue value) except? -1.0:
+    cdef double x
+    if _scalar_math(namespace):
+        if _real(value, &x) and isfinite(x):
+            return c_erf(x)
+        return builtin_erf(value)
+    return namespace.erf(value)
+
+
+cdef double m_exp(object namespace, MathValue value) except? -1.0:
+    cdef double x, result
+    if _scalar_math(namespace):
+        if _real(value, &x):
+            result = c_exp(x)
+            if isfinite(result):
+                return result
+        return builtin_exp(value)
+    return namespace.exp(value)
+
+
+cdef bint m_isinf(object namespace, MathValue value) except -1:
+    cdef double x
+    if _scalar_math(namespace):
+        if _real(value, &x):
+            return c_isinf(x) != 0
+        return builtin_isinf(value)
+    return namespace.isinf(value)
+
+
+cdef double m_log(object namespace, MathValue value) except? -1.0:
+    cdef double x
+    if _scalar_math(namespace):
+        if _real(value, &x) and x > 0.0:
+            return c_log(x)
+        return builtin_log(value)
+    return namespace.log(value)
+
+
+cdef double m_sqrt(object namespace, MathValue value) except? -1.0:
+    cdef double x
+    if _scalar_math(namespace):
+        if _real(value, &x) and x >= 0.0:
+            return c_sqrt(x)
+        return builtin_sqrt(value)
+    return namespace.sqrt(value)
+
+
+cdef long long m_floor_ll(object namespace, MathNumber value) except? -1:
+    """``math.floor`` of a typed number as a C integer (the int the module returns).
+
+    Outside [-2**63, 2**63) the module's own result or error is taken; an int beyond
+    the C range then raises OverflowError (the typed integer domain of the model).
+    """
+    cdef double rounded
+    if namespace is math_module:
+        if MathNumber is double:
+            if isfinite(value):
+                rounded = c_floor(value)
+                if -_I64_BOUND <= rounded < _I64_BOUND:
+                    return <long long>rounded
+            return _math_floor(value)
+        else:
+            return value
+    return namespace.floor(value)
+
+
+cdef long long m_ceil_ll(object namespace, MathNumber value) except? -1:
+    """``math.ceil`` of a typed number as a C integer; see ``m_floor_ll``."""
+    cdef double rounded
+    if namespace is math_module:
+        if MathNumber is double:
+            if isfinite(value):
+                rounded = c_ceil(value)
+                if -_I64_BOUND <= rounded < _I64_BOUND:
+                    return <long long>rounded
+            return _math_ceil(value)
+        else:
+            return value
+    return namespace.ceil(value)
+
+
+cdef object m_floor(object namespace, object value):
+    """``math.floor`` of any object: an exact float takes the C path, the rest the module."""
+    cdef double rounded
+    if namespace is math_module:
+        if PyFloat_CheckExact(value) and isfinite(PyFloat_AS_DOUBLE(value)):
+            rounded = c_floor(PyFloat_AS_DOUBLE(value))
+            if -_I64_BOUND <= rounded < _I64_BOUND:
+                return <long long>rounded
+        return _math_floor(value)
+    return namespace.floor(value)
+
+
+cdef object m_ceil(object namespace, object value):
+    """``math.ceil`` of any object; see ``m_floor``."""
+    cdef double rounded
+    if namespace is math_module:
+        if PyFloat_CheckExact(value) and isfinite(PyFloat_AS_DOUBLE(value)):
+            rounded = c_ceil(PyFloat_AS_DOUBLE(value))
+            if -_I64_BOUND <= rounded < _I64_BOUND:
+                return <long long>rounded
+        return _math_ceil(value)
+    return namespace.ceil(value)
+
+
+cdef object m_constant(object namespace, Py_ssize_t index):
+    """``math.inf`` / ``nan`` / ``pi`` / ``e`` / ``tau`` (index into the names above)."""
+    if namespace is math_module:
+        return _constant_values[index]
+    return getattr(namespace, _constant_names[index])

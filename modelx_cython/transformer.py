@@ -778,9 +778,16 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
         This stage reads registered signatures and lexical receiver identity only.
         """
         from modelx_cython.helpers import HelperCalls
-        helpers = HelperCalls(cls_info.refs, self.helper_providers, cells=cls_info.cells)
+        helpers = HelperCalls(cls_info.refs, self.helper_providers, cells=cls_info.cells, current=cells)
         node = helpers.rewrite(node)
         cells.native_helpers = sorted(helpers.operations | set(inherited))
+        # W1.4 math branch: module math members bound at build time (helpers.module_math).
+        # A cold reduction fallback adds to its formula's counts; a formula sets them.
+        if getattr(node, 'name', None) is not None and node.name.value.startswith('_mx_cold_sum_'):
+            cells.math_native = getattr(cells, 'math_native', 0) + helpers.math_native
+            cells.math_untyped = [*getattr(cells, 'math_untyped', ()), *helpers.math_untyped]
+        else:
+            cells.math_native, cells.math_untyped = helpers.math_native, helpers.math_untyped
         return node
 
     @property   # cannot use cached_property in Transformer

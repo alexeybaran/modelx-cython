@@ -113,14 +113,77 @@ def helper_result_type(value):
 
 
 class HelperCalls(FormulaTransformer):
-    def __init__(self, refs, used, cells=()):
+    def __init__(self, refs, used, cells=(), current=None):
         super().__init__()
         self.refs = refs
         self.used = used
         self.operations = set()
         self.cells = cells
+        self.current = current          # the formula's cells (argument kinds), when known
+        self.math_native = 0            # W1.4: module math members bound at build time
+        self.math_untyped = []
+
+    # ---------------------------------------------------------------- math branch (W1.4)
+    def module_math(self, original, updated):
+        """``self.<ref>.<fn>(x)`` on a module Reference: the provider gets the Reference.
+
+        Returns the new call, ``updated`` itself to keep the Python call (listed in the
+        admission report), or None when the call is no module math member.
+        """
+        from .helper_members import MATH_PROVIDER, argument_kind
+        func = updated.func
+        if not (isinstance(func, cst.Attribute) and isinstance(func.value, cst.Attribute)
+                and isinstance(func.value.value, cst.Name) and func.value.value.value == 'self'):
+            return None
+        members = getattr(self.refs.get(func.value.attr.value), 'helper_members', {})
+        if not any(getattr(member, 'module_math', None) or hasattr(member, 'module_constant')
+                   for member in members.values()):
+            return None
+        name = getattr(members.get(func.attr.value), 'module_math', None)
+        if not name:
+            self.decline(original, f'math.{func.attr.value} has no native form; runs as a Python call')
+            return updated
+        if len(updated.args) != 1 or updated.args[0].keyword or updated.args[0].star:
+            self.decline(original, f'math.{name} with {len(updated.args)} arguments or keywords; '
+                         'runs as a Python call')
+            return updated
+        operation = 'm_' + name
+        if name in ('floor', 'ceil'):
+            kind = argument_kind(updated.args[0].value, self.current, self.cells, self.refs)
+            if kind in ('double', 'longlong'):
+                operation += '_ll'
+        self.used.add(MATH_PROVIDER)
+        self.operations.add(MATH_PROVIDER + '.' + operation)
+        self.math_native += 1
+        return updated.with_changes(
+            func=cst.Attribute(cst.Name(module_name(MATH_PROVIDER)), cst.Name(operation)),
+            args=(cst.Arg(func.value), cst.Arg(updated.args[0].value)))
+
+    def module_constant(self, updated):
+        """``self.<ref>.inf`` (``nan``, ``pi``, ``e``, ``tau``) of the math module."""
+        from .helper_members import MATH_PROVIDER
+        if not (isinstance(updated.value, cst.Attribute) and isinstance(updated.value.value, cst.Name)
+                and updated.value.value.value == 'self'):
+            return None
+        members = getattr(self.refs.get(updated.value.attr.value), 'helper_members', {})
+        index = getattr(members.get(updated.attr.value), 'module_constant', None)
+        if index is None:
+            return None
+        self.used.add(MATH_PROVIDER)
+        self.operations.add(MATH_PROVIDER + '.m_constant')
+        self.math_native += 1
+        return cst.Call(cst.Attribute(cst.Name(module_name(MATH_PROVIDER)), cst.Name('m_constant')),
+                        (cst.Arg(updated.value), cst.Arg(cst.Integer(str(index)))),
+                        lpar=updated.lpar, rpar=updated.rpar)
+
+    def decline(self, node, reason):
+        from .reductions import untyped_entry
+        self.math_untyped.append(untyped_entry(getattr(self, 'line_of', None), node, 'math', reason))
 
     def leave_Call(self, original, updated):
+        math = self.module_math(original, updated)
+        if math is not None:
+            return math
         func = updated.func
         ref = _declared_reference(func, self.refs)
         contract = ref.helper if ref is not None else None
@@ -174,26 +237,37 @@ class HelperCalls(FormulaTransformer):
         ScopeProvider identifies the actual receiver parameter. A lambda that
         shadows it, or a formula that rebinds it, retains its ordinary call.
         """
-        binder = _ScopedHelperCalls(self.refs, self.used, self.cells)
+        binder = _ScopedHelperCalls(self.refs, self.used, self.cells, self.current)
         wrapper = cst.MetadataWrapper(cst.Module(body=(formula,)))
         result = wrapper.visit(binder).body[0]
         self.operations.update(binder.operations)
+        self.math_native += binder.math_native
+        self.math_untyped.extend(binder.math_untyped)
         return result
 
 
 class _ScopedHelperCalls(HelperCalls):
     METADATA_DEPENDENCIES = (cst.metadata.ScopeProvider, cst.metadata.ParentNodeProvider,
-                             cst.metadata.ExpressionContextProvider)
+                             cst.metadata.ExpressionContextProvider, cst.metadata.PositionProvider)
 
-    def __init__(self, refs, used, cells):
-        super().__init__(refs, used, cells)
+    def __init__(self, refs, used, cells, current=None):
+        super().__init__(refs, used, cells, current)
         self.receiver = None
+        self.first_line = None
+
+    def line_of(self, node):
+        position = self.get_metadata(cst.metadata.PositionProvider, node, None)
+        if position is None or self.first_line is None:
+            return 0
+        return position.start.line - self.first_line + 1
 
     def on_visit(self, node):
         if self.receiver is None and isinstance(node, cst.FunctionDef):
             parameters = (*node.params.posonly_params, *node.params.params)
             if parameters and parameters[0].name.value == 'self':
                 self.receiver = parameters[0]
+            position = self.get_metadata(cst.metadata.PositionProvider, node.name, None)
+            self.first_line = position.start.line if position is not None else None
         return cst.CSTTransformer.on_visit(self, node)
 
     def on_leave(self, original_node, updated_node):
@@ -210,6 +284,14 @@ class _ScopedHelperCalls(HelperCalls):
                 and assignments[0].node is self.receiver)
 
     def leave_Attribute(self, original, updated):
+        if (isinstance(original.value, cst.Attribute) and self._owns_receiver(original)
+                and self.get_metadata(cst.metadata.ExpressionContextProvider, original, None)
+                is cst.metadata.ExpressionContext.LOAD):
+            parent = self.get_metadata(cst.metadata.ParentNodeProvider, original)
+            if not (isinstance(parent, cst.Call) and parent.func is original):
+                constant = self.module_constant(updated)
+                if constant is not None:
+                    return constant
         if (original.attr.value not in self.cells
                 or not isinstance(original.value, cst.Name)
                 or not self._owns_receiver(original)
@@ -228,7 +310,10 @@ class _ScopedHelperCalls(HelperCalls):
 
     def leave_Call(self, original, updated):
         function = original.func
-        if _declared_reference(function, self.refs) is None or not self._owns_receiver(function):
+        if not self._owns_receiver(function):
+            return updated
+        if _declared_reference(function, self.refs) is None:
+            self.module_math(original, updated)       # lists math members with no native form
             return updated
         return super().leave_Call(original, updated)
 
