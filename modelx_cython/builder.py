@@ -632,20 +632,19 @@ class CombinedCellsInfo(LexicalCellsInfo):
         """Return True if results can be cached in a fixed-size C
         array.
 
-        A cells is arrayable when all its parameters are integral,
-        no observed argument is negative, and it returns a real-valued
-        scalar. Requires parameters and type information.
+        A Cell with integral parameters and a real scalar result can use
+        dense storage. A declared physical window overrides the automatic
+        size policy and can use signed offsets. This selects storage only.
         """
         assert self.has_args() and self.has_typeinfo()
-        if (self.is_int_args and self.is_real_value and not self.is_array_returned
-                and (not getattr(self._rt, 'has_negative_args', False)
-                     or self.has_shifted_cache)):
-            from modelx_cython import automatic
-            if automatic.enabled(self) and not automatic.dense_fits(self):
-                return False
-            return True
-        else:
+        if not (self.has_formula_def and self.is_int_args and self.is_real_value and not self.is_array_returned):
             return False
+        if TransSpec.DENSE_WINDOW in self._spec:
+            return True
+        if getattr(self._rt, 'has_negative_args', False) and not self.has_shifted_cache:
+            return False
+        from . import automatic
+        return not automatic.enabled(self) or automatic.dense_fits(self)
 
     @property
     def has_shifted_cache(self):
@@ -653,6 +652,8 @@ class CombinedCellsInfo(LexicalCellsInfo):
                 and self.is_real_value and not self.is_array_returned
                 and getattr(self._rt, 'has_negative_args', False)):
             return False
+        if TransSpec.DENSE_WINDOW in self._spec:
+            return self.has_formula_def
         sizes = self.parent.cells_arg_sizes[tuple(self.params)]
         count = 1
         for p, size in zip(self.params, sizes):

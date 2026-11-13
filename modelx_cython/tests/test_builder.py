@@ -246,6 +246,22 @@ def make_dflt_cells(arg_types, defaults, spec=None, has_formula_def=True,
     return cells
 
 
+def test_explicit_dense_window_overrides_only_storage_size():
+    window = ((0, 1000), (-12, 700))
+    cells = make_dflt_cells({"t": int, "k": int}, {}, {"dense_window": window})
+    cells.parent = types.SimpleNamespace(
+        cells_arg_sizes={("t", "k"): (1100, 1200)},
+        module=types.SimpleNamespace(spec=types.SimpleNamespace(automatic_optimizations=True)),
+    )
+    cells._rt.has_negative_args = True
+    cells._rt.min_args = {"k": -12}
+    assert cells.is_arrayable()
+    assert tuple((axis.lower, axis.stop) for axis in cells.dense_axes) == window
+    assert cells.has_dense_spill
+    cells.has_formula_def = False
+    assert not cells.is_arrayable()
+
+
 def test_default_not_of_traced_type_is_object(caplog):
     with caplog.at_level("INFO", logger="modelx_cython.builder"):
         cells = make_dflt_cells({"t": int, "k": int}, {"k": "0.5"})

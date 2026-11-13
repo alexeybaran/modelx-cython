@@ -149,6 +149,12 @@ pointer and cold dictionary. This never narrows the logical key domain:
 keys in that domain outside the physical window retain exact spill storage. A nearly full
 window stays full, preserving its simple range proofs.
 
+For an eligible cached Cell, `dense_window` may declare a half-open physical
+window for each parameter, in parameter order. An explicit window may exceed
+the automatic size ceiling and must fit inside the logical domain. This
+setting changes storage for a cached Cell. The modelx cache flag still
+determines whether the Cell caches results.
+
 Eligible native numeric associative keys/results use the native store; other
 signatures retain Python dictionaries. An exclusively owned receiver gets a
 power-of-two primary table sized for at most 50% observed load, capped at 4,096
