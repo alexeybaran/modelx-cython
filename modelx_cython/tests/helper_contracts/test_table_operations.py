@@ -341,6 +341,12 @@ def test_rectangular_numeric_table_keeps_object_and_report_semantics(native):
     assert math.copysign(1.0, native.float_value(lookup_float, table, ('F', 0), 'rate')) < 0.0
     assert native.float_value(lookup_float, table, ('M', np.int64(1)), 'rate') == 3.0
     assert native.float_default(lookup_float, table, ('M', True), 'rate', 12.0) == 12.0
+    assert native.float_default(lookup_float, table, ('M', 10), 'rate', 12.0) == 12.0
+    assert native.float_value(lookup_float, table, ('M', 1.0), 0) == 3.0
+    assert table.contains(('M', 1)) and not table.contains(('M', 10))
+    for name in ('_keys', '_values', '_positions'):
+        with pytest.raises(AttributeError):
+            object.__getattribute__(table, name)
     with pytest.raises(KeyError) as error:
         native.float_default(lookup_float, table, ('none', 1), 'missing', 12.0)
     assert error.value.args == ('missing',)
@@ -351,6 +357,14 @@ def test_rectangular_numeric_table_keeps_object_and_report_semantics(native):
     assert _RECTANGULAR_STORAGE not in selected._native_cache
     assert native.float_value(lookup_float, selected, ('M', 1), 'rate') == 3.0
     pd.testing.assert_frame_equal(to_pandas(selected), irregular)
+
+
+def test_rectangular_storage_rejects_duplicate_axis_labels():
+    index = pd.MultiIndex(levels=[['F', 'F'], [0, 1]],
+                          codes=[[0, 0, 1, 1], [0, 1, 0, 1]], verify_integrity=False)
+    frame = pd.DataFrame({'rate': [1.0, 2.0, 3.0, 4.0]}, index=index)
+    with pytest.raises(ValueError, match='duplicate table key'):
+        inputs.table(frame, columns=('rate',))
 
 
 def test_tuple_labels_in_plain_index_use_scalar_key_semantics(native):
