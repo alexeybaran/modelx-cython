@@ -17,11 +17,15 @@ def native(tmp_path_factory):
     (root/'native.pyx').write_bytes((provider/'_native_inputs.pyx').read_bytes())
     (root/'native.pxd').write_bytes((provider/'_native_inputs.pxd').read_bytes())
     (root/'probe.pyx').write_text('''cimport native
-_context = native.LookupContext()
-def invoke(conversion, function, table, key, column, *default):
+cdef native.LookupContext _context = native.LookupContext()
+def invoke(conversion, function, table, long long key, column, *default):
+    cdef native.KeyPart part
+    native.key_int(&part, key, False)
     if default:
-        return native.lookup_float_f64(conversion, function, _context, table, key, column, default[0])
-    return native.lookup_float_f64(conversion, function, _context, table, key, column)
+        return native.lookup_keyed_float_f64(conversion, function, _context, table,
+                                             &part, 1, False, column, default[0])
+    return native.lookup_keyed_float_f64(conversion, function, _context, table,
+                                         &part, 1, False, column)
 ''')
     (root/'setup.py').write_text("from setuptools import setup\nfrom Cython.Build import cythonize\nsetup(ext_modules=cythonize(['native.pyx','probe.pyx'],compiler_directives={'language_level':3,'freethreading_compatible':True}))\n")
     run=subprocess.run([sys.executable,'setup.py','build_ext','--inplace'],cwd=root,capture_output=True,text=True)

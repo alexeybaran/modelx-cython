@@ -71,13 +71,11 @@ def test_direct_references_and_foreign_receiver_boundaries():
     assert helper_reference(cst.parse_expression('self.operations.nested.every'), refs) is None
 
 
-def test_shared_iteration_and_contextual_float_capabilities_reach_namespaces():
+def test_shared_iteration_and_bound_lookup_capabilities_reach_namespaces():
     def lookup(*args):
         return args
     lookup.__modelx_cython_helper__ = ('sample.provider', 'lookup')
     lookup.__modelx_cython_iteration__ = ('keys_span', 'KeySpan', 'key_span_count', 'key_span_at')
-    lookup.__modelx_cython_float_numeric__ = 'lookup_float_f64'
-    lookup.__modelx_cython_keyed_float_numeric__ = tuple(f'lookup_key{i}_float_f64' for i in range(5))
     lookup.__modelx_cython_bound_numeric__ = ('ready', 'read', 'prepare')
     lookup.__modelx_cython_bound_numeric_namespace__ = 'namespace_ready'
     module = ModuleType('sample.owned')
@@ -86,8 +84,6 @@ def test_shared_iteration_and_contextual_float_capabilities_reach_namespaces():
     merged = CombinedRefInfo('exported._mx_classes', '_c_Test', 'operations', traced)
     record = merged.helper_members['lookup']
     assert record.iteration_helper == ('keys_span', 'KeySpan', 'key_span_count', 'key_span_at')
-    assert record.float_numeric_helper == 'lookup_float_f64'
-    assert record.keyed_float_numeric_helper == tuple(f'lookup_key{i}_float_f64' for i in range(5))
     assert record.bound_numeric_helper == ('ready', 'read', 'prepare')
     assert record.bound_numeric_namespace_helper == 'namespace_ready'
 
@@ -95,11 +91,6 @@ def test_shared_iteration_and_contextual_float_capabilities_reach_namespaces():
 @pytest.mark.parametrize('capability,value', [
     ('iteration', ('keys_span', 'KeySpan', 'key_span_count')),
     ('iteration', ('keys_span', 'bad-name', 'key_span_count', 'key_span_at')),
-    ('float_numeric', ('lookup_float_f64',)),
-    ('float_numeric', 'bad-name'),
-    ('keyed_float_numeric', ('lookup_key0',)),
-    ('keyed_float_numeric', ('key0', 'key1', 'bad-name', 'key3', 'key4')),
-    ('keyed_float_numeric', ('key0', 'key1', 'for', 'key3', 'key4')),
 ])
 def test_new_capability_shapes_use_the_single_shared_validator(capability, value):
     def invalid():

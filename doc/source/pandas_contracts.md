@@ -33,37 +33,13 @@ the ordinary model contract.
 
 ## Contextual conversion and registry
 
-The shared `helper_reference` resolver handles direct and module-member
-References. Metadata records never freeze the current callable. Contextual
-lowering receives proven builtin `float` scope information and visits one
-formula scope. Child generators, comprehensions, lambdas and functions retain
-their semantics until separately lowered by the generator lane. The reusable
-`ContextualFloat` matcher runs after admitted generator lowering and before
-general helper calls. It supports expressions in assignments, arithmetic,
-branches and native reduction payloads, not just formula returns.
-
-`float_numeric` is one validated provider identifier. The provider receives
-current conversion, current helper, LookupContext and original arguments.
-Its fallback is exactly `conversion(helper(*args))`; an implicit C-double cast
-would incorrectly reject a replacement helper returning the string `'2.5'`.
-The scalar ABI accepts a signed-int64 key, so a boolean key must not be sent
-through it: that would change the key's type under callable replacement.
-
-`keyed_float_numeric` is five validated private provider identifiers for key
-arities zero through four. This is one optional registry capability. A wrapper
-receives current conversion, current helper, context, table, individual key
-components in source order, a tuple-key flag, column and optional default.
-Each component is a fused int64, boolean or object argument. Object components
-retain a strong reference throughout the call; exact Unicode admits native
-hash/comparison while subclasses and other objects preserve fallback identity.
-Scalar text uses arity one with the tuple flag false; `(text,)` uses true.
-Arity zero represents the empty tuple only. Mixed bool/int min/max expressions
-are declined when their original result type cannot be proven.
-
-Wrappers pack primitive components on the C stack. They do not allocate query
-tuples or box numeric components on the admitted path. Full keys are rebuilt
-only for the original fallback or a missing-key exception. This preserves the
-evaluation of later key components before the lookup can raise.
+The shared helper resolver handles direct and module-member References.
+Metadata records preserve the current callable. Explicit typed lookups
+receive the complete key, including every component of a tuple. Native
+providers share one packed-key search across scalar and composite keys.
+The packed key borrows its Python objects from the original argument for
+the duration of the call. Replacement helpers receive the original
+arguments and retain their Python conversion and default behavior.
 
 ## Native resource and semantic boundaries
 
