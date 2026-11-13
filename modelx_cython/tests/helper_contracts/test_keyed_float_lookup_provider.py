@@ -144,7 +144,9 @@ def test_grouped_probe_uses_only_explicit_preparation(native):
     plain = pdn.table(frame, groups=('group',))
     prepared = native.prepare_grouped(pdn.table, frame)
     operations = h.has_group, h.subtable, h.contains, h.lookup
-    assert native.grouped_read(*operations, plain, 1, 2, 'rate') == -2
+    assert native.grouped_read(*operations, plain, 1, 2, 'rate') == 1.5
+    assert native.grouped_read(*operations, plain, 1, 3, 'rate') is None
+    assert native.grouped_read(*operations, plain, 3, 2, 'rate') == -1
     assert not plain._native_groups
     assert native.grouped_read(*operations, prepared, 1, 2, 'rate') == 1.5
     assert native.grouped_read(*operations, prepared, 1, 3, 'rate') is None

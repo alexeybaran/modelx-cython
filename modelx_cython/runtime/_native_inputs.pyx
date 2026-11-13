@@ -521,6 +521,9 @@ cdef class GroupedView:
         self.values = array('d', values)
 
 
+cdef object _missing_group_row = object()
+
+
 cdef object prepare_group(object record, str column):
     groups, keys, offsets, values = [], [], [0], []
     for group, table in record._items:
@@ -563,12 +566,27 @@ cdef inline object probe_group(object prepared, long long group, Py_ssize_t* slo
     return prepared
 
 
+cdef object probe_owned_group(object record, long long group, str column, Py_ssize_t* slot):
+    cdef object child = record._index.get(group, _missing)
+    if child is _missing:
+        slot[0] = -1
+        return None
+    if type(child) is not Table:
+        slot[0] = -2
+        return None
+    slot[0] = 0
+    return child, column
+
+
 cdef object group_probe(object has_fn, object record, long long group, str column,
                         Py_ssize_t* slot):
     if has_fn is not _has_group or type(record) is not Record:
         slot[0] = -2
         return None
-    return probe_group(record._native_groups.get(column), group, slot)
+    cdef object prepared = record._native_groups.get(column)
+    if prepared is None:
+        return probe_owned_group(record, group, column, slot)
+    return probe_group(prepared, group, slot)
 
 
 cdef object group_context_probe(LookupContext context, object has_fn, object record,
@@ -582,12 +600,15 @@ cdef object group_context_probe(LookupContext context, object has_fn, object rec
         return None
     binding = context.grouped
     if binding is not None and binding[0] is record and binding[1] is column:
-        return probe_group(binding[2], group, slot)
-    if type(record) is not Record:
+        prepared = binding[2]
+    elif type(record) is Record:
+        prepared = record._native_groups.get(column)
+        context.grouped = (record, column, prepared)
+    else:
         slot[0] = -2
         return None
-    prepared = record._native_groups.get(column)
-    context.grouped = (record, column, prepared)
+    if prepared is None:
+        return probe_owned_group(record, group, column, slot)
     return probe_group(prepared, group, slot)
 
 
@@ -611,6 +632,17 @@ cdef int group_value(object sub_fn, object contains_fn, object lookup_fn, object
                      Py_ssize_t slot, long long key, double* value) except -1:
     if sub_fn is not _subtable or contains_fn is not _contains or lookup_fn is not _lookup:
         return 2
+    if type(prepared) is tuple:
+        child, column = prepared
+        if column not in child._columns:
+            return 2
+        scalar = _read_owned_table(child, key, column, _missing_group_row)
+        if scalar is _missing_group_row:
+            return 0
+        if not PyFloat_CheckExact(scalar):
+            return 2
+        value[0] = PyFloat_AS_DOUBLE(scalar)
+        return 1
     return group_data_value(<GroupedView>prepared, slot, key, value)
 
 
@@ -618,10 +650,10 @@ cdef int group_context_value(LookupContext context, object sub_fn, object contai
     object lookup_fn, object prepared, Py_ssize_t slot, long long key, double* value) except -1:
     if sub_fn is not _subtable or contains_fn is not _contains or lookup_fn is not _lookup:
         return 2
-    if (context._private_owner and context.group_data is None
+    if (type(prepared) is GroupedView and context._private_owner and context.group_data is None
             and context.grouped is not None and context.grouped[2] is prepared):
         context.group_data = prepared
-    return group_data_value(<GroupedView>prepared, slot, key, value)
+    return group_value(sub_fn, contains_fn, lookup_fn, prepared, slot, key, value)
 
 
 cdef object group_slice_context_probe(LookupContext context, object record, long long group,
