@@ -77,6 +77,9 @@ def describe(module_infos):
                     'native_reductions': getattr(cell, 'native_reductions', 0),
                     'native_enum_comparisons': getattr(cell, 'native_enum_comparisons', 0),
                     'native_enum_constants': getattr(cell, 'native_enum_constants', 0),
+                    'vector_shape': getattr(cell, 'vector_shape', None),
+                    'vector_lowered': getattr(cell, 'vector_lowered', 0),
+                    'vector_fallbacks': getattr(cell, 'vector_fallbacks', []),
                     'reasons': reasons or ['original Cython representation'],
                 }
     return result

@@ -105,6 +105,17 @@ class ReturnTypeInfo:
     value_type: type
     is_array: bool = False
     ndim: int = 0
+    vector_shape: object = None     # 'V' list of floats, ('T', k) tuple of k of them
+
+
+def vector_shape(val):
+    """'V' for a list whose items are all exact floats, ('T', k) for a tuple of k
+    such lists, else None (W0.11 vector cells)."""
+    if type(val) is list:
+        return 'V' if all(type(x) is float for x in val) else None
+    if type(val) is tuple and val and all(vector_shape(x) == 'V' for x in val):
+        return ('T', len(val))
+    return None
 
 
 class RuntimeCellsInfo:     # TODO: Create base class RuntimeBaseMemberInfo
@@ -363,7 +374,8 @@ class _ReturnTypeMerger:
                 self._array_formats.add(signature)
         else:
             tp = ReturnTypeInfo(object if isinstance(val, numbers.Integral)
-                                and not -(1 << 63) <= val < (1 << 63) else type(val))
+                                and not -(1 << 63) <= val < (1 << 63) else type(val),
+                                vector_shape=vector_shape(val))
             if self._integral_double_exact and isinstance(val, numbers.Integral):
                 try:
                     integer = operator.index(val)
@@ -379,6 +391,10 @@ class _ReturnTypeMerger:
             return True
         if last_tp == tp:
             return changed
+        if (last_tp.value_type is tp.value_type and not tp.is_array and not last_tp.is_array
+                and last_tp.vector_shape != tp.vector_shape):
+            last_tp.vector_shape = None
+            return True
 
         before = (last_tp.value_type, last_tp.is_array, last_tp.ndim)
         logged = False

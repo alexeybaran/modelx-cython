@@ -179,6 +179,9 @@ class PXDGenerator:
         from modelx_cython.helpers import module_name
         for provider in sorted(numeric_cache.providers(self.module)):
             stmts.append(f'from {self.package} cimport {module_name(provider)}')
+        from modelx_cython import vectors
+        if vectors.module_uses_vectors(self.module):
+            stmts.append(f'from {self.package} cimport {vectors.ALIAS}')
         for ci in self.module.cimports:
             stmts.append(f"cimport {ci}")
         contexts = {provider for cls in self.module.classes.values()
@@ -576,6 +579,10 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
         self.dense_entries = {}
         self.formula_entries = {}
         self.helper_providers.update(numeric_cache.providers(module))
+        from modelx_cython import vectors
+        if vectors.module_uses_vectors(module):
+            self.helper_providers.add(vectors.PROVIDER)
+        self._vec_counter = [0]
         code_enums.prepare(module)
 
     def _reserve_cold_sum(self):
@@ -606,6 +613,8 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
         when no operand pair can be typed.
         """
         from modelx_cython.checked_arithmetic import CheckedArithmetic
+        from modelx_cython import vectors
+        node = vectors.lower(node, cls_info, cells, scope, self._vec_counter)
         cells.loc_reads_typed, cells.loc_reads_untyped, cells.loc_reads_keys = 0, [], []
         if (self._resolver is not None and getattr(self._resolver, 'table_schemas', None)
                 and all(isinstance(binding, BuiltinAssignment) for binding in scope['float'])):
