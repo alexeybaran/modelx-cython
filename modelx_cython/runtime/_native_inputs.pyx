@@ -61,12 +61,10 @@ cdef inline bint _table_view_key(object value) noexcept:
 
 
 cdef class TableView:
-    cdef bint pandas_at
-    cdef tuple keys, values, columns, ordered
+    cdef tuple values, columns
     cdef dict column_positions
     cdef long long[::1] integers
     cdef long long[::1] sorted_positions
-    cdef object minimum, maximum
     cdef long long first_integer, last_integer
     cdef bint integral
     cdef bint numeric
@@ -76,37 +74,31 @@ cdef class TableView:
 
     def __init__(self, table):
         cdef object key
-        cdef bint all_integers = True
-        self.pandas_at = table._index_error is not None
-        self.keys = table._keys
+        cdef tuple keys = table._keys
+        cdef tuple ordered
+        if not keys:
+            return
+        for key in keys:
+            if type(key) is not int:
+                return
+        ordered = table._ordered
+        low, high = ordered[0], ordered[-1]
+        if not -(1 << 63) <= low <= high < (1 << 63):
+            return
+        self.integral = True
         self.values = table._values
         self.columns = table._columns
-        # Hashing or ordering an unsupported label would run user code during
-        # view construction, even when the eventual lookup reads another row.
-        for key in self.keys:
-            if type(key) is not int:
-                all_integers = False
-                if not _table_view_key(key):
-                    return
         self.column_positions = dict(zip(self.columns, range(len(self.columns))))
-        self.ordered = table._ordered
-        if self.ordered:
-            if all_integers:
-                self.minimum, self.maximum = self.ordered[0], self.ordered[-1]
-                self.integral = -(1 << 63) <= self.minimum and self.maximum < (1 << 63)
-            else:
-                self.minimum, self.maximum = min(self.keys), max(self.keys)
-            if self.integral:
-                self.integers = array('q', self.ordered)
-                self.sorted_positions = array('q', [table._positions[key] for key in self.ordered])
-                self.first_integer = self.minimum
-                self.last_integer = self.maximum
-                # Table guarantees unique keys. Compute the span as Python ints.
-                self.contiguous = self.maximum - self.minimum == len(self.ordered) - 1
-                self.numeric = all(type(value) is float for row in self.values for value in row)
-                if self.numeric:
-                    self.width = len(self.columns)
-                    self.numbers = array('d', [value for row in self.values for value in row])
+        self.integers = array('q', ordered)
+        self.sorted_positions = array('q', [table._positions[key] for key in ordered])
+        self.first_integer = low
+        self.last_integer = high
+        # Table guarantees unique keys. Compute the span as Python ints.
+        self.contiguous = high - low == len(ordered) - 1
+        self.numeric = all(type(value) is float for row in self.values for value in row)
+        if self.numeric:
+            self.width = len(self.columns)
+            self.numbers = array('d', [value for row in self.values for value in row])
 
     @cython.boundscheck(False)
     @cython.wraparound(False)
@@ -203,8 +195,8 @@ cdef object first_key(object function, object table):
         table = (<NativeTable>table)._owner
     if function is _first_key and type(table) is Table:
         data = view(table)
-        if data is not None and data.ordered:
-            return data.minimum
+        if data is not None and data.integral:
+            return data.first_integer
         return min(table._keys)
     return function(table)
 
@@ -215,8 +207,8 @@ cdef object last_key(object function, object table):
         table = (<NativeTable>table)._owner
     if function is _last_key and type(table) is Table:
         data = view(table)
-        if data is not None and data.ordered:
-            return data.maximum
+        if data is not None and data.integral:
+            return data.last_integer
         return max(table._keys)
     return function(table)
 
@@ -343,6 +335,7 @@ cdef object prepared_interpolation(object function, object table, object column,
                                    object lookup_fn, object last_fn, object math_module):
     cdef long long col
     cdef int overflow
+    cdef TableView data
     if function is not _prepared_interpolation:
         return function(table, column, years, lookup_fn, last_fn, math_module)
     if (lookup_fn is not _lookup or last_fn is not _last_key
@@ -352,7 +345,10 @@ cdef object prepared_interpolation(object function, object table, object column,
     col = PyLong_AsLongLongAndOverflow(column, &overflow)
     if overflow:
         return None
-    return interpolate_numeric(view(table), col, PyFloat_AS_DOUBLE(years))
+    data = view(table)
+    if data is None:
+        return function(table, column, years, lookup_fn, last_fn, math_module)
+    return interpolate_numeric(data, col, PyFloat_AS_DOUBLE(years))
 
 
 cdef object interpolate_numeric(TableView data, long long col, double position):
@@ -363,7 +359,7 @@ cdef object interpolate_numeric(TableView data, long long col, double position):
             or not -9223372036854775808.0 <= position < 9223372036854775808.0):
         return None
     lower = <long long>floor(position)
-    upper = data.maximum
+    upper = data.last_integer
     if lower >= upper:
         hi = data.sorted_positions[data.integers.shape[0] - 1]
         return data.numbers[hi * data.width + col]
@@ -1700,7 +1696,22 @@ cdef bint try_clamped_table_float(NativeTable table, LookupContext context, bint
     if table._input_keys is not None:
         low, high = table._input_low, table._input_high
     elif snapshot == <PyObject*>None:
-        if type(table._owner) is not Table or table._owner._index_error is None:
+        if type(table._owner) is not Table:
+            return False
+        # A pandas integer axis establishes the bounds without ordering an
+        # unrelated user-defined label during a scalar read.
+        metadata = table._owner._metadata
+        if metadata is None or metadata[0] not in ('axes', 'frame'):
+            return False
+        axis = metadata[1]
+        if type(axis) is _report_index_type:
+            if not isinstance(axis.dtype, _group_numpy.dtype) or axis.dtype.kind not in ('i', 'u'):
+                return False
+        elif type(axis) is tuple:
+            if not (axis[0] == 'range' or axis[0] == 'labels'
+                    and isinstance(axis[3], _group_numpy.dtype) and axis[3].kind in ('i', 'u')):
+                return False
+        elif type(axis) is not _report_range_type:
             return False
         bounds = table._owner._ordered
         if not bounds:
