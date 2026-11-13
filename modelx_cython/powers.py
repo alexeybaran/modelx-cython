@@ -404,8 +404,12 @@ def rewrite_powers(
         from modelx_cython.numeric_cache import exclusively_owned
         memo = f'_mx_power_{cells.name}' if exclusively_owned(cells) else None
     param_kinds = _param_kinds(cells)
-    native_return = (isinstance(node.body, cst.IndentedBlock)
-                     and cells.get_rettype_expr(c_style=True) == CY_FLOAT_T
+    # A cells object that does not report a return type (any object that
+    # implements only the parameter-type interface) has an unknown return
+    # type, so the native-return arithmetic path does not apply to it.
+    rettype = getattr(cells, 'get_rettype_expr', None)
+    native_return = (isinstance(node.body, cst.IndentedBlock) and rettype is not None
+                     and rettype(c_style=True) == CY_FLOAT_T
                      and any(isinstance(part, cst.Power) for part in lexical_nodes(node.body.body)))
     facts = CstFacts(node.body.body) if native_return else None
     if builtin_float and isinstance(node.body, cst.IndentedBlock):
