@@ -111,7 +111,7 @@ NOT_LOWERED = 'not lowered to a typed handle read; runs as a Python call'
 ROUND2_FALLBACK = ('not lowered to a typed handle read; the formula also has round-2 native reads '
                    '({operations}), which fall back to this Python read where they do not apply')
 KEPT_PYTHON = 'formula kept as a Python method ({why}): runs as a Python call'
-PANDAS_RECEIVER = ('receiver is a pandas DataFrame or Series, not a helper Table: never lowered; '
+PANDAS_RECEIVER = ('receiver is a pandas DataFrame, Series or Index, not a helper Table: never lowered; '
                    'pandas runs on every evaluation')
 TABLE_READ_WARNING = '{cell}: per-step table read is not typed: {read} (formula line {line}): {reason}'
 
@@ -119,6 +119,14 @@ TABLE_READ_WARNING = '{cell}: per-step table read is not typed: {read} (formula 
 def untyped_read_warning(cell, entry):
     """Build warning text for one per-step untyped read (an entry of table_reads_untyped)."""
     return TABLE_READ_WARNING.format(cell=cell, **entry)
+
+
+def _binds_local(statement, local):
+    """Whether an Assign/AnnAssign binds only names tracked as receiver locals."""
+    import libcst as cst
+    targets = ([t.target for t in statement.targets] if isinstance(statement, cst.Assign)
+               else [statement.target])
+    return all(isinstance(t, cst.Name) and t.value in local for t in targets)
 
 
 class TableReadSite:
@@ -146,8 +154,11 @@ def table_read_sites(node, resolver, cls_info, pandas=False):
     the formula, 1 being the ``def`` line.
 
     With ``pandas`` true the receivers are pandas objects instead: zero-argument Cells whose
-    every sampled result is a pandas DataFrame or Series (``resolver.pandas_results``) and
-    ``self.<ref>`` References holding one. Those reads are reported, never lowered.
+    every sampled result is a pandas DataFrame, Series or Index (``resolver.pandas_results``)
+    and ``self.<ref>`` References holding one. Every use of such a receiver is a site, not
+    only the table-read spellings: any attribute or method (kind = the attribute name, or
+    ``attribute``), a subscript, and the receiver itself used as a value (kind ``use``:
+    iterated, passed to a call, returned). Those sites are reported, never lowered.
     """
     import libcst as cst
     from libcst.metadata import MetadataWrapper, PositionProvider
@@ -226,18 +237,33 @@ def table_read_sites(node, resolver, cls_info, pandas=False):
 
     sites = []
 
+    bare = []      # pandas mode: receivers used as values, filtered once parents are known
+
     class Sites(cst.CSTVisitor):
         def visit_Attribute(self, expr):
-            if expr.attr.value in TABLE_READ_ATTRS and receiver(expr.value, local):
-                sites.append((expr, expr.attr.value))
+            if receiver(expr.value, local):
+                if expr.attr.value in TABLE_READ_ATTRS:
+                    sites.append((expr, expr.attr.value))
+                elif pandas:
+                    sites.append((expr, 'attribute'))
+            if pandas and receiver(expr, local):
+                bare.append(expr)
 
         def visit_Subscript(self, expr):
             if receiver(expr.value, local):
                 sites.append((expr, 'row' if isinstance(expr.value, cst.Name)
                               and expr.value.value in rows else 'column'))
 
+        def visit_Call(self, expr):
+            if pandas and receiver(expr, local):
+                bare.append(expr)
+
+        def visit_Name(self, expr):
+            if pandas and receiver(expr, local):
+                bare.append(expr)
+
     node.visit(Sites())
-    if not sites:
+    if not sites and not bare:
         return []
     module = cst.Module(body=[node])
     wrapper = MetadataWrapper(module, unsafe_skip_copy=True)     # same node objects
@@ -252,6 +278,26 @@ def table_read_sites(node, resolver, cls_info, pandas=False):
             return True
 
     node.visit(Parents())
+    for expr in bare:
+        parent = parents.get(id(expr))
+        if isinstance(parent, (cst.Attribute, cst.Subscript)) and parent.value is expr:
+            continue        # a read already listed (or self.<ref>.x on a non-pandas path)
+        if isinstance(parent, cst.Attribute) and parent.attr is expr:
+            continue        # an attribute name that happens to spell a local
+        if isinstance(parent, cst.AssignTarget) or (
+                isinstance(parent, (cst.Assign, cst.AnnAssign)) and getattr(parent, 'value', None) is expr
+                and _binds_local(parent, local)):
+            continue        # the local itself, or its binding: its uses are the sites
+        if isinstance(parent, cst.AnnAssign) and parent.target is expr:
+            continue
+        holder, up = expr, parent
+        while isinstance(up, (cst.Element, cst.Tuple, cst.List)):
+            holder, up = up, parents.get(id(up))
+        if isinstance(up, (cst.For, cst.CompFor)) and up.target is holder:
+            continue        # a loop target (the row of iterrows): its reads are the sites
+        sites.append((expr, 'use'))
+    if not sites:
+        return []
     result = []
     for expr, kind in sites:
         shown = expr

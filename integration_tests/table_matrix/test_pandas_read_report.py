@@ -37,6 +37,17 @@ def rate(t):
             return float(r)
     raise ValueError("no segment")
 ''')
+        projection.new_cells('labels', '''\
+def labels():
+    return segments_frame.index
+''')
+        projection.new_cells('uses', '''\
+def uses(t):
+    n = len(segments()) + segments().reset_index().shape[0]
+    for _, row in segments().iterrows():
+        n += 0 * row["lo"]
+    return t * n if "a" in labels() else 0
+''')
         projection.new_cells('total', '''\
 def total(t):
     return rate(t) + (total(t - 1) if t > 0 else 0.0)
@@ -48,7 +59,8 @@ def total(t):
         'from exported import mx_model\n'
         'p = mx_model.Portfolio.Projection\n'
         'assert [p.rate(t) for t in (0, 5, 6, 9)] == [0.01, 0.01, 0.02, 0.02]\n'
-        'p.total(9)\n', encoding='utf-8')
+        'p.total(9)\n'
+        'assert [p.uses(t) for t in range(10)] == [4 * t for t in range(10)]\n', encoding='utf-8')
 
 
 def _translate(tmp_path, translate_only=True):
@@ -68,13 +80,18 @@ def test_per_step_reads_through_a_pandas_cell_are_reported_and_warned(tmp_path):
     assert rate['table_reads_typed'] == 0
     assert [(e['read'], e['kind'], e['line'], e['per_step']) for e in rate['table_reads_untyped']] == [
         ('tbl["lo"]', 'column', 3, True), ('tbl["hi"]', 'column', 3, True), ('tbl["rate"]', 'column', 3, True)]
-    assert all(e['reason'].startswith('receiver is a pandas DataFrame or Series, not a helper Table')
+    assert all(e['reason'].startswith('receiver is a pandas DataFrame, Series or Index, not a helper Table')
                for e in rate['table_reads_untyped'])
+    uses = report[PREFIX + 'uses']['table_reads_untyped']      # methods, bare uses, an Index cell
+    assert sorted((e['read'], e['kind'], e['line'], e['per_step']) for e in uses) == [
+        ('row["lo"]', 'row', 4, True), ('self.labels()', 'use', 5, True), ('self.segments()', 'use', 2, True),
+        ('self.segments().iterrows()', 'iterrows', 3, True),
+        ('self.segments().reset_index().shape', 'attribute', 2, True)], uses     # the loop row is no 'use'
     segments = report[PREFIX + 'segments']['table_reads_untyped']     # once per policy: listed, not warned
     assert [(e['read'], e['kind'], e['per_step']) for e in segments] == [
         ('self.segments_frame.loc[[self.scenario()]]', 'loc', False)]
     warned = [line for line in output.splitlines() if 'per-step table read is not typed:' in line]
-    assert len(warned) == 3 and all(f'{PREFIX}rate:' in line for line in warned), output
+    assert len(warned) == 8 and sum(f'{PREFIX}rate:' in line for line in warned) == 3, output
     assert report[PREFIX + 'total']['table_reads_untyped'] == []
 
 

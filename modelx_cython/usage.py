@@ -536,10 +536,10 @@ def collect_candidates(module_infos) -> Tuple[Dict[str, int], Set[str]]:
 
 
 def pandas_type_id(tp):
-    """'pandas.DataFrame' or 'pandas.Series' when ``tp`` is (a subclass of) one, else None.
-    Read by class names along the MRO, so pandas is never imported here."""
+    """'pandas.DataFrame', 'pandas.Series' or 'pandas.Index' when ``tp`` is (a subclass of) one,
+    else None. Read by class names along the MRO, so pandas is never imported here."""
     for klass in getattr(tp, '__mro__', ()):
-        if klass.__module__.split('.')[0] == 'pandas' and klass.__name__ in ('DataFrame', 'Series'):
+        if klass.__module__.split('.')[0] == 'pandas' and klass.__name__ in ('DataFrame', 'Series', 'Index'):
             return 'pandas.' + klass.__name__
     return None
 
