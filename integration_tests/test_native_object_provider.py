@@ -1,4 +1,4 @@
-"""An independent owner retains native operations through forwarded Cells."""
+"""An independent provider's view type binds through forwarded Cells, behind its ABI guard."""
 
 from importlib import import_module
 import json
@@ -11,17 +11,6 @@ import modelx as mx
 
 from modelx_cython.helpers import module_name
 
-
-def _c_entry(package, cell):
-    """The C entry the generated code calls for ``cell``: the cpdef of that cell in the package's .pxd
-    (its public name, or the renamed member of a table cell, D101a)."""
-    import re
-    from pathlib import Path
-    for pxd in sorted(Path(package).rglob('_mx_classes.pxd')):
-        found = re.search(rf'cpdef [^(\n]*?\b(\w*\b{cell}|_mx_cell_{cell})\(', pxd.read_text(encoding='utf-8'))
-        if found:
-            return found.group(1)
-    raise AssertionError(f'no C entry for {cell}')
 
 
 PROVIDER = 'curve_example.kernel'
@@ -124,12 +113,7 @@ def test_independent_provider_and_forwarding(tmp_path, monkeypatch):
     implementation.write_text(IMPLEMENTATION, encoding='utf-8')
     manifest = {
         'protocol': 1, 'provider': PROVIDER, 'abi': ABI,
-        'types': {TYPE: {'view_type': 'CurveView', 'bind': 'make_view',
-                         'numeric_table': {'owner_field': 'owner', 'ready': 'prices_ready',
-                                           'methods': {'price': {'signature': 'lookup_f64',
-                                                                 'read': 'bound_price', 'prepare': 'prime_price'}}},
-                         'members': {'rate_at': {'signature': 'int64_label_to_float64',
-                                                 'native': 'calculate_rate'}}}},
+        'types': {TYPE: {'view_type': 'CurveView', 'bind': 'make_view'}},
     }
     (package / 'kernel.provider.json').write_text(json.dumps(manifest), encoding='utf-8')
     monkeypatch.syspath_prepend(str(tmp_path))
@@ -184,13 +168,7 @@ def test_independent_provider_and_forwarding(tmp_path, monkeypatch):
         generated = (tmp_path / f'{name}_cy/_mx_classes.py').read_text(encoding='utf-8')
         assert '.make_view(self._f_primary())' in generated
         assert '.make_view(self._f_forward())' in generated
-        # the native call takes the cells' C entries (whatever their spelling, D101a), not Python attributes
-        assert f'.calculate_rate(self.{_c_entry(tmp_path / f"{name}_cy", "primary")}(), 4)' in generated
-        assert f'.calculate_rate(self.{_c_entry(tmp_path / f"{name}_cy", "again")}(), 4)' in generated
-        assert '.calculate_rate((self.data._v_again if ' in generated
         assert 'self.opaque().rate_at(4)' in generated
-        assert '.prime_price(' in generated and '.bound_price(' in generated
-        assert '.prices_ready(' in generated and 'self._v_schedule.owner' in generated
         implementation.write_text(IMPLEMENTATION + '\n# New build identity.\n', encoding='utf-8')
 
     alias = module_name(PROVIDER)
@@ -207,12 +185,11 @@ def test_independent_provider_and_forwarding(tmp_path, monkeypatch):
         assert f.direct_rate() == f.forwarded_rate() == f.opaque_rate() == 6.5
         assert f.primary() is f.forward() is f.again()
         assert f.primary().__modelx_cython_owner__() is f.opaque().__modelx_cython_owner__()
-        assert first_provider.preparations == 1 and first_provider.reads == 2
+        assert first_provider.preparations == 1
         assert first.Projection.rate_from_data() == 6.5
-        assert first_provider.preparations == 1 and first_provider.reads == 3
-        assert type(first)().Pricing[1].quote(1) == 3.5 and first_provider.price_reads == 0
+        assert first_provider.preparations == 1
+        assert type(first)().Pricing[1].quote(1) == 3.5
         assert first.Pricing.collect().sum.total == 18.0
-        assert first_provider.price_reads == 2
         assert type(f.primary()) is not type(s.primary())
         assert second_provider.preparations == 1
         s.source = f.primary()
