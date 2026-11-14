@@ -425,3 +425,67 @@ def test_demote_rebound_params_uncached_cells_everywhere():
     cells = make_rebound("t = t / 2\nreturn t", {"t": int},
                          has_formula_def=False)
     assert cells.get_argtype_expr("t", c_style=True) == "object"
+
+
+def test_assigned_local_kinds_from_every_assignment():
+    """D59: a local takes a kind only when every binding of it has that kind."""
+    import libcst as cst
+    from modelx_cython.powers import _assigned_local_kinds, KIND_FLOAT, KIND_INT
+
+    class _NoResolve:
+        def resolve_chain(self, *args):
+            return None, None
+
+    source = (
+        'def f(self, t, i):\n'
+        '    v = 1.0 / (1.0 + i)\n'
+        '    total = 0.0\n'
+        '    k = 1\n'
+        '    mixed = 0\n'
+        '    step = 3 if t else 6\n'
+        '    either = 1 if t else 0.5\n'
+        '    while True:\n'
+        '        s = t + (k - 1) * step\n'
+        '        if s > 40:\n'
+        '            break\n'
+        '        total += v ** ((s - t) / 12.0)\n'
+        '        mixed += 0.5\n'
+        '        k += 1\n'
+        '    for j in range(3):\n'
+        '        looped = j\n'
+        '    return total\n')
+    body = cst.parse_module(source).body[0].body.body
+    kinds = _assigned_local_kinds(body, ('t', 'i'), _NoResolve(), {}, {}, 'm.C',
+                                  {'t': KIND_INT, 'i': KIND_FLOAT})
+    assert kinds == {'v': KIND_FLOAT, 'total': KIND_FLOAT, 'k': KIND_INT, 'step': KIND_INT,
+                     's': KIND_INT, 'j': KIND_INT, 'looped': KIND_INT}, kinds
+
+
+@pytest.mark.parametrize("body, count", [
+    # an accumulator started at a double: the power is an operand of its arithmetic
+    ("v = 1.0 / (1.0 + self.rate(t))\n    total = 0.0\n    k = 1\n"
+     "    while k < 5:\n        total += (1.0 / 4) * v ** ((k - t) / 12.0)\n        k += 1\n    return total", 1),
+    # inside a typed range loop, with the bound from a parameter
+    ("v = self.rate(t)\n    total = 0.0\n    for j in range(t):\n        total = total + v ** (j / 12.0)\n"
+     "    return total", 1),
+])
+def test_power_into_a_double_accumulator_is_native(body, count):
+    """D62: the power's value flows into a local that is a double without it."""
+    out = _rewrite(body)
+    assert out.count("_mx_sys._mx_pow(") == count, out
+    assert "**" not in out
+
+
+@pytest.mark.parametrize("body", [
+    # the only double assignment is the power itself: Python's semantics stay
+    "v = self.rate(t)\n    root = v ** 0.5\n    return root",
+    # the accumulator also takes a value of unknown kind
+    "v = self.rate(t)\n    total = 0.0\n    total += v ** 0.5\n    total += self.arr(t)\n    return total",
+    # the base is unknown
+    "total = 0.0\n    total += self.arr(t) ** 0.5\n    return total",
+    # the accumulator is an integer
+    "v = self.rate(t)\n    total = 0\n    total += v ** 0.5\n    return total",
+])
+def test_power_outside_a_double_sink_keeps_python_semantics(body):
+    out = _rewrite(body)
+    assert "_mx_sys._mx_pow(" not in out and "**" in out, out

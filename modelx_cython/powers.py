@@ -187,6 +187,10 @@ class OperandKind:
             return KIND_UNKNOWN
         elif isinstance(expr, cst.BinaryOperation):
             return self._binop_kind(expr)
+        elif isinstance(expr, cst.IfExp):
+            # both branches of one kind give that kind (D59); mixed or unknown stay unknown
+            body, orelse = self.kind(expr.body), self.kind(expr.orelse)
+            return body if body == orelse else KIND_UNKNOWN
         elif isinstance(expr, cst.Name):
             return self._param_kinds.get(expr.value, KIND_UNKNOWN)
         elif isinstance(expr, cst.Call):
@@ -247,17 +251,29 @@ class _PowerRewriter(cst.CSTTransformer):
         self._opaque_depth = 0
         self.rewritten = 0
         self.declined: List[str] = []
+        self.declined_in_loops: List[str] = []
+        self._loop_depth = 0
         self.memo = memo
 
     def on_visit(self, node: cst.CSTNode) -> bool:
         if isinstance(node, _OPAQUE_SCOPES):
             self._opaque_depth += 1
+        if isinstance(node, (cst.For, cst.While, cst.CompFor)):
+            self._loop_depth += 1
         return super().on_visit(node)
 
     def on_leave(self, original_node, updated_node):
         if isinstance(original_node, _OPAQUE_SCOPES):
             self._opaque_depth -= 1
+        if isinstance(original_node, (cst.For, cst.While, cst.CompFor)):
+            self._loop_depth -= 1
         return super().on_leave(original_node, updated_node)
+
+    def _decline(self, node):
+        text = cst.Module([]).code_for_node(node).strip()
+        self.declined.append(text)
+        if self._loop_depth:
+            self.declined_in_loops.append(text)
 
     def leave_BinaryOperation(self, original_node, updated_node):
         if not isinstance(original_node.operator, cst.Power):
@@ -266,9 +282,7 @@ class _PowerRewriter(cst.CSTTransformer):
             # a name here may be bound by the enclosing comprehension,
             # lambda or nested def rather than by the cells, so nothing
             # can be typed from the parameters
-            self.declined.append(
-                cst.Module([]).code_for_node(original_node).strip()
-            )
+            self._decline(original_node)
             return updated_node
         # classify the original operands: a nested power has already
         # been rewritten into a call in ``updated_node``
@@ -298,9 +312,7 @@ class _PowerRewriter(cst.CSTTransformer):
         # Only a floating exponent puts a power on Cython's complex
         # path, so an integer one is left alone without comment.
         if exponent in (KIND_FLOAT, KIND_UNKNOWN):
-            self.declined.append(
-                cst.Module([]).code_for_node(original_node).strip()
-            )
+            self._decline(original_node)
         return updated_node
 
     @staticmethod
@@ -432,8 +444,15 @@ def rewrite_powers(
         if local_kinds:
             return_kind = OperandKind(resolver, cells_kinds, ref_kinds, cls_fqname, {**param_kinds, **local_kinds})
             return_operands = _native_return_arithmetic(node.body.body, return_kind)
+    if isinstance(node.body, cst.IndentedBlock):
+        accumulated = _double_accumulator_powers(
+            node.body.body, cells.params, resolver, cells_kinds, ref_kinds, cls_fqname, param_kinds)
+        if accumulated:
+            return_operands = {**(return_operands or {}), **accumulated}
     rewriter = _PowerRewriter(kind, memo, return_operands)
     updated = node.body.visit(rewriter)
+    # D62: powers left on Python's semantics inside a loop, for the admission report
+    cells.powers_in_loops = list(rewriter.declined_in_loops)
     if rewriter.declined:
         _logger.info(
             f"'**' left as exported in {cells.formula_fqname}, so a "
@@ -445,6 +464,135 @@ def rewrite_powers(
     if memo:
         cells.power_memo = memo
     return node.with_changes(body=updated)
+
+
+_AUGMENTED = {
+    cst.AddAssign: cst.Add, cst.SubtractAssign: cst.Subtract, cst.MultiplyAssign: cst.Multiply,
+    cst.DivideAssign: cst.Divide, cst.FloorDivideAssign: cst.FloorDivide, cst.ModuloAssign: cst.Modulo,
+}
+
+
+def _assigned_local_kinds(body, parameters, resolver, cells_kinds, ref_kinds, cls_fqname, param_kinds):
+    """Kinds of locals proven from every assignment to them (D59).
+
+    A local qualifies when each of its bindings in the formula is a plain or annotated
+    assignment, or an augmented ``+= -= *= /= //= %=``, at the formula's own level or in
+    its ``if``/``while``/``for`` blocks (never in a comprehension, lambda or nested def),
+    it is not a parameter and never deleted, and every assigned value has one known kind.
+    An augmented assignment keeps the kind only when ``local op value`` has that same
+    kind, so ``total = 0.0; total += x`` is a double and ``k = 1; k += 1`` an integer,
+    while ``x = 0; x += 0.5`` is unknown. Formulas with scope effects (global, nonlocal,
+    del, walrus, nested defs, ...) get no local kinds.
+    """
+    if has_scope_effects(body):
+        return {}
+    facts = CstFacts(body)
+    plain, augmented = {}, {}
+    for node in lexical_nodes(body):
+        if isinstance(node, cst.Assign) and len(node.targets) == 1 and isinstance(node.targets[0].target, cst.Name):
+            plain.setdefault(node.targets[0].target.value, []).append(node.value)
+        elif isinstance(node, cst.AnnAssign) and isinstance(node.target, cst.Name) and node.value is not None:
+            plain.setdefault(node.target.value, []).append(node.value)
+        elif (isinstance(node, cst.For) and isinstance(node.target, cst.Name) and not node.asynchronous
+              and isinstance(node.iter, cst.Call) and isinstance(node.iter.func, cst.Name)
+              and node.iter.func.value == 'range' and 1 <= len(node.iter.args) <= 3
+              and not any(arg.keyword or arg.star for arg in node.iter.args)):
+            # a loop over range(): an integer when every bound is (checked below)
+            plain.setdefault(node.target.value, []).append(node.iter)
+        elif isinstance(node, cst.AugAssign) and isinstance(node.target, cst.Name):
+            operator = _AUGMENTED.get(type(node.operator))
+            augmented.setdefault(node.target.value, []).append(
+                None if operator is None else (operator(), node.value))
+    candidates = {
+        name for name, values in plain.items()
+        if name not in parameters and name not in facts.deleted
+        and facts.stores[name] == len(values) + len(augmented.get(name, ()))
+        and None not in augmented.get(name, ())
+    }
+    kinds: Dict[str, str] = {}
+    changed = True
+    while changed:
+        changed = False
+        classify = OperandKind(resolver, cells_kinds, ref_kinds, cls_fqname, {**param_kinds, **kinds})
+        for name in sorted(candidates - set(kinds)):
+            # a value may read the local itself (``total = total + x``): take the kind of the
+            # values that are known without it, then require every value to keep that kind
+            found = {_range_kind(classify, value) if _is_range(value) else classify.kind(value)
+                     for value in plain[name]} - {KIND_UNKNOWN}
+            if len(found) != 1:
+                continue
+            kind, = found
+            trial = OperandKind(resolver, cells_kinds, ref_kinds, cls_fqname,
+                                {**param_kinds, **kinds, name: kind})
+            if all((_range_kind(trial, value) if _is_range(value) else trial.kind(value)) == kind
+                   for value in plain[name]) and all(
+                    trial.kind(cst.BinaryOperation(cst.Name(name), operator, value)) == kind
+                    for operator, value in augmented.get(name, ())):
+                kinds[name] = kind
+                changed = True
+    return kinds
+
+
+def _is_range(value):
+    return isinstance(value, cst.Call) and isinstance(value.func, cst.Name) and value.func.value == 'range'
+
+
+def _range_kind(classify, call):
+    kinds = {classify.kind(arg.value) for arg in call.args}
+    return KIND_INT if kinds == {KIND_INT} else KIND_UNKNOWN
+
+
+def _double_accumulator_powers(body, parameters, resolver, cells_kinds, ref_kinds, cls_fqname, param_kinds):
+    """Powers whose value flows into a C double local (D59, D62).
+
+    A sink is a local whose every assignment is a double expression (``_assigned_local_kinds``)
+    and which has at least one assignment that is a double without any power in it
+    (``total = 0.0``): its C type does not depend on the powers, so Cython declares it a
+    double either way and a complex power result could not be stored in it. Each power
+    in the arithmetic of a value assigned to a sink (``total += c * v ** ((s - t) / 12.0)``)
+    with a floating exponent and a known base is native, raising as ``_mx_pow`` does where
+    Python would give a complex number. A local whose only double assignments are powers
+    (``root = base ** 0.5``) is not a sink, so its power keeps Python's semantics.
+    """
+    kinds = _assigned_local_kinds(body, parameters, resolver, cells_kinds, ref_kinds, cls_fqname, param_kinds)
+    if not any(kind == KIND_FLOAT for kind in kinds.values()):
+        return {}
+    classify = OperandKind(resolver, cells_kinds, ref_kinds, cls_fqname, {**param_kinds, **kinds})
+
+    def has_power(expr):
+        return any(isinstance(part, cst.BinaryOperation) and isinstance(part.operator, cst.Power)
+                   for part in walk(expr))
+
+    assignments = []
+    for statement in lexical_nodes(body):
+        if isinstance(statement, cst.Assign) and len(statement.targets) == 1:
+            target = statement.targets[0].target
+        elif isinstance(statement, (cst.AnnAssign, cst.AugAssign)):
+            target = statement.target
+        else:
+            continue
+        if isinstance(target, cst.Name) and statement.value is not None:
+            assignments.append((target.value, statement))
+    sinks = {name for name, statement in assignments
+             if kinds.get(name) == KIND_FLOAT and not isinstance(statement, cst.AugAssign)
+             and classify.kind(statement.value) == KIND_FLOAT and not has_power(statement.value)}
+
+    def arithmetic(expr):
+        if isinstance(expr, cst.BinaryOperation):
+            if isinstance(expr.operator, cst.Power):
+                yield expr, (classify.kind(expr.left), classify.kind(expr.right))
+            yield from arithmetic(expr.left)
+            yield from arithmetic(expr.right)
+        elif isinstance(expr, cst.UnaryOperation):
+            yield from arithmetic(expr.expression)
+
+    found = {}
+    for name, statement in assignments:
+        if name in sinks:
+            for power, operands in arithmetic(statement.value):
+                if operands[1] == KIND_FLOAT and operands[0] != KIND_UNKNOWN:
+                    found[power] = operands
+    return found
 
 
 def _param_kinds(cells) -> Dict[str, str]:
