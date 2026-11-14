@@ -731,7 +731,7 @@ class VectorLowering(cst.CSTTransformer):
                         out.setdefault(e.value.value, set()).add(kinds[i] if kinds else 'X')
         return {name: kinds.pop() if len(kinds) == 1 else 'X' for name, kinds in out.items()}
 
-    def vector_kind(self, name, items, returned):
+    def _item_kinds(self, items):
         kinds = []
         for item in items:
             if item[0] == 'value':
@@ -741,6 +741,25 @@ class VectorLowering(cst.CSTTransformer):
                 kinds.append(k[1][item[2]] if isinstance(k, tuple) and len(k[1]) == item[3] else None)
             else:
                 kinds.append(None)
+        return kinds
+
+    def vector_kind(self, name, items, returned):
+        kinds = self._item_kinds(items)
+        if (kinds and any(k is None for k in kinds) and self.env.get(name) is None
+                and all(item[0] == 'value' for item in items)):
+            # diag-kr: a vector rebuilt from itself (``val = [v * g for v in val]``) is typed when
+            # assuming the kind its other assignments give makes every assignment that kind: the
+            # first assignment executed is one of the others, so the assumption holds inductively
+            known = {k[-1] for k in kinds if isinstance(k, str)} - {'?'}
+            if len(known) == 1:
+                candidate = known.pop()
+                self.env[name] = candidate
+                try:
+                    trial = self._item_kinds(items)
+                finally:
+                    self.env[name] = None
+                if all(isinstance(k, str) and k[-1] in (candidate, '?') for k in trial):
+                    kinds = trial
         if not kinds or any(k is None for k in kinds) or returned.get(name) == 'X':
             return None
         if all(isinstance(k, tuple) for k in kinds):
