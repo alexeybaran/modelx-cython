@@ -153,11 +153,14 @@ def test_nested_reductions_lifted(tmp_path):
         s.new_cells('h', 'def h(k) -> object:\n    return max(0.0, max(v(i) for i in range(k)) - v(0))\n')
         s.new_cells('m', 'def m(k) -> object:\n    xs = [v(i) for i in range(k)]\n'
                     '    return 1.0 - tol / min(x for x in xs if x > 0.0)\n')
+        # a conditional expression with reductions in its branches becomes an if statement
+        s.new_cells('r', 'def r(k) -> object:\n    free = [i for i in range(k) if v(i) <= 0.0]\n'
+                    '    return (min(free) if free else max(n(i) for i in range(k + 1)) + 1) + 1\n')
         source, report = _build(tmp_path, model, '''\
             from exported import mx_model as m
             w = m.Values
             for k in range(12):
-                for f in (w.a, w.b, w.c, w.d, w.e, w.f, w.g, w.m):
+                for f in (w.a, w.b, w.c, w.d, w.e, w.f, w.g, w.m, w.r):
                     try:
                         f(k)
                     except ValueError:
@@ -167,13 +170,13 @@ def test_nested_reductions_lifted(tmp_path):
             ''')
     finally:
         model.close()
-    for name in ('a', 'b', 'c', 'd', 'e', 'g', 'h', 'm'):
+    for name in ('a', 'b', 'c', 'd', 'e', 'g', 'h', 'm', 'r'):
         assert _cell(report, name)['expressions_untyped'] == [], name
     f = _cell(report, 'f')['expressions_untyped']
     assert [e['form'] for e in f] == ['all'] and 'one branch' in f[0]['reason']
     _differential(tmp_path, _PROBE_HEAD + '''\
     for k in range(12):
-        for f in (w.a, w.b, w.c, w.d, w.e, w.f, w.g, w.h, w.m):
+        for f in (w.a, w.b, w.c, w.d, w.e, w.f, w.g, w.h, w.m, w.r):
             call(f, k)
     json.dump(out, open(sys.argv[2], 'w'))
     ''')

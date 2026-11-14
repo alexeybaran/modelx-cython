@@ -507,12 +507,27 @@ class GeneralReductions:
             lines += cst.parse_module(f'{temp} = ({code(node)})\n').body
             replacements[node] = cst.Name(temp)
         result = names.reserve('_mx_hoist', family=True)
-        line = cst.SimpleStatementLine(body=[cst.Assign(
-            targets=[cst.AssignTarget(cst.Name(result))], value=site)])
-        lowered = self.general(line, line)
-        if lowered is line:
-            return None
-        lines += list(lowered.nodes) if isinstance(lowered, cst.FlattenSentinel) else [lowered]
+        if isinstance(site, cst.IfExp):
+            # a conditional expression whose branch holds a reduction: an if statement
+            # assigning each branch, which evaluates the test and one branch as it does
+            site_now = _replaced(site, {id(node): cst.Name(temp.value) for node, temp in replacements.items()})
+            branches = []
+            for value in (site_now.body, site_now.orelse):
+                line = cst.SimpleStatementLine(body=[cst.Assign(
+                    targets=[cst.AssignTarget(cst.Name(result))], value=value)])
+                lowered = self.leave_SimpleStatementLine(line, line)
+                branches.append(list(lowered.nodes) if isinstance(lowered, cst.FlattenSentinel)
+                                else [lowered])
+            lines.append(cst.If(test=site_now.test.with_changes(lpar=(), rpar=()),
+                                body=cst.IndentedBlock(body=branches[0]),
+                                orelse=cst.Else(body=cst.IndentedBlock(body=branches[1]))))
+        else:
+            line = cst.SimpleStatementLine(body=[cst.Assign(
+                targets=[cst.AssignTarget(cst.Name(result))], value=site)])
+            lowered = self.general(line, line)
+            if lowered is line:
+                return None
+            lines += list(lowered.nodes) if isinstance(lowered, cst.FlattenSentinel) else [lowered]
         replacements[site] = cst.Name(result)
         mapping = {id(node): name.with_changes(lpar=node.lpar, rpar=node.rpar)
                    if getattr(node, 'lpar', ()) else name for node, name in replacements.items()}
@@ -526,6 +541,11 @@ class GeneralReductions:
         def search(node):
             if self.builtin_site(node) and id(node) in self.nested_sites:
                 return node
+            if isinstance(node, cst.IfExp) and any(
+                    id(item) in self.nested_sites for branch in (node.body, node.orelse)
+                    for item in _subtree(branch)):
+                found = search(node.test)
+                return found if found is not None or stop else node
             for child, conditional in _evaluation_order(node):
                 if conditional:
                     stop.append(True)  # later sites run after a conditional part: not lifted
