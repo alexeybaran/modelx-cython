@@ -88,16 +88,14 @@ def _translate(tmp_path, spec=None, translate_only=True):
 def test_untyped_reads_are_reported_and_per_step_ones_warned(tmp_path):
     _model(tmp_path)
     report, output = _translate(tmp_path)
-    listed = report[PREFIX + 'listed']
-    assert listed['table_reads_typed'] == 0 and listed['table_reads_keys'] == []
-    assert listed['table_reads_untyped'] == [{
-        'read': 'self.market.curve().index', 'kind': 'index', 'line': 2, 'per_step': True,
-        'reason': 'not lowered to a typed handle read; runs as a Python call'}]
+    listed = report[PREFIX + 'listed']    # typed_table_reads is on by default (D45)
+    assert listed['table_reads_typed'] == 1 and listed['table_reads_untyped'] == []
+    assert listed['table_reads_keys'] == ['key in index, 1 part: int (parameter t is long long)']
     count = report[PREFIX + 'count']['table_reads_untyped']
     assert [(e['read'], e['kind'], e['line'], e['per_step']) for e in count] == [
         ('table.index', 'index', 3, False)]
-    seen = report[PREFIX + 'seen']['table_reads_untyped']       # inside a generator
-    assert [(e['kind'], e['line'], e['per_step']) for e in seen] == [('index', 2, True)]
+    seen = report[PREFIX + 'seen']       # inside a generator, lowered
+    assert seen['table_reads_typed'] == 1 and seen['table_reads_untyped'] == []
     first = report[PREFIX + 'first']['table_reads_untyped']
     assert [e['read'] for e in first] == ['table.index.first()']
     nested = report[PREFIX + 'nested']['table_reads_untyped']        # inside a closure
@@ -108,15 +106,16 @@ def test_untyped_reads_are_reported_and_per_step_ones_warned(tmp_path):
     upper = report[INPUTS + 'upper']
     assert 'modelx_cython.runtime._native_inputs.read_clamped_table_float' in upper['native_numeric_helpers']
     assert [e['read'] for e in upper['table_reads_untyped']] == ['table.index.max_int()']
-    assert upper['table_reads_untyped'][0]['reason'].startswith(
-        'not lowered to a typed handle read; the formula also has round-2 native reads ('), upper
+    assert upper['table_reads_untyped'][0]['reason'] == (
+        'index.max_int(...) is not in the typed vocabulary; runs as a Python call'), upper
     warned = [line for line in output.splitlines() if 'per-step table read is not typed:' in line]
-    assert len(warned) == 6 and not any('_f_count' in line for line in warned), output
-    assert any(f'{PREFIX}listed: per-step table read is not typed: self.market.curve().index '
-               '(formula line 2): not lowered to a typed handle read; runs as a Python call'
+    assert len(warned) == 4 and not any('_f_count' in line for line in warned), output
+    assert any(f'{PREFIX}first: per-step table read is not typed: table.index.first() '
+               '(formula line 3): index.first(...) is not in the typed vocabulary; runs as a Python call'
                in line for line in warned), output
     # an unrelated cell carries the keys too, empty
-    assert report[PREFIX[:-3] + '_f_seen']['table_reads_typed'] == 0
+    assert report[INPUTS + 'curve']['table_reads_typed'] == 0
+    assert report[INPUTS + 'curve']['table_reads_keys'] == []
     classes = (tmp_path / 'exported_cy/_m_Portfolio/_mx_classes.py').read_text(encoding='utf-8')
     assert 'infer_types' not in classes
 
@@ -129,7 +128,7 @@ def test_spec_keys_infer_types_and_table_recognisers(tmp_path):
     upper = report[INPUTS + 'upper']     # the round-2 clamp recogniser is off
     assert not any('clamped' in name for name in upper['native_numeric_helpers']), upper
     assert upper['table_reads_untyped'][0]['reason'] == (
-        'not lowered to a typed handle read; runs as a Python call')
+        'index.max_int(...) is not in the typed vocabulary; runs as a Python call')
     assert 'read_clamped_table_float' not in classes
 
 

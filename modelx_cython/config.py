@@ -48,8 +48,8 @@ class CompilerPolicy:
     # M1 (W1.1): '# cython: infer_types=True, overflowcheck=True' on generated model modules.
     infer_types: bool = False
     # M1 (W1.3): lower pandas-spelled table reads to typed handle reads (table_reads.py).
-    # Off until the runtime handles (W1.2) replace the stubs.
-    typed_table_reads: bool = False
+    # On by default since the runtime handles (W1.2) landed (D45).
+    typed_table_reads: bool = True
 
     @classmethod
     def resolve(cls, data):
@@ -64,7 +64,7 @@ class CompilerPolicy:
             native_math=data.get('native_math', True),
             table_recognisers=data.get('table_recognisers', True),
             infer_types=data.get('infer_types', False),
-            typed_table_reads=data.get('typed_table_reads', False))
+            typed_table_reads=data.get('typed_table_reads', True))
         for name, value in values.items():
             if name not in ('parallel_workers', 'native_cache_hits') and type(value) is not bool:
                 raise ValueError(f'{name} must be a boolean')
@@ -156,7 +156,7 @@ class TransSpec:
     off the round-2 statement-shape recognisers for table and record reads.
     ``"infer_types"`` (default false): C type inference with overflow checks
     (``# cython: infer_types=True, overflowcheck=True``) in generated model modules.
-    ``"typed_table_reads"`` (default false until the runtime handles land): lower
+    ``"typed_table_reads"`` (default true; false keeps reads as Python calls): lower
     ``.loc``/``.at``/``.index`` reads on traced tables to typed handle reads.
     ``"native_cache_hits"`` defaults to ``"auto"`` when automatic optimization
     and dense miss binding are enabled. It selects scalar hits and already-proven
