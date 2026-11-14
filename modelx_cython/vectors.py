@@ -851,7 +851,52 @@ class VectorLowering(cst.CSTTransformer):
             return self.call('of', k, updated)
         return updated
 
+    def scalar_only_power(self, node):
+        """D91: a power whose operands read no vector, vector element or local the vector typer
+        typed (only parameters, self/Reference attributes, Cell calls and literals), outside any
+        comprehension this lowering expands: powers.py types it as before, with its one-entry
+        memo where enabled; the vector lowering leaves it alone."""
+        if self.comp_scalars:
+            return False
+        allowed = set(self.cells.params) | {'self'}
+
+        class Probe(cst.CSTVisitor):
+            ok = True
+
+            def visit_Attribute(inner, item):
+                item.value.visit(inner)     # the attribute name itself is not a variable
+                return False
+
+            def visit_Subscript(inner, item):
+                inner.ok = False
+                return False
+
+            def visit_Name(inner, item):
+                if item.value not in allowed and item.value not in ('True', 'False', 'None', 'float', 'int'):
+                    inner.ok = False
+
+            def visit_Call(inner, item):
+                if isinstance(item.func, cst.Name) and item.func.value not in ('float', 'int'):
+                    if item.func.value not in allowed:
+                        inner.ok = False
+                elif not isinstance(item.func, cst.Name):
+                    item.func.visit(inner)
+                for arg in item.args:
+                    arg.value.visit(inner)
+                return False
+
+            def visit_Lambda(inner, item):
+                inner.ok = False
+                return False
+
+        probe = Probe()
+        node.left.visit(probe)
+        node.right.visit(probe)
+        return probe.ok
+
     def leave_BinaryOperation(self, original, updated):
+        if isinstance(original.operator, cst.Power) and self.scalar_only_power(original):
+            return updated
         if isinstance(original.operator, cst.Power) and self.scalar(original.right) == FLOAT \
                 and self.scalar(original.left) in (FLOAT, INT) and self.in_lowered_scope(original):
             self.powers += 1
