@@ -82,6 +82,8 @@ class Constants(FormulaTransformer):
                 self.locals.add(name)
 
     def leave_FunctionDef(self, before, after):
+        if before is not self._formula_root:
+            return after          # a nested def: its own receiver, left as written
         self.cell.enum_untyped = list(self.untyped)
         self.cell.enum_memberships = self.memberships
         if self.lines is None or self.rebinds_self:

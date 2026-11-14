@@ -595,6 +595,8 @@ class NativeReductions(GeneralReductions, FormulaTransformer):
         return self.scope_safe
 
     def leave_FunctionDef(self, before, after):
+        if before is not self._formula_root:
+            return after          # a nested def is not this formula
         untyped = []
         for site in self.general_sites:
             if id(site) in self.general_done:
