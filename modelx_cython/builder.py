@@ -620,7 +620,8 @@ class CombinedCellsInfo(LexicalCellsInfo):
     @property
     def native_table_result(self):
         binding = self.native_provider_binding
-        return binding is not None and binding.declaration.numeric_table is not None
+        handle = binding.declaration.handle if binding is not None else None
+        return handle is not None and handle.type == 'TableHandle'
 
     @property
     def native_provider_binding(self):

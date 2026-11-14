@@ -4,7 +4,7 @@ import sys
 import pytest
 
 from modelx_cython.helpers import registered_helper
-from modelx_cython.provider_manifest import GroupedTable, ProviderMember, owner_provider_binding, read_provider_manifest
+from modelx_cython.provider_manifest import owner_provider_binding, read_provider_manifest
 
 
 PROVIDER = 'rates_demo.compiled.curve_kernel'
@@ -31,14 +31,8 @@ def declaration(tmp_path, monkeypatch):
             TYPE: {
                 'view_type': 'CurveReceiver',
                 'bind': 'as_receiver',
-                'members': {
-                    'rate_at': {
-                        'signature': 'int64_label_to_float64',
-                        'native': 'read_rate',
-                    },
-                },
             },
-            'rates_demo.curves.Labels': {'members': {}},
+            'rates_demo.curves.Labels': {},
         },
     }
     try:
@@ -58,20 +52,10 @@ def test_read_independent_provider_manifest(declaration):
     curve = manifest.types[TYPE]
     assert (curve.view_type, curve.bind) == ('CurveReceiver', 'as_receiver')
     assert (curve.admission, curve.bind_cell) == ('observed', False)
-    assert curve.members['rate_at'] == ProviderMember('int64_label_to_float64', 'read_rate')
     assert manifest.types['rates_demo.curves.Labels'].bind is None
     assert PROVIDER not in sys.modules
     with pytest.raises(TypeError):
-        curve.members['another'] = curve.members['rate_at']
-
-
-def test_native_type_can_declare_only_a_view_and_binder(declaration):
-    resource, document = declaration
-    document['types'][TYPE].pop('members')
-    resource.write_text(json.dumps(document), encoding='utf-8')
-    curve = read_provider_manifest(PROVIDER, ABI).types[TYPE]
-    assert (curve.view_type, curve.bind) == ('CurveReceiver', 'as_receiver')
-    assert not curve.members
+        manifest.types['another'] = curve
 
 
 def test_function_provider_does_not_need_a_manifest(declaration):
@@ -100,10 +84,9 @@ def test_invalid_lookup_identity(provider):
     ('provider', 'other_demo.compiled.curve_kernel', 'declares provider'),
     ('abi', 'unknown-abi', 'declares ABI.*expected'),
     ('abi', 'bad abi', 'invalid ABI identity'),
-    ('types', {'not-a-qualified-type': {'members': {}}}, 'invalid qualified type identity'),
-    ('types', {TYPE: {'view_type': 'CurveReceiver', 'members': {}}}, 'view_type and bind'),
-    ('types', {TYPE: {'members': {'rate_at': {'signature': 'float', 'native': '../read'}}}},
-     'invalid member identity or symbol'),
+    ('types', {'not-a-qualified-type': {}}, 'invalid qualified type identity'),
+    ('types', {TYPE: {'view_type': 'CurveReceiver'}}, 'view_type and bind'),
+    ('types', {TYPE: {'members': {}}}, 'invalid fields'),
 ])
 def test_invalid_manifest_is_distinct_from_missing(declaration, field, value, error):
     resource, document = declaration
@@ -123,37 +106,14 @@ def test_duplicate_fields_are_rejected(declaration):
         read_provider_manifest(PROVIDER, ABI)
 
 
-@pytest.mark.parametrize(('changes', 'error'), [
-    ({'owner_field': 'owner.value'}, 'invalid numeric table declaration'),
-    ({'methods': {'rate_at': {'signature': 'previous_f64', 'read': 'read', 'prepare': 'prime'}}},
-     'invalid fields'),
-])
-def test_invalid_numeric_table_declaration(declaration, changes, error):
+def test_binding_on_an_exact_owner_without_a_view(declaration):
     resource, document = declaration
-    document['types'][TYPE]['numeric_table'] = {
-        'owner_field': 'owner', 'ready': 'ready',
-        'methods': {'rate_at': {'signature': 'lookup_f64', 'read': 'read', 'prepare': 'prime'}},
-        **changes,
-    }
-    resource.write_text(json.dumps(document), encoding='utf-8')
-    with pytest.raises(ValueError, match=error):
-        read_provider_manifest(PROVIDER, ABI)
-
-
-def test_grouped_capability_on_an_exact_owner_without_a_view(declaration):
-    resource, document = declaration
-    grouped = {'slice_method': 'choose', 'index_field': 'keys', 'lookup_method': 'price',
-               'probe': 'probe_tariff', 'read': 'read_tariff'}
-    document['types'][TYPE] = {'members': {}, 'grouped_table': grouped}
+    document['types'][TYPE] = {}
     resource.write_text(json.dumps(document), encoding='utf-8')
     owner = type('Curve', (), {'__modelx_cython_type__': (1, PROVIDER, ABI, TYPE)})
 
-    assert owner_provider_binding(owner).declaration.grouped_table == GroupedTable(**grouped)
+    assert owner_provider_binding(owner).declaration.view_type is None
     assert owner_provider_binding(type('Derived', (owner,), {})) is None
-    grouped['bound_probe'] = 'probe_owned'
-    resource.write_text(json.dumps(document), encoding='utf-8')
-    with pytest.raises(ValueError, match='invalid grouped table declaration'):
-        owner_provider_binding(owner)
 
 
 def test_broken_package_dependency_is_reported(declaration):

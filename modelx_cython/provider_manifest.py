@@ -11,61 +11,6 @@ from .helpers import read_resource, valid_identifier
 
 
 @dataclass(frozen=True)
-class ProviderMember:
-    signature: str
-    native: str
-
-
-@dataclass(frozen=True)
-class NumericMethod:
-    signature: str
-    read: str
-    prepare: str
-    read_integer: Optional[str] = None
-    read_object: Optional[str] = None
-    read_text: Optional[str] = None
-
-
-@dataclass(frozen=True)
-class NumericBounds:
-    first: str
-    last: str
-    index: str
-    index_max: str
-    bounded: str
-    clamped: str
-
-
-@dataclass(frozen=True)
-class NumericTable:
-    owner_field: str
-    ready: str
-    methods: Mapping[str, NumericMethod]
-    bounds: Optional[NumericBounds] = None
-
-
-@dataclass(frozen=True)
-class NumericRecord:
-    lookup: str
-    read_field: str
-    read_cast: str
-    field_ready: str
-    cast_ready: str
-    bound_read: str
-
-
-@dataclass(frozen=True)
-class GroupedTable:
-    slice_method: str
-    index_field: str
-    lookup_method: str
-    probe: str
-    read: str
-    bound_probe: Optional[str] = None
-    bound_read: Optional[str] = None
-
-
-@dataclass(frozen=True)
 class TypedHandle:
     """M1 typed handle of a provider type: the cdef class and the function that builds it."""
     type: str
@@ -76,12 +21,8 @@ class TypedHandle:
 class ProviderType:
     view_type: Optional[str]
     bind: Optional[str]
-    members: Mapping[str, ProviderMember]
     admission: str
     bind_cell: bool
-    numeric_table: Optional[NumericTable]
-    numeric_record: Optional[NumericRecord]
-    grouped_table: Optional[GroupedTable] = None
     handle: Optional[TypedHandle] = None
 
 
@@ -172,36 +113,11 @@ def _read_symbols(cls, value, label, required, optional=()):
     return cls(**value)
 
 
-def _read_numeric_table(type_id, declaration):
-    label = f'{type_id}.numeric_table'
-    _require_fields(declaration, label, ('owner_field', 'ready', 'methods'), ('bounds',))
-    owner_field, ready, methods = (declaration[name] for name in ('owner_field', 'ready', 'methods'))
-    if not (valid_identifier(owner_field) and valid_identifier(ready) and isinstance(methods, dict) and methods):
-        raise ValueError(f'invalid numeric table declaration for {type_id}')
-    entries = {}
-    for name, method in methods.items():
-        signature = method.get('signature') if isinstance(method, dict) else None
-        if signature not in ('lookup_f64', 'previous_f64') or not valid_identifier(name):
-            raise ValueError(f'invalid numeric method signature for {label}.{name}')
-        fields = ('read', 'prepare')
-        if signature == 'previous_f64':
-            fields += ('read_integer', 'read_object')
-        optional = ('read_text',) if signature == 'lookup_f64' else ()
-        entries[name] = _read_symbols(NumericMethod, method, f'{label}.{name}',
-                                      ('signature', *fields), optional)
-    bounds = None
-    if 'bounds' in declaration:
-        fields = ('first', 'last', 'index', 'index_max', 'bounded', 'clamped')
-        bounds = _read_symbols(NumericBounds, declaration['bounds'], f'{label}.bounds', fields)
-    return NumericTable(owner_field, ready, MappingProxyType(entries), bounds)
-
-
 def _read_type(type_id, declaration):
     if not _qualified_identifier(type_id):
         raise ValueError(f'invalid qualified type identity {type_id!r}')
     _require_fields(declaration, type_id, (),
-                    ('view_type', 'bind', 'admission', 'bind_cell', 'members',
-                     'numeric_table', 'numeric_record', 'grouped_table', 'handle'))
+                    ('view_type', 'bind', 'admission', 'bind_cell', 'handle'))
     view_type = declaration.get('view_type')
     bind = declaration.get('bind')
     if ('view_type' in declaration or 'bind' in declaration) and not (
@@ -214,40 +130,11 @@ def _read_type(type_id, declaration):
         raise ValueError(f'invalid view admission or bind_cell declaration for {type_id}')
     if view_type is None and (bind_cell or admission != 'observed'):
         raise ValueError(f'{type_id} cannot configure binding without a view_type')
-    numeric_table = None
-    if 'numeric_table' in declaration:
-        if view_type is None:
-            raise ValueError(f'{type_id} cannot configure numeric_table without a view_type')
-        numeric_table = _read_numeric_table(type_id, declaration['numeric_table'])
-    numeric_record = None
-    if 'numeric_record' in declaration:
-        fields = ('lookup', 'read_field', 'read_cast', 'field_ready', 'cast_ready', 'bound_read')
-        numeric_record = _read_symbols(NumericRecord, declaration['numeric_record'],
-                                       f'{type_id}.numeric_record', fields)
-    grouped_table = None
-    if 'grouped_table' in declaration:
-        grouped = declaration['grouped_table']
-        grouped_table = _read_symbols(
-            GroupedTable, grouped, f'{type_id}.grouped_table',
-            ('slice_method', 'index_field', 'lookup_method', 'probe', 'read'), ('bound_probe', 'bound_read'))
-        if ('bound_probe' in grouped) != ('bound_read' in grouped):
-            raise ValueError(f'invalid grouped table declaration for {type_id}')
-
     handle = None
     if 'handle' in declaration:
         handle = _read_symbols(TypedHandle, declaration['handle'], f'{type_id}.handle', ('type', 'build'))
 
-    declared_members = declaration.get('members', {})
-    if not isinstance(declared_members, dict):
-        raise ValueError(f'{type_id} members must be an object')
-    members = {}
-    for name, member in declared_members.items():
-        _require_fields(member, f'{type_id}.{name}', ('signature', 'native'))
-        if not all(valid_identifier(part) for part in (name, member['signature'], member['native'])):
-            raise ValueError(f'invalid member identity or symbol for {type_id}.{name}')
-        members[name] = ProviderMember(member['signature'], member['native'])
-    return ProviderType(view_type, bind, MappingProxyType(members), admission, bind_cell,
-                        numeric_table, numeric_record, grouped_table, handle)
+    return ProviderType(view_type, bind, admission, bind_cell, handle)
 
 
 def read_provider_manifest(provider: str, expected_abi: str) -> Optional[ProviderManifest]:
