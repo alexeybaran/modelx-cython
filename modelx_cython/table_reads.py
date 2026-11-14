@@ -699,6 +699,8 @@ class _Lowering(cst.CSTTransformer):
         self._alive = []            # the emitted nodes of _kinds: their ids are not reused
         self._hoisted = {}          # receiver code -> [name, receiver, kind, first top index]
         self._held_locals = {}      # local TableRef name of a held handle -> its field (D75)
+        self._held_table_locals = {}  # table local -> (held field, top index) or None (diag-mt)
+        self._held_resolves = []      # (top index, resolve statements) of held table locals
         self._declare = []          # (name, type) declared at the top of the formula
         self._companions = {}
         self._rows = {}
@@ -1062,6 +1064,33 @@ class _Lowering(cst.CSTTransformer):
             fields[code] = (f'_mx_th_{len(fields)}', self.o.module)
         return fields[code]
 
+    def held_local(self, name):
+        """The held field of a table local, or None (diag-mt).
+
+        A table local every binding of which is the same zero-argument cached table Cell
+        (``tbl = self.data.surr_table()``) holds that Cell's handle as the inline receiver does
+        (D71): its companion is a borrowed ``TableRef`` of the per-instance field, resolved on the
+        first assignment after a reset. Per step no handle is looked up and no reference count
+        of the shared table or handle is touched; literal column reads through it hold their index
+        (D75). Any other table local keeps an owned ``TableHandle`` companion."""
+        if name in self._held_table_locals:
+            return self._held_table_locals[name]
+        found = None
+        values = self.f.values.get(name, ())
+        if (len(values) == 1 and name not in self.escaped and self._root is not None
+                and not isinstance(values[0], cst.Name) and self.o.table_cell(values[0]) is not None):
+            # the one binding is a top-level statement of the formula, so the handle is resolved
+            # right before it, exactly where the Cell was called
+            top = next((index for index, statement in enumerate(getattr(self._root.body, 'body', ()))
+                        if isinstance(statement, cst.SimpleStatementLine) and len(statement.body) == 1
+                        and isinstance(statement.body[0], (cst.Assign, cst.AnnAssign))
+                        and statement.body[0].value is values[0]), None)
+            field = self.held_field(values[0]) if top is not None else None
+            if field is not None:
+                found = (field[0], top)
+        self._held_table_locals[name] = found
+        return found
+
     def table_ref(self, original):
         """_Ref of an original table expression (with a handle expression), else None."""
         schema = self.o.table_cell(original)
@@ -1070,6 +1099,13 @@ class _Lowering(cst.CSTTransformer):
         if isinstance(original, cst.Name):
             found = self.local(original.value)
             if found is not None and found[0] == 'table':
+                field = self.held_local(original.value)
+                if field is not None:
+                    ref = self.companion(original.value, 'TableRef')
+                    self._held_locals[ref] = field[0]       # held columns (D75) through it
+                    handle = _call(cst.Attribute(cst.Name('_mx_cy'), cst.Name('cast')),
+                                   cst.parse_expression(self.mtype('TableHandle')), cst.Name(ref))
+                    return _Ref('table', found[1], handle, (original,))
                 return _Ref('table', found[1], cst.Name(self.companion(original.value)), (original,))
             if found is not None and found[0] == 'sub':
                 return _Ref('table', found[1], self.sub_handle(original.value), (original,))
@@ -1841,7 +1877,18 @@ class _Lowering(cst.CSTTransformer):
             return updated
         kind = found[0]
         statements = []
-        if kind in ('table', 'record'):
+        held = self.held_local(name) if kind == 'table' else None
+        if held is not None:
+            # diag-mt: a table local bound to a held zero-argument table Cell (see held_local)
+            field, top = held
+            handle = self.companion(name, 'TableRef')
+            self._held_resolves.append((top, cst.parse_module(
+                f'if self.{field} is None:\n'
+                f'    self.{field} = {self.o.module}.table_handle({_code(new_value)})\n').body))
+            statements.append(cst.parse_statement(
+                f'{handle} = _mx_cy.cast({self.mtype("TableRef")}, self.{field})\n').body[0])
+            self.changed = True
+        elif kind in ('table', 'record'):
             type_name, build, prefix = (('TableHandle', 'table_handle', '_mx_h_') if kind == 'table'
                                         else ('RecordHandle', 'record_handle', '_mx_r_'))
             handle = self.companion(name, type_name, prefix)
@@ -1937,6 +1984,8 @@ class _Lowering(cst.CSTTransformer):
                 target=cst.Name(name), annotation=cst.Annotation(cst.parse_expression(self.mtype(type_name))),
                 value=_call(self.m(build), receiver))])
             inserts.setdefault(top, []).append(line)
+        for top, block in self._held_resolves:
+            inserts.setdefault(top, []).extend(block)
         declarations = [cst.SimpleStatementLine([cst.AnnAssign(
             target=cst.Name(name), annotation=cst.Annotation(cst.parse_expression(type_)), value=None)])
             for name, type_ in self._declare]
