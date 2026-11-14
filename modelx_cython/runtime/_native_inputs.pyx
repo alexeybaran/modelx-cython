@@ -191,12 +191,18 @@ cdef object contains(object function, object table, object key):
 
 
 cdef object key_count(object function, object table):
+    if (function is _key_count and type(table) is NativeTable
+            and type((<NativeTable>table)._owner) is Table):      # bound by observed admission (D69)
+        table = (<NativeTable>table)._owner
     if function is _key_count and type(table) is Table:
         return len(table._keys)
     return function(table)
 
 
 cdef object key_at(object function, object table, object index):
+    if (function is _key_at and type(table) is NativeTable
+            and type((<NativeTable>table)._owner) is Table):         # bound by observed admission (D69)
+        table = (<NativeTable>table)._owner
     if function is _key_at and type(table) is Table:
         if index < 0:
             raise IndexError(index)

@@ -14,6 +14,21 @@ cdef class KeySpan:
     pass
 
 
+cdef object _bound_owner(object source):
+    """The helper Table under a NativeTable bound by observed admission (D69), else ``source``.
+
+    This provider cannot cimport the NativeTable class of ``_native_inputs``; a bound table
+    names its helper owner through ``__modelx_table_owner__`` (ABI 1), the same unwrapping
+    ``modelx_helpers`` does when the call falls back to it.
+    """
+    owner = getattr(type(source), '__modelx_table_owner__', None)
+    if owner is not None and getattr(type(source), '__modelx_table_owner_abi__', None) is not None:
+        unwrapped = owner(source)
+        if type(unwrapped) is Table:
+            return unwrapped
+    return source
+
+
 cdef tuple _owned_keys(object source):
     if type(source) is Table:
         return source._keys
@@ -30,6 +45,8 @@ cdef dict _owned_cache(object source):
 
 cdef object keys(object function, tuple keywords, object table):
     if function is _keys:
+        if type(table) is not Table and type(table) is not Record:
+            table = _bound_owner(table)
         if type(table) is Table:
             return table._keys
         if type(table) is Record:
@@ -41,6 +58,8 @@ cdef KeySpan keys_span(object function, object table):
     cdef KeySpan span
     if function is not _keys:
         return None
+    if type(table) is not Table and type(table) is not Record:
+        table = _bound_owner(table)
     values = _owned_keys(table)
     if values is None:
         return None
@@ -80,6 +99,8 @@ cdef FloatKeySpan keys_float_span(object function, object table):
     cdef FloatKeySpan span
     if function is not _keys:
         return None
+    if type(table) is not Table and type(table) is not Record:
+        table = _bound_owner(table)
     values = _owned_keys(table)
     if values is None:
         return None
@@ -120,6 +141,8 @@ cdef StrKeySpan keys_str_span(object function, object table):
     cdef StrKeySpan span
     if function is not _keys:
         return None
+    if type(table) is not Table and type(table) is not Record:
+        table = _bound_owner(table)
     values = _owned_keys(table)
     if values is None:
         return None
