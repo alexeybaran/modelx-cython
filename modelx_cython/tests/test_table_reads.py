@@ -1081,3 +1081,53 @@ def test_held_handle_of_a_zero_argument_table_cell():
     # with the spec key off the handle is resolved per call, as before
     text2, _, _ = lower(base_model(), source, held=False)
     assert '_mx_th_' not in text2 and f'_mx_h0: {M}.TableHandle = {M}.table_handle(self.mort_table())' in text2
+
+
+def test_table_local_bound_to_a_table_cell_is_held():
+    """diag-mt: a table local whose one binding is a top-level call of a zero-argument table Cell
+    holds that Cell's handle as an inline receiver does (D71): resolved once per instance before
+    the binding, read borrowed, its literal column held (D75); values are unchanged."""
+    source = ('def _f_x(self, t):\n'
+              '    tbl = self.mort_table()\n'
+              '    a = self.age(t)\n'
+              '    return float(tbl.loc[a, "mort_rate"])\n')
+    text, reads, _ = lower(base_model(), source, held=True)
+    assert body(text) == (
+        f'_mx_h_tbl: {M}.TableRef\n'
+        'if self._mx_th_0 is None:\n'
+        f'    self._mx_th_0 = {M}.table_handle(self.mort_table())\n'
+        f'_mx_h_tbl = _mx_cy.cast({M}.TableRef, self._mx_th_0)\n'
+        'a = self.age(t)\n'
+        f'return _mx_cy.cast({M}.TableHandle, _mx_h_tbl).f64(_mx_cy.cast({M}.TableHandle, _mx_h_tbl).row_1(_mx_cy.cast(_mx_cy.longlong, a)), '
+        f"{M}.held_col(_mx_cy.address(self._mx_tc_0), _mx_h_tbl, 'mort_rate'))"), text
+    assert reads.typed == 1 and not reads.declined
+    receiver = base_model().receiver()
+    receiver._mx_th_0 = None
+    receiver._mx_tc_0 = 0
+    for t in (0, 1, 2, 40, 500):   # 500: no such row, the same KeyError
+        assert _run(text, receiver, (t,), RUNTIME) == _run(source, receiver, (t,), {})
+    # with the spec key off the local keeps an owned handle per call, as before
+    text2, _, _ = lower(base_model(), source, held=False)
+    assert '_mx_th_' not in text2 and f'_mx_h_tbl = {M}.table_handle(self.mort_table())' in text2
+
+
+def test_table_local_not_held_unless_one_top_level_binding():
+    """diag-mt: a table local bound inside a block, or more than once, keeps its owned handle
+    (resolving it before the enclosing statement would call the Cell where the formula does not)."""
+    nested = ('def _f_x(self, t):\n'
+              '    if t >= 0:\n'
+              '        tbl = self.mort_table()\n'
+              '        return float(tbl.loc[self.age(t), "mort_rate"])\n'
+              '    return 0.0\n')
+    twice = ('def _f_x(self, t):\n'
+             '    tbl = self.mort_table()\n'
+             '    x = float(tbl.loc[self.age(t), "mort_rate"])\n'
+             '    tbl = self.mort_table()\n'
+             '    return x + float(tbl.loc[self.age(t), "mort_rate"])\n')
+    for source in (nested, twice):
+        text, reads, _ = lower(base_model(), source, held=True)
+        assert f'_mx_h_tbl: {M}.TableHandle' in text and '_mx_h_tbl = _mx_cy.cast' not in text, text
+        assert reads.typed >= 1
+        receiver = base_model().receiver()
+        for t in (0, 1, 40):
+            assert _run(text, receiver, (t,), RUNTIME) == _run(source, receiver, (t,), {})
