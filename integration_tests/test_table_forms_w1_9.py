@@ -178,4 +178,7 @@ def test_w1_9_forms_live_exported_compiled(tmp_path):
         assert fragment in text, fragment
     report = '\n'.join(p.read_text(encoding='utf-8') for p in (tmp_path / 'exported_cy').rglob('_mx_admission.json'))
     entries = [item for cell in json.loads(report).values() for item in cell.get('table_reads_untyped') or ()]
-    assert not entries, entries
+    # the pandas-receiver report (diag-uc-fr 0003, D55) lists the one-off use of each source
+    # DataFrame Reference in the Data cells that build the tables; no table read is left
+    assert all(item['reason'].startswith('receiver is a pandas') and not item['per_step']
+               for item in entries), entries
