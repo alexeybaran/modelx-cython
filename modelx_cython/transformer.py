@@ -741,10 +741,32 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
     def _table_reads(self, node, cls_info, cells):
         """M1 hook (W1.1): lower table reads (W1.3, ``table_reads.TableReads``) and report the
         rest in the admission report, with a build warning for each per-step untyped read.
+        auto-tables (D104): every use of an admitted plain pandas table is listed with its class
+        (``cells.table_admission_reads``, ``auto_tables.classify``).
 
         Runs once per formula before the round-2 recognisers. Returns ``node`` itself when
         nothing is lowered.
         """
+        sites = self._admitted_sites(node, cls_info)
+        self._lowered = frozenset()
+        result = self._table_reads_lowered(node, cls_info, cells)
+        self._classify_admitted(cells, sites, self._lowered)
+        return result
+
+    def _admitted_sites(self, node, cls_info):
+        admitted = getattr(self._resolver, 'admitted_tables', None) if self._resolver is not None else None
+        if not admitted:
+            return []
+        from modelx_cython.admission import table_read_sites
+        return table_read_sites(node, self._resolver, cls_info, receivers=admitted)
+
+    @staticmethod
+    def _classify_admitted(cells, sites, lowered):
+        if sites:
+            from modelx_cython.auto_tables import classify
+            cells.table_admission_reads = classify(cells, sites, lowered, cells.pandas_fallbacks)
+
+    def _table_reads_lowered(self, node, cls_info, cells):
         cells.table_reads_typed, cells.table_reads_untyped, cells.table_reads_keys = 0, [], []
         if self._resolver is None:
             return node
@@ -761,6 +783,7 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
         lowering = TableReads(self._resolver, cls_info, cells, self.helper_providers,
                               self.module.spec.policy, sites)
         node = lowering.lower(node)
+        self._lowered = frozenset(lowering.lowered)
         per_step = cells.has_args()
         cells.table_reads_typed = lowering.typed
         cells.table_reads_keys = list(lowering.keys)
@@ -785,6 +808,7 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
 
     def _table_reads_kept(self, node, cls_info, cells, why):
         """List the table reads of a formula kept as a Python method (no lowering)."""
+        self._classify_admitted(cells, self._admitted_sites(node, cls_info), frozenset())
         cells.table_reads_typed, cells.table_reads_untyped, cells.table_reads_keys = 0, [], []
         if self._resolver is None or not (self._resolver.table_results or cls_info.refs
                                           or getattr(self._resolver, 'pandas_results', None)):

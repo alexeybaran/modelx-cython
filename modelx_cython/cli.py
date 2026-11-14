@@ -143,7 +143,11 @@ def run_sample(model_path: pathlib.Path, sample_path: str, new_model_name: str =
             logger=logger,
             max_typed_dict_size=0,
             code_filter= MxCodeFilter()):
-            runpy.run_path(sample_path, run_name="__main__")
+            from .auto_tables import sample_admission
+            with sample_admission(module) as admission:     # auto-tables (D104)
+                admission.tracer = sys.getprofile()
+                logger.admission = admission
+                runpy.run_path(sample_path, run_name="__main__")
 
     finally:
         assert sys.path.pop(0) == module_path
@@ -154,6 +158,29 @@ def run_sample(model_path: pathlib.Path, sample_path: str, new_model_name: str =
 class HandlerError(Exception):
     """Error type reserved for failures in the command-line handlers."""
     pass
+
+
+def _table_admission(logger, report, model_path, policy):
+    """auto-tables (D104): write ``_mx_table_admission.json``, log one warning per not admitted
+    table, per table built more than once and per class C read; stop under ``strict_tables``."""
+    from .auto_tables import per_step_warnings
+    admission = getattr(logger, 'admission', None)
+    if admission is None:
+        return
+    summary = admission.summary()
+    warnings = admission.warnings()
+    for name, entry in report.items():
+        warnings += per_step_warnings(name, entry.get('table_admission') or {})
+    summary['warnings'] = warnings
+    (model_path / '_mx_table_admission.json').write_text(json.dumps(summary, indent=2), encoding='utf-8')
+    for text in warnings:
+        _logger.warning('table admission: %s', text)
+    if summary['admitted']:
+        _logger.info('table admission: %d plain pandas tables admitted', len(summary['admitted']))
+    strict = summary['not_admitted'] or any(' runs pandas on an admitted table on every call' in w for w in warnings)
+    if policy.strict_tables and strict:
+        raise HandlerError('strict_tables: ' + '; '.join(
+            w for w in warnings if 'not admitted' in w or 'on every call' in w))
 
 
 @dataclasses.dataclass
@@ -420,8 +447,9 @@ def main_handler(args: argparse.Namespace, stdout: IO[str], stderr: IO[str]) -> 
         create_setup(model_name, modules=modules, setup_file=setup_file, source_root=work_dir,
                      source_modules=(runtime.syntax, *(state.syntax for state in translated_modules.values())),
                      cell_sources=cell_sources, providers=provider_sources)
-        (model_path / '_mx_admission.json').write_text(
-            json.dumps(describe(module_infos), indent=2), encoding='utf-8')
+        report = describe(module_infos)
+        (model_path / '_mx_admission.json').write_text(json.dumps(report, indent=2), encoding='utf-8')
+        _table_admission(logger, report, model_path, policy)
 
     if args.translate_only:
         return 0

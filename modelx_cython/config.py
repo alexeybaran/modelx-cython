@@ -22,6 +22,7 @@ cells return type or declaring maximum cells parameter sizes.
 """
 
 from typing import Union, Sequence, Mapping
+import os
 from dataclasses import dataclass
 from modelx_cython.consts import (
     FILE_PREF,
@@ -51,6 +52,9 @@ class CompilerPolicy:
     # diag-4w (D71): the handle of a zero-argument table Cell is held per instance and read
     # borrowed (no Cell call, no reference count per read); false resolves it per call.
     held_table_handles: bool = True
+    # auto-tables (D104): a plain pandas table that is not admitted, or pandas run on an admitted
+    # table in a per-step cell (class C), stops the build instead of a warning.
+    strict_tables: bool = False
 
     @classmethod
     def resolve(cls, data):
@@ -65,7 +69,8 @@ class CompilerPolicy:
             native_math=data.get('native_math', True),
             infer_types=data.get('infer_types', True),
             typed_table_reads=data.get('typed_table_reads', True),
-            held_table_handles=data.get('held_table_handles', True))
+            held_table_handles=data.get('held_table_handles', True),
+            strict_tables=data.get('strict_tables', os.environ.get('MX_CY_STRICT_TABLES') == '1'))
         for name, value in values.items():
             if name not in ('parallel_workers', 'native_cache_hits') and type(value) is not bool:
                 raise ValueError(f'{name} must be a boolean')
@@ -172,6 +177,10 @@ class TransSpec:
     local bound once to it) to a read of a record handle held per instance and a held field
     slot; ``int()``/``float()`` of the read convert natively. Other record reads stay Python
     calls and are reported.
+    ``"strict_tables"`` (default false, or true when the environment sets
+    ``MX_CY_STRICT_TABLES=1``; auto-tables, D104): a zero-argument cell returning a pandas
+    DataFrame that is not admitted as a table, or pandas run on an admitted table in a cell with
+    arguments (class C), stops the build with an error instead of a warning.
     ``"held_table_handles"`` (default true): the handle of a zero-argument table Cell
     read by a lowered read is resolved once per instance into a field (reset with the
     per-policy caches) and used borrowed; false resolves it on every call.
