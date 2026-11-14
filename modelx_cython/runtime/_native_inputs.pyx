@@ -1734,6 +1734,12 @@ Table.register(NativeTable)
 
 cdef NativeTable bind_native_table(object value, str cell):
     """Bind a Table or keep a local wrapper already owned by another Cell."""
+    if type(value) is NativeTable:
+        return <NativeTable>value
+    return table_from_value(value, cell)
+
+
+cdef NativeTable _bind_owned(object value, str cell):
     value_type = type(value)
     if value_type is NativeTable:
         return <NativeTable>value
@@ -1749,6 +1755,61 @@ cdef NativeTable bind_native_table(object value, str cell):
                 return NativeTable(value)
     raise TypeError(f'{cell} expected a Table result, got {value_type.__name__}. '
                     "Rebuild with a representative sample or set return_type='object'.")
+
+
+def _schema_mismatch(found, expected):
+    """Why a table of schema ``found`` cannot replace one the compiled code was built for, or None.
+
+    The native reads depend on the key levels (count and kind) and on the kinds of the columns
+    traced at build time; rows, key range, storage form and extra columns may differ.
+    """
+    keys, want = tuple(found.get('keys') or ()), tuple(expected.get('keys') or ())
+    if keys != want:
+        return (f'its key levels have kinds {keys!r} where the compiled model was built for '
+                f'{want!r}; the index must have the same levels with the same kinds')
+    columns = found.get('columns') or {}
+    for name, kind in (expected.get('columns') or {}).items():
+        if name not in columns:
+            return (f'it has no column {name!r}; the compiled model was built for the columns '
+                    f'{sorted(expected.get("columns") or ())!r} (extra columns are allowed)')
+        if columns[name] != kind:
+            return (f'its column {name!r} holds {columns[name]!r} values where the compiled model '
+                    f'reads {kind!r}')
+    return None
+
+
+cpdef NativeTable table_from_value(object value, str cell, object schema=None):
+    """The one conversion of a table cell's value into the internal, natively read table.
+
+    Used by a compiled table cell when its formula result is first bound and by assignment
+    (``cell[()] = value``, ``space.cell = value``; api-tables, D101). ``value`` may be a helper
+    Table (or a view owned by one), the read-only DataFrame a compiled table cell returns to
+    Python (its own table is reused), or a pandas DataFrame, which is converted with
+    ``modelx_helpers.pdn.table`` and so meets the helper's load-time conditions (unique keys,
+    string column names, ...): its ValueError is re-raised naming the cell. With ``schema`` (the
+    build-time ``table_schema`` of the cell), a table that does not fit the compiled reads
+    raises ValueError naming the cell and the reason; rows, key range and extra columns may
+    differ. A key outside a cell's declared or traced argument range still raises the usual
+    IndexError when that cell is called.
+    """
+    source = getattr(type(value), '__modelx_table_cell_source__', None)
+    if source is not None:
+        value = source(value)
+    elif not isinstance(value, Table) and type(value).__module__.split('.')[0] == 'pandas':
+        from modelx_helpers import pdn
+        if not hasattr(value, 'columns'):
+            raise TypeError(f'{cell}: a table cell takes a DataFrame or a helper Table, '
+                            f'got {type(value).__name__}')
+        try:
+            value = pdn.table(value)
+        except ValueError as error:
+            raise ValueError(f'{cell}: the DataFrame cannot be made the internal table: {error}') from error
+    table = _bind_owned(value, cell)
+    if schema is not None:
+        why = _schema_mismatch(_immutable_inputs.table_schema(_semantic_owner(table._owner)), schema)
+        if why is not None:
+            raise ValueError(f'{cell}: the assigned table does not fit the compiled model: {why}')
+    return table
 
 
 cdef double table_field_float(LookupContext context, NativeTable table, object key,

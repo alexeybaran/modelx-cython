@@ -280,6 +280,7 @@ cdef class NativeTable:
     cdef readonly TableHandle handle    # D25 Q8: embedded; None until W1.2 builds it
     cdef object _owner, _index_view, _numeric_view, _indexed_view, _single_label, _input_keys
     cdef object _contiguous_view
+    cdef public object _mx_python_frame   # api-tables (D101): the read-only DataFrame given to Python callers
     cdef const double* _input_values
     cdef const unsigned char* _input_numeric
     cdef const long long* _input_positions
@@ -292,6 +293,8 @@ cdef class NativeTable:
     cpdef object slice(self, object key)
 
 cdef NativeTable bind_native_table(object value, str cell)
+cdef NativeTable _bind_owned(object value, str cell)
+cpdef NativeTable table_from_value(object value, str cell, object schema=*)
 
 cdef bint try_clamped_table_float(NativeTable, LookupContext, bint lower, object namespace, long long key,
                                   object column, double* result) except -1
