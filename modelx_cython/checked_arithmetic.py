@@ -457,6 +457,8 @@ class CheckedArithmetic:
                 reads[node.value].add(node)
         replacements = {}
         counters = set()
+        # D72: range targets examined here and not proven are left to Python on purpose
+        self.cell.python_range_locals = {loop.target.value for _, loop, _ in loops}
         for position, loop, bounds in loops:
             start, stop = bounds if len(bounds) == 2 else (None, bounds[0])
             prior = self._integer_locals(body[:position], facts.stores)
@@ -489,11 +491,15 @@ class CheckedArithmetic:
                 replacements[start] = cst.parse_expression(
                     f'({origin} + {offset} if {origin} <= {limit - offset} else {limit})')
             replacements[loop] = cst.parse_statement(f'{counter}: _mx_cy.longlong\n')
+            self.cell.python_range_locals.discard(counter)
             if start is None:
                 counters.add(counter)
         if not replacements:
             return body
         self.cell.signed_range_counters = frozenset(counters)
+        # a target typed by one loop is a C integer everywhere in the formula
+        self.cell.python_range_locals -= {line.target.value for line in replacements
+                                          if isinstance(line, cst.For)}
 
         class NativeRange(cst.CSTTransformer):
             def on_leave(inner, before, after):

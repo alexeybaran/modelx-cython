@@ -485,6 +485,7 @@ def _type_signed_locals(body, guard, facts, parameters):
         values = _signed_local_assignments(body, name, operands, guard, facts)
         if not values:
             guard.signed_names.remove(name)
+            guard.python_locals.add(name)       # D72: examined and left to Python
             continue
         declarations.append(cst.SimpleStatementLine((cst.AnnAssign(
             cst.Name(name), cst.Annotation(_INTEGER_ANNOTATION)),)))
@@ -531,10 +532,12 @@ def _guard_result(node, cell, cls, resolver, cells_kinds, ref_kinds, signatures,
                            error)
     parameters = tuple(parameter.name.value for parameter in
                        (*node.params.posonly_params, *node.params.params, *node.params.kwonly_params))
+    guard.python_locals = set()
     if divisibility:
         body, declarations = _signed_divisibility(node.body, facts, guard, parameters)
     else:
         body, declarations = _type_signed_locals(node.body, guard, facts, parameters)
+    cell.python_int_locals = set(getattr(cell, 'python_int_locals', ())) | guard.python_locals
     body = body.visit(guard)
     if declarations:
         doc_end = 1 if node.get_docstring() is not None else 0
@@ -582,7 +585,48 @@ def _signed_signatures(state):
     return fields, functions, methods
 
 
-def guard_integer_boundaries(state, module_info, resolver, cells_kinds, ref_kinds, cells):
+def _python_locals(node, cell):
+    """D72: declare ``object`` the locals the integer passes leave to Python on purpose.
+
+    With ``infer_types`` (W1.5 0005) Cython infers a C type for every untyped local, so a local
+    the compiler deliberately kept as a Python int would wrap, raise OverflowError where Python
+    is exact, or lose its identity (``x is saved[0]`` on a re-boxed int). Declared ``object``:
+    every local compared with ``is``/``is not``, every ``range`` target the range pass examined
+    and did not type, and every local the signed-local pass examined and did not prove. Locals
+    with an annotation of their own (the passes' ``long long`` declarations) are left alone.
+    """
+    body = node.body
+    # the overflow handler the guard itself wraps around the body is an except clause; any
+    # other binding construct leaves the formula as it is
+    effects = (cst.Global, cst.Nonlocal, cst.Import, cst.ImportFrom, cst.Del, cst.NamedExpr,
+               cst.FunctionDef, cst.ClassDef, cst.Lambda)
+    if not isinstance(body, cst.IndentedBlock) or any(
+            isinstance(part, effects) or isinstance(part, getattr(cst, 'Match', ()))
+            for part in lexical_nodes(body.body)):
+        return node
+    facts = CstFacts(body.body)
+    parameters = {parameter.name.value for parameter in
+                  (*node.params.posonly_params, *node.params.params, *node.params.kwonly_params)}
+    annotated = {statement.target.value for statement in lexical_nodes(body.body)
+                 if isinstance(statement, cst.AnnAssign) and isinstance(statement.target, cst.Name)}
+    names = set(getattr(cell, 'python_int_locals', ())) | set(getattr(cell, 'python_range_locals', ()))
+    for part in lexical_nodes(body.body):
+        if isinstance(part, cst.Comparison) and any(
+                isinstance(item.operator, (cst.Is, cst.IsNot)) for item in part.comparisons):
+            names.update(item.value for item in walk(part) if isinstance(item, cst.Name))
+    names = sorted(name for name in names
+                   if facts.stores[name] and name not in parameters and name not in annotated)
+    if not names:
+        return node
+    declarations = tuple(cst.SimpleStatementLine((cst.AnnAssign(
+        cst.Name(name), cst.Annotation(cst.Name('object'))),)) for name in names)
+    doc_end = 1 if node.get_docstring() is not None else 0
+    cell.python_object_locals = tuple(names)
+    return node.with_changes(body=body.with_changes(body=(*body.body[:doc_end], *declarations,
+                                                          *body.body[doc_end:])))
+
+
+def guard_integer_boundaries(state, module_info, resolver, cells_kinds, ref_kinds, cells, infer_types=False):
     """Check formula results, arguments and ItemSpace keys after entry lowering."""
     entries = {name: params for name, cell in cells.items() if (params := integer_parameters(cell))}
     private_entries = {
@@ -618,6 +662,8 @@ def guard_integer_boundaries(state, module_info, resolver, cells_kinds, ref_kind
                         and cell.is_arrayable() else ())
                 node = _guard_result(node, cell, cls, resolver, cells_kinds, ref_kinds, signatures,
                                      argument_axes=axes)
+                if infer_types:
+                    node = _python_locals(node, cell)
                 changed = True
             classes.append(node)
             continue
@@ -629,8 +675,11 @@ def guard_integer_boundaries(state, module_info, resolver, cells_kinds, ref_kind
             name = method.name.value
             if name.startswith(FORMULA_PREF) and (formula := cls.cells.get(name[len(FORMULA_PREF):])):
                 method = _guard_calls(method, cls, formula, resolver, entries, cells, private_entries)
-                methods.append(_guard_result(method, formula, cls, resolver, cells_kinds, ref_kinds, signatures,
-                                             native_helpers.get((cls.name, name), ())))
+                method = _guard_result(method, formula, cls, resolver, cells_kinds, ref_kinds, signatures,
+                                       native_helpers.get((cls.name, name), ()))
+                if infer_types:
+                    method = _python_locals(method, formula)
+                methods.append(method)
                 changed = True
                 continue
             cell = cls.cells.get(name)
@@ -641,6 +690,8 @@ def guard_integer_boundaries(state, module_info, resolver, cells_kinds, ref_kind
             if cell is not None and not cell.has_formula_def:
                 method = _guard_calls(method, cls, cell, resolver, entries, cells, private_entries)
                 method = _guard_result(method, cell, cls, resolver, cells_kinds, ref_kinds, signatures)
+                if infer_types:
+                    method = _python_locals(method, cell)
                 changed = True
             methods.append(method)
         added, gates = _python_call_gate(cls, entries, state.names, call_gate)

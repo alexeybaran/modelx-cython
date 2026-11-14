@@ -409,7 +409,7 @@ def main_handler(args: argparse.Namespace, stdout: IO[str], stderr: IO[str]) -> 
         for u in units:
             state = guard_integer_boundaries(
                 translated_modules[u.fqname], u.module_info, resolver, cells_kinds, ref_kinds,
-                cells_by_name,
+                cells_by_name, infer_types=policy.infer_types,
             )
             translated_modules[u.fqname] = state
             u.abs_src_path.write_text(state.syntax.code, encoding='utf-8')
