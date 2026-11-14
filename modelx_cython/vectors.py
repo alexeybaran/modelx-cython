@@ -446,6 +446,7 @@ class VectorLowering(cst.CSTTransformer):
         self.bounds_hoisted, self.bounds_checked, self.powers = 0, 0, 0
         self.decls = []
         self.comp_scalars = []          # stack of {name: scalar kind} inside expanded loops
+        self.extreme_calls = {}          # diag-kr: min/max over a generator on vectors
         self.range_names = set()
         self.ref_scalars = {}
         self.param_scalars = {}         # D87: C-typed parameters, unless the formula rebinds them
@@ -940,6 +941,13 @@ class VectorLowering(cst.CSTTransformer):
             if _is_name(tgt_o) and self.env.get(tgt_o.value) in ('V', 'I'):
                 pre, value = self.destination(so.value, su.value, self.env[tgt_o.value])
                 return self.emit(updated, su.with_changes(value=value), pre)
+        if isinstance(so, (cst.Assign, cst.Return)) and id(getattr(so, 'value', None)) in self.extreme_calls:
+            name, elem = self.extreme_calls[id(so.value)]
+            pre, result = self.expand_extreme(so.value.args[0].value, su.value.args[0].value, name, elem)
+            su = su.with_changes(value=result)
+            if isinstance(so, cst.Return):
+                su = self.wrap_return(so, su, [])[1]
+            return self.emit(updated, su, pre)
         if isinstance(so, (cst.Assign, cst.Return, cst.AugAssign)) and id(getattr(so, 'value', None)) in self.sum_calls:
             pre, result = self.expand_sum(so.value.args[0].value, su.value.args[0].value)
             su = su.with_changes(value=result)
@@ -1112,6 +1120,32 @@ class VectorLowering(cst.CSTTransformer):
         pre.append(_stmt('\n'.join([head] + ['    ' + line for line in lines]) + '\n'))
         self.lowered += 1
         return pre, _expr(f'{ALIAS}.sum_result({CY_MOD}.address({s}))')
+
+    def expand_extreme(self, gen_o, gen_u, name, elem):
+        """diag-kr: ``min``/``max`` of a generator over vectors, as Python computes it: the first
+        element that passes the filters is the current extreme, a later one replaces it only when
+        ``element < current`` (``>`` for max), and an empty result raises ValueError."""
+        pre, head, body, renames, n, i = self.loop_head(gen_o.for_in, gen_u.for_in, 'm')
+        best, seen, value = self.temp('best'), self.temp('seen'), self.temp('item')
+        ctype = SCALARS['V' if elem == FLOAT else 'I']
+        self.declare(best, ctype)
+        self.declare(value, ctype)
+        self.declare(seen, f'{CY_MOD}.bint')
+        elt = _code(gen_u.elt.visit(_Rename(renames)))
+        op = '<' if name == 'min' else '>'
+        pre.append(_stmt(f'{seen} = False\n'))
+        pre.append(_stmt(f'{best} = 0\n'))
+        update = [f'{value} = {elt}', f'if not {seen} or {value} {op} {best}:',
+                  f'    {best} = {value}', f'    {seen} = True']
+        if gen_u.for_in.ifs:
+            cond = ' and '.join(f'({_code(c.test.visit(_Rename(renames)))})' for c in gen_u.for_in.ifs)
+            lines = body + [f'if {cond}:'] + ['    ' + line for line in update]
+        else:
+            lines = body + update
+        pre.append(_stmt('\n'.join([head] + ['    ' + line for line in lines]) + '\n'))
+        pre.append(_stmt(f'if not {seen}:\n    raise ValueError("{name}() iterable argument is empty")\n'))
+        self.lowered += 1
+        return pre, cst.Name(best)
 
     # ---------------------------------------------------------------- for statements
     def visit_For(self, node):
@@ -1431,21 +1465,28 @@ def lower(node, cls_info, cells, scope, counter, module, ref_kinds=None):
 
 
 def _statement_sums(body, lowering):
-    """``sum(<generator over vectors>)`` at statement level whose element is provably a float."""
+    """``sum(<generator over vectors>)`` at statement level whose element is provably a float;
+    diag-kr: also ``min``/``max`` of such a generator whose element is a float or an integer
+    (``lowering.extreme_calls``: id of the call -> its name)."""
     gens, calls = set(), set()
+    lowering.extreme_calls = {}
     for node in _walk(body):
         if isinstance(node, (cst.Assign, cst.Return, cst.AugAssign)) and getattr(node, 'value', None) is not None:
             value = node.value
-            if (isinstance(value, cst.Call) and _is_name(value.func, 'sum') and 'sum' in lowering.builtins
+            if (isinstance(value, cst.Call) and isinstance(value.func, cst.Name)
+                    and value.func.value in ('sum', 'min', 'max') and value.func.value in lowering.builtins
                     and _plain_args(value, 1, 1) and isinstance(value.args[0].value, cst.GeneratorExp)):
                 gen = value.args[0].value
                 if lowering.iter_vectors(gen.for_in.iter) and lowering.comp_ok(gen, ifs_ok=True):
                     lowering.comp_scalars.append(lowering.loop_scalars(gen.for_in))
                     elem = lowering.scalar(gen.elt)
                     lowering.comp_scalars.pop()
-                    if elem == FLOAT:
+                    if value.func.value == 'sum' and elem == FLOAT:
                         gens.add(id(gen))
                         calls.add(id(value))
+                    elif value.func.value != 'sum' and elem in (FLOAT, INT) and not isinstance(node, cst.AugAssign):
+                        gens.add(id(gen))
+                        lowering.extreme_calls[id(value)] = (value.func.value, elem)
     return gens, calls
 
 
