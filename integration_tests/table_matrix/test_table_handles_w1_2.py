@@ -155,3 +155,30 @@ def test_sub_table_object_holds_its_helper_sub_table(b, monkeypatch):
         assert ('y', 1) in table.index and len(table.index) == 3 and len(list(table.index)) == 3
         assert list(table['q']) == list(first['q'])
     assert calls == []
+
+
+def test_plain_table_handle_is_the_cached_one_from_every_thread(b):
+    """diag-4w: the handle of a plain helper Table (a Data table not bound as NativeTable) is read
+    from its native cache without the object's lock or reference counts on the shared cache; the
+    result is the one cached handle, from every thread, and anything else raises as before."""
+    import threading
+    provider = _provider(b)
+    table = pdn.table(pd.DataFrame({'q': [1.0, 2.0, 3.0]}, index=[1, 2, 3]))
+    first = provider.table_handle_of(table)
+    assert table._native_cache[provider.TableHandle] is first
+    seen, errors = [], []
+
+    def read():
+        try:
+            seen.extend(provider.table_handle_of(table) for _ in range(2000))
+        except BaseException as error:  # noqa: BLE001
+            errors.append(error)
+
+    threads = [threading.Thread(target=read) for _ in range(4)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    assert not errors and len(seen) == 8000 and all(handle is first for handle in seen)
+    with pytest.raises(TypeError):
+        provider.table_handle_of(object())

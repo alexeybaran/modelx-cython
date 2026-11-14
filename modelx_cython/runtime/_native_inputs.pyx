@@ -21,6 +21,10 @@ from cpython.ref cimport PyObject
 from cpython.mem cimport PyMem_Malloc, PyMem_Free
 cimport cython
 from modelx_helpers.immutable_inputs import Table, Record, _index_key, _valid_index_key
+from cpython.object cimport Py_TYPE as _mx_Py_TYPE
+# diag-4w: the helper Table class as a C pointer, for exact-type tests on the per-step read path; reading the
+# module global costs a dict lookup and a reference-count update on the shared class object from every worker
+cdef PyObject* _TABLE_TYPE = <PyObject*>Table
 from modelx_helpers import immutable_inputs as _immutable_inputs
 from modelx_helpers.typed_inputs import _FLOOR, _native_operations
 from modelx_cython._call_layout cimport forward_call
@@ -3609,13 +3613,16 @@ cdef class TableHandle:
     # -- columns and cells ------------------------------------------------------------------
 
     cdef Py_ssize_t col(self, object name) except -2:
+        # borrowed: the handle owns its column tuple; a shared handle is read by every worker on
+        # every per-step read, so no reference count of the tuple is touched here (diag-4w)
+        cdef PyObject* columns = <PyObject*>self._columns
         cdef Py_ssize_t j
         for j in range(self.width):
-            if <PyObject*>name == PyTuple_GET_ITEM(self._columns, j):
+            if <PyObject*>name == mx_tuple_item(columns, j):
                 return j
         if PyUnicode_Check(name):
             for j in range(self.width):
-                if mx_unicode_compare(<PyObject*>name, PyTuple_GET_ITEM(self._columns, j)) == 0:
+                if mx_unicode_compare(<PyObject*>name, mx_tuple_item(columns, j)) == 0:
                     return j
         raise KeyError(name)
 
@@ -4170,16 +4177,56 @@ cdef void _record_init(RecordHandle handle, object owner) except *:
 
 
 from cpython.object cimport PyObject_GenericGetAttr
+cdef extern from "Python.h":
+    # PyObject* forms: no reference count is taken on the shared dict or its value
+    PyObject* _mx_dict_get "PyDict_GetItemWithError"(PyObject* mapping, PyObject* key) except? NULL
+    bint _mx_dict_exact "PyDict_CheckExact"(PyObject* value)
+    ctypedef struct _mx_PyMemberDef "PyMemberDef":
+        Py_ssize_t offset
+    ctypedef struct _mx_PyMemberDescrObject "PyMemberDescrObject":
+        _mx_PyMemberDef* d_member
+
+cdef Py_ssize_t _native_cache_offset = -1
+
+
+cdef PyObject* _table_native_cache(object owner) except? NULL:
+    """The `_native_cache` slot of an exact helper Table, borrowed, read at its offset without a lock.
+
+    In free-threaded CPython a slot read through its member descriptor takes the object's
+    critical section, and every worker reads the slot of the same shared Data table on every
+    per-step table read (diag-4w: DIA_US_S, four workers spent most samples waiting there).
+    The slot is assigned only while the table is built, before it is shared (immutable_inputs
+    and the compiled pdn.table), and never reassigned, so a plain load sees its one value; the
+    table (held by the caller) keeps it alive. NULL (no exception) when the slot is unset or
+    its offset is unknown: the caller takes the generic lookup."""
+    global _native_cache_offset
+    if _native_cache_offset < 0:
+        descriptor = Table.__dict__.get('_native_cache')
+        if type(descriptor).__name__ != 'member_descriptor':
+            return NULL
+        _native_cache_offset = (<_mx_PyMemberDescrObject*><PyObject*>descriptor).d_member.offset
+    return (<PyObject**>((<char*><PyObject*>owner) + _native_cache_offset))[0]
+
 
 cdef object _bound_handle(object owner):
     """The handle of a helper Table, built once per table object and kept in its native cache
     (at preparation for tables built by compiled code, else at the first table_handle request)."""
     cdef dict cache
-    if type(owner) is Table:
-        # the slot through the generic lookup: Table defines __getattr__, so the ordinary
-        # attribute read takes the slot getattr hook (type lookups on every read, ~350
-        # instructions); for an exact Table the generic lookup finds the same slot value
-        cache = <dict>PyObject_GenericGetAttr(owner, '_native_cache')
+    cdef PyObject* slot
+    cdef PyObject* found
+    if <PyObject*>_mx_Py_TYPE(owner) == _TABLE_TYPE:
+        # Table defines __getattr__, so an ordinary attribute read takes the slot getattr hook;
+        # an exact Table's slot is read directly and its cached handle borrowed (it is stored
+        # once with setdefault and never removed), so no lock and no reference count of the
+        # shared cache dict is touched (diag-4w)
+        slot = _table_native_cache(owner)
+        if slot != NULL and _mx_dict_exact(slot):
+            found = _mx_dict_get(slot, <PyObject*>TableHandle)
+            if found != NULL:
+                return <object>found
+            cache = <dict>slot
+        else:
+            cache = <dict>PyObject_GenericGetAttr(owner, '_native_cache')
     else:
         cache = owner._native_cache
     handle = cache.get(TableHandle)
@@ -4210,7 +4257,7 @@ cdef TableHandle table_handle(object value):
     # an exact helper Table first: `Table` is a Mapping (an ABC), and isinstance() through
     # the ABC machinery cost more than the read it guards, on every per-step read of a Data
     # table held as a plain Table (diag-us: SPIA_US_S mort_rate_base, improvement_rate)
-    if type(value) is not Table and not isinstance(value, Table):
+    if <PyObject*>_mx_Py_TYPE(value) != _TABLE_TYPE and not isinstance(value, Table):
         raise TypeError(f'expected a Table, got {type(value).__name__}')
     return _bound_handle(value)
 
