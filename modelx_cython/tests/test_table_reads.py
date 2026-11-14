@@ -99,6 +99,9 @@ class PyHandle:
 
     sub_1 = sub_2 = sub_3 = sub_4 = sub_5 = _sub
 
+    def table_object(self):
+        return self.table
+
     def row_record(self, row):
         return self.table.loc[row]
 
@@ -521,10 +524,22 @@ def test_not_lowered_reads_are_declined_with_reasons():
     assert all(reason.endswith('runs as a Python call') for reason in reasons.values())
 
 
-def test_table_valued_result_is_reported_not_built():
+def test_returned_table_valued_selection_is_the_child_table_object():
+    source = ('def _f_x(self):\n'
+              '    return self.multi_table().loc[(self.sex(), self.plan())]\n')
+    text, reads, sites = lower(base_model(), source, params=())
+    assert text.endswith('return _mx_h0.sub_2(self.sex(), self.plan()).table_object()\n'), text
+    assert reads.typed == 1 and len(reads.lowered) == len(sites) == 1 and not reads.declined
+    one = same_values(base_model(), 'def _f_x(self):\n    return self.multi_table().loc[self.sex()]\n',
+                      [()], params=())
+    assert one.typed == 1
+    same_values(base_model(), source, [()], params=())
+
+
+def test_table_valued_selection_used_otherwise_is_reported_not_built():
     text, reads, sites = lower(base_model(), 'def _f_x(self):\n'
-                               '    return self.multi_table().loc[(self.sex(), self.plan())]\n', params=())
-    assert reads.typed == 0 and text.endswith('return self.multi_table().loc[(self.sex(), self.plan())]\n')
+                               '    return len(self.multi_table().loc[(self.sex(), self.plan())])\n', params=())
+    assert reads.typed == 0 and text.endswith('return len(self.multi_table().loc[(self.sex(), self.plan())])\n')
     assert reads.declined[id(sites[0].node)].startswith('table-valued selection used as a value')
 
 

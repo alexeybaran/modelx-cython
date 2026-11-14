@@ -249,6 +249,11 @@ def _results(mode, tmp_path_factory):
             build = subprocess.run([sys.executable, '-m', 'modelx_cython', 'exported', '--sample', 'sample.py',
                                     '--spec', 'spec.py'], cwd=root, capture_output=True, text=True, env=env)
             assert build.returncode == 0, build.stdout[-3000:] + build.stderr[-3000:]
+            # the derived sub-table cells (R3) return the child handle's bound table (D53),
+            # so the S squares read through it
+            generated = '\n'.join(path.read_text(encoding='utf-8')
+                                  for path in (root / 'exported_cy').rglob('_mx_classes.py'))
+            assert generated.count('.table_object()') == 2, 'S_F2 and S_R return the child table object'
             package = 'exported_cy'
         script = runner + f'\nfrom {package} import mx_model as m\nprint(json.dumps(run(m.Matrix, {squares!r})))\n'
         done = subprocess.run([sys.executable, '-c', script], cwd=root, capture_output=True, text=True, env=env)

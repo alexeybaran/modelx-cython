@@ -21,6 +21,8 @@ Generated shape (``H`` a ``TableHandle``, ``M`` the cimported ``_native_inputs``
   ``H.f64(H.row_n(k...), H.col("c"))`` for a float column, ``i64`` for an int column, ``obj``
   otherwise; ``int(...)`` of an int, bool or enum column reads ``i64``; ``float(...)`` around a
   float read is dropped;
+- ``return T.loc[prefix]`` (a table-valued result): ``H.sub_n(prefix...).table_object()``, the
+  bound table of the shared child handle (D45, D53);
 - ``row = T.loc[k]`` (complete key): ``_mx_row_row = H.row_n(k...)``; ``row["c"]`` reads that
   row; any other use of ``row`` becomes ``H.row_record(_mx_row_row)``; an inline row that is
   not read by field (``return T.loc[k]``) is ``H.row_record(H.row_n(...))``;
@@ -41,8 +43,8 @@ a C ``double`` or ``bint``; such parts are cast to object, so a float key or a b
 arrives as the Python value. Lowering is enabled by the spec key ``"typed_table_reads"``.
 
 Everything else on a traced table (``iterrows``, iteration of the index, slices, a column
-chosen by a variable, a table-valued result, a receiver without a traced schema) is left as
-written and runs as a Python call on the bound table; ``declined`` carries the reason, which
+chosen by a variable, a table-valued selection used other than as the returned value, a
+receiver without a traced schema) is left as written and runs as a Python call on the bound table; ``declined`` carries the reason, which
 the admission report shows.
 """
 
@@ -1106,6 +1108,11 @@ class _Lowering(cst.CSTTransformer):
             return updated
         if use is None:
             parent = self.f.parents.get(id(original))
+            if isinstance(parent, cst.Return) and parent.value is original:
+                # a table-valued result (D53): the bound table of the shared child handle
+                self.mark(site, *ref.sites, notes=(*ref.notes, key_parts.note))
+                child = _method(ref.handle, f'sub_{len(key_parts)}', *key_parts)
+                return self.out(_method(child, 'table_object'), updated)
             target = getattr(parent, 'targets', None) and parent.targets[0].target
             if isinstance(target, cst.Name) and target.value in self.kept:
                 self.decline(site, KEPT.format(name=target.value, why=self.kept[target.value]))
