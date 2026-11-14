@@ -1571,9 +1571,9 @@ cdef class NativeTable:
         if not isinstance(owner, Table):
             raise TypeError('declared Table Cell returned a different type')
         self._owner = owner
-        # M1 (W1.2): the typed handle built once per table object (at preparation when compiled
-        # code built the table, else here at its first bind); None when the table has no handle form
-        self.handle = _try_bound_handle(owner)
+        # M1 (W1.2): the typed handle built at preparation (compiled pdn.table) or by the first
+        # table_handle() request; a bind only finds it and never writes the table's cache
+        self.handle = owner._native_cache.get(TableHandle) if type(owner) is Table else None
         if type(owner) is Table:
             self._index_view = _NativeTableIndex(owner)
             self._numeric_view = None
@@ -4071,7 +4071,7 @@ cdef void _record_init(RecordHandle handle, object owner) except *:
 
 cdef object _bound_handle(object owner):
     """The handle of a helper Table, built once per table object and kept in its native cache
-    (at preparation for tables built by compiled code, else at the first bind)."""
+    (at preparation for tables built by compiled code, else at the first table_handle request)."""
     cdef dict cache = owner._native_cache
     handle = cache.get(TableHandle)
     if handle is None:
