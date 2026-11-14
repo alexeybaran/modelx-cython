@@ -2138,6 +2138,9 @@ cdef object column(object function, tuple keywords, object table, object name, o
     cdef tuple columns, values
     cdef list result
     cdef object metadata, carrier, items, series_metadata, containers
+    if (function is _column and type(table) is NativeTable
+            and type((<NativeTable>table)._owner) is Table):       # bound by observed admission (D69)
+        table = (<NativeTable>table)._owner
     if (function is not _column or type(table) is not Table
             or not (report is _missing or report is True or report is False)):
         return forward_call(function, keywords, ('table', 'name', 'report'), (table, name, report), omitted_argument)

@@ -94,7 +94,7 @@ def test_hash_cell_is_dense_on_the_reused_root_and_values_stay(tmp_path):
     generated, report = _model(tmp_path, spec)
     assert '.NumericCache(' in generated and 'root._v_surv.window(0, ' in generated, generated
     assert 'root._v_surv.reset()' in generated
-    assert '.dense_find(self._v_surv, ' in generated and '.dense_put(self._v_surv, ' in generated
+    assert '.dense_find(_mx_dense_cache, ' in generated and '.dense_put(_mx_dense_cache, ' in generated  # the field bound to a typed local
     detail = report[PREFIX + 'surv']['cache_detail']
     assert detail['kind'] == 'native-numeric-keys', detail
     assert 'exceeds max_dense_entries 16' in detail['hash_reason'], detail

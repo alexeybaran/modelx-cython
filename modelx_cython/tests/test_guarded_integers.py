@@ -62,3 +62,20 @@ def test_values_are_exact_on_both_paths():
     big = (1 << 62) + 5
     for start, limit, g in ((0, 5, 7.0), (big, 3, 1e30), (-big, 4, -1.0)):
         assert scope['f'](None, start, limit, g) == scope['g'](None, start, limit, g)
+
+
+def test_subscripts_are_guarded_except_a_proven_raw_vector_buffer():
+    """An index is guarded (exact value as long long on the slow path), except the raw buffer
+    `v.data[...]` that W1.6 emits only inside a loop whose index range it has proven."""
+    source = ('def f(self, n):\n'
+              '    for i in range(n):\n'
+              '        a = values[i + 1]\n'
+              '        b = vec.data[i + 1]\n'
+              '    return a + b\n')
+    node = cst.parse_module(source).body[0]
+    out, count = guard_integers(node, {'i': 'int'}, {'n': 'int'})
+    text = cst.Module([]).code_for_node(out)
+    assert 'values[(i + 1 if ((i ^ (i >> 63))) < _mx_cy.cast(_mx_cy.longlong, 2305843009213693952) else ' \
+           '_mx_cy.cast(_mx_cy.longlong, _mx_cy.cast(object, i) + 1))]' in text
+    assert 'vec.data[i + 1]' in text
+    assert count == 1

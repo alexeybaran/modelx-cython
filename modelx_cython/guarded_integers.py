@@ -306,9 +306,17 @@ class GuardIntegers(cst.CSTTransformer):
     def leave_Element(self, before, after):
         return after.with_changes(value=self._fallback(before.value, after.value))
 
+    def visit_Subscript(self, node):
+        # `v.data[i + 1]`: a typed vector's raw buffer, only emitted (W1.6) inside a loop whose
+        # index range the vector lowering has proven, so the index cannot leave it
+        if isinstance(node.value, cst.Attribute) and node.value.attr.value == 'data':
+            self._skip.update(id(element.slice.value) for element in node.slice
+                              if isinstance(element.slice, cst.Index))
+        return True
+
     def leave_Index(self, before, after):
         # a subscript index: the exact value as long long (an index beyond it fails either way)
-        if self._opaque or not self.a.is_expression(before.value):
+        if self._opaque or id(before.value) in self._skip or not self.a.is_expression(before.value):
             return after
         guarded = self.guard(before.value, after.value, lambda code: code, 'longlong')
         return after.with_changes(value=guarded) if guarded is not None else after
