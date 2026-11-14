@@ -572,6 +572,15 @@ def _assigned_local_kinds(body, parameters, resolver, cells_kinds, ref_kinds, cl
     return kinds
 
 
+def formula_local_kinds(node, parameters, resolver, cells_kinds, ref_kinds, cls_fqname, param_kinds):
+    """Kinds of the locals of a formula FunctionDef that every assignment proves (D59),
+    for later passes that classify operands (argument order, typed min/max)."""
+    if resolver is None or not isinstance(getattr(node, 'body', None), cst.IndentedBlock):
+        return {}
+    return _assigned_local_kinds(node.body.body, parameters, resolver, cells_kinds, ref_kinds,
+                                 cls_fqname, param_kinds)
+
+
 def _is_range(value):
     return isinstance(value, cst.Call) and isinstance(value.func, cst.Name) and value.func.value == 'range'
 

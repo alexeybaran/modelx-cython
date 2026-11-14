@@ -722,13 +722,17 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
             cls_info.fqname, cells, builtin_float='float' in builtin_keys,
         )
         from modelx_cython.ordered_arguments import preserve_argument_order
-        from modelx_cython.powers import OperandKind, kind_of_type_expr
+        from modelx_cython.powers import OperandKind, kind_of_type_expr, formula_local_kinds
         param_kinds = {name: kind_of_type_expr(cells.get_argtype_expr(name, c_style=True, formula=True))
                        for name in cells.params} if cells.has_args() and cells.has_typeinfo() else {}
+        # locals proven of one kind by every assignment (D59): `k = calendar_year(t) - year`
+        # then `base ** k` is an integer exponent, as the same expression written inline is
+        local_kinds = formula_local_kinds(node, cells.params, self._resolver, self._cells_kinds,
+                                          self._ref_kinds, cls_info.fqname, param_kinds)
         return preserve_argument_order(node,
             native_result=cells.get_rettype_expr(c_style=True) in ('double', 'long long', 'bint'),
             operand_kind=OperandKind(self._resolver, self._cells_kinds, self._ref_kinds,
-                                     cls_info.fqname, param_kinds),
+                                     cls_info.fqname, {**local_kinds, **param_kinds}),
             cells=cells, providers=self.helper_providers)
 
     def _table_reads(self, node, cls_info, cells):
