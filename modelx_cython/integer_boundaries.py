@@ -496,16 +496,65 @@ def _type_signed_locals(body, guard, facts, parameters):
     return body, tuple(declarations)
 
 
+class _ProvenGuards(cst.CSTTransformer):
+    """Replace a D76 guard by its native expression where that is proven within 64 bits."""
+
+    def __init__(self, arithmetic):
+        self.arithmetic = arithmetic
+        self._opaque = 0
+
+    def visit_FunctionDef(self, node):
+        self._opaque += 1
+
+    def leave_FunctionDef(self, before, after):
+        self._opaque -= 1
+        return after
+
+    def visit_Lambda(self, node):
+        self._opaque += 1
+
+    def leave_Lambda(self, before, after):
+        self._opaque -= 1
+        return after
+
+    def _side(self, node):
+        return (isinstance(node, (cst.Name, cst.Integer, cst.Float))
+                or self.arithmetic.integer_interval(node, signed=True) is not None)
+
+    def _proven(self, native):
+        """No integer operation of ``native`` can leave the 64-bit range."""
+        if isinstance(native, cst.BinaryOperation) and isinstance(native.operator, cst.Divide):
+            return self._side(native.left) and self._side(native.right)
+        if isinstance(native, cst.Comparison) and len(native.comparisons) == 1:
+            return self._side(native.left) and self._side(native.comparisons[0].comparator)
+        if (isinstance(native, cst.Call) and isinstance(native.func, cst.Name) and native.func.value == 'float'
+                and len(native.args) == 1):
+            return self._side(native.args[0].value)
+        return self.arithmetic.integer_interval(native, signed=True) is not None
+
+    def leave_IfExp(self, before, after):
+        from .guarded_integers import long_long_guard, native_branch, outer_operation
+        if self._opaque or (native := native_branch(after)) is None:
+            return after
+        if not self._proven(native):
+            # Where the value is taken as long long, one outer operation whose operands are
+            # leaves or proven expressions overflows exactly when its exact value is outside
+            # the 64-bit range, which raises on the slow branch too.
+            operands = outer_operation(native) if long_long_guard(after) else None
+            if operands is None or not all(
+                    isinstance(part, (cst.Name, cst.Integer))
+                    or self.arithmetic.integer_interval(part, signed=True) is not None
+                    for part in operands):
+                return after
+        return native.with_changes(lpar=(cst.LeftParen(),), rpar=(cst.RightParen(),))
+
+
 def _guard_result(node, cell, cls, resolver, cells_kinds, ref_kinds, signatures, native_helpers=(),
                   argument_axes=()):
     signed_return = node.returns is not None and node.returns.annotation.deep_equals(_INTEGER_ANNOTATION)
     divisibility = (node.returns is not None and dotted_name(node.returns.annotation) == f'{CY_MOD}.bint'
                     and not cell.is_locked and not cell.body_has_closure and divisibility_enabled(cell)
                     and any(divisibility_operands(part) is not None for part in lexical_nodes(node.body.body)))
-    if not signed_return and not divisibility and not any(
-            isinstance(part, cst.Call) and dotted_name(part.func) == _INTEGER_CONVERSION
-            for part in lexical_nodes(node.body.body)):
-        return node
     params = {name: kind_of_type_expr(cell.get_argtype_expr(name, c_style=True, formula=True))
               for name in cell.params}
     kinds = OperandKind(resolver, cells_kinds, ref_kinds, cls.fqname, params)
@@ -518,6 +567,17 @@ def _guard_result(node, cell, cls, resolver, cells_kinds, ref_kinds, signatures,
     bindings = facts.bindings(lexical_nodes(node.body.body))
     arithmetic.parameter_intervals = {axis.key: (axis.lower, axis.stop - 1) for axis in argument_axes
                                       if axis.key in arithmetic.parameters and axis.key not in bindings}
+    # D76 guards whose native expression cannot overflow here (proven from the argument axes)
+    # are that expression: the signed-local and range proofs below then see it (diag-us2)
+    collapsed = node.body.visit(_ProvenGuards(arithmetic))
+    if not collapsed.deep_equals(node.body):
+        node = node.with_changes(body=collapsed)
+        facts = CstFacts(node.body.body)
+        bindings = facts.bindings(lexical_nodes(node.body.body))
+    if not signed_return and not divisibility and not any(
+            isinstance(part, cst.Call) and dotted_name(part.func) == _INTEGER_CONVERSION
+            for part in lexical_nodes(node.body.body)):
+        return node
     fields, functions, methods = signatures
     signed_names = arithmetic.parameters | {
         statement.target.value for statement in lexical_nodes(node.body.body)

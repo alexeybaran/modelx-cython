@@ -19,6 +19,9 @@ def _attribute_counts(tree):
 
 
 def _argument_range(node, ranges, types, target_type):
+    from .guarded_integers import native_branch
+    if (native := native_branch(node)) is not None:
+        node = native        # a D76 guard has the exact value of its native expression
     if isinstance(node, cst.Name):
         source_type = types.get(node.value)
         if source_type == target_type or (source_type == 'bint' and target_type == 'long long'):

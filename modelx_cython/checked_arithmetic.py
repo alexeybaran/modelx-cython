@@ -213,6 +213,10 @@ class CheckedArithmetic:
         if signed and self.signed_atom is not None and self.signed_atom(expr):
             return self.parameter_intervals.get(expr.value, inputs) if isinstance(expr, cst.Name) else inputs
         if signed and isinstance(expr, cst.IfExp):
+            from .guarded_integers import native_branch
+            if (native := native_branch(expr)) is not None:
+                # a D76 guard has the exact value of its native expression
+                return self.integer_interval(native, signed=True, locals_=locals_)
             yes = self.integer_interval(expr.body, signed=True, locals_=locals_)
             no = self.integer_interval(expr.orelse, signed=True, locals_=locals_)
             if yes is not None and no is not None:

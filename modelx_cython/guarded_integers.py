@@ -140,6 +140,89 @@ def _condition(names, bound):
     return f'({folded}) < {CY_MOD}.cast({CY_MOD}.longlong, {bound})'
 
 
+def native_branch(node):
+    """The native expression of a guard this pass emitted, or None.
+
+    A guard ``(E if <bound test> else <E on Python ints>)`` always has the exact value of ``E``:
+    the slow branch computes it exactly and the fast branch runs only where no intermediate of
+    ``E`` can leave the 64-bit range. So a later analysis may read the guard as ``E``, and where
+    ``E`` is proven not to overflow for every value its names can take, ``E`` alone is the same
+    value (diag-us2).
+    """
+    if not isinstance(node, cst.IfExp) or not isinstance(node.test, cst.Comparison):
+        return None
+    names = _guard_names(node.test)
+    if not names or not names <= {item.value for item in _walk_names(node.body)}:
+        return None
+    return node.body.with_changes(lpar=(), rpar=())
+
+
+def _guard_names(test):
+    """The names of ``(x ^ (x >> 63)) | ... < cast(longlong, B)`` (``_condition``), or None."""
+    if len(test.comparisons) != 1 or not isinstance(test.comparisons[0].operator, cst.LessThan):
+        return None
+    bound = test.comparisons[0].comparator
+    if not (isinstance(bound, cst.Call) and len(bound.args) == 2 and _code(bound.func) == f'{CY_MOD}.cast'
+            and _code(bound.args[0].value) == f'{CY_MOD}.longlong'
+            and isinstance(bound.args[1].value, cst.Integer)
+            and bound.args[1].value.evaluated_value in _CANDIDATES):
+        return None
+    names, stack = set(), [test.left]
+    while stack:
+        part = stack.pop()
+        if isinstance(part, cst.BinaryOperation) and isinstance(part.operator, cst.BitOr):
+            stack.extend((part.left, part.right))
+        elif (isinstance(part, cst.BinaryOperation) and isinstance(part.operator, cst.BitXor)
+              and isinstance(part.left, cst.Name) and isinstance(part.right, cst.BinaryOperation)
+              and isinstance(part.right.operator, cst.RightShift)
+              and isinstance(part.right.left, cst.Name) and part.right.left.value == part.left.value
+              and isinstance(part.right.right, cst.Integer) and part.right.right.evaluated_value == 63):
+            names.add(part.left.value)
+        else:
+            return None
+    return names
+
+
+def _walk_names(node):
+    stack = [node]
+    while stack:
+        item = stack.pop()
+        if isinstance(item, cst.Name):
+            yield item
+        else:
+            stack.extend(item.children)
+
+
+def long_long_guard(node):
+    """True when ``node`` is a guard whose slow branch takes the exact value as long long (an
+    integer local, a range bound, an index, a native argument): there a value outside the
+    64-bit range raises on both branches."""
+    if native_branch(node) is None:
+        return False
+    slow = node.orelse
+    return (isinstance(slow, cst.Call) and len(slow.args) == 2
+            and _code(slow.func) == f'{CY_MOD}.cast' and _code(slow.args[0].value) == f'{CY_MOD}.longlong')
+
+
+def outer_operation(native):
+    """The operands of ``native`` when it is one arithmetic operation (or a negation), else None."""
+    if isinstance(native, cst.UnaryOperation) and isinstance(native.operator, cst.Minus):
+        return (native.expression,)
+    if isinstance(native, cst.BinaryOperation) and isinstance(native.operator, _ARITHMETIC):
+        return (native.left, native.right)
+    return None
+
+
+def _walk_names(node):
+    stack = [node]
+    while stack:
+        item = stack.pop()
+        if isinstance(item, cst.Name):
+            yield item
+        else:
+            stack.extend(item.children)
+
+
 class GuardIntegers(cst.CSTTransformer):
     def __init__(self, arithmetic, integer_locals):
         self.a = arithmetic
