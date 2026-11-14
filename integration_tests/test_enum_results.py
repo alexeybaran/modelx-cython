@@ -20,7 +20,8 @@ def test_enum_cell_results_are_members_where_they_reach_python(tmp_path):
         def build():
             m = mx.new_model("Enums")
             p = m.new_space("Projection", formula="lambda policy_id: None",
-                            refs={"Phase": Phase, "pd": pd, "ids": IDS}, collect_over={"policy_id": IDS},
+                            refs={"Phase": Phase, "pd": pd, "ids": IDS,
+                                  "rates": {(0, 0): 1.0, (1, 0): 2.0, (2, 0): 3.0}}, collect_over={"policy_id": IDS},
                             collect_outputs='lambda: {"sum": {"pv": pv()}}')
             p.new_cells("phase", "def phase(t):\\n    return Phase.ACC if t < 3 * policy_id else "
                                  "(Phase.WDR if t < 9 else Phase.DEP)\\n")
@@ -29,6 +30,8 @@ def test_enum_cell_results_are_members_where_they_reach_python(tmp_path):
             p.new_cells("pv", "def pv():\\n    return sum(cf(t) for t in range(12))\\n")
             p.new_cells("report", "def report():\\n    return pd.DataFrame({'phase': [phase(t).name for t in range(12)]})\\n")
             p.new_cells("phases", "def phases():\\n    return [phase(t) for t in range(12)]\\n")
+            p.new_cells("rate", "def rate(t):\\n    key = (phase(t), 0)\\n    return rates[key]\\n")
+            p.new_cells("pair", "def pair(t):\\n    return (phase(t), t)\\n")
             return m
         """), encoding="utf-8")
     (tmp_path / "build_model.py").write_text(
@@ -36,6 +39,7 @@ def test_enum_cell_results_are_members_where_they_reach_python(tmp_path):
     (tmp_path / "sample.py").write_text(
         "from enums_nomx import mx_model\nfor k in (1, 2, 3, 4):\n"
         "    p = mx_model.Projection[k]; p.collect_outputs(); p.report(); p.phases(); p.phase(0)\n"
+        "    [p.rate(t) for t in range(12)]; [p.pair(t) for t in range(12)]\n"
         "mx_model.Projection.collect()\n", encoding="utf-8")
     (tmp_path / "spec.py").write_text(
         repr({"parallel_workers": 1, "spaces": {"Projection": {"serial_collect": "reuse"}}}), encoding="utf-8")
@@ -53,6 +57,10 @@ def test_enum_cell_results_are_members_where_they_reach_python(tmp_path):
                 assert c is l and type(c) is Phase, (i, t, c, l)
             assert compiled.Projection[i].report().equals(live.Projection[i].report())
             assert all(a is b for a, b in zip(compiled.Projection[i].phases(), live.Projection[i].phases()))
+            for t in range(12):
+                c, l = compiled.Projection[i].pair(t), live.Projection[i].pair(t)
+                assert c[0] is l[0] and c[1] == l[1], (c, l)      # a returned tuple holds the member
+                assert compiled.Projection[i].rate(t) == live.Projection[i].rate(t)
         assert compiled.Projection[1].phase(0).name == "ACC" and compiled.Projection[1].phase(10).value == 2
         total = sum(live.Projection[i].pv() for i in IDS)
         for workers in (1, 4):
@@ -70,4 +78,10 @@ def test_enum_cell_results_are_members_where_they_reach_python(tmp_path):
     cf = generated[generated.index("def _f_cf"):generated.index("def _f_pv")]
     assert "enum_member" not in cf
     assert "def phase(self, t):" in generated and "def _mx_cell_phase(self" in generated
+    # D103a: a key tuple keeps the C integer; a tuple returned as the cell's object value holds the member
+    rate = generated[generated.index("def _f_rate"):generated.index("def _f_pair")]
+    pair = generated[generated.index("def _f_pair"):]
+    pair = pair[:pair.index("\n    @")]
+    assert "enum_member" not in rate, rate
+    assert "enum_member" in pair, pair
     run("checks.py")
