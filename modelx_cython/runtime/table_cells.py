@@ -187,6 +187,16 @@ def _ro_indexer():
         def __setitem__(self, key, value):
             self._frame._mx_refuse()
 
+        def __call__(self, *args, **kwargs):
+            return type(self)(self._inner(*args, **kwargs), self._frame)
+
+        def __getattr__(self, name):
+            # pandas reads through nested indexers (``frame.loc._getitem_axis`` for a tuple key
+            # on a MultiIndex): forward reads, refuse the write paths.
+            if name.startswith('_setitem'):
+                self._frame._mx_refuse()
+            return getattr(self._inner, name)
+
     return pd, _Indexer
 
 
