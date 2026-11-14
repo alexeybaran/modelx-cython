@@ -129,11 +129,22 @@ def test_seg_shaped_cell_keeps_its_window_proof(tmp_path):
     assert '_mx_proven_axes' in source, 'the cache entries lost their window proof'
     entries = re.findall(r'def (_mx_cache_entry_\d+)\(self[^)]*_mx_proven_axes', source)
     assert entries, 'no cache entry takes _mx_proven_axes'
+    c_source = (tmp_path / 'exported_cy/_mx_classes.c').read_text(encoding='utf-8')
+
+    def c_local_type(function, local):
+        """C declaration of a local in the generated C function named after ``function``."""
+        start = re.search(rf'\n[^\n;]*\b__pyx_\w*{function}\([^;{{]*\{{\n', c_source)
+        assert start, function
+        block = c_source[start.end():c_source.index('\n}\n', start.end())]
+        found = re.search(rf'^  (PY_LONG_LONG|PyObject \*)\s*__pyx_v_{local}\b', block, re.M)
+        return found.group(1) if found else None
+
     for name in ('seg_share', 'seg_bal'):
         dense = re.search(rf'def _f_{name}\(.*?(_mx_dense_formula_\d+)\(', source, re.S).group(1)
         body = re.search(rf'\ndef {dense}\(.*?(?=\n@|\ndef |\nclass |\Z)', source, re.S).group(0)
-        assert '>> 63' not in body, body
-        assert re.search(r'm(: _mx_cy\.longlong)? = \(?t - segment_age\)?', body), body
+        # properties: no overflow guard, no boxed operand, and `m` a C long long in the compiled function
+        assert '>> 63' not in body and '_mx_cy.cast(object' not in body, body
+        assert c_local_type(dense, 'm') == 'PY_LONG_LONG', (name, dense)
     probe = textwrap.dedent('''\
         from exported_cy import mx_model
         v = mx_model.Values
