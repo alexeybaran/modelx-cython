@@ -3504,10 +3504,9 @@ cdef TableHandle _h_sub(TableHandle self, const HandlePart* q, Py_ssize_t n):
         handle = _h_child(handle, &q[j])
         if handle == NULL:
             return None
-    child = <TableHandle>handle
-    if child._colbase != self._colbase or child.width != self.width:
-        return _column_of(child, self._colbase, self._columns)
-    return child
+    if (<TableHandle>handle)._colbase != self._colbase or (<TableHandle>handle).width != self.width:
+        return _column_of(<TableHandle>handle, self._colbase, self._columns)
+    return <TableHandle>handle        # the one reference a sub-table read takes
 
 cdef bint _h_has(TableHandle self, const HandlePart* q, Py_ssize_t n) except -1:
     cdef PyObject* handle = <PyObject*>self
@@ -3557,9 +3556,10 @@ cdef object _h_label(TableHandle self, Py_ssize_t row):
     return self._labels[row]
 
 cdef inline PyObject* _h_value(RecordHandle self, Py_ssize_t slot) except NULL:
-    if <size_t>slot >= <size_t>PyTuple_GET_SIZE(self._items):
+    cdef PyObject* items = <PyObject*>self._items     # borrowed: no reference on the shared pairs
+    if <size_t>slot >= <size_t>mx_tuple_size(items):
         raise IndexError(f'record slot {slot} is out of range')
-    return mx_tuple_item(mx_tuple_item(<PyObject*>self._items, slot), 1)
+    return mx_tuple_item(mx_tuple_item(items, slot), 1)
 
 
 @cython.final
@@ -4026,7 +4026,7 @@ cdef class RecordHandle:
         _record_init(self, owner)
 
     cdef Py_ssize_t field(self, object name) except -2:
-        cdef Py_ssize_t j, n = PyTuple_GET_SIZE(self._items)
+        cdef Py_ssize_t j, n = mx_tuple_size(<PyObject*>self._items)
         cdef PyObject* key
         for j in range(n):
             if <PyObject*>name == mx_tuple_item(mx_tuple_item(<PyObject*>self._items, j), 0):
