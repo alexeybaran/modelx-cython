@@ -5,7 +5,7 @@ from dataclasses import dataclass
 import libcst as cst
 
 from modelx_cython.consts import CY_MOD
-from .syntax import arguments, dotted_name, literal_value, statements
+from .syntax import arguments, dotted_name, literal_value, statements, walk
 
 
 @dataclass(frozen=True)
@@ -132,7 +132,30 @@ def _match(node, cls, reuse, private_lookups, parallel_reuse, ordered=False):
     return SerialCollect(label, cell, parameter, reuse, private_lookups, parallel_reuse, ordered)
 
 
-def _reset_lines(cls):
+def _check_closure(cls, names):
+    """Cells a check Cell reaches through ``self.<cell>`` (transitively), or None when a formula uses
+    ``self`` other than as ``self.<attribute>`` (the pre-pass then resets every cache)."""
+    defs = cls.visitor.formula_defs.get(cls.name, {})
+    seen, todo = set(), list(names)
+    while todo:
+        name = todo.pop()
+        if name in seen:
+            continue
+        seen.add(name)
+        node = defs.get(name)
+        if node is None:
+            return None
+        parts = list(walk(node.body))
+        bare = sum(1 for part in parts if isinstance(part, cst.Name) and part.value == 'self')
+        owned = [part.attr.value for part in parts if isinstance(part, cst.Attribute)
+                 and isinstance(part.value, cst.Name) and part.value.value == 'self']
+        if bare != len(owned):
+            return None
+        todo.extend(attr for attr in owned if attr in cls.cells)
+    return seen
+
+
+def _reset_lines(cls, only=None):
     for held, _ in getattr(cls, 'held_table_handles', {}).values():
         # diag-4w (D71): the per-instance table handles go with the per-policy caches
         yield f'root.{held} = None'
@@ -143,6 +166,8 @@ def _reset_lines(cls):
         # D79: and the rows of constant keys held with them
         yield f'root.{field} = 0'
     for name, cell in cls.cells.items():
+        if only is not None and name not in only:
+            continue
         if memo := getattr(cell, 'power_memo', None):
             yield f'root.{memo}.ready = False'
         if cell.is_special() or not cell.has_formula_def:
@@ -220,7 +245,12 @@ def _check_lines(cls, shape, checks):
     """Pre-pass before any projection: every policy's need against the bounds."""
     lines = ['        for coordinate in coords:']
     lines.extend(('            if not first:',))
-    lines.extend('                ' + line for line in _restart_lines(cls, shape))
+    # Between policies only the caches the check Cells can reach are reset (all, if unknown).
+    closure = _check_closure(cls, [check.cell for check in checks]) if shape.reuse else None
+    lines.extend('                ' + line for line in (_restart_lines(cls, shape) if closure is None
+                                                         else _reset_lines(cls, closure)))
+    if closure is not None:
+        lines.append('                pass')
     lines.append(f'            root.{shape.parameter} = coordinate')
     lines.append('            first = False')
     space = cls.name.removeprefix("_c_")
