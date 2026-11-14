@@ -146,6 +146,8 @@ class CheckedArithmetic:
         self.cls, self.cell = cls, cell
         self.builtin_keys = builtin_keys
         self.parameter_intervals = {}
+        # diag-us2 (D94): intervals of locals bound once (range loop targets, single assignments)
+        self.local_intervals = {}
         self.signed_atom = None
 
     def native_call(self, expr):
@@ -208,6 +210,8 @@ class CheckedArithmetic:
             return (value, value) if inputs[0] <= value <= inputs[1] else None
         if self.native_call(expr):
             return inputs
+        if signed and isinstance(expr, cst.Name) and expr.value in self.local_intervals:
+            return self.local_intervals[expr.value]
         if isinstance(expr, cst.Name) and (expr.value in self.parameters or expr.value in locals_):
             return self.parameter_intervals.get(expr.value, inputs) if signed else inputs
         if signed and self.signed_atom is not None and self.signed_atom(expr):

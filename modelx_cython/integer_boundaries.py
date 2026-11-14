@@ -1,5 +1,7 @@
 """Check integer Cell results and ItemSpace keys at their native boundaries."""
 
+from collections import Counter
+
 import libcst as cst
 
 from .checked_arithmetic import (
@@ -496,6 +498,94 @@ def _type_signed_locals(body, guard, facts, parameters):
     return body, tuple(declarations)
 
 
+def _range_args(call, shadowed):
+    """(start, stop) of a builtin ``range(stop)`` / ``range(start, stop)`` call, else None."""
+    if (not isinstance(call, cst.Call) or not isinstance(call.func, cst.Name) or call.func.value != 'range'
+            or 'range' in shadowed or not 1 <= len(call.args) <= 2
+            or any(arg.keyword is not None or arg.star for arg in call.args)):
+        return None
+    args = [arg.value for arg in call.args]
+    return (cst.Integer('0'), args[0]) if len(args) == 1 else (args[0], args[1])
+
+
+def _bound(expr, arithmetic, low, shadowed):
+    """A lower (``low``) or upper bound of an integer expression, or None: its proven interval, or
+    for builtin ``min``/``max`` the bound that follows from the arguments' known bounds (the upper
+    bound of ``min`` needs one argument's, its lower bound all of them; ``max`` the reverse), and
+    a literal added to or subtracted from such an expression."""
+    interval = arithmetic.integer_interval(expr, signed=True)
+    if interval is not None:
+        return interval[0] if low else interval[1]
+    if (isinstance(expr, cst.Call) and isinstance(expr.func, cst.Name) and expr.func.value in ('min', 'max')
+            and expr.func.value not in shadowed and expr.args
+            and all(arg.keyword is None and not arg.star for arg in expr.args)):
+        bounds = [_bound(arg.value, arithmetic, low, shadowed) for arg in expr.args]
+        known = [b for b in bounds if b is not None]
+        pick = min if expr.func.value == 'min' else max
+        any_suffices = (expr.func.value == 'min') != low      # min: upper; max: lower
+        if known and (any_suffices or len(known) == len(bounds)):
+            return pick(known)
+        return None
+    if (isinstance(expr, cst.BinaryOperation) and isinstance(expr.operator, (cst.Add, cst.Subtract))
+            and isinstance(expr.right, cst.Integer)):
+        inner = _bound(expr.left, arithmetic, low, shadowed)
+        if inner is None:
+            return None
+        return inner + expr.right.evaluated_value if isinstance(expr.operator, cst.Add) \
+            else inner - expr.right.evaluated_value
+    return None
+
+
+def _local_intervals(body, arithmetic, facts, bindings):
+    """diag-us2 (D94): intervals of locals bound exactly once in the formula: a ``for`` target over a
+    builtin ``range(start, stop)`` (no step) takes [lower bound of start, upper bound of stop - 1],
+    an assigned local the interval of its value. Each read of such a local sees a value of its one
+    binding, so the interval holds wherever it is read; parameters keep their own (argument
+    window) intervals, and nothing here applies inside nested scopes."""
+    if not isinstance(body, cst.IndentedBlock) or has_scope_effects(body.body):
+        return {}
+    shadowed = {'range', 'min', 'max'} & set(bindings)
+    # a declaration without a value (``u: _mx_cy.longlong``) binds nothing at run time
+    declared = Counter(part.target.value for part in lexical_nodes(body.body)
+                       if isinstance(part, cst.AnnAssign) and part.value is None and isinstance(part.target, cst.Name))
+    once = ({name for name, count in facts.stores.items() if count - declared[name] == 1}
+            - set(arithmetic.parameters))
+    sites = []
+    for part in lexical_nodes(body.body):
+        if isinstance(part, cst.For) and isinstance(part.target, cst.Name) and part.target.value in once:
+            args = _range_args(part.iter, shadowed)
+            if args is not None:
+                sites.append((part.target.value, 'range', args))
+        elif (isinstance(part, cst.Assign) and len(part.targets) == 1 and isinstance(part.targets[0].target, cst.Name)
+              and part.targets[0].target.value in once):
+            sites.append((part.targets[0].target.value, 'value', part.value))
+        elif (isinstance(part, cst.AnnAssign) and part.value is not None and isinstance(part.target, cst.Name)
+              and part.target.value in once):
+            sites.append((part.target.value, 'value', part.value))
+    found = {}
+    arithmetic.local_intervals = found
+    for _ in range(len(sites)):
+        changed = False
+        for name, kind, value in sites:
+            if name in found:
+                continue
+            if kind == 'range':
+                low = _bound(value[0], arithmetic, True, shadowed)
+                high = _bound(value[1], arithmetic, False, shadowed)
+                if low is None or high is None or low < -(1 << 63) or high - 1 > (1 << 63) - 1:
+                    continue
+                found[name] = (low, max(low, high - 1))
+            else:
+                interval = arithmetic.integer_interval(value, signed=True)
+                if interval is None:
+                    continue
+                found[name] = interval
+            changed = True
+        if not changed:
+            break
+    return found
+
+
 class _ProvenGuards(cst.CSTTransformer):
     """Replace a D76 guard by its native expression where that is proven within 64 bits."""
 
@@ -567,6 +657,7 @@ def _guard_result(node, cell, cls, resolver, cells_kinds, ref_kinds, signatures,
     bindings = facts.bindings(lexical_nodes(node.body.body))
     arithmetic.parameter_intervals = {axis.key: (axis.lower, axis.stop - 1) for axis in argument_axes
                                       if axis.key in arithmetic.parameters and axis.key not in bindings}
+    arithmetic.local_intervals = _local_intervals(node.body, arithmetic, facts, bindings)
     # D76 guards whose native expression cannot overflow here (proven from the argument axes)
     # are that expression: the signed-local and range proofs below then see it (diag-us2)
     collapsed = node.body.visit(_ProvenGuards(arithmetic))
