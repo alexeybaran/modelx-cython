@@ -235,6 +235,24 @@ cdef inline Py_ssize_t held_col(Py_ssize_t* slot, TableRef ref, object name) exc
     if slot[0] == 0:
         slot[0] = (<TableHandle>ref).col(name) + 1
     return slot[0] - 1
+
+
+# D79 (diag-vec): the row of a complete key whose parts are build-time integer constants, resolved
+# on first use and held in a per-instance slot (row + 1; 0 unresolved) next to the held handle, as
+# held_col. KeyError as row_n when absent (the slot stays 0, so the next read raises again).
+cdef inline Py_ssize_t held_row_1(Py_ssize_t* slot, TableRef ref, long long p0) except -2:
+    if slot[0] == 0:
+        slot[0] = (<TableHandle>ref).row_1(p0) + 1
+    return slot[0] - 1
+cdef inline Py_ssize_t held_row_2(Py_ssize_t* slot, TableRef ref, long long p0, long long p1) except -2:
+    if slot[0] == 0:
+        slot[0] = (<TableHandle>ref).row_2(p0, p1) + 1
+    return slot[0] - 1
+cdef inline Py_ssize_t held_row_3(Py_ssize_t* slot, TableRef ref, long long p0, long long p1,
+                                  long long p2) except -2:
+    if slot[0] == 0:
+        slot[0] = (<TableHandle>ref).row_3(p0, p1, p2) + 1
+    return slot[0] - 1
 cdef TableRef sub_ref_1(TableHandle h, TableKey p0) except NULL
 cdef TableRef sub_ref_2(TableHandle h, TableKey p0, TableKey p1) except NULL
 cdef TableRef sub_ref_3(TableHandle h, TableKey p0, TableKey p1, TableKey p2) except NULL

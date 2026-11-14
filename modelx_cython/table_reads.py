@@ -349,6 +349,18 @@ class _Ref:
         self.sites, self.extra, self.notes = tuple(sites), extra, tuple(notes)
 
 
+def _constant_int(node):
+    """An integer literal or an enum member constant (``_mx_enum_const_N``), possibly cast to a C
+    integer type: a key part whose value is fixed at build (D79)."""
+    while (isinstance(node, cst.Call) and _code(node.func) == '_mx_cy.cast' and len(node.args) == 2
+           and _code(node.args[0].value) in ('_mx_cy.longlong', '_mx_cy.long', '_mx_cy.int')):
+        node = node.args[1].value
+    if isinstance(node, cst.UnaryOperation) and isinstance(node.operator, cst.Minus):
+        node = node.expression
+    return (isinstance(node, cst.Integer)
+            or (isinstance(node, cst.Name) and node.value.startswith('_mx_enum_const_')))
+
+
 class _Parts(list):
     """Key part expressions, with the note on their types for ``table_reads_keys``."""
     note = None
@@ -448,6 +460,21 @@ class TableReads:
                 and expr.value.value == 'self'):
             return getattr(self.cls_info, 'refs', {}).get(expr.attr.value)
         return None
+
+    def enum_constant(self, expr):
+        """D79: the module constant of ``self.<Enum>.<member>`` (or its definition field
+        ``self._mx_definition_<Enum>.<member>``) when the enum Reference is admitted at build
+        (``enums.prepare``: an IntEnum definition, enum_safe, value within C int), else None."""
+        if not (isinstance(expr, cst.Attribute) and isinstance(expr.value, cst.Attribute)
+                and isinstance(expr.value.value, cst.Name) and expr.value.value.value == 'self'):
+            return None
+        ref = expr.value.attr.value
+        if ref.startswith('_mx_definition_'):
+            ref = ref[len('_mx_definition_'):]
+        module = getattr(self.cls_info, 'module', None)
+        entry = (getattr(module, 'code_enum_symbols', None) or {}).get(
+            (getattr(self.cls_info, 'name', None), ref, expr.attr.value))
+        return entry[0] if entry else None
 
     def enum_member(self, expr):
         """``self.<Enum>.<member>``, ``self.<Enum>(value)`` or ``self.<Enum>[label]`` on an enum
@@ -1280,7 +1307,12 @@ class _Lowering(cst.CSTTransformer):
                 notes.append('object (cast: not known to be a C integer or an object)')
             else:
                 exact = self.o.exact_long_long(source) or (info is not None and info[0] in LONG_LONG_METHODS)
-                if (why.startswith('int') or why == 'enum member') and not exact:
+                constant = self.o.enum_constant(source)
+                if constant is not None:
+                    # D79: a member of an enum admitted at build is its module constant, not a
+                    # Python attribute read of the enum class per call
+                    read, why = cst.Name(constant), 'enum member (constant)'
+                if (why.startswith('int') or why.startswith('enum member')) and not exact:
                     # the fused key takes exactly long long or object: a C long literal, a
                     # Py_ssize_t or a Python int is converted (an enum member is its value)
                     read = _call(cst.Attribute(cst.Name('_mx_cy'), cst.Name('cast')),
@@ -1357,7 +1389,32 @@ class _Lowering(cst.CSTTransformer):
         parts, reason = self.parts(key_original, key_updated, ref.schema, where, allow_prefix=False)
         if parts is None:
             return None, reason
+        held = self.held_row(ref.handle, parts)
+        if held is not None:
+            return held, (parts.note + '; held row (constant key)',)
         return _method(ref.handle, f'row_{len(parts)}', *parts), (parts.note,)
+
+    def held_row(self, handle, parts):
+        """D79: ``M.held_row_n(&self._mx_tr_<k>, ref, p0, ...)`` for a complete key whose parts are
+        all build-time integer constants (enum member constants, integer literals) read through a
+        held handle (D71): the row is resolved on the first read and kept with the handle (reset
+        with it, as D75's column), not looked up on every call. None otherwise."""
+        if not 1 <= len(parts) <= 3 or not isinstance(handle, cst.Call) or not handle.args:
+            return None
+        local = handle.args[-1].value
+        held = self._held_locals.get(local.value) if isinstance(local, cst.Name) else None
+        if held is None or not all(_constant_int(part) for part in parts):
+            return None
+        fields = getattr(self.o.cls_info, 'held_table_rows', None)
+        if fields is None:
+            fields = self.o.cls_info.held_table_rows = {}
+        key = (held, tuple(_code(part) for part in parts))
+        field = fields.get(key)
+        if field is None:
+            field = fields[key] = f'_mx_tr_{len(fields)}'
+        args = ', '.join(_code(part) for part in parts)
+        return cst.parse_expression(
+            f'{self.o.module}.held_row_{len(parts)}(_mx_cy.address(self.{field}), {local.value}, {args})')
 
     def consumer(self, original):
         """How the parent uses an inline selection: 'read' (field, column, loc/at/index),

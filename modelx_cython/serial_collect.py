@@ -139,6 +139,9 @@ def _reset_lines(cls):
     for field in getattr(cls, 'held_table_columns', {}).values():
         # diag-jp (D75): and the column indexes held with them
         yield f'root.{field} = 0'
+    for field in getattr(cls, 'held_table_rows', {}).values():
+        # D79: and the rows of constant keys held with them
+        yield f'root.{field} = 0'
     for name, cell in cls.cells.items():
         if memo := getattr(cell, 'power_memo', None):
             yield f'root.{memo}.ready = False'
