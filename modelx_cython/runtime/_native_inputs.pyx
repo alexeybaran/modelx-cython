@@ -3480,33 +3480,37 @@ cdef Py_ssize_t _h_row(TableHandle self, const HandlePart* q, Py_ssize_t n) exce
         return row
     return _keys_find(&self._keys, q)
 
-cdef TableHandle _h_child(TableHandle self, const HandlePart* q):
+cdef PyObject* _h_child(PyObject* parent, const HandlePart* q) except? NULL:
+    """Borrowed child of `parent` for one prefix part (NULL when absent): the walk takes no
+    reference on the shared handles; the root keeps every child alive."""
     cdef Py_ssize_t position
-    if self.levels < 2:
-        return None
-    if self.scheme == TABLE_PRODUCT:
-        position = _keys_find(&self._axes[0], q)
+    if (<TableHandle>parent).levels < 2:
+        return NULL
+    if (<TableHandle>parent).scheme == TABLE_PRODUCT:
+        position = _keys_find(&(<TableHandle>parent)._axes[0], q)
     else:
-        position = _keys_find(&self._ckeys, q)
+        position = _keys_find(&(<TableHandle>parent)._ckeys, q)
     if position < 0:
-        return None
-    return <TableHandle>PyTuple_GET_ITEM(self._children, position)
+        return NULL
+    return mx_tuple_item(<PyObject*>(<TableHandle>parent)._children, position)
+
 
 cdef TableHandle _h_sub(TableHandle self, const HandlePart* q, Py_ssize_t n):
-    cdef TableHandle handle = self
+    cdef PyObject* handle = <PyObject*>self
     cdef Py_ssize_t j
     if n >= self.levels:
         raise TypeError(f'sub_{n} needs fewer key parts than the {self.levels} levels of the table')
     for j in range(n):
         handle = _h_child(handle, &q[j])
-        if handle is None:
+        if handle == NULL:
             return None
-    if handle._colbase != self._colbase or handle.width != self.width:
-        handle = _column_of(handle, self._colbase, self._columns)
-    return handle
+    child = <TableHandle>handle
+    if child._colbase != self._colbase or child.width != self.width:
+        return _column_of(child, self._colbase, self._columns)
+    return child
 
 cdef bint _h_has(TableHandle self, const HandlePart* q, Py_ssize_t n) except -1:
-    cdef TableHandle handle = self
+    cdef PyObject* handle = <PyObject*>self
     cdef Py_ssize_t j
     if n == self.levels:
         return _h_row(self, q, n) >= 0
@@ -3519,7 +3523,7 @@ cdef bint _h_has(TableHandle self, const HandlePart* q, Py_ssize_t n) except -1:
         return True
     for j in range(n):
         handle = _h_child(handle, &q[j])
-        if handle is None:
+        if handle == NULL:
             return False
     return True
 
@@ -3964,26 +3968,46 @@ cdef class TableHandle:
         return self._children
 
     def memory(self):
-        """Bytes held for this handle tree: arrays (shared by all handles of the table), handle
-        objects of the eager sub-tables, and their count."""
+        """Bytes of this handle tree. `children`: what the eager sub-tables add (their handle
+        objects, own key indexes and label tuples); `shared`: everything else (typed columns,
+        key parts, the root's indexes, read by every handle of the table); `handles`: count."""
         import sys as _sys
+        cdef TableHandle handle
         arrays = 0
         for item in self._hold:
             if type(item) is bytearray:
                 arrays += len(<bytearray>item)
             elif type(item) is tuple:
                 arrays += _sys.getsizeof(item)
-        count, objects, tuples = 0, 0, 0
-        stack = [self]
+            elif hasattr(item, 'nbytes'):
+                arrays += item.nbytes
+        count, objects, owned, labels = 0, 0, 0, 0
+        stack = [(child, self.scheme) for child in self._children]
         while stack:
-            handle = <TableHandle>stack.pop()
+            handle, parent = stack.pop()
             count += 1
             objects += _sys.getsizeof(handle)
-            if handle is not self and handle._labels is not None:
-                tuples += _sys.getsizeof(handle._labels)
-            stack.extend(handle._children)
-        return {'handles': count, 'handle_objects': objects, 'child_label_tuples': tuples,
-                'arrays': arrays}
+            if parent != TABLE_PRODUCT:             # PRODUCT children share their axes' arrays
+                owned += _own_key_bytes(handle)
+                labels += _sys.getsizeof(handle._labels)
+            stack.extend((child, handle.scheme) for child in handle._children)
+        children = objects + owned + labels
+        total = arrays + _sys.getsizeof(self) + objects + labels
+        return {'handles': 1 + count, 'children': children, 'shared': total - children, 'total': total}
+
+
+cdef Py_ssize_t _own_key_bytes(TableHandle h):
+    """Bytes of the key arrays a row-stored sub-table owns (its full-key and child indexes)."""
+    cdef Py_ssize_t size = 0
+    if h.scheme == TABLE_HASHED:
+        size += (h._keys.mask + 1) * sizeof(Py_ssize_t)
+        if h.levels > 1:
+            size += (h._ckeys.mask + 1) * sizeof(Py_ssize_t) + h._ckeys.count * sizeof(HandlePart)
+    elif h.scheme == TABLE_SORTED:
+        size += h.rows * (sizeof(long long) + sizeof(Py_ssize_t))
+    if h._okeys != NULL:
+        size += h.rows * sizeof(long long)
+    return size
 
 
 cdef TableHandle _column_of(TableHandle source, Py_ssize_t colbase, tuple columns):
