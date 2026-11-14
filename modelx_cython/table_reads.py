@@ -660,7 +660,7 @@ class _Lowering(cst.CSTTransformer):
             if name in self.kept:
                 continue
             every = self.f.loads.get(name, ())
-            if kind in ('table', 'record', 'index') and not any(id(node) in self.consumed for node, _ in every):
+            if kind in ('table', 'record', 'index', 'level') and not any(id(node) in self.consumed for node, _ in every):
                 kept.setdefault(name, 'no read through it is lowered')     # left exactly as written
                 continue
             loads = [(node, nested) for node, nested in every if id(node) not in self.consumed]
@@ -743,6 +743,11 @@ class _Lowering(cst.CSTTransformer):
             return ('table', schema) if kind in ('table', 'sub') else (kind, schema) if kind == 'record' else None
         if o.records_enabled() and o.record_cell(value):
             return ('record', None)
+        level = self._level_call(value)
+        if level is not None:           # a level local: ages = T.index.get_level_values("age")
+            receiver = _index_attr(level[0], 'index')
+            base = self._static_schema(receiver, kinds) if receiver is not None else None
+            return ('level', base) if base is not None and base.levels > 1 else None
         receiver = _index_attr(value, 'index')
         if receiver is not None:        # an index local: years = T.index (W1.9)
             base = self._static_schema(receiver, kinds)
@@ -1023,6 +1028,40 @@ class _Lowering(cst.CSTTransformer):
                 return None
             return _Ref('table', ref.schema, ref.handle, (original, values[0], *ref.sites), notes=ref.notes)
         return None
+
+    @staticmethod
+    def _level_call(expr):
+        """(index expression, level literal) of ``X.get_level_values(<str or int literal>)``."""
+        if (isinstance(expr, cst.Call) and isinstance(expr.func, cst.Attribute)
+                and expr.func.attr.value == 'get_level_values' and len(expr.args) == 1
+                and _plain_args(expr) and (isinstance(expr.args[0].value, cst.Integer)
+                                           or _literal_str(expr.args[0].value) is not None)):
+            return expr.func.value, expr.args[0].value
+        return None
+
+    def level_ref(self, original):
+        """(_Ref of the table, level literal) of ``R.index.get_level_values(n)`` on a lowered
+        table of several levels, or of a level local assigned once to one; else None."""
+        sites = ()
+        if isinstance(original, cst.Name):
+            found = self.local(original.value)
+            values = self.f.values.get(original.value) or ()
+            if found is None or found[0] != 'level' or len(values) != 1:
+                return None
+            sites, original = (original,), values[0]
+        level = self._level_call(original)
+        if level is None:
+            return None
+        iref = self.index_ref(level[0])
+        if iref is None or iref.schema.levels < 2:
+            return None
+        return _Ref('table', iref.schema, iref.handle, (*sites, original, *iref.sites), notes=iref.notes), level[1]
+
+    def _level_extreme(self, found, last, updated):
+        ref, level = found
+        self.mark(*ref.sites, notes=(*ref.notes, 'get_level_values(...).min/max: once per handle and level'))
+        return self.out(_call(self.m('level_extreme'), ref.handle, level, cst.Name('True' if last else 'False')),
+                        updated)
 
     def _static_index(self, expr):
         """Schema of an index expression known before lowering (a table cell, a table or
@@ -1481,6 +1520,10 @@ class _Lowering(cst.CSTTransformer):
             return updated
         if not isinstance(func, cst.Attribute):
             return updated
+        if func.attr.value in ('min', 'max') and not original.args:
+            found = self.level_ref(func.value)
+            if found is not None:
+                return self._level_extreme(found, func.attr.value == 'max', updated)
         ref = self.index_ref(func.value)
         if ref is None:
             if func.attr.value == 'iterrows':
@@ -1651,6 +1694,15 @@ class _Lowering(cst.CSTTransformer):
             borrowed = _call(self.m(f'sub_ref_{len(key_parts)}'), parent.handle, *key_parts)
             statements.append(cst.Assign([cst.AssignTarget(cst.Name(handle))], borrowed))
             self.mark(*ref.sites, notes=ref.notes)
+        elif kind == 'level':
+            if name in self.escaped:
+                return updated
+            found = self.level_ref(value)
+            if found is None:
+                self.failed.setdefault(name, f'{self._use(value)} is not lowered')
+                return updated
+            self.mark(*found[0].sites, notes=found[0].notes)
+            return cst.Pass()
         elif kind == 'index':
             if name in self.escaped:
                 return updated

@@ -233,6 +233,7 @@ cdef TableRef sub_ref_5(TableHandle h, TableKey p0, TableKey p1, TableKey p2, Ta
                         TableKey p4) except NULL
 cdef object key_label(TableHandle h, Py_ssize_t i)          # h.index[i] in row order: label or tuple
 cdef double key_f64(TableHandle h, Py_ssize_t i) except? -1  # float(h.index[i])
+cdef object level_extreme(TableHandle h, object level, bint last)  # index.get_level_values(level).min/max()
 # ---- end of the M1 handle interface ------------------------------------------------------
 
 cdef class NativeTable:

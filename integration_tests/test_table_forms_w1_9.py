@@ -8,7 +8,8 @@ form (no Python index iteration left for the forms that are lowered).
 Forms: a sub-table local also used as a Python table; the index as typed keys (len, min/max,
 list/sorted, comprehension and for-statement iteration with the row position, an index
 local); float and str labels; tuple unpacking inside max; a key held in a local of unknown
-arity; asof of an untyped local; a record field as a key part; both chained selections.
+arity; asof of an untyped local; a record field as a key part; both chained selections;
+get_level_values(n).min()/max().
 """
 
 import json
@@ -93,6 +94,13 @@ def untyped_asof(t):
 def record_key():
     return float(data.by_id().loc[point()["fund"], "v"])
 ''',
+    'levels': '''\
+def levels(t):
+    tab = data.pairs()
+    ages = tab.index.get_level_values("a")
+    xx = min(max(t, int(ages.min())), int(ages.max()))
+    return (xx, int(data.pairs().index.get_level_values("s").max()))
+''',
     'chains': '''\
 def chains(t):
     try:
@@ -104,7 +112,7 @@ def chains(t):
 }
 CALLS = [name for name in FORMULAS if name != 'record_key']
 TEXT = ['sub_ref_1(', 'key_int(', '.rows', 'key_f64(', 'key_label(', 'asof_int(_mx_cy.cast(_mx_cy.longlong, a))', 'type(a) is tuple',
-        '.row_2(']
+        '.row_2(', 'level_extreme(']
 RUN = ('import json\nfrom {package} import mx_model as m\n'
        'P = m.Projection\n'
        'out = [[repr(getattr(P, name)(t)) for name in {calls!r}] for t in {trange!r}]\n'

@@ -4300,6 +4300,30 @@ cdef double key_f64(TableHandle h, Py_ssize_t i) except? -1:
     return float(_h_label(h, position))
 
 
+cdef dict _level_extremes = {}     # (id(handle), level, last) -> (handle, value): written once per key
+
+
+cdef object level_extreme(TableHandle h, object level, bint last):
+    """``index.get_level_values(level).min()`` (``max()`` when ``last``) of the handle's table, as
+    the helper (pandas) answers it, computed once per handle and level: the first call asks the
+    helper (a counted fallback), later calls read the memo. The memo holds the handle, so its id
+    is not reused while the entry lives; concurrent first calls store the same value."""
+    key = (<Py_ssize_t><void*>h, level, last)
+    found = _level_extremes.get(key)
+    if found is not None and (<tuple>found)[0] is h:
+        return (<tuple>found)[1]
+    mx_handle_fallback()
+    values = h.helper().index.get_level_values(level)
+    value = values.max() if last else values.min()
+    _level_extremes[key] = (h, value)
+    return value
+
+
+def level_extreme_of(TableHandle h, level, last=False):
+    """Python access to level_extreme (tests)."""
+    return level_extreme(h, level, last)
+
+
 def key_label_of(TableHandle h, Py_ssize_t i):
     """Python access to key_label (tests)."""
     return key_label(h, i)

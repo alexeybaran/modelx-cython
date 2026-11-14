@@ -131,6 +131,8 @@ RUNTIME = {M: SimpleNamespace(table_handle=PyHandle, record_handle=PyRecord,
                               TableHandle=PyHandle, RecordHandle=PyRecord, TableRef=PyHandle,
                               key_label=lambda h, i: list(h.table.index)[i],
                               key_f64=lambda h, i: float(list(h.table.index)[i]),
+                              level_extreme=lambda h, level, last: getattr(
+                                  h.table.index.get_level_values(level), 'max' if last else 'min')(),
                               **{f'sub_ref_{n}': (lambda h, *parts: h._sub(*parts)) for n in range(1, 6)}),
            '_mx_cy': SimpleNamespace(cast=lambda type_, value: int(value) if type_ == 'longlong' else value,
                                      longlong='longlong', Py_ssize_t=int, double='double')}
@@ -1000,3 +1002,26 @@ def test_tuple_index_where_order_matters_is_declined():
     text, reads, sites = lower(_label_model(), source)
     assert 'key_label' not in text and len(reads.declined) == 2
     same_values(_label_model(), source, [0])
+
+
+LEVEL_FORMS = {
+    'local': ('tab = self.multi_table()\n    ages = tab.index.get_level_values("year")\n'
+              '    xx = min(max(int(t), int(ages.min())), int(ages.max()))\n'
+              '    return float(tab.loc[(self.sex(), self.plan(), xx), "v"])',
+              [f'{M}.level_extreme(_mx_h_tab, "year", False)', f'{M}.level_extreme(_mx_h_tab, "year", True)']),
+    'inline': ('return int(self.multi_table().index.get_level_values("year").max()) + t',
+               [f'int({M}.level_extreme(_mx_h0, "year", True)) + t']),
+    'position': ('return self.multi_table().index.get_level_values(2).min() - t',
+                 [f'{M}.level_extreme(_mx_h0, 2, False) - t']),
+}
+
+
+@pytest.mark.parametrize('name', sorted(LEVEL_FORMS))
+def test_level_values_min_max(name):
+    statements, fragments = LEVEL_FORMS[name]
+    source = f'def _f_{name}(self, t):\n    {statements}\n'
+    text, reads, sites = lower(base_model(), source)
+    for fragment in fragments:
+        assert fragment in text, (fragment, text)
+    assert 'get_level_values' not in text and not reads.declined, (text, reads.declined)
+    same_values(base_model(), source, range(-1, 5))
