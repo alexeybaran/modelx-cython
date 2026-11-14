@@ -921,6 +921,92 @@ cdef class NativeTable:
     def __eq__(self, other):
         return _semantic_owner(self._owner) == other
 
+    # auto-tables (D104): operators answered by the owning helper Table (pandas on a frame-built table,
+    # NotImplemented, hence TypeError, on a pdn.table table)
+    def __lt__(self, other):
+        return _owner_operator(self, '__lt__', other)
+
+    def __le__(self, other):
+        return _owner_operator(self, '__le__', other)
+
+    def __gt__(self, other):
+        return _owner_operator(self, '__gt__', other)
+
+    def __ge__(self, other):
+        return _owner_operator(self, '__ge__', other)
+
+    def __add__(self, other):
+        return _owner_operator(self, '__add__', other)
+
+    def __radd__(self, other):
+        return _owner_operator(self, '__radd__', other)
+
+    def __sub__(self, other):
+        return _owner_operator(self, '__sub__', other)
+
+    def __rsub__(self, other):
+        return _owner_operator(self, '__rsub__', other)
+
+    def __mul__(self, other):
+        return _owner_operator(self, '__mul__', other)
+
+    def __rmul__(self, other):
+        return _owner_operator(self, '__rmul__', other)
+
+    def __truediv__(self, other):
+        return _owner_operator(self, '__truediv__', other)
+
+    def __rtruediv__(self, other):
+        return _owner_operator(self, '__rtruediv__', other)
+
+    def __floordiv__(self, other):
+        return _owner_operator(self, '__floordiv__', other)
+
+    def __rfloordiv__(self, other):
+        return _owner_operator(self, '__rfloordiv__', other)
+
+    def __mod__(self, other):
+        return _owner_operator(self, '__mod__', other)
+
+    def __rmod__(self, other):
+        return _owner_operator(self, '__rmod__', other)
+
+    def __pow__(self, other, mod=None):
+        return _owner_operator(self, '__pow__', other)
+
+    def __rpow__(self, other, mod=None):
+        return _owner_operator(self, '__rpow__', other)
+
+    def __and__(self, other):
+        return _owner_operator(self, '__and__', other)
+
+    def __rand__(self, other):
+        return _owner_operator(self, '__rand__', other)
+
+    def __or__(self, other):
+        return _owner_operator(self, '__or__', other)
+
+    def __ror__(self, other):
+        return _owner_operator(self, '__ror__', other)
+
+    def __xor__(self, other):
+        return _owner_operator(self, '__xor__', other)
+
+    def __rxor__(self, other):
+        return _owner_operator(self, '__rxor__', other)
+
+    def __neg__(self):
+        return getattr(_semantic_owner(self._owner), '__neg__')()
+
+    def __pos__(self):
+        return getattr(_semantic_owner(self._owner), '__pos__')()
+
+    def __abs__(self):
+        return getattr(_semantic_owner(self._owner), '__abs__')()
+
+    def __invert__(self):
+        return getattr(_semantic_owner(self._owner), '__invert__')()
+
     def __copy__(self):
         return self
 
@@ -932,6 +1018,12 @@ cdef class NativeTable:
 
 
 Table.register(NativeTable)
+
+
+def _owner_operator(NativeTable table, str name, object other):
+    if type(other) is NativeTable:
+        other = _semantic_owner((<NativeTable>other)._owner)
+    return getattr(_semantic_owner(table._owner), name)(other)
 
 
 cdef NativeTable bind_native_table(object value, str cell):
