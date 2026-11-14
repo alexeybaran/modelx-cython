@@ -578,6 +578,19 @@ class TableReads:
             return self.param_type(expr.value) in UNSAFE_BARE
         if isinstance(expr, cst.Call):
             return self.call_rettype(expr)[0] in UNSAFE_BARE
+        return self.record_field(expr)
+
+    def record_field(self, expr):
+        """``rec["f"]`` on a traced Record (a model point row): one scalar value."""
+        parts = _subscript_parts(expr)
+        if parts is None or len(parts) != 1 or _literal_str(parts[0]) is None:
+            return False
+        value = expr.value
+        if self.record_cell(value):
+            return True
+        if isinstance(value, cst.Name) and value.value not in self.formula.other:
+            values = self.formula.values.get(value.value) or ()
+            return bool(values) and all(self.record_cell(item) for item in values)
         return False
 
 
@@ -1050,7 +1063,8 @@ class _Lowering(cst.CSTTransformer):
             self.reasons.setdefault(id(node), reason)
 
     def out(self, node, updated, info=None):
-        node = node.with_changes(lpar=updated.lpar, rpar=updated.rpar)
+        if updated.lpar or not isinstance(node, cst.IfExp):     # a guarded read keeps its parentheses
+            node = node.with_changes(lpar=updated.lpar, rpar=updated.rpar)
         if info is not None:
             self._kinds[id(node)] = info
         return node
@@ -1263,6 +1277,8 @@ class _Lowering(cst.CSTTransformer):
             node = info = None
             if row is not None:
                 node, info = self.column_read(ref, row, updated.slice[1].slice.value, parts[1])
+            elif self._tuple_name(parts[0], ref.schema):
+                return self._guarded_read(original, updated, ref, attr, parts, site)
             if node is None:
                 self.decline(site, info if row is not None else notes + '; ' + PYTHON)
                 return updated
@@ -1309,6 +1325,50 @@ class _Lowering(cst.CSTTransformer):
         self._memo[id(original)] = _Ref('table', ref.schema.child(len(key_parts)), handle, (site, *ref.sites),
                                         notes=(*ref.notes, key_parts.note))
         return updated
+
+    def _tuple_name(self, key, schema):
+        """A local or parameter key of unknown arity on a table of 2..6 levels."""
+        return (isinstance(key, cst.Name) and 2 <= schema.levels <= MAX_PARTS
+                and key.value not in self.f.other and not self.o.scalar(key)
+                and (key.value in self.o._params or len(self.f.values.get(key.value) or ()) == 1))
+
+    def _python_read(self, ref, updated, attr):
+        """The read as written, on the handle's bound table (the local may not exist)."""
+        return updated.with_changes(value=cst.Attribute(_method(ref.handle, 'table_object'), cst.Name(attr)),
+                                    lpar=[], rpar=[])
+
+    def _guarded_read(self, original, updated, ref, attr, parts, site):
+        """``T.loc[k, "c"]`` with k a local of unknown arity: a typed read when k is a tuple of as
+        many parts as the table has levels, else the read as written (pandas reads a shorter
+        tuple as a prefix, a scalar as one level)."""
+        key, levels = parts[0].value, ref.schema.levels
+        items = [_call(cst.Attribute(cst.Name('_mx_cy'), cst.Name('cast')), cst.Name('object'),
+                       cst.Subscript(cst.Name(key), [cst.SubscriptElement(cst.Index(cst.Integer(str(i))))]))
+                 for i in range(levels)]
+        row = _method(ref.handle, f'row_{levels}', *items)
+        node, info = self.column_read(ref, row, updated.slice[1].slice.value, parts[1])
+        if node is None:
+            self.decline(site, info)
+            return updated
+        fallback = self._python_read(ref, updated, attr)
+        if info[0] == 'f64':
+            fallback = _call(cst.Attribute(cst.Name('_mx_cy'), cst.Name('cast')),
+                             cst.Attribute(cst.Name('_mx_cy'), cst.Name('double')), fallback)
+        else:
+            info = None
+        test = cst.BooleanOperation(
+            left=cst.Comparison(_call(cst.Name('type'), cst.Name(key)),
+                                [cst.ComparisonTarget(cst.Is(), cst.Name('tuple'))]),
+            operator=cst.And(),
+            right=cst.Comparison(_call(cst.Name('len'), cst.Name(key)),
+                                 [cst.ComparisonTarget(cst.Equal(), cst.Integer(str(levels)))]))
+        guarded = cst.IfExp(test=test, body=node, orelse=fallback, lpar=[cst.LeftParen()], rpar=[cst.RightParen()])
+        self.mark(site, *ref.sites, notes=(*ref.notes, f'{attr}[key, column], {levels} parts: '
+                                           f'local {key} read by position when it is a tuple of {levels}'))
+        result = guarded.with_changes(lpar=[cst.LeftParen()], rpar=[cst.RightParen()])
+        if info is not None:
+            self._kinds[id(result)] = info
+        return result
 
     # ------------------------------------------------------------------ reads: index
     def leave_Comparison(self, original, updated):
@@ -1366,6 +1426,19 @@ class _Lowering(cst.CSTTransformer):
                 self.decline(site, 'asof on a table without a single integer level; ' + PYTHON)
                 return updated
             if not (self.o.is_int(original.args[0].value) or (known and known[0] in C_INT_METHODS)):
+                key = original.args[0].value
+                if isinstance(key, cst.Name) and (key.value in self.o._params or (
+                        key.value not in self.f.other and len(self.f.values.get(key.value) or ()) == 1)):
+                    # a typed asof when the key is an int at run time, else the helper's asof
+                    self.mark(site, *ref.sites, notes=(*ref.notes, f'asof: local {key.value} typed when an int'))
+                    typed = _method(ref.handle, 'asof_int', cst.Name(key.value))
+                    python = _call(cst.Attribute(cst.Attribute(_method(ref.handle, 'table_object'),
+                                                               cst.Name('index')), cst.Name('asof')),
+                                   cst.Name(key.value))
+                    test = cst.Comparison(_call(cst.Name('type'), cst.Name(key.value)),
+                                          [cst.ComparisonTarget(cst.Is(), cst.Name('int'))])
+                    return cst.IfExp(test=test, body=typed, orelse=python,
+                                     lpar=[cst.LeftParen()], rpar=[cst.RightParen()])
                 self.decline(site, 'asof key is not known to be an integer; ' + PYTHON)
                 return updated
             self.mark(site, *ref.sites, notes=ref.notes)

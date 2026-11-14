@@ -130,7 +130,7 @@ class PyRecord:
 RUNTIME = {M: SimpleNamespace(table_handle=PyHandle, record_handle=PyRecord,
                               TableHandle=PyHandle, RecordHandle=PyRecord),
            '_mx_cy': SimpleNamespace(cast=lambda type_, value: int(value) if type_ == 'longlong' else value,
-                                     longlong='longlong', Py_ssize_t=int)}
+                                     longlong='longlong', Py_ssize_t=int, double='double')}
 
 
 # ---------------------------------------------------------------------- a fake model
@@ -879,3 +879,51 @@ def test_index_of_tuples_is_not_iterated_natively():
     assert '.index' in text and 'key_int' not in text
     assert all(reason.startswith('iteration of an index that is not a single integer level')
                for reason in reads.declined.values()) and len(reads.declined) == 2
+
+
+# ---------------------------------------------------------------------- W1.9: keys
+def _anchor_model():
+    model = prototype_model()
+    model.add('anchor', lambda t: ((1, 1), (2, 0), (2, 2), 1, (9, 9), (1,))[t % 6], 'object')
+    model.add('loose', lambda t: (1, 2, 5, 9, 3, 1.0)[t % 6], 'object')
+    model.add('points_rec', points().loc[1])
+    model.add('by_age', pdn.table(pd.DataFrame({'v': [1.5, 2.5]}, index=pd.Index([40, 50], name='age'))))
+    return model
+
+
+def test_key_held_in_a_local_of_unknown_arity_is_read_by_position_when_a_tuple():
+    source = ('def _f_x(self, t):\n'
+              '    a = self.anchor(t)\n' + '    ' + probe('float(self.two_table().loc[a, "v"])') + '\n')
+    text, reads, sites = lower(_anchor_model(), source)
+    assert ('(_mx_h0.f64(_mx_h0.row_2(_mx_cy.cast(object, a[0]), _mx_cy.cast(object, a[1])), _mx_h0.col("v")) '
+            'if type(a) is tuple and len(a) == 2 else '
+            '_mx_cy.cast(_mx_cy.double, _mx_h0.table_object().loc[a, "v"]))') in text, text
+    assert not reads.declined and reads.typed == 1
+    same_values(_anchor_model(), source, range(0, 12))
+
+
+def test_record_field_is_one_key_part():
+    source = 'def _f_x(self):\n    return self.by_age().loc[self.points_rec()["age"], "v"]\n'
+    text, reads, sites = lower(_anchor_model(), source, params=())
+    assert '_mx_h0.row_1(_mx_cy.cast(object, _mx_r0.obj(_mx_r0.field("age"))))' in text, text
+    assert not reads.declined
+    same_values(_anchor_model(), source, [()], params=())
+    prefix = 'def _f_x(self):\n    return self.two_table().loc[self.points_rec()["age"] // 40]\n'
+    text, reads, sites = lower(_anchor_model(), prefix, params=())
+    assert 'loc[' in text       # integer division of an object: not a scalar
+    field = 'def _f_x(self):\n    return self.two_table().loc[self.points_rec()["premium"]]\n'
+    text, reads, sites = lower(_anchor_model(), field, params=())
+    assert '_mx_h0.sub_1(_mx_cy.cast(object, _mx_r1.obj(_mx_r1.field("premium")))).table_object()' in text \
+        or '.sub_1(_mx_cy.cast(object, _mx_r0.obj(_mx_r0.field("premium")))).table_object()' in text, text
+    same_values(_anchor_model(), field, [()], params=())
+    off = lower(_anchor_model(), field, params=(), recognisers=True)[0]
+    assert '_mx_h0.sub_1(_mx_cy.cast(object, self.points_rec()["premium"])).table_object()' in off, off
+
+
+def test_asof_of_a_local_not_known_to_be_an_integer_is_typed_when_an_int():
+    source = ('def _f_x(self, t):\n'
+              '    a = self.loose(t)\n' + '    ' + probe('self.gap_table().index.asof(a)') + '\n')
+    text, reads, sites = lower(_anchor_model(), source)
+    assert '(_mx_h0.asof_int(a) if type(a) is int else _mx_h0.table_object().index.asof(a))' in text, text
+    assert not reads.declined
+    same_values(_anchor_model(), source, range(0, 12))
