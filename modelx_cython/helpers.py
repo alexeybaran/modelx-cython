@@ -143,6 +143,8 @@ class HelperCalls(FormulaTransformer):
         if not name:
             self.decline(original, f'math.{func.attr.value} has no native form; runs as a Python call')
             return updated
+        if name == 'isclose':
+            return self.module_isclose(original, updated, func)
         if len(updated.args) != 1 or updated.args[0].keyword or updated.args[0].star:
             self.decline(original, f'math.{name} with {len(updated.args)} arguments or keywords; '
                          'runs as a Python call')
@@ -158,6 +160,48 @@ class HelperCalls(FormulaTransformer):
         return updated.with_changes(
             func=cst.Attribute(cst.Name(module_name(MATH_PROVIDER)), cst.Name(operation)),
             args=(cst.Arg(func.value), cst.Arg(updated.args[0].value)))
+
+    def module_isclose(self, original, updated, func):
+        """W1.8: ``self.<math>.isclose(a, b[, rel_tol=r][, abs_tol=t])`` ->
+        ``m_isclose(self.<math>, a, b, r, t, given)`` (defaults 1e-09 and 0.0; ``given``
+        records which keywords were written, for a replaced Reference). The tolerances
+        must be read without running code (literals, typed References or parameters), so
+        evaluating them in the C call's order keeps the original order."""
+        from .helper_members import MATH_PROVIDER, argument_kind
+        args = updated.args
+        positional = [arg for arg in args if arg.keyword is None]
+        keywords = {arg.keyword.value: arg.value for arg in args if arg.keyword is not None}
+        if (any(arg.star for arg in args) or len(positional) != 2
+                or any(arg.keyword is None for arg in args[2:])
+                or set(keywords) - {'rel_tol', 'abs_tol'} or len(keywords) != len(args) - 2):
+            self.decline(original, 'math.isclose with other than two positional arguments and '
+                         'rel_tol/abs_tol keywords; runs as a Python call')
+            return updated
+        defaults = {'rel_tol': cst.Float('1e-09'), 'abs_tol': cst.Float('0.0')}
+        values = []
+        for name in ('rel_tol', 'abs_tol'):
+            value = keywords.get(name)
+            if value is None:
+                values.append(defaults[name])
+                continue
+            plain = (isinstance(value, (cst.Float, cst.Integer))
+                     or isinstance(value, cst.UnaryOperation) and isinstance(value.expression, (cst.Float, cst.Integer))
+                     or isinstance(value, cst.Name)
+                     or isinstance(value, cst.Attribute) and isinstance(value.value, cst.Name)
+                     and value.value.value == 'self')
+            if not plain or argument_kind(value, self.current, self.cells, self.refs) not in ('double', 'longlong'):
+                self.decline(original, f'math.isclose {name} is not a float or integer literal, '
+                             'typed Reference or parameter; runs as a Python call')
+                return updated
+            values.append(value)
+        given = ('rel_tol' in keywords) + 2 * ('abs_tol' in keywords)
+        self.used.add(MATH_PROVIDER)
+        self.operations.add(MATH_PROVIDER + '.m_isclose')
+        self.math_native += 1
+        return updated.with_changes(
+            func=cst.Attribute(cst.Name(module_name(MATH_PROVIDER)), cst.Name('m_isclose')),
+            args=(cst.Arg(func.value), cst.Arg(positional[0].value), cst.Arg(positional[1].value),
+                  cst.Arg(values[0]), cst.Arg(values[1]), cst.Arg(cst.Integer(str(given)))))
 
     def module_constant(self, updated):
         """``self.<ref>.inf`` (``nan``, ``pi``, ``e``, ``tau``) of the math module."""

@@ -19,6 +19,11 @@ ctypedef fused MathValue:
     long long
     object
 
+ctypedef fused MathValue2:
+    double
+    long long
+    object
+
 cdef object math_module
 cdef object numeric_math_module
 cdef double m_erf(object namespace, MathValue value) except? -1.0
@@ -27,6 +32,9 @@ cdef bint m_isinf(object namespace, MathValue value) except -1
 cdef double m_log(object namespace, MathValue value) except? -1.0
 cdef double m_sqrt(object namespace, MathValue value) except? -1.0
 cdef long long m_floor_ll(object namespace, MathNumber value) except? -1
+# W1.8: math.isclose; ``given`` bit 1: rel_tol written, bit 2: abs_tol written
+cdef bint m_isclose(object namespace, MathValue a, MathValue2 b, double rel_tol, double abs_tol,
+                    int given) except -1
 cdef long long m_ceil_ll(object namespace, MathNumber value) except? -1
 cdef object m_floor(object namespace, object value)
 cdef object m_ceil(object namespace, object value)

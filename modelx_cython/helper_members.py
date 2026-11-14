@@ -5,7 +5,7 @@ still evaluate the current member callable and let the provider check identity.
 The shared tracer/merged-Reference wiring is a separately owned integration.
 """
 import math
-from math import ceil, erf, exp, floor, isinf, log, sqrt
+from math import ceil, erf, exp, floor, isclose, isinf, log, sqrt
 from types import BuiltinFunctionType, FunctionType, ModuleType, SimpleNamespace
 
 import libcst as cst
@@ -18,7 +18,7 @@ MATH_PROVIDER = 'modelx_cython.runtime._native_math'
 # W1.4: members of a module Reference resolved at build time (``_native_math.m_<name>``
 # receives the Reference itself). floor/ceil return the module's int; see m_floor_ll.
 _MODULE_MATH = {erf: 'float64', exp: 'float64', isinf: 'bool', log: 'float64', sqrt: 'float64',
-                floor: 'int64', ceil: 'int64'}
+                floor: 'int64', ceil: 'int64', isclose: 'bool'}      # isclose: W1.8
 MATH_CONSTANTS = ('inf', 'nan', 'pi', 'e', 'tau')     # index order of _native_math.m_constant
 
 

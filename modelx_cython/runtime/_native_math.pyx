@@ -58,7 +58,7 @@ cdef double sqrt(object function, MathArgument value) except? -1.0:
 # errors are those of the module: the C path is taken only where libm and CPython agree
 # (finite results of float or C-integer arguments; the module raises otherwise).
 import math as _math_module
-from libc.math cimport floor as c_floor, ceil as c_ceil
+from libc.math cimport floor as c_floor, ceil as c_ceil, fabs
 from cpython.float cimport PyFloat_CheckExact, PyFloat_AS_DOUBLE
 
 try:
@@ -197,6 +197,35 @@ cdef object m_ceil(object namespace, object value):
                 return <long long>rounded
         return _math_ceil(value)
     return namespace.ceil(value)
+
+
+cdef bint m_isclose(object namespace, MathValue a, MathValue2 b, double rel_tol, double abs_tol,
+                    int given) except -1:
+    """``math.isclose(a, b[, rel_tol=][, abs_tol=])`` (W1.8), CPython's ``math_isclose_impl``:
+    the arguments become doubles as the module converts them (``PyFloat_AsDouble``, a then
+    b), negative tolerances raise its ValueError, equal values (also equal infinities) are
+    close, an infinity is close to nothing else, otherwise ``|b - a|`` is compared with
+    ``rel_tol * |b|``, ``rel_tol * |a|`` and ``abs_tol``; nan is close to nothing.
+    """
+    cdef double x, y, diff
+    if namespace is math_module:
+        x = a
+        y = b
+        if rel_tol < 0.0 or abs_tol < 0.0:
+            raise ValueError("tolerances must be non-negative")
+        if x == y:
+            return True
+        if c_isinf(x) or c_isinf(y):
+            return False
+        diff = fabs(y - x)
+        return diff <= fabs(rel_tol * y) or diff <= fabs(rel_tol * x) or diff <= abs_tol
+    if given == 3:
+        return namespace.isclose(a, b, rel_tol=rel_tol, abs_tol=abs_tol)
+    if given == 1:
+        return namespace.isclose(a, b, rel_tol=rel_tol)
+    if given == 2:
+        return namespace.isclose(a, b, abs_tol=abs_tol)
+    return namespace.isclose(a, b)
 
 
 cdef object m_constant(object namespace, Py_ssize_t index):
