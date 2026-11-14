@@ -21,7 +21,8 @@ def test_parallel_collect_reuse_merges_completed_chunks_and_retries(tmp_path):
     finally:
         model.close()
     spec = {"parallel_workers": 4, "spaces": {
-        "Reused": {"serial_collect": "reuse", "parallel_collect_reuse": True},
+        "Reused": {"serial_collect": "reuse", "parallel_collect_reuse": True,
+                   "parallel_collect_order": "completion"},
         "Ordered": {"serial_collect": "reuse", "parallel_collect_reuse": True,
                     "parallel_collect_order": "domain"},
     }}
