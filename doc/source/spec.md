@@ -60,9 +60,33 @@ value observed for the cell and parameter:
       ("i", "j"): (3, 6)}}   # cells with parameters (i, j)
 ```
 
-The entry applies to each cached Cell in the space with that exact parameter
-tuple. In a mixed signature, only native signed integer coordinates use
-the declared bounds. Other keys keep their own lookup semantics.
+A tuple entry applies to each cached Cell in the space with that exact parameter
+tuple. A single-name entry applies to Cells with that one parameter and also
+bounds that parameter's axis of every other cached Cell in scope whose
+parameter tuple has no tuple entry, so `{"t": 241}` covers `pv(t)` and
+`claims(t, kind)` alike. In a mixed signature, only native signed integer
+coordinates use the declared bounds. Other keys keep their own lookup semantics.
+
+`cells_param_size` may also be given at the model level (the top of the spec)
+and in any enclosing Space; a Space inherits those entries, and the nearest
+declaration of a key wins. Declare a bound once, at the highest level that
+covers it:
+
+```python
+{"cells_param_size": {"t": 1441},              # every Space of the model
+ "spaces":
+     {"Projection":
+          {"cells_param_size": {"x": 121}}}}     # this Space and its children
+```
+
+A declared axis is allocated at its declared size. A Cell whose declared
+array would exceed the dense storage ceiling (`max_dense_entries`) uses the
+hash store instead, and the admission report says so. The report lists, per
+Cell, the axes whose size is declared and where.
+
+An argument whose every sampled value is a member of one `IntEnum` class
+takes the whole member range of that class as its domain, so a member the
+sample did not use is accepted, as it is by the Python model.
 
 If the sample run passes an argument value equal to or larger than the
 declared size, the size is automatically raised to the observed maximum
@@ -71,6 +95,27 @@ tuples with no spec entry, the upper bound is the observed maximum plus
 one. Calling a cached Cell with an integer coordinate outside its accepted
 range raises {py:exc}`IndexError`. To extend the negative range, include
 the required negative indices in the sample.
+
+### `param_bound_checks`
+
+Optional. Maps a sized parameter name to a zero-argument cached Cell of the Space
+whose value is a policy's need for that parameter, for example its projection
+length:
+
+```python
+{"spaces": {"Projection": {"param_bound_checks": {"t": "proj_len"}}}}
+```
+
+The sample fixes the offset between the Cell's value and the largest argument
+the model then passes (the *margin*: the sampled stop of the parameter minus
+the sampled maximum of the Cell). The opt-in collect entry (`serial_collect`)
+evaluates the Cell for every policy before projecting any, and raises
+{py:exc}`IndexError` naming the policy, the parameter, its bound and the
+largest accepted value when value + margin exceeds the bound of any cached
+Cell with that parameter. If the check Cell itself raises, collect raises
+{py:exc}`RuntimeError` naming the Cell and the policy. The pre-pass changes no
+result: the caches are reset before the projection. Direct Cell calls outside
+collect keep the per-Cell {py:exc}`IndexError`.
 
 ### `cells`
 

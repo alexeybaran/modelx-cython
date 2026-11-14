@@ -162,6 +162,96 @@ def _reset_lines(cls):
             yield f'root._v_{name} = None'
 
 
+@dataclass(frozen=True)
+class BoundCheck:
+    parameter: str
+    cell: str
+    limit: int          # largest value of the check Cell a policy may have
+    bound: int          # size of the parameter on the Cell that limits the check
+    margin: int         # traced stop of the parameter minus the traced maximum of the check Cell
+    declared: str       # where the bound comes from
+
+
+def bound_checks(cls):
+    """param_bound_checks of a Space: {parameter: Cell}. The check Cell is a zero-argument cached
+    Cell whose value is the policy's need for the parameter (a horizon, a maximum age). The sample
+    fixes the offset between that value and the arguments the model then passes (``t`` up to
+    ``proj_len()``, say): margin = traced stop of the parameter - traced maximum of the Cell. A
+    policy is accepted when value + margin <= the parameter's bound, on every cached Cell with
+    that parameter."""
+    from .config import TransSpec
+    spec = cls.module.spec.get_spec(cls.fqname)
+    requested = spec.get(TransSpec.PARAM_BOUND_CHECKS, {})
+    if not isinstance(requested, dict):
+        raise ValueError(f'{cls.fqname}: param_bound_checks must be a dict')
+    checks = []
+    for parameter, name in requested.items():
+        cell = cls.cells.get(name)
+        if (cell is None or cell.is_special() or not cell.has_formula_def or cell.has_args()
+                or not cell.has_typeinfo()
+                or cell.get_rettype_expr(c_style=True) not in ('long long', 'double')):
+            raise ValueError(f'{cls.fqname}: param_bound_checks[{parameter!r}] needs a zero-argument '
+                             f'cached Cell with a numeric result, got {name!r}')
+        check_max = getattr(cell._rt, 'max_ret_value', None)
+        if check_max is None:
+            raise ValueError(f'{cls.fqname}: the sample gave no numeric value of {name}')
+        limit = None
+        for signature, sizes in cls.cells_arg_sizes.items():
+            if parameter not in signature:
+                continue
+            stop = sizes[signature.index(parameter)]
+            traced = cls._cells_max_args.get(signature, {}).get(parameter)
+            if traced is None:
+                continue
+            margin = traced[0] + 1 - check_max
+            allowed = stop - margin
+            if limit is None or allowed < limit[0]:
+                where = cls.declared_axes.get(signature, {}).get(parameter)
+                limit = allowed, stop, margin, (f'cells_param_size at {where}' if where
+                                                else 'sampled, not declared')
+        if limit is None:
+            raise ValueError(f'{cls.fqname}: param_bound_checks[{parameter!r}]: no cached Cell has '
+                             f'the integer parameter {parameter!r}')
+        checks.append(BoundCheck(parameter, name, int(limit[0]), int(limit[1]), int(limit[2]), limit[3]))
+    return checks
+
+
+def _check_lines(cls, shape, checks):
+    """Pre-pass before any projection: every policy's need against the bounds."""
+    lines = ['        for coordinate in coords:']
+    lines.extend(('            if not first:',))
+    lines.extend('                ' + line for line in _restart_lines(cls, shape))
+    lines.append(f'            root.{shape.parameter} = coordinate')
+    lines.append('            first = False')
+    space = cls.name.removeprefix("_c_")
+    for check in checks:
+        message = (f'{space}: policy {{}} needs {check.parameter} for {check.cell}() = {{}} '
+                   f'(sampled margin {check.margin}); the size of {check.parameter} is {check.bound} '
+                   f'({check.declared}), which accepts {check.cell}() <= {check.limit}. '
+                   f"Raise cells_param_size {{{{{check.parameter!r}: ...}}}} in the spec.")
+        failed = (f'{space}: param_bound_checks: {check.cell}() raised for policy {{}} '
+                  f'before any projection: {{!r}}')
+        lines.extend((
+            '            try:',
+            f'                need = root.{check.cell}()',
+            '            except Exception as error:',
+            f'                raise RuntimeError({failed!r}.format(coordinate, error)) from error',
+            f'            if need > {check.limit}:',
+            f'                raise IndexError({message!r}.format(coordinate, need))',
+        ))
+    lines.append('        if not first:')
+    lines.extend('            ' + line for line in _restart_lines(cls, shape))
+    lines.append('        first = True')
+    return lines
+
+
+def _restart_lines(cls, shape):
+    if shape.reuse:
+        return list(_reset_lines(cls))
+    return ['root._mx_cells.clear()', 'root._mx_roots.clear()', 'root._space = None',
+            f'root = {cls.name}(self)', 'root._mx_copy_refs(self, self)', 'root._mx_roots.append(root)']
+
+
 def add_methods(cls, node, shape, *, workers):
     """Add a private evaluator to the existing generated collect entry."""
     if collect_contract(node) is None:
@@ -199,21 +289,15 @@ def add_methods(cls, node, shape, *, workers):
                 '        if enable is not None:',
                 '            enable()',
             ))
+    checks = bound_checks(cls)
+    cls.collect_bound_checks = checks
+    if checks:
+        lines.extend(_check_lines(cls, shape, checks))
     lines.extend((
         '        for coordinate in coords:',
         '            if not first:',
     ))
-    if shape.reuse:
-        lines.extend('                ' + line for line in _reset_lines(cls))
-    else:
-        lines.extend((
-            '                root._mx_cells.clear()',
-            '                root._mx_roots.clear()',
-            '                root._space = None',
-            f'                root = {cls.name}(self)',
-            '                root._mx_copy_refs(self, self)',
-            '                root._mx_roots.append(root)',
-        ))
+    lines.extend('                ' + line for line in _restart_lines(cls, shape))
     lines.extend((
         f'            root.{shape.parameter} = coordinate',
         '            if first:',
