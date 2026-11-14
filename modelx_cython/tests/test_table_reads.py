@@ -931,7 +931,8 @@ def test_asof_of_a_local_not_known_to_be_an_integer_is_typed_when_an_int():
     source = ('def _f_x(self, t):\n'
               '    a = self.loose(t)\n' + '    ' + probe('self.gap_table().index.asof(a)') + '\n')
     text, reads, sites = lower(_anchor_model(), source)
-    assert '(_mx_h0.asof_int(a) if type(a) is int else _mx_h0.table_object().index.asof(a))' in text, text
+    assert ('(_mx_h0.asof_int(_mx_cy.cast(_mx_cy.longlong, a)) if type(a) is int '
+            'else _mx_h0.table_object().index.asof(a))') in text, text
     assert not reads.declined
     same_values(_anchor_model(), source, range(0, 12))
 

@@ -581,6 +581,20 @@ class TableReads:
             return self.call_rettype(expr)[0] in UNSAFE_BARE
         return self.record_field(expr)
 
+    def c_local(self, expr):
+        """A local assigned only values of a C scalar type (cell results, parameters, literals):
+        Cython types it as that C type, so it cannot hold a tuple."""
+        values = self.formula.values.get(expr.value) or ()
+        for value in values:
+            if isinstance(value, (cst.Integer, cst.Float)):
+                continue
+            if isinstance(value, cst.Name) and self.param_type(value.value) in (INT_TYPES | UNSAFE_BARE):
+                continue
+            if self.call_rettype(value)[0] in (INT_TYPES | UNSAFE_BARE):
+                continue
+            return False
+        return bool(values)
+
     def record_field(self, expr):
         """``rec["f"]`` on a traced Record (a model point row): one scalar value."""
         parts = _subscript_parts(expr)
@@ -1393,7 +1407,7 @@ class _Lowering(cst.CSTTransformer):
     def _tuple_name(self, key, schema):
         """A local or parameter key of unknown arity on a table of 2..6 levels."""
         return (isinstance(key, cst.Name) and 2 <= schema.levels <= MAX_PARTS
-                and key.value not in self.f.other and not self.o.scalar(key)
+                and key.value not in self.f.other and not self.o.scalar(key) and not self.o.c_local(key)
                 and (key.value in self.o._params or len(self.f.values.get(key.value) or ()) == 1))
 
     def _python_read(self, ref, updated, attr):
@@ -1495,7 +1509,9 @@ class _Lowering(cst.CSTTransformer):
                         key.value not in self.f.other and len(self.f.values.get(key.value) or ()) == 1)):
                     # a typed asof when the key is an int at run time, else the helper's asof
                     self.mark(site, *ref.sites, notes=(*ref.notes, f'asof: local {key.value} typed when an int'))
-                    typed = _method(ref.handle, 'asof_int', cst.Name(key.value))
+                    typed = _method(ref.handle, 'asof_int', _call(
+                        cst.Attribute(cst.Name('_mx_cy'), cst.Name('cast')),
+                        cst.Attribute(cst.Name('_mx_cy'), cst.Name('longlong')), cst.Name(key.value)))
                     python = _call(cst.Attribute(cst.Attribute(_method(ref.handle, 'table_object'),
                                                                cst.Name('index')), cst.Name('asof')),
                                    cst.Name(key.value))
