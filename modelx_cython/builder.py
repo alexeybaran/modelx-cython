@@ -770,10 +770,9 @@ class CombinedCellsInfo(LexicalCellsInfo):
         from modelx_cython import automatic
         if not automatic.enabled(self):
             return False
-        spec = self.parent.module.spec.get_spec(self.parent.fqname)
-        sizes = spec.get(TransSpec.CELLS_PARAM_SIZE, spec.get(TransSpec.CELLS_PARAMS, {}))
-        return not any((key if isinstance(key, tuple) else (key,)) == tuple(self.params)
-                       for key in sizes)
+        self.parent.cells_arg_sizes     # fills declared_axes
+        declared = self.parent.declared_axes.get(tuple(self.params), {})
+        return not all(p in declared for p in self.params)
 
     def get_readiness_array_decl_expr(self, c_style=False):
         # Cython pickles unsigned-char arrays as NUL-terminated strings, which
@@ -973,6 +972,7 @@ class ClassInfo:
         self.cells = {}
         self._cells_max_args = {}
         self._associative_max_args = {}
+        self.declared_axes = {}     # parameter tuple -> {parameter: where its size is declared}
         self.refs = {}
         self.spaces = []
         self._init_cells()
@@ -1096,21 +1096,20 @@ class ClassInfo:
         return self._cache_sizes(self._associative_max_args)
 
     def _cache_sizes(self, observed):
-        spec = self.module.spec.get_spec(self.fqname)
+        # cells_param_size of this Space, of the enclosing Spaces and of the model (nearest wins):
+        # an entry for the exact parameter tuple sizes that tuple; a single-name entry sizes that
+        # parameter's axis of every other tuple in scope.
+        tuples, names = self.module.spec.get_declared_sizes(self.fqname)
         sizes = {}
-        declared = spec.get(TransSpec.CELLS_PARAM_SIZE)
-        if declared is None:
-            declared = {keys: config[TransSpec.SIZE]
-                        for keys, config in spec.get(TransSpec.CELLS_PARAMS, {}).items()
-                        if TransSpec.SIZE in config}
-        for keys, stops in declared.items():
-            if not isinstance(keys, tuple):
-                keys, stops = (keys,), (stops,)
+        for keys, (stops, where) in tuples.items():
             sizes[keys] = dict(zip(keys, stops))
-
+            self.declared_axes[keys] = {key: where for key in keys}
         for keys, maxima in observed.items():
             bounds = sizes.setdefault(keys, {})
+            declared = self.declared_axes.setdefault(keys, {})
             for key, (maximum, cell) in maxima.items():
+                if key not in bounds and key in names:
+                    bounds[key], declared[key] = names[key]
                 stop = maximum + 1
                 if key in bounds and stop <= bounds[key]:
                     continue

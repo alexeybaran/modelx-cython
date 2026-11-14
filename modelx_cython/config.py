@@ -103,7 +103,11 @@ class TransSpec:
       a tuple of parameter names) to its maximum size (or a tuple of
       sizes).  Used to size the fixed-length caches generated for
       cells with parameters; sampled maximum arguments can enlarge
-      but not shrink these sizes.
+      but not shrink these sizes. Also read at the model level (top of
+      the spec) and in enclosing Spaces: the nearest declaration of a key
+      wins. A tuple key applies to Cells with exactly that parameter
+      tuple; a single-name key bounds that parameter's axis of every
+      cached Cell in scope whose parameter tuple has no tuple entry.
     * ``"cells"``: dict mapping cells names to per-cells dicts.
     * ``"serial_collect"``: optional experimental scalar collection for an
       isolated slotted leaf Space. Use ``"reduce"`` for fresh receivers or
@@ -122,6 +126,11 @@ class TransSpec:
       fixed worker count and requires parallel reuse. It does not imply serial
       sum equivalence: the four-worker total can differ from the one-worker
       total in the last bits. Completion order merges each chunk as it finishes.
+    * ``"param_bound_checks"``: dict mapping a sized parameter name to a
+      zero-argument cached Cell of the Space whose value is the policy's
+      need for that parameter (for example ``{"t": "proj_len"}``). The
+      opt-in collect entry checks every policy against the bound before
+      any projection and raises IndexError naming the policy.
     * ``"cells_params"`` (deprecated): older form of
       ``"cells_param_size"``; maps a parameter name (or tuple) to a
       dict with a ``"size"`` key.  Consulted only when
@@ -213,6 +222,7 @@ class TransSpec:
     CELLS = "cells"
     CELLS_PARAM_SIZE = "cells_param_size"
     CELLS_PARAMS = "cells_params"   # deprecated
+    PARAM_BOUND_CHECKS = "param_bound_checks"
     SIZE = "size"   # deprecated
     RET_T = "return_type"
     DENSE_WINDOW = "dense_window"
@@ -232,6 +242,43 @@ class TransSpec:
         self._data = data
         self.policy = CompilerPolicy.resolve(data)
         self.automatic_optimizations = self.policy.automatic_optimizations
+
+    def get_declared_sizes(self, object_path: str):
+        """Return ``(tuples, names)`` of the ``"cells_param_size"`` entries in
+        force for a Space: ``{parameter tuple: (sizes, where)}`` and
+        ``{parameter name: (size, where)}``. The model level comes first, then
+        each enclosing Space down to the addressed one; a nearer declaration
+        of the same key wins. A level without ``"cells_param_size"`` uses its
+        deprecated ``"cells_params"`` sizes, as for one Space."""
+        tuples, names = {}, {}
+
+        def merge(data, where):
+            declared = data.get(self.CELLS_PARAM_SIZE)
+            if declared is None:
+                declared = {keys: config[self.SIZE]
+                            for keys, config in data.get(self.CELLS_PARAMS, {}).items()
+                            if self.SIZE in config}
+            for keys, stops in declared.items():
+                if isinstance(keys, tuple):
+                    tuples[keys] = tuple(stops), where
+                else:
+                    names[keys] = stops, where
+
+        merge(self._data, 'model')
+        data, path = self._data, []
+        for name in object_path.split(".")[1:]:
+            for prefix in (MODULE_PREF, SPACE_PREF):
+                if name[:len(prefix)] == prefix:
+                    name = name[len(prefix):]
+                    break
+            else:
+                continue
+            data = (data.get(self.SPACES) or {}).get(name) or {}
+            if not data:
+                break
+            path.append(name)
+            merge(data, '.'.join(path))
+        return tuples, names
 
     def get_spec(self, object_path: str):
         """Return the space-level spec dict for a dotted object path.

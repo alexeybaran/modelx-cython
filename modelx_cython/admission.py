@@ -71,6 +71,15 @@ def describe(module_infos):
                     'associative_logical_domain': {
                         axis.key: [int(axis.lower), int(axis.stop)] for axis in cell.associative_logical_axes
                     } if cache in ('native-numeric-keys', 'dictionary') else {},
+                    'declared_sizes': _declared_sizes(cls, cell) if cache != 'none' else {},
+                    'enum_domains': {name: f'{e[0]}.{e[1]} ({e[2]} members)' for name, e
+                                     in getattr(getattr(cell, '_rt', None), 'enum_args', {}).items()},
+                    **({'param_bound_checks': [
+                        {'parameter': c.parameter, 'limit': c.limit, 'bound': c.bound,
+                         'margin': c.margin, 'declared': c.declared}
+                        for c in getattr(cls, 'collect_bound_checks', ()) if c.cell == cell.name]}
+                       if any(c.cell == cell.name for c in getattr(cls, 'collect_bound_checks', ()))
+                       else {}),
                     'numeric_primary_capacity': primary_capacity(cell)
                     if cache == 'native-numeric-keys' else 0,
                     'power_memo': bool(getattr(cell, 'power_memo', None)),
@@ -101,6 +110,14 @@ def describe(module_infos):
                     'reasons': reasons or ['original Cython representation'],
                 }
     return result
+
+
+def _declared_sizes(cls, cell):
+    """{parameter: where its cells_param_size is declared} for a Cell's cache axes."""
+    if not cell.params or not hasattr(cls, 'declared_axes'):
+        return {}
+    cls.cells_arg_sizes, cls.associative_arg_sizes
+    return dict(cls.declared_axes.get(tuple(cell.params), {}))
 
 
 def _window(axes):

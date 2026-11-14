@@ -22,7 +22,10 @@ def observed_axes(cell, logical):
     maximum = getattr(runtime, 'observed_max_args', {})
     if not logical or any(axis.key not in minimum or axis.key not in maximum for axis in logical):
         return logical
-    axes = tuple(DenseAxis(axis.key, max(axis.lower, minimum[axis.key]),
+    declared = declared_axes(cell)
+    # A declared size is allocated as declared (cells_param_size); only sampled axes shrink.
+    axes = tuple(axis if axis.key in declared else
+                 DenseAxis(axis.key, max(axis.lower, minimum[axis.key]),
                            min(axis.stop, maximum[axis.key] + 1), axis.c_type) for axis in logical)
     if not all(axis.lower < axis.stop for axis in axes):
         return logical
@@ -37,6 +40,15 @@ def observed_axes(cell, logical):
     # near-full native array (and its range proofs) for less than that storage.
     spill_cost = ctypes.sizeof(ctypes.c_void_p) + sys.getsizeof({})
     return axes if saved >= spill_cost else logical
+
+
+def declared_axes(cell):
+    """Parameters of a Cell whose size the spec declares (cells_param_size, any level)."""
+    parent = getattr(cell, 'parent', None)
+    if parent is None or not hasattr(parent, 'declared_axes'):
+        return {}
+    parent.cells_arg_sizes
+    return parent.declared_axes.get(tuple(getattr(cell, 'params', ())), {})
 
 
 def max_dense_entries_set(cell):
