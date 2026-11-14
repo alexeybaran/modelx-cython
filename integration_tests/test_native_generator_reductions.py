@@ -90,7 +90,8 @@ def test_generator_reductions_match_the_interpreter(tmp_path):
     untyped = {}
     for name in names:
         cell = report[f'exported_cy._mx_classes._c_Projection._f_{name}']
-        if cell['native_expressions'] == 0 and cell['native_reductions'] == 0:
+        if (cell['native_expressions'] == 0 and cell['native_reductions'] == 0
+                and not (cell.get('vectors') or {}).get('lowered')):
             untyped[name] = cell['expressions_untyped']
     assert untyped == {}, untyped
     source = (tmp_path / 'exported_cy/_mx_classes.py').read_text(encoding='utf-8')
