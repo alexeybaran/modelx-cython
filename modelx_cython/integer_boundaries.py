@@ -586,14 +586,14 @@ def _signed_signatures(state):
 
 
 def _python_locals(node, cell):
-    """D72: declare ``object`` the locals the integer passes leave to Python on purpose.
+    """D72/D76: declare ``object`` the locals compared by identity.
 
-    With ``infer_types`` (W1.5 0005) Cython infers a C type for every untyped local, so a local
-    the compiler deliberately kept as a Python int would wrap, raise OverflowError where Python
-    is exact, or lose its identity (``x is saved[0]`` on a re-boxed int). Declared ``object``:
-    every local compared with ``is``/``is not``, every ``range`` target the range pass examined
-    and did not type, and every local the signed-local pass examined and did not prove. Locals
-    with an annotation of their own (the passes' ``long long`` declarations) are left alone.
+    With ``infer_types`` (W1.5 0005) Cython infers a C type for every untyped local; a local
+    compared with ``is``/``is not`` would lose its identity (``x is saved[0]`` on a re-boxed
+    int gives a wrong answer), so it is declared ``object``. Integer locals and ``range``
+    targets otherwise stay C integers: their arithmetic is guarded (guarded_integers, D76).
+    Locals with an annotation of their own are left alone. The admission report lists each
+    declared local (``object_locals``).
     """
     body = node.body
     # the overflow handler the guard itself wraps around the body is an except clause; any
@@ -609,7 +609,9 @@ def _python_locals(node, cell):
                   (*node.params.posonly_params, *node.params.params, *node.params.kwonly_params)}
     annotated = {statement.target.value for statement in lexical_nodes(body.body)
                  if isinstance(statement, cst.AnnAssign) and isinstance(statement.target, cst.Name)}
-    names = set(getattr(cell, 'python_int_locals', ())) | set(getattr(cell, 'python_range_locals', ()))
+    # D76: integer locals and range targets stay C integers with guarded arithmetic
+    # (guarded_integers); only identity keeps the Python object
+    names = set()
     for part in lexical_nodes(body.body):
         if isinstance(part, cst.Comparison) and any(
                 isinstance(item.operator, (cst.Is, cst.IsNot)) for item in part.comparisons):

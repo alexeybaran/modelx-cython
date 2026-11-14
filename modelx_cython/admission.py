@@ -90,6 +90,9 @@ def describe(module_infos):
                         'reductions_native', 'enum_memberships', 'minmax_native', 'math_native')),
                     'expressions_untyped': expressions_untyped(cell),
                     'powers_in_loops': list(getattr(cell, 'powers_in_loops', ())),
+                    'guarded_integer_ops': getattr(cell, 'guarded_integer_ops', 0),
+                    'object_locals': [{'local': name, 'reason': 'compared by identity (is / is not)'}
+                                      for name in getattr(cell, 'python_object_locals', ())],
                     'expressions_object': expressions_object(cell),
                     **({'vectors': cell.vector_report} if getattr(cell, 'vector_report', None) else {}),
                     'reasons': reasons or ['original Cython representation'],

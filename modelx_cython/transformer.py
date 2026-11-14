@@ -732,11 +732,19 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
         # then `base ** k` is an integer exponent, as the same expression written inline is
         local_kinds = formula_local_kinds(node, cells.params, self._resolver, self._cells_kinds,
                                           self._ref_kinds, cls_info.fqname, param_kinds)
-        return preserve_argument_order(node,
+        node = preserve_argument_order(node,
             native_result=cells.get_rettype_expr(c_style=True) in ('double', 'long long', 'bint'),
             operand_kind=OperandKind(self._resolver, self._cells_kinds, self._ref_kinds,
                                      cls_info.fqname, {**local_kinds, **param_kinds}),
             cells=cells, providers=self.helper_providers)
+        cells.guarded_integer_ops = 0
+        if self.module.spec.policy.infer_types and cells.get_rettype_expr(c_style=True) != 'long long':
+            # (an integer-result formula keeps the integer-boundary pass's own checked semantics)
+            # D76: integer locals stay C integers; each integer operation on them that could
+            # leave the 64-bit range runs natively within a safe bound, else exactly in Python
+            from modelx_cython.guarded_integers import guard_integers
+            node, cells.guarded_integer_ops = guard_integers(node, local_kinds, param_kinds)
+        return node
 
     def _table_reads(self, node, cls_info, cells):
         """M1 hook (W1.1): lower table reads (W1.3, ``table_reads.TableReads``) and report the
