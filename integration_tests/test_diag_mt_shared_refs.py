@@ -112,3 +112,89 @@ def test_held_table_local_and_builtin_reduction_take_no_shared_reference(tmp_pat
     # four chunks merge in domain order: equal to the one-worker total within its rounding
     assert abs(float(four) - float(one)) <= 1e-12 * abs(float(one)), out
     assert out['exported_cy'][1:] == out['exported'][1:], out
+
+
+def test_enum_member_local_is_a_c_integer_and_results_stay(tmp_path, monkeypatch):
+    """D83: ``kind = Kind.A if ... else Kind.B`` read only as a compiled Cell's integer argument and in
+    comparisons with members is a C integer bound to the module constants (no member object read per
+    call); both branches give the exported model's values; four workers = one worker."""
+    from modelx_helpers.typed_inputs import EnumDefinitions
+    (tmp_path / 'diag_mt_kinds.py').write_text(
+        'import enum\n\nclass Kind(enum.IntEnum):\n    A = 1\n    B = 2\n', encoding='utf-8')
+    monkeypatch.syspath_prepend(str(tmp_path))
+    from diag_mt_kinds import Kind
+    keys = tuple(range(1, 41))
+    model = mx.new_model('EnumLocal')
+    try:
+        portfolio = model.new_space('Portfolio')
+        projection = portfolio.new_space(
+            'Projection', formula='lambda key: None', refs={'keys': keys, 'Kind': Kind},
+            collect_over={'key': keys}, collect_outputs='lambda: {"sum": {"value": value()}}')
+        projection.enum_definitions = EnumDefinitions(('Kind',))
+        projection.new_cells('pay', '''\
+def pay(t, kind):
+    return (t + key) * (1.5 if kind == Kind.A else 0.25)
+''')
+        projection.new_cells('chosen', '''\
+def chosen(t):
+    kind = Kind.A if (t + key) % 3 == 0 else Kind.B
+    if kind == Kind.B:
+        return pay(t, kind) + 1.0
+    return pay(t, kind)
+''')
+        projection.new_cells('named', '''\
+def named(t):
+    kind = Kind.A if t % 2 == 0 else Kind.B
+    return kind.name
+''')
+        projection.new_cells('value', '''\
+def value():
+    total = 0.0
+    for t in range(30):
+        total += chosen(t)
+    return total
+''')
+        model.export(tmp_path / 'exported')
+    finally:
+        model.close()
+    spec = {'parallel_workers': 4, 'spaces': {'Portfolio': {'spaces': {'Projection': {
+        'serial_collect': 'reuse', 'parallel_collect_reuse': True, 'parallel_collect_order': 'domain'}}}}}
+    (tmp_path / 'spec.py').write_text(repr(spec), encoding='utf-8')
+    (tmp_path / 'sample.py').write_text(
+        'from exported import mx_model\n'
+        'p = mx_model.Portfolio.Projection\n'
+        'p.collect()\n'
+        'for key in (1, 2, 3):\n'
+        '    [p[key].chosen(t) for t in range(30)]; p[key].value(); [p[key].named(t) for t in range(3)]\n',
+        encoding='utf-8')
+    done = subprocess.run([sys.executable, '-m', 'modelx_cython', 'exported', '--sample', 'sample.py',
+                           '--spec', 'spec.py'], cwd=tmp_path, capture_output=True, text=True)
+    assert done.returncode == 0, done.stdout[-3000:] + done.stderr[-3000:]
+    generated = (tmp_path / 'exported_cy/_m_Portfolio/_mx_classes.py').read_text(encoding='utf-8')
+    assert generated.count('\n    kind: _mx_cy.longlong\n') == 1, generated   # chosen only; named keeps the member
+    assert 'kind = _mx_enum_const_0 if (t + self.key) % 3 == 0 else _mx_enum_const_1' in generated
+    assert '_mx_definition_Kind.A if' in generated                           # named: an object, as before
+    probe = textwrap.dedent('''\
+        import sys
+        from importlib import import_module
+        m = import_module(sys.argv[1]).mx_model
+        p = m.Portfolio.Projection
+        if sys.argv[1] == 'exported_cy':
+            serial = type(m)()
+            serial._mx_collect_set_workers_v2(1)
+            one = serial.Portfolio.Projection.collect().sum.value
+            print(repr(one), repr(p.collect().sum.value))
+        else:
+            print(repr(p.collect().sum.value), repr(p.collect().sum.value))
+        item = p[5]
+        print(repr([item.chosen(t) for t in range(30)]), [item.named(t) for t in range(4)])
+        ''')
+    out = {}
+    for package in ('exported', 'exported_cy'):
+        run = subprocess.run([sys.executable, '-c', probe, package], cwd=tmp_path, capture_output=True, text=True)
+        assert run.returncode == 0, package + run.stdout + run.stderr
+        out[package] = run.stdout.splitlines()
+    one, four = out['exported_cy'][0].split()
+    assert one == out['exported'][0].split()[0], out
+    assert abs(float(four) - float(one)) <= 1e-12 * abs(float(one)), out
+    assert out['exported_cy'][1:] == out['exported'][1:], out

@@ -52,6 +52,7 @@ class Constants(FormulaTransformer):
         self.memberships = 0        # ``in`` / ``not in`` over member tuples lowered
         self.object_memberships = []    # W1.8: ``in`` with an object left, as a chain
         self.lines = None
+        self.enum_locals = {}       # D83: local -> enum Ref of a member-valued C integer local
 
     def visit_FunctionDef(self, node):
         from .reductions import formula_lines
@@ -81,6 +82,96 @@ class Constants(FormulaTransformer):
                     and self.cls.cells[v.func.attr.value].get_rettype_expr(c_style=True)
                     in ('long long','bint')) or self.integer_ref(v) for v in values):
                 self.locals.add(name)
+        if node is self._formula_root or self._formula_root is None:
+            self.enum_locals = self.member_locals(node, nodes, assignments, invalid)
+            self.locals.update(self.enum_locals)
+
+    def member_ref(self, node):
+        """The Ref of an admitted enum whose member ``node`` is (``self.<Ref>.<member>``, or a
+        conditional expression of members of one Ref in both branches), else None."""
+        if isinstance(node, cst.IfExp):
+            body, orelse = self.member_ref(node.body), self.member_ref(node.orelse)
+            return body if body is not None and body == orelse else None
+        if (isinstance(node, cst.Attribute) and isinstance(node.value, cst.Attribute)
+                and isinstance(node.value.value, cst.Name) and node.value.value.value == 'self'
+                and (self.cls.name, node.value.attr.value, node.attr.value) in self.symbols):
+            return node.value.attr.value
+        return None
+
+    def member_locals(self, node, nodes, assignments, invalid):
+        """D83: locals held as C integers bound to the enum module constants.
+
+        A local qualifies when every binding is a plain assignment of a member of one admitted enum
+        (or a conditional expression of such members), and every load of it is in a C-integer
+        position of this formula: one side of ``==`` / ``!=`` with a member or an integer, the left
+        of ``in`` / ``not in`` over a literal tuple of members, or a positional argument of a
+        compiled Cell whose parameter is a C integer. An IntEnum member compares, hashes and
+        converts as its value there, so the result is the one the member object gives. Any other
+        load (returned, formatted, an attribute of it, passed to Python, a table key, a nested
+        scope) keeps the local an object: no partial typing."""
+        candidates = {}
+        for name, values in assignments.items():
+            if name in invalid or name in self.locals or name in self.cell.params:
+                continue
+            refs = {self.member_ref(value) for value in values}
+            if len(refs) == 1 and None not in refs:
+                candidates[name] = refs.pop()
+        if not candidates:
+            return {}
+        targets = {id(target.target) for part in nodes if isinstance(part, cst.Assign)
+                   for target in part.targets}
+        every = {}          # name -> ids of all its Name nodes that are not assignment targets
+        for item in walk(node.body):
+            if isinstance(item, cst.Name) and item.value in candidates and id(item) not in targets:
+                every.setdefault(item.value, set()).add(id(item))
+        integer = {}        # name -> ids of loads in C-integer positions (this formula's scope)
+
+        def ok(name_node, ref):
+            integer.setdefault(name_node.value, set()).add(id(name_node))
+
+        for part in nodes:
+            if isinstance(part, cst.Comparison) and len(part.comparisons) == 1:
+                comp = part.comparisons[0]
+                left, right = part.left, comp.comparator
+                if isinstance(comp.operator, (cst.Equal, cst.NotEqual)):
+                    for one, other in ((left, right), (right, left)):
+                        if (isinstance(one, cst.Name) and one.value in candidates
+                                and (self.member_ref(other) == candidates[one.value]
+                                     and not isinstance(other, cst.IfExp) or self.integer(other))):
+                            ok(one, candidates[one.value])
+                elif (isinstance(comp.operator, (cst.In, cst.NotIn)) and isinstance(left, cst.Name)
+                        and left.value in candidates and isinstance(right, cst.Tuple) and right.elements
+                        and all(isinstance(e, cst.Element) and not isinstance(e.value, cst.IfExp)
+                                and self.member_ref(e.value) == candidates[left.value]
+                                for e in right.elements)):
+                    ok(left, candidates[left.value])
+            elif (isinstance(part, cst.Call) and isinstance(part.func, cst.Attribute)
+                    and isinstance(part.func.value, cst.Name) and part.func.value.value == 'self'
+                    and not any(a.keyword or a.star for a in part.args)):
+                cell = self.cls.cells.get(part.func.attr.value)
+                if cell is None or cell.called_with_kwargs or cell.body_has_closure:
+                    continue
+                for arg, param in zip(part.args, cell.params):
+                    if (isinstance(arg.value, cst.Name) and arg.value.value in candidates
+                            and cell.get_argtype_expr(param, c_style=True) in ('long long', 'bint')):
+                        ok(arg.value, candidates[arg.value.value])
+        return {name: ref for name, ref in candidates.items()
+                if every.get(name) and every[name] == integer.get(name)}
+
+    def constant(self, node):
+        """A member expression (see member_ref) with each member replaced by its constant."""
+        if isinstance(node, cst.IfExp):
+            return node.with_changes(body=self.constant(node.body), orelse=self.constant(node.orelse))
+        self.count += 1
+        return cst.Name(self.symbols[self.cls.name, node.value.attr.value, node.attr.value][0],
+                        lpar=node.lpar, rpar=node.rpar)
+
+    def leave_Assign(self, before, after):
+        if (len(after.targets) == 1 and isinstance(after.targets[0].target, cst.Name)
+                and after.targets[0].target.value in self.enum_locals
+                and self.member_ref(after.value) is not None):
+            return after.with_changes(value=self.constant(after.value))
+        return after
 
     def integer_ref(self, node):
         """``self.<ref>`` of a Reference stored in a C ``long long`` field (an integer or an
@@ -106,6 +197,16 @@ class Constants(FormulaTransformer):
         self.cell.enum_object = list(self.object_memberships)
         if self.lines is None or self.rebinds_self:
             return after
+        self.cell.enum_locals = sorted(self.enum_locals)
+        if self.enum_locals:
+            # D83: declared C integers (the bindings are module constants); after the docstring
+            statements = list(after.body.body)
+            start = int(bool(statements) and isinstance(statements[0], cst.SimpleStatementLine)
+                        and len(statements[0].body) == 1 and isinstance(statements[0].body[0], cst.Expr)
+                        and isinstance(statements[0].body[0].value, (cst.SimpleString, cst.ConcatenatedString)))
+            declared = [cst.parse_statement(f'{name}: _mx_cy.longlong\n') for name in sorted(self.enum_locals)]
+            after = after.with_changes(body=after.body.with_changes(
+                body=(*statements[:start], *declared, *statements[start:])))
         # W1.4: a member left as an object (an object position) is read from the definition's
         # C field, not through the Space property: self._mx_definition_<Ref>.<member>.
         fields = _MemberFields(self.cls.name, self.symbols)
