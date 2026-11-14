@@ -10,6 +10,7 @@ from modelx_cython.typedefs import primitive_kind
 
 
 _NUMERIC_TYPES = {"bint", "double", "long long"}
+_C_CASTS = {"double": "double", "long long": "longlong", "bint": "bint"}
 
 
 def allows_exact_receiver(node, owner):
@@ -127,7 +128,7 @@ class _Calls(cst.CSTTransformer):
         if not (isinstance(func, cst.Attribute) and isinstance(func.value, cst.Name)
                 and func.value.value == MX_SELF and func.attr.value in self.entries):
             return updated
-        entry, arity, defaults = self.entries[func.attr.value]
+        entry, arity, defaults, rettype = self.entries[func.attr.value]
         missing = arity - len(updated.args)
         if not 0 <= missing <= len(defaults) or any(a.keyword or a.star for a in updated.args):
             return updated
@@ -136,10 +137,18 @@ class _Calls(cst.CSTTransformer):
             func=cst.Name(entry), args=(cst.Arg(func.value), *updated.args, *supplied))
         if self.exact_depth:
             return direct
+        # D59: the virtual branch converts to the Cell's C return type, as the typed entry
+        # returns it, so the whole expression has that type and a local assigned from it
+        # is inferred as a C number (infer_types) rather than an object.
+        virtual = updated
+        if rettype in _C_CASTS:
+            virtual = cst.Call(func=cst.parse_expression(f'{CY_MOD}.cast'), args=(
+                cst.Arg(cst.parse_expression(f'{CY_MOD}.{_C_CASTS[rettype]}')),
+                cst.Arg(updated.with_changes(lpar=(), rpar=()))))
         return cst.IfExp(
             test=self.exact_receiver,
             body=direct,
-            orelse=updated,
+            orelse=virtual,
             lpar=(cst.LeftParen(),),
             rpar=(cst.RightParen(),),
         )
@@ -208,7 +217,7 @@ def add_inline_entries(module, classes, dense_layouts):
                 next_entry += 1
             next_entry += 1
             cell.inline_entry = entry
-            entries[cell.name] = entry, len(cell.params), defaults
+            entries[cell.name] = entry, len(cell.params), defaults, cell.get_rettype_expr(c_style=True)
             layout = dense_layouts.get((owner, cell.name))
             if layout is not None:
                 dense_entries[entry] = layout
