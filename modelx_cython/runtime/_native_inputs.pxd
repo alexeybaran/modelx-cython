@@ -144,6 +144,11 @@ cdef struct HandleKeys:
     const Py_ssize_t* slots     # row + 1, 0 empty
     size_t mask
     const unsigned char* modes  # pandas boolean label mode per part: 0 any, 1 bool only, 2 no bool
+    # D86 (diag-vec): a dense product index over a HASHED multi-part key whose parts are all plain ints
+    # in a small box: grid[row-major position] = row + 1 (0 absent); NULL when not built (stays hashed)
+    const Py_ssize_t* grid
+    const long long* gfirst     # per part: smallest key
+    const unsigned long long* gspan     # per part: largest - smallest + 1
 
 @cython.final
 cdef class TableHandle:
@@ -171,6 +176,7 @@ cdef class TableHandle:
     cdef bint _spec_missing, _int_keys, _increasing, _preserve
     cdef const long long* _okeys    # single-level int keys in row order
     cdef object _table_obj          # table_object(): built with the handle, None for column views
+    cdef object _key_index          # D86: 'grid', or why a multi-level key stays hashed; None otherwise
     cdef Py_ssize_t col(self, object name) except -2               # identity, then ==; KeyError(name)
     cdef Py_ssize_t row_1(self, TableKey p0) except -2              # KeyError(original key)
     cdef Py_ssize_t row_2(self, TableKey p0, TableKey p1) except -2

@@ -2925,7 +2925,7 @@ cdef inline Py_hash_t _hparts_hash(const HandlePart* parts, Py_ssize_t n) noexce
 cdef Py_ssize_t _keys_find(const HandleKeys* k, const HandlePart* q) except -2:
     """Row (or axis position) of the key q (k.nparts parts) in k; -1 when absent."""
     cdef Py_ssize_t j, lo, hi, mid, r
-    cdef unsigned long long offset
+    cdef unsigned long long offset, pos
     cdef size_t i
     cdef const HandlePart* stored
     cdef long long v
@@ -2954,6 +2954,17 @@ cdef Py_ssize_t _keys_find(const HandleKeys* k, const HandlePart* q) except -2:
         if lo < k.count and k.skeys[lo] == v:
             return k.srows[lo]
         return -1
+    if k.grid != NULL:
+        # D86: the dense product index (same rows as the hash index below, which it replaces)
+        offset = 0
+        for j in range(k.nparts):
+            if q[j].kind != HK_INT:
+                return -1
+            pos = <unsigned long long>q[j].i - <unsigned long long>k.gfirst[j]
+            if pos >= k.gspan[j]:
+                return -1
+            offset = offset * k.gspan[j] + pos
+        return k.grid[offset] - 1
     if k.count == 0:
         return -1
     i = <size_t>_hparts_hash(q, k.nparts) & k.mask
@@ -3006,6 +3017,59 @@ cdef void _hash_index(HandleKeys* k, list hold) except *:
         slots[i] = r + 1
     k.slots = slots
     k.mask = size - 1
+
+
+# D86: the largest dense product index built for a multi-part key (slots of one Py_ssize_t), the default
+# of the compiler's max_dense_entries (D74); a larger box keeps the hash index.
+GRID_MAX_SLOTS = 65536
+
+
+cdef str _grid_index(HandleKeys* k, list hold, Py_ssize_t max_slots):
+    """D86: build k.grid over a HASHED key of two or more parts when every stored part is a plain int
+    (no bool label, no level that matches bools only) and the key box holds at most max_slots positions.
+    Duplicate keys keep the first row, as the hash index finds it. Returns '' when built, else why not."""
+    cdef Py_ssize_t r, j, n = k.nparts
+    cdef const HandlePart* part
+    cdef long long* lo
+    cdef unsigned long long* span
+    cdef unsigned long long size = 1, offset
+    cdef Py_ssize_t* grid
+    if n < 2 or k.count == 0:
+        return 'fewer than two key parts or no rows'
+    for j in range(n):
+        if k.modes[j] == 1:
+            return 'a level matches bool labels only'
+    lo = <long long*>_alloc(hold, n * sizeof(long long))
+    hi = [0] * n
+    for r in range(k.count):
+        for j in range(n):
+            part = &k.parts[r * k.pstride + k.poff + j]
+            if part.kind != HK_INT or part.boolean != HB_NO:
+                return 'a key part is not a plain integer'
+            if r == 0 or part.i < lo[j]:
+                lo[j] = part.i
+            if r == 0 or part.i > hi[j]:
+                hi[j] = part.i
+    span = <unsigned long long*>_alloc(hold, n * sizeof(unsigned long long))
+    for j in range(n):
+        if hi[j] - lo[j] + 1 > max_slots:
+            return f'key box above {max_slots:,} positions'
+        span[j] = <unsigned long long>(hi[j] - lo[j] + 1)
+        size *= span[j]
+        if size > <unsigned long long>max_slots:
+            return f'key box above {max_slots:,} positions'
+    grid = <Py_ssize_t*>_alloc(hold, <Py_ssize_t>(size * sizeof(Py_ssize_t)))
+    for r in range(k.count):
+        offset = 0
+        for j in range(n):
+            offset = offset * span[j] + (<unsigned long long>k.parts[r * k.pstride + k.poff + j].i
+                                         - <unsigned long long>lo[j])
+        if grid[offset] == 0:
+            grid[offset] = r + 1
+    k.gfirst = lo
+    k.gspan = span
+    k.grid = grid
+    return ''
 
 
 cdef void _index_single(TableHandle t, HandleKeys* k, list hold, const HandlePart* parts,
@@ -3442,6 +3506,8 @@ cdef void _init_rows(TableHandle t, list hold, tuple storage) except *:
     t._keys.parts = parts
     t._keys.modes = modes
     _hash_index(&t._keys, hold)
+    why = _grid_index(&t._keys, hold, GRID_MAX_SLOTS)
+    t._key_index = 'grid' if not why else 'hashed: ' + why
     t._first_obj, t._last_obj = _extremes(keys)
     _rows_children(t, hold, parts, levels, 0, t._labels, modes)
 
@@ -3981,6 +4047,12 @@ cdef class TableHandle:
         if not self._prefix:
             return self.owner
         return self.owner.loc[self._prefix if len(self._prefix) > 1 else self._prefix[0]]
+
+    @property
+    def key_index(self):
+        """D86: how a multi-level full key is found: 'grid' (dense product index), or why it stays
+        hashed; None for other schemes."""
+        return self._key_index
 
     @property
     def scheme_name(self):
