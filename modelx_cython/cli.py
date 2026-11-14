@@ -361,6 +361,11 @@ def main_handler(args: argparse.Namespace, stdout: IO[str], stderr: IO[str]) -> 
                 m, source, visitor, module_info,
                 abs_src_path, rel_src_path, abs_pxd_path, abs_init_path))
 
+        # auto-tables (D106): a plain pandas table admitted in the sample stays admitted only if a
+        # read the compiler lowers consumes it; the others are compiled as the frames they are.
+        from .auto_tables import demand_driven
+        demand_driven(units, logger, build_resolver)
+
         # Phase 2: classify cross-module usage of array-returning cells
         # so that get_rettype_expr can fall back to object where needed.
         pairs = [(u.visitor, u.module_info) for u in units]

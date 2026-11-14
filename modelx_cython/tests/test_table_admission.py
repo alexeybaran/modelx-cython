@@ -44,7 +44,6 @@ def test_values_that_are_not_pandas_pass_through():
 
 
 @pytest.mark.parametrize('value, nargs, expected', [
-    (frame(), 1, 'returns a pandas DataFrame from a cell with arguments: not admitted as a table (C1)'),
     (frame()['q'], 0, 'returns a pandas Series: not admitted as a table (C2)'),
     (frame(index=pd.Index([30, 30, 31], name='age')), 0, 'duplicate key 30 (1 duplicated rows) (C3)'),
     (frame(index=pd.Index([30.0, np.nan, 31.0], name='age')), 0, "missing value in key level 'age' (C4)"),
@@ -65,7 +64,12 @@ def test_each_condition_has_its_message(value, nargs, expected):
 def test_every_failed_condition_is_listed():
     value = pd.DataFrame({1: [1.0, 2.0]}, index=pd.Index([1, 1], name='k'))
     found = reasons(value, 2)
-    assert [r.split(' (C')[1][0] for r in found] == ['1', '3', '6']
+    assert [r.split(' (C')[1][0] for r in found] == ['3', '6']
+
+
+def test_a_cell_with_arguments_is_admitted_too():
+    # D105: the argument count does not decide (the build decides by the native reads, D106)
+    assert type(admit(frame(), 'Projection.t', 2)).__name__ == 'Table'
 
 
 def test_c8_is_the_helper_contract():

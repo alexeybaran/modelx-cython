@@ -5,7 +5,7 @@ One model holds two plain pandas tables (``Data.f`` keyed (sex, age), ``Data.g``
 per-policy Space (class B unless lowered) and in a cell with an argument (class C unless lowered).
 Awkward tables sit beside them: duplicate keys (not admitted: stays pandas), float keys, string
 keys, NaN values, an enum key level, a MultiIndex with unused levels, a table built per policy, the
-same frame returned by two cells, a Series, and tuple-valued vector cells. The checks compare every
+same frame returned by two cells, a Series, and tuple-valued cells (a float tuple used as a key). The checks compare every
 cell of the compiled model with live modelx, at 1 and 4 workers, and read the build report.
 """
 import json
@@ -60,8 +60,11 @@ OPS = [
     ("row_sum", "T.loc[31].sum()", "g", "A"),
     ("chained", 'T["q"][31]', "g", "A"),
     ("missing_key", 'T.loc[99, "q"]', "g", "A"),
+    # beyond the experiment's 44: operators on the table itself
+    ("table_times_2", "T * 2", "g", "C"),
+    ("table_compare", "(T > 1.5).sum().sum()", "g", "C"),
 ]
-assert len(OPS) == 44
+assert len(OPS) == 46
 
 MODEL = '''\
 import enum
@@ -86,6 +89,8 @@ DATA = {{
     "g2": "return g()",                                     # the same frame from two cells
     "dup": "return pd.DataFrame({{'x': [1.0, 2.0, 3.0]}}, index=pd.Index([1, 1, 2], name='k'))",
     "fkey": "return pd.DataFrame({{'x': [1.0, 2.0]}}, index=pd.Index([0.5, 1.5], name='k'))",
+    "fkey2": ("return pd.DataFrame({{'x': [1.0, 2.0]}}, "
+              "index=pd.MultiIndex.from_tuples([(0.5, 1.5), (1.5, 2.5)], names=['a', 'b']))"),
     "skey": "return pd.DataFrame({{'x': [1.0, 2.0], 'label': ['a', 'b']}}, index=pd.Index(['p', 'q'], name='k'))",
     "nans": "return pd.DataFrame({{'x': [1.0, np.nan], 's': ['a', None]}}, index=pd.Index([1, 2], name='k'))",
     "ekey": ("frame = f_raw.copy()\\n    frame['sex'] = [Sex[n] for n in frame['sex']]\\n"
@@ -109,9 +114,16 @@ PROJ = {{
     "g2_x": "return data.g2().loc[33, 'q']",
     "ser_x": "return data.ser()[32]",
     "rows_x": "return data.rowkeys().loc[1, 'q']",
-    "vec": "return (sa(), sa() * 2.0, 0.5)",                # a tuple of floats: a vector
-    "ivec": "return (1, 2, int(policy_id))",                # a tuple of ints: a vector
-    "vec_sum": "return sum(vec()) + vec()[1] + sum(ivec())",
+    "vec": "return (sa(), sa() * 2.0, 0.5)",                # a tuple of floats stays a tuple
+    "ivec": "return (1, 2, int(policy_id))",                # a tuple of ints stays a tuple
+    "ivec_key": "return data.f().loc[('F', 30 + ivec()[1]), 'lapse']",
+    "fkey_tuple": "return (0.5, 1.5 + 0.0 * sa())",          # a float key: a tuple, never a vector
+    "fkey_tuple_x": "return data.fkey2().loc[fkey_tuple(), 'x'] + data.fkey2().loc[(1.5, 2.5), 'x']",
+    "lvec": "return [sa(), sa() * 2.0, 0.5]",               # a list of floats: a vector
+    "vec_sum": "return sum(vec()) + vec()[1] + sum(ivec()) + fkey_tuple_x() + ivec_key() + sum(lvec())",
+    "scaled_x": "return scaled(2).loc[31, 'q'] + scaled(3).loc[32, 'w']",
+    "report": ("return pd.DataFrame({{'sa': [sa() * t for t in range(3)]}}, "     # read by nobody natively
+               "index=pd.Index(range(3), name='t'))"),
 }}
 
 
@@ -131,6 +143,7 @@ def build():
                        collect_outputs='lambda: {{"sum": {{"total": total()}}}}')
     for name, body in PROJ.items():
         proj.new_cells(name, f"def {{name}}():\\n    {{body}}\\n")
+    proj.new_cells("scaled", "def scaled(k):\\n    return data.g() * float(k)\\n")   # a frame per argument
     for name, expression, table, _ in OPS:
         proj.new_cells("b_" + name, f"def b_{{name}}():\\n    {{_op_body(expression, table)}}\\n")
         proj.new_cells("c_" + name, f"def c_{{name}}(t):\\n    {{_op_body(expression, table)}}\\n")
@@ -175,8 +188,6 @@ Model = type(package.mx_model)
 def same(a, b):
     if isinstance(a, (pd.DataFrame, pd.Series)):
         return isinstance(b, (pd.DataFrame, pd.Series)) and a.equals(b)
-    if isinstance(a, tuple) and not isinstance(b, (tuple, list, str)) and hasattr(b, "__len__"):
-        b = list(b)         # a tuple vector cell: the compiled value is a typed vector
     if isinstance(a, np.ndarray):
         # a cell whose value is a float64 array returns a memoryview of it from a compiled model, as any
         # array-valued cell does (not a table rule): compared by value
@@ -223,6 +234,8 @@ m = Model()
 frame = m.Data.g()
 assert isinstance(frame, pd.DataFrame) and frame.equals(live.Data.g())
 assert m.Data.g2() is m.Data.g()            # the same frame from two cells: one table
+assert type(m.Projection[1].report()) is pd.DataFrame       # a report stays the model's own DataFrame
+assert type(m.Projection[1].b_mask()) is pd.DataFrame
 assert isinstance(m.Data.dup(), pd.DataFrame) and m.Data.dup().equals(live.Data.dup())
 try:
     m.Data.g()["q"] = 0.0
@@ -272,6 +285,13 @@ def test_auto_tables_compiled_equal_live(tmp_path):
     admitted = set(summary["admitted"])
     assert {"Data.f", "Data.g", "Data.g2", "Data.fkey", "Data.skey", "Data.nans", "Data.ekey",
             "Data.unused", "Data.rowkeys", "Projection.per_policy"} <= admitted, admitted
+    # D106: a frame no lowered read consumes stays the plain DataFrame (the report, the operation cells)
+    assert not any(name.startswith("Projection.b_") for name in admitted), admitted
+    # a cell with arguments read by key is not consumed natively either: no lowered read takes a receiver with
+    # arguments, so its frames stay pandas (scaled(2).loc[31, "q"] runs pandas, equal to live)
+    assert {"Projection.report", "Projection.b_mask", "Projection.b_sort_values",
+            } <= set(summary["not_read_natively"]), summary["not_read_natively"]
+    assert not any(name.startswith(("Projection.c_", "Projection.scaled")) for name in admitted)
     # the zero-argument operation cells that return a frame are admitted too (value-based), except
     # the transpose, whose column names are the ages (C6)
     assert summary["not_admitted"] == {
@@ -308,8 +328,12 @@ def test_auto_tables_compiled_equal_live(tmp_path):
             assert f"Projection.c_{name}: " in log, name
     assert any(e["kind"] == "pandas-per-step" for k, v in report.items() if k.endswith("c_mask")
                for e in v["slow_paths"])
-    vectors = [v for k, v in report.items() if k.endswith(("_f_vec", "_f_ivec", ".vec", ".ivec"))]
-    assert vectors and all(v.get("vectors", {}).get("shape") in ("V", "I") for v in vectors), vectors
+    # tuples stay tuples whatever their elements (a float tuple can be a key: fkey_tuple)
+    tuples = [v for k, v in report.items() if k.endswith(("_f_vec", "_f_ivec", "_f_fkey_tuple"))]
+    assert len(tuples) == 3 and not any(v.get("vectors", {}).get("shape") for v in tuples), tuples
+    lists = [v for k, v in report.items() if k.endswith("_f_lvec")]
+    assert lists and lists[0]["vectors"]["shape"] == "V", lists     # a list of floats is a vector
+    assert "Data.fkey2" in admitted
     (tmp_path / "ops-classes.json").write_text(json.dumps(classes, default=sorted), encoding="utf-8")
     assert _run(tmp_path, "checks.py").stdout.strip().endswith("ok")
 
