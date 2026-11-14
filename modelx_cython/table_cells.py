@@ -181,6 +181,10 @@ def rewrite_class(cls_info, node, config, integer_refs):
             f'    {RUNTIME}.before_reference(self, {path!r})\n'
             f'    self.{mapping[name]} = value\n'
             f'    {RUNTIME}.clear_model(self._model)\n')
+    if 'clear_all' not in _members(cls_info):
+        lines.append(f'def clear_all(self):\n'
+                     f'    """Clear the model\'s values (live modelx spelling; whole model: D101)."""\n'
+                     f'    {RUNTIME}.clear_all(self)\n')
     clear = ['def _mx_clear_values(self):',
              '    """Empty every cache of this Space and drop its ItemSpaces (api-tables, D101)."""']
     clear += ['    ' + line for line in _reset_lines(cls_info)]

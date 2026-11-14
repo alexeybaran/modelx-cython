@@ -46,8 +46,8 @@ def collect_end(model):
 def _check_idle(model, what):
     with _lock:
         if _running.get(id(model)):
-            raise RuntimeError(f'cannot assign {what} while a collect of this model is running; '
-                               'assign before or after the run')
+            raise RuntimeError(f'cannot run {what} while a collect of this model is running; '
+                               'do it before or after the run')
 
 
 def clear_model(model):
@@ -69,7 +69,7 @@ def clear_model(model):
 def assign_table_cell(space, name, path, table):
     """Make ``table`` (already converted) the value of the table cell ``name`` of ``space``."""
     model = space._model
-    _check_idle(model, path)
+    _check_idle(model, f'the assignment of {path}')
     with _lock:
         _inputs.setdefault(id(model), {})[id(space), name] = (space, name, table)
     clear_model(model)
@@ -80,7 +80,26 @@ def before_reference(space, path):
 
     The generated setter then stores the value and calls :func:`clear_model`.
     """
-    _check_idle(space._model, path)
+    _check_idle(space._model, f'the assignment of {path}')
+
+
+def clear_all(space, name=None):
+    """``clear_all()`` of a compiled Space (``name`` None) or of one of its table cells.
+
+    As in live modelx, the assigned table inputs of that Space (and the Spaces below it) or of
+    that cell are dropped, so their formulas run again; then every cached value of the model is
+    cleared: the compiled model holds no dependency graph, so the clear is never limited to
+    the Space and its dependants (a superset of live modelx's clear). Refused while a collect of
+    the model is running.
+    """
+    model = space._model
+    _check_idle(model, f'{type(space).__name__[3:]}.clear_all()' if name is None else f'{name}.clear_all()')
+    with _lock:
+        inputs = _inputs.get(id(model), {})
+        for key, (owner, cell, _) in list(inputs.items()):
+            if (owner is space or owner._mx_is_in(space)) and (name is None or cell == name):
+                del inputs[key]
+    clear_model(model)
 
 
 def frame_of(table, path):
@@ -115,6 +134,10 @@ class TableCell:
         if key != ():
             raise KeyError(f'{self._path} has no parameters: use {self._path}[()] = table')
         setattr(self._space, self._name, value)
+
+    def clear_all(self):
+        """Drop an assigned table (the formula runs again) and clear the model's values."""
+        clear_all(self._space, self._name)
 
     @property
     def name(self):

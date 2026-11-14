@@ -124,6 +124,16 @@ try:
 finally:
     runtime.collect_end = real_end
 assert seen and "collect" in seen[0], seen
+
+m = Model()
+m.Data.points[()] = doubled
+m.Projection.clear_all()
+assert abs(total(m, 1) - live(points=doubled)) < 1e-9       # inputs of Data kept, as live
+m.Data.points.clear_all()
+assert abs(total(m, 4) - base) < 1e-9                       # the cell's input dropped, as live
+m.Data.points[()] = doubled
+m.Data.clear_all()
+assert abs(total(m, 1) - base) < 1e-9 and m.Data.points().equals(FRAME)
 print("ok")
 """
 
