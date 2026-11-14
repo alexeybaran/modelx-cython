@@ -219,6 +219,20 @@ cdef class RecordHandle:
 
 cdef TableHandle table_handle(object value)      # NativeTable.handle or a new handle
 cdef RecordHandle record_handle(object value)
+
+# W1.9: borrowed sub-tables and index labels (module functions; nothing is written).
+# A TableRef is a borrowed pointer to a shared child handle: the parent handle (held by the
+# caller for the whole formula) keeps it alive, so reads through it take no reference;
+# use it as <TableHandle>ref. sub_ref_n raises KeyError as sub_n.
+ctypedef PyObject* TableRef
+cdef TableRef sub_ref_1(TableHandle h, TableKey p0) except NULL
+cdef TableRef sub_ref_2(TableHandle h, TableKey p0, TableKey p1) except NULL
+cdef TableRef sub_ref_3(TableHandle h, TableKey p0, TableKey p1, TableKey p2) except NULL
+cdef TableRef sub_ref_4(TableHandle h, TableKey p0, TableKey p1, TableKey p2, TableKey p3) except NULL
+cdef TableRef sub_ref_5(TableHandle h, TableKey p0, TableKey p1, TableKey p2, TableKey p3,
+                        TableKey p4) except NULL
+cdef object key_label(TableHandle h, Py_ssize_t i)          # h.index[i] in row order: label or tuple
+cdef double key_f64(TableHandle h, Py_ssize_t i) except? -1  # float(h.index[i])
 # ---- end of the M1 handle interface ------------------------------------------------------
 
 cdef class NativeTable:

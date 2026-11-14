@@ -4203,6 +4203,128 @@ cdef RecordHandle record_handle(object value):
     return handle
 
 
+# ---- W1.9: borrowed sub-tables and index labels ----------------------------------------------
+
+cdef inline TableRef _sub_ref(TableHandle h, const HandlePart* q, Py_ssize_t n) except? NULL:
+    """Borrowed shared child for n prefix parts, NULL when absent (no reference is taken)."""
+    cdef PyObject* handle = <PyObject*>h
+    cdef Py_ssize_t j
+    if n >= h.levels:
+        raise TypeError(f'sub_{n} needs fewer key parts than the {h.levels} levels of the table')
+    for j in range(n):
+        handle = _h_child(handle, &q[j])
+        if handle == NULL:
+            return NULL
+    if (<TableHandle>handle)._colbase != h._colbase or (<TableHandle>handle).width != h.width:
+        raise TypeError('a column view has no borrowed sub-table')    # never lowered on views
+    return handle
+
+
+cdef TableRef sub_ref_1(TableHandle h, TableKey p0) except NULL:
+    cdef HandlePart q[1]
+    _set_part(&q[0], p0, h._spec_missing)
+    found = _sub_ref(h, q, 1)
+    if found == NULL:
+        raise KeyError(_original(p0))
+    return found
+
+
+cdef TableRef sub_ref_2(TableHandle h, TableKey p0, TableKey p1) except NULL:
+    cdef HandlePart q[2]
+    _set_part(&q[0], p0, h._spec_missing)
+    _set_part(&q[1], p1, h._spec_missing)
+    found = _sub_ref(h, q, 2)
+    if found == NULL:
+        raise KeyError((_original(p0), _original(p1)))
+    return found
+
+
+cdef TableRef sub_ref_3(TableHandle h, TableKey p0, TableKey p1, TableKey p2) except NULL:
+    cdef HandlePart q[3]
+    _set_part(&q[0], p0, h._spec_missing)
+    _set_part(&q[1], p1, h._spec_missing)
+    _set_part(&q[2], p2, h._spec_missing)
+    found = _sub_ref(h, q, 3)
+    if found == NULL:
+        raise KeyError((_original(p0), _original(p1), _original(p2)))
+    return found
+
+
+cdef TableRef sub_ref_4(TableHandle h, TableKey p0, TableKey p1, TableKey p2, TableKey p3) except NULL:
+    cdef HandlePart q[4]
+    _set_part(&q[0], p0, h._spec_missing)
+    _set_part(&q[1], p1, h._spec_missing)
+    _set_part(&q[2], p2, h._spec_missing)
+    _set_part(&q[3], p3, h._spec_missing)
+    found = _sub_ref(h, q, 4)
+    if found == NULL:
+        raise KeyError((_original(p0), _original(p1), _original(p2), _original(p3)))
+    return found
+
+
+cdef TableRef sub_ref_5(TableHandle h, TableKey p0, TableKey p1, TableKey p2, TableKey p3,
+                        TableKey p4) except NULL:
+    cdef HandlePart q[5]
+    _set_part(&q[0], p0, h._spec_missing)
+    _set_part(&q[1], p1, h._spec_missing)
+    _set_part(&q[2], p2, h._spec_missing)
+    _set_part(&q[3], p3, h._spec_missing)
+    _set_part(&q[4], p4, h._spec_missing)
+    found = _sub_ref(h, q, 5)
+    if found == NULL:
+        raise KeyError((_original(p0), _original(p1), _original(p2), _original(p3), _original(p4)))
+    return found
+
+
+cdef inline Py_ssize_t _key_position(TableHandle h, Py_ssize_t i) except -1:
+    cdef Py_ssize_t position = i + h.rows if i < 0 else i
+    if not 0 <= position < h.rows:
+        raise IndexError(f'index {i} is out of bounds for axis 0 with size {h.rows}')
+    return position
+
+
+cdef object key_label(TableHandle h, Py_ssize_t i):
+    """The i-th label of the index in row order (a tuple on several levels), as the helper's
+    ``index[i]``; negative i counts from the end."""
+    return _h_label(h, _key_position(h, i))
+
+
+cdef double key_f64(TableHandle h, Py_ssize_t i) except? -1:
+    """``float(index[i])``: a float label is read without a reference on it."""
+    cdef Py_ssize_t position = _key_position(h, i)
+    cdef PyObject* label
+    if h.scheme != TABLE_PRODUCT and h._labels is not None and h.levels == 1:
+        label = mx_tuple_item(<PyObject*>h._labels, position)
+        if PyFloat_CheckExact(<object>label):
+            return PyFloat_AS_DOUBLE(<object>label)
+    return float(_h_label(h, position))
+
+
+def key_label_of(TableHandle h, Py_ssize_t i):
+    """Python access to key_label (tests)."""
+    return key_label(h, i)
+
+
+def key_f64_of(TableHandle h, Py_ssize_t i):
+    """Python access to key_f64 (tests)."""
+    return key_f64(h, i)
+
+
+def sub_ref_of(TableHandle h, *parts):
+    """Python access to sub_ref_n (tests): the shared child handle it borrows."""
+    cdef TableRef found
+    n = len(parts)
+    if n == 1:
+        found = sub_ref_1[object](h, parts[0])
+    elif n == 2:
+        found = sub_ref_2[object](h, parts[0], parts[1])
+    elif n == 3:
+        found = sub_ref_3[object](h, parts[0], parts[1], parts[2])
+    else:
+        raise TypeError('sub_ref_of takes 1 to 3 parts')
+    return <object>found
+
+
 def table_handle_of(value):
     """Python access to table_handle (tests and receipts)."""
     return table_handle(value)
