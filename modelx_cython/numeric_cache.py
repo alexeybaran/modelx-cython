@@ -57,6 +57,30 @@ def primary_capacity(cell):
     return size
 
 
+def _fresh(cell, name):
+    while name in cell.params:
+        name += '_'
+    return name
+
+
+def dense_prefix(cell, cache, keys, encode, decode):
+    """D74: a Cell given a dense window on the reused collect root reads and writes the window inline;
+    keys outside it, and every receiver without a window, take the hash store that follows."""
+    if len(cell.params) > 3 or cell.name not in getattr(getattr(cell, 'parent', None), 'reuse_dense_windows', {}):
+        return ''
+    index, value = _fresh(cell, '_mx_dense_index'), _fresh(cell, '_mx_dense_result')
+    local = _fresh(cell, '_mx_dense_cache')
+    # one typed local: the inline accessors then take it borrowed (no reference count per access)
+    return (f'{local}: {TYPE} = {cache}\n'
+            f'{index}: _mx_cy.Py_ssize_t = {ALIAS}.dense_find({local}, {", ".join(keys[:3])})\n'
+            f'if {index} >= 0:\n'
+            f'    if {ALIAS}.dense_ready({local}, {index}):\n'
+            f'        return {ALIAS}.{decode}({ALIAS}.dense_value({local}, {index}))\n'
+            f'    {value}: {cell.get_rettype_expr()} = self._f_{cell.name}({", ".join(cell.params)})\n'
+            f'    {ALIAS}.dense_put({local}, {index}, {ALIAS}.{encode}({value}))\n'
+            f'    return {value}\n')
+
+
 def reserved_body(cell, cache, keys, reflexive, bits, result, encode, decode):
     prefix = '_mx_reservation'
     while any(name.startswith(prefix) for name in cell.params):
@@ -65,7 +89,8 @@ def reserved_body(cell, cache, keys, reflexive, bits, result, encode, decode):
     slot = prefix + '_slot'
     args = ', '.join(words)
     source = (
-        ''.join(f'{name}: {ALIAS}.word = {key}\n' for name, key in zip(words, keys))
+        dense_prefix(cell, cache, keys, encode, decode)
+        + ''.join(f'{name}: {ALIAS}.word = {key}\n' for name, key in zip(words, keys))
         + f'{slot}: _mx_cy.Py_ssize_t = -1\n{bits}: {ALIAS}.word\n'
         + f'if {cache}.reserve({args}, {reflexive}, _mx_cy.address({slot}), '
           f'_mx_cy.address({bits})):\n    return {ALIAS}.{decode}({bits})\n'
@@ -125,7 +150,8 @@ def body(cell):
     found = f'if {cache}.get({args}, _mx_cy.address({bits})):\n    return {ALIAS}.{decode}({bits})\n'
     compute = (f'{result} = self._f_{cell.name}({", ".join(cell.params)})\n'
                f'{cache}.put({args}, {ALIAS}.{encode}({result}))\nreturn {result}\n')
-    declarations = f'{bits}: {ALIAS}.word\n{result}: {cell.get_rettype_expr()}\n' + key_setup
+    declarations = (dense_prefix(cell, cache, keys, encode, decode) if len(keys) <= 3 else '') + (
+        f'{bits}: {ALIAS}.word\n{result}: {cell.get_rettype_expr()}\n' + key_setup)
     if cell.is_locked:
         import textwrap
         source = (declarations

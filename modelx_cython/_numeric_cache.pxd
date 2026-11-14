@@ -16,11 +16,34 @@ cdef struct PrimaryEntry:
     word value
     unsigned char state
 
-cdef word int_word(long long value) noexcept
-cdef word double_word(double value) noexcept
-cdef word value_word(double value) noexcept
-cdef double word_double(word value) noexcept
-cdef long long word_int(word value) noexcept
+cdef union Bits:
+    double real
+    word integer
+
+
+# Inline in the pxd so compiled model modules inline the key and value conversions (D74).
+cdef inline word int_word(long long value) noexcept:
+    return <word>value
+
+
+cdef inline word value_word(double value) noexcept:
+    cdef Bits bits
+    bits.real = value
+    return bits.integer
+
+
+cdef inline word double_word(double value) noexcept:
+    return value_word(value if value != 0.0 else 0.0)
+
+
+cdef inline double word_double(word value) noexcept:
+    cdef Bits bits
+    bits.integer = value
+    return bits.real
+
+
+cdef inline long long word_int(word value) noexcept:
+    return <long long>value
 
 cdef class NumericCache:
     cdef Entry* entries
@@ -43,3 +66,34 @@ cdef class NumericCache:
                       word* value) noexcept
     cdef void publish(self, word a, word b, word c, Py_ssize_t slot, word value) except *
     cpdef reset(self)
+
+
+# D74: the dense window, inline in compiled model modules. dense_find returns the flat index of a key
+# inside the window or -1 (no window, or outside it); dense_ready/dense_value read it; dense_put stores
+# a value and records a first write for the compact reset.
+cdef inline Py_ssize_t dense_find(NumericCache cache, word a, word b, word c) noexcept:
+    cdef unsigned long long i0, i1, i2
+    if cache.dense_values == NULL:
+        return -1
+    i0 = <unsigned long long>(<long long>a - cache.dense_lower[0])
+    i1 = <unsigned long long>(<long long>b - cache.dense_lower[1])
+    i2 = <unsigned long long>(<long long>c - cache.dense_lower[2])
+    if i0 >= cache.dense_size[0] or i1 >= cache.dense_size[1] or i2 >= cache.dense_size[2]:
+        return -1
+    return <Py_ssize_t>((i0 * cache.dense_size[1] + i1) * cache.dense_size[2] + i2)
+
+
+cdef inline bint dense_ready(NumericCache cache, Py_ssize_t index) noexcept:
+    return cache.dense_state[index] != 0
+
+
+cdef inline word dense_value(NumericCache cache, Py_ssize_t index) noexcept:
+    return cache.dense_values[index]
+
+
+cdef inline void dense_put(NumericCache cache, Py_ssize_t index, word value) noexcept:
+    cache.dense_values[index] = value
+    if not cache.dense_state[index]:
+        cache.dense_state[index] = 1
+        cache.dense_written[cache.dense_written_n] = <unsigned int>index
+        cache.dense_written_n += 1

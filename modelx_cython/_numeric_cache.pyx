@@ -4,35 +4,6 @@ from libc.stdlib cimport calloc, free, malloc
 from libc.string cimport memset
 cimport cython
 
-cdef union Bits:
-    double real
-    word integer
-
-
-cdef word int_word(long long value) noexcept:
-    return <word>value
-
-
-cdef word double_word(double value) noexcept:
-    return value_word(value if value != 0.0 else 0.0)
-
-
-cdef word value_word(double value) noexcept:
-    cdef Bits bits
-    bits.real = value
-    return bits.integer
-
-
-cdef double word_double(word value) noexcept:
-    cdef Bits bits
-    bits.integer = value
-    return bits.real
-
-
-cdef long long word_int(word value) noexcept:
-    return <long long>value
-
-
 cdef inline word mix(word value) noexcept:
     value ^= value >> 30
     value *= <word>0xbf58476d1ce4e5b9
@@ -97,23 +68,6 @@ cdef inline void write(NumericCache cache, word a, word b, word c, word value) e
 # dense path takes no critical section.
 cdef enum:
     DENSE_ENTRY_BYTES = 13          # word value + ready byte + uint32 written index
-
-
-cdef inline Py_ssize_t dense_index(NumericCache cache, word a, word b, word c) noexcept:
-    cdef unsigned long long i0 = <unsigned long long>(<long long>a - cache.dense_lower[0])
-    cdef unsigned long long i1 = <unsigned long long>(<long long>b - cache.dense_lower[1])
-    cdef unsigned long long i2 = <unsigned long long>(<long long>c - cache.dense_lower[2])
-    if i0 >= cache.dense_size[0] or i1 >= cache.dense_size[1] or i2 >= cache.dense_size[2]:
-        return -1
-    return <Py_ssize_t>((i0 * cache.dense_size[1] + i1) * cache.dense_size[2] + i2)
-
-
-cdef inline void dense_store(NumericCache cache, Py_ssize_t index, word value) noexcept:
-    cache.dense_values[index] = value
-    if not cache.dense_state[index]:
-        cache.dense_state[index] = 1
-        cache.dense_written[cache.dense_written_n] = <unsigned int>index
-        cache.dense_written_n += 1
 
 
 cdef class NumericCache:
@@ -205,7 +159,7 @@ cdef class NumericCache:
         if not reflexive:
             return False
         if self.dense_values != NULL:
-            index = dense_index(self, a, b, c)
+            index = dense_find(self, a, b, c)
             if index >= 0:
                 if self.dense_state[index]:
                     value[0] = self.dense_values[index]
@@ -218,9 +172,9 @@ cdef class NumericCache:
         cdef Py_ssize_t index
         if reflexive:
             if self.dense_values != NULL:
-                index = dense_index(self, a, b, c)
+                index = dense_find(self, a, b, c)
                 if index >= 0:
-                    dense_store(self, index, value)
+                    dense_put(self, index, value)
                     return
             with cython.critical_section(self):
                 write(self, a, b, c, value)
@@ -234,7 +188,7 @@ cdef class NumericCache:
             slot[0] = -2
             return False
         if self.dense_values != NULL:
-            dense = dense_index(self, a, b, c)
+            dense = dense_find(self, a, b, c)
             if dense >= 0:
                 slot[0] = -3 - dense             # D74: a dense slot
                 if self.dense_state[dense]:
@@ -272,7 +226,7 @@ cdef class NumericCache:
         if slot == -2:
             return
         if slot <= -3 and self.dense_values != NULL and -3 - slot < <Py_ssize_t>self.dense_count:
-            dense_store(self, -3 - slot, value)
+            dense_put(self, -3 - slot, value)
             return
         if 0 <= slot < <Py_ssize_t>self.primary_capacity:
             entry = self.primary + slot
