@@ -60,6 +60,7 @@ LL_MAX = '9223372036854775807'
 LL_MIN = '(-9223372036854775807 - 1)'
 FLOAT, INT = 'f', 'i'           # scalar kinds of the element typer
 NUM = 'n'                       # min/max of mixed float and integer arguments: a float or an int
+MATH_FLOAT = ('exp', 'log', 'sqrt', 'erf')      # math functions whose native form returns a C double
 
 
 def fn(op, elem):
@@ -447,6 +448,7 @@ class VectorLowering(cst.CSTTransformer):
         self.comp_scalars = []          # stack of {name: scalar kind} inside expanded loops
         self.range_names = set()
         self.ref_scalars = {}
+        self.param_scalars = {}         # D87: C-typed parameters, unless the formula rebinds them
         self.scope_stack = []           # per enclosing comprehension/lambda: expanded here
 
     # ---------------------------------------------------------------- kinds
@@ -489,6 +491,13 @@ class VectorLowering(cst.CSTTransformer):
             return None
         if isinstance(node, cst.List) and not node.elements:
             return 'A?'
+        if isinstance(node, cst.List):
+            # D87: a display whose elements are all typed floats (all typed integers) is a fresh
+            # vector written element by element; mixed or untyped elements keep the list path
+            if not all(isinstance(e, cst.Element) for e in node.elements):
+                return None
+            kinds = {self.scalar(e.value) for e in node.elements}
+            return {frozenset({FLOAT}): 'AV', frozenset({INT}): 'AI'}.get(frozenset(kinds))
         if isinstance(node, cst.ListComp):
             if id(node) in self.statement_comps and self.comp_ok(node):
                 elem = self.comp_elem(node)
@@ -551,6 +560,10 @@ class VectorLowering(cst.CSTTransformer):
             f = node.func
             if isinstance(f, cst.Attribute) and _is_name(f.value, 'self'):
                 return self.cell_scalar(f.attr.value)
+            math = self.math_member(f)
+            if math in MATH_FLOAT and len(node.args) == 1 and node.args[0].keyword is None \
+                    and node.args[0].star == '' and self.scalar(node.args[0].value) in (FLOAT, INT):
+                return FLOAT        # D87: math.exp/log/sqrt/erf of a real number is a float
             if (isinstance(f, cst.Name) and f.value in ('min', 'max') and f.value in self.builtins
                     and len(node.args) >= 2 and all(a.keyword is None and a.star == '' for a in node.args)):
                 kinds = {self.scalar(a.value) for a in node.args}
@@ -568,6 +581,15 @@ class VectorLowering(cst.CSTTransformer):
                     if e is not None:
                         return FLOAT if e == 'V' else INT
         return None
+
+    def math_member(self, f):
+        """The math function name of ``self.<math Reference>.<fn>``, else None (helpers.module_math)."""
+        if not (isinstance(f, cst.Attribute) and isinstance(f.value, cst.Attribute)
+                and _is_name(f.value.value, 'self')):
+            return None
+        ref = getattr(self.cls_info, 'refs', {}).get(f.value.attr.value)
+        member = getattr(ref, 'helper_members', {}).get(f.attr.value)
+        return getattr(member, 'module_math', None)
 
     def iter_vectors(self, iterator):
         """The vector operands of a loop source over vectors, else None."""
@@ -632,6 +654,9 @@ class VectorLowering(cst.CSTTransformer):
         self.facts = facts
         self.statement_comps = facts.statement_comps
         assigns = facts.assigns
+        for name, kind in self.param_scalars.items():
+            if name not in assigns and name not in facts.comp_targets:
+                self.scalars[name] = kind
         self.range_names = {name for name, items in assigns.items() if name not in facts.comp_targets
                             and len(items) == 1 and items[0][0] == 'value'
                             and self.range_args(items[0][1]) is not None}
@@ -972,6 +997,8 @@ class VectorLowering(cst.CSTTransformer):
         if isinstance(value_o, cst.List) and not value_o.elements:
             self.lowered += 1
             return [], self.call('new', e, cst.Integer('0'))
+        if isinstance(value_o, cst.List) and k == 'A' + e:
+            return self.display(value_u, e)
         if isinstance(value_o, cst.Subscript) and id(value_o) in self.alloc_slices and self.elem(value_o.value) == e:
             sl = _slice(value_u)
             lo = sl.lower if sl.lower is not None else _expr('0')
@@ -983,6 +1010,23 @@ class VectorLowering(cst.CSTTransformer):
         if _is_name(value_u) and value_u.value.startswith('_mx_v'):
             return [], value_u
         return [], self.call('of', e, value_u)
+
+    def display(self, value_u, e):
+        """D87: ``[a, b, ...]`` of typed scalars of kind e into a new typed vector: the elements are
+        evaluated left to right into typed locals first (an exception leaves no vector), then the
+        vector is allocated and written; no Python list."""
+        pre, temps = [], []
+        for element in value_u.elements:
+            t = self.temp('e')
+            self.declare(t, SCALARS[e])
+            pre.append(_stmt(f'{t} = ({_code(element.value)})\n'))
+            temps.append(t)
+        r = self.temp('d')
+        self.declare(r, TYPES[e])
+        pre.append(_stmt(f'{r} = {fn("new", e)}({len(temps)})\n'))
+        pre += [_stmt(f'{r}.data[{i}] = {t}\n') for i, t in enumerate(temps)]
+        self.lowered += 1
+        return pre, cst.Name(r)
 
     def wrap_return(self, so, su, pre):
         shape = self.cells.vector_shape
@@ -1347,6 +1391,13 @@ def lower(node, cls_info, cells, scope, counter, module, ref_kinds=None):
     from .powers import KIND_FLOAT, KIND_INT
     lowering.ref_scalars = {name: {KIND_FLOAT: FLOAT, KIND_INT: INT}.get(kind)
                             for name, kind in (ref_kinds or {}).items()}
+    for name in cells.params:       # D87: the formula's C-typed parameters are scalars of the typer
+        try:
+            kind = {'double': FLOAT, 'long long': INT}.get(cells.get_argtype_expr(name, c_style=True))
+        except Exception:       # a parameter without type information
+            kind = None
+        if kind:
+            lowering.param_scalars[name] = kind
     lowering.analyse(node.body)
     derived = derived_index_locals(lowering.facts, set(loops), cells.params)
     lowering.range_locals = set(loops)
