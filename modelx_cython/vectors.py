@@ -32,6 +32,11 @@ Lowered forms (``V`` float, ``I`` integer):
                                                -> _mx_sys._mx_pow (C pow, as powers.py)
   tuples       return a, b / a, b = cell(t) / cell(t)[k]
 
+The element typer also knows ``min``/``max`` of typed scalars; with mixed float and integer
+arguments the result is a *number* (``NUM``: Python returns one of the arguments unchanged), which
+becomes a float only through arithmetic with a float, so a lowered sum's value and type stay those
+of the Python sum.
+
 A local bound only by ``for x in range(...)`` is a C ``long long`` in modules with vector
 cells. Everything else on a vector runs through the vector's sequence protocol and is listed
 in the admission report as ``vector_fallbacks``.
@@ -54,6 +59,7 @@ FUNCS = {  # operation -> (float vector, integer vector)
 LL_MAX = '9223372036854775807'
 LL_MIN = '(-9223372036854775807 - 1)'
 FLOAT, INT = 'f', 'i'           # scalar kinds of the element typer
+NUM = 'n'                       # min/max of mixed float and integer arguments: a float or an int
 
 
 def fn(op, elem):
@@ -88,19 +94,102 @@ CACHE_TYPE = f'{ALIAS}.VecCache'
 MAX_CACHE_SLOTS = 1 << 20
 
 
+MAX_CACHE_PARAMS = 3
+CACHE_SLOT_BYTES = 8            # one pointer per slot (the vectors themselves are counted nowhere else either)
+
+
+def _cache_window(cell):
+    """(axes, entries) of a vector cell eligible for a VecCache by its form, else (None, reason)."""
+    if not (cell.vector_shape and cell.has_formula_def and 1 <= len(cell.params) <= MAX_CACHE_PARAMS
+            and not cell.is_locked
+            and all(cell.get_argtype_expr(p, c_style=True) == 'long long' for p in cell.params)):
+        return None, None
+    try:
+        axes = tuple(cell.associative_logical_axes)
+    except (KeyError, AttributeError, TypeError):
+        return None, 'the arguments are not all sampled C integers in a bounded range'
+    if len(axes) != len(cell.params) or [a.key for a in axes] != list(cell.params):
+        return None, 'the arguments are not all sampled C integers in a bounded range'
+    entries = 1
+    for axis in axes:
+        if not 0 < axis.stop - axis.lower:
+            return None, 'empty sampled window'
+        entries *= int(axis.stop - axis.lower)
+    return axes, entries
+
+
+def vector_cache_plan(cls):
+    """({cell name: (axes, entries, bytes)}, {cell name: reason}) for the vector cells of a Space:
+    a vector cell with one to MAX_CACHE_PARAMS C integer parameters gets a dense VecCache within the
+    D74 budget: at most ``max_dense_entries`` slots (spec key of the Cell or Space, MAX_CACHE_SLOTS at
+    most), REUSE_DENSE_CELL_BYTES per Cell and REUSE_DENSE_SPACE_BYTES per Space, largest first.
+    A refused cell keeps the dictionary cache and its reason is reported (``cache_detail``)."""
+    plan = getattr(cls, '_mx_vector_cache_plan', None)
+    if plan is not None:
+        return plan
+    from .automatic import max_dense_entries, REUSE_DENSE_CELL_BYTES, REUSE_DENSE_SPACE_BYTES
+    chosen, refused, candidates = {}, {}, []
+    for name, cell in cls.cells.items():
+        axes, entries = _cache_window(cell)
+        if axes is None:
+            if entries is not None:
+                refused[name] = entries
+            continue
+        limit = min(max_dense_entries(cell), MAX_CACHE_SLOTS)
+        size = entries * CACHE_SLOT_BYTES
+        window = ' x '.join(str(int(a.stop - a.lower)) for a in axes)
+        if entries > limit:
+            refused[name] = f'vector cache window {window} = {entries:,} entries exceeds max_dense_entries {limit:,}'
+        elif size > REUSE_DENSE_CELL_BYTES:
+            refused[name] = (f'vector cache window {window} = {size:,} bytes exceeds the per-cell budget '
+                             f'{REUSE_DENSE_CELL_BYTES:,}')
+        else:
+            candidates.append((size, name, axes, entries))
+    used = 0
+    for size, name, axes, entries in sorted(candidates, key=lambda c: (-c[0], c[1])):
+        if used + size > REUSE_DENSE_SPACE_BYTES:
+            refused[name] = (f'Space budget {REUSE_DENSE_SPACE_BYTES:,} bytes for vector caches exhausted '
+                             f'({used:,} used, {size:,} needed)')
+            continue
+        used += size
+        chosen[name] = (axes, entries, size)
+    plan = (chosen, refused)
+    try:
+        cls._mx_vector_cache_plan = plan
+    except AttributeError:      # a class info without attributes: recomputed per call
+        pass
+    return plan
+
+
 def uses_vector_cache(cell):
-    """A vector cell with one C integer parameter and a sampled domain of at most
-    MAX_CACHE_SLOTS keys caches its values in a VecCache (dense, by index) instead of a dict."""
-    if not (cell.vector_shape and cell.has_formula_def and len(cell.params) == 1 and not cell.is_locked
-            and cell.get_argtype_expr(cell.params[0], c_style=True) == 'long long'):
+    """Whether a vector cell caches its values in a VecCache (dense, by index) instead of a dict:
+    one to MAX_CACHE_PARAMS C integer parameters, within the budget of ``vector_cache_plan``. With
+    several parameters the slot is the row-major index over the sampled axes."""
+    if _cache_window(cell)[0] is None or getattr(cell, 'parent', None) is None:
         return False
-    axes = cell.associative_logical_axes
-    return len(axes) == 1 and 0 < axes[0].stop - axes[0].lower <= MAX_CACHE_SLOTS
+    return cell.name in vector_cache_plan(cell.parent)[0]
 
 
 def cache_constructor(cell):
-    axis = cell.associative_logical_axes[0]
-    return f'{CACHE_TYPE}({int(axis.stop - axis.lower)}, {int(axis.lower)})'
+    axes = cell.associative_logical_axes
+    if len(axes) == 1:
+        return f'{CACHE_TYPE}({int(axes[0].stop - axes[0].lower)}, {int(axes[0].lower)})'
+    size = 1
+    for axis in axes:
+        size *= int(axis.stop - axis.lower)
+    return f'{CACHE_TYPE}({size}, 0)'
+
+
+def _cache_key(cell, key_name):
+    """Statements binding ``key_name`` to the slot of a multi-parameter vector cell's arguments:
+    the row-major index when every argument is inside its sampled axis, else -1 (not cached)."""
+    axes = cell.associative_logical_axes
+    inside = ' and '.join(f'{int(a.lower)} <= {p} < {int(a.stop)}' for p, a in zip(cell.params, axes))
+    index = f'({cell.params[0]} - {int(axes[0].lower)})'
+    for p, a in zip(cell.params[1:], axes[1:]):
+        index = f'({index} * {int(a.stop - a.lower)} + ({p} - {int(a.lower)}))'
+    return (f'{key_name}: {CY_MOD}.longlong = -1\n'
+            f'if {inside}:\n    {key_name} = {index}\n')
 
 
 def cache_body(cell):
@@ -109,11 +198,18 @@ def cache_body(cell):
     value = '_mx_vector_value'
     while value in cell.params:
         value += '_'
-    key = cell.params[0]
-    source = (f'if {cache} is None:\n    {cache} = {cache_constructor(cell)}\n'
-              f'{value}: object = {ALIAS}.cache_get({cache}, {key})\n'
-              f'if {value} is not None:\n    return {value}\n'
-              f'return {cache}.put({key}, self._f_{cell.name}({key}))\n')
+    source = f'if {cache} is None:\n    {cache} = {cache_constructor(cell)}\n'
+    if len(cell.params) == 1:
+        key = cell.params[0]
+    else:
+        key = '_mx_vector_key'
+        while key in cell.params:
+            key += '_'
+        source += _cache_key(cell, key)
+    args = ', '.join(cell.params)
+    source += (f'{value}: object = {ALIAS}.cache_get({cache}, {key})\n'
+               f'if {value} is not None:\n    return {value}\n'
+               f'return {cache}.put({key}, self._f_{cell.name}({args}))\n')
     return cst.IndentedBlock(body=cst.parse_module(source).body)
 
 
@@ -432,6 +528,10 @@ class VectorLowering(cst.CSTTransformer):
             op = node.operator
             if isinstance(op, cst.Divide):
                 return FLOAT
+            if NUM in (a, b):
+                if isinstance(op, (cst.Add, cst.Subtract, cst.Multiply, cst.FloorDivide, cst.Modulo)):
+                    return FLOAT if FLOAT in (a, b) else NUM
+                return None
             if isinstance(op, cst.Power):
                 return FLOAT if b == FLOAT else None
             if isinstance(op, (cst.Add, cst.Subtract, cst.Multiply, cst.FloorDivide, cst.Modulo)):
@@ -451,6 +551,12 @@ class VectorLowering(cst.CSTTransformer):
             f = node.func
             if isinstance(f, cst.Attribute) and _is_name(f.value, 'self'):
                 return self.cell_scalar(f.attr.value)
+            if (isinstance(f, cst.Name) and f.value in ('min', 'max') and f.value in self.builtins
+                    and len(node.args) >= 2 and all(a.keyword is None and a.star == '' for a in node.args)):
+                kinds = {self.scalar(a.value) for a in node.args}
+                if None in kinds:
+                    return None
+                return kinds.pop() if len(kinds) == 1 else NUM
             if isinstance(f, cst.Name) and f.value in self.builtins and _plain_args(node, 1, 1):
                 arg = node.args[0].value
                 if f.value == 'len' and self.elem(arg):
@@ -599,7 +705,7 @@ class VectorLowering(cst.CSTTransformer):
     def appended_kinds(self, name):
         kinds = {self.scalar(v) for b, v, _ in self.facts.appends if _is_name(b, name)}
         kinds |= {self.scalar(v) for b, v in self.facts.writes if _is_name(b, name) and v is not None}
-        if len(kinds) == 1 and None not in kinds:
+        if len(kinds) == 1 and kinds <= {FLOAT, INT}:
             return {'V' if kinds.pop() == FLOAT else 'I'}
         return set()
 
@@ -627,7 +733,7 @@ class VectorLowering(cst.CSTTransformer):
     def _aug_kind(self, item):
         op, value = item[1], item[2]
         v = self.scalar(value)
-        if v is None:
+        if v not in (FLOAT, INT):
             return None
         if isinstance(op, cst.DivideAssign):
             return FLOAT
@@ -672,7 +778,7 @@ class VectorLowering(cst.CSTTransformer):
 
     def leave_BinaryOperation(self, original, updated):
         if isinstance(original.operator, cst.Power) and self.scalar(original.right) == FLOAT \
-                and self.scalar(original.left) is not None and self.in_lowered_scope(original):
+                and self.scalar(original.left) in (FLOAT, INT) and self.in_lowered_scope(original):
             self.powers += 1
             base = updated.left
             if self.scalar(original.left) == INT:
@@ -1234,7 +1340,7 @@ def lower(node, cls_info, cells, scope, counter, module, ref_kinds=None):
     if not module_uses_vectors(module) or not isinstance(node.body, cst.IndentedBlock):
         return node
     cells.vector_report = report = {'shape': _shape_json(cells.vector_shape), 'lowered': 0, 'fallbacks': []}
-    builtins = {name for name in ('sum', 'len', 'zip', 'range')
+    builtins = {name for name in ('sum', 'len', 'zip', 'range', 'min', 'max')
                 if scope[name] and all(isinstance(b, BuiltinAssignment) for b in scope[name])}
     loops = [name for name in range_loop_locals(node.body, builtins) if name not in cells.params]
     lowering = VectorLowering(cls_info, cells, builtins, counter)
