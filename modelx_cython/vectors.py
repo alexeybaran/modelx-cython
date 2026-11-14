@@ -214,8 +214,68 @@ def cache_body(cell):
     return cst.IndentedBlock(body=cst.parse_module(source).body)
 
 
-def module_uses_vectors(module):
+def module_vector_cells(module):
     return any(cell.vector_shape for cls in module.classes.values() for cell in cls.cells.values())
+
+
+class _LocalAllocations(cst.CSTVisitor):
+    """D94: a function that allocates a local list a formula may type as a vector: ``x = [c] * n`` /
+    ``x = n * [c]`` with a numeric literal ``c``, or ``x = []`` with ``x.append(...)`` in the same function."""
+
+    def __init__(self):
+        self.found = False
+        self._stack = []
+
+    def visit_FunctionDef(self, node):
+        self._stack.append((set(), set()))
+
+    def leave_FunctionDef(self, node):
+        empties, appended = self._stack.pop()
+        if empties & appended:
+            self.found = True
+
+    def visit_Assign(self, node):
+        if not self._stack or len(node.targets) != 1 or not isinstance(node.targets[0].target, cst.Name):
+            return
+        value, name = node.value, node.targets[0].target.value
+        if isinstance(value, cst.List) and not value.elements:
+            self._stack[-1][0].add(name)
+        elif isinstance(value, cst.BinaryOperation) and isinstance(value.operator, cst.Multiply):
+            for one in (value.left, value.right):
+                if (isinstance(one, cst.List) and len(one.elements) == 1
+                        and isinstance(one.elements[0], cst.Element) and _numeric_literal(one.elements[0].value)):
+                    self.found = True
+
+    def visit_Call(self, node):
+        f = node.func
+        if self._stack and isinstance(f, cst.Attribute) and f.attr.value == 'append' and isinstance(f.value, cst.Name):
+            self._stack[-1][1].add(f.value.value)
+
+
+def _numeric_literal(node):
+    if isinstance(node, cst.UnaryOperation) and isinstance(node.operator, cst.Minus):
+        node = node.expression
+    return isinstance(node, (cst.Float, cst.Integer))
+
+
+def module_uses_vectors(module):
+    """Vector lowering runs in a module with vector cells, and (D94) in one whose formulas allocate local
+    lists that may be typed vectors; there it changes only the formulas that do get a typed local vector."""
+    cached = getattr(module, '_mx_uses_vectors', None)
+    if cached is not None:
+        return cached
+    result = module_vector_cells(module)
+    if not result:
+        source = getattr(getattr(getattr(module, 'visitor', None), 'wrapper', None), 'module', None)
+        if source is not None:
+            scan = _LocalAllocations()
+            source.visit(scan)
+            result = scan.found
+    try:
+        module._mx_uses_vectors = result
+    except AttributeError:
+        pass
+    return result
 
 
 def providers(module):
@@ -480,6 +540,7 @@ class VectorLowering(cst.CSTTransformer):
         self.range_names = set()
         self.ref_scalars = {}
         self.param_scalars = {}         # D87: C-typed parameters, unless the formula rebinds them
+        self.strict_locals = False      # D94: module without vector cells: untyped writes keep a list
         self.scope_stack = []           # per enclosing comprehension/lambda: expanded here
 
     # ---------------------------------------------------------------- kinds
@@ -712,6 +773,17 @@ class VectorLowering(cst.CSTTransformer):
                     and self.scalar(value) == FLOAT:
                 self.env[base.value] = None
                 self.fallback(base, 'integer vector written with a float: kept as a list')
+            # D94: a float vector local written or appended with a proven int or a mixed min/max stays a
+            # list (the list would hold the int unchanged); in a module without vector cells, also with a
+            # value not proven a float at all (an object the list would hold as it is)
+            elif _is_name(base) and self.env.get(base.value) == 'V' and value is not None \
+                    and (self.scalar(value) in (INT, NUM) or (self.strict_locals and self.scalar(value) != FLOAT)):
+                self.env[base.value] = None
+                self.fallback(base, 'float vector written with a value not proven a float: kept as a list')
+            elif _is_name(base) and self.env.get(base.value) == 'I' and value is not None \
+                    and self.strict_locals and self.scalar(value) != INT:
+                self.env[base.value] = None
+                self.fallback(base, 'integer vector written with a value not proven an integer: kept as a list')
         self.owned = {name for name, items in assigns.items() if self.env.get(name) in ('V', 'I')
                       and all(item[0] == 'value' and isinstance(self.kind(item[1]), str)
                               and self.kind(item[1])[0] == 'A' for item in items)}
@@ -1181,7 +1253,7 @@ class VectorLowering(cst.CSTTransformer):
             for name in (n, i):
                 self.declare(name, f'{CY_MOD}.Py_ssize_t')
             self.declare(r, TYPES[e])
-            pre += [_stmt(f'{lo_t} = {lo}\n'), _stmt(f'{hi_t} = {hi}\n'),
+            pre += [_stmt(f'{lo_t} = ({lo}\n)\n'), _stmt(f'{hi_t} = ({hi}\n)\n'),
                     _stmt(f'{n} = {hi_t} - {lo_t} if {hi_t} > {lo_t} else 0\n'),
                     _stmt(f'{r} = {fn("new", e)}({n})\n'),
                     _stmt(f'for {i} in range({n}):\n    {r}.data[{i}] = {lo_t} + {i}\n')]
@@ -1252,7 +1324,7 @@ class VectorLowering(cst.CSTTransformer):
         z = self.temp(f'{tag}{comp_o.target.value}')
         self.declare(z, f'{CY_MOD}.longlong')
         renames[comp_o.target.value] = z
-        pre += [_stmt(f'{lo_t} = {lo}\n'), _stmt(f'{hi_t} = {hi}\n'),
+        pre += [_stmt(f'{lo_t} = ({lo}\n)\n'), _stmt(f'{hi_t} = ({hi}\n)\n'),
                 _stmt(f'{n} = {hi_t} - {lo_t} if {hi_t} > {lo_t} else 0\n')]
         return pre, f'for {i} in range({n}):', [f'{z} = {lo_t} + {i}'], renames, n, i
 
@@ -1262,7 +1334,8 @@ class VectorLowering(cst.CSTTransformer):
         self.declare(r, TYPES[e])
         elt = _code(comp_u.elt.visit(_Rename(renames)))
         pre.append(_stmt(f'{r} = {fn("new", e)}({n})\n'))
-        loop = '\n'.join([head] + ['    ' + line for line in body] + [f'    {r}.data[{i}] = {elt}']) + '\n'
+        # the element may span lines (as written in the formula): parenthesised, closed on its own line
+        loop = '\n'.join([head] + ['    ' + line for line in body] + [f'    {r}.data[{i}] = ({elt}\n)']) + '\n'
         pre.append(_stmt(loop))
         self.lowered += 1
         return pre, cst.Name(r)
@@ -1585,6 +1658,7 @@ def lower(node, cls_info, cells, scope, counter, module, ref_kinds=None):
     loops = [name for name in range_loop_locals(node.body, builtins) if name not in cells.params]
     lowering = VectorLowering(cls_info, cells, builtins, counter)
     from .powers import KIND_FLOAT, KIND_INT
+    lowering.strict_locals = not module_vector_cells(module)
     lowering.ref_scalars = {name: {KIND_FLOAT: FLOAT, KIND_INT: INT}.get(kind)
                             for name, kind in (ref_kinds or {}).items()}
     for name in cells.params:       # D87: the formula's C-typed parameters are scalars of the typer
@@ -1595,6 +1669,10 @@ def lower(node, cls_info, cells, scope, counter, module, ref_kinds=None):
         if kind:
             lowering.param_scalars[name] = kind
     lowering.analyse(node.body)
+    if not module_vector_cells(module) and not any(k in ('V', 'I') for k in lowering.env.values()):
+        # D94: a module without vector cells: only formulas with a typed local vector are lowered
+        cells.vector_report = None
+        return node
     derived = derived_index_locals(lowering.facts, set(loops), cells.params)
     lowering.range_locals = set(loops)
     lowering.expanding = set()
