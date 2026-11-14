@@ -112,6 +112,12 @@ def helper_result_type(value):
     return owner, parameter
 
 
+def borrowed_namespace(reference):
+    """diag-mt2: the module Reference as the provider's borrowed ``void*`` (no reference taken)."""
+    return cst.Call(cst.Attribute(cst.Name('_mx_cy'), cst.Name('cast')),
+                    (cst.Arg(cst.Attribute(cst.Name('_mx_cy'), cst.Name('p_void'))), cst.Arg(reference)))
+
+
 class HelperCalls(FormulaTransformer):
     def __init__(self, refs, used, cells=(), current=None):
         super().__init__()
@@ -159,7 +165,7 @@ class HelperCalls(FormulaTransformer):
         self.math_native += 1
         return updated.with_changes(
             func=cst.Attribute(cst.Name(module_name(MATH_PROVIDER)), cst.Name(operation)),
-            args=(cst.Arg(func.value), cst.Arg(updated.args[0].value)))
+            args=(cst.Arg(borrowed_namespace(func.value)), cst.Arg(updated.args[0].value)))
 
     def module_isclose(self, original, updated, func):
         """W1.8: ``self.<math>.isclose(a, b[, rel_tol=r][, abs_tol=t])`` ->
@@ -200,7 +206,7 @@ class HelperCalls(FormulaTransformer):
         self.math_native += 1
         return updated.with_changes(
             func=cst.Attribute(cst.Name(module_name(MATH_PROVIDER)), cst.Name('m_isclose')),
-            args=(cst.Arg(func.value), cst.Arg(positional[0].value), cst.Arg(positional[1].value),
+            args=(cst.Arg(borrowed_namespace(func.value)), cst.Arg(positional[0].value), cst.Arg(positional[1].value),
                   cst.Arg(values[0]), cst.Arg(values[1]), cst.Arg(cst.Integer(str(given)))))
 
     def module_constant(self, updated):
@@ -217,7 +223,7 @@ class HelperCalls(FormulaTransformer):
         self.operations.add(MATH_PROVIDER + '.m_constant')
         self.math_native += 1
         return cst.Call(cst.Attribute(cst.Name(module_name(MATH_PROVIDER)), cst.Name('m_constant')),
-                        (cst.Arg(updated.value), cst.Arg(cst.Integer(str(index)))),
+                        (cst.Arg(borrowed_namespace(updated.value)), cst.Arg(cst.Integer(str(index)))),
                         lpar=updated.lpar, rpar=updated.rpar)
 
     def decline(self, node, reason):
