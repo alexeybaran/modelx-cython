@@ -935,7 +935,8 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
             module = module.with_changes(header=(
                 cst.EmptyLine(comment=cst.Comment('# cython: ' + ', '.join(directives))), *module.header))
         # api-tables (D101a): rename the C members of table cells and table References
-        return module.visit(NumericExceptions()).visit(table_cells.RenameMembers(self.module))
+        return module.visit(NumericExceptions()).visit(table_cells.RenameMembers(
+            self.module, updated_node.config_for_parsing, _integer_reference_paths))
 
     def leave_ClassDef(
         self, original_node: ClassDef, updated_node: ClassDef
@@ -1080,9 +1081,6 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
             updated_node = updated_node.with_changes(body=updated_node.body.with_changes(
                 body=code_enums.bind_properties(self.module.classes[cls_name], updated_node.body.body)))
             integer_refs = _integer_reference_paths(cls_info)
-            # api-tables (D101): Python access to table cells and input References
-            updated_node = table_cells.rewrite_class(
-                cls_info, updated_node, self._module_node.config_for_parsing, integer_refs)
             if integer_refs:
                 lines = ['def __setattr__(self, name, value):']
                 for name, path in integer_refs.items():

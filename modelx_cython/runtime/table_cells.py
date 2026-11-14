@@ -69,6 +69,11 @@ def clear_model(model):
 def assign_table_cell(space, name, path, table):
     """Make ``table`` (already converted) the value of the table cell ``name`` of ``space``."""
     model = space._model
+    if space._mx_roots:
+        raise NotImplementedError(
+            f'{path}: a table cell of an ItemSpace cannot be assigned in a compiled model '
+            '(assigning clears the model, which drops its ItemSpaces); assign the input it is '
+            'built from on the Space that holds it')
     _check_idle(model, f'the assignment of {path}')
     with _lock:
         _inputs.setdefault(id(model), {})[id(space), name] = (space, name, table)
@@ -191,7 +196,10 @@ def _frame_class():
         def _wrap(cls, frame, table, path):
             obj = cls(frame)
             for block in obj._mgr.blocks:   # .values / .to_numpy() views cannot write either
-                block.values.flags.writeable = False
+                values = block.values
+                array = values if hasattr(values, 'flags') else getattr(values, '_ndarray', None)
+                if array is not None and hasattr(array, 'flags'):
+                    array.flags.writeable = False   # extension arrays without one stay guarded by the indexers
             object.__setattr__(obj, '_mx_table', table)
             object.__setattr__(obj, '_mx_path', path)
             return obj

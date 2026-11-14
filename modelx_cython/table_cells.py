@@ -214,6 +214,9 @@ def _counted_collect(function, config):
 class RenameMembers(cst.CSTTransformer):
     """Rename the C members of table cells and table References in a whole generated module.
 
+    The last pass over a generated module: it also adds the members of ``rewrite_class`` to each
+    Space class, after every other pass has run on the cells under their public names.
+
     ``x.<cell>(...)`` becomes ``x._mx_cell_<cell>(...)`` and ``x.<ref>`` becomes
     ``x._mx_ref_<ref>`` only where the receiver ``x`` is known to be an instance of the class
     that owns the member: ``self`` in its class, a parameter or local annotated or cast to the
@@ -223,8 +226,10 @@ class RenameMembers(cst.CSTTransformer):
     Class-body annotations of the References are renamed with them.
     """
 
-    def __init__(self, module):
+    def __init__(self, module, config=None, integer_refs=None):
         self.module = module
+        self.config = config
+        self.integer_refs = integer_refs
         self.mapping = module_renames(module)
         self._classes = []          # enclosing generated class names
         self._locals = []           # per function: {local name: class name}
@@ -279,7 +284,11 @@ class RenameMembers(cst.CSTTransformer):
         self._classes.append(node.name.value if node.name.value in self.module.classes else None)
 
     def leave_ClassDef(self, original, updated):
-        self._classes.pop()
+        name = self._classes.pop()
+        if name is not None and self.config is not None and not self._classes:
+            # the last pass: every earlier pass has seen the cells under their own names
+            cls_info = self.module.classes[name]
+            updated = rewrite_class(cls_info, updated, self.config, self.integer_refs(cls_info))
         return updated
 
     def visit_FunctionDef(self, node):
