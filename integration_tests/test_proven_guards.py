@@ -53,18 +53,38 @@ def test_proven_guards_are_native(tmp_path):
         cwd=tmp_path, check=True)
     source = (tmp_path / 'exported_cy/_mx_classes.py').read_text(encoding='utf-8')
 
-    def formula(name):
-        found = re.search(rf'def _f_{name}\(.*?(?=\n    @|\n    def |\nclass |\ndef |\Z)', source, re.S)
-        assert found, name
-        return found.group(0)
+    c_source = (tmp_path / 'exported_cy/_mx_classes.c').read_text(encoding='utf-8')
 
-    # proven from the argument window: no guard, the local is a signed C integer
+    def body(name):
+        """The Python text that computes the cell: its formula method, or the module-level
+        entry function the method delegates to (test_native_integer_boundaries does the same)."""
+        found = (re.search(rf'def _f_{name}\(.*?(?=\n    @|\n    def |\nclass |\ndef |\Z)', source, re.S)
+                 or re.search(rf'    def {name}\(.*?(?=\n    @|\n    def |\nclass |\ndef |\Z)', source, re.S))
+        assert found, name
+        text = found.group(0)
+        entry = re.search(r'return (_mx_dense_formula_\d+)\(', text)
+        if entry:
+            text = re.search(rf'def {entry.group(1)}\(.*?(?=\n@|\nclass |\ndef |\Z)', source, re.S).group(0)
+        return text
+
+    def c_local_type(function, local):
+        """C declaration of a local in the generated C function named after ``function``."""
+        start = re.search(rf'\n[^\n;]*\b__pyx_\w*{function}\([^;{{]*\{{\n', c_source)
+        assert start, function
+        block = c_source[start.end():c_source.index('\n}\n', start.end())]
+        found = re.search(rf'^  (PY_LONG_LONG|PyObject \*)\s*__pyx_v_{local}\b', block, re.M)
+        return found.group(1) if found else None
+
+    # proven from the argument window: no overflow guard where `m` is computed, and `m` is a
+    # C long long there (whether annotated or inferred)
     for name in ('share', 'bal'):
-        text = formula(name)
-        assert 'm: _mx_cy.longlong = (t - age)' in text, text
-        assert '>> 63' not in text, text
+        text = body(name)
+        assert 'm = (t - age)' in text.replace('m: _mx_cy.longlong = (t - age)', 'm = (t - age)'), text
+        assert '>> 63' not in text and '_mx_cy.cast(object, t)' not in text, text
+        function = re.search(r'def (\w+)\(', text).group(1)
+        assert c_local_type(function, 'm') == 'PY_LONG_LONG', (name, function)
     # `a - b` taken as a long long argument: one outer operation, no guard; exact or raising
-    assert '>> 63' not in formula('gap'), formula('gap')
+    assert '>> 63' not in body('gap'), body('gap')
 
     probe = textwrap.dedent('''\
         from exported_cy import mx_model
