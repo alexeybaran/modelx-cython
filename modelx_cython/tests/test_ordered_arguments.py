@@ -120,3 +120,17 @@ def test_typed_extrema_become_c_comparisons_in_object_scopes():
     assert '.max_f64(x, y)' in code           # a child scope of a native-result cell
     code, cells, _ = lowered('def formula(x, y):\n    return max(x, y)\n', True)
     assert 'return max(x, y)' in code and cells.minmax_native == 0   # Cython's intrinsic, as before
+
+
+def test_integer_local_exponent_keeps_the_native_power():
+    """diag-us (SPIA/DIA mort_rate): ``k = calendar_year(t) - year`` then ``b ** k``: with the
+    formula's local kinds the exponent is an integer, as the inline expression was."""
+    from modelx_cython.powers import OperandKind, KIND_INT, KIND_FLOAT
+    source = 'def formula(x, n):\n    k = n - 3\n    q = x * (1.0 - x) ** k\n    return min(1.0, q)\n'
+    boxed = preserve_argument_order(cst.parse_module(source).body[0], native_result=True,
+                                    operand_kind=OperandKind(None, {}, {}, '', {'n': KIND_INT}))
+    assert '_mx_cy.cast(object, (1.0 - x)) ** _mx_cy.cast(object, k)' in cst.Module(body=(boxed,)).code
+    native = preserve_argument_order(cst.parse_module(source).body[0], native_result=True,
+                                     operand_kind=OperandKind(None, {}, {}, '', {'n': KIND_INT, 'k': KIND_INT,
+                                                                                'x': KIND_FLOAT}))
+    assert '(1.0 - x) ** k' in cst.Module(body=(native,)).code

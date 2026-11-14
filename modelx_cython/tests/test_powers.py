@@ -509,3 +509,32 @@ def test_range_loop_bound_from_int_of_a_number():
     out = _rewrite(body)
     assert out.count("_mx_sys._mx_pow(") == 1 and "**" not in out, out
     assert "**" in _rewrite("int = self.arr\n    " + body)
+def test_local_kinds_through_declarations_and_compiler_casts():
+    """diag-us (SPIA_US_S commuted_value): a loop variable declared before its loop
+    (``s: _mx_cy.longlong``) and a value guarded by the overflow cast keep their kinds,
+    so the power in one branch of the accumulator's operand is native."""
+    body = ("n = 12\n    j = self.rate(t)\n    total = 0.0\n    s: _mx_cy.longlong\n"
+            "    for s in range(t + 1, n):\n"
+            "        yrs = ((s - t) / 12.0 if t >= 0 else _mx_cy.cast(_mx_cy.double, (_mx_cy.cast(object, s) - t) / 12.0))\n"
+            "        if t > 3:\n            v = (1.0 + j) ** (-yrs)\n        else:\n            v = max(0.0, 1.0 - j * yrs)\n"
+            "        total += self.rate(s) * v\n    return total")
+    out = _rewrite(body)
+    assert out.count("_mx_sys._mx_pow(") == 1 and "**" not in out, out
+    # without the declaration rule or the cast rule the chain breaks: the power stays Python's
+    assert "**" in _rewrite(body.replace("_mx_cy.cast(_mx_cy.double, ", "self.arr(").replace(
+        "/ 12.0))\n", "/ 12.0))\n", 1))
+
+
+def test_formula_local_kinds_reads_the_formula_body():
+    import libcst as cst
+    from modelx_cython.powers import formula_local_kinds, KIND_INT, KIND_FLOAT
+
+    class _NoResolve:
+        def resolve_chain(self, *args):
+            return None, None
+
+    node = cst.parse_module('def f(self, t):\n    k = t - 3\n    s: _mx_cy.longlong\n'
+                            '    for s in range(k):\n        pass\n    q = 0.5 ** k\n    return q\n').body[0]
+    kinds = formula_local_kinds(node, ('t',), _NoResolve(), {}, {}, 'm.C', {'t': KIND_INT})
+    assert kinds == {'k': KIND_INT, 's': KIND_INT, 'q': KIND_FLOAT}, kinds
+    assert formula_local_kinds(node, ('t',), None, {}, {}, 'm.C', {'t': KIND_INT}) == {}
