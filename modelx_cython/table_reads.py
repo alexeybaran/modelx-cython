@@ -145,6 +145,23 @@ def _is_docstring(statement):
             and isinstance(statement.body[0].value, (cst.SimpleString, cst.ConcatenatedString)))
 
 
+SELECTOR = 'a list, mask or comparison selects several rows (pandas, D104); '
+
+
+def _selector(node):
+    """auto-tables (D104): a ``loc``/``at`` part that selects by list, boolean mask or comparison,
+    never one label: such a read keeps pandas (or the helper's) semantics, so it is not lowered."""
+    if isinstance(node, (cst.List, cst.ListComp, cst.Set, cst.SetComp, cst.Comparison)):
+        return True
+    if isinstance(node, cst.BinaryOperation) and isinstance(node.operator, (cst.BitAnd, cst.BitOr, cst.BitXor)):
+        return True
+    if isinstance(node, cst.UnaryOperation) and isinstance(node.operator, cst.BitInvert):
+        return True
+    if isinstance(node, cst.Tuple):
+        return any(_selector(element.value) for element in node.elements)
+    return False
+
+
 class Schema:
     """Levels and column kinds of a traced table (helper ``table_schema(t)``)."""
     __slots__ = ('levels', 'keys', 'columns')
@@ -1588,6 +1605,9 @@ class _Lowering(cst.CSTTransformer):
         for attr in ('loc', 'at'):
             receiver = _index_attr(value, attr)
             if receiver is not None:
+                if any(_selector(part) for part in parts):
+                    self.decline(value, SELECTOR + PYTHON)
+                    return updated
                 return self._loc(original, updated, receiver, attr, parts)
         if len(parts) == 1 and self.index_ref(value) is not None:
             return self._key_at(original, updated, value, parts[0])
