@@ -986,9 +986,9 @@ cpdef NativeTable table_from_value(object value, str cell, object schema=None):
     Used by a compiled table cell when its formula result is first bound and by assignment
     (``cell[()] = value``, ``space.cell = value``; api-tables, D101). ``value`` may be a helper
     Table (or a view owned by one), the read-only DataFrame a compiled table cell returns to
-    Python (its own table is reused), or a pandas DataFrame, which is converted with
-    ``modelx_helpers.pdn.table`` and so meets the helper's load-time conditions (unique keys,
-    string column names, ...): its ValueError is re-raised naming the cell. With ``schema`` (the
+    Python (its own table is reused), or a pandas DataFrame, which is converted by
+    ``runtime.table_admission.admit`` (auto-tables, D104): a frame failing a condition raises
+    its TableAdmissionError (a ValueError) naming the cell and the reasons. With ``schema`` (the
     build-time ``table_schema`` of the cell), a table that does not fit the compiled reads
     raises ValueError naming the cell and the reason; rows, key range and extra columns may
     differ. A key outside a cell's declared or traced argument range still raises the usual
@@ -998,14 +998,8 @@ cpdef NativeTable table_from_value(object value, str cell, object schema=None):
     if source is not None:
         value = source(value)
     elif not isinstance(value, Table) and type(value).__module__.split('.')[0] == 'pandas':
-        from modelx_helpers import pdn
-        if not hasattr(value, 'columns'):
-            raise TypeError(f'{cell}: a table cell takes a DataFrame or a helper Table, '
-                            f'got {type(value).__name__}')
-        try:
-            value = pdn.table(value)
-        except ValueError as error:
-            raise ValueError(f'{cell}: the DataFrame cannot be made the internal table: {error}') from error
+        from modelx_cython.runtime.table_admission import admit
+        value = admit(value, cell)      # auto-tables (D104): the conditions and messages of the build
     table = _bind_owned(value, cell)
     if schema is not None:
         why = _schema_mismatch(_immutable_inputs.table_schema(_semantic_owner(table._owner)), schema)
