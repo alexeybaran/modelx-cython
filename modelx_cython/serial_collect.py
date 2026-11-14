@@ -270,14 +270,21 @@ def _check_lines(cls, shape, checks):
             f'                raise IndexError({message!r}.format(coordinate, need))',
         ))
     lines.append('        if not first:')
-    lines.extend('            ' + line for line in _restart_lines(cls, shape))
+    if shape.reuse:     # what the check and the collected Cell reach (everything when unknown)
+        both = _check_closure(cls, [shape.cell, *(check.cell for check in checks)])
+        lines.extend('            ' + line for line in _reset_lines(cls, both))
+    else:
+        lines.extend('            ' + line for line in _restart_lines(cls, shape))
+    lines.append('            pass')
     lines.append('        first = True')
     return lines
 
 
 def _restart_lines(cls, shape):
     if shape.reuse:
-        return list(_reset_lines(cls))
+        # D107: collect computes the collected Cell only; between policies it resets what that Cell can
+        # reach (static closure; everything when unknown). The reused root is private to this entry.
+        return list(_reset_lines(cls, _check_closure(cls, [shape.cell])))
     return ['root._mx_cells.clear()', 'root._mx_roots.clear()', 'root._space = None',
             f'root = {cls.name}(self)', 'root._mx_copy_refs(self, self)', 'root._mx_roots.append(root)']
 
