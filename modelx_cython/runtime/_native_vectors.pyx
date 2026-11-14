@@ -2,10 +2,9 @@
 """Typed vectors of vector cells; see _native_vectors.pxd."""
 from cpython.buffer cimport PyBUF_WRITABLE, PyBUF_FORMAT, PyBUF_ND, PyBUF_STRIDES
 from cpython.float cimport PyFloat_AS_DOUBLE
-from cpython.mem cimport PyMem_Malloc, PyMem_Realloc, PyMem_Free
+from cpython.mem cimport PyMem_Malloc, PyMem_Realloc, PyMem_Free, PyMem_Calloc
+from cpython.ref cimport Py_INCREF, Py_XDECREF
 from cpython.object cimport Py_EQ, Py_NE, Py_LT, Py_LE, Py_GT, Py_GE
-from cpython.ref cimport PyObject
-
 import operator
 
 cdef extern from "Python.h":
@@ -523,3 +522,63 @@ cdef int _ivec_set_slow(I64Vec v, long long i, long long value) except -1:
 def _i64_from_sequence(items):
     """Unpickling: an I64Vec holding the given integers."""
     return ivec_of(items)
+
+
+# ---------------------------------------------------------------- dense cache of vector cells
+cdef class VecCache:
+
+    def __cinit__(self, Py_ssize_t n, long long lo):
+        self.slots = <PyObject**>PyMem_Calloc(n if n > 0 else 1, sizeof(PyObject*))
+        if self.slots == NULL:
+            raise MemoryError()
+        self.n = n
+        self.lo = lo
+
+    def __dealloc__(self):
+        cdef Py_ssize_t i
+        if self.slots != NULL:
+            for i in range(self.n):
+                Py_XDECREF(self.slots[i])
+            PyMem_Free(self.slots)
+
+    cdef object put(self, long long key, object value):
+        """Publish value at key unless another thread did first; returns the published one."""
+        cdef unsigned long long i = <unsigned long long>(key - self.lo)
+        cdef PyObject* p
+        if i >= <unsigned long long>self.n:
+            return value        # outside the sampled domain: not cached
+        Py_INCREF(value)
+        if __pyx_vec_publish(&self.slots[i], <PyObject*>value):
+            return value
+        Py_XDECREF(<PyObject*>value)
+        p = __pyx_vec_load(&self.slots[i])
+        return <object>p
+
+    def __len__(self):
+        cdef Py_ssize_t i, k = 0
+        for i in range(self.n):
+            if __pyx_vec_load(&self.slots[i]) != NULL:
+                k += 1
+        return k
+
+    def items(self):
+        """(key, value) of the filled slots."""
+        cdef Py_ssize_t i
+        cdef PyObject* p
+        out = []
+        for i in range(self.n):
+            p = __pyx_vec_load(&self.slots[i])
+            if p != NULL:
+                out.append((self.lo + i, <object>p))
+        return out
+
+    def __reduce__(self):
+        return (_vec_cache_from_items, (self.n, self.lo, self.items()))
+
+
+def _vec_cache_from_items(n, lo, items):
+    """Unpickling: a VecCache holding the given (key, value) pairs."""
+    cdef VecCache cache = VecCache(n, lo)
+    for key, value in items:
+        cache.put(key, value)
+    return cache

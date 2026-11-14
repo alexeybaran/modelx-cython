@@ -84,6 +84,39 @@ def cell_vector_shape(cell):
     return _normal_shape(ret.vector_shape) if ret.vector_shape else None
 
 
+CACHE_TYPE = f'{ALIAS}.VecCache'
+MAX_CACHE_SLOTS = 1 << 20
+
+
+def uses_vector_cache(cell):
+    """A vector cell with one C integer parameter and a sampled domain of at most
+    MAX_CACHE_SLOTS keys caches its values in a VecCache (dense, by index) instead of a dict."""
+    if not (cell.vector_shape and cell.has_formula_def and len(cell.params) == 1 and not cell.is_locked
+            and cell.get_argtype_expr(cell.params[0], c_style=True) == 'long long'):
+        return False
+    axes = cell.associative_logical_axes
+    return len(axes) == 1 and 0 < axes[0].stop - axes[0].lower <= MAX_CACHE_SLOTS
+
+
+def cache_constructor(cell):
+    axis = cell.associative_logical_axes[0]
+    return f'{CACHE_TYPE}({int(axis.stop - axis.lower)}, {int(axis.lower)})'
+
+
+def cache_body(cell):
+    """The public method of a vector cell with a VecCache: one acquire load on a hit."""
+    cache = f'self._v_{cell.name}'
+    value = '_mx_vector_value'
+    while value in cell.params:
+        value += '_'
+    key = cell.params[0]
+    source = (f'if {cache} is None:\n    {cache} = {cache_constructor(cell)}\n'
+              f'{value}: object = {ALIAS}.cache_get({cache}, {key})\n'
+              f'if {value} is not None:\n    return {value}\n'
+              f'return {cache}.put({key}, self._f_{cell.name}({key}))\n')
+    return cst.IndentedBlock(body=cst.parse_module(source).body)
+
+
 def module_uses_vectors(module):
     return any(cell.vector_shape for cls in module.classes.values() for cell in cls.cells.values())
 

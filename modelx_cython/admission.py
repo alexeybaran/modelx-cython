@@ -32,6 +32,8 @@ def describe(module_infos):
                     cache = 'dense'
                 elif cell.uses_native_numeric_cache:
                     cache = 'native-numeric-keys'
+                elif cell.uses_vector_cache:
+                    cache = 'vector-dense'
                 else:
                     cache = 'dictionary'
                 reasons = []

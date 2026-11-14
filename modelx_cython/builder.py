@@ -393,6 +393,12 @@ class CombinedCellsInfo(LexicalCellsInfo):
         from modelx_cython.vectors import cell_vector_shape
         return cell_vector_shape(self)
 
+    @property
+    def uses_vector_cache(self):
+        """Whether a vector cell caches its values in a dense VecCache (``vectors.py``)."""
+        from modelx_cython.vectors import uses_vector_cache
+        return uses_vector_cache(self)
+
     @cached_property
     def is_real_value(self):
         """Whether the normalized return type is numeric.
@@ -451,6 +457,7 @@ class CombinedCellsInfo(LexicalCellsInfo):
         information.  Its ``_v_`` attribute is a ``cdef dict``.
         """
         return (self.has_formula_def and self.has_args() and not self.uses_native_numeric_cache
+                and not self.uses_vector_cache
                 and not (self.has_typeinfo() and self.is_arrayable()))
 
     @property

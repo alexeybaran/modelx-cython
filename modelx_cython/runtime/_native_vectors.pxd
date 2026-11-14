@@ -11,7 +11,20 @@ sum bit for bit. It is a private copy of ``_float_sum_state`` (owned by another
 package); the two are to be unified.
 """
 from cpython.version cimport PY_VERSION_HEX
+from cpython.ref cimport PyObject
 from libc.math cimport fabs, isfinite
+
+
+cdef extern from *:
+    """
+    #define __pyx_vec_load(p) __atomic_load_n((p), __ATOMIC_ACQUIRE)
+    static inline int __pyx_vec_publish(PyObject **slot, PyObject *value) {
+        PyObject *expected = NULL;
+        return __atomic_compare_exchange_n(slot, &expected, value, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE);
+    }
+    """
+    PyObject* __pyx_vec_load(PyObject** p) noexcept nogil
+    bint __pyx_vec_publish(PyObject** slot, PyObject* value) noexcept nogil
 
 
 cdef class F64Vec:
@@ -26,6 +39,28 @@ cdef class I64Vec:
     cdef Py_ssize_t n
     cdef Py_ssize_t cap
     cdef Py_ssize_t _itemsize
+
+
+cdef class VecCache:
+    """The values of a vector cell with one integer parameter, by index (dense cache).
+
+    A slot is published once (compare-and-swap from NULL) and never replaced while the cache
+    lives, so readers on any thread take it with one acquire load and no lock."""
+    cdef PyObject** slots
+    cdef Py_ssize_t n
+    cdef long long lo
+    cdef object put(self, long long key, object value)
+
+
+cdef inline object cache_get(VecCache cache, long long key):
+    """The cached value at key, or None (a vector value is never None)."""
+    cdef unsigned long long i = <unsigned long long>(key - cache.lo)
+    cdef PyObject* p
+    if i < <unsigned long long>cache.n:
+        p = __pyx_vec_load(&cache.slots[i])
+        if p != NULL:
+            return <object>p
+    return None
 
 
 # ---------------------------------------------------------------- compensated sum (private copy)

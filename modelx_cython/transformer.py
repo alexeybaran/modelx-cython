@@ -62,6 +62,7 @@ import libcst.matchers as m
 from libcst.metadata import ParentNodeProvider, ScopeProvider, GlobalScope, ClassScope
 from libcst.metadata.scope_provider import BuiltinAssignment
 
+from modelx_cython import vectors
 from modelx_cython.parser import ParentScopeAddin
 from modelx_cython.builder import ModuleInfo, CombinedCellsInfo
 from modelx_cython.config import TransSpec
@@ -365,6 +366,8 @@ class PXDGenerator:
 
                 elif cells.uses_native_numeric_cache:
                     decl_stmts.append(f'cdef {numeric_cache.storage(cells)} {VAR_PREF + cells.name}\n')
+                elif cells.uses_vector_cache:
+                    decl_stmts.append(f'cdef {vectors.CACHE_TYPE} {VAR_PREF + cells.name}\n')
                 else:
                     decl_stmts.append(f"cdef dict {VAR_PREF + cells.name}\n")
             else:
@@ -925,6 +928,8 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
                     elif cells.uses_native_numeric_cache:
                         decl_stmts.append(cst.parse_statement(
                             f'{VAR_PREF + cells.name}: {numeric_cache.storage(cells)}\n'))
+                    elif cells.uses_vector_cache:
+                        decl_stmts.append(cst.parse_statement(f'{VAR_PREF + cells.name}: {vectors.CACHE_TYPE}\n'))
                     else:
                         decl_stmts.append(
                             cst.parse_statement(
@@ -1247,6 +1252,9 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
                         initializers.append(cst.parse_statement(
                             f'self._v_{cell.name} = {numeric_cache.constructor(cell)}\n'
                         ))
+                    elif cell.uses_vector_cache:
+                        initializers.append(cst.parse_statement(
+                            f'self._v_{cell.name} = {vectors.cache_constructor(cell)}\n'))
                 return updated_node.with_changes(body=updated_node.body.with_changes(
                     body=(*updated_node.body.body, *initializers)))
 
@@ -1479,6 +1487,8 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
                         )
                     elif cells.uses_native_numeric_cache:
                         body = numeric_cache.body(cells)
+                    elif cells.uses_vector_cache:
+                        body = vectors.cache_body(cells)
                     else:
                         if cells.is_locked:
                             # the exported body is already double-checked
