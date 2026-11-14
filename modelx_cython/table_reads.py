@@ -577,6 +577,14 @@ class TableReads:
             return None
         if isinstance(expr, cst.Call) and _plain_args(expr):
             func = expr.func
+            if (self._int_index_read(expr) and (expr.func.attr.value != 'asof' or (
+                    len(expr.args) == 1 and self.is_int(expr.args[0].value, depth + 1)))):
+                # diag-kr: a key of a single integer level (min/max, or asof at an integer)
+                return 'key of an integer index'
+            from .vectors import ALIAS as _VECTORS
+            if (isinstance(func, cst.Attribute) and isinstance(func.value, cst.Name)
+                    and func.value.value == _VECTORS and func.attr.value == 'ivec_get'):
+                return 'element of an integer vector'      # diag-kr: the vector pass's typed read
             if isinstance(func, cst.Name) and func.value in ('min', 'max', 'abs') and expr.args:
                 return ('integer min/max' if all(self.is_int(arg.value, depth + 1) for arg in expr.args)
                         else None)
