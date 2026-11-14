@@ -74,6 +74,11 @@ def str_labels(t):
 def tuple_max(t):
     return (max(a for a, s in data.pairs().index), min(a for a, s in data.pairs().index if s == t % 2))
 ''',
+    'tuple_whole': '''\
+def tuple_whole(t):
+    sub = data.pairs()
+    return min(k for k in sub.index if sub.loc[k, "v"] >= 2.0 + t % 2)
+''',
     'tuple_key': '''\
 def tuple_key(t):
     a = anchor(t)

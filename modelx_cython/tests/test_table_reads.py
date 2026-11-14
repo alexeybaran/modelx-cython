@@ -968,6 +968,10 @@ LABEL_FORMS = {
                   [f'max({M}.key_label(_mx_h0, _mx_i)[0] for _mx_i in range(_mx_h0.rows))']),
     'tuple_filter': ('return min(a for a, s in self.pairs().index if s == t % 2)',
                      [f'if {M}.key_label(_mx_h0, _mx_i)[1] == t % 2)']),
+    'tuple_whole': ('sub = self.pairs()\n'
+                    '    return min(k for k in sub.index if sub.loc[k, "v"] >= 2.0 + t % 2)',
+                    [f'min({M}.key_label(_mx_h_sub, _mx_i) for _mx_i in range(_mx_h_sub.rows) '
+                     'if _mx_h_sub.f64(_mx_i, _mx_h_sub.col("v")) >= 2.0 + t % 2)']),
     'chain_column': ('return float(self.two_table().loc[self.ka(t)]["v"][self.kb(t)])',
                      ['_mx_h0.f64(_mx_h0.row_2(self.ka(t), self.kb(t)), _mx_h0.col("v"))']),
     'chain_loc': ('return float(self.two_table().loc[self.ka(t)].loc[self.kb(t), "v"])',

@@ -839,6 +839,8 @@ class _Lowering(cst.CSTTransformer):
                     found = None
                     if iref is not None and iref.schema.levels == 1 and isinstance(target, cst.Name):
                         found = {target.value: (iref.handle, None, 'int' if iref.schema.int_key else 'label')}
+                    elif iref is not None and isinstance(target, cst.Name) and self._unordered(node):
+                        found = {target.value: (iref.handle, None, 'label')}       # whole tuple keys
                     elif (iref is not None and unpack and len(target.elements) == iref.schema.levels
                           and self._unordered(node)):
                         found = {item.value.value: (iref.handle, None, j) for j, item in enumerate(target.elements)}
@@ -1235,8 +1237,8 @@ class _Lowering(cst.CSTTransformer):
     def row_of(self, ref, key_original, key_updated, where):
         """Row expression for a complete key of ``ref``: (node, notes) or (None, reason)."""
         info = self._kinds.get(id(key_updated))
-        if (info is not None and info[0] in ('key_int', 'key_label') and info[3] is not None and ref.schema.levels == 1
-                and _code(info[2]) == _code(ref.handle)):
+        if (info is not None and info[0] in ('key_int', 'key_label') and info[3] is not None
+                and (ref.schema.levels == 1 or info[0] == 'key_label') and _code(info[2]) == _code(ref.handle)):
             return info[3], (f'{where}: the row of the iterated key',)
         if (info is not None and info[0] == 'asof_int' and ref.schema.levels == 1
                 and _code(info[2]) == _code(ref.handle)):
