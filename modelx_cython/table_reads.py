@@ -61,7 +61,8 @@ UNSAFE_BARE = frozenset(('double', 'float', 'bint'))
 SKIPPED_SCOPES = (cst.FunctionDef, cst.Lambda, cst.ClassDef)
 COMPREHENSIONS = (cst.ListComp, cst.SetComp, cst.DictComp, cst.GeneratorExp)
 LONG_LONG_METHODS = frozenset(('first_int', 'last_int', 'asof_int', 'key_int', 'i64'))
-C_INT_METHODS = frozenset(('first_int', 'last_int', 'asof_int', 'key_int', 'searchsorted_right', 'i64'))
+C_INT_METHODS = frozenset(('first_int', 'last_int', 'asof_int', 'key_int', 'searchsorted_right', 'i64', 'rows'))
+INDEX_BUILTINS = frozenset(('len', 'min', 'max', 'list', 'tuple', 'sorted'))
 
 PYTHON = 'runs as a Python call'
 ESCAPES = 'sub-table local {name!r} is read in a nested function ({use}): kept as written; ' + PYTHON
@@ -73,6 +74,8 @@ ITERROWS_ROW = 'row of iterrows(): ' + PYTHON
 INDEX_OBJECT = ('T.index used as a Python object (iteration, len, list, ...), not by `k in T.index`, '
                 'min()/max(), asof, searchsorted or [i]; ' + PYTHON)
 NO_SCHEMA = 'receiver has no traced table schema; ' + PYTHON
+INDEX_NOT_INT = ('iteration of an index that is not a single integer level (keys are tuples or '
+                 'labels); ' + PYTHON)
 COLUMN_VIEW = 'column selection T["c"] used other than by a key read; ' + PYTHON
 
 
@@ -180,6 +183,7 @@ class _Formula(cst.CSTVisitor):
     def __init__(self, root):
         self.root = root
         self.values, self.other, self.loads, self.parents = {}, set(), {}, {}
+        self.binds = {}             # name -> number of bindings outside comprehensions
         self.names = set()
         self._depth = 0
         self._shadow = []
@@ -192,6 +196,7 @@ class _Formula(cst.CSTVisitor):
             if node is not self.root:
                 if isinstance(node, (cst.FunctionDef, cst.ClassDef)):
                     self.other.add(node.name.value)
+                    self._bind(node.name.value)
                     self._stores.add(id(node.name))
                 params = getattr(node, 'params', None)
                 names = set()
@@ -225,10 +230,14 @@ class _Formula(cst.CSTVisitor):
         if isinstance(node, COMPREHENSIONS):
             self._shadow.pop()
 
+    def _bind(self, name):
+        self.binds[name] = self.binds.get(name, 0) + 1
+
     def _store(self, target, value=None, plain=False):
         if plain and isinstance(target, cst.Name):
             if not any(target.value in names for names in self._shadow):
                 self.values.setdefault(target.value, []).append(value)
+                self._bind(target.value)
             self._stores.add(id(target))
             return
 
@@ -243,6 +252,7 @@ class _Formula(cst.CSTVisitor):
                 self._stores.add(id(node))
                 if not any(node.value in names for names in self._shadow):
                     self.other.add(node.value)
+                    self._bind(node.value)
         target.visit(Collect())
 
     def visit_Assign(self, node):
@@ -280,9 +290,15 @@ class _Formula(cst.CSTVisitor):
 
     def visit_Global(self, node):
         self.other.update(item.name.value for item in node.names)
+        for item in node.names:
+            self._bind(item.name.value)
+            self._bind(item.name.value)
 
     def visit_Nonlocal(self, node):
         self.other.update(item.name.value for item in node.names)
+        for item in node.names:
+            self._bind(item.name.value)
+            self._bind(item.name.value)
 
     def visit_ImportAlias(self, node):
         name = node.asname.name if node.asname else node.name
@@ -290,6 +306,7 @@ class _Formula(cst.CSTVisitor):
             name = name.value
         if isinstance(name, cst.Name):
             self.other.add(name.value)
+            self._bind(name.value)
             self._stores.add(id(name))
 
     def visit_Attribute(self, node):
@@ -335,6 +352,7 @@ class TableReads:
         self.declined = {}
         self.keys = []
         self._site_ids = {id(site.node) for site in sites}
+        self._key_locals = set()    # loop variables of lowered `for k in T.index:` (C long long)
 
     # ------------------------------------------------------------------ driver
     def enabled(self):
@@ -462,6 +480,8 @@ class TableReads:
             kind = self.param_type(expr.value)
             if kind in INT_TYPES:
                 return f'parameter {expr.value} is {kind}'
+            if expr.value in self._key_locals:
+                return f'local {expr.value} is a key of an integer index'
             values = self.formula.values.get(expr.value)
             if (values and expr.value not in self.formula.other and expr.value not in self._params
                     and all(self.is_int(value, depth + 1) for value in values)):
@@ -502,6 +522,10 @@ class TableReads:
                 and expr.func.attr.value in ('min', 'max', 'asof')):
             return False
         receiver = _index_attr(expr.func.value, 'index')
+        if receiver is None and isinstance(expr.func.value, cst.Name):     # an index local
+            values = self.formula.values.get(expr.func.value.value) or ()
+            if len(values) == 1 and expr.func.value.value not in self.formula.other:
+                receiver = _index_attr(values[0], 'index')
         if receiver is None:
             return False
         schema = self.table_cell(receiver)
@@ -543,7 +567,7 @@ class TableReads:
     def exact_long_long(self, expr):
         """``expr`` is statically a C ``long long`` (a cell result or a parameter)."""
         if isinstance(expr, cst.Name):
-            return self.param_type(expr.value) == 'long long'
+            return self.param_type(expr.value) == 'long long' or expr.value in self._key_locals
         return isinstance(expr, cst.Call) and self.call_rettype(expr)[0] == 'long long'
 
     def scalar(self, expr):
@@ -587,7 +611,10 @@ class _Lowering(cst.CSTTransformer):
         self._companions = {}
         self._rows = {}
         self._used = set(self.f.names)
+        self._keyvars = []          # per comprehension: loop name -> (handle, position name)
+        self._compfor = {}          # id(original CompFor) -> (handle, position name, index ref)
         self.locals = self._classify()
+        owner._key_locals = self._loop_keys()
         self._escaping_rows = {
             id(node) for name in escaped if self.locals.get(name, ('',))[0] == 'row'
             for node, nested in self.f.loads.get(name, ()) if not nested}
@@ -605,7 +632,7 @@ class _Lowering(cst.CSTTransformer):
             if name in self.kept:
                 continue
             every = self.f.loads.get(name, ())
-            if kind in ('table', 'record') and not any(id(node) in self.consumed for node, _ in every):
+            if kind in ('table', 'record', 'index') and not any(id(node) in self.consumed for node, _ in every):
                 kept.setdefault(name, 'no read through it is lowered')     # left exactly as written
                 continue
             loads = [(node, nested) for node, nested in every if id(node) not in self.consumed]
@@ -688,6 +715,10 @@ class _Lowering(cst.CSTTransformer):
             return ('table', schema) if kind in ('table', 'sub') else (kind, schema) if kind == 'record' else None
         if o.records_enabled() and o.record_cell(value):
             return ('record', None)
+        receiver = _index_attr(value, 'index')
+        if receiver is not None:        # an index local: years = T.index (W1.9)
+            base = self._static_schema(receiver, kinds)
+            return ('index', base) if base is not None else None
         parts = _subscript_parts(value)
         receiver = _index_attr(value.value, 'loc') if parts is not None else None
         if receiver is None or len(parts) != 1:
@@ -763,13 +794,68 @@ class _Lowering(cst.CSTTransformer):
             while current is not None:
                 names.update(_bound_names(current.target))
                 current = current.inner_for_in
+            mapping = {}
+            current = node.for_in
+            while current is not None:      # for k in R.index: k is H.key_int(i), i a position
+                target = current.target
+                if (isinstance(target, cst.Name) and not self._names_in(current.iter) & names
+                        and self._static_index(current.iter) is not None):
+                    iref = self.index_ref(current.iter)
+                    if iref is not None and iref.schema.int_key:
+                        position = self.reserve('_mx_i')
+                        mapping[target.value] = (iref.handle, position)
+                        self._compfor[id(current)] = (iref.handle, position, iref)
+                    elif iref is not None:
+                        self.decline(iref.sites[0], INDEX_NOT_INT)
+                current = current.inner_for_in
             self._shadow.append(names)
+            self._keyvars.append(mapping)
         return super().on_visit(node)
 
     def on_leave(self, original, updated):
         if isinstance(original, COMPREHENSIONS):
             self._shadow.pop()
+            self._keyvars.pop()
         return super().on_leave(original, updated)
+
+    @staticmethod
+    def _names_in(expr):
+        found = set()
+
+        class Names(cst.CSTVisitor):
+            def visit_Name(inner, node):
+                found.add(node.value)
+        expr.visit(Names())
+        return found
+
+    def leave_CompFor(self, original, updated):
+        found = self._compfor.get(id(original))
+        if found is None:
+            return updated
+        handle, position, iref = found
+        self.mark(*iref.sites, notes=iref.notes)
+        return updated.with_changes(target=cst.Name(position), iter=self._positions(handle))
+
+    def leave_For(self, original, updated):
+        target = original.target
+        if not (isinstance(target, cst.Name) and target.value in self.o._key_locals):
+            return updated
+        iref = self.index_ref(original.iter)
+        if iref is None or not iref.schema.int_key:     # pragma: no cover - _loop_keys agrees
+            return updated
+        position = self.reserve('_mx_i')
+        self._declare.append((position, '_mx_cy.Py_ssize_t'))
+        if (target.value, '_mx_cy.longlong') not in self._declare:
+            self._declare.append((target.value, '_mx_cy.longlong'))
+        self.mark(*iref.sites, notes=iref.notes)
+        first = cst.SimpleStatementLine([cst.Assign([cst.AssignTarget(cst.Name(target.value))],
+                                                    _method(iref.handle, 'key_int', cst.Name(position)))])
+        body = updated.body
+        if isinstance(body, cst.IndentedBlock):
+            body = body.with_changes(body=[first, *body.body])
+        else:
+            body = cst.IndentedBlock(body=[first, cst.SimpleStatementLine(body=body.body)])
+        return updated.with_changes(target=cst.Name(position), iter=self._positions(iref.handle), body=body)
 
     def local(self, name):
         """(kind, schema) of a lowered local read here, else None."""
@@ -855,6 +941,99 @@ class _Lowering(cst.CSTTransformer):
                 index, handle, _ = self.row_names(original.value)
                 return _Ref('row', found[1], handle, (original,), cst.Name(index))
         return None
+
+    def index_ref(self, original):
+        """_Ref of an index expression: ``R.index`` on a lowered table, or an index local
+        (``years = R.index``, assigned once). ``sites`` are the nodes a lowering consumes."""
+        receiver = _index_attr(original, 'index')
+        if receiver is not None:
+            ref = self.table_ref(receiver)
+            if ref is None:
+                return None
+            return _Ref('table', ref.schema, ref.handle, (original, *ref.sites), notes=ref.notes)
+        if isinstance(original, cst.Name):
+            found = self.local(original.value)
+            if found is None or found[0] != 'index':
+                return None
+            values = self.f.values.get(original.value) or ()
+            if len(values) != 1:
+                return None
+            ref = self.table_ref(_index_attr(values[0], 'index'))
+            if ref is None:
+                return None
+            return _Ref('table', ref.schema, ref.handle, (original, values[0], *ref.sites), notes=ref.notes)
+        return None
+
+    def _static_index(self, expr):
+        """Schema of an index expression known before lowering (a table cell, a table or
+        sub-table local, an index local), else None."""
+        receiver = _index_attr(expr, 'index')
+        if receiver is not None:
+            if self.o.table_cell(receiver) is not None:
+                return self.o.table_cell(receiver)
+            if isinstance(receiver, cst.Name):
+                found = self.locals.get(receiver.value)
+                if receiver.value not in self.kept and found and found[0] in ('table', 'sub'):
+                    return found[1]
+            return None
+        if isinstance(expr, cst.Name) and expr.value not in self.kept:
+            found = self.locals.get(expr.value)
+            if found and found[0] == 'index' and len(self.f.values.get(expr.value) or ()) == 1:
+                return found[1]
+        return None
+
+    def _loop_keys(self):
+        """Names bound only as the target of ``for k in R.index:`` over a single integer level."""
+        found, lowering = set(), self
+
+        class Loops(cst.CSTVisitor):
+            def visit_FunctionDef(inner, node):
+                return node is lowering.f.root
+
+            def visit_Lambda(inner, node):
+                return False
+
+            def visit_For(inner, node):
+                target = node.target
+                if (isinstance(target, cst.Name) and lowering.f.binds.get(target.value) == 1
+                        and target.value not in lowering.o._params):
+                    schema = lowering._static_index(node.iter)
+                    if schema is not None and schema.int_key:
+                        found.add(target.value)
+        self.f.root.visit(Loops())
+        return found
+
+    def _positions(self, handle):
+        return _call(cst.Name('range'), cst.Attribute(handle, cst.Name('rows')))
+
+    def _key_list(self, handle):
+        """``[H.key_int(i) for i in range(H.rows)]``: the keys in row order, as the index."""
+        index = self.reserve('_mx_i')
+        return cst.ListComp(elt=_method(handle, 'key_int', cst.Name(index)), for_in=cst.CompFor(
+            target=cst.Name(index), iter=self._positions(handle)))
+
+    def _index_builtin(self, name, iref, original, updated):
+        """``len/min/max/list/tuple/sorted(R.index)`` on a lowered table."""
+        handle, schema = iref.handle, iref.schema
+        site = iref.sites[0]
+        info = None
+        if name == 'len':
+            node, info = cst.Attribute(handle, cst.Name('rows')), ('rows', None, handle, None, None)
+        elif name in ('min', 'max'):
+            if schema.int_key:
+                method = 'first_int' if name == 'min' else 'last_int'
+                node, info = _method(handle, method), (method, None, handle, None, None)
+            else:
+                node = _method(handle, 'first_key' if name == 'min' else 'last_key')
+        elif not schema.int_key:
+            self.decline(site, INDEX_NOT_INT)
+            return updated
+        else:
+            node = self._key_list(handle)
+            if name != 'list':
+                node = _call(cst.Name(name), node)
+        self.mark(*iref.sites, notes=iref.notes)
+        return self.out(node, updated, info)
 
     # ------------------------------------------------------------------ bookkeeping
     def mark(self, *nodes, notes=()):
@@ -953,6 +1132,9 @@ class _Lowering(cst.CSTTransformer):
     def row_of(self, ref, key_original, key_updated, where):
         """Row expression for a complete key of ``ref``: (node, notes) or (None, reason)."""
         info = self._kinds.get(id(key_updated))
+        if (info is not None and info[0] == 'key_int' and info[3] is not None and ref.schema.levels == 1
+                and _code(info[2]) == _code(ref.handle)):
+            return info[3], (f'{where}: the row of the iterated key',)
         if (info is not None and info[0] == 'asof_int' and ref.schema.levels == 1
                 and _code(info[2]) == _code(ref.handle)):
             return _method(ref.handle, 'asof_row', info[3]), (f'{where}: asof key as the row',)
@@ -990,9 +1172,8 @@ class _Lowering(cst.CSTTransformer):
             receiver = _index_attr(value, attr)
             if receiver is not None:
                 return self._loc(original, updated, receiver, attr, parts)
-        receiver = _index_attr(value, 'index')
-        if receiver is not None and len(parts) == 1:
-            return self._key_at(original, updated, receiver, parts[0])
+        if len(parts) == 1 and self.index_ref(value) is not None:
+            return self._key_at(original, updated, value, parts[0])
         one = len(parts) == 1
         new_key = updated.slice[0].slice.value
         row = self.row_ref(value)
@@ -1052,9 +1233,9 @@ class _Lowering(cst.CSTTransformer):
     def _column_original(self, column):
         return column.sites[0]
 
-    def _key_at(self, original, updated, receiver, key):
+    def _key_at(self, original, updated, index, key):
         """``T.index[i]``: H.key_int(i) on a single integer level."""
-        ref = self.table_ref(receiver)
+        ref = self.index_ref(index)
         site = original.value
         if ref is None:
             return updated
@@ -1136,10 +1317,7 @@ class _Lowering(cst.CSTTransformer):
         target = original.comparisons[0]
         if not isinstance(target.operator, (cst.In, cst.NotIn)):
             return updated
-        receiver = _index_attr(target.comparator, 'index')
-        if receiver is None:
-            return updated
-        ref = self.table_ref(receiver)
+        ref = self.index_ref(target.comparator)
         if ref is None:
             return updated
         parts, reason = self.parts(original.left, updated.left, ref.schema, 'key in index', allow_prefix=True)
@@ -1157,18 +1335,21 @@ class _Lowering(cst.CSTTransformer):
         if (isinstance(func, cst.Name) and func.value in ('float', 'int') and len(updated.args) == 1
                 and _plain_args(updated)):
             return self._conversion(func.value, updated)
+        if (isinstance(func, cst.Name) and func.value in INDEX_BUILTINS and len(original.args) == 1
+                and _plain_args(original)):
+            iref = self.index_ref(original.args[0].value)
+            if iref is not None:
+                return self._index_builtin(func.value, iref, original, updated)
+            return updated
         if not isinstance(func, cst.Attribute):
             return updated
-        receiver = _index_attr(func.value, 'index')
-        if receiver is None:
+        ref = self.index_ref(func.value)
+        if ref is None:
             if func.attr.value == 'iterrows':
                 self.decline(func, ITERROWS)
             return updated
         name = func.attr.value
-        ref = self.table_ref(receiver)
-        if ref is None:
-            return updated
-        site = func.value
+        site = ref.sites[0]
         if name in ('min', 'max') and not original.args:
             if ref.schema.int_key:
                 node = _method(ref.handle, 'first_int' if name == 'min' else 'last_int')
@@ -1235,6 +1416,15 @@ class _Lowering(cst.CSTTransformer):
 
     # ------------------------------------------------------------------ names and statements
     def leave_Name(self, original, updated):
+        if self._keyvars and id(original) not in self.f._stores:
+            for shadow, mapping in zip(reversed(self._shadow), reversed(self._keyvars)):
+                if original.value in mapping:
+                    handle, position = mapping[original.value]
+                    self.changed = True
+                    return self.out(_method(handle, 'key_int', cst.Name(position)), updated,
+                                    ('key_int', None, handle, cst.Name(position), None))
+                if original.value in shadow:
+                    break
         name = self._escaping_subs.get(id(original))
         if name is not None:
             self.changed = True
@@ -1294,6 +1484,15 @@ class _Lowering(cst.CSTTransformer):
             handle = self.companion(name)
             statements.append(cst.Assign([cst.AssignTarget(cst.Name(handle))], ref.handle))
             self.mark(*ref.sites, notes=ref.notes)
+        elif kind == 'index':
+            if name in self.escaped:
+                return updated
+            ref = self.index_ref(value)
+            if ref is None:
+                self.failed.setdefault(name, f'{self._use(value)} is not lowered')
+                return updated
+            self.mark(*ref.sites, notes=ref.notes)
+            return cst.Pass()
         elif kind == 'row':
             ref = self._memo.get(id(value))
             if ref is None or ref.kind != 'row':

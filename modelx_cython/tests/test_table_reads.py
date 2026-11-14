@@ -44,15 +44,23 @@ class PyHandle:
     def _key(parts):
         return parts[0] if len(parts) == 1 else tuple(parts)
 
+    @property
+    def rows(self):
+        return len(self.table.index)
+
     def col(self, name):
         if name not in self.columns:
             raise KeyError(name)
         return self.columns.index(name)
 
     def _row(self, *parts):
+        """The row position of a complete key (rows are positions, as the runtime handle's)."""
         key = self._key(parts)
         self.table.loc[key]         # KeyError(key) when absent
-        return key
+        return next(i for i, k in enumerate(self.table.index) if k == key)
+
+    def _label(self, row):
+        return list(self.table.index)[row]
 
     row_1 = row_2 = row_3 = row_4 = row_5 = row_6 = _row
 
@@ -62,13 +70,13 @@ class PyHandle:
     has_1 = has_2 = has_3 = has_4 = has_5 = has_6 = _has
 
     def f64(self, row, col):
-        return float(self.table.loc[row, self.columns[col]])
+        return float(self.table.loc[self._label(row), self.columns[col]])
 
     def i64(self, row, col):
-        return int(self.table.loc[row, self.columns[col]])
+        return int(self.table.loc[self._label(row), self.columns[col]])
 
     def obj(self, row, col):
-        return self.table.loc[row, self.columns[col]]
+        return self.table.loc[self._label(row), self.columns[col]]
 
     def first_int(self):
         return int(self.table.index.min())
@@ -86,7 +94,7 @@ class PyHandle:
         return int(self.table.index.asof(k))
 
     def asof_row(self, k):
-        return self.table.index.asof(k)
+        return self._row(self.table.index.asof(k))
 
     def searchsorted_right(self, k):
         return int(self.table.index.searchsorted(k, side='right'))
@@ -103,7 +111,7 @@ class PyHandle:
         return self.table
 
     def row_record(self, row):
-        return self.table.loc[row]
+        return self.table.loc[self._label(row)]
 
 
 class PyRecord:
@@ -501,7 +509,7 @@ def test_not_lowered_reads_are_declined_with_reasons():
     text, reads, sites = lower(base_model(), 'def _f_x(self, t, name):\n'
                                '    tbl = self.mort_table()\n'
                                '    s = 0.0\n'
-                               '    for k in tbl.index:\n'
+                               '    for k in tbl.index.values:\n'
                                '        s += tbl.loc[k, name]\n'
                                '    for _, r in self.gap_table().iterrows():\n'
                                '        s += r["v"]\n'
@@ -510,7 +518,7 @@ def test_not_lowered_reads_are_declined_with_reasons():
                                '    return s, tbl.loc[30:32, "band"], self.mort_table().index.asof(self.rate(t))\n',
                                params={'t': 'long long', 'name': 'object'})
     reasons = {site.read: reads.declined.get(id(site.node)) for site in sites if id(site.node) not in reads.lowered}
-    assert reasons['tbl.index'].startswith('T.index used as a Python object')
+    assert reasons['tbl.index.values'].startswith('T.index used as a Python object')
     assert reasons['tbl.loc[k, name]'].startswith('column is not a string literal')
     assert reasons['self.gap_table().iterrows()'].startswith('iterrows()')
     assert reasons['r["v"]'].startswith('row of iterrows()')
@@ -570,7 +578,7 @@ def test_a_local_without_lowered_reads_is_left_as_written():
               '    table = self.mort_table()\n'
               '    mp = self.model_point()\n'
               '    key = min(t, table.index.max_int())\n'
-              '    return table.lookup_float(key, "mort_rate"), [k for k in table.index], mp\n')
+              '    return table.lookup_float(key, "mort_rate"), table.index.to_list(), mp\n')
     text, reads, _ = lower(base_model(), source)
     assert text == source and reads.typed == 0
 
@@ -770,13 +778,13 @@ def test_report_contract_with_the_transformer_hook():
     """The fields W1.1's hook reads: typed, lowered ids of sites, declined reasons, keys."""
     _, reads, sites = lower(base_model(), 'def _f_x(self, t):\n'
                             '    tbl = self.mort_table()\n'
-                            '    return tbl.loc[self.age(t), "mort_rate"] + len(tbl.index)\n')
+                            '    return tbl.loc[self.age(t), "mort_rate"] + len(tbl.index.to_list())\n')
     assert isinstance(reads.typed, int) and isinstance(reads.keys, list)
     assert reads.lowered <= {id(site.node) for site in sites}
     assert set(reads.declined) <= {id(site.node) for site in sites} - reads.lowered
     entries = [site.entry(True, reads.declined.get(id(site.node))) for site in sites
                if id(site.node) not in reads.lowered]
-    assert [entry['read'] for entry in entries] == ['tbl.index']
+    assert [entry['read'] for entry in entries] == ['tbl.index.to_list()']
     assert isinstance(sites[0], TableReadSite)
 
 
@@ -791,9 +799,10 @@ def test_sub_table_local_used_as_a_python_table_stays_a_typed_handle():
     text, reads, sites = lower(prototype_model(), source)
     assert '    sub = ' not in text
     assert '_mx_h_sub = _mx_h0.sub_1(self.ka(t))' in text
-    assert '_mx_h_sub.table_object().index' in text and 'len(_mx_h_sub.table_object())' in text
+    assert 'keys = [_mx_h_sub.key_int(_mx_i) for _mx_i in range(_mx_h_sub.rows)]' in text
+    assert 'len(_mx_h_sub.table_object())' in text
     assert '_mx_h_sub.f64(_mx_h_sub.row_1(_mx_cy.cast(object, keys[0])), _mx_h_sub.col("v"))' in text
-    assert reads.typed == 3
+    assert reads.typed == 4
     same_values(prototype_model(), source, range(-1, 12))
 
 
@@ -807,3 +816,66 @@ def test_sub_table_local_read_in_a_nested_function_is_kept():
     assert 'sub = self.two_table().loc[self.ka(t)]' in text
     assert any('is read in a nested function' in reason for reason in reads.declined.values())
     same_values(prototype_model(), source, range(-1, 12))
+
+
+# ---------------------------------------------------------------------- W1.9: the index as keys
+INDEX_FORMS = {
+    # name: (statements, lowered text fragments)
+    'len': ('return len(self.gap_table().index) + t', ['_mx_h0.rows + t']),
+    'minmax': ('return min(self.gap_table().index) * 10 + max(self.gap_table().index) + t',
+               ['_mx_h0.first_int() * 10 + _mx_h0.last_int()']),
+    'minmax_multi': ('return (min(self.multi_table().index), max(self.multi_table().index), t)',
+                     ['_mx_h0.first_key()', '_mx_h0.last_key()']),
+    'list': ('return list(self.gap_table().index), t',
+             ['[_mx_h0.key_int(_mx_i) for _mx_i in range(_mx_h0.rows)]']),
+    'sorted_tuple': ('return sorted(self.gap_table().index), tuple(self.gap_table().index)',
+                     ['sorted([_mx_h0.key_int(_mx_i) for _mx_i in range(_mx_h0.rows)])',
+                      'tuple([_mx_h0.key_int(_mx_i_) for _mx_i_ in range(_mx_h0.rows)])']),
+    'alias': ('tbl = self.gap_table()\n    years = tbl.index\n'
+              '    y = min(max(t, int(years.min())), int(years.max()))\n'
+              '    return float(tbl.loc[tbl.index.asof(y), "v"]), y in years, years[t % 4], len(years)',
+              ['y = min(max(t, _mx_h_tbl.first_int()), _mx_h_tbl.last_int())', '_mx_h_tbl.has_1(',
+               '_mx_h_tbl.key_int(t % 4)', '_mx_h_tbl.rows']),
+    'compr_row': ('tbl = self.gap_table()\n'
+                  '    return sum(tbl.loc[k, "v"] for k in tbl.index if k <= t)',
+                  ['sum(_mx_h_tbl.f64(_mx_i, _mx_h_tbl.col("v")) for _mx_i in range(_mx_h_tbl.rows) '
+                   'if _mx_h_tbl.key_int(_mx_i) <= t)']),
+    'compr_pairs': ('return [(float(k), float(self.gap_table().loc[k, "v"])) for k in self.gap_table().index]',
+                    ['[(float(_mx_h0.key_int(_mx_i)), _mx_h0.f64(_mx_i, _mx_h0.col("v"))) '
+                     'for _mx_i in range(_mx_h0.rows)]']),
+    'compr_float_sorted': ('tbl = self.gap_table()\n    xs = sorted(float(v) for v in tbl.index)\n'
+                           '    return float(tbl.loc[xs[t % 4], "v"]) if t >= 0 else xs',
+                           ['sorted(float(_mx_h_tbl.key_int(_mx_i)) for _mx_i in range(_mx_h_tbl.rows))']),
+    'compr_sub': ('sub = self.two_table().loc[self.ka(t)]\n'
+                  '    return min(k for k in sub.index if sub.loc[k, "v"] >= 2.0)',
+                  ['min(_mx_h_sub.key_int(_mx_i) for _mx_i in range(_mx_h_sub.rows) '
+                   'if _mx_h_sub.f64(_mx_i, _mx_h_sub.col("v")) >= 2.0)']),
+    'compr_shadow': ('tbl = self.gap_table()\n'
+                     '    return [[k for k in range(2)] for k in tbl.index], [k for k in tbl.index]',
+                     ['[[k for k in range(2)] for _mx_i in range(_mx_h_tbl.rows)]']),
+    'for_loop': ('tbl = self.gap_table()\n    total = 0.0\n    for k in tbl.index:\n'
+                 '        if k > t:\n            break\n        total += float(tbl.loc[k, "v"]) * k\n'
+                 '    return total',
+                 ['for _mx_i in range(_mx_h_tbl.rows):\n        k = _mx_h_tbl.key_int(_mx_i)',
+                  '_mx_h_tbl.f64(_mx_h_tbl.row_1(k), _mx_h_tbl.col("v"))']),
+}
+
+
+@pytest.mark.parametrize('name', sorted(INDEX_FORMS))
+def test_index_as_typed_keys(name):
+    statements, fragments = INDEX_FORMS[name]
+    source = f'def _f_{name}(self, t):\n    {statements}\n'
+    text, reads, sites = lower(prototype_model(), source)
+    for fragment in fragments:
+        assert fragment in text, (fragment, text)
+    assert '.index' not in text.split('\n', 1)[1], text
+    assert not reads.declined, reads.declined
+    same_values(prototype_model(), source, range(-2, 12))
+
+
+def test_index_of_tuples_is_not_iterated_natively():
+    source = 'def _f_x(self, t):\n    return [k for k in self.multi_table().index], list(self.two_table().index)\n'
+    text, reads, sites = lower(base_model().add('two_table', prototype_model().cells['two_table'].function()), source)
+    assert '.index' in text and 'key_int' not in text
+    assert all(reason.startswith('iteration of an index that is not a single integer level')
+               for reason in reads.declined.values()) and len(reads.declined) == 2
