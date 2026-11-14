@@ -935,8 +935,7 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
             module = module.with_changes(header=(
                 cst.EmptyLine(comment=cst.Comment('# cython: ' + ', '.join(directives))), *module.header))
         # api-tables (D101a): rename the C members of table cells and table References
-        return module.visit(NumericExceptions()).visit(table_cells.RenameMembers(
-            self.module, updated_node.config_for_parsing, _integer_reference_paths))
+        return module.visit(NumericExceptions())
 
     def leave_ClassDef(
         self, original_node: ClassDef, updated_node: ClassDef

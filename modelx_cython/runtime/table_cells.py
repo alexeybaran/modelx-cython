@@ -107,6 +107,26 @@ def clear_all(space, name=None):
     clear_model(model)
 
 
+_enums = {}
+
+
+def enum_member(module, qualname, value):
+    """The member of the IntEnum ``module.qualname`` whose value is ``value`` (D103).
+
+    A compiled cell holds an admitted enum as its C integer; this is what a Python caller,
+    an object-valued use or a collected output receives, as in live modelx.
+    """
+    cls = _enums.get((module, qualname))
+    if cls is None:
+        import importlib
+        cls = importlib.import_module(module)
+        for part in qualname.split('.'):
+            cls = getattr(cls, part)
+        _enums[module, qualname] = cls
+    member = cls._value2member_map_.get(value)
+    return member if member is not None else cls(value)
+
+
 def frame_of(table, path):
     """The one read-only DataFrame of an internal table, created on first request."""
     frame = table._mx_python_frame

@@ -411,6 +411,9 @@ def main_handler(args: argparse.Namespace, stdout: IO[str], stderr: IO[str]) -> 
                 translated_modules[u.fqname], u.module_info, resolver, cells_kinds, ref_kinds,
                 cells_by_name, infer_types=policy.infer_types,
             )
+            # api-tables (D101a, D103): the last pass, after every pass that looks cells up by name
+            from modelx_cython import table_cells
+            state = state.replace(table_cells.finish(state.syntax, u.module_info))
             translated_modules[u.fqname] = state
             u.abs_src_path.write_text(state.syntax.code, encoding='utf-8')
             cell_sources[u.rel_src_path.as_posix()] = cell_locations(state, u.module_info)

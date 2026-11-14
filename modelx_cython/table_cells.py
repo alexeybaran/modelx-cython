@@ -27,6 +27,7 @@ The runtime side is ``modelx_cython.runtime.table_cells``.
 import types
 
 import libcst as cst
+from libcst.metadata import ParentNodeProvider
 
 from modelx_cython.consts import CY_MOD, MX_SYS_MOD, SPACE_PREF, MODULE_PREF
 
@@ -44,6 +45,22 @@ def table_cells(cls_info):
         binder = cells.native_result_binder
         if binder:
             result[name] = cells
+    return result
+
+
+def enum_cells(cls_info):
+    """``{name: (module, qualname)}`` of the cells whose C result is the value of an admitted IntEnum (D103)."""
+    from modelx_cython.enums import _traced_enum
+    result = {}
+    for name, cells in cls_info.cells.items():
+        if (cells.is_special() or cells.body_has_closure or cells.called_with_kwargs
+                or cells.formula_is_generator or not cells.has_typeinfo()):
+            continue
+        if cells.get_rettype_expr(c_style=True) != 'long long':
+            continue
+        enum = _traced_enum(cells, None)
+        if enum is not None:
+            result[name] = enum
     return result
 
 
@@ -85,7 +102,7 @@ def renames(module):
     result = {}
     for cls_name, cls_info in module.classes.items():
         mapping = {}
-        for name in table_cells(cls_info):
+        for name in (*table_cells(cls_info), *enum_cells(cls_info)):
             if owners[name] == {cls_name}:
                 mapping[name] = CELL_PREF + name
         for name in table_refs(cls_info):
@@ -123,6 +140,7 @@ def rewrite_class(cls_info, node, config, integer_refs):
     """Add the members described in the module docstring to a generated Space class."""
     mapping = module_renames(cls_info.module)[cls_info.name]
     tables = {n: c for n, c in table_cells(cls_info).items() if n in mapping}
+    enums = {n: e for n, e in enum_cells(cls_info).items() if n in mapping}
     refs = [n for n in table_refs(cls_info, integer_refs) if n in mapping]
     body = []
     init_names = set()
@@ -130,7 +148,7 @@ def rewrite_class(cls_info, node, config, integer_refs):
     for statement in node.body.body:
         if isinstance(statement, cst.FunctionDef):
             name = statement.name.value
-            if name in tables:
+            if name in tables or name in enums:
                 statement = statement.with_changes(name=cst.Name(mapping[name]))
             elif name == '__init__':
                 for line in statement.body.body:
@@ -156,6 +174,12 @@ def rewrite_class(cls_info, node, config, integer_refs):
             f'def {name}(self, value):\n'
             f'    {RUNTIME}.assign_table_cell(self, {name!r}, {path!r},\n'
             f'        {helper}.table_from_value(value, {path!r}, {_schema_literal(cells)}))\n')
+    for name, (module, qualname) in enums.items():
+        params = ', '.join(cls_info.cells[name].params)
+        lines.append(
+            f'def {name}(self{", " if params else ""}{params}):\n'
+            f'    """The live IntEnum member (D103); compiled code calls ``{mapping[name]}``."""\n'
+            f'    return {RUNTIME}.enum_member({module!r}, {qualname!r}, self.{mapping[name]}({params}))\n')
     if tables:
         get = ['def _mx_table_cell_value(self, name):']
         put = ['def _mx_set_table_cell(self, name, value):']
@@ -212,6 +236,7 @@ def _counted_collect(function, config):
 
 
 class RenameMembers(cst.CSTTransformer):
+    METADATA_DEPENDENCIES = (ParentNodeProvider,)
     """Rename the C members of table cells and table References in a whole generated module.
 
     The last pass over a generated module: it also adds the members of ``rewrite_class`` to each
@@ -231,6 +256,12 @@ class RenameMembers(cst.CSTTransformer):
         self.config = config
         self.integer_refs = integer_refs
         self.mapping = module_renames(module)
+        self.enums = {}
+        for cls_name, cls_info in module.classes.items():
+            for name, enum in enum_cells(cls_info).items():
+                if name in self.mapping.get(cls_name, {}):
+                    self.enums[name] = enum
+        self.wrapped = 0
         self._classes = []          # enclosing generated class names
         self._locals = []           # per function: {local name: class name}
 
@@ -331,8 +362,88 @@ class RenameMembers(cst.CSTTransformer):
         if isinstance(func, cst.Attribute):
             new = self._new(func.value, func.attr.value, CELL_PREF)
             if new:
-                return updated.with_changes(func=updated.func.with_changes(attr=cst.Name(new)))
+                updated = updated.with_changes(func=updated.func.with_changes(attr=cst.Name(new)))
+                if (func.attr.value in self.enums and self._object_use(original)
+                        and not isinstance(self._parent(original), cst.IfExp)):
+                    return self._member(func.attr.value, updated)
         return updated
+
+    def leave_IfExp(self, original, updated):
+        # an inline entry: `(entry(self, t) if exact else cast(T, self.cell(t)))`
+        name = self._enum_of(original.orelse)
+        if name is not None and self._object_use(original):
+            return self._member(name, updated)
+        return updated
+
+    # ---------------------------------------------------------------- D103: enum results
+    def _parent(self, node):
+        return self.get_metadata(ParentNodeProvider, node, None)
+
+    def _enum_of(self, expr):
+        """The enum cell whose C value ``expr`` is (a call of it, possibly cast), else None."""
+        if isinstance(expr, cst.Call):
+            func = expr.func
+            if (isinstance(func, cst.Attribute) and func.attr.value == 'cast'
+                    and isinstance(func.value, cst.Name) and func.value.value == CY_MOD and len(expr.args) == 2):
+                return self._enum_of(expr.args[1].value)
+            if isinstance(func, cst.Attribute) and func.attr.value in self.enums and self._receiver(func.value):
+                return func.attr.value
+        if isinstance(expr, cst.IfExp):
+            return self._enum_of(expr.orelse)
+        return None
+
+    def _member(self, name, expr):
+        module, qualname = self.enums[name]
+        self.wrapped += 1
+        return cst.parse_expression(f'{RUNTIME}.enum_member({module!r}, {qualname!r}, _x)').with_changes(
+            args=(cst.Arg(cst.SimpleString(repr(module))), cst.Arg(cst.SimpleString(repr(qualname))),
+                  cst.Arg(expr.with_changes(lpar=(), rpar=()))))
+
+    _TYPED_BUILTINS = {'int', 'float', 'bool', 'abs', 'min', 'max', 'round', 'range', 'len'}
+
+    def _object_use(self, node):
+        """Whether the value of ``node`` reaches Python as an object (D103 use sites)."""
+        parent = self._parent(node)
+        if isinstance(parent, cst.Attribute):
+            return parent.value is node
+        if isinstance(parent, (cst.Element, cst.StarredElement, cst.DictElement, cst.StarredDictElement,
+                               cst.Yield)):
+            return True
+        if isinstance(parent, (cst.ListComp, cst.SetComp, cst.GeneratorExp)):
+            return parent.elt is node
+        if isinstance(parent, cst.DictComp):
+            return parent.key is node or parent.value is node
+        if isinstance(parent, cst.IfExp):
+            return parent.test is not node and self._object_use(parent)
+        if isinstance(parent, cst.Return):
+            return self._returns_object(parent)
+        if isinstance(parent, cst.Arg):
+            call = self._parent(parent)
+            return isinstance(call, cst.Call) and not self._typed_call(call)
+        return False
+
+    def _typed_call(self, call):
+        func = call.func
+        if isinstance(func, cst.Name):
+            return func.value.startswith('_mx_') or func.value in self._TYPED_BUILTINS
+        if isinstance(func, cst.Attribute):
+            if func.attr.value.startswith('_mx_'):
+                return True
+            root = func.value
+            while isinstance(root, (cst.Attribute, cst.Call, cst.Subscript)):
+                root = root.func if isinstance(root, cst.Call) else root.value
+            if isinstance(root, cst.Name) and (root.value.startswith('_mx_') or root.value == CY_MOD):
+                return True     # a generated helper, a provider handle or a cast of one
+            return self._receiver(func.value) is not None      # a cell or method of a compiled Space
+        return False
+
+    def _returns_object(self, node):
+        while node is not None and not isinstance(node, (cst.FunctionDef, cst.Lambda)):
+            node = self._parent(node)
+        if not isinstance(node, cst.FunctionDef) or node.returns is None:
+            return True
+        annotation = cst.Module(body=[]).code_for_node(node.returns.annotation)
+        return annotation == 'object'
 
     def leave_Attribute(self, original, updated):
         new = self._new(original.value, original.attr.value, REF_PREF)
@@ -347,3 +458,11 @@ class RenameMembers(cst.CSTTransformer):
             if new and new.startswith(REF_PREF):
                 return updated.with_changes(target=cst.Name(new))
         return updated
+
+
+def finish(syntax, module):
+    """The last pass over a generated module (after entry lowering and integer guards):
+    rename the members of table and enum cells and table References, add the Python members."""
+    from modelx_cython.transformer import _integer_reference_paths
+    return cst.MetadataWrapper(syntax, unsafe_skip_copy=True).visit(
+        RenameMembers(module, syntax.config_for_parsing, _integer_reference_paths))
