@@ -396,13 +396,27 @@ class TableReads:
         self.keys = []
         self._site_ids = {id(site.node) for site in sites}
         self._key_locals = set()    # loop variables of lowered `for k in T.index:` (C long long)
+        self.record_untyped = {}    # D78: record receivers left on Python objects -> why
+
+    def per_call_records(self):
+        """W1.3's record handle built per call: only with held handles turned off and the round-2
+        recognisers off (the explicit diagnostic configuration); otherwise records are held (D78)."""
+        return (not getattr(self.policy, 'held_table_handles', True)
+                and not getattr(self.policy, 'table_recognisers', True))
+
+    def note_record(self, node, reason):
+        """D78: a record receiver whose reads stay Python calls (reported, never a handle per call)."""
+        self.record_untyped.setdefault(_code(node)[:120], reason)
 
     # ------------------------------------------------------------------ driver
     def enabled(self):
         return bool(getattr(self.policy, 'typed_table_reads', False))
 
     def records_enabled(self):
-        return self.enabled() and not getattr(self.policy, 'table_recognisers', True)
+        # D78: record reads are lowered (through held handles) with the round-2 recognisers on
+        # too, unless the spec key ``typed_record_reads`` is false
+        return self.enabled() and (not getattr(self.policy, 'table_recognisers', True)
+                                   or getattr(self.policy, 'typed_record_reads', True))
 
     def lower(self, node):
         if not self.enabled() or self.resolver is None or not (self.sites or self.records_enabled()):
@@ -1064,9 +1078,13 @@ class _Lowering(cst.CSTTransformer):
         if found is None:
             base = '_mx_h' if kind == 'table' else '_mx_r'
             name = self.reserve(f'{base}{sum(1 for item in self._hoisted.values() if item[2] == kind)}')
-            field = self.held_field(receiver) if kind == 'table' else None
+            field = self.held_field(receiver)
             found = self._hoisted[code] = [name, receiver, kind, self._top, field]
         found[3] = min(found[3], self._top)
+        if found[4] is not None and kind == 'record':
+            # D78: the record handle held per instance; its literal fields hold their slots
+            self._held_locals[found[0]] = found[4][0]
+            return cst.Name(found[0])
         if found[4] is not None:
             # diag-4w (D71): a borrowed handle; no reference is taken on the shared handle
             self._held_locals[found[0]] = found[4][0]
@@ -1114,7 +1132,8 @@ class _Lowering(cst.CSTTransformer):
         found = None
         values = self.f.values.get(name, ())
         if (len(values) == 1 and name not in self.escaped and self._root is not None
-                and not isinstance(values[0], cst.Name) and self.o.table_cell(values[0]) is not None):
+                and not isinstance(values[0], cst.Name)
+                and (self.o.table_cell(values[0]) is not None or self.o.record_cell(values[0]))):
             # the one binding is a top-level statement of the formula, so the handle is resolved
             # right before it, exactly where the Cell was called
             top = next((index for index, statement in enumerate(getattr(self._root.body, 'body', ()))
@@ -1158,14 +1177,35 @@ class _Lowering(cst.CSTTransformer):
                      cst.parse_expression(self.mtype('TableHandle')), cst.Name(ref))
 
     def record_ref(self, original):
+        """D78: a record read through a held handle: a zero-argument cached record Cell
+        (``model_point()``) or a local bound once at the top level to one; its handle is resolved
+        once per instance (as D71) and reset with the per-policy caches. Any other record receiver
+        is not lowered (no handle is built per call) and is reported."""
         if not self.o.records_enabled():
             return None
+        if self.o.per_call_records():
+            # W1.3 as it was (held handles off, recognisers off): a record handle per call
+            if self.o.record_cell(original):
+                return _Ref('record', None, self.hoist(original, 'record'))
+            if isinstance(original, cst.Name):
+                found = self.local(original.value)
+                if found is not None and found[0] == 'record':
+                    handle = self.companion(original.value, 'RecordHandle', '_mx_r_')
+                    return _Ref('record', None, cst.Name(handle), (original,))
+            return None
         if self.o.record_cell(original):
+            if self.held_field(original) is None:
+                self.o.note_record(original, 'the record Cell is not a cached zero-argument Cell of a compiled Space')
+                return None
             return _Ref('record', None, self.hoist(original, 'record'))
         if isinstance(original, cst.Name):
             found = self.local(original.value)
             if found is not None and found[0] == 'record':
+                held = self.held_local(original.value)
+                if held is None:
+                    return None
                 handle = self.companion(original.value, 'RecordHandle', '_mx_r_')
+                self._held_locals[handle] = held[0]
                 return _Ref('record', None, cst.Name(handle), (original,))
         return None
 
@@ -1443,6 +1483,22 @@ class _Lowering(cst.CSTTransformer):
         col = self.held_column(ref.handle, names) or _method(ref.handle, 'col', column)
         return _method(ref.handle, method, row, col), (method, kind, ref.handle, row, col)
 
+    def held_record_field(self, handle, name):
+        """D78: ``M.held_field(&self._mx_tc_<k>, R, "f")`` for a literal field of a held record
+        handle: the slot is resolved on the first read and kept with the handle (reset with it), not
+        looked up by name per call; KeyError(name) at the read when the field is absent."""
+        held = self._held_locals.get(handle.value) if isinstance(handle, cst.Name) else None
+        if held is None:
+            return None
+        fields = getattr(self.o.cls_info, 'held_table_columns', None)
+        if fields is None:
+            fields = self.o.cls_info.held_table_columns = {}
+        field = fields.get((held, name))
+        if field is None:
+            field = fields[(held, name)] = f'_mx_tc_{len(fields)}'
+        return cst.parse_expression(
+            f'{self.o.module}.held_field(_mx_cy.address(self.{field}), {handle.value}, {name!r})')
+
     def held_column(self, handle, names):
         """diag-jp (D75): ``M.held_col(&self._mx_tc_<k>, ref, "c")`` for one literal column read
         through a held handle: the index is resolved on the first read and kept with the handle
@@ -1547,10 +1603,12 @@ class _Lowering(cst.CSTTransformer):
             return self.out(node, updated, info)
         record = self.record_ref(value)
         if record is not None and one and _literal_str(parts[0]) is not None:
-            field = _method(record.handle, 'field', new_key)
+            held = self.held_record_field(record.handle, _literal_str(parts[0]))
+            field = held or _method(record.handle, 'field', new_key)
             self.mark(original, *record.sites)
+            # D78: int()/float() of a held record's field convert natively (see _conversion)
             return self.out(_method(record.handle, 'obj', field), updated,
-                            ('obj', None, record.handle, field, None))
+                            ('obj', 'record' if held is not None else None, record.handle, field, None))
         inner = self._memo.get(id(value))
         if inner is not None and one and inner.kind == 'row':
             ref, row_expr = inner.handle, inner.extra
@@ -1863,6 +1921,11 @@ class _Lowering(cst.CSTTransformer):
             return self.out(inner, updated, info)
         if name == 'int' and method in C_INT_METHODS:
             return self.out(inner, updated, info)
+        if method == 'obj' and kind == 'record':
+            # D78: int()/float() of a record field: RecordHandle.i64/f64 convert the stored value as
+            # int()/float() do (a value outside 64 bits raises OverflowError, the D76 contract)
+            node = _method(info[2], 'i64' if name == 'int' else 'f64', info[3])
+            return self.out(node, updated, ('i64' if name == 'int' else 'f64', 'record', info[2], info[3], None))
         if (name == 'int' and method == 'obj' and info[4] is not None
                 and (kind in ('int', 'bool') or (isinstance(kind, str) and kind.startswith('enum:')))):
             node = _method(info[2], 'i64', info[3], info[4])
@@ -1913,8 +1976,27 @@ class _Lowering(cst.CSTTransformer):
             return updated
         kind = found[0]
         statements = []
-        held = self.held_local(name) if kind == 'table' else None
-        if held is not None:
+        held = self.held_local(name) if kind in ('table', 'record') else None
+        if held is not None and kind == 'record':
+            # D78: a record local bound to a held zero-argument record Cell
+            field, top = held
+            handle = self.companion(name, 'RecordHandle', '_mx_r_')
+            self._held_locals[handle] = field
+            self._held_resolves.append((top, cst.parse_module(
+                f'if self.{field} is None:\n'
+                f'    self.{field} = {self.o.module}.record_handle({_code(new_value)})\n').body))
+            statements.append(cst.parse_statement(
+                f'{handle} = _mx_cy.cast({self.mtype("RecordHandle")}, self.{field})\n').body[0])
+            if name in self.escaped:
+                statements.insert(0, updated)
+            self.changed = True
+        elif kind == 'record' and not self.o.per_call_records():
+            # D78: no handle is built per call: a record local that is not held stays as written
+            self.o.note_record(value, 'the record local is not bound once, at the top level, to a held '
+                               'record Cell')
+            self.failed.setdefault(name, 'record local not held (D78)')
+            return updated
+        elif held is not None:
             # diag-mt: a table local bound to a held zero-argument table Cell (see held_local)
             field, top = held
             handle = self.companion(name, 'TableRef')
@@ -2008,6 +2090,14 @@ class _Lowering(cst.CSTTransformer):
         hoisted = sorted(self._hoisted.values(), key=lambda item: (item[3], item[0]))
         inserts = {}
         for name, receiver, kind, top, field in hoisted:
+            if field is not None and kind == 'record':
+                # D78: the record handle held per instance (reset with the table handles)
+                held, _ = field
+                inserts.setdefault(top, []).extend(cst.parse_module(
+                    f'if self.{held} is None:\n'
+                    f'    self.{held} = {self.o.module}.record_handle({_code(receiver)})\n'
+                    f'{name}: {self.mtype("RecordHandle")} = _mx_cy.cast({self.mtype("RecordHandle")}, self.{held})\n').body)
+                continue
             if field is not None:
                 held, _ = field
                 inserts.setdefault(top, []).extend(cst.parse_module(

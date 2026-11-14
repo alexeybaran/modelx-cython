@@ -259,6 +259,12 @@ cdef inline Py_ssize_t held_row_3(Py_ssize_t* slot, TableRef ref, long long p0, 
     if slot[0] == 0:
         slot[0] = (<TableHandle>ref).row_3(p0, p1, p2) + 1
     return slot[0] - 1
+# D78: the slot of a literal field of a held record handle, resolved on first use and held in a
+# per-instance slot (index + 1; 0 unresolved), reset with the handle. KeyError(name) as field().
+cdef inline Py_ssize_t held_field(Py_ssize_t* slot, RecordHandle r, object name) except -2:
+    if slot[0] == 0:
+        slot[0] = r.field(name) + 1
+    return slot[0] - 1
 cdef TableRef sub_ref_1(TableHandle h, TableKey p0) except NULL
 cdef TableRef sub_ref_2(TableHandle h, TableKey p0, TableKey p1) except NULL
 cdef TableRef sub_ref_3(TableHandle h, TableKey p0, TableKey p1, TableKey p2) except NULL

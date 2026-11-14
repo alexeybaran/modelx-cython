@@ -785,6 +785,8 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
         per_step = cells.has_args()
         cells.table_reads_typed = lowering.typed
         cells.table_reads_keys = list(lowering.keys)
+        cells.record_reads_untyped = [{'read': read, 'per_step': per_step, 'reason': reason}
+                                      for read, reason in sorted(lowering.record_untyped.items())]
         cells.table_reads_untyped = sorted(
             [site.entry(per_step, lowering.declined.get(id(site.node)))
              for site in sites if id(site.node) not in lowering.lowered] + pandas,

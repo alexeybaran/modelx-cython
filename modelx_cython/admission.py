@@ -82,6 +82,7 @@ def describe(module_infos):
                     'native_numeric_helpers': getattr(cell, 'native_numeric_helpers', []),
                     'table_reads_typed': getattr(cell, 'table_reads_typed', 0),
                     'table_reads_untyped': getattr(cell, 'table_reads_untyped', []),
+                    'record_reads_untyped': getattr(cell, 'record_reads_untyped', []),
                     'table_reads_keys': getattr(cell, 'table_reads_keys', []),
                     'native_reductions': getattr(cell, 'native_reductions', 0),
                     'native_enum_comparisons': getattr(cell, 'native_enum_comparisons', 0),
@@ -207,6 +208,10 @@ def slow_paths(cell, cache):
     for key in getattr(cell, 'table_reads_keys', ()) or ():
         if 'object (' in key:
             entries.append({'kind': 'table-key-object', 'detail': key, 'per_step': per_step})
+    for entry in getattr(cell, 'record_reads_untyped', ()) or ():
+        # D78: record field reads left on Python objects (no held record handle)
+        entries.append({'kind': 'record-read-object', 'detail': f"{entry['read']}: {entry['reason']}",
+                        'per_step': per_step})
     for power in getattr(cell, 'powers_in_loops', ()) or ():
         entries.append({'kind': 'power-on-objects-in-loop', 'detail': power, 'per_step': per_step})
     if per_step and cache != 'none' and cell.get_rettype_expr(c_style=True) == 'object' and (
