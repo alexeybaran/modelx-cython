@@ -756,7 +756,8 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
             # D76: integer locals stay C integers; each integer operation on them that could
             # leave the 64-bit range runs natively within a safe bound, else exactly in Python
             from modelx_cython.guarded_integers import guard_integers
-            node, cells.guarded_integer_ops = guard_integers(node, local_kinds, param_kinds)
+            node, cells.guarded_integer_ops = guard_integers(node, local_kinds, param_kinds,
+                                                            getattr(cells, 'model_path', None))
         return node
 
     def _table_reads(self, node, cls_info, cells):

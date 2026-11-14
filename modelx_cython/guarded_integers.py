@@ -28,7 +28,7 @@ declaration (integer_boundaries).
 
 import libcst as cst
 
-from .consts import CY_MOD
+from .consts import CY_MOD, MX_SYS_MOD
 from .scopes import OPAQUE_SCOPES
 
 LIMIT = (1 << 63) - 1
@@ -200,8 +200,11 @@ def long_long_guard(node):
     if native_branch(node) is None:
         return False
     slow = node.orelse
-    return (isinstance(slow, cst.Call) and len(slow.args) == 2
-            and _code(slow.func) == f'{CY_MOD}.cast' and _code(slow.args[0].value) == f'{CY_MOD}.longlong')
+    if not (isinstance(slow, cst.Call) and len(slow.args) == 2):
+        return False
+    # `cast(longlong, exact)`, or the named conversion of D96 `_mx_exact_int64(exact, path)`
+    return ((_code(slow.func) == f'{CY_MOD}.cast' and _code(slow.args[0].value) == f'{CY_MOD}.longlong')
+            or _code(slow.func) == f'{MX_SYS_MOD}._mx_exact_int64')
 
 
 def outer_operation(native):
@@ -224,8 +227,9 @@ def _walk_names(node):
 
 
 class GuardIntegers(cst.CSTTransformer):
-    def __init__(self, arithmetic, integer_locals):
+    def __init__(self, arithmetic, integer_locals, path=None):
         self.a = arithmetic
+        self.path = path
         self.integer_locals = integer_locals
         self.guarded = 0
         self._opaque = 0
@@ -256,7 +260,12 @@ class GuardIntegers(cst.CSTTransformer):
         native = render(_code(updated))
         boxed = render(_code(_boxed(updated)))
         if slow_type is not None:
-            boxed = f'{CY_MOD}.cast({CY_MOD}.{slow_type}, {boxed})'
+            if slow_type == 'longlong' and self.path is not None:
+                # D96: the exact value crosses into long long through the named conversion,
+                # so a value beyond 64 bits raises OverflowError naming the cell
+                boxed = f'{MX_SYS_MOD}._mx_exact_int64({boxed}, {self.path!r})'
+            else:
+                boxed = f'{CY_MOD}.cast({CY_MOD}.{slow_type}, {boxed})'
         return _parenthesized(cst.parse_expression(f'({native} if {_condition(names, bound)} else {boxed})'))
 
     def _expression_parts(self, node):
@@ -420,7 +429,7 @@ class GuardIntegers(cst.CSTTransformer):
         return cst.Assign(targets=(cst.AssignTarget(after.target),), value=guarded)
 
 
-def guard_integers(node, local_kinds, param_kinds):
+def guard_integers(node, local_kinds, param_kinds, path=None):
     """Rewrite one formula FunctionDef; returns (node, number of guarded expressions)."""
     if not isinstance(getattr(node, 'body', None), cst.IndentedBlock):
         return node, 0
@@ -439,7 +448,7 @@ def guard_integers(node, local_kinds, param_kinds):
                 return 'int'
             return 'unknown'
 
-    guard = GuardIntegers(_Arithmetic(Kind(), names), integer_locals)
+    guard = GuardIntegers(_Arithmetic(Kind(), names), integer_locals, path)
     guard._opaque_root = node
     body = node.body.visit(guard)
     return node.with_changes(body=body), guard.guarded
