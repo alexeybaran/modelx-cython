@@ -56,7 +56,9 @@ cdef class F64Vec:
     """A read-only sequence of floats backed by a C double buffer.
 
     Equal to a list or tuple holding the same floats; immutable once the formula
-    that built it has returned, so threads read it without a lock.
+    that built it has returned, so threads read it without a lock. Unlike the list a
+    live modelx cell caches, it cannot be changed from Python (item assignment raises
+    TypeError): copy it first (list(v)).
     """
 
     __hash__ = None
@@ -72,21 +74,6 @@ cdef class F64Vec:
         if isinstance(key, slice):
             return [self.data[i] for i in range(*key.indices(self.n))]
         return self.data[_index(key, self.n)]
-
-    def __setitem__(self, key, value):
-        """Item assignment from Python code, as on the list the live model caches (the length
-        never changes, so readers stay lock-free). Formulas cannot write a vector they did not
-        allocate (build error)."""
-        cdef Py_ssize_t i
-        if isinstance(key, slice):
-            indices = range(*key.indices(self.n))
-            items = list(value)
-            if len(items) != len(indices):
-                raise ValueError('a vector cannot change its length')
-            for i, item in zip(indices, items):
-                self.data[i] = _exact_float(item)
-            return
-        self.data[_index(key, self.n)] = _exact_float(value)
 
     def __iter__(self):
         return _F64Iter(self, False)
@@ -333,19 +320,6 @@ cdef class I64Vec:
         if isinstance(key, slice):
             return [self.data[i] for i in range(*key.indices(self.n))]
         return self.data[_index(key, self.n)]
-
-    def __setitem__(self, key, value):
-        """Item assignment from Python code (see F64Vec.__setitem__)."""
-        cdef Py_ssize_t i
-        if isinstance(key, slice):
-            indices = range(*key.indices(self.n))
-            items = list(value)
-            if len(items) != len(indices):
-                raise ValueError('a vector cannot change its length')
-            for i, item in zip(indices, items):
-                self.data[i] = _exact_int(item)
-            return
-        self.data[_index(key, self.n)] = _exact_int(value)
 
     def __iter__(self):
         return _I64Iter(self, False)

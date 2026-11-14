@@ -103,7 +103,11 @@ def test_exported_contract_and_collection(tmp_path, workers):
         result = m.Nested.collect(2)
         assert list(result.individual) == [7, 3]
         assert result.sum.value == 34.0
-        result.individual[7].state[0] = -1.0
+        # A compiled vector cell value is read-only (W1.6, D50); live modelx lets a caller
+        # mutate the cached list. Callers copy first and the cached value stays as it was.
+        state = list(result.individual[7].state)
+        state[0] = -1.0
+        assert state == [-1.0] and result.individual[7].state == [19.0]
         assert m.Nested(2, 7).state() == [19.0]
         assert m.Caller.total(2) == 34.0
         assert calls == [10.0]
