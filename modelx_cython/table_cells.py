@@ -411,6 +411,9 @@ class RenameMembers(cst.CSTTransformer):
         parent = self._parent(node)
         if isinstance(parent, cst.Attribute):
             return parent.value is node
+        if isinstance(parent, cst.Element) and isinstance(self._parent(parent), cst.Tuple):
+            # a tuple is usually a key (table, cache): its elements follow the tuple's own use
+            return self._object_use(self._parent(parent))
         if isinstance(parent, (cst.Element, cst.StarredElement, cst.DictElement, cst.StarredDictElement,
                                cst.Yield)):
             return True
