@@ -500,3 +500,12 @@ def test_power_accumulated_with_max_of_doubles_is_native():
     assert out.count("_mx_sys._mx_pow(") == 1 and "**" not in out, out
     assert "**" in _rewrite(body.replace("max(cert, lf)", "max(cert, self.arr(t))"))
     assert "**" in _rewrite("max = self.rate\n    " + body)
+
+
+def test_range_loop_bound_from_int_of_a_number():
+    """DIA_US_S annuity_factor (range spelling): ``n = int(...)``; ``for k in range(1, n + 1)``."""
+    body = ("v = self.rate(t)\n    n = int((40 - t) // 3)\n    total = 0.0\n"
+            "    for k in range(1, n + 1):\n        total += v ** ((3 * k) / 12.0) * max(v, 0.5)\n    return total")
+    out = _rewrite(body)
+    assert out.count("_mx_sys._mx_pow(") == 1 and "**" not in out, out
+    assert "**" in _rewrite("int = self.arr\n    " + body)

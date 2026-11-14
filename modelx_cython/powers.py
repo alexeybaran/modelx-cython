@@ -468,7 +468,7 @@ def rewrite_powers(
 
 class _LocalKind(OperandKind):
     """OperandKind for the local and sink analysis (D59, D62): also ``min``/``max``/``abs``
-    of operands of one known kind (the builtins; exported formulas read References through
+    of operands of one known kind and ``int()`` of a known number (the builtins; exported formulas read References through
     ``self``, so a bare ``min`` is the builtin unless the formula binds it, which disqualifies
     the formula through its scope facts)."""
 
@@ -480,6 +480,10 @@ class _LocalKind(OperandKind):
                 and (func.value == 'abs' or len(expr.args) >= 2)):
             kinds = {self.kind(arg.value) for arg in expr.args}
             return kinds.pop() if len(kinds) == 1 and KIND_UNKNOWN not in kinds else KIND_UNKNOWN
+        if (isinstance(func, cst.Name) and func.value == 'int' and len(expr.args) == 1
+                and not expr.args[0].keyword and not expr.args[0].star):
+            # int() of a known number is an integer (``n = int((last - start) // step)``)
+            return KIND_INT if self.kind(expr.args[0].value) != KIND_UNKNOWN else KIND_UNKNOWN
         return super()._call_kind(expr)
 
 
@@ -504,7 +508,7 @@ def _assigned_local_kinds(body, parameters, resolver, cells_kinds, ref_kinds, cl
     if has_scope_effects(body):
         return {}
     facts = CstFacts(body)
-    if any(facts.stores[name] for name in ('min', 'max', 'abs', 'range')):
+    if any(facts.stores[name] for name in ('min', 'max', 'abs', 'range', 'int')):
         return {}           # a formula that binds a builtin name: no local kinds
     plain, augmented = {}, {}
     for node in lexical_nodes(body):
