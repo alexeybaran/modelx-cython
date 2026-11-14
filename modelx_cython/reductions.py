@@ -483,6 +483,184 @@ class GeneralReductions:
         return [f'if {test}:', f'    {p}_result = {hit}']
 
 
+    # ---------------------------------------------------------------- W1.8: nested sites
+    def hoist(self, statement, root):
+        """A reduction nested in ``root`` (the value of ``statement``) as its own statement.
+
+        Python evaluates an expression left to right; the reduction is lifted only where it
+        is evaluated unconditionally (not behind ``and``/``or``, a conditional expression's
+        branches or a chained comparison's later terms). Everything evaluated before it in
+        the statement and not free of effects (a cell call, a local read, arithmetic) is
+        first assigned to a temporary in the same order, so evaluation order and the
+        exception raised first are those of the original statement. The lifted
+        ``tmp = R(...)`` goes through the general lowering; if that declines, nothing is
+        lifted. Returns (lines, new root) or None.
+        """
+        site, preceding = self.first_site(root)
+        if site is None:
+            return None
+        names, replacements, lines = self.names, {}, []
+        for node in preceding:
+            if self.effect_free(node):
+                continue
+            temp = names.reserve('_mx_hoist', family=True)
+            lines += cst.parse_module(f'{temp} = ({code(node)})\n').body
+            replacements[node] = cst.Name(temp)
+        result = names.reserve('_mx_hoist', family=True)
+        line = cst.SimpleStatementLine(body=[cst.Assign(
+            targets=[cst.AssignTarget(cst.Name(result))], value=site)])
+        lowered = self.general(line, line)
+        if lowered is line:
+            return None
+        lines += list(lowered.nodes) if isinstance(lowered, cst.FlattenSentinel) else [lowered]
+        replacements[site] = cst.Name(result)
+        mapping = {id(node): name.with_changes(lpar=node.lpar, rpar=node.rpar)
+                   if getattr(node, 'lpar', ()) else name for node, name in replacements.items()}
+        return lines, _replaced(root, mapping)
+
+    def first_site(self, root):
+        """The first reduction site evaluated unconditionally in ``root``, and the subtrees
+        evaluated before it (in order), or (None, ())."""
+        preceding, stop = [], []
+
+        def search(node):
+            if self.builtin_site(node) and id(node) in self.nested_sites:
+                return node
+            for child, conditional in _evaluation_order(node):
+                if conditional:
+                    stop.append(True)  # later sites run after a conditional part: not lifted
+                    self.conditional_sites.update(id(item) for item in _subtree(child)
+                                                  if id(item) in self.nested_sites)
+                    return None
+                found = search(child)
+                if found is not None or stop:
+                    return found
+                preceding.append(child)
+            return None
+
+        site = search(root)
+        if site is None:
+            return None, ()
+        # keep the outermost evaluated subtrees: a preceding child of an ancestor covers its own
+        covered, result = set(), []
+        for node in reversed(preceding):
+            if id(node) in covered:
+                continue
+            result.append(node)
+            covered.update(id(item) for item in _subtree(node))
+        return site, tuple(reversed(result))
+
+    def effect_free(self, node):
+        """Evaluation can neither fail nor run code: literals, parameters, built-in names,
+        ``self`` and ``self.<name>`` (a C field or a bound cell method)."""
+        if isinstance(node, (cst.Integer, cst.Float, cst.SimpleString)):
+            return True
+        if isinstance(node, cst.UnaryOperation) and isinstance(node.operator, cst.Minus):
+            return isinstance(node.expression, (cst.Integer, cst.Float))
+        if isinstance(node, cst.Name):
+            return (node.value in ('self', 'True', 'False', 'None') or node.value in self.cells.params
+                    and node.value not in self.body_facts.stores
+                    or node.value in self.builtin_names)
+        return (isinstance(node, cst.Attribute) and isinstance(node.value, cst.Name)
+                and node.value.value == 'self')
+
+    def leave_If(self, before, after):
+        if not self.nested_sites or id(before) in self.elifs:
+            return after
+        hoisted = self.hoist(before, before.test)
+        if hoisted is None:
+            return after
+        lines, test = hoisted
+        return cst.FlattenSentinel([*lines, after.with_changes(test=test)])
+
+    def visit_If(self, node):
+        if isinstance(node.orelse, cst.If):
+            self.elifs.add(id(node.orelse))
+        return True
+
+    def nested(self, before, after):
+        """``return``/``x = ``/expression statements holding a nested reduction (W1.8)."""
+        if not self.nested_sites or len(before.body) != 1:
+            return after
+        statement = before.body[0]
+        if isinstance(statement, cst.Return) and statement.value is not None:
+            pass
+        elif isinstance(statement, (cst.Assign, cst.Expr)) or (
+                isinstance(statement, cst.AnnAssign) and statement.value is not None):
+            pass
+        else:
+            return after
+        lines, root = [], statement.value
+        while True:
+            hoisted = self.hoist(statement, root)
+            if hoisted is None:
+                break
+            new_lines, root = hoisted
+            lines += new_lines
+        if not lines:
+            return after
+        return cst.FlattenSentinel([*lines, before.with_changes(
+            body=[statement.with_changes(value=root)])])
+
+
+def _replaced(node, mapping):
+    """``node`` with the subtrees whose id is in ``mapping`` replaced; every other subtree
+    is kept as the same object (``deep_replace`` copies them), so site ids stay valid."""
+    if id(node) in mapping:
+        return mapping[id(node)]
+    from dataclasses import fields
+    changes = {}
+    for field in fields(node):
+        value = getattr(node, field.name)
+        if isinstance(value, cst.CSTNode):
+            new = _replaced(value, mapping)
+            if new is not value:
+                changes[field.name] = new
+        elif isinstance(value, (tuple, list)) and any(isinstance(item, cst.CSTNode) for item in value):
+            new = [_replaced(item, mapping) if isinstance(item, cst.CSTNode) else item for item in value]
+            if any(a is not b for a, b in zip(new, value)):
+                changes[field.name] = type(value)(new)
+    return node.with_changes(**changes) if changes else node
+
+
+def _subtree(node):
+    yield node
+    for child in node.children:
+        yield from _subtree(child)
+
+
+def _evaluation_order(node):
+    """Child expressions of ``node`` in the order Python evaluates them, with a flag for
+    those evaluated only conditionally. Scopes (lambda, comprehensions) and other nodes
+    give no children: nothing inside them is lifted."""
+    if isinstance(node, cst.BinaryOperation):
+        return ((node.left, False), (node.right, False))
+    if isinstance(node, cst.UnaryOperation):
+        return ((node.expression, False),)
+    if isinstance(node, cst.BooleanOperation):
+        return ((node.left, False), (node.right, True))
+    if isinstance(node, cst.Comparison):
+        return ((node.left, False), *((part.comparator, index > 0)
+                                      for index, part in enumerate(node.comparisons)))
+    if isinstance(node, cst.IfExp):
+        return ((node.test, False), (node.body, True), (node.orelse, True))
+    if isinstance(node, cst.Call):
+        return ((node.func, False), *((arg.value, False) for arg in node.args))
+    if isinstance(node, cst.Attribute):
+        return ((node.value, False),)
+    if isinstance(node, cst.Subscript):
+        result = [(node.value, False)]
+        for element in node.slice:
+            part = element.slice
+            if isinstance(part, cst.Index):
+                result.append((part.value, False))
+            else:
+                result += [(item, False) for item in (part.lower, part.upper, part.step) if item is not None]
+        return tuple(result)
+    if isinstance(node, (cst.Tuple, cst.List, cst.Set)):
+        return tuple((element.value, False) for element in node.elements)
+    return ()
+
 
 class NativeReductions(GeneralReductions, FormulaTransformer):
     def __init__(self, cls_info, cells, providers, formula, reserve_fallback, builtin_bounds,
@@ -496,6 +674,10 @@ class NativeReductions(GeneralReductions, FormulaTransformer):
         self.fallbacks, self.exact_receiver_guards, self.count = [], set(), 0
         self.general_count, self.general_done, self.general_declined = 0, set(), {}
         self.general_sites, self.general_lines = [], None
+        self.nested_sites, self.elifs, self.conditional_sites = set(), set(), set()      # W1.8
+        self.builtin_names = {name for name in ('bool', 'int', 'float', 'abs', 'len', 'min', 'max',
+                                                'sum', 'all', 'any', 'round')
+                              if name in builtin_reductions or name not in self.body_facts.stores}
         self.captures, self.integer_captures = {}, {}
         self.scope_safe = (not has_scope_effects(formula.body.body)
                            and 'self' not in self.body_facts.stores
@@ -588,6 +770,10 @@ class NativeReductions(GeneralReductions, FormulaTransformer):
     def visit_FunctionDef(self, node):
         self.general_sites = [n for n in lexical_nodes(node.body.body) if self.builtin_site(n)]
         self.general_lines = formula_lines(node)
+        whole = {id(statement.value) for statement in lexical_nodes(node.body.body)
+                 if isinstance(statement, (cst.Return, cst.Assign, cst.AugAssign))
+                 and statement.value is not None}
+        self.nested_sites = {id(site) for site in self.general_sites if id(site) not in whole}
         if not self.scope_safe:
             for site in self.general_sites:
                 self.general_declined.setdefault(id(site), (site, 'the formula rebinds names or '
@@ -602,8 +788,11 @@ class NativeReductions(GeneralReductions, FormulaTransformer):
             if id(site) in self.general_done:
                 continue
             node, reason = self.general_declined.get(id(site), (site, None))
-            untyped.append(untyped_entry(self.general_lines, node, site.func.value, reason or
-                           'not the whole value of a return or assignment statement: built-in call'))
+            untyped.append(untyped_entry(self.general_lines, node, site.func.value, reason or (
+                'evaluated only on one branch (after and/or, in a conditional expression or a later '
+                'chained comparison): built-in call' if id(site) in self.conditional_sites else
+                'not the whole value of a return, assignment or expression statement or an if test '
+                '(an elif or while test, an augmented assignment, a one-line suite): built-in call')))
         self.cells.reductions_native = self.general_count
         self.cells.reductions_untyped = untyped
         return after
@@ -952,7 +1141,10 @@ return {fallback}
             if len(before.body) == 1 and isinstance(getattr(before.body[0], 'value', None), cst.Call):
                 self.general_done.add(id(before.body[0].value))
             return result
-        return self.general(before, after)
+        result = self.general(before, after)
+        if result is not after:
+            return result
+        return self.nested(before, after)
 
     def _specialized(self, before, after):
         if len(before.body) != 1:
