@@ -4029,35 +4029,49 @@ cdef Py_ssize_t _own_key_bytes(TableHandle h):
 @cython.final
 cdef class _HandleTable:
     """Owner of the table object of a sub-table handle: the helper's sub-table, asked from the
-    helper (memoised per prefix there) when Python code first reads it."""
+    helper (memoised per prefix there) when Python code first reads it, then held here.
+
+    Holding it matters: a per-policy table-valued cell (``return T.loc[prefix]``, D53) is read
+    by per-step formulas (``sub["c"]``, ``sub.index``); asking the helper each time ran
+    ``owner.loc[prefix]`` (its memo lookup) on every read, twice to three times the cost of
+    the read itself (diag-uc-fr). The write is benign when two threads race: both store the
+    helper's memoised object, the same one."""
     cdef TableHandle handle
+    cdef object _sub
+
+    cdef inline object _helper(self):
+        cdef object sub = self._sub
+        if sub is None:
+            sub = self.handle.helper()
+            self._sub = sub
+        return sub
 
     def _table(self):
-        return self.handle.helper()
+        return self._helper()
 
     def __getattr__(self, name):
-        return getattr(self.handle.helper(), name)
+        return getattr(self._helper(), name)
 
     def __getitem__(self, key):
-        return self.handle.helper()[key]
+        return self._helper()[key]
 
     def __iter__(self):
-        return iter(self.handle.helper())
+        return iter(self._helper())
 
     def __len__(self):
-        return len(self.handle.helper())
+        return len(self._helper())
 
     def __contains__(self, key):
-        return key in self.handle.helper()
+        return key in self._helper()
 
     def __eq__(self, other):
-        return self.handle.helper() == other
+        return self._helper() == other
 
     def __hash__(self):
         return id(self)
 
     def __reduce__(self):
-        return self.handle.helper().__reduce__()
+        return self._helper().__reduce__()
 
 
 Table.register(_HandleTable)
@@ -4065,7 +4079,7 @@ Table.register(_HandleTable)
 
 cdef inline object _semantic_owner(object owner):
     if type(owner) is _HandleTable:
-        return (<_HandleTable>owner).handle.helper()
+        return (<_HandleTable>owner)._helper()
     return owner
 
 

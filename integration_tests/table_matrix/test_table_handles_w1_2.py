@@ -136,3 +136,22 @@ def test_table_object_of_a_sub_table(b):
     assert root.handle.scheme_name == 'dense' and root.index.max() == 7
     whole = native.handle
     assert d.loc(whole, (1, 'y', 2), 'q', False) == 6.0
+
+
+def test_sub_table_object_holds_its_helper_sub_table(b, monkeypatch):
+    """Python reads on a sub-table's bound table (D53) select the helper sub-table once, not
+    on every read: per-step formulas read `sub["c"]` / `sub.index` on a per-policy table-valued
+    cell, and re-running `owner.loc[prefix]` per read doubled UC_FR_S (diag-uc-fr)."""
+    from modelx_helpers.immutable_inputs import Table
+    d, native = b.driver, b.compiled.base('F2')
+    table = d.sub_object(native, (1,), True)
+    first = table.__modelx_table_owner__()          # materialised here (the helper's memo child)
+    assert first is native.__modelx_table_owner__().loc[1]
+    calls = []
+    loc = Table.loc
+    monkeypatch.setattr(Table, 'loc', property(lambda self: (calls.append(self), loc.fget(self))[1]))
+    for _ in range(3):
+        assert table.__modelx_table_owner__() is first
+        assert ('y', 1) in table.index and len(table.index) == 3 and len(list(table.index)) == 3
+        assert list(table['q']) == list(first['q'])
+    assert calls == []
