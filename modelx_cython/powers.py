@@ -466,6 +466,23 @@ def rewrite_powers(
     return node.with_changes(body=updated)
 
 
+class _LocalKind(OperandKind):
+    """OperandKind for the local and sink analysis (D59, D62): also ``min``/``max``/``abs``
+    of operands of one known kind (the builtins; exported formulas read References through
+    ``self``, so a bare ``min`` is the builtin unless the formula binds it, which disqualifies
+    the formula through its scope facts)."""
+
+    def _call_kind(self, expr):
+        func = expr.func
+        if (isinstance(func, cst.Name) and func.value in ('min', 'max', 'abs') and expr.args
+                and not any(arg.keyword or arg.star for arg in expr.args)
+                and (func.value != 'abs' or len(expr.args) == 1)
+                and (func.value == 'abs' or len(expr.args) >= 2)):
+            kinds = {self.kind(arg.value) for arg in expr.args}
+            return kinds.pop() if len(kinds) == 1 and KIND_UNKNOWN not in kinds else KIND_UNKNOWN
+        return super()._call_kind(expr)
+
+
 _AUGMENTED = {
     cst.AddAssign: cst.Add, cst.SubtractAssign: cst.Subtract, cst.MultiplyAssign: cst.Multiply,
     cst.DivideAssign: cst.Divide, cst.FloorDivideAssign: cst.FloorDivide, cst.ModuloAssign: cst.Modulo,
@@ -487,6 +504,8 @@ def _assigned_local_kinds(body, parameters, resolver, cells_kinds, ref_kinds, cl
     if has_scope_effects(body):
         return {}
     facts = CstFacts(body)
+    if any(facts.stores[name] for name in ('min', 'max', 'abs', 'range')):
+        return {}           # a formula that binds a builtin name: no local kinds
     plain, augmented = {}, {}
     for node in lexical_nodes(body):
         if isinstance(node, cst.Assign) and len(node.targets) == 1 and isinstance(node.targets[0].target, cst.Name):
@@ -513,7 +532,7 @@ def _assigned_local_kinds(body, parameters, resolver, cells_kinds, ref_kinds, cl
     changed = True
     while changed:
         changed = False
-        classify = OperandKind(resolver, cells_kinds, ref_kinds, cls_fqname, {**param_kinds, **kinds})
+        classify = _LocalKind(resolver, cells_kinds, ref_kinds, cls_fqname, {**param_kinds, **kinds})
         for name in sorted(candidates - set(kinds)):
             # a value may read the local itself (``total = total + x``): take the kind of the
             # values that are known without it, then require every value to keep that kind
@@ -522,7 +541,7 @@ def _assigned_local_kinds(body, parameters, resolver, cells_kinds, ref_kinds, cl
             if len(found) != 1:
                 continue
             kind, = found
-            trial = OperandKind(resolver, cells_kinds, ref_kinds, cls_fqname,
+            trial = _LocalKind(resolver, cells_kinds, ref_kinds, cls_fqname,
                                 {**param_kinds, **kinds, name: kind})
             if all((_range_kind(trial, value) if _is_range(value) else trial.kind(value)) == kind
                    for value in plain[name]) and all(
@@ -557,7 +576,7 @@ def _double_accumulator_powers(body, parameters, resolver, cells_kinds, ref_kind
     kinds = _assigned_local_kinds(body, parameters, resolver, cells_kinds, ref_kinds, cls_fqname, param_kinds)
     if not any(kind == KIND_FLOAT for kind in kinds.values()):
         return {}
-    classify = OperandKind(resolver, cells_kinds, ref_kinds, cls_fqname, {**param_kinds, **kinds})
+    classify = _LocalKind(resolver, cells_kinds, ref_kinds, cls_fqname, {**param_kinds, **kinds})
 
     def has_power(expr):
         return any(isinstance(part, cst.BinaryOperation) and isinstance(part.operator, cst.Power)

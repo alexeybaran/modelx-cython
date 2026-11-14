@@ -489,3 +489,14 @@ def test_power_into_a_double_accumulator_is_native(body, count):
 def test_power_outside_a_double_sink_keeps_python_semantics(body):
     out = _rewrite(body)
     assert "_mx_sys._mx_pow(" not in out and "**" in out, out
+
+
+def test_power_accumulated_with_max_of_doubles_is_native():
+    """DIA_US_S annuity_factor: ``total += c * v ** e * max(cert, lf)``."""
+    body = ("v = 1.0 / (1.0 + self.rate(t))\n    cert = self.rate(t) if t else 0.0\n    lf = self.rate(t)\n"
+            "    total = 0.0\n    k = 1\n    while k < 5:\n"
+            "        total += (1.0 / 4) * v ** ((k - t) / 12.0) * max(cert, lf)\n        k += 1\n    return total")
+    out = _rewrite(body)
+    assert out.count("_mx_sys._mx_pow(") == 1 and "**" not in out, out
+    assert "**" in _rewrite(body.replace("max(cert, lf)", "max(cert, self.arr(t))"))
+    assert "**" in _rewrite("max = self.rate\n    " + body)
