@@ -152,12 +152,16 @@ for th in threads:
     th.join()
 assert not errors
 
+# Python code may assign items of a cached value, as of the live model's list
+mine = c.cohorts(7)[0]
+mine[0] = -1.0
+assert c.cohorts(7)[0][0] == -1.0
 try:
-    shared[0] = 1.0
-except TypeError:
+    mine.append(1.0)
+except AttributeError:
     pass
 else:
-    raise AssertionError('a cached vector must be read-only')
+    raise AssertionError('a vector cannot grow from Python')
 print('vector cells ok')
 """
 

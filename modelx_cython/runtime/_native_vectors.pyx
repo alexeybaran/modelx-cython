@@ -73,6 +73,21 @@ cdef class F64Vec:
             return [self.data[i] for i in range(*key.indices(self.n))]
         return self.data[_index(key, self.n)]
 
+    def __setitem__(self, key, value):
+        """Item assignment from Python code, as on the list the live model caches (the length
+        never changes, so readers stay lock-free). Formulas cannot write a vector they did not
+        allocate (build error)."""
+        cdef Py_ssize_t i
+        if isinstance(key, slice):
+            indices = range(*key.indices(self.n))
+            items = list(value)
+            if len(items) != len(indices):
+                raise ValueError('a vector cannot change its length')
+            for i, item in zip(indices, items):
+                self.data[i] = _exact_float(item)
+            return
+        self.data[_index(key, self.n)] = _exact_float(value)
+
     def __iter__(self):
         return _F64Iter(self, False)
 
@@ -318,6 +333,19 @@ cdef class I64Vec:
         if isinstance(key, slice):
             return [self.data[i] for i in range(*key.indices(self.n))]
         return self.data[_index(key, self.n)]
+
+    def __setitem__(self, key, value):
+        """Item assignment from Python code (see F64Vec.__setitem__)."""
+        cdef Py_ssize_t i
+        if isinstance(key, slice):
+            indices = range(*key.indices(self.n))
+            items = list(value)
+            if len(items) != len(indices):
+                raise ValueError('a vector cannot change its length')
+            for i, item in zip(indices, items):
+                self.data[i] = _exact_int(item)
+            return
+        self.data[_index(key, self.n)] = _exact_int(value)
 
     def __iter__(self):
         return _I64Iter(self, False)
