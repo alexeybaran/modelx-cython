@@ -51,6 +51,9 @@ class CompilerPolicy:
     # M1 (W1.3): lower pandas-spelled table reads to typed handle reads (table_reads.py).
     # On by default since the runtime handles (W1.2) landed (D45).
     typed_table_reads: bool = True
+    # diag-4w (D71): the handle of a zero-argument table Cell is held per instance and read
+    # borrowed (no Cell call, no reference count per read); false resolves it per call.
+    held_table_handles: bool = True
 
     @classmethod
     def resolve(cls, data):
@@ -65,7 +68,8 @@ class CompilerPolicy:
             native_math=data.get('native_math', True),
             table_recognisers=data.get('table_recognisers', True),
             infer_types=data.get('infer_types', True),
-            typed_table_reads=data.get('typed_table_reads', True))
+            typed_table_reads=data.get('typed_table_reads', True),
+            held_table_handles=data.get('held_table_handles', True))
         for name, value in values.items():
             if name not in ('parallel_workers', 'native_cache_hits') and type(value) is not bool:
                 raise ValueError(f'{name} must be a boolean')
@@ -161,6 +165,9 @@ class TransSpec:
     overflow checks).
     ``"typed_table_reads"`` (default true; false keeps reads as Python calls): lower
     ``.loc``/``.at``/``.index`` reads on traced tables to typed handle reads.
+    ``"held_table_handles"`` (default true): the handle of a zero-argument table Cell
+    read by a lowered read is resolved once per instance into a field (reset with the
+    per-policy caches) and used borrowed; false resolves it on every call.
     ``"native_cache_hits"`` defaults to ``"auto"`` when automatic optimization
     and dense miss binding are enabled. It selects scalar hits and already-proven
     dense hits; explicit alternatives are ``"none"``, ``"scalar"``, ``"dense"``

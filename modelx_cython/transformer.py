@@ -336,6 +336,9 @@ class PXDGenerator:
         from modelx_cython.helpers import module_name
         for name, provider in getattr(cls_info, 'native_contexts', {}).items():
             decl_stmts.append(f'cdef {module_name(provider)}.LookupContext {name}\n')
+        for held, _ in getattr(cls_info, 'held_table_handles', {}).values():
+            # diag-4w (D71): a table handle held per instance (table_reads.held_field)
+            decl_stmts.append(f'cdef object {held}\n')
         for cells in cls_info.cells.values():
 
             assert cells.module == self.module.fqname
@@ -1025,6 +1028,8 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
             contexts = getattr(self.module.classes[cls_name], 'native_contexts', {})
             for name, provider in contexts.items():
                 decl_stmts.append(cst.parse_statement(f'{name}: {module_name(provider)}.LookupContext\n'))
+            for held, _ in getattr(self.module.classes[cls_name], 'held_table_handles', {}).values():
+                decl_stmts.append(cst.parse_statement(f'{held}: object\n'))
             if contexts:
                 body = []
                 for statement in updated_node.body.body:

@@ -966,9 +966,40 @@ class _Lowering(cst.CSTTransformer):
         if found is None:
             base = '_mx_h' if kind == 'table' else '_mx_r'
             name = self.reserve(f'{base}{sum(1 for item in self._hoisted.values() if item[2] == kind)}')
-            found = self._hoisted[code] = [name, receiver, kind, self._top]
+            field = self.held_field(receiver) if kind == 'table' else None
+            found = self._hoisted[code] = [name, receiver, kind, self._top, field]
         found[3] = min(found[3], self._top)
+        if found[4] is not None:
+            # diag-4w (D71): a borrowed handle; no reference is taken on the shared handle
+            return _call(cst.Attribute(cst.Name('_mx_cy'), cst.Name('cast')),
+                         cst.parse_expression(self.mtype('TableHandle')), cst.Name(found[0]))
         return cst.Name(found[0])
+
+    def held_field(self, receiver):
+        """The per-instance field pair that holds the handle of ``receiver``, or None.
+
+        A zero-argument cached Cell (a Data reader, or a per-policy table-valued cell) has one
+        value until the instance's caches are cleared, so its handle is resolved once into a
+        field of the instance (``_mx_th_<n>``, the handle itself; None until resolved) and reset
+        with the per-policy caches (as the power memo is); reads take it as a borrowed
+        ``TableRef``.
+        Reads use the borrowed handle: per step no Cell is called and no reference count of
+        the shared table or handle is touched (diag-4w: four workers contended on them)."""
+        if not getattr(self.o.policy, 'held_table_handles', True):
+            return None
+        params = self._root.params.params if self._root is not None else ()
+        if not params or params[0].name.value != 'self':
+            return None
+        name = self.o.cell_of(receiver)
+        if name is None or name not in getattr(self.o.resolver, 'cached_cells', ()):
+            return None
+        fields = getattr(self.o.cls_info, 'held_table_handles', None)
+        if fields is None:
+            fields = self.o.cls_info.held_table_handles = {}
+        code = _code(receiver)
+        if code not in fields:
+            fields[code] = (f'_mx_th_{len(fields)}', self.o.module)
+        return fields[code]
 
     def table_ref(self, original):
         """_Ref of an original table expression (with a handle expression), else None."""
@@ -1782,7 +1813,14 @@ class _Lowering(cst.CSTTransformer):
         statements = list(body.body)
         hoisted = sorted(self._hoisted.values(), key=lambda item: (item[3], item[0]))
         inserts = {}
-        for name, receiver, kind, top in hoisted:
+        for name, receiver, kind, top, field in hoisted:
+            if field is not None:
+                held, _ = field
+                inserts.setdefault(top, []).extend(cst.parse_module(
+                    f'if self.{held} is None:\n'
+                    f'    self.{held} = {self.o.module}.table_handle({_code(receiver)})\n'
+                    f'{name}: {self.mtype("TableRef")} = _mx_cy.cast({self.mtype("TableRef")}, self.{held})\n').body)
+                continue
             type_name, build = ('TableHandle', 'table_handle') if kind == 'table' else ('RecordHandle', 'record_handle')
             line = cst.SimpleStatementLine([cst.AnnAssign(
                 target=cst.Name(name), annotation=cst.Annotation(cst.parse_expression(self.mtype(type_name))),

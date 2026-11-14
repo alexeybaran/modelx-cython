@@ -129,6 +129,9 @@ def _match(node, cls, reuse, private_lookups, parallel_reuse, ordered=False):
 
 
 def _reset_lines(cls):
+    for held, _ in getattr(cls, 'held_table_handles', {}).values():
+        # diag-4w (D71): the per-instance table handles go with the per-policy caches
+        yield f'root.{held} = None'
     for name, cell in cls.cells.items():
         if memo := getattr(cell, 'power_memo', None):
             yield f'root.{memo}.ready = False'

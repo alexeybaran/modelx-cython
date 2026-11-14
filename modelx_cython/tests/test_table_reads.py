@@ -212,12 +212,12 @@ class Model:
         return space
 
 
-def lower(model, source, params=('t',), typed=True, recognisers=False):
+def lower(model, source, params=('t',), typed=True, recognisers=False, held=False):
     """Lower one formula: (generated text, TableReads, sites)."""
     node = cst.parse_module(source).body[0]
     resolver = Resolver(model.cells)
     cls_info = SimpleNamespace(fqname='m.C', refs=model.refs)
-    policy = SimpleNamespace(typed_table_reads=typed, table_recognisers=recognisers)
+    policy = SimpleNamespace(typed_table_reads=typed, table_recognisers=recognisers, held_table_handles=held)
     sites = table_read_sites(node, resolver, cls_info)
     providers = set()
     reads = TableReads(resolver, cls_info, Formula(params), providers, policy, sites)
@@ -1044,3 +1044,36 @@ def test_round_two_vocabulary_receiver_keeps_its_index_for_the_recognisers():
     assert 'int(min(table.index))' in text and '_mx_h0.rows' in text, text
     assert any(reason.startswith('the receiver is also read with round-2 helper methods (index.max_int)')
                for reason in reads.declined.values())
+
+
+def test_held_table_handles_reset_with_the_per_policy_caches():
+    """diag-4w (D71): a reused collect root resets each held handle field per policy."""
+    from types import SimpleNamespace
+    from modelx_cython.serial_collect import _reset_lines
+    cls = SimpleNamespace(cells={}, held_table_handles={'self.data.t()': ('_mx_th_0', 'm'),
+                                                         'self.s()': ('_mx_th_1', 'm')})
+    assert list(_reset_lines(cls)) == ['root._mx_th_0 = None', 'root._mx_th_1 = None']
+
+
+def test_held_handle_of_a_zero_argument_table_cell():
+    """diag-4w (D71): with held handles the zero-argument table Cell is called once per instance
+    (its handle kept in a field) and every read uses the field borrowed; values are unchanged."""
+    source = ('def _f_x(self, t):\n'
+              '    return float(self.mort_table().loc[self.age(t), "mort_rate"])\n')
+    text, reads, _ = lower(base_model(), source, held=True)
+    assert body(text) == (
+        'if self._mx_th_0 is None:\n'
+        f'    self._mx_th_0 = {M}.table_handle(self.mort_table())\n'
+        f'_mx_h0: {M}.TableRef = _mx_cy.cast({M}.TableRef, self._mx_th_0)\n'
+        f'return _mx_cy.cast({M}.TableHandle, _mx_h0).f64(_mx_cy.cast({M}.TableHandle, _mx_h0).row_1(self.age(t)), '
+        f'_mx_cy.cast({M}.TableHandle, _mx_h0).col("mort_rate"))'), text
+    assert reads.typed == 1 and not reads.declined
+    model = base_model()
+    receiver = model.receiver()
+    receiver._mx_th_0 = None
+    for t in (0, 1, 2, 40):
+        expected = _run(source, receiver, (t,), {})
+        assert _run(text, receiver, (t,), RUNTIME) == expected
+    # with the spec key off the handle is resolved per call, as before
+    text2, _, _ = lower(base_model(), source, held=False)
+    assert '_mx_th_' not in text2 and f'_mx_h0: {M}.TableHandle = {M}.table_handle(self.mort_table())' in text2
