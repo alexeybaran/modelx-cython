@@ -187,6 +187,9 @@ class _Formula(cst.CSTVisitor):
     def __init__(self, root):
         self.root = root
         self.values, self.other, self.loads, self.parents = {}, set(), {}, {}
+        # diag-jp: element values of `a, b = x, y` (literal tuples of equal length, plain names,
+        # formula level); the names stay in `other`, these values serve `is_int` only
+        self.unpacked = {}
         self.binds = {}             # name -> number of bindings outside comprehensions
         self.names = set()
         self._depth = 0
@@ -262,6 +265,14 @@ class _Formula(cst.CSTVisitor):
     def visit_Assign(self, node):
         for target in node.targets:
             self._store(target.target, node.value, plain=len(node.targets) == 1 and self._depth == 1)
+        target, value = node.targets[0].target, node.value
+        if (len(node.targets) == 1 and self._depth == 1 and isinstance(target, (cst.Tuple, cst.List))
+                and isinstance(value, (cst.Tuple, cst.List)) and len(target.elements) == len(value.elements)
+                and all(isinstance(e, cst.Element) and isinstance(e.value, cst.Name) for e in target.elements)
+                and all(isinstance(e, cst.Element) for e in value.elements)):
+            for name, element in zip(target.elements, value.elements):
+                if not any(name.value.value in names for names in self._shadow):
+                    self.unpacked.setdefault(name.value.value, []).append(element.value)
 
     def visit_AnnAssign(self, node):
         self._store(node.target, node.value, plain=node.value is not None and self._depth == 1)
@@ -489,6 +500,13 @@ class TableReads:
             values = self.formula.values.get(expr.value)
             if (values and expr.value not in self.formula.other and expr.value not in self._params
                     and all(self.is_int(value, depth + 1) for value in values)):
+                return f'local {expr.value} is assigned integers'
+            # diag-jp: bound only by plain and literal-tuple assignments (`x, m = f(k), g(k)`)
+            unpacked = self.formula.unpacked.get(expr.value, ())
+            every = [*(values or ()), *unpacked]
+            if (unpacked and expr.value not in self._params
+                    and self.formula.binds.get(expr.value, 0) == len(every)
+                    and all(self.is_int(value, depth + 1) for value in every)):
                 return f'local {expr.value} is assigned integers'
             return None
         if isinstance(expr, cst.Attribute):
