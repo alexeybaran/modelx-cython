@@ -205,7 +205,7 @@ class _OrderedArguments(cst.CSTTransformer):
         names = {KIND_FLOAT: 'float', KIND_INT: 'int', KIND_UNKNOWN: 'object'}
         self.objects.append(untyped_entry(self.line_of, before, before.func.value,
             'operands ' + ', '.join(names.get(kind, 'object') for kind in kinds)
-            + ': compiled as comparisons of Python objects (the selected operand is the result)'))
+            + ': compiled, operands are Python objects (object comparisons; the selected operand is the result)'))
 
         def boxed(value):
             return cst.Call(cst.Attribute(cst.Name('_mx_cy'), cst.Name('cast')),

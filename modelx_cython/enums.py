@@ -240,7 +240,7 @@ class Constants(FormulaTransformer):
         if isinstance(comp.operator, cst.NotIn):
             text = f'not ({text})'
         self.object_memberships.append(_untyped(self.lines, before, 'in',
-            f'the left operand is an object: {len(parts)} identity and == tests in tuple order, '
+            f'compiled, operands are Python objects: {len(parts)} identity and == tests in tuple order, '
             'no tuple'))
         return cst.parse_expression(f'({text})').with_changes(lpar=after.lpar, rpar=after.rpar)
 
