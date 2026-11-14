@@ -95,9 +95,50 @@ def describe(module_infos):
                                       for name in getattr(cell, 'python_object_locals', ())],
                     'expressions_object': expressions_object(cell),
                     **({'vectors': cell.vector_report} if getattr(cell, 'vector_report', None) else {}),
+                    'slow_paths': slow_paths(cell, cache),
                     'reasons': reasons or ['original Cython representation'],
                 }
     return result
+
+
+def slow_paths(cell, cache):
+    """diag-jp: work of a compiled formula that still runs on Python objects or a slow cache,
+    which the other report keys do not flag as such: a cell with parameters on a hash or
+    dictionary cache (and why it is not dense), lowered reductions that iterate or add Python
+    objects, table reads whose key parts are Python objects, powers left on Python semantics in
+    a loop, and a cell with parameters that returns a Python object. Each entry: kind, detail,
+    per_step (the cell has parameters)."""
+    per_step = bool(cell.params)
+    entries = []
+    if per_step and cache in ('native-numeric-keys', 'dictionary'):
+        detail = f'{cache} cache'
+        try:
+            from .automatic import MAX_DENSE_ENTRIES
+            axes = list(getattr(cell, 'associative_logical_axes', ()) or ())
+            if axes and len(axes) == len(cell.params):
+                sizes = [int(axis.stop) - int(axis.lower) for axis in axes]
+                count = 1
+                for size in sizes:
+                    count *= size
+                detail += (f': dense window {" x ".join(map(str, sizes))} = {count:,} entries exceeds '
+                           f'MAX_DENSE_ENTRIES {MAX_DENSE_ENTRIES:,}' if count > MAX_DENSE_ENTRIES
+                           else ': the arguments are not all sampled C integers in a bounded range')
+        except Exception:       # an axis without bounds: the cache kind alone
+            pass
+        entries.append({'kind': 'hash-cache', 'detail': detail, 'per_step': per_step})
+    for entry in getattr(cell, 'reductions_object', ()) or ():
+        entries.append({'kind': 'reduction-on-objects', 'detail': f"line {entry['line']}: {entry['expr']}: "
+                        f"{entry['reason']}", 'per_step': per_step})
+    for key in getattr(cell, 'table_reads_keys', ()) or ():
+        if 'object (' in key:
+            entries.append({'kind': 'table-key-object', 'detail': key, 'per_step': per_step})
+    for power in getattr(cell, 'powers_in_loops', ()) or ():
+        entries.append({'kind': 'power-on-objects-in-loop', 'detail': power, 'per_step': per_step})
+    if per_step and cache != 'none' and cell.get_rettype_expr(c_style=True) == 'object' and (
+            getattr(cell, 'vector_report', None) is None):
+        entries.append({'kind': 'object-return', 'detail': 'returns a Python object on every call '
+                        '(boxed at the cell boundary)', 'per_step': per_step})
+    return entries
 
 
 def expressions_untyped(cell):
