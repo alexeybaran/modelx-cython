@@ -142,8 +142,11 @@ def frame_of(table, path):
         with _lock:
             frame = table._mx_python_frame
             if frame is None:
-                from modelx_helpers import pdn
-                frame = ReadOnlyFrame._wrap(pdn.to_pandas(table), table, path)
+                from modelx_helpers.immutable_inputs import table_frame
+                frame = table_frame(table.__modelx_table_owner__())     # a table admitted from a frame
+                if frame is None:
+                    from modelx_helpers import pdn
+                    frame = ReadOnlyFrame._wrap(pdn.to_pandas(table), table, path)
                 table._mx_python_frame = frame
     return frame
 
