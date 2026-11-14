@@ -4163,10 +4163,19 @@ cdef void _record_init(RecordHandle handle, object owner) except *:
     handle._items = tuple(owner.items())
 
 
+from cpython.object cimport PyObject_GenericGetAttr
+
 cdef object _bound_handle(object owner):
     """The handle of a helper Table, built once per table object and kept in its native cache
     (at preparation for tables built by compiled code, else at the first table_handle request)."""
-    cdef dict cache = owner._native_cache
+    cdef dict cache
+    if type(owner) is Table:
+        # the slot through the generic lookup: Table defines __getattr__, so the ordinary
+        # attribute read takes the slot getattr hook (type lookups on every read, ~350
+        # instructions); for an exact Table the generic lookup finds the same slot value
+        cache = <dict>PyObject_GenericGetAttr(owner, '_native_cache')
+    else:
+        cache = owner._native_cache
     handle = cache.get(TableHandle)
     if handle is None:
         handle = cache.setdefault(TableHandle, TableHandle(owner))
@@ -4192,7 +4201,10 @@ cdef TableHandle table_handle(object value):
     elif type(value) is TableHandle:
         return <TableHandle>value
     mx_handle_fallback()        # not a bound table: the handle is found through its cache
-    if not isinstance(value, Table):
+    # an exact helper Table first: `Table` is a Mapping (an ABC), and isinstance() through
+    # the ABC machinery cost more than the read it guards, on every per-step read of a Data
+    # table held as a plain Table (diag-us: SPIA_US_S mort_rate_base, improvement_rate)
+    if type(value) is not Table and not isinstance(value, Table):
         raise TypeError(f'expected a Table, got {type(value).__name__}')
     return _bound_handle(value)
 
