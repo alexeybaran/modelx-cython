@@ -339,6 +339,9 @@ class PXDGenerator:
         for held, _ in getattr(cls_info, 'held_table_handles', {}).values():
             # diag-4w (D71): a table handle held per instance (table_reads.held_field)
             decl_stmts.append(f'cdef object {held}\n')
+        for field in getattr(cls_info, 'held_table_columns', {}).values():
+            # diag-jp (D75): a column index held with its handle (table_reads.held_column)
+            decl_stmts.append(f'cdef Py_ssize_t {field}\n')
         for cells in cls_info.cells.values():
 
             assert cells.module == self.module.fqname
@@ -1045,6 +1048,8 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
                 decl_stmts.append(cst.parse_statement(f'{name}: {module_name(provider)}.LookupContext\n'))
             for held, _ in getattr(self.module.classes[cls_name], 'held_table_handles', {}).values():
                 decl_stmts.append(cst.parse_statement(f'{held}: object\n'))
+            for field in getattr(self.module.classes[cls_name], 'held_table_columns', {}).values():
+                decl_stmts.append(cst.parse_statement(f'{field}: _mx_cy.Py_ssize_t\n'))
             if contexts:
                 body = []
                 for statement in updated_node.body.body:

@@ -40,18 +40,26 @@ def value():
         total += rate(t) * key
     return total
 ''')
+        projection.new_cells('rare', '''\
+def rare(t):
+    k = t % 3 + 1
+    if t > 20:
+        return market.curve().loc[k, "missing"]
+    return market.curve().loc[k, "load"]
+''')
         model.export(tmp_path / 'exported')
     finally:
         model.close()
-    spec = {'parallel_workers': 4, 'spaces': {'Projection': {
-        'serial_collect': 'reuse', 'parallel_collect_reuse': True, 'parallel_collect_order': 'domain'}}}
+    spec = {'parallel_workers': 4, 'spaces': {'Portfolio': {'spaces': {'Projection': {
+        'serial_collect': 'reuse', 'parallel_collect_reuse': True, 'parallel_collect_order': 'domain'}}}}}
     (tmp_path / 'spec.py').write_text(repr(spec), encoding='utf-8')
     (tmp_path / 'sample.py').write_text(
         'from exported import mx_model\n'
         'p = mx_model.Portfolio.Projection\n'
         'p.collect()\n'
         'for key in (1, 2, 3):\n'
-        '    [p[key].rate(t) for t in range(24)]; p[key].value()\n', encoding='utf-8')
+        '    [p[key].rate(t) for t in range(24)]; p[key].value(); [p[key].rare(t) for t in range(3)]\n',
+        encoding='utf-8')
 
 
 def test_shared_table_reads_use_a_held_handle_and_results_stay(tmp_path):
@@ -62,9 +70,10 @@ def test_shared_table_reads_use_a_held_handle_and_results_stay(tmp_path):
     generated = (tmp_path / 'exported_cy/_m_Portfolio/_mx_classes.py').read_text(encoding='utf-8')
     assert 'if self._mx_th_0 is None:' in generated, generated
     assert '_mx_cy.cast(_mx_helper_' in generated and '.TableRef, self._mx_th_0)' in generated
-    assert generated.count('.table_handle(self.market.curve())') == 1          # resolved once, not per read
-    # with the per-policy caches: reset on a reused root, or a fresh root per policy
-    assert 'root._mx_th_0 = None' in generated or 'root = _c_Projection(self)' in generated
+    assert generated.count('.table_handle(self.market.curve())') == 2          # once per formula, not per read
+    # with the per-policy caches: reset on the reused root, with the held column indexes (D75)
+    assert 'root._mx_th_0 = None' in generated and 'root._mx_tc_0 = 0' in generated, generated
+    assert '.held_col(_mx_cy.address(self._mx_tc_' in generated and '.col("rate")' not in generated
     probe = textwrap.dedent('''\
         import sys
         from importlib import import_module
@@ -80,6 +89,13 @@ def test_shared_table_reads_use_a_held_handle_and_results_stay(tmp_path):
         else:
             print(repr(p.collect().sum.value), repr(p.collect().sum.value))
         item = p[7]
+        assert [item.rare(t) for t in range(5)] == [p[7].rare(t) for t in range(5)]
+        try:
+            item.rare(22)
+        except KeyError as error:
+            print('KeyError', error.args)
+        else:
+            print('no error')
         values = [item.rate(t) for t in range(24)] + [item.value()]
         assert [item.rate(t) for t in range(24)] + [item.value()] == values
         print(repr(values))
@@ -92,4 +108,4 @@ def test_shared_table_reads_use_a_held_handle_and_results_stay(tmp_path):
     one, four = out['exported_cy'][0].split()
     assert one == out['exported'][0].split()[0], (out, 'one worker equals the exported model')
     assert float(four) == float(one), out                                     # exact sums of a few terms
-    assert out['exported_cy'][1] == out['exported'][1], out
+    assert out['exported_cy'][1:] == out['exported'][1:], out           # the missing column raises at the read

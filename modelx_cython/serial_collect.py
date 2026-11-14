@@ -136,6 +136,9 @@ def _reset_lines(cls):
     for held, _ in getattr(cls, 'held_table_handles', {}).values():
         # diag-4w (D71): the per-instance table handles go with the per-policy caches
         yield f'root.{held} = None'
+    for field in getattr(cls, 'held_table_columns', {}).values():
+        # diag-jp (D75): and the column indexes held with them
+        yield f'root.{field} = 0'
     for name, cell in cls.cells.items():
         if memo := getattr(cell, 'power_memo', None):
             yield f'root.{memo}.ready = False'

@@ -133,8 +133,11 @@ RUNTIME = {M: SimpleNamespace(table_handle=PyHandle, record_handle=PyRecord,
                               key_f64=lambda h, i: float(list(h.table.index)[i]),
                               level_extreme=lambda h, level, last: getattr(
                                   h.table.index.get_level_values(level), 'max' if last else 'min')(),
+                              # D75: the slot is a C field in compiled code; here the column is resolved
+                              held_col=lambda slot, h, name: h.col(name),
                               **{f'sub_ref_{n}': (lambda h, *parts: h._sub(*parts)) for n in range(1, 6)}),
            '_mx_cy': SimpleNamespace(cast=lambda type_, value: int(value) if type_ == 'longlong' else value,
+                                     address=lambda value: value,
                                      longlong='longlong', Py_ssize_t=int, double='double')}
 
 
@@ -1066,11 +1069,12 @@ def test_held_handle_of_a_zero_argument_table_cell():
         f'    self._mx_th_0 = {M}.table_handle(self.mort_table())\n'
         f'_mx_h0: {M}.TableRef = _mx_cy.cast({M}.TableRef, self._mx_th_0)\n'
         f'return _mx_cy.cast({M}.TableHandle, _mx_h0).f64(_mx_cy.cast({M}.TableHandle, _mx_h0).row_1(self.age(t)), '
-        f'_mx_cy.cast({M}.TableHandle, _mx_h0).col("mort_rate"))'), text
+        f"{M}.held_col(_mx_cy.address(self._mx_tc_0), _mx_h0, 'mort_rate'))"), text   # D75: held column
     assert reads.typed == 1 and not reads.declined
     model = base_model()
     receiver = model.receiver()
     receiver._mx_th_0 = None
+    receiver._mx_tc_0 = 0
     for t in (0, 1, 2, 40):
         expected = _run(source, receiver, (t,), {})
         assert _run(text, receiver, (t,), RUNTIME) == expected

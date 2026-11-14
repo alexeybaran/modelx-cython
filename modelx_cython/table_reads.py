@@ -657,6 +657,7 @@ class _Lowering(cst.CSTTransformer):
         self._kinds = {}            # id(emitted node) -> (method, column kind, handle, row, col)
         self._alive = []            # the emitted nodes of _kinds: their ids are not reused
         self._hoisted = {}          # receiver code -> [name, receiver, kind, first top index]
+        self._held_locals = {}      # local TableRef name of a held handle -> its field (D75)
         self._declare = []          # (name, type) declared at the top of the formula
         self._companions = {}
         self._rows = {}
@@ -989,6 +990,7 @@ class _Lowering(cst.CSTTransformer):
         found[3] = min(found[3], self._top)
         if found[4] is not None:
             # diag-4w (D71): a borrowed handle; no reference is taken on the shared handle
+            self._held_locals[found[0]] = found[4][0]
             return _call(cst.Attribute(cst.Name('_mx_cy'), cst.Name('cast')),
                          cst.parse_expression(self.mtype('TableHandle')), cst.Name(found[0]))
         return cst.Name(found[0])
@@ -1320,8 +1322,28 @@ class _Lowering(cst.CSTTransformer):
         kinds = {ref.schema.columns.get(name) for name in names}
         kind = kinds.pop() if len(kinds) == 1 else None
         method = {'float': 'f64', 'int': 'i64'}.get(kind, 'obj')
-        col = _method(ref.handle, 'col', column)
+        col = self.held_column(ref.handle, names) or _method(ref.handle, 'col', column)
         return _method(ref.handle, method, row, col), (method, kind, ref.handle, row, col)
+
+    def held_column(self, handle, names):
+        """diag-jp (D75): ``M.held_col(&self._mx_tc_<k>, ref, "c")`` for one literal column read
+        through a held handle: the index is resolved on the first read and kept with the handle
+        (reset with it), not looked up by name on every call. None otherwise."""
+        if len(names) != 1 or not isinstance(handle, cst.Call) or not handle.args:
+            return None
+        local = handle.args[-1].value
+        held = self._held_locals.get(local.value) if isinstance(local, cst.Name) else None
+        if held is None:
+            return None
+        name = next(iter(names))
+        fields = getattr(self.o.cls_info, 'held_table_columns', None)
+        if fields is None:
+            fields = self.o.cls_info.held_table_columns = {}
+        field = fields.get((held, name))
+        if field is None:
+            field = fields[(held, name)] = f'_mx_tc_{len(fields)}'
+        return cst.parse_expression(
+            f'{self.o.module}.held_col(_mx_cy.address(self.{field}), {local.value}, {name!r})')
 
     def row_of(self, ref, key_original, key_updated, where):
         """Row expression for a complete key of ``ref``: (node, notes) or (None, reason)."""

@@ -225,6 +225,16 @@ cdef RecordHandle record_handle(object value)
 # caller for the whole formula) keeps it alive, so reads through it take no reference;
 # use it as <TableHandle>ref. sub_ref_n raises KeyError as sub_n.
 ctypedef PyObject* TableRef
+
+
+# diag-jp (D75): the column index of a literal column name, resolved on first use and held in a
+# per-instance slot (index + 1; 0 unresolved) next to the held handle, so a per-step read does not
+# look the name up. `ref` is the held handle, borrowed. KeyError(name) as col() when absent (the slot
+# stays 0, so the next read raises again, as before).
+cdef inline Py_ssize_t held_col(Py_ssize_t* slot, TableRef ref, object name) except -2:
+    if slot[0] == 0:
+        slot[0] = (<TableHandle>ref).col(name) + 1
+    return slot[0] - 1
 cdef TableRef sub_ref_1(TableHandle h, TableKey p0) except NULL
 cdef TableRef sub_ref_2(TableHandle h, TableKey p0, TableKey p1) except NULL
 cdef TableRef sub_ref_3(TableHandle h, TableKey p0, TableKey p1, TableKey p2) except NULL
