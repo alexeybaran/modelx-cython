@@ -1131,3 +1131,28 @@ def test_table_local_not_held_unless_one_top_level_binding():
         receiver = base_model().receiver()
         for t in (0, 1, 40):
             assert _run(text, receiver, (t,), RUNTIME) == _run(source, receiver, (t,), {})
+
+
+def test_held_record_reads_with_recognisers_on():
+    """D78: with held handles (default) record reads are lowered with the round-2 recognisers on
+    too: a held record handle per instance, held field slots, int()/float() typed; no handle and no
+    field name look-up per call. A record local bound in a branch is not lowered and is reported."""
+    source = ('def _f_x(self, t):\n'
+              '    mp = self.model_point()\n'
+              '    if self.model_point()["premium"] > 0:\n'
+              '        return float(mp["premium"]) * t + int(self.model_point()["age"])\n'
+              '    return mp["tag"]\n')
+    text, reads, _ = lower(base_model(), source, held=True, recognisers=True)
+    # every construction is guarded by the held field (built once per instance, not per call)
+    assert text.count('.record_handle(self.model_point())') == text.count('if self._mx_th_0 is None:') >= 1, text
+    assert '.held_field(_mx_cy.address(self._mx_tc_' in text, text
+    assert '.field("' not in text and '.f64(' in text and '.i64(' in text, text
+    assert not reads.record_untyped
+    branch = ('def _f_x(self, t):\n'
+              '    if t > 0:\n'
+              '        mp = self.model_point()\n'
+              '        return float(mp["premium"]) * t\n'
+              '    return 0.0\n')
+    text, reads, _ = lower(base_model(), branch, held=True, recognisers=True)
+    assert 'record_handle' not in text and 'float(mp["premium"])' in text, text
+    assert reads.record_untyped, reads.record_untyped
