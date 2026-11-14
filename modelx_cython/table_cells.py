@@ -32,6 +32,7 @@ from libcst.metadata import ParentNodeProvider
 from modelx_cython.consts import CY_MOD, MX_SYS_MOD, SPACE_PREF, MODULE_PREF
 
 RUNTIME = '_mx_table_cells'
+STANDARD_PROVIDER = 'modelx_cython.runtime._native_inputs'
 IMPORT = f'from modelx_cython.runtime import table_cells as {RUNTIME}\n'
 
 
@@ -166,14 +167,18 @@ def rewrite_class(cls_info, node, config, integer_refs):
     for name, cells in tables.items():
         path = path_of(cls_info, name)
         helper = cells.native_result_binder.rsplit('.', 1)[0]
+        if cells.native_provider_binding.manifest.provider == STANDARD_PROVIDER:
+            assign = (f'    {RUNTIME}.assign_table_cell(self, {name!r}, {path!r},\n'
+                      f'        {helper}.table_from_value(value, {path!r}, {_schema_literal(cells)}))\n')
+        else:   # another provider's table: no conversion function to rebuild it from a frame
+            assign = (f'    raise NotImplementedError({path!r} + ": this table is bound by the provider "\n'
+                      f'        {cells.native_provider_binding.manifest.provider!r} + ", which cannot rebuild it from an assigned value")\n')
         lines.append(
             f'@property\n'
             f'def {name}(self):\n'
             f'    return {RUNTIME}.TableCell(self, {name!r}, {path!r})\n\n'
             f'@{name}.setter\n'
-            f'def {name}(self, value):\n'
-            f'    {RUNTIME}.assign_table_cell(self, {name!r}, {path!r},\n'
-            f'        {helper}.table_from_value(value, {path!r}, {_schema_literal(cells)}))\n')
+            f'def {name}(self, value):\n' + assign)
     for name, (module, qualname) in enums.items():
         params = ', '.join(cls_info.cells[name].params)
         lines.append(
@@ -460,9 +465,16 @@ class RenameMembers(cst.CSTTransformer):
         return updated
 
 
+MEMSET = 'from cython.cimports.libc.string import memset as _mx_collect_memset'
+
+
 def finish(syntax, module):
     """The last pass over a generated module (after entry lowering and integer guards):
     rename the members of table and enum cells and table References, add the Python members."""
     from modelx_cython.transformer import _integer_reference_paths
-    return cst.MetadataWrapper(syntax, unsafe_skip_copy=True).visit(
+    result = cst.MetadataWrapper(syntax, unsafe_skip_copy=True).visit(
         RenameMembers(module, syntax.config_for_parsing, _integer_reference_paths))
+    if MEMSET not in syntax.code and '_mx_collect_memset(' in result.code:
+        # _mx_clear_values resets array flags; the module imported memset only for a serial collect
+        result = result.with_changes(body=(cst.parse_statement(MEMSET + '\n'), *result.body))
+    return result
