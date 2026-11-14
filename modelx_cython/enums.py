@@ -50,6 +50,7 @@ class Constants(FormulaTransformer):
         self.rebinds_self = False
         self.member_fields = 0
         self.memberships = 0        # ``in`` / ``not in`` over member tuples lowered
+        self.object_memberships = []    # W1.8: ``in`` with an object left, as a chain
         self.lines = None
 
     def visit_FunctionDef(self, node):
@@ -102,6 +103,7 @@ class Constants(FormulaTransformer):
             return after          # a nested def: its own receiver, left as written
         self.cell.enum_untyped = list(self.untyped)
         self.cell.enum_memberships = self.memberships
+        self.cell.enum_object = list(self.object_memberships)
         if self.lines is None or self.rebinds_self:
             return after
         # W1.4: a member left as an object (an object position) is read from the definition's
@@ -184,9 +186,63 @@ class Constants(FormulaTransformer):
             if member is not after.left:
                 self.comparisons += 1
                 return after.with_changes(left=member)
-        elif isinstance(comp.operator, (cst.In, cst.NotIn)) and self.member_tuple(comp.comparator):
-            self.decline(before, 'the left operand is not a typed integer (an object or untraced value)')
+        elif isinstance(comp.operator, (cst.In, cst.NotIn)):
+            chain = self.object_membership(before, after, comp)
+            if chain is not None:
+                return chain
+            if self.member_tuple(comp.comparator):
+                self.decline(before, 'the left operand is not a typed integer (an object or untraced '
+                             'value) and is not a name, or an element is not a constant or a member')
         return after
+
+    # W1.8: ``x in (a, b, ...)`` with an object ``x``, exactly as tuple membership
+    _MEMBERSHIP_LIMIT = 8
+
+    def plain(self, node):
+        """Read without running code: a literal, a local or parameter name, ``self.<a>.<b>``."""
+        if isinstance(node, (cst.Integer, cst.Float, cst.SimpleString)):
+            return True
+        if isinstance(node, cst.UnaryOperation) and isinstance(node.operator, cst.Minus):
+            return isinstance(node.expression, (cst.Integer, cst.Float))
+        if isinstance(node, cst.Name):
+            return node.value not in ('self',)
+        return (isinstance(node, cst.Attribute) and isinstance(node.value, cst.Attribute)
+                and isinstance(node.value.value, cst.Name) and node.value.value.value == 'self'
+                and any(key[:2] == (self.cls.name, node.value.attr.value) for key in self.symbols))
+
+    def object_membership(self, before, after, comp):
+        """``x in (a, b)`` -> ``(x is a or not not (a == x) or x is b or ...)``.
+
+        Tuple membership compares each element in order with ``PyObject_RichCompareBool
+        (element, x, Py_EQ)``: identity first, then ``element == x`` and its truth. The
+        chain makes the same calls in the same order and stops at the same element; it
+        reads ``x`` and the elements again, so it applies only where those reads run no
+        code (a name, a literal, a member field). The result is a bool, as ``in`` gives.
+        """
+        tuple_ = comp.comparator
+        if (not isinstance(tuple_, cst.Tuple) or not tuple_.elements
+                or len(tuple_.elements) > self._MEMBERSHIP_LIMIT
+                or not all(isinstance(element, cst.Element) for element in tuple_.elements)
+                or not isinstance(after.left, cst.Name) or after.left.value in self.locals
+                or not all(self.plain(element.value) for element in tuple_.elements)):
+            return None
+        left = after.left.value
+        parts = []
+        for element in tuple_.elements:
+            item = cst.Module([]).code_for_node(element.value.with_changes(lpar=(), rpar=())
+                                                if hasattr(element.value, 'lpar') else element.value)
+            if isinstance(element.value, (cst.Integer, cst.Float, cst.SimpleString, cst.UnaryOperation)):
+                # the identity test of a literal is implied by its own reflexive ==
+                parts.append(f'not not (({item}) == {left})')
+            else:
+                parts.append(f'{left} is {item} or not not ({item} == {left})')
+        text = ' or '.join(parts)
+        if isinstance(comp.operator, cst.NotIn):
+            text = f'not ({text})'
+        self.object_memberships.append(_untyped(self.lines, before, 'in',
+            f'the left operand is an object: {len(parts)} identity and == tests in tuple order, '
+            'no tuple'))
+        return cst.parse_expression(f'({text})').with_changes(lpar=after.lpar, rpar=after.rpar)
 
     def member_tuple(self, node):
         """A literal tuple holding at least one ``self.<Ref>.<name>`` of a declared enum."""
@@ -220,6 +276,11 @@ class Constants(FormulaTransformer):
                 and (self.cell.has_formula_def or not self.cell.called_with_kwargs)):
             return after.with_changes(value=self.member(after.value))
         return after
+
+
+def _untyped(lines, node, form, reason):
+    from .reductions import untyped_entry
+    return untyped_entry(lines, node, form, reason)
 
 
 class _MemberFields(cst.CSTTransformer):
