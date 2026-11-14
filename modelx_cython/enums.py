@@ -72,14 +72,30 @@ class Constants(FormulaTransformer):
             elif not isinstance(part, (cst.Name, cst.Assign)):
                 invalid.update(facts.bindings((part,)))
         for name, values in assignments.items():
-            if name not in invalid and all(isinstance(v, cst.Call) and isinstance(v.func, cst.Attribute)
+            if name not in invalid and all((isinstance(v, cst.Call) and isinstance(v.func, cst.Attribute)
                     and isinstance(v.func.value, cst.Name) and v.func.value.value == 'self'
                     and v.func.attr.value in self.cls.cells
                     and not self.cls.cells[v.func.attr.value].called_with_kwargs
                     and not self.cls.cells[v.func.attr.value].body_has_closure
                     and self.cls.cells[v.func.attr.value].get_rettype_expr(c_style=True)
-                    in ('long long','bint') for v in values):
+                    in ('long long','bint')) or self.integer_ref(v) for v in values):
                 self.locals.add(name)
+
+    def integer_ref(self, node):
+        """``self.<ref>`` of a Reference stored in a C ``long long`` field (an integer or an
+        IntEnum member held by the Space, D31): read from the field, so it compares as a C
+        integer with a member constant."""
+        if not (isinstance(node, cst.Attribute) and isinstance(node.value, cst.Name)
+                and node.value.value == 'self'):
+            return False
+        name = node.attr.value
+        ref = getattr(self.cls, 'refs', {}).get(name)
+        if ref is None or name in getattr(self.cls, 'spaces', ()) or name in getattr(self.cls, 'readonly_refs', ()):
+            return False
+        try:
+            return ref.get_type_expr(c_style=True) == 'long long'
+        except Exception:       # a Reference without a scalar type expression
+            return False
 
     def leave_FunctionDef(self, before, after):
         if before is not self._formula_root:
@@ -112,6 +128,8 @@ class Constants(FormulaTransformer):
         if isinstance(node, cst.BinaryOperation) and isinstance(
                 node.operator, (cst.Add, cst.Subtract, cst.Multiply, cst.FloorDivide, cst.Modulo)):
             return self.integer(node.left) and self.integer(node.right)
+        if self.integer_ref(node):
+            return True
         if isinstance(node, cst.Name):
             return node.value in self.locals or (node.value in self.cell.params and
                 self.cell.get_argtype_expr(node.value, c_style=True, formula=True) in ('long long','bint'))
