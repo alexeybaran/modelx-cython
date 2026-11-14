@@ -15,29 +15,29 @@ import sys
 import textwrap
 
 OPS = [
-    # (name, expression on T = data.<table>(), table, expected class when written per step)
+    # (name, expression on T = data.<table>(), table, class when written per step: A lowered, C pandas)
     ("loc_full_key", 'T.loc[("F", 31), "mort_rate"]', "f", "A"),
     ("at_key", 'T.at[31, "q"]', "g", "A"),
     ("in_index", "31 in T.index", "g", "A"),
     ("index_max", "T.index.max()", "g", "A"),
     ("prefix_then_key", 'T.loc["M"].loc[31, "mort_rate"]', "f", "A"),
-    ("iter_index", "[k for k in T.index]", "g", None),
-    ("len_index", "len(T.index)", "g", None),
-    ("asof", "T.index.asof(31.5)", "g", "A"),
-    ("prefix_with_column", 'T.loc["F", "mort_rate"]', "f", None),
-    ("label_slice", "T.loc[31:32]", "g", None),
-    ("label_slice_column", 'T.loc[31:32, "q"]', "g", None),
-    ("list_of_keys", 'T.loc[[30, 32], "q"]', "g", None),
+    ("iter_index", "[k for k in T.index]", "g", "A"),
+    ("len_index", "len(T.index)", "g", "A"),
+    ("asof", "T.index.asof(31.5)", "g", "C"),
+    ("prefix_with_column", 'T.loc["F", "mort_rate"]', "f", "C"),
+    ("label_slice", "T.loc[31:32]", "g", "C"),
+    ("label_slice_column", 'T.loc[31:32, "q"]', "g", "C"),
+    ("list_of_keys", 'T.loc[[30, 32], "q"]', "g", "C"),
     ("mask", 'T[T["q"] > 0.015]', "g", "C"),
     ("mask_and", 'T[(T["lapse"] == 0.1) & (T["mort_rate"] <= 0.002)]', "f", "C"),
-    ("mask_loc_column", 'T.loc[T["q"] > 0.015, "w"]', "g", None),
+    ("mask_loc_column", 'T.loc[T["q"] > 0.015, "w"]', "g", "C"),
     ("iloc", "T.iloc[1]", "g", "C"),
     ("iloc_last_column", 'T.iloc[-1]["q"]', "g", "C"),
     ("values", "T.values", "g", "C"),
     ("column_to_numpy", 'T["q"].to_numpy()', "g", "C"),
     ("groupby_sum", 'T.groupby(level="sex")["mort_rate"].sum()', "f", "C"),
     ("merge", 'pd.merge(T.reset_index(), data.g_raw.reset_index(), on="age")', "g", "C"),
-    ("iterrows", '[(k, r["q"]) for k, r in T.iterrows()]', "g", None),
+    ("iterrows", '[(k, r["q"]) for k, r in T.iterrows()]', "g", "C"),
     ("itertuples", "[r.q for r in T.itertuples()]", "g", "C"),
     ("len", "len(T)", "g", "C"),
     ("column_in", '"q" in T', "g", "C"),
@@ -47,7 +47,7 @@ OPS = [
     ("column_sum", 'T["q"].sum()', "g", "C"),
     ("iter_column", '[v for v in T["q"]]', "g", "C"),
     ("zip_index_column", 'list(zip(T.index, T["q"]))', "g", "C"),
-    ("isna_key", 'pd.isna(T.loc[31, "q"])', "g", None),
+    ("isna_key", 'pd.isna(T.loc[31, "q"])', "g", "A"),
     ("interp_columns", 'np.interp(2.5, T["w"], T["q"])', "g", "C"),
     ("interp_index", 'np.interp(31.5, T.index, T["q"])', "g", "C"),
     ("transpose", "T.T", "g", "C"),
@@ -55,11 +55,11 @@ OPS = [
     ("sort_index", "T.sort_index(ascending=False)", "f", "C"),
     ("shape", "T.shape", "g", "C"),
     ("columns", "list(T.columns)", "g", "C"),
-    ("level_values", 'list(T.index.get_level_values("age"))', "f", None),
-    ("row_then_column", 'T.loc[31]["q"]', "g", None),
-    ("row_sum", "T.loc[31].sum()", "g", None),
-    ("chained", 'T["q"][31]', "g", None),
-    ("missing_key", 'T.loc[99, "q"]', "g", None),
+    ("level_values", 'list(T.index.get_level_values("age"))', "f", "C"),
+    ("row_then_column", 'T.loc[31]["q"]', "g", "A"),
+    ("row_sum", "T.loc[31].sum()", "g", "A"),
+    ("chained", 'T["q"][31]', "g", "A"),
+    ("missing_key", 'T.loc[99, "q"]', "g", "A"),
 ]
 assert len(OPS) == 44
 
@@ -178,7 +178,10 @@ def same(a, b):
     if isinstance(a, tuple) and not isinstance(b, (tuple, list, str)) and hasattr(b, "__len__"):
         b = list(b)         # a tuple vector cell: the compiled value is a typed vector
     if isinstance(a, np.ndarray):
-        return isinstance(b, np.ndarray) and a.shape == b.shape and bool((a == b).all())
+        # a cell whose value is a float64 array returns a memoryview of it from a compiled model, as any
+        # array-valued cell does (not a table rule): compared by value
+        b = np.asarray(b)
+        return a.shape == b.shape and bool((a == b).all())
     if isinstance(a, (tuple, list)) and isinstance(b, (tuple, list)):
         return len(a) == len(b) and all(same(x, y) for x, y in zip(a, b))
     if isinstance(a, float) and a != a:
