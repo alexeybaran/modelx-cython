@@ -111,6 +111,8 @@ NOT_LOWERED = 'not lowered to a typed handle read; runs as a Python call'
 ROUND2_FALLBACK = ('not lowered to a typed handle read; the formula also has round-2 native reads '
                    '({operations}), which fall back to this Python read where they do not apply')
 KEPT_PYTHON = 'formula kept as a Python method ({why}): runs as a Python call'
+PANDAS_RECEIVER = ('receiver is a pandas DataFrame or Series, not a helper Table: never lowered; '
+                   'pandas runs on every evaluation')
 TABLE_READ_WARNING = '{cell}: per-step table read is not typed: {read} (formula line {line}): {reason}'
 
 
@@ -131,7 +133,7 @@ class TableReadSite:
                 'per_step': per_step, 'reason': reason or NOT_LOWERED}
 
 
-def table_read_sites(node, resolver, cls_info):
+def table_read_sites(node, resolver, cls_info, pandas=False):
     """The table reads of one formula FunctionDef, in source order. Read-only.
 
     A receiver is a traced helper Table when it is a self-rooted call to a Cell whose every
@@ -142,15 +144,25 @@ def table_read_sites(node, resolver, cls_info):
     (kind = the attribute) or ``<receiver>[...]`` (kind ``column`` on a table, ``row`` on a
     row local). Reads inside comprehensions and generators count. ``line`` is the line within
     the formula, 1 being the ``def`` line.
+
+    With ``pandas`` true the receivers are pandas objects instead: zero-argument Cells whose
+    every sampled result is a pandas DataFrame or Series (``resolver.pandas_results``) and
+    ``self.<ref>`` References holding one. Those reads are reported, never lowered.
     """
     import libcst as cst
     from libcst.metadata import MetadataWrapper, PositionProvider
     from .usage import RESOLVED, _extract_self_chain
 
-    tables = {name for name, kind in resolver.table_results.items() if kind == TABLE_TYPE}
-    refs = {name for name, ref in getattr(cls_info, 'refs', {}).items()
-            if getattr(ref, 'type_', None) is not None
-            and f'{ref.type_.__module__}.{ref.type_.__qualname__}' == TABLE_TYPE}
+    if pandas:
+        from .usage import pandas_type_id
+        tables = set(getattr(resolver, 'pandas_results', {}))
+        refs = {name for name, ref in getattr(cls_info, 'refs', {}).items()
+                if getattr(ref, 'type_', None) is not None and pandas_type_id(ref.type_)}
+    else:
+        tables = {name for name, kind in resolver.table_results.items() if kind == TABLE_TYPE}
+        refs = {name for name, ref in getattr(cls_info, 'refs', {}).items()
+                if getattr(ref, 'type_', None) is not None
+                and f'{ref.type_.__module__}.{ref.type_.__qualname__}' == TABLE_TYPE}
     if not tables and not refs:
         return []
 

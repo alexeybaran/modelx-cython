@@ -129,6 +129,9 @@ class CellsResolver:
         # cells with a cached formula; cell_rettype() reads the final C return type.
         self.table_schemas = {}
         self.table_results = {}
+        # cells fqname -> 'pandas.DataFrame' / 'pandas.Series': zero-argument cells whose every
+        # sampled result is that pandas class; reads through them are reported, never lowered.
+        self.pandas_results = {}
         self.cached_cells = set()
         self._cell_infos = {}
         self._name_index: Dict[str, List[str]] = {}
@@ -532,6 +535,24 @@ def collect_candidates(module_infos) -> Tuple[Dict[str, int], Set[str]]:
     return candidates, array_returning
 
 
+def pandas_type_id(tp):
+    """'pandas.DataFrame' or 'pandas.Series' when ``tp`` is (a subclass of) one, else None.
+    Read by class names along the MRO, so pandas is never imported here."""
+    for klass in getattr(tp, '__mro__', ()):
+        if klass.__module__.split('.')[0] == 'pandas' and klass.__name__ in ('DataFrame', 'Series'):
+            return 'pandas.' + klass.__name__
+    return None
+
+
+def _pandas_result(cells):
+    """The pandas class of a zero-argument formula cell whose traced results are all of it."""
+    rt = getattr(cells, '_rt', None)
+    if (not rt or not getattr(cells, 'has_formula_def', False) or cells.has_args()
+            or getattr(rt, 'ret_type', None) is None):
+        return None
+    return pandas_type_id(rt.ret_type.value_type)
+
+
 def build_resolver(module_infos) -> CellsResolver:
     """Build a :class:`CellsResolver` over ``{fqname: ModuleInfo}``.
 
@@ -552,6 +573,7 @@ def build_resolver(module_infos) -> CellsResolver:
     provider_results = {}
     observed_provider_results = {}
     table_schemas, table_results, cached_cells, cell_infos = {}, {}, set(), {}
+    pandas_results = {}
 
     for fqname, info in module_infos.items():
         pkg, basename = fqname.rsplit(".", 1)
@@ -572,6 +594,9 @@ def build_resolver(module_infos) -> CellsResolver:
                 result = getattr(cells, 'table_result', None)
                 if result is not None:
                     table_results[cells.fqname] = result
+                pandas_result = _pandas_result(cells)
+                if pandas_result is not None:
+                    pandas_results[cells.fqname] = pandas_result
                 if cells.has_formula_def:
                     cached_cells.add(cells.fqname)
                     cell_infos[cells.fqname] = cells
@@ -603,6 +628,7 @@ def build_resolver(module_infos) -> CellsResolver:
     resolver.observed_provider_results = observed_provider_results
     resolver.table_schemas = table_schemas
     resolver.table_results = table_results
+    resolver.pandas_results = pandas_results
     resolver.cached_cells = cached_cells
     resolver._cell_infos = cell_infos
     return resolver
