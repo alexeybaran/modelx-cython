@@ -110,6 +110,16 @@ def _bound(expr):
     return None
 
 
+def _native_callee(func):
+    """``self.<cell>(..)``, a ``_mx*`` provider or runtime function, builtin min/max/abs."""
+    if isinstance(func, cst.Attribute):
+        base = func.value
+        while isinstance(base, cst.Attribute):
+            base = base.value
+        return isinstance(base, cst.Name) and (base.value == 'self' or base.value.startswith('_mx'))
+    return isinstance(func, cst.Name) and func.value in ('min', 'max', 'abs')
+
+
 def _parenthesized(node):
     return node.with_changes(lpar=(cst.LeftParen(),), rpar=(cst.RightParen(),))
 
@@ -122,7 +132,12 @@ def _boxed(expr):
 
 
 def _condition(names, bound):
-    return ' and '.join(f'-{bound} <= {name} <= {bound}' for name in names)
+    """-bound <= x < bound for every name, in one comparison: ``x ^ (x >> 63)`` is |x| (or
+    |x| - 1) for any int, the OR of non-negative values is below a power of two only if each
+    is, and the bound is a C constant (a literal above 2**31 would be a Python int, making
+    the test a Python comparison)."""
+    folded = ' | '.join(f'({name} ^ ({name} >> 63))' for name in names)
+    return f'({folded}) < {CY_MOD}.cast({CY_MOD}.longlong, {bound})'
 
 
 class GuardIntegers(cst.CSTTransformer):
@@ -133,6 +148,7 @@ class GuardIntegers(cst.CSTTransformer):
         self._opaque = 0
         self._handled = set()
         self._skip = set()
+        self._native_args = set()
 
     # scopes that bind names of their own are left alone
     def on_visit(self, node):
@@ -171,7 +187,7 @@ class GuardIntegers(cst.CSTTransformer):
                 and before.args and not any(arg.keyword or arg.star for arg in before.args)):
             if before.func.value == 'float' and len(before.args) == 1 and self.a.is_expression(before.args[0].value):
                 self._handled.add(id(before.args[0].value))
-                guarded = self.guard(before.args[0].value, after.args[0].value, lambda code: f'float({code})')
+                guarded = self.guard(before.args[0].value, after.args[0].value, lambda code: f'float({code})', 'double')
                 return guarded if guarded is not None else after
             if before.func.value == 'range':
                 args = list(after.args)
@@ -192,7 +208,7 @@ class GuardIntegers(cst.CSTTransformer):
             if sides and all(self.a.is_operand(side) or self._float_side(side) for side in (before.left, before.right)):
                 for side in sides:
                     self._handled.add(id(side))
-                guarded = self.guard(before, after, lambda code: code)
+                guarded = self.guard(before, after, lambda code: code, 'double')
                 return guarded if guarded is not None else after
             return after
         return after
@@ -234,7 +250,9 @@ class GuardIntegers(cst.CSTTransformer):
             def leave_Name(inner, b, a):
                 return cst.parse_expression(f'{CY_MOD}.cast(object, {a.value})') if a.value in names else a
         boxed = _code(after.visit(BoxNames()))
-        return _parenthesized(cst.parse_expression(f'({_code(after)} if {_condition(names, bound)} else {boxed})'))
+        # both branches bint, so the comparison stays a C value (the slow one is an exact bool)
+        return _parenthesized(cst.parse_expression(
+            f'({_code(after)} if {_condition(names, bound)} else {CY_MOD}.cast({CY_MOD}.bint, {boxed}))'))
 
     def leave_Assign(self, before, after):
         if self._opaque or len(before.targets) != 1 or not isinstance(before.targets[0].target, cst.Name):
@@ -266,12 +284,19 @@ class GuardIntegers(cst.CSTTransformer):
         # float()/range() arguments are guarded with their call (leave_Call)
         if isinstance(node.func, cst.Name) and node.func.value in ('float', 'range'):
             self._skip.update(id(arg.value) for arg in node.args)
+        elif _native_callee(node.func):
+            self._native_args.update(id(arg.value) for arg in node.args)
         return True
 
     def leave_Arg(self, before, after):
-        if id(before.value) in self._skip:
+        if id(before.value) in self._skip or self._opaque or not self.a.is_expression(before.value):
             return after
-        return after.with_changes(value=self._fallback(before.value, after.value))
+        # a compiled Cell, a provider/runtime function or a native min/max takes a C integer:
+        # the exact value as long long (the call itself would refuse a wider one); any other
+        # callee gets the Python value
+        slow = 'longlong' if id(before.value) in self._native_args else None
+        guarded = self.guard(before.value, after.value, lambda code: code, slow)
+        return after.with_changes(value=guarded) if guarded is not None else after
 
     def leave_Return(self, before, after):
         if before.value is None:
@@ -282,7 +307,11 @@ class GuardIntegers(cst.CSTTransformer):
         return after.with_changes(value=self._fallback(before.value, after.value))
 
     def leave_Index(self, before, after):
-        return after.with_changes(value=self._fallback(before.value, after.value))
+        # a subscript index: the exact value as long long (an index beyond it fails either way)
+        if self._opaque or not self.a.is_expression(before.value):
+            return after
+        guarded = self.guard(before.value, after.value, lambda code: code, 'longlong')
+        return after.with_changes(value=guarded) if guarded is not None else after
 
     def leave_AugAssign(self, before, after):
         if (self._opaque or not isinstance(before.target, cst.Name)

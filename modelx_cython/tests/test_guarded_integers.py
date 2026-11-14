@@ -28,25 +28,35 @@ def _guarded():
 
 def test_each_context_takes_its_slow_path():
     text, count = _guarded()
+    wide = '< _mx_cy.cast(_mx_cy.longlong, 2305843009213693952)'
+    narrow = '< _mx_cy.cast(_mx_cy.longlong, 2147483648)'
     # range bound and integer locals: the exact value converted to long long on the slow path
-    assert 'range(1, (limit + 1 if -2305843009213693952 <= limit <= 2305843009213693952 else ' \
+    assert f'range(1, (limit + 1 if ((limit ^ (limit >> 63))) {wide} else ' \
            '_mx_cy.cast(_mx_cy.longlong, _mx_cy.cast(object, limit) + 1)))' in text
-    assert '(k - 1) * 3 if -2305843009213693952 <= k <= 2305843009213693952 else _mx_cy.cast(_mx_cy.longlong,' in text  # a literal factor keeps a wide bound
-    assert 's = (start + off if ' in text
-    # comparison, true division and float(): the whole result guarded, exact either way
-    assert '(k * 3 <= g if -2305843009213693952 <= k <= 2305843009213693952 else _mx_cy.cast(object, k) * 3 <= g)' in text
-    assert "(((s - start) / 12.0) if " in text and "((_mx_cy.cast(object, s) - _mx_cy.cast(object, start)) / 12.0))" in text
-    assert '(float(s * s) if -2147483648 <= s <= 2147483648 else float(_mx_cy.cast(object, s) * _mx_cy.cast(object, s)))' in text
-    # an augmented integer local
-    assert 'k2 = (k2 + (1) if ' in text
+    assert f'(k - 1) * 3 if ((k ^ (k >> 63))) {wide} else _mx_cy.cast(_mx_cy.longlong,' in text  # a literal factor
+    assert f's = (start + off if ((off ^ (off >> 63)) | (start ^ (start >> 63))) {wide} else ' in text
+    # comparison, true division and float(): the whole result guarded, C-typed on both branches
+    assert f'(k * 3 <= g if ((k ^ (k >> 63))) {wide} else ' \
+           '_mx_cy.cast(_mx_cy.bint, _mx_cy.cast(object, k) * 3 <= g))' in text
+    assert "_mx_cy.cast(_mx_cy.double, ((_mx_cy.cast(object, s) - _mx_cy.cast(object, start)) / 12.0)))" in text
+    assert f'(float(s * s) if ((s ^ (s >> 63))) {narrow} else ' \
+           '_mx_cy.cast(_mx_cy.double, float(_mx_cy.cast(object, s) * _mx_cy.cast(object, s))))' in text
+    assert f'k2 = (k2 + (1) if ((k2 ^ (k2 >> 63))) {wide} else ' in text   # an augmented integer local
     assert 'same = k2 is k' in text            # identity is not arithmetic
     assert count == 8
+
+
+def test_the_bound_test_is_exact_for_any_int():
+    for bound in (1 << 31, 1 << 61):
+        for x in (-(1 << 70), -(1 << 63) - 1, -(1 << 63), -bound - 1, -bound, -1, 0, 1, bound - 1, bound,
+                  (1 << 63) - 1, 1 << 70):
+            assert ((x ^ (x >> 63)) < bound) == (-bound <= x < bound), (bound, x)
 
 
 def test_values_are_exact_on_both_paths():
     text, _ = _guarded()
     scope = {}
-    shim = 'class _mx_cy:\n    longlong = int\n    @staticmethod\n    def cast(kind, value):\n        return kind(value) if kind is not object else value\n'
+    shim = 'class _mx_cy:\n    longlong = int\n    double = float\n    bint = bool\n    @staticmethod\n    def cast(kind, value):\n        return kind(value) if kind is not object else value\n'
     exec(shim + text, scope)
     exec(SOURCE.replace('def f(', 'def g('), scope)
     big = (1 << 62) + 5
