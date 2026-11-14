@@ -1,5 +1,6 @@
 """Verify native table dispatch through an ordinary parameterized Cell."""
 
+import re
 import subprocess
 import sys
 import textwrap
@@ -103,8 +104,18 @@ def test_parameterized_table_result(tmp_path):
     assert '.prepare_previous_table_method(' in generated
     assert '.read_previous_table_int(' in generated
     assert '.read_bounded_table_float(' in generated
-    assert '.read_cast_record_field_float(' in generated
-    assert '.read_record_item(' in generated
+    # record fields (D78, which retired the round-2 readers): the field read is a native read,
+    # no Python attribute or item access on the record in the generated C, with a double result
+    c_source = (tmp_path / 'exported_cy/_mx_classes.c').read_text(encoding='utf-8')
+    for cell in ('float_field', 'raw_field'):
+        method = re.search(rf'def _f_{cell}\(.*?(?=\n    @|\n    def |\nclass |\Z)', generated, re.S)
+        assert method, cell
+        entry = re.search(r'return (_mx_dense_formula_\d+)\(', method.group(0))
+        function = entry.group(1) if entry else f'_f_{cell}'
+        start = re.search(rf'\n(static [^\n;]*?) __pyx_f_\w*?{function}\([^;{{]*\{{\n', c_source)
+        assert start and 'double' in start.group(1), (cell, function)
+        block = c_source[start.end():c_source.index('\n}\n', start.end())]
+        assert not re.search(r'GetItem|GetAttr|__getitem__', block), (cell, function)
     probe = textwrap.dedent('''\
         from exported_cy import mx_model
         s = mx_model.Policy[0]
