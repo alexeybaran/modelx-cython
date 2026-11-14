@@ -90,6 +90,7 @@ def describe(module_infos):
                         'reductions_native', 'enum_memberships', 'minmax_native', 'math_native')),
                     'expressions_untyped': expressions_untyped(cell),
                     'powers_in_loops': list(getattr(cell, 'powers_in_loops', ())),
+                    'expressions_object': expressions_object(cell),
                     **({'vectors': cell.vector_report} if getattr(cell, 'vector_report', None) else {}),
                     'reasons': reasons or ['original Cython representation'],
                 }
@@ -100,6 +101,15 @@ def expressions_untyped(cell):
     """Expression forms (W1.4) left to the interpreter: reductions, n-argument
     min/max, enum membership and math calls, each with its line and reason."""
     entries = [entry for key in ('reductions_untyped', 'enum_untyped', 'minmax_untyped', 'math_untyped')
+               for entry in getattr(cell, key, ())]
+    return sorted(entries, key=lambda entry: (entry['line'], entry['form'], entry['expr']))
+
+
+def expressions_object(cell):
+    """Built-in forms (W1.8) compiled with comparisons or calls on Python objects, because
+    an operand's class is not known at build time; each with its line and the operand
+    classes. They no longer call the built-in."""
+    entries = [entry for key in ('minmax_object', 'reductions_object', 'enum_object', 'math_object')
                for entry in getattr(cell, key, ())]
     return sorted(entries, key=lambda entry: (entry['line'], entry['form'], entry['expr']))
 

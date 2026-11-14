@@ -20,7 +20,10 @@ class _OrderedArguments(cst.CSTTransformer):
         self.providers = providers       # W1.4: typed min/max need the math provider
         self.lowered = 0
         self.untyped = []
+        self.objects = []                # W1.8: compiled comparisons on Python objects
         self.first_line = None
+        self.kinds = None                # W1.8: ExpressionKind of the formula (locals, builtins)
+        self.formula_scope = None
 
     def on_visit(self, node):
         from .scopes import OPAQUE_SCOPES
@@ -90,16 +93,23 @@ class _OrderedArguments(cst.CSTTransformer):
         value = after.args[0].value
         return value.with_changes(lpar=(cst.LeftParen(),), rpar=(cst.RightParen(),)) if not value.lpar else value
 
+    def operand_kinds(self, before):
+        """Kinds of the positional operands of the original call (W1.8 classifier)."""
+        classify = self.kinds.kind if self.kinds is not None else self.operand_kind.kind
+        return [classify(argument.value) for argument in before.args if argument.keyword is None]
+
     def typed_extrema(self, before, after, positional):
         """W1.4: min/max whose operands are all double or all C integers, as C comparisons.
 
         The result has the operands' class, so no object is made; arguments are
         evaluated left to right. Mixed or unknown operands keep the boxed call.
+        W1.8: the operands are classified on the original call with the formula's
+        locals, cached cell calls and numeric built-ins (``expression_kinds``).
         """
         from .powers import KIND_FLOAT, KIND_INT
         if self.operand_kind is None or self.providers is None:
             return None
-        order = [self.operand_kind.kind(argument.value) for argument in positional]
+        order = self.operand_kinds(before)
         kinds = set(order)
         from .helper_members import MATH_PROVIDER
         from .helpers import module_name
@@ -125,6 +135,16 @@ class _OrderedArguments(cst.CSTTransformer):
         if self.first_line is None:
             position = self.get_metadata(PositionProvider, node.name, None)
             self.first_line = position.start.line if position is not None else None
+            if self.operand_kind is not None and self.providers is not None:
+                # W1.8: the formula's own scope, locals and built-ins for the operand kinds
+                from .expression_kinds import ExpressionKind, local_kinds
+                from .helper_members import MATH_PROVIDER
+                from .helpers import module_name
+                self.formula_scope = self.get_metadata(ScopeProvider, node.body, None)
+                self.kinds = ExpressionKind(
+                    self.operand_kind, lambda item: self.get_metadata(ScopeProvider, item, None),
+                    self.formula_scope, math_alias=module_name(MATH_PROVIDER))
+                local_kinds(node, self.kinds)
 
     def leave_Call(self, before, after):
         integer = self.integer_identity(before, after)
@@ -152,6 +172,9 @@ class _OrderedArguments(cst.CSTTransformer):
             typed = self.typed_extrema(before, after, positional)
             if typed is not None:
                 return typed
+            objects = self.object_extrema(before, after, positional)
+            if objects is not None:
+                return objects
         if self.providers is not None:
             from .reductions import untyped_entry
             self.untyped.append(untyped_entry(self.line_of, before, before.func.value,
@@ -159,6 +182,35 @@ class _OrderedArguments(cst.CSTTransformer):
                 'the built-in to keep the result class' if not keywords else 'keyword arguments: built-in call'))
         values = cst.Tuple(tuple(cst.Element(argument.value) for argument in positional))
         return after.with_changes(args=(cst.Arg(values, star='*'), *keywords))
+
+    def object_extrema(self, before, after, positional):
+        """W1.8: min/max of operands not all of one C kind, compiled on Python objects.
+
+        Every operand is cast to ``object``, so Cython's own min/max lowering (all
+        operands evaluated left to right into temporaries, then ``PyObject_RichCompare``
+        with ``<`` / ``>`` and a truth test, the first extreme kept) applies with no
+        promotion between C types: the result is the selected operand itself, as the
+        built-in returns it, and nan, -0.0, ties and comparison errors follow from the
+        same comparisons the built-in makes. No argument tuple and no built-in call.
+        """
+        if self.providers is None:
+            return None
+        scope = self.get_metadata(ScopeProvider, before.func)
+        if tuple(scope['_mx_cy']) or tuple(scope['object']) and not all(
+                isinstance(binding, BuiltinAssignment) for binding in scope['object']):
+            return None
+        from .powers import KIND_FLOAT, KIND_INT, KIND_UNKNOWN
+        from .reductions import untyped_entry
+        kinds = self.operand_kinds(before)
+        names = {KIND_FLOAT: 'float', KIND_INT: 'int', KIND_UNKNOWN: 'object'}
+        self.objects.append(untyped_entry(self.line_of, before, before.func.value,
+            'operands ' + ', '.join(names.get(kind, 'object') for kind in kinds)
+            + ': compiled as comparisons of Python objects (the selected operand is the result)'))
+
+        def boxed(value):
+            return cst.Call(cst.Attribute(cst.Name('_mx_cy'), cst.Name('cast')),
+                            (cst.Arg(cst.Name('object')), cst.Arg(value)))
+        return after.with_changes(args=tuple(cst.Arg(boxed(argument.value)) for argument in positional))
 
     def line_of(self, node):
         position = self.get_metadata(PositionProvider, node, None)
@@ -179,4 +231,5 @@ def preserve_argument_order(formula, native_result=False, operand_kind=None, cel
     result = wrapper.visit(ordered).body[0]
     if cells is not None:
         cells.minmax_native, cells.minmax_untyped = ordered.lowered, ordered.untyped
+        cells.minmax_object = ordered.objects
     return result
