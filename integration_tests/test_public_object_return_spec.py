@@ -12,7 +12,7 @@ import modelx as mx
 import numpy as np
 import pytest
 
-from modelx_helpers import pandas_inputs, expressions
+from modelx_helpers import pandas_inputs, typed_inputs
 
 
 @pytest.mark.parametrize('use_spec', [False, True])
@@ -21,8 +21,8 @@ def test_public_object_return_specs_all_modes(tmp_path, use_spec):
     frame = pd.DataFrame({'rate': pd.Series([np.float64(.1), np.float64(.2), np.float64(0.)], dtype=object)})
     model = mx.new_model('DeclaredObjectResults')
     try:
-        p = model.new_space('Projection', refs={'source': frame, 'prepare': pandas_inputs.table, 'lookup_object': expressions.lookup_object,
-            'lookup_float': expressions.lookup_float, 'over': expressions.over, 'array_source': np.array([1., 2.])})
+        p = model.new_space('Projection', refs={'source': frame, 'prepare': pandas_inputs.table, 'lookup_object': typed_inputs.lookup_object,
+            'lookup_float': typed_inputs.lookup_float, 'array_source': np.array([1., 2.])})
         p.new_cells('owned', 'lambda: prepare(source, preserve_scalar_types=True)')
         p.new_cells('raw', '''def raw(key) -> object:
     return lookup_object(owned(), key, "rate")
@@ -38,7 +38,7 @@ def test_public_object_return_specs_all_modes(tmp_path, use_spec):
     return raw(0)
 ''')
         p.new_cells('retained', '''def retained(kind=None) -> object:
-    return next(over((0,), lambda key: raw(key) if kind is None else local(key)))
+    return next(map(lambda key: raw(key) if kind is None else local(key), (0,)))
 ''')
         p.new_cells('uncached', '''def uncached(key) -> object:
     return raw(key)
