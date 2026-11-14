@@ -63,6 +63,7 @@ KIND_UNKNOWN : str
 import logging
 from typing import Dict, List, Mapping, Optional
 
+from collections import Counter
 import libcst as cst
 import libcst.matchers as m
 from libcst.metadata import ExpressionContext
@@ -472,8 +473,19 @@ class _LocalKind(OperandKind):
     ``self``, so a bare ``min`` is the builtin unless the formula binds it, which disqualifies
     the formula through its scope facts)."""
 
+    _CASTS = {'double': KIND_FLOAT, 'longlong': KIND_INT}
+
     def _call_kind(self, expr):
         func = expr.func
+        # the compiler's own C cast (``_mx_cy.cast(_mx_cy.double, ...)``, emitted by the integer
+        # overflow guard and the typed dispatch): its value has the C type it names
+        if (isinstance(func, cst.Attribute) and isinstance(func.value, cst.Name)
+                and func.value.value == '_mx_cy' and func.attr.value == 'cast' and len(expr.args) == 2
+                and not any(arg.keyword or arg.star for arg in expr.args)
+                and isinstance(expr.args[0].value, cst.Attribute)
+                and isinstance(expr.args[0].value.value, cst.Name) and expr.args[0].value.value.value == '_mx_cy'
+                and expr.args[0].value.attr.value in self._CASTS):
+            return self._CASTS[expr.args[0].value.attr.value]
         if (isinstance(func, cst.Name) and func.value in ('min', 'max', 'abs') and expr.args
                 and not any(arg.keyword or arg.star for arg in expr.args)
                 and (func.value != 'abs' or len(expr.args) == 1)
@@ -510,9 +522,13 @@ def _assigned_local_kinds(body, parameters, resolver, cells_kinds, ref_kinds, cl
     facts = CstFacts(body)
     if any(facts.stores[name] for name in ('min', 'max', 'abs', 'range', 'int')):
         return {}           # a formula that binds a builtin name: no local kinds
-    plain, augmented = {}, {}
+    plain, augmented, declared = {}, {}, Counter()
     for node in lexical_nodes(body):
-        if isinstance(node, cst.Assign) and len(node.targets) == 1 and isinstance(node.targets[0].target, cst.Name):
+        if isinstance(node, cst.AnnAssign) and isinstance(node.target, cst.Name) and node.value is None:
+            # a bare declaration (``s: _mx_cy.longlong``, added before this pass for a loop
+            # variable or typed local) binds nothing: it neither gives nor removes a kind
+            declared[node.target.value] += 1
+        elif isinstance(node, cst.Assign) and len(node.targets) == 1 and isinstance(node.targets[0].target, cst.Name):
             plain.setdefault(node.targets[0].target.value, []).append(node.value)
         elif isinstance(node, cst.AnnAssign) and isinstance(node.target, cst.Name) and node.value is not None:
             plain.setdefault(node.target.value, []).append(node.value)
@@ -529,7 +545,7 @@ def _assigned_local_kinds(body, parameters, resolver, cells_kinds, ref_kinds, cl
     candidates = {
         name for name, values in plain.items()
         if name not in parameters and name not in facts.deleted
-        and facts.stores[name] == len(values) + len(augmented.get(name, ()))
+        and facts.stores[name] == len(values) + len(augmented.get(name, ())) + declared[name]
         and None not in augmented.get(name, ())
     }
     kinds: Dict[str, str] = {}
