@@ -71,6 +71,7 @@ from modelx_cython.inline_entries import add_inline_entries, allows_exact_receiv
 from modelx_cython.cell_entries import CacheHit, DenseEntry, dense_condition
 from modelx_cython import numeric_cache
 from modelx_cython import enums as code_enums
+from modelx_cython import table_cells
 
 from modelx_cython.consts import (
     FORMULA_PREF,
@@ -408,6 +409,7 @@ class PXDGenerator:
 
         cls_info = self.module.classes[cls_name]
         integer_refs = _integer_reference_paths(cls_info)
+        renamed = table_cells.module_renames(self.module)[cls_name]
         decl_stmts = []
         for ref in cls_info.refs.values():
 
@@ -419,8 +421,11 @@ class PXDGenerator:
             if ref.name in getattr(cls_info, 'readonly_refs', ()):
                 continue
 
-            visibility = "readonly" if ref.name in integer_refs else "public"
-            stmt = f"cdef {visibility} {ref.get_type_expr(c_style=True)} {ref.name}\n"
+            visibility = "readonly " if ref.name in integer_refs else "public "
+            name = renamed.get(ref.name, ref.name)
+            if name != ref.name:
+                visibility = ""     # api-tables (D101a): stored renamed; a property serves Python
+            stmt = f"cdef {visibility}{ref.get_type_expr(c_style=True)} {name}\n"
             decl_stmts.append(stmt)
 
         # Declare child spaces
@@ -548,8 +553,10 @@ class PXDGenerator:
                 parameters = self._add_param_type_hints(
                     cls_name=cls_name, cells_name=cells.name
                 )
+                # api-tables (D101a): a table cell's C entry is renamed; a property serves Python
+                entry = table_cells.module_renames(self.module)[cls_name].get(cells.name, cells.name)
                 decl_stmts.append(
-                    f"cpdef {rettype} {cells.name}({parameters})\n"
+                    f"cpdef {rettype} {entry}({parameters})\n"
                 )
             else:
                 parameters = self._add_param_type_hints(
@@ -901,6 +908,7 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
                 cst.parse_statement(
                     f"import cython as {CY_MOD}", config=updated_node.config_for_parsing
                 ),
+                cst.parse_statement(table_cells.IMPORT, config=updated_node.config_for_parsing),
                 *updated_node.body,
             )
         )
@@ -926,7 +934,8 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
         if directives:
             module = module.with_changes(header=(
                 cst.EmptyLine(comment=cst.Comment('# cython: ' + ', '.join(directives))), *module.header))
-        return module.visit(NumericExceptions())
+        # api-tables (D101a): rename the C members of table cells and table References
+        return module.visit(NumericExceptions()).visit(table_cells.RenameMembers(self.module))
 
     def leave_ClassDef(
         self, original_node: ClassDef, updated_node: ClassDef
@@ -1071,12 +1080,17 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
             updated_node = updated_node.with_changes(body=updated_node.body.with_changes(
                 body=code_enums.bind_properties(self.module.classes[cls_name], updated_node.body.body)))
             integer_refs = _integer_reference_paths(cls_info)
+            # api-tables (D101): Python access to table cells and input References
+            updated_node = table_cells.rewrite_class(
+                cls_info, updated_node, self._module_node.config_for_parsing, integer_refs)
             if integer_refs:
                 lines = ['def __setattr__(self, name, value):']
                 for name, path in integer_refs.items():
                     lines.extend((
                         f'    if {MX_SYS_MOD}._mx_ref_name_is(name, {name!r}):',
+                        f'        {table_cells.RUNTIME}.before_reference(self, {path!r})',
                         f'        self.{name} = {MX_SYS_MOD}._mx_exact_int64(value, {path!r})',
+                        f'        {table_cells.RUNTIME}.clear_model(self._model)',
                         '        return',
                     ))
                 lines.append(f'    {MX_SYS_MOD}._mx_generic_setattr(self, name, value)')
