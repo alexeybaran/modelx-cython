@@ -84,12 +84,17 @@ def conditions(value, nargs=0):
         reasons.append(f'duplicate key {duplicated.tolist()[0]!r} ({len(duplicated)} duplicated rows) (C3); '
                        'keys must be unique')
     for level in range(index.nlevels):
-        labels = index.get_level_values(level).tolist()
+        values = index.get_level_values(level)
         name = names[level]
-        if any(_is_missing(label) for label in labels):
+        if values.hasnans:
             reasons.append(f'missing value in key level {name!r} (C4)')
-            labels = [label for label in labels if not _is_missing(label)]
-        kinds = sorted({_label_kind(label) for label in labels})
+            values = values.dropna()
+        kind = getattr(values.dtype, 'kind', None)
+        if kind in ('i', 'u', 'f', 'b'):       # a numpy level holds one kind of label
+            kinds = [{'i': 'int', 'u': 'int', 'f': 'float', 'b': 'bool'}[kind]] if len(values) else []
+        else:                                   # object or string levels: each distinct label
+            labels = [label for label in values.unique().tolist() if not _is_missing(label)]
+            kinds = sorted({_label_kind(label) for label in labels})
         if len(kinds) > 1:
             reasons.append(f'key level {name!r} mixes {", ".join(kinds)} labels (C5); one kind per level')
         elif kinds and kinds[0] not in ('int', 'float', 'str', 'bool') and not kinds[0].startswith('enum '):
