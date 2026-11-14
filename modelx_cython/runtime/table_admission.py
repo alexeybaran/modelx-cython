@@ -7,7 +7,8 @@ decision is made on the value only, never on how the formula is written.
 
 A pandas DataFrame is admitted when every condition holds:
 
-  C1  the cell has no arguments
+  (C1, "the cell has no arguments", was dropped by D105: which cells are admitted is decided at build
+  by the native reads that consume them, whatever their arity, D106)
   C2  the value is a DataFrame (a Series is not admitted: it stays pandas)
   C3  its keys (the index) are unique
   C4  no key is missing (NaN, None, NaT)
@@ -61,15 +62,13 @@ def _is_missing(label):
 
 
 def conditions(value, nargs=0):
-    """The reasons (C1-C7) why ``value`` cannot be admitted, in condition order; [] if none.
+    """The reasons (C2-C8) why ``value`` cannot be admitted, in condition order; [] if none.
 
-    C8 is checked by :func:`admit`, which builds the table.
+    ``nargs`` (the cell's argument count) does not decide (D105). C8 is checked by :func:`admit`,
+    which builds the table.
     """
     import pandas as pd
     reasons = []
-    if nargs:
-        reasons.append(f'returns a pandas {type(value).__name__} from a cell with arguments: not admitted as a '
-                       'table (C1); every read on it runs pandas')
     if isinstance(value, pd.Series):
         reasons.append('returns a pandas Series: not admitted as a table (C2); return a keyed DataFrame '
                        '(e.g. series.to_frame()) to have it admitted, or a scalar')
