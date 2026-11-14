@@ -997,6 +997,14 @@ class VectorLowering(cst.CSTTransformer):
             if isinstance(so, cst.Return):
                 su = self.wrap_return(so, su, [])[1]
             return self.emit(updated, su, pre)
+        if isinstance(so, (cst.Assign, cst.Return)) and id(so.value) in self.leading_sums:
+            # diag-us2 (D93): the sum evaluated first in a +/- chain, computed just before the statement
+            lead_o, lead_u = _leading_operand(so.value), _leading_operand(su.value)
+            pre, result = self.expand_sum(lead_o.args[0].value, lead_u.args[0].value)
+            su = su.with_changes(value=_replace_leading(su.value, result))
+            if isinstance(so, cst.Return):
+                su = self.wrap_return(so, su, [])[1]
+            return self.emit(updated, su, pre)
         if isinstance(so, (cst.Assign, cst.Return, cst.AugAssign)) and id(getattr(so, 'value', None)) in self.sum_calls:
             pre, result = self.expand_sum(so.value.args[0].value, su.value.args[0].value)
             su = su.with_changes(value=result)
@@ -1546,6 +1554,7 @@ def lower(node, cls_info, cells, scope, counter, module, ref_kinds=None):
     lowering.range_locals = set(loops)
     lowering.expanding = set()
     lowering.vector_fors = set()
+    lowering.leading_sums = set()
     lowering.sum_gens, lowering.sum_calls = _statement_sums(node.body, lowering)
     lowering.sum_slices, lowering.alloc_slices = _vector_slices(node.body, lowering)
     decls = [_stmt(f'{name}: {CY_MOD}.longlong\n') for name in loops + derived]
@@ -1573,15 +1582,39 @@ def lower(node, cls_info, cells, scope, counter, module, ref_kinds=None):
     return _declare_at_top(node.with_changes(body=body), decls)
 
 
+def _leading_operand(value):
+    """The operand evaluated first in a chain of ``+``/``-`` (the leftmost leaf), else None."""
+    if not (isinstance(value, cst.BinaryOperation) and isinstance(value.operator, (cst.Add, cst.Subtract))):
+        return None
+    while isinstance(value, cst.BinaryOperation) and isinstance(value.operator, (cst.Add, cst.Subtract)):
+        value = value.left
+    return value
+
+
+def _replace_leading(value, new):
+    """``value`` with its leftmost ``+``/``-`` leaf replaced by ``new``."""
+    if isinstance(value, cst.BinaryOperation) and isinstance(value.operator, (cst.Add, cst.Subtract)):
+        return value.with_changes(left=_replace_leading(value.left, new))
+    return new.with_changes(lpar=value.lpar, rpar=value.rpar) if hasattr(new, 'lpar') else new
+
+
 def _statement_sums(body, lowering):
     """``sum(<generator over vectors>)`` at statement level whose element is provably a float;
     diag-kr: also ``min``/``max`` of such a generator whose element is a float or an integer
-    (``lowering.extreme_calls``: id of the call -> its name)."""
+    (``lowering.extreme_calls``: id of the call -> its name). diag-us2 (D93): a ``sum`` may also be
+    the leftmost operand of a ``+``/``-`` chain that is the value of an assignment or return, which
+    Python evaluates first, so the sum computed just before the statement keeps the order of
+    evaluation (``lowering.leading_sums``)."""
     gens, calls = set(), set()
     lowering.extreme_calls = {}
     for node in _walk(body):
         if isinstance(node, (cst.Assign, cst.Return, cst.AugAssign)) and getattr(node, 'value', None) is not None:
             value = node.value
+            leading = _leading_operand(value) if isinstance(node, (cst.Assign, cst.Return)) else None
+            if leading is not None:
+                if not (isinstance(leading, cst.Call) and _is_name(leading.func, 'sum')):
+                    continue
+                value = leading
             if (isinstance(value, cst.Call) and isinstance(value.func, cst.Name)
                     and value.func.value in ('sum', 'min', 'max') and value.func.value in lowering.builtins
                     and _plain_args(value, 1, 1) and isinstance(value.args[0].value, cst.GeneratorExp)):
@@ -1593,6 +1626,8 @@ def _statement_sums(body, lowering):
                     if value.func.value == 'sum' and elem == FLOAT:
                         gens.add(id(gen))
                         calls.add(id(value))
+                        if value is not node.value:
+                            lowering.leading_sums.add(id(node.value))
                     elif value.func.value != 'sum' and elem in (FLOAT, INT) and not isinstance(node, cst.AugAssign):
                         gens.add(id(gen))
                         lowering.extreme_calls[id(value)] = (value.func.value, elem)
