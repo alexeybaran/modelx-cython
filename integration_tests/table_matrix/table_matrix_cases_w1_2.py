@@ -10,6 +10,7 @@ storage variant of its form (W1.H's 13 forms), with the key type of the square o
 parts of the key, hits and misses; compiled reads call the handles as W1.3 emits them.
 """
 from table_matrix_squares import applicable
+import table_matrix_cases_w1_3
 import table_matrix_w1_2_support as support
 from table_matrix_w1_2_support import VARIANTS, int_index, keys, levels
 
@@ -61,6 +62,7 @@ def _reads(form, operation, kt):
                 for depth in range(1, n):
                     add('sub_loc', key[:depth], key[depth:], c)
                     add('sub_has', key[:depth], key[depth:], c)
+                    add('sub_obj', key[:depth], key[depth:], c)
         elif operation == 7:
             if len(hits) >= 2:
                 add('rows', hits[0], hits[-1], c)
@@ -119,4 +121,7 @@ def _case(form, operation, kt):
     return case
 
 
-CASES = {square: _case(*square) for square in applicable()}
+# One case per square (test_every_square_is_declared): a square W1.3 contributes a case for
+# (its lowering, end to end) is not repeated here.
+CASES = {square: _case(*square) for square in applicable()
+         if square not in table_matrix_cases_w1_3.CASES}

@@ -246,3 +246,7 @@ def spin2(t, long long n, long long a, long long lo, long long hi, str column):
         s = h.sub_1(a)
         total += s.f64(s.row_1(lo + i % span), c) + h.f64(h.row_2(a, lo + i % span), c)
     return total
+
+
+def sub_object(t, tuple parts, bint cint):               # return T.loc[prefix] (a table-valued cell, D45)
+    return _sub(table_handle(t), parts, cint).table_object()

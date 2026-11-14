@@ -218,6 +218,8 @@ def oracle(read, frame, args):
     kind = read
     if kind == 'has' and _bool_on_number_level(frame, args[0]):
         return ('ok', False)
+    if kind == 'sub_obj':
+        kind = 'sub_loc'
     if kind in ('sub_loc', 'sub_has') and _bool_on_number_level(frame, args[0]):
         return ('KeyError', (norm(item(args[0])),))
     if kind in ('loc', 'at', 'int', 'obj'):
@@ -327,6 +329,7 @@ READS = {
     'clamp_read': ('x, c', "t = table(form)\nreturn ('ok', t.loc[min(max(x, t.index.min()), t.index.max()), c])"),
     'sub_loc': ('p, k, c', "sub = table(form).loc[p]\nreturn ('ok', sub.loc[k, c])"),
     'sub_has': ('p, k, c', "sub = table(form).loc[p]\nreturn ('ok', k in sub.index)"),
+    'sub_obj': ('p, k, c', "sub = table(form).loc[p]\nreturn ('ok', sub.loc[k, c])"),
     'rows': ('k1, k2, c', "row = table(form).loc[k1]\nvalue = row[c]\nrow = table(form).loc[k2]\n"
                           "return ('ok', value + row[c])"),
     'asof': ('x', "t = table(form)\nreturn ('ok', t.index.asof(x))"),
@@ -481,6 +484,15 @@ class Build:
             return d.clamp(table, args[0])
         if read == 'clamp_read':
             return d.clamp_read(table, args[0], args[1])
+        if read == 'sub_obj':
+            # a table-valued cell returns the shared child's bound table (D45); the caller reads it
+            prefix, c_prefix = key(args[0])
+            table_object = d.sub_object(table, prefix, c_prefix)
+            assert table_object is d.sub_object(table, prefix, c_prefix)
+            assert type(table_object).__name__ == 'NativeTable'
+            assert table_object.handle is d.sub(table, prefix, c_prefix)
+            parts, c_int = key(args[1])
+            return d.loc(table_object, parts, args[2], c_int)
         if read in ('sub_loc', 'sub_has'):
             prefix, c_prefix = key(args[0])
             sub = d.sub(table, prefix, c_prefix)
@@ -528,7 +540,7 @@ class Build:
 def _live_args(read, args):
     if read in ('loc', 'at', 'int', 'obj', 'has'):
         return (item(args[0]),) + tuple(args[1:])
-    if read in ('sub_loc', 'sub_has'):
+    if read in ('sub_loc', 'sub_has', 'sub_obj'):
         return (item(args[0]), item(args[1])) + tuple(args[2:])
     if read == 'rows':
         return (item(args[0]), item(args[1]), args[2])

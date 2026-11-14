@@ -170,6 +170,7 @@ cdef class TableHandle:
     cdef Py_ssize_t _stride, _colbase
     cdef bint _spec_missing, _int_keys, _increasing, _preserve
     cdef const long long* _okeys    # single-level int keys in row order
+    cdef object _table_obj          # table_object(): built with the handle, None for column views
     cdef Py_ssize_t col(self, object name) except -2               # identity, then ==; KeyError(name)
     cdef Py_ssize_t row_1(self, TableKey p0) except -2              # KeyError(original key)
     cdef Py_ssize_t row_2(self, TableKey p0, TableKey p1) except -2
@@ -204,6 +205,7 @@ cdef class TableHandle:
     cdef TableHandle sub_5(self, TableKey p0, TableKey p1, TableKey p2, TableKey p3, TableKey p4)
     cdef object row_record(self, Py_ssize_t row)                 # row local that escapes
     cdef TableHandle column_view(self, Py_ssize_t col)           # D13 column selection T["c"]
+    cdef object table_object(self)                               # D45: the bound NativeTable of this handle
 
 @cython.final
 cdef class RecordHandle:

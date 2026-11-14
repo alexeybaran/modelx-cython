@@ -1691,16 +1691,16 @@ cdef class NativeTable:
 
     def __modelx_cython_owner__(self):
         """Expose the semantic owner when passing a view to another package."""
-        return self._owner
+        return _semantic_owner(self._owner)
 
     def __modelx_table_owner__(self):
-        return self._owner
+        return _semantic_owner(self._owner)
 
     def __modelx_table_owner_abi__(self):
         return 1
 
     def __eq__(self, other):
-        return self._owner == other
+        return _semantic_owner(self._owner) == other
 
     def __copy__(self):
         return self
@@ -1709,7 +1709,7 @@ cdef class NativeTable:
         return self
 
     def __reduce__(self):
-        return NativeTable, (self._owner,)
+        return NativeTable, (_semantic_owner(self._owner),)
 
 
 Table.register(NativeTable)
@@ -3591,6 +3591,7 @@ cdef class TableHandle:
             _init_rows(self, hold, storage)
         else:
             raise TypeError(f'unknown table storage {storage[0]!r}')
+        _attach_table_objects(self)
 
     # -- columns and cells ------------------------------------------------------------------
 
@@ -3942,6 +3943,14 @@ cdef class TableHandle:
             raise IndexError(f'table column {col} is out of range')
         return _column_of(self, self._colbase + col, (self._columns[col],))
 
+    cdef object table_object(self):
+        """The bound table of this handle (D45): a NativeTable whose handle is this handle, the
+        same object on every call; Python reads on it go to the helper's table (a sub-table is
+        materialised by the helper's per-prefix memo on first Python use only)."""
+        if self._table_obj is None:
+            raise TypeError('a column view is not a table')
+        return self._table_obj
+
     # -- Python side (tests, receipts) -------------------------------------------------------
 
     def helper(self):
@@ -4010,11 +4019,75 @@ cdef Py_ssize_t _own_key_bytes(TableHandle h):
     return size
 
 
+@cython.final
+cdef class _HandleTable:
+    """Owner of the table object of a sub-table handle: the helper's sub-table, asked from the
+    helper (memoised per prefix there) when Python code first reads it."""
+    cdef TableHandle handle
+
+    def _table(self):
+        return self.handle.helper()
+
+    def __getattr__(self, name):
+        return getattr(self.handle.helper(), name)
+
+    def __getitem__(self, key):
+        return self.handle.helper()[key]
+
+    def __iter__(self):
+        return iter(self.handle.helper())
+
+    def __len__(self):
+        return len(self.handle.helper())
+
+    def __contains__(self, key):
+        return key in self.handle.helper()
+
+    def __eq__(self, other):
+        return self.handle.helper() == other
+
+    def __hash__(self):
+        return id(self)
+
+    def __reduce__(self):
+        return self.handle.helper().__reduce__()
+
+
+Table.register(_HandleTable)
+
+
+cdef inline object _semantic_owner(object owner):
+    if type(owner) is _HandleTable:
+        return (<_HandleTable>owner).handle.helper()
+    return owner
+
+
+cdef void _attach_table_objects(TableHandle root) except *:
+    """Give every handle of a table its NativeTable, while the tree is still private."""
+    cdef TableHandle handle
+    cdef NativeTable table
+    cdef _HandleTable lazy
+    stack = [root]
+    while stack:
+        handle = <TableHandle>stack.pop()
+        table = NativeTable.__new__(NativeTable)
+        if handle._prefix:
+            lazy = _HandleTable.__new__(_HandleTable)
+            lazy.handle = handle
+            table._owner = lazy
+        else:
+            table._owner = handle.owner
+        table.handle = handle
+        handle._table_obj = table
+        stack.extend(handle._children)
+
+
 cdef TableHandle _column_of(TableHandle source, Py_ssize_t colbase, tuple columns):
     cdef TableHandle view = _clone(source)
     view._colbase = colbase
     view._columns = columns
     view.width = len(columns)
+    view._table_obj = None
     return view
 
 

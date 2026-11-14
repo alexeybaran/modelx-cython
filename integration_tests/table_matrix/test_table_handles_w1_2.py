@@ -113,3 +113,26 @@ def test_unbound_tables_and_records(b):
     with pytest.raises(KeyError) as error:
         d.field(record, 'missing')
     assert error.value.args == ('missing',)
+
+
+def test_table_object_of_a_sub_table(b):
+    import pickle
+    provider, d = _provider(b), b.driver
+    native = b.compiled.base('F2')
+    owner = native.__modelx_table_owner__()
+    child = d.sub(native, (1,), True)
+    table = d.sub_object(native, (1,), True)
+    assert table is d.sub_object(native, (1,), True) and table.handle is child
+    cached = dict(owner._native_cache.get(('prefix_children', 1), ({},))[0])
+    before = provider.handle_fallbacks()
+    assert d.loc(table, ('y', 2), 'q', False) == 6.0 and provider.handle_fallbacks() == before
+    assert dict(owner._native_cache.get(('prefix_children', 1), ({},))[0]) == cached   # no helper child made
+    assert table.loc[('y', 2), 'q'] == 6.0                           # Python use: the helper child
+    assert table.__modelx_table_owner__() is owner.loc[1]
+    assert ('y', 1) in table.index and len(table.index) == 3
+    restored = pickle.loads(pickle.dumps(table))
+    assert restored.loc[('x', 3), 'b'] == 1.5
+    root = d.sub_object(b.compiled.base('R3'), (0, 'x'), False)
+    assert root.handle.scheme_name == 'dense' and root.index.max() == 7
+    whole = native.handle
+    assert d.loc(whole, (1, 'y', 2), 'q', False) == 6.0
