@@ -514,13 +514,14 @@ def test_not_lowered_reads_are_declined_with_reasons():
     assert reasons['tbl.loc[k, name]'].startswith('column is not a string literal')
     assert reasons['self.gap_table().iterrows()'].startswith('iterrows()')
     assert reasons['r["v"]'].startswith('row of iterrows()')
-    assert reasons['self.multi_table().loc[self.sex()]'].startswith("local 'sub' could not be lowered") \
-        or 'kept as written' in reasons['self.multi_table().loc[self.sex()]']
-    assert "sub-table local 'sub' is also used as a Python table (len(sub))" in \
-        reasons['sub.loc[(self.plan(), 1), "v"]']
+    # W1.9: the sub-table local stays a typed handle; len(sub) takes its bound table
+    assert 'self.multi_table().loc[self.sex()]' not in reasons
+    assert 'sub.loc[(self.plan(), 1), "v"]' not in reasons
+    assert '_mx_h_sub = _mx_h0.sub_1(self.sex())' in text
+    assert 'len(_mx_h_sub.table_object())' in text
     assert reasons['tbl.loc[30:32, "band"]'].startswith('slice or starred key')
     assert reasons['self.mort_table().index.asof(self.rate(t))'].startswith('asof key is not known')
-    assert 'sub = self.multi_table().loc[self.sex()]' in text
+    assert 'sub = self.multi_table().loc[self.sex()]' not in text
     assert all(reason.endswith('runs as a Python call') for reason in reasons.values())
 
 
@@ -748,7 +749,7 @@ PROTOTYPE = {
     # _prefix_model (int levels), _record_field_model
     'p_two': (probe('sub_two(self, t)').replace('sub_two(self, t)', 'float(self.two_table().loc[self.ka(t)].loc[t % 3, "v"])'), 1),
     'p_asof': ('sub = self.two_table().loc[self.ka(t)]\n    ' + probe('float(sub.loc[sub.index.asof(t), "v"])'), 3),
-    'p_kept': ('sub = self.two_table().loc[self.ka(t)]\n    ' + probe('float(len(sub)) + float(sub.loc[t % 3, "v"])'), 0),
+    'p_kept': ('sub = self.two_table().loc[self.ka(t)]\n    ' + probe('float(len(sub)) + float(sub.loc[t % 3, "v"])'), 2),
     'f_ret': ('return float(self.model_point()["premium"])', 1),
     'f_arith': ('return self.model_point()["premium"] * 2.0 + self.model_point()["age"] + t', 2),
     'f_alias': ('rec = self.model_point()\n    return rec["age"] - t', 1),
@@ -777,3 +778,32 @@ def test_report_contract_with_the_transformer_hook():
                if id(site.node) not in reads.lowered]
     assert [entry['read'] for entry in entries] == ['tbl.index']
     assert isinstance(sites[0], TableReadSite)
+
+
+# ---------------------------------------------------------------------- W1.9: escaping sub-tables
+def test_sub_table_local_used_as_a_python_table_stays_a_typed_handle():
+    """A sub-table local that is also iterated, passed or returned keeps its handle reads; the
+    Python table is the handle's bound table, taken at each such use (W1.9)."""
+    source = ('def _f_x(self, t):\n'
+              '    sub = self.two_table().loc[self.ka(t)]\n'
+              '    keys = [k for k in sub.index]\n'
+              '    return float(sub.loc[keys[0], "v"]) + float(sub.loc[t % 3, "v"]) + len(sub)\n')
+    text, reads, sites = lower(prototype_model(), source)
+    assert '    sub = ' not in text
+    assert '_mx_h_sub = _mx_h0.sub_1(self.ka(t))' in text
+    assert '_mx_h_sub.table_object().index' in text and 'len(_mx_h_sub.table_object())' in text
+    assert '_mx_h_sub.f64(_mx_h_sub.row_1(_mx_cy.cast(object, keys[0])), _mx_h_sub.col("v"))' in text
+    assert reads.typed == 3
+    same_values(prototype_model(), source, range(-1, 12))
+
+
+def test_sub_table_local_read_in_a_nested_function_is_kept():
+    source = ('def _f_x(self, t):\n'
+              '    sub = self.two_table().loc[self.ka(t)]\n'
+              '    def g(k):\n'
+              '        return float(sub.loc[k, "v"])\n'
+              '    return g(t % 3) + float(sub.loc[t % 3, "v"])\n')
+    text, reads, sites = lower(prototype_model(), source)
+    assert 'sub = self.two_table().loc[self.ka(t)]' in text
+    assert any('is read in a nested function' in reason for reason in reads.declined.values())
+    same_values(prototype_model(), source, range(-1, 12))

@@ -64,7 +64,7 @@ LONG_LONG_METHODS = frozenset(('first_int', 'last_int', 'asof_int', 'key_int', '
 C_INT_METHODS = frozenset(('first_int', 'last_int', 'asof_int', 'key_int', 'searchsorted_right', 'i64'))
 
 PYTHON = 'runs as a Python call'
-ESCAPES = 'sub-table local {name!r} is also used as a Python table ({use}): kept as written; ' + PYTHON
+ESCAPES = 'sub-table local {name!r} is read in a nested function ({use}): kept as written; ' + PYTHON
 KEPT = 'local {name!r} could not be lowered ({why}): kept as written; ' + PYTHON
 RESULT = ('table-valued selection used as a value ({use}): the helper sub-table is built; '
           'readers of a table-valued cell use its bound handle; ' + PYTHON)
@@ -591,6 +591,11 @@ class _Lowering(cst.CSTTransformer):
         self._escaping_rows = {
             id(node) for name in escaped if self.locals.get(name, ('',))[0] == 'row'
             for node, nested in self.f.loads.get(name, ()) if not nested}
+        # a sub-table local whose value is also needed as a Python table stays a typed handle;
+        # the Python table is the bound table of that handle, taken at each such use only
+        self._escaping_subs = {
+            id(node): name for name in escaped if self.locals.get(name, ('',))[0] == 'sub'
+            for node, nested in self.f.loads.get(name, ()) if not nested}
 
     # ------------------------------------------------------------------ results
     def escapes(self):
@@ -607,7 +612,7 @@ class _Lowering(cst.CSTTransformer):
             if not loads:
                 continue
             use = self._use(loads[0][0])
-            if kind == 'sub':
+            if kind == 'sub' and any(nested for _, nested in loads):
                 kept.setdefault(name, ESCAPES.format(name=name, use=use))
             elif kind == 'row' and any(nested for _, nested in loads):
                 kept.setdefault(name, f'row local used in a nested function ({use})')
@@ -1230,6 +1235,10 @@ class _Lowering(cst.CSTTransformer):
 
     # ------------------------------------------------------------------ names and statements
     def leave_Name(self, original, updated):
+        name = self._escaping_subs.get(id(original))
+        if name is not None:
+            self.changed = True
+            return _method(cst.Name(self.companion(name)), 'table_object')
         if id(original) in self._escaping_rows:
             index, handle, _ = self.row_names(original.value)
             self.changed = True
