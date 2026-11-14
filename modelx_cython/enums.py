@@ -1,5 +1,6 @@
 """Map explicitly authored enum definitions to private Cython constants."""
 import libcst as cst
+from libcst.metadata import ExpressionContext
 
 from .scopes import CstFacts, FormulaTransformer, Names, lexical_nodes
 from .syntax import walk
@@ -73,6 +74,8 @@ class Constants(FormulaTransformer):
                 invalid.update(n.value for n in walk(part.target) if isinstance(n, cst.Name))
             elif not isinstance(part, (cst.Name, cst.Assign)):
                 invalid.update(facts.bindings((part,)))
+        self.loop_members = self._member_loops(nodes, facts, assignments, invalid)
+        self.locals.update(self.loop_members)
         for name, values in assignments.items():
             if name not in invalid and all((isinstance(v, cst.Call) and isinstance(v.func, cst.Attribute)
                     and isinstance(v.func.value, cst.Name) and v.func.value.value == 'self'
@@ -173,6 +176,66 @@ class Constants(FormulaTransformer):
             return after.with_changes(value=self.constant(after.value))
         return after
 
+    def _member_loops(self, nodes, facts, assignments, invalid):
+        """diag-kr: targets of ``for x in (E.A, E.B, ...)`` over a literal tuple of members.
+
+        Such a target holds only members, which compare and key as their integer values
+        (IntEnum), so it is a C ``long long`` when every binding of it is such a loop and every
+        read of it is an ``==``/``!=``/``in``/``not in`` operand or an argument of a cell
+        parameter typed ``long long``; the tuple's elements become the member constants. A read
+        anywhere else (``x is E.A``, an object parameter, a container, ``x.name``) keeps it an
+        object, so a member is never replaced by a bare int where its identity could show.
+        """
+        loops = {}
+        for part in nodes:
+            if isinstance(part, cst.For) and isinstance(part.target, cst.Name):
+                if part.orelse is None and self.member_tuple_constant(part.iter):
+                    loops[part.target.value] = loops.get(part.target.value, 0) + 1
+        safe = set()
+        for part in nodes:
+            if isinstance(part, cst.Comparison) and all(
+                    isinstance(item.operator, (cst.Equal, cst.NotEqual, cst.In, cst.NotIn))
+                    for item in part.comparisons):
+                safe.update(id(operand) for operand in (part.left, *(c.comparator for c in part.comparisons))
+                            if isinstance(operand, cst.Name))
+            elif (isinstance(part, cst.Call) and isinstance(part.func, cst.Attribute)
+                    and isinstance(part.func.value, cst.Name) and part.func.value.value == 'self'
+                    and not any(a.keyword or a.star for a in part.args)):
+                cell = self.cls.cells.get(part.func.attr.value)
+                if cell is None or cell.called_with_kwargs or cell.body_has_closure:
+                    continue
+                for argument, param in zip(part.args, cell.params):
+                    if (isinstance(argument.value, cst.Name)
+                            and cell.get_argtype_expr(param, c_style=True) in ('long long', 'bint')):
+                        safe.add(id(argument.value))
+        found = set()
+        for name, count in loops.items():
+            loads = [node for node, context in facts.contexts.items()
+                     if isinstance(node, cst.Name) and node.value == name and context is ExpressionContext.LOAD]
+            if (name not in assignments and facts.stores[name] == count and name != 'self'
+                    and all(id(node) in safe for node in loads)):
+                found.add(name)
+        invalid.difference_update(found)
+        return found
+
+    def member_tuple_constant(self, node):
+        """A non-empty literal tuple whose every element is ``self.<Ref>.<member>`` of a declared
+        enum (read only, no count)."""
+        return (isinstance(node, cst.Tuple) and bool(node.elements) and all(
+            isinstance(element, cst.Element) and isinstance(element.value, cst.Attribute)
+            and isinstance(element.value.value, cst.Attribute)
+            and isinstance(element.value.value.value, cst.Name) and element.value.value.value.value == 'self'
+            and self.symbols.get((self.cls.name, element.value.value.attr.value, element.value.attr.value))
+            for element in node.elements))
+
+    def leave_For(self, before, after):
+        if (isinstance(before.target, cst.Name) and before.target.value in getattr(self, 'loop_members', ())
+                and self.member_tuple_constant(before.iter)):
+            members = self.members(after.iter)
+            if members is not None:
+                return after.with_changes(iter=members)
+        return after
+
     def integer_ref(self, node):
         """``self.<ref>`` of a Reference stored in a C ``long long`` field (an integer or an
         IntEnum member held by the Space, D31): read from the field, so it compares as a C
@@ -207,6 +270,15 @@ class Constants(FormulaTransformer):
             declared = [cst.parse_statement(f'{name}: _mx_cy.longlong\n') for name in sorted(self.enum_locals)]
             after = after.with_changes(body=after.body.with_changes(
                 body=(*statements[:start], *declared, *statements[start:])))
+        if getattr(self, 'loop_members', None):
+            # diag-kr: the member-loop targets are C integers (their tuples hold member constants)
+            declarations = tuple(cst.SimpleStatementLine((cst.AnnAssign(
+                cst.Name(name), cst.Annotation(cst.Attribute(cst.Name('_mx_cy'), cst.Name('longlong')))),))
+                for name in sorted(self.loop_members))
+            doc_end = 1 if before.get_docstring() is not None else 0
+            body = after.body
+            after = after.with_changes(body=body.with_changes(
+                body=(*body.body[:doc_end], *declarations, *body.body[doc_end:])))
         # W1.4: a member left as an object (an object position) is read from the definition's
         # C field, not through the Space property: self._mx_definition_<Ref>.<member>.
         fields = _MemberFields(self.cls.name, self.symbols)
