@@ -132,6 +132,7 @@ class CellsResolver:
         # cells fqname -> 'pandas.DataFrame' / 'pandas.Series': zero-argument cells whose every
         # sampled result is that pandas class; reads through them are reported, never lowered.
         self.pandas_results = {}
+        self.admitted_tables = set()    # auto-tables: zero-argument cells admitted from a pandas frame
         self.cached_cells = set()
         self._cell_infos = {}
         self._name_index: Dict[str, List[str]] = {}
@@ -574,6 +575,7 @@ def build_resolver(module_infos) -> CellsResolver:
     observed_provider_results = {}
     table_schemas, table_results, cached_cells, cell_infos = {}, {}, set(), {}
     pandas_results = {}
+    admitted_tables = set()
 
     for fqname, info in module_infos.items():
         pkg, basename = fqname.rsplit(".", 1)
@@ -594,6 +596,8 @@ def build_resolver(module_infos) -> CellsResolver:
                 result = getattr(cells, 'table_result', None)
                 if result is not None:
                     table_results[cells.fqname] = result
+                if getattr(cells, 'admitted_table', False):
+                    admitted_tables.add(cells.fqname)
                 pandas_result = _pandas_result(cells)
                 if pandas_result is not None:
                     pandas_results[cells.fqname] = pandas_result
@@ -629,6 +633,7 @@ def build_resolver(module_infos) -> CellsResolver:
     resolver.table_schemas = table_schemas
     resolver.table_results = table_results
     resolver.pandas_results = pandas_results
+    resolver.admitted_tables = admitted_tables
     resolver.cached_cells = cached_cells
     resolver._cell_infos = cell_infos
     return resolver

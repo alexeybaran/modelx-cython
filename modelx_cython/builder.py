@@ -606,6 +606,21 @@ class CombinedCellsInfo(LexicalCellsInfo):
         return getattr(self._rt, 'observed_provider_binding', None)
 
     @property
+    def admitted_table(self):
+        """auto-tables (D104): the sampled value was a plain pandas frame admitted as a table."""
+        return getattr(self._rt, 'admitted_table', False)
+
+    @property
+    def admission_record(self):
+        """auto-tables: the admission record of a zero-argument formula that returned a DataFrame."""
+        return getattr(self._rt, 'admission_record', None)
+
+    @property
+    def pandas_fallbacks(self):
+        """auto-tables: pandas fallbacks on admitted tables in the sample, ``{line: {operation: calls}}``."""
+        return getattr(self._rt, 'pandas_fallbacks', None) or {}
+
+    @property
     def table_schema(self):
         """M1: key and column kinds of a traced helper Table result (tracer.table_schema)."""
         return getattr(self._rt, 'table_schema', None)

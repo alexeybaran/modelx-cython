@@ -107,6 +107,10 @@ def describe(module_infos):
                     'slow_paths': slow_paths(cell, cache),
                     'reasons': reasons or ['original Cython representation'],
                 }
+                from .auto_tables import cell_report
+                tables = cell_report(cell)
+                if tables:
+                    result[cell.fqname]['table_admission'] = tables
     return result
 
 
@@ -220,6 +224,10 @@ def slow_paths(cell, cache):
     for entry in getattr(cell, 'reductions_object', ()) or ():
         entries.append({'kind': 'reduction-on-objects', 'detail': f"line {entry['line']}: {entry['expr']}: "
                         f"{entry['reason']}", 'per_step': per_step})
+    for read in getattr(cell, 'table_admission_reads', ()) or ():
+        if read['class'] == 'C':    # auto-tables: pandas on an admitted table on every call
+            entries.append({'kind': 'pandas-per-step', 'detail': f"line {read['line']}: {read['read']}",
+                            'per_step': True})
     for key in getattr(cell, 'table_reads_keys', ()) or ():
         if 'object (' in key:
             entries.append({'kind': 'table-key-object', 'detail': key, 'per_step': per_step})
@@ -288,7 +296,7 @@ class TableReadSite:
                 'per_step': per_step, 'reason': reason or NOT_LOWERED}
 
 
-def table_read_sites(node, resolver, cls_info, pandas=False):
+def table_read_sites(node, resolver, cls_info, pandas=False, receivers=None):
     """The table reads of one formula FunctionDef, in source order. Read-only.
 
     A receiver is a traced helper Table when it is a self-rooted call to a Cell whose every
@@ -311,7 +319,9 @@ def table_read_sites(node, resolver, cls_info, pandas=False):
     from libcst.metadata import MetadataWrapper, PositionProvider
     from .usage import RESOLVED, _extract_self_chain
 
-    if pandas:
+    if receivers is not None:      # auto-tables: every use of the given cells (admitted tables)
+        pandas, tables, refs = True, set(receivers), set()
+    elif pandas:
         from .usage import pandas_type_id
         tables = set(getattr(resolver, 'pandas_results', {}))
         refs = {name for name, ref in getattr(cls_info, 'refs', {}).items()

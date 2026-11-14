@@ -235,6 +235,10 @@ class RuntimeCellsInfo:     # TODO: Create base class RuntimeBaseMemberInfo
         self.observed_provider_binding = observed_provider_binding(returned)
         self.table_schema = table_schema(returned)
 
+    admitted_table = False     # auto-tables: the traced value was a pandas frame admitted as a table
+    pandas_fallbacks = {}      # auto-tables: {formula line: {operation: calls}} on admitted tables
+    admission_record = None    # auto-tables: what admission decided for this zero-argument formula
+
     def has_args(self):
         """Return whether the cells method takes arguments.
 
@@ -1048,8 +1052,15 @@ class MxCallTraceLogger(CallTraceLogger):
                     if not (len(qualname) == 2
                             and qualname[0][:len(SPACE_PREF)] == SPACE_PREF):
                         continue
-                # Extract cells
+                # Extract cells; a plain pandas table admitted in the sample is traced as its
+                # table (auto-tables, D104)
+                admission = getattr(self, 'admission', None)
+                admitted = bool(admission is not None and admission.substitute(v))
                 self.cells_info[k] = info = RuntimeCellsInfo(v)
+                info.admitted_table = admitted
+                if admission is not None:
+                    info.pandas_fallbacks = admission.fallback_counts(k)
+                    info.admission_record = admission.record_for(k)
                 if info.module not in self.modules:
                     self.modules.append(info.module)
 
