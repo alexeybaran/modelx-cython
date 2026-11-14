@@ -51,6 +51,7 @@ the admission report shows.
 import libcst as cst
 
 from .usage import RESOLVED, _extract_self_chain
+from .syntax import dotted_name
 
 TABLE_TYPE = 'modelx_helpers.immutable_inputs.Table'
 RECORD_TYPE = 'modelx_helpers.immutable_inputs.Record'
@@ -191,6 +192,12 @@ class _Formula(cst.CSTVisitor):
         # formula level); the names stay in `other`, these values serve `is_int` only
         self.unpacked = {}
         self.binds = {}             # name -> number of bindings outside comprehensions
+        # diag-kr: `for k in range(...)` at formula level (the range call per binding of k);
+        # the names stay in `other`, these serve `is_int` only
+        self.range_loops = {}
+        # diag-kr: names declared ``name: _mx_cy.longlong`` (no value) by an earlier pass, at
+        # formula level: Cython holds them as C long long whatever is assigned
+        self.c_long_long = set()
         self.names = set()
         self._depth = 0
         self._shadow = []
@@ -276,12 +283,21 @@ class _Formula(cst.CSTVisitor):
 
     def visit_AnnAssign(self, node):
         self._store(node.target, node.value, plain=node.value is not None and self._depth == 1)
+        if (node.value is None and self._depth == 1 and isinstance(node.target, cst.Name)
+                and dotted_name(node.annotation.annotation) == '_mx_cy.longlong'):
+            self.c_long_long.add(node.target.value)
 
     def visit_AugAssign(self, node):
         self._store(node.target)
 
     def visit_For(self, node):
         self._store(node.target)
+        if (self._depth == 1 and isinstance(node.target, cst.Name)
+                and not any(node.target.value in names for names in self._shadow)
+                and isinstance(node.iter, cst.Call) and isinstance(node.iter.func, cst.Name)
+                and node.iter.func.value == 'range' and 1 <= len(node.iter.args) <= 3
+                and _plain_args(node.iter)):
+            self.range_loops.setdefault(node.target.value, []).append(node.iter)
 
     def visit_CompFor(self, node):
         class Collect(cst.CSTVisitor):
@@ -528,6 +544,17 @@ class TableReads:
             if (values and expr.value not in self.formula.other and expr.value not in self._params
                     and all(self.is_int(value, depth + 1) for value in values)):
                 return f'local {expr.value} is assigned integers'
+            # diag-kr: a `for k in range(a, b, c)` target with integer bounds (and any plain
+            # integer assignments) is an integer (`for k in range(1, 7): T.loc[k, "c"]`)
+            if expr.value in self.formula.c_long_long and expr.value not in self._params:
+                return f'local {expr.value} is declared long long'
+            loops = self.formula.range_loops.get(expr.value, ())
+            if (loops and expr.value not in self._params and 'range' not in self.formula.binds
+                    and self.formula.binds.get(expr.value, 0) == len(loops) + len(values or ())
+                    and not self.formula.unpacked.get(expr.value)
+                    and all(self.is_int(arg.value, depth + 1) for call in loops for arg in call.args)
+                    and all(self.is_int(value, depth + 1) for value in (values or ()))):
+                return f'local {expr.value} is a range loop variable'
             # diag-jp: bound only by plain and literal-tuple assignments (`x, m = f(k), g(k)`)
             unpacked = self.formula.unpacked.get(expr.value, ())
             every = [*(values or ()), *unpacked]
@@ -630,7 +657,8 @@ class TableReads:
     def exact_long_long(self, expr):
         """``expr`` is statically a C ``long long`` (a cell result or a parameter)."""
         if isinstance(expr, cst.Name):
-            return self.param_type(expr.value) == 'long long' or expr.value in self._key_locals
+            return (self.param_type(expr.value) == 'long long' or expr.value in self._key_locals
+                    or (expr.value in self.formula.c_long_long and expr.value not in self._params))
         return isinstance(expr, cst.Call) and self.call_rettype(expr)[0] == 'long long'
 
     def scalar(self, expr):
