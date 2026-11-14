@@ -22,8 +22,11 @@ FORMULAS = {
     "lead_sub": "def lead_sub(t):\n    return sum(w(t, s) * 2.0 for s in ids(t)) - g(t) + 1.0\n",
     "lead_assign": "def lead_assign(t):\n    x = sum(w(t, s) for s in ids(t) if s > 1) + g(t)\n    return x * 2.0\n",
     "lead_raise": "def lead_raise(t):\n    return sum(w(t, s) for s in ids(t)) + h(t)\n",
+    # D93: not the leftmost operand (g(t) is evaluated first): stays on today's path
+    "trail": "def trail(t):\n    return g(t) + sum(w(t, s) for s in ids(t))\n",
 }
-NAMES = ["lead_add", "lead_sub", "lead_assign", "lead_raise"]
+LOWERED = ["lead_add", "lead_sub", "lead_assign", "lead_raise"]
+NAMES = LOWERED + ["trail"]
 
 SAMPLE = """\
 from exported import mx_model
@@ -41,6 +44,7 @@ from exported import mx_model as original
 from exported_cy import mx_model as compiled
 
 o, c = original.Projection, compiled.Projection
+empty = 0
 for t in range(0, 12):
     for name in {names!r}:
         try:
@@ -54,6 +58,9 @@ for t in range(0, 12):
             raise AssertionError((name, t, 'no ValueError'))
         b = getattr(c, name)(t)
         assert a == b and float(a).hex() == float(b).hex(), (name, t, a, b)
+        if len(o.ids(t)) == 0:
+            empty += 1
+assert empty > 0                       # the empty vector is exercised (t % 4 == 0)
 print('leading sums ok')
 """
 
@@ -85,11 +92,11 @@ def test_leading_vector_sum(tmp_path):
     admission = json.loads((tmp_path / "exported_cy" / "_mx_admission.json").read_text(encoding="utf-8"))
     reports = _reports(admission)
     assert reports["ids"]["vectors"]["shape"] == "I", reports["ids"]
-    for name in NAMES:
+    for name in LOWERED:
         assert reports[name]["vectors"]["lowered"] >= 1, (name, reports[name]["vectors"])
         assert not reports[name]["vectors"]["fallbacks"], (name, reports[name]["vectors"])
-    source = (tmp_path / "exported_cy" / "_mx_classes.py").read_text(encoding="utf-8")
-    assert "PySum" not in source and "_mx_reduce_" not in source
+    assert reports["trail"]["vectors"]["lowered"] == 0, reports["trail"]["vectors"]
+    assert any("generator over vectors not lowered" in f for f in reports["trail"]["vectors"]["fallbacks"])
     (tmp_path / "check.py").write_text(CHECK.format(names=NAMES), encoding="utf-8")
     result = subprocess.run([sys.executable, "check.py"], cwd=tmp_path, capture_output=True, text=True)
     assert result.returncode == 0, result.stdout + result.stderr
