@@ -128,7 +128,10 @@ class PyRecord:
 
 
 RUNTIME = {M: SimpleNamespace(table_handle=PyHandle, record_handle=PyRecord,
-                              TableHandle=PyHandle, RecordHandle=PyRecord),
+                              TableHandle=PyHandle, RecordHandle=PyRecord, TableRef=PyHandle,
+                              key_label=lambda h, i: list(h.table.index)[i],
+                              key_f64=lambda h, i: float(list(h.table.index)[i]),
+                              **{f'sub_ref_{n}': (lambda h, *parts: h._sub(*parts)) for n in range(1, 6)}),
            '_mx_cy': SimpleNamespace(cast=lambda type_, value: int(value) if type_ == 'longlong' else value,
                                      longlong='longlong', Py_ssize_t=int, double='double')}
 
@@ -399,11 +402,12 @@ def test_prefix_selection_local_is_a_typed_handle():
                                '        return float(sub.loc[self.year(t), "v"])\n'
                                '    return float(sub.loc[sub.index.max(), "v"])\n')
     assert body(text).splitlines()[:3] == [
-        f'_mx_h_sub: {M}.TableHandle',
+        f'_mx_h_sub: {M}.TableRef',
         f'_mx_h0: {M}.TableHandle = {M}.table_handle(self.multi_table())',
-        '_mx_h_sub = _mx_h0.sub_2(self.sex(), self.plan())']
-    assert 'if _mx_h_sub.has_1(self.year(t)):' in text
-    assert '_mx_h_sub.f64(_mx_h_sub.row_1(_mx_h_sub.last_int()), _mx_h_sub.col("v"))' in text
+        f'_mx_h_sub = {M}.sub_ref_2(_mx_h0, self.sex(), self.plan())']
+    sub = f'_mx_cy.cast({M}.TableHandle, _mx_h_sub)'      # borrowed shared child (D47, W1.9)
+    assert f'if {sub}.has_1(self.year(t)):' in text
+    assert f'{sub}.f64({sub}.row_1({sub}.last_int()), {sub}.col("v"))' in text
     assert 'sub = ' not in text.replace('_mx_h_sub = ', '')
     assert len(reads.lowered) == len(sites) == 5 and not reads.declined
 
@@ -413,7 +417,8 @@ def test_inline_prefix_chain_and_column_selection():
                            '    return self.multi_table().loc[(self.sex(), self.plan())].loc[self.year(t), "v"]'
                            ' + self.mort_table()["mort_rate"][self.age(t)]'
                            ' + self.mort_table()["band"][self.age(t)]\n')
-    assert '_mx_h0.sub_2(self.sex(), self.plan()).f64(_mx_h0.sub_2(self.sex(), self.plan()).row_1(' in text
+    # W1.9: one row of the parent for the prefix and the key, no child handle
+    assert '_mx_h0.f64(_mx_h0.row_3(self.sex(), self.plan(), self.year(t)), _mx_h0.col("v"))' in text, text
     assert '_mx_h1.f64(_mx_h1.row_1(self.age(t)), _mx_h1.col("mort_rate"))' in text
     assert '_mx_h1.i64(_mx_h1.row_1(self.age(t)), _mx_h1.col("band"))' in text
     assert reads.typed == 3 and not reads.declined
@@ -525,8 +530,8 @@ def test_not_lowered_reads_are_declined_with_reasons():
     # W1.9: the sub-table local stays a typed handle; len(sub) takes its bound table
     assert 'self.multi_table().loc[self.sex()]' not in reasons
     assert 'sub.loc[(self.plan(), 1), "v"]' not in reasons
-    assert '_mx_h_sub = _mx_h0.sub_1(self.sex())' in text
-    assert 'len(_mx_h_sub.table_object())' in text
+    assert f'_mx_h_sub = {M}.sub_ref_1(_mx_h0, self.sex())' in text
+    assert f'len(_mx_cy.cast({M}.TableHandle, _mx_h_sub).table_object())' in text
     assert reasons['tbl.loc[30:32, "band"]'].startswith('slice or starred key')
     assert reasons['self.mort_table().index.asof(self.rate(t))'].startswith('asof key is not known')
     assert 'sub = self.multi_table().loc[self.sex()]' not in text
@@ -798,10 +803,11 @@ def test_sub_table_local_used_as_a_python_table_stays_a_typed_handle():
               '    return float(sub.loc[keys[0], "v"]) + float(sub.loc[t % 3, "v"]) + len(sub)\n')
     text, reads, sites = lower(prototype_model(), source)
     assert '    sub = ' not in text
-    assert '_mx_h_sub = _mx_h0.sub_1(self.ka(t))' in text
-    assert 'keys = [_mx_h_sub.key_int(_mx_i) for _mx_i in range(_mx_h_sub.rows)]' in text
-    assert 'len(_mx_h_sub.table_object())' in text
-    assert '_mx_h_sub.f64(_mx_h_sub.row_1(_mx_cy.cast(object, keys[0])), _mx_h_sub.col("v"))' in text
+    sub = f'_mx_cy.cast({M}.TableHandle, _mx_h_sub)'
+    assert f'_mx_h_sub = {M}.sub_ref_1(_mx_h0, self.ka(t))' in text
+    assert f'keys = [{sub}.key_int(_mx_i) for _mx_i in range({sub}.rows)]' in text
+    assert f'len({sub}.table_object())' in text
+    assert f'{sub}.f64({sub}.row_1(_mx_cy.cast(object, keys[0])), {sub}.col("v"))' in text
     assert reads.typed == 4
     same_values(prototype_model(), source, range(-1, 12))
 
@@ -848,8 +854,8 @@ INDEX_FORMS = {
                            ['sorted(float(_mx_h_tbl.key_int(_mx_i)) for _mx_i in range(_mx_h_tbl.rows))']),
     'compr_sub': ('sub = self.two_table().loc[self.ka(t)]\n'
                   '    return min(k for k in sub.index if sub.loc[k, "v"] >= 2.0)',
-                  ['min(_mx_h_sub.key_int(_mx_i) for _mx_i in range(_mx_h_sub.rows) '
-                   'if _mx_h_sub.f64(_mx_i, _mx_h_sub.col("v")) >= 2.0)']),
+                  ['min(SUB.key_int(_mx_i) for _mx_i in range(SUB.rows) '
+                   'if SUB.f64(_mx_i, SUB.col("v")) >= 2.0)']),
     'compr_shadow': ('tbl = self.gap_table()\n'
                      '    return [[k for k in range(2)] for k in tbl.index], [k for k in tbl.index]',
                      ['[[k for k in range(2)] for _mx_i in range(_mx_h_tbl.rows)]']),
@@ -867,6 +873,7 @@ def test_index_as_typed_keys(name):
     source = f'def _f_{name}(self, t):\n    {statements}\n'
     text, reads, sites = lower(prototype_model(), source)
     for fragment in fragments:
+        fragment = fragment.replace('SUB', f'_mx_cy.cast({M}.TableHandle, _mx_h_sub)')
         assert fragment in text, (fragment, text)
     assert '.index' not in text.split('\n', 1)[1], text
     assert not reads.declined, reads.declined
@@ -877,7 +884,7 @@ def test_index_of_tuples_is_not_iterated_natively():
     source = 'def _f_x(self, t):\n    return [k for k in self.multi_table().index], list(self.two_table().index)\n'
     text, reads, sites = lower(base_model().add('two_table', prototype_model().cells['two_table'].function()), source)
     assert '.index' in text and 'key_int' not in text
-    assert all(reason.startswith('iteration of an index that is not a single integer level')
+    assert all(reason.startswith('iteration of an index of several levels')
                for reason in reads.declined.values()) and len(reads.declined) == 2
 
 
@@ -927,3 +934,68 @@ def test_asof_of_a_local_not_known_to_be_an_integer_is_typed_when_an_int():
     assert '(_mx_h0.asof_int(a) if type(a) is int else _mx_h0.table_object().index.asof(a))' in text, text
     assert not reads.declined
     same_values(_anchor_model(), source, range(0, 12))
+
+
+# ---------------------------------------------------------------------- W1.9: labels, chains
+def _label_model():
+    model = prototype_model()
+    model.add('curve', pdn.table(pd.DataFrame({'value': [0.0, 0.5, 0.9, 1.0]},
+                                              index=pd.Index([0.0, 1.0, 2.5, 4.0], name='key'))))
+    model.add('items', pdn.table(pd.DataFrame({'amount': [1.0, 2.0, 3.0], 'n': [2, 1, 2]},
+                                              index=pd.Index(['b', 'a', 'c'], name='item'))))
+    model.add('pairs', pdn.table(pd.DataFrame({'a': [3, 1, 2, 1], 's': [0, 1, 0, 0], 'v': [1.0, 2.0, 3.0, 4.0]})
+                                 .set_index(['a', 's'])))
+    return model
+
+
+LABEL_FORMS = {
+    'float_pairs': ('tab = self.curve()\n    pv = [(float(k), float(tab.loc[k, "value"])) for k in tab.index]\n'
+                    '    return pv[t % 4][1] + pv[0][0]',
+                    [f'[({M}.key_f64(_mx_h_tab, _mx_i), _mx_h_tab.f64(_mx_i, _mx_h_tab.col("value"))) '
+                     'for _mx_i in range(_mx_h_tab.rows)]']),
+    'float_sorted': ('tbl = self.curve()\n    xs = sorted(float(a) for a in tbl.index)\n'
+                     '    return float(tbl.loc[xs[t % 4], "value"])',
+                     [f'sorted({M}.key_f64(_mx_h_tbl, _mx_i) for _mx_i in range(_mx_h_tbl.rows))']),
+    'str_for': ('tab = self.items()\n    total = 0.0\n    for item in tab.index:\n'
+                '        row = tab.loc[item]\n        if row["n"] != 2:\n            continue\n'
+                '        total += float(row["amount"]) * t\n    return total',
+                [f'item = {M}.key_label(_mx_h_tab, _mx_i)']),
+    'str_list': ('return list(self.items().index), t', [f'[{M}.key_label(_mx_h0, _mx_i) for _mx_i in range(_mx_h0.rows)]']),
+    'tuple_max': ('return max(a for a, s in self.pairs().index) + t',
+                  [f'max({M}.key_label(_mx_h0, _mx_i)[0] for _mx_i in range(_mx_h0.rows))']),
+    'tuple_filter': ('return min(a for a, s in self.pairs().index if s == t % 2)',
+                     [f'if {M}.key_label(_mx_h0, _mx_i)[1] == t % 2)']),
+    'chain_column': ('return float(self.two_table().loc[self.ka(t)]["v"][self.kb(t)])',
+                     ['_mx_h0.f64(_mx_h0.row_2(self.ka(t), self.kb(t)), _mx_h0.col("v"))']),
+    'chain_loc': ('return float(self.two_table().loc[self.ka(t)].loc[self.kb(t), "v"])',
+                  ['_mx_h0.f64(_mx_h0.row_2(self.ka(t), self.kb(t)), _mx_h0.col("v"))']),
+}
+
+
+@pytest.mark.parametrize('name', sorted(LABEL_FORMS))
+def test_index_labels_tuples_and_chains(name):
+    statements, fragments = LABEL_FORMS[name]
+    source = f'def _f_{name}(self, t):\n    ' + probe(statements.replace('\n    return ', '\n    _r = ')
+                                                      .split('\n    _r = ')[0]) if False else \
+        f'def _f_{name}(self, t):\n    {statements}\n'
+    text, reads, sites = lower(_label_model(), source)
+    for fragment in fragments:
+        assert fragment in text, (fragment, text)
+    assert '.index' not in text.split('\n', 1)[1] and 'sub_' not in text, text
+    assert not reads.declined, reads.declined
+    if name.startswith('chain'):
+        # one row of the parent: a missing key raises KeyError of the whole key (prefix and
+        # key parts), where the chain raises it for the part that is missing (as D27b)
+        receiver = _label_model().receiver()
+        for t in range(-2, 12):
+            expected, got = _run(source, receiver, (t,), {}), _run(text, receiver, (t,), RUNTIME)
+            assert got[0] == expected[0] and (got == expected or got[1][0] is expected[1][0] is KeyError)
+        return
+    same_values(_label_model(), source, range(-2, 12))
+
+
+def test_tuple_index_where_order_matters_is_declined():
+    source = 'def _f_x(self, t):\n    return [a for a, s in self.pairs().index], sum(a for a, s in self.pairs().index)\n'
+    text, reads, sites = lower(_label_model(), source)
+    assert 'key_label' not in text and len(reads.declined) == 2
+    same_values(_label_model(), source, [0])

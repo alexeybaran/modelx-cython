@@ -74,8 +74,9 @@ ITERROWS_ROW = 'row of iterrows(): ' + PYTHON
 INDEX_OBJECT = ('T.index used as a Python object (iteration, len, list, ...), not by `k in T.index`, '
                 'min()/max(), asof, searchsorted or [i]; ' + PYTHON)
 NO_SCHEMA = 'receiver has no traced table schema; ' + PYTHON
-INDEX_NOT_INT = ('iteration of an index that is not a single integer level (keys are tuples or '
-                 'labels); ' + PYTHON)
+INDEX_NOT_INT = ('iteration of an index of several levels (tuple keys) other than inside min, max, any, '
+                 'all, sorted or set, or with a target that does not unpack every level; ' + PYTHON)
+UNORDERED = frozenset(('min', 'max', 'any', 'all', 'sorted', 'set'))
 COLUMN_VIEW = 'column selection T["c"] used other than by a key read; ' + PYTHON
 
 
@@ -811,12 +812,20 @@ class _Lowering(cst.CSTTransformer):
             current = node.for_in
             while current is not None:      # for k in R.index: k is H.key_int(i), i a position
                 target = current.target
-                if (isinstance(target, cst.Name) and not self._names_in(current.iter) & names
+                unpack = (isinstance(target, cst.Tuple) and all(
+                    isinstance(item, cst.Element) and isinstance(item.value, cst.Name) for item in target.elements))
+                if ((isinstance(target, cst.Name) or unpack) and not self._names_in(current.iter) & names
                         and self._static_index(current.iter) is not None):
                     iref = self.index_ref(current.iter)
-                    if iref is not None and iref.schema.int_key:
+                    found = None
+                    if iref is not None and iref.schema.levels == 1 and isinstance(target, cst.Name):
+                        found = {target.value: (iref.handle, None, 'int' if iref.schema.int_key else 'label')}
+                    elif (iref is not None and unpack and len(target.elements) == iref.schema.levels
+                          and self._unordered(node)):
+                        found = {item.value.value: (iref.handle, None, j) for j, item in enumerate(target.elements)}
+                    if found is not None:
                         position = self.reserve('_mx_i')
-                        mapping[target.value] = (iref.handle, position)
+                        mapping.update({name: (handle, position, mode) for name, (handle, _, mode) in found.items()})
                         self._compfor[id(current)] = (iref.handle, position, iref)
                     elif iref is not None:
                         self.decline(iref.sites[0], INDEX_NOT_INT)
@@ -830,6 +839,14 @@ class _Lowering(cst.CSTTransformer):
             self._shadow.pop()
             self._keyvars.pop()
         return super().on_leave(original, updated)
+
+    def _unordered(self, node):
+        """The comprehension is the only argument of min, max, any, all, sorted or set, whose
+        result does not depend on the order of the keys."""
+        arg = self.f.parents.get(id(node))
+        call = self.f.parents.get(id(arg)) if isinstance(arg, cst.Arg) else None
+        return (isinstance(node, cst.GeneratorExp) and isinstance(call, cst.Call) and len(call.args) == 1
+                and isinstance(call.func, cst.Name) and call.func.value in UNORDERED)
 
     @staticmethod
     def _names_in(expr):
@@ -851,18 +868,24 @@ class _Lowering(cst.CSTTransformer):
 
     def leave_For(self, original, updated):
         target = original.target
-        if not (isinstance(target, cst.Name) and target.value in self.o._key_locals):
+        if not isinstance(target, cst.Name):
+            return updated
+        ints = target.value in self.o._key_locals
+        if not ints and not (self.f.binds.get(target.value) == 1 and target.value not in self.o._params):
+            return updated
+        if self._static_index(original.iter) is None:
             return updated
         iref = self.index_ref(original.iter)
-        if iref is None or not iref.schema.int_key:     # pragma: no cover - _loop_keys agrees
+        if iref is None or iref.schema.levels != 1 or ints != iref.schema.int_key:
             return updated
         position = self.reserve('_mx_i')
         self._declare.append((position, '_mx_cy.Py_ssize_t'))
-        if (target.value, '_mx_cy.longlong') not in self._declare:
+        if ints and (target.value, '_mx_cy.longlong') not in self._declare:
             self._declare.append((target.value, '_mx_cy.longlong'))
         self.mark(*iref.sites, notes=iref.notes)
-        first = cst.SimpleStatementLine([cst.Assign([cst.AssignTarget(cst.Name(target.value))],
-                                                    _method(iref.handle, 'key_int', cst.Name(position)))])
+        key = (_method(iref.handle, 'key_int', cst.Name(position)) if ints
+               else _call(self.m('key_label'), iref.handle, cst.Name(position)))
+        first = cst.SimpleStatementLine([cst.Assign([cst.AssignTarget(cst.Name(target.value))], key)])
         body = updated.body
         if isinstance(body, cst.IndentedBlock):
             body = body.with_changes(body=[first, *body.body])
@@ -903,7 +926,7 @@ class _Lowering(cst.CSTTransformer):
                 if self.o.table_cell(receiver) is not None:
                     handle = self.hoist(receiver, 'table')
                 elif isinstance(receiver, cst.Name) and self.local(receiver.value):
-                    handle = cst.Name(self.companion(receiver.value))
+                    handle = self.table_ref(receiver).handle
             if handle is None:
                 shared = True
                 handle = cst.Name(self.reserve('_mx_rh_' + name))
@@ -928,11 +951,21 @@ class _Lowering(cst.CSTTransformer):
             return _Ref('table', schema, self.hoist(original, 'table'))
         if isinstance(original, cst.Name):
             found = self.local(original.value)
-            if found is not None and found[0] in ('table', 'sub'):
+            if found is not None and found[0] == 'table':
                 return _Ref('table', found[1], cst.Name(self.companion(original.value)), (original,))
+            if found is not None and found[0] == 'sub':
+                return _Ref('table', found[1], self.sub_handle(original.value), (original,))
             return None
         memo = self._memo.get(id(original))
         return memo if memo is not None and memo.kind == 'table' else None
+
+    def sub_handle(self, name):
+        """The handle of a sub-table local: its borrowed companion ``TableRef`` read as a
+        ``TableHandle`` (no reference is taken on the shared child; the parent handle, held for
+        the whole formula, keeps it alive; D47)."""
+        ref = self.companion(name, 'TableRef')
+        return _call(cst.Attribute(cst.Name('_mx_cy'), cst.Name('cast')),
+                     cst.parse_expression(self.mtype('TableHandle')), cst.Name(ref))
 
     def record_ref(self, original):
         if not self.o.records_enabled():
@@ -1019,10 +1052,13 @@ class _Lowering(cst.CSTTransformer):
     def _positions(self, handle):
         return _call(cst.Name('range'), cst.Attribute(handle, cst.Name('rows')))
 
-    def _key_list(self, handle):
-        """``[H.key_int(i) for i in range(H.rows)]``: the keys in row order, as the index."""
+    def _key_list(self, handle, ints=True):
+        """``[H.key_int(i) for i in range(H.rows)]`` (``M.key_label(H, i)`` for labels that are
+        not integers): the keys in row order, as the index."""
         index = self.reserve('_mx_i')
-        return cst.ListComp(elt=_method(handle, 'key_int', cst.Name(index)), for_in=cst.CompFor(
+        elt = (_method(handle, 'key_int', cst.Name(index)) if ints
+               else _call(self.m('key_label'), handle, cst.Name(index)))
+        return cst.ListComp(elt=elt, for_in=cst.CompFor(
             target=cst.Name(index), iter=self._positions(handle)))
 
     def _index_builtin(self, name, iref, original, updated):
@@ -1038,11 +1074,11 @@ class _Lowering(cst.CSTTransformer):
                 node, info = _method(handle, method), (method, None, handle, None, None)
             else:
                 node = _method(handle, 'first_key' if name == 'min' else 'last_key')
-        elif not schema.int_key:
+        elif schema.levels != 1:
             self.decline(site, INDEX_NOT_INT)
             return updated
         else:
-            node = self._key_list(handle)
+            node = self._key_list(handle, schema.int_key)
             if name != 'list':
                 node = _call(cst.Name(name), node)
         self.mark(*iref.sites, notes=iref.notes)
@@ -1146,7 +1182,7 @@ class _Lowering(cst.CSTTransformer):
     def row_of(self, ref, key_original, key_updated, where):
         """Row expression for a complete key of ``ref``: (node, notes) or (None, reason)."""
         info = self._kinds.get(id(key_updated))
-        if (info is not None and info[0] == 'key_int' and info[3] is not None and ref.schema.levels == 1
+        if (info is not None and info[0] in ('key_int', 'key_label') and info[3] is not None and ref.schema.levels == 1
                 and _code(info[2]) == _code(ref.handle)):
             return info[3], (f'{where}: the row of the iterated key',)
         if (info is not None and info[0] == 'asof_int' and ref.schema.levels == 1
@@ -1230,9 +1266,33 @@ class _Lowering(cst.CSTTransformer):
         self.decline(original, 'column is not a string literal (rule 5); ' + PYTHON)
         return updated
 
+    def _chained(self, site, ref, key_original, key_updated, column_updated, column_original, where):
+        """A complete-row read through an inline selection, ``T.loc[a].loc[b, "c"]`` or
+        ``T.loc[a]["c"][b]``: one row of the parent table for the prefix and key parts together,
+        so no child handle is taken. (node, info) or None."""
+        origin = ref.extra if isinstance(ref.extra, tuple) and ref.extra and ref.extra[0] == 'sub' else None
+        if origin is None:
+            return None
+        parent, prefix = origin[1], origin[2]
+        key_parts, _ = self.parts(key_original, key_updated, ref.schema, where, allow_prefix=False)
+        if key_parts is None or len(prefix) + len(key_parts) > MAX_PARTS:
+            return None
+        row = _method(parent.handle, f'row_{len(prefix) + len(key_parts)}', *prefix, *key_parts)
+        node, info = self.column_read(parent, row, column_updated, column_original)
+        if node is None:
+            return None
+        self.mark(site, *ref.sites, notes=(*ref.notes, f'{where} through a selection: one row of the parent',
+                                           key_parts.note))
+        return node, info
+
     def _column_key(self, original, updated, column, key_original, key_updated):
         """``T["c"][k]``: the read of column c at k (D13)."""
         ref = column.handle
+        chained = self._chained(original, ref, key_original, key_updated, column.extra,
+                                _subscript_parts(self._column_original(column))[0], 'T["c"][key]')
+        if chained is not None:
+            self.mark(*column.sites)
+            return self.out(chained[0], updated, chained[1])
         row, notes = self.row_of(ref, key_original, key_updated, 'T["c"][key]')
         node = info = None
         if row is not None:
@@ -1273,6 +1333,10 @@ class _Lowering(cst.CSTTransformer):
             return updated
         key_updated = updated.slice[0].slice.value
         if len(parts) == 2:
+            chained = self._chained(site, ref, parts[0], key_updated, updated.slice[1].slice.value, parts[1],
+                                    f'{attr}[key, column]')
+            if chained is not None:
+                return self.out(chained[0], updated, chained[1])
             row, notes = self.row_of(ref, parts[0], key_updated, f'{attr}[key, column]')
             node = info = None
             if row is not None:
@@ -1323,7 +1387,7 @@ class _Lowering(cst.CSTTransformer):
             return updated
         handle = _method(ref.handle, f'sub_{len(key_parts)}', *key_parts)
         self._memo[id(original)] = _Ref('table', ref.schema.child(len(key_parts)), handle, (site, *ref.sites),
-                                        notes=(*ref.notes, key_parts.note))
+                                        extra=('sub', ref, key_parts), notes=(*ref.notes, key_parts.note))
         return updated
 
     def _tuple_name(self, key, schema):
@@ -1477,6 +1541,8 @@ class _Lowering(cst.CSTTransformer):
         if info is None:
             return updated
         method, kind = info[0], info[1]
+        if name == 'float' and method == 'key_label':
+            return self.out(_call(self.m('key_f64'), info[2], info[3]), updated)
         if name == 'float' and method == 'f64':
             return self.out(inner, updated, info)
         if name == 'int' and method in C_INT_METHODS:
@@ -1492,16 +1558,22 @@ class _Lowering(cst.CSTTransformer):
         if self._keyvars and id(original) not in self.f._stores:
             for shadow, mapping in zip(reversed(self._shadow), reversed(self._keyvars)):
                 if original.value in mapping:
-                    handle, position = mapping[original.value]
+                    handle, position, mode = mapping[original.value]
                     self.changed = True
-                    return self.out(_method(handle, 'key_int', cst.Name(position)), updated,
-                                    ('key_int', None, handle, cst.Name(position), None))
+                    if mode == 'int':
+                        return self.out(_method(handle, 'key_int', cst.Name(position)), updated,
+                                        ('key_int', None, handle, cst.Name(position), None))
+                    label = _call(self.m('key_label'), handle, cst.Name(position))
+                    if mode == 'label':
+                        return self.out(label, updated, ('key_label', None, handle, cst.Name(position), None))
+                    return self.out(cst.Subscript(label, [cst.SubscriptElement(cst.Index(cst.Integer(str(mode))))]),
+                                    updated)
                 if original.value in shadow:
                     break
         name = self._escaping_subs.get(id(original))
         if name is not None:
             self.changed = True
-            return _method(cst.Name(self.companion(name)), 'table_object')
+            return _method(self.sub_handle(name), 'table_object')
         if id(original) in self._escaping_rows:
             index, handle, _ = self.row_names(original.value)
             self.changed = True
@@ -1554,8 +1626,14 @@ class _Lowering(cst.CSTTransformer):
             if ref is None or ref.kind != 'table':
                 self.failed.setdefault(name, f'the selection {self._use(value)} is not lowered')
                 return updated
-            handle = self.companion(name)
-            statements.append(cst.Assign([cst.AssignTarget(cst.Name(handle))], ref.handle))
+            handle = self.companion(name, 'TableRef')
+            origin = ref.extra if isinstance(ref.extra, tuple) and ref.extra[0] == 'sub' else None
+            if origin is None:      # pragma: no cover - every lowered selection carries its origin
+                self.failed.setdefault(name, f'the selection {self._use(value)} has no parent handle')
+                return updated
+            parent, key_parts = origin[1], origin[2]
+            borrowed = _call(self.m(f'sub_ref_{len(key_parts)}'), parent.handle, *key_parts)
+            statements.append(cst.Assign([cst.AssignTarget(cst.Name(handle))], borrowed))
             self.mark(*ref.sites, notes=ref.notes)
         elif kind == 'index':
             if name in self.escaped:
