@@ -15,7 +15,7 @@ def operation(values):
 
 
 operation.__modelx_cython_helper__ = ('sample.provider', 'all')
-operation.__modelx_cython_reduction__ = 'bool_all'
+operation.__modelx_cython_scalar_result__ = 'bool'
 
 
 def test_aliases_share_capabilities_without_freezing_member_callables():
@@ -24,7 +24,7 @@ def test_aliases_share_capabilities_without_freezing_member_callables():
     module.alias = operation
     metadata = module_helpers(module)
     assert metadata['every'].helper == ('sample.provider', 'all')
-    assert metadata['every'].reduction == 'bool_all'
+    assert metadata['every'].scalar_result == 'bool'
     assert metadata['alias'] == metadata['every']
     ref = SimpleNamespace(helper_members=metadata)
     call = cst.parse_expression('self.operations.every')
@@ -56,7 +56,7 @@ def test_invalid_member_capability_is_not_silently_accepted():
     def invalid(values):
         return values
     invalid.__modelx_cython_helper__ = ('sample.provider', 'invalid')
-    invalid.__modelx_cython_reduction__ = 'invented'
+    invalid.__modelx_cython_scalar_result__ = 'invented'
     module = ModuleType('sample.invalid')
     module.invalid = invalid
     with pytest.raises(ValueError, match='invalid helper capability'):
@@ -71,33 +71,19 @@ def test_direct_references_and_foreign_receiver_boundaries():
     assert helper_reference(cst.parse_expression('self.operations.nested.every'), refs) is None
 
 
-def test_shared_iteration_and_bound_lookup_capabilities_reach_namespaces():
+def test_shared_capabilities_reach_namespaces():
     def lookup(*args):
         return args
     lookup.__modelx_cython_helper__ = ('sample.provider', 'lookup')
-    lookup.__modelx_cython_iteration__ = ('keys_span', 'KeySpan', 'key_span_count', 'key_span_at')
-    lookup.__modelx_cython_bound_numeric__ = ('ready', 'read', 'prepare')
-    lookup.__modelx_cython_bound_numeric_namespace__ = 'namespace_ready'
+    lookup.__modelx_cython_scalar_result__ = 'object'
+    lookup.__modelx_cython_call_layout__ = 'keywords'
     module = ModuleType('sample.owned')
     module.lookup = lookup
     traced = RuntimeValueInfo(module)
     merged = CombinedRefInfo('exported._mx_classes', '_c_Test', 'operations', traced)
     record = merged.helper_members['lookup']
-    assert record.iteration_helper == ('keys_span', 'KeySpan', 'key_span_count', 'key_span_at')
-    assert record.bound_numeric_helper == ('ready', 'read', 'prepare')
-    assert record.bound_numeric_namespace_helper == 'namespace_ready'
-
-
-@pytest.mark.parametrize('capability,value', [
-    ('iteration', ('keys_span', 'KeySpan', 'key_span_count')),
-    ('iteration', ('keys_span', 'bad-name', 'key_span_count', 'key_span_at')),
-])
-def test_new_capability_shapes_use_the_single_shared_validator(capability, value):
-    def invalid():
-        pass
-    setattr(invalid, '__modelx_cython_' + capability + '__', value)
-    with pytest.raises(ValueError, match='invalid helper capability'):
-        helper_capability(invalid, capability)
+    assert record.scalar_result == 'object'
+    assert record.call_layout == 'keywords'
 
 
 @pytest.mark.parametrize('result', ['float64', 'int64', 'bool', 'unicode', 'object'])
@@ -122,21 +108,6 @@ def test_scalar_result_rejects_undeclared_physical_types(result):
     lookup.__modelx_cython_scalar_result__ = result
     with pytest.raises(ValueError, match='invalid helper capability'):
         helper_capability(lookup, 'scalar_result')
-
-
-@pytest.mark.parametrize('suffix,prefix', [('iteration_f64', 'float'), ('iteration_str', 'str')])
-def test_typed_key_iteration_uses_same_module_and_reference_registry(suffix, prefix):
-    def keys(table):
-        raise AssertionError('metadata capture must not invoke a producer')
-    keys.__modelx_cython_helper__ = ('sample.provider', 'keys')
-    capability = (f'keys_{prefix}_span', f'{prefix.title()}KeySpan',
-                  f'{prefix}_key_span_count', f'{prefix}_key_span_at')
-    setattr(keys, '__modelx_cython_' + suffix + '__', capability)
-    module = ModuleType('sample.keys')
-    module.keys = keys
-    field = suffix + '_helper'
-    assert getattr(RuntimeValueInfo(keys), field) == capability
-    assert getattr(RuntimeValueInfo(module).helper_members['keys'], field) == capability
 
 
 def test_keyword_layout_is_explicit_and_preserves_argument_expressions():

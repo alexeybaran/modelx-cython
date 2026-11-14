@@ -90,7 +90,7 @@ def test_scope_overrides_aliases_and_arithmetic(tmp_path):
 ''').is_cached=False
         s.new_cells('hygienic','''def hygienic():
     _mx_reduce_0_function = 1.0
-    return sum_f64(term(k) + _mx_reduce_0_function for k in range(count()) if k != 1)
+    return sum((term(k) + _mx_reduce_0_function for k in range(count()) if k != 1), 0.0)
 ''')
         s.new_cells('reassigned_tail','''def reassigned_tail(t):
     a = t * 2

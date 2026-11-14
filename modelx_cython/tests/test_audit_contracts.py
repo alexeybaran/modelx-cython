@@ -113,9 +113,8 @@ def test_enum_constants_decline_receiver_rebinding():
 
 
 @pytest.mark.parametrize('name,value',[
-    ('bound_numeric',('ready','value')),
-    ('bound_grouped',('probe','value')),
-    ('reduction','unsupported_reduction'),
+    ('scalar_result','float'),
+    ('call_layout','positional'),
 ])
 def test_helper_capability_shape_is_validated_at_registration(name,value):
     def function():pass

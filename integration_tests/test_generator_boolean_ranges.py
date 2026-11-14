@@ -5,15 +5,13 @@ import sys
 import textwrap
 
 import modelx as mx
-from modelx_helpers.typed_inputs import all_true, any_true, max_value, sum_f64
 
 
 def test_nested_filtered_boolean_ranges(tmp_path):
     model = mx.new_model('BooleanRanges')
     try:
         s = model.new_space('Projection', refs={
-            'all_true': all_true, 'any_true': any_true,
-            'max_value': max_value, 'sum_f64': sum_f64, 'events': [],
+            'events': [],
             'amounts': (1e16, 1.0, -1e16, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0),
             'rate': 0.25,
             'throw_horizon': False,
@@ -34,38 +32,38 @@ def test_nested_filtered_boolean_ranges(tmp_path):
         raise error
     return i != false_at
 ''')
-        s.new_cells('every', 'lambda n: all_true(predicate(i) for i in range(bound(n)) if i != 1)')
-        s.new_cells('some', 'lambda n: any_true(predicate(j) for i in range(bound(n)) if i != 1 for j in range(inner(i)) if j != 0)')
+        s.new_cells('every', 'lambda n: all(predicate(i) for i in range(bound(n)) if i != 1)')
+        s.new_cells('some', 'lambda n: any(predicate(j) for i in range(bound(n)) if i != 1 for j in range(inner(i)) if j != 0)')
         s.new_cells('inner_step', '''def inner_step(i):
     events.append(('step', i))
     if throw_horizon:
         raise error
     return 2
 ''')
-        s.new_cells('some_step', 'lambda n: any_true(predicate(j) for i in range(bound(n)) if i != 1 for j in range(0, inner(i), inner_step(i)) if j != 0)')
-        s.new_cells('reverse', 'lambda n: all_true(predicate(i) for i in range(bound(n), -1, -1) if i != 1)')
+        s.new_cells('some_step', 'lambda n: any(predicate(j) for i in range(bound(n)) if i != 1 for j in range(0, inner(i), inner_step(i)) if j != 0)')
+        s.new_cells('reverse', 'lambda n: all(predicate(i) for i in range(bound(n), -1, -1) if i != 1)')
         s.new_cells('amount', '''def amount(i):
     events.append(('amount', i))
     if i == throw_at:
         raise error
     return amounts[i]
 ''')
-        s.new_cells('total', 'lambda n: sum_f64(amount(i) for i in range(bound(n)) if i != 1)')
-        s.new_cells('maximum', 'lambda n: max_value(amount(i) for i in range(bound(n)) if i != 1)')
-        s.new_cells('singleton', 'lambda n: sum_f64(value for value in (amount(n),))')
-        s.new_cells('inner_singleton', 'lambda n: sum_f64(value for i in range(bound(n)) for value in (amount(i),))')
+        s.new_cells('total', 'lambda n: sum((amount(i) for i in range(bound(n)) if i != 1), 0.0)')
+        s.new_cells('maximum', 'lambda n: max(amount(i) for i in range(bound(n)) if i != 1)')
+        s.new_cells('singleton', 'lambda n: sum((value for value in (amount(n),)), 0.0)')
+        s.new_cells('inner_singleton', 'lambda n: sum((value for i in range(bound(n)) for value in (amount(i),)), 0.0)')
         s.new_cells('captured', '''def captured(n):
     factor = rate
-    return sum_f64(amount(i) * factor for i in range(bound(n)))
+    return sum((amount(i) * factor for i in range(bound(n))), 0.0)
 ''')
         s.new_cells('captured_singleton', '''def captured_singleton(n):
     factor = rate
-    return sum_f64(value * factor for value in (amount(n),))
+    return sum((value * factor for value in (amount(n),)), 0.0)
 ''')
         s.new_cells('descending', '''def descending(n):
     if n == -10:
         return 0.0
-    return max_value(amount(i) for i in range(n, max(-1, n - 12), -3))
+    return max(amount(i) for i in range(n, max(-1, n - 12), -3))
 ''')
         s.new_cells('origin', '''def origin(n):
     events.append(('origin', n))
@@ -79,7 +77,7 @@ def test_nested_filtered_boolean_ranges(tmp_path):
 ''')
         s.new_cells('legacy_any', '''def legacy_any(n):
     first = origin(n)
-    return any_true(predicate(i) for i in range(max(0, first), min(first + 3, horizon())))
+    return any(predicate(i) for i in range(max(0, first), min(first + 3, horizon())))
 ''')
         model.export(tmp_path / 'exported')
     finally:
@@ -155,21 +153,6 @@ def test_nested_filtered_boolean_ranges(tmp_path):
         else:
             raise AssertionError('outer bound StopIteration changed')
         s = fresh()
-        def replacement(values):
-            assert iter(values) is values
-            assert s.events == [('bound', 6)]
-            assert next(values) is True
-            assert next(values) is False
-            assert next(values) is True
-            assert next(values) is True
-            assert next(values) is True
-            assert list(values) == []
-            assert list(values) == []
-            return True
-        s.all_true = replacement
-        assert s.every(6) is True
-        assert s.events == [('bound', 6), ('term', 0), ('term', 2),
-                            ('term', 3), ('term', 4), ('term', 5)]
         s = fresh()
         assert s.total(4) == 4.0
         assert s.events == [('bound', 4), ('amount', 0), ('amount', 2), ('amount', 3)]

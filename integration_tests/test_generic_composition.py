@@ -7,7 +7,7 @@ import sys
 from http import HTTPStatus
 
 import modelx as mx
-from modelx_helpers.typed_inputs import EnumDefinitions, sum_f64
+from modelx_helpers.typed_inputs import EnumDefinitions
 
 
 def compile_model(path, sample):
@@ -26,15 +26,15 @@ def test_generator_literals_preserve_integer_width_and_sign(tmp_path):
               'empty': (high-1, high-2, 2)}
     model = mx.new_model('LiteralDomains')
     try:
-        space = model.new_space('Values', refs={'sum_f64': sum_f64, 'Status':HTTPStatus,
+        space = model.new_space('Values', refs={'Status':HTTPStatus,
                                 'definitions':EnumDefinitions(('Status',)), 'stride': 2})
         for name, value in values.items():
-            space.new_cells(name, f'lambda: sum_f64(k * 1.0 for k in ({value},))')
-        space.new_cells('step', f'lambda: sum_f64(k * 1.0 for k in range(0, 2, {1 << 80}))')
-        space.new_cells('filtered', f'lambda: sum_f64(k * 1.0 for k in ({1 << 63},) if k > 0)')
+            space.new_cells(name, f'lambda: sum((k * 1.0 for k in ({value},)), 0.0)')
+        space.new_cells('step', f'lambda: sum((k * 1.0 for k in range(0, 2, {1 << 80})), 0.0)')
+        space.new_cells('filtered', f'lambda: sum((k * 1.0 for k in ({1 << 63},) if k > 0), 0.0)')
         for name, args in ranges.items():
-            space.new_cells(name, f'lambda: sum_f64(k * 1.0 for k in range{args!r})')
-        space.new_cells('dynamic_stride', f'lambda epoch=0: sum_f64(k * 1.0 for k in range({high-1}, {high}, stride))')
+            space.new_cells(name, f'lambda: sum((k * 1.0 for k in range{args!r}), 0.0)')
+        space.new_cells('dynamic_stride', f'lambda epoch=0: sum((k * 1.0 for k in range({high-1}, {high}, stride)), 0.0)')
         space.new_cells('authored_enum_prefix', '''def authored_enum_prefix():
     _mx_enum_const_0 = -123
     if _mx_enum_const_0 < 0:
@@ -42,12 +42,12 @@ def test_generator_literals_preserve_integer_width_and_sign(tmp_path):
     return 0
 ''')
         space.new_cells('assigned', '''def assigned(epoch=0):
-    total = sum_f64(k * 1.0 for k in range(3))
+    total = sum((k * 1.0 for k in range(3)), 0.0)
     return str(total)
 ''')
         space.new_cells('weighted', '''def weighted(epoch=0):
     factor = 1.5
-    total = sum_f64(k * factor for k in range(3))
+    total = sum((k * factor for k in range(3)), 0.0)
     return total
 ''')
         model.export(tmp_path/'exported')
@@ -88,20 +88,5 @@ s.stride=0
 try: s.dynamic_stride(1)
 except ValueError as error: assert str(error)=='range() arg 3 must not be zero'
 else: raise AssertionError('zero range step did not raise')
-class Value:
-    def __str__(self): return 'custom result'
-def replacement(values):
-    assert list(values)==[0.0,1.0,2.0]
-    return Value()
-s.sum_f64=replacement
-assert s.assigned(1)=='custom result'
-failure=RuntimeError('assigned reduction fallback')
-def broken(values):
-    assert next(values)==0.0
-    raise failure
-s.sum_f64=broken
-try: s.assigned(2)
-except RuntimeError as actual: assert actual is failure
-else: raise AssertionError('assigned reduction exception lost')
 '''
         subprocess.run([sys.executable,'-B','-c',script],cwd=tmp_path,check=True)

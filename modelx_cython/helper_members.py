@@ -34,7 +34,7 @@ def module_helpers(value):
                 continue          # floor/ceil only on the math module itself
             result[name] = SimpleNamespace(
                 helper=(MATH_PROVIDER, function.__name__),
-                helper_parameters=None, scalar_result=_MODULE_MATH[function], reduction=None,
+                helper_parameters=None, scalar_result=_MODULE_MATH[function],
                 module_math=function.__name__ if stdlib or name == function.__name__ else None,
             )
             continue

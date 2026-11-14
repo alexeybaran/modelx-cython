@@ -4,7 +4,7 @@ from functools import cached_property
 import libcst as cst
 
 from .cell_entries import exact_receiver
-from .helpers import REDUCTIONS, module_name
+from .helpers import module_name
 from .helper_members import helper_reference
 from .scopes import CstFacts, FormulaTransformer, Names, OPAQUE_SCOPES as OPAQUE, has_scope_effects, lexical_nodes
 from .syntax import arguments, code, literal_value, walk
@@ -38,10 +38,8 @@ BUILTIN_REDUCTIONS = frozenset(('all', 'any', 'max', 'min', 'sum'))
 
 def has_reduction_contract(formula, refs, builtin_reductions=frozenset()):
     """Find declared consumers and supported built-in reductions of one iterable."""
-    return any(isinstance(node, cst.Call) and (
-               getattr(helper_reference(node.func, refs), 'reduction', None) in REDUCTIONS
-               or isinstance(node.func, cst.Name) and node.func.value in builtin_reductions
-               and _one_iterable(node))
+    return any(isinstance(node, cst.Call) and isinstance(node.func, cst.Name)
+               and node.func.value in builtin_reductions and _one_iterable(node)
                for node in lexical_nodes(formula.body.body))
 
 
@@ -1282,14 +1280,9 @@ return {fallback}
         if builtin == 'max':
             return after if assignment else self.single_range(
                 after, func, BUILTIN_PROVIDER, 'max', 'f64_max', source, tree)
-        ref = helper_reference(func, self.cls_info.refs)
-        if builtin == 'sum':
-            provider, reduction = STREAMS_PROVIDER, 'f64_sum' if float_start else 'ordinary_sum'
-        elif getattr(ref, 'reduction', None) in REDUCTIONS and ref.helper:
-            provider, operation = ref.helper
-            reduction = ref.reduction
-        else:
+        if builtin != 'sum':
             return after
+        provider, reduction = STREAMS_PROVIDER, 'f64_sum' if float_start else 'ordinary_sum'
         if assignment and reduction != 'f64_sum':
             return after
         if (reduction == 'ordinary_sum'
@@ -1297,10 +1290,6 @@ return {fallback}
             # Ordinary sum keeps integer/mixed/object semantics. Only an existing
             # double return boundary may normalize empty integer zero to double.
             return after
-        if reduction == 'bool_any':
-            return self.bounded_any(before, after, func, provider, operation, source, tree)
-        if reduction in ('bool_all', 'f64_max'):
-            return self.single_range(after, func, provider, operation, reduction, source, tree)
         original_tree = tree
         enum_range = self.enum_range(tree)
         if enum_range is not None:

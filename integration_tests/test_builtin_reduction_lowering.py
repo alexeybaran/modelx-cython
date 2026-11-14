@@ -8,7 +8,7 @@ from types import SimpleNamespace
 import libcst as cst
 from modelx_helpers import typed_inputs as operations
 
-from modelx_cython.helpers import module_name, HelperCalls
+from modelx_cython.helpers import module_name
 from modelx_cython.helper_members import module_helpers
 from modelx_cython.reductions import NativeReductions
 
@@ -48,32 +48,6 @@ def test_compiled_builtin_reduction_lowering(tmp_path):
         assert rewritten == text
         methods.append('\n'.join('    ' + line if line else '' for line in rewritten.splitlines()))
         cold.extend(cst.Module([function]).code for function in pass_.fallbacks)
-    for name, payload, annotation, result in (
-            ('all_true', 'self.predicate(i)', '_mx_cy.bint', 'bint'),
-            ('any_true', 'self.predicate(i)', '_mx_cy.bint', 'bint'),
-            ('sum_f64', 'self.amount(i)', '_mx_cy.double', 'double'),
-            ('max_value', 'self.amount(i)', '_mx_cy.double', 'double')):
-        text = (f'def namespace_{name}(self, n: _mx_cy.longlong) -> {annotation}:\n'
-                f'    return self.operations.{name}({payload} for i in range(n) if i != 1)\n')
-        formula = cst.parse_module(text).body[0]
-        pass_ = NativeReductions(cls, info(result, ('n',)), set(), formula,
-                                lambda op=name: '_cold_' + op, True)
-        rewritten_formula = formula.visit(pass_)
-        assert pass_.count == (1 if name == 'sum_f64' else 0)
-        rewritten = cst.Module([HelperCalls(cls.refs, set()).rewrite(rewritten_formula)]).code
-        methods.append('\n'.join('    ' + line if line else '' for line in rewritten.splitlines()))
-        cold.extend(cst.Module([function]).code for function in pass_.fallbacks)
-    absolute = cst.parse_module(
-        'def absolute_total(self, n: _mx_cy.longlong) -> _mx_cy.double:\n'
-        '    return self.operations.sum_f64(abs(self.amount(i) - 3.0) for i in range(n))\n'
-    ).body[0]
-    lowering = NativeReductions(cls, info('double', ('n',)), set(), absolute,
-                               lambda: '_cold_absolute_total', True)
-    native = absolute.visit(lowering)
-    assert lowering.count == 1
-    rewritten = cst.Module([HelperCalls(cls.refs, set()).rewrite(native)]).code
-    methods.append('\n'.join('    ' + line if line else '' for line in rewritten.splitlines()))
-    cold.extend(cst.Module([function]).code for function in lowering.fallbacks)
     prefix = f'''import cython as _mx_cy
 from cython.cimports import {alias}
 from cython.cimports import {helper_alias}
@@ -104,8 +78,7 @@ class _c_Test:
     subprocess.run([sys.executable, 'setup.py', 'build_ext', '--inplace'], cwd=tmp_path, check=True)
     c_source = (tmp_path / 'probe.c').read_text()
     assert '__pyx_gb_' in c_source
-    for name in ('all_check','any_check','min_check','max_check',
-                 'namespace_all_true','namespace_any_true','namespace_sum_f64','namespace_max_value'):
+    for name in ('all_check','any_check','min_check','max_check'):
         assert re.search(r'^static[^\n]*__pyx_(?:pf|gb)_[^\n]*'+re.escape(name)+r'\(',c_source,re.MULTILINE),name
     subprocess.run([sys.executable, '-c', '''from probe import _c_Test
 p = _c_Test()
@@ -137,22 +110,4 @@ for name in ('all', 'any'):
     else:
         raise AssertionError('body StopIteration not converted')
 assert seen == [0, 0]
-p.set_hook(lambda i: i != 2)
-assert p.namespace_all_true(4) is False
-assert p.namespace_any_true(4) is True
-assert p.namespace_sum_f64(3) == 3.0
-assert p.absolute_total(3) == 4.5
-assert p.namespace_max_value(3) == 2.0
-assert p.namespace_all_true(0) is True
-assert p.namespace_sum_f64(0) == 0.0
-from types import SimpleNamespace
-held = []
-def replacement(values):
-    assert iter(values) is values
-    held.append(values)
-    return True
-p.set_operations(SimpleNamespace(all_true=replacement))
-assert p.namespace_all_true(4) is True
-assert list(held[0]) == [True, False, True]
-assert list(held[0]) == []
 '''], cwd=tmp_path, check=True)

@@ -16,24 +16,9 @@ from .consts import CY_MOD
 # One registry for tracing, merged References and validation. Tuple lengths
 # describe provider ABI operations, not model or formula source patterns.
 CAPABILITIES = {
-    'reduction': ('reduction', None),
-    'iteration': ('iteration_helper', (4,)),
-    'iteration_f64': ('iteration_f64_helper', (4,)),
-    'iteration_str': ('iteration_str_helper', (4,)),
     'scalar_result': ('scalar_result', None),
     'call_layout': ('call_layout', None),
-    'numeric': ('numeric_helper', None),
-    'clamped': ('clamped_helper', None),
-    'clamped_context': ('clamped_context_helper', None),
-    'optional': ('optional_helper', None),
-    'grouped': ('grouped_helper', (2, 3)),
-    'bounded': ('bounded_helper', None),
-    'bound_bounded': ('bound_bounded_helper', None),
-    'bound_grouped': ('bound_grouped_helper', (3,)),
-    'bound_numeric': ('bound_numeric_helper', (3,)),
-    'bound_numeric_namespace': ('bound_numeric_namespace_helper', None),
 }
-REDUCTIONS = frozenset(('f64_sum', 'ordinary_sum', 'bool_any', 'bool_all', 'f64_max'))
 SCALAR_RESULTS = frozenset(('float64', 'int64', 'bool', 'unicode', 'object'))
 
 
@@ -73,9 +58,7 @@ def helper_capability(value, name):
                  and all(valid_identifier(part) for part in capability))
     else:
         valid = valid_identifier(capability)
-    if (not valid
-            or name == 'reduction' and capability not in REDUCTIONS
-            or name == 'scalar_result' and capability not in SCALAR_RESULTS):
+    if not valid or name == 'scalar_result' and capability not in SCALAR_RESULTS:
         raise ValueError(f'invalid helper capability {name!r} on {value.__qualname__}')
     if name == 'call_layout' and capability != 'keywords':
         raise ValueError(f'invalid helper capability {name!r} on {value.__qualname__}')
