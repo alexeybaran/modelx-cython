@@ -675,7 +675,7 @@ class CombinedCellsInfo(LexicalCellsInfo):
         if getattr(self._rt, 'has_negative_args', False) and not self.has_shifted_cache:
             return False
         from . import automatic
-        return not automatic.enabled(self) or automatic.dense_fits(self)
+        return not (automatic.enabled(self) or automatic.max_dense_entries_set(self)) or automatic.dense_fits(self)
 
     @property
     def has_shifted_cache(self):
@@ -689,8 +689,8 @@ class CombinedCellsInfo(LexicalCellsInfo):
         count = 1
         for p, size in zip(self.params, sizes):
             count *= size - getattr(self._rt, 'min_args', {}).get(p, 0)
-        from .automatic import MAX_DENSE_ENTRIES
-        return 0 < count <= MAX_DENSE_ENTRIES
+        from .automatic import max_dense_entries
+        return 0 < count <= max_dense_entries(self)
 
     @property
     def uses_native_numeric_cache(self):

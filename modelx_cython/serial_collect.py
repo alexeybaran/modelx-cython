@@ -98,6 +98,10 @@ def analyze(module):
         shape = _match(node, cls, option == 'reuse', private, parallel, order == 'domain')
         if shape is not None:
             result[node.name.value] = shape
+            if shape.reuse:
+                # D74: budgeted dense windows for hash-cached Cells on the reused root
+                from .automatic import reuse_dense_windows
+                cls.reuse_dense_windows, cls.reuse_dense_refused = reuse_dense_windows(cls)
     return result
 
 
@@ -175,6 +179,9 @@ def add_methods(cls, node, shape, *, workers):
         '    if not _mx_sys._mx_collect_native_coords(coords):',
         '        return None',
         f'    root = {cls.name}(self)',
+        *(f'    root._v_{name}.window({", ".join(f"{int(a.lower)}, {int(a.stop) - int(a.lower)}" for a in axes)})'
+          for name, (axes, _, _) in sorted(getattr(cls, 'reuse_dense_windows', {}).items())
+          if shape.reuse),
         '    try:',
         '        root._mx_copy_refs(self, self)',
         '        root._mx_roots.append(root)',

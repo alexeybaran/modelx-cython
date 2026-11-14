@@ -95,10 +95,59 @@ def describe(module_infos):
                                       for name in getattr(cell, 'python_object_locals', ())],
                     'expressions_object': expressions_object(cell),
                     **({'vectors': cell.vector_report} if getattr(cell, 'vector_report', None) else {}),
+                    'cache_detail': cache_detail(cell, cache),
                     'slow_paths': slow_paths(cell, cache),
                     'reasons': reasons or ['original Cython representation'],
                 }
     return result
+
+
+def _window(axes):
+    sizes = [int(axis.stop) - int(axis.lower) for axis in axes]
+    count = 1
+    for size in sizes:
+        count *= size
+    return [[int(axis.lower), int(axis.stop)] for axis in axes], sizes, count
+
+
+def cache_detail(cell, cache):
+    """D74: the cache of a Cell with parameters: kind, window, entries, bytes, and why it is not dense.
+    On a Space whose collect reuses one root, a hash-cached Cell may be dense on that root only
+    ('reused_root')."""
+    if not cell.params or cache in ('none', 'scalar'):
+        return {'kind': cache}
+    detail = {'kind': cache}
+    try:
+        if cache == 'dense':
+            window, sizes, count = _window(cell.dense_axes)
+            detail.update(window=window, entries=count, bytes=count * 12)
+            return detail
+        if cache not in ('native-numeric-keys', 'dictionary'):
+            return detail
+        from .automatic import max_dense_entries
+        limit = max_dense_entries(cell)
+        if cache == 'dictionary':
+            detail['hash_reason'] = ('return or parameter types are not native numbers'
+                                     if cell.has_typeinfo() else 'formula not observed by the sample')
+        elif not cell.is_int_args:
+            detail['hash_reason'] = 'key type: the parameters are not all C integers'
+        else:
+            window, sizes, count = _window(cell.dense_logical_axes)
+            detail.update(window=window, entries=count)
+            detail['hash_reason'] = (f'window {" x ".join(map(str, sizes))} = {count:,} entries exceeds '
+                                     f'max_dense_entries {limit:,}' if count > limit
+                                     else 'negative arguments without a shifted window')
+        chosen = getattr(cell.parent, 'reuse_dense_windows', {})
+        refused = getattr(cell.parent, 'reuse_dense_refused', {})
+        if cell.name in chosen:
+            axes, count, size = chosen[cell.name]
+            detail['reused_root'] = {'kind': 'dense', 'window': _window(axes)[0], 'entries': count,
+                                     'bytes': size}
+        elif cell.name in refused:
+            detail['reused_root'] = {'kind': cache, 'reason': refused[cell.name]}
+    except Exception as error:      # an axis without bounds: the kind alone
+        detail.setdefault('hash_reason', f'no bounded window ({type(error).__name__})')
+    return detail
 
 
 def slow_paths(cell, cache):
@@ -110,10 +159,12 @@ def slow_paths(cell, cache):
     per_step (the cell has parameters)."""
     per_step = bool(cell.params)
     entries = []
-    if per_step and cache in ('native-numeric-keys', 'dictionary'):
+    if per_step and cache in ('native-numeric-keys', 'dictionary') and (
+            cell.name not in getattr(getattr(cell, 'parent', None), 'reuse_dense_windows', {})):
         detail = f'{cache} cache'
         try:
-            from .automatic import MAX_DENSE_ENTRIES
+            from .automatic import max_dense_entries
+            limit = max_dense_entries(cell)
             axes = list(getattr(cell, 'associative_logical_axes', ()) or ())
             if axes and len(axes) == len(cell.params):
                 sizes = [int(axis.stop) - int(axis.lower) for axis in axes]
@@ -121,7 +172,7 @@ def slow_paths(cell, cache):
                 for size in sizes:
                     count *= size
                 detail += (f': dense window {" x ".join(map(str, sizes))} = {count:,} entries exceeds '
-                           f'MAX_DENSE_ENTRIES {MAX_DENSE_ENTRIES:,}' if count > MAX_DENSE_ENTRIES
+                           f'max_dense_entries {limit:,}' if count > limit
                            else ': the arguments are not all sampled C integers in a bounded range')
         except Exception:       # an axis without bounds: the cache kind alone
             pass
