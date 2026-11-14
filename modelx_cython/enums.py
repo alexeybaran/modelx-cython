@@ -74,6 +74,7 @@ class Constants(FormulaTransformer):
                 invalid.update(n.value for n in walk(part.target) if isinstance(n, cst.Name))
             elif not isinstance(part, (cst.Name, cst.Assign)):
                 invalid.update(facts.bindings((part,)))
+        self.assignments, self.invalid = assignments, invalid     # D98: provenance of locals
         self.loop_members = self._member_loops(nodes, facts, assignments, invalid)
         self.locals.update(self.loop_members)
         for name, values in assignments.items():
@@ -338,6 +339,9 @@ class Constants(FormulaTransformer):
         if len(after.comparisons) != 1:
             return after
         comp = after.comparisons[0]
+        identity = self.member_identity(after, comp)
+        if identity is not None:
+            return identity
         if self.integer(after.left):
             if isinstance(comp.operator, (cst.Equal,cst.NotEqual)):
                 member = self.member(comp.comparator)
@@ -367,6 +371,61 @@ class Constants(FormulaTransformer):
                 self.decline(before, 'the left operand is not a typed integer (an object or untraced '
                              'value) and is not a name, or an element is not a constant or a member')
         return after
+
+    def member_identity(self, after, comp):
+        """D98: ``x is E.M`` / ``x is not E.M`` (either order) where ``x`` is typed as a C integer
+        and ``E.M`` a member of an admitted enum: lowered exactly as ``==`` / ``!=`` with the
+        member's constant. ``x`` holds the integer value of an enum-valued Cell, parameter or
+        local, which live holds as the member itself; members are singletons, so live's
+        identity test is true exactly when the values are equal. Without this the compiled
+        test compared an int with the member object and was always false. Any other identity
+        test (no typed integer, or no admitted member) is left as it is, so Python decides it."""
+        if not isinstance(comp.operator, (cst.Is, cst.IsNot)):
+            return None
+        operator = (cst.Equal if isinstance(comp.operator, cst.Is) else cst.NotEqual)(
+            whitespace_before=comp.operator.whitespace_before,
+            whitespace_after=comp.operator.whitespace_after)
+        count = self.count
+        if self.integer(after.left) and self.same_enum(after.left, comp.comparator):
+            member = self.member(comp.comparator)
+            if member is not comp.comparator:
+                self.comparisons += 1
+                return after.with_changes(comparisons=(comp.with_changes(operator=operator, comparator=member),))
+        elif self.integer(comp.comparator) and self.same_enum(comp.comparator, after.left):
+            member = self.member(after.left)
+            if member is not after.left:
+                self.comparisons += 1
+                return after.with_changes(left=member, comparisons=(comp.with_changes(operator=operator),))
+        self.count = count
+        return None
+
+    def same_enum(self, value, member):
+        """D98: ``value`` holds a value of the enum class whose member ``member`` is: a call of a
+        compiled Cell whose every traced return value was a member of that class, a parameter
+        traced as that class, or a local bound only to such values (or a D83 member local of it).
+        An integer literal, arithmetic or a plain int parameter is not: ``5 is E.A`` is false in
+        Python while ``5 == E.A`` may be true."""
+        ref = self.member_ref(member) if not isinstance(member, cst.IfExp) else None
+        target = _enum_key(getattr(self.cls, 'refs', {}).get(ref)) if ref else None
+        return target is not None and self.enum_of(value, set()) == target
+
+    def enum_of(self, node, seen):
+        if (isinstance(node, cst.Call) and isinstance(node.func, cst.Attribute)
+                and isinstance(node.func.value, cst.Name) and node.func.value.value == 'self'):
+            cell = self.cls.cells.get(node.func.attr.value)
+            return _traced_enum(cell, None) if cell is not None else None
+        if not isinstance(node, cst.Name):
+            return None
+        name = node.value
+        if name in self.enum_locals:
+            return _enum_key(getattr(self.cls, 'refs', {}).get(self.enum_locals[name]))
+        if name in self.cell.params:
+            return _traced_enum(self.cell, name)
+        values = getattr(self, 'assignments', {}).get(name)
+        if not values or name in getattr(self, 'invalid', ()) or name in seen:
+            return None
+        kinds = {self.enum_of(v, seen | {name}) for v in values}
+        return kinds.pop() if len(kinds) == 1 else None
 
     # W1.8: ``x in (a, b, ...)`` with an object ``x``, exactly as tuple membership
     _MEMBERSHIP_LIMIT = 8
@@ -506,3 +565,28 @@ def bind_properties(cls, body):
     for name in names:
         result.extend(cst.parse_module(f'@property\ndef {name}(self):\n    return self.{storage(name)}\n').body)
     return tuple(result)
+
+
+def _enum_key(ref):
+    """(module, qualname) of an admitted IntEnum Reference, else None."""
+    enum = getattr(ref, 'enum', None)
+    return tuple(enum[:2]) if enum and getattr(ref, 'enum_safe', False) else None
+
+
+def _traced_enum(cell, param):
+    """(module, qualname) of the IntEnum class every traced value of a Cell's return (``param``
+    None) or parameter had, else None. A spec return type or a mixed trace (merged to
+    ``numbers.Integral``) gives None."""
+    import enum
+    trace = getattr(cell, '_rt', None)
+    if trace is None or not cell.has_typeinfo():
+        return None
+    if param is None:
+        if getattr(cell, '_spec_ret_t', None) or getattr(trace.ret_type, 'is_array', False):
+            return None
+        typ = trace.ret_type.value_type
+    else:
+        typ = getattr(trace, 'arg_types', {}).get(param)
+    if isinstance(typ, type) and issubclass(typ, enum.IntEnum) and '<locals>' not in typ.__qualname__:
+        return (typ.__module__, typ.__qualname__)
+    return None
