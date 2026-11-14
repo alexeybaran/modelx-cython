@@ -68,8 +68,8 @@ def test_module_math_bound_at_build_time(tmp_path):
     assert '.m_floor_ll(self.math, x)' in source and '.m_constant(self.math, 0)' in source
     assert '.m_floor(self.math, x)' in source       # the unsampled (object) argument
     assert entry('down')['return_type'] == 'long long' and entry('loglin')['native_expressions'] == 4
-    assert [(e['form'], e['line']) for e in entry('close')['expressions_untyped']] == [('math', 2)]
-    assert 'isclose' in entry('close')['expressions_untyped'][0]['reason']
+    # W1.8: math.isclose compiles (m_isclose); test_native_builtins_w18 compares it
+    assert entry('close')['expressions_untyped'] == [] and '.m_isclose(self.math, ' in source
     assert '2 arguments' in entry('base_two')['expressions_untyped'][0]['reason']
     probe = textwrap.dedent('''\
         import math, random, struct, sys

@@ -41,8 +41,10 @@ def test_typed_extrema_semantics(tmp_path):
     report = json.loads((tmp_path / 'exported_cy/_mx_admission.json').read_text())
     for name in ('lo2', 'hi3', 'ilo', 'inner', 'mixed', 'mixed_lo'):
         assert report[f'exported_cy._mx_classes._c_Values._f_{name}']['native_expressions'] == 1, name
-    three = report['exported_cy._mx_classes._c_Values._f_three']['expressions_untyped']
-    assert [e['form'] for e in three] == ['max']
+    three = report['exported_cy._mx_classes._c_Values._f_three']
+    # W1.8: three mixed operands compile as comparisons of Python objects, no built-in call
+    assert three['expressions_untyped'] == []
+    assert [e['form'] for e in three['expressions_object']] == ['max']
     probe = textwrap.dedent('''\
         import math, struct, sys
         from importlib import import_module

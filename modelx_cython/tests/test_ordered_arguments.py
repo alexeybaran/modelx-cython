@@ -114,8 +114,10 @@ def test_typed_extrema_become_c_comparisons_in_object_scopes():
     code, cells, _ = lowered('def formula(i, x):\n    return min(i, x)\n')
     assert '.min_i64_f64(i, x)' in code and cells.minmax_native == 1
     code, cells, _ = lowered('def formula(i, x, y):\n    return min(i, x, y)\n')
-    assert 'min(*(i, x, y))' in code and cells.minmax_native == 0
-    assert [(e['form'], e['line']) for e in cells.minmax_untyped] == [('min', 2)]
+    # W1.8: three mixed operands compile on Python objects (Cython's min of objects)
+    assert 'min(_mx_cy.cast(object, i), _mx_cy.cast(object, x), _mx_cy.cast(object, y))' in code
+    assert cells.minmax_native == 0 and cells.minmax_untyped == []
+    assert [(e['form'], e['line']) for e in cells.minmax_object] == [('min', 2)]
     code, cells, _ = lowered('def formula(x, y):\n    return [max(x, y) for _ in range(2)]\n', True)
     assert '.max_f64(x, y)' in code           # a child scope of a native-result cell
     code, cells, _ = lowered('def formula(x, y):\n    return max(x, y)\n', True)

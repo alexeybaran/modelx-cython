@@ -56,9 +56,11 @@ def test_member_tuple_membership(tmp_path):
         assert entry(name)['expressions_untyped'] == [], name
     assert entry('reversed_eq')['native_enum_comparisons'] == 1
     assert 'in (_mx_enum_const_' in source and 'not in (_mx_enum_const_' in source
-    loose = entry('loose')['expressions_untyped']
+    # W1.8: an object name on the left: identity and == tests in tuple order
+    assert entry('loose')['expressions_untyped'] == []
+    loose = entry('loose')['expressions_object']
     assert [(e['form'], e['line']) for e in loose] == [('in', 2)], loose   # a lambda's body is line 2 of its def
-    assert 'typed integer' in loose[0]['reason']
+    assert 'object' in loose[0]['reason']
     mixed = entry('literal_mix')['expressions_untyped']
     assert [e['form'] for e in mixed] == ['in'] and 'not a member' in mixed[0]['reason']
     probe = textwrap.dedent('''\
