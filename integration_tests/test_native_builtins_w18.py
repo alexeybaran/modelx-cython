@@ -153,6 +153,12 @@ def test_nested_reductions_lifted(tmp_path):
         s.new_cells('h', 'def h(k) -> object:\n    return max(0.0, max(v(i) for i in range(k)) - v(0))\n')
         s.new_cells('m', 'def m(k) -> object:\n    xs = [v(i) for i in range(k)]\n'
                     '    return 1.0 - tol / min(x for x in xs if x > 0.0)\n')
+        s.new_cells('a2', 'def a2(k) -> object:\n    return k % 3 or any(v(i) > 1.0 for i in range(k))\n')
+        # branches of different classes: the lifted result keeps each branch's class
+        s.new_cells('ty', 'def ty(k) -> object:\n    return (max(n(i) for i in range(k + 1)) if k % 2 else 0.5) * 1\n')
+        s.new_cells('ty2', 'def ty2(k) -> object:\n    return k > 4 and max(n(i) for i in range(k + 1))\n')
+        # an augmented assignment is not lifted (its target is read first): kept, listed
+        s.new_cells('o', 'def o(k) -> object:\n    x = 1.0\n    x += 2 * sum(v(i) for i in range(k))\n    return x\n')
         # a conditional expression with reductions in its branches becomes an if statement
         s.new_cells('r', 'def r(k) -> object:\n    free = [i for i in range(k) if v(i) <= 0.0]\n'
                     '    return (min(free) if free else max(n(i) for i in range(k + 1)) + 1) + 1\n')
@@ -160,7 +166,7 @@ def test_nested_reductions_lifted(tmp_path):
             from exported import mx_model as m
             w = m.Values
             for k in range(12):
-                for f in (w.a, w.b, w.c, w.d, w.e, w.f, w.g, w.m, w.r):
+                for f in (w.a, w.b, w.c, w.d, w.e, w.f, w.g, w.m, w.r, w.a2, w.o, w.ty, w.ty2):
                     try:
                         f(k)
                     except ValueError:
@@ -170,13 +176,15 @@ def test_nested_reductions_lifted(tmp_path):
             ''')
     finally:
         model.close()
-    for name in ('a', 'b', 'c', 'd', 'e', 'g', 'h', 'm', 'r'):
+    for name in ('a', 'b', 'c', 'd', 'e', 'g', 'h', 'm', 'r', 'a2', 'ty', 'ty2'):
         assert _cell(report, name)['expressions_untyped'] == [], name
-    f = _cell(report, 'f')['expressions_untyped']
-    assert [e['form'] for e in f] == ['all'] and 'one branch' in f[0]['reason']
+    # and/or: the left operand once, the reduction only when the operator evaluates it
+    assert _cell(report, 'f')['expressions_untyped'] == []
+    o = _cell(report, 'o')['expressions_untyped']
+    assert [e['form'] for e in o] == ['sum'] and 'augmented assignment' in o[0]['reason']
     _differential(tmp_path, _PROBE_HEAD + '''\
     for k in range(12):
-        for f in (w.a, w.b, w.c, w.d, w.e, w.f, w.g, w.h, w.m, w.r):
+        for f in (w.a, w.b, w.c, w.d, w.e, w.f, w.g, w.h, w.m, w.r, w.a2, w.o, w.ty, w.ty2):
             call(f, k)
     json.dump(out, open(sys.argv[2], 'w'))
     ''')

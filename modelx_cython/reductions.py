@@ -507,7 +507,23 @@ class GeneralReductions:
             lines += cst.parse_module(f'{temp} = ({code(node)})\n').body
             replacements[node] = cst.Name(temp)
         result = names.reserve('_mx_hoist', family=True)
-        if isinstance(site, cst.IfExp):
+        if isinstance(site, cst.BooleanOperation):
+            # ``a and R`` / ``a or R``: a evaluated once, its truth tested once, R only when
+            # the operator needs it; the result is a or R, as the operator gives it
+            site_now = _replaced(site, {id(node): cst.Name(temp.value) for node, temp in replacements.items()})
+            left = names.reserve('_mx_hoist', family=True)
+            lines += cst.parse_module(f'{left} = ({code(site_now.left)})\n').body
+            line = cst.SimpleStatementLine(body=[cst.Assign(
+                targets=[cst.AssignTarget(cst.Name(result))], value=site_now.right)])
+            lowered = self.leave_SimpleStatementLine(line, line)
+            evaluated = list(lowered.nodes) if isinstance(lowered, cst.FlattenSentinel) else [lowered]
+            kept = cst.parse_module(f'{result} = {left}\n').body
+            first, second = (evaluated, kept) if isinstance(site.operator, cst.And) else (kept, evaluated)
+            # one Python object for both branches: C types of the two would be promoted
+            lines += cst.parse_module(f'{result}: object\n').body
+            lines.append(cst.If(test=cst.Name(left), body=cst.IndentedBlock(body=first),
+                                orelse=cst.Else(body=cst.IndentedBlock(body=second))))
+        elif isinstance(site, cst.IfExp):
             # a conditional expression whose branch holds a reduction: an if statement
             # assigning each branch, which evaluates the test and one branch as it does
             site_now = _replaced(site, {id(node): cst.Name(temp.value) for node, temp in replacements.items()})
@@ -518,6 +534,7 @@ class GeneralReductions:
                 lowered = self.leave_SimpleStatementLine(line, line)
                 branches.append(list(lowered.nodes) if isinstance(lowered, cst.FlattenSentinel)
                                 else [lowered])
+            lines += cst.parse_module(f'{result}: object\n').body   # no promotion between branches
             lines.append(cst.If(test=site_now.test.with_changes(lpar=(), rpar=()),
                                 body=cst.IndentedBlock(body=branches[0]),
                                 orelse=cst.Else(body=cst.IndentedBlock(body=branches[1]))))
@@ -545,6 +562,10 @@ class GeneralReductions:
                     id(item) in self.nested_sites for branch in (node.body, node.orelse)
                     for item in _subtree(branch)):
                 found = search(node.test)
+                return found if found is not None or stop else node
+            if isinstance(node, cst.BooleanOperation) and any(
+                    id(item) in self.nested_sites for item in _subtree(node.right)):
+                found = search(node.left)
                 return found if found is not None or stop else node
             for child, conditional in _evaluation_order(node):
                 if conditional:
