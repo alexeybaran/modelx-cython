@@ -215,12 +215,12 @@ class Model:
         return space
 
 
-def lower(model, source, params=('t',), typed=True, recognisers=False, held=False):
+def lower(model, source, params=('t',), typed=True, held=False):
     """Lower one formula: (generated text, TableReads, sites)."""
     node = cst.parse_module(source).body[0]
     resolver = Resolver(model.cells)
     cls_info = SimpleNamespace(fqname='m.C', refs=model.refs)
-    policy = SimpleNamespace(typed_table_reads=typed, table_recognisers=recognisers, held_table_handles=held)
+    policy = SimpleNamespace(typed_table_reads=typed, held_table_handles=held)
     sites = table_read_sites(node, resolver, cls_info)
     providers = set()
     reads = TableReads(resolver, cls_info, Formula(params), providers, policy, sites)
@@ -487,7 +487,7 @@ def test_searchsorted_and_nth_key():
     assert reads.typed == 6
 
 
-def test_record_fields_any_position_only_without_recognisers():
+def test_record_fields_any_position():
     source = ('def _f_x(self, t):\n'
               '    mp = self.model_point()\n'
               '    if self.model_point()["premium"] > 0:\n'
@@ -499,8 +499,6 @@ def test_record_fields_any_position_only_without_recognisers():
     assert 'if _mx_r0.obj(_mx_r0.field("premium")) > 0:' in text
     assert 'float(_mx_r_mp.obj(_mx_r_mp.field("premium"))) * t + int(_mx_r0.obj(_mx_r0.field("age")))' in text
     assert reads.typed == 4
-    same, _, _ = lower(base_model(), source, recognisers=True)
-    assert same == source
 
 
 def test_reads_in_comprehensions_and_generators_respect_shadowing():
@@ -928,8 +926,6 @@ def test_record_field_is_one_key_part():
     assert '_mx_h0.sub_1(_mx_cy.cast(object, _mx_r1.obj(_mx_r1.field("premium")))).table_object()' in text \
         or '.sub_1(_mx_cy.cast(object, _mx_r0.obj(_mx_r0.field("premium")))).table_object()' in text, text
     same_values(_anchor_model(), field, [()], params=())
-    off = lower(_anchor_model(), field, params=(), recognisers=True)[0]
-    assert '_mx_h0.sub_1(_mx_cy.cast(object, self.points_rec()["premium"])).table_object()' in off, off
 
 
 def test_asof_of_a_local_not_known_to_be_an_integer_is_typed_when_an_int():
@@ -1034,21 +1030,6 @@ def test_level_values_min_max(name):
     same_values(base_model(), source, range(-1, 5))
 
 
-def test_round_two_vocabulary_receiver_keeps_its_index_for_the_recognisers():
-    """A receiver also read with round-2 helper methods (`lookup_float`, `index.max_int()`)
-    keeps `min(T.index)` as written, so the round-2 bounded-read recogniser still sees its
-    statements (W1.9 leaves those formulas to it)."""
-    source = ('def _f_x(self, t):\n'
-              '    table = self.mort_table()\n'
-              '    low = int(min(table.index))\n'
-              '    high = table.index.max_int()\n'
-              '    return low + high + len(self.gap_table().index)\n')
-    text, reads, sites = lower(prototype_model(), source)
-    assert 'int(min(table.index))' in text and '_mx_h0.rows' in text, text
-    assert any(reason.startswith('the receiver is also read with round-2 helper methods (index.max_int)')
-               for reason in reads.declined.values())
-
-
 def test_held_table_handles_reset_with_the_per_policy_caches():
     """diag-4w (D71): a reused collect root resets each held handle field per policy."""
     from types import SimpleNamespace
@@ -1139,16 +1120,16 @@ def test_table_local_not_held_unless_one_top_level_binding():
             assert _run(text, receiver, (t,), RUNTIME) == _run(source, receiver, (t,), {})
 
 
-def test_held_record_reads_with_recognisers_on():
-    """D78: with held handles (default) record reads are lowered with the round-2 recognisers on
-    too: a held record handle per instance, held field slots, int()/float() typed; no handle and no
-    field name look-up per call. A record local bound in a branch is not lowered and is reported."""
+def test_held_record_reads():
+    """D78: with held handles (default) record reads are lowered through a held record handle
+    per instance, held field slots, int()/float() typed; no handle and no field name look-up
+    per call. A record local bound in a branch is not lowered and is reported."""
     source = ('def _f_x(self, t):\n'
               '    mp = self.model_point()\n'
               '    if self.model_point()["premium"] > 0:\n'
               '        return float(mp["premium"]) * t + int(self.model_point()["age"])\n'
               '    return mp["tag"]\n')
-    text, reads, _ = lower(base_model(), source, held=True, recognisers=True)
+    text, reads, _ = lower(base_model(), source, held=True)
     # every construction is guarded by the held field (built once per instance, not per call)
     assert text.count('.record_handle(self.model_point())') == text.count('if self._mx_th_0 is None:') >= 1, text
     assert '.held_field(_mx_cy.address(self._mx_tc_' in text, text
@@ -1159,6 +1140,6 @@ def test_held_record_reads_with_recognisers_on():
               '        mp = self.model_point()\n'
               '        return float(mp["premium"]) * t\n'
               '    return 0.0\n')
-    text, reads, _ = lower(base_model(), branch, held=True, recognisers=True)
+    text, reads, _ = lower(base_model(), branch, held=True)
     assert 'record_handle' not in text and 'float(mp["premium"])' in text, text
     assert reads.record_untyped, reads.record_untyped

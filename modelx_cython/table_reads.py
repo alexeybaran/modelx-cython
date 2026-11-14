@@ -34,8 +34,7 @@ Generated shape (``H`` a ``TableHandle``, ``M`` the cimported ``_native_inputs``
   ``H.searchsorted_right(x)``; ``side="left"`` (the default) is ``H.searchsorted_right(x - 1)``,
   the same position on integer keys; ``sub.index[i]``: ``H.key_int(i)``;
 - ``rec["f"]`` on a record: ``R.obj(R.field("f"))`` (``R: M.RecordHandle``; record field kinds
-  are not traced, so conversions around the read stay). Only with ``"table_recognisers":
-  false``: with the round-2 recognisers on they keep handling record reads.
+  are not traced, so conversions around the read stay).
 
 Key parts are passed one by one. A part goes bare (Cython picks the C ``long long``
 specialisation for a C integer, the object one for an object) unless its static type could be
@@ -79,8 +78,6 @@ INDEX_NOT_INT = ('iteration of an index of several levels (tuple keys) other tha
                  'all, sorted or set, or with a target that does not unpack every level; ' + PYTHON)
 UNORDERED = frozenset(('min', 'max', 'any', 'all', 'sorted', 'set'))
 TYPED_INDEX_METHODS = frozenset(('min', 'max', 'asof', 'searchsorted', 'get_level_values'))
-ROUND2 = ('the receiver is also read with round-2 helper methods ({methods}): its index is left to the '
-          'round-2 recognisers; ' + PYTHON)
 COLUMN_VIEW = 'column selection T["c"] used other than by a key read; ' + PYTHON
 
 
@@ -399,10 +396,9 @@ class TableReads:
         self.record_untyped = {}    # D78: record receivers left on Python objects -> why
 
     def per_call_records(self):
-        """W1.3's record handle built per call: only with held handles turned off and the round-2
-        recognisers off (the explicit diagnostic configuration); otherwise records are held (D78)."""
-        return (not getattr(self.policy, 'held_table_handles', True)
-                and not getattr(self.policy, 'table_recognisers', True))
+        """W1.3's record handle built per call: only with held handles turned off (the explicit
+        diagnostic configuration); otherwise records are held (D78)."""
+        return not getattr(self.policy, 'held_table_handles', True)
 
     def note_record(self, node, reason):
         """D78: a record receiver whose reads stay Python calls (reported, never a handle per call)."""
@@ -413,10 +409,7 @@ class TableReads:
         return bool(getattr(self.policy, 'typed_table_reads', False))
 
     def records_enabled(self):
-        # D78: record reads are lowered (through held handles) with the round-2 recognisers on
-        # too, unless the spec key ``typed_record_reads`` is false
-        return self.enabled() and (not getattr(self.policy, 'table_recognisers', True)
-                                   or getattr(self.policy, 'typed_record_reads', True))
+        return self.enabled()
 
     def lower(self, node):
         if not self.enabled() or self.resolver is None or not (self.sites or self.records_enabled()):
@@ -786,7 +779,6 @@ class _Lowering(cst.CSTTransformer):
         self._keyvars = []          # per comprehension: loop name -> (handle, position name)
         self._compfor = {}          # id(original CompFor) -> (handle, position name, index ref)
         self.locals = self._classify()
-        self._round2 = self._round2_receivers()
         owner._key_locals = self._loop_keys()
         self._escaping_rows = {
             id(node) for name in escaped if self.locals.get(name, ('',))[0] == 'row'
@@ -979,7 +971,7 @@ class _Lowering(cst.CSTTransformer):
                 unpack = (isinstance(target, cst.Tuple) and all(
                     isinstance(item, cst.Element) and isinstance(item.value, cst.Name) for item in target.elements))
                 if ((isinstance(target, cst.Name) or unpack) and not self._names_in(current.iter) & names
-                        and self._static_index(current.iter) is not None and not self._round2_index(current.iter)):
+                        and self._static_index(current.iter) is not None):
                     iref = self.index_ref(current.iter)
                     found = None
                     if iref is not None and iref.schema.levels == 1 and isinstance(target, cst.Name):
@@ -1039,7 +1031,7 @@ class _Lowering(cst.CSTTransformer):
         ints = target.value in self.o._key_locals
         if not ints and not (self.f.binds.get(target.value) == 1 and target.value not in self.o._params):
             return updated
-        if self._static_index(original.iter) is None or self._round2_index(original.iter):
+        if self._static_index(original.iter) is None:
             return updated
         iref = self.index_ref(original.iter)
         if iref is None or iref.schema.levels != 1 or ints != iref.schema.int_key:
@@ -1228,7 +1220,7 @@ class _Lowering(cst.CSTTransformer):
         if not self.o.records_enabled():
             return None
         if self.o.per_call_records():
-            # W1.3 as it was (held handles off, recognisers off): a record handle per call
+            # W1.3 as it was (held handles off): a record handle per call
             if self.o.record_cell(original):
                 return _Ref('record', None, self.hoist(original, 'record'))
             if isinstance(original, cst.Name):
@@ -1336,36 +1328,6 @@ class _Lowering(cst.CSTTransformer):
                 return found[1]
         return None
 
-    def _round2_receivers(self):
-        """Receiver code -> round-2 helper methods called on it (``T.lookup_float(...)``,
-        ``T.index.max_int()``, ...). The W1.9 index forms (len/min/max/list/iteration) leave
-        such a receiver's index as written, for the round-2 statement recognisers."""
-        found = {}
-
-        class Calls(cst.CSTVisitor):
-            def visit_Call(inner, node):
-                func = node.func
-                if not isinstance(func, cst.Attribute):
-                    return
-                receiver = _index_attr(func.value, 'index')
-                if receiver is not None:
-                    if func.attr.value not in TYPED_INDEX_METHODS:
-                        found.setdefault(_code(receiver), set()).add('index.' + func.attr.value)
-                elif func.attr.value not in ('loc', 'at', 'iterrows', 'get_level_values') and (
-                        isinstance(func.value, cst.Name) or (isinstance(func.value, cst.Call) and not func.value.args)):
-                    found.setdefault(_code(func.value), set()).add(func.attr.value)
-        self.f.root.visit(Calls())
-        return found
-
-    def _round2_index(self, original):
-        """The round-2 methods read on the receiver of an index expression, else None."""
-        receiver = _index_attr(original, 'index')
-        if receiver is None and isinstance(original, cst.Name):
-            values = self.f.values.get(original.value) or ()
-            receiver = _index_attr(values[0], 'index') if len(values) == 1 else None
-        methods = self._round2.get(_code(receiver)) if receiver is not None else None
-        return ', '.join(sorted(methods)) if methods else None
-
     def _loop_keys(self):
         """Names bound only as the target of ``for k in R.index:`` over a single integer level."""
         found, lowering = set(), self
@@ -1382,7 +1344,7 @@ class _Lowering(cst.CSTTransformer):
                 if (isinstance(target, cst.Name) and lowering.f.binds.get(target.value) == 1
                         and target.value not in lowering.o._params):
                     schema = lowering._static_index(node.iter)
-                    if schema is not None and schema.int_key and not lowering._round2_index(node.iter):
+                    if schema is not None and schema.int_key:
                         found.add(target.value)
         self.f.root.visit(Loops())
         return found
@@ -1403,10 +1365,6 @@ class _Lowering(cst.CSTTransformer):
         """``len/min/max/list/tuple/sorted(R.index)`` on a lowered table."""
         handle, schema = iref.handle, iref.schema
         site = iref.sites[0]
-        methods = self._round2_index(original.args[0].value)
-        if methods:
-            self.decline(site, ROUND2.format(methods=methods))
-            return updated
         info = None
         if name == 'len':
             node, info = cst.Attribute(handle, cst.Name('rows')), ('rows', None, handle, None, None)

@@ -6,7 +6,7 @@ Every square is one cell of a single model (one build for all of them): its form
 written in the target syntax and evaluated for a few arguments in the mode asked. The oracle
 is the same formula run on the pandas frames (``pd.DataFrame`` in place of each table),
 except where D25a pins a different outcome (``EXPECT``). The compiled build lowers the reads
-(spec ``typed_table_reads``, ``table_recognisers`` off), so its squares need the runtime
+(spec ``typed_table_reads``), so its squares need the runtime
 handles of W1.2; until then they fail on the stub handles and stay xfail (not in DONE).
 The squares are the prototype's ``test_loc_reads.py`` forms placed on the matrix; the key
 axis beyond ``int``/``tuple``/``str`` is left to W1.2.
@@ -246,7 +246,7 @@ def _results(mode, tmp_path_factory):
                 f'from exported import mx_model as m\nfor name, args in {squares!r}.items():\n'
                 '    for i in args:\n        try:\n            getattr(m.Matrix, name)(i)\n'
                 '        except Exception:\n            pass\n', encoding='utf-8')
-            (root / 'spec.py').write_text(repr({'typed_table_reads': True, 'table_recognisers': False}))
+            (root / 'spec.py').write_text(repr({'typed_table_reads': True}))
             build = subprocess.run([sys.executable, '-m', 'modelx_cython', 'exported', '--sample', 'sample.py',
                                     '--spec', 'spec.py'], cwd=root, capture_output=True, text=True, env=env)
             assert build.returncode == 0, build.stdout[-3000:] + build.stderr[-3000:]

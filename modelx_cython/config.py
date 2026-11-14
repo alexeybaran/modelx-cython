@@ -42,9 +42,6 @@ class CompilerPolicy:
     propagate_exact_receiver: bool
     native_cache_hits: str
     native_math: bool  # Guarded builtin rounding.
-    # M1 (W1.1), temporary until M4: False turns off the round-2 statement-shape recognisers
-    # for table and record reads, so reads take the typed-handle route.
-    table_recognisers: bool = True
     # M1 (W1.1, default on since W1.5): '# cython: infer_types=True, overflowcheck=True'
     # on generated model modules.
     infer_types: bool = True
@@ -54,9 +51,6 @@ class CompilerPolicy:
     # diag-4w (D71): the handle of a zero-argument table Cell is held per instance and read
     # borrowed (no Cell call, no reference count per read); false resolves it per call.
     held_table_handles: bool = True
-    # D78: record field reads (model_point()["f"]) lowered through a held record handle with the
-    # round-2 recognisers on too; false leaves them to the recognisers / Python.
-    typed_record_reads: bool = True
 
     @classmethod
     def resolve(cls, data):
@@ -69,11 +63,9 @@ class CompilerPolicy:
             propagate_exact_receiver=data.get('propagate_exact_receiver', automatic and miss),
             native_cache_hits=data.get('native_cache_hits', 'auto' if automatic and miss else 'none'),
             native_math=data.get('native_math', True),
-            table_recognisers=data.get('table_recognisers', True),
             infer_types=data.get('infer_types', True),
             typed_table_reads=data.get('typed_table_reads', True),
-            held_table_handles=data.get('held_table_handles', True),
-            typed_record_reads=data.get('typed_record_reads', True))
+            held_table_handles=data.get('held_table_handles', True))
         for name, value in values.items():
             if name not in ('parallel_workers', 'native_cache_hits') and type(value) is not bool:
                 raise ValueError(f'{name} must be a boolean')
@@ -170,21 +162,19 @@ class TransSpec:
     ``"propagate_exact_receiver"`` carries the receiver fact through those
     entries and private dense formula calls. ``"native_math"`` enables guarded
     builtin rounding by default.
-    ``"table_recognisers"`` (default true; temporary, removed in M4): false turns
-    off the round-2 statement-shape recognisers for table and record reads.
     ``"infer_types"`` (default true): C type inference with overflow checks
     (``# cython: infer_types=True, overflowcheck=True``) in generated model modules;
     false keeps Cython's default (no inference of C types for untyped locals, no
     overflow checks).
     ``"typed_table_reads"`` (default true; false keeps reads as Python calls): lower
-    ``.loc``/``.at``/``.index`` reads on traced tables to typed handle reads.
+    ``.loc``/``.at``/``.index`` reads on traced tables to typed handle reads, and (D78) a
+    literal field read of a zero-argument record Cell (``model_point()["f"]``, also through a
+    local bound once to it) to a read of a record handle held per instance and a held field
+    slot; ``int()``/``float()`` of the read convert natively. Other record reads stay Python
+    calls and are reported.
     ``"held_table_handles"`` (default true): the handle of a zero-argument table Cell
     read by a lowered read is resolved once per instance into a field (reset with the
     per-policy caches) and used borrowed; false resolves it on every call.
-    ``"typed_record_reads"`` (default true; D78): a literal field read of a zero-argument
-    record Cell (``model_point()["f"]``, also through a local bound once to it) reads a
-    record handle held per instance and a held field slot; ``int()``/``float()`` of the
-    read convert natively. Other record reads stay Python calls and are reported.
     ``"native_cache_hits"`` defaults to ``"auto"`` when automatic optimization
     and dense miss binding are enabled. It selects scalar hits and already-proven
     dense hits; explicit alternatives are ``"none"``, ``"scalar"``, ``"dense"``

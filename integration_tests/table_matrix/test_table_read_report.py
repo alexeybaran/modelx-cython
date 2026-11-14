@@ -103,7 +103,7 @@ def test_untyped_reads_are_reported_and_per_step_ones_warned(tmp_path):
     assert [(e['read'], e['per_step']) for e in captured] == [('self.market.curve().index', True)]
     assert captured[0]['reason'].startswith('formula kept as a Python method (captured default)')
     upper = report[INPUTS + 'upper']
-    assert 'modelx_cython.runtime._native_inputs.read_clamped_table_float' in upper['native_numeric_helpers']
+    assert upper['native_numeric_helpers'] == []      # no round-2 clamp recogniser
     assert [e['read'] for e in upper['table_reads_untyped']] == ['table.index.max_int()']
     assert upper['table_reads_untyped'][0]['reason'] == (
         'index.max_int(...) is not in the typed vocabulary; runs as a Python call'), upper
@@ -119,21 +119,21 @@ def test_untyped_reads_are_reported_and_per_step_ones_warned(tmp_path):
     assert classes.startswith('# cython: infer_types=True, overflowcheck=True\n')    # default on (W1.5, D57)
 
 
-def test_spec_keys_infer_types_and_table_recognisers(tmp_path):
+def test_spec_key_infer_types(tmp_path):
     _model(tmp_path)
-    report, _ = _translate(tmp_path, {'infer_types': True, 'table_recognisers': False})
+    report, _ = _translate(tmp_path, {'infer_types': True})
     classes = (tmp_path / 'exported_cy/_m_Portfolio/_mx_classes.py').read_text(encoding='utf-8')
     assert classes.startswith('# cython: infer_types=True, overflowcheck=True\n'), classes[:200]
-    upper = report[INPUTS + 'upper']     # the round-2 clamp recogniser is off
+    upper = report[INPUTS + 'upper']     # no clamp recogniser
     assert not any('clamped' in name for name in upper['native_numeric_helpers']), upper
     assert upper['table_reads_untyped'][0]['reason'] == (
         'index.max_int(...) is not in the typed vocabulary; runs as a Python call')
     assert 'read_clamped_table_float' not in classes
 
 
-def test_table_recognisers_off_builds_and_matches(tmp_path):
+def test_untyped_index_read_builds_and_matches(tmp_path):
     _model(tmp_path)
-    _translate(tmp_path, {'table_recognisers': False}, translate_only=False)
+    _translate(tmp_path, {}, translate_only=False)
     check = subprocess.run([sys.executable, '-c', PATCH + '''
 from exported_cy import mx_model
 u = mx_model.Portfolio.MarketInputs.upper
@@ -145,11 +145,10 @@ assert [u(t) for t in range(1, 6)] == [0.05, 0.06, 0.07, 0.07, 0.07]
 @pytest.mark.parametrize('value', ['yes', 1])
 def test_spec_keys_must_be_booleans(value):
     from modelx_cython.config import CompilerPolicy
-    for name in ('infer_types', 'table_recognisers'):
-        with pytest.raises(ValueError, match=name):
-            CompilerPolicy.resolve({name: value})
+    with pytest.raises(ValueError, match='infer_types'):
+        CompilerPolicy.resolve({'infer_types': value})
     policy = CompilerPolicy.resolve({})
-    assert policy.table_recognisers is True and policy.infer_types is True
+    assert policy.infer_types is True
 
 
 def test_native_table_index_forwards_public_names(tmp_path):
