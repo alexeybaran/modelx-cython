@@ -56,11 +56,10 @@ p.zipped(4);p.zipped(0)
 ''')
     runner = textwrap.dedent('''
         import sys
-        from modelx_cython import cli, reductions, numeric_helpers
+        from modelx_cython import cli, reductions
         def forbidden(*args, **kwargs):
             raise AssertionError('legacy AST generator/classifier activation')
         reductions.NativeReductions = forbidden
-        numeric_helpers.ContextualFloat = forbidden
         raise SystemExit(cli.main(['exported','--sample','sample.py','--no-spec'],sys.stdout,sys.stderr))
     ''')
     run = subprocess.run([sys.executable, '-c', runner], cwd=tmp_path,

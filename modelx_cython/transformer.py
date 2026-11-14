@@ -130,26 +130,6 @@ def _guard_associative_cache(cell, body):
 _logger = logging.getLogger(__name__)
 
 
-def _without_table_recognisers(base):
-    """NumericReturns without the round-2 statement-shape recognisers for table and record
-    reads (spec ``"table_recognisers": false``, temporary until M4). Rounded-input rewrites
-    and record-item assignments stay; reads then run as written (typed handles in M1)."""
-    class NumericReturnsWithoutTableRecognisers(base):
-        def leave_FunctionDef(self, before, after):
-            self.function_depth -= 1
-            if (self.function_depth or not self.scope_safe or 'min' not in self.builtin_keys
-                    or self.cell.is_locked or self.cell.cls in self.cls.visitor.dynamic_ref_classes
-                    or self.cell.get_rettype_expr(c_style=True) != 'double'
-                    or not isinstance(after.body, cst.IndentedBlock) or len(after.body.body) < 4):
-                return after
-            rounded = self.rounded_inputs(after.body.body)
-            return after if rounded is None else after.with_changes(
-                body=after.body.with_changes(body=rounded))
-
-        def leave_Return(self, before, after):
-            return after
-    return NumericReturnsWithoutTableRecognisers
-
 class PXDGenerator:
     """Generate a Cython ``.pxd`` declaration file for a model module.
 
@@ -670,13 +650,11 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
         when no operand pair can be typed.
         """
         from modelx_cython.checked_arithmetic import CheckedArithmetic
-        from modelx_cython.numeric_helpers import NumericReturns
+        from modelx_cython.rounding import RoundedInputs
         from modelx_cython import vectors
         node = vectors.lower(node, cls_info, cells, scope, self._vector_counter, self.module,
                              self._ref_kinds.get(cls_info.fqname, {}))
         node = self._table_reads(node, cls_info, cells)
-        if not self.module.spec.policy.table_recognisers:
-            NumericReturns = _without_table_recognisers(NumericReturns)
         cells.formula_allows_exact_receiver = allows_exact_receiver(node, cls_info.name)
         builtin_keys = {name for name in ("all", "any", "sum", "min", "max", "float", "int", "round", "range")
                         if scope[name] and all(isinstance(binding, BuiltinAssignment)
@@ -684,10 +662,10 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
         node = CheckedArithmetic(cls_info, cells, builtin_keys).rewrite(node)
         if not self.module.spec.policy.native_math:
             builtin_keys.discard('round')
-        numeric_returns = NumericReturns(cls_info, cells, self.helper_providers, builtin_keys,
-                                         self._resolver)
-        node = node.visit(numeric_returns)
-        self._table_reads_report(cells, numeric_returns.operations)
+        rounded_inputs = RoundedInputs(cls_info, cells, self.helper_providers, builtin_keys,
+                                        self._resolver)
+        node = node.visit(rounded_inputs)
+        self._table_reads_report(cells)
         if 'round' in builtin_keys and '_mx_canonical_round' not in self._source:
             from modelx_cython.rounding import NativeRounding
             rounding = NativeRounding()
@@ -695,7 +673,7 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
             self._uses_native_round |= rounding.used
         if not hasattr(cls_info, 'native_contexts'):
             cls_info.native_contexts = {}
-        cls_info.native_contexts.update(numeric_returns.contexts)
+        cls_info.native_contexts.update(rounded_inputs.contexts)
         # Keep the qualified typed kernels behind the common helper contracts.
         # The same CST/type facts select their native domain; unsupported source
         # and values keep ordinary object-capable Cython and current callables.
@@ -725,21 +703,14 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
         node = node.visit(enum_comparisons)
         cells.native_enum_comparisons = enum_comparisons.comparisons
         cells.native_enum_constants = enum_comparisons.count
-        operations = set(numeric_returns.operations)
-        if (self._resolver is not None and self._resolver.provider_results
-                and cells.formula_allows_exact_receiver):
-            from .provider_members import ProviderMemberCalls
-            members = ProviderMemberCalls(self._resolver, cls_info.fqname, self.helper_providers)
-            node = node.visit(members)
-            operations.update(members.operations)
+        operations = set(rounded_inputs.operations)
         node = self._bind_declared_helpers(node, cls_info, cells, operations)
         admitted_helpers = set(cells.native_helpers)
         for fallback in reductions.fallbacks if reductions is not None else ():
-            self._cold_sums.append(self._bind_declared_helpers(fallback, cls_info, cells, numeric_returns.operations))
+            self._cold_sums.append(self._bind_declared_helpers(fallback, cls_info, cells, rounded_inputs.operations))
             admitted_helpers.update(cells.native_helpers)
         cells.native_helpers = sorted(admitted_helpers)
-        cells.native_numeric_helpers = sorted(numeric_returns.operations)
-        cells.unlocked_table_reads = sorted(numeric_returns.unlocked_table_reads)
+        cells.native_numeric_helpers = sorted(rounded_inputs.operations)
         node = rewrite_powers(
             node, self._resolver, self._cells_kinds, self._ref_kinds,
             cls_info.fqname, cells, builtin_float='float' in builtin_keys,
@@ -823,19 +794,13 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
             [site.entry(cells.has_args(), KEPT_PYTHON.format(why=why))
              for site in table_read_sites(node, self._resolver, cls_info)]
             + self._pandas_reads(node, cls_info, cells), key=lambda entry: entry['line'])
-        self._table_reads_report(cells, ())
+        self._table_reads_report(cells)
         return node
 
     @staticmethod
-    def _table_reads_report(cells, round2_operations):
-        """Settle the reasons once the round-2 recognisers have run; warn per step."""
-        from modelx_cython.admission import NOT_LOWERED, ROUND2_FALLBACK, untyped_read_warning
-        if round2_operations:
-            reason = ROUND2_FALLBACK.format(operations=', '.join(
-                sorted(name.rsplit('.', 1)[-1] for name in round2_operations)))
-            for entry in cells.table_reads_untyped:
-                if entry['reason'] == NOT_LOWERED:
-                    entry['reason'] = reason
+    def _table_reads_report(cells):
+        """Warn once per per-step untyped table read."""
+        from modelx_cython.admission import untyped_read_warning
         for entry in cells.table_reads_untyped:
             if entry['per_step']:
                 _logger.warning(untyped_read_warning(cells.fqname, entry))

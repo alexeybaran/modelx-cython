@@ -53,8 +53,6 @@ def describe(module_infos):
                     reasons.append('native provider result requires a matching return annotation or direct forwarding from a typed Cell')
                 reasons.extend(_lock_reason(source, 'cached', resource)
                                for source, resource in getattr(cell, 'unlocked_provider_sources', ()))
-                reasons.extend(_lock_reason(source, kind)
-                               for source, kind in getattr(cell, 'unlocked_table_reads', ()))
                 result[cell.fqname] = {
                     'formula': 'python-method' if formula_python else 'cython-cfunction',
                     'public_entry': 'python-method' if public_python else 'cython-cpdef',
@@ -259,8 +257,6 @@ def expressions_object(cell):
 TABLE_TYPE = 'modelx_helpers.immutable_inputs.Table'
 TABLE_READ_ATTRS = ('loc', 'at', 'index', 'iterrows')
 NOT_LOWERED = 'not lowered to a typed handle read; runs as a Python call'
-ROUND2_FALLBACK = ('not lowered to a typed handle read; the formula also has round-2 native reads '
-                   '({operations}), which fall back to this Python read where they do not apply')
 KEPT_PYTHON = 'formula kept as a Python method ({why}): runs as a Python call'
 PANDAS_RECEIVER = ('receiver is a pandas DataFrame, Series or Index, not a helper Table: never lowered; '
                    'pandas runs on every evaluation')
