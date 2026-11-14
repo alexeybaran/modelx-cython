@@ -589,6 +589,8 @@ class TableReads:
             if self.is_int(expr.left, depth + 1) and self.is_int(expr.right, depth + 1):
                 return 'integer arithmetic'
             return None
+        if isinstance(expr, cst.Subscript) and self._int_index_read(expr):
+            return 'part of an extreme key on an integer level'
         if isinstance(expr, cst.Call) and _plain_args(expr):
             func = expr.func
             if (self._int_index_read(expr) and (expr.func.attr.value != 'asof' or (
@@ -615,7 +617,19 @@ class TableReads:
         return None
 
     def _int_index_read(self, expr):
-        """``T.index.min()/max()`` or ``T.index.asof(k)`` on a single integer level."""
+        """``T.index.min()/max()`` or ``T.index.asof(k)`` on a single integer level; or
+        (diag-us2, D91) ``T.index.min()[k]`` / ``T.index.max()[k]`` on several levels whose
+        level k is an integer: the k-th part of the smallest or largest key."""
+        if (isinstance(expr, cst.Subscript) and len(expr.slice) == 1
+                and isinstance(expr.slice[0].slice, cst.Index)
+                and isinstance(expr.slice[0].slice.value, cst.Integer)
+                and isinstance(expr.value, cst.Call) and not expr.value.args
+                and isinstance(expr.value.func, cst.Attribute)
+                and expr.value.func.attr.value in ('min', 'max')):
+            schema = self._index_schema(expr.value.func.value)
+            k = expr.slice[0].slice.value.evaluated_value
+            return (schema is not None and schema.levels > 1 and 0 <= k < schema.levels
+                    and schema.keys[k] == 'int')
         if not (isinstance(expr, cst.Call) and isinstance(expr.func, cst.Attribute)
                 and expr.func.attr.value in ('min', 'max', 'asof')):
             return False
@@ -632,6 +646,19 @@ class TableReads:
             schemas = [self.table_cell(value) or self._sub_table(value) for value in values]
             schema = schemas[0] if schemas and all(s is not None and s.same(schemas[0]) for s in schemas) else None
         return schema is not None and schema.int_key
+
+    def _index_schema(self, index_expr):
+        """Schema of the table whose ``.index`` is ``index_expr`` (a table cell or a table local
+        assigned table cells of one schema), else None."""
+        receiver = _index_attr(index_expr, 'index')
+        if receiver is None:
+            return None
+        schema = self.table_cell(receiver)
+        if schema is None and isinstance(receiver, cst.Name) and receiver.value not in self.formula.other:
+            values = self.formula.values.get(receiver.value) or ()
+            schemas = [self.table_cell(value) for value in values]
+            schema = schemas[0] if schemas and all(x is not None and x.same(schemas[0]) for x in schemas) else None
+        return schema
 
     def _sub_table(self, expr):
         """Schema of ``T.loc[prefix]`` with fewer key parts than ``T`` has levels (a sub-table),
