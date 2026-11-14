@@ -206,6 +206,9 @@ def local_kinds(formula, classifier):
         return {}
     if any(isinstance(node, cst.NamedExpr) for node in walk(formula.body)):
         return {}
+    # a nested function may rebind a formula local through ``nonlocal``
+    rebound = {item.name.value for node in walk(formula.body) if isinstance(node, cst.Nonlocal)
+               for item in node.names}
     params = formula.params
     parameters = {p.name.value for p in (*params.posonly_params, *params.params, *params.kwonly_params)}
     parameters |= {p.name.value for p in (params.star_arg, params.star_kwarg) if isinstance(p, cst.Param)}
@@ -245,7 +248,8 @@ def local_kinds(formula, classifier):
         elif isinstance(node, (cst.Import, cst.ImportFrom)):
             return {}
     candidates = {name: exprs for name, exprs in values.items()
-                  if name not in stores and name not in parameters and exprs and None not in exprs}
+                  if name not in stores and name not in parameters and name not in rebound
+                  and exprs and None not in exprs}
     # seed: a kind from any value computable with the locals seeded so far
     kinds = {}
     changed = True
