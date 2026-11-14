@@ -1126,9 +1126,15 @@ def test_table_local_not_held_unless_one_top_level_binding():
              '    return x + float(tbl.loc[self.age(t), "mort_rate"])\n')
     for source in (nested, twice):
         text, reads, _ = lower(base_model(), source, held=True)
-        assert f'_mx_h_tbl: {M}.TableHandle' in text and '_mx_h_tbl = _mx_cy.cast' not in text, text
+        if source is nested:
+            assert f'_mx_h_tbl: {M}.TableHandle' in text and '_mx_h_tbl = _mx_cy.cast' not in text, text
+        else:
+            # diag-kr (D88 follow-up): several identical bindings hold the handle, resolved at each
+            # binding (where the formula calls the Cell, never before it)
+            assert text.count('if self._mx_th_0 is None:') == 2 and f'_mx_h_tbl: {M}.TableRef' in text, text
         assert reads.typed >= 1
         receiver = base_model().receiver()
+        receiver._mx_th_0, receiver._mx_tc_0 = None, 0     # the held fields of the compiled Space
         for t in (0, 1, 40):
             assert _run(text, receiver, (t,), RUNTIME) == _run(source, receiver, (t,), {})
 

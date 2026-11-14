@@ -3,6 +3,8 @@
 - integer locals in loop bodies, from min/max/abs/int() and compared in tests (``s = t - u``,
   ``d = abs(s)``, ``a = min(max(age(t), lo), hi)``, ``x = age(t)``, ``range(s, t)`` bounds,
   ``t < n + 2 * age(t)``): C integers under D76 (checked here as regressions: no object local);
+- a table local bound in several branches to the same held table Cell holds the Cell's handle,
+  resolved at each binding, and its columns (Cancer_KR_S claims ``tbl = data.care_table()`` per kind);
 - a ``for k in range(...)`` target with integer bounds is an integer table key part
   (Cancer_KR_S ``for k in range(1, 7): tbl.loc[k, "c"]``), not an object key;
 - ``min``/``max`` of a generator over an integer vector cell (Cancer_KR_S tier_share), with
@@ -91,6 +93,16 @@ def _build(tmp_path):
                 if x > 5:
                     return flow(x) * 2.0
                 return flow(x)
+            '''))
+        s.new_cells('branched', textwrap.dedent('''\
+            def branched(t):
+                if t % 2 == 0:
+                    tbl = table()
+                    return float(tbl.loc[1, "rate"]) * t
+                if t % 3 == 0:
+                    tbl = table()
+                    return float(tbl.loc[2, "rate"]) + t
+                return 0.0
             '''))
         s.new_cells('keyed', textwrap.dedent('''\
             def keyed(t):
@@ -182,7 +194,7 @@ def _build(tmp_path):
         'v.vec(); v.ages()\n'
         'for t in range(12):\n'
         '    v.pay(t); v.clamped(t); v.direct(t); v.keyed(t); v.members(t); v.identity(t)\n'
-        '    v.above(t); v.capped(t); v.ids(t); v.over_ids(t); v.grad(t, 1); v.grad(t, 2); v.scaled(t); v.within(t)\n'
+        '    v.above(t); v.capped(t); v.ids(t); v.over_ids(t); v.grad(t, 1); v.grad(t, 2); v.scaled(t); v.within(t); v.branched(t)\n'
         '    try:\n        v.empty_min(t)\n    except ValueError:\n        pass\n'
         '    [v.cohort(t, s) for s in range(-t - 1, t + 2)]\n', encoding='utf-8')
     done = subprocess.run([sys.executable, '-m', 'modelx_cython', 'exported', '--sample', 'sample.py',
@@ -216,6 +228,9 @@ def test_forms_compile_natively_and_equal_the_interpreter(tmp_path):
     assert not report[PREFIX + 'capped']['slow_paths'], report[PREFIX + 'capped']['slow_paths']
     grad = _formula(source, 'grad')
     assert 's: object' not in grad, grad      # assigned in both branches, read by range(s, t)
+    branched = _formula(source, 'branched')
+    assert '.held_col(' in branched and '.col("rate")' not in branched and \
+        branched.count('table_handle(') == branched.count('is None:') == 2, branched   # resolved at each binding
     within = _formula(source, 'within')
     assert 'n: object' not in within, within
     scaled = _formula(source, 'scaled')
@@ -242,6 +257,7 @@ def test_forms_compile_natively_and_equal_the_interpreter(tmp_path):
             out.append(list(v.ids(t)))
             out.append([repr(x) for x in v.scaled(t)])
             call(v.within, t)
+            call(v.branched, t)
             call(v.grad, t, 1)
             call(v.grad, t, 2)
             for s in range(-t - 1, t + 2):
