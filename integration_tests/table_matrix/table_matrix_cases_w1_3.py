@@ -71,7 +71,8 @@ SQUARES = {
     ('C', 12, 'int'): ('return T_C()["q"][5 + i % 4]', range(4)),
     ('R', 1, 'int'): ('return float(T_R().loc[(1 + i % 2, 10 * (1 + i % 3)), "q"])', range(6)),
     ('R', 2, 'int'): ('return T_R().at[(1 + i % 2, 10 * (1 + i % 3)), "q"]', range(6)),
-    ('R', 4, 'int'): ('return (1 + i % 3, 10 * (1 + i % 4)) in T_R().index', range(12)),
+    ('R', 4, 'int'): ('return ((1 + i % 3, 10 * (1 + i % 4)) in T_R().index, (1 + i % 3) in T_R().index)',
+                      range(12)),       # full key, and a one-part prefix of two levels (D27a, D54)
     ('R', 5, 'int'): ('return T_R().index.max(), T_R().index.min()', range(1)),
     ('R', 6, 'int'): ('sub = T_R().loc[1 + i % 2]\n    return float(sub.loc[10 * (1 + i % 3), "q"]) + sub.index.max()',
                       range(6)),

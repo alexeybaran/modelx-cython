@@ -1530,28 +1530,35 @@ cdef inline bint _input_value(NativeTable table, Py_ssize_t row, object column, 
 
 
 cdef class _NativeTableIndex:
+    """The index of a NativeTable, answering exactly as the live helper's index (D54).
+
+    Compiled code reaches it only for index reads the lowering left to Python (W1.3 lowers
+    the target-syntax reads to the typed handle). Every member asks the helper's own index,
+    so a Python read gives the live answer: ``k in index`` is a prefix test on a multi-level
+    table (D27a), iteration and ``len`` read the table's storage, ``max_int``/``max_float``
+    and the pandas vocabulary (``min``, ``max``, ``asof``, ``searchsorted``, ``index[i]``)
+    are the helper's.
+    """
     cdef object _owner
 
     def __init__(self, owner):
         self._owner = owner
 
     def __contains__(self, key):
-        return contains(_contains, self._owner, key)
+        return key in self._owner.index
 
     def __iter__(self):
-        return iter(self._owner._keys)
+        return iter(self._owner.index)
 
     def __len__(self):
-        return len(self._owner._keys)
+        return len(self._owner.index)
 
     def max_int(self):
-        return _typed_int(last_key(_last_key, self._owner))
+        return self._owner.index.max_int()
 
     def max_float(self):
-        return _float_type(last_key(_last_key, self._owner))
+        return self._owner.index.max_float()
 
-    # M1 forwarding (W1.1): the target-syntax index vocabulary (min, max, asof, searchsorted,
-    # index[i], ...) runs on the helper's own index until the typed handles lower it (W1.2/W1.3).
     def __getattr__(self, name):
         if name.startswith('_'):
             raise AttributeError(name)
