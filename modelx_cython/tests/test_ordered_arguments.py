@@ -134,3 +134,24 @@ def test_integer_local_exponent_keeps_the_native_power():
                                      operand_kind=OperandKind(None, {}, {}, '', {'n': KIND_INT, 'k': KIND_INT,
                                                                                 'x': KIND_FLOAT}))
     assert '(1.0 - x) ** k' in cst.Module(body=(native,)).code
+
+
+def test_int_of_a_proven_integer_is_the_integer():
+    """diag-us (DIA_US_S annuity_factor): ``n = int((last - start) // step)`` keeps ``n`` a C
+    integer; a float, an unknown operand, a shadowed ``int`` or a comprehension keep the call."""
+    from modelx_cython.powers import OperandKind, KIND_INT, KIND_FLOAT
+    kinds = OperandKind(None, {}, {}, '', {'a': KIND_INT, 'b': KIND_INT, 'x': KIND_FLOAT})
+
+    def code(source):
+        formula = preserve_argument_order(cst.parse_module(source).body[0], native_result=False, operand_kind=kinds)
+        return cst.Module(body=(formula,)).code
+
+    out = code('def f(a, b, x, y):\n    n = int((a - b) // 3) + 1\n    return n\n')
+    assert 'n = ((a - b) // 3) + 1' in out, out
+    assert 'int(x)' in code('def f(a, b, x, y):\n    return int(x)\n')
+    assert 'int(y)' in code('def f(a, b, x, y):\n    return int(y)\n')
+    assert 'int(a)' in code('def f(a, b, x, y):\n    int = abs\n    return int(a)\n')
+    assert 'int(a)' in code('def f(a, b, x, y):\n    return [int(a) for a in y]\n')
+    namespace = {}
+    exec(out, namespace)
+    assert namespace['f'](10, 2, 0.5, None) == 3 and type(namespace['f'](10, 2, 0.5, None)) is int

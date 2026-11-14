@@ -67,6 +67,29 @@ class _OrderedArguments(cst.CSTTransformer):
                             (cst.Arg(cst.Name('object')), cst.Arg(value)))
         return after.with_changes(left=boxed(after.left), right=boxed(after.right))
 
+    def integer_identity(self, before, after):
+        """``int(x)`` of a proven C integer is ``x`` (diag-us).
+
+        Builtin ``int`` of an int returns that int, but Cython types the call as a Python
+        object, so ``n = int((last - start) // step)`` made ``n`` an object and with it every
+        local derived from it (``for k in range(1, n + 1)``: boxed ``k``, ``k * step``, ...),
+        although the local-kind analysis proves ``n`` an integer (D59, ded875f). Only the
+        builtin, one positional argument, at the formula's own level (not in a comprehension,
+        lambda or nested def, where names may be bound otherwise)."""
+        from .powers import KIND_INT
+        if (self.operand_kind is None or self.opaque_depth != 1 or not isinstance(before.func, cst.Name)
+                or before.func.value != 'int' or len(before.args) != 1 or before.args[0].keyword is not None
+                or before.args[0].star):
+            return None
+        scope = self.get_metadata(ScopeProvider, before.func)
+        bindings = tuple(scope['int'])
+        if not bindings or not all(isinstance(binding, BuiltinAssignment) for binding in bindings):
+            return None
+        if self.operand_kind.kind(before.args[0].value) != KIND_INT:
+            return None
+        value = after.args[0].value
+        return value.with_changes(lpar=(cst.LeftParen(),), rpar=(cst.RightParen(),)) if not value.lpar else value
+
     def typed_extrema(self, before, after, positional):
         """W1.4: min/max whose operands are all double or all C integers, as C comparisons.
 
@@ -104,6 +127,9 @@ class _OrderedArguments(cst.CSTTransformer):
             self.first_line = position.start.line if position is not None else None
 
     def leave_Call(self, before, after):
+        integer = self.integer_identity(before, after)
+        if integer is not None:
+            return integer
         # A numeric Cell already normalizes its result through its native ABI.
         # Object results/child scopes must keep the selected operand's Python
         # scalar class: Cython promotes mixed native min/max inputs to double.
