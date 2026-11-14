@@ -117,7 +117,7 @@ def test_untyped_reads_are_reported_and_per_step_ones_warned(tmp_path):
     assert report[INPUTS + 'curve']['table_reads_typed'] == 0
     assert report[INPUTS + 'curve']['table_reads_keys'] == []
     classes = (tmp_path / 'exported_cy/_m_Portfolio/_mx_classes.py').read_text(encoding='utf-8')
-    assert 'infer_types' not in classes
+    assert classes.startswith('# cython: infer_types=True, overflowcheck=True\n')    # default on (W1.5, D57)
 
 
 def test_spec_keys_infer_types_and_table_recognisers(tmp_path):
@@ -150,7 +150,7 @@ def test_spec_keys_must_be_booleans(value):
         with pytest.raises(ValueError, match=name):
             CompilerPolicy.resolve({name: value})
     policy = CompilerPolicy.resolve({})
-    assert policy.table_recognisers is True and policy.infer_types is False
+    assert policy.table_recognisers is True and policy.infer_types is True
 
 
 def test_native_table_index_forwards_public_names(tmp_path):
