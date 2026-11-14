@@ -750,6 +750,7 @@ class _Lowering(cst.CSTTransformer):
         self._hoisted = {}          # receiver code -> [name, receiver, kind, first top index]
         self._held_locals = {}      # local TableRef name of a held handle -> its field (D75)
         self._held_table_locals = {}  # table local -> (held field, top index) or None (diag-mt)
+        self._resolve_markers = {}    # diag-kr: marker call -> (held field, Cell call) of an alias binding
         self._held_resolves = []      # (top index, resolve statements) of held table locals
         self._declare = []          # (name, type) declared at the top of the formula
         self._companions = {}
@@ -1118,6 +1119,22 @@ class _Lowering(cst.CSTTransformer):
             fields[code] = (f'_mx_th_{len(fields)}', self.o.module)
         return fields[code]
 
+    def held_alias(self, name):
+        """diag-kr (over diag-mt's held_local): a table local with more than one binding, every one
+        the same zero-argument cached table Cell (``tbl = data.care_table()`` in several branches),
+        not needed as a Python value: it holds that Cell's handle as held_local does, resolved at
+        each binding (where the formula calls the Cell, never before it), with held columns (D75).
+        (field, None), or None."""
+        if name in self.escaped:
+            return None
+        values = self.f.values.get(name) or ()
+        if len(values) < 2 or name in self.f.other or len({_code(value) for value in values}) != 1:
+            return None
+        if self.o.table_cell(values[0]) is None:
+            return None
+        field = self.held_field(values[0])
+        return (field[0], None) if field is not None else None
+
     def held_local(self, name):
         """The held field of a table local, or None (diag-mt).
 
@@ -1154,7 +1171,7 @@ class _Lowering(cst.CSTTransformer):
         if isinstance(original, cst.Name):
             found = self.local(original.value)
             if found is not None and found[0] == 'table':
-                field = self.held_local(original.value)
+                field = self.held_local(original.value) or self.held_alias(original.value)
                 if field is not None:
                     ref = self.companion(original.value, 'TableRef')
                     self._held_locals[ref] = field[0]       # held columns (D75) through it
@@ -1976,6 +1993,17 @@ class _Lowering(cst.CSTTransformer):
             return updated
         kind = found[0]
         statements = []
+        alias = self.held_alias(name) if kind == 'table' and self.held_local(name) is None else None
+        if alias is not None:
+            # diag-kr: resolved at this binding (a guarded statement, expanded by
+            # leave_SimpleStatementLine), then read borrowed
+            handle = self.companion(name, 'TableRef')
+            marker = f'_mx_held_resolve_{len(self._resolve_markers)}'
+            self._resolve_markers[marker] = (alias[0], _code(new_value))
+            self.changed = True
+            out = [cst.Expr(cst.Call(cst.Name(marker))), cst.parse_statement(
+                f'{handle} = _mx_cy.cast({self.mtype("TableRef")}, self.{alias[0]})\n').body[0]]
+            return cst.FlattenSentinel(out)
         held = self.held_local(name) if kind in ('table', 'record') else None
         if held is not None and kind == 'record':
             # D78: a record local bound to a held zero-argument record Cell
@@ -2077,6 +2105,30 @@ class _Lowering(cst.CSTTransformer):
         if hasattr(updated, 'semicolon'):
             statements = [s.with_changes(semicolon=cst.MaybeSentinel.DEFAULT) for s in statements]
         return cst.FlattenSentinel(statements)
+
+    def leave_SimpleStatementLine(self, original, updated):
+        """diag-kr: expand the resolve marker of a held alias binding into its guarded statement."""
+        if not self._resolve_markers:
+            return updated
+        out, small = [], []
+        for statement in updated.body:
+            if (isinstance(statement, cst.Expr) and isinstance(statement.value, cst.Call)
+                    and isinstance(statement.value.func, cst.Name)
+                    and statement.value.func.value in self._resolve_markers):
+                if small:
+                    out.append(updated.with_changes(body=small))
+                    small = []
+                field, call = self._resolve_markers[statement.value.func.value]
+                out.extend(cst.parse_module(
+                    f'if self.{field} is None:\n'
+                    f'    self.{field} = {self.o.module}.table_handle({call})\n').body)
+            else:
+                small.append(statement.with_changes(semicolon=cst.MaybeSentinel.DEFAULT))
+        if not out:
+            return updated
+        if small:
+            out.append(updated.with_changes(body=small))
+        return cst.FlattenSentinel(out)
 
     def leave_FunctionDef(self, original, updated):
         if original is not self._root:
