@@ -91,9 +91,8 @@ def test_untyped_reads_are_reported_and_per_step_ones_warned(tmp_path):
     listed = report[PREFIX + 'listed']    # typed_table_reads is on by default (D45)
     assert listed['table_reads_typed'] == 1 and listed['table_reads_untyped'] == []
     assert listed['table_reads_keys'] == ['key in index, 1 part: int (parameter t is long long)']
-    count = report[PREFIX + 'count']['table_reads_untyped']
-    assert [(e['read'], e['kind'], e['line'], e['per_step']) for e in count] == [
-        ('table.index', 'index', 3, False)]
+    count = report[PREFIX + 'count']      # len(T.index) reads the handle's row count (W1.9)
+    assert count['table_reads_typed'] == 1 and count['table_reads_untyped'] == []
     seen = report[PREFIX + 'seen']       # inside a generator, lowered
     assert seen['table_reads_typed'] == 1 and seen['table_reads_untyped'] == []
     first = report[PREFIX + 'first']['table_reads_untyped']

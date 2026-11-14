@@ -77,6 +77,9 @@ NO_SCHEMA = 'receiver has no traced table schema; ' + PYTHON
 INDEX_NOT_INT = ('iteration of an index of several levels (tuple keys) other than inside min, max, any, '
                  'all, sorted or set, or with a target that does not unpack every level; ' + PYTHON)
 UNORDERED = frozenset(('min', 'max', 'any', 'all', 'sorted', 'set'))
+TYPED_INDEX_METHODS = frozenset(('min', 'max', 'asof', 'searchsorted', 'get_level_values'))
+ROUND2 = ('the receiver is also read with round-2 helper methods ({methods}): its index is left to the '
+          'round-2 recognisers; ' + PYTHON)
 COLUMN_VIEW = 'column selection T["c"] used other than by a key read; ' + PYTHON
 
 
@@ -643,6 +646,7 @@ class _Lowering(cst.CSTTransformer):
         self._keyvars = []          # per comprehension: loop name -> (handle, position name)
         self._compfor = {}          # id(original CompFor) -> (handle, position name, index ref)
         self.locals = self._classify()
+        self._round2 = self._round2_receivers()
         owner._key_locals = self._loop_keys()
         self._escaping_rows = {
             id(node) for name in escaped if self.locals.get(name, ('',))[0] == 'row'
@@ -835,7 +839,7 @@ class _Lowering(cst.CSTTransformer):
                 unpack = (isinstance(target, cst.Tuple) and all(
                     isinstance(item, cst.Element) and isinstance(item.value, cst.Name) for item in target.elements))
                 if ((isinstance(target, cst.Name) or unpack) and not self._names_in(current.iter) & names
-                        and self._static_index(current.iter) is not None):
+                        and self._static_index(current.iter) is not None and not self._round2_index(current.iter)):
                     iref = self.index_ref(current.iter)
                     found = None
                     if iref is not None and iref.schema.levels == 1 and isinstance(target, cst.Name):
@@ -895,7 +899,7 @@ class _Lowering(cst.CSTTransformer):
         ints = target.value in self.o._key_locals
         if not ints and not (self.f.binds.get(target.value) == 1 and target.value not in self.o._params):
             return updated
-        if self._static_index(original.iter) is None:
+        if self._static_index(original.iter) is None or self._round2_index(original.iter):
             return updated
         iref = self.index_ref(original.iter)
         if iref is None or iref.schema.levels != 1 or ints != iref.schema.int_key:
@@ -1084,6 +1088,36 @@ class _Lowering(cst.CSTTransformer):
                 return found[1]
         return None
 
+    def _round2_receivers(self):
+        """Receiver code -> round-2 helper methods called on it (``T.lookup_float(...)``,
+        ``T.index.max_int()``, ...). The W1.9 index forms (len/min/max/list/iteration) leave
+        such a receiver's index as written, for the round-2 statement recognisers."""
+        found = {}
+
+        class Calls(cst.CSTVisitor):
+            def visit_Call(inner, node):
+                func = node.func
+                if not isinstance(func, cst.Attribute):
+                    return
+                receiver = _index_attr(func.value, 'index')
+                if receiver is not None:
+                    if func.attr.value not in TYPED_INDEX_METHODS:
+                        found.setdefault(_code(receiver), set()).add('index.' + func.attr.value)
+                elif func.attr.value not in ('loc', 'at', 'iterrows', 'get_level_values') and (
+                        isinstance(func.value, cst.Name) or (isinstance(func.value, cst.Call) and not func.value.args)):
+                    found.setdefault(_code(func.value), set()).add(func.attr.value)
+        self.f.root.visit(Calls())
+        return found
+
+    def _round2_index(self, original):
+        """The round-2 methods read on the receiver of an index expression, else None."""
+        receiver = _index_attr(original, 'index')
+        if receiver is None and isinstance(original, cst.Name):
+            values = self.f.values.get(original.value) or ()
+            receiver = _index_attr(values[0], 'index') if len(values) == 1 else None
+        methods = self._round2.get(_code(receiver)) if receiver is not None else None
+        return ', '.join(sorted(methods)) if methods else None
+
     def _loop_keys(self):
         """Names bound only as the target of ``for k in R.index:`` over a single integer level."""
         found, lowering = set(), self
@@ -1100,7 +1134,7 @@ class _Lowering(cst.CSTTransformer):
                 if (isinstance(target, cst.Name) and lowering.f.binds.get(target.value) == 1
                         and target.value not in lowering.o._params):
                     schema = lowering._static_index(node.iter)
-                    if schema is not None and schema.int_key:
+                    if schema is not None and schema.int_key and not lowering._round2_index(node.iter):
                         found.add(target.value)
         self.f.root.visit(Loops())
         return found
@@ -1121,6 +1155,10 @@ class _Lowering(cst.CSTTransformer):
         """``len/min/max/list/tuple/sorted(R.index)`` on a lowered table."""
         handle, schema = iref.handle, iref.schema
         site = iref.sites[0]
+        methods = self._round2_index(original.args[0].value)
+        if methods:
+            self.decline(site, ROUND2.format(methods=methods))
+            return updated
         info = None
         if name == 'len':
             node, info = cst.Attribute(handle, cst.Name('rows')), ('rows', None, handle, None, None)

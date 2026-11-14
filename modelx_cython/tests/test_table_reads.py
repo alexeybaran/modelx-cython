@@ -1029,3 +1029,18 @@ def test_level_values_min_max(name):
         assert fragment in text, (fragment, text)
     assert 'get_level_values' not in text and not reads.declined, (text, reads.declined)
     same_values(base_model(), source, range(-1, 5))
+
+
+def test_round_two_vocabulary_receiver_keeps_its_index_for_the_recognisers():
+    """A receiver also read with round-2 helper methods (`lookup_float`, `index.max_int()`)
+    keeps `min(T.index)` as written, so the round-2 bounded-read recogniser still sees its
+    statements (W1.9 leaves those formulas to it)."""
+    source = ('def _f_x(self, t):\n'
+              '    table = self.mort_table()\n'
+              '    low = int(min(table.index))\n'
+              '    high = table.index.max_int()\n'
+              '    return low + high + len(self.gap_table().index)\n')
+    text, reads, sites = lower(prototype_model(), source)
+    assert 'int(min(table.index))' in text and '_mx_h0.rows' in text, text
+    assert any(reason.startswith('the receiver is also read with round-2 helper methods (index.max_int)')
+               for reason in reads.declined.values())
