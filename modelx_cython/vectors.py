@@ -269,6 +269,15 @@ def _int_literal(node):
     return None
 
 
+def _list_range(node):
+    """diag-kr: the arguments of ``list(range(a))`` / ``list(range(a, b))``, else None."""
+    if (isinstance(node, cst.Call) and _is_name(node.func, 'list') and _plain_args(node, 1, 1)
+            and isinstance(inner := node.args[0].value, cst.Call) and _is_name(inner.func, 'range')
+            and _plain_args(inner, 1, 2)):
+        return [a.value for a in inner.args]
+    return None
+
+
 def _plain_args(call, low, high):
     return (low <= len(call.args) <= high
             and all(a.keyword is None and a.star == '' for a in call.args))
@@ -315,6 +324,7 @@ class _Facts(cst.CSTVisitor):
         self.appends = []           # (base expr, value expr, call) of v.append(x)
         self.returns = []           # return value expressions
         self.statement_comps = set()
+        self.concat_values = {}     # diag-kr: id of a returned concatenation -> its operands
         self.store_targets = set()  # ids of subscripts that are assignment targets
         self.comp_targets = set()
 
@@ -342,11 +352,31 @@ class _Facts(cst.CSTVisitor):
                 self.store_targets.add(id(tgt))
                 self.writes.append((tgt.value, node.value))
 
+    def concatenation(self, value):
+        """diag-kr: ``A + B + ...`` whose every operand is a list comprehension or
+        ``list(range(...))``: the operands, left to right, else None."""
+        if not (isinstance(value, cst.BinaryOperation) and isinstance(value.operator, cst.Add)):
+            return None
+        parts = []
+        def flatten(node):
+            if isinstance(node, cst.BinaryOperation) and isinstance(node.operator, cst.Add):
+                return flatten(node.left) and flatten(node.right)
+            if isinstance(node, cst.ListComp) or _list_range(node) is not None:
+                parts.append(node)
+                return True
+            return False
+        return parts if flatten(value) else None
+
     def visit_Return(self, node):
         if node.value is not None:
             self.returns.append(node.value)
         if isinstance(node.value, cst.ListComp):
             self.statement_comps.add(id(node.value))
+        parts = self.concatenation(node.value)
+        if parts is not None:
+            # built left to right into one typed vector: the order of evaluation is kept
+            self.concat_values[id(node.value)] = parts
+            self.statement_comps.update(id(part) for part in parts if isinstance(part, cst.ListComp))
         if isinstance(node.value, cst.Tuple) and all(
                 isinstance(e.value, (cst.Name, cst.Integer, cst.Float, cst.ListComp)) for e in node.value.elements):
             # no other element has effects, so building a comprehension first keeps the order
@@ -1017,6 +1047,9 @@ class VectorLowering(cst.CSTTransformer):
             return [], value_u
         if _is_name(value_u) and value_u.value.startswith('_mx_v'):
             return [], value_u
+        concat = self.concatenation(value_o, value_u, e)
+        if concat is not None:
+            return concat
         return [], self.call('of', e, value_u)
 
     def display(self, value_u, e):
@@ -1035,6 +1068,63 @@ class VectorLowering(cst.CSTTransformer):
         pre += [_stmt(f'{r}.data[{i}] = {t}\n') for i, t in enumerate(temps)]
         self.lowered += 1
         return pre, cst.Name(r)
+
+    def concatenation(self, value_o, value_u, e):
+        """diag-kr: ``[... for ...] + list(range(a, b)) + ...`` stored into a typed vector of kind
+        e, each operand built in turn (left to right, as Python evaluates them) and copied into
+        one allocation, instead of Python lists converted by vec_of. None when an operand is not
+        of kind e."""
+        parts_o = self.facts.concat_values.get(id(value_o))
+        if parts_o is None or 'list' not in self.builtins or 'range' not in self.builtins:
+            return None
+        parts_u = []
+        def flatten(node):
+            if isinstance(node, cst.BinaryOperation) and isinstance(node.operator, cst.Add):
+                flatten(node.left)
+                flatten(node.right)
+            else:
+                parts_u.append(node)
+        flatten(value_u)
+        if len(parts_u) != len(parts_o):
+            return None
+        for part in parts_o:
+            if isinstance(part, cst.ListComp):
+                if self.kind(part) != 'A' + e:
+                    return None
+            elif e != 'I' or any(self.scalar(arg) != INT for arg in _list_range(part)):
+                return None
+        pre, names = [], []
+        for po, pu in zip(parts_o, parts_u):
+            if isinstance(po, cst.ListComp):
+                more, value = self.expand_comp(po, pu, e)
+                pre += more
+                names.append(value.value)
+                continue
+            args = [_code(a) for a in _list_range(pu)]
+            lo, hi = ('0', args[0]) if len(args) == 1 else (args[0], args[1])
+            lo_t, hi_t, n, i, r = (self.temp('clo'), self.temp('chi'), self.temp('cn'), self.temp('ci'),
+                                   self.temp('cr'))
+            for name in (lo_t, hi_t):
+                self.declare(name, f'{CY_MOD}.longlong')
+            for name in (n, i):
+                self.declare(name, f'{CY_MOD}.Py_ssize_t')
+            self.declare(r, TYPES[e])
+            pre += [_stmt(f'{lo_t} = {lo}\n'), _stmt(f'{hi_t} = {hi}\n'),
+                    _stmt(f'{n} = {hi_t} - {lo_t} if {hi_t} > {lo_t} else 0\n'),
+                    _stmt(f'{r} = {fn("new", e)}({n})\n'),
+                    _stmt(f'for {i} in range({n}):\n    {r}.data[{i}] = {lo_t} + {i}\n')]
+            names.append(r)
+        out, at, i = self.temp('cat'), self.temp('cat_at'), self.temp('cat_i')
+        self.declare(out, TYPES[e])
+        self.declare(at, f'{CY_MOD}.Py_ssize_t')
+        self.declare(i, f'{CY_MOD}.Py_ssize_t')
+        pre.append(_stmt(f'{out} = {fn("new", e)}({" + ".join(f"{name}.n" for name in names)})\n'))
+        pre.append(_stmt(f'{at} = 0\n'))
+        for name in names:
+            pre.append(_stmt(f'for {i} in range({name}.n):\n    {out}.data[{at} + {i}] = {name}.data[{i}]\n'))
+            pre.append(_stmt(f'{at} += {name}.n\n'))
+        self.lowered += 1
+        return pre, cst.Name(out)
 
     def wrap_return(self, so, su, pre):
         shape = self.cells.vector_shape
@@ -1418,7 +1508,7 @@ def lower(node, cls_info, cells, scope, counter, module, ref_kinds=None):
     if not module_uses_vectors(module) or not isinstance(node.body, cst.IndentedBlock):
         return node
     cells.vector_report = report = {'shape': _shape_json(cells.vector_shape), 'lowered': 0, 'fallbacks': []}
-    builtins = {name for name in ('sum', 'len', 'zip', 'range', 'min', 'max')
+    builtins = {name for name in ('sum', 'len', 'zip', 'range', 'min', 'max', 'list')
                 if scope[name] and all(isinstance(b, BuiltinAssignment) for b in scope[name])}
     loops = [name for name in range_loop_locals(node.body, builtins) if name not in cells.params]
     lowering = VectorLowering(cls_info, cells, builtins, counter)
