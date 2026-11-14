@@ -634,6 +634,7 @@ class _Lowering(cst.CSTTransformer):
         self._shadow = []
         self._memo = {}             # id(original expr) -> _Ref of an inline selection
         self._kinds = {}            # id(emitted node) -> (method, column kind, handle, row, col)
+        self._alive = []            # the emitted nodes of _kinds: their ids are not reused
         self._hoisted = {}          # receiver code -> [name, receiver, kind, first top index]
         self._declare = []          # (name, type) declared at the top of the formula
         self._companions = {}
@@ -1158,6 +1159,7 @@ class _Lowering(cst.CSTTransformer):
             node = node.with_changes(lpar=updated.lpar, rpar=updated.rpar)
         if info is not None:
             self._kinds[id(node)] = info
+            self._alive.append(node)
         return node
 
     def parts(self, key_original, key_updated, schema, where, allow_prefix):
@@ -1487,6 +1489,7 @@ class _Lowering(cst.CSTTransformer):
         result = guarded.with_changes(lpar=[cst.LeftParen()], rpar=[cst.RightParen()])
         if info is not None:
             self._kinds[id(result)] = info
+            self._alive.append(result)
         return result
 
     # ------------------------------------------------------------------ reads: index
