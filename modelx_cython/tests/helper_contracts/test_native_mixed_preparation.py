@@ -79,7 +79,7 @@ def test_public_provider_mixed_storage_exact_contract(native, source, empty, row
                 for name in source.columns:
                     assert type(selected[name]) is type(public[name])
         with pytest.raises(KeyError) as error:
-            native.raw_value(h.lookup_object, restored, 'absent', 'absent-column')
+            native.table_lookup(h.lookup, restored, 'absent', 'absent-column')
         assert error.value.args == ('absent-column',)
         assert pickle.loads(pickle.dumps(restored))._native_cache == {}
     if len(source):
@@ -96,14 +96,14 @@ def test_mixed_sparse_integer_axes_errors_and_raw_object_identity(native, indexi
                            'other': [unused, object()]}, index=pd.Index([9, 2], name='policy'))
     owned = guard(lambda: native.prepare_options(inputs.table, source, True, True, True, indexing),
                   preparation=True)
-    assert guard(lambda: native.raw_value(h.lookup_object, owned, 9, 'other')) is unused
-    assert type(guard(lambda: native.raw_value(h.lookup_object, owned, 9, 'rate'))) is np.float64
+    assert guard(lambda: native.table_lookup(h.lookup, owned, 9, 'other')) is unused
+    assert type(guard(lambda: native.table_lookup(h.lookup, owned, 9, 'rate'))) is np.float64
     unused.append('edited')
-    assert native.raw_value(h.lookup_object, owned, 9, 'other') == ['original', 'edited']
+    assert native.table_lookup(h.lookup, owned, 9, 'other') == ['original', 'edited']
     source.iloc[0, 0] = .9
-    assert native.float_value(h.lookup_float, owned, 9, 'rate') == .1
+    assert float(native.table_lookup(h.lookup, owned, 9, 'rate')) == .1
     with pytest.raises(TypeError):
-        native.float_value(h.lookup_float, owned, 2, 'rate')
+        float(native.table_lookup(h.lookup, owned, 2, 'rate'))
     with pytest.raises(TypeError, match='unsupported immutable input'):
         native.prepare_options(inputs.table, source)
 

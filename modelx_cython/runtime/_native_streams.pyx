@@ -53,23 +53,6 @@ cdef bint f64_accepts(object function):
             ) and PY_VERSION_HEX >= 0x030c0000
 
 
-cdef double sum_nonzero_products(object function, object values, object weights) except? -1.0:
-    cdef const double[:] left, right
-    cdef F64Sum state
-    cdef Py_ssize_t index, size
-    cdef double value
-    if (function is not _sum_nonzero_products or type(values) is not array
-            or type(weights) is not array or values.typecode != 'd' or weights.typecode != 'd'):
-        return function(values, weights)
-    left, right = values, weights
-    size = min(left.shape[0], right.shape[0])
-    f64_init(&state)
-    for index in range(size):
-        value = left[index]
-        if value != 0.0:
-            f64_add(&state, value * right[index])
-    return f64_result(&state)
-
 cdef extern from *:
     """
     static int mx_unpack_noniterable(PyObject *value) {
@@ -314,92 +297,6 @@ cdef class Stream:
 
 
 
-cdef class ZipValues:
-    def __iter__(self):
-        return self
-
-    def __next__(self):
-        with critical_section(self):
-            return self.next_row()
-
-    cdef object next_row(self):
-        cdef Py_ssize_t position, other, count = len(self.cursors)
-        cdef Stream cursor
-        cdef tuple row
-        cdef object value
-        cdef bint exhausted
-        if not count:
-            raise StopIteration
-        # Match zip's retained reusable row. Reuse only when no consumer holds
-        # it; otherwise the new row is independent and the retained row stays.
-        if mx_zip_unique(<void *>self.result):
-            row = self.result
-        else:
-            row = tuple([None] * count)
-        for position in range(count):
-            cursor = <Stream>self.cursors[position]
-            if not self.strict:
-                # A source failure is not a generator body failure. Preserve
-                # its identity and permit the next call to retry the iterator.
-                value = cursor.next_input()
-                mx_zip_replace(row, position, value)
-                value = None
-                continue
-            exhausted = False
-            try:
-                value = cursor.next_input()
-            except StopIteration:
-                exhausted = True
-            if not exhausted:
-                mx_zip_replace(row, position, value)
-                value = None
-                continue
-            if position:
-                if position == 1:
-                    raise ValueError('zip() argument 2 is shorter than argument 1')
-                raise ValueError(f'zip() argument {position + 1} is shorter than arguments 1-{position}')
-            for other in range(1, count):
-                exhausted = False
-                cursor = <Stream>self.cursors[other]
-                try:
-                    value = cursor.next_input()
-                except StopIteration:
-                    exhausted = True
-                if not exhausted:
-                    if other == 1:
-                        raise ValueError('zip() argument 2 is longer than argument 1')
-                    raise ValueError(f'zip() argument {other + 1} is longer than arguments 1-{other}')
-            raise StopIteration
-        mx_zip_track(row)
-        return row
-
-
-cdef object zip_values(object current_callable, tuple keywords, object sources, object strict=_missing):
-    cdef ZipValues result
-    cdef Stream cursor
-    cdef list cursors
-    cdef object source
-    if current_callable is not _ZIP_VALUES:
-        return _replacement(current_callable, keywords, ('sources', 'strict'), (sources, strict))
-    if type(sources) is not tuple:
-        raise TypeError('zip_values requires a tuple of source iterables')
-    result = ZipValues()
-    # zip evaluates strict truth before acquiring the first source iterator.
-    result.strict = False if strict is _missing else bool(strict)
-    cursors = []
-    for source in <tuple>sources:
-        # Always capture the public iterator. Reusing an internal mapped Stream
-        # here would let raw next_input bypass its map/filter/flatten behavior.
-        cursor = Stream()
-        cursor.identity = True
-        _capture(cursor, source)
-        cursors.append(cursor)
-    result.cursors = tuple(cursors)
-    result.result = tuple([None] * len(cursors))
-    return result
-
-
-
 def _stream_generator(Stream cursor):
     try:
         while True:
@@ -480,20 +377,6 @@ def _mapped_generator(Stream cursor, object function, object where, object unpac
     return (function(*arguments) for arguments in cursor if where is None or where(*arguments))
 
 
-cdef object periods(object current_callable, tuple keywords, object start, object stop=_missing, object step=_missing):
-    if current_callable is not _PERIODS:
-        return _replacement(current_callable, keywords, ('start', 'stop', 'step'), (start, stop, step))
-    if stop is _DOMAIN_MISSING:
-        stop = _missing
-    if step is _DOMAIN_MISSING:
-        step = _missing
-    if step is not _missing:
-        return range(start, stop, step)
-    if stop is not _missing:
-        return range(start, stop)
-    return range(start)
-
-
 cdef object over(object current_callable, tuple keywords, object source, object function=_missing, object where=_missing, object unpack=_missing):
     cdef Stream result
     if current_callable is not _OVER:
@@ -520,95 +403,8 @@ cdef object over(object current_callable, tuple keywords, object source, object 
     return ProtocolGenerator(_mapped_generator(result, function, where, unpack))
 
 
-cdef Stream _over_cursor(object source, object function, object where, object unpack=None):
-    cdef Stream result
-    result = Stream()
-    result.function = function
-    result.predicate = where
-    result.unpack = unpack
-    result.closed = False
-    result.bounded = False
-    _capture(result, source)
-    return result
-
-
-cdef object flatten(object current_callable, tuple keywords, object sources):
-    cdef Stream result
-    if current_callable is not _FLATTEN:
-        return _replacement(current_callable, keywords, ('sources',), (sources,))
-    result = Stream()
-    _capture(result, sources)
-    result.flattened = True
-    return ProtocolGenerator(_stream_generator(result))
-
-
-cdef object sum_values(object current_callable, tuple keywords, object source):
-    if current_callable is not _sum_values:
-        return _replacement(current_callable, keywords, ('source',), (source,))
-    # CPython's C consumer preserves integer-prefix transitions, big integers,
-    # NumPy/custom scalar dispatch and release-specific summation behavior.
-    # A native Stream supplies C iteration/callbacks without a generator frame.
-    return builtins.sum(source)
-
-
 def provider_version():
     return 2
 
 
 
-cdef double sum_float_kernel(Stream stream) except *:
-    cdef F64Sum state
-    cdef object value, converter = _FLOAT
-    cdef double contribution
-    f64_init(&state)
-    while True:
-        try:
-            value = stream.next_value()
-        except StopIteration:
-            break
-        try:
-            contribution = converter(value)
-        except StopIteration as error:
-            # Conversion is the body of a private lazy normalization producer.
-            # Do not close an externally retained upstream source on failure.
-            raise RuntimeError('generator raised StopIteration') from error
-        f64_add(&state, contribution)
-    return f64_result(&state)
-
-
-cdef object shift_scale(object function, object values, object weights, object first):
-    cdef const double[:] left, right
-    cdef array result
-    cdef double[:] output
-    cdef Py_ssize_t index, size
-    if (function is not _shift_scale or type(values) is not array
-            or type(weights) is not array or values.typecode != 'd' or weights.typecode != 'd'):
-        return function(values, weights, first)
-    left, right = values, weights
-    size = min(max(0, left.shape[0] - 1), right.shape[0])
-    result = clone(<array>values, size + 1, False)
-    output = result
-    output[0] = first
-    for index in range(size):
-        output[index + 1] = left[index] * right[index]
-    return result
-
-
-def _identity(value):
-    return value
-
-
-cdef object sum_float(object current_callable, tuple keywords, object source, object function=_missing, object where=_missing):
-    cdef Stream stream
-    if current_callable is not _SUM_FLOAT:
-        return _replacement(current_callable, keywords, ('source', 'function', 'where'),
-                            (source, function, where))
-    if function is not _missing and function is not _NO_CALLBACK:
-        stream = _over_cursor(source, function, None if where is _missing else where)
-    elif where is not _missing and where is not None:
-        stream = _over_cursor(source, _identity, where)
-    elif type(source) is Stream:
-        stream = source
-    else:
-        stream = _cursor(source)
-    return sum_float_kernel(stream)

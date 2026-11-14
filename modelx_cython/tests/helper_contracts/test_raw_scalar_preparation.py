@@ -49,17 +49,17 @@ def test_unused_opaque_values_do_not_raise_and_selected_conversion_does(native):
             calls.append(frame.f_code.co_name)
     sys.setprofile(profile)
     try:
-        actual = native.raw_value(h.lookup_object, prepared, 0, 'value')
-        numeric = native.float_value(h.lookup_float, prepared, 0, 'value')
+        actual = native.table_lookup(h.lookup, prepared, 0, 'value')
+        numeric = float(native.table_lookup(h.lookup, prepared, 0, 'value'))
         selected = native.select(row, prepared, 0)
     finally:
         sys.setprofile(None)
     assert calls == []
     assert type(actual) is np.float64 and numeric == 0.1
     assert selected['value'] is actual
-    assert native.raw_value(h.lookup_object, prepared, 1, 'value') is unused
+    assert native.table_lookup(h.lookup, prepared, 1, 'value') is unused
     with pytest.raises(AssertionError, match='unused value converted'):
-        native.float_value(h.lookup_float, prepared, 1, 'value')
+        float(native.table_lookup(h.lookup, prepared, 1, 'value'))
     with pytest.raises(TypeError, match='unsupported immutable input'):
         inputs.table(frame)
     for restored in [pickle.loads(pickle.dumps(prepared)),

@@ -52,44 +52,13 @@ def prepare_column(function, frame, column):
 def prepare_raw(function, frame, rows=False):
     return p.table(function, ('rows', 'report', 'preserve_scalar_types'), frame, columns=p.omitted_argument, groups=p.omitted_argument, indexing=p.omitted_argument, rows=rows, report=True, preserve_scalar_types=True)
 
-def raw_value(function, source, key, column):
-    return p.lookup_object(function, (), source, key, column)
-
-def float_value(function, source, key, column):
-    return p.lookup_float(function, (), source, key, column)
-
-def float_default(function, source, key, column, default):
-    return p.lookup_float(function, ('default',), source, key, column, default=default)
-
-def packed_float_default(function, source, long long key, column, default):
-    cdef p.LookupContext context = p.LookupContext()
-    cdef p.KeyPart part
-    p.key_int(&part, key, False)
-    return p.lookup_keyed_float_f64(float, function, context, source, &part, 1, False, column, default)
-
 def table_lookup(function, source, key, column, *default):
     if default:
         return p.lookup(function, source, key, column, default[0])
     return p.lookup(function, source, key, column)
 
-def contextual_lookup(function, source, long long key, column):
-    cdef p.LookupContext context = p.LookupContext()
-    return p.lookup_f64(function, context, source, key, column)
-
-def interpolate(function, source, lookup, last_key, math):
-    return p.prepared_interpolation(function, source, 0, 1.25, lookup, last_key, math)
-
-def table_key_info(count_function, at_function, source):
-    return p.key_count(count_function, source), p.key_at(at_function, source, 0)
-
 def wrap_table(source):
     return p.NativeTable(source)
-
-def grouped(function, source, labels, first=(), last=()):
-    return p.group_sum(function, ('first', 'last'), source, labels, first=first, last=last)
-
-def grouped_keywords(function, source, labels, first=(), last=()):
-    return p.group_sum(function, ('labels', 'table', 'last', 'first'), labels=labels, table=source, last=last, first=first)
 ''')
     (root / 'setup.py').write_text('''from pathlib import Path
 from setuptools import setup
@@ -287,11 +256,7 @@ def test_native_views_leave_unread_object_keys_untouched(native, fault, indexed)
             if indexed else None)
     cases = [
         (lambda table: native.table_lookup(helpers.lookup, table, 1, 'rate'), 1.5),
-        (lambda table: native.contextual_lookup(helpers.lookup, table, 1, 'rate'), 1.5),
-        (lambda table: native.packed_float_default(helpers.lookup, table, 1, 'rate', 0.0), 1.5),
-        (lambda table: native.raw_value(helpers.lookup_object, table, 1, 'rate'), 1.5),
         (lambda table: 1 in native.wrap_table(table).index, True),
-        (lambda table: native.table_key_info(helpers.key_count, helpers.key_at, table), (2, 1)),
     ]
     for operation, expected in cases:
         armed = False
@@ -299,19 +264,6 @@ def test_native_views_leave_unread_object_keys_untouched(native, fault, indexed)
         armed = True
         assert helpers.lookup(table, 1, 'rate') == 1.5
         assert operation(table) == expected
-
-
-def test_contextual_lookup_does_not_build_integer_view(native):
-    table = Table((1, 2), ((1.5,), (2.5,)), ('rate',))
-    assert native.contextual_lookup(helpers.lookup, table, 1, 'rate') == 1.5
-    assert not table._native_cache
-
-
-def test_external_table_interpolation_uses_original_helper(native):
-    table = Table((1, 2), ((1.5,), (2.5,)), ('rate',))
-    assert native.interpolate(helpers.prepared_interpolation, table,
-                              helpers.lookup, helpers.last_key, math) == 1.75
-    assert not table._native_cache
 
 
 def test_arbitrary_query_retains_python_default_handling(native):
@@ -329,33 +281,31 @@ def test_arbitrary_query_retains_python_default_handling(native):
 
 def test_rectangular_numeric_table_keeps_object_and_report_semantics(native):
     from modelx_helpers.immutable_inputs import _RECTANGULAR_STORAGE
-    from modelx_helpers.typed_inputs import lookup_float
-
     index = pd.MultiIndex.from_product([['F', 'M'], [0, 1]], names=['group', 'age'])
     frame = pd.DataFrame({'rate': [-0.0, 1.5, 2.0, 3.0], 'note': ['x'] * 4}, index=index)
     expected = frame[['rate']].copy()
     table = native.prepare_column(inputs.table, frame, 'rate')
     assert _RECTANGULAR_STORAGE in table._native_cache
     frame.loc[('M', 1), 'rate'] = 99.0
-    assert native.float_value(lookup_float, table, ('M', 1), 'rate') == 3.0
-    assert math.copysign(1.0, native.float_value(lookup_float, table, ('F', 0), 'rate')) < 0.0
-    assert native.float_value(lookup_float, table, ('M', np.int64(1)), 'rate') == 3.0
-    assert native.float_default(lookup_float, table, ('M', True), 'rate', 12.0) == 12.0
-    assert native.float_default(lookup_float, table, ('M', 10), 'rate', 12.0) == 12.0
-    assert native.float_value(lookup_float, table, ('M', 1.0), 0) == 3.0
+    assert native.table_lookup(helpers.lookup, table, ('M', 1), 'rate') == 3.0
+    assert math.copysign(1.0, native.table_lookup(helpers.lookup, table, ('F', 0), 'rate')) < 0.0
+    assert native.table_lookup(helpers.lookup, table, ('M', np.int64(1)), 'rate') == 3.0
+    assert native.table_lookup(helpers.lookup, table, ('M', True), 'rate', 12.0) == 12.0
+    assert native.table_lookup(helpers.lookup, table, ('M', 10), 'rate', 12.0) == 12.0
+    assert native.table_lookup(helpers.lookup, table, ('M', 1.0), 0) == 3.0
     assert table.contains(('M', 1)) and not table.contains(('M', 10))
     for name in ('_keys', '_values', '_positions'):
         with pytest.raises(AttributeError):
             object.__getattribute__(table, name)
     with pytest.raises(KeyError) as error:
-        native.float_default(lookup_float, table, ('none', 1), 'missing', 12.0)
+        native.table_lookup(helpers.lookup, table, ('none', 1), 'missing', 12.0)
     assert error.value.args == ('missing',)
     pd.testing.assert_frame_equal(to_pandas(table), expected)
     pd.testing.assert_frame_equal(to_pandas(pickle.loads(pickle.dumps(table))), expected)
     irregular = expected.iloc[[2, 0, 3, 1]]
     selected = native.prepare_column(inputs.table, irregular, 'rate')
     assert _RECTANGULAR_STORAGE not in selected._native_cache
-    assert native.float_value(lookup_float, selected, ('M', 1), 'rate') == 3.0
+    assert native.table_lookup(helpers.lookup, selected, ('M', 1), 'rate') == 3.0
     pd.testing.assert_frame_equal(to_pandas(selected), irregular)
 
 
@@ -368,13 +318,11 @@ def test_rectangular_storage_rejects_duplicate_axis_labels():
 
 
 def test_tuple_labels_in_plain_index_use_scalar_key_semantics(native):
-    from modelx_helpers.typed_inputs import lookup_object
-
     frame = pd.DataFrame({'value': [10, 20]},
                          index=pd.Index([('M', 1), ('F', 2)], tupleize_cols=False))
     source = inputs.table(frame, indexing='at')
     for key in [('M', 1), ('M', True), ('F', np.int64(2))]:
-        assert native.raw_value(lookup_object, source, key, 'value') == source.lookup(key, 'value')
+        assert native.table_lookup(helpers.lookup, source, key, 'value') == source.lookup(key, 'value')
     with pytest.raises(KeyError) as error:
-        native.raw_value(lookup_object, source, ('M', 2), 'value')
+        native.table_lookup(helpers.lookup, source, ('M', 2), 'value')
     assert error.value.args == (('M', 2),)
