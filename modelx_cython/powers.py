@@ -245,9 +245,10 @@ class OperandKind:
 class _PowerRewriter(cst.CSTTransformer):
     """Replace provably real ``**`` operations with ``_mx_sys._mx_pow``."""
 
-    def __init__(self, operand_kind: OperandKind, memo=None, return_operands=None) -> None:
+    def __init__(self, operand_kind: OperandKind, memo=None, return_operands=None, local_kind=None) -> None:
         super().__init__()
         self._kind = operand_kind
+        self._local_kind = local_kind     # report only: which declined powers are integer powers
         self._return_operands = return_operands or {}
         self._opaque_depth = 0
         self.rewritten = 0
@@ -311,8 +312,11 @@ class _PowerRewriter(cst.CSTTransformer):
                 rpar=updated_node.rpar,
             )
         # Only a floating exponent puts a power on Cython's complex
-        # path, so an integer one is left alone without comment.
-        if exponent in (KIND_FLOAT, KIND_UNKNOWN):
+        # path, so an integer one is left alone without comment; an exponent
+        # that the formula's local kinds prove an integer is one too (diag-jp:
+        # argument ordering, which knows those kinds, keeps its C power)
+        if exponent in (KIND_FLOAT, KIND_UNKNOWN) and not (
+                self._local_kind is not None and self._local_kind.kind(original_node.right) == KIND_INT):
             self._decline(original_node)
         return updated_node
 
@@ -450,7 +454,9 @@ def rewrite_powers(
             node.body.body, cells.params, resolver, cells_kinds, ref_kinds, cls_fqname, param_kinds)
         if accumulated:
             return_operands = {**(return_operands or {}), **accumulated}
-    rewriter = _PowerRewriter(kind, memo, return_operands)
+    local_kinds = formula_local_kinds(node, cells.params, resolver, cells_kinds, ref_kinds, cls_fqname, param_kinds)
+    rewriter = _PowerRewriter(kind, memo, return_operands, OperandKind(
+        resolver, cells_kinds, ref_kinds, cls_fqname, {**local_kinds, **param_kinds}) if local_kinds else None)
     updated = node.body.visit(rewriter)
     # D62: powers left on Python's semantics inside a loop, for the admission report
     cells.powers_in_loops = list(rewriter.declined_in_loops)
@@ -505,6 +511,25 @@ _AUGMENTED = {
 }
 
 
+_C_KINDS = {'longlong': KIND_INT, 'double': KIND_FLOAT}
+
+
+def _declared_c_kinds(body, parameters):
+    """Locals declared with one C scalar type (``x: _mx_cy.longlong``, with or without a value)
+    and no other annotation: a C-typed local can only hold that type, whatever else the formula
+    does (diag-jp: the loop of a lowered reduction, whose ``except ... as`` is a scope effect)."""
+    found = {}
+    for node in lexical_nodes(body):
+        if isinstance(node, cst.AnnAssign) and isinstance(node.target, cst.Name):
+            annotation = node.annotation.annotation
+            ctype = (annotation.attr.value if isinstance(annotation, cst.Attribute)
+                     and isinstance(annotation.value, cst.Name) and annotation.value.value == '_mx_cy'
+                     else None)
+            found.setdefault(node.target.value, set()).add(_C_KINDS.get(ctype))
+    return {name: kinds.pop() for name, kinds in found.items()
+            if name not in parameters and len(kinds) == 1 and None not in kinds}
+
+
 def _assigned_local_kinds(body, parameters, resolver, cells_kinds, ref_kinds, cls_fqname, param_kinds):
     """Kinds of locals proven from every assignment to them (D59).
 
@@ -517,13 +542,23 @@ def _assigned_local_kinds(body, parameters, resolver, cells_kinds, ref_kinds, cl
     while ``x = 0; x += 0.5`` is unknown. Formulas with scope effects (global, nonlocal,
     del, walrus, nested defs, ...) get no local kinds.
     """
+    declared_kinds = _declared_c_kinds(body, parameters)
     if has_scope_effects(body):
-        return {}
+        return declared_kinds   # only what C declarations fix (Cython enforces them)
     facts = CstFacts(body)
     if any(facts.stores[name] for name in ('min', 'max', 'abs', 'range', 'int')):
-        return {}           # a formula that binds a builtin name: no local kinds
+        return declared_kinds   # a formula that binds a builtin name: no inferred local kinds
     plain, augmented, declared = {}, {}, Counter()
+    c_typed = {}
     for node in lexical_nodes(body):
+        if isinstance(node, cst.AnnAssign) and isinstance(node.target, cst.Name):
+            # diag-jp: a local declared with a C scalar type (``s: _mx_cy.longlong``,
+            # ``b: _mx_cy.longlong = ...``, emitted by earlier passes) can only hold that type
+            annotation = node.annotation.annotation
+            ctype = (annotation.attr.value if isinstance(annotation, cst.Attribute)
+                     and isinstance(annotation.value, cst.Name) and annotation.value.value == '_mx_cy'
+                     else None)
+            c_typed.setdefault(node.target.value, set()).add(_C_KINDS.get(ctype))
         if isinstance(node, cst.AnnAssign) and isinstance(node.target, cst.Name) and node.value is None:
             # a bare declaration (``s: _mx_cy.longlong``, added before this pass for a loop
             # variable or typed local) binds nothing: it neither gives nor removes a kind
@@ -548,7 +583,9 @@ def _assigned_local_kinds(body, parameters, resolver, cells_kinds, ref_kinds, cl
         and facts.stores[name] == len(values) + len(augmented.get(name, ())) + declared[name]
         and None not in augmented.get(name, ())
     }
-    kinds: Dict[str, str] = {}
+    kinds: Dict[str, str] = {name: found.pop() for name, found in c_typed.items()
+                             if name not in parameters and name not in facts.deleted
+                             and len(found) == 1 and None not in found}
     changed = True
     while changed:
         changed = False

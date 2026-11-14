@@ -7,7 +7,7 @@ from .cell_entries import exact_receiver
 from .helpers import REDUCTIONS, module_name
 from .helper_members import helper_reference
 from .scopes import CstFacts, FormulaTransformer, Names, OPAQUE_SCOPES as OPAQUE, has_scope_effects, lexical_nodes
-from .syntax import arguments, code, literal_value
+from .syntax import arguments, code, literal_value, walk
 from .typedefs import primitive_kind
 
 
@@ -268,6 +268,15 @@ class GeneralReductions:
         # Body
         body = self.emit_level(0, parts, classes, element, mapping0, '')
         kinds = state['kinds']
+        # diag-jp: what of this lowered reduction still runs on Python objects (build report)
+        objects = []
+        if any(kind_ == 'iter' for kind_, _ in classes):
+            objects.append('iterates a Python object (an iterable that is not a range of C integers '
+                           'or a literal tuple), so its loop variable is an object')
+        if name == 'sum' and None in kinds:
+            objects.append('an element is not a double or C integer: the sum adds Python objects')
+        if objects:
+            self.object_loops.append(untyped_entry(self.general_lines, call, name, '; '.join(objects)))
         # Start, state and result
         if name == 'sum':
             if start is None:
@@ -349,7 +358,7 @@ class GeneralReductions:
         if (bounds is not None and 1 <= len(bounds) <= 3 and isinstance(part_target, cst.Name)
                 and 'range' not in self.body_facts.stores and 'range' not in self.cells.params
                 and safe_range_increment(iterator)
-                and (index or all(self.kind(bound, {}) in ('longlong', 'bint') for bound in bounds))):
+                and (index or all(self.bound_kind(bound, {}) in ('longlong', 'bint') for bound in bounds))):
             return 'range', list(bounds)
         if (isinstance(iterator, cst.Tuple) and iterator.elements
                 and all(isinstance(element, cst.Element) for element in iterator.elements)):
@@ -404,7 +413,7 @@ class GeneralReductions:
         lines, p = [], state['prefix']
         names = _names(part_target)
         if kind_ == 'range' and level and not all(
-                self.kind(self.substituted(bound, mapping), state['local_types']) in ('longlong', 'bint')
+                self.bound_kind(self.substituted(bound, mapping), state['local_types']) in ('longlong', 'bint')
                 for bound in data):
             kind_, data = 'iter', parts[level][1]          # bounds not C integers: a range object
         if kind_ == 'range':
@@ -705,8 +714,15 @@ def _evaluation_order(node):
 
 class NativeReductions(GeneralReductions, FormulaTransformer):
     def __init__(self, cls_info, cells, providers, formula, reserve_fallback, builtin_bounds,
-                 builtin_reductions=frozenset(), enum_symbols=None):
+                 builtin_reductions=frozenset(), enum_symbols=None, formula_kinds=None):
         super().__init__()
+        # diag-jp: kinds of the formula's own locals (powers.formula_local_kinds), for names no
+        # comprehension in the formula binds; a term `pols_lapse(s) * (1.0 - rho) ** k` with
+        # `rho` a double local is then a double and its sum keeps a double state
+        bound = {name.value for part in walk(formula) if isinstance(part, cst.CompFor)
+                 for name in walk(part.target) if isinstance(name, cst.Name)}
+        self.formula_kinds = {name: kind for name, kind in (formula_kinds or {}).items() if name not in bound}
+        self.object_loops = []
         self.cls_info, self.cells, self.providers = cls_info, cells, providers
         self.formula, self.reserve_fallback = formula, reserve_fallback
         self.builtin_bounds = builtin_bounds
@@ -836,6 +852,7 @@ class NativeReductions(GeneralReductions, FormulaTransformer):
                 '(an elif or while test, an augmented assignment, a one-line suite): built-in call')))
         self.cells.reductions_native = self.general_count
         self.cells.reductions_untyped = untyped
+        self.cells.reductions_object = list(self.object_loops)
         return after
 
     def builtin_site(self, node):
@@ -869,6 +886,8 @@ class NativeReductions(GeneralReductions, FormulaTransformer):
                 return primitive_kind(literal_value(node))
             if node.value in locals_:
                 return locals_[node.value]
+            if node.value in getattr(self, 'formula_kinds', {}):
+                return self.formula_kinds[node.value]
             if node.value in self.cells.params and self.cells.has_typeinfo():
                 return {'double': 'double', 'long long': 'longlong', 'bint': 'bint'}.get(
                     self.cells.get_argtype_expr(node.value, c_style=True, formula=True))
@@ -908,6 +927,38 @@ class NativeReductions(GeneralReductions, FormulaTransformer):
             if (left in ('double', 'longlong', 'bint')
                     and right in ('double', 'longlong', 'bint') and 'double' in (left, right)):
                 return 'double'
+        if isinstance(node, cst.BinaryOperation) and isinstance(node.operator, cst.Power):
+            # diag-jp: a double raised to a C integer is a double (Python's float ** int is a
+            # float or raises), so a sum of such terms keeps a double state instead of objects
+            if (self.kind(node.left, locals_) == 'double'
+                    and self.bound_kind(node.right, locals_) in ('longlong', 'bint')):
+                return 'double'
+        return None
+
+    def bound_kind(self, node, locals_):
+        """The kind of a ``range`` bound: as ``kind``, plus C integer arithmetic (``+ - *`` of C
+        integers) and the builtin ``min``/``max`` of C integers, which are C integers (diag-jp:
+        Term_JP_S ``range(max(0, t - reinstate_window_m()), t)`` stayed a Python range object, so
+        its loop variable and every term built from it were objects)."""
+        kind = self.kind(node, locals_)
+        if kind is not None:
+            return kind
+        if isinstance(node, cst.BinaryOperation) and isinstance(node.operator, (cst.Add, cst.Subtract, cst.Multiply)):
+            if (self.bound_kind(node.left, locals_) in ('longlong', 'bint')
+                    and self.bound_kind(node.right, locals_) in ('longlong', 'bint')):
+                return 'longlong'
+            return None
+        args = arguments(node, 'int')
+        if (args and len(args) == 1 and 'int' not in locals_ and 'int' not in self.cells.params
+                and 'int' not in self.body_facts.stores
+                and self.bound_kind(args[0], locals_) in ('double', 'longlong', 'bint')):
+            return 'longlong'       # int() of a number; the bound local's conversion checks the range
+        for name in ('min', 'max'):
+            args = arguments(node, name)
+            if (args and len(args) >= 2 and self.builtin_bounds and name not in locals_
+                    and name not in self.cells.params and name not in self.body_facts.stores
+                    and all(self.bound_kind(arg, locals_) in ('longlong', 'bint') for arg in args)):
+                return 'longlong'
         return None
 
     def cold_fallback(self, source, generator, capture, function, capture_type='_mx_cy.double',

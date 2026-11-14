@@ -695,9 +695,16 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
             builtin_bounds = all(isinstance(binding, BuiltinAssignment)
                                  for name in ("range", "min", "max", "abs", "StopIteration", "RuntimeError")
                                  for binding in scope[name])
+            from modelx_cython.powers import formula_local_kinds, kind_of_type_expr, KIND_INT, KIND_FLOAT
+            param_kinds = ({name: kind_of_type_expr(cells.get_argtype_expr(name, c_style=True, formula=True))
+                            for name in cells.params} if cells.has_args() and cells.has_typeinfo() else {})
+            local_kinds = formula_local_kinds(node, cells.params, self._resolver, self._cells_kinds,
+                                              self._ref_kinds, cls_info.fqname, param_kinds)
             reductions = NativeReductions(
                 cls_info, cells, self.helper_providers, node, self._reserve_cold_sum, builtin_bounds,
-                builtin_reductions, self.module.code_enum_symbols)
+                builtin_reductions, self.module.code_enum_symbols,
+                formula_kinds={name: {KIND_INT: 'longlong', KIND_FLOAT: 'double'}[kind]
+                               for name, kind in local_kinds.items() if kind in (KIND_INT, KIND_FLOAT)})
             node = node.visit(reductions)
             cells.native_reductions = reductions.count
             cells.exact_reduction_guards = reductions.exact_receiver_guards
