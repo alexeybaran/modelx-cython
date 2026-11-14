@@ -824,6 +824,19 @@ class NativeReductions(GeneralReductions, FormulaTransformer):
     def reserve_prefix(self):
         return self.names.reserve(f'_mx_reduce_{self.count}', family=True)
 
+    def callable_name(self, func, prefix):
+        """The name the lowered reduction uses for its callable, and the line binding it ('' when none).
+
+        diag-mt: a reduction whose callable is the builtin itself (``sum``, ``min``, ... resolved to the
+        builtin by the scope pass) reads that name where it is used. Cython reads a builtin name from
+        the module's import-time cache, so the name is the same object at every read and needs no
+        local: binding it to an ``object`` local took a reference on the one builtin function per
+        call, which threads running the same cells contended on (free-threaded reference counts).
+        Any other callable keeps the evaluated-once local."""
+        if isinstance(func, cst.Name) and func.value in self.builtin_reductions:
+            return func.value, ''
+        return f'{prefix}_function', f'{prefix}_function: object = {code(func)}'
+
     def visit_FunctionDef(self, node):
         self.general_sites = [n for n in lexical_nodes(node.body.body) if self.builtin_site(n)]
         self.general_lines = formula_lines(node)
@@ -1030,7 +1043,7 @@ class NativeReductions(GeneralReductions, FormulaTransformer):
             return after
         offset = upper.right.evaluated_value
         alias, prefix = module_name(provider), self.reserve_prefix()
-        function = f'{prefix}_function'
+        function, binding = self.callable_name(func, prefix)
         count = len(self.fallbacks)
         fallback = self.cold_fallback(source, tree, capture, function, 'object')
         if len(self.fallbacks) == count:
@@ -1041,7 +1054,7 @@ class NativeReductions(GeneralReductions, FormulaTransformer):
         self.exact_receiver_guards.add(guard)
         predicate = f'self.{tree.elt.func.attr.value}({prefix}_index)'
         return cst.FlattenSentinel(cst.parse_module(f"""
-{function}: object = {code(func)}
+{binding}
 {prefix}_first: _mx_cy.longlong = {capture}
 {guard}: _mx_cy.bint = {alias}.{operation}_accepts({function}) and {prefix}_first <= {(1 << 63) - 1 - offset}
 if {guard}:
@@ -1072,7 +1085,8 @@ return {fallback}
         if index in {'self', 'range', 'abs', 'max', *self.cells.params}:
             return after
         alias, prefix = module_name(provider), self.reserve_prefix()
-        counter, guard, function = f'{prefix}_index', f'{prefix}_native', f'{prefix}_function'
+        counter, guard = f'{prefix}_index', f'{prefix}_native'
+        function, binding = self.callable_name(func, prefix)
         predicate, boxed_param = tree.elt, None
         if reduction == 'bool_all':
             args = arguments(part.iter, 'range', 1)
@@ -1136,7 +1150,7 @@ return {fallback}
         self.providers.add(provider)
         self.count += 1
         return cst.FlattenSentinel(cst.parse_module(f"""
-{function}: object = {code(func)}
+{binding}
 {guard}: _mx_cy.bint = {alias}.{operation}_accepts({function}){extra_guard}
 if {exact_receiver(self.cls_info.name)} and {guard}:
     {counter}: _mx_cy.longlong
@@ -1186,7 +1200,7 @@ return {fallback}
         if self.kind(tree.elt, {index: 'longlong'}) != 'double':
             return after
         prefix = self.reserve_prefix()
-        function = f'{prefix}_function'
+        function, binding = self.callable_name(cst.Name('min'), prefix)
         count = len(self.fallbacks)
         fallback = self.cold_fallback(code(tree), tree, None, function)
         if len(self.fallbacks) == count:
@@ -1206,7 +1220,7 @@ return {fallback}
                                       for name, value in zip(bound_names, bounds))
         alias = module_name(BUILTIN_PROVIDER)
         return cst.FlattenSentinel(cst.parse_module(f"""
-{function}: object = min
+{binding}
 if {exact_receiver(self.cls_info.name)} and {alias}.min_accepts({function}):
 {bound_assignments}
     {counter}: _mx_cy.longlong
@@ -1335,7 +1349,8 @@ return {fallback}
             return after
         alias, prefix = module_name(provider), self.reserve_prefix()
         count = len(self.fallbacks)
-        fallback = self.cold_fallback(source, original_tree, capture, f'{prefix}_function',
+        function, binding = self.callable_name(func, prefix)
+        fallback = self.cold_fallback(source, original_tree, capture, function,
                                       trailing_args=', 0.0' if float_start else '')
         if len(self.fallbacks) == count:
             return after
@@ -1353,13 +1368,12 @@ return {fallback}
                 return after
 
         tree = tree.visit(Rename())
-        declarations = [f'{prefix}_function: object', f'{prefix}_state: {alias}.F64Sum']
+        declarations = [f'{prefix}_state: {alias}.F64Sum']
         declarations += [f'{renamed[name]}: _mx_cy.{kind}' for name, kind in local_types.items()]
-        guard = f'{alias}.f64_accepts({prefix}_function)'
+        guard = f'{alias}.f64_accepts({function})'
         if enum_range is not None:
             guard += f' and {exact_receiver(self.cls_info.name)}'
-        lines = declarations + [f'{prefix}_function = {code(func)}',
-                               f'if {guard}:',
+        lines = declarations + [binding] * bool(binding) + [f'if {guard}:',
                                f'    {alias}.f64_init(_mx_cy.address({prefix}_state))']
         if capture is not None:
             lines.append(f'    {renamed[capture]} = {capture}')
