@@ -580,9 +580,23 @@ class TableReads:
         schema = self.table_cell(receiver)
         if schema is None and isinstance(receiver, cst.Name):
             values = self.formula.values.get(receiver.value) or ()
-            schemas = [self.table_cell(value) for value in values]
+            schemas = [self.table_cell(value) or self._sub_table(value) for value in values]
             schema = schemas[0] if schemas and all(s is not None and s.same(schemas[0]) for s in schemas) else None
         return schema is not None and schema.int_key
+
+    def _sub_table(self, expr):
+        """Schema of ``T.loc[prefix]`` with fewer key parts than ``T`` has levels (a sub-table),
+        else None (diag-us2: ``int(tbl.index.max())`` on such a local is an integer)."""
+        if not (isinstance(expr, cst.Subscript) and len(expr.slice) == 1
+                and isinstance(expr.slice[0].slice, cst.Index)):
+            return None
+        base = _index_attr(expr.value, 'loc')
+        schema = self.table_cell(base) if base is not None else None
+        if schema is None:
+            return None
+        key = expr.slice[0].slice.value
+        parts = len(key.elements) if isinstance(key, cst.Tuple) else 1
+        return schema.child(parts) if parts < schema.levels else None
 
     def bare_ok(self, expr):
         """Why ``expr`` can be passed bare as a key part (its static type is not a C double or
