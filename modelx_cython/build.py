@@ -32,7 +32,8 @@ def cell_locations(state, module_info):
             if cell.is_special():
                 continue
             identity = cls_name, FORMULA_PREF + cell.name
-            nodes = (methods.get(identity), methods.get((cls_name, cell.name)), *moved[identity])
+            nodes = (methods.get(identity), methods.get((cls_name, cell.name)), *moved[identity],
+                     *moved[cls_name, cell.name])
             name = '.'.join((*space_path, space_name, cell.name))
             typed = cell.get_rettype_expr() != 'object'
             for node in filter(None, nodes):

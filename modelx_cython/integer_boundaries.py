@@ -844,11 +844,12 @@ def guard_integer_boundaries(state, module_info, resolver, cells_kinds, ref_kind
             if origin:
                 owner, name = origin
                 cls = module_info.classes[owner]
-                cell = cls.cells[name[len(FORMULA_PREF):]]
+                # D139: the private entry of an uncached Cell has the Cell's own name as its origin
+                cell = cls.cells[name[len(FORMULA_PREF):] if name.startswith(FORMULA_PREF) else name]
                 node = _guard_calls(node, cls, cell, resolver, entries, cells, private_entries, module_info.classes)
                 # Physical cache misses and compact spill entries both check
                 # the logical domain before reaching the private formula.
-                axes = (cell.dense_logical_axes if cell.has_args() and cell.has_typeinfo()
+                axes = (cell.dense_logical_axes if cell.has_formula_def and cell.has_args() and cell.has_typeinfo()
                         and cell.is_arrayable() else ())
                 node = _guard_result(node, cell, cls, resolver, cells_kinds, ref_kinds, signatures,
                                      argument_axes=axes)

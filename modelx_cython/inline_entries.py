@@ -19,8 +19,10 @@ def allows_exact_receiver(node, owner):
 
 
 def _eligible(cell, params):
+    # D139: an uncached Cell (no ``_f_`` method: its public method is the formula) takes the same
+    # private entry, the formula itself with no cache lookup, storage or readiness flag
     return (
-        cell.has_formula_def
+        (cell.has_formula_def or cell.native_provider_binding is None)
         and not cell.is_locked
         and not cell.formula_is_generator
         and not cell.formula_has_captured_default
@@ -60,8 +62,27 @@ def _literal_defaults(cell, params):
     return tuple(values)
 
 
+def _entry_function(method, entry, owner, optional_receiver, body=None):
+    params = method.params
+    # The public method always has a receiver. Internal calls prove
+    # the exact receiver before entering this private C function.
+    receiver = params.params[0].with_changes(annotation=cst.Annotation(
+        cst.parse_expression(f'{optional_receiver}[{owner}]')))
+    keys = tuple(param.with_changes(default=None, equal=cst.MaybeSentinel.DEFAULT)
+                 if param.default is not None else param
+                 for param in params.params[1:])
+    return method.with_changes(
+        name=cst.Name(entry),
+        params=params.with_changes(params=(receiver, *keys)),
+        body=method.body if body is None else body,
+        decorators=tuple(cst.Decorator(cst.parse_expression(f"{CY_MOD}.{kind}"))
+                         for kind in ("cfunc", "inline")),
+    )
+
+
 class _Calls(cst.CSTTransformer):
-    def __init__(self, owner, entries, exact_guards=(), provider_receivers=None, item_entries=None):
+    def __init__(self, owner, entries, exact_guards=(), provider_receivers=None, item_entries=None,
+                 proven=False):
         self.entries = entries
         # D114 item 5: {typed item local: (its class, that class's entries)}
         self.item_entries = item_entries or {}
@@ -69,7 +90,8 @@ class _Calls(cst.CSTTransformer):
         self.unlocked_provider_sources = set()
         self.exact_receiver = cst.parse_expression(exact_receiver(owner))
         self.exact_guards = exact_guards
-        self.exact_depth = 0
+        # D139: the body of an uncached Cell's private entry runs on a proven exact receiver
+        self.exact_depth = 1 if proven else 0
 
     def has_exact_guard(self, node):
         return isinstance(node.test, cst.Name) and node.test.value in self.exact_guards
@@ -206,6 +228,8 @@ def add_inline_entries(module, classes, dense_layouts):
     next_entry = 0
     body = []
     all_entries, pending = {}, []
+    uncached = {}          # D139: {(owner, cell name): entry} of uncached Cells
+    origins = {}
     for statement in module.body:
         if not isinstance(statement, cst.ClassDef) or statement.name.value not in classes:
             body.append(statement)
@@ -231,6 +255,12 @@ def add_inline_entries(module, classes, dense_layouts):
             next_entry += 1
             cell.inline_entry = entry
             entries[cell.name] = entry, len(cell.params), defaults, cell.get_rettype_expr(c_style=True)
+            if not cell.has_formula_def:
+                # D139: emitted below from the formula, once every class's entries are known
+                uncached[owner, cell.name] = entry
+                origins[entry] = owner, cell.name
+                methods.append(method)
+                continue
             layout = dense_layouts.get((owner, cell.name))
             if layout is not None:
                 dense_entries[entry] = layout
@@ -241,20 +271,7 @@ def add_inline_entries(module, classes, dense_layouts):
                 owner, FORMULA_PREF + cell.name, tuple(cell.params),
                 getattr(cell, 'formula_allows_exact_receiver', False), hit,
             )
-            params = method.params
-            # The public method always has a receiver. Internal calls prove
-            # the exact receiver before entering this private C function.
-            receiver = params.params[0].with_changes(annotation=cst.Annotation(
-                cst.parse_expression(f'{optional_receiver}[{owner}]')))
-            keys = tuple(param.with_changes(default=None, equal=cst.MaybeSentinel.DEFAULT)
-                         if param.default is not None else param
-                         for param in params.params[1:])
-            functions.append(method.with_changes(
-                name=cst.Name(entry),
-                params=params.with_changes(params=(receiver, *keys)),
-                decorators=tuple(cst.Decorator(cst.parse_expression(f"{CY_MOD}.{kind}"))
-                                 for kind in ("cfunc", "inline")),
-            ))
+            functions.append(_entry_function(method, entry, owner, optional_receiver))
             # Public methods retain virtual formula dispatch. Private entries
             # are called only behind the exact-receiver proof emitted below.
             # Both entry paths use the same Cell cache fields.
@@ -270,6 +287,7 @@ def add_inline_entries(module, classes, dense_layouts):
         if placed is not None:
             continue
         statement, owner, cells, entries, methods = next(pending_iter)
+        authored = list(methods)
         if entries or any(getattr(cell, 'typed_item_locals', None) for cell in cells.values()):
             for index, method in enumerate(methods):
                 if not isinstance(method, cst.FunctionDef):
@@ -309,6 +327,15 @@ def add_inline_entries(module, classes, dense_layouts):
                                    item_entries)
                     methods[index] = method.with_changes(body=method.body.visit(calls))
                     cell.unlocked_provider_sources = sorted(calls.unlocked_provider_sources)
+                    if (entry := uncached.get((owner, cell.name))) is not None and not name.startswith(FORMULA_PREF):
+                        # D139: the entry is the authored formula with its calls taken on the proven receiver
+                        proven = _Calls(owner, entries, getattr(cell, 'exact_reduction_guards', ()),
+                                        provider_receivers, item_entries, proven=True)
+                        functions.append(_entry_function(
+                            authored[index], entry, owner, optional_receiver, authored[index].body.visit(proven)))
+                        continue
+                if (entry := uncached.get((owner, cell.name))) is not None and not name.startswith(FORMULA_PREF):
+                    functions.append(_entry_function(authored[index], entry, owner, optional_receiver))
         body[position] = statement.with_changes(body=statement.body.with_changes(body=methods))
     if functions:
         index = 0
@@ -328,4 +355,4 @@ def add_inline_entries(module, classes, dense_layouts):
             index = len(body)
         body.insert(index, cst.parse_statement(
             f'from typing import Optional as {optional_receiver}\n'))
-    return module.with_changes(body=(*body, *functions)), dense_entries, formula_entries
+    return module.with_changes(body=(*body, *functions)), dense_entries, formula_entries, origins

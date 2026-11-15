@@ -424,7 +424,7 @@ def main_handler(args: argparse.Namespace, stdout: IO[str], stderr: IO[str]) -> 
             )
             pxd = PXDGenerator(u.module_info)
 
-            translated_modules[u.fqname] = EntryModule(trans.transformed)
+            translated_modules[u.fqname] = EntryModule(trans.transformed, function_origins=trans.function_origins)
             helper_providers.update(trans.helper_providers)
             object_providers.update(trans.object_providers)
             if trans.dense_entries:
