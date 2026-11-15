@@ -128,7 +128,9 @@ def __getattribute__(self, name):
 class _GuardCalls(cst.CSTTransformer):
     METADATA_DEPENDENCIES = (cst.metadata.ScopeProvider,)
 
-    def __init__(self, receiver, integer_params, counters, owner, resolver, entries, cells, private_entries):
+    def __init__(self, receiver, integer_params, counters, owner, resolver, entries, cells, private_entries,
+                 item_cells=None):
+        self.item_cells = item_cells or {}     # D110 P1: {typed item local: {cell name: cell}}
         self.receiver = receiver
         self.integer_params = integer_params
         self.counters = counters
@@ -164,6 +166,14 @@ class _GuardCalls(cst.CSTTransformer):
         if isinstance(before.func, cst.Name) and (entry := self.private_entries.get(before.func.value)):
             path, params = entry
             return self._arguments(before, after, path, params, start=1)
+        if (isinstance(before.func, cst.Attribute) and isinstance(before.func.value, cst.Name)
+                and (owned := self.item_cells.get(before.func.value.value)) is not None):
+            # D110 P1: a call on a typed item local checks its integer arguments as a call on self does
+            cell = owned.get(before.func.attr.value)
+            if (cell is None or any(arg.star for arg in before.args) or cell.called_with_kwargs
+                    or not (params := self.entries.get(cell.fqname))):
+                return after
+            return self._arguments(before, after, cell.model_path, params)
         chain = _extract_self_chain(before.func)
         if not isinstance(chain, list) or any(arg.star for arg in before.args):
             return after
@@ -191,7 +201,7 @@ class _GuardCalls(cst.CSTTransformer):
         return after.with_changes(args=arguments)
 
 
-def _guard_calls(node, cls, cell, resolver, entries, cells, private_entries):
+def _guard_calls(node, cls, cell, resolver, entries, cells, private_entries, classes=None):
     params = (*node.params.posonly_params, *node.params.params, *node.params.kwonly_params)
     if not params or params[0].name.value != MX_SELF:
         return node
@@ -199,8 +209,10 @@ def _guard_calls(node, cls, cell, resolver, entries, cells, private_entries):
                       and param.annotation.annotation.deep_equals(_INTEGER_ANNOTATION)}
     counters = getattr(cell, 'signed_range_counters', ())
     wrapper = cst.MetadataWrapper(cst.Module(body=(node,)), unsafe_skip_copy=True)
+    item_cells = {local: classes[owner].cells for local, owner in getattr(cell, 'typed_item_locals', {}).items()
+                  if classes and owner in classes}
     return wrapper.visit(_GuardCalls(params[0], integer_params, counters, cls.fqname, resolver, entries, cells,
-                                    private_entries)).body[0]
+                                    private_entries, item_cells)).body[0]
 
 
 def _object_parameters(params, checked):
@@ -827,7 +839,7 @@ def guard_integer_boundaries(state, module_info, resolver, cells_kinds, ref_kind
                 owner, name = origin
                 cls = module_info.classes[owner]
                 cell = cls.cells[name[len(FORMULA_PREF):]]
-                node = _guard_calls(node, cls, cell, resolver, entries, cells, private_entries)
+                node = _guard_calls(node, cls, cell, resolver, entries, cells, private_entries, module_info.classes)
                 # Physical cache misses and compact spill entries both check
                 # the logical domain before reaching the private formula.
                 axes = (cell.dense_logical_axes if cell.has_args() and cell.has_typeinfo()
@@ -846,7 +858,7 @@ def guard_integer_boundaries(state, module_info, resolver, cells_kinds, ref_kind
                 continue
             name = method.name.value
             if name.startswith(FORMULA_PREF) and (formula := cls.cells.get(name[len(FORMULA_PREF):])):
-                method = _guard_calls(method, cls, formula, resolver, entries, cells, private_entries)
+                method = _guard_calls(method, cls, formula, resolver, entries, cells, private_entries, module_info.classes)
                 method = _guard_result(method, formula, cls, resolver, cells_kinds, ref_kinds, signatures,
                                        native_helpers.get((cls.name, name), ()))
                 if infer_types:
@@ -860,7 +872,7 @@ def guard_integer_boundaries(state, module_info, resolver, cells_kinds, ref_kind
                 changed = True
                 continue
             if cell is not None and not cell.has_formula_def:
-                method = _guard_calls(method, cls, cell, resolver, entries, cells, private_entries)
+                method = _guard_calls(method, cls, cell, resolver, entries, cells, private_entries, module_info.classes)
                 method = _guard_result(method, cell, cls, resolver, cells_kinds, ref_kinds, signatures)
                 if infer_types:
                     method = _python_locals(method, cell)

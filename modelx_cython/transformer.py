@@ -736,6 +736,9 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
             from modelx_cython.guarded_integers import guard_integers
             node, cells.guarded_integer_ops = guard_integers(node, local_kinds, param_kinds,
                                                             getattr(cells, 'model_path', None))
+        # D110 P1: a local bound once to an item of a typed ItemSpace Reference is declared its class
+        from modelx_cython.item_locals import type_item_locals
+        node, cells.typed_item_locals = type_item_locals(node, cls_info, self.module)
         return node
 
     def _table_reads(self, node, cls_info, cells):
