@@ -90,6 +90,12 @@ class PyHandle:
     def last_key(self):
         return self.table.index.max()
 
+    def first_part_int(self, k):
+        return int(self.table.index.min()[k])
+
+    def last_part_int(self, k):
+        return int(self.table.index.max()[k])
+
     def asof_int(self, k):
         return int(self.table.index.asof(k))
 

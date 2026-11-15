@@ -139,6 +139,8 @@ cdef class TableHandle:
     cdef long long last_int(self) except? -1                     # index.max()
     cdef object first_key(self)                                  # non-integer keys
     cdef object last_key(self)
+    cdef long long first_part_int(self, Py_ssize_t k) except? -1   # index.min()[k], integer level k
+    cdef long long last_part_int(self, Py_ssize_t k) except? -1    # index.max()[k]
     cdef long long asof_int(self, long long k) except? -1        # KeyError(k) below the first key (D25a)
     cdef Py_ssize_t asof_row(self, long long k) except -2
     cdef Py_ssize_t searchsorted_right(self, long long k) noexcept  # D25b

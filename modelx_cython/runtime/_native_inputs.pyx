@@ -1590,6 +1590,8 @@ cdef extern from "Python.h":
     int mx_rich_equal "PyObject_RichCompareBool"(PyObject* left, PyObject* right, int op) except -1
     PyObject* mx_tuple_item "PyTuple_GET_ITEM"(PyObject* tuple, Py_ssize_t i) noexcept nogil
     Py_ssize_t mx_tuple_size "PyTuple_GET_SIZE"(PyObject* tuple) noexcept nogil
+    bint mx_tuple_check_exact "PyTuple_CheckExact"(PyObject* value) noexcept nogil
+    bint mx_long_check_exact "PyLong_CheckExact"(PyObject* value) noexcept nogil
     ctypedef struct PyMemberDef:
         Py_ssize_t offset
     ctypedef struct PyMemberDescrObject:
@@ -2501,6 +2503,20 @@ cdef long long _object_i64(PyObject* value) except? -1:
     return result
 
 
+cdef long long _h_extreme_part(TableHandle self, PyObject* key, Py_ssize_t k, bint last) except? -1:
+    """Part ``k`` of the smallest (largest when ``last``) key as a C integer (diag-run8). The held
+    extreme tuple and its part are read as borrowed pointers, so neither the shared key nor its
+    part gains a reference; without one (empty table, no held extreme) the key comes from the
+    helper as in ``first_key()[k]`` / ``last_key()[k]`` and converts like a C integer cast of it."""
+    cdef PyObject* value
+    if mx_tuple_check_exact(key) and 0 <= k < mx_tuple_size(key):
+        value = mx_tuple_item(key, k)
+        if mx_long_check_exact(value):
+            return _object_i64(value)
+    found = (self.last_key() if last else self.first_key())[k]
+    return <long long>found
+
+
 cdef inline Py_ssize_t _h_cell(TableHandle self, Py_ssize_t row, Py_ssize_t col) except -1:
     if <size_t>row >= <size_t>self.rows or <size_t>col >= <size_t>self.width:
         raise IndexError(f'table cell ({row}, {col}) is out of range')
@@ -2899,6 +2915,12 @@ cdef class TableHandle:
             mx_handle_fallback()
             return self.helper().index.max()
         return self._last_obj
+
+    cdef long long first_part_int(self, Py_ssize_t k) except? -1:
+        return _h_extreme_part(self, <PyObject*>self._first_obj, k, False)
+
+    cdef long long last_part_int(self, Py_ssize_t k) except? -1:
+        return _h_extreme_part(self, <PyObject*>self._last_obj, k, True)
 
     cdef Py_ssize_t asof_row(self, long long k) except -2:
         """Row of index.asof(k): the last key <= k; KeyError(k) below the first key (D25a)."""

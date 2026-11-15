@@ -11,7 +11,7 @@ SOURCE = ('def _f_x(self, t):\n'
 
 def test_integer_level_part_of_an_extreme_key_is_an_integer():
     text, reads, _ = lower(base_model(), SOURCE)
-    assert '.last_key()[0]' in text, text
+    assert '.last_part_int(0)' in text and 'last_key' not in text, text   # diag-run8: a C integer read
     assert 'row_2(_mx_cy.cast(_mx_cy.longlong, min(t, top)), _mx_cy.cast(_mx_cy.longlong, 20))' in text, text
     assert 'cast(object' not in text, text
     assert reads.keys[-1].startswith('loc[key, column], 2 parts: int (integer min/max)'), reads.keys

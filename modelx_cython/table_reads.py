@@ -28,7 +28,9 @@ Generated shape (``H`` a ``TableHandle``, ``M`` the cimported ``_native_inputs``
   not read by field (``return T.loc[k]``) is ``H.row_record(H.row_n(...))``;
 - ``k in T.index`` / ``not in``: ``H.has_n(...)`` (``n`` may be fewer parts than levels);
   ``T.index.min()/max()``: ``H.first_int()/last_int()`` on a single integer level
-  (``int(...)`` around them dropped), ``first_key()/last_key()`` otherwise;
+  (``int(...)`` around them dropped), ``first_key()/last_key()`` otherwise; ``T.index.min()[k]`` /
+  ``max()[k]`` with an integer literal ``k`` naming an integer level of several:
+  ``H.first_part_int(k)/last_part_int(k)``, a C integer read of the key part without references;
 - ``sub.index.asof(x)``: ``H.asof_int(x)`` in any position, ``H.asof_row(x)`` as the row key of
   a read of the same table; ``sub.index.searchsorted(x, side="right")``:
   ``H.searchsorted_right(x)``; ``side="left"`` (the default) is ``H.searchsorted_right(x - 1)``,
@@ -60,8 +62,9 @@ INT_TYPES = frozenset(('long long', 'long', 'int', 'short', 'Py_ssize_t', 'size_
 UNSAFE_BARE = frozenset(('double', 'float', 'bint'))
 SKIPPED_SCOPES = (cst.FunctionDef, cst.Lambda, cst.ClassDef)
 COMPREHENSIONS = (cst.ListComp, cst.SetComp, cst.DictComp, cst.GeneratorExp)
-LONG_LONG_METHODS = frozenset(('first_int', 'last_int', 'asof_int', 'key_int', 'i64'))
-C_INT_METHODS = frozenset(('first_int', 'last_int', 'asof_int', 'key_int', 'searchsorted_right', 'i64', 'rows'))
+LONG_LONG_METHODS = frozenset(('first_int', 'last_int', 'first_part_int', 'last_part_int', 'asof_int', 'key_int', 'i64'))
+C_INT_METHODS = frozenset(('first_int', 'last_int', 'first_part_int', 'last_part_int', 'asof_int', 'key_int',
+                           'searchsorted_right', 'i64', 'rows'))
 INDEX_BUILTINS = frozenset(('len', 'min', 'max', 'list', 'tuple', 'sorted'))
 
 PYTHON = 'runs as a Python call'
@@ -1612,7 +1615,28 @@ class _Lowering(cst.CSTTransformer):
         return None
 
     # ------------------------------------------------------------------ reads: subscripts
+    def _extreme_part(self, original, updated):
+        """``T.index.min()[k]`` / ``max()[k]`` on several levels whose level ``k`` (an integer
+        literal) is an integer level, once its call is lowered to ``H.first_key()/last_key()``:
+        ``H.first_part_int(k)/last_part_int(k)``, the part as a C integer, read from the handle's
+        extreme key without touching the shared key or part objects (diag-run8)."""
+        if not (isinstance(updated, cst.Subscript) and self.o._int_index_read(original)):
+            return None
+        call = updated.value
+        if not (isinstance(call, cst.Call) and not call.args and isinstance(call.func, cst.Attribute)
+                and call.func.attr.value in ('first_key', 'last_key')):
+            return None
+        method = 'first_part_int' if call.func.attr.value == 'first_key' else 'last_part_int'
+        k = original.slice[0].slice.value.evaluated_value
+        handle = call.func.value
+        node = _method(handle, method, cst.Integer(str(k)))
+        self.keys.append(f'index extreme part {k}: {method} (C integer)')
+        return self.out(node, updated, (method, None, handle, None, None))
+
     def leave_Subscript(self, original, updated):
+        extreme = self._extreme_part(original, updated)
+        if extreme is not None:
+            return extreme
         parts = _subscript_parts(original)
         value = original.value
         if parts is None:
