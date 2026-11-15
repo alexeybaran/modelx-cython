@@ -60,8 +60,14 @@ class {gate}:
     def __wrapped__(self):
         return self.method
 
-    def __getattr__(self, name):
-        return getattr(self.method, name)
+    def __getattribute__(self, name):
+        # introspection reads the method's own attributes (``__doc__`` included), as functools.wraps copied them
+        if name == '__doc__':
+            return self.method.__doc__
+        try:
+            return {runtime}._mx_generic_getattr(self, name)
+        except AttributeError:
+            return getattr(self.method, name)
 
     def __repr__(self):
         return repr(self.method)
