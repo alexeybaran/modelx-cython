@@ -1397,12 +1397,17 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
             elif meth_name == "__call__":
                 # Special methods
                 cells = cls_info.cells[meth_name]
+                if cls_name in self.module.visitor.itemspace_classes:
+                    updated_node = _fast_item_call(updated_node, cls_name)
 
                 if cells and cells.has_typeinfo() and cells.has_args():
                     parameters = self._add_param_type_hints(
                         updated_node, cls_name=cls_name
                     )
                     return updated_node.with_changes(params=parameters)
+
+            elif meth_name == "__delitem__" and cls_name in self.module.visitor.itemspace_classes:
+                updated_node = _releasing_delitem(updated_node, cls_name)
 
             elif meth_name[:2] == "__":
                 # Special methods
@@ -1686,3 +1691,79 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
             updated_node.body, cst.IndentedBlock
         ).with_changes(body=(init_stmt,) + updated_node.body.body)
 
+
+
+def _releasing_delitem(node, cls_name):
+    """D114 item 4: deleting an item also breaks the item's references to itself.
+
+    The exported ``__delitem__`` is ``del self._mx_itemspaces[item]``. An item holds itself in
+    ``_space`` and ``_mx_roots``, so without this it is freed only by the cyclic GC. The removed item,
+    when it is a compiled item without child Spaces or items of its own, is cleared as collect clears
+    its reused root (``_mx_cells``, ``_mx_roots``, ``_space``); it is then freed by its reference count.
+    Any other body is left as exported. The KeyError for a missing key is unchanged (``dict.pop``).
+    """
+    body = node.body.body
+    params = node.params.params
+    if len(body) != 1 or len(params) != 2 or not isinstance(body[0], cst.SimpleStatementLine):
+        return node
+    stmt = body[0].body[0] if len(body[0].body) == 1 else None
+    key = params[1].name.value
+    expected = cst.parse_statement(f"del {MX_SELF}._mx_itemspaces[{key}]\n").body[0]
+    if stmt is None or not stmt.deep_equals(expected):
+        return node
+    removed = '_mx_removed'
+    while removed == key:
+        removed += '_'
+    source = (f"{removed} = {MX_SELF}._mx_itemspaces.pop({key})\n"
+              f"if (type({removed}) is {cls_name} and not {removed}._mx_spaces\n"
+              f"        and not {removed}._mx_itemspaces):\n"
+              f"    {removed}._mx_cells.clear()\n"
+              f"    {removed}._mx_roots.clear()\n"
+              f"    {removed}._space = None\n")
+    return node.with_changes(body=node.body.with_changes(body=cst.parse_module(source).body))
+
+
+def _fast_item_call(node, cls_name):
+    """D114 item 6: a new item of a top-level Space without child Spaces is built without the generic walk.
+
+    The exported ``__call__`` walks the new root and its base in step (``zip(_mx_walk(), _mx_walk())``),
+    copies References, applies the roots' and its own parameters and extends ``_mx_roots``. When the
+    receiver is exactly the compiled class and has no child Spaces and no roots, that walk visits the
+    root alone with no roots to apply, so the same statements run once, on a typed root. Any other
+    exported shape is left unchanged.
+    """
+    found = None
+    for stmt in node.body.body:
+        if (isinstance(stmt, cst.If) and isinstance(stmt.orelse, cst.Else)
+                and isinstance(stmt.test, cst.Comparison)):
+            found = stmt
+    if found is None:
+        return node
+    block = found.orelse.body.body
+    shape = [cst.Module(body=(s,)).code.strip() for s in block]
+    if (len(block) != 5 or shape[0] != '_mx_base = self' or shape[1] != '_mx_root = _mx_base.__class__(self)'
+            or not isinstance(block[2], cst.For)
+            or cst.Module(body=()).code_for_node(block[2].iter) != 'zip(_mx_root._mx_walk(), _mx_base._mx_walk())'
+            or not shape[3].startswith('self._mx_itemspaces[') or shape[4] != 'return _mx_root'):
+        return node
+    loop = block[2].body.body
+    loop_code = [cst.Module(body=(s,)).code.strip() for s in loop]
+    if (len(loop) != 5 or loop_code[0] != '_mx_s._mx_copy_refs(_mx_b, _mx_base)'
+            or not loop_code[1].startswith('for _mx_r in self._mx_roots:')
+            or not loop_code[2].startswith('self._mx_assign_params(_mx_s,')
+            or loop_code[3] != '_mx_s._mx_roots.extend(self._mx_roots)'
+            or loop_code[4] != '_mx_s._mx_roots.append(_mx_root)'):
+        return node
+    root = '_mx_fast_root'
+    assign = loop_code[2].replace('self._mx_assign_params(_mx_s,', f'self._mx_assign_params({root},', 1)
+    store = shape[3].replace('= _mx_root', f'= {root}')
+    fast = cst.parse_module(
+        f"if type(self) is {cls_name} and not self._mx_spaces and not self._mx_roots:\n"
+        f"    {root}: {cls_name} = {cls_name}(self)\n"
+        f"    {root}._mx_copy_refs(self, self)\n"
+        f"    {assign}\n"
+        f"    {root}._mx_roots.append({root})\n"
+        f"    {store}\n"
+        f"    return {root}\n").body
+    new_else = found.orelse.with_changes(body=found.orelse.body.with_changes(body=(*fast, *block)))
+    return node.with_changes(body=node.body.deep_replace(found, found.with_changes(orelse=new_else)))
