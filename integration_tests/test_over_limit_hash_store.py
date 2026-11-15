@@ -1,11 +1,12 @@
-"""D74: a hash-cached Cell is dense on the reused collect root; spec key max_dense_entries.
+"""D135: a Cell above the dense limit is held in the same hash store on both routes.
 
-`surv(s, t)` has a 2-D integer window. With ``max_dense_entries`` below its size it is not inline dense
-(the hash store, on every instance); on the Space whose collect reuses one root per worker the root holds
-the window dense (heap storage, set by ``window()``), and the per-policy reset clears only the entries
-that policy wrote. Values differ by policy, so a stale entry would change the total. The report states the
-cache kind, window, entries, bytes, and why the cell is on the hash store. Compiled at one and four
-workers equals the exported model; an item evaluated outside collect (hash store) equals it too.
+`surv(s, t)` has a 2-D integer window. With ``max_dense_entries`` below its size it is not inline dense,
+and since D135 no route gives it another storage (the D74 window of collect's reused root is removed):
+collect's per-policy reset empties the hash store and a direct item keeps its own. Values differ by
+policy, so a stale entry would change the total. The build warns, naming the cell, its traced range and
+the grid-key rule (R9); the report states the cache kind and why it is not dense. Compiled at one and four
+workers equals the exported model; an item evaluated outside collect equals it too. The removed spec key
+``reuse_dense_windows`` is refused with the reason.
 """
 import json
 import subprocess
@@ -52,8 +53,9 @@ def value():
         '    p[key].value(); [p[key].surv(s, t) for s in range(12) for t in range(12)]\n', encoding='utf-8')
     done = subprocess.run([sys.executable, '-m', 'modelx_cython', 'exported', '--sample', 'sample.py',
                            '--spec', 'spec.py'], cwd=tmp_path, capture_output=True, text=True)
-    assert done.returncode == 0, done.stdout[-3000:] + done.stderr[-3000:]
-    return ((tmp_path / 'exported_cy/_m_Portfolio/_mx_classes.py').read_text(encoding='utf-8'),
+    if not done.returncode == 0:
+        return done
+    return (done.stdout + done.stderr,
             json.loads((tmp_path / 'exported_cy/_mx_admission.json').read_text(encoding='utf-8')))
 
 
@@ -87,20 +89,21 @@ def _run(tmp_path):
     return out
 
 
-def test_hash_cell_is_dense_on_the_reused_root_and_values_stay(tmp_path):
+def test_over_limit_cell_is_one_hash_store_on_both_routes(tmp_path):
     spec = {'parallel_workers': 4, 'spaces': {'Portfolio': {'spaces': {'Projection': {
         'serial_collect': 'reuse', 'parallel_collect_reuse': True, 'parallel_collect_order': 'domain',
         'cells': {'surv': {'max_dense_entries': 16}}}}}}}
-    generated, report = _model(tmp_path, spec)
-    assert '.NumericCache(' in generated and 'root._v_surv.window(0, ' in generated, generated
-    assert 'root._v_surv.reset()' in generated
-    assert '.dense_find(_mx_dense_cache, ' in generated and '.dense_put(_mx_dense_cache, ' in generated  # the field bound to a typed local
+    built = _model(tmp_path, spec)
+    assert isinstance(built, tuple), built.stdout[-3000:] + built.stderr[-3000:]
+    log, report = built
     detail = report[PREFIX + 'surv']['cache_detail']
     assert detail['kind'] == 'native-numeric-keys', detail
     assert 'exceeds max_dense_entries 16' in detail['hash_reason'], detail
-    assert detail['reused_root']['kind'] == 'dense' and detail['reused_root']['bytes'] == (
-        detail['reused_root']['entries'] * 13), detail
-    assert not any(e['kind'] == 'hash-cache' for e in report[PREFIX + 'surv']['slow_paths'])
+    assert 'reused_root' not in detail, detail                       # no collect-only storage (D135)
+    assert any(e['kind'] == 'hash-cache' for e in report[PREFIX + 'surv']['slow_paths'])
+    warning = [line for line in log.splitlines() if 'Projection.surv: window' in line]
+    assert warning and 'exceeds max_dense_entries 16' in warning[0] and 'every route' in warning[0], log[-3000:]
+    assert 's in [' in warning[0] and 't in [' in warning[0] and 'R9' in warning[0], warning
     out = _run(tmp_path)
     one, again, four = out['exported_cy'][0].split()
     assert one == again == out['exported'][0].split()[0], out        # reset leaves nothing stale
@@ -110,15 +113,10 @@ def test_hash_cell_is_dense_on_the_reused_root_and_values_stay(tmp_path):
     assert out['exported_cy'][1] == out['exported'][1], out
 
 
-def test_reuse_dense_windows_off_keeps_the_hash_store(tmp_path):
+def test_removed_spec_key_reuse_dense_windows_is_refused(tmp_path):
     spec = {'spaces': {'Portfolio': {'spaces': {'Projection': {
         'serial_collect': 'reuse', 'reuse_dense_windows': False, 'max_dense_entries': 16}}}}}
-    generated, report = _model(tmp_path, spec)
-    assert '.window(' not in generated
-    detail = report[PREFIX + 'surv']['cache_detail']
-    assert detail['reused_root'] == {'kind': 'native-numeric-keys',
-                                     'reason': 'reuse_dense_windows is false for the Space'}, detail
-    assert any(e['kind'] == 'hash-cache' for e in report[PREFIX + 'surv']['slow_paths'])
-    out = _run(tmp_path)
-    assert out['exported_cy'][0].split()[0] == out['exported'][0].split()[0], out
-    assert out['exported_cy'][1] == out['exported'][1], out
+    done = _model(tmp_path, spec)
+    assert not isinstance(done, tuple), 'the removed spec key was accepted'
+    text = done.stdout + done.stderr
+    assert 'Projection: the spec key reuse_dense_windows was removed (D135)' in text and 'R9' in text, text[-3000:]

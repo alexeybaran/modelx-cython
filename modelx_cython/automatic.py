@@ -88,65 +88,6 @@ def dense_fits(cell):
     return count > 0
 
 
-# D74: on the collect route that reuses one root per worker, a hash-cached Cell with integer keys may hold
-# its whole logical window dense on that root (heap storage allocated on the root only; other instances
-# keep the hash store). Budget per Cell and per Space, largest windows first; 13 bytes per entry (value
-# word, ready byte, written index for a reset that clears only what was written).
-REUSE_DENSE_CELL_BYTES = 16 << 20
-REUSE_DENSE_SPACE_BYTES = 64 << 20
-REUSE_DENSE_ENTRY_BYTES = 13
-
-
-def reuse_dense_windows(cls):
-    """Return ({cell name: (axes, entries, bytes)}, {cell name: reason}) for the hash-cached Cells of a
-    Space whose collect reuses one root. Spec key ``reuse_dense_windows`` (Space) false turns it off."""
-    chosen, refused, candidates = {}, {}, []
-    spec = cls.module.spec.get_spec(cls.fqname) if hasattr(getattr(cls, 'module', None), 'spec') else {}
-    enabled_spec = spec.get('reuse_dense_windows', True)
-    if type(enabled_spec) is not bool:
-        raise ValueError(f'{cls.fqname}: reuse_dense_windows must be a boolean')
-    for name, cell in cls.cells.items():
-        if cell.is_special() or not cell.has_formula_def or not cell.has_args() or not cell.has_typeinfo():
-            continue
-        if not cell.uses_native_numeric_cache:
-            continue
-        if not enabled_spec:
-            refused[name] = 'reuse_dense_windows is false for the Space'
-            continue
-        if len(cell.params) > 3:
-            refused[name] = 'more than three parameters (wide key store)'
-            continue
-        if not cell.is_int_args:
-            refused[name] = 'key type: the parameters are not all C integers'
-            continue
-        try:
-            axes = tuple(cell.dense_logical_axes)
-        except (KeyError, AttributeError, TypeError):
-            refused[name] = 'no bounded logical window for the parameters'
-            continue
-        entries = 1
-        for axis in axes:
-            entries *= int(axis.stop) - int(axis.lower)
-        size = entries * REUSE_DENSE_ENTRY_BYTES
-        if entries <= 0:
-            refused[name] = 'empty logical window'
-        elif size > REUSE_DENSE_CELL_BYTES:
-            refused[name] = (f'window {" x ".join(str(int(a.stop) - int(a.lower)) for a in axes)} = '
-                             f'{entries:,} entries, {size:,} bytes exceeds the per-cell budget '
-                             f'{REUSE_DENSE_CELL_BYTES:,}')
-        else:
-            candidates.append((size, name, axes, entries))
-    used = 0
-    for size, name, axes, entries in sorted(candidates, key=lambda c: (-c[0], c[1])):
-        if used + size > REUSE_DENSE_SPACE_BYTES:
-            refused[name] = (f'Space budget {REUSE_DENSE_SPACE_BYTES:,} bytes exhausted '
-                             f'({used:,} used by larger windows; this one {size:,})')
-            continue
-        used += size
-        chosen[name] = (axes, entries, size)
-    return chosen, refused
-
-
 def primary_capacity(cell):
     # Formula evaluations are cache misses, counted per receiver rather than
     # summed across traced policies. Keep the table's existing <=50% load rule.

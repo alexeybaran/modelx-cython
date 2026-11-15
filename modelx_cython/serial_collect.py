@@ -74,6 +74,13 @@ def analyze(module):
             # audit-routes P6 (D126): every compiled root takes its lookup contexts over privately
             raise ValueError(f'{name.removeprefix("_c_")}: the spec key serial_private_lookups was removed; every compiled '
                              'root (collect and direct items) uses private lookups')
+        if 'reuse_dense_windows' in spec:
+            # D135: the D74 dense window of collect's reused root is removed; both routes keep an over-limit
+            # Cell in the hash store
+            raise ValueError(f'{name.removeprefix("_c_")}: the spec key reuse_dense_windows was removed (D135): '
+                             'collect and the direct route hold a Cell above the dense limit in the same hash '
+                             'store; if the Cell is read only on a regular grid, key it on the grid index '
+                             '(conversion rule R9)')
     automatic = module.spec.automatic_optimizations
     if not any('serial_collect' in spec or 'parallel_collect_reuse' in spec
                for spec in options.values()) and not automatic:
@@ -99,10 +106,6 @@ def analyze(module):
         shape = _match(node, cls, option == 'reuse', parallel, order == 'domain')
         if shape is not None:
             result[node.name.value] = shape
-            if shape.reuse:
-                # D74: budgeted dense windows for hash-cached Cells on the reused root
-                from .automatic import reuse_dense_windows
-                cls.reuse_dense_windows, cls.reuse_dense_refused = reuse_dense_windows(cls)
     return result
 
 
@@ -321,9 +324,6 @@ def add_methods(cls, node, shape, *, workers):
         '    if not _mx_sys._mx_collect_native_coords(coords):',
         '        return None',
         f'    root = {new_root(cls.name)}(self)',
-        *(f'    root._v_{name}.window({", ".join(f"{int(a.lower)}, {int(a.stop) - int(a.lower)}" for a in axes)})'
-          for name, (axes, _, _) in sorted(getattr(cls, 'reuse_dense_windows', {}).items())
-          if shape.reuse),
         '    try:',
     ]
     checks = bound_checks(cls)

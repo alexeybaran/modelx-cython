@@ -103,7 +103,7 @@ class _Space:
 
 
 def test_vector_cache_budget_d74():
-    from modelx_cython.automatic import REUSE_DENSE_SPACE_BYTES
+    from modelx_cython.vectors import VECTOR_CACHE_SPACE_BYTES as REUSE_DENSE_SPACE_BYTES
     small = _VecCell('small', (1104, 6))
     wide = _VecCell('wide', (300, 300))                 # 90,000 > max_dense_entries 65,536
     allowed = _VecCell('allowed', (300, 300), spec={'max_dense_entries': 100_000})

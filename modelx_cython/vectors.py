@@ -119,16 +119,21 @@ def _cache_window(cell):
     return axes, entries
 
 
+# The budget of the vector caches (D79; the values of the removed D74 window budget, D135).
+VECTOR_CACHE_CELL_BYTES = 16 << 20
+VECTOR_CACHE_SPACE_BYTES = 64 << 20
+
+
 def vector_cache_plan(cls):
     """({cell name: (axes, entries, bytes)}, {cell name: reason}) for the vector cells of a Space:
     a vector cell with one to MAX_CACHE_PARAMS C integer parameters gets a dense VecCache within the
-    D74 budget: at most ``max_dense_entries`` slots (spec key of the Cell or Space, MAX_CACHE_SLOTS at
-    most), REUSE_DENSE_CELL_BYTES per Cell and REUSE_DENSE_SPACE_BYTES per Space, largest first.
+    budget: at most ``max_dense_entries`` slots (spec key of the Cell or Space, MAX_CACHE_SLOTS at
+    most), VECTOR_CACHE_CELL_BYTES per Cell and VECTOR_CACHE_SPACE_BYTES per Space, largest first.
     A refused cell keeps the dictionary cache and its reason is reported (``cache_detail``)."""
     plan = getattr(cls, '_mx_vector_cache_plan', None)
     if plan is not None:
         return plan
-    from .automatic import max_dense_entries, REUSE_DENSE_CELL_BYTES, REUSE_DENSE_SPACE_BYTES
+    from .automatic import max_dense_entries
     chosen, refused, candidates = {}, {}, []
     for name, cell in cls.cells.items():
         axes, entries = _cache_window(cell)
@@ -141,15 +146,15 @@ def vector_cache_plan(cls):
         window = ' x '.join(str(int(a.stop - a.lower)) for a in axes)
         if entries > limit:
             refused[name] = f'vector cache window {window} = {entries:,} entries exceeds max_dense_entries {limit:,}'
-        elif size > REUSE_DENSE_CELL_BYTES:
+        elif size > VECTOR_CACHE_CELL_BYTES:
             refused[name] = (f'vector cache window {window} = {size:,} bytes exceeds the per-cell budget '
-                             f'{REUSE_DENSE_CELL_BYTES:,}')
+                             f'{VECTOR_CACHE_CELL_BYTES:,}')
         else:
             candidates.append((size, name, axes, entries))
     used = 0
     for size, name, axes, entries in sorted(candidates, key=lambda c: (-c[0], c[1])):
-        if used + size > REUSE_DENSE_SPACE_BYTES:
-            refused[name] = (f'Space budget {REUSE_DENSE_SPACE_BYTES:,} bytes for vector caches exhausted '
+        if used + size > VECTOR_CACHE_SPACE_BYTES:
+            refused[name] = (f'Space budget {VECTOR_CACHE_SPACE_BYTES:,} bytes for vector caches exhausted '
                              f'({used:,} used, {size:,} needed)')
             continue
         used += size

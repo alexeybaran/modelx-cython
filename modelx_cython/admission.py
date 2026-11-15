@@ -130,10 +130,31 @@ def _window(axes):
     return [[int(axis.lower), int(axis.stop)] for axis in axes], sizes, count
 
 
+OVER_LIMIT_WARNING = ('{cell}: window {window} (traced {ranges}) = {count:,} entries exceeds max_dense_entries '
+                      '{limit:,}; its values are kept in the hash store on every route (D135). If the cell is '
+                      'read only on a regular grid, key it on the grid index (conversion rule R9, grid key).')
+
+
+def over_limit_warning(cell):
+    """D135: the build warning for a hash-cached Cell whose integer window exceeds the dense limit, else None."""
+    if not (cell.has_args() and cell.has_typeinfo() and cell.uses_native_numeric_cache and cell.is_int_args):
+        return None
+    from .automatic import max_dense_entries
+    try:
+        bounds, sizes, count = _window(cell.dense_logical_axes)
+    except (KeyError, AttributeError, TypeError):
+        return None
+    limit = max_dense_entries(cell)
+    if count <= limit:
+        return None
+    ranges = ', '.join(f'{name} in [{lo}, {hi})' for name, (lo, hi) in zip(cell.params, bounds))
+    return OVER_LIMIT_WARNING.format(cell=getattr(cell, 'model_path', cell.fqname), window=' x '.join(map(str, sizes)), ranges=ranges,
+                                     count=count, limit=limit)
+
+
 def cache_detail(cell, cache):
-    """D74: the cache of a Cell with parameters: kind, window, entries, bytes, and why it is not dense.
-    On a Space whose collect reuses one root, a hash-cached Cell may be dense on that root only
-    ('reused_root')."""
+    """The cache of a Cell with parameters: kind, window, entries, bytes, and why it is not dense (D74;
+    D135: one storage on every route, no collect-only window)."""
     if not cell.params or cache in ('none', 'scalar'):
         return {'kind': cache}
     detail = {'kind': cache}
@@ -165,14 +186,6 @@ def cache_detail(cell, cache):
             detail['hash_reason'] = (f'window {" x ".join(map(str, sizes))} = {count:,} entries exceeds '
                                      f'max_dense_entries {limit:,}' if count > limit
                                      else 'negative arguments without a shifted window')
-        chosen = getattr(cell.parent, 'reuse_dense_windows', {})
-        refused = getattr(cell.parent, 'reuse_dense_refused', {})
-        if cell.name in chosen:
-            axes, count, size = chosen[cell.name]
-            detail['reused_root'] = {'kind': 'dense', 'window': _window(axes)[0], 'entries': count,
-                                     'bytes': size}
-        elif cell.name in refused:
-            detail['reused_root'] = {'kind': cache, 'reason': refused[cell.name]}
     except Exception as error:      # an axis without bounds: the kind alone
         detail.setdefault('hash_reason', f'no bounded window ({type(error).__name__})')
     return detail
@@ -198,8 +211,7 @@ def slow_paths(cell, cache):
     per_step (the cell has parameters)."""
     per_step = bool(cell.params)
     entries = []
-    if per_step and cache in ('native-numeric-keys', 'dictionary') and (
-            cell.name not in getattr(getattr(cell, 'parent', None), 'reuse_dense_windows', {})):
+    if per_step and cache in ('native-numeric-keys', 'dictionary'):
         detail = f'{cache} cache'
         refused = vector_refusal(cell) if cache == 'dictionary' else None
         if refused:
