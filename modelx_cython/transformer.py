@@ -1085,9 +1085,7 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
                 for name, path in integer_refs.items():
                     lines.extend((
                         f'    if {MX_SYS_MOD}._mx_ref_name_is(name, {name!r}):',
-                        f'        {table_cells.RUNTIME}.before_reference(self, {path!r})',
                         f'        self.{name} = {MX_SYS_MOD}._mx_exact_int64(value, {path!r})',
-                        f'        {table_cells.RUNTIME}.clear_model(self._model)',
                         '        return',
                     ))
                 lines.append(f'    {MX_SYS_MOD}._mx_generic_setattr(self, name, value)')

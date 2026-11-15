@@ -91,9 +91,14 @@ for workers in (1, 4):
 
 m = Model()
 assert abs(total(m, 4) - base) < 1e-9
+before = m.Projection[1].pv()
 m.Data.raw = doubled                       # a Reference holding a table, after a run
-assert abs(total(m, 4) - live(raw=doubled)) < 1e-9
 assert m.Data.raw.equals(doubled)
+assert m.Projection[1].pv() == before      # D109: published caches stay, as in the exported model
+m.Projection.clear_all()                   # the explicit path recomputes (whole model)
+assert abs(m.Projection[1].pv() / before - 2.0) < 1e-12
+for workers in (1, 4):
+    assert abs(total(m, workers) - live(raw=doubled)) < 1e-9
 
 m = Model()
 for bad, text in ((FRAME.drop(columns="sa"), "no column 'sa'"), (FRAME.assign(sa="x"), "column 'sa' holds"),

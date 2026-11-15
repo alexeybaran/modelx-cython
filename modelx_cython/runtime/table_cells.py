@@ -22,6 +22,7 @@ not synchronised (as in live modelx, which is not thread-safe at all).
 import threading
 
 _lock = threading.Lock()
+_NO_FRAME = object()
 _running = {}       # id(model) -> number of collect calls in progress
 _inputs = {}        # id(model) -> {(id(space), name): (space, name, table)}
 
@@ -83,7 +84,8 @@ def assign_table_cell(space, name, path, table):
 def before_reference(space, path):
     """Raise if the Reference ``path`` cannot be assigned now (a collect of the model is running).
 
-    The generated setter then stores the value and calls :func:`clear_model`.
+    The generated setter then stores the value. It does not clear: published caches stay, as in the
+    exported model, and ``clear_all()`` recomputes (D109).
     """
     _check_idle(space._model, f'the assignment of {path}')
 
@@ -128,8 +130,14 @@ def enum_member(module, qualname, value):
 
 
 def frame_of(table, path):
-    """The one read-only DataFrame of an internal table, created on first request."""
-    frame = table._mx_python_frame
+    """The one read-only DataFrame of an internal table, created on first request.
+
+    Only the standard provider's ``NativeTable`` has a frame; another provider's object (bound by its own
+    result binder) is returned as it is, as before D101.
+    """
+    frame = getattr(table, '_mx_python_frame', _NO_FRAME)
+    if frame is _NO_FRAME:
+        return table
     if frame is None:
         with _lock:
             frame = table._mx_python_frame

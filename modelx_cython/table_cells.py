@@ -208,8 +208,7 @@ def rewrite_class(cls_info, node, config, integer_refs):
             f'@{name}.setter\n'
             f'def {name}(self, value):\n'
             f'    {RUNTIME}.before_reference(self, {path!r})\n'
-            f'    self.{mapping[name]} = value\n'
-            f'    {RUNTIME}.clear_model(self._model)\n')
+            f'    self.{mapping[name]} = value\n')   # D109: published caches stay, as exported
     if 'clear_all' not in _members(cls_info):
         lines.append(f'def clear_all(self):\n'
                      f'    """Clear the model\'s values (live modelx spelling; whole model: D101)."""\n'
