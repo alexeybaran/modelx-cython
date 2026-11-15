@@ -18,12 +18,25 @@ def release_root(cls_name):
     return f'_mx_release_root_{cls_name}'
 
 
-def functions(cls_name):
+def window_lines(cls, receiver='root'):
+    """D74/D123: the dense windows of the class's hash-cached Cells, set once on every new root.
+
+    The same storage for the collect root and for every item (D116): collect differs only in
+    reusing its root and resetting what was written between policies.
+    """
+    return [f'{receiver}._v_{name}.window('
+            + ', '.join(f'{int(a.lower)}, {int(a.stop) - int(a.lower)}' for a in axes) + ')'
+            for name, (axes, _, _) in sorted(getattr(cls, 'reuse_dense_windows', {}).items())]
+
+
+def functions(cls_name, cls=None):
     """Module-level C functions for one compiled ItemSpace class."""
+    windows = ''.join(f'    {line}\n' for line in window_lines(cls)) if cls is not None else ''
     return cst.parse_module(
         f"@{CY_MOD}.cfunc\n"
         f"def {new_root(cls_name)}(base: {cls_name}) -> {cls_name}:\n"
         f"    root: {cls_name} = {cls_name}(base)\n"
+        + windows +
         f"    root._mx_copy_refs(base, base)\n"
         f"    root._mx_roots.append(root)\n"
         f"    return root\n"
