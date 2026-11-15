@@ -78,17 +78,26 @@ class Constants(FormulaTransformer):
         self.loop_members = self._member_loops(nodes, facts, assignments, invalid)
         self.locals.update(self.loop_members)
         for name, values in assignments.items():
-            if name not in invalid and all((isinstance(v, cst.Call) and isinstance(v.func, cst.Attribute)
-                    and isinstance(v.func.value, cst.Name) and v.func.value.value == 'self'
-                    and v.func.attr.value in self.cls.cells
-                    and not self.cls.cells[v.func.attr.value].called_with_kwargs
-                    and not self.cls.cells[v.func.attr.value].body_has_closure
-                    and self.cls.cells[v.func.attr.value].get_rettype_expr(c_style=True)
-                    in ('long long','bint')) or self.integer_ref(v) for v in values):
+            if name not in invalid and all(self.integer_value(v) for v in values):
                 self.locals.add(name)
         if node is self._formula_root or self._formula_root is None:
             self.enum_locals = self.member_locals(node, nodes, assignments, invalid)
             self.locals.update(self.enum_locals)
+
+    def integer_value(self, node):
+        """A value bound to a C-integer local: a call of a compiled Cell returning ``long long`` or
+        ``bint`` (no keywords, no closure), a Reference held in a C ``long long`` field, or (diag-scale
+        P2b) a conditional expression whose two branches are such values. The test of a conditional
+        is evaluated once, as written, so the local holds exactly what the chosen branch gives."""
+        if isinstance(node, cst.IfExp):
+            return self.integer_value(node.body) and self.integer_value(node.orelse)
+        return ((isinstance(node, cst.Call) and isinstance(node.func, cst.Attribute)
+                 and isinstance(node.func.value, cst.Name) and node.func.value.value == 'self'
+                 and node.func.attr.value in self.cls.cells
+                 and not self.cls.cells[node.func.attr.value].called_with_kwargs
+                 and not self.cls.cells[node.func.attr.value].body_has_closure
+                 and self.cls.cells[node.func.attr.value].get_rettype_expr(c_style=True)
+                 in ('long long', 'bint')) or self.integer_ref(node))
 
     def member_ref(self, node):
         """The Ref of an admitted enum whose member ``node`` is (``self.<Ref>.<member>``, or a
@@ -288,6 +297,21 @@ class Constants(FormulaTransformer):
         return after
 
     def member(self, node):
+        """``self.<Ref>.<member>`` of an admitted enum as its module constant, else ``node``.
+
+        diag-scale P2a: a conditional expression (``E.A if c else E.B``, nested or with one branch a
+        C integer) gets each member branch replaced, but only when both branches are then C integers
+        (a member constant or a value ``integer`` accepts); otherwise it is left whole, so a branch
+        that is a Python object keeps the object path. Only the branches change: the test is kept and
+        evaluated once, and a member converts and compares as its value (``enum_safe``)."""
+        if isinstance(node, cst.IfExp):
+            count = self.count
+            body, orelse = self.member(node.body), self.member(node.orelse)
+            if ((body is not node.body or orelse is not node.orelse)
+                    and self._c_integer_branch(node.body, body) and self._c_integer_branch(node.orelse, orelse)):
+                return node.with_changes(body=body, orelse=orelse)
+            self.count = count
+            return node
         if (isinstance(node, cst.Attribute) and isinstance(node.value, cst.Attribute)
                 and isinstance(node.value.value, cst.Name) and node.value.value.value == 'self'):
             entry = self.symbols.get((self.cls.name, node.value.attr.value, node.attr.value))
@@ -295,6 +319,11 @@ class Constants(FormulaTransformer):
                 self.count += 1
                 return cst.Name(entry[0],lpar=node.lpar,rpar=node.rpar)
         return node
+
+    def _c_integer_branch(self, before, after):
+        """A branch of a conditional is a C integer after member replacement: replaced (a member
+        constant, or a nested conditional that was replaced whole), or a value ``integer`` accepts."""
+        return after is not before or self.integer(before)
 
     def integer(self, node):
         if isinstance(node, cst.Integer):
