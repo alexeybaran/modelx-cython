@@ -797,9 +797,10 @@ class CombinedCellsInfo(LexicalCellsInfo):
 
     def get_readiness_array_decl_expr(self, c_style=False):
         # Cython pickles unsigned-char arrays as NUL-terminated strings, which
-        # loses zero flags (and can read beyond the array). Ordinary bint arrays
-        # retain their full shape through the standard compiled-class serializer.
-        element = CY_BOOL_T if c_style else f'{CY_MOD}.{CY_BOOL_T}'
+        # loses zero flags (and can read beyond the array). D110 P2a: 2-byte short
+        # flags halve the flag bytes of every item and keep their full shape through
+        # the standard compiled-class serializer, as bint arrays did.
+        element = 'short' if c_style else f'{CY_MOD}.short'
         return self.get_array_decl_expr(rettype_expr=element, c_style=c_style)
 
     def get_array_decl_expr(self, rettype_expr="", c_style=False):
