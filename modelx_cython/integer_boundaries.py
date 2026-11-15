@@ -39,21 +39,39 @@ def _boxed_arithmetic(value):
 
 
 _CALL_GATE = """\
+@{cy}.cclass
+class {gate}:
+    # D110 P0: a Python-bound Cell with integer arguments, checked as before, then the compiled method;
+    # built without functools.wraps (its attributes are read from the method on demand)
+    method: object
+    params: tuple
+    path: str
+
+    def __call__(self, *args, **kwargs):
+        values = list(args)
+        for position, name in self.params:
+            if position < len(values):
+                values[position] = {runtime}._mx_exact_int64(values[position], self.path)
+            if name in kwargs:
+                kwargs[name] = {runtime}._mx_exact_int64(kwargs[name], self.path)
+        return self.method(*values, **kwargs)
+
+    @property
+    def __wrapped__(self):
+        return self.method
+
+    def __getattr__(self, name):
+        return getattr(self.method, name)
+
+    def __repr__(self):
+        return repr(self.method)
+
+
 @{cy}.cfunc
 def {name}(method: object, params: tuple, path: str) -> object:
-    from functools import wraps
-
-    @wraps(method)
-    def checked(*args, **kwargs):
-        values = list(args)
-        for position, name in params:
-            if position < len(values):
-                values[position] = {runtime}._mx_exact_int64(values[position], path)
-            if name in kwargs:
-                kwargs[name] = {runtime}._mx_exact_int64(kwargs[name], path)
-        return method(*values, **kwargs)
-
-    return checked
+    gate: {gate} = {gate}.__new__({gate})
+    gate.method, gate.params, gate.path = method, params, path
+    return gate
 """
 
 
@@ -792,6 +810,7 @@ def guard_integer_boundaries(state, module_info, resolver, cells_kinds, ref_kind
     classes = []
     declarations = []
     call_gate = state.names.reserve('_mx_checked_cell_callable')
+    gate_class = state.names.reserve('_mx_checked_cell_call')
     changed = False
     signatures = _signed_signatures(state)
     native_helpers = {}
@@ -853,6 +872,6 @@ def guard_integer_boundaries(state, module_info, resolver, cells_kinds, ref_kind
         classes.append(node.with_changes(body=node.body.with_changes(body=(*methods, *gates))))
     if declarations:
         classes.extend(declarations)
-        classes.append(cst.parse_statement(_CALL_GATE.format(
-            cy=CY_MOD, name=call_gate, runtime=MX_SYS_MOD)))
+        classes.extend(cst.parse_module(_CALL_GATE.format(
+            cy=CY_MOD, name=call_gate, gate=gate_class, runtime=MX_SYS_MOD)).body)
     return state.replace(state.syntax.with_changes(body=classes)) if changed else state
