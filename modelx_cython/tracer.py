@@ -214,23 +214,26 @@ class RuntimeCellsInfo:     # TODO: Create base class RuntimeBaseMemberInfo
             receiver = id(trace.arg_vals.get(MX_SELF))
             receiver_calls[receiver] = receiver_calls.get(receiver, 0) + 1
         self.max_evaluations_per_receiver = max(receiver_calls.values())
-        arrays = [trace.ret_val for trace in traces if isinstance(trace.ret_val, np.ndarray)]
+        # D111: a call that raised gives its arguments but no return value; a Cell whose every
+        # traced call raised keeps them all (its result is then traced as None, as before).
+        returned = [trace for trace in traces if not getattr(trace, 'raised', False)] or list(traces)
+        arrays = [trace.ret_val for trace in returned if isinstance(trace.ret_val, np.ndarray)]
         formats = {array.dtype.str for array in arrays}
         self.array_buffer_compatible = (len(formats) == 1 and all(
             array.ndim > 0 and array.dtype.isnative
             and array.dtype in (np.dtype('float64'), np.dtype('int64'))
             for array in arrays)) if arrays else True
         self.has_negative_args = False
-        values = [float(trace.ret_val) for trace in traces
+        values = [float(trace.ret_val) for trace in returned
                   if isinstance(trace.ret_val, (int, float, np.integer, np.floating))
                   and not isinstance(trace.ret_val, (bool, np.bool_))]
         values = [value for value in values if value == value]
         self.max_ret_value = max(values) if values else None   # param_bound_checks margin
         self._init_arg_types(traces)
-        self.ret_type = self._init_ret_type(traces)
+        self.ret_type = self._init_ret_type(returned)
         from .provider_manifest import observed_provider_binding
-        self.observed_provider_binding = observed_provider_binding(traces)
-        self.table_schema = table_schema(traces)
+        self.observed_provider_binding = observed_provider_binding(returned)
+        self.table_schema = table_schema(returned)
 
     def has_args(self):
         """Return whether the cells method takes arguments.
@@ -789,6 +792,8 @@ class MxCallTracer(CallTracer):
                 ret_opcodes = (RETURN_VALUE_OPCODE,)
             if last_opcode in ret_opcodes:
                 trace.ret_val = arg
+            else:
+                trace.raised = True     # unwound by an exception: no return value (D111)
 
             # Extract and store local variables
             # code = frame.f_code
@@ -998,7 +1003,7 @@ class MxCallTraceLogger(CallTraceLogger):
                 state = self._kept[name] = {}, {}, _ReturnTypeMerger(name, log=False)
             types, minimums, merger = state
             args_changed = _add_arg_vals(types, minimums, trace)
-            ret_changed = merger.add(trace)
+            ret_changed = False if getattr(trace, 'raised', False) else merger.add(trace)
             if args_changed or ret_changed:
                 self._traces.setdefault(name, []).append(trace)
 
