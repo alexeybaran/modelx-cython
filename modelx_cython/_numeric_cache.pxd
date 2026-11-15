@@ -50,15 +50,20 @@ cdef class NumericCache:
     cdef size_t capacity, used
     cdef PrimaryEntry* primary
     cdef size_t primary_capacity, primary_used
-    # D74: an optional dense window over integer keys (one private receiver, e.g. a reused collect root)
+    # D74/D123/D126: an optional dense window over integer keys, on every compiled ItemSpace instance built
+    # by the shared constructor (one owning thread). The geometry is set at construction; the storage is
+    # allocated on the first miss (until then dense_state is a shared read-only zero block). The written
+    # list exists only on a receiver that is reset per policy (collect's reused root).
     cdef word* dense_values
     cdef unsigned char* dense_state
     cdef unsigned int* dense_written
     cdef size_t dense_count, dense_written_n
     cdef long long dense_lower[3]
     cdef unsigned long long dense_size[3]
+    cdef bint dense_track
     cpdef int window(self, long long lower0, long long size0, long long lower1=*, long long size1=*,
-                     long long lower2=*, long long size2=*) except -1
+                     long long lower2=*, long long size2=*, bint track=*) except -1
+    cdef void dense_first(self, Py_ssize_t index, word value) noexcept
     cpdef size_t window_bytes(self)
     cdef bint get(self, word a, word b, word c, bint reflexive, word* value) except? -1
     cdef void put(self, word a, word b, word c, bint reflexive, word value) except *
@@ -73,7 +78,7 @@ cdef class NumericCache:
 # a value and records a first write for the compact reset.
 cdef inline Py_ssize_t dense_find(NumericCache cache, word a, word b, word c) noexcept:
     cdef unsigned long long i0, i1, i2
-    if cache.dense_values == NULL:
+    if cache.dense_count == 0:
         return -1
     i0 = <unsigned long long>(<long long>a - cache.dense_lower[0])
     i1 = <unsigned long long>(<long long>b - cache.dense_lower[1])
@@ -92,8 +97,12 @@ cdef inline word dense_value(NumericCache cache, Py_ssize_t index) noexcept:
 
 
 cdef inline void dense_put(NumericCache cache, Py_ssize_t index, word value) noexcept:
-    cache.dense_values[index] = value
-    if not cache.dense_state[index]:
+    if cache.dense_state[index]:
+        cache.dense_values[index] = value
+    elif cache.dense_written != NULL:       # an allocated window that is reset per policy (collect's root)
+        cache.dense_values[index] = value
         cache.dense_state[index] = 1
         cache.dense_written[cache.dense_written_n] = <unsigned int>index
         cache.dense_written_n += 1
+    else:                                   # first miss on this receiver, or a receiver never reset
+        cache.dense_first(index, value)

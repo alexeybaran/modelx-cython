@@ -1766,7 +1766,7 @@ def _fast_item_call(node, cls_name):
     store = shape[3].replace('= _mx_root', f'= {root}')
     fast = cst.parse_module(
         f"if type(self) is {cls_name} and not self._mx_spaces and not self._mx_roots:\n"
-        f"    {root}: {cls_name} = {item_roots.new_root(cls_name)}(self)\n"
+        f"    {root}: {cls_name} = {item_roots.new_root(cls_name)}(self, False)\n"
         f"    {assign}\n"
         f"    {store}\n"
         f"    return {root}\n").body

@@ -67,6 +67,15 @@ def collect_contract(node):
 
 def analyze(module):
     """Recognize the numeric sum shape. Policy isolation is a Space contract."""
+    # D74/D126: a hash-cached Cell's dense window is chosen by Cell and budget, not by route: every
+    # instance of an exclusively owned ItemSpace class built by the shared constructor holds it (the
+    # collect root and every item); spec key reuse_dense_windows false turns it off for the Space.
+    from .automatic import reuse_dense_windows
+    visitor = module.visitor
+    for name, cls in module.classes.items():
+        if (name in visitor.itemspace_classes and name not in visitor.dynamic_ref_classes
+                and not cls.is_locked):
+            cls.reuse_dense_windows, cls.reuse_dense_refused = reuse_dense_windows(cls)
     options = {name: module.spec.get_spec(cls.fqname)
                for name, cls in module.classes.items()}
     for name, spec in options.items():
@@ -99,10 +108,6 @@ def analyze(module):
         shape = _match(node, cls, option == 'reuse', parallel, order == 'domain')
         if shape is not None:
             result[node.name.value] = shape
-            if shape.reuse:
-                # D74: budgeted dense windows for hash-cached Cells on the reused root
-                from .automatic import reuse_dense_windows
-                cls.reuse_dense_windows, cls.reuse_dense_refused = reuse_dense_windows(cls)
     return result
 
 
@@ -293,7 +298,7 @@ def _restart_lines(cls, shape):
         # reach (static closure; everything when unknown). The reused root is private to this entry.
         return list(_reset_lines(cls, _check_closure(cls, [shape.cell])))
     from .item_roots import new_root, release_root
-    return [f'{release_root(cls.name)}(root)', f'root = {new_root(cls.name)}(self)']
+    return [f'{release_root(cls.name)}(root)', f'root = {new_root(cls.name)}(self, False)']
 
 
 def add_methods(cls, node, shape, *, workers):
@@ -320,7 +325,7 @@ def add_methods(cls, node, shape, *, workers):
         '        return None',
         '    if not _mx_sys._mx_collect_native_coords(coords):',
         '        return None',
-        f'    root = {new_root(cls.name)}(self)',      # D123: with the class's dense windows
+        f'    root = {new_root(cls.name)}(self, {bool(shape.reuse)})',   # D126: a reused root tracks writes
         '    try:',
     ]
     checks = bound_checks(cls)
@@ -351,7 +356,7 @@ def _shared_root_methods(cls, node):
     """audit-routes P3: the export's generic collect loop (no evaluator, tracing, nested collect,
     non-native coordinates, workers without reuse) builds and releases each policy root through the
     same generated functions as the evaluator and the direct route (D116), when the class offers them:
-    ``_mx_collect_new_root()`` returns ``_mx_new_root_C(self)`` under the evaluator's own condition, else
+    ``_mx_collect_new_root()`` returns ``_mx_new_root_C(self, False)`` under the evaluator's own condition, else
     None (the export then keeps its generic walk); ``_mx_collect_release_root(root)`` releases it."""
     if node.name.value not in cls.visitor.itemspace_classes or not _isolated_leaf(node, cls):
         return ()
@@ -359,7 +364,8 @@ def _shared_root_methods(cls, node):
     return tuple(cst.parse_module(
         'def _mx_collect_new_root(self):\n'
         f'    if type(self) is {cls.name} and not self._mx_roots and not self._mx_spaces:\n'
-        f'        return {new_root(cls.name)}(self)\n'
+        # a fresh root per policy, released after it, never reset: no written list (D126)
+        f'        return {new_root(cls.name)}(self, False)\n'
         '    return None\n'
         '\n'
         'def _mx_collect_release_root(self, root):\n'

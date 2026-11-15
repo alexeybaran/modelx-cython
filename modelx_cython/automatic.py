@@ -88,10 +88,11 @@ def dense_fits(cell):
     return count > 0
 
 
-# D74: on the collect route that reuses one root per worker, a hash-cached Cell with integer keys may hold
-# its whole logical window dense on that root (heap storage allocated on the root only; other instances
-# keep the hash store). Budget per Cell and per Space, largest windows first; 13 bytes per entry (value
-# word, ready byte, written index for a reset that clears only what was written).
+# D74/D126: a hash-cached Cell with integer keys may hold its whole logical window dense, on every instance
+# the shared constructor builds (collect's reused root and every item): heap storage allocated on that
+# receiver's first miss. Budget per Cell and per Space per receiver, largest windows first; 13 bytes per
+# entry on a receiver reset per policy (value word, ready byte, written index for a reset that clears only
+# what was written), 9 on any other.
 REUSE_DENSE_CELL_BYTES = 16 << 20
 REUSE_DENSE_SPACE_BYTES = 64 << 20
 REUSE_DENSE_ENTRY_BYTES = 13
