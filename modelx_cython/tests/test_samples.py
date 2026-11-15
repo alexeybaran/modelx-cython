@@ -413,7 +413,11 @@ def test_fractional_power(sample_dir, model):
     # uncached_rate has no _f_ method, so its public method carries the
     # formula and goes through the transformer's other rewrite site
     assert "def uncached_rate(" in src
-    assert src.count("_mx_sys._mx_pow(") == 3
+    # D139: its private entry (the same formula, called on a proven receiver) carries the rewrite too
+    entries = [m.group(0) for m in re.finditer(r"\ndef _mx_cache_entry_\d+\(.*?(?=\n@|\n\n)", src, re.S)
+               if "_mx_sys._mx_pow(" in m.group(0)]
+    assert len(entries) == 1
+    assert src.count("_mx_sys._mx_pow(") == 4
 
     # mth_q is not compared, so it would cythonize either way, but only
     # after the rewrite does it come out as a plain pow() on doubles

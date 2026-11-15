@@ -18,6 +18,29 @@ _INTEGER_ARITHMETIC = (cst.Add, cst.Subtract, cst.Multiply)
 _ARITHMETIC = (*_INTEGER_ARITHMETIC, cst.Divide)
 
 
+def virtual_call(expr):
+    """D139: the Cell call of a private-entry expression ``(entry(self, ...) if <exact receiver> else
+    [cast(T, ]self.cell(...)[)])``; the two branches have the same value, so the arithmetic proofs read
+    it as that call. Any other expression is returned unchanged."""
+    if not (isinstance(expr, cst.IfExp) and isinstance(expr.body, cst.Call)
+            and isinstance(expr.body.func, cst.Name) and expr.body.func.value.startswith('_mx_cache_entry_')):
+        return expr
+    test = expr.test
+    exact = (isinstance(test, cst.Name) and test.value == '_mx_exact_receiver'
+             or isinstance(test, cst.Comparison) and len(test.comparisons) == 1
+             and isinstance(test.comparisons[0].operator, cst.Is)
+             and isinstance(test.left, cst.Call) and dotted_name(test.left.func) == 'type'
+             and len(test.left.args) == 1 and isinstance(test.left.args[0].value, cst.Name)
+             and test.left.args[0].value.value == 'self')
+    if not exact:
+        return expr
+    virtual = expr.orelse
+    if (isinstance(virtual, cst.Call) and dotted_name(virtual.func) == '_mx_cy.cast'
+            and len(virtual.args) == 2):
+        virtual = virtual.args[1].value
+    return virtual if isinstance(virtual, cst.Call) and isinstance(virtual.func, cst.Attribute) else expr
+
+
 class _RangeInduction(NamedTuple):
     """An entered iteration satisfies counter >= (origin or zero) + offset."""
     counter: str
@@ -151,6 +174,7 @@ class CheckedArithmetic:
         self.signed_atom = None
 
     def native_call(self, expr):
+        expr = virtual_call(expr)
         args = arguments(expr)
         if (args is None or not isinstance(expr.func, cst.Attribute)
                 or not isinstance(expr.func.value, cst.Name) or expr.func.value.value != 'self'
