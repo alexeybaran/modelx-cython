@@ -14,7 +14,6 @@ class SerialCollect:
     cell: str
     parameter: str
     reuse: bool
-    private_lookups: bool
     parallel_reuse: bool
     ordered: bool = False
 
@@ -70,6 +69,11 @@ def analyze(module):
     """Recognize the numeric sum shape. Policy isolation is a Space contract."""
     options = {name: module.spec.get_spec(cls.fqname)
                for name, cls in module.classes.items()}
+    for name, spec in options.items():
+        if 'serial_private_lookups' in spec:
+            # audit-routes P6 (D126): every compiled root takes its lookup contexts over privately
+            raise ValueError(f'{name.removeprefix("_c_")}: the spec key serial_private_lookups was removed; every compiled '
+                             'root (collect and direct items) uses private lookups')
     automatic = module.spec.automatic_optimizations
     if not any('serial_collect' in spec or 'parallel_collect_reuse' in spec
                for spec in options.values()) and not automatic:
@@ -92,10 +96,7 @@ def analyze(module):
             continue
         if option not in ('reduce', 'reuse'):
             raise ValueError('serial_collect must be reduce or reuse')
-        private = spec.get('serial_private_lookups', automatic and option == 'reuse')
-        if type(private) is not bool or (private and option != 'reuse'):
-            raise ValueError('serial_private_lookups requires serial_collect reuse')
-        shape = _match(node, cls, option == 'reuse', private, parallel, order == 'domain')
+        shape = _match(node, cls, option == 'reuse', parallel, order == 'domain')
         if shape is not None:
             result[node.name.value] = shape
             if shape.reuse:
@@ -114,7 +115,7 @@ def _isolated_leaf(node, cls):
                        for hook in ('_mx_apply_formula', '_mx_collect_attach', '_mx_collect_release')))
 
 
-def _match(node, cls, reuse, private_lookups, parallel_reuse, ordered=False):
+def _match(node, cls, reuse, parallel_reuse, ordered=False):
     if not _isolated_leaf(node, cls):
         return None
     contract = collect_contract(node)
@@ -135,7 +136,7 @@ def _match(node, cls, reuse, private_lookups, parallel_reuse, ordered=False):
             or cls.cells[cell].body_has_closure or cls.cells[cell].called_with_kwargs):
         return None
 
-    return SerialCollect(label, cell, parameter, reuse, private_lookups, parallel_reuse, ordered)
+    return SerialCollect(label, cell, parameter, reuse, parallel_reuse, ordered)
 
 
 def _check_closure(cls, names):
@@ -325,13 +326,6 @@ def add_methods(cls, node, shape, *, workers):
           if shape.reuse),
         '    try:',
     ]
-    if shape.private_lookups:
-        for context in getattr(cls, 'native_contexts', {}):
-            lines.extend((
-                f"        enable = getattr(root.{context}, '_mx_enable_private_lookup', None)",
-                '        if enable is not None:',
-                '            enable()',
-            ))
     checks = bound_checks(cls)
     cls.collect_bound_checks = checks
     if checks:

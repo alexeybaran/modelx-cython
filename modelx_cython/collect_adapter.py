@@ -43,7 +43,7 @@ def _requests_collection(module):
     for cls in module.classes.values():
         options = module.spec.get_spec(cls.fqname)
         if (options.get('serial_collect') is not None or options.get('parallel_collect_reuse')
-                or options.get('serial_private_lookups') or options.get('parallel_collect_order') == 'domain'):
+                or options.get('parallel_collect_order') == 'domain'):
             return True
     return any(isinstance(node, cst.Call) and dotted_name(node.func) == '_mx_sys.collect_from_space'
                for node in walk(module.visitor.wrapper.module))

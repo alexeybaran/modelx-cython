@@ -111,8 +111,6 @@ class TransSpec:
       ``"reuse"`` for one receiver. The collect Space owns policy execution:
       policies are independent and their live receiver and cache stay inside
       collect. In reuse mode, Reference bindings are captured at entry.
-    * ``"serial_private_lookups"``: enable supported helpers' private warm
-      path on a worker-owned serial collect receiver.
     * ``"parallel_collect_reuse"``: with ``"serial_collect": "reuse"``, give
       each ordered collect chunk its own reusable receiver. The same policy
       isolation and stable Reference contract applies across workers. Scalar
