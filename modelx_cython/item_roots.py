@@ -23,14 +23,27 @@ def release_item(cls_name):
     return f'_mx_release_item_{cls_name}'
 
 
-def functions(cls_name, contexts=()):
+def window_lines(cls, receiver='root'):
+    """D74/D123: the dense windows of the class's hash-cached Cells, set once on every new root.
+
+    The same storage for the collect root and for every item (D116): collect differs only in
+    reusing its root and resetting what was written between policies.
+    """
+    return [f'{receiver}._v_{name}.window('
+            + ', '.join(f'{int(a.lower)}, {int(a.stop) - int(a.lower)}' for a in axes) + ')'
+            for name, (axes, _, _) in sorted(getattr(cls, 'reuse_dense_windows', {}).items())]
+
+
+def functions(cls_name, cls=None):
     """Module-level C functions for one compiled ItemSpace class.
 
-    ``contexts`` are the class's per-instance lookup contexts (``native_contexts``). Every root takes
-    them over privately (``_mx_enable_private_lookup``: warm lookups without the critical section, the
-    round memo): items of an exported ItemSpace class are partitioned by the caller, the one documented
-    thread rule for items that ``numeric_cache.exclusively_owned`` already relies on (audit-routes P6,
-    D126). A context whose provider has no such method is left shared."""
+    Every root gets the class's dense windows (D123) and takes its per-instance lookup contexts
+    (``native_contexts``) over privately (``_mx_enable_private_lookup``: warm lookups without the
+    critical section, the round memo): items of an exported ItemSpace class are partitioned by the
+    caller, the one documented thread rule for items that ``numeric_cache.exclusively_owned`` already
+    relies on (audit-routes P6, D126). A context whose provider has no such method is left shared."""
+    windows = ''.join(f'    {line}\n' for line in window_lines(cls)) if cls is not None else ''
+    contexts = getattr(cls, 'native_contexts', {}) if cls is not None else {}
     enable = "".join(
         f"    _mx_enable = getattr(root.{name}, '_mx_enable_private_lookup', None)\n"
         f"    if _mx_enable is not None:\n"
@@ -39,6 +52,7 @@ def functions(cls_name, contexts=()):
         f"@{CY_MOD}.cfunc\n"
         f"def {new_root(cls_name)}(base: {cls_name}) -> {cls_name}:\n"
         f"    root: {cls_name} = {cls_name}(base)\n"
+        + windows +
         f"    root._mx_copy_refs(base, base)\n"
         f"    root._mx_roots.append(root)\n"
         f"{enable}"

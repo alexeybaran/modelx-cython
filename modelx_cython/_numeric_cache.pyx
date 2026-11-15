@@ -64,8 +64,9 @@ cdef inline void write(NumericCache cache, word a, word b, word c, word value) e
 
 # D74: dense window. A key inside the window lives at a flat index; its value word and a ready byte are
 # stored there, and the index is appended to a written list so a reset clears only what was written.
-# The window is set only on a receiver one thread owns (the reused root of a collect worker), so the
-# dense path takes no critical section.
+# The window is set when a compiled ItemSpace instance is built (D123: collect's reused root and every
+# item alike); such a receiver is owned by one thread, as its inline dense arrays are, so the dense
+# path takes no critical section.
 cdef enum:
     DENSE_ENTRY_BYTES = 13          # word value + ready byte + uint32 written index
 

@@ -320,10 +320,7 @@ def add_methods(cls, node, shape, *, workers):
         '        return None',
         '    if not _mx_sys._mx_collect_native_coords(coords):',
         '        return None',
-        f'    root = {new_root(cls.name)}(self)',
-        *(f'    root._v_{name}.window({", ".join(f"{int(a.lower)}, {int(a.stop) - int(a.lower)}" for a in axes)})'
-          for name, (axes, _, _) in sorted(getattr(cls, 'reuse_dense_windows', {}).items())
-          if shape.reuse),
+        f'    root = {new_root(cls.name)}(self)',      # D123: with the class's dense windows
         '    try:',
     ]
     checks = bound_checks(cls)

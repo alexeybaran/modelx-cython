@@ -916,8 +916,7 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
         # D116: one root construction and release per compiled ItemSpace class (collect and direct)
         from modelx_cython import item_roots
         roots = [fn for name in sorted(self.module.visitor.itemspace_classes) if name in self.module.classes
-                 for fn in item_roots.functions(
-                     name, getattr(self.module.classes[name], 'native_contexts', {}))]
+                 for fn in item_roots.functions(name, self.module.classes[name])]
         if roots:
             module = module.with_changes(body=(*module.body, *roots))
         directives = []
