@@ -1705,7 +1705,8 @@ def _releasing_delitem(node, cls_name):
     The exported ``__delitem__`` is ``del self._mx_itemspaces[item]``. An item holds itself in
     ``_space`` and ``_mx_roots``, so without this it is freed only by the cyclic GC. The removed item,
     when it is a compiled item without child Spaces or items of its own, is cleared as collect clears
-    its reused root (``_mx_cells``, ``_mx_roots``, ``_space``); it is then freed by its reference count.
+    its reused root (``_mx_cells``, ``_mx_roots``, ``_space``) by ``item_roots.release_item``, which the
+    whole-model clear shares; it is then freed by its reference count.
     Any other body is left as exported. The KeyError for a missing key is unchanged (``dict.pop``).
     """
     body = node.body.body
@@ -1717,15 +1718,7 @@ def _releasing_delitem(node, cls_name):
     expected = cst.parse_statement(f"del {MX_SELF}._mx_itemspaces[{key}]\n").body[0]
     if stmt is None or not stmt.deep_equals(expected):
         return node
-    removed = '_mx_removed'
-    while removed == key:
-        removed += '_'
-    typed = removed + '_item'
-    source = (f"{removed} = {MX_SELF}._mx_itemspaces.pop({key})\n"
-              f"if type({removed}) is {cls_name}:\n"
-              f"    {typed}: {cls_name} = {CY_MOD}.cast({cls_name}, {removed})\n"
-              f"    if not {typed}._mx_spaces and not {typed}._mx_itemspaces:\n"
-              f"        {item_roots.release_root(cls_name)}({typed})\n")
+    source = f"{item_roots.release_item(cls_name)}({MX_SELF}._mx_itemspaces.pop({key}))\n"
     return node.with_changes(body=node.body.with_changes(body=cst.parse_module(source).body))
 
 

@@ -111,6 +111,14 @@ try:
 except KeyError as error:
     out['missing_key'] = ['KeyError', str(error)]
 out['recreated'] = P[3].f(2) == p.direct() * 0 + P[3].f(2)
+# audit-routes P2: the whole-model clear releases the items it drops, as deletion does; an item a
+# caller still holds stays alive (detached), the others are freed without the cyclic GC
+P[1], P[2], P[3]
+held = live()
+P.clear_all()
+out['freed_on_clear'] = [held, live()]
+out['after_clear'] = p.direct()
+out['recreated_after_clear'] = P[2] is not item and P[2].f(3) == out['item_f_3']
 gc.enable()
 out['gate'] = [gate.__name__, gate.__wrapped__.__name__, callable(gate)]
 print(json.dumps(out))
@@ -138,3 +146,8 @@ def test_item_locals_values_and_checks(tmp_path):
     assert result['same_item'] and result['freed_on_delete'] == 1
     assert result['missing_key'] == ['KeyError', '3']
     assert result['recreated']
+    # P2: the Space and its three items before the clear (same class); after it only the Space and
+    # the item the probe holds (``item``) are alive (without P2 all four stay until the cyclic GC)
+    assert result['freed_on_clear'] == [4, 2]
+    assert abs(result['after_clear'] - live['direct']) <= 1e-7 + 1e-10 * abs(live['direct'])
+    assert result['recreated_after_clear']

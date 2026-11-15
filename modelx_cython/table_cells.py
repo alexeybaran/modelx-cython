@@ -236,6 +236,12 @@ def rewrite_class(cls_info, node, config, integer_refs):
              '    """Empty every cache of this Space and drop its ItemSpaces (api-tables, D101)."""']
     clear += ['    ' + line for line in _reset_lines(cls_info)]
     if '_mx_itemspaces' in init_names:
+        if cls_info.name in cls_info.visitor.itemspace_classes:
+            # audit-routes P2: the dropped items are released as by __delitem__ (D114, D116), so they
+            # are freed by their reference count instead of waiting for the cyclic GC
+            from modelx_cython.item_roots import release_item
+            clear.append('    for _mx_item in self._mx_itemspaces.values():')
+            clear.append(f'        {release_item(cls_info.name)}(_mx_item)')
         clear.append('    self._mx_itemspaces.clear()')
     if has_collect or '_mx_collect_cache' in init_names:
         clear.append('    self._mx_collect_cache.clear()')
