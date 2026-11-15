@@ -448,6 +448,11 @@ def main_handler(args: argparse.Namespace, stdout: IO[str], stderr: IO[str]) -> 
             # api-tables (D101a, D103): the last pass, after every pass that looks cells up by name
             from modelx_cython import table_cells
             state = state.replace(table_cells.finish(state.syntax, u.module_info))
+            from modelx_cython import lazy_values
+            if tail := lazy_values.module_tail(u.module_info):
+                import libcst as _cst
+                state = state.replace(state.syntax.with_changes(
+                    body=(*state.syntax.body, *_cst.parse_module(tail).body)))
             translated_modules[u.fqname] = state
             u.abs_src_path.write_text(state.syntax.code, encoding='utf-8')
             cell_sources[u.rel_src_path.as_posix()] = cell_locations(state, u.module_info)
