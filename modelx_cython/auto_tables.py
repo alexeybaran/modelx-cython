@@ -2,7 +2,9 @@
 
 While the sample runs, every zero-argument formula of the exported model is wrapped at class
 level (no file is edited): a pandas DataFrame it returns goes through
-``runtime.table_admission.admit``. The argument count is not a condition of admission (D105), but no
+``runtime.table_admission.admit`` when its Space is evaluated once for the model (D120: no item
+parameters, here or in an enclosing Space). A DataFrame rebuilt per item (a report frame) is never
+converted: it stays pandas and its readers are pandas reads; a lowerable read of it is warned. The argument count is not a condition of admission (D105), but no
 lowered read takes a receiver with arguments today, so a cell with arguments is never consumed
 natively (D106) and is not wrapped: its frames stay pandas.
 
@@ -32,7 +34,7 @@ import importlib
 import logging
 import sys
 
-from modelx_cython.consts import FORMULA_PREF, MX_MODEL_MOD, MX_SPACE_MOD, SPACE_PREF
+from modelx_cython.consts import FORMULA_PREF, MX_MODEL_MOD, MX_SPACE_MOD, SPACE_PARAMS, SPACE_PREF
 
 _logger = logging.getLogger(__name__)
 
@@ -87,6 +89,16 @@ class SampleAdmission:
         self.tables[id(value)] = (value, table, path)
         self.paths[id(table)] = (table, path)
         return table
+
+    def observe_per_item(self, value, path, funcname=None):
+        """A zero-argument formula of a Space evaluated per item (D120): a DataFrame it returns is never
+        converted (it is rebuilt for every item); it is recorded, and its value is returned as it is."""
+        import pandas as pd
+        if isinstance(value, pd.DataFrame):
+            record = self.cells.setdefault(path, {'status': 'per-item frame', 'count': 0, 'reasons': [],
+                                                  'funcname': funcname})
+            record['count'] += 1
+        return value
 
     def substitute(self, traces):
         """Replace each traced admitted frame by its table (before the traces are merged); the count."""
@@ -152,6 +164,7 @@ class SampleAdmission:
             'admitted': admitted,
             'not_read_natively': sorted(rename(p) for p, r in self.cells.items()
                                         if r['status'] == 'not read natively'),
+            'per_item_frames': sorted(rename(p) for p, r in self.cells.items() if r['status'] == 'per-item frame'),
             'not_admitted': {rename(p): r['reasons'] for p, r in sorted(self.cells.items())
                              if r['status'] == 'not admitted'},
             'built_more_than_once': {rename(p): r['count'] for p, r in sorted(self.cells.items())
@@ -200,12 +213,13 @@ def sample_admission(package):
     importlib.import_module(package)
     wrapped = []
     for module, cls in _formula_classes(package):
+        per_item = _per_item(module, cls)
         for name, function in list(vars(cls).items()):
             code = getattr(function, '__code__', None)
             if not name.startswith(FORMULA_PREF) or code is None or code.co_argcount != 1:
                 continue        # a cell with arguments: no lowered read takes it as a receiver (D106)
             wrapped.append((cls, name, function))
-            setattr(cls, name, _wrapper(admission, function, _path(module, cls, name)))
+            setattr(cls, name, _wrapper(admission, function, _path(module, cls, name), per_item))
     previous = immutable_inputs.FALLBACK_HOOK
     immutable_inputs.FALLBACK_HOOK = admission.fallback
     try:
@@ -216,11 +230,27 @@ def sample_admission(package):
             setattr(cls, name, function)
 
 
-def _wrapper(admission, function, path):
+def _per_item(module, cls):
+    """Whether the Space of ``cls`` is evaluated per item: it, or a Space it is nested in, has parameters."""
+    def params(mod, space):
+        return getattr(sys.modules.get(mod), f'{SPACE_PARAMS}_{space}', None)
+    if params(module.__name__, cls.__name__[len(SPACE_PREF):]):
+        return True
+    parts = module.__name__.split('.')
+    for i, part in enumerate(parts[:-1]):
+        if part.startswith('_m_'):
+            owner = '.'.join(parts[:i]) + '.' + parts[-1]     # the module that defines the enclosing Space
+            if params(owner, part[3:]) or params('.'.join(parts[:i]) + '.' + MX_MODEL_MOD, part[3:]):
+                return True
+    return False
+
+
+def _wrapper(admission, function, path, per_item=False):
     funcname = f'{function.__module__}.{function.__qualname__}'
+    observe = admission.observe_per_item if per_item else admission.observe
 
     def formula(self):
-        return admission.observe(function(self), path, funcname)
+        return observe(function(self), path, funcname)
     formula.__wrapped__ = function      # the tracer resolves the traced code through it
     formula.__name__ = function.__name__
     formula.__qualname__ = function.__qualname__
@@ -390,3 +420,21 @@ def demand_driven(units, logger, build_resolver):
         cell._rt = info
         dropped.add(fqname)
     return dropped
+
+
+PER_ITEM_READ = ('{cell}: {read} (formula line {line}) reads {frame}, a DataFrame built for every item: it is not '
+                 'converted to a table (D120), so the read runs pandas. Build the table once for the model (in a '
+                 'Space without parameters) to have it read natively')
+
+
+def per_item_warnings(name, entry, frames):
+    """Build warnings for the lowerable reads (loc/at/index/iterrows) of a per-item frame in one cell."""
+    result = []
+    for read in entry.get('pandas_reads', ()):
+        if read['kind'] not in CONSUMING:
+            continue
+        for frame in frames:
+            if f'.{frame.rsplit(".", 1)[-1]}()' in read['read']:
+                result.append(PER_ITEM_READ.format(cell=display_name(name), read=read['read'], line=read['line'],
+                                                   frame=frame))
+    return result

@@ -163,7 +163,7 @@ class HandlerError(Exception):
 def _table_admission(logger, report, model_path, policy):
     """auto-tables (D104): write ``_mx_table_admission.json``, log one warning per not admitted
     table, per table built more than once and per class C read; stop under ``strict_tables``."""
-    from .auto_tables import per_step_warnings
+    from .auto_tables import per_item_warnings, per_step_warnings
     admission = getattr(logger, 'admission', None)
     if admission is None:
         return
@@ -171,6 +171,7 @@ def _table_admission(logger, report, model_path, policy):
     warnings = admission.warnings()
     for name, entry in report.items():
         warnings += per_step_warnings(name, entry.get('table_admission') or {})
+        warnings += per_item_warnings(name, entry.get('table_admission') or {}, summary['per_item_frames'])
     summary['warnings'] = warnings
     (model_path / '_mx_table_admission.json').write_text(json.dumps(summary, indent=2), encoding='utf-8')
     for text in warnings:

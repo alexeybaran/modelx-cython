@@ -295,30 +295,21 @@ def test_auto_tables_compiled_equal_live(tmp_path):
     summary = json.loads((tmp_path / "auto_nomx_cy/_mx_table_admission.json").read_text(encoding="utf-8"))
     admitted = set(summary["admitted"])
     assert {"Data.f", "Data.g", "Data.g2", "Data.fkey", "Data.skey", "Data.nans", "Data.ekey",
-            "Data.unused", "Data.rowkeys", "Projection.per_policy"} <= admitted, admitted
-    # D106: a frame no lowered read consumes stays the plain DataFrame (the report, the operation cells)
-    assert not any(name.startswith("Projection.b_") for name in admitted), admitted
-    # a cell with arguments read by key is not consumed natively either: no lowered read takes a receiver with
-    # arguments, so its frames stay pandas (scaled(2).loc[31, "q"] runs pandas, equal to live)
-    assert {"Projection.report", "Projection.b_mask", "Projection.b_sort_values",
-            } <= set(summary["not_read_natively"]), summary["not_read_natively"]
-    assert not any(name.startswith(("Projection.c_", "Projection.scaled")) for name in admitted)
-    # the zero-argument operation cells that return a frame are admitted too (value-based), except
-    # the transpose, whose column names are the ages (C6)
+            "Data.unused", "Data.rowkeys"} <= admitted, admitted
+    # D120: a DataFrame built per item (a Projection cell) is never converted; it stays pandas and its key
+    # reads are pandas reads, warned (the per-policy table, the report, the operation cells)
+    assert not any(name.startswith("Projection.") for name in admitted), admitted
+    assert {"Projection.per_policy", "Projection.report", "Projection.b_mask",
+            "Projection.b_transpose"} <= set(summary["per_item_frames"]), summary["per_item_frames"]
+    assert re.search(r"Projection.per_policy_x: .* reads Projection.per_policy, a DataFrame built for every item", log)
+    # a cell with arguments is never wrapped: no lowered read takes a receiver with arguments
     assert summary["not_admitted"] == {
-        "Data.dup": ["duplicate key 1 (1 duplicated rows) (C3); keys must be unique"],
-        "Projection.b_transpose": ["column names must be non-empty unique strings (C6), got [30, 31, 32, 33]"]}
+        "Data.dup": ["duplicate key 1 (1 duplicated rows) (C3); keys must be unique"]}
     assert summary["same_frame_as"] == {"Data.g2": "Data.g"}
     assert "Data.rowkeys" in summary["row_numbers_as_keys"]
-    assert summary["built_more_than_once"]["Projection.per_policy"] >= 3
-    assert "Data.g" not in summary["built_more_than_once"]
-    assert set(summary["series_cells"]) == {"Data.ser", "Projection.b_column", "Projection.b_column_times_2",
-                                            "Projection.b_groupby_sum", "Projection.b_iloc",
-                                            "Projection.b_label_slice_column", "Projection.b_list_of_keys",
-                                            "Projection.b_mask_loc_column", "Projection.b_prefix_with_column",
-                                            "Projection.b_row_sum"} or summary["series_cells"]
+    assert not summary["built_more_than_once"], summary["built_more_than_once"]
+    assert "Data.ser" in summary["series_cells"]
     assert "Data.dup: not admitted as a table: duplicate key 1" in log
-    assert re.search(r"Projection.per_policy: admitted as a table, but built \d+ times", log)
     report = json.loads((tmp_path / "auto_nomx_cy/_mx_admission.json").read_text(encoding="utf-8"))
 
     def reads(cell):
