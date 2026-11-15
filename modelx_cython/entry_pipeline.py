@@ -391,6 +391,18 @@ def _emit(state, layouts, entries, uses, policy):
             methods[fn] = fn.with_changes(body=fn.body.with_changes(body=(cst.parse_statement(f'return {direct}({args})\n'),)))
             misses[entry] = layout.formula, layout.keys, direct
 
+    if hit_layouts:
+        # D139: the private entry of an uncached Cell is a formula on a proven receiver; its reads of
+        # cached Cells expose their hits as the hoisted formulas' reads do
+        for name, fn in state.functions.items():
+            origin = state.function_origins.get(name)
+            if (origin is None or origin[1].startswith(FORMULA_PREF) or name in entries or name in guards
+                    or fn in methods):
+                continue
+            expose = _expose_hits(fn.body, fn.params.params, hit_layouts)
+            if expose is not None:
+                methods[fn] = fn.with_changes(body=fn.body.visit(calls(expose=expose)))
+
     for name, check in checks.items():
         layout = layouts[name]
         method = _public_entry(layout, state.methods)
