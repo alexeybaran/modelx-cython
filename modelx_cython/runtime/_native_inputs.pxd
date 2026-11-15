@@ -114,6 +114,8 @@ cdef class TableHandle:
     cdef const long long* _okeys    # single-level int keys in row order
     cdef object _table_obj          # table_object(): built with the handle, None for column views
     cdef object _key_index          # D86: 'grid', or why a multi-level key stays hashed; None otherwise
+    cdef tuple _rowrefs             # D132: the helper's own row tuples in handle row order (root rows form), else None
+    cdef object _frame_owner        # D132: the owner when it is a frame-built table (its rows remember the frame row)
     cdef Py_ssize_t col(self, object name) except -2               # identity, then ==; KeyError(name)
     cdef Py_ssize_t row_1(self, TableKey p0) except -2              # KeyError(original key)
     cdef Py_ssize_t row_2(self, TableKey p0, TableKey p1) except -2

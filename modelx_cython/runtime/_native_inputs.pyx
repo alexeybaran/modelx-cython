@@ -1637,6 +1637,92 @@ cdef Py_ssize_t _slot_offset(object owner_type, str name):
 _record_items_offset = _slot_offset(Record, '_items')
 
 
+# ---- D132: the Record of a table row built natively (collect and direct share row_record) ----------
+# The fields ``immutable_inputs._record`` sets, written into the slots of a new Record (not yet
+# shared, so no lock); the values are the helper's own frozen row objects, so types and values are
+# those of ``T.loc[key]``. Used only for root rows-form tables without preserved scalar types and
+# without frame metadata (those keep the helper's ``loc``).
+from cpython.dict cimport PyDict_New, PyDict_SetItem
+from cpython.tuple cimport PyTuple_New, PyTuple_SET_ITEM
+from cpython.ref cimport Py_INCREF
+cdef extern from "Python.h":
+    object PyDictProxy_New(object mapping)
+
+cdef object _object_new = object.__new__
+cdef Py_ssize_t _rec_index_offset = _slot_offset(Record, '_index')
+cdef Py_ssize_t _rec_groups_offset = _slot_offset(Record, '_native_groups')
+cdef Py_ssize_t _rec_metadata_offset = _slot_offset(Record, '_metadata')
+cdef Py_ssize_t _rec_preserve_offset = _slot_offset(Record, '_preserve_scalar_types')
+cdef Py_ssize_t _rec_frame_row_offset = _slot_offset(Record, '_frame_row')   # -1 when the helper has none
+cdef bint _native_records = (_record_items_offset >= 0 and _rec_index_offset >= 0 and _rec_groups_offset >= 0
+                             and _rec_metadata_offset >= 0 and _rec_preserve_offset >= 0)
+
+
+cdef inline void _put_slot(object record, Py_ssize_t offset, object value):
+    Py_INCREF(value)
+    (<PyObject**>(<char*><PyObject*>record + offset))[0] = <PyObject*>value
+
+
+cdef class _FrameRowMaker:
+    """``frame.loc[label]`` of a frame-built table, made only when a Python caller asks (D119 memo)."""
+    cdef object table, label
+
+    def __call__(self):
+        from modelx_helpers.immutable_inputs import _frame_of
+        return _frame_of(self.table).loc[self.label]
+
+
+cdef void _native_rows_init(TableHandle t, object owner) except *:
+    """Keep ``t._rowrefs`` only where the native Record equals the helper's ``loc[key]`` Record."""
+    if t._rowrefs is None:
+        return
+    metadata = getattr(owner, '_metadata', None)
+    if (not _native_records or t._preserve or t._prefix != () or t.base != 0 or len(t._rowrefs) != t.rows
+            or (metadata is not None and metadata[0] == 'frame' and metadata[4] is not None)
+            or not all(type(values) is tuple for values in t._rowrefs)):
+        t._rowrefs = None
+        return
+    t._frame_owner = None
+    if _rec_frame_row_offset >= 0:
+        try:
+            from modelx_helpers.immutable_inputs import _frame_of
+        except ImportError:
+            return
+        if _frame_of(owner) is not None:
+            t._frame_owner = owner
+
+
+cdef object _native_row_record(TableHandle self, Py_ssize_t row):
+    cdef PyObject* values = PyTuple_GET_ITEM(self._rowrefs, row)        # borrowed: held by the handle
+    cdef PyObject* columns = <PyObject*>self._columns
+    cdef Py_ssize_t j, width = self.width
+    cdef _FrameRowMaker maker
+    if mx_tuple_size(values) != width:
+        mx_handle_fallback()
+        return self.helper().loc[_h_label(self, row)]
+    items = PyTuple_New(width)
+    index = PyDict_New()
+    for j in range(width):
+        name = <object>mx_tuple_item(columns, j)
+        value = <object>mx_tuple_item(values, j)
+        pair = (name, value)
+        Py_INCREF(pair)
+        PyTuple_SET_ITEM(items, j, pair)
+        PyDict_SetItem(index, name, value)
+    record = _object_new(Record)
+    _put_slot(record, _record_items_offset, items)
+    _put_slot(record, _rec_index_offset, PyDictProxy_New(index))
+    _put_slot(record, _rec_groups_offset, PyDict_New())
+    _put_slot(record, _rec_metadata_offset, None)
+    _put_slot(record, _rec_preserve_offset, False)
+    if self._frame_owner is not None:
+        maker = _FrameRowMaker.__new__(_FrameRowMaker)
+        maker.table = self._frame_owner
+        maker.label = _h_label(self, row)
+        _put_slot(record, _rec_frame_row_offset, (maker, None))
+    return record
+
+
 def handle_fallbacks():
     """Number of handle reads that ran Python code (W1.2 debug counter, process-wide)."""
     return mx_handle_fallback_count()
@@ -2041,6 +2127,8 @@ cdef TableHandle _clone(TableHandle source):
     t._children = source._children
     t._labels = source._labels
     t._first_obj = source._first_obj
+    t._rowrefs = source._rowrefs
+    t._frame_owner = source._frame_owner
     t._last_obj = source._last_obj
     t._keys = source._keys
     t._ckeys = source._ckeys
@@ -2340,6 +2428,7 @@ cdef void _init_rows(TableHandle t, list hold, tuple storage) except *:
     if levels == 1:
         _row_columns(t, hold, values, list(range(rows)), t.width)
         t._labels = tuple(keys)
+        t._rowrefs = tuple(values)
         _index_single(t, &t._keys, hold, _label_parts(hold, t._labels, t._spec_missing),
                       rows, 1, 0, modes, t._labels)
         t.scheme = t._keys.scheme
@@ -2360,6 +2449,7 @@ cdef void _init_rows(TableHandle t, list hold, tuple storage) except *:
         memcpy(&parts[r * levels], &original[<Py_ssize_t>order[r] * levels], levels * sizeof(HandlePart))
     _row_columns(t, hold, values, order, t.width)
     t._labels = tuple([keys[<Py_ssize_t>order[r]] for r in range(rows)])
+    t._rowrefs = tuple([values[<Py_ssize_t>order[r]] for r in range(rows)])
     t.scheme = TABLE_HASHED
     t._keys.scheme = TABLE_HASHED
     t._keys.count = rows
@@ -2540,6 +2630,7 @@ cdef class TableHandle:
             _init_rows(self, hold, storage)
         else:
             raise TypeError(f'unknown table storage {storage[0]!r}')
+        _native_rows_init(self, owner)
         _attach_table_objects(self)
 
     # -- columns and cells ------------------------------------------------------------------
@@ -2881,9 +2972,13 @@ cdef class TableHandle:
 
 
     cdef object row_record(self, Py_ssize_t row):
-        """The row as the helper's Record (T.loc[k]): a Python object, built by the helper."""
+        """The row as the helper's Record (T.loc[k]). Root rows-form tables: built here from the helper's
+        own row tuple, as ``immutable_inputs._row_record`` builds it, without the Python ``loc`` (D132);
+        otherwise built by the helper."""
         if <size_t>row >= <size_t>self.rows:
             raise IndexError(f'table row {row} is out of range')
+        if self._rowrefs is not None:
+            return _native_row_record(self, row)
         mx_handle_fallback()
         record = self.helper().loc[_h_label(self, row)]
         if self._colbase or self.width != len(record):
