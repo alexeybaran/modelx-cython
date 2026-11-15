@@ -618,6 +618,7 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
         self.dense_entries = {}
         self.formula_entries = {}
         self.function_origins = {}      # D139: {private entry of an uncached Cell: (class, Cell)}
+        self.entry_domains = {}         # D139b: {private entry of an uncached Cell: its argument domain}
         self.helper_providers.update(numeric_cache.providers(module))
         from modelx_cython import vectors
         self.helper_providers.update(vectors.providers(module))
@@ -911,7 +912,8 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
             # Exact type alone cannot rule out overrides on a receiver with a dict.
             ordinary = {name: cls for name, cls in self.module.classes.items()
                         if name not in self.module.visitor.dynamic_ref_classes}
-            module, self.dense_entries, self.formula_entries, self.function_origins = add_inline_entries(
+            (module, self.dense_entries, self.formula_entries, self.function_origins,
+             self.entry_domains) = add_inline_entries(
                 module, ordinary, self._dense_layouts)
         if self._cold_sums or self._cold_spills:
             module = module.with_changes(body=(*module.body, *self._cold_sums, *self._cold_spills))

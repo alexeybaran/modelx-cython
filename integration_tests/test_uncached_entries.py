@@ -40,6 +40,9 @@ def _build(tmp_path):
                     return 1.0
                 return inforce(t - 1) * surv(t - 1, t)
             '''))
+        # D139b: an uncached reader of a dense Cell at its own argument takes the proven inline hit
+        projection.new_cells('df', 'lambda t: 1.0 / (1.0 + 0.01 * key) ** t')
+        projection.new_cells('discount', 'lambda t: surv(0, t) * df(t)', is_cached=False)
         projection.new_cells('tick', textwrap.dedent('''\
             def tick(t):
                 log.append(t)
@@ -58,7 +61,7 @@ def _build(tmp_path):
                 for t in range(12):
                     for s in range(0, t + 1, 1 + key % 3):
                         total += surv(s, t) * (t + 1)
-                    total += inforce(t)
+                    total += inforce(t) + discount(t)
                 return total
             '''))
         portfolio = model.new_space('Portfolio', refs={'projection': projection})
@@ -80,7 +83,8 @@ def _build(tmp_path):
         'p.collect(); mx_model.Portfolio.direct()\n'
         'for key in (1, 2, 3):\n'
         '    p[key].value(); p[key].ticks(5); p[key].tick(2)\n'
-        '    [p[key].surv(s, t) for s in range(12) for t in range(12)]\n', encoding='utf-8')
+        '    [p[key].surv(s, t) for s in range(12) for t in range(12)]\n'
+        '    [p[key].df(t) + p[key].rate(t) for t in range(30)]\n', encoding='utf-8')
     subprocess.run([sys.executable, '-m', 'modelx_cython', 'exported', '--sample', 'sample.py', '--no-spec'],
                    cwd=tmp_path, check=True)
 
@@ -105,6 +109,7 @@ PROBE = textwrap.dedent('''\
     out['surv'] = [item.surv(s, t) for s in range(12) for t in range(12)]
     out['inforce'] = [item.inforce(t) for t in range(12)]
     out['value'] = item.value()
+    out['discount'] = [item.discount(t) for t in (0, 5, 11, 12, 20)]   # 12 and 20: outside the domain
     log = item.log
     del log[:]
     counts = [item.ticks(5)]
@@ -151,7 +156,16 @@ def test_uncached_cells_take_a_direct_entry_and_equal_live(tmp_path):
     # the entry is the formula itself: its recursion and its cached callee are direct C calls
     body = generated.split(f'def {surv}(', 1)[1].split('\n\n', 1)[0]
     assert f'{surv}(self, s, ' in body and f'{entries["rate"]}(self, ' in body
-    assert 'self.surv(' not in body and 'self.rate(' not in body and '_has_' not in body
+    assert 'self.surv(' not in body and 'self.rate(' not in body and '_has_surv' not in body
+
+    # D139b: inside its traced domain an uncached entry reads a dense Cell as a hoisted cached formula
+    # does (the array hit behind the bounds proof); outside it, the checked entry
+    discount = admission[PREFIX + '_f_discount']['inline_entry']
+    body = generated.split(f'def {discount}(', 1)[1].split('\n\n', 1)[0]
+    domain = re.search(r'(_mx_dense_domain\w*): _mx_cy.bint = \(0 <= t < 12\)', body)
+    assert domain, body
+    assert re.search(rf'\(\(self\._v_df\[t\] if self\._has_df\[t\] else \w+_inbounds\(self, t(, True)?\)\) '
+                     rf'if {domain.group(1)} else _mx_cache_entry_\d+\(self, t\)\)', body), body
 
     # same-class readers (collect route) and the typed item local (direct route) both take the entry
     assert re.search(rf'\({surv}\(self, .*\) if _mx_exact_receiver else', generated), 'value reader'
@@ -161,7 +175,7 @@ def test_uncached_cells_take_a_direct_entry_and_equal_live(tmp_path):
     live, compiled = _run(tmp_path, 'exported'), _run(tmp_path, 'exported_cy')
     for key in ('collect1', 'collect1_again', 'collect4', 'direct', 'value'):
         assert abs(compiled[key] - live[key]) <= 1e-7 + 1e-10 * abs(live[key]), key
-    for key in ('surv', 'inforce'):
+    for key in ('surv', 'inforce', 'discount'):
         assert all(abs(a - b) <= 1e-7 + 1e-10 * abs(b) for a, b in zip(compiled[key], live[key])), key
     assert compiled['counts'] == live['counts'] == [5.0, 5, 5, 8]
     assert compiled['log'] == live['log'] == [0, 1, 2, 3, 4, 4, 4, 4]

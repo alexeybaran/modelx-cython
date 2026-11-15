@@ -92,10 +92,20 @@ class _Domain:
 def _bounds(state, layouts, guards, uses):
     guards = {name: guard for name, guard in guards.items() if 0 < len(layouts[name].axes) <= 32}
     ranges = _formula_ranges(state, layouts, guards, uses)
-    masks, domains = {}, {}
+    # Callers whose arguments lie in known axes: a cached Cell's formula, reached inside its dense
+    # window (or behind its own domain test when it checks its spill in the helper), and (D139b) an
+    # uncached Cell's private entry, which tests its arguments against its traced domain once and runs
+    # on a proven receiver. Every caller takes the same proofs below.
+    callers = []
     for name, source_axes in ranges.items():
         layout = layouts[name]
-        formula = state.methods.get((layout.owner, layout.formula))
+        callers.append((state.methods.get((layout.owner, layout.formula)), layout.owner, source_axes,
+                        layout.checks_spill_in_helper, False))
+    for entry, source_axes in state.entry_domains.items():
+        if (origin := state.function_origins.get(entry)) is not None:
+            callers.append((state.functions.get(entry), origin[0], source_axes, True, True))
+    masks, domains = {}, {}
+    for formula, owner, source_axes, checked_domain, proven in callers:
         if not source_axes or formula is None or not _native_formula(formula):
             continue
         nodes = list(walk(formula.body))
@@ -104,10 +114,10 @@ def _bounds(state, layouts, guards, uses):
         mutable = CstFacts(formula.body.body).bindings(nodes)
         intervals = {axis.key: (axis.lower, axis.stop) for axis in source_axes if axis.key not in mutable}
         types = {axis.key: axis.c_type for axis in source_axes}
-        receiver = cst.parse_expression(exact_receiver(layout.owner))
-        for call in _exact_calls(formula.body, receiver):
+        receiver = cst.parse_expression(exact_receiver(owner))
+        for call in _exact_calls(formula.body, receiver, proven):
             target = call.func.value
-            if target not in guards or layouts[target].owner != layout.owner:
+            if target not in guards or layouts[target].owner != owner:
                 continue
             target_axes = ranges.get(target) or layouts[target].axes
             args = arguments(call, count=len(target_axes) + 1)
@@ -119,7 +129,7 @@ def _bounds(state, layouts, guards, uses):
                 if interval and axis.lower <= interval[0] < interval[1] <= axis.stop:
                     mask |= 1 << index
             if mask:
-                if layout.checks_spill_in_helper and formula not in domains:
+                if checked_domain and formula not in domains:
                     domains[formula] = _Domain(state.names.reserve('_mx_dense_domain', family=True), source_axes)
                 masks[call] = mask, domains.get(formula)
     return ranges, masks, domains
@@ -401,7 +411,11 @@ def _emit(state, layouts, entries, uses, policy):
                 continue
             expose = _expose_hits(fn.body, fn.params.params, hit_layouts)
             if expose is not None:
-                methods[fn] = fn.with_changes(body=fn.body.visit(calls(expose=expose)))
+                body = fn.body.visit(calls(expose=expose))
+                if (domain := domains.get(fn)) is not None:
+                    # D139b: the entry's own domain test, as the module pass adds to other formulas
+                    body = _with_domain(body, domain)
+                methods[fn] = fn.with_changes(body=body)
 
     for name, check in checks.items():
         layout = layouts[name]

@@ -2,7 +2,7 @@
 
 import libcst as cst
 
-from modelx_cython.cell_entries import FormulaEntry, cache_hit, exact_receiver
+from modelx_cython.cell_entries import DenseAxis, FormulaEntry, cache_hit, exact_receiver
 from modelx_cython.consts import CY_MOD, FORMULA_PREF, MX_POW, MX_SELF, MX_SYS_MOD
 from modelx_cython.scopes import Names
 from modelx_cython.syntax import statements
@@ -38,6 +38,23 @@ def _eligible(cell, params):
         and params.params[0].default is None
         and all(cell.get_argtype_expr(p, c_style=True) in _NUMERIC_TYPES for p in cell.params)
     )
+
+
+def _entry_domain(cell):
+    """The traced argument range of an uncached Cell with integer arguments, or ``()``.
+
+    The tracer keeps each uncached call that widens an argument's observed range, so this is the
+    exact sampled domain. It sizes nothing: the entry tests its arguments against it once, and inside
+    it the entry's reads of dense Cells take the same bounds proofs as a hoisted cached formula inside
+    its dense window (entry_pipeline._bounds); outside it they take the checked calls."""
+    rt = getattr(cell, '_rt', None)
+    if rt is None or not (cell.has_args() and cell.has_typeinfo()) or any(
+            cell.get_argtype_expr(p, c_style=True) != 'long long' for p in cell.params):
+        return ()
+    lows, highs = getattr(rt, 'observed_min_args', {}), getattr(rt, 'observed_max_args', {})
+    if not all(p in lows and p in highs for p in cell.params) or len(cell.params) > 32:
+        return ()
+    return tuple(DenseAxis(p, lows[p], highs[p] + 1, 'long long') for p in cell.params)
 
 
 def _literal_defaults(cell, params):
@@ -230,6 +247,7 @@ def add_inline_entries(module, classes, dense_layouts):
     all_entries, pending = {}, []
     uncached = {}          # D139: {(owner, cell name): entry} of uncached Cells
     origins = {}
+    domains = {}           # D139b: {entry of an uncached Cell: its traced argument domain}
     for statement in module.body:
         if not isinstance(statement, cst.ClassDef) or statement.name.value not in classes:
             body.append(statement)
@@ -259,6 +277,8 @@ def add_inline_entries(module, classes, dense_layouts):
                 # D139: emitted below from the formula, once every class's entries are known
                 uncached[owner, cell.name] = entry
                 origins[entry] = owner, cell.name
+                if domain := _entry_domain(cell):
+                    domains[entry] = domain
                 methods.append(method)
                 continue
             layout = dense_layouts.get((owner, cell.name))
@@ -355,4 +375,4 @@ def add_inline_entries(module, classes, dense_layouts):
             index = len(body)
         body.insert(index, cst.parse_statement(
             f'from typing import Optional as {optional_receiver}\n'))
-    return module.with_changes(body=(*body, *functions)), dense_entries, formula_entries, origins
+    return module.with_changes(body=(*body, *functions)), dense_entries, formula_entries, origins, domains
