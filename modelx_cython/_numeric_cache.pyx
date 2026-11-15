@@ -71,6 +71,11 @@ cdef enum:
     DENSE_ENTRY_BYTES = 13          # word value + ready byte + uint32 written index
 
 
+cdef unsigned char* _zero_block = NULL
+cdef size_t _zero_size = 0
+_zero_lock = []        # the critical section that guards the shared zero block
+
+
 cdef class NumericCache:
     def __cinit__(self, size_t primary_capacity=0):
         self.capacity = 8
@@ -92,36 +97,75 @@ cdef class NumericCache:
     def __dealloc__(self):
         free(self.primary)
         free(self.entries)
+        if self.dense_values != NULL:      # an unallocated window points at the shared zero block
+            free(self.dense_state)
         free(self.dense_values)
-        free(self.dense_state)
         free(self.dense_written)
 
     cpdef int window(self, long long lower0, long long size0, long long lower1=0, long long size1=1,
-                     long long lower2=0, long long size2=1) except -1:
-        """Hold the keys of a window dense (D74). Keys outside it keep the hash store."""
+                     long long lower2=0, long long size2=1, bint track=True) except -1:
+        """Hold the keys of a window dense (D74). Keys outside it keep the hash store.
+
+        D126: only the geometry is set here; the storage is allocated on the first miss, so a receiver
+        that never reaches the Cell pays nothing. ``track`` keeps the written list a per-policy reset
+        needs (collect's reused root); a receiver that is never reset stores 9 bytes per entry, not 13.
+        """
+        global _zero_block, _zero_size
         cdef size_t count
-        if self.dense_values != NULL:
+        cdef unsigned char* grown
+        if self.dense_count != 0:
             raise ValueError("numeric cache window is already set")
         if size0 <= 0 or size1 <= 0 or size2 <= 0:
             raise ValueError("numeric cache window must not be empty")
         if size0 > 0xffffffff // size1 // size2:
             raise MemoryError("numeric cache window exceeds 2**32 entries")
         count = <size_t>(size0 * size1 * size2)
-        self.dense_values = <word*>malloc(count * sizeof(word))
-        self.dense_state = <unsigned char*>calloc(count, 1)
-        self.dense_written = <unsigned int*>malloc(count * sizeof(unsigned int))
-        if self.dense_values == NULL or self.dense_state == NULL or self.dense_written == NULL:
-            free(self.dense_values); free(self.dense_state); free(self.dense_written)
-            self.dense_values = NULL; self.dense_state = NULL; self.dense_written = NULL
-            raise MemoryError()
-        self.dense_count = count
+        with cython.critical_section(_zero_lock):
+            if count > _zero_size:
+                # read-only zero ready bytes shared by every unallocated window (never written, never
+                # freed; untouched pages of a fresh calloc are the kernel's zero page)
+                grown = <unsigned char*>calloc(count, 1)
+                if grown == NULL:
+                    raise MemoryError()
+                _zero_block = grown
+                _zero_size = count
+            self.dense_state = _zero_block
+        self.dense_values = NULL
+        self.dense_written = NULL
+        self.dense_track = track
         self.dense_written_n = 0
         self.dense_lower[0], self.dense_lower[1], self.dense_lower[2] = lower0, lower1, lower2
         self.dense_size[0], self.dense_size[1], self.dense_size[2] = size0, size1, size2
+        self.dense_count = count
         return 0
 
+    cdef void dense_first(self, Py_ssize_t index, word value) noexcept:
+        """The first miss allocates the window (values unzeroed, ready bytes zeroed, the written list
+        only when tracked); later misses of an untracked receiver store value and ready byte. If the
+        allocation fails the window is turned off: the value is not kept and the hash store serves the
+        keys from then on (recomputed on the next read, never wrong)."""
+        cdef word* values
+        cdef unsigned char* state
+        cdef unsigned int* written = NULL
+        if self.dense_values == NULL:
+            values = <word*>malloc(self.dense_count * sizeof(word))
+            state = <unsigned char*>calloc(self.dense_count, 1)
+            if self.dense_track:
+                written = <unsigned int*>malloc(self.dense_count * sizeof(unsigned int))
+            if values == NULL or state == NULL or (self.dense_track and written == NULL):
+                free(values); free(state); free(written)
+                self.dense_count = 0
+                return
+            self.dense_values, self.dense_state, self.dense_written = values, state, written
+        self.dense_values[index] = value
+        if not self.dense_state[index]:
+            self.dense_state[index] = 1
+            if self.dense_written != NULL:
+                self.dense_written[self.dense_written_n] = <unsigned int>index
+                self.dense_written_n += 1
+
     cpdef size_t window_bytes(self):
-        return self.dense_count * DENSE_ENTRY_BYTES
+        return self.dense_count * (DENSE_ENTRY_BYTES if self.dense_track else DENSE_ENTRY_BYTES - 4)
 
     def __reduce__(self):
         cdef size_t index
@@ -131,9 +175,14 @@ cdef class NumericCache:
                 if self.entries[index].ready:
                     values.append((self.entries[index].a, self.entries[index].b,
                                    self.entries[index].c, self.entries[index].value))
-            for index in range(self.dense_written_n):
-                values.append(self._dense_key(self.dense_written[index])
-                              + (self.dense_values[self.dense_written[index]],))
+            if self.dense_written != NULL:
+                for index in range(self.dense_written_n):
+                    values.append(self._dense_key(self.dense_written[index])
+                                  + (self.dense_values[self.dense_written[index]],))
+            elif self.dense_values != NULL:      # an untracked window: scan its ready bytes
+                for index in range(self.dense_count):
+                    if self.dense_state[index]:
+                        values.append(self._dense_key(index) + (self.dense_values[index],))
             for index in range(self.primary_capacity):
                 if self.primary[index].state == 2:
                     values.append((self.primary[index].a, self.primary[index].b,
@@ -159,7 +208,7 @@ cdef class NumericCache:
         cdef Py_ssize_t index
         if not reflexive:
             return False
-        if self.dense_values != NULL:
+        if self.dense_count != 0:
             index = dense_find(self, a, b, c)
             if index >= 0:
                 if self.dense_state[index]:
@@ -172,7 +221,7 @@ cdef class NumericCache:
     cdef void put(self, word a, word b, word c, bint reflexive, word value) except *:
         cdef Py_ssize_t index
         if reflexive:
-            if self.dense_values != NULL:
+            if self.dense_count != 0:
                 index = dense_find(self, a, b, c)
                 if index >= 0:
                     dense_put(self, index, value)
@@ -188,7 +237,7 @@ cdef class NumericCache:
         if not reflexive:
             slot[0] = -2
             return False
-        if self.dense_values != NULL:
+        if self.dense_count != 0:
             dense = dense_find(self, a, b, c)
             if dense >= 0:
                 slot[0] = -3 - dense             # D74: a dense slot
@@ -226,7 +275,7 @@ cdef class NumericCache:
         cdef word ignored
         if slot == -2:
             return
-        if slot <= -3 and self.dense_values != NULL and -3 - slot < <Py_ssize_t>self.dense_count:
+        if slot <= -3 and self.dense_count != 0 and -3 - slot < <Py_ssize_t>self.dense_count:
             dense_put(self, -3 - slot, value)
             return
         if 0 <= slot < <Py_ssize_t>self.primary_capacity:
@@ -245,7 +294,9 @@ cdef class NumericCache:
 
     cpdef reset(self):
         cdef size_t index
-        if self.dense_values != NULL:
+        if self.dense_values != NULL and self.dense_written == NULL:
+            memset(self.dense_state, 0, self.dense_count)      # an untracked window (never reset per policy)
+        elif self.dense_values != NULL:
             # D74: clear what was written, or the ready bytes when most of the window was written
             if self.dense_written_n * 8 < self.dense_count:
                 for index in range(self.dense_written_n):

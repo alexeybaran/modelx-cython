@@ -68,6 +68,15 @@ def collect_contract(node):
 
 def analyze(module):
     """Recognize the numeric sum shape. Policy isolation is a Space contract."""
+    # D74/D126: a hash-cached Cell's dense window is chosen by Cell and budget, not by route: every
+    # instance of an exclusively owned ItemSpace class built by the shared constructor holds it (the
+    # collect root and every item); spec key reuse_dense_windows false turns it off for the Space.
+    from .automatic import reuse_dense_windows
+    visitor = module.visitor
+    for name, cls in module.classes.items():
+        if (name in visitor.itemspace_classes and name not in visitor.dynamic_ref_classes
+                and not cls.is_locked):
+            cls.reuse_dense_windows, cls.reuse_dense_refused = reuse_dense_windows(cls)
     options = {name: module.spec.get_spec(cls.fqname)
                for name, cls in module.classes.items()}
     automatic = module.spec.automatic_optimizations
@@ -98,10 +107,6 @@ def analyze(module):
         shape = _match(node, cls, option == 'reuse', private, parallel, order == 'domain')
         if shape is not None:
             result[node.name.value] = shape
-            if shape.reuse:
-                # D74: budgeted dense windows for hash-cached Cells on the reused root
-                from .automatic import reuse_dense_windows
-                cls.reuse_dense_windows, cls.reuse_dense_refused = reuse_dense_windows(cls)
     return result
 
 
@@ -286,7 +291,7 @@ def _restart_lines(cls, shape):
         # reach (static closure; everything when unknown). The reused root is private to this entry.
         return list(_reset_lines(cls, _check_closure(cls, [shape.cell])))
     from .item_roots import new_root, release_root
-    return [f'{release_root(cls.name)}(root)', f'root = {new_root(cls.name)}(self)']
+    return [f'{release_root(cls.name)}(root)', f'root = {new_root(cls.name)}(self, False)']
 
 
 def add_methods(cls, node, shape, *, workers):
@@ -312,7 +317,7 @@ def add_methods(cls, node, shape, *, workers):
         '        return None',
         '    if not _mx_sys._mx_collect_native_coords(coords):',
         '        return None',
-        f'    root = {new_root(cls.name)}(self)',      # D123: with the class's dense windows
+        f'    root = {new_root(cls.name)}(self, {bool(shape.reuse)})',   # D126: a reused root tracks writes
         '    try:',
     ]
     if shape.private_lookups:

@@ -24,9 +24,13 @@ def window_lines(cls, receiver='root'):
     The same storage for the collect root and for every item (D116): collect differs only in
     reusing its root and resetting what was written between policies.
     """
-    return [f'{receiver}._v_{name}.window('
-            + ', '.join(f'{int(a.lower)}, {int(a.stop) - int(a.lower)}' for a in axes) + ')'
-            for name, (axes, _, _) in sorted(getattr(cls, 'reuse_dense_windows', {}).items())]
+    lines = []
+    for name, (axes, _, _) in sorted(getattr(cls, 'reuse_dense_windows', {}).items()):
+        bounds = [f'{int(a.lower)}, {int(a.stop) - int(a.lower)}' for a in axes]
+        bounds += ['0, 1'] * (3 - len(bounds))
+        # D126: geometry only (storage on the first miss); the written list only on a reset receiver
+        lines.append(f'{receiver}._v_{name}.window({", ".join(bounds)}, track)')
+    return lines
 
 
 def functions(cls_name, cls=None):
@@ -34,7 +38,7 @@ def functions(cls_name, cls=None):
     windows = ''.join(f'    {line}\n' for line in window_lines(cls)) if cls is not None else ''
     return cst.parse_module(
         f"@{CY_MOD}.cfunc\n"
-        f"def {new_root(cls_name)}(base: {cls_name}) -> {cls_name}:\n"
+        f"def {new_root(cls_name)}(base: {cls_name}, track: {CY_MOD}.bint) -> {cls_name}:\n"
         f"    root: {cls_name} = {cls_name}(base)\n"
         + windows +
         f"    root._mx_copy_refs(base, base)\n"
