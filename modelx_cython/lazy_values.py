@@ -45,6 +45,8 @@ def classes(module):
 
 
 _HELPER = r'''
+#ifndef MX_ALLOC_VALUES_HELPER
+#define MX_ALLOC_VALUES_HELPER
 #include <string.h>
 #ifdef MX_MEMCHECK
 #include <valgrind/memcheck.h>
@@ -83,9 +85,12 @@ static void mx_sort_ranges(Py_ssize_t *r, Py_ssize_t count) {
         r[2 * j] = a; r[2 * j + 1] = b;
     }
 }
+#endif
 '''
 
 _PER_CLASS = r'''
+#ifndef MX_ALLOC_{cls}
+#define MX_ALLOC_{cls}
 static Py_ssize_t mx_ranges_{cls}[{n2}];
 static Py_ssize_t mx_count_{cls} = 0;
 static PyTypeObject *mx_type_{cls} = NULL;
@@ -102,7 +107,13 @@ static void mx_install_{cls}(void *t) {{
     mx_type_{cls} = (PyTypeObject *)t;
     ((PyTypeObject *)t)->tp_alloc = mx_alloc_{cls};
 }}
+#endif
 '''
+
+
+def _tag(module, cls):
+    # C names are global to every module that cimports this .pxd: qualify them with the module
+    return module.fqname.replace('.', '_') + '__' + cls
 
 
 def pxd_declarations(module):
@@ -110,11 +121,12 @@ def pxd_declarations(module):
     owners = classes(module)
     if not owners:
         return ''
-    code = _HELPER + ''.join(_PER_CLASS.format(cls=cls, n2=2 * len(cells)) for cls, cells in owners.items())
+    code = _HELPER + ''.join(_PER_CLASS.format(cls=_tag(module, cls), n2=2 * len(cells))
+                             for cls, cells in owners.items())
     lines = ['cdef extern from *:', '    """'] + ['    ' + line for line in code.strip('\n').splitlines()] + ['    """']
     for cls in owners:
-        lines += [f'    void mx_set_range_{cls}(Py_ssize_t offset, Py_ssize_t size)',
-                  f'    void mx_install_{cls}(void *t)']
+        lines += [f'    void mx_set_range_{_tag(module, cls)}(Py_ssize_t offset, Py_ssize_t size)',
+                  f'    void mx_install_{_tag(module, cls)}(void *t)']
     return '\n'.join(lines) + '\n'
 
 
@@ -130,9 +142,9 @@ def module_tail(module):
                 '    base: _mx_cy.Py_ssize_t = _mx_cy.cast(_mx_cy.Py_ssize_t, _mx_cy.cast(_mx_cy.p_void, o))']
         for c in cells:
             v = VAR_PREF + c.name
-            out.append(f'    mx_set_range_{cls}(_mx_cy.cast(_mx_cy.Py_ssize_t, _mx_cy.address(o.{v})) - base, '
+            out.append(f'    mx_set_range_{_tag(module, cls)}(_mx_cy.cast(_mx_cy.Py_ssize_t, _mx_cy.address(o.{v})) - base, '
                        f'_mx_cy.sizeof(o.{v}))')
-        out += [f'    mx_install_{cls}(_mx_cy.cast(_mx_cy.p_void, {cls}))', '', '']
+        out += [f'    mx_install_{_tag(module, cls)}(_mx_cy.cast(_mx_cy.p_void, {cls}))', '', '']
         out += ['@_mx_cy.cfunc', f'def _mx_zero_unset_{cls}(self: {cls}) -> None:', '    i: _mx_cy.Py_ssize_t']
         for k, c in enumerate(cells):
             value = _ELEMENT[c.get_rettype_expr(c_style=True)]
