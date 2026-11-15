@@ -90,11 +90,14 @@ def test_python_fallbacks_are_counted(b):
     for x in (5, 10, 15, 25, 35):                                     # bisect in row order, as the helper
         assert d.searchsorted(unordered, x) == source.index.searchsorted(x, side='right')
     assert provider.handle_fallbacks() == before                     # native
-    record = d.row_record(b.compiled.base('G'), (20,), True)          # a row that escapes
-    assert record['n'] == 2 and provider.handle_fallbacks() == before + 1
+    record = d.row_record(b.compiled.base('G'), (20,), True)          # a row that escapes: built natively (D132)
+    assert record['n'] == 2 and provider.handle_fallbacks() == before
+    helper_record = b.compiled.base('G').loc[20]
+    assert type(record) is type(helper_record) and dict(record) == dict(helper_record)
+    assert [type(v) for v in record.values()] == [type(v) for v in helper_record.values()]
     with pytest.raises(Exception):
         d.asof(unordered, 25)                                         # pandas decides (not monotonic)
-    assert provider.handle_fallbacks() == before + 2
+    assert provider.handle_fallbacks() == before + 1
 
 
 def test_unbound_tables_and_records(b):
