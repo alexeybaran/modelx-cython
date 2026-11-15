@@ -148,17 +148,35 @@ def _is_docstring(statement):
 SELECTOR = 'a list, mask or comparison selects several rows (pandas, D104); '
 
 
-def _selector(node):
-    """auto-tables (D104): a ``loc``/``at`` part that selects by list, boolean mask or comparison,
-    never one label: such a read keeps pandas (or the helper's) semantics, so it is not lowered."""
-    if isinstance(node, (cst.List, cst.ListComp, cst.Set, cst.SetComp, cst.Comparison)):
-        return True
-    if isinstance(node, cst.BinaryOperation) and isinstance(node.operator, (cst.BitAnd, cst.BitOr, cst.BitXor)):
-        return True
-    if isinstance(node, cst.UnaryOperation) and isinstance(node.operator, cst.BitInvert):
+def _selector(node, is_table):
+    """auto-tables (D104): a ``loc``/``at`` part that selects several rows, never one label: a list,
+    set or comprehension, or a mask: a comparison (or ``&``/``|``/``^``/``~`` of them, or ``.isin``/
+    ``.between``) of a column ``T["c"]`` or the index ``T.index`` of a table (``is_table``). Such a read
+    keeps pandas (or the helper's) semantics, so it is not lowered. ``t > 3`` and
+    ``T.index.asof(x)`` are one label."""
+    if isinstance(node, (cst.List, cst.ListComp, cst.Set, cst.SetComp)):
         return True
     if isinstance(node, cst.Tuple):
-        return any(_selector(element.value) for element in node.elements)
+        return any(_selector(element.value, is_table) for element in node.elements)
+    return _mask(node, is_table)
+
+
+def _rows(node, is_table):
+    """A whole column or the index of a table."""
+    if isinstance(node, cst.Subscript) and len(node.slice) == 1 and isinstance(node.slice[0].slice, cst.Index):
+        return isinstance(node.slice[0].slice.value, cst.SimpleString) and is_table(node.value)
+    return isinstance(node, cst.Attribute) and node.attr.value == 'index' and is_table(node.value)
+
+
+def _mask(node, is_table):
+    if isinstance(node, cst.Comparison):
+        return _rows(node.left, is_table) or any(_rows(c.comparator, is_table) for c in node.comparisons)
+    if isinstance(node, cst.BinaryOperation) and isinstance(node.operator, (cst.BitAnd, cst.BitOr, cst.BitXor)):
+        return _mask(node.left, is_table) or _mask(node.right, is_table)
+    if isinstance(node, cst.UnaryOperation) and isinstance(node.operator, cst.BitInvert):
+        return _mask(node.expression, is_table)
+    if isinstance(node, cst.Call) and isinstance(node.func, cst.Attribute):
+        return node.func.attr.value in ('isin', 'between') and _rows(node.func.value, is_table)
     return False
 
 
@@ -1605,7 +1623,9 @@ class _Lowering(cst.CSTTransformer):
         for attr in ('loc', 'at'):
             receiver = _index_attr(value, attr)
             if receiver is not None:
-                if any(_selector(part) for part in parts):
+                if any(_selector(part, lambda e: self.table_ref(e) is not None or e is receiver
+                                 or (isinstance(e, cst.Name) and isinstance(receiver, cst.Name)
+                                     and e.value == receiver.value)) for part in parts):
                     self.decline(value, SELECTOR + PYTHON)
                     return updated
                 return self._loc(original, updated, receiver, attr, parts)
