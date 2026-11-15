@@ -12,6 +12,18 @@ import modelx as mx
 from modelx_cython.helpers import module_name
 
 
+def _c_entry(package, cell):
+    """The C entry the generated code calls for ``cell``: the cpdef of that cell in the package's .pxd
+    (its public name, or the renamed member of a table cell, D101a)."""
+    import re
+    from pathlib import Path
+    for pxd in sorted(Path(package).rglob('_mx_classes.pxd')):
+        found = re.search(rf'cpdef [^(\n]*?\b(\w*\b{cell}|_mx_cell_{cell})\(', pxd.read_text(encoding='utf-8'))
+        if found:
+            return found.group(1)
+    raise AssertionError(f'no C entry for {cell}')
+
+
 PROVIDER = 'curve_example.kernel'
 ABI = 'curve-v1'
 TYPE = 'curve_example.Curve'
@@ -172,8 +184,9 @@ def test_independent_provider_and_forwarding(tmp_path, monkeypatch):
         generated = (tmp_path / f'{name}_cy/_mx_classes.py').read_text(encoding='utf-8')
         assert '.make_view(self._f_primary())' in generated
         assert '.make_view(self._f_forward())' in generated
-        assert '.calculate_rate(self.primary(), 4)' in generated
-        assert '.calculate_rate(self.again(), 4)' in generated
+        # the native call takes the cells' C entries (whatever their spelling, D101a), not Python attributes
+        assert f'.calculate_rate(self.{_c_entry(tmp_path / f"{name}_cy", "primary")}(), 4)' in generated
+        assert f'.calculate_rate(self.{_c_entry(tmp_path / f"{name}_cy", "again")}(), 4)' in generated
         assert '.calculate_rate((self.data._v_again if ' in generated
         assert 'self.opaque().rate_at(4)' in generated
         assert '.prime_price(' in generated and '.bound_price(' in generated

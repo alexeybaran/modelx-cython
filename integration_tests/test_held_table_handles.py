@@ -14,6 +14,18 @@ import modelx as mx
 from modelx_helpers.immutable_inputs import Table
 
 
+def _c_entry(package, cell):
+    """The C entry the generated code calls for ``cell``: the cpdef of that cell in the package's .pxd
+    (its public name, or the renamed member of a table cell, D101a)."""
+    import re
+    from pathlib import Path
+    for pxd in sorted(Path(package).rglob('_mx_classes.pxd')):
+        found = re.search(rf'cpdef [^(\n]*?\b(\w*\b{cell}|_mx_cell_{cell})\(', pxd.read_text(encoding='utf-8'))
+        if found:
+            return found.group(1)
+    raise AssertionError(f'no C entry for {cell}')
+
+
 def _model(tmp_path):
     keys = tuple(range(1, 41))
     model = mx.new_model('Held')
@@ -70,7 +82,8 @@ def test_shared_table_reads_use_a_held_handle_and_results_stay(tmp_path):
     generated = (tmp_path / 'exported_cy/_m_Portfolio/_mx_classes.py').read_text(encoding='utf-8')
     assert 'if self._mx_th_0 is None:' in generated, generated
     assert '_mx_cy.cast(_mx_helper_' in generated and '.TableRef, self._mx_th_0)' in generated
-    assert generated.count('.table_handle(self.market.curve())') == 2          # once per formula, not per read
+    curve = _c_entry(tmp_path / 'exported_cy', 'curve')                       # the C entry (D101a)
+    assert generated.count(f'.table_handle(self.market.{curve}())') == 2       # once per formula, not per read
     # with the per-policy caches: reset on the reused root, with the held column indexes (D75)
     assert 'root._mx_th_0 = None' in generated and 'root._mx_tc_0 = 0' in generated, generated
     assert '.held_col(_mx_cy.address(self._mx_tc_' in generated and '.col("rate")' not in generated
