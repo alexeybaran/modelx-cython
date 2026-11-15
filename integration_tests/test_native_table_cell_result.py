@@ -33,9 +33,6 @@ def test_parameterized_table_result(tmp_path):
     return compound_rows
 ''')
         space.new_cells('has_row', 'lambda group, key: (group, key) in compound_table().index')
-        space.new_cells('missing', '''def missing(value: object) -> object:
-    return pdn.isna(value)
-''').is_cached = False
         space.new_cells('schedule', textwrap.dedent('''\
             def schedule(account) -> "modelx_helpers.immutable_inputs.Table":
                 return schedules[account]
@@ -47,11 +44,7 @@ def test_parameterized_table_result(tmp_path):
                 key = min(month, table.index.max_int())
                 return table.lookup_float(key, "rate")
             '''))
-        space.new_cells('previous_amount', '''def previous_amount(account, month):
-    return pdn.previous(schedule(account), month, "rate", -2.0)
-''')
         space.new_cells('prepared_schedule', 'lambda: pdn.table(schedule_frame)')
-        space.new_cells('prepared_previous', 'lambda month: pdn.previous(prepared_schedule(), month, "rate", -2.0)')
         space.new_cells('fixed_schedule', '''def fixed_schedule() -> "modelx_helpers.immutable_inputs.Table":
     return schedules[7]
 ''')
@@ -82,9 +75,9 @@ def test_parameterized_table_result(tmp_path):
         'from exported import mx_model\n'
         'from modelx_helpers.immutable_inputs import Record, Table\n'
         's = mx_model.Policy[0]\n'
-        's.amount(2, 0); s.amount(7, 1); s.row_rate(4); s.row_rate(9); s.missing(float("nan"))\n'
-        's.has_row("a", 4); s.previous_amount(2, -1); s.previous_amount(2, 9)\n'
-        's.prepared_previous(-1); s.prepared_previous(9)\n'
+        's.amount(2, 0); s.amount(7, 1); s.row_rate(4); s.row_rate(9)\n'
+        's.has_row("a", 4); s.prepared_schedule()\n'
+        '[s.amount(a, m) for a in (2, 7) for m in range(8)]  # the months the probe reads\n'
         's.interpolated_amount(2, 0.5); s.float_field(1); s.raw_field(1)\n'
         's.previous_method(8); s.previous_column(8, -1); s.previous_column(8, 0)\n'
         's.bounded_method(-1); s.bounded_method(8)\n'
@@ -98,12 +91,6 @@ def test_parameterized_table_result(tmp_path):
                    cwd=tmp_path, check=True)
     generated = (tmp_path / 'exported_cy/_mx_classes.py').read_text(encoding='utf-8')
     assert '.bind_native_table(self._f_schedule(account),' in generated
-    assert '.read_clamped_table_float(' in generated
-    assert '.isna(self.pdn.isna, value)' in generated
-    assert '.previous_f64(self.pdn.previous,' in generated
-    assert '.prepare_previous_table_method(' in generated
-    assert '.read_previous_table_int(' in generated
-    assert '.read_bounded_table_float(' in generated
     # record fields (D78, which retired the round-2 readers): the field read is a native read,
     # no Python attribute or item access on the record in the generated C, with a double result
     c_source = (tmp_path / 'exported_cy/_mx_classes.c').read_text(encoding='utf-8')
@@ -139,18 +126,13 @@ def test_parameterized_table_result(tmp_path):
         import pandas as pd
         def check(frame, event, arg):
             if event == 'call':
-                assert frame.f_code not in (Table.row.__code__, Table.contains.__code__, Table.previous.__code__, pdn.previous.__code__,
-                                            pdn.isna.__code__, pd.isna.__code__)
+                assert frame.f_code not in (Table.row.__code__, Table.contains.__code__, Table.previous.__code__)
         import sys
         sys.setprofile(check)
         try:
             assert s.row_rate(4) == 2.0 and s.row_rate(9) == 5.0
-            assert s.missing(float('nan')) is True
-            assert s.missing(0.0) is False
             assert s.has_row('a', 4) is True and s.has_row('a', 3) is False
             assert s.has_row('b', 3) is True and s.has_row('c', 3) is False
-            assert s.prepared_previous(-1) == -2.0
-            assert s.prepared_previous(8) == 5.0
             assert s.bounded_method(-1) == 2.5 and s.bounded_method(8) == 17.0
             assert s.interpolated_amount(2, 0.5) == 3.5
             assert s.interpolated_amount(7, 8.5) == 17.0
@@ -159,9 +141,6 @@ def test_parameterized_table_result(tmp_path):
             sys.setprofile(None)
         owner = s.schedule(2).__modelx_table_owner__()
         assert not owner._native_cache
-        assert s.previous_amount(2, -1) == -2.0
-        assert s.previous_amount(2, 8) == 5.0
-        assert s.previous_amount(7, 1) == 13.0
         assert s.previous_method(8) == 17.0
         assert s.previous_column(8, -1) == s.previous_column(8, 0) == 17.0
         assert not owner._native_cache
@@ -171,19 +150,6 @@ def test_parameterized_table_result(tmp_path):
             assert str(error) == 'No key at or before -1'
         else:
             raise AssertionError('preceding row before the first key')
-        previous = pdn.previous
-        pdn.previous = lambda table, key, column, default: 23.0
-        try:
-            assert s.previous_amount(2, 9) == 23.0
-        finally:
-            pdn.previous = previous
-        assert np.array_equal(s.missing(np.array([np.nan, 0.])), [True, False])
-        original_isna = pd.isna
-        pd.isna = lambda value: value
-        try:
-            assert s.missing('replacement') == 'replacement'
-        finally:
-            pd.isna = original_isna
         try:
             s.row_rate(8)
         except KeyError as error:
