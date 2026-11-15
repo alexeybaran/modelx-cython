@@ -61,8 +61,10 @@ def _literal_defaults(cell, params):
 
 
 class _Calls(cst.CSTTransformer):
-    def __init__(self, owner, entries, exact_guards=(), provider_receivers=None):
+    def __init__(self, owner, entries, exact_guards=(), provider_receivers=None, item_entries=None):
         self.entries = entries
+        # D114 item 5: {typed item local: (its class, that class's entries)}
+        self.item_entries = item_entries or {}
         self.provider_receivers = provider_receivers or {}
         self.unlocked_provider_sources = set()
         self.exact_receiver = cst.parse_expression(exact_receiver(owner))
@@ -125,17 +127,27 @@ class _Calls(cst.CSTTransformer):
                         f'{MX_SYS_MOD}._mx_load_flag({CY_MOD}.address({receiver}._has_{func.attr.value}))'),
                     body=cst.Attribute(func.value, cst.Name(f'_v_{func.attr.value}')),
                     orelse=updated, lpar=(cst.LeftParen(),), rpar=(cst.RightParen(),))
+        if (isinstance(func, cst.Attribute) and isinstance(func.value, cst.Name)
+                and (item := self.item_entries.get(func.value.value)) is not None
+                and func.attr.value in item[1]):
+            # a call on a typed item local takes the item class's entry behind its own exact-type test
+            return self._entry_call(updated, item[1][func.attr.value],
+                                    cst.parse_expression(f'type({func.value.value}) is {item[0]}'), False)
         if not (isinstance(func, cst.Attribute) and isinstance(func.value, cst.Name)
                 and func.value.value == MX_SELF and func.attr.value in self.entries):
             return updated
-        entry, arity, defaults, rettype = self.entries[func.attr.value]
+        return self._entry_call(updated, self.entries[func.attr.value], self.exact_receiver, self.exact_depth)
+
+    def _entry_call(self, updated, spec, exact_receiver, proven):
+        func = updated.func
+        entry, arity, defaults, rettype = spec
         missing = arity - len(updated.args)
         if not 0 <= missing <= len(defaults) or any(a.keyword or a.star for a in updated.args):
             return updated
         supplied = tuple(cst.Arg(value) for value in defaults[len(defaults) - missing:])
         direct = updated.with_changes(
             func=cst.Name(entry), args=(cst.Arg(func.value), *updated.args, *supplied))
-        if self.exact_depth:
+        if proven:
             return direct
         # D59: the virtual branch converts to the Cell's C return type, as the typed entry
         # returns it, so the whole expression has that type and a local assigned from it
@@ -146,7 +158,7 @@ class _Calls(cst.CSTTransformer):
                 cst.Arg(cst.parse_expression(f'{CY_MOD}.{_C_CASTS[rettype]}')),
                 cst.Arg(updated.with_changes(lpar=(), rpar=()))))
         return cst.IfExp(
-            test=self.exact_receiver,
+            test=exact_receiver,
             body=direct,
             orelse=virtual,
             lpar=(cst.LeftParen(),),
@@ -193,6 +205,7 @@ def add_inline_entries(module, classes, dense_layouts):
     formula_entries = {}
     next_entry = 0
     body = []
+    all_entries, pending = {}, []
     for statement in module.body:
         if not isinstance(statement, cst.ClassDef) or statement.name.value not in classes:
             body.append(statement)
@@ -247,7 +260,17 @@ def add_inline_entries(module, classes, dense_layouts):
             # Both entry paths use the same Cell cache fields.
             methods.append(method)
 
-        if entries:
+        all_entries[owner] = entries
+        pending.append((statement, owner, cells, entries, methods))
+        body.append(None)
+    # D114 item 5: formulas are rewritten after every class's entries are known, so a call on a
+    # typed item local can take the entry of the item's class
+    pending_iter = iter(pending)
+    for position, placed in enumerate(body):
+        if placed is not None:
+            continue
+        statement, owner, cells, entries, methods = next(pending_iter)
+        if entries or any(getattr(cell, 'typed_item_locals', None) for cell in cells.values()):
             for index, method in enumerate(methods):
                 if not isinstance(method, cst.FunctionDef):
                     continue
@@ -277,10 +300,16 @@ def add_inline_entries(module, classes, dense_layouts):
                         if (other.native_provider_binding is not None and not other.has_args()
                             and other.has_formula_def)
                     }
-                    calls = _Calls(owner, entries, getattr(cell, 'exact_reduction_guards', ()), provider_receivers)
+                    item_entries = {
+                        local: (target, all_entries[target])
+                        for local, target in getattr(cell, 'typed_item_locals', {}).items()
+                        # the class name is in the formula only as P1's own annotation of the local
+                        if all_entries.get(target)}
+                    calls = _Calls(owner, entries, getattr(cell, 'exact_reduction_guards', ()), provider_receivers,
+                                   item_entries)
                     methods[index] = method.with_changes(body=method.body.visit(calls))
                     cell.unlocked_provider_sources = sorted(calls.unlocked_provider_sources)
-        body.append(statement.with_changes(body=statement.body.with_changes(body=methods)))
+        body[position] = statement.with_changes(body=statement.body.with_changes(body=methods))
     if functions:
         index = 0
         for index, statement in enumerate(body):
