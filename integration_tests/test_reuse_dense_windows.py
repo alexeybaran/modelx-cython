@@ -122,3 +122,56 @@ def test_reuse_dense_windows_off_keeps_the_hash_store(tmp_path):
     out = _run(tmp_path)
     assert out['exported_cy'][0].split()[0] == out['exported'][0].split()[0], out
     assert out['exported_cy'][1] == out['exported'][1], out
+
+
+ITEM_PROBE = textwrap.dedent('''\
+    import pickle, sys
+    from importlib import import_module
+    m = import_module(sys.argv[1]).mx_model
+    p = m.Portfolio.Projection
+    out = []
+    for key in (4, 9, 17):                 # items outside collect, then after a collect
+        item = p[key]
+        out.append([item.surv(s, t) for s in range(12) for t in range(12)] + [item.value()])
+    total = p.collect().sum.value
+    fresh = p[23]
+    partial = [fresh.surv(0, 5), fresh.surv(2, 7)]
+    out.append(partial + [fresh.surv(s, t) for s in range(12) for t in range(12)] + [fresh.value()])
+    out.append([total, p[4].value()])
+    print(repr(out))
+    if sys.argv[1] == 'exported_cy':
+        # a model whose collect reuses a root holds a thread-local, so its items do not pickle (as before
+        # D123); the item's window store itself round-trips: every entry written into the dense window
+        # comes back from the pickle
+        def caches(value, depth=0):
+            if type(value).__name__ == 'NumericCache':
+                yield value
+            elif isinstance(value, tuple) and depth < 4:
+                for part in value:
+                    yield from caches(part, depth + 1)
+        state = p[9].__reduce_ex__(2)
+        found = list(caches(state))
+        assert found, state
+        for cache in found:
+            entries = sorted(cache.__reduce__()[2])
+            assert entries, 'no dense entries written'
+            assert sorted(pickle.loads(pickle.dumps(cache)).__reduce__()[2]) == entries
+        print('pickled', len(found))
+    ''')
+
+
+def test_items_hold_the_same_dense_window_and_pickle(tmp_path):
+    # D123: every instance built by the shared constructor holds the window; values equal the exported model,
+    # also for an item restored from a pickle with part of its window computed
+    spec = {'spaces': {'Portfolio': {'spaces': {'Projection': {
+        'serial_collect': 'reuse', 'cells': {'surv': {'max_dense_entries': 16}}}}}}}
+    generated, _ = _model(tmp_path, spec)
+    assert 'root._v_surv.window(0, ' in generated
+    out = {}
+    for package in ('exported', 'exported_cy'):
+        run = subprocess.run([sys.executable, '-c', ITEM_PROBE, package], cwd=tmp_path, capture_output=True,
+                             text=True)
+        assert run.returncode == 0, package + run.stdout + run.stderr
+        out[package] = run.stdout.splitlines()
+    assert out['exported_cy'][0] == out['exported'][0], out
+    assert out['exported_cy'][1].startswith('pickled '), out
