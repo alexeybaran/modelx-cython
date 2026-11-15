@@ -105,11 +105,17 @@ def analyze(module):
     return result
 
 
+def _isolated_leaf(node, cls):
+    """A slotted leaf ItemSpace without child Spaces, model lock, dynamic References or collect hooks:
+    its policy root is exactly ``_mx_new_root_C(base)`` (D116)."""
+    return not (len(node.bases) != 1 or dotted_name(node.bases[0].value) != '_mx_sys.BaseSpace'
+                or cls.spaces or cls.is_locked or node.name.value in cls.visitor.dynamic_ref_classes
+                or any(_method(node, hook) is not None or hook in cls.refs
+                       for hook in ('_mx_apply_formula', '_mx_collect_attach', '_mx_collect_release')))
+
+
 def _match(node, cls, reuse, private_lookups, parallel_reuse, ordered=False):
-    if (len(node.bases) != 1 or dotted_name(node.bases[0].value) != '_mx_sys.BaseSpace'
-            or cls.spaces or cls.is_locked or node.name.value in cls.visitor.dynamic_ref_classes
-            or any(_method(node, hook) is not None or hook in cls.refs
-                   for hook in ('_mx_apply_formula', '_mx_collect_attach', '_mx_collect_release'))):
+    if not _isolated_leaf(node, cls):
         return None
     contract = collect_contract(node)
     if contract is None or contract[1]:
@@ -299,8 +305,9 @@ def add_methods(cls, node, shape, *, workers):
     ordered = bool(shape and shape.ordered)
     options = cst.parse_statement(
         f'def _mx_collect_options_v2(self):\n    return {workers}, {callback}, {parallel}, {ordered}\n')
+    shared = _shared_root_methods(cls, node)
     if shape is None:
-        return node.with_changes(body=node.body.with_changes(body=(*node.body.body, options)))
+        return node.with_changes(body=node.body.with_changes(body=(*node.body.body, *shared, options)))
     from .item_roots import new_root, release_root     # D116: shared with the direct route
     lines = [
         'def _mx_evaluate_serial_collect(self, coords):',
@@ -346,4 +353,23 @@ def add_methods(cls, node, shape, *, workers):
         f'    return _mx_sys.CollectResult({{"sum": _mx_sys.CollectResult({{{shape.label!r}: total}})}})',
     ))
     helper = cst.parse_module('\n'.join(lines) + '\n').body[0]
-    return node.with_changes(body=node.body.with_changes(body=(*node.body.body, helper, options)))
+    return node.with_changes(body=node.body.with_changes(body=(*node.body.body, helper, *shared, options)))
+
+
+def _shared_root_methods(cls, node):
+    """audit-routes P3: the export's generic collect loop (no evaluator, tracing, nested collect,
+    non-native coordinates, workers without reuse) builds and releases each policy root through the
+    same generated functions as the evaluator and the direct route (D116), when the class offers them:
+    ``_mx_collect_new_root()`` returns ``_mx_new_root_C(self)`` under the evaluator's own condition, else
+    None (the export then keeps its generic walk); ``_mx_collect_release_root(root)`` releases it."""
+    if node.name.value not in cls.visitor.itemspace_classes or not _isolated_leaf(node, cls):
+        return ()
+    from .item_roots import new_root, release_item
+    return tuple(cst.parse_module(
+        'def _mx_collect_new_root(self):\n'
+        f'    if type(self) is {cls.name} and not self._mx_roots and not self._mx_spaces:\n'
+        f'        return {new_root(cls.name)}(self)\n'
+        '    return None\n'
+        '\n'
+        'def _mx_collect_release_root(self, root):\n'
+        f'    {release_item(cls.name)}(root)\n').body)
