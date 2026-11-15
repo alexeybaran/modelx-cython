@@ -95,6 +95,23 @@ for label, call in (('big', lambda: item.f(2 ** 70)), ('float', lambda: item.f(1
         errors[label] = [type(error).__name__, str(error)]
 gate = item.f
 out['errors'] = errors
+out['doc'] = [gate.__doc__ == type(item).f.__doc__, type(gate).__name__]
+# items are cached and stay the same object; deleting one frees it without the cyclic GC
+import gc
+out['same_item'] = P[3] is P[3] and P(3) is P[3]
+gc.disable()
+def live():
+    return sum(1 for o in gc.get_objects() if type(o) is type(item))
+before = live()
+del P[3]
+out['freed_on_delete'] = before - live()
+try:
+    del P[3]
+    out['missing_key'] = None
+except KeyError as error:
+    out['missing_key'] = ['KeyError', str(error)]
+out['recreated'] = P[3].f(2) == p.direct() * 0 + P[3].f(2)
+gc.enable()
 out['gate'] = [gate.__name__, gate.__wrapped__.__name__, callable(gate)]
 print(json.dumps(out))
 '''
@@ -117,3 +134,7 @@ def test_item_locals_values_and_checks(tmp_path):
     # an argument computed in the compiled Cell that leaves the 64-bit range raises, never wraps
     assert errors['cell_big'] is not None and errors['cell_big'][0] == 'OverflowError'
     assert result['gate'] == ['f', 'f', True]
+    assert result['doc'][0]
+    assert result['same_item'] and result['freed_on_delete'] == 1
+    assert result['missing_key'] == ['KeyError', '3']
+    assert result['recreated']
