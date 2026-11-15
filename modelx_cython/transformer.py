@@ -659,7 +659,7 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
         from modelx_cython import vectors
         node = vectors.lower(node, cls_info, cells, scope, self._vector_counter, self.module,
                              self._ref_kinds.get(cls_info.fqname, {}))
-        node = self._table_reads(node, cls_info, cells)
+        node = self._table_reads_with_row_fields(node, cls_info, cells)
         cells.formula_allows_exact_receiver = allows_exact_receiver(node, cls_info.name)
         builtin_keys = {name for name in ("all", "any", "sum", "min", "max", "float", "int", "round", "range")
                         if scope[name] and all(isinstance(binding, BuiltinAssignment)
@@ -763,6 +763,66 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
         result = self._table_reads_lowered(node, cls_info, cells)
         self._classify_admitted(cells, sites, self._lowered)
         return result
+
+    def _row_cells(self, cls_info):
+        """diag-run8 F3: the row cells of the class whose every use is a field read
+        (``row_cells.analyse``), computed once per class; {} without typed table reads."""
+        cache = self.__dict__.setdefault('_row_cells_cache', {})
+        if cls_info.name not in cache:
+            accepted, refused = {}, {}
+            if self._resolver is not None and getattr(self.module.spec.policy, 'typed_table_reads', False):
+                from modelx_cython import row_cells
+                accepted, refused = row_cells.analyse(self._module_node, cls_info.name)
+                for name in list(accepted):
+                    cell = cls_info.cells.get(name)
+                    if cell is None or cell.has_args() or not cell.has_formula_def:
+                        refused[name] = 'not a cached zero-argument Cell'
+                        del accepted[name]
+                    elif not self._row_key_is_int(accepted[name], cls_info, cell):
+                        # each reader looks the row up again: only C-integer key parts are cheap and
+                        # touch no shared key object (an object key would be hashed and compared per read)
+                        refused[name] = 'a key part is not a C integer'
+                        del accepted[name]
+            for name, why in refused.items():
+                if name in cls_info.cells:
+                    cls_info.cells[name].row_cell_kept = why
+            for name in accepted:
+                cls_info.cells[name].row_cell_inlined = True
+            cache[cls_info.name] = accepted
+        return cache[cls_info.name]
+
+    def _row_key_is_int(self, expr, cls_info, cell):
+        """Every part of the row cell's key is a non-bool C integer (``TableReads.is_int`` in the
+        row cell's own formula); False when it cannot be decided."""
+        from modelx_cython.table_reads import TableReads, _Formula
+        key = expr.slice[0].slice.value
+        parts = [e.value for e in key.elements] if isinstance(key, cst.Tuple) else [key]
+        try:
+            owner = TableReads(self._resolver, cls_info, cell, set(), self.module.spec.policy, [])
+            owner.formula = _Formula(cst.parse_statement(
+                'def _f_row(self):\n    return ' + cst.Module(body=[]).code_for_node(expr) + '\n'))
+            owner._key_locals = set()
+            return all(owner.is_int(part) for part in parts)
+        except Exception:       # noqa: BLE001 - undecided keys keep the Record path
+            return False
+
+    def _table_reads_with_row_fields(self, node, cls_info, cells):
+        """diag-run8 F3: a formula reading fields of accepted row cells is lowered with each
+        ``self.R()`` replaced by the cell's row expression; when a replaced read is not lowered to a
+        native row read, the formula is lowered as written instead (its reads keep the Record)."""
+        rows = {name: expr for name, expr in self._row_cells(cls_info).items() if name != cells.name}
+        cells.row_fields_inlined = 0
+        if rows:
+            from modelx_cython import row_cells
+            inline = row_cells.Inline(rows)
+            candidate = node.visit(inline)
+            if inline.count:
+                lowered = self._table_reads(candidate, cls_info, cells)
+                code = cst.Module(body=[]).code_for_node(lowered)
+                if not any(cst.Module(body=[]).code_for_node(expr) in code for expr in rows.values()):
+                    cells.row_fields_inlined = inline.count
+                    return lowered
+        return self._table_reads(node, cls_info, cells)
 
     def _admitted_sites(self, node, cls_info):
         admitted = getattr(self._resolver, 'admitted_tables', None) if self._resolver is not None else None

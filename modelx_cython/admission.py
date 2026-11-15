@@ -95,6 +95,9 @@ def describe(module_infos):
                     'native_enum_comparisons': getattr(cell, 'native_enum_comparisons', 0),
                     'native_enum_constants': getattr(cell, 'native_enum_constants', 0),
                     'native_enum_labels': getattr(cell, 'native_enum_labels', 0),   # diag-run8
+                    'row_fields_inlined': getattr(cell, 'row_fields_inlined', 0),   # diag-run8 F3
+                    'row_cell_inlined': getattr(cell, 'row_cell_inlined', False),
+                    'row_cell_kept': getattr(cell, 'row_cell_kept', None),
                     'native_tuple_int_loops': getattr(cell, 'native_tuple_int_loops', 0),
                     'native_expressions': sum(getattr(cell, key, 0) for key in (
                         'reductions_native', 'enum_memberships', 'minmax_native', 'math_native')),
