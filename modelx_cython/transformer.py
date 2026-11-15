@@ -699,6 +699,7 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
                                for name, kind in local_kinds.items() if kind in (KIND_INT, KIND_FLOAT)})
             node = node.visit(reductions)
             cells.native_reductions = reductions.count
+            cells.native_tuple_int_loops = getattr(reductions, 'tuple_int_loops', 0)   # diag-scale P3
             cells.exact_reduction_guards = reductions.exact_receiver_guards
         enum_comparisons = code_enums.Constants(cls_info, cells, self.module.code_enum_symbols)
         node = node.visit(enum_comparisons)

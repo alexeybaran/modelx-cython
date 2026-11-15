@@ -2,7 +2,7 @@ from libc.math cimport (
     pow as _mx_c_pow, floor as _mx_c_floor, isfinite as _mx_c_isfinite)
 from libc.limits cimport LLONG_MAX, LLONG_MIN
 from libc.string cimport memcmp
-from cpython.long cimport PyLong_AsLongLong, PyLong_CheckExact
+from cpython.long cimport PyLong_AsLongLong, PyLong_Check, PyLong_CheckExact
 from cpython.number cimport PyNumber_Index
 from cpython.object cimport Py_TYPE, PyObject_GenericGetAttr, PyObject_GenericSetAttr
 from cpython.unicode cimport PyUnicode_Check, PyUnicode_Compare
@@ -11,9 +11,13 @@ cimport cython
 
 
 cdef inline long long _mx_exact_int64(object value, str path) except? -1:
-    """Cross a signed 64-bit boundary through the Python index protocol."""
+    """Cross a signed 64-bit boundary through the Python index protocol.
+
+    An int or any int subclass (IntEnum, bool) is read directly: PyNumber_Index returns such an
+    object unchanged, so the value and the OverflowError are the same, without taking and
+    releasing a reference on it (diag-scale P3: enum members are shared by every worker)."""
     try:
-        if PyLong_CheckExact(value):
+        if PyLong_Check(value):
             return PyLong_AsLongLong(value)
         return PyLong_AsLongLong(PyNumber_Index(value))
     except TypeError as error:

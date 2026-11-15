@@ -2,6 +2,7 @@
 from functools import cached_property
 
 import libcst as cst
+from libcst.metadata import ExpressionContext
 
 from .cell_entries import exact_receiver
 from .helpers import module_name
@@ -428,8 +429,31 @@ class GeneralReductions:
             variables = [state['renamed'][n] for n in names]
             target = (variables[0] if isinstance(part_target, cst.Name)
                       else ', '.join(variables) + (',' if len(variables) == 1 else ''))
-            lines.append(f'{indent}for {target} in ({code(iterator)}):')
             inner = dict(mapping, **{n: cst.Name(v) for n, v in zip(names, variables)})
+            if (level == 0 and isinstance(part_target, cst.Name) and isinstance(iterator, cst.Name)
+                    and self.integer_argument_only(names[0], parts, element)):
+                # diag-scale P3: an exact tuple whose items this loop only passes as C-integer
+                # arguments: index loop, items read borrowed; an item that is not an int fitting
+                # in 64 bits takes the object path as written, any other iterable the loop as written
+                alias, it, index, value = state['alias'], code(iterator), f'{p}_i', f'{variables[0]}_ll'
+                for typed in (f'{index}: _mx_cy.Py_ssize_t', f'{value}: _mx_cy.longlong'):
+                    if typed not in state.setdefault('typed_vars', []):
+                        state['typed_vars'].append(typed)
+                state['local_types'][value] = 'longlong'
+                lines.append(f'{indent}if {alias}.exact_tuple({it}):')
+                lines.append(f'{indent}    for {index} in range({alias}.tuple_size({it})):')
+                lines.append(f'{indent}        if {alias}.tuple_int64({it}, {index}, _mx_cy.address({value})):')
+                lines += self.emit_body(level, parts, classes, element, dict(mapping, **{names[0]: cst.Name(value)}),
+                                        indent + ' ' * 12, tests)
+                lines.append(f'{indent}        else:')
+                lines.append(f'{indent}            {target} = {it}[{index}]')
+                lines += self.emit_body(level, parts, classes, element, inner, indent + ' ' * 12, tests)
+                lines.append(f'{indent}else:')
+                lines.append(f'{indent}    for {target} in ({it}):')
+                lines += self.emit_body(level, parts, classes, element, inner, indent + ' ' * 8, tests)
+                self.tuple_int_loops = getattr(self, 'tuple_int_loops', 0) + 1
+                return lines
+            lines.append(f'{indent}for {target} in ({code(iterator)}):')
             lines += self.emit_body(level, parts, classes, element, inner, indent + '    ', tests)
         else:
             values = data
@@ -451,6 +475,38 @@ class GeneralReductions:
             else:
                 lines += block
         return lines
+
+    def integer_argument_only(self, name, parts, element):
+        """diag-scale P3: every read of the loop variable ``name`` in the element and in the
+        conditions is a positional argument of a call ``self.<cell>(...)`` of a compiled Cell of
+        this class whose parameter there is a C ``long long`` or ``bint`` (no keywords, no star
+        arguments, no closure). The value then reaches the Cell only through the integer boundary,
+        so reading it as a C integer gives the same calls; any other read (returned, compared,
+        stored, passed to Python, an attribute of it) keeps the object loop."""
+        if len(parts) != 1:
+            return False
+        state = self.general_state
+        facts = state['facts']
+        if facts is None:
+            return False
+        cells = getattr(self.cls_info, 'cells', {})
+        nodes = [element, *parts[0][2]]
+        allowed, loads = set(), []
+        for root in nodes:
+            for node in walk(root):
+                if isinstance(node, cst.Name) and node.value == name and facts.contexts.get(node) is ExpressionContext.LOAD:
+                    loads.append(node)
+                if (isinstance(node, cst.Call) and isinstance(node.func, cst.Attribute)
+                        and isinstance(node.func.value, cst.Name) and node.func.value.value == 'self'
+                        and not any(arg.keyword or arg.star for arg in node.args)):
+                    cell = cells.get(node.func.attr.value)
+                    if cell is None or cell.called_with_kwargs or cell.body_has_closure:
+                        continue
+                    for arg, param in zip(node.args, cell.params):
+                        if (isinstance(arg.value, cst.Name) and arg.value.value == name
+                                and cell.get_argtype_expr(param, c_style=True) in ('long long', 'bint')):
+                            allowed.add(id(arg.value))
+        return bool(loads) and all(id(node) in allowed for node in loads)
 
     def emit_body(self, level, parts, classes, element, mapping, indent, tests, loop=True):
         state = self.general_state

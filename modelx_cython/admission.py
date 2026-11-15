@@ -94,6 +94,7 @@ def describe(module_infos):
                     'native_reductions': getattr(cell, 'native_reductions', 0),
                     'native_enum_comparisons': getattr(cell, 'native_enum_comparisons', 0),
                     'native_enum_constants': getattr(cell, 'native_enum_constants', 0),
+                    'native_tuple_int_loops': getattr(cell, 'native_tuple_int_loops', 0),
                     'native_expressions': sum(getattr(cell, key, 0) for key in (
                         'reductions_native', 'enum_memberships', 'minmax_native', 'math_native')),
                     'expressions_untyped': expressions_untyped(cell),
