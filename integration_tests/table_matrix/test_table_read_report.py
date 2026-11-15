@@ -161,8 +161,13 @@ import exported_cy._mx_classes
 p = mx_model.Portfolio.Projection
 assert p.first(1) == 2 and p.first(3) == 4
 assert p.listed(3) and not p.listed(0) and p.count() == 3 and p.seen(4) == 3
-table = mx_model.Portfolio.MarketInputs.curve()
-assert type(table).__name__ == "NativeTable", type(table)
+import pandas as pd
+from modelx_helpers import pdn
+frame = mx_model.Portfolio.MarketInputs.curve()
+# D101: Python gets the read-only DataFrame; the native table behind it forwards the helper's public names
+assert isinstance(frame, pd.DataFrame) and frame is mx_model.Portfolio.MarketInputs.curve()
+table = frame.__modelx_table_cell_source__()
+assert pdn.to_pandas(table).equals(frame)
 assert table.index.first() == 1
 try:
     table.index._table

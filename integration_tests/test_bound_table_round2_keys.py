@@ -1,7 +1,7 @@
 """Round-2 key vocabulary on a table bound by observed admission stays native (D69).
 
-With observed-table admission (W1.5 0004) a Data cell built by `pdn.table` returns a bound
-`NativeTable`. The round-2 provider calls `keys(pdn.keys, (), table)`, `key_count` and
+With observed-table admission (W1.5 0004) a Data cell built by `pdn.table` is bound to a
+`NativeTable` (Python sees its read-only DataFrame, D101). The round-2 provider calls `keys(pdn.keys, (), table)`, `key_count` and
 `key_at` took their native path only for a helper `Table` and otherwise called the Python
 helper on every evaluation (W1.5 hand-back: up to +30% on 18 models). They now unwrap the
 bound table to its helper owner. Checked: the Data cell is bound, values equal the
@@ -35,7 +35,17 @@ try:
     out = [m.Projection.last_key(t) for t in range(3)] + [m.Projection.count(t) for t in range(3)]
 finally:
     sys.setprofile(None)
-print(json.dumps([out, called, type(m.Data.table()).__name__]))
+import pandas as pd
+value = m.Data.table()
+try:
+    value.iloc[0, 0] = value.iloc[0, 0]
+except TypeError:
+    read_only = True
+else:
+    read_only = False
+kind = ('read-only frame of the bound table' if isinstance(value, pd.DataFrame) and read_only
+        and value is m.Data.table() and value.__modelx_table_cell_source__() is not None else repr(type(value)))
+print(json.dumps([out, called, kind, pdn.to_pandas(value).equals(value)]))
 '''
 
 
@@ -62,7 +72,8 @@ def test_round2_keys_on_a_bound_table_take_the_native_path(tmp_path):
     assert 'keys(' in text
     out = subprocess.run([sys.executable, '-c', RUN], cwd=tmp_path, capture_output=True, text=True)
     assert out.returncode == 0, out.stdout[-3000:] + out.stderr[-3000:]
-    values, called, kind = json.loads(out.stdout.strip().splitlines()[-1])
+    values, called, kind, same = json.loads(out.stdout.strip().splitlines()[-1])
     assert values == live
-    assert kind == 'NativeTable'
+    # D101/D109: Python gets the read-only DataFrame of the bound table; the compiled cells keep the native path
+    assert kind == 'read-only frame of the bound table' and same
     assert called == [], called
