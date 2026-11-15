@@ -1595,6 +1595,11 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
                     formula = f"{MX_SELF}.{FORMULA_PREF}{meth_name}()"
                     if binder:
                         path = f', {cells.method_fqname!r}' if binding_args else ''
+                        if cells.native_provider_binding.manifest.provider == table_cells.STANDARD_PROVIDER:
+                            # D130: a table cell marked by a clear of another Space rebinds from the
+                            # frame it holds (an in-place edit is read); a cleared one runs its formula
+                            formula = (f'({table_cells.RUNTIME}.rebind_source({cache}) '
+                                       f'if {cache} is not None else {formula})')
                         formula = f'{binder}({formula}{path})'
                     if cells.is_locked or binder:
                         if cells.is_locked:

@@ -237,24 +237,20 @@ frame = m.Data.g()
 assert isinstance(frame, pd.DataFrame) and frame.equals(live.Data.g())
 assert m.Data.g2() is m.Data.g()            # the same frame from two cells: one table
 assert type(m.Projection[1].report()) is pd.DataFrame       # a report stays the model's own DataFrame
-row = m.Projection[2].mp()                  # D119: a row cell gives Python the read-only pandas row
-assert isinstance(row, pd.Series) and row.equals(live.Projection[2].mp()) and row.name == live.Projection[2].mp().name
+row = m.Projection[2].mp()                  # D130: a row cell gives Python the plain pandas row, as live
+assert type(row) is pd.Series and row.equals(live.Projection[2].mp()) and row.name == live.Projection[2].mp().name
 assert row is m.Projection[2].mp()
-try:
-    row["q"] = 0.0
-except TypeError as error:
-    assert "Projection.mp is a row" in str(error), error
-else:
-    raise AssertionError("a row of an admitted table was written in place")
 assert type(m.Projection[1].b_mask()) is pd.DataFrame
 assert isinstance(m.Data.dup(), pd.DataFrame) and m.Data.dup().equals(live.Data.dup())
-try:
-    m.Data.g()["q"] = 0.0
-except TypeError as error:
-    assert "Data.g" in str(error), error
-else:
-    raise AssertionError("an admitted table was written in place")
+assert type(m.Data.g()) is pd.DataFrame     # D130: the plain frame, editable in place
+before = m.Projection[1].c_column_sum(0)
+m.Data.g()["q"] = m.Data.g()["q"] * 3       # an in-place edit: nothing changes until a clear
+assert m.Projection[1].c_column_sum(0) == before
+m.Projection.clear_all()
+assert abs(m.Projection[1].c_column_sum(0) - 3 * before) < 1e-12
 m.Data.g[()] = live.Data.g().assign(q=live.Data.g()["q"] * 2)
+assert abs(m.Projection[1].c_column_sum(0) - 3 * before) < 1e-12      # assignment clears nothing
+m.Projection.clear_all()
 assert abs(m.Projection[1].c_column_sum(0) - 0.2) < 1e-12
 try:
     m.Data.g[()] = pd.DataFrame({"q": [1.0, 2.0], "w": [1.0, 1.0]}, index=pd.Index([1, 1], name="age"))

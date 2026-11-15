@@ -10,15 +10,16 @@ override is added):
   name, and an extension type is immutable, so the public name is freed by the rename. The
   property of the public name returns a ``runtime.table_cells.TableCell``; its setter converts
   the assigned value with the provider's ``table_from_value`` against the build-time schema and
-  assigns it;
+  assigns it, without clearing anything (D130); its miss path rebinds from the frame the cell holds
+  when a clear of another Space marked it (``_mx_stale_tables``), so an in-place edit is read;
 - a Reference holding a table (a pandas DataFrame or Series, or a helper Table) is stored as
   ``_mx_ref_<name>``, every read of it in the module renamed; the property of its name returns
-  the value and its setter stores the new value and clears the model's values. Other
-  References keep their names and declarations (integer References keep their generated
-  ``__setattr__``, which now clears in the same way); assigning one of them after a run is
-  still not seen by values already computed;
+  the value and its setter stores the new value (nothing is cleared, D130). Other References keep
+  their names and declarations (integer References keep their generated ``__setattr__``);
 - a name is renamed only when no other class of the module has a member of that name;
-- ``_mx_clear_values`` empties the Space's caches and drops its ItemSpaces;
+- ``clear_all``: live modelx's ``Space.clear_all()`` (D130); live's other clears (``clear_cells``,
+  ``clear_items``, ``clear_at``) raise, naming ``Space.clear_all()`` and ``Model.clear_all()``;
+  ``_mx_clear_values`` empties the Space's caches and drops its ItemSpaces;
 - ``collect`` counts the run so that an assignment during it raises.
 
 The runtime side is ``modelx_cython.runtime.table_cells``.
@@ -196,7 +197,7 @@ def rewrite_class(cls_info, node, config, integer_refs):
     for name in records:
         lines.append(
             f'def {name}(self):\n'
-            f'    """The read-only pandas row (D119); compiled code calls ``{mapping[name]}``."""\n'
+            f'    """The pandas row, as live (D130); compiled code calls ``{mapping[name]}``."""\n'
             f'    return {RUNTIME}.row_series(self.{mapping[name]}(), {path_of(cls_info, name)!r})\n')
     for name, (module, qualname) in enums.items():
         params = ', '.join(cls_info.cells[name].params)
@@ -205,6 +206,14 @@ def rewrite_class(cls_info, node, config, integer_refs):
             f'    """The live IntEnum member (D103); compiled code calls ``{mapping[name]}``."""\n'
             f'    return {RUNTIME}.enum_member({module!r}, {qualname!r}, self.{mapping[name]}({params}))\n')
     if tables:
+        # D130: the table cells marked by a clear of another Space rebind from the frame they hold
+        stale = ['def _mx_stale_tables(self):']
+        for name, cells in tables.items():
+            if cells.is_locked:
+                stale.append(f'    {MX_SYS_MOD}._mx_store_flag({CY_MOD}.address(self._has_{name}), False)')
+            else:
+                stale.append(f'    self._has_{name} = False')
+        lines.append('\n'.join(stale) + '\n')
         get = ['def _mx_table_cell_value(self, name):']
         put = ['def _mx_set_table_cell(self, name, value):']
         for name, cells in tables.items():
@@ -228,12 +237,21 @@ def rewrite_class(cls_info, node, config, integer_refs):
             f'def {name}(self, value):\n'
             f'    {RUNTIME}.before_reference(self, {path!r})\n'
             f'    self.{mapping[name]} = value\n')   # D109: published caches stay, as exported
-    if 'clear_all' not in _members(cls_info):
+    members = _members(cls_info)
+    # D130: of live modelx's clears only Space.clear_all() and Model.clear_all() are provided (no cell-level
+    # or partial clear: without dependency tracking they would leave dependents stale)
+    if 'clear_all' not in members:
         lines.append(f'def clear_all(self):\n'
-                     f'    """Clear the model\'s values (live modelx spelling; whole model: D101)."""\n'
+                     f'    """Clear the values of this Space and the Spaces below it, their assigned inputs and '
+                     f'their ItemSpaces, as live modelx."""\n'
                      f'    {RUNTIME}.clear_all(self)\n')
+    for removed in ('clear_cells', 'clear_items', 'clear_at'):
+        if removed not in members:
+            # D130: live modelx's other Space clears are not provided; calling one names the two clears
+            lines.append(f'def {removed}(self, *args, **kwargs):\n'
+                         f'    {RUNTIME}.not_provided(self, {removed!r})\n')
     clear = ['def _mx_clear_values(self):',
-             '    """Empty every cache of this Space and drop its ItemSpaces (api-tables, D101)."""']
+             '    """Empty every cache of this Space and drop its ItemSpaces (D101, D130)."""']
     clear += ['    ' + line for line in _reset_lines(cls_info)]
     if '_mx_itemspaces' in init_names:
         if cls_info.name in cls_info.visitor.itemspace_classes:

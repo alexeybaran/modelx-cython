@@ -108,14 +108,14 @@ def test_parameterized_table_result(tmp_path):
         s = mx_model.Policy[0]
         assert type(s.schedule(2)).__name__ == 'NativeTable'
         assert list(s.compound_table().index) == [('a', 4), ('a', 9), ('b', 3)]
-        # D101: a zero-argument table cell gives Python its read-only DataFrame; the native table behind it
-        # keeps the helper's index API, and the frame equals it
-        import pandas as pd
+        # D130: a zero-argument cell whose formula builds a helper Table gives Python that Table, as live;
+        # the native table behind it keeps the helper's index API, and the two hold the same rows
         from modelx_helpers import pdn
-        frame = s.row_table()
-        assert isinstance(frame, pd.DataFrame) and frame is s.row_table() and frame.index.max() == 9
-        native = frame.__modelx_table_cell_source__()
-        assert pdn.to_pandas(native).equals(frame)
+        from modelx_helpers.immutable_inputs import Table as HelperTable
+        table = s.row_table()
+        assert isinstance(table, HelperTable) and table is s.row_table()
+        native = s._mx_table_cell_value('row_table')
+        assert pdn.to_pandas(native).equals(pdn.to_pandas(table))
         assert native.index.max_int() == 9
         assert native.index.max_float() == 9.0
         assert s.schedule(2) is s.schedule(2)

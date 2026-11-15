@@ -1,4 +1,10 @@
-"""Python access to compiled table cells and table References (D101, D101a)."""
+"""Python access to compiled table cells and table References (D101a, D130).
+
+D130: nothing is cleared automatically. A table cell returns the plain DataFrame it was built
+from, editable in place; assigning a table (cell or Reference) or a scalar Reference changes no
+computed value; ``space.clear_all()`` clears that Space (and its items) and the next values,
+on the collect and the direct route, read the edited or new input. The exported pure-Python
+model behaves the same (asserted on both)."""
 
 import subprocess
 import sys
@@ -19,14 +25,15 @@ def build():
     model = mx.new_model("Tables")
     data = model.new_space("Data", refs={"pd": pd, "pdn": pdn})
     data.raw = FRAME
-    data.new_cells("points", "def points():\\n    return pdn.table(raw)\\n")
-    data.new_cells("table", "def table():\\n    return pdn.table(FRAME2)\\n")
+    data.new_cells("points", "def points():\\n    return raw.copy()\\n")       # plain pandas (D121)
+    data.new_cells("table", "def table():\\n    return FRAME2.copy()\\n")
     data.FRAME2 = FRAME
-    proj = model.new_space("Projection", formula="lambda policy_id: None", refs={"data": data, "ids": IDS},
+    proj = model.new_space("Projection", formula="lambda policy_id: None",
+                           refs={"data": data, "ids": IDS, "factor": 1.0},
                            collect_over={"policy_id": IDS}, collect_outputs='lambda: {"sum": {"pv": pv()}}')
     proj.new_cells("sa", 'lambda: data.points().loc[policy_id, "sa"]')
     proj.new_cells("rate", 'lambda: data.table().loc[policy_id, "rate"]')
-    proj.new_cells("pv", "lambda: sum(sa() * (1.0 + rate()) ** t for t in range(12))")
+    proj.new_cells("pv", "lambda: factor * sum(sa() * (1.0 + rate()) ** t for t in range(12))")
     return model
 """
 
@@ -38,9 +45,12 @@ import pandas as pd
 from modelx_helpers import pdn
 from tables_model import FRAME, build
 
-package = import_module("tables_nomx_cy")
-assert isinstance(import_module("tables_nomx_cy._mx_classes").__loader__, ExtensionFileLoader)
-runtime = import_module("modelx_cython.runtime.table_cells")
+name = sys.argv[1]
+compiled = name.endswith("_cy")
+package = import_module(name)
+if compiled:
+    assert isinstance(import_module(name + "._mx_classes").__loader__, ExtensionFileLoader)
+    runtime = import_module("modelx_cython.runtime.table_cells")
 Model = type(package.mx_model)
 
 
@@ -49,97 +59,150 @@ def total(m, workers):
     return m.Projection.collect().sum.pv
 
 
-def live(points=None, table=None, raw=None):
+def direct(m):
+    return sum(m.Projection[i].pv() for i in (1, 2, 3, 4))
+
+
+def live(points=None, raw=None, factor=None):
     m = build()
     try:
-        if points is not None:
-            m.Data.points[()] = pdn.table(points)
-        if table is not None:
-            m.Data.table = pdn.table(table)
         if raw is not None:
             m.Data.raw = raw
+        if points is not None:
+            m.Data.points[()] = points
+        if factor is not None:
+            m.Projection.factor = factor
         return sum(m.Projection[i].pv() for i in (1, 2, 3, 4))
     finally:
         m.close()
 
 
+def close(a, b):
+    return abs(a - b) <= 1e-9 * max(1.0, abs(b))
+
+
 base = live()
+edited = FRAME.copy()
+edited.loc[2, "sa"] = 2000.0
+doubled = FRAME.assign(sa=FRAME["sa"] * 2)
+
+# (1) a table cell returns a plain, editable DataFrame, the same object every time
 m = Model()
 v = m.Data.points()
-assert isinstance(v, pd.DataFrame) and v is m.Data.points() and v is m.Data.points[()]
-assert v.equals(FRAME) and float(v.loc[2, "sa"]) == 200.0
-for edit in (lambda t: t.loc.__setitem__((1, "sa"), 1.0), lambda t: t.__setitem__("sa", 0.0),
-             lambda t: t.at.__setitem__((1, "sa"), 1.0), lambda t: t.fillna(0, inplace=True)):
-    try:
-        edit(v)
-    except TypeError as error:
-        assert "Data.points" in str(error) and "Data.points[()] = t" in str(error), error
-    else:
-        raise AssertionError("an in-place write did not raise")
-assert abs(total(m, 1) - base) < 1e-9
+assert type(v) is pd.DataFrame and v is m.Data.points() and v.equals(FRAME), type(v)
+assert close(total(m, 1), base) and close(direct(m), base)
 
-doubled = FRAME.assign(sa=FRAME["sa"] * 2)
-for workers in (1, 4):
-    m = Model()
-    before = m.Projection[1].pv()
-    assert abs(total(m, workers) - base) < 1e-9
-    m.Data.points[()] = doubled
-    assert abs(m.Projection[1].pv() / before - 2.0) < 1e-12      # dependants recalculated
-    assert abs(total(m, workers) - live(points=doubled)) < 1e-9
-    m.Data.table = FRAME.assign(rate=FRAME["rate"] * 0)            # the space.cell spelling
-    assert abs(total(m, workers) - live(points=doubled, table=FRAME.assign(rate=FRAME["rate"] * 0))) < 1e-9
-
+# (2) in-place edit: nothing changes until the dependent Space is cleared; then both routes read it
 m = Model()
-assert abs(total(m, 4) - base) < 1e-9
-before = m.Projection[1].pv()
-m.Data.raw = doubled                       # a Reference holding a table, after a run
-assert m.Data.raw.equals(doubled)
-assert m.Projection[1].pv() == before      # D109: published caches stay, as in the exported model
-m.Projection.clear_all()                   # the explicit path recomputes (whole model)
-assert abs(m.Projection[1].pv() / before - 2.0) < 1e-12
-for workers in (1, 4):
-    assert abs(total(m, workers) - live(raw=doubled)) < 1e-9
-
-m = Model()
-for bad, text in ((FRAME.drop(columns="sa"), "no column 'sa'"), (FRAME.assign(sa="x"), "column 'sa' holds"),
-                  (FRAME.set_axis(pd.Index(list("abcd"), name="policy_id")), "key levels")):
-    try:
-        m.Data.points[()] = bad
-    except ValueError as error:
-        assert "Data.points" in str(error) and text in str(error), error
-    else:
-        raise AssertionError("an unfit table was accepted")
-assert abs(total(m, 1) - base) < 1e-9
-
-m = Model()
-m._mx_collect_set_workers_v2(4)
-real_end, seen = runtime.collect_end, []
-def probing_end(model):
-    def other():
-        try:
-            model.Data.points[()] = doubled
-        except RuntimeError as error:
-            seen.append(str(error))
-    thread = threading.Thread(target=other)
-    thread.start(); thread.join()
-    real_end(model)
-runtime.collect_end = probing_end
-try:
-    assert abs(m.Projection.collect().sum.pv - base) < 1e-9
-finally:
-    runtime.collect_end = real_end
-assert seen and "collect" in seen[0], seen
-
-m = Model()
-m.Data.points[()] = doubled
+item = m.Projection[2]
+before = item.pv()
+assert close(total(m, 1), base)
+m.Data.points().loc[2, "sa"] = 2000.0
+assert m.Projection[2].pv() == before and close(total(m, 1), base)      # no clear: old values
 m.Projection.clear_all()
-assert abs(total(m, 1) - live(points=doubled)) < 1e-9       # inputs of Data kept, as live
-m.Data.points.clear_all()
-assert abs(total(m, 4) - base) < 1e-9                       # the cell's input dropped, as live
-m.Data.points[()] = doubled
+assert m.Projection[2] is not item                                        # items dropped by the clear
+assert close(direct(m), live(points=edited))
+for workers in (1, 4):
+    assert close(total(m, workers), live(points=edited))
+assert m.Data.points().loc[2, "sa"] == 2000.0                             # Data kept its edited frame
+
+# (3) assigning a table cell (the compiled model's assign API; the exported model's cells are plain
+# methods without one): no change until the clear
+if compiled:
+    m = Model()
+    assert close(total(m, 1), base) and close(direct(m), base)
+    m.Data.points[()] = doubled
+    assert close(total(m, 1), base) and close(direct(m), base)
+    m.Projection.clear_all()
+    assert close(direct(m), live(points=doubled)) and close(total(m, 4), live(points=doubled))
+
+# (4) assigning a Reference that holds a table: no change until the clears (Data recomputes points)
+m = Model()
+assert close(total(m, 1), base) and close(direct(m), base)
+m.Data.raw = doubled
+assert m.Data.raw.equals(doubled)
+assert close(total(m, 1), base) and close(direct(m), base)
 m.Data.clear_all()
-assert abs(total(m, 1) - base) < 1e-9 and m.Data.points().equals(FRAME)
-print("ok")
+m.Projection.clear_all()
+assert close(direct(m), live(raw=doubled)) and close(total(m, 1), live(raw=doubled))
+
+# (5) a scalar Reference: the same rule
+m = Model()
+assert close(total(m, 1), base) and close(direct(m), base)
+m.Projection.factor = 3.0
+assert close(total(m, 1), base) and close(direct(m), base)
+m.Projection.clear_all()
+assert close(direct(m), live(factor=3.0)) and close(total(m, 4), live(factor=3.0))
+
+# (6) inputs: kept by a clear of another Space, dropped by the clear of their own Space, as live
+if compiled:
+    m = Model()
+    m.Data.points[()] = doubled
+    m.Projection.clear_all()
+    assert close(total(m, 1), live(points=doubled))
+    m.Data.clear_all()                          # drops it: the formula runs again
+    m.Projection.clear_all()
+    assert close(total(m, 4), base) and m.Data.points().equals(FRAME)
+    # only Space.clear_all() and Model.clear_all() are provided: every other clear of live modelx raises
+    for target, method in ((m.Data.points, "clear"), (m.Data.points, "clear_all"), (m.Data.points, "clear_at"),
+                           (m.Projection, "clear_cells"), (m.Projection, "clear_items"), (m.Projection, "clear_at")):
+        try:
+            getattr(target, method)()
+        except NotImplementedError as error:
+            assert method + "() is not provided" in str(error) and "Space.clear_all()" in str(error) \
+                and "Model.clear_all()" in str(error), error
+        else:
+            raise AssertionError(method + " ran")
+else:
+    for method in ("clear_cells", "clear_items", "clear_at"):
+        assert not hasattr(m.Projection, method), method
+
+# (7) one ItemSpace (del, as before) and the whole model
+m = Model()
+item = m.Projection[3]
+del m.Projection[3]
+assert m.Projection[3] is not item
+m = Model()
+assert close(total(m, 1), base)
+m.Data.points().loc[2, "sa"] = 2000.0
+m.Projection.factor = 3.0
+m.clear_all()                                   # the whole model: Data reruns its formula (edit lost, as live)
+assert close(direct(m), live(factor=3.0)) and close(total(m, 1), live(factor=3.0))
+
+if compiled:
+    m = Model()
+    for bad, text in ((FRAME.drop(columns="sa"), "no column 'sa'"), (FRAME.assign(sa="x"), "column 'sa' holds"),
+                      (FRAME.set_axis(pd.Index(list("abcd"), name="policy_id")), "key levels")):
+        try:
+            m.Data.points[()] = bad
+        except ValueError as error:
+            assert "Data.points" in str(error) and text in str(error), error
+        else:
+            raise AssertionError("an unfit table was accepted")
+    assert close(total(m, 1), base)
+
+    # (8) assignment and clear are refused while a collect runs
+    m = Model()
+    m._mx_collect_set_workers_v2(4)
+    real_end, seen = runtime.collect_end, []
+    def probing_end(model):
+        def other():
+            for attempt in (lambda: model.Data.points.__setitem__((), doubled),
+                            lambda: model.Projection.clear_all()):
+                try:
+                    attempt()
+                except RuntimeError as error:
+                    seen.append(str(error))
+        thread = threading.Thread(target=other)
+        thread.start(); thread.join()
+        real_end(model)
+    runtime.collect_end = probing_end
+    try:
+        assert close(m.Projection.collect().sum.pv, base)
+    finally:
+        runtime.collect_end = real_end
+    assert len(seen) == 2 and all("collect" in text for text in seen), seen
+print("ok", name)
 """
 
 
@@ -166,4 +229,5 @@ def test_table_cells_get_assign_edit(tmp_path):
     assert "self._mx_ref_raw" in generated and "cdef object _mx_ref_raw" in pxd
     assert "cdef object _mx_ref_FRAME2" in pxd
     assert "cdef public object ids" in pxd               # a Reference that holds no table keeps its name
-    run("checks.py")
+    run("checks.py", "tables_nomx_cy")
+    run("checks.py", "tables_nomx")         # the exported pure-Python model behaves the same (D130)

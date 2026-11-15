@@ -1,22 +1,27 @@
-"""Python access to the table cells and input References of a compiled model (api-tables, D101).
+"""Python access to the table cells and input References of a compiled model (api-tables, D130).
 
 A compiled table cell keeps its internal table (a ``NativeTable``), which compiled code reads
 natively and every thread shares without locks. Python callers see it through a per-name
-property generated on the Space class:
+property generated on the Space class (D130, superseding the read-only frames and the automatic
+clears of D101, D109, D119 and D127):
 
-- ``space.cell()`` and ``space.cell[()]`` return a read-only pandas DataFrame
-  (:class:`ReadOnlyFrame`), one object per internal table, so every call returns the same
-  object. Any in-place write raises TypeError naming the cell and the fix.
+- ``space.cell()`` and ``space.cell[()]`` return the plain pandas DataFrame the internal table was
+  built from (the formula's own result, or the assigned frame), the same object on every call, as
+  live modelx returns the cached value. It may be edited in place.
 - ``space.cell[()] = df`` and ``space.cell = df`` convert ``df`` with the provider's
-  ``table_from_value`` (the same conversion the compiled cell uses for its formula result),
-  check it against the build-time schema, then clear **every cached value of the model**
-  (a superset of the dependants: the compiled model holds no dependency graph) and store the
-  new table as an input that later clears keep.
-- assigning an input Reference (``space.ref = value``) clears the model in the same way.
+  ``table_from_value`` and store it as an input that later clears keep. Nothing is cleared.
+- assigning an input Reference stores the value. Nothing is cleared.
+- two clears, named as in live modelx: ``Model.clear_all()`` and ``Space.clear_all()`` (this Space and
+  the Spaces below it: values, assigned inputs, ItemSpaces). Live's other clears (``Space.clear_cells``,
+  ``clear_items``, ``clear_at``; ``cell.clear``, ``clear_all``, ``clear_at``) are not provided and raise
+  NotImplementedError naming the two: without a dependency graph they would leave dependents stale.
+  ``del space[key]`` deletes one ItemSpace, as before (D114). Every Space not cleared keeps its values; its
+  table cells are rebuilt, on the next read, from the frame they hold, so an in-place edit made before
+  a clear is what compiled code reads afterwards.
 
-Both raise RuntimeError while a ``collect`` of the model is running, at any number of workers.
-An assignment made while another thread is calculating a single cell outside ``collect`` is
-not synchronised (as in live modelx, which is not thread-safe at all).
+Assignment and clear raise RuntimeError while a ``collect`` of the model is running, at any number
+of workers. An assignment made while another thread is calculating a single cell outside ``collect``
+is not synchronised (as in live modelx, which is not thread-safe at all).
 """
 
 import threading
@@ -25,11 +30,6 @@ _lock = threading.Lock()
 _NO_FRAME = object()
 _running = {}       # id(model) -> number of collect calls in progress
 _inputs = {}        # id(model) -> {(id(space), name): (space, name, table)}
-
-MESSAGE = ("{cell} is a table input of the compiled model and is read-only. Build a new table "
-           "and assign it, e.g.: t = {cell}().copy(); edit t; {cell}[()] = t")
-ROW_MESSAGE = ("{cell} is a row of a table input of the compiled model and is read-only. Copy it to edit it "
-               "(r = {cell}().copy()), or assign a new table to the table cell it is read from")
 
 
 def collect_begin(model):
@@ -54,61 +54,101 @@ def _check_idle(model, what):
 
 
 def clear_model(model):
-    """Clear every cached value of ``model``, keep the assigned table inputs.
+    """Clear every cached value of ``model``, keep the assigned table inputs (a model-level clear).
 
-    Every Space's caches are emptied and its ItemSpaces dropped (they are created again, with
-    the current References, on the next access); an ItemSpace object a caller still holds is
-    detached from the model. This clears more than the dependants of what changed, which the
-    compiled model cannot list.
+    Every Space's caches are emptied and its ItemSpaces dropped and released (they are created again,
+    with the current References, on the next access); an ItemSpace object a caller still holds is
+    detached from the model.
     """
     for space in model._mx_walk(skip_self=True):
         space._mx_clear_values()
+    _reapply_inputs(model)
+
+
+def _reapply_inputs(model, spaces=None):
     with _lock:
         inputs = list(_inputs.get(id(model), {}).values())
     for space, name, table in inputs:
-        space._mx_set_table_cell(name, table)
+        if spaces is None or any(space is cleared for cleared in spaces):
+            space._mx_set_table_cell(name, table)
 
 
 def assign_table_cell(space, name, path, table):
-    """Make ``table`` (already converted) the value of the table cell ``name`` of ``space``."""
+    """Make ``table`` (already converted) the value of the table cell ``name`` of ``space``, as an
+    input that clears keep. Values already computed from the old table stay until the user clears
+    the Spaces that depend on it (D130)."""
     model = space._model
-    if space._mx_roots:
-        raise NotImplementedError(
-            f'{path}: a table cell of an ItemSpace cannot be assigned in a compiled model '
-            '(assigning clears the model, which drops its ItemSpaces); assign the input it is '
-            'built from on the Space that holds it')
     _check_idle(model, f'the assignment of {path}')
     with _lock:
         _inputs.setdefault(id(model), {})[id(space), name] = (space, name, table)
-    clear_model(model)
+    space._mx_set_table_cell(name, table)
 
 
 def before_reference(space, path):
     """Raise if the Reference ``path`` cannot be assigned now (a collect of the model is running).
 
-    The generated setter then stores the value. It does not clear: published caches stay, as in the
-    exported model, and ``clear_all()`` recomputes (D109).
+    The generated setter then stores the value. It does not clear: computed values stay, as in the
+    exported model, until the user clears (D130).
     """
     _check_idle(space._model, f'the assignment of {path}')
 
 
-def clear_all(space, name=None):
-    """``clear_all()`` of a compiled Space (``name`` None) or of one of its table cells.
-
-    As in live modelx, the assigned table inputs of that Space (and the Spaces below it) or of
-    that cell are dropped, so their formulas run again; then every cached value of the model is
-    cleared: the compiled model holds no dependency graph, so the clear is never limited to
-    the Space and its dependants (a superset of live modelx's clear). Refused while a collect of
-    the model is running.
-    """
-    model = space._model
-    _check_idle(model, f'{type(space).__name__[3:]}.clear_all()' if name is None else f'{name}.clear_all()')
+def _drop_inputs(model, spaces):
     with _lock:
         inputs = _inputs.get(id(model), {})
         for key, (owner, cell, _) in list(inputs.items()):
-            if (owner is space or owner._mx_is_in(space)) and (name is None or cell == name):
+            if any(owner is space for space in spaces):
                 del inputs[key]
-    clear_model(model)
+
+
+def clear_all(space):
+    """``Space.clear_all()`` as in live modelx (D130): the values and assigned inputs of the cells of this
+    Space and the Spaces below it are cleared and their ItemSpaces dropped (released through P2). Every
+    other cell keeps its value: the compiled model holds no dependency graph, so clearing what depends on
+    a change is the user's call, as on the exported model. The table cells kept are rebuilt from the
+    frames they hold on their next read, so an in-place edit is what compiled code reads. Refused while a
+    collect of the model is running."""
+    model = space._model
+    _check_idle(model, f'{type(space).__name__[3:]}.clear_all()')
+    cleared = list(space._mx_walk())
+    _drop_inputs(model, cleared)
+    for target in cleared:
+        target._mx_clear_values()
+    rebuild_tables(model, cleared)
+
+
+CLEARS = ("Clear the Space that depends on the change (Space.clear_all()) or the whole model "
+          "(Model.clear_all()); a compiled model has no dependency graph, so no other clear is provided.")
+CELL_CLEAR = "{path}.{method}() is not provided by a compiled model. " + CLEARS
+
+
+def not_provided(space, method):
+    """The other clears of live modelx's Space (clear_cells, clear_items, clear_at) are not provided."""
+    raise NotImplementedError(f'{type(space).__name__[3:]}.{method}() is not provided by a compiled model. '
+                              + CLEARS)
+
+
+def rebuild_tables(model, skip=()):
+    """Mark every table cell of ``model`` outside ``skip`` for a rebuild from the frame it holds (D130):
+    the next read converts that frame again instead of running the formula, so an in-place edit of
+    the frame reaches compiled code. Values computed from the old table are not touched."""
+    for target in model._mx_walk(skip_self=True):
+        if not any(target is cleared for cleared in skip):
+            stale = getattr(target, '_mx_stale_tables', None)
+            if stale is not None:
+                stale()
+
+
+def rebind_source(table):
+    """What a table cell marked by :func:`rebuild_tables` rebinds from: the frame it holds (the source
+    frame, or the frame handed to Python), else the internal table itself (nothing to rebuild)."""
+    frame = getattr(table, '_mx_python_frame', None)
+    if frame is not None and type(frame).__module__.split('.')[0] == 'pandas':
+        return frame
+    from modelx_helpers.immutable_inputs import table_frame
+    owner = getattr(table, '__modelx_table_owner__', None)
+    frame = table_frame(owner()) if owner is not None else None
+    return frame if frame is not None else table
 
 
 _enums = {}
@@ -132,7 +172,10 @@ def enum_member(module, qualname, value):
 
 
 def frame_of(table, path):
-    """The one read-only DataFrame of an internal table, created on first request.
+    """What a Python caller gets for an internal table, the same object on every request, equal to what
+    live modelx returns (D130): the plain DataFrame the table was admitted from (a formula's result or
+    an assigned frame), which may be edited in place (compiled code reads the edit after a clear); for a
+    table the model text builds with the helper (``pdn.table``), the helper Table itself, as live.
 
     Only the standard provider's ``NativeTable`` has a frame; another provider's object (bound by its own
     result binder) is returned as it is, as before D101.
@@ -145,10 +188,10 @@ def frame_of(table, path):
             frame = table._mx_python_frame
             if frame is None:
                 from modelx_helpers.immutable_inputs import table_frame
-                frame = table_frame(table.__modelx_table_owner__())     # a table admitted from a frame
+                owner = table.__modelx_table_owner__()
+                frame = table_frame(owner)          # a table admitted from a frame
                 if frame is None:
-                    from modelx_helpers import pdn
-                    frame = ReadOnlyFrame._wrap(pdn.to_pandas(table), table, path)
+                    frame = owner                   # a helper Table: what the formula returned, as live
                 table._mx_python_frame = frame
     return frame
 
@@ -173,9 +216,20 @@ class TableCell:
             raise KeyError(f'{self._path} has no parameters: use {self._path}[()] = table')
         setattr(self._space, self._name, value)
 
+    def _mx_no_cell_clear(self, method):
+        raise NotImplementedError(CELL_CLEAR.format(path=self._path, method=method))
+
+    def clear(self):
+        """Not provided (D130): live modelx's cell-level clear; use the Space or model clear."""
+        self._mx_no_cell_clear('clear')
+
     def clear_all(self):
-        """Drop an assigned table (the formula runs again) and clear the model's values."""
-        clear_all(self._space, self._name)
+        """Not provided (D130): live modelx's cell-level clear; use the Space or model clear."""
+        self._mx_no_cell_clear('clear_all')
+
+    def clear_at(self, *args, **kwargs):
+        """Not provided (D130): live modelx's cell-level clear; use the Space or model clear."""
+        self._mx_no_cell_clear('clear_at')
 
     @property
     def name(self):
@@ -185,130 +239,11 @@ class TableCell:
         return f'<compiled table cell {self._path}>'
 
 
-def _ro_indexer():
-    import pandas as pd
-
-    class _Indexer:
-        __slots__ = ('_inner', '_frame')
-
-        def __init__(self, inner, frame):
-            self._inner, self._frame = inner, frame
-
-        def __getitem__(self, key):
-            return self._inner[key]
-
-        def __setitem__(self, key, value):
-            self._frame._mx_refuse()
-
-        def __call__(self, *args, **kwargs):
-            return type(self)(self._inner(*args, **kwargs), self._frame)
-
-        def __getattr__(self, name):
-            # pandas reads through nested indexers (``frame.loc._getitem_axis`` for a tuple key
-            # on a MultiIndex): forward reads, refuse the write paths.
-            if name.startswith('_setitem'):
-                self._frame._mx_refuse()
-            return getattr(self._inner, name)
-
-    return pd, _Indexer
-
-
-_FRAME_CLASS = None
-
-
-def _frame_class():
-    global _FRAME_CLASS
-    if _FRAME_CLASS is None:
-        import pandas as pd
-        _FRAME_CLASS = _read_only_class(pd.DataFrame, 'ReadOnlyFrame',
-                                        'A read-only DataFrame of a compiled table cell. Anything derived is plain pandas.')
-    return _FRAME_CLASS
-
-
-_SERIES_CLASS = None
-
-
-def _series_class():
-    global _SERIES_CLASS
-    if _SERIES_CLASS is None:
-        import pandas as pd
-        _SERIES_CLASS = _read_only_class(pd.Series, 'ReadOnlySeries',
-                                         'A read-only row (Series) of a table admitted from a frame (D119).')
-    return _SERIES_CLASS
-
-
-def _read_only_class(base, name, doc):
-    """A read-only subclass of the pandas ``base`` (DataFrame or Series): in-place writes raise TypeError
-    naming the cell and the fix; the arrays cannot be written; anything derived is plain pandas."""
-    pd, _Indexer = _ro_indexer()
-    inplace = set()
-    for attr in dir(base):
-        code = getattr(getattr(base, attr, None), '__code__', None)
-        if not attr.startswith('_') and code is not None and 'inplace' in code.co_varnames:
-            inplace.add(attr)
-    frame = base is pd.DataFrame
-
-    class ReadOnly(base):
-        _metadata = ['_mx_table', '_mx_path']
-
-        @property
-        def _constructor(self):
-            return base
-
-        @classmethod
-        def _wrap(cls, value, table, path):
-            obj = cls(value)
-            for block in obj._mgr.blocks:   # .values / .to_numpy() views cannot write either
-                values = block.values
-                array = values if hasattr(values, 'flags') else getattr(values, '_ndarray', None)
-                if array is not None and hasattr(array, 'flags'):
-                    array.flags.writeable = False   # extension arrays without one stay guarded by the indexers
-            object.__setattr__(obj, '_mx_table', table)
-            object.__setattr__(obj, '_mx_path', path)
-            return obj
-
-        def __modelx_table_owner__(self):
-            """The helper Table behind the frame, so helper functions (``pdn.to_pandas``, ...) accept it."""
-            return self._mx_table.__modelx_table_owner__()
-
-        def _mx_refuse(self, *args, **kwargs):
-            raise TypeError((MESSAGE if frame else ROW_MESSAGE).format(cell=self._mx_path))
-
-        loc = property(lambda self: _Indexer(base.loc.__get__(self), self))
-        iloc = property(lambda self: _Indexer(base.iloc.__get__(self), self))
-        at = property(lambda self: _Indexer(base.at.__get__(self), self))
-        iat = property(lambda self: _Indexer(base.iat.__get__(self), self))
-        __setitem__ = __delitem__ = pop = _mx_refuse
-        if frame:
-            insert = _mx_refuse
-
-            def __modelx_table_cell_source__(self):
-                return self._mx_table
-
-        def __setattr__(self, name, value):
-            if name == 'index' or (frame and (name == 'columns' or name in getattr(self, 'columns', ()))):
-                self._mx_refuse()
-            super().__setattr__(name, value)
-
-        def __getattribute__(self, name):
-            attr = super().__getattribute__(name)
-            if name in inplace:
-                def guarded(*args, **kwargs):
-                    if kwargs.get('inplace'):
-                        self._mx_refuse()
-                    return attr(*args, **kwargs)
-                return guarded
-            return attr
-
-    ReadOnly.__name__ = ReadOnly.__qualname__ = name
-    ReadOnly.__doc__ = doc
-    return ReadOnly
-
-
 def row_series(record, path):
-    """What a Python caller gets for a cell whose value is a row of a table admitted from a frame (D119):
-    the read-only pandas row (``frame.loc[key]``, as live gives it), the same object on every call. Any
-    other value is returned as it is. Compiled code keeps reading the Record."""
+    """What a Python caller gets for a cell whose value is a row of a table admitted from a frame: the
+    plain pandas row (``frame.loc[key]``, as live gives it), the same object on every call of the
+    cached cell (D130, superseding D119's read-only Series). Any other value is returned as it is.
+    Compiled code keeps reading the Record."""
     from modelx_helpers.immutable_inputs import record_row
     found = record_row(record)
     if found is None:
@@ -318,19 +253,6 @@ def row_series(record, path):
         with _lock:
             cached = record_row(record)[1]
             if cached is None:
-                cached = _series_class()._wrap(row(), record, path)
+                cached = row()
                 object.__setattr__(record, '_frame_row', (row, cached))
     return cached
-
-
-class _FrameFactory:
-    """``ReadOnlyFrame`` resolved on first use, so importing this module does not import pandas."""
-
-    def __getattr__(self, name):
-        return getattr(_frame_class(), name)
-
-    def __instancecheck__(self, obj):
-        return isinstance(obj, _frame_class())
-
-
-ReadOnlyFrame = _FrameFactory()

@@ -32,9 +32,8 @@ def lowered(p):
 RUN = ('import json\nfrom {package} import mx_model as m\n'
        'print(json.dumps([[repr(m.Projection.probe(p)), m.Projection.lowered(p)] for p in range(4)]))\n'
        'import pandas as pd\nv = m.Data.table()\n'
-       'try:\n    v.iloc[0, 0] = v.iloc[0, 0]\nexcept TypeError:\n    ro = True\nelse:\n    ro = False\n'
-       'print("read-only frame" if isinstance(v, pd.DataFrame) and ro and v is m.Data.table() '
-       'and v.__modelx_table_cell_source__() is not None else type(v).__name__)\n')
+       'from modelx_helpers.immutable_inputs import Table\n'
+       'print("as live" if isinstance(v, Table) and v is m.Data.table() else type(v).__name__)\n')
 
 
 def _model(root):
@@ -80,7 +79,7 @@ def test_native_table_index_answers_as_the_helper(tmp_path):
         lines = out.stdout.strip().splitlines()
         assert json.loads(lines[-2]) == live, (package, lines[-2], live)
         if package == 'exported_cy':
-            assert lines[-1] == 'read-only frame'     # D101: Python gets the read-only DataFrame
+            assert lines[-1] == 'as live'             # D130: Python gets the helper Table the formula built
             classes = (tmp_path / 'exported_cy/_m_Projection/_mx_classes.py')
             text = classes.read_text(encoding='utf-8') if classes.exists() else '\n'.join(
                 p.read_text(encoding='utf-8') for p in (tmp_path / 'exported_cy').rglob('_mx_classes.py'))

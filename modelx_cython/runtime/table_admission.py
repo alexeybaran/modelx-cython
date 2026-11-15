@@ -18,8 +18,8 @@ A pandas DataFrame is admitted when every condition holds:
   C8  ``modelx_helpers.pdn.table`` accepts the frame (its own scalar-kind contract)
 
 The result is the helper Table ``pdn.table`` builds, given the frame's pandas vocabulary
-(``immutable_inputs.with_frame``): an operation the Table does not answer runs pandas on one
-read-only copy of the frame, which is also the DataFrame Python callers of a compiled model get.
+(``immutable_inputs.with_frame``): an operation the Table does not answer runs pandas on the frame,
+which is also the DataFrame Python callers of a compiled model get (D130: the frame itself, editable).
 An unnamed RangeIndex is admitted (row numbers are the keys). A helper Table, or a value that is not
 pandas, is returned unchanged, so ``pdn.table(...)`` in model text keeps working.
 
@@ -143,6 +143,6 @@ def admit(value, cell, nargs=0):
         table = pdn.table(value)
     except (TypeError, ValueError) as error:
         raise TableAdmissionError(cell, [f'{error} (C8)']) from error
-    from .table_cells import ReadOnlyFrame
-    frame = ReadOnlyFrame._wrap(value.copy(deep=True), table, cell)
-    return with_frame(table, frame)
+    # D130: the table keeps the frame itself, the object the formula returned or the caller assigned;
+    # Python callers get it back and may edit it in place (compiled code reads the edit after a clear)
+    return with_frame(table, value)

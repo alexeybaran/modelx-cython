@@ -115,16 +115,16 @@ def test_unused_multiindex_levels_read_as_pandas():
     assert list(table.index.levels[0]) == list(value.index.levels[0]) == ['F', 'M']
 
 
-def test_the_admitted_frame_is_a_read_only_copy():
+def test_the_admitted_frame_is_the_value_itself():
+    """D130: the table keeps the frame it was admitted from (no copy); an in-place edit of that frame
+    reaches the table only when it is admitted again (what a clear does), never by itself."""
     value = frame()
     table = admit(value, 'Data.t')
     from modelx_helpers.immutable_inputs import table_frame
-    frame_ = table_frame(table)
-    assert frame_.equals(value) and frame_ is not value
-    with pytest.raises(TypeError, match='Data.t'):
-        frame_.loc[30, 'q'] = 1.0
-    value.loc[30, 'q'] = 9.0                  # the author's frame stays writeable and separate
-    assert table.loc[30, 'q'] == 0.01
+    assert table_frame(table) is value
+    value.loc[30, 'q'] = 9.0
+    assert table.loc[30, 'q'] == 0.01         # the table is a snapshot until it is rebuilt
+    assert admit(value, 'Data.t').loc[30, 'q'] == 9.0
 
 
 def test_an_admitted_table_pickles_with_its_frame():

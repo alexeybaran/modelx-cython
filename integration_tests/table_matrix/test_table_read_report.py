@@ -163,10 +163,11 @@ assert p.listed(3) and not p.listed(0) and p.count() == 3 and p.seen(4) == 3
 import pandas as pd
 from modelx_helpers import pdn
 frame = mx_model.Portfolio.MarketInputs.curve()
-# D101: Python gets the read-only DataFrame; the native table behind it forwards the helper's public names
-assert isinstance(frame, pd.DataFrame) and frame is mx_model.Portfolio.MarketInputs.curve()
-table = frame.__modelx_table_cell_source__()
-assert pdn.to_pandas(table).equals(frame)
+# D130: Python gets what the formula returned (the helper Table Reference, as live); the native table
+# behind it forwards the helper's public names
+assert frame is mx_model.Portfolio.MarketInputs.rates and frame is mx_model.Portfolio.MarketInputs.curve()
+table = mx_model.Portfolio.MarketInputs._mx_table_cell_value('curve')
+assert pdn.to_pandas(table).equals(pdn.to_pandas(frame))
 assert table.index.first() == 1
 try:
     table.index._table

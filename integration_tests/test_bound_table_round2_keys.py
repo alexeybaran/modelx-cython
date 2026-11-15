@@ -36,16 +36,11 @@ try:
 finally:
     sys.setprofile(None)
 import pandas as pd
+from modelx_helpers.immutable_inputs import Table
 value = m.Data.table()
-try:
-    value.iloc[0, 0] = value.iloc[0, 0]
-except TypeError:
-    read_only = True
-else:
-    read_only = False
-kind = ('read-only frame of the bound table' if isinstance(value, pd.DataFrame) and read_only
-        and value is m.Data.table() and value.__modelx_table_cell_source__() is not None else repr(type(value)))
-print(json.dumps([out, called, kind, pdn.to_pandas(value).equals(value)]))
+kind = ('the helper table, as live' if isinstance(value, Table) and value is m.Data.table()
+        else repr(type(value)))
+print(json.dumps([out, called, kind, pdn.to_pandas(value).equals(m.Data.source)]))
 '''
 
 
@@ -74,6 +69,6 @@ def test_round2_keys_on_a_bound_table_take_the_native_path(tmp_path):
     assert out.returncode == 0, out.stdout[-3000:] + out.stderr[-3000:]
     values, called, kind, same = json.loads(out.stdout.strip().splitlines()[-1])
     assert values == live
-    # D101/D109: Python gets the read-only DataFrame of the bound table; the compiled cells keep the native path
-    assert kind == 'read-only frame of the bound table' and same
+    # D130: Python gets what the formula returned (the helper Table, as live); compiled cells keep the native path
+    assert kind == 'the helper table, as live' and same
     assert called == [], called
