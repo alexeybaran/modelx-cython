@@ -1714,12 +1714,14 @@ def _releasing_delitem(node, cls_name):
     removed = '_mx_removed'
     while removed == key:
         removed += '_'
+    typed = removed + '_item'
     source = (f"{removed} = {MX_SELF}._mx_itemspaces.pop({key})\n"
-              f"if (type({removed}) is {cls_name} and not {removed}._mx_spaces\n"
-              f"        and not {removed}._mx_itemspaces):\n"
-              f"    {removed}._mx_cells.clear()\n"
-              f"    {removed}._mx_roots.clear()\n"
-              f"    {removed}._space = None\n")
+              f"if type({removed}) is {cls_name}:\n"
+              f"    {typed}: {cls_name} = {CY_MOD}.cast({cls_name}, {removed})\n"
+              f"    if not {typed}._mx_spaces and not {typed}._mx_itemspaces:\n"
+              f"        {typed}._mx_cells.clear()\n"
+              f"        {typed}._mx_roots.clear()\n"
+              f"        {typed}._space = None\n")
     return node.with_changes(body=node.body.with_changes(body=cst.parse_module(source).body))
 
 
