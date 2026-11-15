@@ -285,8 +285,8 @@ def _restart_lines(cls, shape):
         # D107: collect computes the collected Cell only; between policies it resets what that Cell can
         # reach (static closure; everything when unknown). The reused root is private to this entry.
         return list(_reset_lines(cls, _check_closure(cls, [shape.cell])))
-    return ['root._mx_cells.clear()', 'root._mx_roots.clear()', 'root._space = None',
-            f'root = {cls.name}(self)', 'root._mx_copy_refs(self, self)', 'root._mx_roots.append(root)']
+    from .item_roots import new_root, release_root
+    return [f'{release_root(cls.name)}(root)', f'root = {new_root(cls.name)}(self)']
 
 
 def add_methods(cls, node, shape, *, workers):
@@ -301,6 +301,7 @@ def add_methods(cls, node, shape, *, workers):
         f'def _mx_collect_options_v2(self):\n    return {workers}, {callback}, {parallel}, {ordered}\n')
     if shape is None:
         return node.with_changes(body=node.body.with_changes(body=(*node.body.body, options)))
+    from .item_roots import new_root, release_root     # D116: shared with the direct route
     lines = [
         'def _mx_evaluate_serial_collect(self, coords):',
         f'    root: {cls.name}',
@@ -311,13 +312,11 @@ def add_methods(cls, node, shape, *, workers):
         '        return None',
         '    if not _mx_sys._mx_collect_native_coords(coords):',
         '        return None',
-        f'    root = {cls.name}(self)',
+        f'    root = {new_root(cls.name)}(self)',
         *(f'    root._v_{name}.window({", ".join(f"{int(a.lower)}, {int(a.stop) - int(a.lower)}" for a in axes)})'
           for name, (axes, _, _) in sorted(getattr(cls, 'reuse_dense_windows', {}).items())
           if shape.reuse),
         '    try:',
-        '        root._mx_copy_refs(self, self)',
-        '        root._mx_roots.append(root)',
     ]
     if shape.private_lookups:
         for context in getattr(cls, 'native_contexts', {}):
@@ -343,9 +342,7 @@ def add_methods(cls, node, shape, *, workers):
         '            else:',
         f'                total += root.{shape.cell}()',
         '    finally:',
-        '        root._mx_cells.clear()',
-        '        root._mx_roots.clear()',
-        '        root._space = None',
+        f'        {release_root(cls.name)}(root)',
         f'    return _mx_sys.CollectResult({{"sum": _mx_sys.CollectResult({{{shape.label!r}: total}})}})',
     ))
     helper = cst.parse_module('\n'.join(lines) + '\n').body[0]

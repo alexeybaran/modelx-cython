@@ -913,6 +913,12 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
                 module, ordinary, self._dense_layouts)
         if self._cold_sums or self._cold_spills:
             module = module.with_changes(body=(*module.body, *self._cold_sums, *self._cold_spills))
+        # D116: one root construction and release per compiled ItemSpace class (collect and direct)
+        from modelx_cython import item_roots
+        roots = [fn for name in sorted(self.module.visitor.itemspace_classes) if name in self.module.classes
+                 for fn in item_roots.functions(name)]
+        if roots:
+            module = module.with_changes(body=(*module.body, *roots))
         directives = []
         if any(getattr(cell, 'power_memo', None) for cls in self.module.classes.values()
                for cell in cls.cells.values()):
@@ -1719,10 +1725,11 @@ def _releasing_delitem(node, cls_name):
               f"if type({removed}) is {cls_name}:\n"
               f"    {typed}: {cls_name} = {CY_MOD}.cast({cls_name}, {removed})\n"
               f"    if not {typed}._mx_spaces and not {typed}._mx_itemspaces:\n"
-              f"        {typed}._mx_cells.clear()\n"
-              f"        {typed}._mx_roots.clear()\n"
-              f"        {typed}._space = None\n")
+              f"        {item_roots.release_root(cls_name)}({typed})\n")
     return node.with_changes(body=node.body.with_changes(body=cst.parse_module(source).body))
+
+
+from modelx_cython import item_roots
 
 
 def _fast_item_call(node, cls_name):
@@ -1761,10 +1768,8 @@ def _fast_item_call(node, cls_name):
     store = shape[3].replace('= _mx_root', f'= {root}')
     fast = cst.parse_module(
         f"if type(self) is {cls_name} and not self._mx_spaces and not self._mx_roots:\n"
-        f"    {root}: {cls_name} = {cls_name}(self)\n"
-        f"    {root}._mx_copy_refs(self, self)\n"
+        f"    {root}: {cls_name} = {item_roots.new_root(cls_name)}(self)\n"
         f"    {assign}\n"
-        f"    {root}._mx_roots.append({root})\n"
         f"    {store}\n"
         f"    return {root}\n").body
     new_else = found.orelse.with_changes(body=found.orelse.body.with_changes(body=(*fast, *block)))
