@@ -28,6 +28,8 @@ _inputs = {}        # id(model) -> {(id(space), name): (space, name, table)}
 
 MESSAGE = ("{cell} is a table input of the compiled model and is read-only. Build a new table "
            "and assign it, e.g.: t = {cell}().copy(); edit t; {cell}[()] = t")
+ROW_MESSAGE = ("{cell} is a row of a table input of the compiled model and is read-only. Copy it to edit it "
+               "(r = {cell}().copy()), or assign a new table to the table cell it is read from")
 
 
 def collect_begin(model):
@@ -216,26 +218,46 @@ _FRAME_CLASS = None
 
 def _frame_class():
     global _FRAME_CLASS
-    if _FRAME_CLASS is not None:
-        return _FRAME_CLASS
+    if _FRAME_CLASS is None:
+        import pandas as pd
+        _FRAME_CLASS = _read_only_class(pd.DataFrame, 'ReadOnlyFrame',
+                                        'A read-only DataFrame of a compiled table cell. Anything derived is plain pandas.')
+    return _FRAME_CLASS
+
+
+_SERIES_CLASS = None
+
+
+def _series_class():
+    global _SERIES_CLASS
+    if _SERIES_CLASS is None:
+        import pandas as pd
+        _SERIES_CLASS = _read_only_class(pd.Series, 'ReadOnlySeries',
+                                         'A read-only row (Series) of a table admitted from a frame (D119).')
+    return _SERIES_CLASS
+
+
+def _read_only_class(base, name, doc):
+    """A read-only subclass of the pandas ``base`` (DataFrame or Series): in-place writes raise TypeError
+    naming the cell and the fix; the arrays cannot be written; anything derived is plain pandas."""
     pd, _Indexer = _ro_indexer()
     inplace = set()
-    for attr in dir(pd.DataFrame):
-        code = getattr(getattr(pd.DataFrame, attr, None), '__code__', None)
+    for attr in dir(base):
+        code = getattr(getattr(base, attr, None), '__code__', None)
         if not attr.startswith('_') and code is not None and 'inplace' in code.co_varnames:
             inplace.add(attr)
+    frame = base is pd.DataFrame
 
-    class ReadOnlyFrame(pd.DataFrame):
-        """A read-only DataFrame of a compiled table cell. Anything derived is plain pandas."""
+    class ReadOnly(base):
         _metadata = ['_mx_table', '_mx_path']
 
         @property
         def _constructor(self):
-            return pd.DataFrame
+            return base
 
         @classmethod
-        def _wrap(cls, frame, table, path):
-            obj = cls(frame)
+        def _wrap(cls, value, table, path):
+            obj = cls(value)
             for block in obj._mgr.blocks:   # .values / .to_numpy() views cannot write either
                 values = block.values
                 array = values if hasattr(values, 'flags') else getattr(values, '_ndarray', None)
@@ -245,24 +267,26 @@ def _frame_class():
             object.__setattr__(obj, '_mx_path', path)
             return obj
 
-        def __modelx_table_cell_source__(self):
-            return self._mx_table
-
         def __modelx_table_owner__(self):
             """The helper Table behind the frame, so helper functions (``pdn.to_pandas``, ...) accept it."""
             return self._mx_table.__modelx_table_owner__()
 
         def _mx_refuse(self, *args, **kwargs):
-            raise TypeError(MESSAGE.format(cell=self._mx_path))
+            raise TypeError((MESSAGE if frame else ROW_MESSAGE).format(cell=self._mx_path))
 
-        loc = property(lambda self: _Indexer(pd.DataFrame.loc.__get__(self), self))
-        iloc = property(lambda self: _Indexer(pd.DataFrame.iloc.__get__(self), self))
-        at = property(lambda self: _Indexer(pd.DataFrame.at.__get__(self), self))
-        iat = property(lambda self: _Indexer(pd.DataFrame.iat.__get__(self), self))
-        __setitem__ = __delitem__ = insert = pop = _mx_refuse
+        loc = property(lambda self: _Indexer(base.loc.__get__(self), self))
+        iloc = property(lambda self: _Indexer(base.iloc.__get__(self), self))
+        at = property(lambda self: _Indexer(base.at.__get__(self), self))
+        iat = property(lambda self: _Indexer(base.iat.__get__(self), self))
+        __setitem__ = __delitem__ = pop = _mx_refuse
+        if frame:
+            insert = _mx_refuse
+
+            def __modelx_table_cell_source__(self):
+                return self._mx_table
 
         def __setattr__(self, name, value):
-            if name in ('index', 'columns') or (name in getattr(self, 'columns', ())):
+            if name == 'index' or (frame and (name == 'columns' or name in getattr(self, 'columns', ()))):
                 self._mx_refuse()
             super().__setattr__(name, value)
 
@@ -276,8 +300,27 @@ def _frame_class():
                 return guarded
             return attr
 
-    _FRAME_CLASS = ReadOnlyFrame
-    return ReadOnlyFrame
+    ReadOnly.__name__ = ReadOnly.__qualname__ = name
+    ReadOnly.__doc__ = doc
+    return ReadOnly
+
+
+def row_series(record, path):
+    """What a Python caller gets for a cell whose value is a row of a table admitted from a frame (D119):
+    the read-only pandas row (``frame.loc[key]``, as live gives it), the same object on every call. Any
+    other value is returned as it is. Compiled code keeps reading the Record."""
+    from modelx_helpers.immutable_inputs import record_row
+    found = record_row(record)
+    if found is None:
+        return record
+    row, cached = found
+    if cached is None:
+        with _lock:
+            cached = record_row(record)[1]
+            if cached is None:
+                cached = _series_class()._wrap(row(), record, path)
+                object.__setattr__(record, '_frame_row', (row, cached))
+    return cached
 
 
 class _FrameFactory:

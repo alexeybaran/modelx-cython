@@ -100,6 +100,12 @@ class SampleAdmission:
             self.traces[traces[0].funcname] = list(traces)
         return count
 
+    @staticmethod
+    def frame_rows(traces):
+        """Whether every traced result is a row Record of a table admitted from a frame (D119)."""
+        from modelx_helpers.immutable_inputs import record_row
+        return bool(traces) and all(record_row(trace.ret_val) is not None for trace in traces)
+
     def restore(self, funcname):
         """The traces of ``funcname`` with their frames back (the cell is not admitted after all)."""
         traces = self.traces.pop(funcname)

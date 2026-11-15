@@ -49,6 +49,19 @@ def table_cells(cls_info):
     return result
 
 
+def record_cells(cls_info):
+    """Names of the zero-argument cells whose value is a row of a table admitted from a frame (D119):
+    compiled code reads the Record; a Python caller gets the read-only pandas row, as live."""
+    result = {}
+    for name, cells in cls_info.cells.items():
+        if (cells.is_special() or cells.has_args() or not cells.has_formula_def or cells.body_has_closure
+                or cells.called_with_kwargs or cells.formula_is_generator or cells.native_result_binder):
+            continue
+        if getattr(cells, 'frame_row_result', False):
+            result[name] = cells
+    return result
+
+
 def enum_cells(cls_info):
     """``{name: (module, qualname)}`` of the cells whose C result is the value of an admitted IntEnum (D103)."""
     from modelx_cython.enums import _traced_enum
@@ -103,7 +116,7 @@ def renames(module):
     result = {}
     for cls_name, cls_info in module.classes.items():
         mapping = {}
-        for name in (*table_cells(cls_info), *enum_cells(cls_info)):
+        for name in (*table_cells(cls_info), *enum_cells(cls_info), *record_cells(cls_info)):
             if owners[name] == {cls_name}:
                 mapping[name] = CELL_PREF + name
         for name in table_refs(cls_info):
@@ -142,6 +155,7 @@ def rewrite_class(cls_info, node, config, integer_refs):
     mapping = module_renames(cls_info.module)[cls_info.name]
     tables = {n: c for n, c in table_cells(cls_info).items() if n in mapping}
     enums = {n: e for n, e in enum_cells(cls_info).items() if n in mapping}
+    records = [n for n in record_cells(cls_info) if n in mapping]
     refs = [n for n in table_refs(cls_info, integer_refs) if n in mapping]
     body = []
     init_names = set()
@@ -149,7 +163,7 @@ def rewrite_class(cls_info, node, config, integer_refs):
     for statement in node.body.body:
         if isinstance(statement, cst.FunctionDef):
             name = statement.name.value
-            if name in tables or name in enums:
+            if name in tables or name in enums or name in records:
                 statement = statement.with_changes(name=cst.Name(mapping[name]))
             elif name == '__init__':
                 for line in statement.body.body:
@@ -179,6 +193,11 @@ def rewrite_class(cls_info, node, config, integer_refs):
             f'    return {RUNTIME}.TableCell(self, {name!r}, {path!r})\n\n'
             f'@{name}.setter\n'
             f'def {name}(self, value):\n' + assign)
+    for name in records:
+        lines.append(
+            f'def {name}(self):\n'
+            f'    """The read-only pandas row (D119); compiled code calls ``{mapping[name]}``."""\n'
+            f'    return {RUNTIME}.row_series(self.{mapping[name]}(), {path_of(cls_info, name)!r})\n')
     for name, (module, qualname) in enums.items():
         params = ', '.join(cls_info.cells[name].params)
         lines.append(

@@ -120,6 +120,8 @@ PROJ = {{
     "fkey_tuple": "return (0.5, 1.5 + 0.0 * sa())",          # a float key: a tuple, never a vector
     "fkey_tuple_x": "return data.fkey2().loc[fkey_tuple(), 'x'] + data.fkey2().loc[(1.5, 2.5), 'x']",
     "lvec": "return [sa(), sa() * 2.0, 0.5]",               # a list of floats: a vector
+    "mp": "return data.g().loc[30 + int(policy_id)]",       # a row of an admitted table (D119)
+    "mp_q": "return mp()['q'] * 2.0 + mp()['w']",           # compiled code reads the row natively
     "vec_sum": "return sum(vec()) + vec()[1] + sum(ivec()) + fkey_tuple_x() + ivec_key() + sum(lvec())",
     "scaled_x": "return scaled(2).loc[31, 'q'] + scaled(3).loc[32, 'w']",
     "report": ("return pd.DataFrame({{'sa': [sa() * t for t in range(3)]}}, "     # read by nobody natively
@@ -235,6 +237,15 @@ frame = m.Data.g()
 assert isinstance(frame, pd.DataFrame) and frame.equals(live.Data.g())
 assert m.Data.g2() is m.Data.g()            # the same frame from two cells: one table
 assert type(m.Projection[1].report()) is pd.DataFrame       # a report stays the model's own DataFrame
+row = m.Projection[2].mp()                  # D119: a row cell gives Python the read-only pandas row
+assert isinstance(row, pd.Series) and row.equals(live.Projection[2].mp()) and row.name == live.Projection[2].mp().name
+assert row is m.Projection[2].mp()
+try:
+    row["q"] = 0.0
+except TypeError as error:
+    assert "Projection.mp is a row" in str(error), error
+else:
+    raise AssertionError("a row of an admitted table was written in place")
 assert type(m.Projection[1].b_mask()) is pd.DataFrame
 assert isinstance(m.Data.dup(), pd.DataFrame) and m.Data.dup().equals(live.Data.dup())
 try:
@@ -334,6 +345,9 @@ def test_auto_tables_compiled_equal_live(tmp_path):
     lists = [v for k, v in report.items() if k.endswith("_f_lvec")]
     assert lists and lists[0]["vectors"]["shape"] == "V", lists     # a list of floats is a vector
     assert "Data.fkey2" in admitted
+    generated = (tmp_path / "auto_nomx_cy/_mx_classes.py").read_text(encoding="utf-8")
+    assert "def _mx_cell_mp(self)" in generated and "row_series(self._mx_cell_mp(), 'Projection.mp')" in generated
+    assert "self._mx_cell_mp()" in generated.split("def _f_mp_q")[1].split("def ")[0] or "_mx_cell_mp" in generated
     (tmp_path / "ops-classes.json").write_text(json.dumps(classes, default=sorted), encoding="utf-8")
     assert _run(tmp_path, "checks.py").stdout.strip().endswith("ok")
 
