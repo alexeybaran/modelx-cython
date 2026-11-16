@@ -773,10 +773,31 @@ class TableReads:
         value = expr.value
         if self.record_cell(value):
             return True
+        if self.row_field(value, _literal_str(parts[0])):
+            return True
         if isinstance(value, cst.Name) and value.value not in self.formula.other:
             values = self.formula.values.get(value.value) or ()
             return bool(values) and all(self.record_cell(item) for item in values)
         return False
+
+
+    def row_field(self, value, column):
+        """diag-run8 F3: ``T.loc[key]`` with a complete key on a traced table whose schema holds the
+        literal column read from it: ``T.loc[key]["c"]`` is one value, as the field of the row cell it
+        replaces (``self.R()["c"]`` with ``R`` returning ``T.loc[key]``) is."""
+        if not (isinstance(value, cst.Subscript) and isinstance(value.value, cst.Attribute)
+                and value.value.attr.value == 'loc'):
+            return False
+        schema = self.table_cell(value.value.value)
+        if schema is None or column not in (getattr(schema, 'columns', None) or {}):
+            return False
+        parts = _subscript_parts(value)
+        if parts is None or len(parts) != 1:
+            return False
+        key = parts[0]
+        if isinstance(key, cst.Tuple):
+            return len(key.elements) == schema.levels
+        return schema.levels == 1
 
 
 class _Lowering(cst.CSTTransformer):
