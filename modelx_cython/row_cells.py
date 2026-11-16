@@ -23,8 +23,9 @@ Python it computes and caches the same ``Record`` as before. A key that is not i
 raised by the reader's own row read, with the exception type and message the row cell's read gives.
 A reader whose inlined read the table lowering does not turn native is left as written.
 
-The transformer accepts a row cell only when every key part is a C integer (each reader looks the
-row up again; an object key part would be hashed and compared on every read, by every worker).
+The transformer accepts a row cell only when every key part is fixed per item (``item_constant``):
+the readers then hold the row position per item (``held_row``, reset with the item's caches), so
+the key is looked up once per item, an integer or a str label alike.
 """
 
 import libcst as cst
@@ -108,6 +109,25 @@ def _row_expression(func):
     if not names.plain or names.names - {'self'}:
         return None
     return expr.with_changes(lpar=(), rpar=())
+
+
+def item_constant(node, cached_call):
+    """A key part whose value is fixed for an item until its caches are cleared: an integer
+    literal, ``self.<name>`` (a Space parameter or Reference), or ``self.<cell>()`` of a cached
+    zero-argument Cell (``cached_call(node)``). Such a key's row is held per item (``held_row``)."""
+    if isinstance(node, cst.Integer):
+        return True
+    if isinstance(node, cst.Attribute) and isinstance(node.value, cst.Name) and node.value.value == 'self':
+        return True
+    return (isinstance(node, cst.Call) and not node.args and isinstance(node.func, cst.Attribute)
+            and isinstance(node.func.value, cst.Name) and node.func.value.value == 'self'
+            and cached_call(node))
+
+
+def key_parts(expr):
+    """The key parts of a row expression ``T.loc[key]``."""
+    key = expr.slice[0].slice.value
+    return [e.value for e in key.elements] if isinstance(key, cst.Tuple) else [key]
 
 
 def _literal_field(subscript):

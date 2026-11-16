@@ -200,6 +200,21 @@ cdef inline Py_ssize_t held_row_3(Py_ssize_t* slot, TableRef ref, long long p0, 
     if slot[0] == 0:
         slot[0] = (<TableHandle>ref).row_3(p0, p1, p2) + 1
     return slot[0] - 1
+# diag-run8 F3: the same for a key whose parts are fixed per item but may be objects (a str label):
+# the generated read tests the slot before evaluating the key, so the key is read once per item.
+cdef inline Py_ssize_t held_row_obj_1(Py_ssize_t* slot, TableRef ref, object p0) except -2:
+    if slot[0] == 0:
+        slot[0] = (<TableHandle>ref).row_1(p0) + 1
+    return slot[0] - 1
+cdef inline Py_ssize_t held_row_obj_2(Py_ssize_t* slot, TableRef ref, object p0, object p1) except -2:
+    if slot[0] == 0:
+        slot[0] = (<TableHandle>ref).row_2(p0, p1) + 1
+    return slot[0] - 1
+cdef inline Py_ssize_t held_row_obj_3(Py_ssize_t* slot, TableRef ref, object p0, object p1,
+                                      object p2) except -2:
+    if slot[0] == 0:
+        slot[0] = (<TableHandle>ref).row_3(p0, p1, p2) + 1
+    return slot[0] - 1
 # D78: the slot of a literal field of a held record handle, resolved on first use and held in a
 # per-instance slot (index + 1; 0 unresolved), reset with the handle. KeyError(name) as field().
 cdef inline Py_ssize_t held_field(Py_ssize_t* slot, RecordHandle r, object name) except -2:

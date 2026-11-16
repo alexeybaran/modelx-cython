@@ -1574,6 +1574,9 @@ class _Lowering(cst.CSTTransformer):
         held = self.held_row(ref.handle, parts)
         if held is not None:
             return held, (parts.note + '; held row (constant key)',)
+        held = self.held_item_row(ref.handle, parts, key_original)
+        if held is not None:
+            return held, (parts.note + '; held row (key fixed per item)',)
         return _method(ref.handle, f'row_{len(parts)}', *parts), (parts.note,)
 
     def held_row(self, handle, parts):
@@ -1597,6 +1600,41 @@ class _Lowering(cst.CSTTransformer):
         args = ', '.join(_code(part) for part in parts)
         return cst.parse_expression(
             f'{self.o.module}.held_row_{len(parts)}(_mx_cy.address(self.{field}), {local.value}, {args})')
+
+    def held_item_row(self, handle, parts, key_original):
+        """diag-run8 F3: ``(slot - 1) if slot else M.held_row_n(&slot, ref, p0, ...)`` for a complete
+        key whose parts are each fixed per item (``row_cells.item_constant``: a Space parameter or
+        Reference, a cached zero-argument Cell, an integer literal) read through a held handle: the
+        row is resolved by the first read of the item (the key evaluated only then) and held in a
+        per-instance slot reset with the item's caches; a missing key raises at every read, as
+        row_n. Integer parts take ``held_row_n``, any other ``held_row_obj_n``. None otherwise."""
+        from .row_cells import item_constant
+        if not 1 <= len(parts) <= 3 or not isinstance(handle, cst.Call) or not handle.args:
+            return None
+        local = handle.args[-1].value
+        held = self._held_locals.get(local.value) if isinstance(local, cst.Name) else None
+        if held is None:
+            return None
+        originals = ([e.value for e in key_original.elements] if isinstance(key_original, cst.Tuple)
+                     else [key_original])
+        cached = getattr(self.o.resolver, 'cached_cells', ())
+        if len(originals) != len(parts) or not all(
+                item_constant(o, lambda call: self.o.cell_of(call) in cached) for o in originals):
+            return None
+        fields = getattr(self.o.cls_info, 'held_table_rows', None)
+        if fields is None:
+            fields = self.o.cls_info.held_table_rows = {}
+        key = (held, tuple(_code(o) for o in originals))
+        field = fields.get(key)
+        if field is None:
+            field = fields[key] = f'_mx_tr_{len(fields)}'
+        ints = all(_constant_int(part) or (isinstance(part, cst.Call) and _code(part.func) == '_mx_cy.cast'
+                   and _code(part.args[0].value) == '_mx_cy.longlong') for part in parts)
+        args = ', '.join(_code(part) for part in parts)
+        helper = f'held_row_{len(parts)}' if ints else f'held_row_obj_{len(parts)}'
+        return cst.parse_expression(
+            f'((self.{field} - 1) if self.{field} != 0 else '
+            f'{self.o.module}.{helper}(_mx_cy.address(self.{field}), {local.value}, {args}))')
 
     def consumer(self, original):
         """How the parent uses an inline selection: 'read' (field, column, loc/at/index),

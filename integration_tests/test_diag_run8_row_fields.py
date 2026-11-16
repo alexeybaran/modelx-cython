@@ -1,8 +1,9 @@
 """diag-run8 F3 on a compiled model: fields of a row cell (``model_point = points().loc[policy_id]``) whose
 every use is a field read are read from the table row by the readers, without building the row; the row
 cell itself, called from Python, still gives its row. A key missing from the table is raised by the
-reader with the type and message live gives. A row cell with an object key part, and a model where the row escapes (returned by a
-public Cell), keep the Record path. Compiled equals the exported model, values and errors."""
+reader with the type and message live gives. The row position is held per item
+(an integer or a str key, looked up once per item, reset between policies and by clear_all). A model
+where the row escapes (returned by a public Cell) keeps the Record path. Compiled equals the exported model, values and errors."""
 
 import json
 import subprocess
@@ -42,7 +43,7 @@ def build(escape=False):
     proj.new_cells("sex", 'lambda: Sex[model_point()["sex"]]')
     proj.new_cells("both", 'def both():\\n    mp = model_point()\\n    return mp["sa"] * mp["age"]\\n')
     proj.new_cells("cost_id", 'lambda: "A" if policy_id < 3 else "B"')
-    proj.new_cells("cost_row", "lambda: data.costs().loc[cost_id()]")      # an object key: kept
+    proj.new_cells("cost_row", "lambda: data.costs().loc[cost_id()]")      # a str key, held per item
     proj.new_cells("fee", 'lambda: float(cost_row()["fee"])')
     proj.new_cells("pv", "lambda: sa() * (1.0 + 0.01 * age()) + 10.0 * sex() + both() + fee()")
     if escape:
@@ -66,8 +67,18 @@ for call in ("sa", "pv"):
         out.append(("value", call))
     except Exception as e:
         out.append(("raise", call, type(e).__name__, str(e)))
-# a key removed from the table in place, then cleared (D130): the direct route and a collect at 1 and 4 workers
 m = package.mx_model
+setter = getattr(m, "_mx_collect_set_workers_v2", None)
+for workers in (1, 4):                   # the held row is reset between policies, on both routes
+    if setter is not None:
+        setter(workers)
+    out.append(("collect", workers, round(float(m.Projection.collect().sum.pv), 9)))
+# an in-place edit (D130): nothing changes until clear_all, then every reader reads the edited row
+m.Data.points().loc[1, "sa"] = 999.0
+out.append(("edited, not cleared", m.Projection[1].sa()))
+m.Projection.clear_all()
+out.append(("edited, cleared", m.Projection[1].sa(), float(m.Projection[1].pv())))
+# a key removed from the table in place, then cleared (D130): the direct route and a collect at 1 and 4 workers
 frame = m.Data.points()
 frame.drop(2, inplace=True)
 m.Projection.clear_all()
@@ -126,8 +137,11 @@ def test_row_fields_read_without_the_row(tmp_path):
         assert f"('raise', {route}, 'KeyError', '2')" in outs[f"{name}_nomx"], (route, outs)
     assert cells["model_point"]["row_cell_inlined"] is True, cells["model_point"]
     assert sum(cells[c]["row_fields_inlined"] for c in ("sa", "age", "sex", "both")) == 4, cells
-    assert cells["cost_row"]["row_cell_kept"] == "a key part is not a C integer", cells["cost_row"]
-    assert cells["fee"]["row_fields_inlined"] == 0, cells["fee"]
+    # a str key is held per item too (diag-run8 F3 held row): read once per item, then by position
+    assert cells["cost_row"]["row_cell_inlined"] is True, cells["cost_row"]
+    assert cells["fee"]["row_fields_inlined"] == 1, cells["fee"]
+    assert "held_row_obj_1(" in generated and "held_row_1(" in generated
+    assert "'edited, cleared', 999.0" in outs[f"{name}_nomx"], outs
 
 
 def test_an_escaping_row_keeps_the_record_path(tmp_path):

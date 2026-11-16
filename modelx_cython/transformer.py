@@ -778,10 +778,11 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
                     if cell is None or cell.has_args() or not cell.has_formula_def:
                         refused[name] = 'not a cached zero-argument Cell'
                         del accepted[name]
-                    elif not self._row_key_is_int(accepted[name], cls_info, cell):
-                        # each reader looks the row up again: only C-integer key parts are cheap and
-                        # touch no shared key object (an object key would be hashed and compared per read)
-                        refused[name] = 'a key part is not a C integer'
+                    elif not all(row_cells.item_constant(part, self._cached_call)
+                                 for part in row_cells.key_parts(accepted[name])):
+                        # readers hold the row per item (table_reads.held_item_row): every key part
+                        # must be fixed per item, so the key is looked up once per item
+                        refused[name] = 'a key part is not fixed per item'
                         del accepted[name]
             for name, why in refused.items():
                 if name in cls_info.cells:
@@ -791,20 +792,11 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
             cache[cls_info.name] = accepted
         return cache[cls_info.name]
 
-    def _row_key_is_int(self, expr, cls_info, cell):
-        """Every part of the row cell's key is a non-bool C integer (``TableReads.is_int`` in the
-        row cell's own formula); False when it cannot be decided."""
-        from modelx_cython.table_reads import TableReads, _Formula
-        key = expr.slice[0].slice.value
-        parts = [e.value for e in key.elements] if isinstance(key, cst.Tuple) else [key]
-        try:
-            owner = TableReads(self._resolver, cls_info, cell, set(), self.module.spec.policy, [])
-            owner.formula = _Formula(cst.parse_statement(
-                'def _f_row(self):\n    return ' + cst.Module(body=[]).code_for_node(expr) + '\n'))
-            owner._key_locals = set()
-            return all(owner.is_int(part) for part in parts)
-        except Exception:       # noqa: BLE001 - undecided keys keep the Record path
-            return False
+    def _cached_call(self, call):
+        """A self-rooted zero-argument call of a cached Cell (the resolver's cached_cells)."""
+        name = call.func.attr.value if isinstance(call.func, cst.Attribute) else None
+        cached = getattr(self._resolver, 'cached_cells', ())
+        return name is not None and any(str(c).endswith('._f_' + name) for c in cached)
 
     def _table_reads_with_row_fields(self, node, cls_info, cells):
         """diag-run8 F3: a formula reading fields of accepted row cells is lowered with each
@@ -819,7 +811,9 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
             if inline.count:
                 lowered = self._table_reads(candidate, cls_info, cells)
                 code = cst.Module(body=[]).code_for_node(lowered)
-                if not any(cst.Module(body=[]).code_for_node(expr) in code for expr in rows.values()):
+                # every inlined read must be native and hold its row per item (no lookup per read)
+                if (not any(cst.Module(body=[]).code_for_node(expr) in code for expr in rows.values())
+                        and code.count('held_row_') >= 1):
                     cells.row_fields_inlined = inline.count
                     return lowered
         return self._table_reads(node, cls_info, cells)
