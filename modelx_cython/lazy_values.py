@@ -91,6 +91,11 @@ static PyObject *mx_alloc_values(PyTypeObject *t, Py_ssize_t n, PyTypeObject *ex
     PyObject_GC_Track(o);
     return o;
 }
+/* A real, zeroed instance of the class (tp_new not run) whose field addresses give the layout: an
+   address taken through any other object would point outside that object. Released by the caller. */
+static PyObject *mx_probe_instance(void *t) {
+    return PyType_GenericAlloc((PyTypeObject *)t, 0);
+}
 static int mx_type_kind_ok(PyTypeObject *tp) {
     unsigned long excluded = Py_TPFLAGS_HEAPTYPE;
 #ifdef Py_TPFLAGS_MANAGED_DICT
@@ -182,6 +187,7 @@ def pxd_declarations(module):
     code = _HELPER + ''.join(_PER_CLASS.format(cls=_tag(module, cls), n2=2 * len(cells), n5=5 * len(cells))
                              for cls, cells in owners.items())
     lines = ['cdef extern from *:', '    """'] + ['    ' + line for line in code.strip('\n').splitlines()] + ['    """']
+    lines.append('    object mx_probe_instance(void *t)')
     for cls in owners:
         lines += [f'    void mx_set_range_{_tag(module, cls)}(Py_ssize_t value, Py_ssize_t size, Py_ssize_t element, '
                   'Py_ssize_t flag, Py_ssize_t flag_element)',
@@ -200,7 +206,9 @@ def module_tail(module):
     for cls, cells in owners.items():
         tag = _tag(module, cls)
         out += ['@_mx_cy.cfunc', f'def _mx_install_values_{cls}() -> _mx_cy.bint:',
-                f'    o: {cls} = _mx_cy.cast({cls}, None)',
+                # offsets are taken on a real instance, so every address stays inside its object
+                f'    probe = mx_probe_instance(_mx_cy.cast(_mx_cy.p_void, {cls}))',
+                f'    o: {cls} = _mx_cy.cast({cls}, probe)',
                 '    base: _mx_cy.Py_ssize_t = _mx_cy.cast(_mx_cy.Py_ssize_t, _mx_cy.cast(_mx_cy.p_void, o))',
                 '    layout = []',
                 '    value: _mx_cy.Py_ssize_t', '    flag: _mx_cy.Py_ssize_t']

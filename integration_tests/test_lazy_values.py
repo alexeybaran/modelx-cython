@@ -53,8 +53,10 @@ def _build(tmp_path):
         'p = mx_model.Projection\n'
         'p.collect(); mx_model.Portfolio.direct()\n'
         '[p.base_rate(t) for t in range(40)]\n', encoding='utf-8')
-    subprocess.run([sys.executable, '-m', 'modelx_cython', 'exported', '--sample', 'sample.py', '--no-spec'],
-                   cwd=tmp_path, check=True)
+    done = subprocess.run([sys.executable, '-m', 'modelx_cython', 'exported', '--sample', 'sample.py', '--no-spec'],
+                          cwd=tmp_path, capture_output=True, text=True)
+    assert done.returncode == 0, done.stdout[-3000:] + done.stderr[-3000:]
+    return done.stdout + done.stderr
 
 
 VALUES = textwrap.dedent('''\
@@ -268,3 +270,12 @@ def test_the_build_fails_when_the_reduce_function_is_not_found_exactly_once(tmp_
     assert '{\n  mx_zero_unset_pkg_mod_mxv__c_A((PyObject *)__pyx_v_self);\n  int x;' in text
     lazy_values.patch_reduce(once)                      # idempotent
     assert text == once.read_text(encoding='utf-8')
+
+
+def test_the_generated_module_compiles_without_warnings(tmp_path):
+    # the allocator takes field offsets on a real instance (mx_probe_instance): an address taken
+    # through None pointed outside that object, and gcc reported it as -Warray-bounds
+    output = _build(tmp_path)
+    warnings = [line for line in output.splitlines() if '_mx_classes.c:' in line and 'warning:' in line]
+    assert not any('Warray-bounds' in line for line in output.splitlines()), warnings[:5]
+    assert not warnings, warnings[:5]
