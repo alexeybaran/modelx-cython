@@ -40,9 +40,9 @@ CHECKS = """\
 import sys
 from importlib import import_module
 p = import_module(sys.argv[1]).mx_model.Projection
-# row values compared as numbers: a live all-numeric row Series upcasts its ints to float, the compiled row
-# keeps them (pre-existing, also without diag-run8 F3; recorded as open)
+# row values compared as numbers; the type of the public row is compared in the xfail test below
 print(repr([(p[i].sa(), p[i].pv(), sorted((str(k), float(v)) for k, v in p[i].model_point().items())) for i in (1, 2, 3)]))
+print(type(p[1].model_point()).__name__)
 """
 
 
@@ -66,11 +66,20 @@ def test_derived_space_keeps_the_record_path(tmp_path, override):
                                     capture_output=True, text=True)
     run("build_model.py")
     run("-m", "modelx_cython", name, "--sample", "sample.py", "--spec", "spec.py")
-    outs = {pkg: run("checks.py", pkg).stdout for pkg in (name + "_cy", name)}
-    assert outs[name + "_cy"] == outs[name], outs
+    outs = {pkg: run("checks.py", pkg).stdout.splitlines() for pkg in (name + "_cy", name)}
+    assert outs[name + "_cy"][0] == outs[name][0], outs
     report = json.loads((tmp_path / f"{name}_cy/_mx_admission.json").read_text(encoding="utf-8"))
     rows = {k: v for k, v in report.items() if isinstance(v, dict) and k.endswith("._f_model_point")}
     assert rows and all(v["row_cell_inlined"] is False and "another class" in (v["row_cell_kept"] or "")
                         for v in rows.values()), rows
     readers = [v for k, v in report.items() if isinstance(v, dict) and k.endswith("._f_sa")]
     assert readers and all(v["row_fields_inlined"] == 0 for v in readers), readers
+
+
+@pytest.mark.xfail(strict=True, reason="open, pre-existing (also without F3): in a derived Space the compiled "
+                                       "public row cell returns the helper Record, live returns a pandas Series")
+def test_derived_space_public_row_is_a_pandas_row(tmp_path):
+    test_derived_space_keeps_the_record_path(tmp_path, "none")
+    out = subprocess.run([sys.executable, "checks.py", "d_none_cy"], cwd=tmp_path, check=True,
+                         capture_output=True, text=True).stdout.splitlines()
+    assert out[1] == "Series", out

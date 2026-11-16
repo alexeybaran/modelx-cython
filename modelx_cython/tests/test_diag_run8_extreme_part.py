@@ -34,3 +34,12 @@ def test_label_level_variable_index_and_single_level_keep_their_forms():
     for source in declined:
         text, _, _ = lower(base_model(), source)
         assert 'part_int' not in text, text
+
+
+def test_a_subscript_of_a_single_level_extreme_keeps_the_read_as_written():
+    source = 'def _f_x(self, t):\n    return self.mort_table().index.max()[0]\n'
+    text, reads, _ = lower(base_model(), source)
+    assert '.index.max()[0]' in text and 'last_int' not in text, text
+    receiver = base_model().receiver()
+    assert _run(text, receiver, (0,), RUNTIME) == _run(source, receiver, (0,), {})
+    assert _run(source, receiver, (0,), {})[0] == 'raise'
