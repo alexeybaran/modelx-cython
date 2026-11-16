@@ -88,3 +88,8 @@ def test_enum_labels_lower_to_c_integers_with_live_values_and_errors(tmp_path, m
     assert labels['compare'] == 1, labels
     pxd = (tmp_path / 'exported_cy/_mx_classes.pxd').read_text(encoding='utf-8')
     assert 'cdef inline long long _mx_enum_label_0(object receiver, object label)' in pxd, pxd
+    # the member-name fast path takes no reference on the enum class, its members or the label
+    sys.path.insert(0, os.path.dirname(__file__))
+    from _diag_run8_c import refcount_operations
+    c_text = (tmp_path / 'exported_cy/_mx_classes.c').read_text(encoding='utf-8')
+    assert refcount_operations(c_text, '_mx_enum_label_0', 'getattr(receiver,') == []

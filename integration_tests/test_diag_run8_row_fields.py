@@ -66,6 +66,26 @@ for call in ("sa", "pv"):
         out.append(("value", call))
     except Exception as e:
         out.append(("raise", call, type(e).__name__, str(e)))
+# a key removed from the table in place, then cleared (D130): the direct route and a collect at 1 and 4 workers
+m = package.mx_model
+frame = m.Data.points()
+frame.drop(2, inplace=True)
+m.Projection.clear_all()
+for call in ("sa", "pv"):
+    try:
+        getattr(m.Projection[2], call)()
+        out.append(("value", "direct", call))
+    except Exception as e:
+        out.append(("raise", "direct", call, type(e).__name__, str(e)))
+for workers in (1, 4):
+    setter = getattr(m, "_mx_collect_set_workers_v2", None)
+    if setter is not None:
+        setter(workers)
+    try:
+        m.Projection.collect()
+        out.append(("value", "collect", workers))
+    except Exception as e:
+        out.append(("raise", "collect", workers, type(e).__name__, str(e)))
 print(repr(out))
 """
 
@@ -102,6 +122,8 @@ def test_row_fields_read_without_the_row(tmp_path):
     outs, cells, generated, name = _build(tmp_path, escape=False)
     assert outs[f"{name}_nomx_cy"] == outs[f"{name}_nomx"], outs
     assert "'raise', 'sa', 'KeyError', '99'" in outs[f"{name}_nomx"], outs       # the missing key, as live
+    for route in ("'direct', 'sa'", "'collect', 1", "'collect', 4"):          # a removed key, as live
+        assert f"('raise', {route}, 'KeyError', '2')" in outs[f"{name}_nomx"], (route, outs)
     assert cells["model_point"]["row_cell_inlined"] is True, cells["model_point"]
     assert sum(cells[c]["row_fields_inlined"] for c in ("sa", "age", "sex", "both")) == 4, cells
     assert cells["cost_row"]["row_cell_kept"] == "a key part is not a C integer", cells["cost_row"]
