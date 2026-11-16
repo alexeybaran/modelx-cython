@@ -1637,6 +1637,13 @@ class _Lowering(cst.CSTTransformer):
         extreme = self._extreme_part(original, updated)
         if extreme is not None:
             return extreme
+        known = self._kinds.get(id(updated.value))
+        if known is not None and known[0] in C_INT_METHODS:
+            # a subscript of a read lowered to a C integer (``T.index.max()[0]`` on one integer level):
+            # pandas gives a scalar there, and indexing it raises at run time; the subscript keeps the
+            # read as written, so the Python path gives live's value or error (diag-run8)
+            self.decline(original, 'subscript of a scalar index read; ' + PYTHON)
+            return updated.with_changes(value=original.value)
         parts = _subscript_parts(original)
         value = original.value
         if parts is None:
