@@ -13,7 +13,6 @@ def storage(name):
 
 def prepare(module):
     module.code_enum_symbols = {}
-    module.code_enum_labels = {}        # diag-run8: (class, Ref) -> (function, ((member, symbol), ...))
     identifiers = Names(module.visitor.wrapper.module)
     for cls in module.classes.values():
         markers = {name: ref.enum_definitions for name,ref in cls.refs.items()
@@ -37,33 +36,14 @@ def prepare(module):
 def declarations(module):
     if not getattr(module, 'code_enum_symbols', {}):
         return ''
-    text = 'cdef enum:\n' + ''.join(f'    {symbol} = {value}\n'
+    return 'cdef enum:\n' + ''.join(f'    {symbol} = {value}\n'
         for symbol,value in module.code_enum_symbols.values())
-    for (cls_name, ref), (function, members) in getattr(module, 'code_enum_labels', {}).items():
-        text += label_function(function, ref, members)
-    return text
-
-
-def label_function(function, ref, members):
-    """diag-run8: ``self.<Ref>[label]`` of an admitted enum in a C-integer position, as an inline
-    function of the module's ``.pxd``. An exact ``str`` label equal to a member name gives that
-    member's constant, compared without touching the enum class, its members or their ints (shared
-    by every worker). Any other label (another member name such as an alias, an unknown name, a
-    non-string operand) runs ``self.<Ref>[label]`` as written, so the member, the KeyError and its
-    message are the ones live gives; the member then converts to its value as before."""
-    lines = [f'\ncdef inline long long {function}(object receiver, object label) except? -1:',
-             '    if type(label) is str:']
-    lines += [f'        if label == {member!r}:\n            return {symbol}' for member, symbol in members]
-    lines.append(f'    return <long long>getattr(receiver, {ref!r})[label]\n')
-    return '\n'.join(lines)
 
 
 class Constants(FormulaTransformer):
-    def __init__(self, cls, cell, symbols, labels=None):
+    def __init__(self, cls, cell, symbols):
         super().__init__()
         self.cls, self.cell, self.symbols = cls, cell, symbols
-        self.module_labels = labels     # diag-run8: the module's label functions (None: not lowered)
-        self.labels = 0
         self.locals = set()
         self.count = 0
         self.comparisons = 0
@@ -316,35 +296,6 @@ class Constants(FormulaTransformer):
         self.member_fields = fields.count
         return after
 
-    def label_member(self, node):
-        """diag-run8: ``self.<Ref>[label]`` (one plain subscript) of an admitted enum whose every
-        member has a module constant, as ``<function>(self, label)``, a C integer (see
-        ``label_function``); else None. The label is evaluated once, as written."""
-        if not (isinstance(node, cst.Subscript) and len(node.slice) == 1
-                and isinstance(node.slice[0].slice, cst.Index) and node.slice[0].slice.star is None
-                and isinstance(node.value, cst.Attribute) and isinstance(node.value.value, cst.Name)
-                and node.value.value.value == 'self'):
-            return None
-        name = node.value.attr.value
-        ref = self.cls.refs.get(name)
-        enum = getattr(ref, 'enum', None)
-        if not enum or not getattr(ref, 'enum_safe', False):
-            return None
-        members = tuple((member, self.symbols.get((self.cls.name, name, member), (None,))[0])
-                        for member in enum[2])
-        if not members or any(symbol is None for _, symbol in members):
-            return None
-        labels = self.module_labels
-        if labels is None:
-            return None
-        key = (self.cls.name, name)
-        if key not in labels:
-            labels[key] = (f'_mx_enum_label_{len(labels)}', members)
-        self.count += 1
-        self.labels += 1
-        return cst.Call(cst.Name(labels[key][0], lpar=node.lpar, rpar=node.rpar),
-                        (cst.Arg(cst.Name('self')), cst.Arg(node.slice[0].slice.value)))
-
     def member(self, node):
         """``self.<Ref>.<member>`` of an admitted enum as its module constant, else ``node``.
 
@@ -367,9 +318,6 @@ class Constants(FormulaTransformer):
             if entry:
                 self.count += 1
                 return cst.Name(entry[0],lpar=node.lpar,rpar=node.rpar)
-        label = self.label_member(node)
-        if label is not None:
-            return label
         return node
 
     def _c_integer_branch(self, before, after):
@@ -423,9 +371,6 @@ class Constants(FormulaTransformer):
         identity = self.member_identity(after, comp)
         if identity is not None:
             return identity
-        labelled = self.label_comparison(after, comp)
-        if labelled is not None:
-            return labelled
         if self.integer(after.left):
             if isinstance(comp.operator, (cst.Equal,cst.NotEqual)):
                 member = self.member(comp.comparator)
@@ -455,33 +400,6 @@ class Constants(FormulaTransformer):
                 self.decline(before, 'the left operand is not a typed integer (an object or untraced '
                              'value) and is not a name, or an element is not a constant or a member')
         return after
-
-    def label_comparison(self, after, comp):
-        """diag-run8: ``E[label] == x`` / ``!=`` (either order) where the other side is a member of
-        the same admitted enum or a typed integer: both sides as C integers (``label_member`` and the
-        member's constant). An IntEnum member compares as its value, so the result is the one the
-        member objects give; the operands keep their order of evaluation."""
-        if not isinstance(comp.operator, (cst.Equal, cst.NotEqual)):
-            return None
-        left, right = after.left, comp.comparator
-        for one, other in ((left, right), (right, left)):
-            if not (isinstance(one, cst.Subscript) and isinstance(one.value, cst.Attribute)):
-                continue
-            name = one.value.attr.value
-            if not (self.member_ref(other) == name and not isinstance(other, cst.IfExp)
-                    or self.integer(other)):
-                continue
-            count = self.count
-            lowered = self.label_member(one)
-            if lowered is None:
-                self.count = count
-                continue
-            constant = self.member(other)
-            self.comparisons += 1
-            if one is left:
-                return after.with_changes(left=lowered, comparisons=(comp.with_changes(comparator=constant),))
-            return after.with_changes(left=constant, comparisons=(comp.with_changes(comparator=lowered),))
-        return None
 
     def member_identity(self, after, comp):
         """D98: ``x is E.M`` / ``x is not E.M`` (either order) where ``x`` is typed as a C integer

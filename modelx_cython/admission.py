@@ -94,7 +94,6 @@ def describe(module_infos):
                     'native_reductions': getattr(cell, 'native_reductions', 0),
                     'native_enum_comparisons': getattr(cell, 'native_enum_comparisons', 0),
                     'native_enum_constants': getattr(cell, 'native_enum_constants', 0),
-                    'native_enum_labels': getattr(cell, 'native_enum_labels', 0),   # diag-run8
                     'row_fields_inlined': getattr(cell, 'row_fields_inlined', 0),   # diag-run8 F3
                     'row_cell_inlined': getattr(cell, 'row_cell_inlined', False),
                     'row_cell_kept': getattr(cell, 'row_cell_kept', None),

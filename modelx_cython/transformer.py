@@ -702,12 +702,10 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
             cells.native_reductions = reductions.count
             cells.native_tuple_int_loops = getattr(reductions, 'tuple_int_loops', 0)   # diag-scale P3
             cells.exact_reduction_guards = reductions.exact_receiver_guards
-        enum_comparisons = code_enums.Constants(cls_info, cells, self.module.code_enum_symbols,
-                                                   getattr(self.module, 'code_enum_labels', None))
+        enum_comparisons = code_enums.Constants(cls_info, cells, self.module.code_enum_symbols)
         node = node.visit(enum_comparisons)
         cells.native_enum_comparisons = enum_comparisons.comparisons
         cells.native_enum_constants = enum_comparisons.count
-        cells.native_enum_labels = enum_comparisons.labels       # diag-run8
         operations = set(rounded_inputs.operations)
         node = self._bind_declared_helpers(node, cls_info, cells, operations)
         admitted_helpers = set(cells.native_helpers)
