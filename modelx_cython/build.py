@@ -108,12 +108,6 @@ def fp_contract_off(cmdclass, providers=()):
 
     class ModelFloatingPoint(cmdclass.get('build_ext', build_ext)):
         def build_extension(self, extension):
-            if extension.name not in providers:
-                # lazy_values: the zeroing call first in each lazily allocated class's __reduce_cython__
-                from modelx_cython import lazy_values
-                for source in getattr(extension, 'sources', ()) or ():
-                    if str(source).endswith('.c'):
-                        lazy_values.patch_reduce(source)
             args = list(extension.extra_compile_args or ())
             if (extension.name not in providers and FP_CONTRACT_OFF not in args
                     and self.compiler.compiler_type in ('unix', 'mingw32', 'cygwin')):

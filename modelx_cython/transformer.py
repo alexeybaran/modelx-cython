@@ -70,7 +70,6 @@ from modelx_cython.powers import rewrite_powers
 from modelx_cython.inline_entries import add_inline_entries, allows_exact_receiver
 from modelx_cython.cell_entries import CacheHit, DenseEntry, dense_condition
 from modelx_cython import numeric_cache
-from modelx_cython import lazy_values
 from modelx_cython import enums as code_enums
 from modelx_cython import table_cells
 
@@ -164,7 +163,6 @@ class PXDGenerator:
     from {package} cimport {MX_SYS_MOD}
     {child_cimports}
 
-    {lazy_values}
     {class_defs}
     """)
 
@@ -232,7 +230,6 @@ class PXDGenerator:
             cmodule_imports=self.cmodule_imports,
             MX_SYS_MOD=MX_SYS_MOD,
             child_cimports=self.child_cimports,
-            lazy_values=lazy_values.pxd_declarations(self.module),
             class_defs=self.class_defs
         )
 
