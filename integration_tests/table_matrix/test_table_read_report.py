@@ -116,14 +116,14 @@ def test_untyped_reads_are_reported_and_per_step_ones_warned(tmp_path):
     assert report[INPUTS + 'curve']['table_reads_typed'] == 0
     assert report[INPUTS + 'curve']['table_reads_keys'] == []
     classes = (tmp_path / 'exported_cy/_m_Portfolio/_mx_classes.py').read_text(encoding='utf-8')
-    assert classes.startswith('# cython: infer_types=True, overflowcheck=True\n')    # default on (W1.5, D57)
+    assert classes.startswith(f"# cython: infer_types=True, overflowcheck={json.loads((tmp_path / 'exported_cy/_mx_integer_checks.json').read_text())['mode'] == 'checked'}\n")  # the resolved integer mode
 
 
 def test_spec_key_infer_types(tmp_path):
     _model(tmp_path)
     report, _ = _translate(tmp_path, {'infer_types': True})
     classes = (tmp_path / 'exported_cy/_m_Portfolio/_mx_classes.py').read_text(encoding='utf-8')
-    assert classes.startswith('# cython: infer_types=True, overflowcheck=True\n'), classes[:200]
+    assert classes.startswith(f"# cython: infer_types=True, overflowcheck={json.loads((tmp_path / 'exported_cy/_mx_integer_checks.json').read_text())['mode'] == 'checked'}\n"), classes[:200]
     upper = report[INPUTS + 'upper']     # no clamp recogniser
     assert not any('clamped' in name for name in upper['native_numeric_helpers']), upper
     assert upper['table_reads_untyped'][0]['reason'] == (

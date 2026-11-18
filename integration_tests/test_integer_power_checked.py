@@ -32,7 +32,17 @@ OUTSIDE = {"const_exponent": 9, "local_base": 9, "float_context": 9, "variable_e
 
 @pytest.fixture(scope="module")
 def power_build(tmp_path_factory):
-    work = tmp_path_factory.mktemp("integer-power")
+    # the checked mode (owner's rule): the small sample would resolve the unchecked mode
+    return _power_build(tmp_path_factory, "checked")
+
+
+@pytest.fixture(scope="module")
+def power_build_unchecked(tmp_path_factory):
+    return _power_build(tmp_path_factory, "unchecked")
+
+
+def _power_build(tmp_path_factory, mode):
+    work = tmp_path_factory.mktemp(f"integer-power-{mode}")
     model = mx.new_model("IntegerPower")
     try:
         space = model.new_space("Sp")
@@ -46,7 +56,7 @@ def power_build(tmp_path_factory):
     (work / "sample.py").write_text(
         "from exported import mx_model\nSp = mx_model.Sp\n"
         + "".join(f"Sp.{name}(2); Sp.{name}(3)\n" for name in INSIDE) + "Sp.h(0)\n")
-    (work / "spec.py").write_text(repr({"spaces": {"Sp": {"cells_param_size": {"t": 20}}}}))
+    (work / "spec.py").write_text(repr({"integer_checks": mode, "spaces": {"Sp": {"cells_param_size": {"t": 20}}}}))
     run = subprocess.run([sys.executable, "-B", "-m", "modelx_cython", "exported", "--sample", "sample.py",
                           "--spec", "spec.py"], cwd=work, capture_output=True, text=True, timeout=600)
     assert run.returncode == 0, run.stdout + run.stderr
@@ -60,9 +70,11 @@ def _probe(work, code):
     return json.loads(run.stdout.strip().splitlines()[-1])
 
 
-def test_power_inside_the_range_equals_live(power_build):
-    live = json.loads((power_build / "live.json").read_text())
-    compiled = _probe(power_build, f'''
+@pytest.mark.parametrize("mode", ["checked", "unchecked"])
+def test_power_inside_the_range_equals_live(power_build, power_build_unchecked, mode):
+    work = power_build if mode == "checked" else power_build_unchecked
+    live = json.loads((work / "live.json").read_text())
+    compiled = _probe(work, f'''
         import json
         from exported_cy import mx_model
         print(json.dumps({{name: {{str(t): repr(getattr(mx_model.Sp, name)(t)) for t in ts}}
@@ -91,7 +103,7 @@ def test_power_beyond_64_bits_raises_naming_the_cell(power_build):
     for name in OUTSIDE:
         kind, text = outcome[name]
         assert kind == "OverflowError", (name, outcome[name])
-        assert text.startswith(f"Sp.{name} "), (name, text)
+        assert text.startswith(f"Sp.{name}:"), (name, text)
 
 
 def test_power_of_c_integers_uses_the_checked_power(power_build):
@@ -100,3 +112,10 @@ def test_power_of_c_integers_uses_the_checked_power(power_build):
         assert f"'Sp.{name}')" in source and "_mx_sys._mx_signed_pow(" in source
     # a negative exponent has a float value in Python: Cython's double power, left as it was
     assert "2 ** -" in source
+
+
+def test_unchecked_mode_power_is_plain_c(power_build_unchecked):
+    """Unchecked mode: an integer power of C integers is Cython's own C power (as on upstream):
+    no checked power in the generated code; beyond 64 bits it wraps."""
+    source = (power_build_unchecked / "exported_cy" / "_mx_classes.py").read_text(encoding="utf-8")
+    assert "_mx_signed_pow(" not in source
