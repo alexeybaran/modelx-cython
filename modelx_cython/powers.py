@@ -242,11 +242,24 @@ class OperandKind:
         )
 
 
+MX_SIGNED_POW = "_mx_signed_pow"
+
+
+def _nonnegative_integer(expr):
+    """``expr`` is an integer literal >= 0, as ``+2`` or ``20`` (not ``-1``)."""
+    if isinstance(expr, cst.UnaryOperation) and isinstance(expr.operator, cst.Plus):
+        expr = expr.expression
+    return isinstance(expr, cst.Integer)
+
+
 class _PowerRewriter(cst.CSTTransformer):
     """Replace provably real ``**`` operations with ``_mx_sys._mx_pow``."""
 
-    def __init__(self, operand_kind: OperandKind, memo=None, return_operands=None, local_kind=None) -> None:
+    def __init__(self, operand_kind: OperandKind, memo=None, return_operands=None, local_kind=None,
+                 path=None) -> None:
         super().__init__()
+        self._path = path                 # the Cell's "Space.cell", named by a checked integer power
+        self.integer_rewritten = 0
         self._kind = operand_kind
         self._local_kind = local_kind     # report only: which declined powers are integer powers
         self._return_operands = return_operands or {}
@@ -293,6 +306,22 @@ class _PowerRewriter(cst.CSTTransformer):
         else:
             base = self._kind.kind(original_node.left)
             exponent = self._kind.kind(original_node.right)
+        integer_base = base
+        if base == KIND_UNKNOWN and self._local_kind is not None:
+            # a local Cython infers from a C integer (infer_types): formula_local_kinds
+            integer_base = self._local_kind.kind(original_node.left)
+        if (integer_base == KIND_INT and self._path is not None
+                and not isinstance(original_node.left, cst.Integer)
+                and _nonnegative_integer(original_node.right)):
+            # Cython types a C integer raised to a non-negative integer literal as a C integer
+            # and computes it unchecked (__Pyx_pow_*): the checked power raises instead of wrapping
+            self.integer_rewritten += 1
+            return cst.Call(
+                func=cst.Attribute(value=cst.Name(MX_SYS_MOD), attr=cst.Name(MX_SIGNED_POW)),
+                args=[cst.Arg(updated_node.left.with_changes(lpar=(), rpar=())),
+                      cst.Arg(updated_node.right.with_changes(lpar=(), rpar=())),
+                      cst.Arg(cst.SimpleString(repr(self._path)))],
+                lpar=updated_node.lpar, rpar=updated_node.rpar)
         if exponent == KIND_FLOAT and base != KIND_UNKNOWN:
             self.rewritten += 1
             operation = MX_POW
@@ -456,7 +485,8 @@ def rewrite_powers(
             return_operands = {**(return_operands or {}), **accumulated}
     local_kinds = formula_local_kinds(node, cells.params, resolver, cells_kinds, ref_kinds, cls_fqname, param_kinds)
     rewriter = _PowerRewriter(kind, memo, return_operands, OperandKind(
-        resolver, cells_kinds, ref_kinds, cls_fqname, {**local_kinds, **param_kinds}) if local_kinds else None)
+        resolver, cells_kinds, ref_kinds, cls_fqname, {**local_kinds, **param_kinds}) if local_kinds else None,
+        path=getattr(cells, 'model_path', None))
     updated = node.body.visit(rewriter)
     # D62: powers left on Python's semantics inside a loop, for the admission report
     cells.powers_in_loops = list(rewriter.declined_in_loops)
@@ -466,9 +496,9 @@ def rewrite_powers(
             "fractional exponent there still compiles to complex "
             "arithmetic: " + "; ".join(rewriter.declined[:3])
         )
-    if not rewriter.rewritten:
+    if not rewriter.rewritten and not rewriter.integer_rewritten:
         return node
-    if memo:
+    if memo and rewriter.rewritten:
         cells.power_memo = memo
     return node.with_changes(body=updated)
 

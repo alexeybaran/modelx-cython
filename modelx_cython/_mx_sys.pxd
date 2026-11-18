@@ -154,6 +154,24 @@ cdef inline long long _mx_signed_left_shift(long long value, long long count, st
     return _mx_signed_mul(value, (<long long>1) << count, path)
 
 
+cdef inline long long _mx_signed_pow(long long base, long long exponent, str path) except? -1:
+    """``base ** exponent`` of two C integers, exactly or OverflowError naming the Cell (Cython's own
+    C integer power wraps). A negative exponent has a float value in Python, which a C integer
+    result cannot hold: TypeError naming the Cell. By squaring: each square taken is at most
+    the result in magnitude (|base| >= 2), so no check fails for a power that fits."""
+    cdef long long result = 1
+    if exponent < 0:
+        raise TypeError(
+            f"{path} requires an exact signed 64-bit integer. Rebuild with a wider sample or spec.")
+    while True:
+        if exponent & 1:
+            result = _mx_signed_mul(result, base, path)
+        exponent >>= 1
+        if exponent == 0:
+            return result
+        base = _mx_signed_mul(base, base, path)
+
+
 cdef inline long long _mx_signed_right_shift(long long value, long long count, str path) except? -1:
     if count < 0:
         raise ValueError("negative shift count")
