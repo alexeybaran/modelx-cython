@@ -132,6 +132,7 @@ class CellsResolver:
         # cells fqname -> 'pandas.DataFrame' / 'pandas.Series': zero-argument cells whose every
         # sampled result is that pandas class; reads through them are reported, never lowered.
         self.pandas_results = {}
+        self.frame_schemas = {}          # T-3: zero-argument cells fqname -> tracer.frame_schema
         self.admitted_tables = set()    # auto-tables: zero-argument cells admitted from a pandas frame
         self.cached_cells = set()
         self._cell_infos = {}
@@ -575,6 +576,7 @@ def build_resolver(module_infos) -> CellsResolver:
     observed_provider_results = {}
     table_schemas, table_results, cached_cells, cell_infos = {}, {}, set(), {}
     pandas_results = {}
+    frame_schemas = {}
     admitted_tables = set()
 
     for fqname, info in module_infos.items():
@@ -601,6 +603,9 @@ def build_resolver(module_infos) -> CellsResolver:
                 pandas_result = _pandas_result(cells)
                 if pandas_result is not None:
                     pandas_results[cells.fqname] = pandas_result
+                    frame = getattr(getattr(cells, '_rt', None), 'frame_schema', None)
+                    if frame is not None:
+                        frame_schemas[cells.fqname] = frame
                 if cells.has_formula_def:
                     cached_cells.add(cells.fqname)
                     cell_infos[cells.fqname] = cells
@@ -633,6 +638,7 @@ def build_resolver(module_infos) -> CellsResolver:
     resolver.table_schemas = table_schemas
     resolver.table_results = table_results
     resolver.pandas_results = pandas_results
+    resolver.frame_schemas = frame_schemas
     resolver.admitted_tables = admitted_tables
     resolver.cached_cells = cached_cells
     resolver._cell_infos = cell_infos

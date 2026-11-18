@@ -11,7 +11,8 @@ A class's ``HoldTable`` has one entry per held value, in three kinds:
 - ``column``: the column index, or record field slot, of one literal name read through a held handle
   (``_mx_tc_<n>``; 0 until resolved), keyed by (held field, name);
 - ``row``: the row of a key fixed per item and read through a held handle (``_mx_tr_<n>``; 0 until
-  resolved), keyed by (held field, key parts).
+  resolved), keyed by (held field, key parts);
+- ``prepared`` and ``prepared_slot`` (T-3): the PreparedTable of a pandas frame and the slot of a column in it.
 
 Which reads are held is decided in ``table_reads`` by traced type and data flow, never by how a read is
 spelled. This module only names the fields and gives their declarations and reset lines.
@@ -22,6 +23,11 @@ _KINDS = {
     'handle': ('_mx_th_', 'object', 'object', 'None'),
     'column': ('_mx_tc_', 'Py_ssize_t', '_mx_cy.Py_ssize_t', '0'),
     'row': ('_mx_tr_', 'Py_ssize_t', '_mx_cy.Py_ssize_t', '0'),
+    # T-3 (frame_reads): the PreparedTable of a pandas frame read per item, and the slot of one column in it
+    # (0 until resolved, as a new item's field starts; -1 when the read stays pandas; slot + 1 when native),
+    # keyed by (receiver, column, kind)
+    'prepared': ('_mx_tp_', 'object', 'object', 'None'),
+    'prepared_slot': ('_mx_tq_', 'Py_ssize_t', '_mx_cy.Py_ssize_t', '0'),
 }
 
 

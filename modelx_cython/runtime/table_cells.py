@@ -115,6 +115,24 @@ def clear_all(space):
     for target in cleared:
         target._mx_clear_values()
     rebuild_tables(model, cleared)
+    forget_prepared()
+
+
+# T-3: the PreparedTable caches of the loaded models (runtime _tables, one per compiled model); a clear drops
+# them, so a frame edited in place is prepared again on its next read
+_prepared_caches = []
+
+
+def register_prepared(forget):
+    with _lock:
+        _prepared_caches.append(forget)
+
+
+def forget_prepared():
+    with _lock:
+        caches = list(_prepared_caches)
+    for forget in caches:
+        forget()
 
 
 CLEARS = ("Clear the Space that depends on the change (Space.clear_all()) or the whole model "

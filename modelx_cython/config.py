@@ -59,6 +59,10 @@ class CompilerPolicy:
     # traced integer reaches UNCHECKED_LIMIT in magnitude, with them otherwise; 'checked' and
     # 'unchecked' force a mode. The build resolves 'auto' after the trace (resolve_integer_checks).
     integer_checks: str = 'auto'
+    # T-3 (toolkit p2/tables/DESIGN.md): the sample runs on the user's frames (no table admission or
+    # substitution); reads of a traced DataFrame or Series are lowered onto a PreparedTable bound to
+    # the real frame (frame_reads.py). False restores the admission of the older table layer.
+    prepared_tables: bool = True
 
     @classmethod
     def resolve(cls, data):
@@ -75,7 +79,8 @@ class CompilerPolicy:
             typed_table_reads=data.get('typed_table_reads', True),
             held_table_handles=data.get('held_table_handles', True),
             strict_tables=data.get('strict_tables', os.environ.get('MX_CY_STRICT_TABLES') == '1'),
-            integer_checks=data.get('integer_checks', 'auto'))
+            integer_checks=data.get('integer_checks', 'auto'),
+            prepared_tables=data.get('prepared_tables', True))
         for name, value in values.items():
             if name not in ('parallel_workers', 'native_cache_hits', 'integer_checks') and type(value) is not bool:
                 raise ValueError(f'{name} must be a boolean')

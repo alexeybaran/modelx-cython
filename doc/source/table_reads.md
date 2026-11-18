@@ -1,8 +1,8 @@
 # Table reads in compiled models
 
-**Status:** this page describes the target of the table redesign (steps T-1 to T-7). Until step T-3, compiled models
-still use the older table layer, and the probe test lists where it differs from live modelx
-(`integration_tests/test_table_probe.py`, `KNOWN`).
+**Status:** this page describes the target of the table redesign (steps T-1 to T-7). Since step T-3 the sample runs
+on the user's frames and the forms L1 and L7 are made fast; L2 to L6 follow in T-4 and T-5 and run on pandas until
+then. The probe test (`integration_tests/test_table_probe.py`) checks every compiled result against live modelx.
 
 ## Rule
 
@@ -35,9 +35,9 @@ One entry per cell that reads a table, one record per read site:
 ```json
 {
   "Calc.premium": [
-    {"line": 3, "expression": "T.loc[age, 'q']", "receiver": "Data.mort_table", "form": "L1"},
-    {"line": 4, "expression": "T.loc[T['q'] > x]", "receiver": "Data.mort_table", "form": "pandas",
-     "reason": "a boolean mask: not a recognised read"}
+    {"expression": "T.loc[age, 'q']", "receiver": "self.data.mort_table()", "form": "L1"},
+    {"expression": "T.loc[age, 'plan']", "receiver": "self.data.mort_table()", "form": "pandas",
+     "reason": "column 'plan' is not float64 or int64 in every trace"}
   ]
 }
 ```
@@ -48,12 +48,23 @@ One entry per cell that reads a table, one record per read site:
 - The report states what the build decided and why. It does not claim that a result equals live modelx: that
   claim is checked by the tests, not by the build.
 
+## How a fast read is bound
+
+- In an ItemSpace, each item binds the frame once, when its first fast read of that frame runs. The binding is
+  held in fields of the item and reset with its caches. Later reads take no reference on the frame, on the Data
+  Space's cached value, or on the prepared table.
+- In any other Space, the frame is looked up once per formula call.
+- A frame is found by identity. A new frame, assigned or recomputed, is prepared afresh. A clear (`Space.clear_all()`,
+  `Model.clear_all()`) drops every prepared copy.
+- A formula that edits a frame in place keeps all its reads of that frame on pandas.
+
 ## Input changes
 
 Compiled models follow live modelx:
 
-- assigning a new frame to a Data cell (`Data.T[()] = frame`) replaces it at once: no prepared copy of the old frame
-  is used afterwards;
+- assigning a new frame to a Data cell (`Data.T[()] = frame`) replaces it at once for every formula call in a Space
+  without items, and for every item created afterwards. An item that has already bound the old frame keeps it until
+  its Space is cleared, like its cached values;
 - results already cached stay cached until the dependent Space is cleared (`Space.clear_all()`), and are then
   recomputed from the new frame;
 - `Model.clear_all()` discards assigned inputs (the cell recomputes its formula), as on live modelx;
