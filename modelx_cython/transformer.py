@@ -1652,9 +1652,13 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
                             formula = (f'({table_cells.RUNTIME}.rebind_source({cache}) '
                                        f'if {cache} is not None else {formula})')
                         formula = f'{binder}({formula}{path})'
-                    if cells.is_locked or binder:
+                    shared = (cells.has_formula_def and not cells.is_locked
+                              and not numeric_cache.exclusively_owned(cells))
+                    if cells.is_locked or binder or shared:
                         if cells.is_locked:
                             body = self._locked_body(flag, cache, formula)
+                        elif shared:
+                            body = self._shared_body(flag, cache, formula, cells.get_rettype_expr())
                         else:
                             body = (f'if {flag}:\n'
                                     f'    return {cache}\n'
@@ -1707,6 +1711,34 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
         declaration = cst.parse_statement(f"{value_name}: object\n")
         body = body.visit(Lookup())
         return body.with_changes(body=(declaration,) + body.body)
+
+    @staticmethod
+    def _shared_body(has_expr: str, v_expr: str, f_expr: str, rettype: str) -> str:
+        """The body of a zero-argument cached cells of a Space shared by threads and not locked.
+
+        An instance of a Space that is not an ItemSpace (or that has dynamic References) can be
+        read by several threads at once, e.g. the Data Space by the workers of a collect. The
+        value is published once: a thread that misses runs the formula without a lock, then
+        stores the value and the flag inside ``cython.critical_section`` on the instance, only
+        if no other thread has stored one, so the field is written once and never cleared under
+        a reader; the flag is written through ``_mx_store_flag`` (a release store) after the
+        value and read through ``_mx_load_flag`` (an acquire load), so a reader that sees the
+        flag sees the whole value. Racing threads may each run the formula; all return the one
+        stored value. On a build with the GIL the critical section is a no-op and the stores do
+        not release the GIL.
+        """
+        load = f"{MX_SYS_MOD}._mx_load_flag({CY_MOD}.address({has_expr}))"
+        store = f"{MX_SYS_MOD}._mx_store_flag({CY_MOD}.address({has_expr}), True)"
+        return textwrap.dedent(f"""\
+            if {load}:
+                return {v_expr}
+            val: {rettype} = {f_expr}
+            with {CY_MOD}.critical_section({MX_SELF}):
+                if not {has_expr}:
+                    {v_expr} = val
+                    {store}
+            return {v_expr}
+            """)
 
     @staticmethod
     def _locked_body(has_expr: str, v_expr: str, f_expr: str, indent=0) -> str:
