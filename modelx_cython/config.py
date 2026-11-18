@@ -97,6 +97,10 @@ class CompilerPolicy:
 # integer guards: with every traced integer below 2**31 in magnitude, a product of two stays below
 # 2**62, so the ordinary arithmetic of a formula keeps far from the 64-bit limit
 UNCHECKED_LIMIT = 1 << 31
+UNCHECKED_LIMIT_NOTE = (
+    'Unchecked mode: intermediate values are not traced, so a product of several large terms or an '
+    'integer power could exceed 64 bits and would wrap, as on upstream; set "integer_checks": "checked" '
+    'in the spec to force the checked mode.')
 
 
 def resolve_integer_checks(policy, largest_traced_integer):
@@ -193,7 +197,9 @@ class TransSpec:
     without overflow checks (as plain C), ``"checked"`` with them; ``"auto"`` chooses unchecked when
     no traced integer (Cell arguments and results, References, ItemSpace parameters, integer
     columns of input tables) reaches 2**31 in magnitude. ``_mx_integer_checks.json`` records the
-    mode used and the largest traced integer.
+    mode used and the largest traced integer. Limit of the unchecked mode: intermediate values are
+    not traced, so a product of several large terms or an integer power could exceed 64 bits and
+    would wrap, as on upstream; set ``"integer_checks": "checked"`` to force the checked mode.
     ``"typed_table_reads"`` (default true; false keeps reads as Python calls): lower
     ``.loc``/``.at``/``.index`` reads on traced tables to typed handle reads, and (D78) a
     literal field read of a zero-argument record Cell (``model_point()["f"]``, also through a

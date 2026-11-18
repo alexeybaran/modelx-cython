@@ -414,6 +414,7 @@ def rewrite_powers(
     cells,
     *,
     builtin_float=False,
+    checked_integer_powers=True,
 ) -> cst.FunctionDef:
     """Rewrite the provably real powers in one method body.
 
@@ -486,7 +487,7 @@ def rewrite_powers(
     local_kinds = formula_local_kinds(node, cells.params, resolver, cells_kinds, ref_kinds, cls_fqname, param_kinds)
     rewriter = _PowerRewriter(kind, memo, return_operands, OperandKind(
         resolver, cells_kinds, ref_kinds, cls_fqname, {**local_kinds, **param_kinds}) if local_kinds else None,
-        path=getattr(cells, 'model_path', None))
+        path=getattr(cells, 'model_path', None) if checked_integer_powers else None)
     updated = node.body.visit(rewriter)
     # D62: powers left on Python's semantics inside a loop, for the admission report
     cells.powers_in_loops = list(rewriter.declined_in_loops)

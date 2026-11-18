@@ -711,6 +711,7 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
         node = rewrite_powers(
             node, self._resolver, self._cells_kinds, self._ref_kinds,
             cls_info.fqname, cells, builtin_float='float' in builtin_keys,
+            checked_integer_powers=self.module.spec.policy.integer_checks != 'unchecked',
         )
         from modelx_cython.ordered_arguments import preserve_argument_order
         from modelx_cython.powers import OperandKind, kind_of_type_expr, formula_local_kinds
@@ -726,7 +727,8 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
                                      cls_info.fqname, {**local_kinds, **param_kinds}),
             cells=cells, providers=self.helper_providers)
         cells.guarded_integer_ops = 0
-        if self.module.spec.policy.infer_types and cells.get_rettype_expr(c_style=True) != 'long long':
+        if (self.module.spec.policy.infer_types and cells.get_rettype_expr(c_style=True) != 'long long'
+                and self.module.spec.policy.integer_checks != 'unchecked'):
             # (an integer-result formula keeps the integer-boundary pass's own checked semantics)
             # D76: integer locals stay C integers; each integer operation on them that could
             # leave the 64-bit range runs natively within a safe bound, else exactly in Python
@@ -981,7 +983,9 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
         if self.module.spec.policy.infer_types:
             # M1 (spec key infer_types): C integer inference with overflow checks in
             # generated model modules; providers keep their own directives.
-            directives.append('infer_types=True, overflowcheck=True')
+            # integer guards: overflow checks only in the checked mode (owner's rule)
+            checked = self.module.spec.policy.integer_checks != 'unchecked'
+            directives.append(f'infer_types=True, overflowcheck={checked}')
         if directives:
             module = module.with_changes(header=(
                 cst.EmptyLine(comment=cst.Comment('# cython: ' + ', '.join(directives))), *module.header))

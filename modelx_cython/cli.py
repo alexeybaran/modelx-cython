@@ -325,11 +325,13 @@ def main_handler(args: argparse.Namespace, stdout: IO[str], stderr: IO[str]) -> 
 
         spec = TransSpec(d)
         # integer guards (owner's rule): the mode follows the largest traced integer
-        from .config import UNCHECKED_LIMIT, resolve_integer_checks
+        from .config import UNCHECKED_LIMIT, UNCHECKED_LIMIT_NOTE, resolve_integer_checks
         mode = resolve_integer_checks(spec.policy, logger.max_integer)
         integer_report = {'mode': mode, 'requested': spec.policy.integer_checks,
                           'largest_traced_integer': logger.max_integer, 'seen_at': logger.max_integer_at,
                           'unchecked_below': UNCHECKED_LIMIT}
+        if mode == 'unchecked':
+            integer_report['limit'] = UNCHECKED_LIMIT_NOTE
         spec.policy = dataclasses.replace(spec.policy, integer_checks=mode)
         _logger.info('integer checks: %s (largest traced integer %d at %s)',
                      mode, logger.max_integer, logger.max_integer_at)

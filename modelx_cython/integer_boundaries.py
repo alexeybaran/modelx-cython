@@ -245,8 +245,10 @@ def _guard_space_parameters(node, cell):
 
 class _GuardIntegers(cst.CSTTransformer):
     def __init__(self, path, kinds, native_helpers, arithmetic, signed_fields,
-                 signed_functions, signed_methods, signed_names, signed_return, error):
+                 signed_functions, signed_methods, signed_names, signed_return, error, checked=True):
         self.path = path
+        # integer guards: False in the unchecked mode, where C integer arithmetic stays plain C
+        self.checked = checked
         self.kinds = kinds
         self.native_helpers = native_helpers
         self.arithmetic = arithmetic
@@ -320,7 +322,10 @@ class _GuardIntegers(cst.CSTTransformer):
         if isinstance(value, cst.BinaryOperation) and type(value.operator) in _SIGNED_OPERATIONS:
             left, left_signed = self._signed_expression(value.left, path)
             right, right_signed = self._signed_expression(value.right, path)
-            if left_signed and right_signed and self.arithmetic.integer_interval(value, signed=True) is None:
+            # a right shift keeps its helper in both modes: Python rounds a negative value down,
+            # where C leaves the shift of a negative value to the implementation
+            if ((self.checked or isinstance(value.operator, cst.RightShift)) and left_signed and right_signed
+                    and self.arithmetic.integer_interval(value, signed=True) is None):
                 operation = _SIGNED_OPERATIONS[type(value.operator)]
                 checked = _boundary_call(operation, path, left, right)
                 return checked.with_changes(lpar=value.lpar, rpar=value.rpar), True
@@ -333,7 +338,7 @@ class _GuardIntegers(cst.CSTTransformer):
             if self.arithmetic.integer_interval(value, signed=True) is not None:
                 return value, True
             operand, signed = self._signed_expression(value.expression, path)
-            if signed and isinstance(value.operator, cst.Minus):
+            if signed and isinstance(value.operator, cst.Minus) and self.checked:
                 checked = _boundary_call('_mx_signed_sub', path, cst.Integer('0'), operand)
                 return checked.with_changes(lpar=value.lpar, rpar=value.rpar), True
             return value.with_changes(expression=operand), signed
@@ -382,7 +387,7 @@ class _GuardIntegers(cst.CSTTransformer):
             and self.arithmetic.integer_interval(part, signed=True) is None
             for part in walk(value)
         )
-        if needs_overflow_check:
+        if needs_overflow_check and self.checked:
             self.check_overflow = True
             if self.in_statement:
                 self.statement_overflow = True
@@ -677,7 +682,7 @@ class _ProvenGuards(cst.CSTTransformer):
 
 
 def _guard_result(node, cell, cls, resolver, cells_kinds, ref_kinds, signatures, native_helpers=(),
-                  argument_axes=()):
+                  argument_axes=(), checked=True):
     signed_return = node.returns is not None and node.returns.annotation.deep_equals(_INTEGER_ANNOTATION)
     divisibility = (node.returns is not None and dotted_name(node.returns.annotation) == f'{CY_MOD}.bint'
                     and not cell.is_locked and not cell.body_has_closure and divisibility_enabled(cell)
@@ -717,7 +722,7 @@ def _guard_result(node, cell, cls, resolver, cells_kinds, ref_kinds, signatures,
     error = Names(node).reserve('_mx_integer_overflow')
     guard = _GuardIntegers(cell.model_path, kinds, native_helpers, arithmetic, receiver_fields,
                            functions.difference(bindings), receiver_methods, signed_names, signed_return,
-                           error)
+                           error, checked)
     parameters = tuple(parameter.name.value for parameter in
                        (*node.params.posonly_params, *node.params.params, *node.params.kwonly_params))
     guard.python_locals = set()
@@ -818,6 +823,9 @@ def _python_locals(node, cell):
 
 def guard_integer_boundaries(state, module_info, resolver, cells_kinds, ref_kinds, cells, infer_types=False):
     """Check formula results, arguments and ItemSpace keys after entry lowering."""
+    # integer guards: arguments, keys and results are checked in both modes; arithmetic only in
+    # the checked mode
+    checked = module_info.spec.policy.integer_checks != 'unchecked'
     entries = {name: params for name, cell in cells.items() if (params := integer_parameters(cell))}
     private_entries = {
         name: (cell.model_path, params)
@@ -853,7 +861,7 @@ def guard_integer_boundaries(state, module_info, resolver, cells_kinds, ref_kind
                 axes = (cell.dense_logical_axes if cell.has_formula_def and cell.has_args() and cell.has_typeinfo()
                         and cell.is_arrayable() else ())
                 node = _guard_result(node, cell, cls, resolver, cells_kinds, ref_kinds, signatures,
-                                     argument_axes=axes)
+                                     argument_axes=axes, checked=checked)
                 if infer_types:
                     node = _python_locals(node, cell)
                 changed = True
@@ -868,7 +876,7 @@ def guard_integer_boundaries(state, module_info, resolver, cells_kinds, ref_kind
             if name.startswith(FORMULA_PREF) and (formula := cls.cells.get(name[len(FORMULA_PREF):])):
                 method = _guard_calls(method, cls, formula, resolver, entries, cells, private_entries, module_info.classes)
                 method = _guard_result(method, formula, cls, resolver, cells_kinds, ref_kinds, signatures,
-                                       native_helpers.get((cls.name, name), ()))
+                                       native_helpers.get((cls.name, name), ()), checked=checked)
                 if infer_types:
                     method = _python_locals(method, formula)
                 methods.append(method)
@@ -881,7 +889,8 @@ def guard_integer_boundaries(state, module_info, resolver, cells_kinds, ref_kind
                 continue
             if cell is not None and not cell.has_formula_def:
                 method = _guard_calls(method, cls, cell, resolver, entries, cells, private_entries, module_info.classes)
-                method = _guard_result(method, cell, cls, resolver, cells_kinds, ref_kinds, signatures)
+                method = _guard_result(method, cell, cls, resolver, cells_kinds, ref_kinds, signatures,
+                                       checked=checked)
                 if infer_types:
                     method = _python_locals(method, cell)
                 changed = True
