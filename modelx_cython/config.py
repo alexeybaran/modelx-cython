@@ -257,9 +257,9 @@ class TransSpec:
                             if self.SIZE in config}
             for keys, stops in declared.items():
                 if isinstance(keys, tuple):
-                    tuples[keys] = tuple(stops), where
+                    tuples[keys] = tuple(_declared_stop(keys, k, v) for k, v in zip(keys, stops)), where
                 else:
-                    names[keys] = stops, where
+                    names[keys] = _declared_stop(keys, keys, stops), where
 
         merge(self._data, 'model')
         data, path = self._data, []
@@ -275,6 +275,43 @@ class TransSpec:
                 break
             path.append(name)
             merge(data, '.'.join(path))
+        return tuples, names
+
+    def get_declared_lowers(self, object_path: str):
+        """Return ``(tuples, names)`` of the declared lower bounds in force for a Space, with the same
+        precedence as :meth:`get_declared_sizes`: ``{parameter tuple: {parameter: lower}}`` and
+        ``{parameter name: lower}``. A declaration is a size (lower bound: today's default) or a
+        ``(lower, stop)`` pair; only pairs appear here (R-3-lower)."""
+        tuples, names = {}, {}
+
+        def merge(data):
+            declared = data.get(self.CELLS_PARAM_SIZE)
+            if declared is None:
+                declared = {keys: config[self.SIZE]
+                            for keys, config in data.get(self.CELLS_PARAMS, {}).items()
+                            if self.SIZE in config}
+            for keys, stops in declared.items():
+                if isinstance(keys, tuple):
+                    tuples[keys] = {k: _declared_lower(keys, k, v)
+                                    for k, v in zip(keys, stops) if _declared_lower(keys, k, v) is not None}
+                elif _declared_lower(keys, keys, stops) is not None:
+                    names[keys] = _declared_lower(keys, keys, stops)
+                else:
+                    names.pop(keys, None)
+
+        merge(self._data)
+        data = self._data
+        for name in object_path.split(".")[1:]:
+            for prefix in (MODULE_PREF, SPACE_PREF):
+                if name[:len(prefix)] == prefix:
+                    name = name[len(prefix):]
+                    break
+            else:
+                continue
+            data = (data.get(self.SPACES) or {}).get(name) or {}
+            if not data:
+                break
+            merge(data)
         return tuples, names
 
     def get_spec(self, object_path: str):
@@ -339,3 +376,23 @@ class TransSpec:
                     return {}
 
         return data
+
+
+def _declared_pair(keys, key, value):
+    """A declaration ``(lower, stop)`` of two ints with lower < stop, else None (a plain size)."""
+    if isinstance(value, (tuple, list)):
+        if (len(value) != 2 or not all(type(v) is int for v in value) or not value[0] < value[1]):
+            raise ValueError(f'cells_param_size {keys!r}: {key} must be a size or a (lower, stop) pair of '
+                             f'ints with lower < stop, got {value!r}')
+        return tuple(value)
+    return None
+
+
+def _declared_stop(keys, key, value):
+    pair = _declared_pair(keys, key, value)
+    return value if pair is None else pair[1]
+
+
+def _declared_lower(keys, key, value):
+    pair = _declared_pair(keys, key, value)
+    return None if pair is None else pair[0]

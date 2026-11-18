@@ -709,7 +709,7 @@ class CombinedCellsInfo(LexicalCellsInfo):
         sizes = self.parent.cells_arg_sizes[tuple(self.params)]
         count = 1
         for p, size in zip(self.params, sizes):
-            count *= size - getattr(self._rt, 'min_args', {}).get(p, 0)
+            count *= size - self._axis_lower(p)
         from .automatic import max_dense_entries
         return 0 < count <= max_dense_entries(self)
 
@@ -730,9 +730,24 @@ class CombinedCellsInfo(LexicalCellsInfo):
     def cache_offsets(self):
         return tuple(axis.lower for axis in self.dense_axes)
 
-    def _logical_axes(self, sizes):
+    def _axis_lower(self, key):
+        """Lower bound of a logical axis: a declared (lower, stop) pair gives lower (R-3-lower; a sampled
+        argument below it replaces it, as a sampled one above a declared stop replaces the stop);
+        otherwise min(0, sampled minimum), as before."""
         minimums = getattr(self._rt, 'min_args', {})
-        return tuple(DenseAxis(key, minimums.get(key, 0), stop,
+        declared = getattr(self.parent, 'declared_lowers', {}).get(tuple(self.params), {})
+        if key not in declared:
+            return minimums.get(key, 0)
+        lower = declared[key]
+        sampled = getattr(self._rt, 'observed_min_args', {}).get(key)
+        if sampled is not None and sampled < lower:
+            _logger.info(f"Specified lower bound {lower} for cells parameter {key} in {self.fqname} "
+                         f"is replaced by {sampled} from the sample")
+            return sampled
+        return lower
+
+    def _logical_axes(self, sizes):
+        return tuple(DenseAxis(key, self._axis_lower(key), stop,
                                self.get_argtype_expr(key, c_style=True))
                      for key, stop in sizes.items())
 
@@ -1000,6 +1015,7 @@ class ClassInfo:
         self._cells_max_args = {}
         self._associative_max_args = {}
         self.declared_axes = {}     # parameter tuple -> {parameter: where its size is declared}
+        self.declared_lowers = {}   # parameter tuple -> {parameter: declared lower bound} (R-3-lower pairs)
         self.refs = {}
         self.spaces = []
         self._init_cells()
@@ -1127,16 +1143,21 @@ class ClassInfo:
         # an entry for the exact parameter tuple sizes that tuple; a single-name entry sizes that
         # parameter's axis of every other tuple in scope.
         tuples, names = self.module.spec.get_declared_sizes(self.fqname)
+        tuple_lowers, name_lowers = self.module.spec.get_declared_lowers(self.fqname)
         sizes = {}
         for keys, (stops, where) in tuples.items():
             sizes[keys] = dict(zip(keys, stops))
             self.declared_axes[keys] = {key: where for key in keys}
+            if tuple_lowers.get(keys):
+                self.declared_lowers[keys] = dict(tuple_lowers[keys])
         for keys, maxima in observed.items():
             bounds = sizes.setdefault(keys, {})
             declared = self.declared_axes.setdefault(keys, {})
             for key, (maximum, cell) in maxima.items():
                 if key not in bounds and key in names:
                     bounds[key], declared[key] = names[key]
+                    if key in name_lowers:
+                        self.declared_lowers.setdefault(keys, {})[key] = name_lowers[key]
                 stop = maximum + 1
                 if key in bounds and stop <= bounds[key]:
                     continue
