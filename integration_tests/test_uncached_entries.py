@@ -169,7 +169,10 @@ def test_uncached_cells_take_a_direct_entry_and_equal_live(tmp_path):
 
     # same-class readers (collect route) and the typed item local (direct route) both take the entry
     assert re.search(rf'\({surv}\(self, .*\) if _mx_exact_receiver else', generated), 'value reader'
-    assert re.search(rf'\({tick}\(self, i\) if _mx_exact_receiver else', generated), 'ticks reader'
+    # (the range counter i passes the named argument conversion: the typed counters of the removed
+    # range proofs are gone; for a long long counter the conversion is the identity)
+    assert re.search(rf"\({tick}\(self, (?:i|_mx_sys\._mx_integer_result\(i, 'Projection\.tick'\))\) "
+                     rf"if _mx_exact_receiver else", generated), 'ticks reader'
     assert re.search(rf'\({surv}\(item, 0, .*\) if type\(item\) is _c_Projection else', generated), 'direct route'
 
     live, compiled = _run(tmp_path, 'exported'), _run(tmp_path, 'exported_cy')

@@ -41,9 +41,13 @@ assert pickle.loads(pickle.dumps(original)).values()==original.values()
 '''],cwd=tmp_path,check=True)
 
 
-def compile_model(tmp_path, sample):
+def compile_model(tmp_path, sample, integer_checks=None):
     (tmp_path/'sample.py').write_text(sample,encoding='utf-8')
-    subprocess.run([sys.executable,'-B','-m','modelx_cython','exported','--no-spec'],
+    spec = ['--no-spec']
+    if integer_checks is not None:
+        (tmp_path/'spec.py').write_text(repr({'integer_checks': integer_checks}),encoding='utf-8')
+        spec = ['--spec','spec.py']
+    subprocess.run([sys.executable,'-B','-m','modelx_cython','exported',*spec],
                    cwd=tmp_path,check=True)
 
 
@@ -111,7 +115,8 @@ def test_scope_overrides_aliases_and_arithmetic(tmp_path):
         's.compare_flag(1);'
         's.aliases(1.25);s.long_expression(2);s.hygienic();s.reassigned_tail(2)\n'
         'v=mx_model.VirtualValues\nv.matches(200);v.condition(200);v.compound(200);'
-        'v.comparison_value(200);v.call_code(1);v.coded(1,201);v.compare_flag(1)\n')
+        'v.comparison_value(200);v.call_code(1);v.coded(1,201);v.compare_flag(1)\n',
+        integer_checks='checked')     # the arithmetic checks below are the checked mode's (owner's rule)
     admission=json.loads((tmp_path/'exported_cy/_mx_admission.json').read_text())
     info=lambda name:admission[f'exported_cy._mx_classes._c_Values._f_{name}']
     assert info('nested_sum')['native_reductions']==0
@@ -190,7 +195,16 @@ for x in (-4.75,-0.0,1.25,17.5):
 s.downward=lambda x:10
 assert s.aliases(1.25)==12
 for t in (-(1<<32),-(1<<25),-1,0,1,(1<<25),(1<<32)):
-    assert s.long_expression(t)==(t+t+t+t+t+t+t+t)/12.0+t*(t-1)
+    if abs(t)==(1<<32) and type(s).__module__.startswith('exported_cy'):
+        # t*(t-1) leaves the signed range: the exact fallback is gone (checked mode), it raises
+        try:
+            s.long_expression(t)
+        except OverflowError as error:
+            assert 'Values.long_expression' in str(error),error
+        else:
+            raise AssertionError('long_expression: an intermediate beyond the signed range did not raise')
+    else:
+        assert s.long_expression(t)==(t+t+t+t+t+t+t+t)/12.0+t*(t-1)
     assert s.reassigned_tail(t)==(t*3)/12.0+t*3
 '''
     for package in ('exported','exported_cy'):
