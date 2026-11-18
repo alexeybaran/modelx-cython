@@ -169,11 +169,12 @@ assert frame is mx_model.Portfolio.MarketInputs.rates and frame is mx_model.Port
 table = mx_model.Portfolio.MarketInputs._mx_table_cell_value('curve')
 assert pdn.to_pandas(table).equals(pdn.to_pandas(frame))
 assert table.index.first() == 1
-try:
-    table.index._table
-except AttributeError:
-    pass
-else:
-    raise AssertionError("private names are not forwarded")
+# the native table's index is the helper's own index (one forwarding point): its public names
+# and operations are the helper's, which gives the pandas index's result where it has no native one
+from modelx_helpers.immutable_inputs import _TableIndex
+assert type(table.index) is _TableIndex and type(frame.index) is _TableIndex
+assert list(table.index) == list(frame.index) and len(table.index) == len(frame.index)
+expected = pdn.to_pandas(frame).index
+assert (table.index + 1).equals(expected + 1) and (table.index < 2).tolist() == (expected < 2).tolist()
 '''], cwd=tmp_path, capture_output=True, text=True)
     assert check.returncode == 0, check.stdout + check.stderr
