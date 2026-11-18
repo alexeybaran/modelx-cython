@@ -1221,7 +1221,10 @@ class _Lowering(cst.CSTTransformer):
             return self._held_table_locals[name]
         found = None
         values = self.f.values.get(name, ())
-        if (len(values) == 1 and name not in self.escaped and self._root is not None
+        # a table local whose Python value is also needed is held too and keeps its binding;
+        # a record local whose value escapes stays as written (D78)
+        escapes = name in self.escaped and self.locals.get(name, ('',))[0] != 'table'
+        if (len(values) == 1 and not escapes and self._root is not None
                 and not isinstance(values[0], cst.Name)
                 and (self.o.table_cell(values[0]) is not None or self.o.record_cell(values[0]))):
             # the one binding is a top-level statement of the formula, so the handle is resolved
@@ -2121,6 +2124,8 @@ class _Lowering(cst.CSTTransformer):
                 f'    self.{field} = {self.o.module}.table_handle({_code(new_value)})\n').body))
             statements.append(cst.parse_statement(
                 f'{handle} = _mx_cy.cast({self.mtype("TableRef")}, self.{field})\n').body[0])
+            if name in self.escaped:
+                statements.insert(0, updated)
             self.changed = True
         elif kind in ('table', 'record'):
             type_name, build, prefix = (('TableHandle', 'table_handle', '_mx_h_') if kind == 'table'

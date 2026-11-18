@@ -1100,6 +1100,23 @@ def test_table_local_bound_to_a_table_cell_is_held():
     assert '_mx_th_' not in text2 and f'_mx_h_tbl = {M}.table_handle(self.mort_table())' in text2
 
 
+def test_table_local_also_used_as_a_python_value_is_held():
+    """R-4: a table local bound once at the top level to a zero-argument table Cell whose Python
+    value is also needed (here ``len(tbl)``) is held as well: it keeps its Python binding, and its
+    lowered reads use the held handle (no handle taken per call); values are unchanged."""
+    source = ('def _f_x(self, t):\n'
+              '    tbl = self.mort_table()\n'
+              '    return float(tbl.loc[self.age(t), "mort_rate"]) + len(tbl)\n')
+    text, reads, _ = lower(base_model(), source, held=True)
+    assert 'if self._mx_th_0 is None:' in text and 'tbl = self.mort_table()' in text, text
+    assert f'_mx_h_tbl = _mx_cy.cast({M}.TableRef, self._mx_th_0)' in text, text
+    assert text.count('table_handle(') == 1 and reads.typed == 1, text
+    receiver = base_model().receiver()
+    receiver._mx_th_0, receiver._mx_tc_0 = None, 0
+    for t in (0, 1, 40, 500):   # 500: no such row, the same KeyError
+        assert _run(text, receiver, (t,), RUNTIME) == _run(source, receiver, (t,), {})
+
+
 def test_table_local_not_held_unless_one_top_level_binding():
     """diag-mt: a table local bound inside a block, or more than once, keeps its owned handle
     (resolving it before the enclosing statement would call the Cell where the formula does not)."""
