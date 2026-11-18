@@ -5,7 +5,7 @@ import libcst as cst
 from modelx_cython.cell_entries import DenseAxis, FormulaEntry, cache_hit, exact_receiver
 from modelx_cython.consts import CY_MOD, FORMULA_PREF, MX_POW, MX_SELF, MX_SYS_MOD
 from modelx_cython.scopes import Names
-from modelx_cython.syntax import statements
+from modelx_cython.syntax import statements, walk
 from modelx_cython.typedefs import primitive_kind
 
 
@@ -234,6 +234,30 @@ class _Calls(cst.CSTTransformer):
         ])
 
 
+def _referenced_entries(body, functions, uncached, classes, origins, domains):
+    """``functions`` without the private entry of an uncached Cell that no emitted code calls.
+
+    An uncached Cell's entry (D139) exists for its callers on a proven receiver. With none it is
+    an unreachable module-level C function and is not emitted; an entry called only by such an
+    entry is unreachable too."""
+    candidates = {entry: key for key, entry in uncached.items()}
+    kept = list(functions)
+    while True:
+        names = [(fn, {n.value for n in walk(fn) if isinstance(n, cst.Name)}) for fn in kept]
+        used = {n.value for node in body if node is not None for n in walk(node) if isinstance(n, cst.Name)}
+        for fn, found in names:
+            used |= found - {fn.name.value}
+        dead = {fn.name.value for fn in kept if fn.name.value in candidates and fn.name.value not in used}
+        if not dead:
+            return kept
+        kept = [fn for fn in kept if fn.name.value not in dead]
+        for entry in dead:
+            owner, name = candidates[entry]
+            classes[owner].cells[name].inline_entry = None
+            origins.pop(entry, None)
+            domains.pop(entry, None)
+
+
 def add_inline_entries(module, classes, dense_layouts):
     """Move each admitted cache body and report its dense layout to the build."""
     names = Names(module)
@@ -357,6 +381,7 @@ def add_inline_entries(module, classes, dense_layouts):
                 if (entry := uncached.get((owner, cell.name))) is not None and not name.startswith(FORMULA_PREF):
                     functions.append(_entry_function(authored[index], entry, owner, optional_receiver))
         body[position] = statement.with_changes(body=statement.body.with_changes(body=methods))
+    functions = _referenced_entries(body, functions, uncached, classes, origins, domains)
     if functions:
         index = 0
         for index, statement in enumerate(body):
