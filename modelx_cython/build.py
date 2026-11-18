@@ -51,6 +51,17 @@ def cell_locations(state, module_info):
 _CYTHON_LOCATION = re.compile(r'^(.+?):(\d+):\d+: (.+)$', re.MULTILINE)
 
 
+def package_include_path():
+    """The directory that holds the ``modelx_cython`` package, for Cython's ``include_path``.
+
+    Cython resolves ``cimport modelx_cython...`` through the include path and ``sys.path``; a
+    PEP 660 editable install puts the package behind a meta-path finder, not on ``sys.path``, so
+    every build that cimports the shipped ``.pxd`` files passes this directory explicitly (the
+    generated ``setup.py`` and the tests that compile their own extensions)."""
+    import modelx_cython
+    return os.path.dirname(os.path.dirname(os.path.abspath(modelx_cython.__file__)))
+
+
 def cythonize_model(modules, *, cell_sources=None, **kwargs):
     """Keep Cython's diagnostics and add cell paths to formula errors."""
     from Cython.Build import cythonize
@@ -168,10 +179,8 @@ def create_setup(model_name: str, modules: Sequence[str], setup_file: pathlib.Pa
     setup_script = textwrap.dedent("""\
     from setuptools import setup
     from Cython.Compiler.PyrexTypes import CArrayType, c_int_type
-    from pathlib import Path
-    from modelx_cython.build import cythonize_model, fp_contract_off
+    from modelx_cython.build import cythonize_model, fp_contract_off, package_include_path
     from modelx_cython.provider_build_cache import provider_build_cache
-    import modelx_cython
     import sys
     sys.setrecursionlimit(max(sys.getrecursionlimit(), {recursion_budget}))
 
@@ -195,8 +204,7 @@ def create_setup(model_name: str, modules: Sequence[str], setup_file: pathlib.Pa
             ],
             cell_sources={cell_sources!r},
             annotate=True,
-            # PEP660 meta-path installs do not add the package root to sys.path.
-            include_path=[str(Path(modelx_cython.__file__).resolve().parent.parent)],
+            include_path=[package_include_path()],
             compiler_directives={{"freethreading_compatible": True}}
         ),
         cmdclass=fp_contract_off(provider_build_cache({provider_sources!r}), {provider_names!r})

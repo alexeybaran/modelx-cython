@@ -66,7 +66,8 @@ def probe(tmp_path_factory):
     (folder / 'exact_sum_probe.pyx').write_text(PROBE, encoding='utf-8')
     (folder / 'setup.py').write_text(
         'from setuptools import setup\nfrom Cython.Build import cythonize\n'
-        'setup(ext_modules=cythonize(["exact_sum_probe.pyx"], '
+        'from modelx_cython.build import package_include_path\n'
+        'setup(ext_modules=cythonize(["exact_sum_probe.pyx"], include_path=[package_include_path()], '
         'compiler_directives={"freethreading_compatible": True}))\n', encoding='utf-8')
     subprocess.run([sys.executable, 'setup.py', 'build_ext', '--inplace'], cwd=folder, check=True,
                    stdout=subprocess.DEVNULL)
