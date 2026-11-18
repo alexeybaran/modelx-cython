@@ -14,6 +14,9 @@ inline methods of the .pxd.
 """
 from libc.math cimport isnan
 
+import threading
+import weakref
+
 import numpy as np
 import pandas as pd
 
@@ -30,6 +33,11 @@ cdef inline bint _plain_int(object label):
 cdef class PreparedTable:
     """A pandas table prepared for keyed reads. Immutable once built."""
 
+    @property
+    def source(self):
+        """The user's frame or Series this table was prepared from (None once it is gone)."""
+        return self._source()
+
     def __reduce__(self):
         return (prepare, (self.source,))
 
@@ -38,11 +46,32 @@ cdef class PreparedTable:
         cdef object code
         codes = self.level_codes[level]
         if codes is None:
+            if isinstance(key, (float, np.floating)) and float(key).is_integer():
+                key = int(key)          # pandas finds an integral float key on an int index
             if not _plain_int(key):
                 return -1
             return self.code_ll(level, <long long>key)
         code = (<dict>codes).get(key)
         return -1 if code is None else <Py_ssize_t>code
+
+    cdef Py_ssize_t row_key(self, object key) except -2:
+        """The stored row of a full key given as Python objects (a scalar, or a tuple), or -1."""
+        cdef Py_ssize_t[8] buffer
+        cdef Py_ssize_t code
+        cdef int level
+        if self.nlevels == 1:
+            if isinstance(key, tuple):
+                return -1
+            code = self.code_obj(0, key)
+            return code
+        if not isinstance(key, tuple) or len(<tuple>key) != self.nlevels:
+            return -1
+        for level in range(self.nlevels):
+            code = self.code_obj(level, (<tuple>key)[level])
+            if code < 0:
+                return -1
+            buffer[level] = code
+        return self.row_codes(buffer, self.nlevels)
 
     cdef bint prefix_range(self, const Py_ssize_t* codes, int count, Py_ssize_t* start, Py_ssize_t* stop) noexcept nogil:
         """The stored rows [start, stop) whose first ``count`` level codes are ``codes``; False when none."""
@@ -221,7 +250,7 @@ cdef PreparedTable _build(object value):
         raise ValueError('duplicate column labels')
     if index.nlevels > _MAX_LEVELS:
         raise ValueError(f'more than {_MAX_LEVELS} index levels')
-    table.source = value
+    table._source = weakref.ref(value)
     table.nrows = n = len(index)
     table.nlevels = index.nlevels
     levels = [_level(index.get_level_values(i)) for i in range(table.nlevels)]
@@ -296,3 +325,77 @@ cdef PreparedTable _build(object value):
         table.asof_keys = np.zeros(0)
         table.asof_labels = []
     return table
+
+
+
+# ---- binding (T-3) ----------------------------------------------------------------------------------
+# One PreparedTable per frame object, prepared on first use and dropped when the frame dies. A table
+# assigned to a Data cell, or recomputed after a clear, is a new object: it is prepared afresh, and no
+# prepared copy of the old frame is ever used for it.
+cdef dict _prepared = {}               # id(frame) -> (weak reference to the frame, PreparedTable or None)
+_lock = threading.RLock()
+
+
+def _forget(key):
+    with _lock:
+        _prepared.pop(key, None)
+
+
+def forget():
+    """Drop every prepared copy (a Space was cleared: a frame edited in place is prepared again)."""
+    with _lock:
+        _prepared.clear()
+
+
+try:
+    from modelx_cython.runtime.table_cells import register_prepared as _register
+except ImportError:         # the runtime used on its own (tests)
+    pass
+else:
+    _register(forget)
+
+
+cdef object prepared(object frame):
+    """The PreparedTable of ``frame`` (None when its reads must stay pandas), prepared once per object."""
+    key = id(frame)
+    with _lock:
+        entry = _prepared.get(key)
+    if entry is not None and entry[0]() is frame:
+        return entry[1]
+    table = prepare(frame)
+    ref = weakref.ref(frame, lambda _, key=key: _forget(key))
+    with _lock:
+        _prepared[key] = (ref, table)
+    return table
+
+
+cdef int missing(object key) except -1:
+    raise KeyError(key)
+
+
+cdef object hold(object frame, object label, int kind, Py_ssize_t* slot):
+    """Resolve a hold: return the PreparedTable of ``frame`` (the holder keeps it) and set ``*slot`` to one plus
+    the slot of column ``label`` within its ``kind`` block (one for a hold of index membership, ``kind`` < 0).
+    ``*slot`` = -1 (and None returned) when the read stays pandas: the frame is not prepared, the column is
+    absent, or its kind is another. 0 is left to mean unresolved: a new item's field starts at 0."""
+    cdef PreparedTable table = prepared(frame)
+    cdef Py_ssize_t position
+    slot[0] = -1
+    if table is None:
+        return None
+    if kind < 0:
+        slot[0] = 1
+        return table
+    position = table.column_positions.get(label, -1)
+    if position < 0 or table.column_kind[position] != kind:
+        return None
+    slot[0] = table.column_slot[position] + 1
+    return table
+
+
+cdef int missing2(object a, object b) except -1:
+    raise KeyError((a, b))
+
+
+cdef int missing3(object a, object b, object c) except -1:
+    raise KeyError((a, b, c))

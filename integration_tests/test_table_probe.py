@@ -100,22 +100,9 @@ DATA = {
            "        index=pd.MultiIndex.from_tuples([('A', 1), ('A', 1), ('B', 1), ('B', 1)], names=['tab', 'sex']))",
 }
 
-# Compiled differs from live today (84befe4), by cell: what the redesign removes step by step.
-KNOWN = {
-    'loc_row__flat': 'Record for Series',
-    'loc_prefix__multi': 'NativeTable for DataFrame',
-    'loc_callable__flat': 'KeyError on the callable',
-    'merge__flat': 'TypeError: NativeTable is not a DataFrame',
-    'join__flat': 'ValueError: Joining multiple DataFrames',
-    'pickle__flat': 'NativeTable for DataFrame',
-    'isinstance__flat': 'False for True',
-    'type_name__flat': 'NativeTable for DataFrame',
-    'type_name__multi': 'NativeTable for DataFrame',
-    'np_asarray__flat': 'TypeError: Expected str',
-    'pd_concat__flat': 'TypeError: cannot concatenate NativeTable',
-    'pd_frame__flat': 'frame of column names',
-    'mutate_loc__mut': "AttributeError: '_FrameTableLoc' object has no attribute '__setitem__'",
-}
+# Compiled differs from live, by cell: what the redesign removes step by step. Empty since T-3 (the sample
+# runs on the user's frames; nothing stands in for them). The 13 entries at 84befe4 are in the T-1 report.
+KNOWN = {}
 
 # Boundary types that equal upstream modelx-cython's (a C-typed cell result, an array-valued cell)
 BOUNDARY = {'float for numpy.float64', 'int for numpy.int64', 'memoryview for ndarray', 'vector for list'}
@@ -147,6 +134,10 @@ def build():
         for source in sources.split():
             calc.new_cells(f"{{op}}__{{source}}",
                            f"def {{op}}__{{source}}(t):\\n    T = data.{{source}}()\\n    return {{expression}}\\n")
+    items = model.new_space("Items", formula="lambda i: None")     # an ItemSpace: reads held per item
+    items.data = data
+    items.new_cells("v__flat", "def v__flat(t):\\n    return data.flat().loc[20 + t, 'q']\\n")
+    items.new_cells("in__multi", "def in__multi(t):\\n    return (('A', 'B', 'C', 'D')[t % 4], 1) in data.multi().index\\n")
     return model
 
 
@@ -163,6 +154,10 @@ for name in names():
             getattr(mx_model.Calc, name)(t)
         except Exception:
             pass
+for i in (1, 2):
+    for t in range(4):
+        mx_model.Items[i].v__flat(t)
+        mx_model.Items[i].in__multi(t)
 '''
 
 CHECKS = '''\
@@ -263,8 +258,15 @@ def equal(pair):
     return float(a) == float(b)
 
 
+def item(i, t):
+    return live.Items[i].v__flat(t), compiled.Items[i].v__flat(t)
+
+
 old = both("loc_scalar__flat", 1)
 checks["before: equal to live"] = equal(old)
+old_item = item(1, 1)
+checks["item: before: equal to live"] = equal(old_item) and all(
+    live.Items[1].in__multi(t) == compiled.Items[1].in__multi(t) for t in range(4))
 frame2 = live.Data.flat().assign(q=live.Data.flat()["q"] * 2)
 live.Data.flat[()] = frame2
 compiled.Data.flat[()] = frame2.copy()
@@ -273,8 +275,15 @@ compiled.Data.flat[()] = frame2.copy()
 checks["reassign, no clear: Data cell returns the assigned frame"] = compiled.Data.flat().equals(frame2)
 checks["reassign, no clear: cached result stays"] = float(compiled.Calc.loc_scalar__flat(1)) == float(old[1])
 checks["reassign, no clear: uncached result reads the new frame"] = equal(both("loc_scalar__flat", 2))
+checks["item: reassign, no clear: cached result stays"] = float(compiled.Items[1].v__flat(1)) == float(old_item[1])
+# a new item binds the frame assigned now; an item that already holds keeps its frame until its Space is
+# cleared, as its cached values do (the hold is taken once per item)
+checks["item: reassign, no clear: a new item reads the new frame"] = equal(item(3, 2))
+checks["item: reassign, no clear: an item that already holds reads the new frame"] = equal(item(1, 2))
 compiled.Calc.clear_all()
 checks["reassign + Space.clear_all: equal to live on the new frame"] = equal(both("loc_scalar__flat", 1))
+compiled.Items.clear_all()
+checks["item: reassign + Space.clear_all: equal to live on the new frame"] = equal(item(1, 1)) and equal(item(1, 2))
 # Model.clear_all discards assigned inputs on live modelx (the cell recomputes its formula): compiled the same
 live.clear_all()
 compiled.clear_all()
@@ -292,11 +301,22 @@ compiled.Data.flat().loc[21, "q"] = 0.5
 compiled.Calc.clear_all()
 live.Calc.clear_all()
 checks["in-place edit + Space.clear_all: equal to live"] = equal(both("loc_scalar__flat", 1))
+compiled.Items.clear_all()
+live.Items.clear_all()
+checks["item: in-place edit + Space.clear_all: equal to live"] = equal(item(1, 1))
 json.dump(checks, sys.stdout, indent=1)
 '''
 
-# Contract checks that fail today (84befe4), removed step by step
-KNOWN_CONTRACT = {'reassign, no clear: uncached result reads the new frame'}
+# Contract checks that fail, removed step by step. Empty since T-3; at 84befe4 the uncached call after a
+# reassignment read the old frame.
+KNOWN_CONTRACT = set()
+
+# Documented differences from live modelx (owner's decision), each with the sentence a user needs
+DOCUMENTED_CONTRACT = {
+    'item: reassign, no clear: an item that already holds reads the new frame':
+        'An item keeps the frame it bound until its Space is cleared, like its cached values: apply an input '
+        'change by reassigning it and clearing the dependent Space (Space.clear_all()).',
+}
 
 
 def _run(tmp_path, *args):
@@ -333,4 +353,5 @@ def test_reassign_and_clear(probe):
     work, _, _ = probe
     checks = json.loads(_run(work, "contract.py").stdout)
     failing = {name for name, ok in checks.items() if not ok}
-    assert failing == KNOWN_CONTRACT, f"failing: {sorted(failing)}; expected failing: {sorted(KNOWN_CONTRACT)}"
+    expected = KNOWN_CONTRACT | set(DOCUMENTED_CONTRACT)
+    assert failing == expected, f"failing: {sorted(failing)}; expected failing: {sorted(expected)}"

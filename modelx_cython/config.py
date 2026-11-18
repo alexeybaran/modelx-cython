@@ -55,6 +55,10 @@ class CompilerPolicy:
     # auto-tables (D104): a plain pandas table that is not admitted, or pandas run on an admitted
     # table in a per-step cell (class C), stops the build instead of a warning.
     strict_tables: bool = False
+    # T-3 (toolkit p2/tables/DESIGN.md): the sample runs on the user's frames (no table admission or
+    # substitution); reads of a traced DataFrame or Series are lowered onto a PreparedTable bound to
+    # the real frame (frame_reads.py). False restores the admission of the older table layer.
+    prepared_tables: bool = True
 
     @classmethod
     def resolve(cls, data):
@@ -70,7 +74,8 @@ class CompilerPolicy:
             infer_types=data.get('infer_types', True),
             typed_table_reads=data.get('typed_table_reads', True),
             held_table_handles=data.get('held_table_handles', True),
-            strict_tables=data.get('strict_tables', os.environ.get('MX_CY_STRICT_TABLES') == '1'))
+            strict_tables=data.get('strict_tables', os.environ.get('MX_CY_STRICT_TABLES') == '1'),
+            prepared_tables=data.get('prepared_tables', True))
         for name, value in values.items():
             if name not in ('parallel_workers', 'native_cache_hits') and type(value) is not bool:
                 raise ValueError(f'{name} must be a boolean')

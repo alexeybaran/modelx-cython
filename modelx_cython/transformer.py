@@ -824,6 +824,12 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
         cells.table_reads_typed, cells.table_reads_untyped, cells.table_reads_keys = 0, [], []
         if self._resolver is None:
             return node
+        if getattr(self.module.spec.policy, 'prepared_tables', False):
+            # T-3: reads of a traced pandas frame onto its PreparedTable (frame_reads.py)
+            from modelx_cython.frame_reads import FrameReads
+            frames = FrameReads(self._resolver, cls_info, cells, self.helper_providers, self.module.spec.policy)
+            node = frames.lower(node)
+            cells.frame_reads = frames.lowered + frames.declined
         pandas = self._pandas_reads(node, cls_info, cells)
         if not (self._resolver.table_results or cls_info.refs):
             cells.table_reads_untyped = pandas      # nothing to lower: the generated code is unchanged
