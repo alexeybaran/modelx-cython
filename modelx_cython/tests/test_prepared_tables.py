@@ -226,3 +226,16 @@ def test_hundred_thousand_reads(tables, name, frame):
             assert row < 0, (name, key)
             continue
         assert (table.value(key, 'q'), table.value(key, 'k')) == want, (name, key)
+
+
+def test_check_mode_detects_an_edit(tables):
+    """T-4 verify_inputs: a frame edited in place after it was bound is detected; an unchanged one passes."""
+    _tables, _ = tables
+    frame = pd.DataFrame({'q': [1.0, 2.0, 3.0], 'k': np.arange(3, dtype=np.int64)}, index=pd.Index([10, 11, 12]))
+    _tables.check_unchanged(frame)          # binds it, then checks: unchanged
+    _tables.check_unchanged(frame)
+    frame.loc[11, 'q'] = 9.0
+    with pytest.raises(RuntimeError, match='edited in place'):
+        _tables.check_unchanged(frame)
+    _tables.forget()                         # a clear drops the prepared copies: the edit is bound afresh
+    _tables.check_unchanged(frame)

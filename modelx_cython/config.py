@@ -63,6 +63,9 @@ class CompilerPolicy:
     # substitution); reads of a traced DataFrame or Series are lowered onto a PreparedTable bound to
     # the real frame (frame_reads.py). False restores the admission of the older table layer.
     prepared_tables: bool = True
+    # T-4: opt-in check mode: each hold of a prepared table first checks that the frame still equals the copy
+    # prepared when it was bound, and raises if it was edited in place without a clear
+    verify_inputs: bool = False
 
     @classmethod
     def resolve(cls, data):
@@ -80,7 +83,8 @@ class CompilerPolicy:
             held_table_handles=data.get('held_table_handles', True),
             strict_tables=data.get('strict_tables', os.environ.get('MX_CY_STRICT_TABLES') == '1'),
             integer_checks=data.get('integer_checks', 'auto'),
-            prepared_tables=data.get('prepared_tables', True))
+            prepared_tables=data.get('prepared_tables', True),
+            verify_inputs=data.get('verify_inputs', False))
         for name, value in values.items():
             if name not in ('parallel_workers', 'native_cache_hits', 'integer_checks') and type(value) is not bool:
                 raise ValueError(f'{name} must be a boolean')

@@ -134,6 +134,14 @@ ctypedef fused KeyC:
 cdef object prepared(object frame)
 cdef int missing(object key) except -1
 cdef object hold(object frame, object label, int kind, Py_ssize_t* slot)
+cdef object hold_checked(object frame, object label, int kind, Py_ssize_t* slot)
+cdef Py_ssize_t hold_code(object table, int level, object value) except -2
+cdef Py_ssize_t asof_row(PreparedRef ref, int count, Py_ssize_t c0, Py_ssize_t c1, Py_ssize_t c2,
+                         Py_ssize_t c3, Py_ssize_t c4, double x) noexcept
+cdef Py_ssize_t hold_unassigned(object space, object name) except -2
+cdef Py_ssize_t hold_row(object table, object key, object space, object name) except -2
+cdef int missing_codes(PreparedRef ref, const Py_ssize_t* codes, int count) except -1
+cdef object object_field(PreparedRef ref, Py_ssize_t slot, Py_ssize_t row)
 
 
 cdef inline Py_ssize_t _code(PreparedTable table, int level, KeyA part) except -2:
@@ -224,3 +232,67 @@ cdef inline bint contains_2(PreparedRef ref, KeyA a, KeyB b) except -1:
 
 cdef inline bint contains_3(PreparedRef ref, KeyA a, KeyB b, KeyC c) except -1:
     return row3(<PreparedTable>ref, a, b, c) >= 0
+
+
+# ---- T-4: reads by level codes (held per item, or computed per read) and held rows ---------------------------
+# A key of up to MAX_CODES parts is passed as one level code per part: ``held - 1`` for a part fixed per item
+# (resolved once by ``hold_code``), ``lcode(ref, level, k)`` for a C integer part, ``ocode(ref, level, k)`` for
+# any other part. No fused types: one function per part count.
+
+cdef inline Py_ssize_t lcode(PreparedRef ref, int level, long long key) noexcept nogil:
+    return (<PreparedTable>ref).code_ll(level, key)
+
+
+cdef inline Py_ssize_t ocode(PreparedRef ref, int level, object key) except -2:
+    return (<PreparedTable>ref).code_obj(level, key)
+
+
+cdef inline Py_ssize_t _row_c(PreparedRef ref, const Py_ssize_t* codes, int count) except -2:
+    cdef Py_ssize_t row = (<PreparedTable>ref).row_codes(codes, count)
+    if row < 0:
+        missing_codes(ref, codes, count)
+    return row
+
+
+cdef inline double f64_c(PreparedRef ref, Py_ssize_t slot, int count, Py_ssize_t c0, Py_ssize_t c1, Py_ssize_t c2,
+                         Py_ssize_t c3, Py_ssize_t c4, Py_ssize_t c5) except? -1.0:
+    """``frame.loc[key, column]`` of a float64 column, the key given as level codes (unused codes are 0)."""
+    cdef Py_ssize_t[6] codes
+    codes[0] = c0; codes[1] = c1; codes[2] = c2; codes[3] = c3; codes[4] = c4; codes[5] = c5
+    return (<PreparedTable>ref).f64_at(_row_c(ref, codes, count), slot - 1)
+
+
+cdef inline long long i64_c(PreparedRef ref, Py_ssize_t slot, int count, Py_ssize_t c0, Py_ssize_t c1, Py_ssize_t c2,
+                            Py_ssize_t c3, Py_ssize_t c4, Py_ssize_t c5) except? -1:
+    cdef Py_ssize_t[6] codes
+    codes[0] = c0; codes[1] = c1; codes[2] = c2; codes[3] = c3; codes[4] = c4; codes[5] = c5
+    return (<PreparedTable>ref).i64_at(_row_c(ref, codes, count), slot - 1)
+
+
+cdef inline bint contains_c(PreparedRef ref, int count, Py_ssize_t c0, Py_ssize_t c1, Py_ssize_t c2,
+                            Py_ssize_t c3, Py_ssize_t c4, Py_ssize_t c5) noexcept nogil:
+    cdef Py_ssize_t[6] codes
+    codes[0] = c0; codes[1] = c1; codes[2] = c2; codes[3] = c3; codes[4] = c4; codes[5] = c5
+    return (<PreparedTable>ref).row_codes(codes, count) >= 0
+
+
+# a field of a row held per item (``row - 1`` from ``hold_row``)
+cdef inline double f64_row(PreparedRef ref, Py_ssize_t slot, Py_ssize_t row) noexcept nogil:
+    return (<PreparedTable>ref).f64_at(row - 1, slot - 1)
+
+
+cdef inline long long i64_row(PreparedRef ref, Py_ssize_t slot, Py_ssize_t row) noexcept nogil:
+    return (<PreparedTable>ref).i64_at(row - 1, slot - 1)
+
+
+# T-4: extremes of a one-level int index (``T.index.max()`` / ``.min()``), as C integers (no reference taken)
+cdef inline long long max_ll(PreparedRef ref) noexcept:
+    if (<PreparedTable>ref).level_kind[0] == LEVEL_DENSE:
+        return (<PreparedTable>ref).level_first[0] + (<PreparedTable>ref).level_size[0] - 1
+    return (<PreparedTable>ref).sorted_labels[(<PreparedTable>ref).level_offset[0] + (<PreparedTable>ref).level_size[0] - 1]
+
+
+cdef inline long long min_ll(PreparedRef ref) noexcept:
+    if (<PreparedTable>ref).level_kind[0] == LEVEL_DENSE:
+        return (<PreparedTable>ref).level_first[0]
+    return (<PreparedTable>ref).sorted_labels[(<PreparedTable>ref).level_offset[0]]
