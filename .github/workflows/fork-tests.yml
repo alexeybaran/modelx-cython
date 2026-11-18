@@ -17,8 +17,9 @@ jobs:
         python: ['3.13', '3.14', '3.14t']
         experimental: [false]
         include:
-          # agreed floor; allowed to fail
-          - {os: ubuntu-latest, python: '3.9', experimental: true}
+          # agreed floor; allowed to fail. ubuntu-latest (26.04) has no 3.9
+          # build in actions/python-versions, so this cell pins 24.04.
+          - {os: ubuntu-24.04, python: '3.9', experimental: true}
     env:
       # short base path so MSVC link.exe stays under MAX_PATH; forward slash
       # because pytest splits PYTEST_ADDOPTS POSIX-style
@@ -53,14 +54,14 @@ jobs:
         timeout-minutes: 100
         shell: bash
         run: >
-          python -m pytest modelx_cython/tests -rf -q
+          python -m pytest modelx_cython/tests -rfE -q
           --junitxml=reports/unit.xml
       - name: Integration tests
         timeout-minutes: 120
         if: ${{ !cancelled() && steps.install.outcome == 'success' }}
         shell: bash
         run: >
-          python -m pytest integration_tests -rf -q
+          python -m pytest integration_tests -rfE -q
           --junitxml=reports/integration.xml
       - name: Upload test reports
         if: ${{ !cancelled() }}
