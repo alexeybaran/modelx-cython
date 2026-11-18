@@ -105,7 +105,8 @@ def increment_backups(
             backup_path.rename(next_backup)
 
 
-def run_sample(model_path: pathlib.Path, sample_path: str, new_model_name: str = None) -> MxCallTraceLogger:
+def run_sample(model_path: pathlib.Path, sample_path: str, new_model_name: str = None,
+               admit_tables: bool = True) -> MxCallTraceLogger:
     """Run the user's sample script while tracing calls into the model.
 
     Temporarily prepends the model's parent directory to ``sys.path``,
@@ -143,10 +144,15 @@ def run_sample(model_path: pathlib.Path, sample_path: str, new_model_name: str =
             logger=logger,
             max_typed_dict_size=0,
             code_filter= MxCodeFilter()):
-            from .auto_tables import sample_admission
-            with sample_admission(module) as admission:     # auto-tables (D104)
-                admission.tracer = sys.getprofile()
-                logger.admission = admission
+            if admit_tables:
+                from .auto_tables import sample_admission
+                with sample_admission(module) as admission:     # auto-tables (D104)
+                    admission.tracer = sys.getprofile()
+                    logger.admission = admission
+                    runpy.run_path(sample_path, run_name="__main__")
+            else:
+                # ablation: without typed table reads no frame is replaced by a helper Table
+                # while the sample runs, so tracing sees the values the model text returns
                 runpy.run_path(sample_path, run_name="__main__")
 
     finally:
@@ -314,7 +320,6 @@ def main_handler(args: argparse.Namespace, stdout: IO[str], stderr: IO[str]) -> 
         shutil.copytree(orig_path, model_path)
         shutil.copy(pathlib.Path(__file__).parent / (MX_SYS_MOD + ".pxd"), model_path)
 
-        logger = run_sample(orig_path, args.sample, new_model_name=model_name)
         if args.no_spec:
             d = {}
         else:
@@ -324,6 +329,8 @@ def main_handler(args: argparse.Namespace, stdout: IO[str], stderr: IO[str]) -> 
                 raise FileNotFoundError(f"{e}. Add '--no-spec' to omit the spec file.") from e
 
         spec = TransSpec(d)
+        logger = run_sample(orig_path, args.sample, new_model_name=model_name,
+                            admit_tables=spec.policy.typed_table_reads)
         rel_model_path = model_path.relative_to(model_path.parent)
 
         modules = [rel_model_path / (MX_SYS_MOD + ".py")]

@@ -32,6 +32,42 @@ from modelx_cython.consts import (
 )
 
 
+# ---------------------------------------------------------------- ablation (measurement only)
+# MX_CY_ABLATE: a comma-separated list of mechanism groups to turn off for an ablation build
+# (branch r3/p1-ablation, never shipped). A CompilerPolicy field name sets that field to its off
+# value (native_cache_hits: 'none'), overriding the spec; the other names are the groups below.
+ABLATION_GROUPS = (
+    'vectors',              # vector cells and vector locals (vectors.py)
+    'reductions',           # native sum/min/max/all/any loops (reductions.py)
+    'enums',                # IntEnum members as C constants and their comparisons (enums.py)
+    'private_entries',      # private same-Space cache entries and uncached-cell entries (inline_entries.py)
+    'row_fields',           # F3: row cells inlined into their field readers (row_cells.py)
+    'index_extreme_part',   # F1: T.index.max()[k] / min()[k] read as a C integer part
+    'helper_providers',     # registered helper calls (lookup, first_key, row, column, ...) as provider calls
+    'math_provider',        # math-module calls and constants as native provider calls
+    'plain_sum',            # float sums by plain addition instead of CPython's compensated sum
+)
+_POLICY_OFF = {'automatic_optimizations': False, 'dense_bounds_proofs': False, 'dense_miss_binding': False,
+               'dense_one_axis': False, 'propagate_exact_receiver': False, 'native_cache_hits': 'none',
+               'native_math': False, 'infer_types': False, 'typed_table_reads': False,
+               'held_table_handles': False}
+
+
+def ablation():
+    """The ablated names of MX_CY_ABLATE (a frozenset); unknown names raise."""
+    raw = os.environ.get('MX_CY_ABLATE', '')
+    names = frozenset(n.strip() for n in raw.split(',') if n.strip())
+    unknown = names - set(ABLATION_GROUPS) - set(_POLICY_OFF)
+    if unknown:
+        raise ValueError(f'MX_CY_ABLATE: unknown names {sorted(unknown)}')
+    return names
+
+
+def ablated(group):
+    """Whether the mechanism group ``group`` is turned off by MX_CY_ABLATE."""
+    return group in ablation()
+
+
 @dataclass(frozen=True)
 class CompilerPolicy:
     """Resolve dependent diagnostic options once, before code generation."""
@@ -58,6 +94,17 @@ class CompilerPolicy:
 
     @classmethod
     def resolve(cls, data):
+        off = ablation() & set(_POLICY_OFF)
+        if off:     # ablation: the named fields are off whatever the spec says; dependants follow
+            data = dict(data)
+            if 'automatic_optimizations' in off:
+                for name in ('dense_bounds_proofs', 'dense_miss_binding', 'dense_one_axis',
+                             'propagate_exact_receiver', 'native_cache_hits'):
+                    data.pop(name, None)
+            if 'dense_miss_binding' in off:
+                off = off | {'propagate_exact_receiver', 'native_cache_hits'}
+            for name in off:
+                data[name] = _POLICY_OFF[name]
         automatic = data.get('automatic_optimizations', True)
         miss = data.get('dense_miss_binding', automatic)
         values = dict(automatic_optimizations=automatic,

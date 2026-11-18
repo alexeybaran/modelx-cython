@@ -120,6 +120,9 @@ class HelperCalls(FormulaTransformer):
         admission report), or None when the call is no module math member.
         """
         from .helper_members import MATH_PROVIDER, argument_kind
+        from .config import ablated
+        if ablated('math_provider'):
+            return None
         func = updated.func
         if isinstance(func, cst.Attribute) and self.local_math(original.func.value):
             members = _stdlib_math_members()
@@ -198,6 +201,9 @@ class HelperCalls(FormulaTransformer):
     def module_constant(self, updated, original=None):
         """``self.<ref>.inf`` (``nan``, ``pi``, ``e``, ``tau``) of the math module."""
         from .helper_members import MATH_PROVIDER
+        from .config import ablated
+        if ablated('math_provider'):
+            return None
         if original is not None and self.local_math(original.value):
             members = _stdlib_math_members()
         elif not (isinstance(updated.value, cst.Attribute) and isinstance(updated.value.value, cst.Name)
@@ -242,6 +248,10 @@ class HelperCalls(FormulaTransformer):
         func = updated.func
         ref = _declared_reference(func, self.refs)
         contract = ref.helper if ref is not None else None
+        from .config import ablated
+        from .helper_members import MATH_PROVIDER
+        if contract and ablated('math_provider' if contract[0] == MATH_PROVIDER else 'helper_providers'):
+            return updated
         layout = getattr(ref, 'call_layout', None)
         if not contract or any(arg.star for arg in updated.args):
             return updated
@@ -477,6 +487,24 @@ def _declared_reference(function, refs):
     return helper_reference(function, refs)
 
 
+def _plain_sum_sources(name, sources):
+    """ABLATION ONLY (MX_CY_ABLATE=plain_sum): the provider sources with every compensated float sum
+    replaced by plain addition: the shared sum state is cimported from ``_float_sum_plain`` and the
+    private copy in ``_native_vectors.pxd`` drops its compensation term."""
+    result = {}
+    for suffix, payload in sources.items():
+        payload = payload.replace(b'modelx_cython._float_sum_state cimport',
+                                  b'modelx_cython._float_sum_plain cimport')
+        if name == '_native_vectors' and suffix == '.pxd':
+            marker = (b'    cdef double following = state.total + value\n'
+                      b'    if PY_VERSION_HEX >= 0x030C0000:\n')
+            if payload.count(marker) != 1:
+                raise RuntimeError('plain_sum ablation: the vector sum state of _native_vectors.pxd changed')
+            payload = payload.replace(marker, marker[:marker.index(b'    if ')] + b'    if False:\n')
+        result[suffix] = payload
+    return result
+
+
 def install(providers, model_path, object_providers=None):
     modules = []
     expected = {}
@@ -496,6 +524,9 @@ def install(providers, model_path, object_providers=None):
             fingerprint = digest.hexdigest()
             expected[alias] = ((manifest.protocol, manifest.provider, manifest.abi), fingerprint)
             sources['.pyx'] += f'\n\n__modelx_cython_provider_build__ = {fingerprint!r}\n'.encode()
+        from .config import ablated
+        if ablated('plain_sum'):
+            sources = _plain_sum_sources(name, sources)
         for suffix, payload in sources.items():
             (model_path / (alias + suffix)).write_bytes(payload)
         modules.append(model_path.relative_to(model_path.parent)

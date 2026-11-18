@@ -651,6 +651,9 @@ class TableReads:
         """``T.index.min()/max()`` or ``T.index.asof(k)`` on a single integer level; or
         (diag-us2, D91) ``T.index.min()[k]`` / ``T.index.max()[k]`` on several levels whose
         level k is an integer: the k-th part of the smallest or largest key."""
+        from .config import ablated
+        if (isinstance(expr, cst.Subscript) and ablated('index_extreme_part')):
+            return False
         if (isinstance(expr, cst.Subscript) and len(expr.slice) == 1
                 and isinstance(expr.slice[0].slice, cst.Index)
                 and isinstance(expr.slice[0].slice.value, cst.Integer)

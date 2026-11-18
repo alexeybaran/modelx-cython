@@ -5,6 +5,7 @@ from libcst.metadata import ExpressionContext
 from .scopes import CstFacts, FormulaTransformer, Names, lexical_nodes
 from .syntax import walk
 from .consts import MX_SYS_MOD
+from .config import ablated
 
 
 def storage(name):
@@ -25,7 +26,7 @@ def prepare(module):
                 raise ValueError(f'{cls.fqname}.{name}: enum definition must bind an IntEnum class')
             if storage(name) in cls.refs:
                 raise ValueError(f'{cls.fqname}: reserved enum storage name {storage(name)}')
-            if not ref.enum_safe:
+            if not ref.enum_safe or ablated('enums'):
                 continue
             for member, value in ref.enum[2].items():
                 if -(1 << 31) <= value < (1 << 31):

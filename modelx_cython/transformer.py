@@ -684,7 +684,8 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
         cells.native_reductions = 0
         cells.exact_reduction_guards = ()
         builtin_reductions = builtin_keys & BUILTIN_REDUCTIONS
-        if has_reduction_contract(node, cls_info.refs, builtin_reductions):
+        from modelx_cython.config import ablated
+        if not ablated('reductions') and has_reduction_contract(node, cls_info.refs, builtin_reductions):
             builtin_bounds = all(isinstance(binding, BuiltinAssignment)
                                  for name in ("range", "min", "max", "abs", "StopIteration", "RuntimeError")
                                  for binding in scope[name])
@@ -765,7 +766,9 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
         cache = self.__dict__.setdefault('_row_cells_cache', {})
         if cls_info.name not in cache:
             accepted, refused = {}, {}
-            if self._resolver is not None and getattr(self.module.spec.policy, 'typed_table_reads', False):
+            from modelx_cython.config import ablated
+            if (self._resolver is not None and getattr(self.module.spec.policy, 'typed_table_reads', False)
+                    and not ablated('row_fields')):
                 from modelx_cython import row_cells
                 accepted, refused = row_cells.analyse(self._module_node, cls_info.name)
                 for name in list(accepted):

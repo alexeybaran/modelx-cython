@@ -81,6 +81,9 @@ def _normal_shape(shape):
 
 def cell_vector_shape(cell):
     """The vector shape of a cells (builder.CombinedCellsInfo.vector_shape)."""
+    from .config import ablated
+    if ablated('vectors'):
+        return None
     if not (cell.has_typeinfo() and cell.has_formula_def) or cell.has_spec_rettype or cell.is_special():
         return None
     if cell.body_has_closure or cell.formula_is_generator or cell.formula_has_captured_default:
@@ -1655,6 +1658,9 @@ def lower(node, cls_info, cells, scope, counter, module, ref_kinds=None):
     Runs only in modules with vector cells (``module_uses_vectors``); elsewhere the node is
     returned as it is, so modules without vector cells translate as before."""
     from libcst.metadata import BuiltinAssignment
+    from .config import ablated
+    if ablated('vectors'):
+        return node
     if not module_uses_vectors(module) or not isinstance(node.body, cst.IndentedBlock):
         return node
     cells.vector_report = report = {'shape': _shape_json(cells.vector_shape), 'lowered': 0, 'fallbacks': []}

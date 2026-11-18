@@ -21,6 +21,9 @@ def allows_exact_receiver(node, owner):
 def _eligible(cell, params):
     # D139: an uncached Cell (no ``_f_`` method: its public method is the formula) takes the same
     # private entry, the formula itself with no cache lookup, storage or readiness flag
+    from modelx_cython.config import ablated
+    if ablated('private_entries'):
+        return False
     return (
         (cell.has_formula_def or cell.native_provider_binding is None)
         and not cell.is_locked
