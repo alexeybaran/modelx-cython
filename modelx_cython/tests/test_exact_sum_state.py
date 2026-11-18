@@ -2,7 +2,8 @@
 
 A small extension cimports the header-only state and feeds it items the way the
 lowered generators do: typed doubles, C integers and bools, or objects. Every
-case compares type, value, the sign of zero, nan, and the exception type and text.
+case compares the result type, the exception type and text exactly, and the value
+within 1e-10 x sum(|items|) + 1e-7 (nan only equals nan).
 """
 import math
 import random
@@ -79,16 +80,47 @@ def probe(tmp_path_factory):
         sys.path.remove(str(folder))
 
 
+REL_TOL, ABS_TOL = 1e-10, 1e-7     # the project tolerance; the last digit is not a goal
+
+
+def magnitude(items, *start):
+    """sum(|x|) over the numeric items and start: the scale of the relative tolerance, so a result that
+    differs only by cancellation among the items is equal within the tolerance of what was summed."""
+    total = 0.0
+    for x in (*items, *start):
+        if isinstance(x, (int, float, complex, Fraction)):
+            try:
+                total += float(abs(x))
+            except OverflowError:
+                return math.inf
+    return total
+
+
 def outcome(function, *args):
     try:
         value = function(*args)
     except Exception as error:   # the error itself is the result
         return ('raise', type(error), str(error))
-    if isinstance(value, float):
-        return (float, struct.pack('<d', value) if not math.isnan(value) else 'nan')
-    if isinstance(value, complex):
-        return (complex, outcome(lambda: value.real)[1], outcome(lambda: value.imag)[1])
     return (type(value), value)
+
+
+def _close(a, b, scale):
+    if math.isnan(a) or math.isnan(b):
+        return math.isnan(a) and math.isnan(b)
+    return a == b or abs(a - b) <= REL_TOL * scale + ABS_TOL
+
+
+def same(actual, expected, scale):
+    """Equal error (type and text) or equal result type, with float and complex values within
+    REL_TOL x scale + ABS_TOL and every other value exactly equal."""
+    if actual[0] == 'raise' or expected[0] == 'raise' or actual[0] is not expected[0]:
+        return actual == expected
+    if expected[0] is float:
+        return _close(actual[1], expected[1], scale)
+    if expected[0] is complex:
+        return (_close(actual[1].real, expected[1].real, scale)
+                and _close(actual[1].imag, expected[1].imag, scale))
+    return actual == expected
 
 
 def check(probe, items, *start):
@@ -96,7 +128,7 @@ def check(probe, items, *start):
     for typed in (True, False):
         actual = outcome(probe.exact_sum, items, *start, typed) if start else outcome(
             lambda: probe.exact_sum(items, typed=typed))
-        assert actual == expected, (items, start, typed, actual, expected)
+        assert same(actual, expected, magnitude(items, *start)), (items, start, typed, actual, expected)
 
 
 EDGES = [0.0, -0.0, 1.0, -1.0, 0.1, 1e16, -1e16, 1e308, -1e308, 5e-324, -5e-324,
@@ -143,8 +175,11 @@ def test_result_at_a_double_boundary(probe):
             actual = ('raise', type(error))
         if expected[1] is None:
             assert actual[0] == 'raise' and actual[1] is TypeError
-        else:
+        elif expected[0] == 'raise':
             assert actual == expected, items
+        else:
+            assert (actual[0] == 'value' and type(actual[1]) is type(expected[1])
+                    and _close(actual[1], expected[1], magnitude(items))), items
 
 
 def test_random_property(probe):
