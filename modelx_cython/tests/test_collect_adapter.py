@@ -52,5 +52,13 @@ def test_duplicate_current_hook_does_not_enable_native_collection():
 
 
 def test_current_version_still_requires_the_worker_hook():
-    source = current().replace('workers=None):', 'legacy_workers=None):')
+    class WithoutWorkers(cst.CSTTransformer):
+        def leave_FunctionDef(self, original, updated):
+            if updated.name.value != '_mx_collect_parallel':
+                return updated
+            params = [param for param in updated.params.params if param.name.value != 'workers']
+            return updated.with_changes(params=updated.params.with_changes(params=params))
+
+    source = cst.parse_module(current()).visit(WithoutWorkers()).code
+    assert source != current()
     assert not CollectRuntime(source).hook
