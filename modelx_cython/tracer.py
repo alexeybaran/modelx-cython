@@ -931,6 +931,33 @@ class MxCodeFilter:
         return False
 
 
+def integer_magnitude(value) -> int:
+    """The largest |integer| in ``value``: an int (not a bool), or the integer columns of a NumPy
+    array, pandas Series or DataFrame (an input table read by the model); 0 for anything else."""
+    if type(value) is int or (isinstance(value, numbers.Integral) and not isinstance(value, (bool, np.bool_))):
+        return abs(int(value))
+    arrays = ()
+    if isinstance(value, np.ndarray):
+        arrays = (value,)
+    elif type(value).__module__.startswith('pandas.'):
+        if hasattr(value, 'dtypes') and hasattr(value, 'columns'):          # DataFrame
+            arrays = [value[c].to_numpy() for c, t in zip(value.columns, value.dtypes)
+                      if getattr(t, 'kind', '') in 'iu']
+            index = getattr(value, 'index', None)
+            if index is not None and getattr(index.dtype, 'kind', '') in 'iu':
+                arrays.append(index.to_numpy())
+        elif hasattr(value, 'dtype') and hasattr(value, 'to_numpy'):         # Series or Index
+            arrays = [value.to_numpy()]
+            index = getattr(value, 'index', None)
+            if index is not None and getattr(index.dtype, 'kind', '') in 'iu':
+                arrays.append(index.to_numpy())
+    largest = 0
+    for array in arrays:
+        if getattr(array.dtype, 'kind', '') in 'iu' and array.size:
+            largest = max(largest, int(max(abs(int(array.max())), abs(int(array.min())))))
+    return largest
+
+
 class MxCallTraceLogger(CallTraceLogger):
     """Log and store/print records collected by a CallTracer.
 
@@ -980,6 +1007,10 @@ class MxCallTraceLogger(CallTraceLogger):
         self.modules = []
         self.param_info = {}  # class name -> {param: RuntimeParamInfo}
         self._assigned_params = {}
+        # integer guards: the largest |integer| traced (Cell arguments and results, References,
+        # ItemSpace parameters, integer columns of input tables) and where it was seen
+        self.max_integer = 0
+        self.max_integer_at = None
 
     def log(self, trace: CallTrace) -> None:
         """Log a single call trace.
@@ -990,6 +1021,7 @@ class MxCallTraceLogger(CallTraceLogger):
         argument or return observation.
         """
         name = trace.func.__name__
+        self._integer_magnitudes(trace.funcname, (*trace.arg_vals.values(), getattr(trace, 'ret_val', None)))
         if name == "_mx_assign_params":
             values = iter(trace.arg_vals.items())
             _, target = next(values)
@@ -1011,6 +1043,12 @@ class MxCallTraceLogger(CallTraceLogger):
             ret_changed = False if getattr(trace, 'raised', False) else merger.add(trace)
             if args_changed or ret_changed:
                 self._traces.setdefault(name, []).append(trace)
+
+    def _integer_magnitudes(self, where, values):
+        for value in values:
+            magnitude = integer_magnitude(value)
+            if magnitude > self.max_integer:
+                self.max_integer, self.max_integer_at = magnitude, where
 
     def _record_params(self, target, values):
         cls = type(target)
@@ -1045,6 +1083,7 @@ class MxCallTraceLogger(CallTraceLogger):
                 for name, val in instance_attrs(tr0.arg_vals[MX_SELF]):
                     if is_user_defined(name):
                         fqname = ".".join(name_split[:-1] + [name])
+                        self._integer_magnitudes(fqname, (val,))
                         self.ref_info[fqname] = RuntimeRefInfo.init_mxobj(val, self.module)
             else:
                 if is_user_defined(name_split[-1]):

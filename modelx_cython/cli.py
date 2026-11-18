@@ -324,6 +324,15 @@ def main_handler(args: argparse.Namespace, stdout: IO[str], stderr: IO[str]) -> 
                 raise FileNotFoundError(f"{e}. Add '--no-spec' to omit the spec file.") from e
 
         spec = TransSpec(d)
+        # integer guards (owner's rule): the mode follows the largest traced integer
+        from .config import UNCHECKED_LIMIT, resolve_integer_checks
+        mode = resolve_integer_checks(spec.policy, logger.max_integer)
+        integer_report = {'mode': mode, 'requested': spec.policy.integer_checks,
+                          'largest_traced_integer': logger.max_integer, 'seen_at': logger.max_integer_at,
+                          'unchecked_below': UNCHECKED_LIMIT}
+        spec.policy = dataclasses.replace(spec.policy, integer_checks=mode)
+        _logger.info('integer checks: %s (largest traced integer %d at %s)',
+                     mode, logger.max_integer, logger.max_integer_at)
         rel_model_path = model_path.relative_to(model_path.parent)
 
         modules = [rel_model_path / (MX_SYS_MOD + ".py")]
@@ -459,6 +468,7 @@ def main_handler(args: argparse.Namespace, stdout: IO[str], stderr: IO[str]) -> 
                      cell_sources=cell_sources, providers=provider_sources)
         report = describe(module_infos)
         (model_path / '_mx_admission.json').write_text(json.dumps(report, indent=2), encoding='utf-8')
+        (model_path / '_mx_integer_checks.json').write_text(json.dumps(integer_report, indent=2), encoding='utf-8')
         _table_admission(logger, report, model_path, policy)
 
     if args.translate_only:

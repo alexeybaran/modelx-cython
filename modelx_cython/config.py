@@ -55,6 +55,10 @@ class CompilerPolicy:
     # auto-tables (D104): a plain pandas table that is not admitted, or pandas run on an admitted
     # table in a per-step cell (class C), stops the build instead of a warning.
     strict_tables: bool = False
+    # integer guards (owner's rule): 'auto' (default) compiles without overflow checks when no
+    # traced integer reaches UNCHECKED_LIMIT in magnitude, with them otherwise; 'checked' and
+    # 'unchecked' force a mode. The build resolves 'auto' after the trace (resolve_integer_checks).
+    integer_checks: str = 'auto'
 
     @classmethod
     def resolve(cls, data):
@@ -70,10 +74,13 @@ class CompilerPolicy:
             infer_types=data.get('infer_types', True),
             typed_table_reads=data.get('typed_table_reads', True),
             held_table_handles=data.get('held_table_handles', True),
-            strict_tables=data.get('strict_tables', os.environ.get('MX_CY_STRICT_TABLES') == '1'))
+            strict_tables=data.get('strict_tables', os.environ.get('MX_CY_STRICT_TABLES') == '1'),
+            integer_checks=data.get('integer_checks', 'auto'))
         for name, value in values.items():
-            if name not in ('parallel_workers', 'native_cache_hits') and type(value) is not bool:
+            if name not in ('parallel_workers', 'native_cache_hits', 'integer_checks') and type(value) is not bool:
                 raise ValueError(f'{name} must be a boolean')
+        if values['integer_checks'] not in ('auto', 'checked', 'unchecked'):
+            raise ValueError('integer_checks must be auto, checked or unchecked')
         if type(values['parallel_workers']) is not int or values['parallel_workers'] < 1:
             raise ValueError('parallel_workers must be a positive integer')
         if type(values['native_cache_hits']) is not str or values['native_cache_hits'] not in (
@@ -85,6 +92,19 @@ class CompilerPolicy:
             if values['native_cache_hits'] != 'none':
                 raise ValueError('native_cache_hits requires dense_miss_binding')
         return cls(**values)
+
+
+# integer guards: with every traced integer below 2**31 in magnitude, a product of two stays below
+# 2**62, so the ordinary arithmetic of a formula keeps far from the 64-bit limit
+UNCHECKED_LIMIT = 1 << 31
+
+
+def resolve_integer_checks(policy, largest_traced_integer):
+    """The integer-check mode for this build: the spec's, or for 'auto' 'unchecked' when the
+    largest traced integer is below UNCHECKED_LIMIT in magnitude and 'checked' otherwise."""
+    if policy.integer_checks != 'auto':
+        return policy.integer_checks
+    return 'unchecked' if largest_traced_integer < UNCHECKED_LIMIT else 'checked'
 
 
 class TransSpec:
@@ -169,6 +189,11 @@ class TransSpec:
     (``# cython: infer_types=True, overflowcheck=True``) in generated model modules;
     false keeps Cython's default (no inference of C types for untyped locals, no
     overflow checks).
+    ``"integer_checks"`` (default ``"auto"``): ``"unchecked"`` compiles C integer arithmetic
+    without overflow checks (as plain C), ``"checked"`` with them; ``"auto"`` chooses unchecked when
+    no traced integer (Cell arguments and results, References, ItemSpace parameters, integer
+    columns of input tables) reaches 2**31 in magnitude. ``_mx_integer_checks.json`` records the
+    mode used and the largest traced integer.
     ``"typed_table_reads"`` (default true; false keeps reads as Python calls): lower
     ``.loc``/``.at``/``.index`` reads on traced tables to typed handle reads, and (D78) a
     literal field read of a zero-argument record Cell (``model_point()["f"]``, also through a
