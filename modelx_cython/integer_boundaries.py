@@ -26,6 +26,7 @@ _SIGNED_OPERATIONS = {
     cst.RightShift: '_mx_signed_right_shift',
     cst.Power: '_mx_signed_pow',
 }
+_PYTHON_SEMANTICS = (cst.LeftShift, cst.RightShift, cst.Modulo)
 _INTEGER_CONVERSION = f'{MX_SYS_MOD}._mx_integer_result'
 _SIGNED_HELPERS = frozenset((*_SIGNED_OPERATIONS.values(), '_mx_integer_result', '_mx_exact_int64'))
 
@@ -345,11 +346,13 @@ class _GuardIntegers(cst.CSTTransformer):
         if isinstance(value, cst.BinaryOperation) and type(value.operator) in _SIGNED_OPERATIONS:
             left, left_signed = self._signed_expression(value.left, path)
             right, right_signed = self._signed_expression(value.right, path)
-            # A right shift keeps its helper in both modes: Python rounds a negative value down,
-            # where C leaves the shift of a negative value to the implementation. An integer power
+            # Shifts and the remainder keep their helpers in both modes, for Python's semantics:
+            # a right shift rounds a negative value down (C leaves it to the implementation), a
+            # left shift of a negative value or by 64 or more is exact in Python (Cython's checked
+            # shift raises), LLONG_MIN % -1 is 0 (C traps). An integer power
             # takes the checked power in the checked mode (Cython's own wraps). Every other
             # operator is plain C: Cython's overflowcheck checks it in the checked mode.
-            if ((isinstance(value.operator, cst.RightShift)
+            if ((isinstance(value.operator, _PYTHON_SEMANTICS)
                  or self.checked and isinstance(value.operator, cst.Power)) and left_signed and right_signed):
                 operation = _SIGNED_OPERATIONS[type(value.operator)]
                 checked = _boundary_call(operation, path, left, right)

@@ -158,7 +158,11 @@ cdef inline long long _mx_signed_remainder(long long left, long long right, str 
     return left % right
 
 
+@cython.overflowcheck(True)
 cdef inline long long _mx_signed_left_shift(long long value, long long count, str path) except? -1:
+    """Python's ``value << count`` on C integers: a negative count raises ValueError, a count of
+    64 or more is exact for 0 (and -1 << 63), and a result beyond 64 bits raises OverflowError
+    naming the Cell. Cython's own checked shift raises for negative values (-3 << 2)."""
     if count < 0:
         raise ValueError("negative shift count")
     if count >= 63:
@@ -166,8 +170,11 @@ cdef inline long long _mx_signed_left_shift(long long value, long long count, st
             return 0
         if count == 63 and value == -1:
             return LLONG_MIN
-        return _mx_signed_overflow(path)
-    return _mx_signed_mul(value, (<long long>1) << count, path)
+        raise _mx_named(OverflowError(f"{path}: value too large (integer arithmetic beyond 64 bits)"), path)
+    try:
+        return value * ((<long long>1) << count)
+    except OverflowError as error:
+        raise _mx_named_overflow(error, path)
 
 
 @cython.overflowcheck(True)
