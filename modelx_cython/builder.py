@@ -741,8 +741,13 @@ class CombinedCellsInfo(LexicalCellsInfo):
         lower = declared[key]
         sampled = getattr(self._rt, 'observed_min_args', {}).get(key)
         if sampled is not None and sampled < lower:
-            _logger.info(f"Specified lower bound {lower} for cells parameter {key} in {self.fqname} "
-                         f"is replaced by {sampled} from the sample")
+            reported = self.parent.__dict__.setdefault('_widened_reported', set())
+            if (self.name, key) not in reported:
+                reported.add((self.name, key))
+                stop = dict(zip(self.params, self.parent.cells_arg_sizes.get(tuple(self.params), ()))).get(key)
+                _logger.warning(RANGE_WIDENED.format(
+                    cell=getattr(self, 'model_path', self.fqname), params=', '.join(self.params), key=key, lower=lower, stop=stop,
+                    end='lower', sampled=sampled, used_lower=sampled, used_stop=stop))
             return sampled
         return lower
 
@@ -1165,8 +1170,23 @@ class ClassInfo:
                     _logger.info(
                         f"Specified max size of {bounds[key]} for cells parameter {key} "
                         f"in {self.name} is replaced by {stop} from {cell}")
+                    lower = self.declared_lowers.get(keys, {}).get(key, 0)
+                    reported = self.__dict__.setdefault('_widened_reported', set())
+                    if (cell, key, 'stop') not in reported:
+                        reported.add((cell, key, 'stop'))
+                        info = self.cells.get(cell.rsplit('.', 1)[-1].split(FORMULA_PREF, 1)[-1])
+                        _logger.warning(RANGE_WIDENED.format(
+                            cell=getattr(info, 'model_path', cell), params=', '.join(keys), key=key, lower=lower,
+                            stop=bounds[key], end='stop', sampled=maximum, used_lower=lower, used_stop=stop))
                 bounds[key] = stop
         return sizes
+
+
+# R-3-lower: a sampled argument outside a declared range widens it (as upstream does for a declared size);
+# the build says so, one line per cell and parameter. For the stop, the cell named is the one whose sample
+# widened it; the widened range applies to every Cell with the same parameter tuple in that Space.
+RANGE_WIDENED = ('{cell} ({params}): parameter {key} declared range [{lower}, {stop}), sampled {sampled} '
+                 'beyond the declared {end}, range used [{used_lower}, {used_stop})')
 
 
 class ModuleInfo:

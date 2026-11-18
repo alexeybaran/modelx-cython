@@ -10,7 +10,7 @@ import textwrap
 import modelx as mx
 
 
-def _build(tmp_path, spec):
+def _build(tmp_path, spec, output=None):
     model = mx.new_model('DeclaredLower')
     try:
         s = model.new_space('Policy', formula='lambda key: None')
@@ -23,7 +23,10 @@ def _build(tmp_path, spec):
         'from exported import mx_model\ns = mx_model.Policy[1]\n'
         'for g in range(1950, 1961):\n    s.q_year(g)\n    for x in range(10, 20):\n        s.q(g, x)\n')
     (tmp_path / 'spec.py').write_text(repr(spec))
-    subprocess.run([sys.executable, '-B', '-m', 'modelx_cython', 'exported'], cwd=tmp_path, check=True)
+    run = subprocess.run([sys.executable, '-B', '-m', 'modelx_cython', 'exported'], cwd=tmp_path, check=True,
+                         capture_output=True, text=True)
+    if output is not None:
+        output.append(run.stdout + run.stderr)
     admission = json.loads((tmp_path / 'exported_cy/_mx_admission.json').read_text())
     return {k.rsplit('._f_', 1)[1]: v for k, v in admission.items() if '._c_Policy._f_' in k}
 
@@ -63,5 +66,21 @@ def test_plain_size_keeps_its_meaning(tmp_path):
 
 
 def test_sampled_minimum_below_the_declared_lower_replaces_it(tmp_path):
-    cells = _build(tmp_path, {'spaces': {'Policy': {'cells_param_size': {'gen': (1955, 1981), 'x': 155}}}})
+    output = []
+    cells = _build(tmp_path, {'spaces': {'Policy': {'cells_param_size': {'gen': (1955, 1981), 'x': 155}}}}, output)
     assert cells['q']['dense_logical_domain'] == [[1950, 1981], [0, 155]]
+    # the build says so, one line per cell and parameter
+    lines = [line for line in output[0].splitlines() if 'beyond the declared lower' in line]
+    assert len([line for line in lines if 'Policy.q (gen, x): parameter gen declared range [1955, 1981), sampled 1950 '
+                'beyond the declared lower, range used [1950, 1981)' in line]) == 1, output[0]
+    assert len([line for line in lines if 'Policy.q_year (gen): parameter gen declared range [1955, 1981), sampled 1950'
+                in line]) == 1, output[0]
+
+
+def test_sampled_maximum_above_the_declared_stop_replaces_it(tmp_path):
+    output = []
+    cells = _build(tmp_path, {'spaces': {'Policy': {'cells_param_size': {'gen': (1940, 1981), 'x': 15}}}}, output)
+    assert cells['q']['dense_logical_domain'] == [[1940, 1981], [0, 20]]
+    lines = [line for line in output[0].splitlines() if 'beyond the declared stop' in line]
+    assert len(lines) == 1 and ('Policy.q (gen, x): parameter x declared range [0, 15), sampled 19 beyond the declared stop, '
+                                'range used [0, 20)' in lines[0]), output[0]
