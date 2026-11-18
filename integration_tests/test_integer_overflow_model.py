@@ -7,7 +7,8 @@ are typed as C integers; the run then calls them with the values below.
 Checked mode: every case is exact or raises an error naming the Cell; none is silently wrong.
 Unchecked mode: C integer arithmetic is plain C, as on upstream. The cases marked "plain" are
 outside its guarantee (their value is whatever C gives); the others are exact or raise as in the
-checked mode, because the conversions at the Python boundary stay checked and named.
+checked mode: the conversions at the Python boundary stay checked and named, and a power stored as
+a C integer takes the checked power in both modes.
 """
 import json
 import subprocess
@@ -46,8 +47,10 @@ RUNS = {"neg": 0, "pw": 9, "sh": 9, "rs": 3, "fd": 3, "md": 3, "fm": 0, "il": 10
         "dl": 100, "lf": 1, "lg": 1}
 EXACT = {"rs", "fd", "md", "dl", "lf", "lg"}
 # checked mode: everything else raises naming the Cell
-UNCHECKED_PLAIN = {"neg", "pw", "sh", "il", "ie", "ls", "mx", "pl", "pf", "pv", "pc"}
-UNCHECKED_RAISES = {"fm", "sm", "di"}     # division check, named boundary conversions
+UNCHECKED_PLAIN = {"neg", "il", "ie", "ls", "mx", "pf", "pc"}
+# division check, named boundary conversions, the checked power of a power stored as a C integer,
+# the left-shift helper (Python's shift rules, checked in both modes)
+UNCHECKED_RAISES = {"fm", "sm", "di", "pw", "pl", "pv", "sh"}
 
 
 @pytest.fixture(scope="module")
@@ -113,8 +116,8 @@ def test_unchecked_mode_is_plain_c_outside_the_boundary(exported, tmp_path):
         assert outcome[name] == ["value", live[name]], name
     for name in UNCHECKED_RAISES:
         assert outcome[name][0] == "OverflowError", (name, outcome[name])
-    for name in ("sm", "di"):
-        assert outcome[name][1].startswith(f"Sp.{name} "), (name, outcome[name])
+    for name in ("sm", "di", "pw", "pl", "pv", "sh"):
+        assert outcome[name][1].startswith(f"Sp.{name}"), (name, outcome[name])
     for name in UNCHECKED_PLAIN:         # plain C arithmetic: no check, no exception
         assert outcome[name][0] == "value", (name, outcome[name])
 

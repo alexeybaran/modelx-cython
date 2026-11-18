@@ -726,14 +726,6 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
             operand_kind=OperandKind(self._resolver, self._cells_kinds, self._ref_kinds,
                                      cls_info.fqname, {**local_kinds, **param_kinds}),
             cells=cells, providers=self.helper_providers)
-        cells.guarded_integer_ops = 0
-        if False:   # integer guards: the D76 exact fallback is gone (checked mode raises instead)
-            # (an integer-result formula keeps the integer-boundary pass's own checked semantics)
-            # D76: integer locals stay C integers; each integer operation on them that could
-            # leave the 64-bit range runs natively within a safe bound, else exactly in Python
-            from modelx_cython.guarded_integers import guard_integers
-            node, cells.guarded_integer_ops = guard_integers(node, local_kinds, param_kinds,
-                                                            getattr(cells, 'model_path', None))
         # D110 P1: a local bound once to an item of a typed ItemSpace Reference is declared its class
         from modelx_cython.item_locals import type_item_locals
         node, cells.typed_item_locals = type_item_locals(node, cls_info, self.module)

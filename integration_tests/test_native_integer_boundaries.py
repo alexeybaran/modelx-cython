@@ -445,15 +445,23 @@ def test_signed_local_flow(integer_domain_build):
 
 
 def test_terminal_product_checks_the_final_signed_result(integer_domain_build):
-    generated = (integer_domain_build / "exported_cy/_m_Outer/_mx_classes.py").read_text(encoding="utf-8")
-    assert generated.count("cast(object, _mx_checked_") == 4
     run_python(integer_domain_build, "-c", textwrap.dedent("""\
         from exported import mx_model as exported
         from exported_cy import mx_model as compiled
 
         minimum = -(1 << 63)
         for name in ('terminal_product', 'reordered_product'):
-            for amount, divisor in ((2, 3), (0, minimum), (1, minimum + 1)):
+            # (0, minimum): the intermediate divisor - 1 leaves the range although the product
+            # is 0; the exact terminal arithmetic is gone (owner's rule), it raises naming the Cell
+            projection = type(compiled)().Outer.Projection
+            projection.amount, projection.divisor, projection.reads = 0, minimum, []
+            try:
+                getattr(projection, name)()
+            except OverflowError as error:
+                assert f"Outer.Projection.{name}" in str(error)
+            else:
+                raise AssertionError(f"{name}: intermediate beyond the signed range did not raise")
+            for amount, divisor in ((2, 3), (1, minimum + 1)):
                 reference = type(exported)().Outer.Projection
                 projection = type(compiled)().Outer.Projection
                 reference.amount = projection.amount = amount

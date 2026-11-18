@@ -114,8 +114,25 @@ def test_power_of_c_integers_uses_the_checked_power(power_build):
     assert "2 ** -" in source
 
 
-def test_unchecked_mode_power_is_plain_c(power_build_unchecked):
-    """Unchecked mode: an integer power of C integers is Cython's own C power (as on upstream):
-    no checked power in the generated code; beyond 64 bits it wraps."""
+def test_unchecked_mode_power(power_build_unchecked):
+    """Unchecked mode: a power stored as a C integer still takes the checked power (Cython's own
+    wraps, and gives a double for a variable exponent, which a C integer cannot take); in a float
+    or comparison context it is Cython's C power and wraps beyond 64 bits, as on upstream."""
     source = (power_build_unchecked / "exported_cy" / "_mx_classes.py").read_text(encoding="utf-8")
-    assert "_mx_signed_pow(" not in source
+    for name in ("const_exponent", "local_base", "variable_exponent"):
+        assert f"'Sp.{name}')" in source and "_mx_sys._mx_signed_pow(" in source, name
+    outcome = _probe(power_build_unchecked, f'''
+        import json
+        from exported_cy import mx_model
+        out = {{}}
+        for name, t in {OUTSIDE!r}.items():
+            try:
+                out[name] = ["value", repr(getattr(mx_model.Sp, name)(t))]
+            except (OverflowError, TypeError) as error:
+                out[name] = [type(error).__name__, str(error)]
+        print(json.dumps(out))
+    ''')
+    for name in ("const_exponent", "local_base", "variable_exponent"):
+        assert outcome[name][0] == "OverflowError" and outcome[name][1].startswith(f"Sp.{name}:"), outcome[name]
+    for name in ("float_context", "comparison"):
+        assert outcome[name][0] == "value", outcome[name]          # plain C power

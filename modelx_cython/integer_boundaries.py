@@ -1,12 +1,9 @@
 """Check integer Cell results and ItemSpace keys at their native boundaries."""
 
-from collections import Counter
-
 import libcst as cst
 
 from .checked_arithmetic import (
-    CheckedArithmetic, divisibility_enabled, divisibility_operands, guarded_integer_intervals,
-    signed_local_assignments,
+    CheckedArithmetic, divisibility_enabled, divisibility_operands, signed_local_assignments,
 )
 from .consts import CY_MOD, FORMULA_PREF, MX_SELF, MX_SYS_MOD
 from .powers import KIND_FLOAT, OperandKind, kind_of_type_expr
@@ -17,27 +14,19 @@ from .usage import RESOLVED, _extract_self_chain
 
 _INTEGER_ANNOTATION = cst.Attribute(cst.Name(CY_MOD), cst.Name('longlong'))
 _SIGNED_OPERATIONS = {
-    cst.Add: '_mx_signed_add',
-    cst.Subtract: '_mx_signed_sub',
-    cst.Multiply: '_mx_signed_mul',
-    cst.FloorDivide: '_mx_signed_floor',
+    # integer guards: the operators that keep a helper (Python semantics, the checked power);
+    # + - * // are plain C operators, checked by Cython's overflowcheck in the checked mode
     cst.Modulo: '_mx_signed_remainder',
     cst.LeftShift: '_mx_signed_left_shift',
     cst.RightShift: '_mx_signed_right_shift',
     cst.Power: '_mx_signed_pow',
 }
+_PLAIN_OPERATIONS = (cst.Add, cst.Subtract, cst.Multiply, cst.FloorDivide)
+_INTEGER_OPERATIONS = (*_PLAIN_OPERATIONS, *_SIGNED_OPERATIONS)
 _PYTHON_SEMANTICS = (cst.LeftShift, cst.RightShift, cst.Modulo)
+_HELPER_OPERATIONS = (*_PYTHON_SEMANTICS, cst.Power)
 _INTEGER_CONVERSION = f'{MX_SYS_MOD}._mx_integer_result'
 _SIGNED_HELPERS = frozenset((*_SIGNED_OPERATIONS.values(), '_mx_integer_result', '_mx_exact_int64'))
-
-
-def _boxed_arithmetic(value):
-    if isinstance(value, cst.Call):
-        return (dotted_name(value.func) == f'{CY_MOD}.cast' and len(value.args) == 2
-                and isinstance(value.args[0].value, cst.Name) and value.args[0].value.value == 'object')
-    return (isinstance(value, cst.BinaryOperation)
-            and type(value.operator) in _SIGNED_OPERATIONS
-            and (_boxed_arithmetic(value.left) or _boxed_arithmetic(value.right)))
 
 
 _CALL_GATE = """\
@@ -276,43 +265,17 @@ class _GuardIntegers(cst.CSTTransformer):
         self.kinds = kinds
         self.native_helpers = native_helpers
         self.arithmetic = arithmetic
-        self.check_overflow = False
         self.signed_fields = signed_fields
         self.signed_functions = signed_functions
         self.signed_methods = signed_methods
         self.signed_names = signed_names
         self.signed_return = signed_return
         self.error = error
-        self.outer_intervals = []
-        self.in_statement = self.statement_overflow = self.function_handler = False
         self.arithmetic.signed_atom = self._signed_atom
 
     def on_visit(self, node):
         return not isinstance(node, OPAQUE_SCOPES) and super().on_visit(node)
 
-    def visit_If_body(self, node):
-        self.outer_intervals.append(self.arithmetic.parameter_intervals)
-        body = statements(node.body)
-        if (len(body) != 1 or not isinstance(body[0], cst.Return) or has_scope_effects(body)
-                or any(isinstance(part, cst.Call) for part in walk(body[0]))):
-            return
-        bounded = guarded_integer_intervals(node.test)
-        if bounded and bounded.keys() <= self.signed_names:
-            self.arithmetic.parameter_intervals = {**self.arithmetic.parameter_intervals, **bounded}
-
-    def leave_If_body(self, node):
-        self.arithmetic.parameter_intervals = self.outer_intervals.pop()
-
-    def visit_SimpleStatementLine(self, node):
-        self.in_statement = True
-        self.statement_overflow = False
-
-    def leave_SimpleStatementLine(self, before, after):
-        self.in_statement = False
-        if not self.statement_overflow:
-            return after
-        return _overflow_handler((after.with_changes(leading_lines=()),), self.path, self.error,
-                                 after.leading_lines)
 
     def leave_Return(self, before, after):
         if not self.signed_return or after.value is None:
@@ -343,17 +306,18 @@ class _GuardIntegers(cst.CSTTransformer):
 
     def _signed_expression(self, value, path):
         """Lower signed C expressions, leaving object operators on Cython's object path."""
-        if isinstance(value, cst.BinaryOperation) and type(value.operator) in _SIGNED_OPERATIONS:
+        if isinstance(value, cst.BinaryOperation) and isinstance(value.operator, _INTEGER_OPERATIONS):
             left, left_signed = self._signed_expression(value.left, path)
             right, right_signed = self._signed_expression(value.right, path)
             # Shifts and the remainder keep their helpers in both modes, for Python's semantics:
             # a right shift rounds a negative value down (C leaves it to the implementation), a
             # left shift of a negative value or by 64 or more is exact in Python (Cython's checked
             # shift raises), LLONG_MIN % -1 is 0 (C traps). An integer power
-            # takes the checked power in the checked mode (Cython's own wraps). Every other
+            # stored as a C integer takes the checked power in both modes: Cython's own C integer
+            # power wraps, and with a variable exponent Cython makes it a double, which a C integer
+            # result cannot take (at all, not only beyond 64 bits). Every other
             # operator is plain C: Cython's overflowcheck checks it in the checked mode.
-            if ((isinstance(value.operator, _PYTHON_SEMANTICS)
-                 or self.checked and isinstance(value.operator, cst.Power)) and left_signed and right_signed):
+            if isinstance(value.operator, _HELPER_OPERATIONS) and left_signed and right_signed:
                 operation = _SIGNED_OPERATIONS[type(value.operator)]
                 checked = _boundary_call(operation, path, left, right)
                 return checked.with_changes(lpar=value.lpar, rpar=value.rpar), True
@@ -363,8 +327,6 @@ class _GuardIntegers(cst.CSTTransformer):
             orelse, else_signed = self._signed_expression(value.orelse, path)
             return value.with_changes(body=body, orelse=orelse), body_signed and else_signed
         if isinstance(value, cst.UnaryOperation) and isinstance(value.operator, (cst.Plus, cst.Minus)):
-            if self.arithmetic.integer_interval(value, signed=True) is not None:
-                return value, True
             operand, signed = self._signed_expression(value.expression, path)
             if signed and isinstance(value.operator, cst.Minus) and self.checked:
                 # Cython's overflowcheck does not check a unary minus (-LLONG_MIN): as 0 - x it does
@@ -379,6 +341,9 @@ class _GuardIntegers(cst.CSTTransformer):
     def _signed_atom(self, value):
         if isinstance(value, cst.Name):
             return value.value in self.signed_names
+        if (isinstance(value, cst.Call) and dotted_name(value.func) == f'{CY_MOD}.cast' and len(value.args) == 2
+                and dotted_name(value.args[0].value) == f'{CY_MOD}.longlong'):
+            return True         # the compiler's own C cast to long long (the virtual branch of a dispatch)
         if isinstance(value, cst.Call):
             target = value.func
             if isinstance(target, cst.Name):
@@ -409,28 +374,14 @@ class _GuardIntegers(cst.CSTTransformer):
         return value if signed else _checked_integer(value, self.path)
 
     def _lower(self, value, path):
-        value, signed = self._signed_expression(value, path)
-        needs_overflow_check = any(
-            isinstance(part, cst.BinaryOperation)
-            and isinstance(part.operator, (cst.Add, cst.Subtract, cst.Multiply))
-            and not _boxed_arithmetic(part)
-            and self.arithmetic.integer_interval(part, signed=True) is None
-            for part in walk(value)
-        )
-        if False:      # the function-level handler names the Cell (_name_overflows)
-            self.check_overflow = True
-            if self.in_statement:
-                self.statement_overflow = True
-            else:
-                self.function_handler = True
-        return value, signed
+        return self._signed_expression(value, path)
 
 
 def _signed_operand_names(value):
     """Find the name uses that signed expression lowering treats as C operands."""
     if isinstance(value, cst.Name):
         yield value
-    elif isinstance(value, cst.BinaryOperation) and type(value.operator) in _SIGNED_OPERATIONS:
+    elif isinstance(value, cst.BinaryOperation) and isinstance(value.operator, _INTEGER_OPERATIONS):
         yield from _signed_operand_names(value.left)
         yield from _signed_operand_names(value.right)
     elif isinstance(value, cst.UnaryOperation) and isinstance(value.operator, (cst.Plus, cst.Minus)):
@@ -484,7 +435,7 @@ def _signed_divisibility(body, facts, guard, parameters):
             continue
         assignments, reads = signed_local_assignments(
             body, name, facts,
-            lambda value: value if guard.arithmetic.integer_interval(value, signed=True) is not None else None,
+            lambda value: value if guard._signed_expression(value, guard.path)[1] else None,
         )
         if not assignments or not reads <= uses:
             continue
@@ -570,147 +521,6 @@ def _type_signed_locals(body, guard, facts, parameters):
     return body, tuple(declarations)
 
 
-def _range_args(call, shadowed):
-    """(start, stop) of a builtin ``range(stop)`` / ``range(start, stop)`` call, else None."""
-    if (not isinstance(call, cst.Call) or not isinstance(call.func, cst.Name) or call.func.value != 'range'
-            or 'range' in shadowed or not 1 <= len(call.args) <= 2
-            or any(arg.keyword is not None or arg.star for arg in call.args)):
-        return None
-    args = [arg.value for arg in call.args]
-    return (cst.Integer('0'), args[0]) if len(args) == 1 else (args[0], args[1])
-
-
-def _bound(expr, arithmetic, low, shadowed):
-    """A lower (``low``) or upper bound of an integer expression, or None: its proven interval, or
-    for builtin ``min``/``max`` the bound that follows from the arguments' known bounds (the upper
-    bound of ``min`` needs one argument's, its lower bound all of them; ``max`` the reverse), and
-    a literal added to or subtracted from such an expression."""
-    interval = arithmetic.integer_interval(expr, signed=True)
-    if interval is not None:
-        return interval[0] if low else interval[1]
-    if (isinstance(expr, cst.Call) and isinstance(expr.func, cst.Name) and expr.func.value in ('min', 'max')
-            and expr.func.value not in shadowed and expr.args
-            and all(arg.keyword is None and not arg.star for arg in expr.args)):
-        bounds = [_bound(arg.value, arithmetic, low, shadowed) for arg in expr.args]
-        known = [b for b in bounds if b is not None]
-        pick = min if expr.func.value == 'min' else max
-        any_suffices = (expr.func.value == 'min') != low      # min: upper; max: lower
-        if known and (any_suffices or len(known) == len(bounds)):
-            return pick(known)
-        return None
-    if (isinstance(expr, cst.BinaryOperation) and isinstance(expr.operator, (cst.Add, cst.Subtract))
-            and isinstance(expr.right, cst.Integer)):
-        inner = _bound(expr.left, arithmetic, low, shadowed)
-        if inner is None:
-            return None
-        return inner + expr.right.evaluated_value if isinstance(expr.operator, cst.Add) \
-            else inner - expr.right.evaluated_value
-    return None
-
-
-def _local_intervals(body, arithmetic, facts, bindings):
-    """diag-us2 (D94): intervals of locals bound exactly once in the formula: a ``for`` target over a
-    builtin ``range(start, stop)`` (no step) takes [lower bound of start, upper bound of stop - 1],
-    an assigned local the interval of its value. Each read of such a local sees a value of its one
-    binding, so the interval holds wherever it is read; parameters keep their own (argument
-    window) intervals, and nothing here applies inside nested scopes."""
-    if not isinstance(body, cst.IndentedBlock) or has_scope_effects(body.body):
-        return {}
-    shadowed = {'range', 'min', 'max'} & set(bindings)
-    # a declaration without a value (``u: _mx_cy.longlong``) binds nothing at run time
-    declared = Counter(part.target.value for part in lexical_nodes(body.body)
-                       if isinstance(part, cst.AnnAssign) and part.value is None and isinstance(part.target, cst.Name))
-    once = ({name for name, count in facts.stores.items() if count - declared[name] == 1}
-            - set(arithmetic.parameters))
-    sites = []
-    for part in lexical_nodes(body.body):
-        if isinstance(part, cst.For) and isinstance(part.target, cst.Name) and part.target.value in once:
-            args = _range_args(part.iter, shadowed)
-            if args is not None:
-                sites.append((part.target.value, 'range', args))
-        elif (isinstance(part, cst.Assign) and len(part.targets) == 1 and isinstance(part.targets[0].target, cst.Name)
-              and part.targets[0].target.value in once):
-            sites.append((part.targets[0].target.value, 'value', part.value))
-        elif (isinstance(part, cst.AnnAssign) and part.value is not None and isinstance(part.target, cst.Name)
-              and part.target.value in once):
-            sites.append((part.target.value, 'value', part.value))
-    found = {}
-    arithmetic.local_intervals = found
-    for _ in range(len(sites)):
-        changed = False
-        for name, kind, value in sites:
-            if name in found:
-                continue
-            if kind == 'range':
-                low = _bound(value[0], arithmetic, True, shadowed)
-                high = _bound(value[1], arithmetic, False, shadowed)
-                if low is None or high is None or low < -(1 << 63) or high - 1 > (1 << 63) - 1:
-                    continue
-                found[name] = (low, max(low, high - 1))
-            else:
-                interval = arithmetic.integer_interval(value, signed=True)
-                if interval is None:
-                    continue
-                found[name] = interval
-            changed = True
-        if not changed:
-            break
-    return found
-
-
-class _ProvenGuards(cst.CSTTransformer):
-    """Replace a D76 guard by its native expression where that is proven within 64 bits."""
-
-    def __init__(self, arithmetic):
-        self.arithmetic = arithmetic
-        self._opaque = 0
-
-    def visit_FunctionDef(self, node):
-        self._opaque += 1
-
-    def leave_FunctionDef(self, before, after):
-        self._opaque -= 1
-        return after
-
-    def visit_Lambda(self, node):
-        self._opaque += 1
-
-    def leave_Lambda(self, before, after):
-        self._opaque -= 1
-        return after
-
-    def _side(self, node):
-        return (isinstance(node, (cst.Name, cst.Integer, cst.Float))
-                or self.arithmetic.integer_interval(node, signed=True) is not None)
-
-    def _proven(self, native):
-        """No integer operation of ``native`` can leave the 64-bit range."""
-        if isinstance(native, cst.BinaryOperation) and isinstance(native.operator, cst.Divide):
-            return self._side(native.left) and self._side(native.right)
-        if isinstance(native, cst.Comparison) and len(native.comparisons) == 1:
-            return self._side(native.left) and self._side(native.comparisons[0].comparator)
-        if (isinstance(native, cst.Call) and isinstance(native.func, cst.Name) and native.func.value == 'float'
-                and len(native.args) == 1):
-            return self._side(native.args[0].value)
-        return self.arithmetic.integer_interval(native, signed=True) is not None
-
-    def leave_IfExp(self, before, after):
-        from .guarded_integers import long_long_guard, native_branch, outer_operation
-        if self._opaque or (native := native_branch(after)) is None:
-            return after
-        if not self._proven(native):
-            # Where the value is taken as long long, one outer operation whose operands are
-            # leaves or proven expressions overflows exactly when its exact value is outside
-            # the 64-bit range, which raises on the slow branch too.
-            operands = outer_operation(native) if long_long_guard(after) else None
-            if operands is None or not all(
-                    isinstance(part, (cst.Name, cst.Integer))
-                    or self.arithmetic.integer_interval(part, signed=True) is not None
-                    for part in operands):
-                return after
-        return native.with_changes(lpar=(cst.LeftParen(),), rpar=(cst.RightParen(),))
-
-
 def _guard_result(node, cell, cls, resolver, cells_kinds, ref_kinds, signatures, native_helpers=(),
                   argument_axes=(), checked=True):
     signed_return = node.returns is not None and node.returns.annotation.deep_equals(_INTEGER_ANNOTATION)
@@ -727,16 +537,6 @@ def _guard_result(node, cell, cls, resolver, cells_kinds, ref_kinds, signatures,
     }
     facts = CstFacts(node.body.body)
     bindings = facts.bindings(lexical_nodes(node.body.body))
-    arithmetic.parameter_intervals = {axis.key: (axis.lower, axis.stop - 1) for axis in argument_axes
-                                      if axis.key in arithmetic.parameters and axis.key not in bindings}
-    arithmetic.local_intervals = _local_intervals(node.body, arithmetic, facts, bindings)
-    # D76 guards whose native expression cannot overflow here (proven from the argument axes)
-    # are that expression: the signed-local and range proofs below then see it (diag-us2)
-    collapsed = node.body.visit(_ProvenGuards(arithmetic))
-    if not collapsed.deep_equals(node.body):
-        node = node.with_changes(body=collapsed)
-        facts = CstFacts(node.body.body)
-        bindings = facts.bindings(lexical_nodes(node.body.body))
     if not signed_return and not divisibility and not any(
             isinstance(part, cst.Call) and dotted_name(part.func) == _INTEGER_CONVERSION
             for part in lexical_nodes(node.body.body)):
@@ -765,14 +565,7 @@ def _guard_result(node, cell, cls, resolver, cells_kinds, ref_kinds, signatures,
     if declarations:
         doc_end = 1 if node.get_docstring() is not None else 0
         body = body.with_changes(body=(*body.body[:doc_end], *declarations, *body.body[doc_end:]))
-    if not guard.check_overflow or not isinstance(body, cst.IndentedBlock):
-        return node.with_changes(body=body)
-    decorator = cst.Decorator(cst.parse_expression(f'{CY_MOD}.overflowcheck(True)'))
-    if guard.function_handler:
-        prefix = len(declarations) + (1 if node.get_docstring() is not None else 0)
-        handler = _overflow_handler(body.body[prefix:], cell.model_path, error)
-        body = body.with_changes(body=(*body.body[:prefix], handler))
-    return node.with_changes(decorators=(*node.decorators, decorator), body=body)
+    return node.with_changes(body=body)
 
 
 def _signed_signatures(state):
@@ -814,7 +607,7 @@ def _python_locals(node, cell):
     With ``infer_types`` (W1.5 0005) Cython infers a C type for every untyped local; a local
     compared with ``is``/``is not`` would lose its identity (``x is saved[0]`` on a re-boxed
     int gives a wrong answer), so it is declared ``object``. Integer locals and ``range``
-    targets otherwise stay C integers: their arithmetic is guarded (guarded_integers, D76).
+    targets otherwise stay C integers (their arithmetic: plain C, checked by overflowcheck in the checked mode).
     Locals with an annotation of their own are left alone. The admission report lists each
     declared local (``object_locals``).
     """
@@ -833,7 +626,7 @@ def _python_locals(node, cell):
     annotated = {statement.target.value for statement in lexical_nodes(body.body)
                  if isinstance(statement, cst.AnnAssign) and isinstance(statement.target, cst.Name)}
     # D76: integer locals and range targets stay C integers with guarded arithmetic
-    # (guarded_integers); only identity keeps the Python object
+    # (integer guards); only identity keeps the Python object
     names = set()
     for part in lexical_nodes(body.body):
         if isinstance(part, cst.Comparison) and any(

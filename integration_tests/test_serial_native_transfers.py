@@ -1,13 +1,16 @@
 """Exercise the generated fast entries and their existing public contracts."""
 
 import subprocess
+
+import pytest
 import sys
 import textwrap
 
 import modelx as mx
 
 
-def test_native_transfers(tmp_path):
+@pytest.mark.parametrize('mode', ['checked', 'unchecked'])
+def test_native_transfers(tmp_path, mode):
     model = mx.new_model('NativeTransfers')
     try:
         space = model.new_space('Policy', formula='lambda key: None')
@@ -53,6 +56,8 @@ def test_native_transfers(tmp_path):
         'dense_one_axis': True,
         'dense_miss_binding': True,
         'propagate_exact_receiver': True,
+        # both integer-check modes (owner's rule); they differ only at the signed range's edges
+        'integer_checks': mode,
         'spaces': {'Policy': {'cells_param_size': {'i': 5}, 'cells': {
             'divisible': {'native_divisibility': True},
             'offset': {'native_divisibility': True},
@@ -67,9 +72,6 @@ def test_native_transfers(tmp_path):
     assert '_mx_divisible(' in generated and '_mx_divisible_after_decrement(' in generated
     assert 'step: _mx_cy.longlong' in generated and '_mx_divisible_after_increment(t, step)' in generated
     assert '_mx_memo_pow(' in generated
-    assert '_mx_checked_quotient:' in generated
-    assert 'year: _mx_cy.longlong' in generated
-    assert '_mx_cy.cast(object, year)' in generated
     (tmp_path / 'override.pyx').write_text(textwrap.dedent('''\
         # cython: freethreading_compatible=True
         from exported_cy._mx_classes cimport _c_Policy
@@ -118,9 +120,27 @@ def test_native_transfers(tmp_path):
                 pass
             else:
                 raise AssertionError('zero divisor was accepted')
-        for t in (-(1 << 63), -(1 << 25) - 1, -7, -1, 0, 7, 1 << 25, (1 << 63) - 1):
+        for t in (-(1 << 63), -(1 << 25) - 1, -7, -1, 0, 7, 1 << 25, (1 << 63) - 2):
             assert s.fraction(t).hex() == (((t + 1) / 12) * 0.05).hex()
-        for t in (-(1 << 63), -(1 << 63) + 1, -7, 0, 1, 2, 99, (1 << 63) - 1):
+        if CHECKED:     # m = t + 1 leaves the range: no exact fallback, it raises naming the Cell
+            try:
+                s.fraction((1 << 63) - 1)
+            except OverflowError as error:
+                assert 'Policy.fraction' in str(error)
+            else:
+                raise AssertionError('fraction: an intermediate beyond the signed range did not raise')
+        else:           # unchecked mode: plain C at the edge
+            s.fraction((1 << 63) - 1)
+        if CHECKED:     # year - 1 leaves the range: no exact fallback, it raises naming the Cell
+            try:
+                s.piecewise(-(1 << 63))
+            except OverflowError as error:
+                assert 'Policy.piecewise' in str(error)
+            else:
+                raise AssertionError('piecewise: an intermediate beyond the signed range did not raise')
+        else:
+            s.piecewise(-(1 << 63))
+        for t in (-(1 << 63) + 1, -7, 0, 1, 2, 99, (1 << 63) - 1):
             expected = 0.0 if t >= 99 else (min(t, 9) * 0.25 if t == 1
                                             else max(0.1 - (0.04 / 3.0) * (t - 1), 0.06))
             assert s.piecewise(t).hex() == expected.hex()
@@ -142,4 +162,4 @@ def test_native_transfers(tmp_path):
                 raise AssertionError('failed power was cached')
         assert s.factor(0, 9.0, 0.5) == 3.0
         ''')
-    subprocess.run([sys.executable, '-c', probe], cwd=tmp_path, check=True)
+    subprocess.run([sys.executable, '-c', f'CHECKED = {mode == "checked"}\n' + probe], cwd=tmp_path, check=True)
