@@ -94,6 +94,15 @@ def test_mx2cy_with_uslib(sample_dir, model):
             # Read the preserved public operand behind a generated exact-type
             # dispatch; authored conditional arithmetic is not normalized away.
             return self.visit(node.orelse) if self.exact_guard(node.test) else self.generic_visit(node)
+        def visit_Call(self,node):
+            # The virtual branch of that dispatch converts the public call to the Cell's C
+            # return type (``_mx_cy.cast(_mx_cy.double, ...)``, D59); read the call itself.
+            if (isinstance(node.func,ast.Attribute) and node.func.attr=='cast'
+                    and isinstance(node.func.value,ast.Name) and node.func.value.id=='_mx_cy'
+                    and len(node.args)==2 and isinstance(node.args[0],ast.Attribute)
+                    and isinstance(node.args[0].value,ast.Name) and node.args[0].value.id=='_mx_cy'):
+                return self.visit(node.args[1])
+            return self.generic_visit(node)
     def has_power(base):
         expected = [ast.dump(ast.parse(expr, mode='eval').body) for expr in (base, '1 / 12')]
         return any([ast.dump(PublicOperands().visit(arg)) for arg in call.args[-2:]] == expected
