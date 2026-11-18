@@ -45,10 +45,13 @@ jobs:
         shell: bash
         run: |
           python -m pip install --upgrade pip
-          # modelx first in the same call, so lifelib's modelx requirement is
-          # met by the pinned fork commit and never resolved from PyPI
-          python -m pip install -e "dependencies/modelx[helpers]" -e dependencies/lifelib
-          python -m pip install -e . pytest pandas openpyxl psutil
+          # modelx in the same call as lifelib, so lifelib's modelx requirement
+          # is met by the pinned fork commit and never resolved from PyPI.
+          # Regular (not editable) installs: Cython resolves cimports of the
+          # shipped .pxd files through sys.path entries, which setuptools'
+          # editable finder does not provide.
+          python -m pip install "./dependencies/modelx[helpers]" ./dependencies/lifelib
+          python -m pip install . pytest pandas openpyxl psutil
           python -m pip list
       - name: Unit tests
         timeout-minutes: 100
