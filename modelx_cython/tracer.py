@@ -237,6 +237,7 @@ class RuntimeCellsInfo:     # TODO: Create base class RuntimeBaseMemberInfo
         from .provider_manifest import observed_provider_binding
         self.observed_provider_binding = observed_provider_binding(returned)
         self.table_schema = table_schema(returned)
+        self.frame_schema = frame_schema(returned)
 
     admitted_table = False     # auto-tables: the traced value was a pandas frame admitted as a table
     pandas_fallbacks = {}      # auto-tables: {formula line: {operation: calls}} on admitted tables
@@ -672,6 +673,55 @@ def instance_attrs(obj: Any) -> Iterator[tuple]:
                 yield name, getattr(obj, name)
             except AttributeError:  # slot never assigned
                 pass
+
+
+def _frame_schema(value):
+    """The schema of one pandas DataFrame or Series (see ``frame_schema``), or None."""
+    modules = {klass.__module__.split('.')[0] for klass in type(value).__mro__}
+    if 'pandas' not in modules:
+        return None
+    names = {klass.__name__ for klass in type(value).__mro__}
+    if 'DataFrame' in names:
+        kind, columns = 'frame', tuple((label, _column_kind(value[label].dtype) if
+                                         list(value.columns).count(label) == 1 else 'obj')
+                                        for label in value.columns)
+    elif 'Series' in names:
+        kind, columns = 'series', ((None, _column_kind(value.dtype)),)
+    else:
+        return None
+    index = value.index
+    levels = tuple('int' if getattr(level, 'dtype', None) is not None and level.dtype.kind in 'iu' else 'obj'
+                   for level in (index.levels if index.nlevels > 1 else (index,)))
+    return {'kind': kind, 'levels': levels, 'unique': bool(index.is_unique), 'columns': columns}
+
+
+def _column_kind(dtype):
+    return {'float64': 'f64', 'int64': 'i64'}.get(str(dtype), 'obj')
+
+
+def frame_schema(traces):
+    """T-3: the schema of a traced pandas DataFrame or Series result, or None.
+
+    ``{'kind': 'frame'|'series', 'levels': ('int'|'obj', ...), 'unique': bool, 'columns': ((label,
+    'f64'|'i64'|'obj'), ...)}`` (a Series has one column, labelled None). The compiler lowers reads onto a
+    PreparedTable from it (frame_reads.py); the frame itself is never replaced. None when a traced value is not
+    a pandas frame or Series, or when the traced values disagree (a column kind or level kind differs; a
+    column present in one only is dropped, so its reads stay pandas).
+    """
+    schema = None
+    for trace in traces or ():
+        found = _frame_schema(trace.ret_val)
+        if found is None:
+            return None
+        if schema is None:
+            schema = found
+            continue
+        if found['kind'] != schema['kind'] or found['levels'] != schema['levels']:
+            return None
+        mine = dict(found['columns'])
+        schema = dict(schema, unique=schema['unique'] and found['unique'],
+                      columns=tuple((label, kind) for label, kind in schema['columns'] if mine.get(label) == kind))
+    return schema
 
 
 # M1 (W1.1): schema of a traced helper Table result, through the helper's contract.

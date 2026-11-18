@@ -105,7 +105,8 @@ def increment_backups(
             backup_path.rename(next_backup)
 
 
-def run_sample(model_path: pathlib.Path, sample_path: str, new_model_name: str = None) -> MxCallTraceLogger:
+def run_sample(model_path: pathlib.Path, sample_path: str, new_model_name: str = None,
+               admission: bool = True) -> MxCallTraceLogger:
     """Run the user's sample script while tracing calls into the model.
 
     Temporarily prepends the model's parent directory to ``sys.path``,
@@ -143,11 +144,15 @@ def run_sample(model_path: pathlib.Path, sample_path: str, new_model_name: str =
             logger=logger,
             max_typed_dict_size=0,
             code_filter= MxCodeFilter()):
-            from .auto_tables import sample_admission
-            with sample_admission(module) as admission:     # auto-tables (D104)
-                admission.tracer = sys.getprofile()
-                logger.admission = admission
+            if not admission:   # T-3: the sample runs on the user's own frames
+                logger.admission = None
                 runpy.run_path(sample_path, run_name="__main__")
+            else:
+                from .auto_tables import sample_admission
+                with sample_admission(module) as admitted:     # auto-tables (D104)
+                    admitted.tracer = sys.getprofile()
+                    logger.admission = admitted
+                    runpy.run_path(sample_path, run_name="__main__")
 
     finally:
         assert sys.path.pop(0) == module_path
@@ -314,7 +319,6 @@ def main_handler(args: argparse.Namespace, stdout: IO[str], stderr: IO[str]) -> 
         shutil.copytree(orig_path, model_path)
         shutil.copy(pathlib.Path(__file__).parent / (MX_SYS_MOD + ".pxd"), model_path)
 
-        logger = run_sample(orig_path, args.sample, new_model_name=model_name)
         if args.no_spec:
             d = {}
         else:
@@ -324,6 +328,8 @@ def main_handler(args: argparse.Namespace, stdout: IO[str], stderr: IO[str]) -> 
                 raise FileNotFoundError(f"{e}. Add '--no-spec' to omit the spec file.") from e
 
         spec = TransSpec(d)
+        logger = run_sample(orig_path, args.sample, new_model_name=model_name,
+                            admission=not spec.policy.prepared_tables)
         # integer guards (owner's rule): the mode follows the largest traced integer
         from .config import UNCHECKED_LIMIT, UNCHECKED_LIMIT_NOTE, resolve_integer_checks
         mode = resolve_integer_checks(spec.policy, logger.max_integer)
@@ -471,6 +477,13 @@ def main_handler(args: argparse.Namespace, stdout: IO[str], stderr: IO[str]) -> 
         report = describe(module_infos)
         (model_path / '_mx_admission.json').write_text(json.dumps(report, indent=2), encoding='utf-8')
         (model_path / '_mx_integer_checks.json').write_text(json.dumps(integer_report, indent=2), encoding='utf-8')
+        if policy.prepared_tables:      # T-3: the build report of table reads (doc table_reads.md)
+            from modelx_cython.table_cells import path_of
+            reads = {path_of(cls, cell.name): cell.frame_reads
+                     for info in module_infos.values() for cls in info.classes.values()
+                     for cell in cls.cells.values() if getattr(cell, 'frame_reads', None)}
+            (model_path / '_mx_table_reads.json').write_text(json.dumps(reads, indent=1, sort_keys=True),
+                                                             encoding='utf-8')
         _table_admission(logger, report, model_path, policy)
 
     if args.translate_only:

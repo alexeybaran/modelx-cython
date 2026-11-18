@@ -46,9 +46,17 @@ def table_cells(cls_info):
                 or cells.body_has_closure or cells.called_with_kwargs or cells.formula_is_generator):
             continue
         binder = cells.native_result_binder
-        if binder:
+        if binder or frame_cell(cls_info, cells):
             result[name] = cells
     return result
+
+
+def frame_cell(cls_info, cells):
+    """T-3: a zero-argument cell whose traced value is a pandas DataFrame or Series, compiled with prepared
+    tables: it is a table cell whose value is the frame itself (assigned as it is, never converted)."""
+    policy = getattr(getattr(getattr(cls_info, 'module', None), 'spec', None), 'policy', None)
+    return (bool(getattr(policy, 'prepared_tables', False)) and not cells.native_result_binder
+            and getattr(getattr(cells, '_rt', None), 'frame_schema', None) is not None)
 
 
 def record_cells(cls_info):
@@ -199,6 +207,15 @@ def rewrite_class(cls_info, node, config, integer_refs):
     lines = []
     for name, cells in tables.items():
         path = path_of(cls_info, name)
+        if frame_cell(cls_info, cells):
+            assign = f'    {RUNTIME}.assign_table_cell(self, {name!r}, {path!r}, value)\n'
+            lines.append(
+                f'@property\n'
+                f'def {name}(self):\n'
+                f'    return {RUNTIME}.TableCell(self, {name!r}, {path!r})\n\n'
+                f'@{name}.setter\n'
+                f'def {name}(self, value):\n' + assign)
+            continue
         helper = cells.native_result_binder.rsplit('.', 1)[0]
         if cells.native_provider_binding.manifest.provider == STANDARD_PROVIDER:
             assign = (f'    {RUNTIME}.assign_table_cell(self, {name!r}, {path!r},\n'
@@ -242,10 +259,14 @@ def rewrite_class(cls_info, node, config, integer_refs):
         # D130: the table cells marked by a clear of another Space rebind from the frame they hold
         stale = ['def _mx_stale_tables(self):']
         for name, cells in tables.items():
+            if frame_cell(cls_info, cells):
+                continue        # T-3: a frame cell holds the frame itself; nothing to rebuild
             if cells.is_locked:
                 stale.append(f'    {MX_SYS_MOD}._mx_store_flag({CY_MOD}.address(self._has_{name}), False)')
             else:
                 stale.append(f'    self._has_{name} = False')
+        if len(stale) == 1:
+            stale.append('    pass')
         lines.append('\n'.join(stale) + '\n')
         get = ['def _mx_table_cell_value(self, name):']
         put = ['def _mx_set_table_cell(self, name, value):']

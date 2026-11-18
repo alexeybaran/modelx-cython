@@ -3,6 +3,8 @@
 # and value reads below are inline, so the C compiler inlines them into the compiled model; they take no
 # reference on a shared object (an object-column read returns a new reference to the value it reads).
 
+from cpython.ref cimport PyObject
+
 cdef enum:
     LEVEL_DENSE = 0      # consecutive int labels: code = key - first
     LEVEL_SORTED = 1     # other int labels: binary search over the sorted labels
@@ -14,7 +16,8 @@ cdef enum:
     COLUMN_OBJECT = 2
 
 cdef class PreparedTable:
-    cdef readonly object source            # the user's frame or Series (the object the formula sees)
+    cdef object _source                    # weak reference to the user's frame or Series (``source``): a prepared
+                                           # copy never keeps a replaced frame alive
     cdef readonly bint is_series
     cdef readonly Py_ssize_t nrows, nlevels
     cdef readonly tuple level_labels       # per level: its labels in code order (a list)
@@ -101,7 +104,123 @@ cdef class PreparedTable:
         return self.i64[row * self.i64_width + slot]
 
     cdef Py_ssize_t code_obj(self, int level, object key) except -2
+    cdef Py_ssize_t row_key(self, object key) except -2
     cdef bint prefix_range(self, const Py_ssize_t* codes, int count, Py_ssize_t* start, Py_ssize_t* stop) noexcept nogil
     cdef Py_ssize_t asof_position(self, double x) noexcept nogil
     cdef object object_at(self, Py_ssize_t row, Py_ssize_t slot)
     cpdef Py_ssize_t column(self, object label) except -2
+
+
+# ---- reads of compiled code (T-3) ---------------------------------------------------------------------
+# A PreparedRef is a borrowed pointer to a PreparedTable held by the reading item (or a local of the formula):
+# the holder keeps it alive, so a read through it takes no reference. ``slot`` is what ``hold`` set: one plus
+# the column's slot. Key parts are a C long long (an integer part on an integer level: no Python object) or the
+# Python value (looked up as pandas does).
+ctypedef PyObject* PreparedRef
+ctypedef long long IntKey
+
+ctypedef fused KeyA:
+    IntKey
+    object
+
+ctypedef fused KeyB:
+    IntKey
+    object
+
+ctypedef fused KeyC:
+    IntKey
+    object
+
+cdef object prepared(object frame)
+cdef int missing(object key) except -1
+cdef object hold(object frame, object label, int kind, Py_ssize_t* slot)
+
+
+cdef inline Py_ssize_t _code(PreparedTable table, int level, KeyA part) except -2:
+    if KeyA is IntKey:
+        return table.code_ll(level, part)
+    else:
+        return table.code_obj(level, part)
+
+
+cdef inline Py_ssize_t row1(PreparedTable table, KeyA a) except -2:
+    if KeyA is IntKey:
+        return table.row_ll(a)
+    else:
+        return table.row_key(a)
+
+
+cdef inline Py_ssize_t row2(PreparedTable table, KeyA a, KeyB b) except -2:
+    cdef Py_ssize_t[2] codes
+    codes[0] = _code(table, 0, a)
+    codes[1] = _code(table, 1, b)
+    return table.row_codes(codes, 2)
+
+
+cdef inline Py_ssize_t row3(PreparedTable table, KeyA a, KeyB b, KeyC c) except -2:
+    cdef Py_ssize_t[3] codes
+    codes[0] = _code(table, 0, a)
+    codes[1] = _code(table, 1, b)
+    codes[2] = _code(table, 2, c)
+    return table.row_codes(codes, 3)
+
+
+cdef int missing2(object a, object b) except -1
+cdef int missing3(object a, object b, object c) except -1
+
+
+cdef inline double read_f64(PreparedRef ref, Py_ssize_t slot, KeyA a) except? -1.0:
+    """``frame.loc[key, column]`` of a float64 column through a held table; KeyError as pandas."""
+    cdef Py_ssize_t row = row1(<PreparedTable>ref, a)
+    if row < 0:
+        missing(a)
+    return (<PreparedTable>ref).f64_at(row, slot - 1)
+
+
+cdef inline double read_f64_2(PreparedRef ref, Py_ssize_t slot, KeyA a, KeyB b) except? -1.0:
+    cdef Py_ssize_t row = row2(<PreparedTable>ref, a, b)
+    if row < 0:
+        missing2(a, b)
+    return (<PreparedTable>ref).f64_at(row, slot - 1)
+
+
+cdef inline double read_f64_3(PreparedRef ref, Py_ssize_t slot, KeyA a, KeyB b, KeyC c) except? -1.0:
+    cdef Py_ssize_t row = row3(<PreparedTable>ref, a, b, c)
+    if row < 0:
+        missing3(a, b, c)
+    return (<PreparedTable>ref).f64_at(row, slot - 1)
+
+
+cdef inline long long read_i64(PreparedRef ref, Py_ssize_t slot, KeyA a) except? -1:
+    """``frame.loc[key, column]`` of an int64 column through a held table; KeyError as pandas."""
+    cdef Py_ssize_t row = row1(<PreparedTable>ref, a)
+    if row < 0:
+        missing(a)
+    return (<PreparedTable>ref).i64_at(row, slot - 1)
+
+
+cdef inline long long read_i64_2(PreparedRef ref, Py_ssize_t slot, KeyA a, KeyB b) except? -1:
+    cdef Py_ssize_t row = row2(<PreparedTable>ref, a, b)
+    if row < 0:
+        missing2(a, b)
+    return (<PreparedTable>ref).i64_at(row, slot - 1)
+
+
+cdef inline long long read_i64_3(PreparedRef ref, Py_ssize_t slot, KeyA a, KeyB b, KeyC c) except? -1:
+    cdef Py_ssize_t row = row3(<PreparedTable>ref, a, b, c)
+    if row < 0:
+        missing3(a, b, c)
+    return (<PreparedTable>ref).i64_at(row, slot - 1)
+
+
+cdef inline bint contains(PreparedRef ref, KeyA a) except -1:
+    """``key in frame.index`` through a held table."""
+    return row1(<PreparedTable>ref, a) >= 0
+
+
+cdef inline bint contains_2(PreparedRef ref, KeyA a, KeyB b) except -1:
+    return row2(<PreparedTable>ref, a, b) >= 0
+
+
+cdef inline bint contains_3(PreparedRef ref, KeyA a, KeyB b, KeyC c) except -1:
+    return row3(<PreparedTable>ref, a, b, c) >= 0
