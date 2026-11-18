@@ -28,6 +28,10 @@ _KINDS = {
     # keyed by (receiver, column, kind)
     'prepared': ('_mx_tp_', 'object', 'object', 'None'),
     'prepared_slot': ('_mx_tq_', 'Py_ssize_t', '_mx_cy.Py_ssize_t', '0'),
+    # T-4: one plus the level code of a key part fixed per item (-1 absent), keyed by (table field, level, part);
+    # one plus the row of a row cell's key (-1: pandas), keyed by (table field, key)
+    'prepared_code': ('_mx_tk_', 'Py_ssize_t', '_mx_cy.Py_ssize_t', '0'),
+    'prepared_row': ('_mx_tw_', 'Py_ssize_t', '_mx_cy.Py_ssize_t', '0'),
 }
 
 

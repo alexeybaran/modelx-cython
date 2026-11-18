@@ -781,6 +781,28 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
             cache[cls_info.name] = accepted
         return cache[cls_info.name]
 
+    def _prefix_cells(self, cls_info):
+        """T-4: {cell: its ``T.loc[key]``} for the zero-argument cells of the class whose formula is ``return
+        T.loc[key]`` and that no other class of the module defines (frame_reads decides prefix from row)."""
+        cache = self.__dict__.setdefault('_prefix_cache', {})
+        if cls_info.name not in cache:
+            from modelx_cython import row_cells
+            found = {}
+            module = getattr(self, '_module_node', None)
+            classes = [n for n in getattr(module, 'body', ()) if isinstance(n, cst.ClassDef)]
+            own = next((c for c in classes if c.name.value == cls_info.name), None)
+            if own is not None:
+                for func in own.body.body:
+                    if isinstance(func, cst.FunctionDef) and func.name.value.startswith('_f_'):
+                        expr = row_cells._row_expression(func)
+                        name = func.name.value[3:]
+                        if expr is not None and not any(
+                                isinstance(f, cst.FunctionDef) and f.name.value in ('_f_' + name, name)
+                                for c in classes if c is not own for f in c.body.body):
+                            found[name] = expr
+            cache[cls_info.name] = found
+        return cache[cls_info.name]
+
     def _cached_call(self, call):
         """A self-rooted zero-argument call of a cached Cell (the resolver's cached_cells)."""
         name = call.func.attr.value if isinstance(call.func, cst.Attribute) else None
@@ -798,10 +820,21 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
             inline = row_cells.Inline(rows)
             candidate = node.visit(inline)
             if inline.count:
-                lowered = self._table_reads(candidate, cls_info, cells)
-                code = cst.Module(body=[]).code_for_node(lowered)
+                code_of = cst.Module(body=[]).code_for_node
+                self._row_names = {code_of(expr): name for name, expr in rows.items()}
+                try:
+                    lowered = self._table_reads(candidate, cls_info, cells)
+                finally:
+                    self._row_names = None
+                code = code_of(lowered)
+                if getattr(self.module.spec.policy, 'prepared_tables', False):
+                    # T-4: every inlined field read is an L2 read of a row held per item (the pandas row is
+                    # built only on a fallback)
+                    if sum(1 for e in getattr(cells, 'frame_reads', ()) if e['form'] == 'L2') >= inline.count:
+                        cells.row_fields_inlined = inline.count
+                        return lowered
                 # every inlined read must be native and hold its row per item (no lookup per read)
-                if (not any(cst.Module(body=[]).code_for_node(expr) in code for expr in rows.values())
+                elif (not any(code_of(expr) in code for expr in rows.values())
                         and code.count('held_row_') >= 1):
                     cells.row_fields_inlined = inline.count
                     return lowered
@@ -827,7 +860,8 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
         if getattr(self.module.spec.policy, 'prepared_tables', False):
             # T-3: reads of a traced pandas frame onto its PreparedTable (frame_reads.py)
             from modelx_cython.frame_reads import FrameReads
-            frames = FrameReads(self._resolver, cls_info, cells, self.helper_providers, self.module.spec.policy)
+            frames = FrameReads(self._resolver, cls_info, cells, self.helper_providers, self.module.spec.policy,
+                                getattr(self, '_row_names', None), self._prefix_cells(cls_info))
             node = frames.lower(node)
             cells.frame_reads = frames.lowered + frames.declined
         pandas = self._pandas_reads(node, cls_info, cells)
