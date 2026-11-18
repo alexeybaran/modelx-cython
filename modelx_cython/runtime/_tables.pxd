@@ -43,6 +43,9 @@ cdef class PreparedTable:
     cdef readonly object max_label, min_label   # index.max(), index.min() as pandas returns them
     cdef const double[::1] asof_keys       # sorted labels of a flat numeric index (for asof)
     cdef readonly object asof_labels       # the labels themselves, by position, as pandas returns them
+    cdef bytes _verdict_bytes              # T-4 item 0: per read signature of the model, 1 when this table is of
+    cdef const unsigned char* verdicts     # the kinds that read was compiled for (decided when prepared)
+    cdef Py_ssize_t n_verdicts
 
     cdef inline Py_ssize_t code_ll(self, int level, long long key) noexcept nogil:
         """The code of an int key part at ``level``, or -1 (absent, or an object level)."""
@@ -133,8 +136,8 @@ ctypedef fused KeyC:
 
 cdef object prepared(object frame)
 cdef int missing(object key) except -1
-cdef object hold(object frame, object label, int kind, Py_ssize_t* slot)
-cdef object hold_checked(object frame, object label, int kind, Py_ssize_t* slot)
+cdef object hold(object frame, object label, int kind, Py_ssize_t* slot, int signature)
+cdef object hold_checked(object frame, object label, int kind, Py_ssize_t* slot, int signature)
 cdef Py_ssize_t hold_code(object table, int level, object value) except -2
 cdef Py_ssize_t asof_row(PreparedRef ref, int count, Py_ssize_t c0, Py_ssize_t c1, Py_ssize_t c2,
                          Py_ssize_t c3, Py_ssize_t c4, double x) noexcept

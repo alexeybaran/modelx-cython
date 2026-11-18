@@ -325,15 +325,22 @@ class FrameReads:
             return [cst.parse_statement(f'if self.{field} == 0:\n    self.{field} = {value}\n')]
         label = repr(hold.label) if hold.label is not _NO_LABEL else 'None'
         function = 'hold_checked' if getattr(self.policy, 'verify_inputs', False) else 'hold'
+        # T-4 item 0: the kinds the read is compiled for; another kind at run time keeps pandas
+        schema = self._schema_of_call(hold.receiver) or {}
+        levels = repr(''.join('i' if kind == 'int' else 'o' for kind in schema.get('levels', ())))
+        kinds = {'f64': 0, 'i64': 1, 'obj': 2}
+        columns = (repr(tuple((name, kinds[kind]) for name, kind in schema.get('columns', ())))
+                   if getattr(hold, 'row_columns', False) else 'None')
+        extra = f', {self.signature(levels, columns)}'
         receiver = _code(hold.receiver)
         if self.per_item:
             return [cst.parse_statement(
                 f'if self.{hold.slot} == 0:\n'
                 f'    self.{hold.table} = {m}.{function}({receiver}, {label}, {hold.kind}, '
-                f'_mx_cy.address(self.{hold.slot}))\n')]
+                f'_mx_cy.address(self.{hold.slot}){extra})\n')]
         return [cst.parse_statement(f'{hold.slot}: _mx_cy.Py_ssize_t = 0'),
                 cst.parse_statement(f'{hold.table}: object = {m}.{function}({receiver}, {label}, {hold.kind}, '
-                                    f'_mx_cy.address({hold.slot}))')]
+                                    f'_mx_cy.address({hold.slot}){extra})')]
 
     def extreme(self, expr):
         """``R.index.max()`` / ``R.index.min()`` on a frame receiver with one unique int level: (R call, 'max'|'min')."""
@@ -345,6 +352,11 @@ class FrameReads:
         if found is None or found[1]['levels'] != ('int',) or not found[1].get('unique') or _code(found[0]) in self.mutated:
             return None
         return found[0], expr.func.attr.value
+
+    def signature(self, levels, columns):
+        """The model-wide id of a read signature (written to ``_mx_table_signatures.py`` at the end of the build)."""
+        table = self.resolver.__dict__.setdefault('table_signatures', {})
+        return table.setdefault((levels, columns), len(table))
 
     def cached_call(self, call):
         """A self-rooted zero-argument call of a cached Cell (as the transformer's ``_cached_call``)."""
@@ -450,6 +462,10 @@ class _Rewrite(cst.CSTTransformer):
 
     def _record(self, node, form, receiver, why=None):
         entry = {'expression': _code(node)[:160], 'receiver': _code(receiver), 'form': form}
+        if not why:
+            schema = self.o._schema_of_call(receiver) or {}
+            entry['pandas_when'] = ('the frame at run time has other index level kinds than '
+                                    f"{list(schema.get('levels', ()))}, or the column read is of another kind")
         if why:
             entry['reason'] = why
             self.o.declined.append(entry)
@@ -737,6 +753,7 @@ class _Rewrite(cst.CSTTransformer):
         kind = kinds[label] if mixed else ('f64' if any(k == 'f64' for k in kinds.values()) else 'i64')
         stored = kinds[label]           # the block the column is stored in
         hold = self._take(call, label, {'f64': 0, 'i64': 1, 'obj': 2}[stored])
+        hold.row_columns = True         # the row's dtype depends on every column: all of them are checked
         if isinstance(row.value.value, cst.Name):
             self.replaced_names.add(row.value.value.value)
         name = o.row_names.get(_code(row)) if o.row_names else None

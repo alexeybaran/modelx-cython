@@ -253,6 +253,7 @@ json.dump(result, sys.stdout, indent=1)
 
 CONTRACT = '''\
 import json
+import re
 import sys
 from importlib import import_module
 import pandas as pd
@@ -340,6 +341,51 @@ compiled.Data.rates[()] = rates2.copy()
 live.Items.clear_all()
 compiled.Items.clear_all()
 checks["item: reassign the prefix cell's table + Space.clear_all: equal to live"] = items_equal()
+
+
+# T-4 item 0: an assigned frame of other kinds than the traced ones (the reads keep pandas), compiled = live
+def outcomes(space, cell, ts):
+    found = []
+    for t in ts:
+        try:
+            found.append(("ok", float(getattr(space, cell)(t))))
+        except Exception as error:
+            # live wraps a formula's error in FormulaError and names the original in its message (as checks.py
+            # reads it): compare the original exception type
+            name = type(error).__name__
+            if name == "FormulaError":
+                named = re.search(r"\\n(\\w+): ", str(error))
+                name = named.group(1) if named else name
+            found.append(("raise", name))
+    return found
+
+
+def same_outcomes(cell, ts, items=False):
+    if items:
+        return all(outcomes(live.Items[i], cell, ts) == outcomes(compiled.Items[i], cell, ts) for i in (1, 2))
+    return outcomes(live.Calc, cell, ts) == outcomes(compiled.Calc, cell, ts)
+
+
+base = live.Data.flat()
+KINDS = {
+    "int level -> float level": base.set_axis(pd.Index([20.0, 21.0, 22.0, 23.0], name="age"), axis=0),
+    "float column -> int column": base.assign(q=[1, 2, 3, 4]),
+    "int level -> text level": base.set_axis(pd.Index(["20", "21", "22", "23"], name="age"), axis=0),
+}
+for name, frame in KINDS.items():
+    live.Data.flat[()] = frame
+    compiled.Data.flat[()] = frame.copy()
+    live.Calc.clear_all(); compiled.Calc.clear_all(); live.Items.clear_all(); compiled.Items.clear_all()
+    checks[f"kind: {name}: equal to live"] = (same_outcomes("loc_scalar__flat", range(4))
+                                              and same_outcomes("at__flat", range(4))
+                                              and same_outcomes("v__flat", range(4), items=True))
+multi = live.Data.multi()
+multi_int = multi.set_axis(multi.index.set_levels([1, 2, 3], level=0), axis=0)
+live.Data.multi[()] = multi_int
+compiled.Data.multi[()] = multi_int.copy()
+live.Calc.clear_all(); compiled.Calc.clear_all(); live.Items.clear_all(); compiled.Items.clear_all()
+checks["kind: text level -> int level (two levels): equal to live"] = (
+    same_outcomes("loc_tuple__multi", range(4)) and same_outcomes("at_tuple__multi", range(4)))
 json.dump(checks, sys.stdout, indent=1)
 '''
 

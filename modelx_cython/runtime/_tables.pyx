@@ -365,6 +365,8 @@ cdef object prepared(object frame):
     if entry is not None and entry[0]() is frame:
         return entry[1]
     table = prepare(frame)
+    if table is not None:
+        _decide(table)          # the kind verdicts of every read of the model, once per prepared table
     ref = weakref.ref(frame, lambda _, key=key: _forget(key))
     with _lock:
         _prepared[key] = (ref, table)
@@ -375,15 +377,17 @@ cdef int missing(object key) except -1:
     raise KeyError(key)
 
 
-cdef object hold(object frame, object label, int kind, Py_ssize_t* slot):
+cdef object hold(object frame, object label, int kind, Py_ssize_t* slot, int signature):
     """Resolve a hold: return the PreparedTable of ``frame`` (the holder keeps it) and set ``*slot`` to one plus
-    the slot of column ``label`` within its ``kind`` block (one for a hold of index membership, ``kind`` < 0).
-    ``*slot`` = -1 (and None returned) when the read stays pandas: the frame is not prepared, the column is
-    absent, or its kind is another. 0 is left to mean unresolved: a new item's field starts at 0."""
+    the slot of column ``label`` within its ``kind`` block (one for a hold of the index alone, ``kind`` < 0).
+    ``*slot`` = -1 (and None returned) when the read stays pandas: the frame is not prepared, or it is not of the
+    kinds the read was compiled for (T-4 item 0). ``signature`` numbers those kinds in the model's
+    ``_mx_table_signatures``; the verdict was decided when the table was prepared and is one C flag here.
+    0 is left to mean unresolved: a new item's field starts at 0."""
     cdef PreparedTable table = prepared(frame)
     cdef Py_ssize_t position
     slot[0] = -1
-    if table is None:
+    if table is None or signature < 0 or signature >= table.n_verdicts or not table.verdicts[signature]:
         return None
     if kind < 0:            # -1: index membership; -2: extremes of the index (not of an empty one)
         if kind == -2 and table.nrows == 0:
@@ -395,6 +399,55 @@ cdef object hold(object frame, object label, int kind, Py_ssize_t* slot):
         return None
     slot[0] = table.column_slot[position] + 1
     return table
+
+
+cdef object _signatures = None
+
+
+cdef object model_signatures():
+    """The read signatures of the compiled model this runtime copy belongs to (``_mx_table_signatures.SIGNATURES``:
+    (levels, columns) per id, written at build), loaded once."""
+    global _signatures
+    if _signatures is None:
+        import importlib
+        package = __name__.rpartition('.')[0]
+        try:        # the runtime used on its own (no model package) has no compiled reads
+            _signatures = (tuple(importlib.import_module(package + '._mx_table_signatures').SIGNATURES)
+                           if package else ())
+        except ImportError:
+            _signatures = ()
+    return _signatures
+
+
+cdef void _decide(PreparedTable table):
+    """T-4 item 0: decide, once per prepared table, which of the model's read signatures it satisfies:
+    - ``levels``: one letter per index level, ``i`` for a level a read takes integer keys on (it must still be an
+      int level), ``o`` for any other; the number of levels must be the same;
+    - ``columns``: for a row read by field, every (label, kind) of the traced frame (the row's dtype depends on all
+      of them); else None. The column read is checked by ``hold`` (its kind and slot)."""
+    cdef int level
+    cdef Py_ssize_t position
+    verdicts = bytearray()
+    for levels, columns in model_signatures():
+        result = len(levels) == table.nlevels
+        if result:
+            for level in range(table.nlevels):
+                if levels[level] == 'i' and table.level_kind[level] == LEVEL_OBJECT:
+                    result = False
+                    break
+        if result and columns is not None:
+            if len(columns) != len(table.column_positions):
+                result = False
+            else:
+                for name, expected in columns:
+                    position = table.column_positions.get(name, -1)
+                    if position < 0 or table.column_kind[position] != expected:
+                        result = False
+                        break
+        verdicts.append(1 if result else 0)
+    table._verdict_bytes = bytes(verdicts) + b'\0'
+    table.verdicts = <const unsigned char*>table._verdict_bytes
+    table.n_verdicts = len(verdicts)
 
 
 def check_unchanged(frame):
@@ -427,10 +480,10 @@ cdef bint _same(PreparedTable a, PreparedTable b):
     return True
 
 
-cdef object hold_checked(object frame, object label, int kind, Py_ssize_t* slot):
+cdef object hold_checked(object frame, object label, int kind, Py_ssize_t* slot, int signature):
     """``hold`` in check mode: the frame is first checked against its prepared copy."""
     check_unchanged(frame)
-    return hold(frame, label, kind, slot)
+    return hold(frame, label, kind, slot, signature)
 
 
 cdef Py_ssize_t hold_code(object table, int level, object value) except -2:
