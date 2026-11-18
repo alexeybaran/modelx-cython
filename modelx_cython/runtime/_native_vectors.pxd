@@ -17,11 +17,27 @@ from libc.math cimport fabs, isfinite
 
 cdef extern from *:
     """
-    #define __pyx_vec_load(p) __atomic_load_n((p), __ATOMIC_ACQUIRE)
-    static inline int __pyx_vec_publish(PyObject **slot, PyObject *value) {
+    /* One mechanism on every C compiler: CPython's own atomics. From 3.13 Python.h includes
+       cpython/pyatomic.h, whose functions are underscore-prefixed interpreter API (not the
+       stable ABI): _Py_atomic_load_ptr_acquire and _Py_atomic_compare_exchange_ptr here,
+       _Py_atomic_add_int64 and _Py_atomic_load_int64_relaxed in _native_inputs. Before 3.13
+       there is no free-threaded build, and every caller (VecCache.put/get, len, items) runs
+       Python object code, so it holds the GIL: plain loads and stores are ordered by it. */
+    #if PY_VERSION_HEX >= 0x030D0000
+    #define __pyx_vec_load(p) ((PyObject *)_Py_atomic_load_ptr_acquire((p)))
+    static CYTHON_INLINE int __pyx_vec_publish(PyObject **slot, PyObject *value) {
         PyObject *expected = NULL;
-        return __atomic_compare_exchange_n(slot, &expected, value, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE);
+        return _Py_atomic_compare_exchange_ptr(slot, &expected, value);
     }
+    #else
+    #define __pyx_vec_load(p) (*(p))
+    static CYTHON_INLINE int __pyx_vec_publish(PyObject **slot, PyObject *value) {
+        if (*slot != NULL)
+            return 0;
+        *slot = value;
+        return 1;
+    }
+    #endif
     """
     PyObject* __pyx_vec_load(PyObject** p) noexcept nogil
     bint __pyx_vec_publish(PyObject** slot, PyObject* value) noexcept nogil
@@ -204,7 +220,7 @@ cdef inline long long ivec_sum_range(I64Vec v, long long a, long long b) except?
     cdef Py_ssize_t i
     _clip(&a, &b, v.n)
     for i in range(<Py_ssize_t>a, <Py_ssize_t>b):
-        if __builtin_saddll_overflow(total, v.data[i], &total):
+        if mx_vec_add_overflow(total, v.data[i], &total):
             return _ivec_sum_slow(v, <Py_ssize_t>a, <Py_ssize_t>b)
     return total
 
@@ -214,4 +230,14 @@ cdef inline long long ivec_sum(I64Vec v) except? -1:
 
 
 cdef extern from *:
-    bint __builtin_saddll_overflow(long long a, long long b, long long* out) nogil
+    """
+    #include <limits.h>
+    /* exact signed add in portable C (no compiler builtin): the test runs before the add */
+    static CYTHON_INLINE int mx_vec_add_overflow(long long a, long long b, long long *out) {
+        if ((b > 0 && a > LLONG_MAX - b) || (b < 0 && a < LLONG_MIN - b))
+            return 1;
+        *out = a + b;
+        return 0;
+    }
+    """
+    bint mx_vec_add_overflow(long long a, long long b, long long* out) nogil

@@ -1557,15 +1557,17 @@ from libc.string cimport memcpy
 
 cdef extern from *:
     """
-    #if defined(_MSC_VER)
-    #include <intrin.h>
-    static volatile __int64 mx_handle_fallbacks_ = 0;
-    static void mx_handle_fallback(void) { _InterlockedIncrement64(&mx_handle_fallbacks_); }
-    static long long mx_handle_fallback_count(void) { return (long long)mx_handle_fallbacks_; }
+    /* Process-wide debug counter, with the one atomics mechanism of _native_vectors.pxd:
+       CPython's cpython/pyatomic.h from 3.13 (_Py_atomic_add_int64,
+       _Py_atomic_load_int64_relaxed; underscore-prefixed interpreter API); before 3.13 every
+       caller holds the GIL (the read runs Python object code), so a plain counter is exact. */
+    static int64_t mx_handle_fallbacks_ = 0;
+    #if PY_VERSION_HEX >= 0x030D0000
+    static void mx_handle_fallback(void) { (void)_Py_atomic_add_int64(&mx_handle_fallbacks_, 1); }
+    static long long mx_handle_fallback_count(void) { return (long long)_Py_atomic_load_int64_relaxed(&mx_handle_fallbacks_); }
     #else
-    static long long mx_handle_fallbacks_ = 0;
-    static void mx_handle_fallback(void) { __atomic_fetch_add(&mx_handle_fallbacks_, 1, __ATOMIC_RELAXED); }
-    static long long mx_handle_fallback_count(void) { return __atomic_load_n(&mx_handle_fallbacks_, __ATOMIC_RELAXED); }
+    static void mx_handle_fallback(void) { mx_handle_fallbacks_ += 1; }
+    static long long mx_handle_fallback_count(void) { return (long long)mx_handle_fallbacks_; }
     #endif
     static inline Py_hash_t mx_mix64(unsigned long long x) {
         x ^= x >> 30; x *= 0xbf58476d1ce4e5b9ULL; x ^= x >> 27; x *= 0x94d049bb133111ebULL; x ^= x >> 31;

@@ -62,71 +62,43 @@ cdef inline long long _mx_integer_result(_mx_integer_source value, str path) exc
 cdef extern from *:
     """
     #include <limits.h>
-    #if defined(_MSC_VER)
-    #define MX_SIGNED_INLINE __forceinline
-    #else
     #define MX_SIGNED_INLINE CYTHON_INLINE
-    #endif
-    #if defined(_MSC_VER) && defined(_M_X64)
-    #include <intrin.h>
-    #endif
 
+    /* Exact signed 64-bit add, subtract and multiply in one portable C form, the same on
+       every C compiler (no compiler builtins): the overflow test runs before the operation,
+       so no signed overflow is executed. */
     static MX_SIGNED_INLINE int mx_add_overflow(long long left, long long right,
                                              long long *result) {
-    #if defined(__GNUC__) || defined(__clang__)
-        return __builtin_add_overflow(left, right, result);
-    #elif defined(_MSC_VER)
-        /* MSVC's signed integers are two's complement. Detect a sign change
-           in the unsigned result without executing a signed overflow. */
-        unsigned long long a = (unsigned long long)left;
-        unsigned long long b = (unsigned long long)right;
-        unsigned long long sum = a + b;
-        *result = (long long)sum;
-        return ((a ^ sum) & (b ^ sum)) > (unsigned long long)LLONG_MAX;
-    #else
         if ((right > 0 && left > LLONG_MAX - right) ||
             (right < 0 && left < LLONG_MIN - right))
             return 1;
         *result = left + right;
         return 0;
-    #endif
     }
 
     static MX_SIGNED_INLINE int mx_sub_overflow(long long left, long long right,
                                              long long *result) {
-    #if defined(__GNUC__) || defined(__clang__)
-        return __builtin_sub_overflow(left, right, result);
-    #elif defined(_MSC_VER)
-        unsigned long long a = (unsigned long long)left;
-        unsigned long long b = (unsigned long long)right;
-        unsigned long long difference = a - b;
-        *result = (long long)difference;
-        return ((a ^ b) & (a ^ difference)) > (unsigned long long)LLONG_MAX;
-    #else
         if ((right > 0 && left < LLONG_MIN + right) ||
             (right < 0 && left > LLONG_MAX + right))
             return 1;
         *result = left - right;
         return 0;
-    #endif
     }
 
     static MX_SIGNED_INLINE int mx_mul_overflow(long long left, long long right,
                                              long long *result) {
-    #if defined(__GNUC__) || defined(__clang__)
-        return __builtin_mul_overflow(left, right, result);
-    #elif defined(_MSC_VER) && defined(_M_X64)
-        long long high;
-        *result = _mul128(left, right, &high);
-        return high != (*result < 0 ? -1 : 0);
-    #else
+        /* both operands in [-2**31, 2**31): the product fits, no division on this path */
+        if ((unsigned long long)left + 0x80000000ULL <= 0xFFFFFFFFULL &&
+            (unsigned long long)right + 0x80000000ULL <= 0xFFFFFFFFULL) {
+            *result = left * right;
+            return 0;
+        }
         if (left > 0 ? (right > 0 ? left > LLONG_MAX / right : right < LLONG_MIN / left)
                      : (left < 0 && (right > 0 ? left < LLONG_MIN / right
                                               : right < 0 && left < LLONG_MAX / right)))
             return 1;
         *result = left * right;
         return 0;
-    #endif
     }
     static long long mx_signed_overflow(PyObject *path) {
         PyErr_Format(PyExc_OverflowError,
