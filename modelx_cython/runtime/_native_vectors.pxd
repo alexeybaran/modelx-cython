@@ -10,37 +10,10 @@ Sums of float vectors use a compensated state equal to CPython's built-in float
 sum bit for bit. It is a private copy of ``_float_sum_state`` (owned by another
 package); the two are to be unified.
 """
+cimport cython
 from cpython.version cimport PY_VERSION_HEX
 from cpython.ref cimport PyObject
 from libc.math cimport fabs, isfinite
-
-
-cdef extern from *:
-    """
-    /* One mechanism on every C compiler: CPython's own atomics. From 3.13 Python.h includes
-       cpython/pyatomic.h, whose functions are underscore-prefixed interpreter API (not the
-       stable ABI): _Py_atomic_load_ptr_acquire and _Py_atomic_compare_exchange_ptr here,
-       _Py_atomic_add_int64 and _Py_atomic_load_int64_relaxed in _native_inputs. Before 3.13
-       there is no free-threaded build, and every caller (VecCache.put/get, len, items) runs
-       Python object code, so it holds the GIL: plain loads and stores are ordered by it. */
-    #if PY_VERSION_HEX >= 0x030D0000
-    #define __pyx_vec_load(p) ((PyObject *)_Py_atomic_load_ptr_acquire((p)))
-    static CYTHON_INLINE int __pyx_vec_publish(PyObject **slot, PyObject *value) {
-        PyObject *expected = NULL;
-        return _Py_atomic_compare_exchange_ptr(slot, &expected, value);
-    }
-    #else
-    #define __pyx_vec_load(p) (*(p))
-    static CYTHON_INLINE int __pyx_vec_publish(PyObject **slot, PyObject *value) {
-        if (*slot != NULL)
-            return 0;
-        *slot = value;
-        return 1;
-    }
-    #endif
-    """
-    PyObject* __pyx_vec_load(PyObject** p) noexcept nogil
-    bint __pyx_vec_publish(PyObject** slot, PyObject* value) noexcept nogil
 
 
 cdef class F64Vec:
@@ -60,22 +33,22 @@ cdef class I64Vec:
 cdef class VecCache:
     """The values of a vector cell with one integer parameter, by index (dense cache).
 
-    A slot is published once (compare-and-swap from NULL) and never replaced while the cache
-    lives, so readers on any thread take it with one acquire load and no lock."""
-    cdef PyObject** slots
+    A pre-sized list: a slot is written once, under the list's critical section, and never
+    replaced while the cache lives; a read is a plain list item read (``PyList_GetItemRef`` on
+    the free-threaded build), with no lock (components review row 13)."""
+    cdef list slots
     cdef Py_ssize_t n
     cdef long long lo
     cdef object put(self, long long key, object value)
 
 
+@cython.boundscheck(False)
+@cython.wraparound(False)
 cdef inline object cache_get(VecCache cache, long long key):
     """The cached value at key, or None (a vector value is never None)."""
     cdef unsigned long long i = <unsigned long long>(key - cache.lo)
-    cdef PyObject* p
     if i < <unsigned long long>cache.n:
-        p = __pyx_vec_load(&cache.slots[i])
-        if p != NULL:
-            return <object>p
+        return cache.slots[<Py_ssize_t>i]
     return None
 
 
