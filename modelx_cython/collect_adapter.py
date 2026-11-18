@@ -2,10 +2,11 @@
 
 import libcst as cst
 
-from .syntax import dotted_name, literal_value, statements, walk
+from .syntax import dotted_name, literal_value, statements
 
 
 _VERSION = '_mx_collect_adapter_version'
+PROTOCOL = 2
 _HOOKS = {
     'collect_from_space': {'evaluate_serial', 'reuse_in_parallel', 'private_ordered'},
     '_mx_collect_parallel': {'private', 'private_ordered', 'workers'},
@@ -28,7 +29,7 @@ def _current(tree):
         version = literal_value(declarations[0])
     except (ValueError, TypeError):
         return False
-    if type(version) is not int or version != 2:
+    if type(version) is not int or version != PROTOCOL:
         return False
     for name, arguments in _HOOKS.items():
         functions = [node for node in tree.body
@@ -39,21 +40,16 @@ def _current(tree):
     return True
 
 
-def _requests_collection(module):
-    for cls in module.classes.values():
-        options = module.spec.get_spec(cls.fqname)
-        if (options.get('serial_collect') is not None or options.get('parallel_collect_reuse')
-                or options.get('parallel_collect_order') == 'domain'):
-            return True
-    return any(isinstance(node, cst.Call) and dotted_name(node.func) == '_mx_sys.collect_from_space'
-               for node in walk(module.visitor.wrapper.module))
-
-
 class CollectRuntime:
     def __init__(self, source):
         self.syntax = cst.parse_module(source)
         self.hook = _current(self.syntax)
 
-    def require_current(self, modules, workers):
-        if not self.hook and (workers != 1 or any(_requests_collection(module) for module in modules)):
-            raise ValueError('Collection requires export protocol v2. Re-export the model with current modelx.')
+    def require_current(self, modules=(), workers=1):
+        """The one check of the modelx that wrote the export: its runtime (``_mx_sys.py``) must
+        declare export protocol 2 with its collect entries, whatever the build uses."""
+        if not self.hook:
+            raise ValueError(
+                f'This export was written by a modelx without export protocol {PROTOCOL} '
+                f'({_VERSION} = {PROTOCOL} in _mx_sys.py, with its collect entries), which '
+                f'modelx-cython requires. Re-export the model with a modelx that writes protocol {PROTOCOL}.')

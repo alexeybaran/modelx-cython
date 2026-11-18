@@ -149,4 +149,4 @@ def test_obsolete_collect_export_requests_reexport(tmp_path):
         cwd=tmp_path, capture_output=True, text=True,
     )
     assert result.returncode != 0
-    assert "Re-export the model with current modelx" in result.stderr
+    assert "without export protocol 2" in result.stderr and "Re-export the model" in result.stderr

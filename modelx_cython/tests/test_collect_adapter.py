@@ -29,18 +29,19 @@ def test_current_exporter_runtime_is_kept_verbatim():
 
 
 @pytest.mark.parametrize('marker', ['', '_mx_collect_adapter_version = 1', '_mx_collect_adapter_version = 17'])
-def test_obsolete_collection_entry_requires_reexport(marker):
+def test_obsolete_export_requires_reexport(marker):
+    # one check of the export's protocol, whatever the model uses (an ordinary collect method
+    # used to pass with an old export)
     runtime = CollectRuntime(current().replace('_mx_collect_adapter_version = 2', marker))
     assert not runtime.hook
-    ordinary = module('def collect(self): return 42\n')
-    runtime.require_current((ordinary,), workers=1)
-    collect = module('def collect(self): return _mx_sys.collect_from_space(self)\n')
-    with pytest.raises(ValueError, match='Re-export the model'):
-        runtime.require_current((collect,), workers=1)
+    for source in ('def collect(self): return 42\n',
+                   'def collect(self): return _mx_sys.collect_from_space(self)\n'):
+        with pytest.raises(ValueError, match='export protocol 2.*Re-export the model'):
+            runtime.require_current((module(source),), workers=1)
 
 
-@pytest.mark.parametrize('options,workers', [({'serial_collect': 'reuse'}, 1), ({}, 4)])
-def test_explicit_collection_options_require_a_current_export(options, workers):
+@pytest.mark.parametrize('options,workers', [({'serial_collect': 'reuse'}, 1), ({}, 4), ({}, 1)])
+def test_a_runtime_without_the_protocol_requires_a_current_export(options, workers):
     runtime = CollectRuntime('pass\n')
     with pytest.raises(ValueError, match='Re-export the model'):
         runtime.require_current((module('pass\n', options),), workers)
