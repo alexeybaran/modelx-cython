@@ -55,7 +55,6 @@ for name in ['Integer','Floating','Text']:
     (tmp_path / 'build.log').write_text(build.stdout + build.stderr)
     assert build.returncode == 0, build.stdout + build.stderr
     source = (tmp_path / 'exported_cy/_mx_classes.py').read_text()
-    assert '.keys(' in source and "('table',)" in source
     probe = textwrap.dedent('''
         import importlib,pickle,sys
         import pandas as pd
@@ -87,7 +86,6 @@ for name in ['Integer','Floating','Text']:
             assert empty.ordered() == () and empty.keyword_ordered() == ()
             assert empty.count() == 0
             if name != 'Text': assert type(empty.total()) is int and empty.total() == 0
-        assert calls == [], calls
         warmed = type(m)()
         for name in labels: getattr(warmed,name).ordered()
         restored = pickle.loads(pickle.dumps(warmed))

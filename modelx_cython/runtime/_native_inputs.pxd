@@ -2,34 +2,13 @@ cimport cython
 from libc.math cimport fabs
 from modelx_cython._float_sum_state cimport F64Sum, f64_init, f64_add, f64_result
 
-cdef object lookup(object function, object table, object key, object column, object default=*)
 cdef Py_ssize_t indexed_position(object table, object key) except? -2
-cdef object first_key(object function, object table)
-cdef object last_key(object function, object table)
 
 cdef inline double f64_abs(double value) noexcept nogil:
     return fabs(value)
 
 cdef bint f64_accepts(object function)
 
-
-cdef class LookupContext:
-    cdef bint _private_owner
-    cdef object group_data, bounded_data
-    cdef Py_ssize_t bounded_column
-    cdef object numeric_source, numeric_column_source, numeric_data, numeric_function
-    cdef Py_ssize_t numeric_index
-    cdef object first, second
-    cdef object data_first, data_second
-    cdef object column_first, column_second
-    cdef Py_ssize_t index_first, index_second
-    cdef tuple grouped
-    cdef object keyed_cache
-    cdef object record_float, record_namespace, input_first, input_second
-    cdef unsigned char clamped_bindings_ready
-    cdef object clamped_source, clamped_column, clamped_namespace
-    cdef Py_ssize_t clamped_index
-    cdef object get(self, object table, object column, Py_ssize_t* index)
 
 # Packed keys borrow object components from the key owner during lookup.
 from cpython.ref cimport PyObject
@@ -249,10 +228,7 @@ cdef NativeTable bind_native_table(object value, str cell)
 cdef NativeTable _bind_owned(object value, str cell)
 cpdef NativeTable table_from_value(object value, str cell, object schema=*)
 
-cdef object indexed_lookup(object,object,object,object default=*)
 
 cdef object omitted_argument
 
 cdef object row(object function, tuple keywords, object table, object key)
-cdef object column(object function, tuple keywords, object table, object name, object report=*)
-cdef object table(object function, tuple keywords, object frame, object columns=*, object groups=*, object indexing=*, object rows=*, object report=*, object preserve_scalar_types=*)

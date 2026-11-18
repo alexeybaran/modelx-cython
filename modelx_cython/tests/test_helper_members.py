@@ -110,25 +110,6 @@ def test_scalar_result_rejects_undeclared_physical_types(result):
         helper_capability(lookup, 'scalar_result')
 
 
-def test_keyword_layout_is_explicit_and_preserves_argument_expressions():
-    ref = SimpleNamespace(helper=('sample.provider', 'over'), call_layout='keywords')
-    source = 'def formula(self):\n    return self.over(source(), function=payload(), where=predicate(), unpack=2)\n'
-    binder = HelperCalls({'over': ref}, set())
-    result = cst.Module(body=(binder.rewrite(cst.parse_module(source).body[0]),)).code
-    assert f"{module_name('sample.provider')}.over(self.over, ('function', 'where', 'unpack'), source(), function=payload(), where=predicate(), unpack=2)" in result
-
-
-def test_binding_inside_callbacks_uses_lexical_receiver_identity():
-    ref = SimpleNamespace(helper=('sample.provider', 'lookup'))
-    source = '''def formula(self):
-    return (lambda t: self.lookup(t), lambda self: self.lookup(1))
-'''
-    binder = HelperCalls({'lookup': ref}, set())
-    result = cst.Module(body=(binder.rewrite(cst.parse_module(source).body[0]),)).code
-    assert f"lambda t: {module_name('sample.provider')}.lookup(self.lookup, t)" in result
-    assert 'lambda self: self.lookup(1)' in result
-
-
 def test_rebound_receiver_and_starred_calls_retain_ordinary_binding():
     ref = SimpleNamespace(helper=('sample.provider', 'lookup'), call_layout='keywords')
     for source in ['def formula(self):\n    self = other\n    return self.lookup(1)\n',
@@ -136,25 +117,6 @@ def test_rebound_receiver_and_starred_calls_retain_ordinary_binding():
         binder = HelperCalls({'lookup': ref}, set())
         assert cst.Module(body=(binder.rewrite(cst.parse_module(source).body[0]),)).code == source
         assert binder.operations == set()
-
-
-def test_registered_binding_and_signature_capture_never_parse_formula_ast(monkeypatch):
-    import ast
-    def reducer(source, function=None, where=None):
-        raise AssertionError('metadata must not execute a helper')
-    reducer.__modelx_cython_helper__ = ('sample.provider', 'sum_float')
-    reducer.__modelx_cython_call_layout__ = 'keywords'
-    formula = cst.parse_module('def formula(self):\n    return self.reducer(values(), where=predicate())\n').body[0]
-    def forbidden(*args, **kwargs):
-        raise AssertionError('AST parsing in registered helper binding')
-    with monkeypatch.context() as patch:
-        patch.setattr(ast, 'parse', forbidden)
-        ref = RuntimeValueInfo(reducer)
-        binder = HelperCalls({'reducer': ref}, set())
-        code = cst.Module(body=(binder.rewrite(formula),)).code
-    assert ref.helper_parameters == (('source', False, False), ('function', True, False), ('where', True, False))
-    assert "('where',)" in code
-    assert f"function = {module_name('sample.provider')}.omitted_argument" in code
 
 
 def test_first_class_cells_use_bound_callables_without_changing_direct_calls():

@@ -31,32 +31,6 @@ def select(function, source, key):
 def select_keyword(function, source, key):
     return p.row(function, ('key', 'table'), key=key, table=source)
 
-def values(function, source, name):
-    return p.column(function, (), source, name)
-
-def report_values(function, source, name):
-    return p.column(function, ('report',), source, name, report=True)
-
-def prepare(function, frame, rows=False):
-    return p.table(function, ('rows', 'report'), frame, columns=p.omitted_argument, groups=p.omitted_argument, indexing=p.omitted_argument, rows=rows, report=True)
-
-def prepare_keywords(function, frame):
-    return p.table(function, ('report', 'frame'), frame=frame, columns=p.omitted_argument, groups=p.omitted_argument, indexing=p.omitted_argument, rows=p.omitted_argument, report=True)
-
-def prepare_options(function, frame, rows=False, report=False, raw=False, indexing='loc'):
-    return p.table(function, ('rows', 'report', 'preserve_scalar_types', 'indexing'), frame, columns=p.omitted_argument, groups=p.omitted_argument, rows=rows, report=report, preserve_scalar_types=raw, indexing=indexing)
-
-def prepare_column(function, frame, column):
-    return p.table(function, ('columns',), frame, columns=(column,))
-
-def prepare_raw(function, frame, rows=False):
-    return p.table(function, ('rows', 'report', 'preserve_scalar_types'), frame, columns=p.omitted_argument, groups=p.omitted_argument, indexing=p.omitted_argument, rows=rows, report=True, preserve_scalar_types=True)
-
-def table_lookup(function, source, key, column, *default):
-    if default:
-        return p.lookup(function, source, key, column, default[0])
-    return p.lookup(function, source, key, column)
-
 def wrap_table(source):
     return p.NativeTable(source)
 ''')
@@ -117,11 +91,6 @@ def test_exact_output_rows_values_and_pickle(native, frame):
                     if b is pd.NA: assert a is b
                     elif isinstance(b, float) and np.isnan(b): assert np.isnan(a)
                     else: assert a == b
-        for name in frame.columns:
-            actual = native.values(column, source, name)
-            assert type(actual) is tuple
-            assert len(actual) == len(frame)
-            assert actual == column(source, name)
 
 
 def test_legacy_row_metadata_remains_readable(native):
@@ -152,11 +121,10 @@ def test_compiled_selection_has_no_python_helper_pandas_or_owner_calls(native):
     try:
         for _ in range(2):
             selected = native.select(row, source, 0)
-            values = native.values(column, source, 'rate')
     finally:
         sys.setprofile(None)
     assert calls == []
-    assert selected['age'] == 42.0 and values == (0.1, 0.2)
+    assert selected['age'] == 42.0
 
 
 def test_replacement_layout_and_errors(native):
@@ -171,7 +139,7 @@ def test_replacement_layout_and_errors(native):
     for operation in [row, lambda table, key: native.select(row, table, key)]:
         with pytest.raises(KeyError) as error: operation(source, 99)
         assert error.value.args == (99,)
-    for operation in [column, lambda table, name: native.values(column, table, name)]:
+    for operation in [column]:
         with pytest.raises(KeyError) as error: operation(source, 'absent')
         assert error.value.args == ('absent',)
     with pytest.raises(ValueError, match='metadata'): row(Table([3], [[0.1]], ['rate']), 3)
@@ -255,7 +223,6 @@ def test_native_views_leave_unread_object_keys_untouched(native, fault, indexed)
     spec = (inputs.table(pd.DataFrame({'rate': [1.5, 2.5]}, index=[1, 23]), indexing='at')._index_error
             if indexed else None)
     cases = [
-        (lambda table: native.table_lookup(helpers.lookup, table, 1, 'rate'), 1.5),
         (lambda table: 1 in native.wrap_table(table).index, True),
     ]
     for operation, expected in cases:
@@ -266,63 +233,9 @@ def test_native_views_leave_unread_object_keys_untouched(native, fault, indexed)
         assert operation(table) == expected
 
 
-def test_arbitrary_query_retains_python_default_handling(native):
-    class Query:
-        def __hash__(self):
-            raise KeyError('no label')
-
-    table = Table((1,), ((1.5,),), ('rate',))
-    query = Query()
-    assert native.table_lookup(helpers.lookup, table, query, 'rate', 4.5) == 4.5
-    with pytest.raises(KeyError) as error:
-        native.table_lookup(helpers.lookup, table, query, 'rate')
-    assert error.value.args == ('no label',)
-
-
-def test_rectangular_numeric_table_keeps_object_and_report_semantics(native):
-    from modelx_helpers.immutable_inputs import _RECTANGULAR_STORAGE
-    index = pd.MultiIndex.from_product([['F', 'M'], [0, 1]], names=['group', 'age'])
-    frame = pd.DataFrame({'rate': [-0.0, 1.5, 2.0, 3.0], 'note': ['x'] * 4}, index=index)
-    expected = frame[['rate']].copy()
-    table = native.prepare_column(inputs.table, frame, 'rate')
-    assert _RECTANGULAR_STORAGE in table._native_cache
-    frame.loc[('M', 1), 'rate'] = 99.0
-    assert native.table_lookup(helpers.lookup, table, ('M', 1), 'rate') == 3.0
-    assert math.copysign(1.0, native.table_lookup(helpers.lookup, table, ('F', 0), 'rate')) < 0.0
-    assert native.table_lookup(helpers.lookup, table, ('M', np.int64(1)), 'rate') == 3.0
-    assert native.table_lookup(helpers.lookup, table, ('M', True), 'rate', 12.0) == 12.0
-    assert native.table_lookup(helpers.lookup, table, ('M', 10), 'rate', 12.0) == 12.0
-    assert native.table_lookup(helpers.lookup, table, ('M', 1.0), 0) == 3.0
-    assert table.contains(('M', 1)) and not table.contains(('M', 10))
-    for name in ('_keys', '_values', '_positions'):
-        with pytest.raises(AttributeError):
-            object.__getattribute__(table, name)
-    with pytest.raises(KeyError) as error:
-        native.table_lookup(helpers.lookup, table, ('none', 1), 'missing', 12.0)
-    assert error.value.args == ('missing',)
-    pd.testing.assert_frame_equal(to_pandas(table), expected)
-    pd.testing.assert_frame_equal(to_pandas(pickle.loads(pickle.dumps(table))), expected)
-    irregular = expected.iloc[[2, 0, 3, 1]]
-    selected = native.prepare_column(inputs.table, irregular, 'rate')
-    assert _RECTANGULAR_STORAGE not in selected._native_cache
-    assert native.table_lookup(helpers.lookup, selected, ('M', 1), 'rate') == 3.0
-    pd.testing.assert_frame_equal(to_pandas(selected), irregular)
-
-
 def test_rectangular_storage_rejects_duplicate_axis_labels():
     index = pd.MultiIndex(levels=[['F', 'F'], [0, 1]],
                           codes=[[0, 0, 1, 1], [0, 1, 0, 1]], verify_integrity=False)
     frame = pd.DataFrame({'rate': [1.0, 2.0, 3.0, 4.0]}, index=index)
     with pytest.raises(ValueError, match='duplicate table key'):
         inputs.table(frame, columns=('rate',))
-
-
-def test_tuple_labels_in_plain_index_use_scalar_key_semantics(native):
-    frame = pd.DataFrame({'value': [10, 20]},
-                         index=pd.Index([('M', 1), ('F', 2)], tupleize_cols=False))
-    source = inputs.table(frame, indexing='at')
-    for key in [('M', 1), ('M', True), ('F', np.int64(2))]:
-        assert native.table_lookup(helpers.lookup, source, key, 'value') == source.lookup(key, 'value')
-    with pytest.raises(KeyError) as error:
-        native.table_lookup(helpers.lookup, source, ('M', 2), 'value')
-    assert error.value.args == (('M', 2),)

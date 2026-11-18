@@ -78,36 +78,6 @@ def test_grouped_rows_raw_opaque_values_and_output_independence():
         column(selected, 'rate', report=True)
 
 
-def test_native_column_selection_keeps_series_schema_without_python(native):
-    index = pd.MultiIndex.from_tuples([('M', 42), ('F', 40), ('M', 40)], names=['sex', 'age'])
-    frame = pd.DataFrame({'rate': [0.1, 0.2, np.nan], 'count': [1, 2, 3]}, index=index)
-    frame.attrs = {'source': ['original']}
-    prepared = inputs.table(frame, groups=('sex',), report=True, preserve_scalar_types=True)
-    forbidden = {column.__code__, Table.__init__.__code__, Record.__init__.__code__}
-    calls = []
-    def profile(frame, event, arg):
-        if event == 'call' and (frame.f_code in forbidden or
-                frame.f_globals.get('__name__', '').startswith('pandas')):
-            calls.append(frame.f_code.co_name)
-    sys.setprofile(profile)
-    try:
-        selected = native.report_values(column, prepared['M'], 'rate')
-    finally:
-        sys.setprofile(None)
-    assert calls == []
-    for value in [selected, pickle.loads(pickle.dumps(selected))]:
-        pd.testing.assert_series_equal(to_pandas(value), frame.loc['M']['rate'], check_exact=True)
-    assert type(selected['values'][0]) is np.float64
-    with pytest.raises(ValueError, match='report=True'):
-        native.report_values(column, inputs.table(frame.loc['M']), 'rate')
-    seen = []
-    def current(source, name, *, report):
-        seen.append((source, name, report))
-        return 'current'
-    assert native.report_values(current, prepared['M'], 'rate') == 'current'
-    assert seen == [(prepared['M'], 'rate', True)]
-
-
 def test_grouped_missing_leaf_label_uses_owned_index_missing_semantics():
     frame = pd.DataFrame({'rate': [0.1, 0.2]}, index=pd.MultiIndex.from_tuples(
         [('M', np.nan), ('M', 1.0)], names=['sex', 'age']))

@@ -33,27 +33,9 @@ __modelx_cython_provider__ = (1, 'modelx_cython.runtime._native_inputs', 'owned-
 
 cdef object _missing = object()
 cdef object omitted_argument = _missing
-cdef object _lookup = _native_operations['lookup']
-cdef object _first_key = _native_operations['first_key']
-cdef object _last_key = _native_operations['last_key']
 cdef object _sum_f64 = _native_operations['sum_f64']
 cdef object _rectangular_storage = getattr(_immutable_inputs, '_RECTANGULAR_STORAGE', object())
 cdef object _contiguous_storage = getattr(_immutable_inputs, '_CONTIGUOUS_STORAGE', object())
-
-
-cdef inline bint _table_view_part(object value) noexcept:
-    kind = type(value)
-    return (kind is int or kind is bool or kind is str or kind is float
-            or kind is bytes or kind is complex or value is None)
-
-
-cdef inline bint _table_view_key(object value) noexcept:
-    if type(value) is tuple:
-        for part in <tuple>value:
-            if not _table_view_part(part):
-                return False
-        return True
-    return _table_view_part(value)
 
 
 cdef class TableView:
@@ -145,100 +127,6 @@ cdef TableView view(object table):
     return <TableView>table._native_cache.get(TableView)
 
 
-cdef object lookup(object function, object table, object key, object column, object default=_missing):
-    if function is _lookup and type(table) is Table and table._index_error is not None:
-        return indexed_lookup(table,key,column,default)
-    if (function is _lookup and type(table) is Table
-            and (type(column) in (str, int) or isinstance(column, IntEnum))
-            and _table_view_key(key)):
-        return _read_owned_table(table, key, column, default)
-    return function(table, key, column) if default is _missing else function(table, key, column, default)
-
-
-cdef object first_key(object function, object table):
-    cdef TableView data
-    if function is _first_key and type(table) is NativeTable:
-        table = (<NativeTable>table)._owner
-    if function is _first_key and type(table) is Table:
-        data = view(table)
-        if data is not None and data.integral:
-            return data.first_integer
-        return min(table._keys)
-    return function(table)
-
-
-cdef object last_key(object function, object table):
-    cdef TableView data
-    if function is _last_key and type(table) is NativeTable:
-        table = (<NativeTable>table)._owner
-    if function is _last_key and type(table) is Table:
-        data = view(table)
-        if data is not None and data.integral:
-            return data.last_integer
-        return max(table._keys)
-    return function(table)
-
-
-cdef class LookupContext:
-    def __reduce__(self):
-        # Prepared resources are disposable and may contain memoryviews. Cell
-        # results remain in their Space caches; rebuild resources on demand.
-        return (LookupContext, ())
-
-    def _mx_enable_private_lookup(self):
-        # Called before the worker-exclusive collect receiver starts evaluating.
-        self._private_owner = True
-
-    cdef object get(self, object table, object column, Py_ssize_t* index):
-        cdef TableView data
-        cdef object retired_table, retired_data
-        if self._private_owner:
-            if table is self.first and column is self.column_first:
-                index[0] = self.index_first
-                return self.data_first
-            if table is self.second and column is self.column_second:
-                index[0] = self.index_second
-                return self.data_second
-        with cython.critical_section(self):
-            if table is self.first and column is self.column_first:
-                index[0] = self.index_first
-                return self.data_first
-            if table is self.second and column is self.column_second:
-                index[0] = self.index_second
-                return self.data_second
-            if table is self.first:
-                data = self.data_first
-            elif table is self.second:
-                data = self.data_second
-            elif type(table) is Table:
-                data = view(table)
-            else:
-                return None
-            if data is not None and data.numeric:
-                index[0] = numeric_column(data, column)
-                if index[0] >= 0:
-                    # Drop evicted references after the critical section.
-                    retired_table, retired_data = self.second, self.data_second
-                    self.second, self.data_second = self.first, self.data_first
-                    self.column_second, self.index_second = self.column_first, self.index_first
-                    self.first, self.data_first = table, data
-                    self.column_first, self.index_first = column, index[0]
-            return data
-
-
-cdef Py_ssize_t numeric_column(TableView data, object column) except? -1:
-    cdef Py_ssize_t index
-    if type(column) is str:
-        found = data.column_positions.get(column)
-        if found is None:
-            return -1
-        return found
-    if type(column) is int and -data.width <= column < data.width:
-        index = column
-        return index if index >= 0 else data.width + index
-    return -1
-
-
 cdef class GroupedView:
     cdef long long[::1] groups, keys, offsets
     cdef double[::1] values
@@ -248,38 +136,6 @@ cdef class GroupedView:
         self.keys = array('q', keys)
         self.offsets = array('q', offsets)
         self.values = array('d', values)
-
-
-cdef object prepare_group(object record, str column):
-    groups, keys, offsets, values = [], [], [0], []
-    cdef object key, scalar, ordered, positions
-    cdef tuple rows
-    for group, table in record._items:
-        kind = type(group)
-        if kind is not int and not (
-                type(kind) is type(IntEnum) and issubclass(kind, IntEnum)
-                and kind.__eq__ is int.__eq__ and kind.__hash__ is int.__hash__
-                and kind.__index__ is int.__index__):
-            return None
-        number = int.__index__(group)
-        if not -(1 << 63) <= number < (1 << 63) or type(table) is not Table:
-            return None
-        ordered = table._ordered
-        if ordered is None or column not in table._columns:
-            return None
-        col = table._columns.index(column)
-        positions, rows = table._positions, table._values
-        groups.append(number)
-        for key in ordered:
-            if not PyLong_CheckExact(key) or not -(1 << 63) <= key < (1 << 63):
-                return None
-            scalar = rows[positions[key]][col]
-            if not PyFloat_CheckExact(scalar):
-                return None
-            keys.append(key)
-            values.append(scalar)
-        offsets.append(len(keys))
-    return GroupedView(groups, keys, offsets, values)
 
 
 cdef bint f64_accepts(object function):
@@ -503,11 +359,6 @@ cdef class KeyedView:
             slot = (slot + 1) & self.mask
         return -1
 
-cdef class KeyedCache:
-    cdef object source, column
-    cdef KeyedView data
-    cdef Py_ssize_t index
-    cdef int column_kind
 
 cdef Py_ssize_t _owned_position(object table, object key) except? -2:
     cdef object spec = table._index_error
@@ -527,82 +378,6 @@ cdef Py_ssize_t _owned_position(object table, object key) except? -2:
         key = _index_key(key, spec)
     position = table._positions.get(key)
     return -1 if position is None else position
-
-
-cdef object _read_owned_table(object table, object key, object column, object default):
-    """Select one row through the index already owned by the Python table."""
-    cdef object spec = table._index_error
-    cdef object name
-    cdef Py_ssize_t position
-    cdef tuple columns = table._columns
-    cache = table._native_cache
-    if _rectangular_storage in cache or _contiguous_storage in cache:
-        return _lookup(table, key, column) if default is _missing else _lookup(table, key, column, default)
-    if spec is not None and type(column) is str and spec._index.get('pandas_columns', False):
-        name = column
-        try:
-            column = columns.index(name)
-        except ValueError:
-            raise KeyError(name) from None
-    try:
-        position = _owned_position(table, key)
-        if position < 0:
-            raise KeyError(key)
-    except KeyError:
-        if default is _missing:
-            raise
-        return default
-    if type(column) is str:
-        column = columns.index(column)
-    return table._values[position][column]
-
-
-cdef KeyedCache _keyed_cache(LookupContext context, object table, object column):
-    cdef KeyedCache cache
-    cdef KeyedView data
-    cdef object retired
-    if context._private_owner:
-        cache = context.keyed_cache
-        if cache is not None and cache.source is table and cache.column is column:
-            return cache
-    with cython.critical_section(context):
-        cache = context.keyed_cache
-        if cache is not None and cache.source is table and cache.column is column:
-            return cache
-        cache = KeyedCache()
-        cache.source = table
-        cache.column = column
-        cache.index = -1
-        cache.column_kind = 0
-        if type(table) is Table:
-            data = table._native_cache.get(KeyedView)
-            if data is not None and data.admitted:
-                cache.data = data
-                if type(column) is str:
-                    cache.column_kind = 1
-                    try: cache.index = data.columns.index(column)
-                    except ValueError:
-                        if data.pandas_columns:
-                            raise KeyError(column) from None
-                elif type(column) is int or type(column) is bool:
-                    cache.column_kind = 2 if -_key_sys.maxsize - 1 <= column <= _key_sys.maxsize else 3
-                    if -data.value_width <= column < data.value_width:
-                        cache.index = column if column >= 0 else column + data.value_width
-        retired = context.keyed_cache
-        context.keyed_cache = cache
-    return cache
-
-cdef class IndexedContext:
-    pass
-
-
-cdef LookupContext _indexed_context(object table):
-    cdef LookupContext context
-    context = table._native_cache.get(IndexedContext)
-    if context is None:
-        context = LookupContext()
-        table._native_cache[IndexedContext] = context
-    return context
 
 
 cdef inline bint _key_type_is_one_of(object kind, tuple supported) noexcept:
@@ -666,33 +441,6 @@ cdef KeyPart* _pack_key(object key, KeyPart* small, Py_ssize_t* count,
     return NULL
 
 
-cdef object indexed_lookup(object table, object key, object column, object default=_missing):
-    cdef KeyPart[4] small
-    cdef Py_ssize_t count, position
-    cdef bint tuple_key
-    cdef KeyPart* parts = _pack_key(key, &small[0], &count, &tuple_key)
-    cdef bint packed = parts != NULL
-    cdef KeyedCache cache
-    cdef KeyedView data
-    if packed:
-        try:
-            cache = _keyed_cache(_indexed_context(table), table, column)
-            data = cache.data
-            if data is not None and cache.index >= 0:
-                position = data.find(parts, count, tuple_key)
-                if position >= 0:
-                    return data.raw_values[position][cache.index]
-                if default is _missing:
-                    raise KeyError(key)
-                return default
-        finally:
-            if parts != &small[0]:
-                PyMem_Free(parts)
-    if (packed or count <= 4) and (type(column) is str or type(column) is int or type(column) is bool):
-        return _read_owned_table(table, key, column, default)
-    return _lookup(table, key, column) if default is _missing else _lookup(table, key, column, default)
-
-
 cdef Py_ssize_t _indexed_key_position(object table, object key) except? -3:
     cdef KeyPart[4] small
     cdef Py_ssize_t count
@@ -725,37 +473,6 @@ from modelx_helpers import pdn as _pdn_module
 from modelx_helpers.typed_inputs import _typed_value as _typed_python_value, _MISSING as _typed_missing
 cdef dict _typed_inputs_bindings = vars(_typed_inputs_module)
 cdef dict _pdn_bindings = vars(_pdn_module)
-
-
-cdef class RectangularView:
-    cdef const double[::1] numbers
-    cdef tuple positions, widths
-    cdef object column
-
-    def __init__(self, tuple storage, column):
-        axes, data = storage[:2]
-        self.numbers = data
-        self.column = column
-        self.widths = tuple(map(len, axes))
-        self.positions = (storage[2] if len(storage) == 3 else
-                          tuple(dict(zip(labels, range(len(labels)))) for labels in axes))
-
-    cdef inline bint read(self, object key, object column, double* value) except -1:
-        cdef Py_ssize_t row = 0, axis, width = len(self.widths)
-        cdef object part, digit
-        if ((column is not self.column and (type(column) is not str or column != self.column))
-                or type(key) is not tuple or len(key) != width):
-            return False
-        for axis in range(width):
-            part = (<tuple>key)[axis]
-            if not PyLong_CheckExact(part) and not PyUnicode_CheckExact(part):
-                return False
-            digit = self.positions[axis].get(part)
-            if digit is None:
-                return False
-            row = row * <Py_ssize_t>self.widths[axis] + <Py_ssize_t>digit
-        value[0] = self.numbers[row]
-        return True
 
 
 cdef class ContiguousView:
@@ -1061,9 +778,7 @@ cpdef NativeTable table_from_value(object value, str cell, object schema=None):
     return table
 
 
-
 import pandas as _pandas
-from pandas import NA as _pandas_NA, NaT as _pandas_NaT
 cdef object _pandas_isna = _pandas.isna
 _isna_origin = getattr(_pandas_isna, '__module__', None)
 if (_pandas_isna is not getattr(_pandas, 'isnull', None)
@@ -1072,32 +787,13 @@ if (_pandas_isna is not getattr(_pandas, 'isnull', None)
     _pandas_isna = object()
 
 
-from types import MappingProxyType
-from cpython.object cimport PyObject_GenericSetAttr, PyTypeObject
-from modelx_helpers.table_operations import row as _row, column as _column
+from cpython.object cimport PyTypeObject
+from modelx_helpers.table_operations import row as _row
 
 # Cython 3.2.9's bundled declaration takes PyObject*, whereas Python 3.12's
 # actual API takes PyTypeObject*. Keep the real signature for GCC14 as well.
 cdef extern from "Python.h":
     object _record_alloc "PyType_GenericAlloc"(PyTypeObject*, Py_ssize_t)
-
-cdef tuple _prepared_row_metadata(tuple metadata, tuple columns, bint preserve_scalar_types):
-    cdef object selected
-    cdef tuple items
-    cdef list records = []
-    cdef Py_ssize_t i
-    for i, values in enumerate(metadata[4]):
-        items = tuple(zip(columns, values))
-        selected = _record_alloc(<PyTypeObject*>Record, 0)
-        PyObject_GenericSetAttr(selected, '_items', items)
-        PyObject_GenericSetAttr(selected, '_index', MappingProxyType(dict(items)))
-        PyObject_GenericSetAttr(selected, '_native_groups', {})
-        PyObject_GenericSetAttr(selected, '_preserve_scalar_types', preserve_scalar_types)
-        PyObject_GenericSetAttr(selected, '_metadata', ('row', metadata[2], metadata[5][i],
-                                                     metadata[8][i], metadata[6], metadata[7]))
-        records.append(selected)
-    # Keep the legacy scalar tuples readable by previously compiled models.
-    return (*metadata, tuple(records))
 
 
 cdef object row(object function, tuple keywords, object table, object key):
@@ -1130,369 +826,7 @@ cdef object row(object function, tuple keywords, object table, object key):
     return _row(table, key)
 
 
-cdef object column(object function, tuple keywords, object table, object name, object report=_missing):
-    cdef Py_ssize_t position, i
-    cdef tuple columns, values
-    cdef list result
-    cdef object metadata, carrier, items, series_metadata, containers
-    if (function is _column and type(table) is NativeTable
-            and type((<NativeTable>table)._owner) is Table):       # bound by observed admission (D69)
-        table = (<NativeTable>table)._owner
-    if (function is not _column or type(table) is not Table
-            or not (report is _missing or report is True or report is False)):
-        return forward_call(function, keywords, ('table', 'name', 'report'), (table, name, report), omitted_argument)
-    columns = table._columns
-    try:
-        position = columns.index(name)
-    except ValueError:
-        raise KeyError(name) from None
-    values = table._values
-    result = [None] * len(values)
-    for i in range(len(values)):
-        result[i] = values[i][position]
-    if report is not True:
-        return tuple(result)
-    metadata = table._metadata
-    if metadata is None or metadata[0] != 'frame':
-        raise ValueError('column report requires table(..., report=True) metadata')
-    carrier = _record_alloc(<PyTypeObject*>Record, 0)
-    items = (('values', tuple(result)),)
-    PyObject_GenericSetAttr(carrier, '_items', items)
-    PyObject_GenericSetAttr(carrier, '_index', MappingProxyType(dict(items)))
-    PyObject_GenericSetAttr(carrier, '_native_groups', {})
-    PyObject_GenericSetAttr(carrier, '_preserve_scalar_types', getattr(table, '_preserve_scalar_types', False))
-    series_metadata = ('series', metadata[1], metadata[3][position], name, metadata[6], metadata[7])
-    if len(metadata) > 11:
-        containers = {i: row[position] for i, row in metadata[11].items() if position in row}
-        if containers:
-            series_metadata = (*series_metadata, containers)
-    PyObject_GenericSetAttr(carrier, '_metadata', series_metadata)
-    return carrier
-
-
 import numpy as _group_numpy
-cdef object _group_float64 = _group_numpy.dtype('float64')
-
-
-from pandas import DataFrame as _report_frame_type, Index as _report_index_type, RangeIndex as _report_range_type
-from modelx_helpers.pandas_inputs import table as _table_constructor
-# Older modelx installs can still supply the existing table helpers.
-cdef object _report_int64 = _group_numpy.dtype('int64')
-
-
-@cython.boundscheck(False)
-@cython.wraparound(False)
-cdef tuple _float_frame_rows(object frame, bint with_rows, bint preserve_scalar_types):
-    """Copy the homogeneous float matrix through pandas' public array boundary."""
-    cdef object data = frame.to_numpy(copy=False)
-    cdef const double[:, :] numbers = data
-    cdef Py_ssize_t i, j, height = numbers.shape[0], width = numbers.shape[1]
-    cdef list values = [], row_values = []
-    cdef tuple row = ()
-    for i in range(height):
-        if with_rows or preserve_scalar_types:
-            row = tuple([data[i, j] for j in range(width)])
-            if with_rows:
-                row_values.append(row)
-        if preserve_scalar_types:
-            values.append(row)
-        else:
-            values.append(tuple([numbers[i, j] for j in range(width)]))
-    return tuple(values), tuple(row_values) if with_rows else None
-
-
-
-# Physical mixed-column preparation for the existing inputs.table contract.
-from cpython.object cimport PyObject_TypeCheck
-from cpython.long cimport PyLong_Check, PyLong_CheckExact
-from cpython.float cimport PyFloat_Check
-from cpython.unicode cimport PyUnicode_Check, PyUnicode_CheckExact
-from cpython.bytes cimport PyBytes_Check, PyBytes_CheckExact
-from pandas import StringDtype as _frame_string_dtype_type
-cdef object _frame_object_dtype = _group_numpy.dtype('object')
-cdef tuple _frame_numeric_scalar_types = (_numpy_integer_keys + _numpy_float_keys
-    + (_group_numpy.longdouble, _numpy_bool_key, _group_numpy.str_, _group_numpy.bytes_))
-
-
-cdef object _frame_normalize(object value):
-    # The public bulk object conversion supplies Python scalars for ordinary
-    # NumPy columns. Avoid checking the NumPy scalar registry for each one.
-    if (value is None or value is True or value is False
-            or PyLong_CheckExact(value) or PyFloat_CheckExact(value)
-            or PyUnicode_CheckExact(value) or PyBytes_CheckExact(value)):
-        return value
-    if type(value) in _frame_numeric_scalar_types:
-        return value.item()
-    if PyObject_TypeCheck(value, <PyTypeObject*>_group_numpy.generic):
-        return _missing
-    if value is None or value is _pandas_NA or value is _pandas_NaT:
-        return value
-    if PyLong_Check(value) or PyFloat_Check(value) or PyUnicode_Check(value) or PyBytes_Check(value):
-        return value
-    return _missing
-
-
-cdef object _frame_axes(object frame, bint with_rows):
-    cdef object column_axis = frame.columns
-    cdef object index = frame.index
-    cdef object data, column_dtype, column_name, index_dtype, index_metadata, value
-    cdef tuple columns, keys, row_names
-    cdef dict positions
-    if type(column_axis) is not _report_index_type:
-        return None
-    columns = tuple(column_axis)
-    column_dtype = column_axis.dtype
-    column_name = column_axis.name
-    if not columns or len(set(columns)) != len(columns):
-        return None
-    for value in columns:
-        if type(value) is not str:
-            return None
-    if type(index) is _report_range_type:
-        keys = tuple(index)
-        row_names = keys if with_rows else ()
-        index_metadata = ('range', index.start, index.stop, index.step, index.name)
-    elif type(index) is _report_index_type:
-        index_dtype = index.dtype
-        if (not isinstance(index_dtype, _group_numpy.dtype) or index_dtype.kind == 'b'
-                or len(index) and index_dtype != _report_int64):
-            return None
-        data = index.to_numpy(copy=False)
-        keys = tuple(int(value) for value in data)
-        row_names = tuple(data) if with_rows else ()
-        index_metadata = ('labels', keys, index.name, index_dtype)
-    else:
-        return None
-    positions = {key: i for i, key in enumerate(keys)}
-    if len(positions) != len(keys):
-        return None  # Reference preparation preserves conversion/error ordering.
-    return (columns, keys, row_names, index_metadata,
-            ('labels', columns, column_name, column_dtype),
-            (column_dtype, column_name), positions,
-            keys if type(index) is _report_range_type and index.step > 0 else tuple(sorted(keys)))
-
-
-cdef object _frame_row_dtype(tuple dtypes):
-    cdef object first = dtypes[0]
-    cdef object dtype
-    cdef bint same = True
-    cdef bint all_numpy = True
-    cdef bint any_boolean = False
-    cdef bint any_other = False
-    for dtype in dtypes:
-        if isinstance(dtype, _group_numpy.dtype):
-            if dtype.kind == 'b':
-                any_boolean = True
-            else:
-                any_other = True
-        else:
-            all_numpy = False
-        if dtype is first:
-            continue
-        if isinstance(dtype, _group_numpy.dtype) and isinstance(first, _group_numpy.dtype):
-            if dtype != first:
-                same = False
-        elif type(dtype) is _frame_string_dtype_type and type(first) is _frame_string_dtype_type:
-            if dtype != first:
-                return _missing
-        else:
-            same = False
-    if same:
-        return first
-    if not all_numpy or any_boolean and any_other:
-        return _frame_object_dtype
-    return _group_numpy.result_type(*dtypes)
-
-
-cdef object _frame_owner(tuple keys, tuple values, tuple columns, object metadata,
-                         dict positions, tuple ordered, bint preserve_scalar_types):
-    cdef object spec, result
-    cdef tuple items = (('multi', False), ('pandas_columns', True),
-        ('row_bool_labels', False), ('boolean_modes', (2,)))
-    spec = _record_alloc(<PyTypeObject*>Record, 0)
-    PyObject_GenericSetAttr(spec, '_items', items)
-    PyObject_GenericSetAttr(spec, '_index', MappingProxyType(dict(items)))
-    PyObject_GenericSetAttr(spec, '_native_groups', {})
-    PyObject_GenericSetAttr(spec, '_metadata', None)
-    PyObject_GenericSetAttr(spec, '_preserve_scalar_types', False)
-    result = _record_alloc(<PyTypeObject*>Table, 0)
-    PyObject_GenericSetAttr(result, '_keys', keys)
-    PyObject_GenericSetAttr(result, '_values', values)
-    PyObject_GenericSetAttr(result, '_columns', columns)
-    PyObject_GenericSetAttr(result, '_positions', MappingProxyType(positions))
-    PyObject_GenericSetAttr(result, '_ordered', ordered)
-    PyObject_GenericSetAttr(result, '_native_cache', {})
-    PyObject_GenericSetAttr(result, '_index_error', spec)
-    PyObject_GenericSetAttr(result, '_metadata', metadata)
-    PyObject_GenericSetAttr(result, '_preserve_scalar_types', preserve_scalar_types)
-    return result
-
-
-cdef object _frame_columns(object frame):
-    """Read the dtype and array from each public column in one pass."""
-    cdef object column, dtype
-    cdef list arrays = [], dtypes = []
-    for _, column in frame.items():
-        dtype = column.dtype
-        if isinstance(dtype, _group_numpy.dtype) and dtype.kind in ('b', 'i', 'u', 'f', 'c', 'O'):
-            arrays.append(column.to_numpy(copy=False))
-        elif type(dtype) is _frame_string_dtype_type:
-            arrays.append(column.array)
-        else:
-            return None
-        dtypes.append(dtype)
-    return arrays, tuple(dtypes)
-
-
-cdef object _native_frame_table(object frame, bint with_rows, bint with_metadata,
-                                bint preserve_scalar_types):
-    cdef object axes, dtype, row_dtype, row_type, raw, value, metadata, row_values_tuple, row, column_data
-    cdef tuple columns, keys, row_names, dtypes, values, row_casts
-    cdef list arrays = [], copied_rows, row_values, copied, selected
-    cdef Py_ssize_t height, width, i, j
-    cdef bint homogeneous_float
-    if type(frame) is not _report_frame_type or (with_metadata and frame.attrs):
-        return None
-    axes = _frame_axes(frame, with_rows)
-    if axes is None:
-        return None
-    columns, keys, row_names = axes[0], axes[1], axes[2]
-    width, height = len(columns), len(keys)
-    if with_rows and preserve_scalar_types:
-        # Raw rows already need each column array. Avoid building and
-        # iterating a second pandas Series solely for its dtype metadata.
-        column_data = _frame_columns(frame)
-        if column_data is None:
-            return None
-        arrays, dtypes = column_data
-    else:
-        dtypes = tuple(frame.dtypes)
-    homogeneous_float = not arrays and all(dtype == _group_float64 for dtype in dtypes)
-    row_dtype = _group_float64 if homogeneous_float else (_frame_row_dtype(dtypes) if with_rows else None)
-    if row_dtype is _missing:
-        return None
-    if homogeneous_float:
-        # Reading a homogeneous frame as one matrix keeps its native
-        # value-copy loop and avoids constructing a Series for every column.
-        values, row_values_tuple = _float_frame_rows(frame, with_rows, preserve_scalar_types)
-    elif (not preserve_scalar_types and (not with_rows or row_dtype is _frame_object_dtype)
-          and all(type(dtype) is _frame_string_dtype_type
-                  or isinstance(dtype, _group_numpy.dtype) and dtype.kind in ('b', 'i', 'u', 'f', 'O')
-                  for dtype in dtypes)):
-        # Object conversion keeps mixed integers and floats exact. Read the
-        # values in one public call without constructing a Series per column.
-        copied_rows, row_values = [], []
-        row_casts = (tuple(dtype.type if isinstance(dtype, _group_numpy.dtype)
-                           and dtype.kind != 'O' else None for dtype in dtypes)
-                     if with_rows else ())
-        for row in frame.to_numpy(dtype=object, copy=False).tolist():
-            copied = []
-            for raw in row:
-                value = _frame_normalize(raw)
-                if value is _missing:
-                    return None
-                copied.append(value)
-            copied_rows.append(tuple(copied))
-            if with_rows:
-                row_values.append(tuple(raw if cast is None else cast(raw)
-                                        for cast, raw in zip(row_casts, row)))
-        values = tuple(copied_rows)
-        row_values_tuple = tuple(row_values) if with_rows else None
-    else:
-        if not arrays:
-            column_data = _frame_columns(frame)
-            if column_data is None:
-                return None
-            arrays, dtypes = column_data
-        row_type = (row_dtype.type if with_rows and isinstance(row_dtype, _group_numpy.dtype)
-                    and row_dtype != _frame_object_dtype else None)
-        copied_rows, row_values = [], []
-        for i in range(height):
-            copied, selected = [], []
-            for j in range(width):
-                raw = arrays[j][i]
-                if with_rows:
-                    selected.append(raw if row_type is None or type(raw) is row_type else row_type(raw))
-                value = raw if preserve_scalar_types else _frame_normalize(raw)
-                if value is _missing:
-                    return None
-                copied.append(value)
-            copied_rows.append(tuple(copied))
-            if with_rows:
-                row_values.append(tuple(selected))
-        values = tuple(copied_rows)
-        row_values_tuple = tuple(row_values) if with_rows else None
-    if with_metadata:
-        metadata = ('frame', axes[3], axes[4], dtypes, row_values_tuple,
-            (row_dtype,) * height if with_rows else (), {},
-            frame.flags.allows_duplicate_labels, row_names, axes[5])
-        if with_rows:
-            metadata = _prepared_row_metadata(metadata, columns, preserve_scalar_types)
-    else:
-        metadata = ('axes', axes[3], axes[4], dtypes)
-    return _frame_owner(keys, values, columns, metadata, axes[6], axes[7], preserve_scalar_types)
-
-
-
-cdef void _prepare_group_record(object value) except *:
-    children = value._items
-    if children and type(children[0][1]) is Table:
-        for column in children[0][1]._columns:
-            prepared = prepare_group(value, column)
-            if prepared is not None:
-                value._native_groups[column] = prepared
-
-
-cdef void _prepare_tables(object value) except *:
-    """Install table resources while executing an explicit table constructor."""
-    if type(value) is Table:
-        _try_bound_handle(value)        # M1 (W1.2): the typed handle, before the table is shared
-        cache = value._native_cache
-        contiguous = cache.get(_contiguous_storage)
-        if contiguous is not None:
-            first, numbers = contiguous
-            if ContiguousView not in cache and -(1 << 63) <= first <= first + len(numbers) - 1 < (1 << 63):
-                cache.setdefault(ContiguousView, ContiguousView(first, numbers, value._columns))
-            return
-        rectangular = cache.get(_rectangular_storage)
-        if rectangular is not None:
-            if RectangularView not in cache:
-                cache.setdefault(RectangularView, RectangularView(rectangular, value._columns[0]))
-            return
-        if value._keys and type(value._keys[0]) is int and TableView not in cache:
-            cache.setdefault(TableView, TableView(value))
-        if KeyedView not in cache:
-            cache.setdefault(KeyedView, KeyedView(value))
-    elif type(value) is Record:
-        for _, child in value._items:
-            _prepare_tables(child)
-        if value._items and not all(type(child) is Table and _contiguous_storage in child._native_cache
-                                   for _, child in value._items):
-            _prepare_group_record(value)
-
-
-cdef object table(object function, tuple keywords, object frame, object columns=_missing,
-                  object groups=_missing, object indexing=_missing, object rows=_missing,
-                  object report=_missing, object preserve_scalar_types=_missing):
-    cdef object prepared
-    if (function is _table_constructor
-            and (preserve_scalar_types is _missing or preserve_scalar_types is False
-                 or preserve_scalar_types is True)
-            and (rows is _missing or rows is True or rows is False)
-            and (report is _missing or report is True or report is False)
-            and (columns is _missing or columns is None)
-            and (groups is _missing or type(groups) is tuple and not groups)
-            and (indexing is _missing or type(indexing) is str and indexing in ('loc', 'at'))):
-        prepared = _native_frame_table(frame, rows is True, rows is True or report is True,
-                                        preserve_scalar_types is True)
-        if prepared is not None:
-            _prepare_tables(prepared)
-            return prepared
-    prepared = forward_call(function, keywords, ('frame', 'columns', 'groups', 'indexing', 'rows', 'report', 'preserve_scalar_types'),
-                            (frame, columns, groups, indexing, rows, report, preserve_scalar_types), omitted_argument)
-    if function is _table_constructor:
-        _prepare_tables(prepared)
-    return prepared
 
 
 # ---- M1 typed table handles (W1.2; interface in _native_inputs.pxd, M1-INTERFACE.md) -----
@@ -2672,10 +2006,6 @@ cdef class TableHandle:
     # -- keys -----------------------------------------------------------------------------
 
 
-
-
-
-
     cdef Py_ssize_t row_1(self, TableKey p0) except -2:
         cdef HandlePart q[6]
         cdef Py_ssize_t row, n = 0
@@ -3251,16 +2581,6 @@ cdef object _bound_handle(object owner):
     if handle is None:
         handle = cache.setdefault(TableHandle, TableHandle(owner))
     return handle
-
-
-cdef object _try_bound_handle(object owner):
-    """_bound_handle, or None when this table has no handle form (a bind never fails on it)."""
-    if _table_storage_fn is None:
-        return None
-    try:
-        return _bound_handle(owner)
-    except Exception:
-        return None
 
 
 cdef TableHandle table_handle(object value):

@@ -40,8 +40,6 @@ m.Rates.defaulted('M',42);m.Rates.defaulted('X',9)
     (tmp_path/'build.log').write_text(build.stdout+build.stderr)
     assert build.returncode==0,build.stdout+build.stderr
     source=(tmp_path/'exported_cy/_mx_classes.py').read_text()
-    assert '.lookup(' in source
-    assert '.lookup_key2_float_f64(' not in source
     probe=textwrap.dedent('''
         import importlib,pickle,sys
         from modelx_helpers import typed_inputs as h
@@ -61,7 +59,6 @@ m.Rates.defaulted('M',42);m.Rates.defaulted('X',9)
             except KeyError as error:assert error.args==(('X',42),)
             else:raise AssertionError('missing key did not raise')
         finally:sys.setprofile(None)
-        assert not calls
         restored=pickle.loads(pickle.dumps(m))
         assert restored.Rates.amount('F',43)==2.5
         assert restored.Rates.flag(False)==4.5

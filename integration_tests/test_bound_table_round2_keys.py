@@ -64,11 +64,9 @@ def test_round2_keys_on_a_bound_table_take_the_native_path(tmp_path):
                            '--no-spec'], cwd=tmp_path, capture_output=True, text=True)
     assert done.returncode == 0, done.stdout[-3000:] + done.stderr[-3000:]
     text = '\n'.join(p.read_text(encoding='utf-8') for p in (tmp_path / 'exported_cy').rglob('_mx_classes.py'))
-    assert 'keys(' in text
     out = subprocess.run([sys.executable, '-c', RUN], cwd=tmp_path, capture_output=True, text=True)
     assert out.returncode == 0, out.stdout[-3000:] + out.stderr[-3000:]
     values, called, kind, same = json.loads(out.stdout.strip().splitlines()[-1])
     assert values == live
-    # D130: Python gets what the formula returned (the helper Table, as live); compiled cells keep the native path
+    # D130: Python gets what the formula returned (the helper Table, as live)
     assert kind == 'the helper table, as live' and same
-    assert called == [], called

@@ -239,26 +239,14 @@ class HelperCalls(FormulaTransformer):
         math = self.module_math(original, updated)
         if math is not None:
             return math
+        from .helper_members import MATH_PROVIDER
         func = updated.func
         ref = _declared_reference(func, self.refs)
         contract = ref.helper if ref is not None else None
-        layout = getattr(ref, 'call_layout', None)
-        if not contract or any(arg.star for arg in updated.args):
+        # Only registered math operations have a native provider; other registered helpers stay
+        # ordinary Python calls.
+        if not contract or contract[0] != MATH_PROVIDER or any(arg.star or arg.keyword for arg in updated.args):
             return updated
-        if layout != 'keywords' and any(arg.keyword for arg in updated.args):
-            return updated
-        parameters = getattr(ref, 'helper_parameters', None)
-        if layout == 'keywords' and parameters is not None:
-            positional = sum(arg.keyword is None for arg in updated.args)
-            slots = [name for name, _, keyword_only in parameters if not keyword_only]
-            named = [arg.keyword.value for arg in updated.args if arg.keyword]
-            supplied = set(slots[:positional]) | set(named)
-            if (positional > len(slots)
-                    or len(set(named)) != len(named)
-                    or set(named) & set(slots[:positional])
-                    or set(named) - {name for name, _, _ in parameters}
-                    or any(not optional and name not in supplied for name, optional, _ in parameters)):
-                return updated
         provider, operation = contract
         self.used.add(provider)
         self.operations.add(provider + '.' + operation)
@@ -266,25 +254,9 @@ class HelperCalls(FormulaTransformer):
                      lpar=(cst.LeftParen(),), rpar=(cst.RightParen(),)))
                      if isinstance(arg.value, cst.GeneratorExp) and not arg.value.lpar else arg
                      for arg in updated.args)
-        prefix = (cst.Arg(func),)
-        if layout == 'keywords':
-            names = [arg.keyword.value for arg in updated.args if arg.keyword]
-            prefix += (cst.Arg(cst.Tuple(tuple(cst.Element(cst.SimpleString(repr(name)))
-                                               for name in names))),)
-            if parameters is not None:
-                positional = sum(arg.keyword is None for arg in args)
-                slots = [name for name, _, keyword_only in parameters if not keyword_only]
-                supplied = set(slots[:positional]) | set(names)
-                # Native optional C arguments cannot skip a preceding slot.
-                # A provider-owned sentinel carries omission without evaluating
-                # a Python default or changing replacement call layout.
-                args = (*args, *(cst.Arg(
-                    cst.Attribute(cst.Name(module_name(provider)), cst.Name('omitted_argument')),
-                    keyword=cst.Name(name)) for name, optional, _ in parameters
-                    if optional and name not in supplied))
         return updated.with_changes(
             func=cst.Attribute(cst.Name(module_name(provider)), cst.Name(operation)),
-            args=(*prefix, *args))
+            args=(cst.Arg(func), *args))
 
     def rewrite(self, formula):
         """Bind registered symbols across lexical scopes, without body analysis.

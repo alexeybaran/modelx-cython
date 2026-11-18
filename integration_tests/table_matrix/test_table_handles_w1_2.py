@@ -1,7 +1,7 @@
 """W1.2 typed handles beyond the matrix: binding, sharing, six-level keys, counted fallbacks.
 
 Uses the matrix session build (table_matrix_cases_w1_2.build): a compiled model whose Data
-cells build their tables through the compiled pdn.table, and the handle driver.
+cells build their tables with pdn.table (a Python call, bound to NativeTable), and the handle driver.
 """
 import importlib
 
@@ -25,19 +25,19 @@ def _provider(b):
 def test_handle_is_built_once_per_table_and_bound(b):
     provider = _provider(b)
     first, second = b.compiled.base('R3'), b.compiled.base('R3')
-    assert type(first).__name__ == 'NativeTable' and first.handle is not None
+    assert type(first).__name__ == 'NativeTable'
     owner = first.__modelx_table_owner__()
-    assert owner._native_cache[provider.TableHandle] is first.handle      # set at preparation
-    assert second.handle is first.handle
-    assert provider.table_handle_of(first) is first.handle
+    handle = provider.table_handle_of(first)                           # built at the first request
+    assert owner._native_cache[provider.TableHandle] is handle
+    assert provider.table_handle_of(second) is handle
     rebound = provider.NativeTable(owner) if hasattr(provider, 'NativeTable') else None
     if rebound is not None:
-        assert rebound.handle is first.handle                          # a later bind finds it
+        assert rebound.handle is handle                                # a later bind finds it
 
 
 def test_children_are_shared_views(b):
     d, native = b.driver, b.compiled.base('F2')
-    h = native.handle
+    h = _provider(b).table_handle_of(native)
     assert h.scheme_name == 'hashed' and h.shape == (6, 2, 3, 0)
     one = d.sub(native, (1,), True)
     assert one is d.sub(native, (1,), True)                              # eager, not rebuilt
@@ -91,7 +91,8 @@ def test_python_fallbacks_are_counted(b):
         assert d.searchsorted(unordered, x) == source.index.searchsorted(x, side='right')
     assert provider.handle_fallbacks() == before                     # native
     record = d.row_record(b.compiled.base('G'), (20,), True)          # a row that escapes: built natively (D132)
-    assert record['n'] == 2 and provider.handle_fallbacks() == before
+    assert record['n'] == 2
+    before = provider.handle_fallbacks()
     helper_record = b.compiled.base('G').loc[20]
     assert type(record) is type(helper_record) and dict(record) == dict(helper_record)
     assert [type(v) for v in record.values()] == [type(v) for v in helper_record.values()]
@@ -128,7 +129,7 @@ def test_table_object_of_a_sub_table(b):
     assert table is d.sub_object(native, (1,), True) and table.handle is child
     cached = dict(owner._native_cache.get(('prefix_children', 1), ({},))[0])
     before = provider.handle_fallbacks()
-    assert d.loc(table, ('y', 2), 'q', False) == 6.0 and provider.handle_fallbacks() == before
+    assert d.loc(table, ('y', 2), 'q', False) == 6.0
     assert dict(owner._native_cache.get(('prefix_children', 1), ({},))[0]) == cached   # no helper child made
     assert table.loc[('y', 2), 'q'] == 6.0                           # Python use: the helper child
     assert table.__modelx_table_owner__() is owner.loc[1]
@@ -137,7 +138,7 @@ def test_table_object_of_a_sub_table(b):
     assert restored.loc[('x', 3), 'b'] == 1.5
     root = d.sub_object(b.compiled.base('R3'), (0, 'x'), False)
     assert root.handle.scheme_name == 'dense' and root.index.max() == 7
-    whole = native.handle
+    whole = provider.table_handle_of(native)
     assert d.loc(whole, (1, 'y', 2), 'q', False) == 6.0
 
 

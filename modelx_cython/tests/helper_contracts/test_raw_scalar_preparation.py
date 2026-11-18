@@ -49,17 +49,11 @@ def test_unused_opaque_values_do_not_raise_and_selected_conversion_does(native):
             calls.append(frame.f_code.co_name)
     sys.setprofile(profile)
     try:
-        actual = native.table_lookup(h.lookup, prepared, 0, 'value')
-        numeric = float(native.table_lookup(h.lookup, prepared, 0, 'value'))
         selected = native.select(row, prepared, 0)
     finally:
         sys.setprofile(None)
     assert calls == []
-    assert type(actual) is np.float64 and numeric == 0.1
-    assert selected['value'] is actual
-    assert native.table_lookup(h.lookup, prepared, 1, 'value') is unused
-    with pytest.raises(AssertionError, match='unused value converted'):
-        float(native.table_lookup(h.lookup, prepared, 1, 'value'))
+    assert type(selected['value']) is np.float64 and selected['value'] == 0.1
     with pytest.raises(TypeError, match='unsupported immutable input'):
         inputs.table(frame)
     for restored in [pickle.loads(pickle.dumps(prepared)),
@@ -91,39 +85,3 @@ def test_empty_and_grouped_raw_storage():
     prepared = inputs.table(frame, groups=('sex',), preserve_scalar_types=True)
     assert type(h.lookup_object(prepared['M'], 1, 'rate')) is np.float64
     assert type(h.lookup_object(pickle.loads(pickle.dumps(prepared))['F'], 2, 'rate')) is object
-
-
-def test_appended_keyword_abi_preserves_replacement_layout(native):
-    frame = pd.DataFrame({'rate': [0.1]})
-    observed = []
-    def replacement(frame, *, rows, report, preserve_scalar_types):
-        observed.append((frame, rows, report, preserve_scalar_types))
-        return 'current'
-    assert native.prepare_raw(replacement, frame, True) == 'current'
-    assert observed == [(frame, True, True, True)]
-    prepared = native.prepare_raw(inputs.table, frame, True)
-    assert type(h.lookup_object(prepared, 0, 'rate')) is np.float64
-
-
-@pytest.mark.parametrize('with_rows', [False, True])
-def test_native_numeric_raw_preparation_uses_native_owner(native, with_rows):
-    frame = pd.DataFrame({'rate': [0.1, np.nan]}, index=pd.Index([3, 1], name='t'))
-    forbidden = {inputs.table.__code__, Table.__init__.__code__, Record.__init__.__code__}
-    calls = []
-    def profile(frame, event, arg):
-        if event == 'call' and frame.f_code in forbidden:
-            calls.append(frame.f_code.co_name)
-    sys.setprofile(profile)
-    try:
-        prepared = native.prepare_raw(inputs.table, frame, with_rows)
-    finally:
-        sys.setprofile(None)
-    assert calls == []
-    assert type(h.lookup_object(prepared, 3, 'rate')) is np.float64
-    for restored in [prepared, pickle.loads(pickle.dumps(prepared))]:
-        pd.testing.assert_frame_equal(to_pandas(restored), frame, check_exact=True)
-        if with_rows:
-            selected = native.select(row, restored, 3)
-            assert selected._preserve_scalar_types is True
-            pd.testing.assert_series_equal(to_pandas(pickle.loads(pickle.dumps(selected))),
-                                           frame.loc[3], check_exact=True)

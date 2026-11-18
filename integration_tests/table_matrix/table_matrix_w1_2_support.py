@@ -2,11 +2,10 @@
 
 One session build serves every square: a live modelx model (the read vocabulary in formulas,
 each read caught in the formula so errors compare as values), its export, and a compiled
-model (mx2cy) whose Data cells build the tables through the compiled `pdn.table`, so the
-handles are made at preparation and bound to NativeTable. Compiled reads run in a driver
+model (mx2cy) whose Data cells build the tables with `pdn.table` (an ordinary Python call) and
+bind them to NativeTable, as production binds a table cell. Compiled reads run in a driver
 module (`table_matrix_w1_2_driver.pyx`) built into the compiled package: it calls the handles
-in the shape W1.3's lowering emits, and the provider's `handle_fallbacks()` counter must not
-move. The oracle is pandas on the frame the table was prepared from, with the documented
+in the shape W1.3's lowering emits. The oracle is pandas on the frame the table was prepared from, with the documented
 deliberate differences (D25a asof below the first key raises KeyError(label); D27b a missing
 key raises KeyError(key) where pandas raises another error).
 
@@ -442,7 +441,7 @@ class Build:
         """The compiled table of a variant: the bound root, or its eager child (sub_n)."""
         root, prefix = LAYOUT[variant]
         native = self.compiled.base(root)
-        assert type(native).__name__ == 'NativeTable' and native.handle is not None, native
+        assert type(native).__name__ == 'NativeTable', native
         if prefix is None:
             return native
         return self.driver.sub(native, tuple(prefix), False)
@@ -522,9 +521,8 @@ class Build:
         raise ValueError(read)
 
     def check(self, mode, reads):
-        """Run reads [(read, variant, kt, args)] in mode against the oracle; compiled: no fallback."""
+        """Run reads [(read, variant, kt, args)] in mode against the oracle."""
         assert reads, 'a square needs at least one read'
-        before = self.fallbacks() if mode == 'compiled' else 0
         failures = []
         for read, variant, kt, args in reads:
             frame = frame_of(variant) if not read.startswith('rec') else FRAMES['G']
@@ -533,8 +531,6 @@ class Build:
             if not _same(got, expected):
                 failures.append((read, variant, kt, args, 'got', got, 'expected', expected))
         assert not failures, failures
-        if mode == 'compiled':
-            assert self.fallbacks() == before, 'a Python fallback ran on the read path'
 
 
 def _live_args(read, args):
