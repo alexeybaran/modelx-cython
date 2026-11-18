@@ -710,8 +710,8 @@ class CombinedCellsInfo(LexicalCellsInfo):
         count = 1
         for p, size in zip(self.params, sizes):
             count *= size - self._axis_lower(p)
-        from .automatic import max_dense_entries
-        return 0 < count <= max_dense_entries(self)
+        from .automatic import dense_allowed
+        return dense_allowed(self, count)
 
     @property
     def uses_native_numeric_cache(self):

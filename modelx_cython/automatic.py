@@ -78,14 +78,43 @@ def max_dense_entries(cell):
     return value
 
 
-def dense_fits(cell):
-    limit = max_dense_entries(cell)
+# R-3b: above the default ceiling, storage is chosen by use. A rectangle stays dense while it is at most
+# DENSE_USE_FACTOR times the entries one receiver (policy root) fills in the sample: the formula evaluations
+# per receiver the tracer counts (max_evaluations_per_receiver). A hash entry costs about 550 instructions
+# to fill and 119 per hit against a few for a dense slot, while a dense slot costs about 2 (collect reset)
+# to 10 (loop zero-fill) instructions per policy whether used or not: dense is cheaper up to a ratio of
+# about 80 on the loop route and 400 on collect.
+DENSE_USE_FACTOR = 16
+
+
+def filled_per_receiver(cell):
+    """The most entries of the Cell one receiver filled in the sample (its formula evaluations)."""
+    return getattr(getattr(cell, '_rt', None), 'max_evaluations_per_receiver', 0) or 0
+
+
+def dense_by_use(cell, count):
+    """R-3b: whether a rectangle of ``count`` entries above the ceiling stays dense by use. An explicit
+    max_dense_entries (Cell or Space) is a hard limit and is not overridden."""
+    if max_dense_entries_set(cell):
+        return False
+    filled = filled_per_receiver(cell)
+    return filled > 0 and count <= DENSE_USE_FACTOR * filled
+
+
+def dense_allowed(cell, count):
+    """Dense when the rectangle is within the ceiling, or (R-3b) within DENSE_USE_FACTOR x its use."""
+    return count > 0 and (count <= max_dense_entries(cell) or dense_by_use(cell, count))
+
+
+def dense_count(cell):
     count = 1
     for axis in observed_axes(cell, cell.dense_logical_axes):
         count *= axis.stop - axis.lower
-        if count > limit:
-            return False
-    return count > 0
+    return count
+
+
+def dense_fits(cell):
+    return dense_allowed(cell, dense_count(cell))
 
 
 def primary_capacity(cell):

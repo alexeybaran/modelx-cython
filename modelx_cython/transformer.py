@@ -1606,8 +1606,10 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
                         )
                     elif cells.uses_native_numeric_cache:
                         body = numeric_cache.body(cells)
-                        from modelx_cython.admission import over_limit_warning
+                        from modelx_cython.admission import over_limit_warning, use_warning
                         if (warning := over_limit_warning(cells)) is not None:
+                            _logger.warning(warning)
+                        if (warning := use_warning(cells)) is not None:
                             _logger.warning(warning)
                     elif cells.uses_vector_cache:
                         body = vectors.cache_body(cells)
