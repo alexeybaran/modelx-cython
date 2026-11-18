@@ -10,6 +10,22 @@ from modelx_cython._rounding cimport _mx_round_one, _mx_round_digits
 cimport cython
 
 
+cdef inline object _mx_named(object error, str path):
+    """``error`` marked as naming the Cell ``path``."""
+    error._mx_cell = path
+    return error
+
+
+cdef inline object _mx_named_overflow(object error, str path):
+    """The OverflowError to raise from Cell ``path``: ``error`` itself when a Cell already named it,
+    else a new one naming ``path``, caused by ``error``."""
+    if getattr(error, '_mx_cell', None) is not None:
+        return error
+    named = _mx_named(OverflowError(f"{path}: {error} (integer arithmetic beyond 64 bits)"), path)
+    named.__cause__ = error
+    return named
+
+
 cdef inline long long _mx_exact_int64(object value, str path) except? -1:
     """Cross a signed 64-bit boundary through the Python index protocol.
 
@@ -21,13 +37,13 @@ cdef inline long long _mx_exact_int64(object value, str path) except? -1:
             return PyLong_AsLongLong(value)
         return PyLong_AsLongLong(PyNumber_Index(value))
     except TypeError as error:
-        raise TypeError(
+        raise _mx_named(TypeError(
             f"{path} requires an exact signed 64-bit integer. Rebuild with a wider sample or spec."
-        ) from error
+        ), path) from error
     except OverflowError as error:
-        raise OverflowError(
+        raise _mx_named(OverflowError(
             f"{path} requires an exact signed 64-bit integer. Rebuild with a wider sample or spec."
-        ) from error
+        ), path) from error
 
 
 ctypedef unsigned long _mx_native_ulong
@@ -46,14 +62,14 @@ cdef inline long long _mx_integer_result(_mx_integer_source value, str path) exc
     if _mx_integer_source is object:
         return _mx_exact_int64(value, path)
     elif _mx_integer_source is double:
-        raise TypeError(
+        raise _mx_named(TypeError(
             f"{path} requires an exact signed 64-bit integer. Rebuild with a wider sample or spec."
-        )
+        ), path)
     elif _mx_integer_source is _mx_native_ulong or _mx_integer_source is _mx_native_ulonglong:
         if value > LLONG_MAX:
-            raise OverflowError(
+            raise _mx_named(OverflowError(
                 f"{path} requires an exact signed 64-bit integer. Rebuild with a wider sample or spec."
-            )
+            ), path)
         return <long long>value
     else:
         return value
@@ -154,22 +170,27 @@ cdef inline long long _mx_signed_left_shift(long long value, long long count, st
     return _mx_signed_mul(value, (<long long>1) << count, path)
 
 
+@cython.overflowcheck(True)
 cdef inline long long _mx_signed_pow(long long base, long long exponent, str path) except? -1:
-    """``base ** exponent`` of two C integers, exactly or OverflowError naming the Cell (Cython's own
-    C integer power wraps). A negative exponent has a float value in Python, which a C integer
-    result cannot hold: TypeError naming the Cell. By squaring: each square taken is at most
-    the result in magnitude (|base| >= 2), so no check fails for a power that fits."""
+    """``base ** exponent`` of two C integers, exactly or OverflowError (Cython's overflowcheck on
+    the products; Cython's own C integer power wraps). A negative exponent has a float value in
+    Python, which a C integer result cannot hold: TypeError naming the Cell. By squaring: each
+    square taken is at most the result in magnitude (|base| >= 2), so no check fails for a power
+    that fits."""
     cdef long long result = 1
     if exponent < 0:
-        raise TypeError(
-            f"{path} requires an exact signed 64-bit integer. Rebuild with a wider sample or spec.")
-    while True:
-        if exponent & 1:
-            result = _mx_signed_mul(result, base, path)
-        exponent >>= 1
-        if exponent == 0:
-            return result
-        base = _mx_signed_mul(base, base, path)
+        raise _mx_named(TypeError(
+            f"{path} requires an exact signed 64-bit integer. Rebuild with a wider sample or spec."), path)
+    try:
+        while True:
+            if exponent & 1:
+                result = result * base
+            exponent >>= 1
+            if exponent == 0:
+                return result
+            base = base * base
+    except OverflowError as error:
+        raise _mx_named_overflow(error, path)
 
 
 cdef inline long long _mx_signed_right_shift(long long value, long long count, str path) except? -1:

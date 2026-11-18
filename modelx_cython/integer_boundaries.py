@@ -100,14 +100,37 @@ def _checked_integer(value, path):
 
 
 def _overflow_handler(body, path, error, leading_lines=()):
-    message = f'{path} requires an exact signed 64-bit integer. Rebuild with a wider sample or spec.'
+    """``try: <body> except OverflowError: raise <named>``: the error names the Cell; an error a
+    Cell already named (a call to another Cell, a checked conversion) passes unchanged."""
     handler = cst.parse_statement(
-        # Keep Python exceptions and the diagnostics from checked boundaries.
         f'try:\n    pass\nexcept OverflowError as {error}:\n'
-        f'    if {error}.args != ("value too large",):\n        raise\n'
-        f'    raise OverflowError({message!r}) from {error}\n'
-    )
+        f'    raise {MX_SYS_MOD}._mx_named_overflow({error}, {path!r})\n')
     return handler.with_changes(body=cst.IndentedBlock(body=body), leading_lines=leading_lines)
+
+
+_ARITHMETIC_NODES = (cst.Add, cst.Subtract, cst.Multiply, cst.FloorDivide, cst.Modulo, cst.Power,
+                     cst.LeftShift, cst.AddAssign, cst.SubtractAssign, cst.MultiplyAssign,
+                     cst.FloorDivideAssign, cst.ModuloAssign, cst.PowerAssign, cst.LeftShiftAssign)
+
+
+def _name_overflows(node, path):
+    """Checked mode: one handler around the body of a formula function that does arithmetic, so
+    an OverflowError from Cython's overflowcheck names the Cell. Declarations stay before it."""
+    if not isinstance(node.body, cst.IndentedBlock) or not any(
+            isinstance(part, _ARITHMETIC_NODES)
+            or isinstance(part, cst.UnaryOperation) and isinstance(part.operator, cst.Minus)
+            for part in walk(node.body)):
+        return node
+    lines = list(node.body.body)
+    prefix = 1 if node.get_docstring() is not None else 0
+    while prefix < len(lines) and isinstance(lines[prefix], cst.SimpleStatementLine) and all(
+            isinstance(small, cst.AnnAssign) and small.value is None for small in lines[prefix].body):
+        prefix += 1
+    if prefix == len(lines):
+        return node
+    error = Names(node).reserve('_mx_integer_overflow')
+    handler = _overflow_handler(tuple(lines[prefix:]), path, error)
+    return node.with_changes(body=node.body.with_changes(body=(*lines[:prefix], handler)))
 
 
 def _python_call_gate(cls, entries, names, call_gate):
@@ -322,10 +345,12 @@ class _GuardIntegers(cst.CSTTransformer):
         if isinstance(value, cst.BinaryOperation) and type(value.operator) in _SIGNED_OPERATIONS:
             left, left_signed = self._signed_expression(value.left, path)
             right, right_signed = self._signed_expression(value.right, path)
-            # a right shift keeps its helper in both modes: Python rounds a negative value down,
-            # where C leaves the shift of a negative value to the implementation
-            if ((self.checked or isinstance(value.operator, cst.RightShift)) and left_signed and right_signed
-                    and self.arithmetic.integer_interval(value, signed=True) is None):
+            # A right shift keeps its helper in both modes: Python rounds a negative value down,
+            # where C leaves the shift of a negative value to the implementation. An integer power
+            # takes the checked power in the checked mode (Cython's own wraps). Every other
+            # operator is plain C: Cython's overflowcheck checks it in the checked mode.
+            if ((isinstance(value.operator, cst.RightShift)
+                 or self.checked and isinstance(value.operator, cst.Power)) and left_signed and right_signed):
                 operation = _SIGNED_OPERATIONS[type(value.operator)]
                 checked = _boundary_call(operation, path, left, right)
                 return checked.with_changes(lpar=value.lpar, rpar=value.rpar), True
@@ -339,8 +364,10 @@ class _GuardIntegers(cst.CSTTransformer):
                 return value, True
             operand, signed = self._signed_expression(value.expression, path)
             if signed and isinstance(value.operator, cst.Minus) and self.checked:
-                checked = _boundary_call('_mx_signed_sub', path, cst.Integer('0'), operand)
-                return checked.with_changes(lpar=value.lpar, rpar=value.rpar), True
+                # Cython's overflowcheck does not check a unary minus (-LLONG_MIN): as 0 - x it does
+                return cst.BinaryOperation(cst.Integer('0'), cst.Subtract(), operand,
+                                           lpar=(cst.LeftParen(), *value.lpar),
+                                           rpar=(*value.rpar, cst.RightParen())), True
             return value.with_changes(expression=operand), signed
         if isinstance(value, cst.Integer):
             return value, value.evaluated_value <= (1 << 63) - 1
@@ -387,7 +414,7 @@ class _GuardIntegers(cst.CSTTransformer):
             and self.arithmetic.integer_interval(part, signed=True) is None
             for part in walk(value)
         )
-        if needs_overflow_check and self.checked:
+        if False:      # the function-level handler names the Cell (_name_overflows)
             self.check_overflow = True
             if self.in_statement:
                 self.statement_overflow = True
@@ -862,6 +889,8 @@ def guard_integer_boundaries(state, module_info, resolver, cells_kinds, ref_kind
                         and cell.is_arrayable() else ())
                 node = _guard_result(node, cell, cls, resolver, cells_kinds, ref_kinds, signatures,
                                      argument_axes=axes, checked=checked)
+                if checked:
+                    node = _name_overflows(node, cell.model_path)
                 if infer_types:
                     node = _python_locals(node, cell)
                 changed = True
@@ -877,6 +906,8 @@ def guard_integer_boundaries(state, module_info, resolver, cells_kinds, ref_kind
                 method = _guard_calls(method, cls, formula, resolver, entries, cells, private_entries, module_info.classes)
                 method = _guard_result(method, formula, cls, resolver, cells_kinds, ref_kinds, signatures,
                                        native_helpers.get((cls.name, name), ()), checked=checked)
+                if checked:
+                    method = _name_overflows(method, formula.model_path)
                 if infer_types:
                     method = _python_locals(method, formula)
                 methods.append(method)
@@ -891,6 +922,8 @@ def guard_integer_boundaries(state, module_info, resolver, cells_kinds, ref_kind
                 method = _guard_calls(method, cls, cell, resolver, entries, cells, private_entries, module_info.classes)
                 method = _guard_result(method, cell, cls, resolver, cells_kinds, ref_kinds, signatures,
                                        checked=checked)
+                if checked:
+                    method = _name_overflows(method, cell.model_path)
                 if infer_types:
                     method = _python_locals(method, cell)
                 changed = True

@@ -727,8 +727,7 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
                                      cls_info.fqname, {**local_kinds, **param_kinds}),
             cells=cells, providers=self.helper_providers)
         cells.guarded_integer_ops = 0
-        if (self.module.spec.policy.infer_types and cells.get_rettype_expr(c_style=True) != 'long long'
-                and self.module.spec.policy.integer_checks != 'unchecked'):
+        if False:   # integer guards: the D76 exact fallback is gone (checked mode raises instead)
             # (an integer-result formula keeps the integer-boundary pass's own checked semantics)
             # D76: integer locals stay C integers; each integer operation on them that could
             # leave the 64-bit range runs natively within a safe bound, else exactly in Python
