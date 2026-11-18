@@ -503,7 +503,11 @@ class Constants(FormulaTransformer):
         self.object_memberships.append(_untyped(self.lines, before, 'in',
             f'compiled, operands are Python objects: {len(parts)} identity and == tests in tuple order, '
             'no tuple'))
-        return cst.parse_expression(f'({text})').with_changes(lpar=after.lpar, rpar=after.rpar)
+        chain = cst.parse_expression(f'({text})')
+        # The chain keeps its own parentheses whatever its position (an operand of and/not, a
+        # comparison or arithmetic): without them `A and x in (p, q)` would read as
+        # `(A and p == x) or q == x`. The original's own parentheses stay outside.
+        return chain.with_changes(lpar=(*after.lpar, *chain.lpar), rpar=(*chain.rpar, *after.rpar))
 
     def member_tuple(self, node):
         """A literal tuple holding at least one ``self.<Ref>.<name>`` of a declared enum."""

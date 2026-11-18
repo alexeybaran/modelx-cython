@@ -449,7 +449,10 @@ def main_handler(args: argparse.Namespace, stdout: IO[str], stderr: IO[str]) -> 
             from modelx_cython import table_cells
             state = state.replace(table_cells.finish(state.syntax, u.module_info))
             translated_modules[u.fqname] = state
-            u.abs_src_path.write_text(state.syntax.code, encoding='utf-8')
+            # the printed text must mean the tree the passes built (no dropped parentheses)
+            from modelx_cython import reparse_check
+            u.abs_src_path.write_text(reparse_check.check(state.syntax, name=u.rel_src_path.as_posix()),
+                                      encoding='utf-8')
             cell_sources[u.rel_src_path.as_posix()] = cell_locations(state, u.module_info)
         create_setup(model_name, modules=modules, setup_file=setup_file, source_root=work_dir,
                      source_modules=(runtime.syntax, *(state.syntax for state in translated_modules.values())),

@@ -237,3 +237,41 @@ def test_object_membership_and_isclose(tmp_path):
         call(w.c5, i); call(w.mem, i)
     json.dump(out, open(sys.argv[2], 'w'))
     ''')
+
+
+def test_object_membership_keeps_its_grouping(tmp_path):
+    """The identity-and-== chain of ``x in (...)`` is one operand wherever it stands: an operand
+    of and/or/not, of a comparison, of arithmetic, of an attribute (original Child_KR_S:
+    ``broad_def() and cause in ("cerebral", "cardiac")``)."""
+    members = ('cerebral', 'cardiac', 'other', 1, 2.0, None, 'a', 0)
+    model = mx.new_model('GroupW18')
+    try:
+        s = model.new_space('Values', refs={'members': members})
+        s.new_cells('mo', 'lambda i: members[i]')
+        s.new_cells('flag', 'lambda i: i % 3 == 0')
+        s.new_cells('g', 'def g(i) -> object:\n    cause = mo(i)\n    return (\n'
+                    '        flag(i) and cause in ("cerebral", "cardiac"),\n'
+                    '        cause in ("cerebral", "a") and i < 5,\n'
+                    '        i > 2 or cause in (1, None) and flag(i),\n'
+                    '        not flag(i) and cause not in ("cardiac", 0),\n'
+                    '        (cause in ("other", 2.0)) == flag(i),\n'
+                    '        (cause in ("other", 2.0)) + i,\n'
+                    '        -(cause not in ("a",)),\n'
+                    '        (cause in ("a", "other")).real,\n'
+                    '    )\n')
+        s.new_cells('h', 'def h(i) -> object:\n    cause = mo(i)\n'
+                    '    if flag(i) and cause in ("cerebral", "cardiac"):\n        return 4\n    return 1\n')
+        source, report = _build(tmp_path, model, '''\
+            from exported import mx_model as m
+            for i in range(8):
+                m.Values.g(i); m.Values.h(i)
+            ''')
+    finally:
+        model.close()
+    # the chain lowering is the route taken (no tuple membership left in these cells)
+    assert '== cause)' in source and 'in ("cerebral", "cardiac")' not in source
+    _differential(tmp_path, _PROBE_HEAD + '''\
+    for i in range(8):
+        call(w.g, i); call(w.h, i)
+    json.dump(out, open(sys.argv[2], 'w'))
+    ''')
