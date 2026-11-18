@@ -186,3 +186,42 @@ def test_plain_table_handle_is_the_cached_one_from_every_thread(b):
     assert not errors and len(seen) == 8000 and all(handle is first for handle in seen)
     with pytest.raises(TypeError):
         provider.table_handle_of(object())
+
+
+def test_first_native_read_from_four_threads_takes_one_handle(b):
+    """A NativeTable bound without a handle takes it at its first native read, once: four threads
+    racing on that read of a fresh table all get the same handle, the table stores it, and no
+    reference is leaked (the handle's reference count equals that after the same first read made by
+    one thread)."""
+    import sys
+    import threading
+    provider, d = _provider(b), b.driver
+    frame = pd.DataFrame({'q': [1.0, 2.0, 3.0]}, index=[10, 20, 30])
+
+    def first_read(threads):
+        native = provider.NativeTable(pdn.table(frame))
+        assert native.handle is None
+        barrier = threading.Barrier(threads)
+        got = [None] * threads
+
+        def read(i):
+            barrier.wait()
+            got[i] = d.handle(native)
+        workers = [threading.Thread(target=read, args=(i,)) for i in range(threads)]
+        for t in workers:
+            t.start()
+        for t in workers:
+            t.join()
+        handle = native.handle
+        assert handle is not None and all(h is handle for h in got)
+        assert native.__modelx_table_owner__()._native_cache[provider.TableHandle] is handle
+        assert d.loc(native, (20,), 'q', True) == 2.0
+        return native, handle
+
+    native, handle = first_read(1)
+    baseline = sys.getrefcount(handle)
+    del native, handle
+    for _ in range(50):
+        native, handle = first_read(4)
+        assert sys.getrefcount(handle) == baseline
+        del native, handle

@@ -2584,11 +2584,24 @@ cdef object _bound_handle(object owner):
 
 
 cdef TableHandle table_handle(object value):
-    """The handle of a bound table: NativeTable.handle, else the table's own handle."""
+    """The handle of a bound table: NativeTable.handle, else the table's own handle.
+
+    A NativeTable without a handle (bound before its table had one) takes it at its first native
+    read: the handle is found or built once per table through the table's cache (``_bound_handle``:
+    built at most once per table, published with ``setdefault``, so every racing thread gets the same
+    object) and stored into the NativeTable under a critical section on it, only while the field is
+    still None. Later reads return the field without the counted path. A table whose storage has no
+    handle raises here, at the first native read, as before."""
+    cdef TableHandle handle
     if type(value) is NativeTable:
         if (<NativeTable>value).handle is not None:
             return (<NativeTable>value).handle
-        value = (<NativeTable>value)._owner
+        mx_handle_fallback()        # once per table: its first native read
+        handle = _bound_handle((<NativeTable>value)._owner)
+        with cython.critical_section(value):
+            if (<NativeTable>value).handle is None:
+                (<NativeTable>value).handle = handle
+        return (<NativeTable>value).handle
     elif type(value) is TableHandle:
         return <TableHandle>value
     mx_handle_fallback()        # not a bound table: the handle is found through its cache
