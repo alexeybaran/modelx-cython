@@ -347,12 +347,14 @@ def forget():
         _prepared.clear()
 
 
+_assigned = None
 try:
-    from modelx_cython.runtime.table_cells import register_prepared as _register
+    from modelx_cython.runtime.table_cells import register_prepared as _register, assigned as _assigned
 except ImportError:         # the runtime used on its own (tests)
     pass
 else:
-    _register(forget)
+    _register(forget, lambda value: prepared(value) if isinstance(value, (pd.DataFrame, pd.Series)) else None,
+              __name__.split('.')[0])
 
 
 cdef object prepared(object frame):
@@ -383,7 +385,9 @@ cdef object hold(object frame, object label, int kind, Py_ssize_t* slot):
     slot[0] = -1
     if table is None:
         return None
-    if kind < 0:
+    if kind < 0:            # -1: index membership; -2: extremes of the index (not of an empty one)
+        if kind == -2 and table.nrows == 0:
+            return None
         slot[0] = 1
         return table
     position = table.column_positions.get(label, -1)
@@ -391,6 +395,117 @@ cdef object hold(object frame, object label, int kind, Py_ssize_t* slot):
         return None
     slot[0] = table.column_slot[position] + 1
     return table
+
+
+def check_unchanged(frame):
+    """T-4 check mode (spec key ``verify_inputs``): raise if ``frame`` no longer equals the copy prepared when it was
+    bound, i.e. it was edited in place and the dependent Space was not cleared (Space.clear_all())."""
+    cdef PreparedTable table = prepared(frame)
+    cdef PreparedTable fresh
+    if table is None:
+        return
+    fresh = prepare(frame)
+    if fresh is None or not _same(table, fresh):
+        raise RuntimeError(
+            f'a table read by compiled code was edited in place after it was bound ({type(frame).__name__} of '
+            f'shape {getattr(frame, "shape", None)}): clear the Space that reads it (Space.clear_all()) so the '
+            f'edit is used, as on live modelx')
+
+
+cdef bint _same(PreparedTable a, PreparedTable b):
+    if a.nrows != b.nrows or a.nlevels != b.nlevels or a.level_labels != b.level_labels:
+        return False
+    if a.column_positions != b.column_positions or a.objects != b.objects:
+        return False
+    if len(a._arrays) != len(b._arrays):
+        return False
+    for x, y in zip(a._arrays, b._arrays):
+        if x.dtype != y.dtype or x.shape != y.shape:
+            return False
+        if not np.array_equal(x, y, equal_nan=x.dtype.kind == 'f'):
+            return False
+    return True
+
+
+cdef object hold_checked(object frame, object label, int kind, Py_ssize_t* slot):
+    """``hold`` in check mode: the frame is first checked against its prepared copy."""
+    check_unchanged(frame)
+    return hold(frame, label, kind, slot)
+
+
+cdef Py_ssize_t hold_code(object table, int level, object value) except -2:
+    """T-4: one plus the code of ``value`` at ``level`` of a held table (resolved once per item), or -1 when the
+    table is not prepared or the value is absent (the read then runs on pandas, which raises as it does)."""
+    cdef Py_ssize_t code
+    if table is None:
+        return -1
+    code = (<PreparedTable>table).code_obj(level, value)
+    return code + 1 if code >= 0 else -1
+
+
+cdef Py_ssize_t asof_row(PreparedRef ref, int count, Py_ssize_t c0, Py_ssize_t c1, Py_ssize_t c2,
+                         Py_ssize_t c3, Py_ssize_t c4, double x) noexcept:
+    """T-4: ``P.index.asof(x)`` on the sub-frame P = ``T.loc[prefix]`` (``count`` prefix codes) whose one remaining
+    level is an int level, as the stored row of that label in T: the row of the largest label <= x among the
+    prefix's rows; -1 when there is none or x is NaN (pandas returns NaN; the read then runs on pandas)."""
+    cdef PreparedTable table = <PreparedTable>ref
+    cdef Py_ssize_t[6] codes
+    cdef Py_ssize_t start, stop, lo, hi, mid
+    cdef int last = table.nlevels - 1
+    cdef long long label
+    codes[0] = c0; codes[1] = c1; codes[2] = c2; codes[3] = c3; codes[4] = c4
+    if count != last or x != x or table.level_kind[last] == LEVEL_OBJECT:
+        return -1
+    if not table.prefix_range(codes, count, &start, &stop):
+        return -1
+    lo, hi = start, stop        # rows of the prefix, ascending by the last level's label
+    while lo < hi:
+        mid = (lo + hi) >> 1
+        if _last_label(table, mid) <= x:
+            lo = mid + 1
+        else:
+            hi = mid
+    return lo - 1 if lo > start else -1
+
+
+cdef inline long long _last_label(PreparedTable table, Py_ssize_t row) noexcept:
+    cdef int last = table.nlevels - 1
+    cdef long long combined = table.combined[row]
+    cdef Py_ssize_t code = <Py_ssize_t>(combined % table.radix[last - 1]) if last > 0 else <Py_ssize_t>combined
+    if table.level_kind[last] == LEVEL_DENSE:
+        return table.level_first[last] + code
+    return table.sorted_labels[table.level_offset[last] + code]
+
+
+cdef Py_ssize_t hold_unassigned(object space, object name) except -2:
+    """T-4: 1 when the cell ``name`` of ``space`` holds its formula's value, -1 when the user assigned it."""
+    return -1 if (_assigned is not None and _assigned(space, name)) else 1
+
+
+cdef Py_ssize_t hold_row(object table, object key, object space, object name) except -2:
+    """T-4: one plus the stored row of ``key`` in a held table, for the fields of the row cell ``name`` of
+    ``space`` (``T.loc[key]``); -1 when the table is not prepared, the key is absent, or the cell holds a value the
+    user assigned (the fields are then read from that value, on pandas)."""
+    cdef Py_ssize_t row
+    if table is None:
+        return -1
+    if _assigned is not None and _assigned(space, name):
+        return -1
+    row = (<PreparedTable>table).row_key(key)
+    return row + 1 if row >= 0 else -1
+
+
+cdef int missing_codes(PreparedRef ref, const Py_ssize_t* codes, int count) except -1:
+    """KeyError for a key given as codes: the labels of the parts found, None for a part absent from its level
+    (the type is pandas'; the key shown lists the parts found)."""
+    cdef PreparedTable table = <PreparedTable>ref
+    parts = tuple(table.level_labels[i][codes[i]] if 0 <= codes[i] < table.level_size[i] else None
+                  for i in range(count))
+    raise KeyError(parts if count > 1 else parts[0])
+
+
+cdef object object_field(PreparedRef ref, Py_ssize_t slot, Py_ssize_t row):
+    return (<PreparedTable>ref).object_at(row - 1, slot - 1)
 
 
 cdef int missing2(object a, object b) except -1:

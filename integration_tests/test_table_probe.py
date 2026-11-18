@@ -138,6 +138,19 @@ def build():
     items.data = data
     items.new_cells("v__flat", "def v__flat(t):\\n    return data.flat().loc[20 + t, 'q']\\n")
     items.new_cells("in__multi", "def in__multi(t):\\n    return (('A', 'B', 'C', 'D')[t % 4], 1) in data.multi().index\\n")
+    # T-4: a prefix cell (traced: the sub-frame of Data.rates), its reads, a rejected prefix shape, keys in locals
+    data.new_cells("rates", "def rates():\\n    return pd.DataFrame({{'q': [0.01 * n for n in range(12)]}}, index="
+                   "pd.MultiIndex.from_product([['A', 'B'], ['F', 'M'], [2000, 2001, 2002]], names=['plan', 'sex', 'year']))\\n")
+    items.new_cells("plan", "def plan():\\n    return ('A', 'B')[i % 2]\\n")
+    items.new_cells("sex", "def sex():\\n    return ('F', 'M')[(i // 2) % 2]\\n")
+    items.new_cells("sched", "def sched():\\n    return data.rates().loc[(plan(), sex())]\\n")
+    items.new_cells("pre__rates", "def pre__rates(t):\\n    sub = sched()\\n    return sub.loc[2000 + t % 3, 'q']\\n")
+    items.new_cells("sched_list", "def sched_list():\\n    return data.rates().loc[[plan()]]\\n")
+    items.new_cells("pre_list__rates", "def pre_list__rates(t):\\n    return sched_list().loc[(plan(), sex(), 2000 + t % 3), 'q']\\n")
+    items.new_cells("key_local__rates", "def key_local__rates(t):\\n    key = (plan(), sex(), 2000 + t % 3)\\n"
+                    "    return data.rates().loc[key, 'q']\\n")
+    items.new_cells("key_rebound__rates", "def key_rebound__rates(t):\\n    key = (plan(), sex(), 2000)\\n"
+                    "    if t % 2:\\n        key = (plan(), sex(), 2001)\\n    return data.rates().loc[key, 'q']\\n")
     return model
 
 
@@ -154,10 +167,11 @@ for name in names():
             getattr(mx_model.Calc, name)(t)
         except Exception:
             pass
-for i in (1, 2):
+ITEM_CELLS = ("v__flat", "in__multi", "pre__rates", "pre_list__rates", "key_local__rates", "key_rebound__rates")
+for i in (1, 2, 3, 4):
     for t in range(4):
-        mx_model.Items[i].v__flat(t)
-        mx_model.Items[i].in__multi(t)
+        for name in ITEM_CELLS:
+            getattr(mx_model.Items[i], name)(t)
 '''
 
 CHECKS = '''\
@@ -264,6 +278,21 @@ def item(i, t):
 
 old = both("loc_scalar__flat", 1)
 checks["before: equal to live"] = equal(old)
+ITEM_CELLS = ("pre__rates", "pre_list__rates", "key_local__rates", "key_rebound__rates")
+
+
+def items_equal(items=(1, 2, 3, 4)):
+    return all(float(getattr(live.Items[i], n)(t)) == float(getattr(compiled.Items[i], n)(t))
+               for i in items for n in ITEM_CELLS for t in range(4))
+
+
+checks["item: prefix cell, keys in locals: equal to live"] = items_equal()
+# an assigned value of the prefix cell, on an item that has not read it: its reads use the assigned frame
+alt = live.Data.rates().loc[("A", "F")] * 7
+live.Items[6].sched[()] = alt
+compiled.Items[6].sched[()] = alt.copy()
+checks["item: prefix cell holding an assigned value: equal to live"] = all(
+    float(live.Items[6].pre__rates(t)) == float(compiled.Items[6].pre__rates(t)) for t in range(3))
 old_item = item(1, 1)
 checks["item: before: equal to live"] = equal(old_item) and all(
     live.Items[1].in__multi(t) == compiled.Items[1].in__multi(t) for t in range(4))
@@ -304,6 +333,13 @@ checks["in-place edit + Space.clear_all: equal to live"] = equal(both("loc_scala
 compiled.Items.clear_all()
 live.Items.clear_all()
 checks["item: in-place edit + Space.clear_all: equal to live"] = equal(item(1, 1))
+# reassign the table under the prefix cell and rerun: as live after Space.clear_all
+rates2 = live.Data.rates() * 3
+live.Data.rates[()] = rates2
+compiled.Data.rates[()] = rates2.copy()
+live.Items.clear_all()
+compiled.Items.clear_all()
+checks["item: reassign the prefix cell's table + Space.clear_all: equal to live"] = items_equal()
 json.dump(checks, sys.stdout, indent=1)
 '''
 
