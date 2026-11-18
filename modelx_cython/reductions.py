@@ -5,6 +5,7 @@ import libcst as cst
 from libcst.metadata import ExpressionContext
 
 from .cell_entries import exact_receiver
+from .consts import CY_MOD
 from .helpers import module_name
 from .helper_members import helper_reference
 from .scopes import CstFacts, FormulaTransformer, Names, OPAQUE_SCOPES as OPAQUE, has_scope_effects, lexical_nodes
@@ -562,6 +563,13 @@ class GeneralReductions:
         site, preceding = self.first_site(root)
         if site is None:
             return None
+        if any(not self.effect_free(node) and _compile_time(node) for node in preceding):
+            # Cython syntax put in by an earlier lowering (a cast, a C type, a method of a
+            # typed handle) has no run-time value to keep in a temporary: lift nothing
+            self.general_declined.setdefault(id(site), (site, (
+                'evaluated after compiler-inserted Cython syntax (a cast, a C type or a typed-handle '
+                'method) in the same statement, which cannot be held in a temporary: built-in call')))
+            return None
         names, replacements, lines = self.names, {}, []
         for node in preceding:
             if self.effect_free(node):
@@ -725,6 +733,13 @@ def _replaced(node, mapping):
             if any(a is not b for a, b in zip(new, value)):
                 changes[field.name] = type(value)(new)
     return node.with_changes(**changes) if changes else node
+
+
+def _compile_time(node):
+    """``node`` holds a reference to the Cython namespace (``_mx_cy``): compiler-inserted
+    syntax resolved at C compile time (casts, C types, typed-handle members), never a
+    value of the model's own formula."""
+    return any(isinstance(item, cst.Name) and item.value == CY_MOD for item in _subtree(node))
 
 
 def _subtree(node):
