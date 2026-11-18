@@ -59,7 +59,7 @@ def test_public_object_return_specs_all_modes(tmp_path, use_spec):
 p=m.Projection
 for key in (0,1):
  p.raw(key);p.local(key);p.forward(key);p.uncached(key);p.ordinary(key)
-p.scalar();p.retained();p.retained("local");p.array();p.arithmetic(0)
+p.scalar();p.retained();p.retained("local");p.array();p.arithmetic(0);p.arithmetic(2)
 ''')
     object_cells = ['raw','local','forward','scalar','retained','uncached','array','arithmetic']
     spec = {'spaces': {'Projection': {'cells': {name: {'return_type': 'object'}

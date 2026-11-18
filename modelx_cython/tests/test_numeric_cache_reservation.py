@@ -19,7 +19,9 @@ def test_numeric_reservation_survives_reentry_and_spill(tmp_path):
         model.close()
     (tmp_path / "sample.py").write_text(
         "from exported import mx_model as m\n"
-        "m.Policies[1].amount(0, 0.5)\n",
+        "m.Policies[1].amount(0, 0.5)\n"
+        "m.Policies[1].amount(-2, 0.5)\n"
+        "m.Policies[1].amount(42, 0.5)\n",
         encoding="utf-8",
     )
     (tmp_path / "spec.py").write_text(
