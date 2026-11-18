@@ -411,7 +411,7 @@ def test_logger_dedup_keeps_every_message(seq, caplog):
     assert derive(kept) == derive(traces)
 
 
-def test_cached_formula_retains_repeated_evaluations_for_cache_sizing():
+def test_cached_formula_retains_repeated_evaluations_for_cache_sizing(monkeypatch):
     def _f_count(self, i):
         return i
 
@@ -421,8 +421,9 @@ def test_cached_formula_retains_repeated_evaluations_for_cache_sizing():
         trace = CallTrace(_f_count, {"self": receiver, "i": 1}, ret_val=1)
         logger.log(trace)
 
-    info = RuntimeCellsInfo(logger._traces[trace.funcname])
-    assert info.max_evaluations_per_receiver == 4
+    monkeypatch.setattr(logger, "_get_params", lambda: None)     # no model module to walk here
+    logger.flush()
+    assert logger.cells_info[trace.funcname].max_evaluations_per_receiver == 4
 
 
 @pytest.mark.parametrize("seq", [
@@ -442,3 +443,48 @@ def test_logger_dedup_retains_native_admission_observations(seq):
     assert kept.arg_types == full.arg_types
     assert kept.ret_type == full.ret_type
     assert kept.array_buffer_compatible == full.array_buffer_compatible
+
+
+def test_cached_formula_traces_are_bounded_by_observations(monkeypatch):
+    """A cached formula traced on every point and period keeps the traces that add an observation,
+    not one per call; the cells info equals the one built from all traces."""
+    def _f_value(self, t):
+        return float(t % 7)
+
+    receivers = [object() for _ in range(200)]
+    logger = MxCallTraceLogger(module="M")
+    traces = []
+    for receiver in receivers:
+        for t in range(100):
+            traces.append(CallTrace(_f_value, {"self": receiver, "t": t}, ret_val=float(t % 7)))
+            logger.log(traces[-1])
+    name = traces[0].funcname
+    assert len(logger._traces[name]) <= 100        # 20,000 calls
+
+    monkeypatch.setattr(logger, "_get_params", lambda: None)
+    logger.flush()
+    kept, full = logger.cells_info[name], RuntimeCellsInfo(traces)
+    for attribute in ("arg_types", "max_args", "min_args", "observed_min_args", "observed_max_args",
+                      "ret_type", "max_ret_value", "max_evaluations_per_receiver", "has_negative_args",
+                      "array_buffer_compatible"):
+        assert getattr(kept, attribute) == getattr(full, attribute), attribute
+
+
+def test_cache_sizing_counts_receivers_that_are_freed(monkeypatch):
+    """A receiver whose traces add nothing is held with its count: a later receiver cannot take
+    its id and merge the two counts."""
+    def _f_once(self, t):
+        return 1.0
+
+    class Receiver:
+        pass
+
+    logger = MxCallTraceLogger(module="M")
+    for _ in range(50):
+        trace = CallTrace(_f_once, {"self": Receiver(), "t": 0}, ret_val=1.0)
+        logger.log(trace)
+        name = trace.funcname
+        del trace
+    monkeypatch.setattr(logger, "_get_params", lambda: None)
+    logger.flush()
+    assert logger.cells_info[name].max_evaluations_per_receiver == 1

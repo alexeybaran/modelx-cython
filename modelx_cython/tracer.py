@@ -191,7 +191,7 @@ class RuntimeCellsInfo:     # TODO: Create base class RuntimeBaseMemberInfo
     max_args: Dict[str, int]
     ret_type: ReturnTypeInfo
 
-    def __init__(self, traces: Sequence[CallTrace]) -> None:
+    def __init__(self, traces: Sequence[CallTrace], receiver_calls=None) -> None:
         """Build merged type information from a method's traces.
 
         Parameters
@@ -199,6 +199,9 @@ class RuntimeCellsInfo:     # TODO: Create base class RuntimeBaseMemberInfo
         traces : sequence of CallTrace
             Non-empty traces of a single cells method; identity fields
             are taken from the first trace.
+        receiver_calls : dict, optional
+            Calls per receiver counted over all traced calls, when the
+            logger kept only the traces that add an observation.
         """
         self.fqname = traces[0].funcname
         self.name = traces[0].func.__name__
@@ -209,11 +212,11 @@ class RuntimeCellsInfo:     # TODO: Create base class RuntimeBaseMemberInfo
         self.observed_min_args = {}
         self.observed_max_args = {}
         self.enum_args = {}         # argument -> (module, qualname, member count) of its IntEnum
-        receiver_calls = {}
-        for trace in traces:
-            receiver = id(trace.arg_vals.get(MX_SELF))
-            receiver_calls[receiver] = receiver_calls.get(receiver, 0) + 1
-        self.max_evaluations_per_receiver = max(receiver_calls.values())
+        if receiver_calls is None:
+            receiver_calls = {}
+            for trace in traces:
+                _count_receiver(receiver_calls, trace)
+        self.max_evaluations_per_receiver = max(count for _, count in receiver_calls.values())
         # D111: a call that raised gives its arguments but no return value; a Cell whose every
         # traced call raised keeps them all (its result is then traced as None, as before).
         returned = [trace for trace in traces if not getattr(trace, 'raised', False)] or list(traces)
@@ -339,6 +342,21 @@ class RuntimeCellsInfo:     # TODO: Create base class RuntimeBaseMemberInfo
         for tr in traces:
             merger.add(tr)
         return merger.ret_type
+
+
+def _count_receiver(receiver_calls, trace):
+    """Count a call of ``trace``'s receiver. The receiver is held with its count, as a kept trace
+    would hold it, so that its id is not reused by another receiver while the counts are open."""
+    receiver = trace.arg_vals.get(MX_SELF)
+    entry = receiver_calls.get(id(receiver))
+    if entry is None:
+        receiver_calls[id(receiver)] = [receiver, 1]
+    else:
+        entry[1] += 1
+
+
+# Returns read by value only (type, magnitude): a repeat of one adds nothing to RuntimeCellsInfo
+_PLAIN_RETURNS = frozenset((int, float, bool, str, type(None), np.float64, np.float32, np.int64, np.int32, np.bool_))
 
 
 def _add_arg_vals(arg_type_val: Dict[str, Dict[type, Any]], minimums, trace) -> bool:
@@ -1002,6 +1020,9 @@ class MxCallTraceLogger(CallTraceLogger):
         # funcname -> (argument types and values, integral minima, return
         # type merger) for uncached traces: see log
         self._kept = {}
+        # funcname -> the same state for cached traces, with calls per receiver, the result
+        # types seen and the largest scalar result: see log
+        self._cached = {}
         self.cells_info = {}  # funcname -> MethodTypeInfo
         self.ref_info = {}
         self.modules = []
@@ -1015,10 +1036,14 @@ class MxCallTraceLogger(CallTraceLogger):
     def log(self, trace: CallTrace) -> None:
         """Log a single call trace.
 
-        Cached formula calls are kept for their per-receiver cache sizing
-        observations. An uncached cell is called on every use and has
-        no cache to size, so retain only the traces that contribute an
-        argument or return observation.
+        Retain only the traces that contribute an argument or return
+        observation. Cached formula calls also count their calls per
+        receiver, for cache sizing. A cached trace is kept as well when
+        its result is not a plain scalar (arrays, frames, tables and
+        other objects are read trace by trace), when its result type is
+        new, or when it raises the largest scalar result, so that
+        :class:`RuntimeCellsInfo` derives from the kept traces exactly
+        what it derives from all of them.
         """
         name = trace.func.__name__
         self._integer_magnitudes(trace.funcname, (*trace.arg_vals.values(), getattr(trace, 'ret_val', None)))
@@ -1032,7 +1057,30 @@ class MxCallTraceLogger(CallTraceLogger):
             params = getattr(sys.modules[cls.__module__], SPACE_PARAMS + "_" + cls.__name__[len(SPACE_PREF):])
             self._record_params(target, ((param, getattr(source, param)) for param in params))
         elif name.startswith(FORMULA_PREF) or name in (MX_ASSIGN_REFS, "__call__"):
-            self._traces.setdefault(trace.funcname, []).append(trace)
+            name = trace.funcname
+            state = self._cached.get(name)
+            if state is None:
+                state = self._cached[name] = {}, {}, _ReturnTypeMerger(name, log=False), {}, set(), [None]
+            types, minimums, merger, receivers, ret_types, largest = state
+            _count_receiver(receivers, trace)
+            value, raised = getattr(trace, 'ret_val', None), getattr(trace, 'raised', False)
+            keep = _add_arg_vals(types, minimums, trace)
+            if type(value) not in ret_types:
+                ret_types.add(type(value))
+                keep = True
+            if type(value) not in _PLAIN_RETURNS:
+                keep = True
+            elif not raised:
+                keep = merger.add(trace) or keep
+                if type(value) not in (bool, np.bool_, str, type(None)) and value == value:
+                    try:
+                        value = float(value)
+                    except OverflowError:
+                        value, keep = None, True
+                    if value is not None and (largest[0] is None or value > largest[0]):
+                        largest[0], keep = value, True
+            if keep:
+                self._traces.setdefault(name, []).append(trace)
         else:
             name = trace.funcname
             state = self._kept.get(name)
@@ -1096,7 +1144,7 @@ class MxCallTraceLogger(CallTraceLogger):
                 # table (auto-tables, D104)
                 admission = getattr(self, 'admission', None)
                 admitted = bool(admission is not None and admission.substitute(v))
-                self.cells_info[k] = info = RuntimeCellsInfo(v)
+                self.cells_info[k] = info = RuntimeCellsInfo(v, self._cached[k][3] if k in self._cached else None)
                 info.admitted_table = admitted
                 if admission is not None:
                     info.pandas_fallbacks = admission.fallback_counts(k)
@@ -1107,6 +1155,7 @@ class MxCallTraceLogger(CallTraceLogger):
 
         self._traces.clear()
         self._kept.clear()
+        self._cached.clear()
         self._get_params()
         # Collection receivers are absent from the retained ItemSpace tree.
         for cls, assigned in self._assigned_params.items():

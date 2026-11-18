@@ -413,6 +413,7 @@ def demand_driven(units, logger, build_resolver):
         if funcname is None:
             continue
         info = RuntimeCellsInfo(admission.restore(funcname))
+        info.max_evaluations_per_receiver = rt.max_evaluations_per_receiver   # counted over all calls
         info.module = rt.module
         info.pandas_fallbacks = rt.pandas_fallbacks
         info.admission_record = admission.record_for(funcname)
