@@ -1040,8 +1040,10 @@ def test_held_table_handles_reset_with_the_per_policy_caches():
     """diag-4w (D71): a reused collect root resets each held handle field per policy."""
     from types import SimpleNamespace
     from modelx_cython.serial_collect import _reset_lines
-    cls = SimpleNamespace(cells={}, held_table_handles={'self.data.t()': ('_mx_th_0', 'm'),
-                                                         'self.s()': ('_mx_th_1', 'm')})
+    from modelx_cython.holds import hold_table
+    cls = SimpleNamespace(cells={})
+    hold_table(cls).field('handle', 'self.data.t()')
+    hold_table(cls).field('handle', 'self.s()')
     assert list(_reset_lines(cls)) == ['root._mx_th_0 = None', 'root._mx_th_1 = None']
 
 

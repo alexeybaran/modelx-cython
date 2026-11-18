@@ -53,6 +53,7 @@ import libcst as cst
 
 from .usage import RESOLVED, _extract_self_chain
 from .syntax import dotted_name
+from .holds import hold_table
 
 TABLE_TYPE = 'modelx_helpers.immutable_inputs.Table'
 RECORD_TYPE = 'modelx_helpers.immutable_inputs.Record'
@@ -1189,13 +1190,7 @@ class _Lowering(cst.CSTTransformer):
         name = self.o.cell_of(receiver)
         if name is None or name not in getattr(self.o.resolver, 'cached_cells', ()):
             return None
-        fields = getattr(self.o.cls_info, 'held_table_handles', None)
-        if fields is None:
-            fields = self.o.cls_info.held_table_handles = {}
-        code = _code(receiver)
-        if code not in fields:
-            fields[code] = (f'_mx_th_{len(fields)}', self.o.module)
-        return fields[code]
+        return (hold_table(self.o.cls_info).field('handle', _code(receiver)), self.o.module)
 
     def held_alias(self, name):
         """diag-kr (over diag-mt's held_local): a table local with more than one binding, every one
@@ -1551,12 +1546,7 @@ class _Lowering(cst.CSTTransformer):
         held = self._held_locals.get(handle.value) if isinstance(handle, cst.Name) else None
         if held is None:
             return None
-        fields = getattr(self.o.cls_info, 'held_table_columns', None)
-        if fields is None:
-            fields = self.o.cls_info.held_table_columns = {}
-        field = fields.get((held, name))
-        if field is None:
-            field = fields[(held, name)] = f'_mx_tc_{len(fields)}'
+        field = hold_table(self.o.cls_info).field('column', (held, name))
         return cst.parse_expression(
             f'{self.o.module}.held_field(_mx_cy.address(self.{field}), {handle.value}, {name!r})')
 
@@ -1571,12 +1561,7 @@ class _Lowering(cst.CSTTransformer):
         if held is None:
             return None
         name = next(iter(names))
-        fields = getattr(self.o.cls_info, 'held_table_columns', None)
-        if fields is None:
-            fields = self.o.cls_info.held_table_columns = {}
-        field = fields.get((held, name))
-        if field is None:
-            field = fields[(held, name)] = f'_mx_tc_{len(fields)}'
+        field = hold_table(self.o.cls_info).field('column', (held, name))
         return cst.parse_expression(
             f'{self.o.module}.held_col(_mx_cy.address(self.{field}), {local.value}, {name!r})')
 
@@ -1611,13 +1596,7 @@ class _Lowering(cst.CSTTransformer):
         held = self._held_locals.get(local.value) if isinstance(local, cst.Name) else None
         if held is None or not all(_constant_int(part) for part in parts):
             return None
-        fields = getattr(self.o.cls_info, 'held_table_rows', None)
-        if fields is None:
-            fields = self.o.cls_info.held_table_rows = {}
-        key = (held, tuple(_code(part) for part in parts))
-        field = fields.get(key)
-        if field is None:
-            field = fields[key] = f'_mx_tr_{len(fields)}'
+        field = hold_table(self.o.cls_info).field('row', (held, tuple(_code(part) for part in parts)))
         args = ', '.join(_code(part) for part in parts)
         return cst.parse_expression(
             f'{self.o.module}.held_row_{len(parts)}(_mx_cy.address(self.{field}), {local.value}, {args})')
@@ -1642,13 +1621,7 @@ class _Lowering(cst.CSTTransformer):
         if len(originals) != len(parts) or not all(
                 item_constant(o, lambda call: self.o.cell_of(call) in cached) for o in originals):
             return None
-        fields = getattr(self.o.cls_info, 'held_table_rows', None)
-        if fields is None:
-            fields = self.o.cls_info.held_table_rows = {}
-        key = (held, tuple(_code(o) for o in originals))
-        field = fields.get(key)
-        if field is None:
-            field = fields[key] = f'_mx_tr_{len(fields)}'
+        field = hold_table(self.o.cls_info).field('row', (held, tuple(_code(o) for o in originals)))
         ints = all(_constant_int(part) or (isinstance(part, cst.Call) and _code(part.func) == '_mx_cy.cast'
                    and _code(part.args[0].value) == '_mx_cy.longlong') for part in parts)
         args = ', '.join(_code(part) for part in parts)

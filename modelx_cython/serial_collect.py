@@ -5,6 +5,7 @@ from dataclasses import dataclass
 import libcst as cst
 
 from modelx_cython.consts import CY_MOD
+from modelx_cython.holds import reset_lines
 from .syntax import arguments, dotted_name, literal_value, statements, walk
 
 
@@ -166,15 +167,8 @@ def _check_closure(cls, names):
 
 
 def _reset_lines(cls, only=None):
-    for held, _ in getattr(cls, 'held_table_handles', {}).values():
-        # diag-4w (D71): the per-instance table handles go with the per-policy caches
-        yield f'root.{held} = None'
-    for field in getattr(cls, 'held_table_columns', {}).values():
-        # diag-jp (D75): and the column indexes held with them
-        yield f'root.{field} = 0'
-    for field in getattr(cls, 'held_table_rows', {}).values():
-        # D79: and the rows of constant keys held with them
-        yield f'root.{field} = 0'
+    # R-4: what the item holds from shared inputs goes with the per-policy caches
+    yield from reset_lines(cls)
     for name, cell in cls.cells.items():
         if only is not None and name not in only:
             continue
