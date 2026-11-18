@@ -1,5 +1,6 @@
 """Safety boundaries for the native field-read optimization."""
 import ast
+import sys
 from dataclasses import replace
 import textwrap
 import pytest
@@ -103,7 +104,8 @@ def test_mismatched_value_index_is_rejected():
     '_mx_cy = other\n',
     'import other as _mx_cy\n',
     'try:\n    pass\nexcept RuntimeError as _mx_cy:\n    pass\n',
-    'match t:\n    case _mx_cy:\n        pass\n',
+    pytest.param('match t:\n    case _mx_cy:\n        pass\n',
+                 marks=pytest.mark.skipif(sys.version_info < (3, 10), reason='match needs Python 3.10')),
 ])
 def test_cython_alias_rebinding_is_rejected(prelude):
     result=rewrite(entry(guard='0 <= t < 4'),'_mx_cache_entry_0(self, t)',prelude=prelude)
@@ -120,7 +122,7 @@ def test_attribute_names_are_not_parameter_references():
 
 
 def test_python_without_pattern_ast_nodes_still_optimizes(monkeypatch):
-    monkeypatch.delattr(ast,'Match')
+    monkeypatch.delattr(ast,'Match',raising=False)     # absent before Python 3.10
     result=rewrite(entry(guard='0 <= t < 4'),'_mx_cache_entry_0(self,t)')
     assert isinstance(ast.parse(result).body[-1].body[-1].value,ast.IfExp)
 

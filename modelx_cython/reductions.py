@@ -102,7 +102,18 @@ class _Unsupported(Exception):
 
 _ATOMIC = (cst.Name, cst.Attribute, cst.Integer, cst.Float, cst.SimpleString)
 _UNROLL_LIMIT = 32            # literal-tuple instances unrolled per reduction
-_EMPTY = '{name}() iterable argument is empty'
+def _empty_message():
+    """The running interpreter's own message for min() of an empty iterable, with the function
+    name as a placeholder: "iterable argument is empty" from 3.12, "arg is an empty sequence"
+    before. The compiled reduction raises exactly the built-in's message."""
+    try:
+        min(())
+    except ValueError as error:
+        return str(error).replace('min', '{name}', 1)
+    raise AssertionError('min(()) did not raise')
+
+
+_EMPTY = _empty_message()
 _COMPARE = {'min': '<', 'max': '>'}
 
 

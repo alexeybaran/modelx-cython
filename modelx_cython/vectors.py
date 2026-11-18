@@ -1383,7 +1383,8 @@ class VectorLowering(cst.CSTTransformer):
         else:
             lines = body + update
         pre.append(_stmt('\n'.join([head] + ['    ' + line for line in lines]) + '\n'))
-        pre.append(_stmt(f'if not {seen}:\n    raise ValueError("{name}() iterable argument is empty")\n'))
+        from .reductions import _EMPTY
+        pre.append(_stmt(f'if not {seen}:\n    raise ValueError("{_EMPTY.format(name=name)}")\n'))
         self.lowered += 1
         return pre, cst.Name(best)
 

@@ -194,7 +194,7 @@ def test_nested_filtered_boolean_ranges(tmp_path):
         else:
             raise AssertionError('outer singleton StopIteration changed')
         s = fresh()
-        assert s.inner_singleton(3) == 1.0
+        assert s.inner_singleton(3) == sum((1e16, 1.0, -1e16), 0.0)   # compensated from Python 3.12: 1.0, before: 0.0
         assert s.events == [('bound', 3), ('amount', 0), ('amount', 1), ('amount', 2)]
         s = fresh()
         s.throw_at = 0
@@ -205,7 +205,7 @@ def test_nested_filtered_boolean_ranges(tmp_path):
         else:
             raise AssertionError('inner singleton StopIteration not converted')
         s = fresh()
-        assert s.captured(3) == 0.25
+        assert s.captured(3) == sum((v * 0.25 for v in (1e16, 1.0, -1e16)), 0.0)   # 0.25 from 3.12, 0.0 before
         s = fresh()
         s.throw_at = 0
         try:

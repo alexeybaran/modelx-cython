@@ -223,7 +223,7 @@ def test_forms_compile_natively_and_equal_the_interpreter(tmp_path):
     identity = _formula(source, 'identity')
     assert 'code: _mx_cy.longlong' not in identity, identity
     above = _formula(source, 'above')
-    assert 'cast(object' not in above and 'ValueError("min() iterable argument is empty")' in above, above
+    assert 'cast(object' not in above and f'ValueError("{_empty_min_message()}")' in above, above
     assert report[PREFIX + 'capped']['vectors']['lowered'] >= 1, report[PREFIX + 'capped']['vectors']
     assert not report[PREFIX + 'capped']['slow_paths'], report[PREFIX + 'capped']['slow_paths']
     grad = _formula(source, 'grad')
@@ -270,3 +270,11 @@ def test_forms_compile_natively_and_equal_the_interpreter(tmp_path):
         assert run.returncode == 0, package + run.stdout + run.stderr
         results.append(json.loads(run.stdout))
     assert results[0] == results[1], [(a, b) for a, b in zip(*results) if a != b][:10]
+
+
+def _empty_min_message():
+    """The running interpreter's min() message for an empty iterable (its text changed in 3.12)."""
+    try:
+        min(())
+    except ValueError as error:
+        return str(error)
