@@ -234,7 +234,7 @@ cdef object level_extreme(TableHandle h, object level, bint last)  # index.get_l
 
 cdef class NativeTable:
     cdef readonly TableHandle handle    # D25 Q8: embedded; None until W1.2 builds it
-    cdef object _owner, _index_view, _numeric_view, _indexed_view, _single_label, _input_keys
+    cdef object _owner, _numeric_view, _indexed_view, _single_label, _input_keys
     cdef object _contiguous_view
     cdef public object _mx_python_frame   # api-tables (D101): the read-only DataFrame given to Python callers
     cdef const double* _input_values
