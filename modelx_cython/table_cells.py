@@ -51,6 +51,25 @@ def table_cells(cls_info):
     return result
 
 
+class _BindFrame(cst.CSTTransformer):
+    """T-4: in the C entry of a frame cell, prepare the computed frame where it is stored (``self._v_<name> =
+    val``), under the cell's lock: a table is prepared when it is bound, never on a formula's first read."""
+
+    def __init__(self, name):
+        super().__init__()
+        self.target = f'self._v_{name}'
+
+    def leave_IndentedBlock(self, original, updated):
+        body = []
+        for statement in updated.body:
+            if (isinstance(statement, cst.SimpleStatementLine) and len(statement.body) == 1
+                    and isinstance(statement.body[0], cst.Assign)
+                    and cst.Module(body=()).code_for_node(statement.body[0].targets[0].target) == self.target):
+                body.append(cst.parse_statement(f'{RUNTIME}.bind_frame(self, val)'))
+            body.append(statement)
+        return updated.with_changes(body=body)
+
+
 def frame_cell(cls_info, cells):
     """T-3: a zero-argument cell whose traced value is a pandas DataFrame or Series, compiled with prepared
     tables: it is a table cell whose value is the frame itself (assigned as it is, never converted)."""
@@ -192,6 +211,9 @@ def rewrite_class(cls_info, node, config, integer_refs):
                 if name in vectors:
                     signatures[name] = statement.params
                 statement = statement.with_changes(name=cst.Name(mapping[name]))
+                if (name in tables and frame_cell(cls_info, tables[name])
+                        and cls_info.name not in cls_info.visitor.itemspace_classes):
+                    statement = statement.visit(_BindFrame(name))     # T-4: prepared when bound (Data-like)
             elif name == '__init__':
                 for line in statement.body.body:
                     if not isinstance(line, cst.SimpleStatementLine):
@@ -208,7 +230,9 @@ def rewrite_class(cls_info, node, config, integer_refs):
     for name, cells in tables.items():
         path = path_of(cls_info, name)
         if frame_cell(cls_info, cells):
-            assign = f'    {RUNTIME}.assign_table_cell(self, {name!r}, {path!r}, value)\n'
+            bind = ('' if cls_info.name in cls_info.visitor.itemspace_classes
+                    else f'    {RUNTIME}.bind_frame(self, value)\n')
+            assign = bind + f'    {RUNTIME}.assign_table_cell(self, {name!r}, {path!r}, value)\n'
             lines.append(
                 f'@property\n'
                 f'def {name}(self):\n'

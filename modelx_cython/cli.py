@@ -479,9 +479,17 @@ def main_handler(args: argparse.Namespace, stdout: IO[str], stderr: IO[str]) -> 
         (model_path / '_mx_integer_checks.json').write_text(json.dumps(integer_report, indent=2), encoding='utf-8')
         if policy.prepared_tables:      # T-3: the build report of table reads (doc table_reads.md)
             from modelx_cython.table_cells import path_of
+            from modelx_cython.table_cells import frame_cell
             reads = {path_of(cls, cell.name): cell.frame_reads
                      for info in module_infos.values() for cls in info.classes.values()
                      for cell in cls.cells.values() if getattr(cell, 'frame_reads', None)}
+            # T-4: the frame cells prepared when their value is computed or assigned (bind); any other frame
+            # read fast is prepared on its first read
+            reads['_prepared_at_bind'] = sorted(
+                path_of(cls, cell.name) for info in module_infos.values() for cls in info.classes.values()
+                if cls.name not in cls.visitor.itemspace_classes
+                for cell in cls.cells.values() if not cell.has_args() and cell.has_formula_def
+                and frame_cell(cls, cell))
             (model_path / '_mx_table_reads.json').write_text(json.dumps(reads, indent=1, sort_keys=True),
                                                              encoding='utf-8')
         _table_admission(logger, report, model_path, policy)

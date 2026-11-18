@@ -141,9 +141,28 @@ def clear_all(space):
 _prepared_caches = []
 
 
-def register_prepared(forget):
+_binders = {}       # top-level package of a compiled model -> its runtime _tables.bind
+
+
+def register_prepared(forget, bind=None, package=None):
     with _lock:
         _prepared_caches.append(forget)
+        if bind is not None:
+            _binders[package] = bind
+
+
+def assigned(space, name):
+    """Whether the cell ``name`` of ``space`` holds a value the user assigned (an input), not its formula's."""
+    with _lock:
+        return (id(space), name) in _inputs.get(id(space._model), {})
+
+
+def bind_frame(space, value):
+    """T-4: prepare ``value`` (a frame cell's computed or assigned frame) in the model's PreparedTable cache, so
+    the first fast read finds it prepared. A value that is not a preparable frame is left as it is."""
+    bind = _binders.get(type(space).__module__.split('.')[0])
+    if bind is not None:
+        bind(value)
 
 
 def forget_prepared():
