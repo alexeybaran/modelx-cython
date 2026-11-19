@@ -178,6 +178,11 @@ STMTS = {
     'param_prefix': ('flat', "return pseries(t).loc[20 + t % 4, 'q'] + float(pseries(t + 1).loc[21, 'n'])"),
     'param_view': ('flat', "sub = pseries(t)\nreturn (sub.loc[22, 'q'], len(sub.index), int(sub.index[-1]))"),
     'param_missing': ('flat', "return pmissing(t).loc[20, 'q']"),
+    # T-5c (shape H): a local assigned the same table in several branches
+    'rebound_table': ('flat', "if t % 2:\n    tbl = data.flat()\n    return tbl.loc[20 + t, 'q']\nelse:\n    tbl = data.flat()\n"
+                      "    return sum(tbl.loc[k, 'r'] for k in range(20, 22 + t))"),
+    'tuple_local_display': ('grid', "key = (('A', 'B')[t % 2], 20 + t)\nreturn (key in T.index, T.loc[key, 'q'] if t < 4 else 0.0)"),
+    'text_x': ('grid', "sub = T.loc['A']\nreturn (sub.index.asof('a'), sub.index.searchsorted('a'))"),
     'iterrows_find': ('mixed', "for k, row in T.iterrows():\n    if int(row['n']) >= 1 + t:\n        return (k, str(row['tag']))\nreturn None"),
     'obj_col': ('mixed', "return (T.loc[20 + t, 'tag'], T.at[20 + t, 'tag'] == 'x')"),
     'obj_col_missing': ('mixed', "return T.loc[98 + t, 'tag']"),
@@ -242,6 +247,10 @@ T5_ITEMS = {
     # T-5c: a prefix of a prefix cell's value: one view of the parent table
     'prefix_of_cell': "sub = psched().loc[sex()]\nreturn sub.loc[2000 + t % 3, 'q'] + len(sub.index) + int(sub.index[-1])",
     'prefix_of_cell_step': "sub = psched().loc[('F', 'M')[t % 2]]\nreturn ([int(v) for v in sub.index], sub.loc[2001, 'q'])",
+    'row_cell_local': "row = tagrow()\nreturn row['q'] * t + row['m']",
+    # T-5c: index operations on a prefix cell called directly; the extremes of several remaining levels
+    'cell_index_max': "return int(sched().index.max()) + int(sched().index.min()) + t",
+    'cell_index_max_part': "return int(psched().index.max()[0] == 'F') + int(psched().index.min()[1]) + t",
     'param_item': "return ipser(t).loc[2000 + t % 3, 'q']",
     'param_item_view': "sub = ipser(t)\nreturn sub.loc[2001, 'q'] + len(sub.index)",
     'row_by_field': "return tagrow()['q'] * t + tagrow()['m']",

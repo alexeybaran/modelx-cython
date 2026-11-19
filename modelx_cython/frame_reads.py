@@ -54,6 +54,11 @@ def _literal_str(node):
     return None
 
 
+def _text(node):
+    """A text literal (T-5c: never cast to a C number; pandas raises its own TypeError)."""
+    return isinstance(node, (cst.SimpleString, cst.ConcatenatedString, cst.FormattedString))
+
+
 def _cast(type_expr, value):
     return cst.Call(func=cst.Attribute(cst.Name('_mx_cy'), cst.Name('cast')),
                     args=[cst.Arg(cst.parse_expression(type_expr)), cst.Arg(value)])
@@ -110,9 +115,17 @@ class FrameReads:
         return f.binds.get(name, 0) == 1 and name not in f.other and name not in self.facts._params
 
     def _value_of(self, name):
-        """The one value assigned to the local ``name`` bound once, else None."""
+        """The value of the local ``name``: the one value of a local bound once, or (T-5c) the call of a local whose
+        every assignment is the same zero-argument call (``tbl = data.T()`` in several branches), else None."""
         values = self.facts.formula.values.get(name) or ()
-        return values[0] if len(values) == 1 and self._once(name) else None
+        if len(values) == 1 and self._once(name):
+            return values[0]
+        f = self.facts.formula
+        if (len(values) > 1 and f.binds.get(name, 0) == len(values) and name not in f.other
+                and name not in self.facts._params and all(isinstance(v, cst.Call) and not v.args for v in values)
+                and len({_code(v) for v in values}) == 1):
+            return values[0]
+        return None
 
     @staticmethod
     def _simple_assign(statement):
@@ -715,6 +728,9 @@ class FrameReads:
             return None
         if isinstance(key, cst.Name):
             value = self._value_of(key.value)
+            if (isinstance(value, cst.Tuple) and len(value.elements) == count
+                    and not any(isinstance(e, cst.StarredElement) for e in value.elements)):
+                return [e.value for e in value.elements]      # a local bound once to a tuple display: its parts
             if isinstance(value, cst.Call) and item_constant(value, self.cached_call):
                 key = value
             elif key.value in self.facts._params or self.views.get(key.value) or key.value in self.columns:
@@ -1023,6 +1039,15 @@ class _Rewrite(cst.CSTTransformer):
             return o.views[expr.value]
         if isinstance(expr, cst.Name) and expr.value in o.columns:     # a column's index is its view's
             return self._view(o.columns[expr.value][0])
+        prefix = o.prefix_receiver(expr) if isinstance(expr, cst.Call) else None
+        if prefix is not None and self._shared(prefix[1]) and o.per_item:
+            # T-5c: ``self.P()`` itself (P a prefix cell): a view of its table, P's parts held per item
+            _, call, schema, parts, cell = prefix
+            hold = self._take(call, _NO_LABEL, -1)
+            codes, conditions = self._prefix_holds(hold, parts, cell)
+            args = [o.ref(hold), cst.Integer(str(len(parts))), *self._padded(codes)]
+            start = self._lowered(self._conjunction(conditions), self._m('view_start', *args), cst.parse_expression('-1'))
+            return _View(None, call, schema, len(parts), codes, start, self._m('view_stop', *args))
         inline = o.prefix_of(expr)
         if inline is not None and not self._shared(inline[0][0]):
             return None
@@ -1034,7 +1059,7 @@ class _Rewrite(cst.CSTTransformer):
             start = self._m('view_start', *args)
             if _code(expr) in o.ambiguous:
                 start = cst.IfExp(test=self._native_test(self._take(call, 1, -5), []), body=start,
-                                  orelse=cst.Integer('-1'), lpar=[cst.LeftParen()], rpar=[cst.RightParen()])
+                                  orelse=cst.parse_expression('-1'), lpar=[cst.LeftParen()], rpar=[cst.RightParen()])
             return _View(None, call, schema, len(parts), codes, start, self._m('view_stop', *args))
         found = o._receiver(expr)
         if found is None or not found[1].get('unique') or _code(found[0]) in o.mutated or not self._shared(found[0]):
@@ -1177,6 +1202,19 @@ class _Rewrite(cst.CSTTransformer):
             self._record(original, 'L5', view.call)
             native = self._m(func.attr.value + '_obj', o.ref(hold))
             return self._guarded(original, updated, view, self._native_test(hold, []), native)
+        levels = view.schema['levels'] if view is not None else ()
+        if (view is not None and view.start is not None and func.attr.value in ('max', 'min') and not original.args
+                and len(levels) - view.depth > 1):
+            # T-5c: lexicographic: rows in pandas order at every remaining level (one order verdict per depth)
+            holds = [self._take(view.call, depth, -3) for depth in range(view.depth, len(levels))]
+            start, stop, test = self._view_parts(view, holds[0])
+            test = self._conjunction([test, *(self._native_test(h, []) for h in holds[1:]),
+                                      cst.Comparison(stop, [cst.ComparisonTarget(cst.GreaterThan(), start)])])
+            row = start if func.attr.value == 'min' else cst.BinaryOperation(stop, cst.Subtract(), cst.Integer('1'))
+            native = cst.Tuple([cst.Element(self._label(view, holds[0], row, level))
+                                for level in range(view.depth, len(levels))])
+            self._record(original, 'L5', view.call)
+            return self._guarded(original, updated, view, test, native)
         if view is None or not self._one_level(view) or view.schema['levels'][view.depth] != 'int':
             return None
         if func.attr.value == 'searchsorted':
@@ -1184,8 +1222,8 @@ class _Rewrite(cst.CSTTransformer):
             plain = [a for a in original.args if a.keyword is None]
             right = side and side[0].keyword.value == 'side' and _literal_str(side[0].value) == 'right'
             left = not side or (side[0].keyword.value == 'side' and _literal_str(side[0].value) == 'left')
-            if len(plain) != 1 or len(side) > 1 or not (right or left):
-                return None
+            if len(plain) != 1 or len(side) > 1 or not (right or left) or _text(plain[0].value):
+                return None         # (a text x is pandas' own TypeError, never a C double)
             hold = self._take(view.call, view.depth, -3)
             start, stop, test = self._view_parts(view, hold)
             x = _cast('_mx_cy.double', self.updated_of.get(id(plain[0].value), plain[0].value))
@@ -1201,7 +1239,8 @@ class _Rewrite(cst.CSTTransformer):
             return self._guarded(original, updated, view, test, self._label(view, hold, row), 'i64')
         if func.attr.value == 'asof' and self._key_position(original):
             return self._asof(original, updated, 1)
-        if func.attr.value == 'asof' and len(original.args) == 1 and not original.args[0].keyword:
+        if (func.attr.value == 'asof' and len(original.args) == 1 and not original.args[0].keyword
+                and not _text(original.args[0].value)):
             # T-5c: a bare asof value: the label when one is <= x, else pandas' own asof (NaN stays pandas')
             hold = self._take(view.call, view.depth, -3)
             start, stop, test = self._view_parts(view, hold)
@@ -1268,7 +1307,7 @@ class _Rewrite(cst.CSTTransformer):
         if not (isinstance(func, cst.Attribute) and func.attr.value == 'asof' and isinstance(func.value, cst.Attribute)
                 and func.value.attr.value == 'index' and len(call.args) == 1 and not call.args[0].keyword):
             return None
-        view = self._view(func.value.value)
+        view = self._view(func.value.value) if not _text(call.args[0].value) else None
         if view is None or not self._one_level(view) or view.schema['levels'][view.depth] != 'int':
             return None
         hold = self._take(view.call, view.depth, -3)
@@ -1937,6 +1976,8 @@ class _Rewrite(cst.CSTTransformer):
         ``float()`` reads ``float(row[f])`` from the prepared blocks."""
         o = self.o
         call = original.value
+        if isinstance(call, cst.Name):          # T-5c: ``row = self.P()`` then ``row["f"]``
+            call = o._value_of(call.value) or call
         if not (o.per_item and isinstance(call, cst.Call) and not call.args and isinstance(call.func, cst.Attribute)
                 and isinstance(call.func.value, cst.Name) and call.func.value.value == 'self'):
             return None
@@ -2062,6 +2103,8 @@ class _Rewrite(cst.CSTTransformer):
             if runtime is None:
                 return None
         own = [e.value for e in key.elements] if isinstance(key, cst.Tuple) and remaining > 1 else [key]
+        if runtime is not None and _code(runtime[0]) not in o.tuple_guards:
+            own, runtime = runtime, None        # a local bound once to a tuple display: its parts, as a display
         levels = view.schema['levels']
         count = view.depth + len(own)
         if (view.start is None and count >= len(levels)) or count > len(levels) or any(
