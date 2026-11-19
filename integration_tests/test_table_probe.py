@@ -169,6 +169,12 @@ STMTS = {
                         "        total += T.loc[k, 'q'] * k[1]\nreturn total"),
     'walk_tuple_view': ('tri', "sub = T.loc[('A', 'B')[t % 2]]\nreturn [k for k in sub.index if sub.loc[k, 'q'] > 0.1 * t]"),
     'dict_walk': ('grid sgrid', "sub = T.loc[('A', 'B')[t % 2]]\nreturn {int(a): float(sub.loc[a, 'q']) for a in sub.index if a > 19 + t}"),
+    # T-5c: a bare asof value: found, not found (x below the first label: NaN), a prefix with no rows (pandas)
+    'asof_bare': ('grid sgrid', "sub = T.loc[('A', 'B')[t % 2]]\n"
+                  "k = sub.index.asof(20.5 + 2 * t) if t < 4 else sub.index.asof(19.0 - t)\nreturn float(k) if k == k else -1.0"),
+    'asof_bare_scen': ('scen', "sub = T.loc[('up', 'down')[t % 2]]\nk = sub.index.asof(6.0 * t - 3.0)\nreturn float(k) if k == k else -1.0"),
+    'asof_bare_whole': ('flat shuffled', "k = T.index.asof(19.5 + 1.5 * t)\nreturn float(k) if k == k else -1.0"),
+    'asof_bare_absent': ('grid', "sub = T.loc[('A', 'C')[t % 2]]\nreturn sub.index.asof(21.0 + t)"),
     'iterrows_find': ('mixed', "for k, row in T.iterrows():\n    if int(row['n']) >= 1 + t:\n        return (k, str(row['tag']))\nreturn None"),
     'obj_col': ('mixed', "return (T.loc[20 + t, 'tag'], T.at[20 + t, 'tag'] == 'x')"),
     'obj_col_missing': ('mixed', "return T.loc[98 + t, 'tag']"),
