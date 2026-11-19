@@ -25,6 +25,10 @@ Binding, by the kind of the reading class:
 Either way an assignment of a new frame is a new object: its PreparedTable is prepared afresh and no prepared copy
 of an older frame is used for it. A read the table cannot answer natively (the frame not prepared: a non-unique
 index, NaN labels; the column absent or of another kind) runs the original pandas expression.
+
+Rule: a recogniser or emitter never raises on a shape it does not recognise (a loop target, a slice, a literal of
+another spelling): it returns None, and the expression stays pandas (with a report line where the form records one).
+Every unpacking or indexing of a syntax node is preceded by the check of its shape.
 """
 
 import libcst as cst
@@ -270,9 +274,9 @@ class FrameReads:
         index = parents.get(id(use))
         element = parents.get(id(index)) if isinstance(index, cst.Index) else None
         subscript = parents.get(id(element)) if isinstance(element, cst.SubscriptElement) else None
-        if not (isinstance(subscript, cst.Subscript) and len(subscript.slice) == 2
-                and subscript.slice[0] is element and _literal_str(subscript.slice[1].slice.value) is not None
-                and isinstance(subscript.value, cst.Attribute) and subscript.value.attr.value == 'loc'):
+        parts = _index_parts(subscript) if isinstance(subscript, cst.Subscript) else None
+        if not (parts is not None and len(parts) == 2 and subscript.slice[0] is element
+                and _literal_str(parts[1]) is not None and isinstance(subscript.value, cst.Attribute) and subscript.value.attr.value == 'loc'):
             return False
         prefix = self.prefix_receiver(subscript.value.value)
         return prefix is not None and prefix[4] == cell
@@ -523,8 +527,8 @@ class FrameReads:
                 if not (isinstance(it, cst.Call) and not it.args and isinstance(it.func, cst.Attribute)
                         and it.func.attr.value == 'iterrows' and isinstance(target, cst.Tuple)
                         and len(target.elements) == 2
-                        and all(isinstance(e.value, cst.Name) for e in target.elements)):
-                    return
+                        and all(isinstance(e, cst.Element) and isinstance(e.value, cst.Name) for e in target.elements)):
+                    return      # (`for k, *row in ...` is not this form)
                 got = self._receiver(it.func.value)
                 key, name = (e.value.value for e in target.elements)
                 if (got is None or got[1]['kind'] != 'frame' or not got[1].get('unique') or len(got[1]['levels']) != 1
@@ -539,14 +543,15 @@ class FrameReads:
             columns = dict(schema['columns'])
             for use, nested in f.loads.get(name, ()):
                 sub = f.parents.get(id(use))
-                if nested or not isinstance(sub, cst.Subscript) or sub.value is not use or len(sub.slice) != 1:
+                parts = _index_parts(sub) if isinstance(sub, cst.Subscript) else None
+                if nested or parts is None or sub.value is not use or len(parts) != 1:
                     return False
-                if _literal_str(sub.slice[0].slice.value) in columns:
+                if _literal_str(parts[0]) in columns:
                     continue
                 up = f.parents.get(id(sub))
                 call = f.parents.get(id(up)) if isinstance(up, cst.Arg) else None
                 if not (isinstance(call, cst.Call) and isinstance(call.func, cst.Name) and call.func.value == 'float'
-                        and len(call.args) == 1 and _literal_str(sub.slice[0].slice.value) is None):
+                        and len(call.args) == 1 and _literal_str(parts[0]) is None):
                     return False
             return True
         node.visit(Scan())
@@ -1085,7 +1090,7 @@ class _Rewrite(cst.CSTTransformer):
         arg = inner.args[0].value
         names = schema.get('names') or ()
         if isinstance(arg, cst.Integer):
-            index, name = int(arg.value), None
+            index, name = int(arg.value, 0), None
         elif _literal_str(arg) is not None and list(names).count(_literal_str(arg)) == 1:
             name = _literal_str(arg)
             index = list(names).index(name)
@@ -1323,9 +1328,12 @@ class _Rewrite(cst.CSTTransformer):
         stored row (``_mx_rw_row``), its fields read as a row local's; the pandas loop (``_mx_rw_row`` -1) when the
         table is not of the traced kinds (every column checked)."""
         o = self.o
-        key, name = (e.value.value for e in original.target.elements) if isinstance(original.target, cst.Tuple) \
-            else (None, None)
-        found = o.row_locals.get(name) if name else None
+        target = original.target         # any other target shape: not this form (row locals found only `k, row`)
+        if not (isinstance(target, cst.Tuple) and len(target.elements) == 2
+                and all(isinstance(e, cst.Element) and isinstance(e.value, cst.Name) for e in target.elements)):
+            return None
+        key, name = (e.value.value for e in target.elements)
+        found = o.row_locals.get(name)
         if found is None or found[2] is not original:
             return None
         call, schema, _ = found
