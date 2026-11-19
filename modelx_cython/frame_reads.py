@@ -684,12 +684,14 @@ class FrameReads:
         ref = ref[len('_mx_definition_'):] if ref.startswith('_mx_definition_') else ref
         return bool(getattr(getattr(self.cls_info, 'refs', {}).get(ref), 'enum', None))
 
-    def code_field(self, hold, level, part):
+    def code_field(self, hold, level, part, emit=None):
+        """The item field holding the code of ``part`` (``emit``, the part with its own reads lowered, is what the hold
+        evaluates; T-5c)."""
         key = (hold.table, level, _code(part))
         fields = self.code_fields
         if key not in fields:
             fields[key] = hold_table(self.cls_info).field('prepared_code', key)
-            self.new_items.append(('code', fields[key], hold.table, level, part))
+            self.new_items.append(('code', fields[key], hold.table, level, part if emit is None else emit))
         return fields[key]
 
     def assigned_field(self, hold, name):
@@ -873,7 +875,7 @@ class _Rewrite(cst.CSTTransformer):
 
     def _held(self, hold, level, part, conditions):
         """The code of a key part fixed per item, held per item (``held - 1``); ``conditions`` gets its presence."""
-        field = self.o.code_field(hold, level, part)
+        field = self.o.code_field(hold, level, part, self.updated_of.get(id(part)))
         conditions.append(cst.parse_expression(f'self.{field} > 0'))
         return cst.parse_expression(f'self.{field} - 1')
 
