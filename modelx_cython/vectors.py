@@ -45,6 +45,7 @@ import libcst as cst
 
 from .consts import CY_MOD, MX_SYS_MOD
 from .helpers import module_name
+from .syntax import dotted_name
 
 PROVIDER = 'modelx_cython.runtime._native_vectors'
 ALIAS = module_name(PROVIDER)
@@ -536,6 +537,7 @@ class VectorLowering(cst.CSTTransformer):
         self.shapes = {name: c.vector_shape for name, c in cls_info.cells.items() if c.vector_shape}
         self.builtins = builtins
         self.counter = counter          # shared per module: unique temporaries
+        self.temps = set()              # the temporaries temp() made
         self.env, self.scalars, self.owned = {}, {}, set()
         self.lowered, self.fallbacks = 0, []
         self.bounds_hoisted, self.bounds_checked, self.powers = 0, 0, 0
@@ -896,7 +898,9 @@ class VectorLowering(cst.CSTTransformer):
     # ---------------------------------------------------------------- helpers
     def temp(self, label):
         self.counter[0] += 1
-        return f'_mx_v{self.counter[0]}_{label}'
+        name = f'_mx_v{self.counter[0]}_{label}'
+        self.temps.add(name)
+        return name
 
     def declare(self, name, typ):
         self.decls.append(_stmt(f'{name}: {typ}\n'))
@@ -1194,7 +1198,7 @@ class VectorLowering(cst.CSTTransformer):
             return [], self.call('slice', e, value_u.value, lo, hi)
         if self.elem(value_o) == e and not (isinstance(k, str) and k[0] == 'A'):
             return [], value_u
-        if _is_name(value_u) and value_u.value.startswith('_mx_v'):
+        if _is_name(value_u) and value_u.value in self.temps:
             return [], value_u
         concat = self.concatenation(value_o, value_u, e)
         if concat is not None:
@@ -1523,7 +1527,7 @@ class _Unchecked(cst.CSTTransformer):
         return False
 
     def leave_Call(self, original, updated):
-        name = _code(updated.func)
+        name = dotted_name(updated.func)
         if name in self.gets:
             hit = self.target(updated)
             if hit:
@@ -1536,7 +1540,7 @@ class _Unchecked(cst.CSTTransformer):
 
     def leave_Expr(self, original, updated):
         value = updated.value
-        if isinstance(value, cst.Call) and _code(value.func) in self.sets:
+        if isinstance(value, cst.Call) and dotted_name(value.func) in self.sets:
             hit = self.target(value)
             if hit:
                 v, c, index = hit

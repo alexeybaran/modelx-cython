@@ -91,7 +91,7 @@ from modelx_cython.consts import (
     is_user_defined,
 )
 
-from modelx_cython.syntax import dotted_name, literal_value
+from modelx_cython.syntax import dotted_name, literal_value, same_expression
 from modelx_cython.typedefs import CY_BOOL_T, CY_INT_T, primitive_kind
 
 
@@ -1698,13 +1698,17 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
         while value_name in params:
             value_name += '_'
 
+        def is_cache(node):     # the exporter's dict cache of this Cell: ``self._v_<cell>``
+            return (isinstance(node, cst.Attribute) and isinstance(node.value, cst.Name) and node.value.value == MX_SELF
+                    and node.attr.value == VAR_PREF + meth_name)
+
         class Lookup(cst.CSTTransformer):
             def leave_If(self, original_node, updated_node):
                 test = updated_node.test
                 if (not isinstance(test, cst.Comparison)
                         or len(test.comparisons) != 1
                         or not isinstance(test.comparisons[0].operator, cst.In)
-                        or module.code_for_node(test.comparisons[0].comparator) != cache):
+                        or not is_cache(test.comparisons[0].comparator)):
                     return updated_node
                 key = module.code_for_node(test.left)
                 assignment = cst.parse_statement(
@@ -1836,23 +1840,43 @@ def _fast_item_call(node, cls_name):
     if found is None:
         return node
     block = found.orelse.body.body
-    shape = [cst.Module(body=(s,)).code.strip() for s in block]
-    if (len(block) != 5 or shape[0] != '_mx_base = self' or shape[1] != '_mx_root = _mx_base.__class__(self)'
+
+    def stmt(code):
+        return cst.parse_statement(code + '\n')
+
+    def same(node, code):
+        return same_expression(node, stmt(code))
+
+    def single(node, kind):     # the one small statement of a line, of the given type, or None
+        if isinstance(node, cst.SimpleStatementLine) and len(node.body) == 1 and isinstance(node.body[0], kind):
+            return node.body[0]
+        return None
+
+    store = single(block[3], cst.Assign) if len(block) == 5 else None
+    if (len(block) != 5 or not same(block[0], '_mx_base = self') or not same(block[1], '_mx_root = _mx_base.__class__(self)')
             or not isinstance(block[2], cst.For)
-            or cst.Module(body=()).code_for_node(block[2].iter) != 'zip(_mx_root._mx_walk(), _mx_base._mx_walk())'
-            or not shape[3].startswith('self._mx_itemspaces[') or shape[4] != 'return _mx_root'):
+            or not same_expression(block[2].iter, cst.parse_expression('zip(_mx_root._mx_walk(), _mx_base._mx_walk())'))
+            or store is None or len(store.targets) != 1 or not isinstance(store.targets[0].target, cst.Subscript)
+            or not same_expression(store.targets[0].target.value, cst.parse_expression('self._mx_itemspaces'))
+            or not same_expression(store.value, cst.Name('_mx_root'))
+            or not same(block[4], 'return _mx_root')):
         return node
     loop = block[2].body.body
-    loop_code = [cst.Module(body=(s,)).code.strip() for s in loop]
-    if (len(loop) != 5 or loop_code[0] != '_mx_s._mx_copy_refs(_mx_b, _mx_base)'
-            or not loop_code[1].startswith('for _mx_r in self._mx_roots:')
-            or not loop_code[2].startswith('self._mx_assign_params(_mx_s,')
-            or loop_code[3] != '_mx_s._mx_roots.extend(self._mx_roots)'
-            or loop_code[4] != '_mx_s._mx_roots.append(_mx_root)'):
+    params = single(loop[2], cst.Expr) if len(loop) == 5 else None
+    params = params.value if params is not None else None
+    if (len(loop) != 5 or not same(loop[0], '_mx_s._mx_copy_refs(_mx_b, _mx_base)')
+            or not isinstance(loop[1], cst.For) or not same_expression(loop[1].target, cst.Name('_mx_r'))
+            or not same_expression(loop[1].iter, cst.parse_expression('self._mx_roots'))
+            or not isinstance(params, cst.Call) or not params.args
+            or not same_expression(params.func, cst.parse_expression('self._mx_assign_params'))
+            or not same_expression(params.args[0].value, cst.Name('_mx_s'))
+            or not same(loop[3], '_mx_s._mx_roots.extend(self._mx_roots)')
+            or not same(loop[4], '_mx_s._mx_roots.append(_mx_root)')):
         return node
     root = '_mx_fast_root'
-    assign = loop_code[2].replace('self._mx_assign_params(_mx_s,', f'self._mx_assign_params({root},', 1)
-    store = shape[3].replace('= _mx_root', f'= {root}')
+    assign = cst.Module(body=(loop[2].with_changes(body=(cst.Expr(params.with_changes(
+        args=(params.args[0].with_changes(value=cst.Name(root)), *params.args[1:]))),)),)).code.strip()
+    store = cst.Module(body=(block[3].with_changes(body=(store.with_changes(value=cst.Name(root)),)),)).code.strip()
     fast = cst.parse_module(
         f"if type(self) is {cls_name} and not self._mx_spaces and not self._mx_roots:\n"
         f"    {root}: {cls_name} = {item_roots.new_root(cls_name)}(self)\n"

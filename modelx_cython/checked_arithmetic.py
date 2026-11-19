@@ -8,12 +8,19 @@ from .syntax import arguments, dotted_name, local_assignment, statements, walk
 _BOUND = 1 << 25
 
 
-def virtual_call(expr):
+def entry_names(cls):
+    """The private entries :func:`inline_entries.add_inline_entries` emitted for the Cells of ``cls``
+    (recorded on each Cell as ``inline_entry``)."""
+    return {name for cell in cls.cells.values() if (name := getattr(cell, 'inline_entry', None))}
+
+
+def virtual_call(expr, entries):
     """D139: the Cell call of a private-entry expression ``(entry(self, ...) if <exact receiver> else
-    [cast(T, ]self.cell(...)[)])``; the two branches have the same value, so the arithmetic proofs read
-    it as that call. Any other expression is returned unchanged."""
+    [cast(T, ]self.cell(...)[)])``, where ``entry`` is one of ``entries`` (see :func:`entry_names`);
+    the two branches have the same value, so the arithmetic proofs read it as that call. Any other
+    expression is returned unchanged."""
     if not (isinstance(expr, cst.IfExp) and isinstance(expr.body, cst.Call)
-            and isinstance(expr.body.func, cst.Name) and expr.body.func.value.startswith('_mx_cache_entry_')):
+            and isinstance(expr.body.func, cst.Name) and expr.body.func.value in entries):
         return expr
     test = expr.test
     exact = (isinstance(test, cst.Name) and test.value == '_mx_exact_receiver'
@@ -107,7 +114,7 @@ class CheckedArithmetic:
         self.signed_atom = None
 
     def native_call(self, expr):
-        expr = virtual_call(expr)
+        expr = virtual_call(expr, entry_names(self.cls))
         args = arguments(expr)
         if (args is None or not isinstance(expr.func, cst.Attribute)
                 or not isinstance(expr.func.value, cst.Name) or expr.func.value.value != 'self'

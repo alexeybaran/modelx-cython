@@ -8,8 +8,6 @@ of :class:`powers.OperandKind` (literals, typed parameters, typed cells and Refe
 - formula locals whose every binding is a plain assignment (``x = v``, ``x: T = v``,
   ``x op= v``) of one kind; solved as a greatest fixpoint, so ``worst = max(worst, ...)``
   keeps its kind;
-- the cached-cell form the compiler writes for a typed call,
-  ``(_mx_cache_entry_N(self, ...) if type(self) is _c_X else self.cell(...))``;
 - built-ins: ``float(x)`` (always a float), ``abs(x)`` (the kind of ``x``), ``len(x)``
   (an integer), ``round(x, n)`` with a float ``x`` and an integer ``n`` (a float), and
   ``min``/``max`` of operands of one kind (that kind);
@@ -144,18 +142,6 @@ class ExpressionKind:
         return self.base._binop_kind(expr) if hasattr(self.base, '_binop_kind') else KIND_UNKNOWN
 
     def _ifexp(self, expr):
-        test = expr.test
-        cached = (isinstance(test, cst.Comparison) and len(test.comparisons) == 1
-                  and isinstance(test.comparisons[0].operator, cst.Is)
-                  and isinstance(test.left, cst.Call) and isinstance(test.left.func, cst.Name)
-                  and test.left.func.value == 'type' and len(test.left.args) == 1
-                  and isinstance(test.left.args[0].value, cst.Name)
-                  and test.left.args[0].value.value == 'self'
-                  and isinstance(expr.body, cst.Call) and isinstance(expr.body.func, cst.Name)
-                  and expr.body.func.value.startswith('_mx_cache_entry_'))
-        if cached:
-            # the cache entry returns the same cell's value as the call in the other branch
-            return self.kind(expr.orelse)
         return join((self.kind(expr.body), self.kind(expr.orelse)))
 
     def _builtin_call(self, expr):
