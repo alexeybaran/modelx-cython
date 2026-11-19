@@ -226,12 +226,12 @@ class GeneralReductions:
                 if any(later.get(name_, -1) > index or (later.get(name_, -1) == index and name_ in
                        (set(CstFacts(iterator).reads) if index else set())) for name_ in reads):
                     raise _Unsupported('a variable read before its for clause binds it')
-        if start is not None and name != 'sum':
+        if start is not None:
             raise _Unsupported('a second argument')
         self.general_state = dict(prefix=prefix, name=name, generator=generator, facts=facts,
                                   renamed=renamed, mode=mode, target=target,
                                   local_types={}, kinds=set(), alias=module_name(STREAMS_PROVIDER))
-        return self.emit_general(statement, call, parts, element, start)
+        return self.emit_general(statement, call, parts, element)
 
     def substituted(self, node, mapping):
         state = self.general_state
@@ -244,7 +244,7 @@ class GeneralReductions:
         return kind if kind in ('double', 'longlong', 'bint') else None
 
     # ---------------------------------------------------------------- emission
-    def emit_general(self, statement, call, parts, element, start):
+    def emit_general(self, statement, call, parts, element):
         state = self.general_state
         p, name, alias = state['prefix'], state['name'], state['alias']
         # all/any stop at the deciding item, except over a list comprehension, which
@@ -290,15 +290,11 @@ class GeneralReductions:
             self.object_loops.append(untyped_entry(self.general_lines, call, name, '; '.join(objects)))
         # Start, state and result
         if name == 'sum':
-            if start is None:
-                init = f'{alias}.sum_init(_mx_cy.address({p}_state))'
-                float_start = False
-            else:
-                init, float_start = self.sum_start(start)
+            init = f'{alias}.sum_init(_mx_cy.address({p}_state))'
             declarations.append(f'{p}_state: {alias}.PySum')
             nonempty = outer_kind == 'tuple' and not any(tests for _, _, tests in parts) and all(
                 kind_ == 'tuple' for kind_, _ in classes)
-            exact_float = kinds == {'double'} and (float_start or nonempty)
+            exact_float = kinds == {'double'} and nonempty
             if state['mode'] == 'return' and self.cells.get_rettype_expr(c_style=True) == 'double':
                 exact_float = True
             result = (f'{alias}.sum_result_f64(_mx_cy.address({p}_state))' if exact_float
@@ -339,29 +335,6 @@ class GeneralReductions:
                      + ['try:'] + ['    ' + line for line in lines[len(declarations) + len(prologue):]]
                      + ['finally:', f'    {alias}.sum_clear(_mx_cy.address({p}_state))'])
         return '\n'.join(lines) + '\n'
-
-    def sum_start(self, start):
-        p, alias = self.general_state['prefix'], self.general_state['alias']
-        address = f'_mx_cy.address({p}_state)'
-        try:
-            value = literal_value(start)
-        except (ValueError, TypeError):
-            value = start
-            try:
-                if isinstance(start, cst.UnaryOperation) and isinstance(start.operator, cst.Minus):
-                    value = -literal_value(start.expression)
-            except (ValueError, TypeError):
-                value = start
-        if type(value) is float:
-            return f'{alias}.sum_init_f64({address}, {value!r})', True
-        if type(value) is int and primitive_kind(value) == 'longlong':
-            return f'{alias}.sum_init_ll({address}, {value!r})', False
-        kind = self.kind(start, {})
-        if kind == 'double':
-            return f'{alias}.sum_init_f64({address}, ({code(start)}))', True
-        if kind == 'longlong':
-            return f'{alias}.sum_init_ll({address}, ({code(start)}))', False
-        return f'{alias}.sum_init_object({address}, ({code(start)}))', False
 
     def classify(self, index, part):
         part_target, iterator, _ = part
@@ -1054,9 +1027,8 @@ class NativeReductions(GeneralReductions, FormulaTransformer):
                 return 'longlong'
         return None
 
-    def cold_fallback(self, source, generator, capture, function, capture_type='_mx_cy.double',
-                      boxed_param=None, trailing_args=''):
-        original = f'{function}({source}{trailing_args})'
+    def cold_fallback(self, source, generator, capture, function, capture_type='_mx_cy.double'):
+        original = f'{function}({source})'
         if not self.cells.has_formula_def or not self.scope_safe:
             return original
         names = CstFacts(generator).reads
@@ -1078,8 +1050,7 @@ class NativeReductions(GeneralReductions, FormulaTransformer):
                 kind = self.cells.get_argtype_expr(name, c_style=True, formula=True)
                 if kind not in ('double', 'long long', 'bint', 'object'):
                     return original
-                args.append((name, 'object' if name == boxed_param else
-                             self.cells.get_argtype_expr(name, formula=True)))
+                args.append((name, self.cells.get_argtype_expr(name, formula=True)))
         if capture is not None:
             args.append((capture, capture_type))
         helper = self.reserve_fallback()
@@ -1154,7 +1125,7 @@ if {guard}:
 return {fallback}
 """).body)
 
-    def single_range(self, after, func, provider, operation, reduction, source, tree):
+    def single_range(self, after, func, provider, operation, source, tree):
         parts = tuple(_parts(tree))
         if len(parts) != 1 or not self.cells.formula_allows_exact_receiver:
             return after
@@ -1167,33 +1138,32 @@ return {fallback}
         alias, prefix = module_name(provider), self.reserve_prefix()
         counter, guard = f'{prefix}_index', f'{prefix}_native'
         function, binding = self.callable_name(func, prefix)
-        predicate, boxed_param = tree.elt, None
-        if reduction == 'bool_all':
-            args = arguments(part.iter, 'range', 1)
-            if not (args is not None and arguments(args[0], count=0) is not None
-                    and self.kind(args[0], {}) == 'longlong'
-                    and self.cells.get_rettype_expr(c_style=True) == 'bint'):
+        predicate = tree.elt
+        args = arguments(part.iter, 'range', 1)
+        if not (args is not None and arguments(args[0], count=0) is not None
+                and self.kind(args[0], {}) == 'longlong'
+                and self.cells.get_rettype_expr(c_style=True) == 'bint'):
+            return after
+        iterator = f'range({prefix}_limit)'
+        if isinstance(predicate, cst.Comparison):
+            if len(predicate.comparisons) != 1:
                 return after
-            iterator, extra_guard = f'range({prefix}_limit)', ''
-            if isinstance(predicate, cst.Comparison):
-                if len(predicate.comparisons) != 1:
-                    return after
-                comparison = predicate.comparisons[0]
-                absolute = arguments(predicate.left, 'abs', 1)
-                if not (isinstance(comparison.operator, (cst.LessThan, cst.LessThanEqual, cst.GreaterThan, cst.GreaterThanEqual))
-                        and absolute is not None and self.kind(comparison.comparator, {}) == 'double'
-                        and isinstance(comparison.comparator, (cst.Float, cst.Attribute))):
-                    return after
-                value = self.indexed_cell(absolute[0], index, 'double', counter)
-                if value is None:
-                    return after
-                operator = {cst.LessThan: '<', cst.LessThanEqual: '<=', cst.GreaterThan: '>', cst.GreaterThanEqual: '>='}[type(comparison.operator)]
-                test = f'{alias}.f64_abs({value}) {operator} {code(comparison.comparator)}'
-            else:
-                test = self.indexed_cell(predicate, index, 'bint', counter)
-                if test is None:
-                    return after
-            loop = f"""    {prefix}_limit: _mx_cy.longlong = {code(args[0])}
+            comparison = predicate.comparisons[0]
+            absolute = arguments(predicate.left, 'abs', 1)
+            if not (isinstance(comparison.operator, (cst.LessThan, cst.LessThanEqual, cst.GreaterThan, cst.GreaterThanEqual))
+                    and absolute is not None and self.kind(comparison.comparator, {}) == 'double'
+                    and isinstance(comparison.comparator, (cst.Float, cst.Attribute))):
+                return after
+            value = self.indexed_cell(absolute[0], index, 'double', counter)
+            if value is None:
+                return after
+            operator = {cst.LessThan: '<', cst.LessThanEqual: '<=', cst.GreaterThan: '>', cst.GreaterThanEqual: '>='}[type(comparison.operator)]
+            test = f'{alias}.f64_abs({value}) {operator} {code(comparison.comparator)}'
+        else:
+            test = self.indexed_cell(predicate, index, 'bint', counter)
+            if test is None:
+                return after
+        loop = f"""    {prefix}_limit: _mx_cy.longlong = {code(args[0])}
     try:
         for {counter} in {iterator}:
             if not ({test}):
@@ -1201,37 +1171,15 @@ return {fallback}
     except StopIteration as {prefix}_error:
         raise RuntimeError("generator raised StopIteration") from {prefix}_error
     return True"""
-        else:
-            value, bounds = self.indexed_cell(predicate, index, 'double', counter), self.descending_window(part.iter)
-            if value is None or bounds is None or self.cells.get_rettype_expr(c_style=True) != 'double':
-                return after
-            start, offset, step = bounds
-            boxed_param, extra_guard = start, f' and {start} >= 0'
-            stop, best, item = f'{prefix}_stop', f'{prefix}_best', f'{prefix}_item'
-            first = self.indexed_cell(predicate, index, 'double', start)
-            loop = f"""    {stop}: _mx_cy.longlong = {start} - {offset}
-    if {stop} < -1:
-        {stop} = -1
-    {best}: _mx_cy.double
-    {item}: _mx_cy.double
-    try:
-        {best} = {first}
-        for {counter} in range({start} - {step}, {stop}, -{step}):
-            {item} = {value}
-            if {item} > {best}:
-                {best} = {item}
-    except StopIteration as {prefix}_error:
-        raise RuntimeError("generator raised StopIteration") from {prefix}_error
-    return {best}"""
         count = len(self.fallbacks)
-        fallback = self.cold_fallback(source, tree, None, function, boxed_param=boxed_param)
+        fallback = self.cold_fallback(source, tree, None, function)
         if len(self.fallbacks) == count:
             return after
         self.providers.add(provider)
         self.count += 1
         return cst.FlattenSentinel(cst.parse_module(f"""
 {binding}
-{guard}: _mx_cy.bint = {alias}.{operation}_accepts({function}){extra_guard}
+{guard}: _mx_cy.bint = {alias}.{operation}_accepts({function})
 if {exact_receiver(self.cls_info.name)} and {guard}:
     {counter}: _mx_cy.longlong
 {loop}
@@ -1247,24 +1195,6 @@ return {fallback}
         if len(cell.params) != 1 or cell.get_argtype_expr(cell.params[0], c_style=True) != 'long long':
             return None
         return f'self.{node.func.attr.value}({counter})'
-
-    def descending_window(self, node):
-        args = arguments(node, 'range', 3)
-        if args is None:
-            return None
-        start, limit, step = args
-        if not (isinstance(start, cst.Name) and start.value in self.cells.params
-                and self.cells.get_argtype_expr(start.value, c_style=True, formula=True) == 'long long'
-                and _call(limit, 'max', 2) and _literal_int(limit.args[0].value, -1)
-                and isinstance(step, cst.UnaryOperation) and isinstance(step.operator, cst.Minus)):
-            return None
-        lower = limit.args[1].value
-        if not (isinstance(lower, cst.BinaryOperation) and isinstance(lower.operator, cst.Subtract)
-                and isinstance(lower.left, cst.Name) and lower.left.value == start.value
-                and isinstance(lower.right, cst.Integer) and isinstance(step.expression, cst.Integer)
-                and 0 < step.expression.evaluated_value <= lower.right.evaluated_value <= (1 << 31) - 1):
-            return None
-        return start.value, lower.right.evaluated_value, step.expression.evaluated_value
 
     def minimum(self, after, tree):
         """Keep the first minimum in a typed range, with the ordinary generator as fallback."""
@@ -1347,28 +1277,22 @@ return {fallback}
         func, tree = value.func, args[0]
         source = code(tree)
         builtin = func.value if isinstance(func, cst.Name) and func.value in self.builtin_reductions else None
-        float_start = (builtin == 'sum' and len(args) == 2 and isinstance(args[1], cst.Float)
-                       and args[1].evaluated_value == 0.0)
-        if len(args) != 1 and not float_start:
+        if len(args) != 1:
             return after
         if builtin == 'min':
             return after if assignment else self.minimum(after, tree)
         if builtin == 'all':
             return after if assignment else self.single_range(
-                after, func, BUILTIN_PROVIDER, 'all', 'bool_all', source, tree)
+                after, func, BUILTIN_PROVIDER, 'all', source, tree)
         if builtin == 'any':
             return after if assignment else self.bounded_any(
                 before, after, func, BUILTIN_PROVIDER, 'any', source, tree)
-        if builtin == 'max':
-            return after if assignment else self.single_range(
-                after, func, BUILTIN_PROVIDER, 'max', 'f64_max', source, tree)
         if builtin != 'sum':
             return after
-        provider, reduction = STREAMS_PROVIDER, 'f64_sum' if float_start else 'ordinary_sum'
-        if assignment and reduction != 'f64_sum':
+        provider = STREAMS_PROVIDER
+        if assignment:
             return after
-        if (reduction == 'ordinary_sum'
-                and self.cells.get_rettype_expr(c_style=True) != 'double'):
+        if self.cells.get_rettype_expr(c_style=True) != 'double':
             # Ordinary sum keeps integer/mixed/object semantics. Only an existing
             # double return boundary may normalize empty integer zero to double.
             return after
@@ -1421,8 +1345,7 @@ return {fallback}
         alias, prefix = module_name(provider), self.reserve_prefix()
         count = len(self.fallbacks)
         function, binding = self.callable_name(func, prefix)
-        fallback = self.cold_fallback(source, original_tree, capture, function,
-                                      trailing_args=', 0.0' if float_start else '')
+        fallback = self.cold_fallback(source, original_tree, capture, function)
         if len(self.fallbacks) == count:
             return after
         # Iterator/capture names must not alias the accumulator or call-layout

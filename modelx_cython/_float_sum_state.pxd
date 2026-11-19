@@ -48,9 +48,6 @@ from cpython.float cimport PyFloat_Check, PyFloat_CheckExact, PyFloat_AS_DOUBLE,
 from cpython.complex cimport PyComplex_CheckExact, PyComplex_AsCComplex, PyComplex_FromDoubles, Py_complex
 from cpython.bool cimport PyBool_Check
 from cpython.number cimport PyNumber_Add
-from cpython.unicode cimport PyUnicode_Check
-from cpython.bytes cimport PyBytes_Check
-from cpython.bytearray cimport PyByteArray_Check
 from libc.limits cimport LLONG_MAX, LLONG_MIN
 
 cdef enum:
@@ -91,54 +88,11 @@ cdef inline void sum_init(PySum* state) noexcept:
     state.value = NULL
 
 
-cdef inline void sum_init_ll(PySum* state, long long start) noexcept:
-    """An exact int start (literal or typed C integer, not a bool)."""
-    sum_init(state)
-    state.whole = start
-
-
-cdef inline void sum_init_f64(PySum* state, double start) noexcept:
-    """An exact float start."""
-    sum_init(state)
-    state.mode = SUM_FLOAT
-    state.hi = start
-
-
 cdef inline void _sum_hold(PySum* state, object value) noexcept:
     Py_INCREF(value)
     Py_XDECREF(state.value)
     state.value = <PyObject*>value
     state.mode = SUM_OBJECT
-
-
-cdef inline int sum_init_object(PySum* state, object start) except -1:
-    """Any start object, checked and classified as builtin_sum_impl does."""
-    cdef int overflow = 0
-    cdef long long whole
-    cdef Py_complex z
-    sum_init(state)
-    if PyUnicode_Check(start):
-        raise TypeError("sum() can't sum strings [use ''.join(seq) instead]")
-    if PyBytes_Check(start):
-        raise TypeError("sum() can't sum bytes [use b''.join(seq) instead]")
-    if PyByteArray_Check(start):
-        raise TypeError("sum() can't sum bytearray [use b''.join(seq) instead]")
-    if PyLong_CheckExact(start):
-        whole = PyLong_AsLongLongAndOverflow(start, &overflow)
-        if overflow == 0:
-            state.whole = whole
-            return 0
-    elif PyFloat_CheckExact(start):
-        state.mode = SUM_FLOAT
-        state.hi = PyFloat_AS_DOUBLE(start)
-        return 0
-    elif PyComplex_CheckExact(start):
-        z = PyComplex_AsCComplex(start)
-        state.mode = SUM_COMPLEX
-        state.hi, state.ihi = z.real, z.imag
-        return 0
-    _sum_hold(state, start)
-    return 0
 
 
 cdef inline object _sum_current(PySum* state):

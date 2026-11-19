@@ -18,23 +18,14 @@ import pytest
 PROBE = textwrap.dedent('''\
     # cython: language_level=3
     from modelx_cython._float_sum_state cimport (
-        PySum, sum_init, sum_init_f64, sum_init_ll, sum_init_object, sum_add_f64, sum_add_ll,
+        PySum, sum_init, sum_add_f64, sum_add_ll,
         sum_add_bint, sum_add_object, sum_result, sum_result_f64, sum_clear)
 
-    _omitted = object()
-
-    def exact_sum(items, start=_omitted, typed=True):
+    def exact_sum(items, typed=True):
         """typed=True: floats, ints in the C range and bools go through the typed adds."""
         cdef PySum state
         cdef int overflow
-        if start is _omitted:
-            sum_init(&state)
-        elif typed and type(start) is float:
-            sum_init_f64(&state, start)
-        elif typed and type(start) is int and -2**63 <= start < 2**63:
-            sum_init_ll(&state, start)
-        else:
-            sum_init_object(&state, start)
+        sum_init(&state)
         try:
             for item in items:
                 if typed and type(item) is float:
@@ -123,12 +114,11 @@ def same(actual, expected, scale):
     return actual == expected
 
 
-def check(probe, items, *start):
-    expected = outcome(sum, items, *start)
+def check(probe, items):
+    expected = outcome(sum, items)
     for typed in (True, False):
-        actual = outcome(probe.exact_sum, items, *start, typed) if start else outcome(
-            lambda: probe.exact_sum(items, typed=typed))
-        assert same(actual, expected, magnitude(items, *start)), (items, start, typed, actual, expected)
+        actual = outcome(lambda: probe.exact_sum(items, typed=typed))
+        assert same(actual, expected, magnitude(items)), (items, typed, actual, expected)
 
 
 EDGES = [0.0, -0.0, 1.0, -1.0, 0.1, 1e16, -1e16, 1e308, -1e308, 5e-324, -5e-324,
@@ -140,27 +130,19 @@ def test_documented_edges(probe):
     check(probe, [1e16, 1, 1, -1e16])            # integer items are compensated (3.12+)
     check(probe, ())                              # int 0
     check(probe, [-0.0])                          # 0.0: int start 0 + -0.0
-    check(probe, [-0.0], -0.0)                    # -0.0
     check(probe, [1e308, 1e308, -1e308])          # inf, not nan
     check(probe, [math.inf, -math.inf])           # nan
     check(probe, [1.0, math.nan])
-    check(probe, [], 0.0)
-    check(probe, [], -0.0)
-    check(probe, [1, 2, 3], 0.5)
     check(probe, [2 ** 63 - 1, 1, 0.5])           # int overflow: generic loop, no compensation
     check(probe, [2 ** 63 - 1, 1, 1e16, 1.0, -1e16])
     check(probe, [-2 ** 63, -1])
     check(probe, [1.5, 2 ** 1100])                # OverflowError from the float loop
-    check(probe, [1, 2], 2 ** 70)                 # overflowed start: generic loop
-    check(probe, [1.0, 2.0], True)                # bool start is not an exact int
     check(probe, [True, True, 1.5, False])
     check(probe, [1, 1j, 1e16, 1.0, -1e16])       # complex loop, compensated
     check(probe, [0.5, Fraction(1, 3), 0.25])     # generic loop
     check(probe, [Fraction(1, 3), 0.5])
     check(probe, [1, 'a'])
     check(probe, [1.0, None])
-    for start in ('', b'', bytearray()):
-        check(probe, [1], start)
 
 
 def test_result_at_a_double_boundary(probe):
@@ -183,7 +165,7 @@ def test_result_at_a_double_boundary(probe):
 
 
 def test_random_property(probe):
-    """At least 100,000 random cases: floats from every binade, ints, bools, starts."""
+    """At least 100,000 random cases: floats from every binade, ints, bools."""
     rng = random.Random(20261113)
     cases = 0
 
@@ -204,7 +186,6 @@ def test_random_property(probe):
         items = [element() for _ in range(rng.randint(0, 12))]
         if rng.random() < 0.3:
             items = [float(x) if not isinstance(x, complex) and abs(x) < 1e300 else x for x in items]
-        start = () if rng.random() < 0.5 else (element(),)
-        check(probe, items, *start)
+        check(probe, items)
         cases += 1
     assert cases >= 100_000
