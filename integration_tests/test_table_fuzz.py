@@ -86,8 +86,11 @@ def _model(tmp_path, chosen):
         probe.MODEL.format(ops={}, stmts=stmts, data=probe.DATA, t5_items={}), encoding='utf-8')
     (tmp_path / 'sample.py').write_text(probe.SAMPLE, encoding='utf-8')
     (tmp_path / 'checks.py').write_text(probe.CHECKS, encoding='utf-8')
-    (tmp_path / 'spec.py').write_text(repr({'parallel_workers': 1, 'strict_lowering': True}), encoding='utf-8')
+    (tmp_path / 'spec.py').write_text(repr({'parallel_workers': 1, **SPEC}), encoding='utf-8')
     probe._run(tmp_path, 'probe_model.py')
+
+
+SPEC = {} if os.environ.get('MX_CY_FUZZ_BASELINE') else {'strict_lowering': True}
 
 
 def _build(tmp_path, *extra):
@@ -144,6 +147,8 @@ def pairs(count, seed=SEED + 2):
         table = rng.choice(sorted(PREFIXES))
         a, b = rng.sample(PREFIXES[table], 2)
         reads = READS['grid' if table != 'rates' else 'rates']
+        if table == 'sgrid':        # unordered: pandas' asof raises (and the sample would stop on it)
+            reads = [r for r in reads if 'asof' not in r]
         ra, rb = rng.choice(reads), rng.choice(reads)
         first = f"sub = data.{table}().loc[{a}]\nreturn {ra}"
         second = f"sub = data.{table}().loc[{b}]\nreturn {rb}"
@@ -159,7 +164,7 @@ def test_fuzz_two_formulas(tmp_path):
         probe.MODEL.format(ops={}, stmts={}, data=probe.DATA, t5_items=items), encoding='utf-8')
     (tmp_path / 'sample.py').write_text(probe.SAMPLE, encoding='utf-8')
     (tmp_path / 'checks.py').write_text(probe.CHECKS, encoding='utf-8')
-    (tmp_path / 'spec.py').write_text(repr({'parallel_workers': 1, 'strict_lowering': True}), encoding='utf-8')
+    (tmp_path / 'spec.py').write_text(repr({'parallel_workers': 1, **SPEC}), encoding='utf-8')
     probe._run(tmp_path, 'probe_model.py')
     built = _build(tmp_path)
     assert built.returncode == 0, built.stdout[-4000:] + built.stderr[-8000:]

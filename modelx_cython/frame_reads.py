@@ -1162,6 +1162,8 @@ class _Rewrite(cst.CSTTransformer):
             return None
         if not (o.facts.is_int(parts[0]) or self.native.get(id(self.updated_of.get(id(parts[0])))) == 'i64'):
             return None
+        if isinstance(parts[0], cst.Name) and parts[0].value in ('True', 'False'):
+            return None         # T-5c: a bool is not a position for pandas (it raises)
         hold = self._walk_hold(view)
         start, stop, test = self._view_parts(view, hold)
         i = _cast('_mx_cy.Py_ssize_t', self.updated_of.get(id(parts[0]), parts[0]))
@@ -1229,6 +1231,8 @@ class _Rewrite(cst.CSTTransformer):
             x = _cast('_mx_cy.double', self.updated_of.get(id(plain[0].value), plain[0].value))
             native = self._m('search', o.ref(hold), start, stop, cst.Integer(str(view.depth)), x,
                              cst.Name('True' if right else 'False'))
+            # T-5c: NaN (pandas sorts it last) is pandas' own
+            test = self._conjunction([test, cst.Comparison(x, [cst.ComparisonTarget(cst.Equal(), x)])])
             self._record(original, 'L8', view.call)
             return self._guarded(original, updated, view, test, native, 'i64')
         if func.attr.value in ('max', 'min') and not original.args and view.start is not None:
@@ -1737,7 +1741,8 @@ class _Rewrite(cst.CSTTransformer):
         emit = self.updated_of.get(id(part), part)
         chold = self._take(view.call, label, COLUMN_KIND[kind])
         if value.attr.value == 'iloc':
-            if not (o.facts.is_int(part) or self.native.get(id(emit)) == 'i64'):
+            if not (o.facts.is_int(part) or self.native.get(id(emit)) == 'i64') or (
+                    isinstance(part, cst.Name) and part.value in ('True', 'False')):
                 return None
             hold = self._walk_hold(view)
             start, stop, test = self._view_parts(view, hold)
