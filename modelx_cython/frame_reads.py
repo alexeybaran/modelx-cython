@@ -394,6 +394,17 @@ class FrameReads:
         prefix = self.prefix_receiver(value) if isinstance(value, cst.Call) else None
         if prefix is not None:
             return name, prefix[1], prefix[2], prefix[3], prefix[4]
+        # T-5c: ``name = self.P().loc[more]``, a prefix of a prefix cell's value: one view of the parent table, the
+        # cell's parts held per item and ``more`` coded per call
+        inner = (value.value.value if isinstance(value, cst.Subscript) and isinstance(value.value, cst.Attribute)
+                 and value.value.attr.value == 'loc' else None)
+        prefix = self.prefix_receiver(inner) if isinstance(inner, cst.Call) else None
+        extra = _index_parts(value) if prefix is not None else None
+        if extra is not None and len(extra) == 1:
+            more = _parts(extra[0])
+            if len(prefix[3]) + len(more) < len(prefix[2]['levels']) and not any(
+                    isinstance(p, (cst.Slice, cst.List, cst.ListComp, cst.Tuple, cst.StarredElement)) for p in more):
+                return name, prefix[1], prefix[2], [*prefix[3], *more], prefix[4], len(prefix[3])
         got = self.prefix_of(value)
         if got is None:
             return None
@@ -920,16 +931,17 @@ class _Rewrite(cst.CSTTransformer):
         """``name = R.loc[prefix]``: the prefix codes and the view's stored rows [start, stop) in C locals, before
         the assignment (dropped when every use of ``name`` is lowered). The view is valid while start >= 0."""
         o = self.o
-        name, call, schema, parts, cell = found
+        name, call, schema, parts, cell, *rest = found
+        held = rest[0] if rest else None    # T-5c: the cell's parts of a prefix of a prefix cell's value
         hold = self._take(call, _NO_LABEL, -1)
         test = _code(self._native_test(hold, []))
         if cell is None and _code(statement.body[0].value) in o.ambiguous:
             test = f'{test} and {_code(self._native_test(self._take(call, 1, -5), []))}'
         statements, codes, conditions = [], [], []
         if cell is not None:
-            codes, conditions = self._prefix_holds(hold, parts, cell)
-        else:
-            for level, part in enumerate(parts):
+            codes, conditions = self._prefix_holds(hold, parts if held is None else parts[:held], cell)
+        if cell is None or held is not None:
+            for level, part in enumerate(parts[len(codes):], len(codes)):
                 if o.item_fixed(part, schema['levels'][level]):
                     codes.append(self._held(hold, level, part, conditions))
                     continue
@@ -953,7 +965,8 @@ class _Rewrite(cst.CSTTransformer):
         statements.append(cst.parse_statement(f'{stop}: _mx_cy.Py_ssize_t = {m}.range_stop(_mx_vr_{name})'))
         value = statement.body[0].value
         source = value.with_changes(value=value.value.with_changes(value=call)) if cell is None else value
-        view = o.views[name] = _View(name, call, schema, len(parts), codes, cst.Name(start), cst.Name(stop), cell)
+        view = o.views[name] = _View(name, call, schema, len(parts), codes, cst.Name(start), cst.Name(stop),
+                                     cell if held is None else None)
         view.setup = [*statements, statement]     # the setup statements are kept only if a use needs them
         self.swaps[name] = source
         return view.setup
