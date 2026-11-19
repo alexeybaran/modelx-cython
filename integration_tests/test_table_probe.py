@@ -45,6 +45,10 @@ OPS = {  # name: (sources, expression on T = data.<source>() and the argument t)
     'col_item': ('flat', "T['q']"),
     'col_keyed': ('flat', "T['q'][20 + t]"),
     'col_list': ('flat', "T[['q', 'r']]"),
+    'col_attr_keyed': ('flat', "T.q[20 + t]"),
+    'col_keyed_tuple': ('multi', "T['rate'][(('A', 'B', 'C')[t % 3], 1 + t % 2)]"),
+    'index_in_prefix': ('multi grid', "('A', 'B', 'C', 'D')[t % 4] in T.index"),
+    'index_in_prefix_tuple': ('rates', "(('A', 'B')[t % 2], ('F', 'X')[t // 2]) in T.index"),
     'index_max': ('flat multi', "T.index.max()"),
     'index_min': ('flat', "T.index.min()"),
     'index_max_part': ('multi', "T.index.max()[t % 2]"),
@@ -88,6 +92,65 @@ OPS = {  # name: (sources, expression on T = data.<source>() and the argument t)
     'mutate_loc': ('mut', "(T.loc.__setitem__((20, 'q'), 9.0 + t), T.loc[20, 'q'])[1]"),
 }
 
+# T-5: formulas of several statements on T = data.<source>() and t (views of a prefix, index walks, row locals)
+STMTS = {
+    'view_index': ('grid sgrid', "sub = T.loc[('A', 'B')[t % 2]]\n"
+                   "return (int(sub.index[0]), int(sub.index[-1]), sub.index[t % 4], sub.index[-1 - t], len(sub.index))"),
+    'view_search': ('grid sgrid', "sub = T.loc[('A', 'B')[t % 2]]\nx = 20.5 + t * 0.7\n"
+                    "return (sub.index.searchsorted(x, side='right'), sub.index.searchsorted(x), int(sub.index.asof(x)))"),
+    'view_asof_low': ('grid', "return int(T.loc['A'].index.asof(19.0 + t))"),
+    'view_asof_key': ('grid', "sub = T.loc['B']\nreturn sub.loc[sub.index.asof(19.5 + t), 'q']"),
+    'view_read': ('grid sgrid', "sub = T.loc[('A', 'B')[t % 2]]\nreturn sub.loc[20 + t, 'q'] + sub.loc[23 - t, 'n']"),
+    'view_walk': ('grid sgrid', "sub = T.loc[('A', 'B')[t % 2]]\nreturn [sub.loc[k, 'q'] for k in sub.index if k <= 21 + t]"),
+    'view_loop': ('grid sgrid', "sub = T.loc['B']\ntotal = 0.0\nfor k in sub.index:\n"
+                  "    if k > 22 - t:\n        break\n    total += sub.loc[k, 'q'] * k\nreturn total"),
+    'view_builtins': ('grid sgrid', "sub = T.loc['A']\nreturn (sorted(sub.index), list(sub.index), set(sub.index), "
+                      "tuple(sub.index), min(sub.index), max(sub.index), sub.index.max() + t, sub.index.min())"),
+    'whole_walk': ('flat shuffled', "return [T.loc[k, 'q'] for k in T.index if k > 19 + t]"),
+    'whole_loop': ('flat shuffled', "out = []\nfor k in T.index:\n    out.append(k * 2)\nreturn out[t % 4]"),
+    'whole_item': ('flat shuffled', "return (T.index[t % 4], T.index[-1 - t % 4], T.index.searchsorted(21 + t), "
+                   "len(T.index), list(T.index), sorted(T.index))"),
+    'whole_unpack': ('grid sgrid', "return (max(a for p, a in T.index if p == ('A', 'B')[t % 2]), "
+                     "[(p, a) for p, a in T.index][t])"),
+    'row_local': ('mixed', "row = T.loc[20 + t]\nreturn (row['q'], row['tag'], row['n'], str(row['tag']))"),
+    'row_local_num': ('flat', "row = T.loc[20 + t]\nreturn row['q'] + row['r']"),
+    'row_local_missing': ('flat', "row = T.loc[22 + t]\nreturn row['q']"),
+    'row_in_loop': ('mixed', "total = 0.0\nfor k in T.index:\n    row = T.loc[k]\n"
+                    "    if str(row['tag']) != 'x':\n        continue\n    total += float(row['q']) * row['n']\nreturn total + t"),
+    'extreme_obj': ('fgrid grid', "return (T.index.max(), T.index.min(), t)"),
+    'inline_max': ('grid sgrid', "return int(T.loc[('A', 'B')[t % 2]].index.max()) + t"),
+    'nested_key': ('flat', "return T.loc[min(20 + t, int(T.index.max())), 'q']"),
+    'two_part_prefix': ('tri', "sub = T.loc[('A', 'B')[t % 2], ('F', 'M')[t // 2]]\nreturn (list(sub.index), sub.loc[21, 'q'])"),
+    'two_part_prefix_amb': ('tri_amb', "sub = T.loc[('A', 'B')[t % 2], ('q', 'x')[t // 2]]\n"
+                            "return (list(sub.index), sub.loc[21, 'q'])"),
+    'index_in_key_local': ('multi', "key = (('A', 'B', 'D')[t % 3], 1 + t % 2)\nreturn (key in T.index, key not in T.index)"),
+    'named_col': ('flat', "name = ('q', 'r', 'n')[t % 3]\nreturn T.loc[20 + t, name]"),
+    'named_col_mixed': ('grid', "name = ('q', 'n')[t % 2]\nreturn T.loc[('A', 20 + t), name]"),
+    'named_col_float': ('mixed', "name = ('q', 'n', 'tag')[t % 3]\nreturn float(T.loc[20 + t, name])"),
+    'named_col_fresh': ('flat mixed', "name = ''.join([('q', 'r', 'n')[t % 3]])\nreturn float(T.loc[20 + t, name])"),
+    'named_col_missing': ('flat', "return T.loc[20, ('q', 'zz')[t % 2]]"),
+    'named_col_view': ('tri', "sub = T.loc['A', ('F', 'M')[t % 2]]\nreturn sub.loc[20 + t % 2, ('q', 'x')[t // 2]]"),
+    'col_view_items': ('grid sgrid', "tab = T.loc[('A', 'B')[t % 2]]['q']\nreturn [(float(k), float(v)) for k, v in tab.items()]"),
+    'col_view_iter': ('grid', "return tuple(float(p) for p in T.loc['B']['n'])"),
+    'col_view_tolist': ('grid sgrid', "sub = T.loc['A']\nreturn list(zip(sub['q'].tolist(), sub['n'].tolist(), [len(sub['q'])]))"),
+    'col_whole': ('flat shuffled', "return ([v for v in T['q']], T['r'].tolist(), list(T['q']), "
+                  "[k for k, v in T['q'].items() if v > 0.001 * t])"),
+    'col_loop': ('flat shuffled', "total = 0.0\nfor k, v in T['q'].items():\n    total += k * v\nreturn total + t"),
+    'iterrows_loop': ('flat shuffled mixed', "total = 0.0\nfor k, row in T.iterrows():\n"
+                      "    if k > 22 - t:\n        continue\n    total += row['q'] * k + float(row[('q', 'q')[t % 2]])\nreturn total"),
+    'iterrows_find': ('mixed', "for k, row in T.iterrows():\n    if int(row['n']) >= 1 + t:\n        return (k, str(row['tag']))\nreturn None"),
+    'obj_col': ('mixed', "return (T.loc[20 + t, 'tag'], T.at[20 + t, 'tag'] == 'x')"),
+    'obj_col_missing': ('mixed', "return T.loc[98 + t, 'tag']"),
+    'view_within': ('scen', "sub = T.loc[('up', 'down')[t % 2]]\nmonths = [m for m in sub.index if m <= 6 * t]\n"
+                    "return (sub.loc[max(months), 'v'], int(sub.index.asof(5.0 * t)), sub.index[-1])"),
+    'level_extreme': ('grid sgrid tri', "return (int(T.index.get_level_values(1).max()) + t, T.index.get_level_values(-1).min())"),
+    'level_extreme_named': ('rates', "return (int(T.index.get_level_values('year').max()) - t, T.index.get_level_values('year').min())"),
+    'col_of_loc': ('tri', "curve = T.loc[(('A', 'B')[t % 2], ('F', 'M')[t // 2]), 'q']\nms = [int(v) for v in curve.index]\n"
+                   "return (ms, float(curve.iloc[0]), float(curve.iloc[-1]), float(curve.loc[21]))"),
+    'whole_asof': ('flat shuffled', "return int(T.index.asof(21.5 + t))"),
+    'view_member': ('grid sgrid', "sub = T.loc[('A', 'B')[t % 2]]\nreturn ((20 + t) in sub.index, (21 + 2 * t) not in sub.index)"),
+}
+
 DATA = {
     'flat': "pd.DataFrame({'q': [0.001, 0.002, 0.004, 0.008], 'r': [1.0, 2.0, 3.0, 4.0]},\n"
             "                        index=pd.Index([20, 21, 22, 23], name='age'))",
@@ -99,6 +162,36 @@ DATA = {
            "                        index=pd.Index([20, 21, 22, 23], name='age'))",
     'dup': "pd.DataFrame({'rate': [1.5, 1.7, 2.5, 2.7]},\n"
            "        index=pd.MultiIndex.from_tuples([('A', 1), ('A', 1), ('B', 1), ('B', 1)], names=['tab', 'sex']))",
+    # T-5: a two-level table in sorted order, the same rows unordered, a float index, a row with an object column
+    'grid': "pd.DataFrame({'q': [0.01 * n for n in range(8)], 'n': list(range(8))},\n"
+            "        index=pd.MultiIndex.from_product([['A', 'B'], [20, 21, 22, 23]], names=['plan', 'age']))",
+    'sgrid': "pd.DataFrame({'q': [0.01 * n for n in range(8)], 'n': list(range(8))},\n"
+             "        index=pd.MultiIndex.from_product([['A', 'B'], [20, 21, 22, 23]], names=['plan', 'age'])).iloc[[5, 0, 7, 2, 1, 4, 3, 6]]",
+    'shuffled': "pd.DataFrame({'q': [0.004, 0.001, 0.008, 0.002], 'r': [3.0, 1.0, 4.0, 2.0]},\n"
+                "                        index=pd.Index([22, 20, 23, 21], name='age'))",
+    'fgrid': "pd.DataFrame({'q': [0.1, 0.2, 0.3]}, index=pd.Index([0.5, 1.5, 2.5], name='x'))",
+    'mixed': "pd.DataFrame({'q': [0.5, 1.5, 2.5, 3.5], 'tag': ['x', 'y', 'x', 'y'], 'n': [1, 2, 3, 4]},\n"
+             "                        index=pd.Index([20, 21, 22, 23], name='age'))",
+    # T-5: two scenarios out of sorted order, each in sorted order within (ordered within a prefix, not as a whole)
+    'scen': "pd.DataFrame({'v': [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]},\n"
+            "        index=pd.MultiIndex.from_tuples([('up', 0), ('up', 12), ('up', 24), ('down', 0), ('down', 12), ('down', 24)]))",
+    # T-5 choice 5: `T.loc[a, b]` on three levels, the labels of b's level apart from the columns, or among them
+    'tri': "pd.DataFrame({'q': [0.1 * n for n in range(8)], 'x': [0.0] * 8},\n"
+           "        index=pd.MultiIndex.from_product([['A', 'B'], ['F', 'M'], [20, 21]]))",
+    'tri_amb': "pd.DataFrame({'q': [0.1 * n for n in range(8)], 'x': [0.0] * 8},\n"
+               "        index=pd.MultiIndex.from_product([['A', 'B'], ['q', 'x'], [20, 21]]))",
+}
+
+# T-5: item cells (a view of a prefix fixed per item: codes held per item; walks of a shared table)
+T5_ITEMS = {
+    'view_item': "sub = data.grid().loc[plan()]\nreturn sub.loc[20 + t, 'q'] + int(sub.index[-1]) + len(sub.index)",
+    'view_item_walk': "sub = data.grid().loc[plan()]\nreturn sum(sub.loc[k, 'q'] for k in sub.index if k <= 20 + t)",
+    'whole_item_walk': "return [k for k in data.shuffled().index if k > 20 + t]",
+    'row_item': "row = data.mixed().loc[20 + t]\nreturn row['q'] * row['n']",
+    # a row cell kept (one read takes a computed field): its fields through the row held per item
+    'row_cell_lit': "return mrow()['q'] * mrow()['n']",
+    'obj_item': "return data.mixed().loc[pid(), 'tag'] + data.mixed().loc[20 + t, 'tag']",
+    'row_cell_computed': "return float(mrow()[('q', 'n')[t % 2]]) + float(mrow()['q'])",
 }
 
 # Compiled differs from live, by cell: what the redesign removes step by step. Empty since T-3 (the sample
@@ -114,13 +207,19 @@ import numpy as np
 import pandas as pd
 import pickle
 OPS = {ops!r}
+STMTS = {stmts!r}
 DATA = {data!r}
+T5_ITEMS = {t5_items!r}
 
 
 def names():
-    for op, (sources, _) in OPS.items():
+    for op, (sources, _) in (*OPS.items(), *STMTS.items()):
         for source in sources.split():
             yield f"{{op}}__{{source}}"
+
+
+def _indent(body):
+    return "".join(f"    {{line}}\\n" for line in body.split("\\n"))
 
 
 def build():
@@ -135,6 +234,9 @@ def build():
         for source in sources.split():
             calc.new_cells(f"{{op}}__{{source}}",
                            f"def {{op}}__{{source}}(t):\\n    T = data.{{source}}()\\n    return {{expression}}\\n")
+    for op, (sources, body) in STMTS.items():
+        for source in sources.split():
+            calc.new_cells(f"{{op}}__{{source}}", f"def {{op}}__{{source}}(t):\\n    T = data.{{source}}()\\n" + _indent(body))
     items = model.new_space("Items", formula="lambda i: None")     # an ItemSpace: reads held per item
     items.data = data
     items.new_cells("v__flat", "def v__flat(t):\\n    return data.flat().loc[20 + t, 'q']\\n")
@@ -152,6 +254,10 @@ def build():
                     "    return data.rates().loc[key, 'q']\\n")
     items.new_cells("key_rebound__rates", "def key_rebound__rates(t):\\n    key = (plan(), sex(), 2000)\\n"
                     "    if t % 2:\\n        key = (plan(), sex(), 2001)\\n    return data.rates().loc[key, 'q']\\n")
+    items.new_cells("pid", "def pid():\\n    return 20 + i % 4\\n")
+    items.new_cells("mrow", "def mrow():\\n    return data.mixed().loc[pid()]\\n")
+    for name, body in T5_ITEMS.items():
+        items.new_cells(name, f"def {{name}}(t):\\n" + _indent(body))
     return model
 
 
@@ -168,7 +274,9 @@ for name in names():
             getattr(mx_model.Calc, name)(t)
         except Exception:
             pass
-ITEM_CELLS = ("v__flat", "in__multi", "pre__rates", "pre_list__rates", "key_local__rates", "key_rebound__rates")
+from probe_model import T5_ITEMS
+ITEM_CELLS = ("v__flat", "in__multi", "pre__rates", "pre_list__rates", "key_local__rates", "key_rebound__rates",
+              *T5_ITEMS)
 for i in (1, 2, 3, 4):
     for t in range(4):
         for name in ITEM_CELLS:
@@ -182,7 +290,7 @@ from importlib import import_module
 from importlib.machinery import ExtensionFileLoader
 import numpy as np
 import pandas as pd
-from probe_model import build, names
+from probe_model import build, names, T5_ITEMS
 
 assert isinstance(import_module("probe_nomx_cy._mx_classes").__loader__, ExtensionFileLoader)
 compiled = import_module("probe_nomx_cy").mx_model
@@ -224,15 +332,17 @@ def boundary(a, b):
         parts = [boundary(x, y) if not same(x, y) else "" for x, y in zip(a, b)]
         if all(p is not None for p in parts):
             found = {p for p in parts if p}
-            return found.pop() if len(found) == 1 else ("" if not found else None)
+            return "; ".join(sorted(found)) if found else ""     # each element a documented boundary
     return None
 
 
 result = {}
-for name in names():
+cases = [(name, name, live.Calc, compiled.Calc) for name in names()] + [
+    (f"Items[{{i}}].{{name}}", name, live.Items[i], compiled.Items[i]) for name in T5_ITEMS for i in (1, 2, 3, 4)]
+for key, name, live_space, compiled_space in cases:
     verdict = "same"
     for t in range(4):
-        (lk, lv), (ck, cv) = outcome(live.Calc, name, t), outcome(compiled.Calc, name, t)
+        (lk, lv), (ck, cv) = outcome(live_space, name, t), outcome(compiled_space, name, t)
         if lk == "raise" and ck == "raise":
             original = lv.__cause__ or lv
             if type(cv) is type(original) or type(cv).__name__ + ":" in str(lv):
@@ -247,7 +357,7 @@ for name in names():
             verdict = f"boundary: {kind}" if kind else f"differs: live {type(lv).__name__} {repr(lv)[:60]}, compiled {type(cv).__name__} {repr(cv)[:60]}"
         if verdict != "same":
             break
-    result[name] = verdict
+    result[key] = verdict
 json.dump(result, sys.stdout, indent=1)
 '''
 
@@ -410,7 +520,8 @@ def _run(tmp_path, *args):
 @pytest.fixture(scope="module")
 def probe(tmp_path_factory):
     work = tmp_path_factory.mktemp("probe")
-    (work / "probe_model.py").write_text(MODEL.format(ops=OPS, data=DATA), encoding="utf-8")
+    (work / "probe_model.py").write_text(MODEL.format(ops=OPS, stmts=STMTS, data=DATA, t5_items=T5_ITEMS),
+                                         encoding="utf-8")
     (work / "sample.py").write_text(SAMPLE, encoding="utf-8")
     (work / "checks.py").write_text(CHECKS, encoding="utf-8")
     (work / "contract.py").write_text(CONTRACT, encoding="utf-8")
@@ -424,7 +535,8 @@ def probe(tmp_path_factory):
 def test_probe_compiled_equals_live(probe):
     _, _, verdicts = probe
     differing = {name: v for name, v in verdicts.items()
-                 if v != "same" and not (v.startswith("boundary: ") and v[len("boundary: "):] in BOUNDARY)}
+                 if v != "same" and not (v.startswith("boundary: ")
+                                         and set(v[len("boundary: "):].split("; ")) <= BOUNDARY)}
     unexpected = {name: v for name, v in differing.items() if name not in KNOWN}
     fixed = sorted(name for name in KNOWN if name not in differing)
     assert not unexpected, "compiled differs from live where it did not before:\n" + "\n".join(
@@ -460,3 +572,40 @@ def test_item_holds_take_no_lookup_or_lock(probe):
     for forbidden in ("bind_ref(", ".prepared(", "assigned(", "hold_unassigned(", "_mx_lock"):
         assert not [line for line in code.splitlines()
                     if forbidden in line and "_mx_tp_" in line and "self.data." in line], forbidden
+    # T-5: every read kind (keyed reads, views of a prefix, index walks, row locals) uses a held table only borrowed,
+    # as a PreparedRef (no reference counted per step); the table object itself appears only in the hold statements
+    # (once per item: the binding, the held codes and rows, the resets)
+    borrowed = re.compile(r"_mx_cy\.cast\(_mx_helper_\w+\.PreparedRef, self\._mx_tp_\d+\)")
+    hold_line = re.compile(r"\s*(if )?(self|root)\._mx_t[pqkw]_\d+ (=|==) ")
+    for kind in T5_ITEMS:
+        assert any(kind in block for block in helpers) or kind in items, kind
+    identity = re.compile(r"self\._mx_tp_\d+ is self\._mx_tp_\d+")      # a pointer comparison
+    escaping = [line.strip()[:160] for line in code.splitlines()
+                if "_mx_tp_" in identity.sub("", borrowed.sub("", line)) and not hold_line.match(line)
+                and not re.match(r"\s*_mx_tp_\d+: object", line)]
+    assert not escaping, escaping
+
+
+def test_native_branches_call_no_pandas(probe):
+    """T-5: the native branch of every lowered read (the body of its ``... if <slot> > 0 ... else <pandas>``), with
+    the pandas branches of the reads nested in it removed, makes no pandas call (a read nested in a key part is
+    lowered there too)."""
+    import libcst as cst
+    work, _, _ = probe
+    module = cst.parse_module((work / "probe_nomx_cy" / "_mx_classes.py").read_text(encoding="utf-8"))
+    code = module.code_for_node
+    found = []
+
+    class Strip(cst.CSTTransformer):
+        def leave_IfExp(self, original, updated):
+            return updated.with_changes(orelse=cst.Name("None")) if ".slot(" in code(original.test) else updated
+
+    class Scan(cst.CSTVisitor):
+        def visit_IfExp(self, node):
+            if ".slot(" in code(node.test):
+                native = re.sub(r"'[^']*'|\"[^\"]*\"", "''", code(node.body.visit(Strip())))   # not in a literal
+                if any(token in native for token in (".loc[", ".at[", ".iloc", ".iat[", ".index", "self.data.")):
+                    found.append(native[:200])
+    module.visit(Scan())
+    assert not found, found
+
