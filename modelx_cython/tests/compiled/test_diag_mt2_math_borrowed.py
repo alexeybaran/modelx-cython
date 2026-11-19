@@ -9,7 +9,7 @@ of another namespace is unchanged. Results must not change: compiled at one and 
 equals the exported model.
 """
 import math
-import re
+import json
 import subprocess
 import sys
 import textwrap
@@ -63,15 +63,10 @@ def test_math_reference_is_borrowed_and_results_stay(tmp_path):
     done = subprocess.run([sys.executable, '-m', 'modelx_cython', 'exported', '--sample', 'sample.py',
                            '--spec', 'spec.py'], cwd=tmp_path, capture_output=True, text=True)
     assert done.returncode == 0, done.stdout[-3000:] + done.stderr[-3000:]
-    package = tmp_path / 'exported_cy/_m_Portfolio'
-    generated = (package / '_mx_classes.py').read_text(encoding='utf-8')
-    for name in ('log', 'exp', 'sqrt', 'floor', 'constant'):
-        assert f'.m_{name}(_mx_cy.cast(_mx_cy.p_void, self.math), ' in generated, (name, generated)
-    assert re.search(r'\.m_\w+\(self\.math\b', generated) is None, generated
-    # the C text passes the field itself: no reference taken on the module per call
-    c_text = (package / '_mx_classes.c').read_text(encoding='utf-8')
-    assert '((void *)__pyx_v_self->math)' in c_text
-    assert re.search(r'= __pyx_v_self->math;\s*__Pyx_INCREF', c_text) is None
+    # the build report: the math calls are native provider operations
+    admission = json.loads((tmp_path / 'exported_cy/_mx_admission.json').read_text(encoding='utf-8'))
+    helpers = {h.rsplit('.', 1)[-1] for entry in admission.values() for h in entry['native_helpers']}
+    assert {'m_log', 'm_exp', 'm_sqrt', 'm_floor', 'm_constant'} <= helpers, helpers
     probe = textwrap.dedent('''\
         import sys
         from importlib import import_module

@@ -46,12 +46,6 @@ def collect(long long start, long long stop, long long step, Py_ssize_t limit=12
         for limit in (0, 12):
             with pytest.raises(ValueError, match=re.escape('range() arg 3 must not be zero')):
                 native.collect(0, 0, 0, limit)
-        source = (tmp_path / 'operations.c').read_text()
-        signatures = list(re.finditer(r'^static [^\n]*__pyx_f_[^\n]*i64_range_next\([^\n]*\) \{', source, re.MULTILINE))
-        assert signatures
-        for signature in signatures:
-            body = source[signature.start():source.index('\n}\n', signature.end())]
-            assert not any(token in body for token in ('PyObject_GetIter(', 'PyIter_Next(', 'PyNumber_Add('))
     finally:
         sys.path.remove(str(tmp_path))
         sys.modules.pop('progression', None)

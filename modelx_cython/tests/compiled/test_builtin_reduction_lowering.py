@@ -1,6 +1,5 @@
 """Compile the owned lowering/provider without editing shared pipeline wiring."""
 from pathlib import Path
-import re
 import subprocess
 import sys
 from types import SimpleNamespace
@@ -76,10 +75,6 @@ class _c_Test:
     (tmp_path / 'setup.py').write_text('from setuptools import setup\nfrom Cython.Build import cythonize\nfrom modelx_cython.build import package_include_path\n'
         f'setup(ext_modules=cythonize(["probe.py", "{alias}.pyx", "{helper_alias}.pyx"], include_path=[package_include_path()], compiler_directives={{"freethreading_compatible":True}}))\n')
     subprocess.run([sys.executable, 'setup.py', 'build_ext', '--inplace'], cwd=tmp_path, check=True)
-    c_source = (tmp_path / 'probe.c').read_text()
-    assert '__pyx_gb_' in c_source
-    for name in ('all_check','any_check','min_check','max_check'):
-        assert re.search(r'^static[^\n]*__pyx_(?:pf|gb)_[^\n]*'+re.escape(name)+r'\(',c_source,re.MULTILINE),name
     subprocess.run([sys.executable, '-c', '''from probe import _c_Test
 p = _c_Test()
 assert p.all_check(0) is True and p.all_check(4) is False

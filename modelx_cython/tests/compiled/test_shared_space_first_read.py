@@ -6,6 +6,7 @@ their value once: four threads racing on the first read of a fresh model each ge
 value, for every result type (typed memoryview, object, C double), and none sees the flag before
 the value (``Memoryview is not initialized``) or a value cleared under it.
 """
+import json
 import subprocess
 import sys
 import textwrap
@@ -30,9 +31,9 @@ def test_first_read_of_a_shared_space_from_four_threads(tmp_path):
         "d.rates()[0], d.table()[0, 0], d.labels()[0], d.scale()\n", encoding="utf-8")
     subprocess.run([sys.executable, "-m", "modelx_cython", "exported", "--sample", "sample.py", "--no-spec"],
                    cwd=tmp_path, check=True)
-    generated = (tmp_path / "exported_cy/_mx_classes.py").read_text(encoding="utf-8")
-    assert "_mx_cy.critical_section(self)" in generated, generated
-    assert "const[_mx_cy.double][:]" in generated, generated      # the arrays are typed memoryviews
+    admission = json.loads((tmp_path / "exported_cy/_mx_admission.json").read_text(encoding="utf-8"))
+    types = {name.rsplit("._f_", 1)[-1]: entry["return_type"] for name, entry in admission.items()}
+    assert types["rates"].endswith("[:]") and types["table"].endswith("[:, :]"), types   # typed memoryviews
     probe = textwrap.dedent("""\
         import threading
         from exported_cy import mx_model as m

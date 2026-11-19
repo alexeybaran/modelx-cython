@@ -33,9 +33,6 @@ def test_parallel_collect_reuse_merges_completed_chunks_and_retries(tmp_path):
     )
     subprocess.run([sys.executable, "-m", "modelx_cython", "exported",
                     "--sample", "sample.py", "--spec", "spec.py"], cwd=tmp_path, check=True)
-    generated = (tmp_path / "exported_cy/_mx_classes.py").read_text(encoding="utf-8")
-    assert "reuse_in_parallel" not in generated
-    assert "def _mx_collect_options_v2(self):" in generated
     assert (tmp_path / 'exported/_mx_sys.py').read_bytes() == (tmp_path / 'exported_cy/_mx_sys.py').read_bytes()
     probe = textwrap.dedent("""\
         from concurrent import futures

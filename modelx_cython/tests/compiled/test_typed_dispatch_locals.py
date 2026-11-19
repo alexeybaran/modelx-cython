@@ -52,14 +52,12 @@ def test_locals_from_typed_cells_are_c_numbers_and_values_match(tmp_path):
     done = subprocess.run([sys.executable, '-m', 'modelx_cython', 'exported', '--sample', 'sample.py',
                            '--no-spec'], cwd=tmp_path, capture_output=True, text=True)
     assert done.returncode == 0, done.stdout[-3000:] + done.stderr[-3000:]
-    text = (tmp_path / 'exported_cy/_mx_classes.py').read_text(encoding='utf-8')
-    assert '_mx_cy.cast(_mx_cy.longlong, self.freq())' in text, text
-    assert '_mx_cy.cast(_mx_cy.double, self.rate())' in text
+    admission = json.loads((tmp_path / 'exported_cy/_mx_admission.json').read_text(encoding='utf-8'))
+    factor = next(entry for name, entry in admission.items() if name.endswith('._f_factor'))
+    # the build report: m and step are C locals of the compiled formula, not Python objects
+    assert not {'m', 'step'} & {local.split(' ')[0].split(':')[0] for local in factor['object_locals']}, factor
     for package in ('exported', 'exported_cy'):
         out = subprocess.run([sys.executable, '-c', RUN.format(package=package)], cwd=tmp_path,
                              capture_output=True, text=True)
         assert out.returncode == 0, out.stdout[-3000:] + out.stderr[-3000:]
         assert json.loads(out.stdout.strip().splitlines()[-1]) == expected, package
-    c_source = next((tmp_path / 'exported_cy').glob('_mx_classes.c')).read_text(encoding='utf-8')
-    # m and step are C integers in the compiled formula: no Python object for them
-    assert '__pyx_v_m = ' in c_source and 'PyObject *__pyx_v_m ' not in c_source

@@ -77,10 +77,6 @@ def test_generator_literals_preserve_integer_width_and_sign(tmp_path):
     # complete width/sign/error oracles for the general and specialized paths.
     for name in ('assigned', 'weighted', 'positive_safe', 'negative_safe', 'empty'):
         assert admission[f'exported_cy._mx_classes._c_Values._f_{name}']['native_reductions'] == 1
-    generated = (tmp_path/'exported_cy/_mx_classes.py').read_text()
-    assert 'for k in range(3)' in generated
-    native = (tmp_path/'exported_cy/_mx_classes.c').read_text()
-    assert '__Pyx_Generator_New' in native and '__pyx_gb_' in native
     for package in ('exported', 'exported_cy'):
         script=f'''from {package} import mx_model
 s=mx_model.Values

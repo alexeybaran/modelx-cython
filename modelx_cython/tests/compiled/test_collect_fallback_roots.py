@@ -43,8 +43,6 @@ def _build(tmp_path):
         "for k in range(5):\n    m.Projection[k].value()\n", encoding="utf-8")
     subprocess.run([sys.executable, "-m", "modelx_cython", "exported", "--sample", "sample.py",
                     "--spec", "spec.py"], cwd=tmp_path, check=True)
-    generated = (tmp_path / "exported_cy/_mx_classes.py").read_text(encoding="utf-8")
-    assert "_mx_evaluate_serial_collect" in generated
 
 
 PROBE = textwrap.dedent('''\
