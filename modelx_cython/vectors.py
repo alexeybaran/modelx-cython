@@ -1654,6 +1654,94 @@ def _declare_at_top(node, decls):
     return node.with_changes(body=node.body.with_changes(body=[*stmts[:start], *decls, *stmts[start:]]))
 
 
+class _ObjectUses(cst.CSTTransformer):
+    """D154: a vector reaching Python code inside a compiled formula is a new list there (``.tolist()``).
+
+    After the lowering, a typed vector (a vector local or temporary, or the result of a vector cell's entry
+    ``self.<cell>(...)``) is used natively only as the argument of a provider operation, through ``.n`` or
+    ``.data``, in ``is None`` / ``is not None``, as an assignment target, as the value assigned to a vector
+    name, as the returned value, or as the element of a tuple of vectors (unpacked, indexed or returned).
+    Every other use is Python code (the sequence protocol, a builtin, a comprehension, a pandas index): the
+    vector becomes a list there, so the value and the Python semantics are those of live, which builds a list.
+    A tuple of vectors in such a position becomes a tuple of lists."""
+    METADATA_DEPENDENCIES = (__import__('libcst.metadata', fromlist=['ParentNodeProvider']).ParentNodeProvider,)
+
+    def __init__(self, names, shapes):
+        super().__init__()
+        self.names, self.shapes = names, shapes     # {name: shape}, {vector cell: shape}
+        self.converted = []
+
+    def _shape(self, node):
+        if isinstance(node, cst.Name):
+            return self.names.get(node.value)
+        if (isinstance(node, cst.Call) and isinstance(node.func, cst.Attribute)
+                and _is_name(node.func.value, 'self')):
+            return self.shapes.get(node.func.attr.value)
+        if isinstance(node, cst.Subscript):
+            base = self._shape(node.value)
+            if isinstance(base, tuple) and _index(node) is not None and _int_literal(_index(node)) is not None:
+                k = _int_literal(_index(node))
+                if -len(base[1]) <= k < len(base[1]):
+                    return base[1][k]
+        return None
+
+    def _parent(self, node):
+        return self.get_metadata(self.METADATA_DEPENDENCIES[0], node, None)
+
+    def _native(self, node, shape):
+        parent = self._parent(node)
+        if isinstance(parent, cst.Arg):
+            call = self._parent(parent)
+            f = call.func if isinstance(call, cst.Call) else None
+            return isinstance(f, cst.Attribute) and _is_name(f.value, ALIAS)
+        if isinstance(parent, cst.Attribute) and parent.value is node:
+            return parent.attr.value in ('n', 'data')
+        if isinstance(parent, cst.ComparisonTarget) or isinstance(parent, cst.Comparison):
+            comp = parent if isinstance(parent, cst.Comparison) else self._parent(parent)
+            ops = [c.operator for c in comp.comparisons]
+            return all(isinstance(o, (cst.Is, cst.IsNot)) for o in ops) and any(
+                _is_name(c.comparator, 'None') for c in comp.comparisons)
+        if isinstance(parent, (cst.AssignTarget, cst.Return)):
+            return True
+        if isinstance(parent, cst.Assign) and parent.value is node:
+            return all(isinstance(t.target, (cst.Name, cst.Tuple)) for t in parent.targets)
+        if isinstance(parent, cst.AnnAssign):
+            return True
+        if isinstance(parent, cst.Subscript) and parent.value is node and isinstance(shape, tuple):
+            return True     # an element of a tuple of vectors: judged where the element is used
+        if isinstance(parent, cst.Element):
+            outer = self._parent(parent)
+            return isinstance(outer, cst.Tuple) and isinstance(self._parent(outer), (cst.Return, cst.Assign))
+        return False
+
+    def _leave(self, original, updated):
+        shape = self._shape(original)
+        if shape is None or self._native(original, shape):
+            return updated
+        self.converted.append(_code(original)[:80])
+        if isinstance(shape, tuple):
+            return _expr(f'tuple([_mx_vector.tolist() for _mx_vector in {_code(updated)}])')
+        return cst.Call(cst.Attribute(updated, cst.Name('tolist')), ())
+
+    def leave_Name(self, original, updated):
+        return self._leave(original, updated)
+
+    def leave_Call(self, original, updated):
+        return self._leave(original, updated)
+
+    def leave_Subscript(self, original, updated):
+        return self._leave(original, updated)
+
+
+def _object_uses(body, names, shapes):
+    """``body`` (an IndentedBlock) with every Python use of a vector made a list (``_ObjectUses``)."""
+    from libcst.metadata import MetadataWrapper
+    wrapper = MetadataWrapper(cst.Module(body=body.body), unsafe_skip_copy=True)
+    uses = _ObjectUses(names, shapes)
+    module = wrapper.visit(uses)
+    return body.with_changes(body=module.body), uses.converted
+
+
 def lower(node, cls_info, cells, scope, counter, module, ref_kinds=None):
     """Lower the vector forms of one ``_f_`` FunctionDef of ``module``; returns the new node.
 
@@ -1701,6 +1789,14 @@ def lower(node, cls_info, cells, scope, counter, module, ref_kinds=None):
         return _declare_at_top(node, decls)
     body = node.body.visit(lowering)
     vector_locals = sorted(name for name, k in lowering.env.items() if k in ('V', 'I'))
+    typed = {name: lowering.env[name] for name in vector_locals}
+    for decl in lowering.decls:     # temporaries the lowering declared as vectors
+        for small in decl.body:
+            if (isinstance(small, cst.AnnAssign) and isinstance(small.target, cst.Name)
+                    and _code(small.annotation.annotation) in TYPES.values()):
+                typed[small.target.value] = next(k for k, t in TYPES.items() if t == _code(small.annotation.annotation))
+    body, converted = _object_uses(body, typed, {n: s for n, s in lowering.shapes.items()
+                                                 if s in ('V', 'I') or isinstance(s, tuple)})
     for name, items in lowering.facts.assigns.items():
         # a local bound only as the target of loops over vectors holds C elements
         if (name not in cells.params and name not in loops and items
@@ -1709,7 +1805,7 @@ def lower(node, cls_info, cells, scope, counter, module, ref_kinds=None):
             elem = lowering.elem(lowering.iter_vectors(items[0][1])[items[0][2]])
             decls.append(_stmt(f'{name}: {SCALARS[elem]}\n'))
     decls += [_stmt(f'{name}: {TYPES[lowering.env[name]]}\n') for name in vector_locals] + lowering.decls
-    report.update({'lowered': lowering.lowered, 'fallbacks': lowering.fallbacks,
+    report.update({'lowered': lowering.lowered, 'fallbacks': lowering.fallbacks, 'lists': converted,
                    'bounds_hoisted': lowering.bounds_hoisted, 'powers': lowering.powers,
                    'vector_locals': {name: lowering.env[name] for name in vector_locals}})
     return _declare_at_top(node.with_changes(body=body), decls)
