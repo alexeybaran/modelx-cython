@@ -1,0 +1,75 @@
+name: Fork tests
+
+# Runs the unit and integration suites against the fork's pinned modelx and
+# lifelib commits. Upstream's python-package.yml only runs on main.
+
+on: [push, pull_request, workflow_dispatch]
+
+jobs:
+  test:
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 240
+    continue-on-error: ${{ matrix.experimental }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        python: ['3.13', '3.14', '3.14t']
+        experimental: [false]
+        include:
+          # agreed floor; allowed to fail. ubuntu-latest (26.04) has no 3.9
+          # build in actions/python-versions, so this cell pins 24.04.
+          - {os: ubuntu-24.04, python: '3.9', experimental: true}
+    env:
+      # short base path so MSVC link.exe stays under MAX_PATH; forward slash
+      # because pytest splits PYTEST_ADDOPTS POSIX-style
+      PYTEST_ADDOPTS: ${{ startsWith(matrix.os, 'windows') && '--basetemp=C:/t' || '' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: alexeybaran/modelx
+          ref: ac6fc71fa15b0041c0d22eb281de21eefa05e3b4
+          path: dependencies/modelx
+      - uses: actions/checkout@v4
+        with:
+          repository: alexeybaran/lifelib
+          ref: 15e1956929940d48ef9cca35a29accc0551771a3
+          path: dependencies/lifelib
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Install dependencies
+        id: install
+        # bash on every OS so a failing pip aborts the step on Windows too
+        shell: bash
+        run: |
+          python -m pip install --upgrade pip
+          # modelx in the same call as lifelib, so lifelib's modelx requirement
+          # is met by the pinned fork commit and never resolved from PyPI.
+          # Regular (not editable) installs: Cython resolves cimports of the
+          # shipped .pxd files through sys.path entries, which setuptools'
+          # editable finder does not provide.
+          python -m pip install "./dependencies/modelx[helpers]" ./dependencies/lifelib
+          python -m pip install . pytest pandas openpyxl psutil
+          python -m pip list
+      - name: Unit tests
+        timeout-minutes: 100
+        shell: bash
+        run: >
+          python -m pytest modelx_cython/tests -rfE -q
+          --junitxml=reports/unit.xml
+      - name: Integration tests
+        timeout-minutes: 120
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
+        shell: bash
+        run: >
+          python -m pytest integration_tests -rfE -q
+          --junitxml=reports/integration.xml
+      - name: Upload test reports
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: junit-${{ matrix.os }}-py${{ matrix.python }}
+          path: reports/*.xml
+          if-no-files-found: warn
