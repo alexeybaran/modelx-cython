@@ -134,13 +134,18 @@ class FrameReads:
         return getattr(self.resolver, 'frame_schemas', {}).get(name)
 
     def _receiver(self, expr):
-        """(cell call, schema) when ``expr`` is a frame receiver, else None."""
+        """(cell call, schema) when ``expr`` is a frame receiver, else None. In an item class only a table the Data
+        space publishes is one (T-5c): a frame or row the item computes itself would be prepared per item, which
+        costs more than its pandas reads (main leaves them on pandas too)."""
         schema = self._schema_of_call(expr)
-        if schema is not None:
-            return expr, schema
-        value = self._value_of(expr.value) if isinstance(expr, cst.Name) else None
-        schema = self._schema_of_call(value) if value is not None else None
-        return (value, schema) if schema is not None else None
+        found = (expr, schema) if schema is not None else None
+        if found is None:
+            value = self._value_of(expr.value) if isinstance(expr, cst.Name) else None
+            schema = self._schema_of_call(value) if value is not None else None
+            found = (value, schema) if schema is not None else None
+        if found is not None and getattr(self, 'per_item', False) and self.published(found[0]) is None:
+            return None
+        return found
 
     def prefix_receiver(self, expr):
         """T-4 (L3 through a cell): ``self.P()`` (or a local assigned once from it) where the formula of P is
