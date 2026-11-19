@@ -1602,6 +1602,9 @@ class _Rewrite(cst.CSTTransformer):
         start, stop, test = self._view_parts(view, hold)
         x = call.args[0].value
         x = _cast('_mx_cy.double', self.updated_of.get(id(x), x))
+        # T-5c: pandas' asof of NaN differs by version (NaN on pandas 3, the last label on pandas 2.2): NaN is read
+        # on pandas, so the result is live's on every supported version
+        test = self._conjunction([test, cst.Comparison(x, [cst.ComparisonTarget(cst.Equal(), x)])])
         row = self._m('asof_at', o.ref(hold), start, stop, cst.Integer(str(view.depth)), x, cst.Integer(str(error)))
         self._record(call, 'L6', view.call, view=view)
         return self._guarded(whole_call or call, updated, view, test, self._label(view, hold, row), 'i64')

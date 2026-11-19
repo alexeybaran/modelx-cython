@@ -173,7 +173,9 @@ def test_asof(tables):
         frame = pd.DataFrame({'q': np.arange(len(index)) * 1.0}, index=index)
         table = _tables.prepare(frame)
         sorted_index = index.sort_values()
-        for x in [-10, 0.5, 1, 1.49, 2, 20, 22.5, 30, 31, np.nan]:
+        # NaN is left out: pandas' asof of NaN differs by version (NaN on pandas 3, the last label on 2.2), so the
+        # compiled reads take it to pandas (test_table_probe's asof cells check that against live)
+        for x in [-10, 0.5, 1, 1.49, 2, 20, 22.5, 30, 31]:
             want = sorted_index.asof(x)
             got = table.asof(x)
             assert (want != want and got != got) or (type(want) is type(got) and want == got), (list(index), x, want, got)

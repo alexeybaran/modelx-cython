@@ -215,6 +215,14 @@ STMTS = {
     'view_member': ('grid sgrid', "sub = T.loc[('A', 'B')[t % 2]]\nreturn ((20 + t) in sub.index, (21 + 2 * t) not in sub.index)"),
     # a frame the formula computes from a Reference: its kinds can differ at run time from the traced ones
     'loc_ref': ('refd', "return T.loc[20 + t, 'q']"),
+    # T-5c: a boolean mask as the row key selects rows (pandas): never a label read
+    'loc_mask_col': ('flat grid', "return float(T.loc[T['q'] > 0.002, 'q'].sum()) + t"),
+    'loc_mask_col_local': ('flat', "m = T['q'] > 0.001 * (t + 1)\nreturn list(T.loc[m, 'r'])"),
+    'defs_at': ('table_defs', "return bool(T.at[(1, 3, 4)[t % 3], 'has_select'])"),
+    'defs_mask': ('defs', "return len(T.loc[T['is_used'] == True]) + t"),
+    # T-5c: asof of NaN is pandas' own (it differs by pandas version), as an int and as a key
+    'asof_nan_int': ('flat shuffled', "return int(T.index.asof(float('nan') if t % 2 else 21.5 + t))"),
+    'asof_nan_key': ('flat', "return T.loc[T.index.asof(float('nan') if t % 2 else 21.5 + t), 'q']"),
 }
 
 DATA = {
@@ -248,6 +256,11 @@ DATA = {
     'tri_amb': "pd.DataFrame({'q': [0.1 * n for n in range(8)], 'x': [0.0] * 8},\n"
                "        index=pd.MultiIndex.from_product([['A', 'B'], ['q', 'x'], [20, 21]]))",
     'refd': "SRC.copy()",       # the Reference SRC (set in build)
+    # T-5c: the shape of IntegratedLife's Mortality.table_defs: a cell that filters a table with a mask once, read
+    # downstream with .at on the filtered frame (a frame a cell computes, not an input)
+    'defs': "pd.DataFrame({'is_used': [True, False, True, True], 'has_select': [True, False, False, True]},\n"
+            "        index=pd.Index([1, 2, 3, 4], name='id'))",
+    'table_defs': "defs().loc[defs()['is_used'] == True]",
 }
 
 # T-5: item cells (a view of a prefix fixed per item: codes held per item; walks of a shared table)

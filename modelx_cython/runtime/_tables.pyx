@@ -206,7 +206,8 @@ cdef class PreparedTable:
         return self.row(key) >= 0
 
     def asof(self, x):
-        """``source.index.asof(x)`` for a flat numeric index."""
+        """``source.index.asof(x)`` for a flat numeric index and a number x (pandas' asof of NaN differs by version:
+        the compiled reads read NaN on pandas, and this returns NaN for it)."""
         position = self.asof_position(float(x))
         return self.asof_labels[position] if position >= 0 else np.nan
 
