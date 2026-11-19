@@ -158,6 +158,10 @@ STMTS = {
                          "return (k in T.index, T.loc[k, 'q'] if len(k) == 3 else float(T.loc[k, 'q'].sum()))"),
     'member_local': ('grid sgrid', "k = (('A', 20 + t % 4) if t % 2 else ('B', 20, 1) if t == 2 else 'A' if t == 4 else 'C')\n"
                      "return (k in T.index, k not in T.index)"),
+    # T-5c: a local holding a view's index: extremes, len and walks read the view
+    'index_alias': ('grid sgrid', "sub = T.loc[('A', 'B')[t % 2]]\nyears = sub.index\n"
+                    "y = min(max(20 + t, int(years.min())), int(years.max()))\n"
+                    "return (sub.at[y, 'q'], len(years), [k for k in years if k > 20])"),
     'iterrows_find': ('mixed', "for k, row in T.iterrows():\n    if int(row['n']) >= 1 + t:\n        return (k, str(row['tag']))\nreturn None"),
     'obj_col': ('mixed', "return (T.loc[20 + t, 'tag'], T.at[20 + t, 'tag'] == 'x')"),
     'obj_col_missing': ('mixed', "return T.loc[98 + t, 'tag']"),

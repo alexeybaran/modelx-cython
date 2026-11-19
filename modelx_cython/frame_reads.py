@@ -1052,7 +1052,13 @@ class _Rewrite(cst.CSTTransformer):
         return lowered
 
     def _index_of(self, expr):
-        """``X.index`` with X a view: the view, else None."""
+        """``X.index`` with X a view, or a local assigned once from one (T-5c): the view, else None."""
+        if isinstance(expr, cst.Name):
+            value = self.o._value_of(expr.value)
+            view = self._index_of(value) if isinstance(value, cst.Attribute) else None
+            if view is not None:        # the pandas fallbacks read the index itself
+                self.swaps.setdefault(expr.value, value)
+            return view
         if isinstance(expr, cst.Attribute) and expr.attr.value == 'index':
             return self._view(expr.value)
         return None
@@ -1097,10 +1103,9 @@ class _Rewrite(cst.CSTTransformer):
         level = self.level_extreme(original, updated)
         if level is not None:
             return level
-        if not (isinstance(func, cst.Attribute) and isinstance(func.value, cst.Attribute)
-                and func.value.attr.value == 'index'):
+        view = self._index_of(func.value) if isinstance(func, cst.Attribute) else None
+        if view is None:
             return None
-        view = self._view(func.value.value)
         if (view is not None and view.start is None and func.attr.value in ('max', 'min') and not original.args
                 and o.extreme(original) is None):
             hold = self._take(view.call, _NO_LABEL, -2)          # pandas' own max/min of a non-empty index
