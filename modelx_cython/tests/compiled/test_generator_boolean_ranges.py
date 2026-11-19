@@ -95,8 +95,11 @@ def test_nested_filtered_boolean_ranges(tmp_path):
     report = json.loads((tmp_path / 'exported_cy/_mx_admission.json').read_text())
     for name in ('every', 'some', 'some_step', 'reverse', 'total', 'maximum', 'singleton',
                  'inner_singleton', 'captured', 'captured_singleton', 'descending', 'legacy_any'):
-        assert report[f'exported_cy._mx_classes._c_Projection._f_{name}']['native_reductions'] == (
-            1 if name == 'legacy_any' else 0)      # sum with a start argument and max: not lowered (R-6)
+        assert report[f'exported_cy._mx_classes._c_Projection._f_{name}']['native_reductions'] == 0
+    # the bounded any is a general-lowering site since R-6 5a (the report counts specialised sites only):
+    # its generator is gone from the generated module, with no cold fallback
+    source = (tmp_path / 'exported_cy/_mx_classes.py').read_text(encoding='utf-8')
+    assert 'any(predicate(i) for i in range(' not in source
     probe = textwrap.dedent('''\
         import sys
         import pickle

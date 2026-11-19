@@ -66,14 +66,6 @@ def _parts(generator):
         part = part.inner_for_in
 
 
-def _literal_int(node, expected):
-    try:
-        value = literal_value(node)
-        return type(value) is int and value == expected
-    except (ValueError, TypeError):
-        return False
-
-
 def safe_range_increment(iterator):
     """Prove the final C loop increment, including an overshoot of stop."""
     args = arguments(iterator)
@@ -788,7 +780,7 @@ class NativeReductions(GeneralReductions, FormulaTransformer):
         self.builtin_names = {name for name in ('bool', 'int', 'float', 'abs', 'len', 'min', 'max',
                                                 'sum', 'all', 'any', 'round')
                               if name in builtin_reductions or name not in self.body_facts.stores}
-        self.captures, self.integer_captures = {}, {}
+        self.captures = {}
         self.scope_safe = (not has_scope_effects(formula.body.body)
                            and 'self' not in self.body_facts.stores
                            and not {'locals', 'vars', 'eval', 'exec'} & self.body_facts.reads
@@ -810,8 +802,6 @@ class NativeReductions(GeneralReductions, FormulaTransformer):
                 if isinstance(target, cst.Name):
                     if self.double_expression(rhs):
                         self.captures[id(consumer)] = target.value
-                    elif isinstance(rhs, cst.Call) and self.kind(rhs, {}) == 'longlong':
-                        self.integer_captures[id(consumer)] = target.value
 
     @cached_property
     def body_facts(self):
@@ -1061,70 +1051,6 @@ class NativeReductions(GeneralReductions, FormulaTransformer):
         actuals = ', '.join(['self', function] + [name for name, _ in args])
         return f'{helper}({actuals})'
 
-    def bounded_any(self, before, after, func, provider, operation, source, tree):
-        capture = self.integer_captures.get(id(before))
-        parts = tuple(_parts(tree))
-        if not (self.builtin_bounds and capture and capture not in self.cells.params
-                and capture not in {'self', 'min', 'max', 'range'}
-                and self.cells.get_rettype_expr(c_style=True) == 'bint' and len(parts) == 1):
-            return after
-        part, = parts
-
-        def named(node, name):
-            return isinstance(node, cst.Name) and node.value == name
-
-        if not (isinstance(part.target, cst.Name) and not part.ifs and part.asynchronous is None
-                and _call(part.iter, 'range', 2)):
-            return after
-        index = part.target.value
-        predicate_args = arguments(tree.elt, count=1)
-        if (index in {capture, 'self', 'range', 'min', 'max', *self.cells.params}
-                or predicate_args is None or not named(predicate_args[0], index)
-                or self.kind(tree.elt, {index: 'longlong'}) != 'bint'):
-            return after
-        low, high = arguments(part.iter)
-        if not (_call(low, 'max', 2) and _call(high, 'min', 2)
-                and _literal_int(low.args[0].value, 0) and named(low.args[1].value, capture)):
-            return after
-        upper, limit = arguments(high)
-        if not (isinstance(upper, cst.BinaryOperation) and isinstance(upper.operator, cst.Add)
-                and named(upper.left, capture) and isinstance(upper.right, cst.Integer)
-                and 0 < upper.right.evaluated_value <= (1 << 31) - 1
-                and arguments(limit, count=0) is not None and self.kind(limit, {}) == 'longlong'):
-            return after
-        offset = upper.right.evaluated_value
-        alias, prefix = module_name(provider), self.reserve_prefix()
-        function, binding = self.callable_name(func, prefix)
-        count = len(self.fallbacks)
-        fallback = self.cold_fallback(source, tree, capture, function, 'object')
-        if len(self.fallbacks) == count:
-            return after
-        self.providers.add(provider)
-        self.count += 1
-        guard = f'{prefix}_native'
-        self.exact_receiver_guards.add(guard)
-        predicate = f'self.{tree.elt.func.attr.value}({prefix}_index)'
-        return cst.FlattenSentinel(cst.parse_module(f"""
-{binding}
-{prefix}_first: _mx_cy.longlong = {capture}
-{guard}: _mx_cy.bint = {alias}.{operation}_accepts({function}) and {prefix}_first <= {(1 << 63) - 1 - offset}
-if {guard}:
-    {prefix}_low: _mx_cy.longlong = {prefix}_first if {prefix}_first > 0 else 0
-    {prefix}_high: _mx_cy.longlong = {prefix}_first + {offset}
-    {prefix}_limit: _mx_cy.longlong = {code(limit)}
-    if {prefix}_high > {prefix}_limit:
-        {prefix}_high = {prefix}_limit
-    {prefix}_index: _mx_cy.longlong
-    try:
-        for {prefix}_index in range({prefix}_low, {prefix}_high):
-            if {predicate}:
-                return True
-    except StopIteration as {prefix}_error:
-        raise RuntimeError("generator raised StopIteration") from {prefix}_error
-    return False
-return {fallback}
-""").body)
-
     def single_range(self, after, func, provider, operation, source, tree):
         parts = tuple(_parts(tree))
         if len(parts) != 1 or not self.cells.formula_allows_exact_receiver:
@@ -1196,61 +1122,6 @@ return {fallback}
             return None
         return f'self.{node.func.attr.value}({counter})'
 
-    def minimum(self, after, tree):
-        """Keep the first minimum in a typed range, with the ordinary generator as fallback."""
-        part = tree.for_in
-        bounds = arguments(part.iter, 'range')
-        if (self.cells.get_rettype_expr(c_style=True) != 'double'
-                or not isinstance(part.target, cst.Name)
-                or part.inner_for_in is not None or part.ifs or part.asynchronous is not None
-                or not bounds or len(bounds) > 3 or not safe_range_increment(part.iter)
-                or not all(self.kind(arg, {}) in ('longlong', 'bint') for arg in bounds)):
-            return after
-        index = part.target.value
-        if self.kind(tree.elt, {index: 'longlong'}) != 'double':
-            return after
-        prefix = self.reserve_prefix()
-        function, binding = self.callable_name(cst.Name('min'), prefix)
-        count = len(self.fallbacks)
-        fallback = self.cold_fallback(code(tree), tree, None, function)
-        if len(self.fallbacks) == count:
-            return after
-        self.providers.add(BUILTIN_PROVIDER)
-        self.count += 1
-        counter = f'{prefix}_index'
-        contexts = CstFacts(tree.elt).contexts
-
-        class RenameIndex(cst.CSTTransformer):
-            def leave_Name(self, before, after):
-                return after.with_changes(value=counter) if before.value == index and before in contexts else after
-
-        element = code(tree.elt.visit(RenameIndex()))
-        bound_names = [f'{prefix}_bound_{i}' for i in range(len(bounds))]
-        bound_assignments = '\n'.join(f'    {name}: _mx_cy.longlong = {code(value)}'
-                                      for name, value in zip(bound_names, bounds))
-        alias = module_name(BUILTIN_PROVIDER)
-        return cst.FlattenSentinel(cst.parse_module(f"""
-{binding}
-if {exact_receiver(self.cls_info.name)} and {alias}.min_accepts({function}):
-{bound_assignments}
-    {counter}: _mx_cy.longlong
-    {prefix}_seen: _mx_cy.bint = False
-    {prefix}_best: _mx_cy.double = 0.0
-    {prefix}_value: _mx_cy.double
-    try:
-        for {counter} in range({', '.join(bound_names)}):
-            {prefix}_value = {element}
-            if not {prefix}_seen or {prefix}_value < {prefix}_best:
-                {prefix}_best = {prefix}_value
-                {prefix}_seen = True
-    except StopIteration as {prefix}_error:
-        raise RuntimeError("generator raised StopIteration") from {prefix}_error
-    if not {prefix}_seen:
-        return {function}(())
-    return {prefix}_best
-return {fallback}
-""").body)
-
     def leave_SimpleStatementLine(self, before, after):
         result = self._specialized(before, after)
         if result is not after:
@@ -1279,14 +1150,9 @@ return {fallback}
         builtin = func.value if isinstance(func, cst.Name) and func.value in self.builtin_reductions else None
         if len(args) != 1:
             return after
-        if builtin == 'min':
-            return after if assignment else self.minimum(after, tree)
         if builtin == 'all':
             return after if assignment else self.single_range(
                 after, func, BUILTIN_PROVIDER, 'all', source, tree)
-        if builtin == 'any':
-            return after if assignment else self.bounded_any(
-                before, after, func, BUILTIN_PROVIDER, 'any', source, tree)
         if builtin != 'sum':
             return after
         provider = STREAMS_PROVIDER
