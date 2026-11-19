@@ -75,11 +75,54 @@ cdef inline long long _mx_integer_result(_mx_integer_source value, str path) exc
         return value
 
 
-cdef inline long long _mx_signed_remainder(long long left, long long right, str path) except? -1:
-    # C remainder shares division's overflow at LLONG_MIN % -1.
-    if right == -1:
-        return 0
-    return left % right
+cdef extern from *:
+    """
+    /* Python's a // b on C integers with the branches Cython emits on LP64 platforms, on every
+       platform: Cython 3.3.1 compiles its LLONG_MIN // -1 check only where long long is as wide as
+       long, so the C division traps there (STATUS_INTEGER_OVERFLOW on Windows). The error value
+       is LLONG_MAX (a quotient only of LLONG_MAX // 1), so a quotient of -1 needs no error check.
+       The path is the Cell's, for the signature of the integer helpers; the checked mode's
+       handler names the OverflowError after it. */
+    static CYTHON_INLINE long long __mx_signed_floordiv(long long a, long long b, PyObject *path) {
+        long long q, r;
+        (void)path;
+        if (b == 0) {
+            PyErr_SetString(PyExc_ZeroDivisionError, "integer division or modulo by zero");
+            return LLONG_MAX;
+        }
+        if (b == -1 && a == LLONG_MIN) {
+            PyErr_SetString(PyExc_OverflowError, "value too large to perform division");
+            return LLONG_MAX;
+        }
+        q = a / b;
+        r = a - q * b;
+        return q - ((r != 0) & ((r ^ b) < 0));
+    }
+    """
+    long long _mx_signed_floordiv "__mx_signed_floordiv"(long long left, long long right, str path) \
+        except? 9223372036854775807
+
+
+cdef extern from *:
+    """
+    /* Python's a % b on C integers: Cython's remainder (zero check, sign adaptation), and 0 for
+       b == -1, where C's a % b traps (LLONG_MIN % -1) and Cython does not check it. A Python
+       remainder is smaller than b in magnitude, so LLONG_MAX is never one: the error value. */
+    static CYTHON_INLINE long long __mx_signed_remainder(long long a, long long b, PyObject *path) {
+        long long r;
+        (void)path;
+        if (b == 0) {
+            PyErr_SetString(PyExc_ZeroDivisionError, "integer division or modulo by zero");
+            return LLONG_MAX;
+        }
+        if (b == -1)
+            return 0;
+        r = a % b;
+        return r + ((r != 0) & ((r ^ b) < 0)) * b;
+    }
+    """
+    long long _mx_signed_remainder "__mx_signed_remainder"(long long left, long long right, str path) \
+        except 9223372036854775807
 
 
 @cython.overflowcheck(True)
