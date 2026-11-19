@@ -2,7 +2,8 @@
 
 ``step(t) = data.rates()[t] * i`` would copy the shared ``Data``'s cached slice on every evaluation (an atomic
 acquire and release of the one acquisition count every worker shares). The compiled item holds the slice once
-(``holds`` kind ``array``) and reads elements of its own field: the generated formula calls the held read, the
+(``holds`` kind ``array``) and reads elements of its own field (in formulas with parameters; a zero-argument Cell
+runs once per item and keeps its read): the generated formula calls the held read, the
 values equal live; four threads racing on the first reads of a fresh model all get the right values (the Cell's
 first-fill discipline, mv-race); and after ``Data.clear_all()`` between runs, items read the refilled array.
 A clear concurrent with evaluation is outside the contract (change an input, clear, run again: D191).
@@ -24,9 +25,10 @@ def _build(tmp_path):
         proj = model.new_space("Projection", formula=lambda i: None)
         proj.data = data
         proj.new_cells("step", "def step(t):\n    return data.rates()[t] * i\n")
-        proj.new_cells("corner", "def corner():\n    return data.grid()[2, 3] + data.grid()[i % 3, 1]\n")
+        proj.new_cells("corner", "def corner(k):\n    return data.grid()[2, 3] + data.grid()[i % 3, k]\n")
+        proj.new_cells("head", "def head():\n    return data.rates()[0] + 1.0\n")      # once per item: not held
         proj.new_cells("total", "def total():\n    s = 0.0\n    for t in range(101):\n"
-                                "        s += step(t)\n    return s + corner()\n")
+                                "        s += step(t)\n    return s + corner(1) + head()\n")
         expected = {i: float(model.Projection[i].total()) for i in range(1, 9)}
         model.export(tmp_path / "exported")
     finally:
@@ -43,6 +45,7 @@ def test_held_array_reads_values_and_generated_code(tmp_path):
     source = (tmp_path / "exported_cy/_mx_classes.py").read_text(encoding="utf-8")
     assert "_mx_held__c_Projection_mx_ta_" in source
     assert "data.rates()[t]" not in source and "data.grid()[2, 3]" not in source, "subscripts not held"
+    assert "data.rates()[0]" in source, "a zero-argument Cell runs once per item: its read stays as written"
     probe = textwrap.dedent(f"""\
         from exported_cy import mx_model as m
         expected = {expected!r}
