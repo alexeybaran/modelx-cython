@@ -128,9 +128,8 @@ for name, kind in VECTORS.items():
     assert all(type(p).__name__ == kind for p in parts), (name, type(value))
     for p in parts:
         assert pickle.loads(pickle.dumps(p)) == p
-        assert list(p) == p and tuple(p) == p and len(p) == len(list(p))
-        assert memoryview(p).readonly
-assert type(c.listed(2)).__name__ == 'F64Vec' and c.listed(2) == [o.rate(2), 2.0]
+        assert list(p) == p and len(p) == len(list(p))      # D154: a list (never equal to a tuple)
+assert type(c.listed(2)).__name__ == 'list' and c.listed(2) == [o.rate(2), 2.0]
 
 for k in range(40):
     assert bits(o.noise_sum(k)) == bits(c.noise_sum(k)), k
@@ -152,12 +151,18 @@ for th in threads:
     th.join()
 assert not errors
 
-try:
-    shared[0] = 1.0
-except TypeError:
-    pass
-else:
-    raise AssertionError('a cached vector must be read-only')
+# D154: a Python caller gets new lists; changing them never reaches the cache
+mine = c.cohorts(6)
+assert type(mine) is tuple and all(type(part) is list for part in mine)
+again = c.cohorts(6)
+assert all(a == b and a is not b for a, b in zip(mine, again))     # each inner list is fresh
+before = [list(part) for part in mine]
+mine[1][0] = 1.0
+mine[0].append(2.0)
+assert [list(part) for part in c.cohorts(6)] == before
+single = c.listed(2)
+single[0] = -1.0
+assert c.listed(2) == [o.rate(2), 2.0]
 print('vector cells ok')
 """
 
@@ -199,8 +204,9 @@ def test_vector_cells_compile_to_typed_buffers(tmp_path):
     assert reports["cohorts"]["bounds_hoisted"] == 4
     assert reports["cohorts"]["derived_index_locals"] == ["cy"]
     assert reports["fallback"]["fallbacks"], reports["fallback"]
-    vectors = {"cohorts": "F64Vec", "powered": "F64Vec", "shifted": "F64Vec", "zipped": "F64Vec",
-               "ranged": "F64Vec", "sliced": "F64Vec", "ids": "I64Vec", "listed": "F64Vec"}
+    # D154: Python callers get lists (a tuple of lists for a tuple of vectors)
+    vectors = {"cohorts": "list", "powered": "list", "shifted": "list", "zipped": "list",
+               "ranged": "list", "sliced": "list", "ids": "list", "listed": "list"}
     (tmp_path / "check.py").write_text(CHECK.format(names=names, vectors=vectors), encoding="utf-8")
     result = subprocess.run([sys.executable, "check.py"], cwd=tmp_path, check=True,
                             capture_output=True, text=True)

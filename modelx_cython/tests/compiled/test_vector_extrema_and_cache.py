@@ -89,8 +89,10 @@ for repeat in range(2):          # the second pass reads the caches
             assert bits(o.pairs(t, g)) == bits(c.pairs(t, g)), (t, g)
             for z in range(2):
                 assert bits(o.triple(t, g, z)) == bits(c.triple(t, g, z)), (t, g, z)
-assert type(c.pairs(3, 2)).__name__ == 'F64Vec' and type(c.triple(3, 2, 1)).__name__ == 'F64Vec'
-assert c.pairs(3, 2) is c.pairs(3, 2)          # cached, not rebuilt
+assert type(c.pairs(3, 2)).__name__ == 'list' and type(c.triple(3, 2, 1)).__name__ == 'list'
+# D154: a new list per Python call, equal values; the cache itself is the compiled entry's value
+assert c.pairs(3, 2) == c.pairs(3, 2) and c.pairs(3, 2) is not c.pairs(3, 2)
+assert c._mx_cell_pairs(3, 2) is c._mx_cell_pairs(3, 2)      # cached, not rebuilt
 assert type(o.mixed(1)) is type(c.mixed(1)) is float and type(c.ints(1)) is int
 # arguments outside the sampled axes: the compiled domain contract (as for every cached cell):
 # the same value, or IndexError naming the sampled range

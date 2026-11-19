@@ -38,7 +38,7 @@ o, c = original.Projection, compiled.Projection
 empty_float = 0
 for t in range(0, 12):
     v = c.entries(t)
-    assert type(v).__name__ == 'I64Vec' and list(v) == o.entries(t) and v == o.entries(t), t
+    assert type(v).__name__ == 'list' and list(v) == o.entries(t) and v == o.entries(t), t     # D154
     assert all(type(x) is int for x in v), t
     for name in {names!r}:
         a, b = getattr(o, name)(t), getattr(c, name)(t)
@@ -50,13 +50,13 @@ for t in range(0, 12):
         if name in ('total', 'filt') and type(a) is float:
             assert a.hex() == b.hex(), (name, t)
 assert empty_float > 0
-assert c.entries(4) is c.entries(4)
-try:
-    c.entries(4)[0] = 7
-except TypeError:
-    pass
-else:
-    raise AssertionError('a cached vector must be read-only')
+# D154: a new list per Python call; changing it never reaches the cache
+assert c.entries(4) == c.entries(4) and c.entries(4) is not c.entries(4)
+assert c._mx_cell_entries(4) is c._mx_cell_entries(4)        # cached, not rebuilt
+mine = c.entries(4)
+mine[0] = 7
+mine.append(8)
+assert c.entries(4) == o.entries(4)
 print('integer vectors ok')
 """
 
