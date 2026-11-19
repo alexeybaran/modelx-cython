@@ -8,6 +8,13 @@ starred parts). Every case is a cell of the probe model (``test_table_probe``).
 - Translation of every case runs under strict lowering: an internal error of a recogniser fails the build.
 - A seeded subset is compiled and every case is compared with live modelx as the probe compares: equal, or one of
   the probe's accepted boundary types. A case either compiles natively or is left to pandas; both must equal live.
+  A case that differs and has no read lowered by this layer (every report entry of its cell on pandas) is the base
+  compiler's own behaviour: it is listed, not failed.
+
+Tiers: the default suite runs a small fuzz of a fixed seed (about 300 translations, 50 compiled cases, 32 formulas
+of two-formula pairs). ``-m fuzz_full`` runs the full fuzz (3,000, 500 and 240) on the seed MX_CY_FUZZ_SEED, or a
+random one; the seed is printed and named in every failure, so a failure is reproducible. Each failure the full fuzz
+finds becomes a fixed probe cell.
 """
 import json
 import os
@@ -19,8 +26,8 @@ import pytest
 import test_table_probe as probe
 
 SEED = 20261119
-COUNT = int(os.environ.get('MX_CY_FUZZ_CASES', '3000'))
-COMPILED = int(os.environ.get('MX_CY_FUZZ_COMPILED', '500'))
+SMALL = {'translate': 300, 'compiled': 50, 'pairs': 8}
+FULL = {'translate': 3000, 'compiled': 500, 'pairs': 60}
 
 KEYS = {   # by table: one-part keys, complete keys, prefixes
     'flat': ['20', '20 + t', '0x14', '20.0', 'True', "'a'", '(20,)', '((20,),)', '[20]', '20:21', 'int(20.0)',
@@ -102,26 +109,61 @@ def _build(tmp_path, *extra):
                           capture_output=True, text=True)
 
 
-def test_fuzz_translation_never_raises(tmp_path):
-    _model(tmp_path, cases(COUNT))
+def _full_seed():
+    seed = int(os.environ.get('MX_CY_FUZZ_SEED') or random.SystemRandom().randrange(1, 2 ** 31))
+    print(f'table fuzz seed {seed} (MX_CY_FUZZ_SEED={seed} reproduces it)')
+    return seed
+
+
+def _translation(tmp_path, count, seed):
+    _model(tmp_path, cases(count, seed))
     built = _build(tmp_path, '--translate-only')
-    assert built.returncode == 0, built.stdout[-4000:] + built.stderr[-8000:]
+    assert built.returncode == 0, f'seed {seed}\n' + built.stdout[-4000:] + built.stderr[-8000:]
     reads = json.loads((tmp_path / 'probe_nomx_cy' / '_mx_table_reads.json').read_text())
     errors = [e for es in reads.values() if isinstance(es, list) for e in es
               if isinstance(e, dict) and 'internal error' in e.get('reason', '')]
-    assert not errors, errors[:10]
+    assert not errors, (seed, errors[:10])
 
 
-def test_fuzz_compiled_equals_live(tmp_path):
-    chosen = random.Random(SEED + 1).sample(cases(COUNT), min(COMPILED, COUNT))
-    _model(tmp_path, chosen)
-    built = _build(tmp_path)
-    assert built.returncode == 0, built.stdout[-4000:] + built.stderr[-8000:]
-    verdicts = json.loads(probe._run(tmp_path, 'checks.py').stdout)
+def _differing(tmp_path, verdicts):
+    """The differing cases this layer lowered (a cell with a read not on pandas); the others are listed."""
+    reads = json.loads((tmp_path / 'probe_nomx_cy' / '_mx_table_reads.json').read_text())
+    lowered = {cell.split('.')[-1] for cell, es in reads.items() if isinstance(es, list)
+               and any(isinstance(e, dict) and e.get('form') not in (None, 'pandas') for e in es)}
     differing = {name: v for name, v in verdicts.items()
                  if v != 'same' and not (v.startswith('boundary: ')
                                          and set(v[len('boundary: '):].split('; ')) <= probe.BOUNDARY)}
-    assert not differing, '\n'.join(f'{n}: {v}' for n, v in sorted(differing.items())[:40])
+    outside = sorted(n for n in differing if n.split('.')[-1] not in lowered)
+    if outside:
+        print(f'{len(outside)} differing cases with every read on pandas (the base compiler):', outside[:20])
+    return {n: v for n, v in differing.items() if n.split('.')[-1] in lowered}
+
+
+def _compiled(tmp_path, count, total, seed):
+    chosen = random.Random(seed + 1).sample(cases(total, seed), min(count, total))
+    _model(tmp_path, chosen)
+    built = _build(tmp_path)
+    assert built.returncode == 0, f'seed {seed}\n' + built.stdout[-4000:] + built.stderr[-8000:]
+    differing = _differing(tmp_path, json.loads(probe._run(tmp_path, 'checks.py').stdout))
+    assert not differing, f'seed {seed}\n' + '\n'.join(f'{n}: {v}' for n, v in sorted(differing.items())[:40])
+
+
+def test_fuzz_translation_never_raises(tmp_path):
+    _translation(tmp_path, SMALL['translate'], SEED)
+
+
+def test_fuzz_compiled_equals_live(tmp_path):
+    _compiled(tmp_path, SMALL['compiled'], SMALL['translate'], SEED)
+
+
+@pytest.mark.fuzz_full
+def test_fuzz_full_translation_never_raises(tmp_path):
+    _translation(tmp_path, FULL['translate'], _full_seed())
+
+
+@pytest.mark.fuzz_full
+def test_fuzz_full_compiled_equals_live(tmp_path):
+    _compiled(tmp_path, FULL['compiled'], FULL['translate'], _full_seed())
 
 
 # Two-formula mode: pairs of formulas of one item class that reuse the same local names, cells and tables with
@@ -158,18 +200,24 @@ def pairs(count, seed=SEED + 2):
     return out
 
 
-def test_fuzz_two_formulas(tmp_path):
-    items = pairs(int(os.environ.get('MX_CY_FUZZ_PAIRS', '60')))
+def _two_formulas(tmp_path, count, seed):
+    items = pairs(count, seed)
     (tmp_path / 'probe_model.py').write_text(
         probe.MODEL.format(ops={}, stmts={}, data=probe.DATA, t5_items=items), encoding='utf-8')
     (tmp_path / 'sample.py').write_text(probe.SAMPLE, encoding='utf-8')
     (tmp_path / 'checks.py').write_text(probe.CHECKS, encoding='utf-8')
-    (tmp_path / 'spec.py').write_text(repr({'parallel_workers': 1, **SPEC}), encoding='utf-8')
+    (tmp_path / 'spec.py').write_text(repr({'parallel_workers': 1, 'strict_lowering': True}), encoding='utf-8')
     probe._run(tmp_path, 'probe_model.py')
     built = _build(tmp_path)
-    assert built.returncode == 0, built.stdout[-4000:] + built.stderr[-8000:]
-    verdicts = json.loads(probe._run(tmp_path, 'checks.py').stdout)
-    differing = {name: v for name, v in verdicts.items()
-                 if v != 'same' and not (v.startswith('boundary: ')
-                                         and set(v[len('boundary: '):].split('; ')) <= probe.BOUNDARY)}
-    assert not differing, '\n'.join(f'{n}: {v}' for n, v in sorted(differing.items())[:40])
+    assert built.returncode == 0, f'seed {seed}\n' + built.stdout[-4000:] + built.stderr[-8000:]
+    differing = _differing(tmp_path, json.loads(probe._run(tmp_path, 'checks.py').stdout))
+    assert not differing, f'seed {seed}\n' + '\n'.join(f'{n}: {v}' for n, v in sorted(differing.items())[:40])
+
+
+def test_fuzz_two_formulas(tmp_path):
+    _two_formulas(tmp_path, SMALL['pairs'], SEED + 2)
+
+
+@pytest.mark.fuzz_full
+def test_fuzz_full_two_formulas(tmp_path):
+    _two_formulas(tmp_path, FULL['pairs'], _full_seed() + 2)
