@@ -189,6 +189,7 @@ class FrameReads:
         self.holds = {}         # (receiver code, label, kind) -> _Hold
         self.bindings = {}      # receiver code -> its binding (_Hold of the table field)
         self.code_fields, self.row_fields = {}, {}
+        self.tuple_guards = {}  # T-5c: code of a part ``k[i]`` of a key tuple held at run time -> (code of k, count)
         self.mutated = self._mutated(node)
         self.asof_locals = self._asof_locals(node)
         self.views = {}         # T-5: view local -> _View
@@ -354,6 +355,9 @@ class FrameReads:
             what, field, table, level_or_key, extra = hold
             if what == 'code':
                 value = f'{m}.hold_code(self.{table}, {level_or_key}, {_code(extra)})'
+                if _code(extra) in self.tuple_guards:      # T-5c: -1 (the reads run on pandas) when not a tuple
+                    key, count = self.tuple_guards[_code(extra)]
+                    value = f'({value} if type({key}) is tuple and len({key}) == {count} else -1)'
             elif what == 'range':       # T-5: the stored rows of a prefix held per item, packed, plus 2 (0: unresolved)
                 value = f'{level_or_key} + 2'
             elif what == 'free':        # T-4.2: the item's own flag, set when the cell is assigned
@@ -642,8 +646,34 @@ class FrameReads:
         if isinstance(part, cst.SimpleString) or self._enum_attribute(part):
             return True
         parts = _index_parts(part) if isinstance(part, cst.Subscript) else None
-        return (parts is not None and len(parts) == 1 and _literal_str(parts[0]) is not None
+        return (parts is not None and len(parts) == 1
+                and (_literal_str(parts[0]) is not None or _code(part) in self.tuple_guards)
                 and isinstance(part.value, cst.Call) and item_constant(part.value, self.cached_call))
+
+    def tuple_key(self, key, count):
+        """T-5c: ``k[0]`` ... ``k[count - 1]`` for a key held in a local or returned by a cached zero-argument cell,
+        whose value is a tuple of ``count`` parts at run time (checked by every read: ``guards``); a local assigned
+        once from such a cell is that cell. None for another key."""
+        from .row_cells import item_constant
+        if count < 2 or count > MAX_PARTS:
+            return None
+        if isinstance(key, cst.Name):
+            value = self._value_of(key.value)
+            if isinstance(value, cst.Call) and item_constant(value, self.cached_call):
+                key = value
+            elif key.value in self.facts._params or self.views.get(key.value) or key.value in self.columns:
+                return None
+        elif not (isinstance(key, cst.Call) and item_constant(key, self.cached_call)):
+            return None
+        parts = [cst.Subscript(key, [cst.SubscriptElement(cst.Index(cst.Integer(str(i))))]) for i in range(count)]
+        for part in parts:
+            self.tuple_guards[_code(part)] = (_code(key), count)
+        return parts
+
+    def guards(self, parts):
+        """The run-time tests that the key tuples of ``parts`` are tuples of their count (one per tuple)."""
+        tests = dict.fromkeys(self.tuple_guards[_code(p)] for p in parts if _code(p) in self.tuple_guards)
+        return [cst.parse_expression(f'(type({k}) is tuple and len({k}) == {n})') for k, n in tests]
 
     def _enum_attribute(self, part):
         """``self.<Enum>.<member>`` (or ``self._mx_definition_<Enum>.<member>``) on an enum Reference."""
@@ -817,6 +847,9 @@ class _Rewrite(cst.CSTTransformer):
                 return None, 'a tuple key on a single-level index'
             parts = [key]
         else:
+            runtime = self.o.tuple_key(key, len(levels)) if not isinstance(key, cst.Tuple) else None
+            if runtime is not None:         # T-5c: a tuple held in a local or returned by a cell, checked per read
+                return runtime, None
             if not isinstance(key, cst.Tuple) or any(isinstance(e, cst.StarredElement) for e in key.elements):
                 return None, 'the key is not a tuple display of every level'
             parts = [e.value for e in key.elements]
@@ -833,7 +866,7 @@ class _Rewrite(cst.CSTTransformer):
         """(key arguments, extra native conditions) for a read of ``parts`` through ``hold``: one level code per part
         (T-5: the one read path for every key), ``held - 1`` for a part fixed per item (and its condition that the
         part is present), ``lcode``/``ocode`` of the part otherwise."""
-        conditions = []
+        conditions = self.o.guards(parts)
         codes = [self._held(hold, level, part, conditions) if self.o.item_fixed(part, kind)
                  else self.code_of(hold, level, part, kind) for level, (part, kind) in enumerate(zip(parts, levels))]
         return self.code_args(codes), conditions
@@ -1399,14 +1432,21 @@ class _Rewrite(cst.CSTTransformer):
         kind = dict(view.schema['columns']).get(label) if view.schema['kind'] == 'frame' else None
         own = _parts(parts[0])
         levels = view.schema['levels']
+        if len(own) == 1 and view.depth + 1 < len(levels):     # T-5c: a key tuple held at run time
+            own = o.tuple_key(parts[0], len(levels) - view.depth) or own
         if label is None or kind not in READ or view.depth + len(own) != len(levels):
             return None
         hold = self._take(view.call, label, COLUMN_KIND[kind])
         start, stop, test = self._view_parts(view, hold)
-        suffix, args = self._codes(hold, view.codes, own, levels)
+        conditions = o.guards(own)
+        codes = list(view.codes) + [self._held(hold, level, part, conditions) if o.item_fixed(part, levels[level])
+                                    else self.code_of(hold, level, part, levels[level])
+                                    for level, part in enumerate(own, view.depth)]
+        suffix, args = self.code_args(codes)
+        test = self._conjunction([test, *conditions])
         native = self._m(kind + suffix, o.ref(hold), o.slot(hold), *args)
         self._record(original, 'L3', view.call)
-        return self._guarded(original, updated, view, test, native, kind)
+        return self._guarded(original, updated, view, test, native, None if o.guards(own) else kind)
 
     # ------------------------------------------------------------------ T-5: row locals
     def leave_SimpleStatementLine(self, original, updated):
@@ -1652,7 +1692,9 @@ class _Rewrite(cst.CSTTransformer):
         (suffix, args), conditions = self._read_args(hold, key_parts, schema['levels'])
         read = self._m(kind + suffix, o.ref(hold), o.slot(hold), *args)
         self._record(original, form, call)
-        return self._lowered(self._native_test(hold, conditions), read, self._fallback(updated, call), kind)
+        # T-5c: with a key tuple checked at run time the pandas branch may be a prefix (a Series): the read is boxed
+        typed = None if o.guards(key_parts) else kind
+        return self._lowered(self._native_test(hold, conditions), read, self._fallback(updated, call), typed)
 
     def object_read(self, original, updated, value, form, call, schema, key, label):
         """T-5: ``R.loc[key, "c"]`` of an object column (or ``S[k]`` of an object Series): the object pandas returns,
@@ -1893,9 +1935,14 @@ class _Rewrite(cst.CSTTransformer):
             view = _View(None, *found)
         key = original.left
         remaining = len(view.schema['levels']) - view.depth
+        runtime = None
         if remaining > 1 and not isinstance(key, cst.Tuple) and not (
                 o.facts.is_int(key) or _literal_str(key) is not None or o.facts.enum_constant(key) is not None):
-            return None         # a name may hold a whole tuple key: L7 resolves key locals, else pandas
+            # T-5c: a key held in a local or returned by a cell: a tuple of every remaining level is a complete key,
+            # another tuple is pandas' own, any other value a one-level prefix
+            runtime = o.tuple_key(key, remaining)
+            if runtime is None:
+                return None
         own = [e.value for e in key.elements] if isinstance(key, cst.Tuple) and remaining > 1 else [key]
         levels = view.schema['levels']
         count = view.depth + len(own)
@@ -1904,19 +1951,27 @@ class _Rewrite(cst.CSTTransformer):
             return None         # a complete key on the whole table: L7
         view.used = True
         hold = self._take(view.call, _NO_LABEL, -1)
-        codes = list(view.codes)
-        for level, part in enumerate(own, start=view.depth):
-            codes.append(self._held(hold, level, part, []) if o.item_fixed(part, levels[level])
-                         else self.code_of(hold, level, part, levels[level]))
-        if count == len(levels):
-            suffix, args = self.code_args(codes)
-            test = self._m('contains' + suffix, o.ref(hold), *args)
-        else:
-            test = cst.Comparison(self._m('view_start', o.ref(hold), cst.Integer(str(count)), *self._padded(codes)),
-                                  [cst.ComparisonTarget(cst.GreaterThanEqual(), cst.Integer('0'))])
-        if isinstance(target.operator, cst.NotIn):
-            test = cst.UnaryOperation(cst.Not(), test)
+
+        def membership(parts):
+            codes = list(view.codes) + [self._held(hold, level, part, []) if o.item_fixed(part, levels[level])
+                                        else self.code_of(hold, level, part, levels[level])
+                                        for level, part in enumerate(parts, start=view.depth)]
+            if view.depth + len(parts) == len(levels):
+                suffix, args = self.code_args(codes)
+                test = self._m('contains' + suffix, o.ref(hold), *args)
+            else:
+                test = cst.Comparison(self._m('view_start', o.ref(hold), cst.Integer(str(view.depth + len(parts))),
+                                              *self._padded(codes)),
+                                      [cst.ComparisonTarget(cst.GreaterThanEqual(), cst.Integer('0'))])
+            return cst.UnaryOperation(cst.Not(), test) if isinstance(target.operator, cst.NotIn) else test
+        test = membership(own)
+        shape = []
+        if runtime is not None:     # a tuple of another length: pandas (the native test fails)
+            k, n = o.tuple_guards[_code(runtime[0])]
+            test = self._lowered(cst.parse_expression(f'type({k}) is tuple'), membership(runtime), test)
+            shape = [cst.parse_expression(f'(type({k}) is not tuple or len({k}) == {n})')]
         start, stop, native = self._view_parts(view, hold)
+        native = self._conjunction([native, *shape])
         if name is None and isinstance(index.value, cst.Name):
             self.replaced_names.add(index.value.value)
         self._record(original, 'L7', view.call)
@@ -1953,8 +2008,11 @@ class _Rewrite(cst.CSTTransformer):
         if isinstance(target.operator, cst.NotIn):
             test = cst.UnaryOperation(cst.Not(), test)
         self._record(original, 'L7', call)
-        # a part fixed per item that is absent from its level: the membership is False without a lookup
-        native = self._native_test(hold, [])
+        # a part fixed per item that is absent from its level: the membership is False without a lookup; a key that
+        # is not the tuple the read expects (T-5c) is pandas' own membership
+        guards = o.guards(key_parts)
+        conditions = conditions[len(guards):]
+        native = self._native_test(hold, guards)
         if conditions:
             test = self._lowered(self._conjunction(conditions), test,
                                  cst.Name('True' if isinstance(target.operator, cst.NotIn) else 'False'))
