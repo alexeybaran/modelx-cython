@@ -148,6 +148,16 @@ STMTS = {
     'iterrows_three': ('flat', "total = 0.0\nfor i, (k, row) in enumerate(T.iterrows()):\n    total += i * row['q'] + k\n"
                        "return total + t"),
     'row_slice': ('flat', "row = T.loc[20 + t]\nreturn float(row['q']) + float(row[:1].iloc[0])"),
+    # T-5c: a key tuple held in a local (checked per read: a scalar or a tuple of another length is pandas' own)
+    'tuple_key_local': ('grid sgrid', "k = ('A', 20 + t % 4) if t % 2 else ('B', 21)\n"
+                        "return (T.loc[k, 'q'], k in T.index, ('C', 20) in T.index)"),
+    'tuple_key_scalar': ('grid', "k = 'A' if t % 2 else 'B'\nreturn (float(T.loc[k, 'q'].sum()), k in T.index)"),
+    'tuple_key_view': ('tri', "sub = T.loc[('A', 'B')[t % 2]]\nk = ('F', 20 + t % 2) if t < 3 else ('M', 21)\n"
+                       "return sub.loc[k, 'q']"),
+    'tuple_key_length': ('tri', "k = ('A', 'F') if t % 2 else ('B', 'M', 20)\n"
+                         "return (k in T.index, T.loc[k, 'q'] if len(k) == 3 else float(T.loc[k, 'q'].sum()))"),
+    'member_local': ('grid sgrid', "k = (('A', 20 + t % 4) if t % 2 else ('B', 20, 1) if t == 2 else 'A' if t == 4 else 'C')\n"
+                     "return (k in T.index, k not in T.index)"),
     'iterrows_find': ('mixed', "for k, row in T.iterrows():\n    if int(row['n']) >= 1 + t:\n        return (k, str(row['tag']))\nreturn None"),
     'obj_col': ('mixed', "return (T.loc[20 + t, 'tag'], T.at[20 + t, 'tag'] == 'x')"),
     'obj_col_missing': ('mixed', "return T.loc[98 + t, 'tag']"),
@@ -203,6 +213,11 @@ T5_ITEMS = {
     'row_cell_lit': "return mrow()['q'] * mrow()['n']",
     'obj_item': "return data.mixed().loc[pid(), 'tag'] + data.mixed().loc[20 + t, 'tag']",
     'row_cell_computed': "return float(mrow()[('q', 'n')[t % 2]]) + float(mrow()['q'])",
+    # T-5c: a key tuple returned by a cell, fixed per item: its codes held per item (a tuple checked once)
+    'tuple_cell_view': "sub = data.rates().loc[plan()]\na = anchor()\nreturn sub.loc[a, 'q'] + (anchor() in sub.index)",
+    'tuple_cell_whole': "return data.rates().loc[full(), 'q'] + data.rates().loc[odd(), 'q'].sum()",
+    'member_cell': "return (plan() in data.rates().index, full() in data.rates().index, odd() not in data.rates().index,\n"
+                   "        anchor() in data.rates().loc[plan()].index, t)",
 }
 
 # Compiled differs from live, by cell: what the redesign removes step by step. Empty since T-3 (the sample
@@ -266,6 +281,9 @@ def build():
     items.new_cells("key_rebound__rates", "def key_rebound__rates(t):\\n    key = (plan(), sex(), 2000)\\n"
                     "    if t % 2:\\n        key = (plan(), sex(), 2001)\\n    return data.rates().loc[key, 'q']\\n")
     items.new_cells("pid", "def pid():\\n    return 20 + i % 4\\n")
+    items.new_cells("anchor", "def anchor():\\n    return (sex(), 2000 + i % 3)\\n")
+    items.new_cells("full", "def full():\\n    return (plan(), sex(), 2000 + i % 3)\\n")
+    items.new_cells("odd", "def odd():\\n    return (plan(), sex()) if i % 2 else plan()\\n")
     items.new_cells("mrow", "def mrow():\\n    return data.mixed().loc[pid()]\\n")
     for name, body in T5_ITEMS.items():
         items.new_cells(name, f"def {{name}}(t):\\n" + _indent(body))
