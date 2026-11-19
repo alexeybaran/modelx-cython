@@ -40,10 +40,22 @@ def _current(tree):
     return True
 
 
+def _flag(tree, name):
+    for node in statements(tree):
+        if isinstance(node, cst.Assign) and any(dotted_name(target.target) == name for target in node.targets):
+            try:
+                return literal_value(node.value) is True
+            except (ValueError, TypeError):
+                return False
+    return False
+
+
 class CollectRuntime:
     def __init__(self, source):
         self.syntax = cst.parse_module(source)
         self.hook = _current(self.syntax)
+        # protocol 2 extension: the evaluator may take the collect's other Space parameters
+        self.evaluator_args = self.hook and _flag(self.syntax, '_mx_collect_evaluator_args')
 
     def require_current(self, modules=(), workers=1):
         """The one check of the modelx that wrote the export: its runtime (``_mx_sys.py``) must

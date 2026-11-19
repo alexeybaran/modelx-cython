@@ -33,6 +33,7 @@ class MultiCollect:
     parallel_reuse: bool
     ordered: bool
     leaves: tuple
+    extra: tuple = ()       # the collect's other Space parameters: (name, C type or 'object')
 
     @property
     def native(self):
@@ -100,7 +101,7 @@ def collect_contract(node):
     return None
 
 
-def analyze(module):
+def analyze(module, evaluator_args=False):
     """Recognize the numeric sum shape. Policy isolation is a Space contract."""
     options = {name: module.spec.get_spec(cls.fqname)
                for name, cls in module.classes.items()}
@@ -138,7 +139,7 @@ def analyze(module):
             continue
         if option not in ('reduce', 'reuse'):
             raise ValueError('serial_collect must be reduce or reuse')
-        shape = _match(node, cls, option == 'reuse', parallel, order == 'domain')
+        shape = _match(node, cls, option == 'reuse', parallel, order == 'domain', evaluator_args)
         if shape is not None:
             result[node.name.value] = shape
     return result
@@ -153,28 +154,43 @@ def _isolated_leaf(node, cls):
                        for hook in ('_mx_apply_formula', '_mx_collect_attach', '_mx_collect_release')))
 
 
-def _match(node, cls, reuse, parallel_reuse, ordered=False):
+def _match(node, cls, reuse, parallel_reuse, ordered=False, evaluator_args=False):
     if not _isolated_leaf(node, cls):
         return None
     contract = collect_contract(node)
-    if contract is None or contract[1]:
+    if contract is None:
         return None
     parameter = contract[0]
     if (not isinstance(parameter, str) or parameter not in cls.refs
             or cls.refs[parameter].get_type_expr(c_style=True) != 'long long'):
         return None
+    extra = []
+    for name in contract[1]:            # the collect's other Space parameters, typed from the trace
+        if name not in cls.refs:
+            return None
+        kind = cls.refs[name].get_type_expr(c_style=True)
+        extra.append((name, kind if kind in ('long long', 'double') else 'object'))
     output = _return_expr(_method(node, '_f_collect_outputs'))
     mode, fields = _single_dict(output)
     label, entry = _single_dict(fields)
-    if mode == 'sum' and label and _scalar_cell(cls, entry):
+    if not extra and mode == 'sum' and label and _scalar_cell(cls, entry):
         _report(cls, (Leaf('sum', label, 'scalar', cell=_self_attribute(entry.func)),))
         return SerialCollect(label, _self_attribute(entry.func), parameter, reuse, parallel_reuse, ordered)
     leaves = _leaves(cls, output)
     if leaves is None:
         return None
     _report(cls, leaves)
-    shape = MultiCollect(parameter, reuse, parallel_reuse, ordered, leaves)
-    return shape if shape.native else None
+    shape = MultiCollect(parameter, reuse, parallel_reuse, ordered, leaves, tuple(extra))
+    if not shape.native:
+        return None
+    if extra and not evaluator_args:
+        from .collect_adapter import PROTOCOL, _VERSION
+        raise ValueError(
+            f'{cls.name.removeprefix("_c_")}: its collect takes other Space parameters '
+            f'({", ".join(name for name, _ in extra)}), which needs the export protocol {PROTOCOL} extension '
+            f'(_mx_collect_evaluator_args in _mx_sys.py, beside {_VERSION} = {PROTOCOL}). '
+            'Re-export the model with a modelx that writes it.')
+    return shape
 
 
 def _plain_cell(cls, name):
@@ -451,8 +467,9 @@ def add_methods(cls, node, shape, *, workers):
     # an individual section is returned in domain order whatever order the parallel chunks finish in
     ordered = bool(shape and (shape.ordered or isinstance(shape, MultiCollect)
                               and any(leaf.mode == 'individual' for leaf in shape.leaves)))
+    takes_args = ', True' if isinstance(shape, MultiCollect) and shape.extra else ''
     options = cst.parse_statement(
-        f'def _mx_collect_options_v2(self):\n    return {workers}, {callback}, {parallel}, {ordered}\n')
+        f'def _mx_collect_options_v2(self):\n    return {workers}, {callback}, {parallel}, {ordered}{takes_args}\n')
     shared = _shared_root_methods(cls, node)
     if shape is None:
         return node.with_changes(body=node.body.with_changes(body=(*node.body.body, *shared, options)))
@@ -527,7 +544,7 @@ def _multi_lines(cls, shape):
     c = CY_MOD
     leaves = shape.leaves
     lines = [
-        'def _mx_evaluate_serial_collect(self, coords):',
+        f"def _mx_evaluate_serial_collect(self, coords{', args' if shape.extra else ''}):",
         f'    root: {cls.name}',
         f'    coordinate: {c}.longlong',
         f'    first: {c}.bint = True',
@@ -546,6 +563,16 @@ def _multi_lines(cls, shape):
         '    if not coords or not _mx_sys._mx_collect_native_coords(coords):',
         '        return None',
     ]
+    if shape.extra:     # values of the other parameters the traced type holds, else the export's path
+        lines.append(f'    if len(args) != {len(shape.extra)}:')
+        lines.append('        return None')
+        for position, (name, kind) in enumerate(shape.extra):
+            if kind == 'long long':
+                lines += [f'    if type(args[{position}]) is not int or not '
+                          f'(-9223372036854775808 <= args[{position}] <= 9223372036854775807):',
+                          '        return None']
+            elif kind == 'double':
+                lines += [f'    if type(args[{position}]) is not float:', '        return None']
     for index, leaf in enumerate(leaves):
         if leaf.kind == 'dict':
             lines += [
@@ -562,6 +589,8 @@ def _multi_lines(cls, shape):
         lines += ['    from . import _mx_collect_semantics as _mx_cs',
                   '    _mx_accumulated = _mx_cs.Accumulator(_mx_sys.CollectResult)']
     lines += [f'    root = {new_root(cls.name)}(self)', '    try:']
+    for position, (name, _) in enumerate(shape.extra):     # once per collect call
+        lines.append(f'        root.{name} = args[{position}]')
     for index, leaf in enumerate(leaves):
         if leaf.kind == 'dict':
             lines += [
