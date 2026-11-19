@@ -82,10 +82,24 @@ def assign_table_cell(space, name, path, table):
     input that clears keep. Values already computed from the old table stay until the user clears
     the Spaces that depend on it (D130)."""
     model = space._model
-    _check_idle(model, f'the assignment of {path}')
+    # T-5c: as clear_all, the check and the mark are one step under the lock: the assignment replaces the cell's
+    # published prepared table, which the workers of a collect read without a lock, so no collect may start
+    # until it is done (collect_begin refuses while the mark is set)
     with _lock:
+        if _running.get(id(model)):
+            raise RuntimeError(f'cannot run the assignment of {path} while a collect of this model is running; '
+                               'do it before or after the run')
+        _clearing[id(model)] = _clearing.get(id(model), 0) + 1
         _inputs.setdefault(id(model), {})[id(space), name] = (space, name, table)
-    space._mx_set_table_cell(name, table)
+    try:
+        space._mx_set_table_cell(name, table)
+    finally:
+        with _lock:
+            count = _clearing.get(id(model), 0) - 1
+            if count > 0:
+                _clearing[id(model)] = count
+            else:
+                _clearing.pop(id(model), None)
 
 
 def before_reference(space, path):
