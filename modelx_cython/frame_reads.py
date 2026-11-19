@@ -632,7 +632,8 @@ class FrameReads:
         # T-5c: a text literal, an enum member and a field of a cached row cell are fixed too, unless the read takes
         # the part as a C integer (key_part): their code is held per item instead of looked up at every read
         return item_constant(part, self.cached_call) or (
-            self._fixed_value(part) and not (level_kind == 'int' and self.facts.is_int(part)))
+            self._fixed_value(part) and not (level_kind == 'int' and (
+                self.facts.is_int(part) or self.facts.enum_constant(part) is not None)))
 
     def fixed_part(self, part):
         """A prefix part fixed per item: ``row_cells.item_constant``, or one of ``_fixed_value`` (T-5c)."""
@@ -745,10 +746,10 @@ class FrameReads:
         the Python value (the table looks an object key up as pandas does). The facts are of the original ``part``;
         ``emit`` is what the code evaluates (the part with its own reads lowered; T-5)."""
         emit = part if emit is None else emit
+        constant = self.facts.enum_constant(part) if level_kind == 'int' else None
+        if constant is not None:        # an IntEnum member: its C constant (enums.py, D79; T-5c: not only under is_int)
+            return cst.Name(constant), 'int'
         if level_kind == 'int' and self.facts.is_int(part):
-            constant = self.facts.enum_constant(part)
-            if constant is not None:
-                return cst.Name(constant), 'int'
             if self.facts.exact_long_long(part):
                 return emit, 'int'
             return _cast('_mx_cy.longlong', emit), 'int'
@@ -937,7 +938,9 @@ class _Rewrite(cst.CSTTransformer):
         m = o.module
         packed = f'({m}.view_range({_code(o.ref(hold))}, {len(parts)}, {args}) if {guard} else -1)'
         if o.per_item and not statements:       # every prefix code held per item: the rows are too
-            field = hold_table(o.cls_info).field('prepared_row', (hold.table, 'range', name))
+            # keyed by the prefix (its held codes and conditions), not the local's name: two formulas of the class
+            # may name views of different prefixes alike (T-5c defect fix)
+            field = hold_table(o.cls_info).field('prepared_row', (hold.table, 'range', packed))
             o.new_items.append(('range', field, hold.table, packed, None))
             packed = f'(self.{field} - 2)'
         statements.append(cst.parse_statement(f'_mx_vr_{name}: _mx_cy.longlong = {packed}'))
@@ -1221,6 +1224,23 @@ class _Rewrite(cst.CSTTransformer):
             native = cst.BinaryOperation(stop, cst.Subtract(), start) if view.start is not None else stop
             self._record(original, 'L8', view.call)
             return self._guarded(original, updated, view, test, native, 'i64')
+        if name in ('min', 'max'):      # T-5c: the extreme itself, no list of labels
+            if view.start is None and view.schema['levels'] == ('int',):
+                # the extreme of a non-empty int index (signature kind -2) as the C integer the builtin's Python
+                # ints give; another level kind keeps the list (iteration gives Python floats, pandas numpy ones)
+                hold = self._take(view.call, _NO_LABEL, -2)
+                self._record(original, 'L5', view.call)
+                return self._guarded(original, updated, view, self._native_test(hold, []),
+                                     self._m(name + '_ll', self.o.ref(hold)), 'i64')
+        if name in ('min', 'max') and view.start is not None:
+            hold = self._walk_hold(view)        # an ordered prefix view: its first or last row (empty: pandas)
+            start, stop, test = self._view_parts(view, hold)
+            row = start if name == 'min' else cst.BinaryOperation(stop, cst.Subtract(), cst.Integer('1'))
+            test = self._conjunction([test, cst.Comparison(stop, [cst.ComparisonTarget(cst.GreaterThan(), start)])])
+            self._record(original, 'L5', view.call)
+            int_level = view.schema['levels'][view.depth] == 'int'
+            return self._guarded(original, updated, view, test, self._label(view, hold, row),
+                                 'i64' if int_level else None)
         hold = self._walk_hold(view)
         native, test = self._values(view, hold, lambda row: self._label(view, hold, row), [], name)
         self._record(original, 'L8', view.call)
