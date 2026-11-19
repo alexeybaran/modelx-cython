@@ -51,7 +51,7 @@ jobs:
         pip install -e .
         pip install pytest
     - name: Test with pytest
-      run: pytest modelx_cython/tests/ --ignore=modelx_cython/tests/test_samples.py --ignore=modelx_cython/tests/test_annuallife.py --ignore=modelx_cython/tests/test_uslib.py
+      run: pytest modelx_cython/tests/ --ignore=modelx_cython/tests/compiled --ignore=modelx_cython/tests/test_samples.py --ignore=modelx_cython/tests/test_annuallife.py --ignore=modelx_cython/tests/test_uslib.py
 
   integration:
     # test_samples.py, test_annuallife.py and test_uslib.py translate the
@@ -108,7 +108,7 @@ jobs:
         # The forward slash matters: pytest splits PYTEST_ADDOPTS with shlex in
         # POSIX mode, which would swallow the backslash of "C:\t".
         PYTEST_ADDOPTS: ${{ runner.os == 'Windows' && '--basetemp=C:/t' || '' }}
-      run: pytest modelx_cython/tests/
+      run: pytest modelx_cython/tests/ --ignore=modelx_cython/tests/compiled
 
   free-threaded:
     # The generated setup.py compiles with the freethreading_compatible
@@ -139,4 +139,4 @@ jobs:
         pip install -e .
         pip install pytest
     - name: Test with pytest
-      run: pytest modelx_cython/tests/ --deselect modelx_cython/tests/test_annuallife.py --deselect modelx_cython/tests/test_uslib.py --deselect modelx_cython/tests/test_samples.py::test_mx2cy_with_lifelib
+      run: pytest modelx_cython/tests/ --ignore=modelx_cython/tests/compiled --deselect modelx_cython/tests/test_annuallife.py --deselect modelx_cython/tests/test_uslib.py --deselect modelx_cython/tests/test_samples.py::test_mx2cy_with_lifelib

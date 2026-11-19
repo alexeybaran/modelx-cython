@@ -24,7 +24,7 @@ def test_compiled_builtin_reduction_lowering(tmp_path):
         refs={'operations': SimpleNamespace(helper_members=module_helpers(operations))},
         cells={'predicate': info('bint', ('i',)), 'amount': info('double', ('i',))})
     alias = module_name('modelx_cython._native_iterables')
-    source = Path(__file__).parents[1] / 'modelx_cython'
+    source = Path(__file__).parents[3] / 'modelx_cython'
     for suffix in ('.pyx', '.pxd'):
         (tmp_path / (alias + suffix)).write_bytes((source / ('_native_iterables' + suffix)).read_bytes())
     from modelx_cython import runtime as native_runtime

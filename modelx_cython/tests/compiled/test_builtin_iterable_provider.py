@@ -5,7 +5,7 @@ import sys
 
 
 def test_builtin_reduction_identity_provider(tmp_path):
-    source = Path(__file__).parents[1] / 'modelx_cython'
+    source = Path(__file__).parents[3] / 'modelx_cython'
     for suffix in ('.pyx', '.pxd'):
         (tmp_path / ('native' + suffix)).write_bytes((source / ('_native_iterables' + suffix)).read_bytes())
     (tmp_path / 'probe.pyx').write_text('''cimport native

@@ -34,6 +34,6 @@ jobs:
       - name: Qualify compiled contract and helper semantics
         env:
           PYTEST_ADDOPTS: ${{ runner.os == 'Windows' && '--basetemp=C:/contract' || '' }}
-        run: python -m pytest integration_tests dependencies/lifelib/lifelib/tests/test_immutable_inputs.py -q
+        run: python -m pytest modelx_cython/tests/compiled integration_tests dependencies/lifelib/lifelib/tests/test_immutable_inputs.py -q
       - name: Verify packaging
         run: python -m pip wheel --no-deps . --wheel-dir dist
