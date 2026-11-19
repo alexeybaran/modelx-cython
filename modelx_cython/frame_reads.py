@@ -1139,6 +1139,17 @@ class _Rewrite(cst.CSTTransformer):
             return self._guarded(original, updated, view, test, self._label(view, hold, row), 'i64')
         if func.attr.value == 'asof' and self._key_position(original):
             return self._asof(original, updated, 1)
+        if func.attr.value == 'asof' and len(original.args) == 1 and not original.args[0].keyword:
+            # T-5c: a bare asof value: the label when one is <= x, else pandas' own asof (NaN stays pandas')
+            hold = self._take(view.call, view.depth, -3)
+            start, stop, test = self._view_parts(view, hold)
+            x = _cast('_mx_cy.double', self.updated_of.get(id(original.args[0].value), original.args[0].value))
+            found = self._m('search', o.ref(hold), start, stop, cst.Integer(str(view.depth)), x, cst.Name('True'))
+            row = cst.BinaryOperation(cst.BinaryOperation(start, cst.Add(), found), cst.Subtract(), cst.Integer('1'))
+            test = self._conjunction([test, cst.Comparison(found, [cst.ComparisonTarget(cst.GreaterThan(),
+                                                                                       cst.Integer('0'))])])
+            self._record(original, 'L6', view.call)
+            return self._guarded(original, updated, view, test, self._label(view, hold, row))
         return None
 
     def level_extreme(self, original, updated):
