@@ -1,10 +1,12 @@
-"""diag-us2: a vector sum that is the leftmost operand of a ``+``/``-`` chain is lowered.
+"""diag-us2: a vector sum that is the leftmost operand of a ``+``/``-``/``*``/``/`` chain is lowered.
 
 ``return (sum(f(t, i) for i in ids()) + g(t))`` (VUL_US_S unloaned_av_pp_at, av_pp): Python evaluates the
 leftmost operand first, so the sum computed just before the statement keeps the order of evaluation. It is
 lowered to a native loop over the vector (no object iteration, no fallback) and equals the exported model
 bit for bit, including an empty vector (D24(2): 0.0 + g(t) is a float either way), a subtraction chain,
-an assignment, and a chain where a later operand raises (the exception is the same).
+an assignment, and a chain where a later operand raises (the exception is the same). The leading operand of
+a ``*`` or ``/`` chain is evaluated first as well (``sum(...) / av_pp(t)``, VA_KR_S bond_weight), so it is
+lowered the same way; a sum that is not the leftmost operand of any of the four stays on today's path.
 """
 import json
 import subprocess
@@ -22,11 +24,18 @@ FORMULAS = {
     "lead_sub": "def lead_sub(t):\n    return sum(w(t, s) * 2.0 for s in ids(t)) - g(t) + 1.0\n",
     "lead_assign": "def lead_assign(t):\n    x = sum(w(t, s) for s in ids(t) if s > 1) + g(t)\n    return x * 2.0\n",
     "lead_raise": "def lead_raise(t):\n    return sum(w(t, s) for s in ids(t)) + h(t)\n",
+    "lead_mul": "def lead_mul(t):\n    return sum(w(t, s) for s in ids(t)) * g(t) + 1.0\n",
+    "lead_div": "def lead_div(t):\n    return sum(w(t, s) for s in ids(t)) / (g(t) + 3.0)\n",
+    "lead_div_raise": "def lead_div_raise(t):\n    return sum(w(t, s) for s in ids(t)) / h(t)\n",
     # D93: not the leftmost operand (g(t) is evaluated first): stays on today's path
     "trail": "def trail(t):\n    return g(t) + sum(w(t, s) for s in ids(t))\n",
+    "trail_sub": "def trail_sub(t):\n    return g(t) - sum(w(t, s) for s in ids(t))\n",
+    "trail_mul": "def trail_mul(t):\n    return g(t) * sum(w(t, s) for s in ids(t))\n",
+    "trail_div": "def trail_div(t):\n    return g(t) / (sum(w(t, s) for s in ids(t)) + 1.0)\n",
 }
-LOWERED = ["lead_add", "lead_sub", "lead_assign", "lead_raise"]
-NAMES = LOWERED + ["trail"]
+LOWERED = ["lead_add", "lead_sub", "lead_assign", "lead_raise", "lead_mul", "lead_div", "lead_div_raise"]
+TRAILING = ["trail", "trail_sub", "trail_mul", "trail_div"]
+NAMES = LOWERED + TRAILING
 
 SAMPLE = """\
 from exported import mx_model
@@ -35,7 +44,7 @@ for t in range(0, 12):
     for name in {names!r}:
         try:
             getattr(p, name)(t)
-        except ValueError:
+        except (ValueError, ZeroDivisionError):
             pass
 """
 
@@ -49,13 +58,15 @@ for t in range(0, 12):
     for name in {names!r}:
         try:
             a = getattr(o, name)(t)
-        except ValueError as error:
+        except (ValueError, ZeroDivisionError) as error:
             try:
                 getattr(c, name)(t)
-            except ValueError as other:
-                assert other.args == error.args, (name, t)
+            except (ValueError, ZeroDivisionError) as other:
+                # the type is the same; a compiled double division's ZeroDivisionError has Cython's text
+                assert type(other) is type(error), (name, t)
+                assert other.args == error.args or type(error) is ZeroDivisionError, (name, t)
                 continue
-            raise AssertionError((name, t, 'no ValueError'))
+            raise AssertionError((name, t, 'no ' + type(error).__name__))
         b = getattr(c, name)(t)
         assert a == b and float(a).hex() == float(b).hex(), (name, t, a, b)
         if len(o.ids(t)) == 0:
@@ -95,8 +106,9 @@ def test_leading_vector_sum(tmp_path):
     for name in LOWERED:
         assert reports[name]["vectors"]["lowered"] >= 1, (name, reports[name]["vectors"])
         assert not reports[name]["vectors"]["fallbacks"], (name, reports[name]["vectors"])
-    assert reports["trail"]["vectors"]["lowered"] == 0, reports["trail"]["vectors"]
-    assert any("generator over vectors not lowered" in f for f in reports["trail"]["vectors"]["fallbacks"])
+    for name in TRAILING:
+        assert reports[name]["vectors"]["lowered"] == 0, (name, reports[name]["vectors"])
+        assert any("generator over vectors not lowered" in f for f in reports[name]["vectors"]["fallbacks"]), name
     (tmp_path / "check.py").write_text(CHECK.format(names=NAMES), encoding="utf-8")
     result = subprocess.run([sys.executable, "check.py"], cwd=tmp_path, capture_output=True, text=True)
     assert result.returncode == 0, result.stdout + result.stderr

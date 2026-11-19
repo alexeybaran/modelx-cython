@@ -1814,18 +1814,21 @@ def lower(node, cls_info, cells, scope, counter, module, ref_kinds=None):
     return _declare_at_top(node.with_changes(body=body), decls)
 
 
+_CHAIN = (cst.Add, cst.Subtract, cst.Multiply, cst.Divide)
+
+
 def _leading_operand(value):
-    """The operand evaluated first in a chain of ``+``/``-`` (the leftmost leaf), else None."""
-    if not (isinstance(value, cst.BinaryOperation) and isinstance(value.operator, (cst.Add, cst.Subtract))):
+    """The operand evaluated first in a chain of ``+``/``-``/``*``/``/`` (the leftmost leaf), else None."""
+    if not (isinstance(value, cst.BinaryOperation) and isinstance(value.operator, _CHAIN)):
         return None
-    while isinstance(value, cst.BinaryOperation) and isinstance(value.operator, (cst.Add, cst.Subtract)):
+    while isinstance(value, cst.BinaryOperation) and isinstance(value.operator, _CHAIN):
         value = value.left
     return value
 
 
 def _replace_leading(value, new):
-    """``value`` with its leftmost ``+``/``-`` leaf replaced by ``new``."""
-    if isinstance(value, cst.BinaryOperation) and isinstance(value.operator, (cst.Add, cst.Subtract)):
+    """``value`` with its leftmost ``+``/``-``/``*``/``/`` leaf replaced by ``new``."""
+    if isinstance(value, cst.BinaryOperation) and isinstance(value.operator, _CHAIN):
         return value.with_changes(left=_replace_leading(value.left, new))
     return new.with_changes(lpar=value.lpar, rpar=value.rpar) if hasattr(new, 'lpar') else new
 
@@ -1834,7 +1837,7 @@ def _statement_sums(body, lowering):
     """``sum(<generator over vectors>)`` at statement level whose element is provably a float;
     diag-kr: also ``min``/``max`` of such a generator whose element is a float or an integer
     (``lowering.extreme_calls``: id of the call -> its name). diag-us2 (D93): a ``sum`` may also be
-    the leftmost operand of a ``+``/``-`` chain that is the value of an assignment or return, which
+    the leftmost operand of a ``+``/``-``/``*``/``/`` chain that is the value of an assignment or return, which
     Python evaluates first, so the sum computed just before the statement keeps the order of
     evaluation (``lowering.leading_sums``)."""
     gens, calls = set(), set()
