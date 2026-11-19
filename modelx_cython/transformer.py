@@ -320,6 +320,8 @@ class PXDGenerator:
             decl_stmts.append(f'cdef {module_name(provider)}.LookupContext {name}\n')
         # R-4: what an item holds from shared inputs (holds.HoldTable)
         decl_stmts.extend(holds.pxd_declarations(cls_info))
+        if getattr(self.module.spec.policy, 'prepared_tables', False):
+            decl_stmts.extend(table_cells.pxd_declarations(cls_info))     # T-4.2
         for cells in cls_info.cells.values():
 
             assert cells.module == self.module.fqname

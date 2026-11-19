@@ -43,6 +43,9 @@ cdef class PreparedTable:
     cdef readonly object max_label, min_label   # index.max(), index.min() as pandas returns them
     cdef const double[::1] asof_keys       # sorted labels of a flat numeric index (for asof)
     cdef readonly object asof_labels       # the labels themselves, by position, as pandas returns them
+    cdef object _slot_array                # T-4.2: per read signature of the model, one plus the slot of its column
+    cdef const Py_ssize_t* slots           # (1 for a read of the index), or -1 when this table is not of the kinds
+    cdef Py_ssize_t n_slots                # the read was compiled for (decided once, when the table is prepared)
 
     cdef inline Py_ssize_t code_ll(self, int level, long long key) noexcept nogil:
         """The code of an int key part at ``level``, or -1 (absent, or an object level)."""
@@ -133,13 +136,12 @@ ctypedef fused KeyC:
 
 cdef object prepared(object frame)
 cdef int missing(object key) except -1
-cdef object hold(object frame, object label, int kind, Py_ssize_t* slot)
-cdef object hold_checked(object frame, object label, int kind, Py_ssize_t* slot)
+cdef object bind_ref(object frame)
+cdef object bind_ref_checked(object frame)
 cdef Py_ssize_t hold_code(object table, int level, object value) except -2
 cdef Py_ssize_t asof_row(PreparedRef ref, int count, Py_ssize_t c0, Py_ssize_t c1, Py_ssize_t c2,
                          Py_ssize_t c3, Py_ssize_t c4, double x) noexcept
-cdef Py_ssize_t hold_unassigned(object space, object name) except -2
-cdef Py_ssize_t hold_row(object table, object key, object space, object name) except -2
+cdef Py_ssize_t hold_row(object table, object key, bint assigned) except -2
 cdef int missing_codes(PreparedRef ref, const Py_ssize_t* codes, int count) except -1
 cdef object object_field(PreparedRef ref, Py_ssize_t slot, Py_ssize_t row)
 
@@ -296,3 +298,10 @@ cdef inline long long min_ll(PreparedRef ref) noexcept:
     if (<PreparedTable>ref).level_kind[0] == LEVEL_DENSE:
         return (<PreparedTable>ref).level_first[0]
     return (<PreparedTable>ref).sorted_labels[(<PreparedTable>ref).level_offset[0]]
+
+
+# T-4.2: the slot of a read, through the table its item holds: one C load (a read stays pandas when it is <= 0)
+cdef inline Py_ssize_t slot(PreparedRef ref, int signature) noexcept:
+    if signature < (<PreparedTable>ref).n_slots:
+        return (<PreparedTable>ref).slots[signature]
+    return -1

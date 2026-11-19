@@ -27,9 +27,8 @@ _KINDS = {
     'column': ('_mx_tc_', 'Py_ssize_t', '_mx_cy.Py_ssize_t', '0'),
     'row': ('_mx_tr_', 'Py_ssize_t', '_mx_cy.Py_ssize_t', '0'),
     'array': ('_mx_ta_', None, None, None),     # typed per field; reset clears the ready flag
-    # T-3 (frame_reads): the PreparedTable of a pandas frame read per item, and the slot of one column in it
-    # (0 until resolved, as a new item's field starts; -1 when the read stays pandas; slot + 1 when native),
-    # keyed by (receiver, column, kind)
+    # T-3/T-4.2 (frame_reads): the PreparedTable an item holds for one frame receiver (a table whose every slot is
+    # -1 when the frame is not prepared), and whether it is bound (0 until bound), keyed by the receiver
     'prepared': ('_mx_tp_', 'object', 'object', 'None'),
     'prepared_slot': ('_mx_tq_', 'Py_ssize_t', '_mx_cy.Py_ssize_t', '0'),
     # T-4: one plus the level code of a key part fixed per item (-1 absent), keyed by (table field, level, part);
