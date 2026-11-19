@@ -866,7 +866,12 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
                                 getattr(self, '_row_names', None), self._prefix_cells(cls_info))
             node = frames.lower(node)
             cells.frame_reads = frames.lowered + frames.declined
-        pandas = self._pandas_reads(node, cls_info, cells)
+        if getattr(self.module.spec.policy, 'prepared_tables', False):
+            # T-5: the pandas fallback of a lowered read runs only when the table cannot answer: not a pandas read
+            from modelx_cython.frame_reads import without_fallbacks
+            pandas = self._pandas_reads(without_fallbacks(node), cls_info, cells)
+        else:
+            pandas = self._pandas_reads(node, cls_info, cells)
         if not (self._resolver.table_results or cls_info.refs):
             cells.table_reads_untyped = pandas      # nothing to lower: the generated code is unchanged
             return node

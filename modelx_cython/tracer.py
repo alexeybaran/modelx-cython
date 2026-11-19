@@ -676,7 +676,8 @@ def _frame_schema(value):
     index = value.index
     levels = tuple('int' if getattr(level, 'dtype', None) is not None and level.dtype.kind in 'iu' else 'obj'
                    for level in (index.levels if index.nlevels > 1 else (index,)))
-    return {'kind': kind, 'levels': levels, 'unique': bool(index.is_unique), 'columns': columns}
+    names = tuple(index.names) if all(isinstance(n, (str, int, type(None))) for n in index.names) else None
+    return {'kind': kind, 'levels': levels, 'unique': bool(index.is_unique), 'columns': columns, 'names': names}
 
 
 def _column_kind(dtype):
@@ -704,6 +705,7 @@ def frame_schema(traces):
             return None
         mine = dict(found['columns'])
         schema = dict(schema, unique=schema['unique'] and found['unique'],
+                      names=schema.get('names') if schema.get('names') == found.get('names') else None,
                       columns=tuple((label, kind) for label, kind in schema['columns'] if mine.get(label) == kind))
     return schema
 
