@@ -1,6 +1,5 @@
 # cython: freethreading_compatible=True, boundscheck=False, wraparound=False
 """Typed vectors of vector cells; see _native_vectors.pxd."""
-cimport cython
 from cpython.buffer cimport PyBUF_WRITABLE, PyBUF_FORMAT, PyBUF_ND, PyBUF_STRIDES
 from cpython.float cimport PyFloat_AS_DOUBLE
 from cpython.mem cimport PyMem_Malloc, PyMem_Realloc, PyMem_Free, PyMem_Calloc
@@ -531,31 +530,49 @@ def _i64_from_sequence(items):
 cdef class VecCache:
 
     def __cinit__(self, Py_ssize_t n, long long lo):
-        self.slots = [None] * (n if n > 0 else 0)
-        self.n = n if n > 0 else 0
+        self.slots = <PyObject**>PyMem_Calloc(n if n > 0 else 1, sizeof(PyObject*))
+        if self.slots == NULL:
+            raise MemoryError()
+        self.n = n
         self.lo = lo
 
-    @cython.boundscheck(False)
-    @cython.wraparound(False)
+    def __dealloc__(self):
+        cdef Py_ssize_t i
+        if self.slots != NULL:
+            for i in range(self.n):
+                Py_XDECREF(self.slots[i])
+            PyMem_Free(self.slots)
+
     cdef object put(self, long long key, object value):
         """Publish value at key unless another thread did first; returns the published one."""
         cdef unsigned long long i = <unsigned long long>(key - self.lo)
-        cdef object current
+        cdef PyObject* p
         if i >= <unsigned long long>self.n:
             return value        # outside the sampled domain: not cached
-        with cython.critical_section(self.slots):
-            current = self.slots[<Py_ssize_t>i]
-            if current is None:
-                self.slots[<Py_ssize_t>i] = value
-                current = value
-        return current
+        Py_INCREF(value)
+        if __pyx_vec_publish(&self.slots[i], <PyObject*>value):
+            return value
+        Py_XDECREF(<PyObject*>value)
+        p = __pyx_vec_load(&self.slots[i])
+        return <object>p
 
     def __len__(self):
-        return self.n - self.slots.count(None)
+        cdef Py_ssize_t i, k = 0
+        for i in range(self.n):
+            if __pyx_vec_load(&self.slots[i]) != NULL:
+                k += 1
+        return k
 
     def items(self):
         """(key, value) of the filled slots."""
-        return [(self.lo + i, value) for i, value in enumerate(self.slots) if value is not None]
+        cdef Py_ssize_t i
+        cdef PyObject* p
+        out = []
+        for i in range(self.n):
+            p = __pyx_vec_load(&self.slots[i])
+            if p != NULL:
+                out.append((self.lo + i, <object>p))
+        return out
 
     def __reduce__(self):
         return (_vec_cache_from_items, (self.n, self.lo, self.items()))
