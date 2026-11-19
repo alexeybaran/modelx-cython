@@ -1537,17 +1537,24 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
                         args = tuple(cells.params)
                         idx_range = dense_condition(axes)
 
+                        # A shared Space's dense cache is filled by concurrent workers: its flag is
+                        # published after the value (release) and read before it (acquire).
+                        published = not cells.is_locked and not numeric_cache.exclusively_owned(cells)
+                        ready_expr = (f"{MX_SYS_MOD}._mx_load_dense_flag({CY_MOD}.address({has_expr}))"
+                                      if published else has_expr)
+                        ready_store = (f"{MX_SYS_MOD}._mx_store_dense_flag({CY_MOD}.address({has_expr}), True)"
+                                       if published else f"{has_expr} = True")
                         if cells.is_locked:
                             cache_body = self._locked_body(
                                 has_expr, v_expr, f_expr, indent=4)
                         else:
                             cache_body = textwrap.dedent(f"""\
-                                if {has_expr}:
+                                if {ready_expr}:
                                     return {v_expr}
                                 else:
                                     val = {f_expr}
                                     {v_expr} = val
-                                    {has_expr} = True
+                                    {ready_store}
                                     return val
                                 """)
                         logical_axes = cells.dense_logical_axes
@@ -1589,7 +1596,7 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
                         )
                         hit = None
                         if not cells.is_locked and len(axes) == 1 and axes[0].c_type == 'long long':
-                            hit = CacheHit(cst.parse_expression(has_expr),
+                            hit = CacheHit(cst.parse_expression(ready_expr),
                                            cst.parse_expression(v_expr), if_node.test)
                         self._dense_layouts[cls_name, meth_name] = DenseEntry(
                             cls_name, FORMULA_PREF + meth_name, axes, cells.has_dense_spill,
