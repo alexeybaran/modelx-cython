@@ -138,12 +138,23 @@ STMTS = {
     'col_loop': ('flat shuffled', "total = 0.0\nfor k, v in T['q'].items():\n    total += k * v\nreturn total + t"),
     'iterrows_loop': ('flat shuffled mixed', "total = 0.0\nfor k, row in T.iterrows():\n"
                       "    if k > 22 - t:\n        continue\n    total += row['q'] * k + float(row[('q', 'q')[t % 2]])\nreturn total"),
+    # loop targets the lowering does not take: each declines to pandas (no compiler error)
+    'for_three': ('flat', "total = 0.0\nfor k, q, r in zip(T.index, T['q'], T['r']):\n    total += k * q + r\nreturn total + t"),
+    'for_nested': ('flat', "total = 0.0\nfor k, (q, r) in zip(T.index, zip(T['q'], T['r'])):\n"
+                   "    total += k * q - r\nreturn total + t"),
+    'iterrows_nested': ('flat', "total = 0.0\nfor k, (q, r) in T[['q', 'r']].iterrows():\n    total += k * q + r\n"
+                        "return total + t"),
+    'iterrows_star': ('flat', "total = 0.0\nfor k, *rest in T.iterrows():\n    total += k * rest[0]['q']\nreturn total + t"),
+    'iterrows_three': ('flat', "total = 0.0\nfor i, (k, row) in enumerate(T.iterrows()):\n    total += i * row['q'] + k\n"
+                       "return total + t"),
+    'row_slice': ('flat', "row = T.loc[20 + t]\nreturn float(row['q']) + float(row[:1].iloc[0])"),
     'iterrows_find': ('mixed', "for k, row in T.iterrows():\n    if int(row['n']) >= 1 + t:\n        return (k, str(row['tag']))\nreturn None"),
     'obj_col': ('mixed', "return (T.loc[20 + t, 'tag'], T.at[20 + t, 'tag'] == 'x')"),
     'obj_col_missing': ('mixed', "return T.loc[98 + t, 'tag']"),
     'view_within': ('scen', "sub = T.loc[('up', 'down')[t % 2]]\nmonths = [m for m in sub.index if m <= 6 * t]\n"
                     "return (sub.loc[max(months), 'v'], int(sub.index.asof(5.0 * t)), sub.index[-1])"),
     'level_extreme': ('grid sgrid tri', "return (int(T.index.get_level_values(1).max()) + t, T.index.get_level_values(-1).min())"),
+    'level_extreme_hex': ('grid', "return int(T.index.get_level_values(0x1).max()) + t"),
     'level_extreme_named': ('rates', "return (int(T.index.get_level_values('year').max()) - t, T.index.get_level_values('year').min())"),
     'col_of_loc': ('tri', "curve = T.loc[(('A', 'B')[t % 2], ('F', 'M')[t // 2]), 'q']\nms = [int(v) for v in curve.index]\n"
                    "return (ms, float(curve.iloc[0]), float(curve.iloc[-1]), float(curve.loc[21]))"),
