@@ -73,8 +73,8 @@ class _c_Test:
         self.operations = value
 '''
     (tmp_path / 'probe.py').write_text(prefix + '\n'.join(methods) + '\n' + '\n'.join(cold))
-    (tmp_path / 'setup.py').write_text('from setuptools import setup\nfrom Cython.Build import cythonize\n'
-        f'setup(ext_modules=cythonize(["probe.py", "{alias}.pyx", "{helper_alias}.pyx"],compiler_directives={{"freethreading_compatible":True}}))\n')
+    (tmp_path / 'setup.py').write_text('from setuptools import setup\nfrom Cython.Build import cythonize\nfrom modelx_cython.build import package_include_path\n'
+        f'setup(ext_modules=cythonize(["probe.py", "{alias}.pyx", "{helper_alias}.pyx"], include_path=[package_include_path()], compiler_directives={{"freethreading_compatible":True}}))\n')
     subprocess.run([sys.executable, 'setup.py', 'build_ext', '--inplace'], cwd=tmp_path, check=True)
     c_source = (tmp_path / 'probe.c').read_text()
     assert '__pyx_gb_' in c_source

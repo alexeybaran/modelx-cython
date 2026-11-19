@@ -22,7 +22,8 @@ def absolute(double value):
 ''')
     (tmp_path / 'setup.py').write_text('''from setuptools import setup
 from Cython.Build import cythonize
-setup(ext_modules=cythonize(['native.pyx', 'probe.pyx'],compiler_directives={'freethreading_compatible':True}))
+from modelx_cython.build import package_include_path
+setup(ext_modules=cythonize(['native.pyx', 'probe.pyx'], include_path=[package_include_path()], compiler_directives={'freethreading_compatible':True}))
 ''')
     subprocess.run([sys.executable, 'setup.py', 'build_ext', '--inplace'], cwd=tmp_path, check=True)
     subprocess.run([sys.executable, '-c', '''import builtins

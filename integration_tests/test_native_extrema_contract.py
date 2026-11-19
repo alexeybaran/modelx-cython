@@ -25,8 +25,8 @@ def ordered(object function):
     return operations.f64_max_pair(operations.f64_max_pair(value(function, 0), value(function, 1)), value(function, 2))
 ''')
     (tmp_path / 'setup.py').write_text('from setuptools import setup\n'
-        'from Cython.Build import cythonize\n'
-        'setup(ext_modules=cythonize(["extrema.pyx", "operations.pyx"], compiler_directives={"freethreading_compatible": True}))\n')
+        'from Cython.Build import cythonize\nfrom modelx_cython.build import package_include_path\n'
+        'setup(ext_modules=cythonize(["extrema.pyx", "operations.pyx"], include_path=[package_include_path()], compiler_directives={"freethreading_compatible": True}))\n')
     result = subprocess.run([sys.executable, 'setup.py', 'build_ext', '--inplace'],
                             cwd=tmp_path, text=True, capture_output=True)
     (tmp_path / 'build.log').write_text(result.stdout + result.stderr)

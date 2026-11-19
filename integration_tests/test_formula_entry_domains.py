@@ -65,7 +65,7 @@ def test_long_and_hash_formula_contracts(tmp_path):
                 return 200.0 + t
         '''))
     (tmp_path/'setup_override.py').write_text('from setuptools import setup\n'
-        'from Cython.Build import cythonize\nsetup(ext_modules=cythonize("override.pyx"))\n')
+        'from Cython.Build import cythonize\nfrom modelx_cython.build import package_include_path\nsetup(ext_modules=cythonize("override.pyx", include_path=[package_include_path()]))\n')
     subprocess.run([sys.executable,'-B','setup_override.py','build_ext','--inplace'],cwd=tmp_path,check=True)
     subprocess.run([sys.executable,'-B','-c',textwrap.dedent('''\
         from exported_cy import mx_model

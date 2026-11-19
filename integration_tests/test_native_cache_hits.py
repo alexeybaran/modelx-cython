@@ -54,7 +54,7 @@ def test_native_cache_hit_contract(tmp_path):
             cpdef double value(self, long long u) except? -1:
                 return 200.0 + u
         '''))
-    (tmp_path/'setup_override.py').write_text('from setuptools import setup\nfrom Cython.Build import cythonize\nsetup(ext_modules=cythonize("override.pyx"))\n')
+    (tmp_path/'setup_override.py').write_text('from setuptools import setup\nfrom Cython.Build import cythonize\nfrom modelx_cython.build import package_include_path\nsetup(ext_modules=cythonize("override.pyx", include_path=[package_include_path()]))\n')
     subprocess.run([sys.executable,'-B','setup_override.py','build_ext','--inplace'],cwd=tmp_path,check=True)
     (tmp_path/'probe.py').write_text(textwrap.dedent('''\
         from exported_cy import mx_model

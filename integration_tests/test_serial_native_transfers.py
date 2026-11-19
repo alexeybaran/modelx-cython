@@ -85,8 +85,8 @@ def test_native_transfers(tmp_path, mode):
         '''), encoding='utf-8')
     (tmp_path / 'setup_override.py').write_text(
         'from setuptools import setup\n'
-        'from Cython.Build import cythonize\n'
-        'setup(ext_modules=cythonize("override.pyx"))\n', encoding='utf-8')
+        'from Cython.Build import cythonize\nfrom modelx_cython.build import package_include_path\n'
+        'setup(ext_modules=cythonize("override.pyx", include_path=[package_include_path()]))\n', encoding='utf-8')
     subprocess.run([sys.executable, 'setup_override.py', 'build_ext', '--inplace'],
                    cwd=tmp_path, check=True)
     probe = textwrap.dedent('''\
