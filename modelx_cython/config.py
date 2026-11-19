@@ -66,6 +66,9 @@ class CompilerPolicy:
     # T-4: opt-in check mode: each hold of a prepared table first checks that the frame still equals the copy
     # prepared when it was bound, and raises if it was edited in place without a clear
     verify_inputs: bool = False
+    # T-5c: a formula whose table-read lowering raises an internal error is compiled as written (its reads on
+    # pandas) and the build report says so; strict turns that internal error into a build failure (test suites)
+    strict_lowering: bool = False
 
     @classmethod
     def resolve(cls, data):
@@ -84,7 +87,8 @@ class CompilerPolicy:
             strict_tables=data.get('strict_tables', os.environ.get('MX_CY_STRICT_TABLES') == '1'),
             integer_checks=data.get('integer_checks', 'auto'),
             prepared_tables=data.get('prepared_tables', True),
-            verify_inputs=data.get('verify_inputs', False))
+            verify_inputs=data.get('verify_inputs', False),
+            strict_lowering=data.get('strict_lowering', os.environ.get('MX_CY_STRICT_LOWERING') == '1'))
         for name, value in values.items():
             if name not in ('parallel_workers', 'native_cache_hits', 'integer_checks') and type(value) is not bool:
                 raise ValueError(f'{name} must be a boolean')
