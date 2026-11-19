@@ -19,7 +19,7 @@ executable script.
 
 ## Requirements
 
-modelx-cython requires Python 3.8 or newer, and depends on the following
+modelx-cython requires Python 3.9 or newer, and depends on the following
 packages, which are installed automatically when you install modelx-cython
 with `pip` or `conda`:
 
