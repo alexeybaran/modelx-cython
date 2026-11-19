@@ -465,6 +465,13 @@ def main_handler(args: argparse.Namespace, stdout: IO[str], stderr: IO[str]) -> 
                      cell_sources=cell_sources, providers=provider_sources)
         report = describe(module_infos)
         (model_path / '_mx_admission.json').write_text(json.dumps(report, indent=2), encoding='utf-8')
+        if policy.prepared_tables:      # T-4 item 0: the read signatures, decided per table when it is prepared
+            signatures = getattr(resolver, 'table_signatures', {})
+            ordered = [key for key, _ in sorted(signatures.items(), key=lambda item: item[1])]
+            (model_path / '_mx_table_signatures.py').write_text(
+                '# Generated: the index and column kinds each fast table read is compiled for, by id (T-4).\n'
+                'SIGNATURES = (\n' + ''.join(f'    {signature!r},\n' for signature in ordered) + ')\n',
+                encoding='utf-8')
         if policy.prepared_tables:      # T-3: the build report of table reads (doc table_reads.md)
             from modelx_cython.table_cells import path_of
             from modelx_cython.table_cells import frame_cell
