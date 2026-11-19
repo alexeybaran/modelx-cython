@@ -26,7 +26,6 @@ import textwrap
 
 import modelx as mx
 from modelx_helpers.immutable_inputs import Table
-from modelx_helpers.typed_inputs import EnumDefinitions
 
 PREFIX = 'exported_cy._mx_classes._c_Values._f_'
 
@@ -50,8 +49,7 @@ def _build(tmp_path):
     model = mx.new_model('DiagKR')
     try:
         rates = Table([1, 2, 3, 4], [(1.5,), (2.5,), (3.5,), (4.5,)], ['rate'])
-        s = model.new_space('Values', refs={'rates': rates, 'Status': HTTPStatus,
-                                            'definitions': EnumDefinitions(('Status',))})
+        s = model.new_space('Values', refs={'rates': rates, 'Status': HTTPStatus})
         s.new_cells('table', 'lambda: rates')
         s.new_cells('age', 'lambda t: 3 + t // 4')
         s.new_cells('flow', 'lambda s: 1.0 + 0.25 * s')

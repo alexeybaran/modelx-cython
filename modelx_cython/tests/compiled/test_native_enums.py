@@ -1,5 +1,10 @@
-"""Enum specialization must read the current exported Reference on a miss."""
+"""Enum specialization must read the current exported Reference on a miss.
+
+An IntEnum class bound to a Reference is an enum definition by its traced type: fixed in the compiled
+model, its members C constants. Another value with the same members (here a namespace) stays an
+ordinary Reference, read on every evaluation and rebindable."""
 from http import HTTPStatus
+from types import SimpleNamespace
 import json
 import subprocess
 import sys
@@ -7,16 +12,14 @@ import textwrap
 import pytest
 
 import modelx as mx
-from modelx_helpers.typed_inputs import EnumDefinitions
 
 
 @pytest.mark.parametrize('code_owned', [False, True])
 def test_enum_reference_replacement(tmp_path, code_owned):
     model = mx.new_model('EnumContract')
     try:
-        s = model.new_space('Projection', formula='lambda policy: None', refs={'Status': HTTPStatus})
-        if code_owned:
-            s.enum_definitions = EnumDefinitions(('Status',))
+        status = HTTPStatus if code_owned else SimpleNamespace(OK=HTTPStatus.OK)
+        s = model.new_space('Projection', formula='lambda policy: None', refs={'Status': status})
         s.new_cells('kind', 'lambda t: 200 + t')
         s.new_cells('matches', 'lambda t: kind(t) == Status.OK')
         s.new_cells('uncached', 'lambda t: t == Status.OK').is_cached = False
@@ -35,7 +38,7 @@ def test_enum_reference_replacement(tmp_path, code_owned):
     subprocess.run([sys.executable, '-m', 'modelx_cython', 'exported',
                     '--sample', 'sample.py', '--no-spec'], cwd=tmp_path, check=True)
     report = json.loads((tmp_path/'exported_cy/_mx_admission.json').read_text())
-    # the build report: members are C constants exactly when the enum class is code-owned
+    # the build report: members are C constants exactly when the Reference holds an IntEnum class
     assert (sum(entry['native_enum_constants'] for entry in report.values()) > 0) == code_owned, report
     probe = textwrap.dedent('''\
         import sys
@@ -43,13 +46,14 @@ def test_enum_reference_replacement(tmp_path, code_owned):
         from importlib import import_module
         from http import HTTPStatus
         s = import_module(sys.argv[1]).mx_model.Projection
-        assert s.Status is HTTPStatus
+        assert (s.Status is HTTPStatus) == (sys.argv[2] == 'True')
+        initial = s.Status
         assert s.uncached(200) is True and s.uncached(2**40) is False
         first = s[11]
-        assert first.Status is HTTPStatus
+        assert first.Status is initial
         assert first.matches(0) is True
         del s[11]
-        assert s[11] is not first and s[11].Status is HTTPStatus
+        assert s[11] is not first and s[11].Status is initial
         assert s.matches(0) is True
         assert s.local(0) is False
         if sys.argv[2] == 'True' and sys.argv[1] == 'exported_cy':

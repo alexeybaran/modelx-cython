@@ -118,7 +118,6 @@ def test_enum_member_local_is_a_c_integer_and_results_stay(tmp_path, monkeypatch
     """D83: ``kind = Kind.A if ... else Kind.B`` read only as a compiled Cell's integer argument and in
     comparisons with members is a C integer bound to the module constants (no member object read per
     call); both branches give the exported model's values; four workers = one worker."""
-    from modelx_helpers.typed_inputs import EnumDefinitions
     (tmp_path / 'diag_mt_kinds.py').write_text(
         'import enum\n\nclass Kind(enum.IntEnum):\n    A = 1\n    B = 2\n', encoding='utf-8')
     monkeypatch.syspath_prepend(str(tmp_path))
@@ -130,7 +129,6 @@ def test_enum_member_local_is_a_c_integer_and_results_stay(tmp_path, monkeypatch
         projection = portfolio.new_space(
             'Projection', formula='lambda key: None', refs={'keys': keys, 'Kind': Kind},
             collect_over={'key': keys}, collect_outputs='lambda: {"sum": {"value": value()}}')
-        projection.enum_definitions = EnumDefinitions(('Kind',))
         projection.new_cells('pay', '''\
 def pay(t, kind):
     return (t + key) * (1.5 if kind == Kind.A else 0.25)

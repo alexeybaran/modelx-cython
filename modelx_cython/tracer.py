@@ -553,8 +553,6 @@ class RuntimeValueInfo:
         for capability, (name, _) in CAPABILITIES.items():
             setattr(self, name, helper_capability(value, capability)
                     if self.helper is not None else None)
-        self.enum_definitions = (tuple(value) if isinstance(value, tuple)
-            and vars(type(value)).get('__modelx_cython_enum_definitions__') is True else ())
         self.enum_safe = (isinstance(value, type) and issubclass(value, IntEnum)
                           and type(value) is type(IntEnum)
                           and value.__eq__ is int.__eq__ and value.__ne__ is int.__ne__)

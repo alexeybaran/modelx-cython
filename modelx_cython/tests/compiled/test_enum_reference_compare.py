@@ -11,7 +11,6 @@ import sys
 import textwrap
 
 import modelx as mx
-from modelx_helpers.typed_inputs import EnumDefinitions
 
 
 PREFIX = 'exported_cy._mx_classes._c_Projection._f_'
@@ -21,7 +20,6 @@ def _model(tmp_path):
     model = mx.new_model('EnumRef')
     try:
         s = model.new_space('Projection', refs={'Conv': HTTPStatus, 'conv_ref': HTTPStatus.CREATED})
-        s.enum_definitions = EnumDefinitions(('Conv',))
         s.new_cells('factor', textwrap.dedent('''\
             def factor(t):
                 conv = conv_ref

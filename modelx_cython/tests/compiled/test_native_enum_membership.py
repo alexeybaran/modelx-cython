@@ -6,14 +6,12 @@ import sys
 import textwrap
 
 import modelx as mx
-from modelx_helpers.typed_inputs import EnumDefinitions
 
 
 def test_member_tuple_membership(tmp_path):
     model = mx.new_model('EnumMembership')
     try:
-        s = model.new_space('Projection', refs={'Status': HTTPStatus,
-                                                'definitions': EnumDefinitions(('Status',))})
+        s = model.new_space('Projection', refs={'Status': HTTPStatus})
         s.new_cells('kind', 'lambda t: 200 + t')
         s.new_cells('hit', 'lambda t: kind(t) in (Status.OK, Status.CREATED)')
         s.new_cells('miss', 'lambda t: kind(t) not in (Status.OK, Status.ACCEPTED, Status.CREATED)')

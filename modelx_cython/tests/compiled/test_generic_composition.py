@@ -7,7 +7,6 @@ import sys
 from http import HTTPStatus
 
 import modelx as mx
-from modelx_helpers.typed_inputs import EnumDefinitions
 
 
 def compile_model(path, sample):
@@ -26,8 +25,7 @@ def test_generator_literals_preserve_integer_width_and_sign(tmp_path):
               'empty': (high-1, high-2, 2)}
     model = mx.new_model('LiteralDomains')
     try:
-        space = model.new_space('Values', refs={'Status':HTTPStatus,
-                                'definitions':EnumDefinitions(('Status',)), 'stride': 2})
+        space = model.new_space('Values', refs={'Status':HTTPStatus, 'stride': 2})
         for name, value in values.items():
             space.new_cells(name, f'lambda: sum((k * 1.0 for k in ({value},)), 0.0)')
         space.new_cells('step', f'lambda: sum((k * 1.0 for k in range(0, 2, {1 << 80})), 0.0)')

@@ -11,7 +11,7 @@ from pathlib import Path
 import modelx as mx
 import numpy as np
 from modelx_cython.cli import create_setup
-from modelx_helpers.typed_inputs import EnumDefinitions, lookup, sum_f64
+from modelx_helpers.typed_inputs import lookup, sum_f64
 from modelx_helpers.immutable_inputs import Table
 
 
@@ -58,7 +58,7 @@ def test_scope_overrides_aliases_and_arithmetic(tmp_path):
             lookup=functools.partial(float,7), sum_f64=sum_f64,
             term=functools.partial(float), count=functools.partial(int,2))
         s=model.new_space('Values',refs={'Status':HTTPStatus,
-            'enum_definitions':EnumDefinitions(('Status',)), 'other':foreign,
+            'other':foreign,
             'lookup':lookup,'sum_f64':sum_f64,'numbers':math,
             'downward':math.floor,'round_alias':round})
         s.new_cells('term','lambda k: 1.0 + k')
@@ -101,7 +101,8 @@ def test_scope_overrides_aliases_and_arithmetic(tmp_path):
     a = t * 3
     return a / 12.0 + a
 ''').is_cached=False
-        virtual=model.new_space('VirtualValues',refs={'Status':HTTPStatus})
+        # not an IntEnum class: an ordinary Reference (read per evaluation, rebindable)
+        virtual=model.new_space('VirtualValues',refs={'Status':SimpleNamespace(OK=HTTPStatus.OK)})
         for name in ('matches','condition','compound','comparison_value','coded',
                      'call_code','flag','compare_flag'):
             cell=virtual.new_cells(name,s.cells[name].formula.source)
@@ -122,6 +123,7 @@ def test_scope_overrides_aliases_and_arithmetic(tmp_path):
     assert info('nested_sum')['native_reductions']==0
     assert info('hygienic')['native_reductions']==0      # a sum with a start argument is not lowered (R-6)
     script='''import math
+from http import HTTPStatus
 from types import SimpleNamespace
 from PACKAGE import mx_model
 s=mx_model.Values
@@ -138,12 +140,16 @@ override._mx_copy_refs(s,s)
 assert override.call_code(1)==1201
 if type(s).__module__.startswith('exported_cy'):
     for parent in (type(s),type('Middle',(type(s),),{})):
-        for name in ('Status','enum_definitions'):
+        for name in ('Status',):
             invalid=type('ChangedSchema',(parent,),{name:object()})
             try: invalid(mx_model)
             except TypeError as actual:
                 assert name in str(actual) and 'rebuild' in str(actual)
             else: raise AssertionError('changed compiled definition was accepted')
+    try: s.Status=SimpleNamespace(OK=201)
+    except AttributeError: pass
+    else: raise AssertionError('an IntEnum Reference was rebindable in the compiled model')
+    assert s.Status is HTTPStatus
 v=mx_model.VirtualValues
 v.Status=SimpleNamespace(OK=201)
 assert v.matches(200) is False and v.matches(201) is True

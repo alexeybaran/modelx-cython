@@ -58,7 +58,6 @@ def mixed_items(t):
 
 
 def _model(tmp_path, monkeypatch):
-    from modelx_helpers.typed_inputs import EnumDefinitions
     (tmp_path / 'p3_kinds.py').write_text(
         'import enum\n\n'
         'class Leg(enum.IntEnum):\n    A = 1\n    B = 2\n    C = 3\n\n'
@@ -69,7 +68,6 @@ def _model(tmp_path, monkeypatch):
     try:
         s = model.new_space('Projection', formula='lambda policy: None',
                             refs={'Leg': Leg, 'odd': Odd(5), 'values': (1, 2)})
-        s.enum_definitions = EnumDefinitions(('Leg',))
         for name, formula in CELLS.items():
             s.new_cells(name, formula)
         model.export(tmp_path / 'exported')
