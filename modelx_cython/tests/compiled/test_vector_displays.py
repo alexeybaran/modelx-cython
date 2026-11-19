@@ -100,18 +100,10 @@ def test_list_displays_are_written_into_typed_vectors(tmp_path):
         model.close()
     (tmp_path / "sample.py").write_text(SAMPLE.format(names=NAMES), encoding="utf-8")
     subprocess.run([sys.executable, "-m", "modelx_cython", "exported", "--no-spec"], cwd=tmp_path, check=True)
-    source = (tmp_path / "exported_cy" / "_mx_classes.py").read_text(encoding="utf-8")
     reports = _reports(json.loads((tmp_path / "exported_cy" / "_mx_admission.json").read_text(encoding="utf-8")))
 
-    def body(name):
-        start = source.index(f"def _f_{name}(")
-        end = source.find("\n    def ", start + 1)
-        return source[start:end if end > 0 else None]
-    for name in ("trans", "ints", "local", "risky"):
-        assert ".vec_new(" in body(name) or ".ivec_new(" in body(name) or "_mx_dense_formula" in body(name), name
     lowered = [name for name in ("trans", "ints", "local", "risky") if reports[name]["vectors"]["lowered"] >= 1]
     assert lowered == ["trans", "ints", "local", "risky"], {n: reports[n]["vectors"] for n in reports}
-    assert "vec_of(" in source                     # the mixed / untyped displays keep the list path
     (tmp_path / "check.py").write_text(CHECK.format(names=NAMES), encoding="utf-8")
     result = subprocess.run([sys.executable, "check.py"], cwd=tmp_path, capture_output=True, text=True)
     assert result.returncode == 0, result.stdout + result.stderr

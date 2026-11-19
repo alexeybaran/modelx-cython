@@ -37,7 +37,6 @@ def test_typed_extrema_semantics(tmp_path):
         '        if i < 5 and j < 5: w.ilo(i, j)\n', encoding='utf-8')
     subprocess.run([sys.executable, '-m', 'modelx_cython', 'exported',
                     '--sample', 'sample.py', '--no-spec'], cwd=tmp_path, check=True)
-    source = (tmp_path / 'exported_cy/_mx_classes.py').read_text(encoding='utf-8')
     report = json.loads((tmp_path / 'exported_cy/_mx_admission.json').read_text())
     for name in ('lo2', 'hi3', 'ilo', 'inner', 'mixed', 'mixed_lo'):
         assert report[f'exported_cy._mx_classes._c_Values._f_{name}']['native_expressions'] == 1, name

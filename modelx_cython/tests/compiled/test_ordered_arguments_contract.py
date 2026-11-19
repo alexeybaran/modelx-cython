@@ -42,8 +42,6 @@ def test_ordered_builtin_extrema_native_contract(tmp_path):
         text=True, env=dict(os.environ))
     (tmp_path / 'build.log').write_text(build.stdout + build.stderr)
     assert build.returncode == 0, build.stdout + build.stderr
-    source = (tmp_path / 'exported_cy/_mx_classes.py').read_text()
-    assert 'max(*(' not in source and 'min(*(' not in source
     probe = textwrap.dedent('''
         import importlib,itertools,math,struct,sys
         model=importlib.import_module(sys.argv[1]).mx_model

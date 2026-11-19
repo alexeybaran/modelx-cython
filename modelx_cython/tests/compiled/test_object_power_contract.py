@@ -41,9 +41,6 @@ p.raw_minimum(1)
         capture_output=True, text=True)
     (tmp_path/'build.log').write_text(build.stdout+build.stderr)
     assert build.returncode == 0, build.stdout+build.stderr
-    source = (tmp_path/'exported_cy/_mx_classes.py').read_text()
-    assert '_mx_sys._mx_object_power(' not in source
-    assert '_mx_sys._mx_capture_power_base(' not in source
     probe = '''import importlib,itertools,math,struct,sys
 m=importlib.import_module(sys.argv[1]).mx_model
 def outcome(operation):

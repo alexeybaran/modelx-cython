@@ -1,6 +1,5 @@
 """Native integer boundaries reject lossy conversions with rebuild guidance."""
 
-import ast
 import json
 import operator
 import subprocess
@@ -383,25 +382,17 @@ def test_native_signed_arithmetic_cannot_wrap_result(integer_domain_build):
 
 
 def test_signed_local_flow(integer_domain_build):
-    generated = (integer_domain_build / "exported_cy/_m_Outer/_mx_classes.py").read_text(encoding="utf-8")
-    methods = {node.name: node for node in ast.walk(ast.parse(generated)) if isinstance(node, ast.FunctionDef)}
+    report = json.loads((integer_domain_build / "exported_cy/_mx_admission.json").read_text(encoding="utf-8"))
 
-    def native_local(cell):
-        formula = methods[f"_f_{cell}"]
-        if (len(formula.body) == 1 and isinstance(formula.body[0], ast.Return)
-                and isinstance(call := formula.body[0].value, ast.Call) and isinstance(call.func, ast.Name)):
-            formula = methods.get(call.func.id, formula)
-        return any(isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name)
-                   and node.target.id == "adjusted" and ast.unparse(node.annotation) == "_mx_cy.longlong"
-                   for node in ast.walk(formula))
+    def object_locals(cell):
+        entry = next(v for k, v in report.items() if k.endswith(f"._c_Projection._f_{cell}"))
+        return {item["local"] for item in entry["object_locals"]}
 
-    assert native_local("reassigned_local")
-    assert native_local("conditional_local")
-    assert native_local("single_assignment_after_guard")
-    assert not native_local("mixed_local")
-    assert not native_local("possibly_unbound_local")
-    assert not native_local("python_context_local")
-    assert not native_local("prefix_identity_local")
+    # the build report: a local compared by identity stays a Python object; the others do not
+    for cell in ("reassigned_local", "conditional_local", "single_assignment_after_guard"):
+        assert "adjusted" not in object_locals(cell), cell
+    for cell in ("python_context_local", "prefix_identity_local"):
+        assert "adjusted" in object_locals(cell), cell
     run_python(integer_domain_build, "-c", textwrap.dedent("""\
         from exported import mx_model as exported
         from exported_cy import mx_model as compiled

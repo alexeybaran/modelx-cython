@@ -1,4 +1,5 @@
 """Declared object sums retain identity; ordinary numeric Cells may widen."""
+import json
 import os
 import subprocess
 import sys
@@ -29,7 +30,8 @@ def test_scalar_sum_variant_cache_modes(tmp_path):
         text=True, env=dict(os.environ))
     (tmp_path / 'build.log').write_text(build.stdout + build.stderr)
     assert build.returncode == 0, build.stdout + build.stderr
-    assert 'cdef double _f_numeric_total(' in (tmp_path/'exported_cy/_mx_classes.pxd').read_text()
+    report = json.loads((tmp_path/'exported_cy/_mx_admission.json').read_text())
+    assert report['exported_cy._mx_classes._c_Values._f_numeric_total']['return_type'] == 'double'
     probe = '''import importlib,pickle,sys
 import pandas as pd
 m=importlib.import_module(sys.argv[1]).mx_model

@@ -129,7 +129,6 @@ def test_vector_extrema_and_multi_parameter_cache(tmp_path):
     (tmp_path / "sample.py").write_text(SAMPLE.format(scalars=SCALARS), encoding="utf-8")
     subprocess.run([sys.executable, "-m", "modelx_cython", "exported", "--no-spec"],
                    cwd=tmp_path, check=True)
-    source = (tmp_path / "exported_cy" / "_mx_classes.py").read_text(encoding="utf-8")
     admission = json.loads((tmp_path / "exported_cy" / "_mx_admission.json").read_text(encoding="utf-8"))
     reports = _reports(admission)
     for name in ("capped", "floored", "raw", "fmax", "signed", "tie_ff", "tie_ff_min", "tie_ii", "tie_if",
@@ -138,8 +137,8 @@ def test_vector_extrema_and_multi_parameter_cache(tmp_path):
         assert not reports[name]["vectors"]["fallbacks"], (name, reports[name]["vectors"])
     for name in ("mixed", "ints"):
         assert reports[name]["vectors"]["fallbacks"], (name, reports[name]["vectors"])
-    assert "VecCache(" in source and "_mx_vector_key" in source
-    assert "self._v_pairs = {}" not in source and "self._v_triple = {}" not in source
+    for name in ("pairs", "triple"):   # the multi-parameter cells keep a vector cache, not a dict
+        assert admission[f"exported_cy._mx_classes._c_Projection._f_{name}"]["cache"] == "vector-dense", name
     (tmp_path / "check.py").write_text(CHECK.format(scalars=SCALARS), encoding="utf-8")
     result = subprocess.run([sys.executable, "check.py"], cwd=tmp_path, check=True,
                             capture_output=True, text=True)

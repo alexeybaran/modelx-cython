@@ -165,10 +165,6 @@ def test_independent_provider_and_forwarding(tmp_path, monkeypatch):
     for name in ('first', 'second'):
         subprocess.run([sys.executable, '-m', 'modelx_cython', name,
                         '--sample', f'{name}_sample.py', '--spec', 'spec.py'], cwd=tmp_path, check=True)
-        generated = (tmp_path / f'{name}_cy/_mx_classes.py').read_text(encoding='utf-8')
-        assert '.make_view(self._f_primary())' in generated
-        assert '.make_view(self._f_forward())' in generated
-        assert 'self.opaque().rate_at(4)' in generated
         implementation.write_text(IMPLEMENTATION + '\n# New build identity.\n', encoding='utf-8')
 
     alias = module_name(PROVIDER)

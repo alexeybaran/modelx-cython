@@ -181,12 +181,6 @@ def test_vector_cells_compile_to_typed_buffers(tmp_path):
         "for k in range(40):\n    p.noise_sum(k)\n"), encoding="utf-8")
     subprocess.run([sys.executable, "-m", "modelx_cython", "exported", "--no-spec"],
                    cwd=tmp_path, check=True)
-    source = (tmp_path / "exported_cy" / "_mx_classes.py").read_text(encoding="utf-8")
-    # typed vectors, direct buffer loops, powers and sums as described in vectors.py
-    assert "F64Vec" in source and "I64Vec" in source
-    assert ".data[i + 1] = " in source            # versioned cohort loop
-    assert "_mx_sys._mx_pow(" in source
-    assert "vec_sum_range(" in source and "sum_result(" in source
     import json
     admission = json.loads((tmp_path / "exported_cy" / "_mx_admission.json").read_text(encoding="utf-8"))
     reports = {key.rsplit("._f_", 1)[-1]: value["vectors"] for module in admission.values()

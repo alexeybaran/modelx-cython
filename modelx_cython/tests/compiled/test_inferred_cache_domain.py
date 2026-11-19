@@ -1,4 +1,5 @@
 """Sample and spec bounds govern both public and private dense calls."""
+import json
 import os
 import subprocess
 import sys
@@ -37,8 +38,8 @@ m.Projection.tupled(0, 0)
                          cwd=tmp_path,env=dict(os.environ),capture_output=True,text=True)
     (tmp_path/'build.log').write_text(build.stdout+build.stderr)
     assert build.returncode==0,build.stdout+build.stderr
-    generated = (tmp_path/'exported_cy'/'_mx_classes.pxd').read_text()
-    assert ('_spill_value' in generated) is explicit
+    admission = json.loads((tmp_path/'exported_cy'/'_mx_admission.json').read_text())
+    assert admission['exported_cy._mx_classes._c_Projection._f_value']['exact_spill'] is explicit
     probe='''import pickle,sys
 from exported_cy import mx_model as m
 p=m.Projection

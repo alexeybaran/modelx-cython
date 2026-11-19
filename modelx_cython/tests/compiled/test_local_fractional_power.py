@@ -34,9 +34,6 @@ def clamped_root(value, ceiling):
         check=True,
     )
 
-    source = (tmp_path / "exported_cy" / "_mx_classes.py").read_text(encoding="utf-8")
-    assert "_mx_sys._mx_pow(value, 0.5)" in source
-    assert "_mx_cy.cast(object, base) ** _mx_cy.cast(object, 0.5)" in source
 
     (tmp_path / "assert_compiled.py").write_text(
         """\

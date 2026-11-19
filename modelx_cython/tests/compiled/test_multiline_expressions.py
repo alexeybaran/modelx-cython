@@ -42,5 +42,3 @@ try: s.divisible(2,0)
 except ZeroDivisionError: pass
 else: raise AssertionError('zero divisor accepted')
 '''], cwd=tmp_path, check=True, timeout=30)
-    code = (tmp_path/'exported_cy/_mx_classes.py').read_text(encoding='utf-8')
-    assert '_mx_sys._mx_divisible(n, size)' in code

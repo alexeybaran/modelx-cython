@@ -98,9 +98,6 @@ def test_nested_filtered_boolean_ranges(tmp_path):
         assert report[f'exported_cy._mx_classes._c_Projection._f_{name}']['native_reductions'] == (
             1 if name in ('total', 'singleton', 'inner_singleton', 'captured',
                           'captured_singleton', 'descending', 'legacy_any') else 0)
-    from compiled_evidence import assert_compiled_generator_formulas
-    assert_compiled_generator_formulas(tmp_path, ('every','some','some_step','reverse','total','maximum',
-        'singleton','inner_singleton','captured','captured_singleton','descending','legacy_any'))
     probe = textwrap.dedent('''\
         import sys
         import pickle

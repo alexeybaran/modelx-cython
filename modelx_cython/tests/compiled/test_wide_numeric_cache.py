@@ -1,5 +1,6 @@
 """Exercise ordinary native Cell caching with more than three numeric keys."""
 
+import json
 import subprocess
 import sys
 import textwrap
@@ -39,8 +40,8 @@ def test_wide_numeric_cache(tmp_path):
     }}}}), encoding='utf-8')
     subprocess.run([sys.executable, '-m', 'modelx_cython', 'exported', '--sample', 'sample.py', '--spec', 'spec.py'],
                    cwd=tmp_path, check=True)
-    source = (tmp_path / 'exported_cy/_mx_classes.py').read_text(encoding='utf-8')
-    assert '.WideNumericCache(6, True, 8)' in source
+    report = json.loads((tmp_path / 'exported_cy/_mx_admission.json').read_text(encoding='utf-8'))
+    assert report['exported_cy._mx_classes._c_Policy._f_value']['cache'] == 'native-numeric-keys'
     probe = textwrap.dedent('''\
         import math
         import pickle

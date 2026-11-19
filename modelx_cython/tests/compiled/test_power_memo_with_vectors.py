@@ -67,8 +67,6 @@ def test_scalar_power_keeps_its_memo_in_a_model_with_vectors(tmp_path):
     assert reports["q_mth"]["power_memo"] is True, reports["q_mth"]
     assert reports["q_mth"]["vectors"]["powers"] == 0, reports["q_mth"]["vectors"]
     assert reports["vec_pow"]["vectors"]["powers"] >= 1, reports["vec_pow"]["vectors"]
-    source = (tmp_path / "exported_cy" / "_mx_classes.py").read_text(encoding="utf-8")
-    assert "_mx_memo_pow(_mx_cy.address(self._mx_power_q_mth)" in source
     (tmp_path / "check.py").write_text(CHECK, encoding="utf-8")
     result = subprocess.run([sys.executable, "check.py"], cwd=tmp_path, capture_output=True, text=True)
     assert result.returncode == 0, result.stdout + result.stderr

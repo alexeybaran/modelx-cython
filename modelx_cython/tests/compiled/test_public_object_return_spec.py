@@ -71,8 +71,9 @@ p.scalar();p.retained();p.retained("local");p.array();p.arithmetic(0);p.arithmet
         capture_output=True, text=True)
     (tmp_path/'build.log').write_text(run.stdout+run.stderr)
     assert run.returncode == 0, run.stdout+run.stderr
-    pxd = (tmp_path/'exported_cy/_mx_classes.pxd').read_text()
-    assert 'object _f_raw(' in pxd and 'double _f_ordinary(' in pxd
+    report = json.loads((tmp_path/'exported_cy/_mx_admission.json').read_text())
+    types = {name.rsplit('._f_', 1)[-1]: entry['return_type'] for name, entry in report.items()}
+    assert types['raw'] == 'object' and types['ordinary'] == 'double', types
     probe = '''import importlib,pickle,sys,warnings,numpy as np
 m=importlib.import_module(sys.argv[1]).mx_model
 p=type(m)().Projection

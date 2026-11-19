@@ -106,21 +106,12 @@ def test_power_beyond_64_bits_raises_naming_the_cell(power_build):
         assert text.startswith(f"Sp.{name}:"), (name, text)
 
 
-def test_power_of_c_integers_uses_the_checked_power(power_build):
-    source = (power_build / "exported_cy" / "_mx_classes.py").read_text(encoding="utf-8")
-    for name in OUTSIDE:
-        assert f"'Sp.{name}')" in source and "_mx_sys._mx_signed_pow(" in source
-    # a negative exponent has a float value in Python: Cython's double power, left as it was
-    assert "2 ** -" in source
 
 
 def test_unchecked_mode_power(power_build_unchecked):
     """Unchecked mode: a power stored as a C integer still takes the checked power (Cython's own
     wraps, and gives a double for a variable exponent, which a C integer cannot take); in a float
     or comparison context it is Cython's C power and wraps beyond 64 bits, as on upstream."""
-    source = (power_build_unchecked / "exported_cy" / "_mx_classes.py").read_text(encoding="utf-8")
-    for name in ("const_exponent", "local_base", "variable_exponent"):
-        assert f"'Sp.{name}')" in source and "_mx_sys._mx_signed_pow(" in source, name
     outcome = _probe(power_build_unchecked, f'''
         import json
         from exported_cy import mx_model

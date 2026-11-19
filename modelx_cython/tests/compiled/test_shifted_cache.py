@@ -45,14 +45,11 @@ def test_shifted_dense_bounds(tmp_path, window):
     logical = (-3, stop)
     physical = window or logical
     compact = physical != logical
-    for suffix in ('py', 'pxd'):
-        generated = (tmp_path/f'exported_cy/_mx_classes.{suffix}').read_text()
-        for cell in ('value', 'previous'):
-            assert (f'_spill_{cell}' in generated) is compact
     report = json.loads((tmp_path/'exported_cy/_mx_admission.json').read_text())
     shifted = report['exported_cy._mx_classes._c_Plain._f_value']
     assert shifted['dense_offsets'] == [physical[0]]
     assert shifted['exact_spill'] is compact
+    assert report['exported_cy._mx_classes._c_Plain._f_previous']['exact_spill'] is compact
     assert shifted['dense_logical_domain'] == [list(logical)]
     probe = textwrap.dedent('''\
         import sys

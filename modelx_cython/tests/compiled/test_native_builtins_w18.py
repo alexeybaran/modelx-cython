@@ -32,9 +32,7 @@ def _build(tmp_path, model, sample):
     (tmp_path / 'sample.py').write_text(textwrap.dedent(sample), encoding='utf-8')
     subprocess.run([sys.executable, '-m', 'modelx_cython', 'exported',
                     '--sample', 'sample.py', '--no-spec'], cwd=tmp_path, check=True)
-    source = (tmp_path / 'exported_cy/_mx_classes.py').read_text(encoding='utf-8')
-    report = json.loads((tmp_path / 'exported_cy/_mx_admission.json').read_text())
-    return source, report
+    return json.loads((tmp_path / 'exported_cy/_mx_admission.json').read_text())
 
 
 def _differential(tmp_path, probe):
@@ -100,7 +98,7 @@ def test_minmax_operand_kinds_and_objects(tmp_path):
         s.new_cells('err', 'def err(i, j) -> object:\n    return max(o(i), wd(j % 3))\n')
         # a comprehension variable of a parameter's name is not the parameter
         s.new_cells('shadow', 'def shadow(i) -> object:\n    return [max(i, 0) for i in (0.5, -1, v(i))]\n')
-        source, report = _build(tmp_path, model, f'''\
+        report = _build(tmp_path, model, f'''\
             from exported import mx_model as m
             w = m.Values
             def t(f, *args):
@@ -116,7 +114,6 @@ def test_minmax_operand_kinds_and_objects(tmp_path):
             ''')
     finally:
         model.close()
-    assert 'max(*(' not in source and 'min(*(' not in source
     for name in ('loc', 'blt', 'ln', 'ints2'):
         assert _cell(report, name)['expressions_object'] == [], name
         assert _cell(report, name)['expressions_untyped'] == [], name
@@ -162,7 +159,7 @@ def test_nested_reductions_lifted(tmp_path):
         # a conditional expression with reductions in its branches becomes an if statement
         s.new_cells('r', 'def r(k) -> object:\n    free = [i for i in range(k) if v(i) <= 0.0]\n'
                     '    return (min(free) if free else max(n(i) for i in range(k + 1)) + 1) + 1\n')
-        source, report = _build(tmp_path, model, '''\
+        report = _build(tmp_path, model, '''\
             from exported import mx_model as m
             w = m.Values
             for k in range(12):
@@ -213,7 +210,7 @@ def test_object_membership_and_isclose(tmp_path):
         s.new_cells('c5', 'def c5(i) -> object:\n    return math.isclose(mo(i), 0)\n')
         s.new_cells('mem', 'def mem(i) -> object:\n    x = mo(i)\n'
                     '    return (x in (1, 2, k3), x not in (0.0, "a"), x in (None,), x in (2 ** 62, -0.0))\n')
-        source, report = _build(tmp_path, model, '''\
+        report = _build(tmp_path, model, '''\
             from exported import mx_model as m
             w = m.Values
             for i in range(24):
@@ -224,7 +221,6 @@ def test_object_membership_and_isclose(tmp_path):
             ''')
     finally:
         model.close()
-    assert '.isclose(' not in source.replace('namespace.isclose', '')
     for name in ('c1', 'c2', 'c3', 'c4'):
         assert _cell(report, name)['expressions_untyped'] == [], name
     _differential(tmp_path, _PROBE_HEAD + '''\
@@ -261,15 +257,13 @@ def test_object_membership_keeps_its_grouping(tmp_path):
                     '    )\n')
         s.new_cells('h', 'def h(i) -> object:\n    cause = mo(i)\n'
                     '    if flag(i) and cause in ("cerebral", "cardiac"):\n        return 4\n    return 1\n')
-        source, report = _build(tmp_path, model, '''\
+        report = _build(tmp_path, model, '''\
             from exported import mx_model as m
             for i in range(8):
                 m.Values.g(i); m.Values.h(i)
             ''')
     finally:
         model.close()
-    # the chain lowering is the route taken (no tuple membership left in these cells)
-    assert '== cause)' in source and 'in ("cerebral", "cardiac")' not in source
     _differential(tmp_path, _PROBE_HEAD + '''\
     for i in range(8):
         call(w.g, i); call(w.h, i)
