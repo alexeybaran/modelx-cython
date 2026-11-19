@@ -24,6 +24,7 @@ of workers. An assignment made while another thread is calculating a single cell
 is not synchronised (as in live modelx, which is not thread-safe at all).
 """
 
+import sys
 import logging
 import threading
 
@@ -33,6 +34,13 @@ _NO_FRAME = object()
 _running = {}       # id(model) -> number of collect calls in progress
 _clearing = {}      # id(model) -> number of clear_all() calls in progress
 _inputs = {}        # id(model) -> {(id(space), name): (space, name, table)}
+
+
+def _pandas_object(value):
+    """A pandas DataFrame, Series or Index (isinstance against pandas' public classes, looked up only when pandas
+    is already loaded: this module never imports it)."""
+    pd = sys.modules.get('pandas')
+    return pd is not None and isinstance(value, (pd.DataFrame, pd.Series, pd.Index))
 
 
 def collect_begin(model):
@@ -255,7 +263,7 @@ def rebind_source(table):
     """What a table cell marked by :func:`rebuild_tables` rebinds from: the frame it holds (the source
     frame, or the frame handed to Python), else the internal table itself (nothing to rebuild)."""
     frame = getattr(table, '_mx_python_frame', None)
-    if frame is not None and type(frame).__module__.split('.')[0] == 'pandas':
+    if frame is not None and _pandas_object(frame):
         return frame
     from modelx_helpers.immutable_inputs import table_frame
     owner = getattr(table, '__modelx_table_owner__', None)

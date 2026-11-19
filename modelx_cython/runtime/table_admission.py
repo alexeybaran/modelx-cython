@@ -27,6 +27,7 @@ pandas, is returned unchanged, so ``pdn.table(...)`` in model text keeps working
 ``<cell>: <reason>``.
 """
 
+import sys
 import numbers
 
 
@@ -36,6 +37,13 @@ class TableAdmissionError(ValueError):
     def __init__(self, cell, reasons):
         self.cell, self.reasons = cell, tuple(reasons)
         super().__init__('\n'.join(f'{cell}: {reason}' for reason in self.reasons))
+
+
+def _pandas_object(value):
+    """A pandas DataFrame, Series or Index (isinstance against pandas' public classes, looked up only when pandas
+    is already loaded: this module never imports it)."""
+    pd = sys.modules.get('pandas')
+    return pd is not None and isinstance(value, (pd.DataFrame, pd.Series, pd.Index))
 
 
 def _label_kind(label):
@@ -130,8 +138,7 @@ def admit(value, cell, nargs=0):
     Returns ``value`` itself when it is not a pandas object (a helper Table, a scalar, ...).
     Raises :class:`TableAdmissionError` naming the cell and every failed condition.
     """
-    module = type(value).__module__
-    if module.split('.')[0] != 'pandas':
+    if not _pandas_object(value):
         return value
     cell = display_name(cell)
     reasons = conditions(value, nargs)

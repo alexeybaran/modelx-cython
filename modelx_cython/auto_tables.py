@@ -54,8 +54,7 @@ class SampleAdmission:
     # ------------------------------------------------------------ values
     def observe(self, value, path, funcname=None):
         """The value the sample continues with for the zero-argument cell ``path``."""
-        module = type(value).__module__
-        if module.split('.')[0] != 'pandas':
+        if not _pandas_object(value):
             first = self.paths.get(id(value))
             if first is not None and first[0] is value and first[1] != path:   # an admitted table passed on
                 record = self.cells.setdefault(path, {'status': 'admitted', 'count': 0, 'reasons': [],
@@ -84,7 +83,7 @@ class SampleAdmission:
             record['reasons'] = list(error.reasons)
             return value
         record['status'] = 'admitted'
-        if getattr(type(value.index), '__name__', '') == 'RangeIndex' and value.index.name is None:
+        if isinstance(value.index, sys.modules['pandas'].RangeIndex) and value.index.name is None:
             record['row_numbers_as_keys'] = True
         self.tables[id(value)] = (value, table, path)
         self.paths[id(table)] = (table, path)
@@ -186,6 +185,13 @@ class SampleAdmission:
                               '(a table built per policy?): build it once in a Space without per-policy reset '
                               'and select with .loc[key]')
         return result
+
+
+def _pandas_object(value):
+    """A pandas DataFrame, Series or Index (isinstance against pandas' public classes, looked up only when pandas
+    is already loaded: this module never imports it)."""
+    pd = sys.modules.get('pandas')
+    return pd is not None and isinstance(value, (pd.DataFrame, pd.Series, pd.Index))
 
 
 def _formula_classes(package):
