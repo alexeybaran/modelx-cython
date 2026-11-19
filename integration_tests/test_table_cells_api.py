@@ -227,7 +227,7 @@ if compiled:
             try:
                 results.append(m.Projection.collect().sum.pv)
             except RuntimeError as error:
-                assert "while clear_all() of this model is running" in str(error), error
+                assert "while clear_all() or a table assignment of this model is running" in str(error), error
                 refused += 1
     finally:
         stop.set()
