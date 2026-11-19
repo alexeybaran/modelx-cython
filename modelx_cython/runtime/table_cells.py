@@ -25,11 +25,9 @@ is not synchronised (as in live modelx, which is not thread-safe at all).
 """
 
 import sys
-import logging
 import threading
 
 _lock = threading.Lock()
-_log = logging.getLogger('modelx_cython.runtime')
 _NO_FRAME = object()
 _running = {}       # id(model) -> number of collect calls in progress
 _clearing = {}      # id(model) -> number of clear_all() calls in progress
@@ -89,7 +87,10 @@ def _reapply_inputs(model, spaces=None):
 
 def frame_unfit(value, schema):
     """T-5c: why ``value`` does not fit the traced schema of a frame cell (``tracer.frame_schema``), as a list of
-    reasons; empty when it fits. The compiled reads of a frame that does not fit run on pandas (equal to live)."""
+    reasons; empty when it fits. A frame fits when every property the compiled reads were built for is as traced:
+    the kind (DataFrame or Series), the number of index levels and the kind of each (integer or other), the level
+    names, uniqueness, and the columns (the same labels, in the same order, each of the traced kind: float64,
+    int64 or other). An assignment that does not fit is refused (``assign_table_cell``)."""
     import pandas as pd
     from pandas.api.types import is_bool_dtype, is_integer_dtype
     kind = schema.get('kind')
@@ -104,34 +105,51 @@ def frame_unfit(value, schema):
     else:
         for position, level in enumerate(levels):
             values = index.get_level_values(position)
-            if level == 'int' and not (is_integer_dtype(values.dtype) and not is_bool_dtype(values.dtype)):
+            integer = is_integer_dtype(values.dtype) and not is_bool_dtype(values.dtype)
+            if level == 'int' and not integer:
                 reasons.append(f'index level {position} holds {values.dtype}, compiled for integers')
+            elif level != 'int' and integer:
+                reasons.append(f'index level {position} holds {values.dtype}, compiled for labels other than integers')
+    names = schema.get('names')
+    if names is not None and tuple(index.names) != tuple(names):
+        reasons.append(f'index level names {list(index.names)}, compiled for {list(names)}')
     if schema.get('unique') and not index.is_unique:
         reasons.append('the index is not unique')
-    dtypes = {'f64': 'float64', 'i64': 'int64'}
-    for label, column_kind in schema.get('columns') or ():
-        if kind == 'series':
-            dtype = value.dtype
-        elif label not in value.columns:
+    traced = tuple(schema.get('columns') or ())
+    def column_kind(dtype):
+        return {'float64': 'f64', 'int64': 'i64'}.get(str(dtype), 'obj')
+    names_of = {'f64': 'float64', 'i64': 'int64', 'obj': 'a type other than float64 or int64'}
+    if kind == 'series':
+        found = column_kind(value.dtype)
+        if traced and found != traced[0][1]:
+            reasons.append(f'values of {value.dtype}, compiled for {names_of[traced[0][1]]}')
+        return reasons
+    labels = list(value.columns)
+    for label, column in traced:
+        if label not in labels:
             reasons.append(f'no column {label!r}')
             continue
-        else:
-            dtype = value[label].dtype
-        if column_kind in dtypes and str(dtype) != dtypes[column_kind]:
-            reasons.append(f'column {label!r} holds {dtype}, compiled for {dtypes[column_kind]}')
+        dtype = value[label].dtype if labels.count(label) == 1 else 'object'
+        if column_kind(dtype) != column:
+            reasons.append(f'column {label!r} holds {dtype}, compiled for {names_of[column]}')
+    extra = [label for label in labels if label not in dict(traced)]
+    if extra:
+        reasons.append(f'columns {extra} not in the compiled frame')
+    elif not reasons and tuple(labels) != tuple(label for label, _ in traced):
+        reasons.append(f'columns in the order {labels}, compiled for {[label for label, _ in traced]}')
     return reasons
 
 
 def assign_table_cell(space, name, path, table, schema=None):
     """Make ``table`` (already converted) the value of the table cell ``name`` of ``space``, as an
     input that clears keep. Values already computed from the old table stay until the user clears
-    the Spaces that depend on it (D130). T-5c: a frame that does not fit the cell's traced ``schema`` is
-    accepted as live modelx accepts it; its compiled reads run on pandas, and one warning names the cell and
-    why. A later assignment that fits is read natively again."""
+    the Spaces that depend on it (D130). A frame that does not fit the cell's traced ``schema``
+    (``frame_unfit``) is refused with ValueError naming the cell and why, as on main; nothing changes (the
+    previous frame stays)."""
     unfit = frame_unfit(table, schema) if schema is not None else ()
     if unfit:
-        _log.warning('%s: the assigned %s does not fit the compiled reads (%s): they run on pandas, with the '
-                     'values and errors of live modelx', path, type(table).__name__, '; '.join(unfit))
+        raise ValueError(f'{path}: the assigned {type(table).__name__} does not fit the compiled reads '
+                         f'({"; ".join(unfit)}); the previous value stays')
     model = space._model
     # T-5c: as clear_all, the check and the mark are one step under the lock: the assignment replaces the cell's
     # published prepared table, which the workers of a collect read without a lock, so no collect may start

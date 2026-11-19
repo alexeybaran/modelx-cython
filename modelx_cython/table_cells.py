@@ -293,7 +293,7 @@ def rewrite_class(cls_info, node, config, integer_refs):
     for name, cells in tables.items():
         path = path_of(cls_info, name)
         if frame_cell(cls_info, cells):
-            frame = getattr(getattr(cells, '_rt', None), 'frame_schema', None)     # T-5c: warned when unfit
+            frame = getattr(getattr(cells, '_rt', None), 'frame_schema', None)     # T-5c: an unfit frame is refused
             assign = f'    {RUNTIME}.assign_table_cell(self, {name!r}, {path!r}, value, {frame!r})\n'
             if cls_info.name not in cls_info.visitor.itemspace_classes:
                 lines.append(_prepared_method(name, mapping, cells.is_locked))

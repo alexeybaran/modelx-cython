@@ -213,6 +213,8 @@ STMTS = {
                    "return (ms, float(curve.iloc[0]), float(curve.iloc[-1]), float(curve.loc[21]))"),
     'whole_asof': ('flat shuffled', "return int(T.index.asof(21.5 + t))"),
     'view_member': ('grid sgrid', "sub = T.loc[('A', 'B')[t % 2]]\nreturn ((20 + t) in sub.index, (21 + 2 * t) not in sub.index)"),
+    # a frame the formula computes from a Reference: its kinds can differ at run time from the traced ones
+    'loc_ref': ('refd', "return T.loc[20 + t, 'q']"),
 }
 
 DATA = {
@@ -245,6 +247,7 @@ DATA = {
            "        index=pd.MultiIndex.from_product([['A', 'B'], ['F', 'M'], [20, 21]]))",
     'tri_amb': "pd.DataFrame({'q': [0.1 * n for n in range(8)], 'x': [0.0] * 8},\n"
                "        index=pd.MultiIndex.from_product([['A', 'B'], ['q', 'x'], [20, 21]]))",
+    'refd': "SRC.copy()",       # the Reference SRC (set in build)
 }
 
 # T-5: item cells (a view of a prefix fixed per item: codes held per item; walks of a shared table)
@@ -314,6 +317,7 @@ def build():
     for name, expression in DATA.items():
         data.new_cells(name, f"def {{name}}():\\n    return {{expression}}\\n")
     data.pd = pd
+    data.SRC = pd.DataFrame({{'q': [0.001, 0.002, 0.004, 0.008]}}, index=pd.Index([20, 21, 22, 23], name='age'))
     calc = model.new_space("Calc")
     calc.data, calc.pd, calc.np, calc.pickle = data, pd, np, pickle
     for op, (sources, expression) in OPS.items():
@@ -550,7 +554,9 @@ compiled.Items.clear_all()
 checks["item: reassign the prefix cell's table + Space.clear_all: equal to live"] = items_equal()
 
 
-# T-4 item 0: an assigned frame of other kinds than the traced ones (the reads keep pandas), compiled = live
+# T-4 item 0 (owner's rule, as main): an assigned frame of other kinds than the traced ones is refused with
+# ValueError naming the cell; nothing changes (the previous frame stays, every read as before, equal to live).
+# A frame a formula computes with other kinds (here from a Reference) is read on pandas, equal to live.
 def outcomes(space, cell, ts):
     found = []
     for t in ts:
@@ -579,20 +585,41 @@ KINDS = {
     "float column -> int column": base.assign(q=[1, 2, 3, 4]),
     "int level -> text level": base.set_axis(pd.Index(["20", "21", "22", "23"], name="age"), axis=0),
 }
-for name, frame in KINDS.items():
-    live.Data.flat[()] = frame
-    compiled.Data.flat[()] = frame.copy()
+
+
+def refused(space, name, frame):
+    before = getattr(space, name)()
+    try:
+        getattr(space, name)[()] = frame.copy()
+    except ValueError as error:
+        return f"Data.{name}" in str(error) and getattr(space, name)() is before
+    return False
+
+
+def clear_both():
     live.Calc.clear_all(); compiled.Calc.clear_all(); live.Items.clear_all(); compiled.Items.clear_all()
-    checks[f"kind: {name}: equal to live"] = (same_outcomes("loc_scalar__flat", range(4))
-                                              and same_outcomes("at__flat", range(4))
-                                              and same_outcomes("v__flat", range(4), items=True))
+
+
+for name, frame in KINDS.items():
+    ok = refused(compiled.Data, "flat", frame)
+    clear_both()
+    checks[f"kind: {name}: refused, reads unchanged"] = (ok and same_outcomes("loc_scalar__flat", range(4))
+                                                         and same_outcomes("at__flat", range(4))
+                                                         and same_outcomes("v__flat", range(4), items=True))
 multi = live.Data.multi()
 multi_int = multi.set_axis(multi.index.set_levels([1, 2, 3], level=0), axis=0)
-live.Data.multi[()] = multi_int
-compiled.Data.multi[()] = multi_int.copy()
-live.Calc.clear_all(); compiled.Calc.clear_all(); live.Items.clear_all(); compiled.Items.clear_all()
-checks["kind: text level -> int level (two levels): equal to live"] = (
-    same_outcomes("loc_tuple__multi", range(4)) and same_outcomes("at_tuple__multi", range(4)))
+ok = refused(compiled.Data, "multi", multi_int)
+clear_both()
+checks["kind: text level -> int level (two levels): refused, reads unchanged"] = (
+    ok and same_outcomes("loc_tuple__multi", range(4)) and same_outcomes("at_tuple__multi", range(4)))
+source = live.Data.SRC
+for name, frame in {"int level -> float level": source.set_axis(pd.Index([20.0, 21.0, 22.0, 23.0], name="age")),
+                    "int level -> text level": source.set_axis(pd.Index(["20", "21", "22", "23"], name="age")),
+                    "float column -> int column": source.assign(q=[1, 2, 3, 4])}.items():
+    live.Data.SRC = frame
+    compiled.Data.SRC = frame.copy()
+    live.Data.clear_all(); compiled.Data.clear_all(); clear_both()
+    checks[f"computed kind: {name}: equal to live"] = same_outcomes("loc_ref__refd", range(4))
 json.dump(checks, sys.stdout, indent=1)
 '''
 
@@ -711,8 +738,9 @@ def test_native_branches_call_no_pandas(probe):
 # and the build report names it (the run-time conditions in the read's ``pandas_when``; a shape not recognised as
 # form 'pandas' with its reason). The internal-error fallback is in ``test_table_safety_net``.
 FALLBACKS = {   # condition -> (cell, the report's form, a phrase of its pandas_when or reason, the value checks)
-    'kind change': ('Calc.loc_scalar__flat', 'L1', 'other index level kinds than',
-                    ('kind: int level -> float level: equal to live', 'kind: int level -> text level: equal to live')),
+    'kind change': ('Calc.loc_ref__refd', 'L1', 'other index level kinds than',
+                    ('computed kind: int level -> float level: equal to live',
+                     'computed kind: int level -> text level: equal to live')),
     'unordered index': ('Calc.view_index__sgrid', None, "the stored order of the index within the prefix", ()),
     'ambiguous key part': ('Calc.two_part_prefix_amb__tri_amb', None, '`T.loc[a, b]` is not a row prefix', ()),
     'assigned value': ('Items.pre__rates', None, 'the cell sched holds an assigned value',

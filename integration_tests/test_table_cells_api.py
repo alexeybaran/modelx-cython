@@ -170,48 +170,33 @@ m.clear_all()                                   # the whole model: Data reruns i
 assert close(direct(m), live(factor=3.0)) and close(total(m, 1), live(factor=3.0))
 
 if compiled:
-    # T-5c (result difference from main): a frame that does not fit the compiled reads is accepted, as live
-    # accepts it; its reads run on pandas, with live's values and errors; one warning names the cell and why. A
-    # later assignment that fits is read natively again.
-    import logging, pkgutil, re
-    helper = next(import_module(f"{name}.{info.name}") for info in pkgutil.iter_modules(package.__path__)
-                  if info.name.startswith("_mx_helper_")
-                  and hasattr(import_module(f"{name}.{info.name}"), "native_slots"))
-    warned = []
-    class Catch(logging.Handler):
-        def emit(self, record):
-            warned.append(record.getMessage())
-    logging.getLogger("modelx_cython.runtime").addHandler(Catch())
-
-    def outcome(call):
-        try:
-            return ("ok", round(call(), 9))
-        except Exception as error:        # live wraps the formula's error: compare the original type
-            text = type(error).__name__
-            if text == "FormulaError":
-                found = re.search(r"\\n(\\w+): ", str(error))
-                text = found.group(1) if found else text
-            return ("raise", text)
-
+    # an assigned frame that does not fit the compiled reads is refused (main's rule), naming the cell and why;
+    # nothing changes: the previous frame stays and every value is as before. A frame that fits is accepted.
     m = Model()
     assert close(total(m, 1), base)
-    fit = helper.native_slots(m.Data.points())
-    assert fit > 0, fit
+    previous = m.Data.points()
     for bad, text in ((FRAME.drop(columns="sa"), "no column 'sa'"), (FRAME.assign(sa="x"), "column 'sa' holds"),
-                      (FRAME.set_axis(pd.Index(list("abcd"), name="policy_id")), "index level 0 holds")):
-        del warned[:]
-        m.Data.points[()] = bad
+                      (FRAME.set_axis(pd.Index(list("abcd"), name="policy_id")), "index level 0 holds"),
+                      (FRAME.set_axis(pd.Index([1.0, 2.0, 3.0, 4.0], name="policy_id")), "index level 0 holds"),
+                      (FRAME.assign(sa=FRAME["sa"].astype("float32")), "column 'sa' holds float32"),
+                      (FRAME.assign(extra=1.0), "not in the compiled frame"),
+                      (FRAME[["rate", "sa"]], "columns in the order"),
+                      (FRAME.rename_axis("id"), "index level names")):
+        try:
+            m.Data.points[()] = bad
+        except ValueError as error:
+            assert "Data.points" in str(error) and text in str(error), error
+        else:
+            raise AssertionError(f"an unfit table was accepted: {text}")
+        assert m.Data.points() is previous
         m.Projection.clear_all()
-        assert len(warned) == 1 and "Data.points" in warned[0] and text in warned[0], warned
-        assert helper.native_slots(m.Data.points()) < fit
-        expected = outcome(lambda: live(points=bad))
-        assert outcome(lambda: direct(m)) == expected, (text, outcome(lambda: direct(m)), expected)
-        assert outcome(lambda: total(m, 1)) == expected and outcome(lambda: total(m, 4)) == expected, text
-    del warned[:]
-    m.Data.points[()] = FRAME.copy()                # fits again: native again, no warning
+        assert close(direct(m), base) and close(total(m, 1), base) and close(total(m, 4), base), text
+    m.Data.points[()] = doubled                     # fits: accepted
     m.Projection.clear_all()
-    assert not warned and helper.native_slots(m.Data.points()) == fit
-    assert close(total(m, 1), base) and close(total(m, 4), base)
+    assert close(total(m, 1), live(points=doubled)) and close(total(m, 4), live(points=doubled))
+    m.Data.points[()] = FRAME.copy()                # fits again
+    m.Projection.clear_all()
+    assert close(direct(m), base) and close(total(m, 1), base) and close(total(m, 4), base)
 
     # (8) assignment and clear are refused while a collect runs
     m = Model()
