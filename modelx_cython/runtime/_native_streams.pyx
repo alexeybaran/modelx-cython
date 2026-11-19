@@ -58,31 +58,8 @@ cdef extern from *:
     static int mx_unpack_noniterable(PyObject *value) {
         return Py_TYPE(value)->tp_iter == NULL && !PySequence_Check(value);
     }
-    static void mx_zip_replace(PyObject *row, Py_ssize_t position, PyObject *value) {
-        PyObject *previous = PyTuple_GET_ITEM(row, position);
-        Py_INCREF(value);
-        PyTuple_SET_ITEM(row, position, value);
-        Py_DECREF(previous);
-    }
-    static void mx_zip_track(PyObject *row) {
-        if (!PyObject_GC_IsTracked(row)) PyObject_GC_Track(row);
-    }
-    static int mx_zip_unique(void *row) {
-        /* Borrowed pointer is deliberate: an object-typed Cython argument
-           adds a temporary INCREF and changes zip's row retention behavior. */
-        #if PY_VERSION_HEX >= 0x030e0000
-        return PyUnstable_Object_IsUniquelyReferenced((PyObject *)row);
-        #elif defined(Py_GIL_DISABLED)
-        #error "Native zip_values on free-threaded Python requires CPython 3.14 or newer"
-        #else
-        return Py_REFCNT((PyObject *)row) == 1;
-        #endif
-    }
     """
     bint mx_unpack_noniterable(object value) noexcept
-    void mx_zip_replace(object row, Py_ssize_t position, object value) noexcept
-    void mx_zip_track(object row) noexcept
-    bint mx_zip_unique(void *row) noexcept
 
 
 cdef object _replacement(object function, tuple keywords, tuple names, tuple values):
@@ -299,9 +276,7 @@ cdef class Stream:
 
 def _stream_generator(Stream cursor):
     try:
-        while True:
-            if not cursor.prepare_next():
-                return
+        while cursor.prepare_next():
             yield cursor.take_pending()
     finally:
         cursor.close()
