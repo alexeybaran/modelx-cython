@@ -1258,6 +1258,10 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
         for param in param_list:
             param_name = param.name.value
             type_expr = cells.get_argtype_expr(param_name, formula=formula)
+            if type_expr == 'str':
+                # a Python object parameter accepts None as Python does; the bare annotation
+                # makes Cython reject None (at the Python entry, and at a direct C call)
+                type_expr = 'str | None'
             if type_expr:
                 updated_params.append(
                     param.with_changes(
