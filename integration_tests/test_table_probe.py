@@ -191,6 +191,10 @@ STMTS = {
                     "return (sub.loc[max(months), 'v'], int(sub.index.asof(5.0 * t)), sub.index[-1])"),
     'level_extreme': ('grid sgrid tri', "return (int(T.index.get_level_values(1).max()) + t, T.index.get_level_values(-1).min())"),
     'level_extreme_hex': ('grid', "return int(T.index.get_level_values(0x1).max()) + t"),
+    # T-5c: the level values in a local, then their extremes (the clamp of an age); the local also read otherwise
+    'level_extreme_local': ('rates', "ages = T.index.get_level_values('year')\n"
+                            "xx = min(max(1999 + t, int(ages.min())), int(ages.max()))\nreturn float(T.loc[('A', 'F', xx), 'q'])"),
+    'level_extreme_local_kept': ('rates', "ages = T.index.get_level_values(2)\nreturn (int(ages.max()) - t, len(ages))"),
     'level_extreme_named': ('rates', "return (int(T.index.get_level_values('year').max()) - t, T.index.get_level_values('year').min())"),
     'col_of_loc': ('tri', "curve = T.loc[(('A', 'B')[t % 2], ('F', 'M')[t // 2]), 'q']\nms = [int(v) for v in curve.index]\n"
                    "return (ms, float(curve.iloc[0]), float(curve.iloc[-1]), float(curve.loc[21]))"),
@@ -685,3 +689,37 @@ def test_native_branches_call_no_pandas(probe):
     module.visit(Scan())
     assert not found, found
 
+
+
+# T-5c: every documented fallback condition, as cells of the probe: compiled equals live where the condition holds,
+# and the build report names it (the run-time conditions in the read's ``pandas_when``; a shape not recognised as
+# form 'pandas' with its reason). The internal-error fallback is in ``test_table_safety_net``.
+FALLBACKS = {   # condition -> (cell, the report's form, a phrase of its pandas_when or reason, the value checks)
+    'kind change': ('Calc.loc_scalar__flat', 'L1', 'other index level kinds than',
+                    ('kind: int level -> float level: equal to live', 'kind: int level -> text level: equal to live')),
+    'unordered index': ('Calc.view_index__sgrid', None, "the stored order of the index within the prefix", ()),
+    'ambiguous key part': ('Calc.two_part_prefix_amb__tri_amb', None, '`T.loc[a, b]` is not a row prefix', ()),
+    'assigned value': ('Items.pre__rates', None, 'the cell sched holds an assigned value',
+                       ('item: prefix cell holding an assigned value: equal to live',)),
+    'unsupported shape': ('Calc.loc_list__flat', 'pandas', 'a key part selects several rows', ()),
+    'frame edited in place': ('Calc.mutate_loc__mut', 'pandas', 'the formula edits this frame in place', ()),
+    'index not unique': ('Calc.nonunique_key_col__dup', 'pandas', 'the index is not unique', ()),
+}
+
+
+def test_fallback_conditions_reported_and_equal_to_live(probe):
+    work, _, verdicts = probe
+    reads = json.loads((work / "probe_nomx_cy" / "_mx_table_reads.json").read_text(encoding="utf-8"))
+    contract = json.loads(_run(work, "contract.py").stdout)
+    missing = []
+    for condition, (cell, form, phrase, checks) in FALLBACKS.items():
+        entries = [e for c, es in reads.items() if c.endswith(cell) and isinstance(es, list) for e in es
+                   if isinstance(e, dict) and (form is None or e.get('form') == form)
+                   and phrase in e.get('pandas_when', '') + e.get('reason', '')]
+        if not entries:
+            missing.append(f"{condition}: no report entry of {cell} names it: {reads.get(cell)}")
+        name = cell.split('.')[-1]
+        missing += [f"{condition}: {key} differs from live: {v}" for key, v in verdicts.items()
+                    if key.split('.')[-1] == name and v != 'same' and not v.startswith('boundary: ')]
+        missing += [f"{condition}: {check}" for check in checks if not contract.get(check)]
+    assert not missing, "\n".join(missing)

@@ -31,6 +31,8 @@ another spelling): it returns None, and the expression stays pandas (with a repo
 Every unpacking or indexing of a syntax node is preceded by the check of its shape.
 """
 
+import re
+
 import libcst as cst
 
 from .holds import hold_table
@@ -834,6 +836,16 @@ _NO_LABEL = object()
 PREPARE_MIN_EVALUATIONS = 8
 
 
+# T-5c: the run-time conditions that send a lowered read to pandas, by the signature kind of a hold it takes (the
+# report's ``pandas_when``; the kinds of levels and columns apply to every read)
+RUN_TIME = {
+    -2: 'the table or view is empty',
+    -3: "the stored order of the index within the prefix differs from pandas' order",
+    -5: '`T.loc[a, b]` is not a row prefix of the table at run time (pandas reads it as row and column)',
+    -6: 'the level has no longer that name, is not an int level, or the table is empty',
+}
+
+
 class _View:
     """T-5: the rows of a frame receiver ``call`` a read walks: the whole table (``start`` None: pandas positions map
     to stored rows), or the stored rows [start, stop) of a prefix of ``depth`` levels (``codes``; C locals of the
@@ -882,6 +894,7 @@ class _Rewrite(cst.CSTTransformer):
         self.key_locals = {}    # name of a key local -> its tuple display (the fallback evaluates the display)
         self.asof_rows = {}     # asof local -> (membership hold, prefix cell call, asof expression)
         self.native = {}        # id(lowered read) -> column kind, for float()/int() around it
+        self.taken = []         # T-5c: kinds of the holds taken since the last recorded read (its run-time fallbacks)
         self.updated_of = {}    # id(original node) -> its rewritten node (key parts are emitted with their reads lowered)
 
     def on_leave(self, original, updated):
@@ -899,14 +912,24 @@ class _Rewrite(cst.CSTTransformer):
         return False
 
     def _take(self, receiver, label, kind):
+        self.taken.append(kind)
         return self.o.hold(receiver, label, kind)
 
-    def _record(self, node, form, receiver, why=None):
+    def _record(self, node, form, receiver, why=None, view=None):
         entry = {'expression': _code(node)[:160], 'receiver': _code(receiver), 'form': form}
         if not why:
             schema = self.o._schema_of_call(receiver) or {}
-            entry['pandas_when'] = ('the frame at run time has other index level kinds than '
-                                    f"{list(schema.get('levels', ()))}, or the column read is of another kind")
+            when = ['the frame at run time has other index level kinds than '
+                    f"{list(schema.get('levels', ()))}, or the column read is of another kind"]
+            when += [RUN_TIME[kind] for kind in sorted(set(self.taken) & set(RUN_TIME), key=str)]
+            cells = {view.cell} if view is not None and view.cell else set()
+            cells |= set(re.findall(r'\bself\.(\w+)\(\)', entry['expression'] + ' ' + entry['receiver']))
+            when += [f'the cell {name} holds an assigned value' for name in sorted(cells)
+                     if self.o.assigned_flag(name) != 'False']
+            if any(code in entry['expression'] for code in self.o.ambiguous):
+                when.append(RUN_TIME[-5])
+            entry['pandas_when'] = '; '.join(dict.fromkeys(when))
+        self.taken = []
         if why:
             entry['reason'] = why
             self.o.declined.append(entry)
@@ -1182,7 +1205,7 @@ class _Rewrite(cst.CSTTransformer):
         start, stop, test = self._view_parts(view, hold)
         i = _cast('_mx_cy.Py_ssize_t', self.updated_of.get(id(parts[0]), parts[0]))
         row = self._row_at(view, hold, self._m('position', start, stop, i))
-        self._record(original, 'L8', view.call)
+        self._record(original, 'L8', view.call, view=view)
         int_level = view.schema['levels'][view.depth] == 'int'
         return self._guarded(original, updated, view, test, self._label(view, hold, row), 'i64' if int_level else None)
 
@@ -1215,7 +1238,7 @@ class _Rewrite(cst.CSTTransformer):
         if (view is not None and view.start is None and func.attr.value in ('max', 'min') and not original.args
                 and o.extreme(original) is None):
             hold = self._take(view.call, _NO_LABEL, -2)          # pandas' own max/min of a non-empty index
-            self._record(original, 'L5', view.call)
+            self._record(original, 'L5', view.call, view=view)
             native = self._m(func.attr.value + '_obj', o.ref(hold))
             return self._guarded(original, updated, view, self._native_test(hold, []), native)
         levels = view.schema['levels'] if view is not None else ()
@@ -1229,7 +1252,7 @@ class _Rewrite(cst.CSTTransformer):
             row = start if func.attr.value == 'min' else cst.BinaryOperation(stop, cst.Subtract(), cst.Integer('1'))
             native = cst.Tuple([cst.Element(self._label(view, holds[0], row, level))
                                 for level in range(view.depth, len(levels))])
-            self._record(original, 'L5', view.call)
+            self._record(original, 'L5', view.call, view=view)
             return self._guarded(original, updated, view, test, native)
         if view is None or not self._one_level(view) or view.schema['levels'][view.depth] != 'int':
             return None
@@ -1247,13 +1270,13 @@ class _Rewrite(cst.CSTTransformer):
                              cst.Name('True' if right else 'False'))
             # T-5c: NaN (pandas sorts it last) is pandas' own
             test = self._conjunction([test, cst.Comparison(x, [cst.ComparisonTarget(cst.Equal(), x)])])
-            self._record(original, 'L8', view.call)
+            self._record(original, 'L8', view.call, view=view)
             return self._guarded(original, updated, view, test, native, 'i64')
         if func.attr.value in ('max', 'min') and not original.args and view.start is not None:
             hold = self._take(view.call, _NO_LABEL, -1)
             start, stop, test = self._view_parts(view, hold)
             row = start if func.attr.value == 'min' else cst.BinaryOperation(stop, cst.Subtract(), cst.Integer('1'))
-            self._record(original, 'L5', view.call)
+            self._record(original, 'L5', view.call, view=view)
             return self._guarded(original, updated, view, test, self._label(view, hold, row), 'i64')
         if func.attr.value == 'asof' and self._key_position(original):
             return self._asof(original, updated, 1)
@@ -1267,7 +1290,7 @@ class _Rewrite(cst.CSTTransformer):
             row = cst.BinaryOperation(cst.BinaryOperation(start, cst.Add(), found), cst.Subtract(), cst.Integer('1'))
             test = self._conjunction([test, cst.Comparison(found, [cst.ComparisonTarget(cst.GreaterThan(),
                                                                                        cst.Integer('0'))])])
-            self._record(original, 'L6', view.call)
+            self._record(original, 'L6', view.call, view=view)
             return self._guarded(original, updated, view, test, self._label(view, hold, row))
         return None
 
@@ -1278,6 +1301,9 @@ class _Rewrite(cst.CSTTransformer):
         o = self.o
         func = original.func
         inner = func.value if isinstance(func, cst.Attribute) else None
+        local = inner.value if isinstance(inner, cst.Name) else None
+        if local is not None:           # T-5c: ``ages = R.index.get_level_values(L)``, then ``ages.max()``
+            inner = o._value_of(local)
         if not (inner is not None and func.attr.value in ('max', 'min') and not original.args and isinstance(inner, cst.Call)
                 and isinstance(inner.func, cst.Attribute) and inner.func.attr.value == 'get_level_values'
                 and len(inner.args) == 1 and not inner.args[0].keyword
@@ -1299,6 +1325,8 @@ class _Rewrite(cst.CSTTransformer):
         if not 0 <= index < len(schema['levels']) or schema['levels'][index] != 'int':
             return None
         hold = self._take(call, (name, index), -6)
+        if local is not None:           # the pandas branch reads the level values; the local goes once unread
+            self.swaps.setdefault(local, inner)
         if isinstance(inner.func.value.value, cst.Name):
             self.replaced_names.add(inner.func.value.value.value)
         native = self._m(f'level_{func.attr.value}_ll', o.ref(hold), cst.Integer(str(index)))
@@ -1333,7 +1361,7 @@ class _Rewrite(cst.CSTTransformer):
         x = call.args[0].value
         x = _cast('_mx_cy.double', self.updated_of.get(id(x), x))
         row = self._m('asof_at', o.ref(hold), start, stop, cst.Integer(str(view.depth)), x, cst.Integer(str(error)))
-        self._record(call, 'L6', view.call)
+        self._record(call, 'L6', view.call, view=view)
         return self._guarded(whole_call or call, updated, view, test, self._label(view, hold, row), 'i64')
 
     def _values(self, view, hold, value, test, name):
@@ -1352,14 +1380,14 @@ class _Rewrite(cst.CSTTransformer):
             hold = self._take(view.call, _NO_LABEL, -1)
             start, stop, test = self._view_parts(view, hold)
             native = cst.BinaryOperation(stop, cst.Subtract(), start) if view.start is not None else stop
-            self._record(original, 'L8', view.call)
+            self._record(original, 'L8', view.call, view=view)
             return self._guarded(original, updated, view, test, native, 'i64')
         if name in ('min', 'max'):      # T-5c: the extreme itself, no list of labels
             if view.start is None and view.schema['levels'] == ('int',):
                 # the extreme of a non-empty int index (signature kind -2) as the C integer the builtin's Python
                 # ints give; another level kind keeps the list (iteration gives Python floats, pandas numpy ones)
                 hold = self._take(view.call, _NO_LABEL, -2)
-                self._record(original, 'L5', view.call)
+                self._record(original, 'L5', view.call, view=view)
                 return self._guarded(original, updated, view, self._native_test(hold, []),
                                      self._m(name + '_ll', self.o.ref(hold)), 'i64')
         if name in ('min', 'max') and view.start is not None:
@@ -1367,13 +1395,13 @@ class _Rewrite(cst.CSTTransformer):
             start, stop, test = self._view_parts(view, hold)
             row = start if name == 'min' else cst.BinaryOperation(stop, cst.Subtract(), cst.Integer('1'))
             test = self._conjunction([test, cst.Comparison(stop, [cst.ComparisonTarget(cst.GreaterThan(), start)])])
-            self._record(original, 'L5', view.call)
+            self._record(original, 'L5', view.call, view=view)
             int_level = view.schema['levels'][view.depth] == 'int'
             return self._guarded(original, updated, view, test, self._label(view, hold, row),
                                  'i64' if int_level else None)
         hold = self._walk_hold(view)
         native, test = self._values(view, hold, lambda row: self._label(view, hold, row), [], name)
-        self._record(original, 'L8', view.call)
+        self._record(original, 'L8', view.call, view=view)
         return self._guarded(original, updated, view, test, native)
 
     def _column_builtin(self, name, column, original, updated):
@@ -1388,7 +1416,7 @@ class _Rewrite(cst.CSTTransformer):
         chold = self._take(view.call, label, COLUMN_KIND[kind])
         native, test = self._values(view, hold, lambda row: self._column_value(chold, kind, row),
                                     [self._positive(self.o.slot(chold))], name)
-        self._record(original, 'L8', view.call)
+        self._record(original, 'L8', view.call, view=view)
         return self._guarded(original, updated, view, test, native)
 
     def _column_value(self, chold, kind, row):
@@ -1508,7 +1536,7 @@ class _Rewrite(cst.CSTTransformer):
         parens = {'lpar': [cst.LeftParen()], 'rpar': [cst.RightParen()]}
         if isinstance(original, cst.GeneratorExp):
             native, updated = native.with_changes(**parens), updated.with_changes(**parens)
-        self._record(original, 'L8', view.call)
+        self._record(original, 'L8', view.call, view=view)
         return self._guarded(original, updated, view, test, native)
 
     def leave_ListComp(self, original, updated):
@@ -1540,7 +1568,7 @@ class _Rewrite(cst.CSTTransformer):
         self.o.declarations.append(position.value)
         native = self._loop(updated, position, self._range(start, stop),
                             [self._assign(n, expr) for n, expr in make(position).items()])
-        self._record(original, 'L8', view.call)
+        self._record(original, 'L8', view.call, view=view)
         return self._branch(test, [native], [self._fallback(updated, view.call)])
 
     @staticmethod
@@ -1610,7 +1638,7 @@ class _Rewrite(cst.CSTTransformer):
         suffix, args = self.code_args(codes)
         test = self._conjunction([test, *conditions])
         native = self._m(kind + suffix, o.ref(hold), o.slot(hold), *args)
-        self._record(original, 'L3', view.call)
+        self._record(original, 'L3', view.call, view=view)
         return self._guarded(original, updated, view, test, native, None if o.guards(own) else kind)
 
     # ------------------------------------------------------------------ T-5: row locals
@@ -1769,7 +1797,7 @@ class _Rewrite(cst.CSTTransformer):
             suffix, args = self._codes(chold, view.codes, [part], view.schema['levels'])
             read = self._m(kind + suffix, o.ref(chold), o.slot(chold), *args)
         test = self._conjunction([test, self._positive(o.slot(chold))])
-        self._record(original, 'L8' if value.attr.value == 'iloc' else 'L3', view.call)
+        self._record(original, 'L8' if value.attr.value == 'iloc' else 'L3', view.call, view=view)
         return self._guarded(original, updated, view, test, read, kind)
 
     def leave_Subscript(self, original, updated):
@@ -2157,7 +2185,7 @@ class _Rewrite(cst.CSTTransformer):
         native = self._conjunction([native, *shape])
         if name is None and isinstance(index.value, cst.Name):
             self.replaced_names.add(index.value.value)
-        self._record(original, 'L7', view.call)
+        self._record(original, 'L7', view.call, view=view)
         return self._guarded(original, updated, view, native, test)
 
     def leave_Comparison(self, original, updated):
