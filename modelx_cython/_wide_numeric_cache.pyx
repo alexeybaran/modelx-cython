@@ -26,7 +26,8 @@ cdef inline word* position(word* entries, size_t capacity, size_t width, size_t 
 cdef inline void grow(WideNumericCache cache) except *:
     cdef size_t i, capacity = cache.capacity * 2
     cdef size_t row_bytes = cache.stride * sizeof(word)
-    cdef word *grown, *row
+    cdef word *grown
+    cdef word *row
     if cache.capacity > ((<size_t>-1) // row_bytes) // 2:
         raise MemoryError("numeric cache exceeds addressable storage")
     grown = <word*>calloc(capacity, row_bytes)
@@ -159,7 +160,7 @@ cdef class WideNumericCache:
         try:
             self.reset()
             for key, value in values:
-                if len(key) != self.width:
+                if <size_t>len(key) != self.width:
                     raise ValueError("invalid wide numeric cache key")
                 for i in range(self.width):
                     words[i] = key[i]
