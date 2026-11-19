@@ -42,6 +42,9 @@ with `pip` or `conda`:
   types
 * [NumPy](https://numpy.org/) — for handling array-valued cells
 
+Models that read pandas tables in their formulas also need pandas 2.2.2 or newer
+(`pip install "modelx-cython[tables]"`), the version CI pins on its oldest Python; models without tables do not.
+
 ## C compiler
 
 Compiling the translated model requires a C compiler that Python's build
