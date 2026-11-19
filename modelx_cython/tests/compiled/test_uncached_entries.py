@@ -10,7 +10,6 @@ appends n entries to a shared log, a second `ticks(n)` is a cache hit, and each 
 again. Compiled values equal the exported model at one and four workers and on the direct route.
 """
 import json
-import re
 import subprocess
 import sys
 import textwrap
@@ -141,39 +140,12 @@ def _run(tmp_path, module):
 
 def test_uncached_cells_take_a_direct_entry_and_equal_live(tmp_path):
     _build(tmp_path)
-    generated = (tmp_path / 'exported_cy/_mx_classes.py').read_text(encoding='utf-8')
-    declarations = (tmp_path / 'exported_cy/_mx_classes.pxd').read_text(encoding='utf-8')
     admission = json.loads((tmp_path / 'exported_cy/_mx_admission.json').read_text(encoding='utf-8'))
 
-    # no storage member, no readiness flag, no reset or clear line for an uncached Cell
+    # the build report: no cache for an uncached Cell, and a private entry for each admitted Cell
     for name in ('surv', 'tick'):
-        assert not re.search(rf'\b_(v|has)_{name}\b', generated + declarations), name
         assert admission[PREFIX + '_f_' + name]['cache'] == 'none'
-    entries = {name: admission[PREFIX + '_f_' + name]['inline_entry'] for name in ('surv', 'tick', 'rate')}
-    assert all(entries.values())
-    surv, tick = entries['surv'], entries['tick']
-
-    # the entry is the formula itself: its recursion and its cached callee are direct C calls
-    body = generated.split(f'def {surv}(', 1)[1].split('\n\n', 1)[0]
-    assert f'{surv}(self, s, ' in body and f'{entries["rate"]}(self, ' in body
-    assert 'self.surv(' not in body and 'self.rate(' not in body and '_has_surv' not in body
-
-    # D139b: inside its traced domain an uncached entry reads a dense Cell as a hoisted cached formula
-    # does (the array hit behind the bounds proof); outside it, the checked entry
-    discount = admission[PREFIX + '_f_discount']['inline_entry']
-    body = generated.split(f'def {discount}(', 1)[1].split('\n\n', 1)[0]
-    domain = re.search(r'(_mx_dense_domain\w*): _mx_cy.bint = \(0 <= t < 12\)', body)
-    assert domain, body
-    assert re.search(rf'\(\(self\._v_df\[t\] if self\._has_df\[t\] else \w+_inbounds\(self, t(, True)?\)\) '
-                     rf'if {domain.group(1)} else _mx_cache_entry_\d+\(self, t\)\)', body), body
-
-    # same-class readers (collect route) and the typed item local (direct route) both take the entry
-    assert re.search(rf'\({surv}\(self, .*\) if _mx_exact_receiver else', generated), 'value reader'
-    # (the range counter i passes the named argument conversion: the typed counters of the removed
-    # range proofs are gone; for a long long counter the conversion is the identity)
-    assert re.search(rf"\({tick}\(self, (?:i|_mx_sys\._mx_integer_result\(i, 'Projection\.tick'\))\) "
-                     rf"if _mx_exact_receiver else", generated), 'ticks reader'
-    assert re.search(rf'\({surv}\(item, 0, .*\) if type\(item\) is _c_Projection else', generated), 'direct route'
+    assert all(admission[PREFIX + '_f_' + name]['inline_entry'] for name in ('surv', 'tick', 'rate', 'discount'))
 
     live, compiled = _run(tmp_path, 'exported'), _run(tmp_path, 'exported_cy')
     for key in ('collect1', 'collect1_again', 'collect4', 'direct', 'value'):

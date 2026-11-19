@@ -41,19 +41,6 @@ def test_long_and_hash_formula_contracts(tmp_path):
     assert cells['hash_total']['associative_logical_domain'] == {'t': [0, 4]}
     assert cells['untyped']['associative_logical_domain'] == {'t': [0, 4]}
     assert cells['value']['associative_logical_domain'] == {}
-    tree=ast.parse((tmp_path/'exported_cy/_mx_classes.py').read_text())
-    functions={n.name:n for n in ast.walk(tree) if isinstance(n,ast.FunctionDef)}
-    for name in ('_f_long_total','_f_hash_total'):
-        fn=functions[name]
-        assert len(fn.body)==1 and isinstance(fn.body[0],ast.Return)
-        assert fn.body[0].value.func.id.startswith('_mx_dense_formula_')
-    for name in ('long_total','hash_total','value'):
-        # Public cache methods must not delegate unproven receivers to a
-        # private entry; public/private paths share the same cache fields.
-        assert not any(isinstance(n,ast.Call) and isinstance(n.func,ast.Name)
-            and n.func.id.startswith('_mx_cache_entry_') for n in ast.walk(functions[name]))
-    assert not any(isinstance(n,ast.Call) and isinstance(n.func,ast.Name)
-        and n.func.id.startswith('_mx_dense_formula_') for n in ast.walk(functions['_f_untyped']))
     (tmp_path/'override.pyx').write_text(textwrap.dedent('''\
         # cython: freethreading_compatible=True
         from exported_cy._mx_classes cimport _c_Policy

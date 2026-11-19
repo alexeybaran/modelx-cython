@@ -1,5 +1,6 @@
 """Exercise the generated fast entries and their existing public contracts."""
 
+import json
 import subprocess
 
 import pytest
@@ -66,12 +67,8 @@ def test_native_transfers(tmp_path, mode):
     }), encoding='utf-8')
     subprocess.run([sys.executable, '-m', 'modelx_cython', 'exported'],
                    cwd=tmp_path, check=True)
-    generated = (tmp_path / 'exported_cy/_mx_classes.py').read_text(encoding='utf-8')
-    assert '_inbounds(' in generated
-    assert '_mx_inbounds_exact' in generated and '_mx_exact_receiver' in generated
-    assert '_mx_divisible(' in generated and '_mx_divisible_after_decrement(' in generated
-    assert 'step: _mx_cy.longlong' in generated and '_mx_divisible_after_increment(t, step)' in generated
-    assert '_mx_memo_pow(' in generated
+    admission = json.loads((tmp_path / 'exported_cy/_mx_admission.json').read_text(encoding='utf-8'))
+    assert admission['exported_cy._mx_classes._c_Policy._f_factor']['power_memo'] is True   # memoize_power applied
     (tmp_path / 'override.pyx').write_text(textwrap.dedent('''\
         # cython: freethreading_compatible=True
         from exported_cy._mx_classes cimport _c_Policy

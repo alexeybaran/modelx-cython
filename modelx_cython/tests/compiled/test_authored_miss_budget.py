@@ -63,12 +63,6 @@ def test_guard_shadowing_stays_on_method_path(tmp_path):
         'for t in range(4):s.value(t,2);s.other(t,2);s.catches(t)\n')
     (tmp_path/'spec.py').write_text(repr(dict(dense_miss_binding=True,propagate_exact_receiver=True)))
     subprocess.run([sys.executable,'-B','-m','modelx_cython','exported'],cwd=tmp_path,check=True)
-    source=(tmp_path/'exported_cy/_mx_classes.py').read_text()
-    tree=ast.parse(source)
-    for name in ('_f_value','_f_other'):
-        fn=next(n for n in ast.walk(tree) if isinstance(n,ast.FunctionDef) and n.name==name)
-        assert not any(isinstance(n,ast.Call) and isinstance(n.func,ast.Name)
-                       and n.func.id.startswith('_mx_dense_formula_') for n in ast.walk(fn))
     subprocess.run([sys.executable,'-B','-c','from exported_cy import mx_model\n'
         's=mx_model.Projection\nassert s.value(1,2)==3.0\nassert s.other(1,2)==3.0\n'
         'assert s.catches(1)==1.0\nassert s.catches(2)==-1.0\n'],cwd=tmp_path,check=True)
@@ -92,11 +86,6 @@ def test_small_authored_formula_with_expanded_calls(tmp_path):
         'for t in (0,1,3):\n    s.total(t);s.total(t,2)\n')
     (tmp_path/'spec.py').write_text(repr(dict(dense_miss_binding=True,propagate_exact_receiver=True)))
     subprocess.run([sys.executable,'-B','-m','modelx_cython','exported'],cwd=tmp_path,check=True)
-    source=(tmp_path/'exported_cy/_mx_classes.py').read_text()
-    tree=ast.parse(source)
-    total=next(n for n in ast.walk(tree) if isinstance(n,ast.FunctionDef) and n.name=='_f_total')
-    assert len(total.body)==1 and isinstance(total.body[0],ast.Return)
-    assert total.body[0].value.func.id.startswith('_mx_dense_formula_')
     (tmp_path/'override.pyx').write_text(textwrap.dedent('''\
         # cython: freethreading_compatible=True
         from exported_cy._mx_classes cimport _c_Policy

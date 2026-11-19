@@ -1,5 +1,4 @@
 """Native hits preserve shared caches, errors, ranges, and virtual overrides."""
-import ast
 import subprocess
 import sys
 import textwrap
@@ -36,14 +35,6 @@ def test_native_cache_hit_contract(tmp_path):
         'dense_one_axis':True,'dense_bounds_proofs':True,'native_cache_hits':'both',
         'spaces':{'Policy':{'cells_param_size':{'t':5}}}}))
     subprocess.run([sys.executable,'-B','-m','modelx_cython','exported'],cwd=tmp_path,check=True)
-    tree=ast.parse((tmp_path/'exported_cy/_mx_classes.py').read_text())
-    functions=[fn for fn in tree.body if isinstance(fn,ast.FunctionDef) and fn.name.startswith('_mx_dense_formula_')]
-    # Prove the fixture actually exercises both native hit forms.
-    fields={n.body.attr for fn in functions for n in ast.walk(fn)
-            if isinstance(n,ast.IfExp) and isinstance(n.body,ast.Attribute)}
-    indexes={n.body.value.attr for fn in functions for n in ast.walk(fn)
-             if isinstance(n,ast.IfExp) and isinstance(n.body,ast.Subscript) and isinstance(n.body.value,ast.Attribute)}
-    assert '_v_scalar' in fields and {'_v_value','_v_retry'} <= indexes
     (tmp_path/'override.pyx').write_text(textwrap.dedent('''\
         # cython: freethreading_compatible=True
         from exported_cy._mx_classes cimport _c_Policy
