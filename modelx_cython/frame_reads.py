@@ -1348,11 +1348,13 @@ class _Rewrite(cst.CSTTransformer):
             def leave_Arg(self, o_, new):
                 return new.with_changes(keyword=o_.keyword)
         native = updated.with_changes(for_in=updated.for_in.with_changes(target=position, iter=self._range(start, stop)))
-        native = native.with_changes(elt=native.elt.visit(Sub()), for_in=native.for_in.with_changes(
+        native = native.with_changes(for_in=native.for_in.with_changes(
             ifs=[i.visit(Sub()) for i in native.for_in.ifs],
             inner_for_in=native.for_in.inner_for_in.visit(Sub()) if native.for_in.inner_for_in else None))
         if isinstance(native, cst.DictComp):
             native = native.with_changes(key=native.key.visit(Sub()), value=native.value.visit(Sub()))
+        else:
+            native = native.with_changes(elt=native.elt.visit(Sub()))
         parens = {'lpar': [cst.LeftParen()], 'rpar': [cst.RightParen()]}
         if isinstance(original, cst.GeneratorExp):
             native, updated = native.with_changes(**parens), updated.with_changes(**parens)
@@ -1363,6 +1365,9 @@ class _Rewrite(cst.CSTTransformer):
         return self.comprehension(original, updated) or updated
 
     def leave_SetComp(self, original, updated):
+        return self.comprehension(original, updated) or updated
+
+    def leave_DictComp(self, original, updated):       # T-5c
         return self.comprehension(original, updated) or updated
 
     def leave_GeneratorExp(self, original, updated):
