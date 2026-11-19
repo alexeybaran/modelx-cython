@@ -65,10 +65,11 @@ def _index_parts(subscript):
 
 
 class _Hold:
-    """One (receiver, column, kind) a formula reads natively: its fields (item) or locals (other classes)."""
+    """One (receiver, column, kind) a formula reads natively; ``table`` (and ``state`` in items) are the fields of
+    the receiver's binding, shared by every read of that receiver."""
 
-    def __init__(self, table, slot, receiver, label, kind):
-        self.table, self.slot, self.receiver, self.label, self.kind = table, slot, receiver, label, kind
+    def __init__(self, table, state, receiver, label, kind):
+        self.table, self.state, self.receiver, self.label, self.kind = table, state, receiver, label, kind
 
 
 class FrameReads:
@@ -171,6 +172,7 @@ class FrameReads:
         self.module = module_name(PROVIDER)
         self.per_item = self.cls_info.name in self.cls_info.visitor.itemspace_classes
         self.holds = {}         # (receiver code, label, kind) -> _Hold
+        self.bindings = {}      # receiver code -> its binding (_Hold of the table field)
         self.code_fields, self.row_fields = {}, {}
         self.mutated = self._mutated(node)
         self.asof_locals = self._asof_locals(node)
@@ -318,22 +320,59 @@ class FrameReads:
             what, field, table, level_or_key, extra = hold
             if what == 'code':
                 value = f'{m}.hold_code(self.{table}, {level_or_key}, {_code(extra)})'
-            elif what == 'free':
-                value = f'{m}.hold_unassigned(self, {level_or_key!r})'
+            elif what == 'free':        # T-4.2: the item's own flag, set when the cell is assigned
+                value = f'(-1 if {self.assigned_flag(level_or_key)} else 1)'
             else:
-                value = f'{m}.hold_row(self.{table}, {_code(level_or_key)}, self, {extra!r})'
+                value = f'{m}.hold_row(self.{table}, {_code(level_or_key)}, {self.assigned_flag(extra)})'
             return [cst.parse_statement(f'if self.{field} == 0:\n    self.{field} = {value}\n')]
-        label = repr(hold.label) if hold.label is not _NO_LABEL else 'None'
-        function = 'hold_checked' if getattr(self.policy, 'verify_inputs', False) else 'hold'
+        # T-4.2: one binding per receiver and item (or per call outside items): the frame's PreparedTable, or a
+        # table whose every slot is -1; each read then takes its slot from the table by its signature id
+        function = 'bind_ref_checked' if getattr(self.policy, 'verify_inputs', False) else 'bind_ref'
         receiver = _code(hold.receiver)
         if self.per_item:
+            held = self.published(hold.receiver)
+            value = held if held is not None and function == 'bind_ref' else f'{m}.{function}({receiver})'
             return [cst.parse_statement(
-                f'if self.{hold.slot} == 0:\n'
-                f'    self.{hold.table} = {m}.{function}({receiver}, {label}, {hold.kind}, '
-                f'_mx_cy.address(self.{hold.slot}))\n')]
-        return [cst.parse_statement(f'{hold.slot}: _mx_cy.Py_ssize_t = 0'),
-                cst.parse_statement(f'{hold.table}: object = {m}.{function}({receiver}, {label}, {hold.kind}, '
-                                    f'_mx_cy.address({hold.slot}))')]
+                f'if self.{hold.state} == 0:\n'
+                f'    self.{hold.table} = {value}\n'
+                f'    self.{hold.state} = 1\n')]
+        return [cst.parse_statement(f'{hold.table}: object = {m}.{function}({receiver})')]
+
+    def published(self, receiver):
+        """T-4.2: ``X._mx_prepared_<name>()`` when the receiver ``X.<name>()`` is a frame cell of a class without
+        items in this module, which publishes its prepared table (one field read per item, as main's held handle);
+        else None (the binding prepares or looks the frame up)."""
+        if not (isinstance(receiver, cst.Call) and not receiver.args and isinstance(receiver.func, cst.Attribute)):
+            return None
+        from .usage import RESOLVED, _extract_self_chain
+        from .table_cells import data_frame_cells
+        chain = _extract_self_chain(receiver.func)
+        if not isinstance(chain, list) or not chain:
+            return None
+        status, fqname = self.resolver.resolve_chain(self.cls_info.fqname, chain)
+        if status != RESOLVED:
+            return None
+        for owner in self.cls_info.module.classes.values():
+            for name, cells in owner.cells.items():
+                if cells.fqname == fqname and name in data_frame_cells(owner):
+                    return f'{_code(receiver.func.value)}._mx_prepared_{name}()'
+        return None
+
+    def assigned_flag(self, name):
+        """T-4.2: the item's flag of an assigned row or prefix cell ``name`` (False when it cannot be assigned)."""
+        from .table_cells import item_frame_cells
+        return f'self._mx_assigned_{name}' if name and name in item_frame_cells(self.cls_info) else 'False'
+
+    def read_signature(self, hold):
+        """T-4 item 0 / T-4.2: the id of the kinds a read is compiled for (index levels; every column for a row read by
+        field; the column read and its kind), whose slot each prepared table decides once."""
+        schema = self._schema_of_call(hold.receiver) or {}
+        levels = ''.join('i' if kind == 'int' else 'o' for kind in schema.get('levels', ()))
+        kinds = {'f64': 0, 'i64': 1, 'obj': 2}
+        columns = (tuple((name, kinds[kind]) for name, kind in schema.get('columns', ()))
+                   if getattr(hold, 'row_columns', False) else None)
+        label = hold.label if hold.label is not _NO_LABEL else None
+        return self.signature(levels, columns, label, hold.kind)
 
     def extreme(self, expr):
         """``R.index.max()`` / ``R.index.min()`` on a frame receiver with one unique int level: (R call, 'max'|'min')."""
@@ -345,6 +384,11 @@ class FrameReads:
         if found is None or found[1]['levels'] != ('int',) or not found[1].get('unique') or _code(found[0]) in self.mutated:
             return None
         return found[0], expr.func.attr.value
+
+    def signature(self, levels, columns, label, kind):
+        """The model-wide id of a read signature (written to ``_mx_table_signatures.py`` at the end of the build)."""
+        table = self.resolver.__dict__.setdefault('table_signatures', {})
+        return table.setdefault((levels, columns, label, kind), len(table))
 
     def cached_call(self, call):
         """A self-rooted zero-argument call of a cached Cell (as the transformer's ``_cached_call``)."""
@@ -386,18 +430,22 @@ class FrameReads:
         return fields[key]
 
     def hold(self, receiver, label, kind):
-        key = (_code(receiver), label, kind)
+        """The read (receiver, column, kind): its table is the receiver's binding, one per receiver."""
+        code = _code(receiver)
+        key = (code, label, kind)
         found = self.holds.get(key)
         if found is None:
-            if self.per_item:
-                table = hold_table(self.cls_info).field('prepared', key)
-                slot = hold_table(self.cls_info).field('prepared_slot', key)
-            else:
-                n = self.local_count
-                self.local_count += 1
-                table, slot = f'_mx_pt{n}', f'_mx_ps{n}'
-            found = self.holds[key] = _Hold(table, slot, receiver, label, kind)
-            self.new_items.append(found)
+            binding = self.bindings.get(code)
+            if binding is None:
+                if self.per_item:
+                    table = hold_table(self.cls_info).field('prepared', code)
+                    state = hold_table(self.cls_info).field('prepared_slot', code)
+                else:
+                    table, state = f'_mx_pt{self.local_count}', None
+                    self.local_count += 1
+                binding = self.bindings[code] = _Hold(table, state, receiver, None, None)
+                self.new_items.append(binding)
+            found = self.holds[key] = _Hold(binding.table, binding.state, receiver, label, kind)
         return found
 
     def ref(self, hold):
@@ -405,7 +453,9 @@ class FrameReads:
         return _cast(f'{self.module}.PreparedRef', cst.parse_expression(where))
 
     def slot(self, hold):
-        return cst.parse_expression(f'self.{hold.slot}' if self.per_item else hold.slot)
+        """The slot of a read: one C load from the held table by the read's signature id."""
+        return cst.Call(func=cst.Attribute(cst.Name(self.module), cst.Name('slot')),
+                        args=[cst.Arg(self.ref(hold)), cst.Arg(cst.Integer(str(self.read_signature(hold))))])
 
     def key_part(self, part, level_kind):
         """A key part passed to the fused reads: a C long long on an int level when it is an integer, else
@@ -450,6 +500,10 @@ class _Rewrite(cst.CSTTransformer):
 
     def _record(self, node, form, receiver, why=None):
         entry = {'expression': _code(node)[:160], 'receiver': _code(receiver), 'form': form}
+        if not why:
+            schema = self.o._schema_of_call(receiver) or {}
+            entry['pandas_when'] = ('the frame at run time has other index level kinds than '
+                                    f"{list(schema.get('levels', ()))}, or the column read is of another kind")
         if why:
             entry['reason'] = why
             self.o.declined.append(entry)
@@ -737,6 +791,7 @@ class _Rewrite(cst.CSTTransformer):
         kind = kinds[label] if mixed else ('f64' if any(k == 'f64' for k in kinds.values()) else 'i64')
         stored = kinds[label]           # the block the column is stored in
         hold = self._take(call, label, {'f64': 0, 'i64': 1, 'obj': 2}[stored])
+        hold.row_columns = True         # the row's dtype depends on every column: all of them are checked
         if isinstance(row.value.value, cst.Name):
             self.replaced_names.add(row.value.value.value)
         name = o.row_names.get(_code(row)) if o.row_names else None

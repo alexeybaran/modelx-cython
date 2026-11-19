@@ -140,11 +140,11 @@ def assigned(space, name):
 
 
 def bind_frame(space, value):
-    """T-4: prepare ``value`` (a frame cell's computed or assigned frame) in the model's PreparedTable cache, so
-    the first fast read finds it prepared. A value that is not a preparable frame is left as it is."""
+    """T-4: prepare ``value`` (a frame cell's computed or assigned frame) in the model's PreparedTable cache and
+    return what an item reading it holds (T-4.2): its PreparedTable, or a table whose every slot is -1 (not a
+    preparable frame); None when the model has no fast reads."""
     bind = _binders.get(type(space).__module__.split('.')[0])
-    if bind is not None:
-        bind(value)
+    return bind(value) if bind is not None else None
 
 
 def forget_prepared():

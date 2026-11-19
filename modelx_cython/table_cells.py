@@ -51,11 +51,14 @@ def table_cells(cls_info):
 
 
 class _BindFrame(cst.CSTTransformer):
-    """T-4: in the C entry of a frame cell, prepare the computed frame where it is stored (``self._v_<name> =
-    val``), under the cell's lock: a table is prepared when it is bound, never on a formula's first read."""
+    """T-4/T-4.2: in the C entry of a frame cell, prepare the computed frame where it is stored (``self._v_<name> =
+    val``), under the cell's lock, and publish the prepared table in ``_mx_ptable_<name>`` (then its flag
+    ``_mx_ptready_<name>``, released as the cell's own ``_has_`` flag is): a table is prepared when it is bound,
+    and an item binds it with one field read (``_mx_prepared_<name>``)."""
 
-    def __init__(self, name):
+    def __init__(self, name, locked):
         super().__init__()
+        self.name, self.locked = name, locked
         self.target = f'self._v_{name}'
 
     def leave_IndentedBlock(self, original, updated):
@@ -64,9 +67,66 @@ class _BindFrame(cst.CSTTransformer):
             if (isinstance(statement, cst.SimpleStatementLine) and len(statement.body) == 1
                     and isinstance(statement.body[0], cst.Assign)
                     and cst.Module(body=()).code_for_node(statement.body[0].targets[0].target) == self.target):
-                body.append(cst.parse_statement(f'{RUNTIME}.bind_frame(self, val)'))
+                body.extend(_statements(_publish(self.name, 'val', self.locked), cst.Module(body=()).config_for_parsing))
             body.append(statement)
         return updated.with_changes(body=body)
+
+
+def _publish(name, value, locked):
+    """Statements that prepare ``value`` and publish it as the frame cell's prepared table (T-4.2)."""
+    flag = (f'{MX_SYS_MOD}._mx_store_flag({CY_MOD}.address(self._mx_ptready_{name}), True)' if locked
+            else f'self._mx_ptready_{name} = True')
+    return f'self._mx_ptable_{name} = {RUNTIME}.bind_frame(self, {value})\n{flag}\n'
+
+
+def _prepared_method(name, mapping, locked):
+    """``_mx_prepared_<name>()``: the prepared table of a frame cell for the items that read it (T-4.2). The fast
+    path reads the published flag (acquire) and the field; else the cell is computed, which publishes it."""
+    if locked:
+        ready = f'{MX_SYS_MOD}._mx_load_flag({CY_MOD}.address(self._mx_ptready_{name}))'
+        return (f'@{CY_MOD}.cfunc\n'
+                f'def _mx_prepared_{name}(self) -> object:\n'
+                f'    if {ready}:\n'
+                f'        return self._mx_ptable_{name}\n'
+                f'    value = self.{mapping[name]}()\n'
+                f'    with self._mx_lock:\n'
+                f'        if not self._mx_ptready_{name}:      # cleared since it was bound: bind the frame again\n'
+                f'            ' + _publish(name, 'value', True).replace('\n', '\n            ').rstrip() + '\n'
+                f'        return self._mx_ptable_{name}\n')
+    return (f'@{CY_MOD}.cfunc\n'
+            f'def _mx_prepared_{name}(self) -> object:\n'
+            f'    if not self._mx_ptready_{name}:\n'
+            f'        value = self.{mapping[name]}()\n'
+            f'        if not self._mx_ptready_{name}:\n'
+            f'            ' + _publish(name, 'value', False).replace('\n', '\n            ').rstrip() + '\n'
+            f'    return self._mx_ptable_{name}\n')
+
+
+def data_frame_cells(cls_info):
+    """T-4.2: the frame cells of a class without items whose prepared table is held in the class (renamed cells)."""
+    if cls_info.name in cls_info.visitor.itemspace_classes:
+        return {}
+    mapping = module_renames(cls_info.module)[cls_info.name]
+    return {n: c for n, c in table_cells(cls_info).items() if n in mapping and frame_cell(cls_info, c)}
+
+
+def item_frame_cells(cls_info):
+    """T-4.2: the frame cells of an item class: each has an ``_mx_assigned_<name>`` flag set when assigned."""
+    if cls_info.name not in cls_info.visitor.itemspace_classes:
+        return {}
+    mapping = module_renames(cls_info.module)[cls_info.name]
+    return {n: c for n, c in table_cells(cls_info).items() if n in mapping and frame_cell(cls_info, c)}
+
+
+def pxd_declarations(cls_info):
+    """The .pxd lines of the T-4.2 members of a class."""
+    lines = []
+    for name in data_frame_cells(cls_info):
+        lines += [f'cdef object _mx_ptable_{name}\n', f'cdef bint _mx_ptready_{name}\n',
+                  f'cdef object _mx_prepared_{name}(self)\n']
+    for name in item_frame_cells(cls_info):
+        lines.append(f'cdef bint _mx_assigned_{name}\n')
+    return lines
 
 
 def frame_cell(cls_info, cells):
@@ -195,7 +255,8 @@ def rewrite_class(cls_info, node, config, integer_refs):
                 statement = statement.with_changes(name=cst.Name(mapping[name]))
                 if (name in tables and frame_cell(cls_info, tables[name])
                         and cls_info.name not in cls_info.visitor.itemspace_classes):
-                    statement = statement.visit(_BindFrame(name))     # T-4: prepared when bound (Data-like)
+                    # T-4: prepared when bound (Data-like); T-4.2: published for the items that read it
+                    statement = statement.visit(_BindFrame(name, tables[name].is_locked))
             elif name == '__init__':
                 for line in statement.body.body:
                     if not isinstance(line, cst.SimpleStatementLine):
@@ -212,9 +273,9 @@ def rewrite_class(cls_info, node, config, integer_refs):
     for name, cells in tables.items():
         path = path_of(cls_info, name)
         if frame_cell(cls_info, cells):
-            bind = ('' if cls_info.name in cls_info.visitor.itemspace_classes
-                    else f'    {RUNTIME}.bind_frame(self, value)\n')
-            assign = bind + f'    {RUNTIME}.assign_table_cell(self, {name!r}, {path!r}, value)\n'
+            assign = f'    {RUNTIME}.assign_table_cell(self, {name!r}, {path!r}, value)\n'
+            if cls_info.name not in cls_info.visitor.itemspace_classes:
+                lines.append(_prepared_method(name, mapping, cells.is_locked))
             lines.append(
                 f'@property\n'
                 f'def {name}(self):\n'
@@ -251,7 +312,11 @@ def rewrite_class(cls_info, node, config, integer_refs):
         stale = ['def _mx_stale_tables(self):']
         for name, cells in tables.items():
             if frame_cell(cls_info, cells):
-                continue        # T-3: a frame cell holds the frame itself; nothing to rebuild
+                # T-3: a frame cell holds the frame itself; T-4.2: its prepared table is bound again on next use
+                if name in data_frame_cells(cls_info):
+                    stale.append(f'    self._mx_ptready_{name} = False')
+                    stale.append(f'    self._mx_ptable_{name} = None')
+                continue
             if cells.is_locked:
                 stale.append(f'    {MX_SYS_MOD}._mx_store_flag({CY_MOD}.address(self._has_{name}), False)')
             else:
@@ -264,6 +329,10 @@ def rewrite_class(cls_info, node, config, integer_refs):
         for name, cells in tables.items():
             get += [f'    if name == {name!r}:', f'        return self.{mapping[name]}()']
             put += [f'    if name == {name!r}:', f'        self._v_{name} = value']
+            if name in data_frame_cells(cls_info):          # T-4.2: the assigned frame's prepared table
+                put += ['        ' + line for line in _publish(name, 'value', cells.is_locked).strip().split('\n')]
+            elif name in item_frame_cells(cls_info):        # T-4.2: its reads by row or prefix keep pandas
+                put.append(f'        self._mx_assigned_{name} = True')
             if cells.is_locked:
                 put.append(f'        {MX_SYS_MOD}._mx_store_flag({CY_MOD}.address(self._has_{name}), True)')
             else:
@@ -298,6 +367,10 @@ def rewrite_class(cls_info, node, config, integer_refs):
     clear = ['def _mx_clear_values(self):',
              '    """Empty every cache of this Space and drop its ItemSpaces (D101, D130)."""']
     clear += ['    ' + line for line in _reset_lines(cls_info)]
+    for name in data_frame_cells(cls_info):         # T-4.2: bound again with the cell's next value
+        clear += [f'    self._mx_ptready_{name} = False', f'    self._mx_ptable_{name} = None']
+    for name in item_frame_cells(cls_info):
+        clear.append(f'    self._mx_assigned_{name} = False')
     if '_mx_itemspaces' in init_names:
         if cls_info.name in cls_info.visitor.itemspace_classes:
             # audit-routes P2: the dropped items are released as by __delitem__ (D114, D116), so they

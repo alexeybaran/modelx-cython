@@ -347,14 +347,12 @@ def forget():
         _prepared.clear()
 
 
-_assigned = None
 try:
-    from modelx_cython.runtime.table_cells import register_prepared as _register, assigned as _assigned
+    from modelx_cython.runtime.table_cells import register_prepared as _register
 except ImportError:         # the runtime used on its own (tests)
     pass
 else:
-    _register(forget, lambda value: prepared(value) if isinstance(value, (pd.DataFrame, pd.Series)) else None,
-              __name__.split('.')[0])
+    _register(forget, lambda value: bind_ref(value), __name__.split('.')[0])
 
 
 cdef object prepared(object frame):
@@ -365,6 +363,8 @@ cdef object prepared(object frame):
     if entry is not None and entry[0]() is frame:
         return entry[1]
     table = prepare(frame)
+    if table is not None:
+        _decide(table)          # the kind verdicts of every read of the model, once per prepared table
     ref = weakref.ref(frame, lambda _, key=key: _forget(key))
     with _lock:
         _prepared[key] = (ref, table)
@@ -375,26 +375,76 @@ cdef int missing(object key) except -1:
     raise KeyError(key)
 
 
-cdef object hold(object frame, object label, int kind, Py_ssize_t* slot):
-    """Resolve a hold: return the PreparedTable of ``frame`` (the holder keeps it) and set ``*slot`` to one plus
-    the slot of column ``label`` within its ``kind`` block (one for a hold of index membership, ``kind`` < 0).
-    ``*slot`` = -1 (and None returned) when the read stays pandas: the frame is not prepared, the column is
-    absent, or its kind is another. 0 is left to mean unresolved: a new item's field starts at 0."""
-    cdef PreparedTable table = prepared(frame)
+cdef PreparedTable _NOT_PREPARED = PreparedTable.__new__(PreparedTable)     # every slot -1: reads stay pandas
+
+
+cdef object bind_ref(object frame):
+    """T-4.2: what an item holds for one frame receiver: its PreparedTable, or a table whose every slot is -1 when
+    the frame is not prepared (its reads then run on pandas). Taken once per item and receiver."""
+    table = prepared(frame)
+    return _NOT_PREPARED if table is None else table
+
+
+cdef object _signatures = None
+
+
+cdef object model_signatures():
+    """The read signatures of the compiled model this runtime copy belongs to (``_mx_table_signatures.SIGNATURES``:
+    (levels, columns) per id, written at build), loaded once."""
+    global _signatures
+    if _signatures is None:
+        import importlib
+        package = __name__.rpartition('.')[0]
+        try:        # the runtime used on its own (no model package) has no compiled reads
+            _signatures = (tuple(importlib.import_module(package + '._mx_table_signatures').SIGNATURES)
+                           if package else ())
+        except ImportError:
+            _signatures = ()
+    return _signatures
+
+
+cdef void _decide(PreparedTable table):
+    """T-4.2: decide, once per prepared table, the slot of every read signature of the model:
+    (levels, columns, label, kind) ->
+    - ``levels``: one letter per index level, ``i`` for a level a read takes integer keys on (it must still be an
+      int level), ``o`` for any other; the number of levels must be the same;
+    - ``columns``: for a row read by field, every (label, kind) of the traced frame (the row's dtype depends on all
+      of them); else None;
+    - ``label``, ``kind``: the column read and its block kind (-1: index membership; -2: extremes of a non-empty
+      index).
+    The slot is one plus the column's slot in its block (1 for a read of the index), or -1."""
+    cdef int level
     cdef Py_ssize_t position
-    slot[0] = -1
-    if table is None:
-        return None
-    if kind < 0:            # -1: index membership; -2: extremes of the index (not of an empty one)
-        if kind == -2 and table.nrows == 0:
-            return None
-        slot[0] = 1
-        return table
-    position = table.column_positions.get(label, -1)
-    if position < 0 or table.column_kind[position] != kind:
-        return None
-    slot[0] = table.column_slot[position] + 1
-    return table
+    slots = []
+    for levels, columns, label, kind in model_signatures():
+        result = len(levels) == table.nlevels
+        if result:
+            for level in range(table.nlevels):
+                if levels[level] == 'i' and table.level_kind[level] == LEVEL_OBJECT:
+                    result = False
+                    break
+        if result and columns is not None:
+            if len(columns) != len(table.column_positions):
+                result = False
+            else:
+                for name, expected in columns:
+                    position = table.column_positions.get(name, -1)
+                    if position < 0 or table.column_kind[position] != expected:
+                        result = False
+                        break
+        value = -1
+        if result:
+            if kind < 0:
+                value = 1 if (kind == -1 or table.nrows > 0) else -1
+            else:
+                position = table.column_positions.get(label, -1)
+                if position >= 0 and table.column_kind[position] == kind:
+                    value = table.column_slot[position] + 1
+        slots.append(value)
+    array = np.asarray(slots + [-1], dtype=np.intp)
+    table._slot_array = array
+    table.slots = <const Py_ssize_t*><size_t>array.ctypes.data
+    table.n_slots = len(slots)
 
 
 def check_unchanged(frame):
@@ -427,17 +477,17 @@ cdef bint _same(PreparedTable a, PreparedTable b):
     return True
 
 
-cdef object hold_checked(object frame, object label, int kind, Py_ssize_t* slot):
-    """``hold`` in check mode: the frame is first checked against its prepared copy."""
+cdef object bind_ref_checked(object frame):
+    """``bind_ref`` in check mode: the frame is first checked against its prepared copy."""
     check_unchanged(frame)
-    return hold(frame, label, kind, slot)
+    return bind_ref(frame)
 
 
 cdef Py_ssize_t hold_code(object table, int level, object value) except -2:
     """T-4: one plus the code of ``value`` at ``level`` of a held table (resolved once per item), or -1 when the
     table is not prepared or the value is absent (the read then runs on pandas, which raises as it does)."""
     cdef Py_ssize_t code
-    if table is None:
+    if table is None or table is _NOT_PREPARED:
         return -1
     code = (<PreparedTable>table).code_obj(level, value)
     return code + 1 if code >= 0 else -1
@@ -447,49 +497,41 @@ cdef Py_ssize_t asof_row(PreparedRef ref, int count, Py_ssize_t c0, Py_ssize_t c
                          Py_ssize_t c3, Py_ssize_t c4, double x) noexcept:
     """T-4: ``P.index.asof(x)`` on the sub-frame P = ``T.loc[prefix]`` (``count`` prefix codes) whose one remaining
     level is an int level, as the stored row of that label in T: the row of the largest label <= x among the
-    prefix's rows; -1 when there is none or x is NaN (pandas returns NaN; the read then runs on pandas)."""
-    cdef PreparedTable table = <PreparedTable>ref
+    prefix's rows; -1 when there is none or x is NaN (pandas returns NaN; the read then runs on pandas).
+    Read through the borrowed pointer only (T-4.2: no reference on the shared table per step)."""
     cdef Py_ssize_t[6] codes
     cdef Py_ssize_t start, stop, lo, hi, mid
-    cdef int last = table.nlevels - 1
-    cdef long long label
+    cdef int last = (<PreparedTable>ref).nlevels - 1
     codes[0] = c0; codes[1] = c1; codes[2] = c2; codes[3] = c3; codes[4] = c4
-    if count != last or x != x or table.level_kind[last] == LEVEL_OBJECT:
+    if count != last or x != x or (<PreparedTable>ref).level_kind[last] == LEVEL_OBJECT:
         return -1
-    if not table.prefix_range(codes, count, &start, &stop):
+    if not (<PreparedTable>ref).prefix_range(codes, count, &start, &stop):
         return -1
     lo, hi = start, stop        # rows of the prefix, ascending by the last level's label
     while lo < hi:
         mid = (lo + hi) >> 1
-        if _last_label(table, mid) <= x:
+        if _last_label(ref, mid) <= x:
             lo = mid + 1
         else:
             hi = mid
     return lo - 1 if lo > start else -1
 
 
-cdef inline long long _last_label(PreparedTable table, Py_ssize_t row) noexcept:
-    cdef int last = table.nlevels - 1
-    cdef long long combined = table.combined[row]
-    cdef Py_ssize_t code = <Py_ssize_t>(combined % table.radix[last - 1]) if last > 0 else <Py_ssize_t>combined
-    if table.level_kind[last] == LEVEL_DENSE:
-        return table.level_first[last] + code
-    return table.sorted_labels[table.level_offset[last] + code]
+cdef inline long long _last_label(PreparedRef ref, Py_ssize_t row) noexcept:
+    cdef int last = (<PreparedTable>ref).nlevels - 1
+    cdef long long combined = (<PreparedTable>ref).combined[row]
+    cdef Py_ssize_t code = <Py_ssize_t>(combined % (<PreparedTable>ref).radix[last - 1]) if last > 0 else <Py_ssize_t>combined
+    if (<PreparedTable>ref).level_kind[last] == LEVEL_DENSE:
+        return (<PreparedTable>ref).level_first[last] + code
+    return (<PreparedTable>ref).sorted_labels[(<PreparedTable>ref).level_offset[last] + code]
 
 
-cdef Py_ssize_t hold_unassigned(object space, object name) except -2:
-    """T-4: 1 when the cell ``name`` of ``space`` holds its formula's value, -1 when the user assigned it."""
-    return -1 if (_assigned is not None and _assigned(space, name)) else 1
-
-
-cdef Py_ssize_t hold_row(object table, object key, object space, object name) except -2:
-    """T-4: one plus the stored row of ``key`` in a held table, for the fields of the row cell ``name`` of
-    ``space`` (``T.loc[key]``); -1 when the table is not prepared, the key is absent, or the cell holds a value the
-    user assigned (the fields are then read from that value, on pandas)."""
+cdef Py_ssize_t hold_row(object table, object key, bint assigned) except -2:
+    """T-4: one plus the stored row of ``key`` in a held table, for the fields of a row cell (``T.loc[key]``);
+    -1 when the table is not prepared, the key is absent, or the row cell holds a value the user assigned
+    (``assigned``: the item's own flag, T-4.2; the fields are then read from that value, on pandas)."""
     cdef Py_ssize_t row
-    if table is None:
-        return -1
-    if _assigned is not None and _assigned(space, name):
+    if table is None or table is _NOT_PREPARED or assigned:
         return -1
     row = (<PreparedTable>table).row_key(key)
     return row + 1 if row >= 0 else -1

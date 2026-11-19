@@ -14,6 +14,7 @@ frame to a Data cell and calling clear_all (on the dependent Space and on the mo
 new frame; without clear_all, cached results stay, but no prepared copy of the reassigned cell survives.
 Model.clear_all discards an assigned input on live modelx (the cell recomputes its formula); compiled the same.
 """
+import re
 import json
 import subprocess
 import sys
@@ -253,6 +254,7 @@ json.dump(result, sys.stdout, indent=1)
 
 CONTRACT = '''\
 import json
+import re
 import sys
 from importlib import import_module
 import pandas as pd
@@ -340,6 +342,51 @@ compiled.Data.rates[()] = rates2.copy()
 live.Items.clear_all()
 compiled.Items.clear_all()
 checks["item: reassign the prefix cell's table + Space.clear_all: equal to live"] = items_equal()
+
+
+# T-4 item 0: an assigned frame of other kinds than the traced ones (the reads keep pandas), compiled = live
+def outcomes(space, cell, ts):
+    found = []
+    for t in ts:
+        try:
+            found.append(("ok", float(getattr(space, cell)(t))))
+        except Exception as error:
+            # live wraps a formula's error in FormulaError and names the original in its message (as checks.py
+            # reads it): compare the original exception type
+            name = type(error).__name__
+            if name == "FormulaError":
+                named = re.search(r"\\n(\\w+): ", str(error))
+                name = named.group(1) if named else name
+            found.append(("raise", name))
+    return found
+
+
+def same_outcomes(cell, ts, items=False):
+    if items:
+        return all(outcomes(live.Items[i], cell, ts) == outcomes(compiled.Items[i], cell, ts) for i in (1, 2))
+    return outcomes(live.Calc, cell, ts) == outcomes(compiled.Calc, cell, ts)
+
+
+base = live.Data.flat()
+KINDS = {
+    "int level -> float level": base.set_axis(pd.Index([20.0, 21.0, 22.0, 23.0], name="age"), axis=0),
+    "float column -> int column": base.assign(q=[1, 2, 3, 4]),
+    "int level -> text level": base.set_axis(pd.Index(["20", "21", "22", "23"], name="age"), axis=0),
+}
+for name, frame in KINDS.items():
+    live.Data.flat[()] = frame
+    compiled.Data.flat[()] = frame.copy()
+    live.Calc.clear_all(); compiled.Calc.clear_all(); live.Items.clear_all(); compiled.Items.clear_all()
+    checks[f"kind: {name}: equal to live"] = (same_outcomes("loc_scalar__flat", range(4))
+                                              and same_outcomes("at__flat", range(4))
+                                              and same_outcomes("v__flat", range(4), items=True))
+multi = live.Data.multi()
+multi_int = multi.set_axis(multi.index.set_levels([1, 2, 3], level=0), axis=0)
+live.Data.multi[()] = multi_int
+compiled.Data.multi[()] = multi_int.copy()
+live.Calc.clear_all(); compiled.Calc.clear_all(); live.Items.clear_all(); compiled.Items.clear_all()
+checks["kind: text level -> int level (two levels): equal to live"] = (
+    same_outcomes("loc_tuple__multi", range(4)) and same_outcomes("at_tuple__multi", range(4)))
 json.dump(checks, sys.stdout, indent=1)
 '''
 
@@ -391,3 +438,25 @@ def test_reassign_and_clear(probe):
     failing = {name for name, ok in checks.items() if not ok}
     expected = KNOWN_CONTRACT | set(DOCUMENTED_CONTRACT)
     assert failing == expected, f"failing: {sorted(failing)}; expected failing: {sorted(expected)}"
+
+
+def test_item_holds_take_no_lookup_or_lock(probe):
+    """T-4.2: an item binds each shared Data table with one read of the table the Data space published
+    (``_mx_prepared_<name>()``): its per-item hold code calls no cache lookup (prepared/bind_ref), no assigned-value
+    lookup and takes no lock. A frame the item computes itself (a cell of its own, a new frame per item) is bound
+    by preparing it. Read from the generated module of the probe."""
+    work, _, _ = probe
+    source = (work / "probe_nomx_cy" / "_mx_classes.py").read_text(encoding="utf-8")
+    start = source.index("class _c_Items(")
+    end = source.find("\nclass ", start + 1)
+    items = source[start:end if end > 0 else len(source)]
+    # the item's formulas live in module-level dense helpers too: those taking an Items receiver
+    helpers = [block for block in source.split("\n@_mx_cy.cfunc") if "_mx_private_receiver[_c_Items]" in block]
+    code = items + "".join(helpers)
+    bindings = [line.strip() for line in code.splitlines() if re.match(r"\s*self\._mx_tp_\d+ = (?!None)", line)]
+    assert bindings, "no item binding found"
+    shared = [line for line in bindings if "self.data." in line]
+    assert shared and all("._mx_prepared_" in line for line in shared), shared
+    for forbidden in ("bind_ref(", ".prepared(", "assigned(", "hold_unassigned(", "_mx_lock"):
+        assert not [line for line in code.splitlines()
+                    if forbidden in line and "_mx_tp_" in line and "self.data." in line], forbidden
