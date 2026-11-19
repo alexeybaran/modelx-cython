@@ -214,6 +214,7 @@ DATA = {
     'scen': "pd.DataFrame({'v': [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]},\n"
             "        index=pd.MultiIndex.from_tuples([('up', 0), ('up', 12), ('up', 24), ('down', 0), ('down', 12), ('down', 24)]))",
     # T-5 choice 5: `T.loc[a, b]` on three levels, the labels of b's level apart from the columns, or among them
+    'bytag': "pd.DataFrame({'q': [0.5, 1.5], 'm': [1, 2]}, index=['x', 'y'])",
     'tri': "pd.DataFrame({'q': [0.1 * n for n in range(8)], 'x': [0.0] * 8},\n"
            "        index=pd.MultiIndex.from_product([['A', 'B'], ['F', 'M'], [20, 21]]))",
     'tri_amb': "pd.DataFrame({'q': [0.1 * n for n in range(8)], 'x': [0.0] * 8},\n"
@@ -234,6 +235,8 @@ T5_ITEMS = {
     # two formulas name views of different prefixes alike: each holds its own rows
     'same_name_a': "sub = data.grid().loc['A']\nreturn sub.loc[20 + t % 4, 'q'] + len(sub.index)",
     'same_name_b': "sub = data.grid().loc['B']\nreturn sub.loc[20 + t % 4, 'q'] + float(sub.index[0])",
+    # T-5c: a row cell keyed by a field of the model-point row: the row held per item
+    'row_by_field': "return tagrow()['q'] * t + tagrow()['m']",
     'tuple_cell_view': "sub = data.rates().loc[plan()]\na = anchor()\nreturn sub.loc[a, 'q'] + (anchor() in sub.index)",
     'tuple_cell_whole': "return data.rates().loc[full(), 'q'] + data.rates().loc[odd(), 'q'].sum()",
     'member_cell': "return (plan() in data.rates().index, full() in data.rates().index, odd() not in data.rates().index,\n"
@@ -305,6 +308,7 @@ def build():
     items.new_cells("full", "def full():\\n    return (plan(), sex(), 2000 + i % 3)\\n")
     items.new_cells("odd", "def odd():\\n    return (plan(), sex()) if i % 2 else plan()\\n")
     items.new_cells("mrow", "def mrow():\\n    return data.mixed().loc[pid()]\\n")
+    items.new_cells("tagrow", "def tagrow():\\n    return data.bytag().loc[mrow()['tag']]\\n")
     for name, body in T5_ITEMS.items():
         items.new_cells(name, f"def {{name}}(t):\\n" + _indent(body))
     return model

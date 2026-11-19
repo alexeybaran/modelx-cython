@@ -1887,7 +1887,7 @@ class _Rewrite(cst.CSTTransformer):
         from .row_cells import item_constant
         fixed = key.elements if isinstance(key, cst.Tuple) else [key]
         if (len(fixed) if isinstance(key, cst.Tuple) else 1) != len(levels) or not all(
-                item_constant(e.value if isinstance(e, cst.Element) else e, o.cached_call) for e in fixed):
+                o.fixed_part(e.value if isinstance(e, cst.Element) else e) for e in fixed):
             return None
         hold = self._take(found[0], _NO_LABEL, -1)
         field = o.row_field(hold, key, name)
@@ -1925,7 +1925,7 @@ class _Rewrite(cst.CSTTransformer):
             return updated
         from .row_cells import item_constant
         # T-5: a key not fixed per item finds its row per read (KeyError as pandas when it has none)
-        per_read = not (o.per_item and all(item_constant(e.value if isinstance(e, cst.Element) else e, o.cached_call)
+        per_read = not (o.per_item and all(o.fixed_part(e.value if isinstance(e, cst.Element) else e)
                                            for e in fixed))
         kinds = dict(schema['columns'])
         if label not in kinds:
