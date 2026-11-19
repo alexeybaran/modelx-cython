@@ -6,7 +6,41 @@ import libcst as cst
 
 from modelx_cython.consts import CY_MOD
 from modelx_cython.holds import reset_lines
-from .syntax import arguments, dotted_name, literal_value, statements, walk
+from .syntax import arguments, code, dotted_name, literal_value, statements, walk
+
+
+@dataclass(frozen=True)
+class Leaf:
+    """One output of ``collect_outputs``: ``kind`` is 'scalar' (``self.cell()``, a double), 'dict'
+    (``{k: self.cell(k) for k in self.<domain>}``, a double Cell of one C-integer parameter over a
+    Reference) or 'python' (anything else, and the whole ``individual`` section), evaluated per item
+    and merged as the export merges it."""
+    mode: str
+    label: str
+    kind: str
+    cell: str = ''
+    domain: str = ''
+    expression: str = ''
+    reason: str = ''
+
+
+@dataclass(frozen=True)
+class MultiCollect:
+    """collect_outputs with several outputs, ``{k: cell(k) for k in D}`` outputs or an ``individual``
+    section: the native leaves are summed in C arrays, the others merged by the export's Accumulator."""
+    parameter: str
+    reuse: bool
+    parallel_reuse: bool
+    ordered: bool
+    leaves: tuple
+
+    @property
+    def native(self):
+        return tuple(leaf for leaf in self.leaves if leaf.kind != 'python')
+
+    @property
+    def python(self):
+        return tuple(leaf for leaf in self.leaves if leaf.kind == 'python')
 
 
 @dataclass(frozen=True)
@@ -132,15 +166,119 @@ def _match(node, cls, reuse, parallel_reuse, ordered=False):
     output = _return_expr(_method(node, '_f_collect_outputs'))
     mode, fields = _single_dict(output)
     label, entry = _single_dict(fields)
-    if mode != 'sum' or not label or arguments(entry, count=0) is None:
+    if mode == 'sum' and label and _scalar_cell(cls, entry):
+        _report(cls, (Leaf('sum', label, 'scalar', cell=_self_attribute(entry.func)),))
+        return SerialCollect(label, _self_attribute(entry.func), parameter, reuse, parallel_reuse, ordered)
+    leaves = _leaves(cls, output)
+    if leaves is None:
         return None
-    cell = _self_attribute(entry.func)
-    if (cell not in cls.cells or cls.cells[cell].has_args()
-            or cls.cells[cell].get_rettype_expr(c_style=True) != 'double'
-            or cls.cells[cell].body_has_closure or cls.cells[cell].called_with_kwargs):
-        return None
+    _report(cls, leaves)
+    shape = MultiCollect(parameter, reuse, parallel_reuse, ordered, leaves)
+    return shape if shape.native else None
 
-    return SerialCollect(label, cell, parameter, reuse, parallel_reuse, ordered)
+
+def _plain_cell(cls, name):
+    cell = cls.cells.get(name)
+    return (cell is not None and not cell.body_has_closure and not cell.called_with_kwargs
+            and cell.get_rettype_expr(c_style=True) == 'double')
+
+
+def _scalar_cell(cls, entry):
+    """``self.cell()``: a zero-argument Cell with a double result."""
+    if arguments(entry, count=0) is None:
+        return False
+    name = _self_attribute(entry.func)
+    return name is not None and _plain_cell(cls, name) and not cls.cells[name].has_args()
+
+
+def _dict_leaf(cls, entry):
+    """``{k: self.cell(k) for k in self.<domain>}``: (cell, domain) or the reason it is not native."""
+    if not isinstance(entry, cst.DictComp):
+        return 'not a call of a zero-argument double Cell or {k: cell(k) for k in D}'
+    part = entry.for_in
+    if (part.inner_for_in is not None or part.ifs or part.asynchronous is not None
+            or not isinstance(part.target, cst.Name) or not isinstance(entry.key, cst.Name)
+            or entry.key.value != part.target.value):
+        return 'the comprehension is not {k: cell(k) for k in D} (one for clause, no condition, the key is k)'
+    variable = part.target.value
+    value = entry.value
+    args = arguments(value, count=1)
+    if args is None or not isinstance(args[0], cst.Name) or args[0].value != variable:
+        return 'the value is not cell(k) with k its only argument'
+    name = _self_attribute(value.func)
+    if name is None or not _plain_cell(cls, name):
+        return 'the value is not a call of a double Cell'
+    cell = cls.cells[name]
+    if len(cell.params) != 1 or cell.get_argtype_expr(cell.params[0], c_style=True) != 'long long':
+        return f'{name} does not take one C-integer argument'
+    domain = _self_attribute(part.iter)
+    if domain is None or domain in cls.cells:
+        return ('the domain is not a Reference of the Space (a Cell may give a different domain to each '
+                'item)')
+    if domain not in cls.refs:
+        return 'the domain is not a Reference of the Space'
+    return name, domain
+
+
+class _Root(cst.CSTTransformer):
+    def leave_Name(self, original, updated):
+        return updated.with_changes(value='root') if updated.value == 'self' else updated
+
+
+def _python_leaf(mode, label, entry, reason):
+    return Leaf(mode, label, 'python', expression=code(entry.visit(_Root())), reason=reason)
+
+
+def _leaves(cls, output):
+    """The outputs of ``collect_outputs`` in source order, or None when it is not a literal
+    ``{'individual': ..., 'sum': {name: ...}}``."""
+    if not isinstance(output, cst.Dict) or not output.elements:
+        return None
+    leaves, modes = [], set()
+    for element in output.elements:
+        if not isinstance(element, cst.DictElement):
+            return None
+        try:
+            mode = literal_value(element.key)
+        except (ValueError, TypeError):
+            return None
+        if mode not in ('individual', 'sum') or mode in modes:
+            return None
+        modes.add(mode)
+        if mode == 'individual':
+            leaves.append(_python_leaf(mode, '', element.value, 'individual outputs are kept per item'))
+            continue
+        fields = element.value
+        if not isinstance(fields, cst.Dict) or not fields.elements:
+            return None
+        for item in fields.elements:
+            if not isinstance(item, cst.DictElement):
+                return None
+            try:
+                label = literal_value(item.key)
+            except (ValueError, TypeError):
+                return None
+            if type(label) is not str:
+                return None
+            entry = item.value
+            if _scalar_cell(cls, entry):
+                leaves.append(Leaf(mode, label, 'scalar', cell=_self_attribute(entry.func)))
+                continue
+            found = _dict_leaf(cls, entry)
+            if isinstance(found, tuple):
+                leaves.append(Leaf(mode, label, 'dict', cell=found[0], domain=found[1]))
+            else:
+                leaves.append(_python_leaf(mode, label, entry, found))
+    return tuple(leaves)
+
+
+def _report(cls, leaves):
+    """Build report: each output of collect_outputs, native or not and why (on the collect_outputs Cell)."""
+    cell = cls.cells.get('collect_outputs')
+    if cell is not None:
+        cell.collect_leaves = [{'mode': leaf.mode, 'output': leaf.label, 'native': leaf.kind != 'python',
+                                **({'reason': leaf.reason} if leaf.kind == 'python' else {})}
+                               for leaf in leaves]
 
 
 def _check_closure(cls, names):
@@ -275,7 +413,7 @@ def _check_lines(cls, shape, checks):
         ))
     lines.append('        if not first:')
     if shape.reuse:     # what the check and the collected Cell reach (everything when unknown)
-        both = _check_closure(cls, [shape.cell, *(check.cell for check in checks)])
+        both = _closure(cls, shape, [check.cell for check in checks])
         lines.extend('            ' + line for line in _reset_lines(cls, both))
     else:
         lines.extend('            ' + line for line in _restart_lines(cls, shape))
@@ -284,11 +422,21 @@ def _check_lines(cls, shape, checks):
     return lines
 
 
+def _closure(cls, shape, extra=()):
+    """What the collected Cells (and ``extra``) reach; None (everything) when an output is evaluated
+    as Python code."""
+    if isinstance(shape, MultiCollect):
+        if shape.python:
+            return None
+        return _check_closure(cls, [*dict.fromkeys(leaf.cell for leaf in shape.native), *extra])
+    return _check_closure(cls, [shape.cell, *extra])
+
+
 def _restart_lines(cls, shape):
     if shape.reuse:
         # D107: collect computes the collected Cell only; between policies it resets what that Cell can
         # reach (static closure; everything when unknown). The reused root is private to this entry.
-        return list(_reset_lines(cls, _check_closure(cls, [shape.cell])))
+        return list(_reset_lines(cls, _closure(cls, shape)))
     from .item_roots import new_root, release_root
     return [f'{release_root(cls.name)}(root)', f'root = {new_root(cls.name)}(self)']
 
@@ -307,6 +455,9 @@ def add_methods(cls, node, shape, *, workers):
     if shape is None:
         return node.with_changes(body=node.body.with_changes(body=(*node.body.body, *shared, options)))
     from .item_roots import new_root, release_root     # D116: shared with the direct route
+    if isinstance(shape, MultiCollect):
+        helper = cst.parse_module('\n'.join(_multi_lines(cls, shape)) + '\n').body[0]
+        return node.with_changes(body=node.body.with_changes(body=(*node.body.body, helper, *shared, options)))
     lines = [
         'def _mx_evaluate_serial_collect(self, coords):',
         f'    root: {cls.name}',
@@ -361,3 +512,121 @@ def _shared_root_methods(cls, node):
         '\n'
         'def _mx_collect_release_root(self, root):\n'
         f'    {release_item(cls.name)}(root)\n').body)
+
+
+def _multi_lines(cls, shape):
+    """The evaluator of a MultiCollect. Outputs are evaluated item by item in source order (the order
+    ``collect_outputs`` evaluates them). A native output adds in C: the first item assigns and each
+    later one adds, as the export's merge does, so a double sums bit for bit as there. The others are
+    collected per item and merged by the export's Accumulator. The domain of a dict output is read once
+    from the Reference (every item shares it); a domain that is not a tuple, list or range of ints
+    within 64 bits, or no items, leaves the whole collect to the export."""
+    from .item_roots import new_root, release_root
+    c = CY_MOD
+    leaves = shape.leaves
+    lines = [
+        'def _mx_evaluate_serial_collect(self, coords):',
+        f'    root: {cls.name}',
+        f'    coordinate: {c}.longlong',
+        f'    first: {c}.bint = True',
+        f'    _mx_i: {c}.Py_ssize_t',
+    ]
+    for index, leaf in enumerate(leaves):
+        if leaf.kind == 'scalar':
+            lines.append(f'    _mx_t{index}: {c}.double = 0.0')
+        elif leaf.kind == 'dict':
+            lines += [f'    _mx_n{index}: {c}.Py_ssize_t = 0',
+                      f'    _mx_k{index}: {c}.p_longlong = {c}.NULL',
+                      f'    _mx_a{index}: {c}.p_double = {c}.NULL']
+    lines += [
+        f'    if type(self) is not {cls.name} or self._mx_roots or self._mx_spaces:',
+        '        return None',
+        '    if not coords or not _mx_sys._mx_collect_native_coords(coords):',
+        '        return None',
+    ]
+    for index, leaf in enumerate(leaves):
+        if leaf.kind == 'dict':
+            lines += [
+                f'    _mx_d{index} = self.{leaf.domain}',
+                f'    if not (type(_mx_d{index}) is range or type(_mx_d{index}) in (tuple, list)',
+                f'            and all(type(_mx_x) is int for _mx_x in _mx_d{index})):',
+                '        return None',
+                f'    _mx_d{index} = tuple(_mx_d{index})',
+                f'    if any(_mx_x < -9223372036854775808 or _mx_x > 9223372036854775807 for _mx_x in _mx_d{index}):',
+                '        return None',
+                f'    _mx_n{index} = len(_mx_d{index})',
+            ]
+    if shape.python:
+        lines += ['    from . import _mx_collect_semantics as _mx_cs',
+                  '    _mx_accumulated = _mx_cs.Accumulator(_mx_sys.CollectResult)']
+    lines += [f'    root = {new_root(cls.name)}(self)', '    try:']
+    for index, leaf in enumerate(leaves):
+        if leaf.kind == 'dict':
+            lines += [
+                f'        _mx_k{index} = {c}.cast({c}.p_longlong, _mx_collect_malloc(({c}.sizeof({c}.longlong)) * (_mx_n{index} + 1)))',
+                f'        _mx_a{index} = {c}.cast({c}.p_double, _mx_collect_malloc(({c}.sizeof({c}.double)) * (_mx_n{index} + 1)))',
+                f'        if _mx_k{index} == {c}.NULL or _mx_a{index} == {c}.NULL:',
+                '            raise MemoryError()',
+                f'        for _mx_i in range(_mx_n{index}):',
+                f'            _mx_k{index}[_mx_i] = _mx_d{index}[_mx_i]',
+            ]
+    checks = bound_checks(cls)
+    cls.collect_bound_checks = checks
+    if checks:
+        lines.extend(_check_lines(cls, shape, checks))
+    lines += ['        for coordinate in coords:', '            if not first:']
+    lines.extend('                ' + line for line in _restart_lines(cls, shape))
+    lines.append(f'            root.{shape.parameter} = coordinate')
+    if shape.python:
+        lines.append('            _mx_sum = {}')
+    for index, leaf in enumerate(leaves):
+        if leaf.kind == 'scalar':
+            lines += ['            if first:',
+                      f'                _mx_t{index} = root.{leaf.cell}()',
+                      '            else:',
+                      f'                _mx_t{index} += root.{leaf.cell}()']
+        elif leaf.kind == 'dict':
+            lines += ['            if first:',
+                      f'                for _mx_i in range(_mx_n{index}):',
+                      f'                    _mx_a{index}[_mx_i] = root.{leaf.cell}(_mx_k{index}[_mx_i])',
+                      '            else:',
+                      f'                for _mx_i in range(_mx_n{index}):',
+                      f'                    _mx_a{index}[_mx_i] += root.{leaf.cell}(_mx_k{index}[_mx_i])']
+        elif leaf.mode == 'individual':
+            lines.append(f'            _mx_individual = ({leaf.expression})')
+        else:
+            lines.append(f'            _mx_sum[{leaf.label!r}] = ({leaf.expression})')
+    if shape.python:
+        modes = list(dict.fromkeys(leaf.mode for leaf in shape.python))
+        parts = ', '.join(f"'individual': _mx_individual" if mode == 'individual' else "'sum': _mx_sum"
+                          for mode in modes)
+        lines.append(f'            _mx_accumulated.add(coordinate, _mx_cs.prepare_output({{{parts}}}, '
+                     '(_mx_sys.BaseMxObject,)))')
+    lines += ['            first = False']
+    # the result, in the order collect_outputs writes its sections and outputs
+    if shape.python:
+        lines.append('        _mx_python = _mx_accumulated.result()._fields')
+    sections = []
+    for mode in dict.fromkeys(leaf.mode for leaf in leaves):
+        if mode == 'individual':
+            sections.append("'individual': _mx_python['individual']")
+            continue
+        fields = []
+        for index, leaf in enumerate(leaves):
+            if leaf.mode != 'sum':
+                continue
+            if leaf.kind == 'scalar':
+                fields.append(f'{leaf.label!r}: _mx_t{index}')
+            elif leaf.kind == 'dict':
+                fields.append(f'{leaf.label!r}: {{_mx_d{index}[_mx_i]: _mx_a{index}[_mx_i] '
+                              f'for _mx_i in range(_mx_n{index})}}')
+            else:
+                fields.append(f"{leaf.label!r}: _mx_python['sum']._fields[{leaf.label!r}]")
+        sections.append(f"'sum': _mx_sys.CollectResult({{{', '.join(fields)}}})")
+    lines.append(f"        return _mx_sys.CollectResult({{{', '.join(sections)}}})")
+    lines.append('    finally:')
+    for index, leaf in enumerate(leaves):
+        if leaf.kind == 'dict':
+            lines += [f'        _mx_collect_free(_mx_k{index})', f'        _mx_collect_free(_mx_a{index})']
+    lines.append(f'        {release_root(cls.name)}(root)')
+    return lines

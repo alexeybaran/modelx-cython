@@ -92,6 +92,7 @@ def describe(module_infos):
                     'record_reads_untyped': getattr(cell, 'record_reads_untyped', []),
                     'table_reads_keys': getattr(cell, 'table_reads_keys', []),
                     'native_reductions': getattr(cell, 'native_reductions', 0),
+                    **({'collect_outputs': cell.collect_leaves} if getattr(cell, 'collect_leaves', None) else {}),
                     'native_enum_comparisons': getattr(cell, 'native_enum_comparisons', 0),
                     'native_enum_constants': getattr(cell, 'native_enum_constants', 0),
                     'row_fields_inlined': getattr(cell, 'row_fields_inlined', 0),   # diag-run8 F3

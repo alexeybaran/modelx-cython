@@ -1039,6 +1039,10 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
         if any(shape.reuse for shape in self._serial_shapes.values()):
             stmts.append(cst.parse_statement(
                 'from cython.cimports.libc.string import memset as _mx_collect_memset'))
+        if any(leaf.kind == 'dict' for shape in self._serial_shapes.values()
+               for leaf in getattr(shape, 'leaves', ())):
+            stmts.append(cst.parse_statement(
+                'from cython.cimports.libc.stdlib import malloc as _mx_collect_malloc, free as _mx_collect_free'))
         from modelx_cython.helpers import module_name
         from modelx_cython.exceptions import NumericExceptions
         if self._uses_native_round:
