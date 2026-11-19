@@ -202,6 +202,39 @@ if compiled:
     finally:
         runtime.collect_end = real_end
     assert len(seen) == 2 and all("collect" in text for text in seen), seen
+
+    # (9) clear_all() from another thread, again and again, during 200 four-worker collects: each clear raises
+    # (a collect is running) or runs wholly between two collects; a collect started while a clear runs raises;
+    # every collect that runs returns the intact result (no worker reads a cache while it is cleared)
+    m = Model()
+    m._mx_collect_set_workers_v2(4)
+    stop, other, counts = threading.Event(), [], {"raised": 0, "cleared": 0}
+    def clearer():
+        while not stop.is_set():
+            try:
+                m.Projection.clear_all()
+                counts["cleared"] += 1
+            except RuntimeError as error:
+                if "while a collect of this model is running" in str(error):
+                    counts["raised"] += 1
+                else:
+                    other.append(str(error))
+    thread = threading.Thread(target=clearer)
+    thread.start()
+    results, refused = [], 0
+    try:
+        for _ in range(200):
+            try:
+                results.append(m.Projection.collect().sum.pv)
+            except RuntimeError as error:
+                assert "while clear_all() of this model is running" in str(error), error
+                refused += 1
+    finally:
+        stop.set()
+        thread.join()
+    assert results and all(close(value, base) for value in results), results[:3]
+    assert not other, other[:3]
+    assert counts["cleared"] and counts["raised"] + refused, (counts, refused)
 print("ok", name)
 """
 

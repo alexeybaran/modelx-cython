@@ -29,11 +29,15 @@ import threading
 _lock = threading.Lock()
 _NO_FRAME = object()
 _running = {}       # id(model) -> number of collect calls in progress
+_clearing = {}      # id(model) -> number of clear_all() calls in progress
 _inputs = {}        # id(model) -> {(id(space), name): (space, name, table)}
 
 
 def collect_begin(model):
     with _lock:
+        if _clearing.get(id(model)):
+            raise RuntimeError('cannot run a collect while clear_all() of this model is running; '
+                               'run it before or after the clear')
         _running[id(model)] = _running.get(id(model), 0) + 1
 
 
@@ -109,12 +113,26 @@ def clear_all(space):
     frames they hold on their next read, so an in-place edit is what compiled code reads. Refused while a
     collect of the model is running."""
     model = space._model
-    _check_idle(model, f'{type(space).__name__[3:]}.clear_all()')
-    cleared = list(space._mx_walk())
-    _drop_inputs(model, cleared)
-    for target in cleared:
-        target._mx_clear_values()
-    rebuild_tables(model, cleared)
+    # the check and the mark are one step under the lock: a collect cannot start between them (collect_begin
+    # refuses while the model is being cleared), so no worker reads a cache while it is cleared
+    with _lock:
+        if _running.get(id(model)):
+            raise RuntimeError(f'cannot run {type(space).__name__[3:]}.clear_all() while a collect of this '
+                               'model is running; do it before or after the run')
+        _clearing[id(model)] = _clearing.get(id(model), 0) + 1
+    try:
+        cleared = list(space._mx_walk())
+        _drop_inputs(model, cleared)
+        for target in cleared:
+            target._mx_clear_values()
+        rebuild_tables(model, cleared)
+    finally:
+        with _lock:
+            count = _clearing.get(id(model), 0) - 1
+            if count > 0:
+                _clearing[id(model)] = count
+            else:
+                _clearing.pop(id(model), None)
 
 
 CLEARS = ("Clear the Space that depends on the change (Space.clear_all()) or the whole model "
