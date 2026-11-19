@@ -11,7 +11,10 @@ A class's ``HoldTable`` has one entry per held value, in three kinds:
 - ``column``: the column index, or record field slot, of one literal name read through a held handle
   (``_mx_tc_<n>``; 0 until resolved), keyed by (held field, name);
 - ``row``: the row of a key fixed per item and read through a held handle (``_mx_tr_<n>``; 0 until
-  resolved), keyed by (held field, key parts).
+  resolved), keyed by (held field, key parts);
+- ``array``: the slice of a zero-argument cached Cell with a typed-memoryview result read by subscript
+  (``_mx_ta_<n>`` of the Cell's memoryview type, valid while ``_mx_ta_<n>_ready``), keyed by (receiver, Cell);
+  see ``held_arrays``.
 
 Which reads are held is decided in ``table_reads`` by traced type and data flow, never by how a read is
 spelled. This module only names the fields and gives their declarations and reset lines.
@@ -22,6 +25,7 @@ _KINDS = {
     'handle': ('_mx_th_', 'object', 'object', 'None'),
     'column': ('_mx_tc_', 'Py_ssize_t', '_mx_cy.Py_ssize_t', '0'),
     'row': ('_mx_tr_', 'Py_ssize_t', '_mx_cy.Py_ssize_t', '0'),
+    'array': ('_mx_ta_', None, None, None),     # typed per field; reset clears the ready flag
 }
 
 
@@ -30,13 +34,17 @@ class HoldTable:
 
     def __init__(self):
         self._fields = {kind: {} for kind in _KINDS}
+        self.types = {}     # array field -> (C type of the .pxd, annotation of the .py)
 
-    def field(self, kind, key):
-        """The field holding ``key`` (created on first use, numbered per kind)."""
+    def field(self, kind, key, ctype=None, annotation=None):
+        """The field holding ``key`` (created on first use, numbered per kind); an ``array`` field takes the
+        memoryview's C type and annotation."""
         fields = self._fields[kind]
         field = fields.get(key)
         if field is None:
             field = fields[key] = f'{_KINDS[kind][0]}{len(fields)}'
+            if kind == 'array':
+                self.types[field] = (ctype, annotation)
         return field
 
     def fields(self):
@@ -62,16 +70,34 @@ def _held(cls_info):
     return table.fields() if table is not None else ()
 
 
+def _types(cls_info):
+    return cls_info.holds.types
+
+
 def pxd_declarations(cls_info):
     """``cdef`` lines of the class's .pxd for its held fields."""
-    return [f'cdef {_KINDS[kind][1]} {field}\n' for field, kind in _held(cls_info)]
+    lines = []
+    for field, kind in _held(cls_info):
+        if kind == 'array':
+            lines += [f'cdef {_types(cls_info)[field][0]} {field}\n', f'cdef bint {field}_ready\n']
+        else:
+            lines.append(f'cdef {_KINDS[kind][1]} {field}\n')
+    return lines
 
 
 def py_declarations(cls_info):
     """Annotated declarations of the class body of the .py for its held fields."""
-    return [f'{field}: {_KINDS[kind][2]}\n' for field, kind in _held(cls_info)]
+    lines = []
+    for field, kind in _held(cls_info):
+        if kind == 'array':
+            lines += [f'{field}: {_types(cls_info)[field][1]}\n', f'{field}_ready: _mx_cy.bint\n']
+        else:
+            lines.append(f'{field}: {_KINDS[kind][2]}\n')
+    return lines
 
 
 def reset_lines(cls_info, target='root'):
-    """Reset of every held field of ``target``, with the per-policy caches."""
-    return [f'{target}.{field} = {_KINDS[kind][3]}' for field, kind in _held(cls_info)]
+    """Reset of every held field of ``target``, with the per-policy caches (a held array: its ready flag; the
+    slice it holds is replaced at the next read)."""
+    return [f'{target}.{field}_ready = False' if kind == 'array' else f'{target}.{field} = {_KINDS[kind][3]}'
+            for field, kind in _held(cls_info)]
