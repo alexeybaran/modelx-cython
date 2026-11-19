@@ -19,7 +19,7 @@ authors = [
 dependencies = [
     "modelx>=0.33.1.dev0",
     "libcst",
-    "Cython>=3.3.1",
+    "Cython>=3.2",
     "setuptools",
     "MonkeyType",
     "numpy",

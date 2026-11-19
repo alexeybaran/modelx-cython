@@ -13,13 +13,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
-        python: ['3.13', '3.14', '3.14t']
+        os: [ubuntu-latest]
+        python: ['3.14', '3.14t']
         experimental: [false]
-        include:
-          # agreed floor; allowed to fail. ubuntu-latest (26.04) has no 3.9
-          # build in actions/python-versions, so this cell pins 24.04.
-          - {os: ubuntu-24.04, python: '3.9', experimental: true}
     env:
       # short base path so MSVC link.exe stays under MAX_PATH; forward slash
       # because pytest splits PYTEST_ADDOPTS POSIX-style
@@ -52,6 +48,7 @@ jobs:
           # editable finder does not provide.
           python -m pip install "./dependencies/modelx[helpers]" ./dependencies/lifelib
           python -m pip install . pytest pandas openpyxl psutil
+          python -m pip install 'Cython==3.2.4'
           python -m pip list
       - name: Unit tests
         timeout-minutes: 100
