@@ -649,7 +649,7 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
         from modelx_cython.rounding import RoundedInputs
         from modelx_cython import vectors, held_arrays
         # a typed-memoryview Cell read by subscript is held per item (no slice copy per evaluation)
-        node = held_arrays.lower(node, cls_info, self._held_arrays)
+        node = held_arrays.lower(node, cls_info, cells, self._held_arrays)
         node = vectors.lower(node, cls_info, cells, scope, self._vector_counter, self.module,
                              self._ref_kinds.get(cls_info.fqname, {}))
         node = self._table_reads_with_row_fields(node, cls_info, cells)
