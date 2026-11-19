@@ -189,10 +189,9 @@ class TransSpec:
     ``"propagate_exact_receiver"`` carries the receiver fact through those
     entries and private dense formula calls. ``"native_math"`` enables guarded
     builtin rounding by default.
-    ``"infer_types"`` (default true): C type inference with overflow checks
-    (``# cython: infer_types=True, overflowcheck=True``) in generated model modules;
-    false keeps Cython's default (no inference of C types for untyped locals, no
-    overflow checks).
+    ``"infer_types"`` (default true): C type inference (``# cython: infer_types=True``) in
+    generated model modules; false keeps Cython's default (no inference of C types for untyped
+    locals). Overflow checks follow ``"integer_checks"`` either way.
     ``"integer_checks"`` (default ``"auto"``): ``"unchecked"`` compiles C integer arithmetic
     without overflow checks (as plain C), ``"checked"`` with them; ``"auto"`` chooses unchecked when
     no traced integer (Cell arguments and results, References, ItemSpace parameters, integer
