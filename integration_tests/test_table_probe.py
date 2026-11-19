@@ -192,6 +192,10 @@ STMTS = {
     'level_extreme': ('grid sgrid tri', "return (int(T.index.get_level_values(1).max()) + t, T.index.get_level_values(-1).min())"),
     'level_extreme_hex': ('grid', "return int(T.index.get_level_values(0x1).max()) + t"),
     # T-5c: the level values in a local, then their extremes (the clamp of an age); the local also read otherwise
+    # T-5c: a builtin of a generator walk (hoisted out of the read's conditional: a loop, not a generator object)
+    'walk_builtins': ('grid sgrid', "sub = T.loc[('A', 'B')[t % 2]]\nages = sorted(int(a) for a in sub.index)\n"
+                      "return (ages, max(a for a in sub.index if a <= 21 + t), sum(int(a) for a in sub.index),\n"
+                      "        any(a > 22 for a in sub.index), min((a for a in sub.index), default=-1))"),
     'level_extreme_local': ('rates', "ages = T.index.get_level_values('year')\n"
                             "xx = min(max(1999 + t, int(ages.min())), int(ages.max()))\nreturn float(T.loc[('A', 'F', xx), 'q'])"),
     'level_extreme_local_kept': ('rates', "ages = T.index.get_level_values(2)\nreturn (int(ages.max()) - t, len(ages))"),
