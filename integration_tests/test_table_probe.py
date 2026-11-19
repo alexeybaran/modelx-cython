@@ -175,6 +175,9 @@ STMTS = {
     'asof_bare_scen': ('scen', "sub = T.loc[('up', 'down')[t % 2]]\nk = sub.index.asof(6.0 * t - 3.0)\nreturn float(k) if k == k else -1.0"),
     'asof_bare_whole': ('flat shuffled', "k = T.index.asof(19.5 + 1.5 * t)\nreturn float(k) if k == k else -1.0"),
     'asof_bare_absent': ('grid', "sub = T.loc[('A', 'C')[t % 2]]\nreturn sub.index.asof(21.0 + t)"),
+    'param_prefix': ('flat', "return pseries(t).loc[20 + t % 4, 'q'] + float(pseries(t + 1).loc[21, 'n'])"),
+    'param_view': ('flat', "sub = pseries(t)\nreturn (sub.loc[22, 'q'], len(sub.index), int(sub.index[-1]))"),
+    'param_missing': ('flat', "return pmissing(t).loc[20, 'q']"),
     'iterrows_find': ('mixed', "for k, row in T.iterrows():\n    if int(row['n']) >= 1 + t:\n        return (k, str(row['tag']))\nreturn None"),
     'obj_col': ('mixed', "return (T.loc[20 + t, 'tag'], T.at[20 + t, 'tag'] == 'x')"),
     'obj_col_missing': ('mixed', "return T.loc[98 + t, 'tag']"),
@@ -239,6 +242,8 @@ T5_ITEMS = {
     # T-5c: a prefix of a prefix cell's value: one view of the parent table
     'prefix_of_cell': "sub = psched().loc[sex()]\nreturn sub.loc[2000 + t % 3, 'q'] + len(sub.index) + int(sub.index[-1])",
     'prefix_of_cell_step': "sub = psched().loc[('F', 'M')[t % 2]]\nreturn ([int(v) for v in sub.index], sub.loc[2001, 'q'])",
+    'param_item': "return ipser(t).loc[2000 + t % 3, 'q']",
+    'param_item_view': "sub = ipser(t)\nreturn sub.loc[2001, 'q'] + len(sub.index)",
     'row_by_field': "return tagrow()['q'] * t + tagrow()['m']",
     'tuple_cell_view': "sub = data.rates().loc[plan()]\na = anchor()\nreturn sub.loc[a, 'q'] + (anchor() in sub.index)",
     'tuple_cell_whole': "return data.rates().loc[full(), 'q'] + data.rates().loc[odd(), 'q'].sum()",
@@ -289,6 +294,9 @@ def build():
     for op, (sources, body) in STMTS.items():
         for source in sources.split():
             calc.new_cells(f"{{op}}__{{source}}", f"def {{op}}__{{source}}(t):\\n    T = data.{{source}}()\\n" + _indent(body))
+    # T-5c (shape G): cells of parameters whose formula is a prefix of a Data table
+    calc.new_cells("pseries", "def pseries(s):\\n    return data.grid().loc[('A', 'B')[s % 2]]\\n")
+    calc.new_cells("pmissing", "def pmissing(s):\\n    return data.grid().loc[('A', 'C')[s % 2]]\\n")
     items = model.new_space("Items", formula="lambda i: None")     # an ItemSpace: reads held per item
     items.data = data
     items.new_cells("v__flat", "def v__flat(t):\\n    return data.flat().loc[20 + t, 'q']\\n")
@@ -312,6 +320,7 @@ def build():
     items.new_cells("odd", "def odd():\\n    return (plan(), sex()) if i % 2 else plan()\\n")
     items.new_cells("mrow", "def mrow():\\n    return data.mixed().loc[pid()]\\n")
     items.new_cells("psched", "def psched():\\n    return data.rates().loc[plan()]\\n")
+    items.new_cells("ipser", "def ipser(s):\\n    return data.rates().loc[(plan(), ('F', 'M')[s % 2])]\\n")
     items.new_cells("tagrow", "def tagrow():\\n    return data.bytag().loc[mrow()['tag']]\\n")
     for name, body in T5_ITEMS.items():
         items.new_cells(name, f"def {{name}}(t):\\n" + _indent(body))
