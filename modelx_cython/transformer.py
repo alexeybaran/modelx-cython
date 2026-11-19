@@ -800,6 +800,45 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
             cache[cls_info.name] = found
         return cache[cls_info.name]
 
+    def _param_prefix_cells(self, cls_info):
+        """T-5c (shape G): {cell: (parameter names, its ``T.loc[key]``)} for the cells of the class with positional
+        parameters whose formula is ``return T.loc[key]``, the key's names among the parameters, T a self-rooted
+        zero-argument call, and that no other class of the module defines."""
+        cache = self.__dict__.setdefault('_param_prefix_cache', {})
+        if cls_info.name not in cache:
+            from modelx_cython import row_cells
+            found = {}
+            module = getattr(self, '_module_node', None)
+            classes = [n for n in getattr(module, 'body', ()) if isinstance(n, cst.ClassDef)]
+            own = next((c for c in classes if c.name.value == cls_info.name), None)
+            for func in (own.body.body if own is not None else ()):
+                if not (isinstance(func, cst.FunctionDef) and func.name.value.startswith('_f_')):
+                    continue
+                params = func.params
+                names = [p.name.value for p in params.params]
+                if (len(names) < 2 or names[0] != 'self' or params.star_arg not in (None, cst.MaybeSentinel.DEFAULT)
+                        or params.kwonly_params or params.star_kwarg or params.posonly_params
+                        or any(p.default is not None for p in params.params)):
+                    continue
+                body = row_cells._body(func)
+                ret = body[0].body[0] if (len(body) == 1 and isinstance(body[0], cst.SimpleStatementLine)
+                                          and len(body[0].body) == 1) else None
+                expr = ret.value if isinstance(ret, cst.Return) else None
+                if not (isinstance(expr, cst.Subscript) and len(expr.slice) == 1
+                        and isinstance(expr.slice[0].slice, cst.Index) and expr.slice[0].slice.star is None
+                        and isinstance(expr.value, cst.Attribute) and expr.value.attr.value == 'loc'
+                        and row_cells._self_chain_call(expr.value.value)):
+                    continue
+                free = row_cells._Names()
+                expr.slice[0].slice.value.visit(free)
+                name = func.name.value[3:]
+                if (free.plain and free.names <= set(names) and not any(
+                        isinstance(f, cst.FunctionDef) and f.name.value in ('_f_' + name, name)
+                        for c in classes if c is not own for f in c.body.body)):
+                    found[name] = (names[1:], expr.with_changes(lpar=(), rpar=()))
+            cache[cls_info.name] = found
+        return cache[cls_info.name]
+
     def _cached_call(self, call):
         """A self-rooted zero-argument call of a cached Cell (the resolver's cached_cells)."""
         name = call.func.attr.value if isinstance(call.func, cst.Attribute) else None
@@ -882,7 +921,8 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
             # T-3: reads of a traced pandas frame onto its PreparedTable (frame_reads.py)
             from modelx_cython.frame_reads import FrameReads
             frames = FrameReads(self._resolver, cls_info, cells, self.helper_providers, self.module.spec.policy,
-                                getattr(self, '_row_names', None), self._prefix_cells(cls_info))
+                                getattr(self, '_row_names', None), self._prefix_cells(cls_info),
+                                self._param_prefix_cells(cls_info))
             node = self._lower_frames(frames, node, cls_info, cells)
             cells.frame_reads = frames.lowered + frames.declined
         if getattr(self.module.spec.policy, 'prepared_tables', False):
