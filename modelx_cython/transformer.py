@@ -647,7 +647,9 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
         """
         from modelx_cython.checked_arithmetic import CheckedArithmetic
         from modelx_cython.rounding import RoundedInputs
-        from modelx_cython import vectors
+        from modelx_cython import vectors, held_arrays
+        # a typed-memoryview Cell read by subscript is held per item (no slice copy per evaluation)
+        node = held_arrays.lower(node, cls_info, self._held_arrays)
         node = vectors.lower(node, cls_info, cells, scope, self._vector_counter, self.module,
                              self._ref_kinds.get(cls_info.fqname, {}))
         node = self._table_reads_with_row_fields(node, cls_info, cells)
@@ -905,6 +907,7 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
         """
         self._cold_sums = []
         self._cold_spills = []
+        self._held_arrays = {}
         self._dense_layouts = {}
         self._next_cold_sum = 0
         self._uses_native_round = False
@@ -956,8 +959,9 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
             (module, self.dense_entries, self.formula_entries, self.function_origins,
              self.entry_domains) = add_inline_entries(
                 module, ordinary, self._dense_layouts)
-        if self._cold_sums or self._cold_spills:
-            module = module.with_changes(body=(*module.body, *self._cold_sums, *self._cold_spills))
+        if self._cold_sums or self._cold_spills or self._held_arrays:
+            module = module.with_changes(body=(*module.body, *self._cold_sums, *self._cold_spills,
+                                               *(stmt for held in self._held_arrays.values() for stmt in held.body)))
         # D116: one root construction and release per compiled ItemSpace class (collect and direct)
         from modelx_cython import item_roots
         roots = [fn for name in sorted(self.module.visitor.itemspace_classes) if name in self.module.classes
