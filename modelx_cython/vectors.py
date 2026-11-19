@@ -1805,6 +1805,9 @@ def lower(node, cls_info, cells, scope, counter, module, ref_kinds=None):
             elem = lowering.elem(lowering.iter_vectors(items[0][1])[items[0][2]])
             decls.append(_stmt(f'{name}: {SCALARS[elem]}\n'))
     decls += [_stmt(f'{name}: {TYPES[lowering.env[name]]}\n') for name in vector_locals] + lowering.decls
+    for code in converted:      # the report names every Python use of a vector (D154), recorded or not above
+        if not any(code in item for item in lowering.fallbacks):
+            lowering.fallbacks.append(f'vector used in Python code: a new list: {code}')
     report.update({'lowered': lowering.lowered, 'fallbacks': lowering.fallbacks, 'lists': converted,
                    'bounds_hoisted': lowering.bounds_hoisted, 'powers': lowering.powers,
                    'vector_locals': {name: lowering.env[name] for name in vector_locals}})
