@@ -3,7 +3,7 @@
 Random keys, misses included, on every index kind the preparation accepts: dense and sparse int, text,
 IntEnum, float, unsorted, two and three levels, a Series. Each read is compared with ``.loc[key, col]`` in value
 and type, a miss with pandas' KeyError; ``in index`` and ``index.asof`` likewise. A typed probe module
-exercises the C-level reads compiled code uses (row_ll, row_codes, prefix_range, f64_at, i64_at).
+exercises the C-level reads compiled code uses (code_ll, row_codes, prefix_range, f64_at, i64_at).
 """
 import enum
 import zlib
@@ -24,7 +24,7 @@ PROBE = textwrap.dedent('''\
     from _tables cimport PreparedTable
 
     def flat_f64(PreparedTable table, long long key, Py_ssize_t slot):
-        cdef Py_ssize_t row = table.row_ll(key)
+        cdef Py_ssize_t row = table.code_ll(0, key) if table.nlevels == 1 else -1
         if row < 0:
             raise KeyError(key)
         return table.f64_at(row, slot)
