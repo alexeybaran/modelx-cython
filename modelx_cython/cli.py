@@ -424,7 +424,8 @@ def main_handler(args: argparse.Namespace, stdout: IO[str], stderr: IO[str]) -> 
         formula_entries = {}
         translated_modules = {}
         for u in units:
-            serial_shapes = serial_collect.analyze(u.module_info) if runtime.hook else {}
+            serial_shapes = (serial_collect.analyze(u.module_info, evaluator_args=runtime.evaluator_args)
+                             if runtime.hook else {})
             trans = ModuleTransformer(
                 u.source, u.module_info,
                 resolver=resolver,

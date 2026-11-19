@@ -97,3 +97,59 @@ def test_native_and_python_outputs_equal_the_export(tmp_path):
         ("sum", "none"): True}
     assert "Reference" in leaves("CellDomain")[("sum", "cf")][1]
     assert leaves("MissingKey")[("sum", "pv")][0] and not leaves("MissingKey")[("sum", "cf")][0]
+
+
+def test_collect_with_other_parameters_is_native_per_argument_set(tmp_path):
+    """Valuation(a, key, b).collect(a, b): the other parameters reach the compiled evaluator (protocol 2
+    extension); each call has its own accumulators (allocated and freed in that call), and the collect
+    cache is keyed by the arguments, so two argument sets never share a total. One item and many argument
+    sets is the per-call cost case."""
+    model = mx.new_model("CollectArguments")
+    try:
+        for name, keys in (("Book", (1, 2, 3, 4, 5, 6, 7, 8)), ("One", (7,))):
+            months = tuple(range(12))
+            space = model.new_space(name, formula="lambda a, key, b=-1: None",
+                                    refs={"keys": keys, "months": months}, collect_over={"key": keys},
+                                    collect_outputs='lambda: {"sum": {"pv": pv(), "cf": {t: cf(t) for t in months}}}')
+            space.new_cells("cf", "lambda t: key * 0.37 + a / 7.0 + b * 0.011 + t / 3.0")
+            space.new_cells("pv", "lambda: sum(cf(t) for t in months) / (1.0 + a / 100.0)")
+        model.export(tmp_path / "exported")
+    finally:
+        model.close()
+    spec = {"spaces": {name: {"serial_collect": "reuse", "parallel_collect_reuse": True} for name in ("Book", "One")}}
+    (tmp_path / "spec.py").write_text(repr(spec), encoding="utf-8")
+    (tmp_path / "sample.py").write_text(
+        "from exported import mx_model as m\n"
+        "for a in (0, 12, 24):\n    for b in (-1, 0, 6):\n        m.Book.collect(a, b); m.One.collect(a, b)\n",
+        encoding="utf-8")
+    subprocess.run([sys.executable, "-m", "modelx_cython", "exported", "--sample", "sample.py",
+                    "--spec", "spec.py"], cwd=tmp_path, check=True)
+    probe = textwrap.dedent("""\
+        import json, sys
+        m = __import__(sys.argv[1]).mx_model
+        def plain(r):
+            return [repr(r.sum.pv), [[k, repr(v)] for k, v in r.sum.cf.items()]]
+        out = {}
+        for workers in (1, 4):
+            m.collect_workers = workers
+            m.clear_all()
+            out[f'book{workers}'] = [plain(m.Book.collect(a, b)) for a in (0, 12, 24) for b in (-1, 0, 6)]
+            out[f'one{workers}'] = [plain(m.One.collect(a, b)) for a in range(0, 300, 12) for b in range(-1, 7)]
+        out['native'] = [hasattr(getattr(m, n), '_mx_collect_options_v2') and getattr(m, n)._mx_collect_options_v2()[1] is not None
+                         for n in ('Book', 'One')]
+        print(json.dumps(out))
+        """)
+    results = {}
+    for package in ("exported", "exported_cy"):
+        done = subprocess.run([sys.executable, "-c", probe, package], cwd=tmp_path, capture_output=True, text=True)
+        assert done.returncode == 0, done.stderr
+        results[package] = json.loads(done.stdout)
+    live, compiled = results["exported"], results["exported_cy"]
+    assert compiled["native"] == [True, True]
+    assert compiled["book1"] == live["book1"] and compiled["one1"] == live["one1"] == compiled["one4"]
+    assert len({json.dumps(r) for r in compiled["book1"]}) == 9            # nine argument sets, nine totals
+    # 4 workers: chunk totals merge in the parallel order, so the last bits may differ from the serial sum
+    for got, want in zip(compiled["book4"], live["book1"]):
+        assert [k for k, _ in got[1]] == [k for k, _ in want[1]]
+        for (_, x), (_, y) in zip(got[1], want[1]):
+            assert abs(float(x) - float(y)) <= 1e-12 * abs(float(y))
