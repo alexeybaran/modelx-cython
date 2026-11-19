@@ -202,6 +202,9 @@ STMTS = {
     # T-5c: the extreme of one level through a walk of the whole index with a tuple target (a C read per step)
     'level_walk_extreme': ('grid sgrid', "top = max(a for p, a in T.index)\n"
                            "return (T.loc[('B', min(20 + t, top)), 'n'], min(a for p, a in T.index) - t, top)"),
+    # T-5c: a bool literal as a position stays pandas' (it raises); a starred loop target is a list
+    'bool_position': ('flat grid', "return T.index[True] if t < 0 else T.iloc[False]"),
+    'starred_items': ('flat', "n = 0\nfor a, *b in T['q'].items():\n    n += len(b) + int(a > 20)\nreturn n"),
     'level_extreme_local': ('rates', "ages = T.index.get_level_values('year')\n"
                             "xx = min(max(1999 + t, int(ages.min())), int(ages.max()))\nreturn float(T.loc[('A', 'F', xx), 'q'])"),
     'level_extreme_local_kept': ('rates', "ages = T.index.get_level_values(2)\nreturn (int(ages.max()) - t, len(ages))"),
@@ -252,6 +255,8 @@ T5_ITEMS = {
     'row_item': "row = data.mixed().loc[20 + t]\nreturn row['q'] * row['n']",
     # a row cell kept (one read takes a computed field): its fields through the row held per item
     'row_cell_lit': "return mrow()['q'] * mrow()['n']",
+    # T-5c: a row local whose key is fixed per item, in a per-step cell: the row held per item
+    'row_item_fixed': "row = data.mixed().loc[pid()]\nreturn row['q'] * t + row['n'] + len(row['tag'])",
     'obj_item': "return data.mixed().loc[pid(), 'tag'] + data.mixed().loc[20 + t, 'tag']",
     'row_cell_computed': "return float(mrow()[('q', 'n')[t % 2]]) + float(mrow()['q'])",
     # T-5c: a key tuple returned by a cell, fixed per item: its codes held per item (a tuple checked once)
@@ -435,7 +440,8 @@ for key, name, live_space, compiled_space in cases:
         (lk, lv), (ck, cv) = outcome(live_space, name, t), outcome(compiled_space, name, t)
         if lk == "raise" and ck == "raise":
             original = lv.__cause__ or lv
-            if type(cv) is type(original) or type(cv).__name__ + ":" in str(lv):
+            named = type(cv).__name__          # live names the original as "Name: message", or "Name" alone
+            if type(cv) is type(original) or named + ":" in str(lv) or "\\n" + named + "\\n" in str(lv):
                 continue
             verdict = f"other error: live {type(lv).__name__}, compiled {type(cv).__name__}: {str(cv)[:120]}"
         elif ck == "raise":

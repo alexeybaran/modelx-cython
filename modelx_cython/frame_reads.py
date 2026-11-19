@@ -878,6 +878,34 @@ _NO_LABEL = object()
 PREPARE_MIN_EVALUATIONS = 8
 
 
+# T-5c: attributes of a pandas object whose subscript is a pandas selection (a bool key is passed as the Python bool)
+PANDAS_INDEXERS = frozenset(('index', 'iloc', 'loc', 'at', 'iat', 'columns'))
+
+
+def _starred_target(target):
+    """T-5c: for a loop target holding a starred element (``for a, *b in ...``): a rewrite of the loop into ``for
+    _mx_item in ...:`` and ``a, *b = _mx_item`` first in its body (Cython types a starred loop target from the
+    items; the assignment makes ``b`` the list Python makes it), else None."""
+    found = []
+
+    class Find(cst.CSTVisitor):
+        def visit_StarredElement(self, node):
+            found.append(node)
+    target.visit(Find())
+    if not found:
+        return None
+
+    def rewrite(updated, owner):
+        if not isinstance(updated.body, cst.IndentedBlock):
+            return updated          # a one-line body: kept as written
+        item = cst.Name(f'_mx_item{owner.local_count}')
+        owner.local_count += 1
+        unpack = cst.SimpleStatementLine([cst.Assign([cst.AssignTarget(updated.target)], item)])
+        body = updated.body.with_changes(body=[unpack, *updated.body.body])
+        return updated.with_changes(target=item, body=body)
+    return rewrite
+
+
 # T-5c: builtins of one iterable whose generator argument is hoisted out of the read's conditional
 WALK_BUILTINS = frozenset(('sorted', 'list', 'tuple', 'set', 'frozenset', 'sum', 'min', 'max', 'any', 'all'))
 
@@ -1665,6 +1693,9 @@ class _Rewrite(cst.CSTTransformer):
         position's row; the pandas loop when the table cannot answer."""
         if original.asynchronous is not None:
             return updated
+        starred = _starred_target(original.target)
+        if starred is not None:
+            return starred(updated, self.o)
         rows = self.iterrows_loop(original, updated)
         if rows is not None:
             return rows
@@ -1765,16 +1796,25 @@ class _Rewrite(cst.CSTTransformer):
         hold = self._take(call, _NO_LABEL, -4)
         hold.row_columns = True
         key = _index_parts(assign.value)[0]
-        suffix, args = self._codes(hold, [], _parts(key), schema['levels'])
         var = f'_mx_rw_{name.value}'
         if var not in o.declarations:
             o.declarations.append(var)
-        lookup = self._m('row' + suffix, o.ref(hold), *args)
-        native = self._assign(var, lookup)
         fallback = [cst.parse_statement(f'{var} = -1'),
                     original.with_changes(body=[original.body[0].with_changes(
                         value=self._fallback(original.body[0].value, call))])]
         self._record(assign.value, 'L2', call)
+        parts = _parts(key)
+        if (o.per_item and o.cells.has_args() and len(parts) == len(schema['levels'])
+                and all(o.fixed_part(p) for p in parts)):
+            # T-5c: a key fixed per item (``row = T.loc[cost_id()]`` in a per-step cell): the row held per item,
+            # looked up once (as a row cell's), not at every step
+            field = o.row_field(hold, key, None, self._detached(key))
+            native = self._assign(var, cst.parse_expression(f'self.{field} - 1'))
+            return self._branch(self._native_test(hold, [cst.parse_expression(f'self.{field} > 0')]), [native],
+                                fallback)
+        suffix, args = self._codes(hold, [], parts, schema['levels'])
+        lookup = self._m('row' + suffix, o.ref(hold), *args)
+        native = self._assign(var, lookup)
         return self._branch(self._native_test(hold, []), [native], fallback)
 
     def row_local_read(self, original, updated, parts):
@@ -1915,6 +1955,11 @@ class _Rewrite(cst.CSTTransformer):
         parts = _index_parts(original)
         if parts is None:
             return updated
+        if (len(parts) == 1 and isinstance(parts[0], cst.Name) and parts[0].value in ('True', 'False')
+                and isinstance(value, cst.Attribute) and value.attr.value in PANDAS_INDEXERS):
+            # T-5c: a bool literal as the key of a pandas indexer: Cython compiles X[True] as the integer index 1;
+            # the call passes the Python bool, as live does (pandas raises or selects by it)
+            return cst.Call(func=cst.Attribute(updated.value, cst.Name('__getitem__')), args=[cst.Arg(parts[0])])
         row = (self.row_local_read(original, updated, parts) or self.row_cell_field(original, updated, parts)
                or self._row_field(original, updated, parts))
         if row is not None:
