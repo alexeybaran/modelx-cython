@@ -46,6 +46,7 @@ cdef class PreparedTable:
     cdef tuple _arrays                     # the numpy arrays the pointers point into (kept alive, never written)
     cdef tuple objects                     # per object column: tuple of the values pandas returns, by stored row
     cdef readonly object max_label, min_label   # index.max(), index.min() as pandas returns them
+    cdef long long[8] max_parts, min_parts      # T-5c: their int parts as C integers (0 for another kind)
     cdef const double[::1] asof_keys       # sorted labels of a flat numeric index (for asof)
     cdef readonly object asof_labels       # the labels themselves, by position, as pandas returns them
     cdef object _name_arrays               # T-5: column name map: open addressing, `name_mask + 1` entries of
@@ -231,6 +232,16 @@ cdef inline long long min_ll(PreparedRef ref) noexcept:
     if (<PreparedTable>ref).level_kind[0] == LEVEL_DENSE:
         return (<PreparedTable>ref).level_first[0]
     return (<PreparedTable>ref).sorted_labels[(<PreparedTable>ref).level_offset[0]]
+
+
+# T-5c: part ``level`` (an int level) of ``T.index.max()`` / ``.min()`` of a non-empty index of several levels, as a C
+# integer: the label tuple pandas returns is not touched (no reference taken on an object shared by every thread)
+cdef inline long long max_part_ll(PreparedRef ref, int level) noexcept nogil:
+    return (<PreparedTable>ref).max_parts[level]
+
+
+cdef inline long long min_part_ll(PreparedRef ref, int level) noexcept nogil:
+    return (<PreparedTable>ref).min_parts[level]
 
 
 # ---- T-5: index walks: labels by stored row, positions, views of a prefix --------------------------------------

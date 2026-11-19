@@ -390,6 +390,10 @@ cdef PreparedTable _build(object value):
     # index extremes and asof keys, as pandas gives them
     table.max_label = index.max() if n else None
     table.min_label = index.min() if n else None
+    if n and table.nlevels > 1:
+        for level in range(min(table.nlevels, 8)):
+            table.max_parts[level] = _int_part(table.max_label[level])
+            table.min_parts[level] = _int_part(table.min_label[level])
     if table.nlevels == 1 and n and index.dtype.kind in 'iuf':
         sorted_index = index.sort_values()
         table.asof_keys = np.ascontiguousarray(sorted_index.to_numpy(dtype=np.float64))
@@ -399,6 +403,13 @@ cdef PreparedTable _build(object value):
         table.asof_labels = []
     return table
 
+
+
+cdef long long _int_part(object part):
+    """An int part of an extreme label as a C integer (0 for a part of another kind: never read)."""
+    if isinstance(part, (int, np.integer)) and not isinstance(part, (bool, np.bool_)):
+        return int(part)
+    return 0
 
 
 # ---- binding (T-3) ----------------------------------------------------------------------------------

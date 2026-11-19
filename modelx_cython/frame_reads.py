@@ -109,7 +109,26 @@ class FrameReads:
         facts.formula = _Formula(node)
         node.visit(facts.formula)
         facts._params = set(getattr(self.cells, 'params', ()) or ())
+        plain = facts._int_index_read
+
+        def int_index_read(expr):       # T-5c: also on a traced pandas frame (`top = T.index.max()[0]`)
+            return plain(expr) or self._extreme_part_int(expr)
+        facts._int_index_read = int_index_read
         return facts
+
+    def _extreme_part_int(self, expr):
+        """``R.index.max()[k]`` / ``.min()[k]``, R a unique frame of several levels whose level k is int."""
+        if not (isinstance(expr, cst.Subscript) and len(expr.slice) == 1 and isinstance(expr.slice[0].slice, cst.Index)
+                and isinstance(expr.slice[0].slice.value, cst.Integer) and isinstance(expr.value, cst.Call)
+                and not expr.value.args and isinstance(expr.value.func, cst.Attribute)
+                and expr.value.func.attr.value in ('max', 'min') and isinstance(expr.value.func.value, cst.Attribute)
+                and expr.value.func.value.attr.value == 'index'):
+            return False
+        found = self._receiver(expr.value.func.value.value)
+        if found is None or not found[1].get('unique'):
+            return False
+        levels, level = found[1]['levels'], int(expr.slice[0].slice.value.value, 0)
+        return 1 < len(levels) <= 8 and 0 <= level < len(levels) and levels[level] == 'int'
 
     def _once(self, name):
         """``name`` is bound once by an assignment of the formula (not a parameter, a loop target or another binding)."""
@@ -1338,6 +1357,29 @@ class _Rewrite(cst.CSTTransformer):
         return self._guarded(original, updated, _View(None, call, schema),
                              self._native_test(hold, []), native, 'i64')
 
+    def extreme_part(self, original, updated, parts):
+        """T-5c: ``R.index.max()[k]`` / ``.min()[k]`` on a whole frame of several levels, ``k`` an integer literal
+        naming an int level: that part of pandas' extreme as a C integer (signature kind -2: the index is not
+        empty), where the label tuple would be one Python object shared by every thread."""
+        o = self.o
+        call = original.value
+        if not (len(parts) == 1 and isinstance(parts[0], cst.Integer) and isinstance(call, cst.Call) and not call.args
+                and isinstance(call.func, cst.Attribute) and call.func.attr.value in ('max', 'min')):
+            return None
+        view = self._index_of(call.func.value)
+        if view is None or view.start is not None:
+            return None
+        levels = view.schema['levels']
+        level = int(parts[0].value, 0)
+        if not (1 < len(levels) <= 8 and 0 <= level < len(levels) and levels[level] == 'int'):
+            return None
+        hold = self._take(view.call, _NO_LABEL, -2)
+        inner = updated.value
+        pandas = updated.with_changes(value=inner.orelse) if isinstance(inner, cst.IfExp) else updated
+        native = self._m(f'{call.func.attr.value}_part_ll', o.ref(hold), cst.Integer(str(level)))
+        self._record(original, 'L5', view.call, view=view)
+        return self._lowered(self._native_test(hold, []), native, self._fallback(pandas, view.call), 'i64')
+
     def _key_position(self, node):
         """``node`` is the key (or a key part) of a ``.loc[...]`` / ``.at[...]`` read."""
         parents = self.o.facts.formula.parents
@@ -1817,6 +1859,9 @@ class _Rewrite(cst.CSTTransformer):
                or self._row_field(original, updated, parts))
         if row is not None:
             return row
+        part = self.extreme_part(original, updated, parts)
+        if part is not None:
+            return part
         walk = (self.index_item(original, updated) or self.column_keyed(original, updated, parts)
                 or self.column_item(original, updated, parts))
         if walk is not None:

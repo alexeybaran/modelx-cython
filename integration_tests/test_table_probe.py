@@ -196,6 +196,9 @@ STMTS = {
     'walk_builtins': ('grid sgrid', "sub = T.loc[('A', 'B')[t % 2]]\nages = sorted(int(a) for a in sub.index)\n"
                       "return (ages, max(a for a in sub.index if a <= 21 + t), sum(int(a) for a in sub.index),\n"
                       "        any(a > 22 for a in sub.index), min((a for a in sub.index), default=-1))"),
+    # T-5c: an int part of the whole index's extreme as a key part (a C integer: no shared label tuple per step)
+    'extreme_part_key': ('grid sgrid', "top = T.index.max()[1]\nreturn (T.loc[('A', min(20 + t, top)), 'q'], T.index.min()[1] + t,\n"
+                         "        T.index.max()[0], T.index.max()[-1])"),
     'level_extreme_local': ('rates', "ages = T.index.get_level_values('year')\n"
                             "xx = min(max(1999 + t, int(ages.min())), int(ages.max()))\nreturn float(T.loc[('A', 'F', xx), 'q'])"),
     'level_extreme_local_kept': ('rates', "ages = T.index.get_level_values(2)\nreturn (int(ages.max()) - t, len(ages))"),
