@@ -36,8 +36,8 @@ _inputs = {}        # id(model) -> {(id(space), name): (space, name, table)}
 def collect_begin(model):
     with _lock:
         if _clearing.get(id(model)):
-            raise RuntimeError('cannot run a collect while clear_all() of this model is running; '
-                               'run it before or after the clear')
+            raise RuntimeError('cannot run a collect while clear_all() or a table assignment of this model is '
+                               'running; run it before or after')
         _running[id(model)] = _running.get(id(model), 0) + 1
 
 
