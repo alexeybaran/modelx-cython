@@ -238,6 +238,7 @@ if compiled:
     # (9) clear_all() from another thread, again and again, during 200 four-worker collects: each clear raises
     # (a collect is running) or runs wholly between two collects; a collect started while a clear runs raises;
     # every collect that runs returns the intact result (no worker reads a cache while it is cleared)
+    import time
     m = Model()
     m._mx_collect_set_workers_v2(4)
     stop, other, counts = threading.Event(), [], {"raised": 0, "cleared": 0}
@@ -251,11 +252,14 @@ if compiled:
                     counts["raised"] += 1
                 else:
                     other.append(str(error))
+            time.sleep(0.0002)          # leaves room for collects to start between clears
     thread = threading.Thread(target=clearer)
     thread.start()
     results, refused = [], 0
-    try:
-        for _ in range(200):
+    deadline = time.monotonic() + 300
+    try:        # 200 collects that run (a clearer that never pauses can refuse many attempts on a loaded machine)
+        while len(results) < 200:
+            assert time.monotonic() < deadline, (len(results), refused, counts)
             try:
                 results.append(m.Projection.collect().sum.pv)
             except RuntimeError as error:
