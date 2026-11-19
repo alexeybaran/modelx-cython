@@ -86,16 +86,14 @@ def test_extreme_part_is_lexicographic_and_cleared_with_the_space(tmp_path):
     run("build_model.py")
     run("-m", "modelx_cython", "extremes_nomx", "--sample", "sample.py", "--spec", "spec.py")
     generated = (tmp_path / "extremes_nomx_cy/_mx_classes.py").read_text(encoding="utf-8")
-    assert ".last_part_int(1)" in generated and ".first_part_int(1)" in generated, generated[-4000:]
-    assert ".last_part_int(0)" in generated
+    # T-5c (prepared tables): the int parts of the extremes, kept as C integers when the table is prepared
+    assert "max_part_ll(" in generated and "min_part_ll(" in generated, generated[-4000:]
+    assert "self.data._mx_prepared_tbl()" in generated
     # the lowered read takes no reference on a shared object (the regression diag-run8 first found by timing)
     sys.path.insert(0, str(__import__("pathlib").Path(__file__).parent))
     from _diag_run8_c import refcount_operations
-    helper = next(p for p in (tmp_path / "extremes_nomx_cy").glob("_mx_helper_*.c")
-                  if "_h_extreme_part" in p.read_text(encoding="utf-8"))
-    c_text = helper.read_text(encoding="utf-8")
-    for function in ("TableHandle_last_part_int", "TableHandle_first_part_int"):
+    c_text = (tmp_path / "extremes_nomx_cy" / "_mx_classes.c").read_text(encoding="utf-8")
+    for function in ("max_part_ll", "min_part_ll"):
         assert refcount_operations(c_text, function) == [], function
-    assert refcount_operations(c_text, "__h_extreme_part", "found = (self.last_key()") == []
     run("checks.py", "extremes_nomx_cy")
     run("checks.py", "extremes_nomx")

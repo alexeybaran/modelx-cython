@@ -40,7 +40,7 @@ CHECKS = """\
 import sys
 from importlib import import_module
 p = import_module(sys.argv[1]).mx_model.Projection
-# row values compared as numbers; the type of the public row is compared in the xfail test below
+# row values compared as numbers; the type of the public row is compared in the test below
 print(repr([(p[i].sa(), p[i].pv(), sorted((str(k), float(v)) for k, v in p[i].model_point().items())) for i in (1, 2, 3)]))
 print(type(p[1].model_point()).__name__)
 """
@@ -76,8 +76,8 @@ def test_derived_space_keeps_the_record_path(tmp_path, override):
     assert readers and all(v["row_fields_inlined"] == 0 for v in readers), readers
 
 
-@pytest.mark.xfail(strict=True, reason="open, pre-existing (also without F3): in a derived Space the compiled "
-                                       "public row cell returns the helper Record, live returns a pandas Series")
+# T-5c: was an open difference on the helper layer (the compiled public row cell returned the helper Record); on
+# prepared tables the row is live's pandas Series
 def test_derived_space_public_row_is_a_pandas_row(tmp_path):
     test_derived_space_keeps_the_record_path(tmp_path, "none")
     out = subprocess.run([sys.executable, "checks.py", "d_none_cy"], cwd=tmp_path, check=True,

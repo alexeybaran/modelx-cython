@@ -84,14 +84,13 @@ def built(tmp_path_factory):
 def test_subscript_of_a_scalar_index_read_keeps_the_python_path(built):
     outs, generated = built
     assert outs["scalar_nomx_cy"][0] == outs["scalar_nomx"][0], outs     # the plain extreme, a C integer read
-    # both raise at run time (asserted in checks.py); the type differs, recorded as open: compiled code reads
-    # the internal table, whose index.max() is a Python int (TypeError), live pandas gives a numpy int (IndexError)
-    assert outs["scalar_nomx_cy"][1] == "'TypeError'" and outs["scalar_nomx"][1] == "'IndexError'", outs
-    assert ".last_int()" in generated and ".index.max()[0]" in generated, generated[-3000:]
+    # both raise at run time (asserted in checks.py); T-5c: the subscript of the C read takes pandas' value, so
+    # the error is live's (IndexError); it was TypeError on the helper layer (an open difference)
+    assert outs["scalar_nomx_cy"][1] == outs["scalar_nomx"][1] == "'IndexError'", outs
+    assert "max_ll(" in generated and ".index.max())[0]" in generated, generated[-3000:]
 
 
-@pytest.mark.xfail(strict=True, reason="open: the scalar index subscript raises TypeError compiled, IndexError "
-                                       "live (internal table vs pandas scalar; diag-run8 RESULT-FIX.md)")
+# T-5c: was an open difference on the helper layer (TypeError compiled, IndexError live); now equal
 def test_scalar_index_subscript_error_type_equals_live(built):
     outs, _ = built
     assert outs["scalar_nomx_cy"][1] == outs["scalar_nomx"][1], outs

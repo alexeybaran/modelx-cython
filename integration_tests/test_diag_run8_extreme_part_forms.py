@@ -97,6 +97,6 @@ def test_extreme_part_forms_equal_live(tmp_path):
     run("build_model.py")
     run("-m", "modelx_cython", "forms_nomx", "--sample", "sample.py", "--spec", "spec.py")
     generated = (tmp_path / "forms_nomx_cy/_mx_classes.py").read_text(encoding="utf-8")
-    assert generated.count("part_int(") >= 4, generated.count("part_int(")
+    assert generated.count("_part_ll(") >= 4, generated.count("_part_ll(")      # T-5c: prepared-table parts
     outs = {pkg: run("checks.py", pkg).stdout for pkg in ("forms_nomx_cy", "forms_nomx")}
     assert outs["forms_nomx_cy"] == outs["forms_nomx"], outs

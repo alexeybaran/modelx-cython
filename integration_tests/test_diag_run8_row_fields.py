@@ -138,7 +138,7 @@ def test_row_fields_read_without_the_row(tmp_path):
     # a str key is held per item too (diag-run8 F3 held row): read once per item, then by position
     assert cells["cost_row"]["row_cell_inlined"] is True, cells["cost_row"]
     assert cells["fee"]["row_fields_inlined"] == 1, cells["fee"]
-    assert "held_row_obj_1(" in generated and "held_row_1(" in generated
+    assert "hold_row(" in generated         # T-5c: the row held per item on the prepared table
     assert "'edited, cleared', 999.0" in outs[f"{name}_nomx"], outs
 
 
@@ -147,4 +147,4 @@ def test_an_escaping_row_keeps_the_record_path(tmp_path):
     assert outs[f"{name}_nomx_cy"] == outs[f"{name}_nomx"], outs
     assert cells["model_point"]["row_cell_inlined"] is False and cells["model_point"]["row_cell_kept"], cells
     assert all(cells[c]["row_fields_inlined"] == 0 for c in ("sa", "age", "sex", "both")), cells
-    assert "record_handle(" in generated
+    assert "return self.data._mx_cell_points().loc[self.policy_id]" in generated   # T-5c: the escaping row is pandas'

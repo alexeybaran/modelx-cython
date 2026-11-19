@@ -1999,6 +1999,14 @@ class _Rewrite(cst.CSTTransformer):
     def leave_Subscript(self, original, updated):
         o = self.o
         value = original.value
+        if self.native.get(id(updated.value)) in CTYPE and isinstance(updated.value, cst.IfExp):
+            # T-5c: a subscript of a read lowered to a C scalar (``T.index.max()[0]`` on one level): the pandas
+            # value, which pandas subscripts (or raises on) as live does
+            pandas = updated.value.orelse
+            if (isinstance(pandas, cst.Call) and _code(pandas.func) == '_mx_cy.cast' and len(pandas.args) == 2
+                    and _code(pandas.args[0].value) in CTYPE.values()):
+                pandas = pandas.args[1].value       # the read's own value, not cast to the C type
+            return updated.with_changes(value=pandas.with_changes(lpar=[cst.LeftParen()], rpar=[cst.RightParen()]))
         parts = _index_parts(original)
         if parts is None:
             return updated
