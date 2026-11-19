@@ -220,42 +220,46 @@ if compiled:
         runtime.collect_end = real_end
     assert len(seen) == 2 and all("collect" in text for text in seen), seen
 
-    # (9) clear_all() from another thread, again and again, during 200 four-worker collects: each clear raises
-    # (a collect is running) or runs wholly between two collects; a collect started while a clear runs raises;
-    # every collect that runs returns the intact result (no worker reads a cache while it is cleared)
-    import time
+    # (9) the collect guard, forced in both directions (no sleeps, no counts that depend on scheduling; the same on
+    # GIL and free-threaded builds). Clears and assignments racing four-worker collects are the stress test's.
+    # (a) a clear_all() started while a collect is inside its run raises: it runs from collect_end, which a collect
+    #     calls while it is still counted as running (as (8) for the assignment);
+    # (b) a collect started while a clear_all() is inside its marked step is refused: it runs from rebuild_tables,
+    #     which the clear calls before it lifts its mark;
+    # (c) with neither, the clear succeeds and the next collect returns the intact result.
     m = Model()
     m._mx_collect_set_workers_v2(4)
-    stop, other, counts = threading.Event(), [], {"raised": 0, "cleared": 0}
-    def clearer():
-        while not stop.is_set():
+    real_end, real_rebuild, outcomes = runtime.collect_end, runtime.rebuild_tables, {}
+    def other(key, attempt):
+        def run():
             try:
-                m.Projection.clear_all()
-                counts["cleared"] += 1
+                attempt()
+                outcomes[key] = "ran"
             except RuntimeError as error:
-                if "while a collect of this model is running" in str(error):
-                    counts["raised"] += 1
-                else:
-                    other.append(str(error))
-            time.sleep(0.0002)          # leaves room for collects to start between clears
-    thread = threading.Thread(target=clearer)
-    thread.start()
-    results, refused = [], 0
-    deadline = time.monotonic() + 300
-    try:        # 200 collects that run (a clearer that never pauses can refuse many attempts on a loaded machine)
-        while len(results) < 200:
-            assert time.monotonic() < deadline, (len(results), refused, counts)
-            try:
-                results.append(m.Projection.collect().sum.pv)
-            except RuntimeError as error:
-                assert "while clear_all() or a table assignment of this model is running" in str(error), error
-                refused += 1
+                outcomes[key] = str(error)
+        thread = threading.Thread(target=run)
+        thread.start(); thread.join()
+    def end_with_clear(model):
+        other("clear during collect", lambda: model.Projection.clear_all())
+        real_end(model)
+    def rebuild_with_collect(model, spaces):
+        other("collect during clear", lambda: model.Projection.collect())
+        real_rebuild(model, spaces)
+    runtime.collect_end = end_with_clear
+    try:
+        assert close(m.Projection.collect().sum.pv, base)
     finally:
-        stop.set()
-        thread.join()
-    assert results and all(close(value, base) for value in results), results[:3]
-    assert not other, other[:3]
-    assert counts["cleared"] and counts["raised"] + refused, (counts, refused)
+        runtime.collect_end = real_end
+    runtime.rebuild_tables = rebuild_with_collect
+    try:
+        m.Projection.clear_all()
+    finally:
+        runtime.rebuild_tables = real_rebuild
+    assert "while a collect of this model is running" in outcomes["clear during collect"], outcomes
+    assert "while clear_all() or a table assignment of this model is running" in outcomes["collect during clear"], \
+        outcomes
+    m.Projection.clear_all()
+    assert close(m.Projection.collect().sum.pv, base)
 print("ok", name)
 """
 
