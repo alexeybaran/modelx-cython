@@ -90,7 +90,7 @@ def test_held_table_local_and_builtin_reduction_take_no_shared_reference(tmp_pat
         p = m.Portfolio.Projection
         if sys.argv[1] == 'exported_cy':
             serial = type(m)()
-            serial._mx_collect_set_workers_v2(1)
+            serial.collect_workers = 1
             one = serial.Portfolio.Projection.collect().sum.value
             four = p.collect().sum.value
             again = p.collect().sum.value
@@ -181,7 +181,7 @@ def value():
         p = m.Portfolio.Projection
         if sys.argv[1] == 'exported_cy':
             serial = type(m)()
-            serial._mx_collect_set_workers_v2(1)
+            serial.collect_workers = 1
             one = serial.Portfolio.Projection.collect().sum.value
             print(repr(one), repr(p.collect().sum.value))
         else:

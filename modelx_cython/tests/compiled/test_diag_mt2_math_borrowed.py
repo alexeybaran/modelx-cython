@@ -74,7 +74,7 @@ def test_math_reference_is_borrowed_and_results_stay(tmp_path):
         p = m.Portfolio.Projection
         if sys.argv[1] == 'exported_cy':
             serial = type(m)()
-            serial._mx_collect_set_workers_v2(1)
+            serial.collect_workers = 1
             one = serial.Portfolio.Projection.collect().sum.value
             four = p.collect().sum.value
             again = p.collect().sum.value

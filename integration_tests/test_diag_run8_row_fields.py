@@ -68,10 +68,8 @@ for call in ("sa", "pv"):
     except Exception as e:
         out.append(("raise", call, type(e).__name__, str(e)))
 m = package.mx_model
-setter = getattr(m, "_mx_collect_set_workers_v2", None)
 for workers in (1, 4):                   # the held row is reset between policies, on both routes
-    if setter is not None:
-        setter(workers)
+    m.collect_workers = workers
     out.append(("collect", workers, round(float(m.Projection.collect().sum.pv), 9)))
 # an in-place edit (D130): nothing changes until clear_all, then every reader reads the edited row
 m.Data.points().loc[1, "sa"] = 999.0
@@ -89,9 +87,7 @@ for call in ("sa", "pv"):
     except Exception as e:
         out.append(("raise", "direct", call, type(e).__name__, str(e)))
 for workers in (1, 4):
-    setter = getattr(m, "_mx_collect_set_workers_v2", None)
-    if setter is not None:
-        setter(workers)
+    m.collect_workers = workers
     try:
         m.Projection.collect()
         out.append(("value", "collect", workers))

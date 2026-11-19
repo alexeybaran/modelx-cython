@@ -69,7 +69,7 @@ PROBE = textwrap.dedent('''\
 
     def fresh():
         m = type(compiled)()
-        m._mx_collect_set_workers_v2(workers)
+        m.collect_workers = workers
         m.Data.events.clear()
         return m
 

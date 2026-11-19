@@ -221,7 +221,7 @@ assert expected[1, "c_missing_key"] == "KeyError", expected[1, "c_missing_key"]
 failures = []
 for workers in (1, 4):
     m = Model()
-    m._mx_collect_set_workers_v2(workers)
+    m.collect_workers = workers
     total = m.Projection.collect().sum.total
     if abs(total - live_total) > 1e-7 + 1e-10 * abs(live_total):
         failures.append(("collect", workers, total, live_total))

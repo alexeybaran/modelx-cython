@@ -109,7 +109,7 @@ def test_held_record_reads_equal_live_at_one_and_four_workers(tmp_path):
         p = m.Portfolio.Projection
         if sys.argv[1] == 'exported_cy':
             serial = type(m)()
-            serial._mx_collect_set_workers_v2(1)
+            serial.collect_workers = 1
             one = serial.Portfolio.Projection.collect().sum.value
             four = p.collect().sum.value
             print(repr(one), repr(four))

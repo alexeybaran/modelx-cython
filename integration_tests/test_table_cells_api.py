@@ -55,7 +55,7 @@ Model = type(package.mx_model)
 
 
 def total(m, workers):
-    m._mx_collect_set_workers_v2(workers)
+    m.collect_workers = workers
     return m.Projection.collect().sum.pv
 
 
@@ -183,7 +183,7 @@ if compiled:
 
     # (8) assignment and clear are refused while a collect runs
     m = Model()
-    m._mx_collect_set_workers_v2(4)
+    m.collect_workers = 4
     real_end, seen = runtime.collect_end, []
     def probing_end(model):
         def other():
