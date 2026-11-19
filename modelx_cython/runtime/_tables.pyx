@@ -25,6 +25,12 @@ cdef long long _COMBINED_LIMIT = 1LL << 62
 cdef int _MAX_LEVELS = 8
 
 
+cdef extern from "Python.h":
+    Py_hash_t _object_hash "PyObject_Hash"(PyObject* o) except -1
+    int _object_equal "PyObject_RichCompareBool"(PyObject* a, PyObject* b, int op) except -1
+    int _Py_EQ "Py_EQ"
+
+
 cdef inline bint _plain_int(object label):
     # an int label (including IntEnum members and numpy integers), not a bool
     return isinstance(label, (int, np.integer)) and not isinstance(label, (bool, np.bool_))
@@ -41,11 +47,41 @@ cdef class PreparedTable:
     def __reduce__(self):
         return (prepare, (self.source,))
 
+    cdef Py_ssize_t row_search(self, long long combined) noexcept nogil:
+        """The stored row of a combined code by binary search (a table without a grid), or -1. Out of line, so the
+        inline reads stay small."""
+        cdef Py_ssize_t lo = 0, hi = self.nrows, mid
+        while lo < hi:
+            mid = (lo + hi) >> 1
+            if self.combined[mid] < combined:
+                lo = mid + 1
+            else:
+                hi = mid
+        if lo < self.nrows and self.combined[lo] == combined:
+            return lo
+        return -1
+
+    cdef Py_ssize_t name_position(self, object label) except -2:
+        """T-5: the position of column ``label`` (a name chosen at run time), or -1: the hash and equality of a dict
+        lookup, through borrowed pointers only (no reference, no lock per read)."""
+        cdef Py_hash_t h = _object_hash(<PyObject*>label)
+        cdef Py_ssize_t i = <Py_ssize_t>(<size_t>h & <size_t>self.name_mask), position
+        while True:
+            position = self.name_pos[i]
+            if position < 0:
+                return -1
+            if <PyObject*>self.name_obj[i] == <PyObject*>label or (
+                    self.name_hash[i] == h and _object_equal(<PyObject*>self.name_obj[i], <PyObject*>label, _Py_EQ)):
+                return position
+            i = (i + 1) & self.name_mask
+
     cdef Py_ssize_t code_obj(self, int level, object key) except -2:
         """The code of any key part at ``level``, or -1 when absent."""
         cdef object code
         codes = self.level_codes[level]
         if codes is None:
+            if type(key) is int:            # the common case first (no numpy type lookups)
+                return self.code_ll(level, <long long>key)
             if isinstance(key, (float, np.floating)) and float(key).is_integer():
                 key = int(key)          # pandas finds an integral float key on an int index
             if not _plain_int(key):
@@ -214,14 +250,15 @@ def _level(values):
     return LEVEL_OBJECT, ordered, 0, codes
 
 
-cdef void _point(PreparedTable table, sorted_array, combined, grid, f64, i64):
+cdef void _point(PreparedTable table, sorted_array, combined, grid, f64, i64, pos_row):
     """Point the table's raw pointers into its arrays and keep the arrays alive with it."""
     cdef const long long[::1] s = sorted_array
     cdef const long long[::1] c = combined
     cdef const Py_ssize_t[::1] g = grid
     cdef const double[:, ::1] f = f64
     cdef const long long[:, ::1] i = i64
-    table._arrays = (sorted_array, combined, grid, f64, i64)
+    cdef const Py_ssize_t[::1] p = pos_row
+    table._arrays = (sorted_array, combined, grid, f64, i64, pos_row)
     for array in table._arrays:
         array.flags.writeable = False
     table.sorted_labels = &s[0]
@@ -229,6 +266,29 @@ cdef void _point(PreparedTable table, sorted_array, combined, grid, f64, i64):
     table.grid = &g[0]
     table.f64 = &f[0, 0]
     table.i64 = &i[0, 0]
+    table.pos_row = &p[0]
+
+
+cdef void _name_map(PreparedTable table):
+    """T-5: the column name map of ``name_position`` (open addressing, at least twice as many entries as columns)."""
+    cdef Py_ssize_t size = 8, i
+    while size < 2 * len(table.column_positions):
+        size *= 2
+    objs = np.zeros(size, dtype=np.intp)
+    hashes = np.zeros(size, dtype=np.int64)
+    positions = np.full(size, -1, dtype=np.intp)
+    for label, position in table.column_positions.items():     # the dict's own key objects (kept alive by it)
+        h = hash(label)
+        i = h & (size - 1)
+        while positions[i] >= 0:
+            i = (i + 1) & (size - 1)
+        objs[i], hashes[i], positions[i] = id(label), h, position
+    cdef const Py_ssize_t[::1] o = objs
+    cdef const long long[::1] hh = hashes
+    cdef const Py_ssize_t[::1] p = positions
+    table._name_arrays = (objs, hashes, positions)
+    table.name_obj, table.name_hash, table.name_pos = &o[0], <const Py_hash_t*>&hh[0], &p[0]
+    table.name_mask = size - 1
 
 
 cdef PreparedTable _build(object value):
@@ -281,6 +341,18 @@ cdef PreparedTable _build(object value):
         level_codes = np.fromiter((table.code_obj(i, label) for label in labels), dtype=np.int64, count=n)
         codes += level_codes * table.radix[i]
     order = np.argsort(codes, kind='stable')
+    pos_row = np.zeros(max(1, n), dtype=np.intp)       # T-5: pandas position -> stored row
+    pos_row[order] = np.arange(n, dtype=np.intp)
+    table.ordered = bool((order == np.arange(n)).all())
+    # T-5: per prefix depth d, whether the stored rows of every prefix of d levels are in pandas order (a walk of a
+    # view of that depth is then in pandas order); depth 0 is the whole table
+    within = [table.ordered]
+    for d in range(1, table.nlevels):
+        prefix = codes[order] // table.radix[d - 1] if n else codes
+        same = prefix[1:] == prefix[:-1]
+        within.append(bool(n < 2 or (order[1:][same] > order[:-1][same]).all()))
+    table.ordered_within = tuple(within)
+    table.level_names = tuple(index.names)
     combined = np.ascontiguousarray(codes[order] if n else np.zeros(1, dtype=np.int64), dtype=np.int64)
     if product <= _GRID_LIMIT:
         grid = np.full(max(1, product), -1, dtype=np.intp)
@@ -306,13 +378,14 @@ cdef PreparedTable _build(object value):
             slots.append(len(objects))
             objects.append(tuple(column.iat[int(row)] for row in order))
     table.column_positions = {label: position for position, label in enumerate(labels)}
+    _name_map(table)
     table.column_kind = np.asarray(kinds, dtype=np.intc) if kinds else np.zeros(1, dtype=np.intc)
     table.column_slot = np.asarray(slots, dtype=np.intp) if slots else np.zeros(1, dtype=np.intp)
     f64 = np.ascontiguousarray(np.column_stack(f64_cols) if f64_cols else np.zeros((max(1, n), 1)), dtype=np.float64)
     i64 = np.ascontiguousarray(np.column_stack(i64_cols) if i64_cols else np.zeros((max(1, n), 1), dtype=np.int64),
                                dtype=np.int64)
     table.f64_width, table.i64_width = f64.shape[1], i64.shape[1]
-    _point(table, sorted_array, combined, grid, f64, i64)
+    _point(table, sorted_array, combined, grid, f64, i64, pos_row)
     table.objects = tuple(objects)
     # index extremes and asof keys, as pandas gives them
     table.max_label = index.max() if n else None
@@ -371,10 +444,6 @@ cdef object prepared(object frame):
     return table
 
 
-cdef int missing(object key) except -1:
-    raise KeyError(key)
-
-
 cdef PreparedTable _NOT_PREPARED = PreparedTable.__new__(PreparedTable)     # every slot -1: reads stay pandas
 
 
@@ -411,7 +480,9 @@ cdef void _decide(PreparedTable table):
     - ``columns``: for a row read by field, every (label, kind) of the traced frame (the row's dtype depends on all
       of them); else None;
     - ``label``, ``kind``: the column read and its block kind (-1: index membership; -2: extremes of a non-empty
-      index).
+      index; -3: a walk of the index in pandas order: the table ordered within every prefix of ``label`` levels
+      (0 or None: the whole table); -4: a row read by field, ``columns`` given;
+      -5: ``T.loc[a, b]`` read as a row prefix, no label of level ``label`` (b's) being a column label).
     The slot is one plus the column's slot in its block (1 for a read of the index), or -1."""
     cdef int level
     cdef Py_ssize_t position
@@ -434,8 +505,15 @@ cdef void _decide(PreparedTable table):
                         break
         value = -1
         if result:
-            if kind < 0:
-                value = 1 if (kind == -1 or table.nrows > 0) else -1
+            if kind == -6:      # T-5: level label[1] is named label[0] and is an int level (get_level_values)
+                value = 1 if (label[1] < table.nlevels and (label[0] is None or table.level_names[label[1]] == label[0])
+                              and table.level_kind[label[1]] != LEVEL_OBJECT and table.nrows > 0) else -1
+            elif kind == -5:      # T-5: `T.loc[a, b]` is a row prefix: no label of level `label` is a column label
+                value = 1 if not any(name in table.column_positions for name in table.level_labels[label]) else -1
+            elif kind < 0:      # -1 the index; -2 its extremes (not empty); -3 a walk in pandas order (ordered)
+                ordered = table.ordered_within[label] if kind == -3 and label is not None and label < table.nlevels \
+                    else table.ordered
+                value = 1 if (kind in (-1, -4) or (kind == -2 and table.nrows > 0) or (kind == -3 and ordered)) else -1
             else:
                 position = table.column_positions.get(label, -1)
                 if position >= 0 and table.column_kind[position] == kind:
@@ -541,8 +619,8 @@ cdef int missing_codes(PreparedRef ref, const Py_ssize_t* codes, int count) exce
     """KeyError for a key given as codes: the labels of the parts found, None for a part absent from its level
     (the type is pandas'; the key shown lists the parts found)."""
     cdef PreparedTable table = <PreparedTable>ref
-    parts = tuple(table.level_labels[i][codes[i]] if 0 <= codes[i] < table.level_size[i] else None
-                  for i in range(count))
+    parts = tuple(table.level_labels[i][codes[i]] if i < table.nlevels and 0 <= codes[i] < table.level_size[i]
+                  else None for i in range(count))
     raise KeyError(parts if count > 1 else parts[0])
 
 
@@ -550,9 +628,126 @@ cdef object object_field(PreparedRef ref, Py_ssize_t slot, Py_ssize_t row):
     return (<PreparedTable>ref).object_at(row - 1, slot - 1)
 
 
-cdef int missing2(object a, object b) except -1:
-    raise KeyError((a, b))
+# ---- T-5: index walks ------------------------------------------------------------------------------------
+cdef object label_obj(PreparedRef ref, Py_ssize_t row, int level):
+    """The label of any level at a stored row, the object pandas holds."""
+    return (<PreparedTable>ref).level_labels[level][level_code_at(ref, row, level)]
 
 
-cdef int missing3(object a, object b, object c) except -1:
-    raise KeyError((a, b, c))
+cdef long long view_range(PreparedRef ref, int count, Py_ssize_t c0, Py_ssize_t c1, Py_ssize_t c2, Py_ssize_t c3,
+                          Py_ssize_t c4) noexcept:
+    """T-5: the stored rows [start, stop) of a prefix given as level codes, packed as ``start << 32 | stop``, or -1
+    when the prefix has no row (one search for both ends)."""
+    cdef Py_ssize_t[5] codes
+    cdef Py_ssize_t start, stop
+    codes[0] = c0; codes[1] = c1; codes[2] = c2; codes[3] = c3; codes[4] = c4
+    if not (<PreparedTable>ref).prefix_range(codes, count, &start, &stop):
+        return -1
+    return (<long long>start << 32) | <long long>stop
+
+
+cdef Py_ssize_t view_start(PreparedRef ref, int count, Py_ssize_t c0, Py_ssize_t c1, Py_ssize_t c2, Py_ssize_t c3,
+                           Py_ssize_t c4) noexcept:
+    """The first stored row of the prefix given as ``count`` level codes, or -1 when it has no row."""
+    cdef Py_ssize_t[5] codes
+    cdef Py_ssize_t start, stop
+    codes[0] = c0; codes[1] = c1; codes[2] = c2; codes[3] = c3; codes[4] = c4
+    if not (<PreparedTable>ref).prefix_range(codes, count, &start, &stop):
+        return -1
+    return start
+
+
+cdef Py_ssize_t view_stop(PreparedRef ref, int count, Py_ssize_t c0, Py_ssize_t c1, Py_ssize_t c2, Py_ssize_t c3,
+                          Py_ssize_t c4) noexcept:
+    cdef Py_ssize_t[5] codes
+    cdef Py_ssize_t start, stop
+    codes[0] = c0; codes[1] = c1; codes[2] = c2; codes[3] = c3; codes[4] = c4
+    if not (<PreparedTable>ref).prefix_range(codes, count, &start, &stop):
+        return -1
+    return stop
+
+
+cdef Py_ssize_t position(Py_ssize_t start, Py_ssize_t stop, Py_ssize_t i) except -2:
+    """``index[i]`` of a view: the stored row (``i`` counted from the end when negative); IndexError as pandas."""
+    cdef Py_ssize_t n = stop - start
+    if i < 0:
+        i += n
+    if i < 0 or i >= n:
+        raise IndexError(f'index {i if i >= 0 else i - n} is out of bounds for axis 0 with size {n}')
+    return start + i
+
+
+cdef Py_ssize_t search(PreparedRef ref, Py_ssize_t start, Py_ssize_t stop, int level, double x, bint right) noexcept:
+    """``index.searchsorted(x, side)`` of an ordered view on an int level: the position (from ``start``) of the first
+    label > x (right) or >= x (left)."""
+    cdef Py_ssize_t lo = start, hi = stop, mid
+    cdef double label
+    while lo < hi:
+        mid = (lo + hi) >> 1
+        label = <double>label_ll(ref, mid, level)
+        if label < x or (right and label == x):
+            lo = mid + 1
+        else:
+            hi = mid
+    return lo - start
+
+
+cdef Py_ssize_t asof_at(PreparedRef ref, Py_ssize_t start, Py_ssize_t stop, int level, double x, int error) except -2:
+    """``index.asof(x)`` of an ordered view on an int level as the stored row of the label; when there is none (x
+    below the first label, or NaN) the error pandas then raises: ValueError for ``int(...)`` of it (``error`` 0),
+    KeyError for a key read with it (1)."""
+    cdef Py_ssize_t row
+    if x == x:
+        row = start + search(ref, start, stop, level, x, True) - 1
+        if row >= start:
+            return row
+    if error == 0:
+        raise ValueError('cannot convert float NaN to integer')
+    raise KeyError(float('nan'))
+
+
+cdef object max_obj(PreparedRef ref):
+    return (<PreparedTable>ref).max_label
+
+
+cdef object min_obj(PreparedRef ref):
+    return (<PreparedTable>ref).min_label
+
+
+cdef double field_f64(PreparedRef ref, Py_ssize_t row, object label) except? -1.0:
+    """``float(row[label])`` of a stored row held per item (``row`` is one plus the row), the field chosen at run
+    time; KeyError as pandas for a label that is not a column."""
+    cdef Py_ssize_t position = (<PreparedTable>ref).name_position(label)
+    if position < 0:
+        raise KeyError(label)
+    cdef int kind = (<PreparedTable>ref).column_kind[position]
+    cdef Py_ssize_t slot = (<PreparedTable>ref).column_slot[position]
+    if kind == COLUMN_F64:
+        return (<PreparedTable>ref).f64_at(row - 1, slot)
+    if kind == COLUMN_I64:
+        return <double>(<PreparedTable>ref).i64_at(row - 1, slot)
+    return float((<PreparedTable>ref).object_at(row - 1, slot))
+
+
+cdef Py_ssize_t named_slot(PreparedRef ref, object label) except -2:
+    """One plus the slot of the column named at run time on a table whose columns are all of one kind (its read
+    signature checks them); KeyError as pandas for a label that is not a column."""
+    cdef Py_ssize_t position = (<PreparedTable>ref).name_position(label)
+    if position < 0:
+        raise KeyError(label)
+    return (<PreparedTable>ref).column_slot[position] + 1
+
+
+cdef long long level_max_ll(PreparedRef ref, int level) noexcept:
+    """``T.index.get_level_values(level).max()`` of an int level (non-empty): its largest label (borrowed pointer
+    only)."""
+    if (<PreparedTable>ref).level_kind[level] == LEVEL_DENSE:
+        return (<PreparedTable>ref).level_first[level] + (<PreparedTable>ref).level_size[level] - 1
+    return (<PreparedTable>ref).sorted_labels[(<PreparedTable>ref).level_offset[level]
+                                              + (<PreparedTable>ref).level_size[level] - 1]
+
+
+cdef long long level_min_ll(PreparedRef ref, int level) noexcept:
+    if (<PreparedTable>ref).level_kind[level] == LEVEL_DENSE:
+        return (<PreparedTable>ref).level_first[level]
+    return (<PreparedTable>ref).sorted_labels[(<PreparedTable>ref).level_offset[level]]
