@@ -162,6 +162,11 @@ STMTS = {
     'index_alias': ('grid sgrid', "sub = T.loc[('A', 'B')[t % 2]]\nyears = sub.index\n"
                     "y = min(max(20 + t, int(years.min())), int(years.max()))\n"
                     "return (sub.at[y, 'q'], len(years), [k for k in years if k > 20])"),
+    # T-5c: one loop name over a multi-level index: the tuple of the labels
+    'walk_tuple': ('grid sgrid', "return min(k for k in T.index if T.loc[k, 'q'] > 0.01 * t)"),
+    'walk_tuple_loop': ('grid sgrid', "total = 0.0\nfor k in T.index:\n    if k[1] <= 21 + t:\n"
+                        "        total += T.loc[k, 'q'] * k[1]\nreturn total"),
+    'walk_tuple_view': ('tri', "sub = T.loc[('A', 'B')[t % 2]]\nreturn [k for k in sub.index if sub.loc[k, 'q'] > 0.1 * t]"),
     'iterrows_find': ('mixed', "for k, row in T.iterrows():\n    if int(row['n']) >= 1 + t:\n        return (k, str(row['tag']))\nreturn None"),
     'obj_col': ('mixed', "return (T.loc[20 + t, 'tag'], T.at[20 + t, 'tag'] == 'x')"),
     'obj_col_missing': ('mixed', "return T.loc[98 + t, 'tag']"),

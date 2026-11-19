@@ -1251,6 +1251,8 @@ class _Rewrite(cst.CSTTransformer):
         remaining = len(view.schema['levels']) - view.depth
         if isinstance(target, cst.Name) and remaining == 1:
             return {target.value: view.depth}
+        if isinstance(target, cst.Name) and 1 < remaining <= MAX_PARTS:      # T-5c: the tuple of the labels
+            return {target.value: tuple(range(view.depth, view.depth + remaining))}
         if (isinstance(target, cst.Tuple) and len(target.elements) == remaining
                 and all(isinstance(e, cst.Element) and isinstance(e.value, cst.Name) for e in target.elements)):
             names = [e.value.value for e in target.elements]
@@ -1286,7 +1288,8 @@ class _Rewrite(cst.CSTTransformer):
             if names is None:
                 return None
             hold = self._walk_hold(view)
-            make = lambda row: {n: self._label(view, hold, row, lv) for n, lv in names.items()}
+            make = lambda row: {n: cst.Tuple([cst.Element(self._label(view, hold, row, level)) for level in lv])
+                                if isinstance(lv, tuple) else self._label(view, hold, row, lv) for n, lv in names.items()}
             extra = []
         else:
             items = (isinstance(it, cst.Call) and not it.args and isinstance(it.func, cst.Attribute)
