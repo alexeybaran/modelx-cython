@@ -14,7 +14,6 @@ import textwrap
 
 import modelx as mx
 from modelx_helpers.immutable_inputs import Table
-from modelx_helpers.typed_inputs import EnumDefinitions
 
 
 def _model(tmp_path):
@@ -31,7 +30,6 @@ def _model(tmp_path):
         projection = portfolio.new_space(
             'Projection', formula='lambda key: None', refs={'market': data, 'keys': keys, 'P': HTTPStatus},
             collect_over={'key': keys}, collect_outputs='lambda: {"sum": {"value": value()}}')
-        projection.enum_definitions = EnumDefinitions(('P',))
         projection.new_cells('rate', textwrap.dedent('''\
             def rate(t):
                 mix = market.basis().at[P.OK, "value"]

@@ -892,7 +892,6 @@ class CombinedRefInfo:
     is_relative: bool = False
     helper = None
     enum = None
-    enum_definitions = ()
     enum_safe = False
 
     def __init__(self, module,
@@ -913,7 +912,6 @@ class CombinedRefInfo:
         if rt_info:
             self.helper = getattr(rt_info, 'helper', None)
             self.enum = getattr(rt_info, 'enum', None)
-            self.enum_definitions = getattr(rt_info, 'enum_definitions', ())
             self.enum_safe = getattr(rt_info, 'enum_safe', False)
 
             if rt_info.mx_class:

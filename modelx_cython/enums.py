@@ -1,4 +1,4 @@
-"""Map explicitly authored enum definitions to private Cython constants."""
+"""Map enum definitions (References whose traced value is an IntEnum class) to private Cython constants."""
 import libcst as cst
 from libcst.metadata import ExpressionContext
 
@@ -15,18 +15,18 @@ def prepare(module):
     module.code_enum_symbols = {}
     identifiers = Names(module.visitor.wrapper.module)
     for cls in module.classes.values():
-        markers = {name: ref.enum_definitions for name,ref in cls.refs.items()
-                   if getattr(ref, 'enum_definitions', ())}
-        names = tuple(dict.fromkeys(n for declaration in markers.values() for n in declaration))
-        cls.readonly_refs = tuple(dict.fromkeys((*names, *markers)))
+        # An enum definition is a Reference whose traced value is an enum-safe IntEnum class
+        # (selected by type, no declaration). It is fixed in the compiled model: read-only, and its
+        # members are C constants. A Reference still holding the former declaration marker
+        # (modelx_helpers' EnumDefinitions) is an ordinary Reference and is ignored here.
+        names = tuple(name for name, ref in cls.refs.items()
+                      if name not in getattr(cls, 'spaces', ())
+                      and getattr(ref, 'enum', None) and getattr(ref, 'enum_safe', False))
+        cls.readonly_refs = names
         for name in names:
-            ref = cls.refs.get(name)
-            if ref is None or not getattr(ref, 'enum', None):
-                raise ValueError(f'{cls.fqname}.{name}: enum definition must bind an IntEnum class')
+            ref = cls.refs[name]
             if storage(name) in cls.refs:
                 raise ValueError(f'{cls.fqname}: reserved enum storage name {storage(name)}')
-            if not ref.enum_safe:
-                continue
             for member, value in ref.enum[2].items():
                 if -(1 << 31) <= value < (1 << 31):
                     symbol = identifiers.reserve(f'_mx_enum_const_{len(module.code_enum_symbols)}')

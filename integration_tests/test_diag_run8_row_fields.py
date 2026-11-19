@@ -14,7 +14,6 @@ MODEL = """\
 import enum
 import modelx as mx
 import pandas as pd
-from modelx_helpers.typed_inputs import EnumDefinitions
 
 
 class Sex(enum.IntEnum):
@@ -36,7 +35,6 @@ def build(escape=False):
     proj = model.new_space("Projection", formula="lambda policy_id: None",
                            refs={"data": data, "ids": IDS, "Sex": Sex},
                            collect_over={"policy_id": IDS}, collect_outputs='lambda: {"sum": {"pv": pv()}}')
-    proj.enum_definitions = EnumDefinitions(("Sex",))
     proj.new_cells("model_point", "lambda: data.points().loc[policy_id]")
     proj.new_cells("sa", 'lambda: float(model_point()["sa"])')
     proj.new_cells("age", 'lambda: int(model_point()["age"])')

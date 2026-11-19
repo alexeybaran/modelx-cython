@@ -16,7 +16,6 @@ import modelx as mx
 
 
 def _model(tmp_path, monkeypatch):
-    from modelx_helpers.typed_inputs import EnumDefinitions
     (tmp_path / 'd98_kinds.py').write_text(
         'import enum\n\nclass Kind(enum.IntEnum):\n    A = 1\n    B = 2\n    C = 3\n', encoding='utf-8')
     monkeypatch.syspath_prepend(str(tmp_path))
@@ -24,7 +23,6 @@ def _model(tmp_path, monkeypatch):
     model = mx.new_model('EnumIdentity')
     try:
         s = model.new_space('Projection', formula='lambda policy: None', refs={'Kind': Kind})
-        s.enum_definitions = EnumDefinitions(('Kind',))
         s.new_cells('kind', '''\
 def kind(t):
     return Kind.A if t % 3 == 0 else (Kind.B if t % 3 == 1 else Kind.C)

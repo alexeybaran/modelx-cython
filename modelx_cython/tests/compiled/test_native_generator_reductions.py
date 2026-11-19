@@ -12,7 +12,6 @@ import sys
 import textwrap
 
 import modelx as mx
-from modelx_helpers.typed_inputs import EnumDefinitions
 
 FORMULAS = {
     # name: formula text (lambda or def)
@@ -61,7 +60,7 @@ def build(tmp_path):
     model = mx.new_model('GeneratorReductions')
     try:
         s = model.new_space('Projection', refs={
-            'Status': HTTPStatus, 'definitions': EnumDefinitions(('Status',)),
+            'Status': HTTPStatus,
             'values': (0.1, -0.0, 1e16, 1.0, -1e16, 0.7, 2.5, -3.25, 1e-300, 0.0),
             'ints': (3, -7, 2 ** 62, 2 ** 62, 0, 5)})
         for name, formula in FORMULAS.items():
