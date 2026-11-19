@@ -51,6 +51,7 @@ OPS = {  # name: (sources, expression on T = data.<source>() and the argument t)
     'index_in_prefix_tuple': ('rates', "(('A', 'B')[t % 2], ('F', 'X')[t // 2]) in T.index"),
     'index_max': ('flat multi', "T.index.max()"),
     'index_min': ('flat', "T.index.min()"),
+    'builtin_extremes': ('flat shuffled', "(max(T.index), min(T.index), t)"),
     'index_max_part': ('multi', "T.index.max()[t % 2]"),
     'index_asof': ('flat', "T.index.asof(20.5 + t)"),
     'index_get_loc': ('flat', "T.index.get_loc(20 + t)"),
@@ -224,6 +225,9 @@ T5_ITEMS = {
     'obj_item': "return data.mixed().loc[pid(), 'tag'] + data.mixed().loc[20 + t, 'tag']",
     'row_cell_computed': "return float(mrow()[('q', 'n')[t % 2]]) + float(mrow()['q'])",
     # T-5c: a key tuple returned by a cell, fixed per item: its codes held per item (a tuple checked once)
+    # two formulas name views of different prefixes alike: each holds its own rows
+    'same_name_a': "sub = data.grid().loc['A']\nreturn sub.loc[20 + t % 4, 'q'] + len(sub.index)",
+    'same_name_b': "sub = data.grid().loc['B']\nreturn sub.loc[20 + t % 4, 'q'] + float(sub.index[0])",
     'tuple_cell_view': "sub = data.rates().loc[plan()]\na = anchor()\nreturn sub.loc[a, 'q'] + (anchor() in sub.index)",
     'tuple_cell_whole': "return data.rates().loc[full(), 'q'] + data.rates().loc[odd(), 'q'].sum()",
     'member_cell': "return (plan() in data.rates().index, full() in data.rates().index, odd() not in data.rates().index,\n"
