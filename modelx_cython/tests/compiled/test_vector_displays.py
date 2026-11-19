@@ -63,7 +63,7 @@ for repeat in range(2):
             assert bits(o.trans(t, g)) == bits(c.trans(t, g)), (t, g)
         if t != 4:
             assert bits(o.risky(t)) == bits(c.risky(t)), t
-assert type(c.trans(3, 2)).__name__ == 'F64Vec' and type(c.ints(3)).__name__ == 'I64Vec'
+assert type(c.trans(3, 2)).__name__ == 'list' and type(c.ints(3)).__name__ == 'list'     # D154
 for attempt in range(2):           # raises every time: no partial value was cached
     for model in (o, c):
         try:
