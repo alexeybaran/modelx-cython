@@ -30,10 +30,10 @@ with `pip` or `conda`:
   model must be exported with `export(path, use_slots=False)`.  A model
   exported with `locked_spaces` (modelx v0.33.0+, see
   {doc}`freethreading`) needs modelx-cython v0.1.0 or later.
-* [Cython](https://cython.org/) v3.3.1+ — for compiling the translated
-  models; this is the version the test suite runs on (the generated build
-  script sets the `freethreading_compatible` directive, which Cython
-  versions before 3.2 do not know)
+* [Cython](https://cython.org/) v3.2.4+ — for compiling the translated
+  models; CI tests 3.2.4 (one pinned cell) and the latest release (the
+  generated build script sets the `freethreading_compatible` directive,
+  which Cython versions before 3.2 do not know)
 * [setuptools](https://setuptools.pypa.io/) — for building the extension
   modules
 * [libcst](https://libcst.readthedocs.io/) — for parsing and transforming
