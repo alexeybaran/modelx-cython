@@ -112,12 +112,33 @@ class FrameReads:
         plain = facts._int_index_read
 
         def int_index_read(expr):       # T-5c: also on a traced pandas frame (`top = T.index.max()[0]`)
-            return plain(expr) or self._extreme_part_int(expr)
+            return plain(expr) or (isinstance(expr, cst.Subscript) and self._extreme_part_int(expr))
         facts._int_index_read = int_index_read
+        plain_int = facts.is_int
+
+        def is_int(expr, depth=0):      # T-5c: `max(a for a, s in T.index)` of an int level
+            return plain_int(expr, depth) or (
+                'extreme of an integer level' if isinstance(expr, cst.Call) and self._extreme_part_int(expr) else None)
+        facts.is_int = is_int
         return facts
 
     def _extreme_part_int(self, expr):
-        """``R.index.max()[k]`` / ``.min()[k]``, R a unique frame of several levels whose level k is int."""
+        """``R.index.max()[k]`` / ``.min()[k]``, R a unique frame of several levels whose level k is int; or
+        ``max(a for a, s in R.index)`` with ``a`` naming an int level (``level_walk_extreme``)."""
+        if (isinstance(expr, cst.Call) and isinstance(expr.func, cst.Name) and expr.func.value in ('max', 'min')
+                and len(expr.args) == 1 and isinstance(expr.args[0].value, cst.GeneratorExp)):
+            gen = expr.args[0].value
+            target, it = gen.for_in.target, gen.for_in.iter
+            if (gen.for_in.ifs or gen.for_in.inner_for_in is not None or not isinstance(gen.elt, cst.Name)
+                    or not isinstance(target, cst.Tuple) or not isinstance(it, cst.Attribute) or it.attr.value != 'index'
+                    or not all(isinstance(e.value, cst.Name) for e in target.elements)):
+                return False
+            names = [e.value.value for e in target.elements]
+            found = self._receiver(it.value)
+            if names.count(gen.elt.value) != 1 or found is None or not found[1].get('unique'):
+                return False
+            levels = found[1]['levels']
+            return len(levels) == len(names) and levels[names.index(gen.elt.value)] == 'int'
         if not (isinstance(expr, cst.Subscript) and len(expr.slice) == 1 and isinstance(expr.slice[0].slice, cst.Index)
                 and isinstance(expr.slice[0].slice.value, cst.Integer) and isinstance(expr.value, cst.Call)
                 and not expr.value.args and isinstance(expr.value.func, cst.Attribute)
@@ -1357,6 +1378,43 @@ class _Rewrite(cst.CSTTransformer):
         return self._guarded(original, updated, _View(None, call, schema),
                              self._native_test(hold, []), native, 'i64')
 
+    def level_walk_extreme(self, original, updated):
+        """T-5c: ``max(a for a, s in R.index)`` / ``min(...)``: the element is the part of the tuple target naming an
+        int level, with no condition, over a whole frame of unique keys: that level's extreme as a C integer, as
+        ``R.index.get_level_values(i).max()`` (signature kind -6), not a walk of every row per evaluation."""
+        o = self.o
+        func = original.func
+        if not (isinstance(func, cst.Name) and func.value in ('max', 'min') and len(original.args) == 1
+                and not original.args[0].keyword and not original.args[0].star
+                and isinstance(original.args[0].value, cst.GeneratorExp)):
+            return None
+        gen = original.args[0].value
+        comp = gen.for_in
+        if comp.ifs or comp.inner_for_in is not None or comp.asynchronous is not None or not isinstance(gen.elt, cst.Name):
+            return None
+        target = comp.target
+        if not (isinstance(target, cst.Tuple) and all(isinstance(e, cst.Element) and isinstance(e.value, cst.Name)
+                                                       for e in target.elements)):
+            return None
+        names = [e.value.value for e in target.elements]
+        if names.count(gen.elt.value) != 1:
+            return None
+        level = names.index(gen.elt.value)
+        view = self._index_of(comp.iter)
+        if view is None or view.start is not None or not view.schema.get('unique'):
+            return None
+        levels = view.schema['levels']
+        if len(levels) != len(names) or levels[level] != 'int' or _code(view.call) in o.mutated:
+            return None
+        hold = self._take(view.call, (None, level), -6)
+        native = self._m(f'level_{func.value}_ll', o.ref(hold), cst.Integer(str(level)))
+        self._record(original, 'L5', view.call, view=view)
+        arg = updated.args[0].value         # the pandas branch: the generator as written, not its lowered walk
+        if id(arg) in self.generator_walks:
+            updated = updated.with_changes(args=[updated.args[0].with_changes(value=arg.orelse.with_changes(
+                lpar=[], rpar=[]))])
+        return self._lowered(self._native_test(hold, []), native, self._fallback(updated, view.call), 'i64')
+
     def extreme_part(self, original, updated, parts):
         """T-5c: ``R.index.max()[k]`` / ``.min()[k]`` on a whole frame of several levels, ``k`` an integer literal
         naming an int level: that part of pandas' extreme as a C integer (signature kind -2: the index is not
@@ -1979,7 +2037,7 @@ class _Rewrite(cst.CSTTransformer):
         """``float(...)`` around a float64 read and ``int(...)`` around an int64 read are dropped: the read is
         already that C value, and the builtin would box it into a Python object and back. L5: the extremes of a
         one-level int index are read as C integers."""
-        walk = self.index_call(original, updated)
+        walk = self.index_call(original, updated) or self.level_walk_extreme(original, updated)
         if walk is not None:
             return walk
         found = self.o.extreme(original)

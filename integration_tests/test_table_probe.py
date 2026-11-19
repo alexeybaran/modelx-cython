@@ -199,6 +199,9 @@ STMTS = {
     # T-5c: an int part of the whole index's extreme as a key part (a C integer: no shared label tuple per step)
     'extreme_part_key': ('grid sgrid', "top = T.index.max()[1]\nreturn (T.loc[('A', min(20 + t, top)), 'q'], T.index.min()[1] + t,\n"
                          "        T.index.max()[0], T.index.max()[-1])"),
+    # T-5c: the extreme of one level through a walk of the whole index with a tuple target (a C read per step)
+    'level_walk_extreme': ('grid sgrid', "top = max(a for p, a in T.index)\n"
+                           "return (T.loc[('B', min(20 + t, top)), 'n'], min(a for p, a in T.index) - t, top)"),
     'level_extreme_local': ('rates', "ages = T.index.get_level_values('year')\n"
                             "xx = min(max(1999 + t, int(ages.min())), int(ages.max()))\nreturn float(T.loc[('A', 'F', xx), 'q'])"),
     'level_extreme_local_kept': ('rates', "ages = T.index.get_level_values(2)\nreturn (int(ages.max()) - t, len(ages))"),
