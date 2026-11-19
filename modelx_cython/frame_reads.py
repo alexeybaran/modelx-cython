@@ -292,6 +292,7 @@ class FrameReads:
         self.ambiguous = set()  # T-5: codes of `T.loc[a, b]` prefixes (row prefix or row and column)
         self.columns = {}       # T-5: column local -> (view expression, column label)
         self.row_locals = self._row_locals(node)
+        self.enum_key_locals = self._enum_key_locals()
         self.declarations = []  # T-5: C Py_ssize_t locals of the formula (loop positions)
         self.local_count = 0
         rewriter = _Rewrite(self)
@@ -856,11 +857,48 @@ class FrameReads:
         return cst.Call(func=cst.Attribute(cst.Name(self.module), cst.Name('slot')),
                         args=[cst.Arg(self.ref(hold)), cst.Arg(cst.Integer(str(self.read_signature(hold))))])
 
+    def _enum_constants(self, value):
+        """{code of each enum member: its C constant} when ``value`` is an admitted IntEnum member (``self.E.m``) or a
+        conditional between such values, else None."""
+        if isinstance(value, cst.IfExp):
+            body, orelse = self._enum_constants(value.body), self._enum_constants(value.orelse)
+            return {**body, **orelse} if body is not None and orelse is not None else None
+        constant = self.facts.enum_constant(value)
+        return {_code(value): constant} if constant is not None else None
+
+    def _enum_key_locals(self):
+        """T-5c: {local: its enum constants} for each local bound once to an IntEnum member, or to a choice between
+        members (``item = E.a if paid_up(k) else E.b``), whose every read is a key part of a ``.loc``/``.at`` read:
+        it is bound to the members' C constants, and a key part it gives is a C integer (D79), not the member
+        object (shared by every thread) looked up at every read."""
+        found = {}
+        f = self.facts.formula
+        for name, values in f.values.items():
+            value = self._value_of(name)
+            constants = self._enum_constants(value) if value is not None else None
+            loads = f.loads.get(name) or ()
+            if constants and loads and all(not nested and self._key_part_position(load) for load, nested in loads):
+                found[name] = constants
+        return found
+
+    def _key_part_position(self, node):
+        """``node`` is the key, or a part of a tuple key, of a ``.loc[...]`` / ``.at[...]`` read."""
+        parents = self.facts.formula.parents
+        up = parents.get(id(node))
+        if isinstance(up, cst.Element):
+            up = parents.get(id(parents.get(id(up))))
+        element = parents.get(id(up)) if isinstance(up, cst.Index) else None
+        subscript = parents.get(id(element)) if isinstance(element, cst.SubscriptElement) else None
+        return (isinstance(subscript, cst.Subscript) and isinstance(subscript.value, cst.Attribute)
+                and subscript.value.attr.value in ('loc', 'at'))
+
     def key_part(self, part, level_kind, emit=None):
         """A key part whose code is computed per read: a C long long on an int level when it is an integer, else
         the Python value (the table looks an object key up as pandas does). The facts are of the original ``part``;
         ``emit`` is what the code evaluates (the part with its own reads lowered; T-5)."""
         emit = part if emit is None else emit
+        if level_kind == 'int' and isinstance(part, cst.Name) and part.value in self.enum_key_locals:
+            return _cast('_mx_cy.longlong', emit), 'int'     # T-5c: bound to the members' C constants
         constant = self.facts.enum_constant(part) if level_kind == 'int' else None
         if constant is not None:        # an IntEnum member: its C constant (enums.py, D79; T-5c: not only under is_int)
             return cst.Name(constant), 'int'
@@ -1789,6 +1827,15 @@ class _Rewrite(cst.CSTTransformer):
         if not (len(original.body) == 1 and isinstance(original.body[0], cst.Assign)):
             return updated
         name = original.body[0].targets[0].target
+        constants = o.enum_key_locals.get(name.value) if isinstance(name, cst.Name) else None
+        if constants:       # T-5c: ``item = E.a if c else E.b`` used only as key parts: bound to C constants
+
+            class Constants(cst.CSTTransformer):
+                def leave_Attribute(self, o_, new):
+                    constant = constants.get(_code(o_))
+                    return cst.Name(constant) if constant is not None else new
+            return updated.with_changes(body=[updated.body[0].with_changes(
+                value=updated.body[0].value.visit(Constants()))])
         found = o.row_locals.get(name.value) if isinstance(name, cst.Name) else None
         if found is None or found[2] is not original.body[0]:
             return updated
