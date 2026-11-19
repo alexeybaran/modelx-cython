@@ -118,6 +118,7 @@ cdef class PreparedTable:
 ctypedef PyObject* PreparedRef
 cdef object prepared(object frame)
 cdef object bind_ref(object frame)
+cdef object bind_own(object frame)
 cdef object bind_ref_checked(object frame)
 cdef Py_ssize_t hold_code(object table, int level, object value) except -2
 cdef Py_ssize_t asof_row(PreparedRef ref, int count, Py_ssize_t c0, Py_ssize_t c1, Py_ssize_t c2,

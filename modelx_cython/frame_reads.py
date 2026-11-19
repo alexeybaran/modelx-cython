@@ -467,6 +467,8 @@ class FrameReads:
         receiver = _code(hold.receiver)
         if self.per_item:
             held = self.published(hold.receiver)
+            if held is None and function == 'bind_ref':     # T-5c: a frame the item computes: prepared for it alone
+                function = 'bind_own'
             value = held if held is not None and function == 'bind_ref' else f'{m}.{function}({receiver})'
             return [cst.parse_statement(
                 f'if self.{hold.state} == 0:\n'
@@ -913,7 +915,7 @@ def without_fallbacks(node):
             return updated
 
         def leave_Call(self, original, updated):     # the frame a binding prepares or looks up is not read
-            if isinstance(updated.func, cst.Attribute) and updated.func.attr.value in ('bind_ref', 'bind_ref_checked') \
+            if isinstance(updated.func, cst.Attribute) and updated.func.attr.value in ('bind_ref', 'bind_ref_checked', 'bind_own') \
                     and _code(updated.func.value) == module:
                 return updated.with_changes(args=[])
             return updated
