@@ -70,13 +70,11 @@ def test_generator_literals_preserve_integer_width_and_sign(tmp_path):
             '    actual=getattr(mx_model.Values,name)()\n'
             '    assert actual==value,(name,actual,value)\n'], cwd=tmp_path, check=True, timeout=30)
     admission = json.loads((tmp_path/'exported_cy/_mx_admission.json').read_text())
+    # 'assigned' .. 'empty' are sums with a start argument, not lowered since R-6; the value oracles stay.
     for name in ('above', 'below', 'large', 'step', 'filtered',
-                 'positive_overshoot', 'negative_overshoot', 'dynamic_stride'):
+                 'positive_overshoot', 'negative_overshoot', 'dynamic_stride',
+                 'assigned', 'weighted', 'positive_safe', 'negative_safe', 'empty'):
         assert admission[f'exported_cy._mx_classes._c_Values._f_{name}']['native_reductions'] == 0
-    # These declared float-start consumers have proved native domains. Keep the
-    # complete width/sign/error oracles for the general and specialized paths.
-    for name in ('assigned', 'weighted', 'positive_safe', 'negative_safe', 'empty'):
-        assert admission[f'exported_cy._mx_classes._c_Values._f_{name}']['native_reductions'] == 1
     for package in ('exported', 'exported_cy'):
         script=f'''from {package} import mx_model
 s=mx_model.Values

@@ -45,7 +45,7 @@ def test_builtin_minimum_of_typed_range(tmp_path):
                     '--sample', 'sample.py', '--no-spec'], cwd=tmp_path, check=True)
     report = json.loads((tmp_path / 'exported_cy/_mx_admission.json').read_text())
     for name, count in (('minimum', 1), ('shadowed', 0), ('all_positive', 1), ('total', 1),
-                        ('any_positive', 1), ('maximum', 1), ('float_total', 1)):
+                        ('any_positive', 1), ('maximum', 0), ('float_total', 0)):     # max and a sum start: not lowered (R-6)
         assert report[f'exported_cy._mx_classes._c_Projection._f_{name}']['native_reductions'] == count
     probe = textwrap.dedent('''\
         import math

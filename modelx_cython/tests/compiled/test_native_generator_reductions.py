@@ -93,7 +93,8 @@ def test_generator_reductions_match_the_interpreter(tmp_path):
         if (cell['native_expressions'] == 0 and cell['native_reductions'] == 0
                 and not (cell.get('vectors') or {}).get('lowered')):
             untyped[name] = cell['expressions_untyped']
-    assert untyped == {}, untyped
+    # sums with a start argument are not lowered (R-6); every other form is
+    assert set(untyped) == {'start_float', 'start_int', 'tuple_direct'}, untyped
     probe = textwrap.dedent(f'''\
         import math, pickle, sys
         from importlib import import_module

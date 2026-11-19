@@ -120,7 +120,7 @@ def test_scope_overrides_aliases_and_arithmetic(tmp_path):
     admission=json.loads((tmp_path/'exported_cy/_mx_admission.json').read_text())
     info=lambda name:admission[f'exported_cy._mx_classes._c_Values._f_{name}']
     assert info('nested_sum')['native_reductions']==0
-    assert info('hygienic')['native_reductions']==1
+    assert info('hygienic')['native_reductions']==0      # a sum with a start argument is not lowered (R-6)
     script='''import math
 from types import SimpleNamespace
 from PACKAGE import mx_model
