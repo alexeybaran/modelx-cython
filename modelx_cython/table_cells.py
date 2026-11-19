@@ -25,6 +25,7 @@ override is added):
 The runtime side is ``modelx_cython.runtime.table_cells``.
 """
 
+import re
 import types
 
 import libcst as cst
@@ -68,9 +69,8 @@ def enum_cells(cls_info):
     from modelx_cython.enums import _traced_enum
     result = {}
     for name, cells in cls_info.cells.items():
-        if (cells.is_special() or cells.body_has_closure or cells.called_with_kwargs
-                or cells.formula_is_generator or not cells.has_typeinfo()):
-            continue
+        if cells.is_special() or cells.formula_is_generator or not cells.has_typeinfo():
+            continue        # a keyword call or a closure keeps its entry: its public method forwards (D154)
         if cells.get_rettype_expr(c_style=True) != 'long long':
             continue
         enum = _traced_enum(cells, None)
@@ -84,9 +84,8 @@ def vector_cells(cls_info):
     code passes the vector itself; a Python caller gets a new list (a tuple of new lists), never the cache."""
     result = {}
     for name, cells in cls_info.cells.items():
-        if (cells.is_special() or cells.body_has_closure or cells.called_with_kwargs
-                or cells.formula_is_generator or not cells.has_typeinfo()):
-            continue
+        if cells.is_special() or cells.formula_is_generator or not cells.has_typeinfo():
+            continue        # a keyword call or a closure keeps its entry: its public method forwards (D154)
         shape = cells.vector_shape
         if shape in ('V', 'I') or (isinstance(shape, tuple) and shape and shape[0] == 'T'):
             result[name] = shape
@@ -177,10 +176,13 @@ def rewrite_class(cls_info, node, config, integer_refs):
     body = []
     init_names = set()
     has_collect = False
+    signatures = {}     # vector cells: the parameters of the entry, defaults included (keyword calls)
     for statement in node.body.body:
         if isinstance(statement, cst.FunctionDef):
             name = statement.name.value
             if name in tables or name in enums or name in records or name in vectors:
+                if name in vectors:
+                    signatures[name] = statement.params
                 statement = statement.with_changes(name=cst.Name(mapping[name]))
             elif name == '__init__':
                 for line in statement.body.body:
@@ -225,8 +227,14 @@ def rewrite_class(cls_info, node, config, integer_refs):
         params = ', '.join(cls_info.cells[name].params)
         value = f'self.{mapping[name]}({params})'
         result = (f'tuple([v.tolist() for v in {value}])' if isinstance(shape, tuple) else f'{value}.tolist()')
+        declared = params
+        cell = cls_info.cells[name]
+        if name in signatures and (cell.called_with_kwargs or cell.body_has_closure):
+            # a keyword call reaches the public method: the entry's own parameters, defaults included
+            rest = signatures[name].with_changes(params=signatures[name].params[1:])
+            declared = cst.Module(body=[]).code_for_node(rest)
         lines.append(
-            f'def {name}(self{", " if params else ""}{params}):\n'
+            f'def {name}(self{", " if declared else ""}{declared}):\n'
             f'    """A new list of the values, as live returns a list (D154); compiled code calls '
             f'``{mapping[name]}``, which passes the typed vector without a copy."""\n'
             f'    return {result}\n')
@@ -334,8 +342,12 @@ class RenameMembers(cst.CSTTransformer):
                 if name in self.mapping.get(cls_name, {}):
                     self.enums[name] = enum
         self.wrapped = 0
+        self.vectors = {cls_name: vector_cells(cls_info) for cls_name, cls_info in module.classes.items()}
+        self.vector_publics = 0     # D154: vector cell calls left on the public method (a new list)
         self._classes = []          # enclosing generated class names
         self._locals = []           # per function: {local name: class name}
+        self._vector_locals = []    # per function: local names declared as typed vectors
+        self._functions = []        # enclosing FunctionDef nodes
 
     # ---------------------------------------------------------------- receivers
     @staticmethod
@@ -418,10 +430,93 @@ class RenameMembers(cst.CSTTransformer):
                     if cls:
                         types_[small.targets[0].target.value] = cls
         self._locals.append(types_)
+        from modelx_cython.vectors import TYPES
+        vector_types = set(TYPES.values())
+        self._vector_locals.append({small.target.value for line in lines
+            if isinstance(line, (cst.SimpleStatementLine, cst.SimpleStatementSuite)) for small in line.body
+            if isinstance(small, cst.AnnAssign) and isinstance(small.target, cst.Name)
+            and cst.Module(body=[]).code_for_node(small.annotation.annotation) in vector_types})
+        self._functions.append(node)
 
     def leave_FunctionDef(self, original, updated):
         self._locals.pop()
+        self._vector_locals.pop()
+        self._functions.pop()
         return updated
+
+    # ---------------------------------------------------------------- D154: vector results
+    def _vector_return(self, shape):
+        """Whether the enclosing function returns the typed vector (or tuple of them) of ``shape``."""
+        from modelx_cython.vectors import TYPES
+        if not self._functions or self._functions[-1].returns is None:
+            return False
+        function = self._functions[-1]
+        annotation = cst.Module(body=[]).code_for_node(function.returns.annotation)
+        if isinstance(shape, tuple):
+            own = self.vectors.get(self._classes[-1] if self._classes else None, {})
+            name = function.name.value
+            for prefix in ('_f_', CELL_PREF):
+                if name.startswith(prefix) and own.get(name[len(prefix):]) == shape:
+                    return True
+            return False
+        return annotation == TYPES.get(shape)
+
+    def _vector_targets(self, targets):
+        names = self._vector_locals[-1] if self._vector_locals else set()
+        def typed(t):
+            if isinstance(t, cst.Name):     # a typed vector local, or a temporary of the lowering
+                return t.value in names or re.match(r'_mx_v[0-9]+_', t.value) is not None
+            if isinstance(t, cst.Tuple):
+                return all(typed(e.value) for e in t.elements)
+            return False
+        return all(typed(t) for t in targets)
+
+    def _vector_native(self, node, shape):
+        """Whether compiled code consumes the typed vector that ``node`` (a vector cell call) gives (D154).
+
+        Native uses: a provider operation's argument, ``.n`` / ``.data`` / ``.tolist()``, ``is (not) None``, a
+        typed vector local assigned from it, the return of a function typed to return it, and the elements of
+        a tuple of vectors so used. Everywhere else the call stays on the public method, which returns a new
+        list: the value Python code sees there is the list live builds, whatever the receiver."""
+        from modelx_cython.vectors import ALIAS
+        parent = self._parent(node)
+        if isinstance(parent, cst.Attribute) and parent.value is node:
+            return parent.attr.value in ('n', 'data', 'tolist')
+        if isinstance(parent, cst.Arg):
+            call = self._parent(parent)
+            return (isinstance(call, cst.Call) and isinstance(call.func, cst.Attribute)
+                    and isinstance(call.func.value, cst.Name) and call.func.value.value == ALIAS)
+        if isinstance(parent, cst.Comparison) and parent.left is node:
+            return all(isinstance(c.operator, (cst.Is, cst.IsNot)) and isinstance(c.comparator, cst.Name)
+                       and c.comparator.value == 'None' for c in parent.comparisons)
+        if isinstance(parent, cst.Subscript) and parent.value is node and isinstance(shape, tuple):
+            index = parent.slice[0].slice if len(parent.slice) == 1 else None
+            value = getattr(index, 'value', None)
+            if not isinstance(value, cst.Integer) or not -len(shape[1]) <= int(value.value) < len(shape[1]):
+                return False
+            return self._vector_native(parent, shape[1][int(value.value)])
+        if isinstance(parent, cst.Element):
+            outer = self._parent(parent)
+            above = self._parent(outer) if isinstance(outer, cst.Tuple) else None
+            if isinstance(above, cst.Return):
+                own = self.vectors.get(self._classes[-1] if self._classes else None, {})
+                return any(isinstance(k, tuple) and self._vector_return(k) for k in own.values())
+            if isinstance(above, cst.Assign) and above.value is outer:
+                return all(isinstance(t.target, cst.Tuple) for t in above.targets) and self._vector_targets(
+                    [t.target for t in above.targets])
+            return False
+        if isinstance(parent, cst.IfExp) and parent.test is not node:
+            return self._vector_native(parent, shape)
+        if isinstance(parent, cst.CompFor) and parent.iter is node:
+            # _ObjectUses' own conversion of a tuple of vectors: [_mx_vector.tolist() for _mx_vector in <call>]
+            return isinstance(parent.target, cst.Name) and parent.target.value == '_mx_vector'
+        if isinstance(parent, cst.Assign) and parent.value is node:
+            return self._vector_targets([t.target for t in parent.targets])
+        if isinstance(parent, cst.AnnAssign) and parent.value is node:
+            return self._vector_targets([parent.target])
+        if isinstance(parent, cst.Return):
+            return self._vector_return(shape)
+        return False
 
     # ---------------------------------------------------------------- renames
     def _new(self, receiver, name, prefix):
@@ -433,6 +528,10 @@ class RenameMembers(cst.CSTTransformer):
         func = original.func
         if isinstance(func, cst.Attribute):
             new = self._new(func.value, func.attr.value, CELL_PREF)
+            shape = self.vectors.get(self._receiver(func.value), {}).get(func.attr.value) if new else None
+            if new and shape is not None and not self._vector_native(original, shape):
+                self.vector_publics += 1
+                return updated      # Python code: the public method's new list (D154)
             if new:
                 updated = updated.with_changes(func=updated.func.with_changes(attr=cst.Name(new)))
                 if (func.attr.value in self.enums and self._object_use(original)

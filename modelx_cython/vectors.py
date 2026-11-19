@@ -41,6 +41,8 @@ A local bound only by ``for x in range(...)`` is a C ``long long`` in modules wi
 cells. Everything else on a vector runs through the vector's sequence protocol and is listed
 in the admission report as ``vector_fallbacks``.
 """
+import re
+
 import libcst as cst
 
 from .consts import CY_MOD, MX_SYS_MOD
@@ -1654,6 +1656,9 @@ def _declare_at_top(node, decls):
     return node.with_changes(body=node.body.with_changes(body=[*stmts[:start], *decls, *stmts[start:]]))
 
 
+_TEMP = re.compile(r'_mx_v[0-9]+_')     # the lowering's temporaries (``VectorLowering.temp``)
+
+
 class _ObjectUses(cst.CSTTransformer):
     """D154: a vector reaching Python code inside a compiled formula is a new list there (``.tolist()``).
 
@@ -1666,10 +1671,18 @@ class _ObjectUses(cst.CSTTransformer):
     A tuple of vectors in such a position becomes a tuple of lists."""
     METADATA_DEPENDENCIES = (__import__('libcst.metadata', fromlist=['ParentNodeProvider']).ParentNodeProvider,)
 
-    def __init__(self, names, shapes):
+    def __init__(self, names, shapes, own=None):
         super().__init__()
         self.names, self.shapes = names, shapes     # {name: shape}, {vector cell: shape}
+        self.own = own                              # the shape this formula returns, if it is a vector cell
         self.converted = []
+
+    def _typed_target(self, target):
+        if isinstance(target, cst.Name):    # a typed vector local, or a temporary of the lowering (consumed natively)
+            return target.value in self.names or _TEMP.match(target.value) is not None
+        if isinstance(target, cst.Tuple):
+            return all(self._typed_target(e.value) for e in target.elements)
+        return False
 
     def _shape(self, node):
         if isinstance(node, cst.Name):
@@ -1701,17 +1714,24 @@ class _ObjectUses(cst.CSTTransformer):
             ops = [c.operator for c in comp.comparisons]
             return all(isinstance(o, (cst.Is, cst.IsNot)) for o in ops) and any(
                 _is_name(c.comparator, 'None') for c in comp.comparisons)
-        if isinstance(parent, (cst.AssignTarget, cst.Return)):
+        if isinstance(parent, cst.AssignTarget):
             return True
+        if isinstance(parent, cst.Return):
+            return self.own is not None and self.own == shape     # the formula returns this typed vector
         if isinstance(parent, cst.Assign) and parent.value is node:
-            return all(isinstance(t.target, (cst.Name, cst.Tuple)) for t in parent.targets)
+            return all(self._typed_target(t.target) for t in parent.targets)
         if isinstance(parent, cst.AnnAssign):
-            return True
+            return self._typed_target(parent.target)
         if isinstance(parent, cst.Subscript) and parent.value is node and isinstance(shape, tuple):
             return True     # an element of a tuple of vectors: judged where the element is used
         if isinstance(parent, cst.Element):
             outer = self._parent(parent)
-            return isinstance(outer, cst.Tuple) and isinstance(self._parent(outer), (cst.Return, cst.Assign))
+            above = self._parent(outer) if isinstance(outer, cst.Tuple) else None
+            if isinstance(above, cst.Return):
+                return isinstance(self.own, tuple)
+            if isinstance(above, cst.Assign) and above.value is outer:
+                return all(self._typed_target(t.target) for t in above.targets)
+            return False
         return False
 
     def _leave(self, original, updated):
@@ -1733,11 +1753,11 @@ class _ObjectUses(cst.CSTTransformer):
         return self._leave(original, updated)
 
 
-def _object_uses(body, names, shapes):
+def _object_uses(body, names, shapes, own=None):
     """``body`` (an IndentedBlock) with every Python use of a vector made a list (``_ObjectUses``)."""
     from libcst.metadata import MetadataWrapper
     wrapper = MetadataWrapper(cst.Module(body=body.body), unsafe_skip_copy=True)
-    uses = _ObjectUses(names, shapes)
+    uses = _ObjectUses(names, shapes, own)
     module = wrapper.visit(uses)
     return body.with_changes(body=module.body), uses.converted
 
@@ -1796,7 +1816,8 @@ def lower(node, cls_info, cells, scope, counter, module, ref_kinds=None):
                     and _code(small.annotation.annotation) in TYPES.values()):
                 typed[small.target.value] = next(k for k, t in TYPES.items() if t == _code(small.annotation.annotation))
     body, converted = _object_uses(body, typed, {n: s for n, s in lowering.shapes.items()
-                                                 if s in ('V', 'I') or isinstance(s, tuple)})
+                                                 if s in ('V', 'I') or isinstance(s, tuple)},
+                                   cells.vector_shape if cells.vector_shape in ("V", "I") or isinstance(cells.vector_shape, tuple) else None)
     for name, items in lowering.facts.assigns.items():
         # a local bound only as the target of loops over vectors holds C elements
         if (name not in cells.params and name not in loops and items
