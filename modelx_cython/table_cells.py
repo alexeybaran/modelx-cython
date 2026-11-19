@@ -79,6 +79,20 @@ def enum_cells(cls_info):
     return result
 
 
+def vector_cells(cls_info):
+    """``{name: shape}`` of the cells whose C result is a typed vector or a tuple of them (D154): compiled
+    code passes the vector itself; a Python caller gets a new list (a tuple of new lists), never the cache."""
+    result = {}
+    for name, cells in cls_info.cells.items():
+        if (cells.is_special() or cells.body_has_closure or cells.called_with_kwargs
+                or cells.formula_is_generator or not cells.has_typeinfo()):
+            continue
+        shape = cells.vector_shape
+        if shape in ('V', 'I') or (isinstance(shape, tuple) and shape and shape[0] == 'T'):
+            result[name] = shape
+    return result
+
+
 def path_of(cls_info, name):
     owners = [part[len(MODULE_PREF):] for part in cls_info.module.fqname.split('.')[1:-1]]
     owners.append(cls_info.name[len(SPACE_PREF):])
@@ -117,7 +131,8 @@ def renames(module):
     result = {}
     for cls_name, cls_info in module.classes.items():
         mapping = {}
-        for name in (*table_cells(cls_info), *enum_cells(cls_info), *record_cells(cls_info)):
+        for name in (*table_cells(cls_info), *enum_cells(cls_info), *record_cells(cls_info),
+                     *vector_cells(cls_info)):
             if owners[name] == {cls_name}:
                 mapping[name] = CELL_PREF + name
         for name in table_refs(cls_info):
@@ -157,6 +172,7 @@ def rewrite_class(cls_info, node, config, integer_refs):
     tables = {n: c for n, c in table_cells(cls_info).items() if n in mapping}
     enums = {n: e for n, e in enum_cells(cls_info).items() if n in mapping}
     records = [n for n in record_cells(cls_info) if n in mapping]
+    vectors = {n: v for n, v in vector_cells(cls_info).items() if n in mapping}
     refs = [n for n in table_refs(cls_info, integer_refs) if n in mapping]
     body = []
     init_names = set()
@@ -164,7 +180,7 @@ def rewrite_class(cls_info, node, config, integer_refs):
     for statement in node.body.body:
         if isinstance(statement, cst.FunctionDef):
             name = statement.name.value
-            if name in tables or name in enums or name in records:
+            if name in tables or name in enums or name in records or name in vectors:
                 statement = statement.with_changes(name=cst.Name(mapping[name]))
             elif name == '__init__':
                 for line in statement.body.body:
@@ -205,6 +221,15 @@ def rewrite_class(cls_info, node, config, integer_refs):
             f'def {name}(self{", " if params else ""}{params}):\n'
             f'    """The live IntEnum member (D103); compiled code calls ``{mapping[name]}``."""\n'
             f'    return {RUNTIME}.enum_member({module!r}, {qualname!r}, self.{mapping[name]}({params}))\n')
+    for name, shape in vectors.items():
+        params = ', '.join(cls_info.cells[name].params)
+        value = f'self.{mapping[name]}({params})'
+        result = (f'tuple([v.tolist() for v in {value}])' if isinstance(shape, tuple) else f'{value}.tolist()')
+        lines.append(
+            f'def {name}(self{", " if params else ""}{params}):\n'
+            f'    """A new list of the values, as live returns a list (D154); compiled code calls '
+            f'``{mapping[name]}``, which passes the typed vector without a copy."""\n'
+            f'    return {result}\n')
     if tables:
         # D130: the table cells marked by a clear of another Space rebind from the frame they hold
         stale = ['def _mx_stale_tables(self):']
