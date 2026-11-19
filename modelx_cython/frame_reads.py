@@ -34,6 +34,7 @@ from .holds import hold_table
 PROVIDER = 'modelx_cython.runtime._tables'
 COLUMN_KIND = {'f64': 0, 'i64': 1}
 READ = ('f64', 'i64')
+CTYPE = {'f64': '_mx_cy.double', 'i64': '_mx_cy.longlong'}
 MAX_PARTS = 6
 MUTATORS = frozenset(('__setitem__', '__delitem__', 'update', 'insert', 'pop'))
 
@@ -52,6 +53,11 @@ def _literal_str(node):
 def _cast(type_expr, value):
     return cst.Call(func=cst.Attribute(cst.Name('_mx_cy'), cst.Name('cast')),
                     args=[cst.Arg(cst.parse_expression(type_expr)), cst.Arg(value)])
+
+
+def _parts(key):
+    """The parts of a key: the elements of a tuple display, else the key itself."""
+    return [e.value for e in key.elements] if isinstance(key, cst.Tuple) else [key]
 
 
 def _index_parts(subscript):
@@ -92,6 +98,25 @@ class FrameReads:
         facts._params = set(getattr(self.cells, 'params', ()) or ())
         return facts
 
+    def _once(self, name):
+        """``name`` is bound once by an assignment of the formula (not a parameter, a loop target or another binding)."""
+        f = self.facts.formula
+        return f.binds.get(name, 0) == 1 and name not in f.other and name not in self.facts._params
+
+    def _value_of(self, name):
+        """The one value assigned to the local ``name`` bound once, else None."""
+        values = self.facts.formula.values.get(name) or ()
+        return values[0] if len(values) == 1 and self._once(name) else None
+
+    @staticmethod
+    def _simple_assign(statement):
+        """(name, value) of a statement ``name = value``, else None."""
+        if (isinstance(statement, cst.SimpleStatementLine) and len(statement.body) == 1
+                and isinstance(statement.body[0], cst.Assign) and len(statement.body[0].targets) == 1
+                and isinstance(statement.body[0].targets[0].target, cst.Name)):
+            return statement.body[0].targets[0].target.value, statement.body[0].value
+        return None
+
     def _schema_of_call(self, expr):
         if not (isinstance(expr, cst.Call) and not expr.args):
             return None
@@ -109,28 +134,15 @@ class FrameReads:
         schema = self._schema_of_call(expr)
         if schema is not None:
             return expr, schema
-        if isinstance(expr, cst.Name):
-            f = self.facts.formula
-            values = f.values.get(expr.value) or ()
-            if (len(values) == 1 and expr.value not in f.other and expr.value not in self.facts._params
-                    and f.binds.get(expr.value, 0) == 1):
-                schema = self._schema_of_call(values[0])
-                if schema is not None:
-                    return values[0], schema
-        return None
+        value = self._value_of(expr.value) if isinstance(expr, cst.Name) else None
+        schema = self._schema_of_call(value) if value is not None else None
+        return (value, schema) if schema is not None else None
 
     def prefix_receiver(self, expr):
         """T-4 (L3 through a cell): ``self.P()`` (or a local assigned once from it) where the formula of P is
         ``return T.loc[prefix]``, T a frame receiver and every prefix part fixed per item: (P call, T call, T's
         schema, prefix parts, P). The keyed reads of P's value read T with the prefix held as codes."""
-        call = expr
-        if isinstance(expr, cst.Name):
-            f = self.facts.formula
-            values = f.values.get(expr.value) or ()
-            if not (len(values) == 1 and expr.value not in f.other and expr.value not in self.facts._params
-                    and f.binds.get(expr.value, 0) == 1):
-                return None
-            call = values[0]
+        call = self._value_of(expr.value) if isinstance(expr, cst.Name) else expr
         if not (isinstance(call, cst.Call) and not call.args and isinstance(call.func, cst.Attribute)
                 and isinstance(call.func.value, cst.Name) and call.func.value.value == 'self'):
             return None
@@ -142,7 +154,7 @@ class FrameReads:
         if found is None or found[1]['kind'] != 'frame':
             return None
         key = row.slice[0].slice.value
-        parts = [e.value for e in key.elements] if isinstance(key, cst.Tuple) else [key]
+        parts = _parts(key)
         from .row_cells import item_constant
         if len(parts) >= len(found[1]['levels']) or not all(item_constant(p, self.cached_call) for p in parts):
             return None
@@ -201,7 +213,7 @@ class FrameReads:
                     if isinstance(source, tuple):       # `R.loc[prefix, "c"]`: a view local of R.loc[prefix] first
                         _, prefix, ((call, schema), parts) = source
                         vname = f'_mx_cv_{column[0]}'
-                        synthetic = cst.SimpleStatementLine([cst.Assign([cst.AssignTarget(cst.Name(vname))], prefix)])
+                        synthetic = rewriter._assign(vname, prefix)
                         new = [*rewriter.view_statement(synthetic, (vname, call, schema, parts, None)), new]
                         source = cst.Name(vname)
                     self.columns[column[0]] = (source, column[2])
@@ -224,11 +236,8 @@ class FrameReads:
         return node.with_changes(body=node.body.with_changes(body=self._flatten(body)))
 
     def _asof_assignment(self, statement):
-        if (isinstance(statement, cst.SimpleStatementLine) and len(statement.body) == 1
-                and isinstance(statement.body[0], cst.Assign) and len(statement.body[0].targets) == 1
-                and isinstance(statement.body[0].targets[0].target, cst.Name)):
-            return self.asof_locals.get(statement.body[0].targets[0].target.value)
-        return None
+        assign = self._simple_assign(statement)
+        return self.asof_locals.get(assign[0]) if assign else None
 
     def _asof_locals(self, node):
         """T-4: ``lo = P.index.asof(x)`` at the top level of an item formula, P the value of a prefix cell with one
@@ -238,16 +247,12 @@ class FrameReads:
             return {}
         f, found = self.facts.formula, {}
         for statement in node.body.body:
-            if not (isinstance(statement, cst.SimpleStatementLine) and len(statement.body) == 1
-                    and isinstance(statement.body[0], cst.Assign) and len(statement.body[0].targets) == 1
-                    and isinstance(statement.body[0].targets[0].target, cst.Name)):
-                continue
-            name, value = statement.body[0].targets[0].target.value, statement.body[0].value
+            name, value = self._simple_assign(statement) or (None, None)
             if not (isinstance(value, cst.Call) and len(value.args) == 1 and not value.args[0].keyword
                     and isinstance(value.func, cst.Attribute) and value.func.attr.value == 'asof'
                     and isinstance(value.func.value, cst.Attribute) and value.func.value.attr.value == 'index'):
                 continue
-            if f.binds.get(name, 0) != 1 or name in f.other or name in self.facts._params:
+            if not self._once(name):
                 continue
             prefix = self.prefix_receiver(value.func.value.value)
             if prefix is None or len(prefix[2]['levels']) - len(prefix[3]) != 1 or prefix[2]['levels'][-1] != 'int':
@@ -332,12 +337,9 @@ class FrameReads:
         module.visit(Loads())
         out = []
         for statement in flat:
-            if (isinstance(statement, cst.SimpleStatementLine) and len(statement.body) == 1
-                    and isinstance(statement.body[0], cst.Assign) and len(statement.body[0].targets) == 1
-                    and isinstance(statement.body[0].targets[0].target, cst.Name)):
-                name = statement.body[0].targets[0].target.value
-                if name in replaced and loads.get(name, 0) == 1:     # the target itself only
-                    continue
+            name = (self._simple_assign(statement) or (None,))[0]
+            if name in replaced and loads.get(name, 0) == 1:     # the target itself only
+                continue
             out.append(statement)
         return out
 
@@ -373,14 +375,8 @@ class FrameReads:
         """T-5: ``name = R.loc[prefix]`` (or ``name = self.P()``, P a prefix cell) at the top level of the formula,
         ``name`` bound once and never in a nested function, R a frame receiver of more levels than the prefix:
         (name, R call, R schema, prefix parts, prefix cell name or None); else None."""
-        if not (isinstance(statement, cst.SimpleStatementLine) and len(statement.body) == 1
-                and isinstance(statement.body[0], cst.Assign) and len(statement.body[0].targets) == 1
-                and isinstance(statement.body[0].targets[0].target, cst.Name)):
-            return None
-        name, value = statement.body[0].targets[0].target.value, statement.body[0].value
-        f = self.facts.formula
-        if (f.binds.get(name, 0) != 1 or name in f.other or name in self.facts._params
-                or any(nested for _, nested in f.loads.get(name, ()))):
+        name, value = self._simple_assign(statement) or (None, None)
+        if name is None or not self._once(name) or any(nested for _, nested in self.facts.formula.loads.get(name, ())):
             return None
         prefix = self.prefix_receiver(value) if isinstance(value, cst.Call) else None
         if prefix is not None:
@@ -395,11 +391,9 @@ class FrameReads:
         """``name = X["c"]`` at the top level, X a view local, a frame receiver or ``R.loc[prefix]``, ``name`` bound
         once and only walked (``for``, a comprehension, ``.items()``) or read whole (``.tolist()``, list, tuple,
         len): (name, X, "c"), else None."""
-        if not (isinstance(statement, cst.SimpleStatementLine) and len(statement.body) == 1
-                and isinstance(statement.body[0], cst.Assign) and len(statement.body[0].targets) == 1
-                and isinstance(statement.body[0].targets[0].target, cst.Name)):
+        name, value = self._simple_assign(statement) or (None, None)
+        if name is None:
             return None
-        name, value = statement.body[0].targets[0].target.value, statement.body[0].value
         parts = _index_parts(value) if isinstance(value, cst.Subscript) else None
         label = _literal_str(parts[0]) if parts and len(parts) == 1 else None
         f = self.facts.formula
@@ -415,7 +409,7 @@ class FrameReads:
             if got is None:
                 return None
             source = ('view', prefix, got)
-        if label is None or f.binds.get(name, 0) != 1 or name in f.other or name in self.facts._params:
+        if label is None or not self._once(name):
             return None
         if isinstance(source, tuple):
             pass
@@ -514,8 +508,7 @@ class FrameReads:
                 parts = _index_parts(n.value)
                 got = self._receiver(n.value.value.value)
                 if (got is None or parts is None or len(parts) != 1 or got[1]['kind'] != 'frame'
-                        or not got[1].get('unique') or _code(got[0]) in self.mutated
-                        or f.binds.get(name, 0) != 1 or name in f.other or name in self.facts._params):
+                        or not got[1].get('unique') or _code(got[0]) in self.mutated or not self._once(name)):
                     return
                 levels = got[1]['levels']
                 key = parts[0]
@@ -706,8 +699,8 @@ class _View:
     to stored rows), or the stored rows [start, stop) of a prefix of ``depth`` levels (``codes``; C locals of the
     formula), held in a local ``name`` (of a prefix cell ``cell``, or None)."""
 
-    def __init__(self, name, call, schema, depth, codes, start, stop, cell):
-        self.name, self.call, self.schema, self.depth, self.codes = name, call, schema, depth, codes
+    def __init__(self, name, call, schema, depth=0, codes=None, start=None, stop=None, cell=None):
+        self.name, self.call, self.schema, self.depth, self.codes = name, call, schema, depth, codes or []
         self.start, self.stop, self.cell = start, stop, cell
         self.setup, self.used = None, False
 
@@ -784,12 +777,9 @@ class _Rewrite(cst.CSTTransformer):
         """The parts of a complete key on ``schema``: (parts, None) or (None, why). A key held in a local assigned
         once to a tuple display is that display."""
         levels = schema['levels']
-        f = self.o.facts.formula
-        if (isinstance(key, cst.Name) and len(levels) > 1 and key.value not in f.other
-                and key.value not in self.o.facts._params and f.binds.get(key.value, 0) == 1
-                and len(f.values.get(key.value) or ()) == 1 and isinstance(f.values[key.value][0], cst.Tuple)):
-            self.key_locals[key.value] = f.values[key.value][0]
-            key = f.values[key.value][0]
+        value = self.o._value_of(key.value) if isinstance(key, cst.Name) and len(levels) > 1 else None
+        if isinstance(value, cst.Tuple):
+            self.key_locals[key.value] = key = value
         if len(levels) == 1:
             if isinstance(key, cst.Tuple):
                 return None, 'a tuple key on a single-level index'
@@ -811,16 +801,20 @@ class _Rewrite(cst.CSTTransformer):
         """(key arguments, extra native conditions) for a read of ``parts`` through ``hold``: one level code per part
         (T-5: the one read path for every key), ``held - 1`` for a part fixed per item (and its condition that the
         part is present), ``lcode``/``ocode`` of the part otherwise."""
-        o = self.o
-        codes, conditions = [], []
-        for level, (part, kind) in enumerate(zip(parts, levels)):
-            if o.item_fixed(part):
-                field = o.code_field(hold, level, part)
-                codes.append(cst.parse_expression(f'self.{field} - 1'))
-                conditions.append(cst.parse_expression(f'self.{field} > 0'))
-            else:
-                codes.append(self.code_of(hold, level, part, kind))
+        conditions = []
+        codes = [self._held(hold, level, part, conditions) if self.o.item_fixed(part)
+                 else self.code_of(hold, level, part, kind) for level, (part, kind) in enumerate(zip(parts, levels))]
         return self.code_args(codes), conditions
+
+    def _held(self, hold, level, part, conditions):
+        """The code of a key part fixed per item, held per item (``held - 1``); ``conditions`` gets its presence."""
+        field = self.o.code_field(hold, level, part)
+        conditions.append(cst.parse_expression(f'self.{field} > 0'))
+        return cst.parse_expression(f'self.{field} - 1')
+
+    @staticmethod
+    def _padded(codes):
+        return [*codes, *[cst.Integer('0')] * (5 - len(codes))]
 
     @staticmethod
     def code_args(codes):
@@ -830,16 +824,20 @@ class _Rewrite(cst.CSTTransformer):
             return '_1', codes
         return '_c', [cst.Integer(str(len(codes))), *codes, *[cst.Integer('0')] * (MAX_PARTS - len(codes))]
 
+    def _codes(self, hold, prefix, parts, levels):
+        """code_args of the codes ``prefix`` followed by those of key ``parts`` on the levels after them."""
+        return self.code_args(list(prefix) + [self.code_of(hold, level, part, levels[level])
+                                              for level, part in enumerate(parts, len(prefix))])
+
     def code_of(self, hold, level, part, kind):
         """The level code of one key part computed per read: ``lcode`` of a C integer on an int level, else ``ocode``
         of the Python value (looked up as pandas does)."""
         o = self.o
         arg, how = o.key_part(part, kind, self.updated_of.get(id(part)))
-        return cst.Call(func=cst.Attribute(cst.Name(o.module), cst.Name('lcode' if how == 'int' else 'ocode')),
-                        args=[cst.Arg(o.ref(hold)), cst.Arg(cst.Integer(str(level))), cst.Arg(arg)])
+        return self._m('lcode' if how == 'int' else 'ocode', o.ref(hold), cst.Integer(str(level)), arg)
 
     def _native_test(self, hold, conditions):
-        test = cst.Comparison(self.o.slot(hold), [cst.ComparisonTarget(cst.GreaterThan(), cst.Integer('0'))])
+        test = self._positive(self.o.slot(hold))
         for condition in conditions:
             test = cst.BooleanOperation(left=test, operator=cst.And(), right=condition)
         return test
@@ -860,15 +858,13 @@ class _Rewrite(cst.CSTTransformer):
         else:
             for level, part in enumerate(parts):
                 if o.item_fixed(part):
-                    field = o.code_field(hold, level, part)
-                    codes.append(cst.parse_expression(f'self.{field} - 1'))
-                    conditions.append(cst.parse_expression(f'self.{field} > 0'))
+                    codes.append(self._held(hold, level, part, conditions))
                     continue
                 var = f'_mx_vc_{name}_{level}'
                 code = _code(self.code_of(hold, level, part, schema['levels'][level]))
                 statements.append(cst.parse_statement(f'{var}: _mx_cy.Py_ssize_t = {code} if {test} else -1'))
                 codes.append(cst.Name(var))
-        args = ', '.join(_code(c) for c in codes + [cst.Integer('0')] * (5 - len(codes)))
+        args = ', '.join(_code(c) for c in self._padded(codes))
         guard = ' and '.join([test] + [_code(c) for c in conditions])
         start, stop = f'_mx_vs_{name}', f'_mx_ve_{name}'
         m = o.module
@@ -902,18 +898,18 @@ class _Rewrite(cst.CSTTransformer):
             (call, schema), parts = inline
             hold = self._take(call, _NO_LABEL, -1)
             codes = [self.code_of(hold, level, part, schema['levels'][level]) for level, part in enumerate(parts)]
-            args = [o.ref(hold), cst.Integer(str(len(parts))), *codes, *[cst.Integer('0')] * (5 - len(codes))]
+            args = [o.ref(hold), cst.Integer(str(len(parts))), *self._padded(codes)]
             start = self._m('view_start', *args)
             if _code(expr) in o.ambiguous:
                 start = cst.IfExp(test=self._native_test(self._take(call, 1, -5), []), body=start,
                                   orelse=cst.Integer('-1'), lpar=[cst.LeftParen()], rpar=[cst.RightParen()])
-            return _View(None, call, schema, len(parts), codes, start, self._m('view_stop', *args), None)
+            return _View(None, call, schema, len(parts), codes, start, self._m('view_stop', *args))
         found = o._receiver(expr)
         if found is None or not found[1].get('unique') or _code(found[0]) in o.mutated or not self._shared(found[0]):
             return None
         if isinstance(expr, cst.Name):
             self.replaced_names.add(expr.value)
-        return _View(None, found[0], found[1], 0, [], None, None, None)
+        return _View(None, *found)
 
     def _shared(self, call):
         """In an item, walks read only a table the Data space publishes: a frame the item computes itself would be
@@ -931,6 +927,30 @@ class _Rewrite(cst.CSTTransformer):
 
     def _m(self, name, *args):
         return cst.Call(func=cst.Attribute(cst.Name(self.o.module), cst.Name(name)), args=[cst.Arg(a) for a in args])
+
+    @staticmethod
+    def _next(expr):
+        return cst.BinaryOperation(expr, cst.Add(), cst.Integer('1'))
+
+    @staticmethod
+    def _range(*bounds):
+        return cst.Call(func=cst.Name('range'), args=[cst.Arg(b) for b in bounds])
+
+    @staticmethod
+    def _assign(name, value):
+        return cst.SimpleStatementLine([cst.Assign([cst.AssignTarget(cst.Name(name))], value)])
+
+    @staticmethod
+    def _positive(expr):
+        return cst.Comparison(expr, [cst.ComparisonTarget(cst.GreaterThan(), cst.Integer('0'))])
+
+    @staticmethod
+    def _loop(updated, position, iterator, first):
+        """The native loop of a walk: ``for position in iterator:``, the statements ``first`` before the body."""
+        body = updated.body
+        body = body.with_changes(body=[*first, *body.body]) if isinstance(body, cst.IndentedBlock) else \
+            cst.IndentedBlock(body=[*first, cst.SimpleStatementLine(body=body.body)])
+        return updated.with_changes(target=position, body=body, iter=iterator)
 
     def _row_at(self, view, hold, position):
         """The stored row at a pandas position of a view (a stored row of a prefix view, ordered)."""
@@ -952,11 +972,15 @@ class _Rewrite(cst.CSTTransformer):
         return self._take(view.call, _NO_LABEL, -1) if view.start is None else self._take(view.call, view.depth, -3)
 
     def _guarded(self, original, updated, view, test, native, kind=None):
-        fallback = self._fallback(updated, view.call)
-        if kind is not None:
-            fallback = _cast({'f64': '_mx_cy.double', 'i64': '_mx_cy.longlong'}[kind], fallback)
-        lowered = cst.IfExp(test=test, body=native, orelse=fallback, lpar=[cst.LeftParen()], rpar=[cst.RightParen()])
-        if kind is not None:
+        return self._lowered(test, native, self._fallback(updated, view.call), kind)
+
+    def _lowered(self, test, read, fallback, kind=None):
+        """``read if test else fallback``: the pandas read cast to the read's C type when the read is typed (both
+        branches native), and the lowered read marked as of that kind (``float()``/``int()`` around it dropped)."""
+        if kind in CTYPE:
+            fallback = _cast(CTYPE[kind], fallback)
+        lowered = cst.IfExp(test=test, body=read, orelse=fallback, lpar=[cst.LeftParen()], rpar=[cst.RightParen()])
+        if kind in CTYPE:
             self.native[id(lowered)] = kind
         return lowered
 
@@ -1074,7 +1098,7 @@ class _Rewrite(cst.CSTTransformer):
             self.replaced_names.add(inner.func.value.value.value)
         native = self._m(f'level_{func.attr.value}_ll', o.ref(hold), cst.Integer(str(index)))
         self._record(original, 'L5', call)
-        return self._guarded(original, updated, _View(None, call, schema, 0, [], None, None, None),
+        return self._guarded(original, updated, _View(None, call, schema),
                              self._native_test(hold, []), native, 'i64')
 
     def _key_position(self, node):
@@ -1107,13 +1131,14 @@ class _Rewrite(cst.CSTTransformer):
         self._record(call, 'L6', view.call)
         return self._guarded(whole_call or call, updated, view, test, self._label(view, hold, row), 'i64')
 
-    def _labels(self, view, hold):
-        """``[label for each position]`` of a one-level view, in pandas order."""
+    def _values(self, view, hold, value, test, name):
+        """``name([value(row) for each position])`` of a one-level view in pandas order (``list``: the list itself)."""
         position = cst.Name(self.o.position_name())
-        start, stop, test = self._view_parts(view, hold)
-        rng = cst.Call(func=cst.Name('range'), args=[cst.Arg(start), cst.Arg(stop)])
-        return cst.ListComp(elt=self._label(view, hold, self._row_at(view, hold, position)),
-                            for_in=cst.CompFor(target=position, iter=rng)), test
+        start, stop, view_test = self._view_parts(view, hold)
+        values = cst.ListComp(elt=value(self._row_at(view, hold, position)),
+                              for_in=cst.CompFor(target=position, iter=self._range(start, stop)))
+        native = values if name == 'list' else cst.Call(func=cst.Name(name), args=[cst.Arg(values)])
+        return native, self._conjunction([view_test, *test])
 
     def _builtin(self, name, view, original, updated):
         if not self._one_level(view):
@@ -1125,8 +1150,7 @@ class _Rewrite(cst.CSTTransformer):
             self._record(original, 'L8', view.call)
             return self._guarded(original, updated, view, test, native, 'i64')
         hold = self._walk_hold(view)
-        labels, test = self._labels(view, hold)
-        native = labels if name == 'list' else cst.Call(func=cst.Name(name), args=[cst.Arg(labels)])
+        native, test = self._values(view, hold, lambda row: self._label(view, hold, row), [], name)
         self._record(original, 'L8', view.call)
         return self._guarded(original, updated, view, test, native)
 
@@ -1138,19 +1162,16 @@ class _Rewrite(cst.CSTTransformer):
             return None
         if name == 'len':
             return self._builtin('len', view, original, updated)
-        position = cst.Name(self.o.position_name())
         hold = self._walk_hold(view)
         chold = self._take(view.call, label, COLUMN_KIND[kind])
-        start, stop, test = self._view_parts(view, hold)
-        value = self._m(kind + '_row', self.o.ref(chold), self.o.slot(chold),
-                        cst.BinaryOperation(self._row_at(view, hold, position), cst.Add(), cst.Integer('1')))
-        values = cst.ListComp(elt=value, for_in=cst.CompFor(target=position, iter=cst.Call(
-            func=cst.Name('range'), args=[cst.Arg(start), cst.Arg(stop)])))
-        native = values if name == 'list' else cst.Call(func=cst.Name(name), args=[cst.Arg(values)])
-        test = self._conjunction([test, cst.Comparison(self.o.slot(chold), [cst.ComparisonTarget(
-            cst.GreaterThan(), cst.Integer('0'))])])
+        native, test = self._values(view, hold, lambda row: self._column_value(chold, kind, row),
+                                    [self._positive(self.o.slot(chold))], name)
         self._record(original, 'L8', view.call)
         return self._guarded(original, updated, view, test, native)
+
+    def _column_value(self, chold, kind, row):
+        """The value of a float64 or int64 column at a stored row."""
+        return self._m(kind + '_row', self.o.ref(chold), self.o.slot(chold), self._next(row))
 
     def _walk_target(self, target, view):
         """{name: level} of a loop target over a view's index: one name (one remaining level) or a tuple of names,
@@ -1206,8 +1227,7 @@ class _Rewrite(cst.CSTTransformer):
                 return None
             hold = self._walk_hold(view)
             chold = self._take(view.call, label, COLUMN_KIND[kind])
-            value = lambda row: self._m(kind + '_row', self.o.ref(chold), self.o.slot(chold),
-                                        cst.BinaryOperation(row, cst.Add(), cst.Integer('1')))
+            value = lambda row: self._column_value(chold, kind, row)
             if items:
                 if not (isinstance(target, cst.Tuple) and len(target.elements) == 2 and all(
                         isinstance(e, cst.Element) and isinstance(e.value, cst.Name) for e in target.elements)):
@@ -1220,7 +1240,7 @@ class _Rewrite(cst.CSTTransformer):
                 make = lambda row: {target.value: value(row)}
             else:
                 return None
-            extra = [cst.Comparison(self.o.slot(chold), [cst.ComparisonTarget(cst.GreaterThan(), cst.Integer('0'))])]
+            extra = [self._positive(self.o.slot(chold))]
         start, stop, test = self._view_parts(view, hold)
         return view, self._conjunction([test, *extra]), start, stop, lambda row: make(self._row_at(view, hold, row))
 
@@ -1252,8 +1272,7 @@ class _Rewrite(cst.CSTTransformer):
 
             def leave_Arg(self, o_, new):
                 return new.with_changes(keyword=o_.keyword)
-        native = updated.with_changes(for_in=updated.for_in.with_changes(
-            target=position, iter=cst.Call(func=cst.Name('range'), args=[cst.Arg(start), cst.Arg(stop)])))
+        native = updated.with_changes(for_in=updated.for_in.with_changes(target=position, iter=self._range(start, stop)))
         native = native.with_changes(elt=native.elt.visit(Sub()), for_in=native.for_in.with_changes(
             ifs=[i.visit(Sub()) for i in native.for_in.ifs],
             inner_for_in=native.for_in.inner_for_in.visit(Sub()) if native.for_in.inner_for_in else None))
@@ -1289,17 +1308,15 @@ class _Rewrite(cst.CSTTransformer):
         view, test, start, stop, make = found
         self.o.position_name()
         self.o.declarations.append(position.value)
-        first = [cst.SimpleStatementLine([cst.Assign([cst.AssignTarget(cst.Name(n))], expr)])
-                 for n, expr in make(position).items()]
-        body = updated.body
-        body = body.with_changes(body=[*first, *body.body]) if isinstance(body, cst.IndentedBlock) else \
-            cst.IndentedBlock(body=[*first, cst.SimpleStatementLine(body=body.body)])
-        native = updated.with_changes(target=position, body=body,
-                                      iter=cst.Call(func=cst.Name('range'), args=[cst.Arg(start), cst.Arg(stop)]))
-        fallback = self._fallback(updated, view.call)
+        native = self._loop(updated, position, self._range(start, stop),
+                            [self._assign(n, expr) for n, expr in make(position).items()])
         self._record(original, 'L8', view.call)
-        return cst.If(test=test, body=cst.IndentedBlock(body=[native]),
-                      orelse=cst.Else(body=cst.IndentedBlock(body=[fallback])))
+        return self._branch(test, [native], [self._fallback(updated, view.call)])
+
+    @staticmethod
+    def _branch(test, native, fallback):
+        """``if test: native else: fallback`` (statements)."""
+        return cst.If(test=test, body=cst.IndentedBlock(body=native), orelse=cst.Else(body=cst.IndentedBlock(body=fallback)))
 
     def iterrows_loop(self, original, updated):
         """``for k, row in R.iterrows():`` (T-5 shape D): positions in pandas order, ``k`` the label and ``row`` the
@@ -1314,27 +1331,21 @@ class _Rewrite(cst.CSTTransformer):
         call, schema, _ = found
         hold = self._take(call, _NO_LABEL, -4)
         hold.row_columns = True
-        view = _View(None, call, schema, 0, [], None, None, None)
+        view = _View(None, call, schema)
         var = f'_mx_rw_{name}'
         if var not in o.declarations:
             o.declarations.append(var)
         position = cst.Name(o.position_name())
         o.declarations.append(position.value)
         row = self._m('whole_row', o.ref(hold), position)
-        first = [cst.SimpleStatementLine([cst.Assign([cst.AssignTarget(cst.Name(var))], row)]),
-                 cst.SimpleStatementLine([cst.Assign([cst.AssignTarget(cst.Name(key))], self._label(view, hold, row))])]
-        body = updated.body
-        body = body.with_changes(body=[*first, *body.body]) if isinstance(body, cst.IndentedBlock) else \
-            cst.IndentedBlock(body=[*first, cst.SimpleStatementLine(body=body.body)])
-        native = updated.with_changes(target=position, body=body, iter=cst.Call(
-            func=cst.Name('range'), args=[cst.Arg(self._m('nrows', o.ref(hold)))]))
+        native = self._loop(updated, position, self._range(self._m('nrows', o.ref(hold))),
+                            [self._assign(var, row), self._assign(key, self._label(view, hold, row))])
         if isinstance(original.iter.func.value, cst.Name):
             self.replaced_names.add(original.iter.func.value.value)
         fallback = [cst.parse_statement(f'{var} = -1'), self._fallback(updated, call)]
         self._record(original.iter, 'L8', call)
         unbound = cst.parse_statement(f'{name} = None')    # only its guarded pandas reads name it
-        return cst.If(test=self._native_test(hold, []), body=cst.IndentedBlock(body=[unbound, native]),
-                      orelse=cst.Else(body=cst.IndentedBlock(body=fallback)))
+        return self._branch(self._native_test(hold, []), [unbound, native], fallback)
 
     def view_read(self, original, updated, value, parts):
         """``V.loc[k, "c"]`` on a view local (not a prefix cell's): the prefix codes and k's code."""
@@ -1351,17 +1362,14 @@ class _Rewrite(cst.CSTTransformer):
                 return named.with_changes(test=self._conjunction([test, named.test]))
             return None
         kind = dict(view.schema['columns']).get(label) if view.schema['kind'] == 'frame' else None
-        own = [e.value for e in parts[0].elements] if isinstance(parts[0], cst.Tuple) else [parts[0]]
+        own = _parts(parts[0])
         levels = view.schema['levels']
         if label is None or kind not in READ or view.depth + len(own) != len(levels):
             return None
         hold = self._take(view.call, label, COLUMN_KIND[kind])
         start, stop, test = self._view_parts(view, hold)
-        codes = list(view.codes) + [self.code_of(hold, level, part, levels[level])
-                                    for level, part in enumerate(own, start=view.depth)]
-        suffix, args = self.code_args(codes)
-        native = cst.Call(func=cst.Attribute(cst.Name(o.module), cst.Name(kind + suffix)),
-                          args=[cst.Arg(o.ref(hold)), cst.Arg(o.slot(hold)), *[cst.Arg(c) for c in args]])
+        suffix, args = self._codes(hold, view.codes, own, levels)
+        native = self._m(kind + suffix, o.ref(hold), o.slot(hold), *args)
         self._record(original, 'L3', view.call)
         return self._guarded(original, updated, view, test, native, kind)
 
@@ -1380,21 +1388,17 @@ class _Rewrite(cst.CSTTransformer):
         hold = self._take(call, _NO_LABEL, -4)
         hold.row_columns = True
         key = _index_parts(assign.value)[0]
-        parts = [e.value for e in key.elements] if isinstance(key, cst.Tuple) else [key]
-        codes = [self.code_of(hold, level, part, schema['levels'][level]) for level, part in enumerate(parts)]
-        suffix, args = self.code_args(codes)
+        suffix, args = self._codes(hold, [], _parts(key), schema['levels'])
         var = f'_mx_rw_{name.value}'
         if var not in o.declarations:
             o.declarations.append(var)
-        lookup = cst.Call(func=cst.Attribute(cst.Name(o.module), cst.Name('row' + suffix)),
-                          args=[cst.Arg(o.ref(hold)), *[cst.Arg(a) for a in args]])
-        native = cst.SimpleStatementLine([cst.Assign([cst.AssignTarget(cst.Name(var))], lookup)])
+        lookup = self._m('row' + suffix, o.ref(hold), *args)
+        native = self._assign(var, lookup)
         fallback = [cst.parse_statement(f'{var} = -1'),
                     original.with_changes(body=[original.body[0].with_changes(
                         value=self._fallback(original.body[0].value, call))])]
         self._record(assign.value, 'L2', call)
-        return cst.If(test=self._native_test(hold, []), body=cst.IndentedBlock(body=[native]),
-                      orelse=cst.Else(body=cst.IndentedBlock(body=fallback)))
+        return self._branch(self._native_test(hold, []), [native], fallback)
 
     def row_local_read(self, original, updated, parts):
         """``row["c"]`` of a row local: the field from the prepared blocks, of the kind pandas gives it (as L2)."""
@@ -1411,31 +1415,28 @@ class _Rewrite(cst.CSTTransformer):
             read = self._m('field_f64', o.ref(hold), cst.parse_expression(f'_mx_rw_{value.value} + 1'),
                            _cast('object', self.updated_of.get(id(parts[0]), parts[0])))
             self._record(original, 'L2', call)
-            lowered = cst.IfExp(test=cst.parse_expression(f'_mx_rw_{value.value} >= 0'), body=read,
-                                orelse=_cast('_mx_cy.double', updated), lpar=[cst.LeftParen()], rpar=[cst.RightParen()])
-            self.native[id(lowered)] = 'f64'
-            return lowered
+            return self._lowered(cst.parse_expression(f'_mx_rw_{value.value} >= 0'), read, updated, 'f64')
+        read, kind, _ = self._field_read(call, schema, label, lambda hold: (
+            cst.parse_expression(f'_mx_rw_{value.value} + 1'), []))
+        self._record(original, 'L2', call)
+        return self._lowered(cst.parse_expression(f'_mx_rw_{value.value} >= 0'), read, updated, kind)
+
+    def _field_read(self, call, schema, label, position):
+        """Field ``label`` of a stored row, of the kind pandas gives it: the column's own on a row with an object
+        column, else the row's common kind (an int column of a float row reads as a float). ``position(hold)``:
+        (the row + 1, its conditions). (read, kind, conditions)."""
+        o = self.o
         kinds = dict(schema['columns'])
         mixed = any(k == 'obj' for k in kinds.values())
         kind = kinds[label] if mixed else ('f64' if any(k == 'f64' for k in kinds.values()) else 'i64')
-        stored = kinds[label]
+        stored = kinds[label]           # the block the column is stored in
         hold = self._take(call, label, {'f64': 0, 'i64': 1, 'obj': 2}[stored])
-        hold.row_columns = True
-        fn = {'f64': 'f64_row', 'i64': 'i64_row', 'obj': 'object_field'}[stored]
-        read = cst.Call(func=cst.Attribute(cst.Name(o.module), cst.Name(fn)),
-                        args=[cst.Arg(o.ref(hold)), cst.Arg(o.slot(hold)),
-                              cst.Arg(cst.parse_expression(f'_mx_rw_{value.value} + 1'))])
+        hold.row_columns = True         # the row's dtype depends on every column: all of them are checked
+        row, conditions = position(hold)
+        read = self._m({'f64': 'f64_row', 'i64': 'i64_row', 'obj': 'object_field'}[stored], o.ref(hold), o.slot(hold), row)
         if kind == 'f64' and stored == 'i64':
             read = _cast('_mx_cy.double', read)
-        fallback = updated
-        if kind in ('f64', 'i64'):
-            fallback = _cast('_mx_cy.double' if kind == 'f64' else '_mx_cy.longlong', fallback)
-        self._record(original, 'L2', call)
-        lowered = cst.IfExp(test=cst.parse_expression(f'_mx_rw_{value.value} >= 0'), body=read, orelse=fallback,
-                            lpar=[cst.LeftParen()], rpar=[cst.RightParen()])
-        if kind != 'obj':
-            self.native[id(lowered)] = kind
-        return lowered
+        return read, kind, self._native_test(hold, conditions)
 
     def column_keyed(self, original, updated, parts):
         """L4 (T-5): ``R["c"][k]`` / ``R.c[k]`` of a float64 or int64 column: ``R.loc[k, "c"]`` (the same rule for an
@@ -1460,21 +1461,7 @@ class _Rewrite(cst.CSTTransformer):
             return None
         if schema['levels'] != ('int',) and len(schema['levels']) == 1 and o.facts.is_int(parts[0]):
             return None
-        key_parts, why = self._key(parts[0], schema)
-        if why:
-            return None
-        hold = self._take(call, label, COLUMN_KIND[kind])
-        if isinstance(column.value, cst.Name):
-            self.replaced_names.add(column.value.value)
-        (suffix, args), conditions = self._read_args(hold, key_parts, schema['levels'])
-        read = self._m(kind + suffix, o.ref(hold), o.slot(hold), *args)
-        self._record(original, 'L4', call)
-        lowered = cst.IfExp(test=self._native_test(hold, conditions), body=read,
-                            orelse=_cast('_mx_cy.double' if kind == 'f64' else '_mx_cy.longlong',
-                                         self._fallback(updated, call)),
-                            lpar=[cst.LeftParen()], rpar=[cst.RightParen()])
-        self.native[id(lowered)] = kind
-        return lowered
+        return self._column_read(original, updated, call, schema, parts[0], label, kind, column.value, 'L4')
 
     def named_read(self, original, updated, call, schema, key, name, prefix):
         """T-5 (shape A): ``R.loc[key, name]`` with the column chosen at run time, every column of the frame of one
@@ -1498,24 +1485,17 @@ class _Rewrite(cst.CSTTransformer):
         hold.row_columns = True
         conditions = []
         if prefix:
-            codes = list(prefix)
-            codes += [self.code_of(hold, level, part, levels[level]) for level, part in enumerate(own, len(prefix))]
-            suffix, args = self.code_args(codes)
+            suffix, args = self._codes(hold, prefix, own, levels)
         else:
             (suffix, args), conditions = self._read_args(hold, own, levels)
         label = _cast('object', self.updated_of.get(id(name), name))
         if kind is None:            # float(R.loc[key, name]) on columns of several kinds: float of the stored value
-            row = cst.BinaryOperation(self._m('row' + suffix, o.ref(hold), *args), cst.Add(), cst.Integer('1'))
+            row = self._next(self._m('row' + suffix, o.ref(hold), *args))
             read, kind = self._m('field_f64', o.ref(hold), row, label), 'f64'
         else:
             read = self._m(kind + suffix, o.ref(hold), self._m('named_slot', o.ref(hold), label), *args)
         self._record(original, 'L1', call)
-        lowered = cst.IfExp(test=self._native_test(hold, conditions), body=read,
-                            orelse=_cast('_mx_cy.double' if kind == 'f64' else '_mx_cy.longlong',
-                                         self._fallback(updated, call)),
-                            lpar=[cst.LeftParen()], rpar=[cst.RightParen()])
-        self.native[id(lowered)] = kind
-        return lowered
+        return self._lowered(self._native_test(hold, conditions), read, self._fallback(updated, call), kind)
 
     def column_item(self, original, updated, parts):
         """``C.iloc[i]`` / ``C.loc[k]`` of a column of a view in a local (a float64 or int64 column): the value at
@@ -1540,17 +1520,14 @@ class _Rewrite(cst.CSTTransformer):
             hold = self._walk_hold(view)
             start, stop, test = self._view_parts(view, hold)
             row = self._row_at(view, hold, self._m('position', start, stop, _cast('_mx_cy.Py_ssize_t', emit)))
-            read = self._m(kind + '_row', o.ref(chold), o.slot(chold), cst.BinaryOperation(row, cst.Add(), cst.Integer('1')))
+            read = self._column_value(chold, kind, row)
         else:
             if view.start is None or isinstance(part, (cst.Slice, cst.List, cst.ListComp, cst.Tuple)):
                 return None
             start, stop, test = self._view_parts(view, self._take(view.call, _NO_LABEL, -1))
-            levels = view.schema['levels']
-            codes = list(view.codes) + [self.code_of(chold, view.depth, part, levels[view.depth])]
-            suffix, args = self.code_args(codes)
+            suffix, args = self._codes(chold, view.codes, [part], view.schema['levels'])
             read = self._m(kind + suffix, o.ref(chold), o.slot(chold), *args)
-        test = self._conjunction([test, cst.Comparison(o.slot(chold), [cst.ComparisonTarget(
-            cst.GreaterThan(), cst.Integer('0'))])])
+        test = self._conjunction([test, self._positive(o.slot(chold))])
         self._record(original, 'L8' if value.attr.value == 'iloc' else 'L3', view.call)
         return self._guarded(original, updated, view, test, read, kind)
 
@@ -1585,11 +1562,7 @@ class _Rewrite(cst.CSTTransformer):
         if found is None:
             return updated
         call, schema = found
-        if _code(call) in o.mutated:
-            self._record(original, 'pandas', call, 'the formula edits this frame in place')
-            return updated
-        if not schema.get('unique'):
-            self._record(original, 'pandas', call, 'the index is not unique (pandas)')
+        if not self._plain(original, call, schema):
             return updated
         if schema['kind'] == 'series':
             if len(parts) != 1:
@@ -1618,25 +1591,33 @@ class _Rewrite(cst.CSTTransformer):
                 'the Series values are not float64 or int64 in every trace (a row read by field: form L2)'
                 if schema['kind'] == 'series' else f'column {label!r} is not float64 or int64 in every trace'))
             return updated
-        key_parts, why = self._key(key, schema)
+        return self._column_read(original, updated, call, schema, key, label, kind,
+                                 value.value if form != 'item' else value, 'L1') or updated
+
+    def _plain(self, original, call, schema):
+        """The frame ``call`` is read as stored: not edited by the formula, of a unique index (else the reason)."""
+        why = ('the formula edits this frame in place' if _code(call) in self.o.mutated
+               else None if schema.get('unique') else 'the index is not unique (pandas)')
         if why:
             self._record(original, 'pandas', call, why)
-            return updated
+        return why is None
+
+    def _column_read(self, original, updated, call, schema, key, label, kind, receiver, form):
+        """A typed read of column ``label`` at a complete ``key`` of the frame ``call`` (L1, L4); None, with the
+        reason recorded for L1, when the key is not one."""
+        o = self.o
+        key_parts, why = self._key(key, schema)
+        if why:
+            if form == 'L1':
+                self._record(original, 'pandas', call, why)
+            return None
         hold = self._take(call, label, COLUMN_KIND[kind])
-        if isinstance(value.value if form != 'item' else value, cst.Name):
-            self.replaced_names.add((value.value if form != 'item' else value).value)
+        if isinstance(receiver, cst.Name):
+            self.replaced_names.add(receiver.value)
         (suffix, args), conditions = self._read_args(hold, key_parts, schema['levels'])
-        read = cst.Call(func=cst.Attribute(cst.Name(o.module), cst.Name(kind + suffix)),
-                        args=[cst.Arg(o.ref(hold)), cst.Arg(o.slot(hold)), *[cst.Arg(p) for p in args]])
-        # the pandas read converted to the column's C type, so both branches are native (no boxing per read); the
-        # value is the same (float64 -> double, int64 -> long long), the boundary types of the probe
-        fallback = _cast('_mx_cy.double' if kind == 'f64' else '_mx_cy.longlong', self._fallback(updated, call))
-        self._record(original, 'L1', call)
-        lowered = cst.IfExp(test=self._native_test(hold, conditions),
-                            body=read, orelse=fallback,
-                            lpar=[cst.LeftParen()], rpar=[cst.RightParen()])
-        self.native[id(lowered)] = kind
-        return lowered
+        read = self._m(kind + suffix, o.ref(hold), o.slot(hold), *args)
+        self._record(original, form, call)
+        return self._lowered(self._native_test(hold, conditions), read, self._fallback(updated, call), kind)
 
     def object_read(self, original, updated, value, form, call, schema, key, label):
         """T-5: ``R.loc[key, "c"]`` of an object column (or ``S[k]`` of an object Series): the object pandas returns,
@@ -1656,11 +1637,10 @@ class _Rewrite(cst.CSTTransformer):
             conditions = [cst.parse_expression(f'self.{field} > 0')]
         else:
             (suffix, args), conditions = self._read_args(hold, key_parts, schema['levels'])
-            row = cst.BinaryOperation(self._m('row' + suffix, o.ref(hold), *args), cst.Add(), cst.Integer('1'))
+            row = self._next(self._m('row' + suffix, o.ref(hold), *args))
             read = self._m('object_field', o.ref(hold), o.slot(hold), row)
         self._record(original, 'L1', call)
-        return cst.IfExp(test=self._native_test(hold, conditions), body=read, orelse=self._fallback(updated, call),
-                         lpar=[cst.LeftParen()], rpar=[cst.RightParen()])
+        return self._lowered(self._native_test(hold, conditions), read, self._fallback(updated, call))
 
     def leave_Call(self, original, updated):
         """``float(...)`` around a float64 read and ``int(...)`` around an int64 read are dropped: the read is
@@ -1676,13 +1656,9 @@ class _Rewrite(cst.CSTTransformer):
             hold = self._take(call, _NO_LABEL, -2)
             if isinstance(original.func.value.value, cst.Name):
                 self.replaced_names.add(original.func.value.value.value)
-            read = cst.Call(func=cst.Attribute(cst.Name(o.module), cst.Name(which + '_ll')), args=[cst.Arg(o.ref(hold))])
+            read = self._m(which + '_ll', o.ref(hold))
             self._record(original, 'L5', call)
-            lowered = cst.IfExp(test=self._native_test(hold, []), body=read,
-                                orelse=_cast('_mx_cy.longlong', self._fallback(updated, call)),
-                                lpar=[cst.LeftParen()], rpar=[cst.RightParen()])
-            self.native[id(lowered)] = 'i64'
-            return lowered
+            return self._lowered(self._native_test(hold, []), read, self._fallback(updated, call), 'i64')
         if (isinstance(updated.func, cst.Name) and len(updated.args) == 1 and not updated.args[0].keyword
                 and not updated.args[0].star):
             kind = self.native.get(id(updated.args[0].value))
@@ -1692,11 +1668,8 @@ class _Rewrite(cst.CSTTransformer):
 
     def _prefix_holds(self, hold, prefix_parts, name):
         o = self.o
-        codes, conditions = [], []
-        for level, part in enumerate(prefix_parts):
-            field = o.code_field(hold, level, part)
-            codes.append(cst.parse_expression(f'self.{field} - 1'))
-            conditions.append(cst.parse_expression(f'self.{field} > 0'))
+        conditions = []
+        codes = [self._held(hold, level, part, conditions) for level, part in enumerate(prefix_parts)]
         conditions.append(cst.parse_expression(f'self.{o.assigned_field(hold, name)} > 0'))
         return codes, conditions
 
@@ -1708,10 +1681,7 @@ class _Rewrite(cst.CSTTransformer):
         target = statement.body[0].targets[0].target.value
         hold = self._take(call, len(prefix_parts), -3)     # T-5: asof needs pandas order within the prefix
         codes, conditions = self._prefix_holds(hold, prefix_parts, name)
-        codes += [cst.Integer('0')] * (5 - len(codes))
-        search = cst.Call(func=cst.Attribute(cst.Name(o.module), cst.Name('asof_row')),
-                          args=[cst.Arg(o.ref(hold)), cst.Arg(cst.Integer(str(len(prefix_parts)))),
-                                *[cst.Arg(c) for c in codes], cst.Arg(_cast('_mx_cy.double', x))])
+        search = self._m('asof_row', o.ref(hold), cst.Integer(str(len(prefix_parts))), *self._padded(codes), _cast('_mx_cy.double', x))
         value = cst.IfExp(test=self._native_test(hold, conditions), body=search, orelse=cst.parse_expression('-1'))
         self.asof_rows[target] = (hold, pcall, original)
         # the fallback of a read evaluates the pandas asof again, on the cell's value
@@ -1737,7 +1707,7 @@ class _Rewrite(cst.CSTTransformer):
         key = parts[0]
         if isinstance(key, cst.Name) and key.value in self.asof_rows:     # a key found by a lowered asof
             return self._asof_read(original, updated, value, label, kind, call, pcall, key.value)
-        own = [e.value for e in key.elements] if isinstance(key, cst.Tuple) else [key]
+        own = _parts(key)
         levels = schema['levels']
         if len(prefix_parts) + len(own) != len(levels) or not o.per_item:
             self._record(original, 'pandas', pcall, 'the prefix and the key do not make a complete key'
@@ -1745,37 +1715,26 @@ class _Rewrite(cst.CSTTransformer):
             return updated
         hold = self._take(call, label, COLUMN_KIND[kind])
         codes, conditions = self._prefix_holds(hold, prefix_parts, name)
-        for level, part in enumerate(own, start=len(prefix_parts)):
-            codes.append(self.code_of(hold, level, part, levels[level]))
-        suffix, args = self.code_args(codes)
-        read = cst.Call(func=cst.Attribute(cst.Name(o.module), cst.Name(kind + suffix)),
-                        args=[cst.Arg(o.ref(hold)), cst.Arg(o.slot(hold)), *[cst.Arg(c) for c in args]])
+        suffix, args = self._codes(hold, codes, own, levels)
+        read = self._m(kind + suffix, o.ref(hold), o.slot(hold), *args)
         if isinstance(value.value, cst.Name):
             self.swaps[value.value.value] = pcall
-        fallback = _cast('_mx_cy.double' if kind == 'f64' else '_mx_cy.longlong', self._fallback(updated, call))
         self._record(original, 'L3', pcall)
-        lowered = cst.IfExp(test=self._native_test(hold, conditions), body=read, orelse=fallback,
-                            lpar=[cst.LeftParen()], rpar=[cst.RightParen()])
-        self.native[id(lowered)] = kind
-        return lowered
+        return self._lowered(self._native_test(hold, conditions), read, self._fallback(updated, call), kind)
 
     def _asof_read(self, original, updated, value, label, kind, call, pcall, name):
         o = self.o
         asof_hold = self.asof_rows[name][0]
         hold = self._take(call, label, COLUMN_KIND[kind])
         row = f'_mx_asof_{name}'
-        read = cst.Call(func=cst.Attribute(cst.Name(o.module), cst.Name(kind + '_row')),
-                        args=[cst.Arg(o.ref(hold)), cst.Arg(o.slot(hold)), cst.Arg(cst.parse_expression(f'{row} + 1'))])
+        read = self._m(kind + '_row', o.ref(hold), o.slot(hold), cst.parse_expression(f'{row} + 1'))
         # the row is a row of the table the asof searched: the same prepared table object
         test = self._conjunction([cst.parse_expression(f'{row} >= 0'), self._native_test(hold, []),
                                   cst.parse_expression(f'self.{hold.table} is self.{asof_hold.table}')])
         if isinstance(value.value, cst.Name):
             self.swaps[value.value.value] = pcall
-        fallback = _cast('_mx_cy.double' if kind == 'f64' else '_mx_cy.longlong', self._fallback(updated, call))
         self._record(original, 'L3', pcall)
-        lowered = cst.IfExp(test=test, body=read, orelse=fallback, lpar=[cst.LeftParen()], rpar=[cst.RightParen()])
-        self.native[id(lowered)] = kind
-        return lowered
+        return self._lowered(test, read, self._fallback(updated, call), kind)
 
     def row_cell_field(self, original, updated, parts):
         """T-5: ``self.P()["f"]`` with P a row cell (``return T.loc[key]``, the key complete and fixed per item) that
@@ -1812,10 +1771,7 @@ class _Rewrite(cst.CSTTransformer):
         label = self.updated_of.get(id(parts[0]), parts[0])
         read = self._m('field_f64', o.ref(hold), cst.parse_expression(f'self.{field}'), _cast('object', label))
         self._record(original, 'L2', found[0])
-        lowered = cst.IfExp(test=self._native_test(hold, [cst.parse_expression(f'self.{field} > 0')]), body=read,
-                            orelse=_cast('_mx_cy.double', updated), lpar=[cst.LeftParen()], rpar=[cst.RightParen()])
-        self.native[id(lowered)] = 'f64'
-        return lowered
+        return self._lowered(self._native_test(hold, [cst.parse_expression(f'self.{field} > 0')]), read, updated, 'f64')
 
     def _row_field(self, original, updated, parts, cell=None):
         """L2 (T-4): ``R.loc[key]["f"]``, a field of a row of a frame, the key fixed per item (the model-point row,
@@ -1835,9 +1791,7 @@ class _Rewrite(cst.CSTTransformer):
         call, schema = found
         if schema['kind'] != 'frame':
             return None
-        if _code(call) in o.mutated or not schema.get('unique'):
-            self._record(original, 'pandas', call, 'the formula edits this frame in place'
-                         if _code(call) in o.mutated else 'the index is not unique (pandas)')
+        if not self._plain(original, call, schema):
             return updated
         key = key_parts[0]
         levels = schema['levels']
@@ -1854,41 +1808,19 @@ class _Rewrite(cst.CSTTransformer):
         if label not in kinds:
             self._record(original, 'pandas', call, f'column {label!r} is not in every traced frame')
             return updated
-        mixed = any(k == 'obj' for k in kinds.values())
-        kind = kinds[label] if mixed else ('f64' if any(k == 'f64' for k in kinds.values()) else 'i64')
-        stored = kinds[label]           # the block the column is stored in
-        hold = self._take(call, label, {'f64': 0, 'i64': 1, 'obj': 2}[stored])
-        hold.row_columns = True         # the row's dtype depends on every column: all of them are checked
         if isinstance(row.value.value, cst.Name):
             self.replaced_names.add(row.value.value.value)
         name = cell or (o.row_names.get(_code(row)) if o.row_names else None)
-        m = o.module
-        if per_read:
-            parts_ = [e.value for e in key.elements] if isinstance(key, cst.Tuple) else [key]
-            codes = [self.code_of(hold, level, part, levels[level]) for level, part in enumerate(parts_)]
-            suffix, cargs = self.code_args(codes)
-            position = cst.BinaryOperation(self._m('row' + suffix, o.ref(hold), *cargs), cst.Add(), cst.Integer('1'))
-            conditions = []
-        else:
+
+        def position(hold):
+            if per_read:
+                suffix, cargs = self._codes(hold, [], _parts(key), levels)
+                return self._next(self._m('row' + suffix, o.ref(hold), *cargs)), []
             field = o.row_field(hold, key, name)
-            position = cst.parse_expression(f'self.{field}')
-            conditions = [cst.parse_expression(f'self.{field} > 0')]
-        args = [cst.Arg(o.ref(hold)), cst.Arg(o.slot(hold)), cst.Arg(position)]
-        fn = {'f64': 'f64_row', 'i64': 'i64_row', 'obj': 'object_field'}[stored]
-        read = cst.Call(func=cst.Attribute(cst.Name(m), cst.Name(fn)), args=args)
-        fallback = self._fallback(updated, call)
-        if kind == 'f64':
-            if stored == 'i64':
-                read = _cast('_mx_cy.double', read)
-            fallback = _cast('_mx_cy.double', fallback)
-        elif kind == 'i64':
-            fallback = _cast('_mx_cy.longlong', fallback)
+            return cst.parse_expression(f'self.{field}'), [cst.parse_expression(f'self.{field} > 0')]
+        read, kind, test = self._field_read(call, schema, label, position)
         self._record(original, 'L2', call)
-        lowered = cst.IfExp(test=self._native_test(hold, conditions),
-                            body=read, orelse=fallback, lpar=[cst.LeftParen()], rpar=[cst.RightParen()])
-        if kind != 'obj':
-            self.native[id(lowered)] = kind
-        return lowered
+        return self._lowered(test, read, self._fallback(updated, call), kind)
 
     @staticmethod
     def _conjunction(conditions):
@@ -1923,7 +1855,7 @@ class _Rewrite(cst.CSTTransformer):
             found = o._receiver(index.value)
             if found is None or not found[1].get('unique') or _code(found[0]) in o.mutated:
                 return None
-            view = _View(None, found[0], found[1], 0, [], None, None, None)
+            view = _View(None, *found)
         key = original.left
         remaining = len(view.schema['levels']) - view.depth
         if remaining > 1 and not isinstance(key, cst.Tuple) and not (
@@ -1937,19 +1869,15 @@ class _Rewrite(cst.CSTTransformer):
             return None         # a complete key on the whole table: L7
         view.used = True
         hold = self._take(view.call, _NO_LABEL, -1)
-        codes, conditions = list(view.codes), []
+        codes = list(view.codes)
         for level, part in enumerate(own, start=view.depth):
-            if o.item_fixed(part):
-                field = o.code_field(hold, level, part)
-                codes.append(cst.parse_expression(f'self.{field} - 1'))
-            else:
-                codes.append(self.code_of(hold, level, part, levels[level]))
+            codes.append(self._held(hold, level, part, []) if o.item_fixed(part)
+                         else self.code_of(hold, level, part, levels[level]))
         if count == len(levels):
             suffix, args = self.code_args(codes)
             test = self._m('contains' + suffix, o.ref(hold), *args)
         else:
-            test = cst.Comparison(self._m('view_start', o.ref(hold), cst.Integer(str(count)), *codes,
-                                          *[cst.Integer('0')] * (5 - len(codes))),
+            test = cst.Comparison(self._m('view_start', o.ref(hold), cst.Integer(str(count)), *self._padded(codes)),
                                   [cst.ComparisonTarget(cst.GreaterThanEqual(), cst.Integer('0'))])
         if isinstance(target.operator, cst.NotIn):
             test = cst.UnaryOperation(cst.Not(), test)
@@ -1976,11 +1904,7 @@ class _Rewrite(cst.CSTTransformer):
         if found is None:
             return updated
         call, schema = found
-        if _code(call) in o.mutated:
-            self._record(original, 'pandas', call, 'the formula edits this frame in place')
-            return updated
-        if not schema.get('unique'):
-            self._record(original, 'pandas', call, 'the index is not unique (pandas)')
+        if not self._plain(original, call, schema):
             return updated
         key_parts, why = self._key(original.left, schema)
         if why:
@@ -1990,17 +1914,13 @@ class _Rewrite(cst.CSTTransformer):
         if isinstance(index.value, cst.Name):
             self.replaced_names.add(index.value.value)
         (suffix, args), conditions = self._read_args(hold, key_parts, schema['levels'])
-        test = cst.Call(func=cst.Attribute(cst.Name(o.module), cst.Name('contains' + suffix)),
-                        args=[cst.Arg(o.ref(hold)), *[cst.Arg(p) for p in args]])
+        test = self._m('contains' + suffix, o.ref(hold), *args)
         if isinstance(target.operator, cst.NotIn):
             test = cst.UnaryOperation(cst.Not(), test)
         self._record(original, 'L7', call)
         # a part fixed per item that is absent from its level: the membership is False without a lookup
         native = self._native_test(hold, [])
         if conditions:
-            missing = cst.Name('True' if isinstance(target.operator, cst.NotIn) else 'False')
-            test = cst.IfExp(test=self._conjunction(conditions), body=test, orelse=missing,
-                             lpar=[cst.LeftParen()], rpar=[cst.RightParen()])
-        return cst.IfExp(test=native,
-                         body=test, orelse=self._fallback(updated, call),
-                         lpar=[cst.LeftParen()], rpar=[cst.RightParen()])
+            test = self._lowered(self._conjunction(conditions), test,
+                                 cst.Name('True' if isinstance(target.operator, cst.NotIn) else 'False'))
+        return self._lowered(native, test, self._fallback(updated, call))
