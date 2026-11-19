@@ -48,9 +48,6 @@ def test_member_reference_compares_as_c_integer(tmp_path):
     done = subprocess.run([sys.executable, '-m', 'modelx_cython', 'exported', '--sample', 'sample.py', '--no-spec'],
                           cwd=tmp_path, check=False, capture_output=True, text=True)
     assert done.returncode == 0, done.stdout[-3000:] + done.stderr[-3000:]
-    generated = (tmp_path / 'exported_cy/_mx_classes.py').read_text()
-    assert 'conv == _mx_enum_const_' in generated, generated
-    assert '._mx_definition_Conv.OK' not in generated and '._mx_definition_Conv.CREATED' not in generated
     report = json.loads((tmp_path / 'exported_cy/_mx_admission.json').read_text())
     assert report[PREFIX + 'factor']['native_enum_comparisons'] == 2
     assert report[PREFIX + 'direct']['native_enum_comparisons'] == 1

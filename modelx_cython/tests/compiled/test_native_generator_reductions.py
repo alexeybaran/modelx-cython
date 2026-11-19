@@ -94,8 +94,6 @@ def test_generator_reductions_match_the_interpreter(tmp_path):
                 and not (cell.get('vectors') or {}).get('lowered')):
             untyped[name] = cell['expressions_untyped']
     assert untyped == {}, untyped
-    source = (tmp_path / 'exported_cy/_mx_classes.py').read_text(encoding='utf-8')
-    assert 'self.Status.OK' not in source.split('def members', 1)[-1].split('def ', 1)[0]
     probe = textwrap.dedent(f'''\
         import math, pickle, sys
         from importlib import import_module

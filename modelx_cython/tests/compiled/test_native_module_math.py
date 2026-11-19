@@ -55,21 +55,23 @@ def test_module_math_bound_at_build_time(tmp_path):
         '        except (ValueError, OverflowError): pass\n', encoding='utf-8')
     subprocess.run([sys.executable, '-m', 'modelx_cython', 'exported',
                     '--sample', 'sample.py', '--no-spec'], cwd=tmp_path, check=True)
-    source = (tmp_path / 'exported_cy/_mx_classes.py').read_text(encoding='utf-8')
     report = json.loads((tmp_path / 'exported_cy/_mx_admission.json').read_text())
 
     def entry(name):
         return report[f'exported_cy._mx_classes._c_Values._f_{name}']
 
-    assert 'self.math.' not in source.replace('self.math.isclose', '').replace('self.math.log(', '')
+    # the build report: the math calls are native provider operations
+    def helpers(name):
+        return {h.rsplit('.', 1)[-1] for h in entry(name)['native_helpers']}
+
     for name in ('erf', 'exp', 'log', 'sqrt', 'isinf'):
-        assert f'.m_{name}(_mx_cy.cast(_mx_cy.p_void, self.math), ' in source, name
-    assert '.m_floor_ll(_mx_cy.cast(_mx_cy.p_void, self.math), ' in source and '.m_ceil_ll(_mx_cy.cast(_mx_cy.p_void, self.math), ' in source
-    assert '.m_floor_ll(_mx_cy.cast(_mx_cy.p_void, self.math), x)' in source and '.m_constant(_mx_cy.cast(_mx_cy.p_void, self.math), 0)' in source
-    assert '.m_floor(_mx_cy.cast(_mx_cy.p_void, self.math), x)' in source       # the unsampled (object) argument
+        assert f'm_{name}' in helpers(name), (name, helpers(name))
+    assert 'm_floor_ll' in helpers('down') and 'm_ceil_ll' in helpers('up'), (helpers('down'), helpers('up'))
+    used = set().union(*(helpers(name.rsplit('._f_', 1)[-1]) for name in report))
+    assert {'m_floor_ll', 'm_constant', 'm_floor'} <= used, used   # m_floor: the unsampled (object) argument
     assert entry('down')['return_type'] == 'long long' and entry('loglin')['native_expressions'] == 4
     # W1.8: math.isclose compiles (m_isclose); test_native_builtins_w18 compares it
-    assert entry('close')['expressions_untyped'] == [] and '.m_isclose(_mx_cy.cast(_mx_cy.p_void, self.math), ' in source
+    assert entry('close')['expressions_untyped'] == [] and 'm_isclose' in helpers('close')
     assert '2 arguments' in entry('base_two')['expressions_untyped'][0]['reason']
     probe = textwrap.dedent('''\
         import math, random, struct, sys

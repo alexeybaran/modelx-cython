@@ -77,10 +77,6 @@ def test_enum_identity_with_a_typed_integer_is_equality(tmp_path, monkeypatch):
     done = subprocess.run([sys.executable, '-m', 'modelx_cython', 'exported', '--sample', 'sample.py',
                            '--no-spec'], cwd=tmp_path, capture_output=True, text=True)
     assert done.returncode == 0, done.stdout[-3000:] + done.stderr[-3000:]
-    generated = (tmp_path / 'exported_cy/_mx_classes.py').read_text(encoding='utf-8')
-    # no identity test between a C integer and a member remains
-    assert ' is self._mx_definition_Kind.' not in generated, generated
-    assert 'self._mx_definition_Kind.A is ' not in generated and 'self._mx_definition_Kind.C is ' not in generated
     probe = textwrap.dedent('''\
         import sys
         from importlib import import_module

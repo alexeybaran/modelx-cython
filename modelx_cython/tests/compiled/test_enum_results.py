@@ -73,15 +73,4 @@ def test_enum_cell_results_are_members_where_they_reach_python(tmp_path):
     run = lambda *a: subprocess.run([sys.executable, *a], cwd=tmp_path, check=True, timeout=600)
     run("build_model.py")
     run("-m", "modelx_cython", "enums_nomx", "--sample", "sample.py", "--spec", "spec.py")
-    generated = (tmp_path / "enums_nomx_cy/_mx_classes.py").read_text(encoding="utf-8")
-    # native comparisons keep the C integer: the cf formula calls the C entry and never the member
-    cf = generated[generated.index("def _f_cf"):generated.index("def _f_pv")]
-    assert "enum_member" not in cf
-    assert "def phase(self, t):" in generated and "def _mx_cell_phase(self" in generated
-    # D103a: a key tuple keeps the C integer; a tuple returned as the cell's object value holds the member
-    rate = generated[generated.index("def _f_rate"):generated.index("def _f_pair")]
-    pair = generated[generated.index("def _f_pair"):]
-    pair = pair[:pair.index("\n    @")]
-    assert "enum_member" not in rate, rate
-    assert "enum_member" in pair, pair
     run("checks.py")

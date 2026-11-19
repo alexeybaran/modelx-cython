@@ -1,5 +1,6 @@
 """Guarded native rounding preserves exact scalar and callable semantics."""
 
+import json
 import math
 import subprocess
 import sys
@@ -50,11 +51,11 @@ def cached_digits(x, n):
     subprocess.run([sys.executable, '-m', 'modelx_cython', 'exported'],
                    cwd=tmp_path, check=True)
     package = tmp_path / 'exported_cy'
-    source = (package / '_mx_classes.py').read_text(encoding='utf-8')
-    assert '_mx_round_one(' in source and '_mx_round_digits(' in source
-    assert f'{module_name(NATIVE_ROUNDING_PROVIDER)}.repeated_round_float(' in source
+    report = json.loads((package / '_mx_admission.json').read_text(encoding='utf-8'))
+    # the build report: the repeated rounding of cached_digits is the native rounding operation
+    assert (f'{NATIVE_ROUNDING_PROVIDER}.repeated_round_float'
+            in report['exported_cy._mx_classes._c_Values._f_cached_digits']['native_helpers'])
     assert not (package / f"{module_name('modelx_cython.runtime._native_inputs')}.pyx").exists()
-    assert '_mx_integral_math_call(' not in source
     probe = textwrap.dedent('''\
         import math
         import random

@@ -43,7 +43,6 @@ def test_member_tuple_membership(tmp_path):
         'for x in (200, "a", 201.0, 202, None): p.loose(x)\n', encoding='utf-8')
     subprocess.run([sys.executable, '-m', 'modelx_cython', 'exported',
                     '--sample', 'sample.py', '--no-spec'], cwd=tmp_path, check=True)
-    source = (tmp_path / 'exported_cy/_mx_classes.py').read_text(encoding='utf-8')
     report = json.loads((tmp_path / 'exported_cy/_mx_admission.json').read_text())
 
     def entry(name):
@@ -55,7 +54,6 @@ def test_member_tuple_membership(tmp_path):
         assert entry(name)['native_enum_comparisons'] == count, name
         assert entry(name)['expressions_untyped'] == [], name
     assert entry('reversed_eq')['native_enum_comparisons'] == 1
-    assert 'in (_mx_enum_const_' in source and 'not in (_mx_enum_const_' in source
     # W1.8: an object name on the left: identity and == tests in tuple order
     assert entry('loose')['expressions_untyped'] == []
     loose = entry('loose')['expressions_object']

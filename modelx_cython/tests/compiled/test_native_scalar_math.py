@@ -1,6 +1,7 @@
 """Check the registered scalar math provider on values, errors and rebinding."""
 
 import math
+import json
 import subprocess
 import sys
 import textwrap
@@ -28,9 +29,10 @@ def test_registered_scalar_math(tmp_path, namespace):
         'v.erf(1.5); v.exp(1.5); v.isinf(1.5); v.log(1.5); v.sqrt(1.5); v.composed(1.5)\n', encoding='utf-8')
     subprocess.run([sys.executable, '-m', 'modelx_cython', 'exported', '--sample', 'sample.py', '--no-spec'],
                    cwd=tmp_path, check=True)
-    source = (tmp_path / 'exported_cy/_mx_classes.py').read_text(encoding='utf-8')
-    for name in ('erf', 'exp', 'isinf', 'log', 'sqrt'):
-        assert f'.m_{name}(_mx_cy.cast(_mx_cy.p_void, self.numbers), x)' in source   # W1.4: bound at build time
+    report = json.loads((tmp_path / 'exported_cy/_mx_admission.json').read_text(encoding='utf-8'))
+    for name in ('erf', 'exp', 'isinf', 'log', 'sqrt'):   # W1.4: bound at build time (the build report)
+        helpers = report[f'exported_cy._mx_classes._c_Values._f_{name}']['native_helpers']
+        assert any(h.endswith(f'.m_{name}') for h in helpers), (name, helpers)
     probe = textwrap.dedent('''\
         import math
         from types import SimpleNamespace

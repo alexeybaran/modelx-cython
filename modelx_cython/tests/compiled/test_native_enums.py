@@ -1,5 +1,6 @@
 """Enum specialization must read the current exported Reference on a miss."""
 from http import HTTPStatus
+import json
 import subprocess
 import sys
 import textwrap
@@ -33,9 +34,9 @@ def test_enum_reference_replacement(tmp_path, code_owned):
         'm.Projection.uncached(200)\n')
     subprocess.run([sys.executable, '-m', 'modelx_cython', 'exported',
                     '--sample', 'sample.py', '--no-spec'], cwd=tmp_path, check=True)
-    generated = (tmp_path/'exported_cy/_mx_classes.py').read_text()
-    assert '_mx_enum_eq_' not in generated
-    assert ('_mx_enum_const_' in generated) == code_owned
+    report = json.loads((tmp_path/'exported_cy/_mx_admission.json').read_text())
+    # the build report: members are C constants exactly when the enum class is code-owned
+    assert (sum(entry['native_enum_constants'] for entry in report.values()) > 0) == code_owned, report
     probe = textwrap.dedent('''\
         import sys
         from types import SimpleNamespace
