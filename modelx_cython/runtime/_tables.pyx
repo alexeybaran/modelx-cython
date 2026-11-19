@@ -572,6 +572,15 @@ cdef void _decide(PreparedTable table):
     table.n_slots = len(slots)
 
 
+def native_slots(frame):
+    """T-5c (tests): how many of the model's read signatures ``frame`` serves natively (0 when its reads run on
+    pandas)."""
+    cdef PreparedTable table = prepared(frame)
+    if table is None:
+        return 0
+    return sum(1 for i in range(table.n_slots) if table.slots[i] > 0)
+
+
 def check_unchanged(frame):
     """T-4 check mode (spec key ``verify_inputs``): raise if ``frame`` no longer equals the copy prepared when it was
     bound, i.e. it was edited in place and the dependent Space was not cleared (Space.clear_all())."""
