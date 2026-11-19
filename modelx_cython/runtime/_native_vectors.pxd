@@ -47,14 +47,12 @@ cdef class F64Vec:
     cdef double* data
     cdef Py_ssize_t n
     cdef Py_ssize_t cap
-    cdef Py_ssize_t _itemsize
 
 
 cdef class I64Vec:
     cdef long long* data
     cdef Py_ssize_t n
     cdef Py_ssize_t cap
-    cdef Py_ssize_t _itemsize
 
 
 cdef class VecCache:

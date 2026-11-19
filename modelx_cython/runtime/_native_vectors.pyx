@@ -1,64 +1,26 @@
 # cython: freethreading_compatible=True, boundscheck=False, wraparound=False
 """Typed vectors of vector cells; see _native_vectors.pxd."""
-from cpython.buffer cimport PyBUF_WRITABLE, PyBUF_FORMAT, PyBUF_ND, PyBUF_STRIDES
 from cpython.float cimport PyFloat_AS_DOUBLE
 from cpython.mem cimport PyMem_Malloc, PyMem_Realloc, PyMem_Free, PyMem_Calloc
 from cpython.ref cimport Py_INCREF, Py_XDECREF
-from cpython.object cimport Py_EQ, Py_NE, Py_LT, Py_LE, Py_GT, Py_GE
 import operator
 
 cdef extern from "Python.h":
-    PyObject* PyObject_RichCompare(object a, object b, int op) except NULL
     Py_ssize_t PyList_GET_SIZE(object)
     PyObject* PyList_GET_ITEM(object, Py_ssize_t)
     Py_ssize_t PyTuple_GET_SIZE(object)
     PyObject* PyTuple_GET_ITEM(object, Py_ssize_t)
 
-cdef char* _F64_FORMAT = b'd'
-cdef char* _I64_FORMAT = b'q'
 cdef double _TWO53 = 9007199254740992.0
-
-
-cdef inline bint _is_sequence(object other):
-    return type(other) is list or type(other) is tuple or type(other) is F64Vec or type(other) is I64Vec
-
-
-cdef object _richcmp_items(object items, object other, int op):
-    """Comparison of a vector as the list of its items (list semantics)."""
-    if op == Py_EQ or op == Py_NE:
-        if not _is_sequence(other):
-            return NotImplemented
-        equal = len(items) == len(other) and all(a == b for a, b in zip(items, other))
-        return equal if op == Py_EQ else not equal
-    if not _is_sequence(other):
-        return NotImplemented
-    mine, theirs = list(items), list(other)
-    if op == Py_LT:
-        return mine < theirs
-    if op == Py_LE:
-        return mine <= theirs
-    if op == Py_GT:
-        return mine > theirs
-    return mine >= theirs
-
-
-cdef inline Py_ssize_t _index(object key, Py_ssize_t n) except -1:
-    cdef Py_ssize_t i = operator.index(key)
-    if i < 0:
-        i += n
-    if i < 0 or i >= n:
-        raise IndexError("list index out of range")
-    return i
 
 
 # ---------------------------------------------------------------- F64Vec
 cdef class F64Vec:
-    """A read-only sequence of floats backed by a C double buffer.
+    """Floats in a C double buffer: the cached value of a float vector cell.
 
-    Equal to a list or tuple holding the same floats; immutable once the formula
-    that built it has returned, so threads read it without a lock. Unlike the list a
-    live modelx cell caches, it cannot be changed from Python (item assignment raises
-    TypeError): copy it first (list(v)).
+    Compiled code reads and writes the buffer through the functions below; it is immutable once
+    the formula that built it has returned, so threads read it without a lock. Python never sees
+    it (D154): a cell's public method and every use in Python code get ``tolist()``, a new list.
     """
 
     __hash__ = None
@@ -66,137 +28,12 @@ cdef class F64Vec:
     def __dealloc__(self):
         PyMem_Free(self.data)
 
-    def __len__(self):
-        return self.n
-
-    def __getitem__(self, key):
-        cdef Py_ssize_t i
-        if isinstance(key, slice):
-            return [self.data[i] for i in range(*key.indices(self.n))]
-        return self.data[_index(key, self.n)]
-
-    def __iter__(self):
-        return _F64Iter(self, False)
-
-    def __reversed__(self):
-        return _F64Iter(self, True)
-
-    def __contains__(self, item):
-        cdef Py_ssize_t i
-        for i in range(self.n):
-            if self.data[i] == item:
-                return True
-        return False
-
-    def index(self, item):
-        cdef Py_ssize_t i
-        for i in range(self.n):
-            if self.data[i] == item:
-                return i
-        raise ValueError(f'{item!r} is not in list')
-
-    def count(self, item):
-        cdef Py_ssize_t i, k = 0
-        for i in range(self.n):
-            if self.data[i] == item:
-                k += 1
-        return k
-
     def tolist(self):
         cdef Py_ssize_t i
         return [self.data[i] for i in range(self.n)]
 
-    def __richcmp__(self, other, int op):
-        cdef Py_ssize_t i
-        cdef F64Vec w
-        cdef double x
-        if op == Py_EQ or op == Py_NE:
-            if type(other) is F64Vec:
-                w = <F64Vec>other
-                equal = w.n == self.n
-                if equal:
-                    for i in range(self.n):
-                        if not (self.data[i] == w.data[i]):
-                            equal = False
-                            break
-                return equal if op == Py_EQ else not equal
-            if type(other) is list or type(other) is tuple:
-                if len(other) != self.n:
-                    return op == Py_NE
-                for i in range(self.n):
-                    item = other[i]
-                    if type(item) is float:
-                        x = PyFloat_AS_DOUBLE(item)
-                        if not (self.data[i] == x):
-                            return op == Py_NE
-                    elif not (self.data[i] == item):
-                        return op == Py_NE
-                return op == Py_EQ
-        return _richcmp_items(self, other, op)
-
-    def __add__(self, other):
-        return list(self) + list(other) if _is_sequence(other) else NotImplemented
-
-    def __radd__(self, other):
-        return list(other) + list(self) if _is_sequence(other) else NotImplemented
-
-    def __mul__(self, count):
-        return list(self) * count
-
-    def __rmul__(self, count):
-        return list(self) * count
-
-    def __copy__(self):
-        return self
-
-    def __deepcopy__(self, memo):
-        return self
-
     def __repr__(self):
         return 'F64Vec(%r)' % (self.tolist(),)
-
-    def __reduce__(self):
-        return (_f64_from_sequence, (self.tolist(),))
-
-    def __getbuffer__(self, Py_buffer* buffer, int flags):
-        if flags & PyBUF_WRITABLE:
-            raise BufferError('F64Vec is read-only')
-        self._itemsize = sizeof(double)
-        buffer.buf = <void*>self.data
-        buffer.obj = self
-        buffer.len = self.n * sizeof(double)
-        buffer.readonly = 1
-        buffer.itemsize = sizeof(double)
-        buffer.format = _F64_FORMAT if flags & PyBUF_FORMAT else NULL
-        buffer.ndim = 1
-        buffer.shape = &self.n if flags & PyBUF_ND else NULL
-        buffer.strides = &self._itemsize if flags & PyBUF_STRIDES == PyBUF_STRIDES else NULL
-        buffer.suboffsets = NULL
-        buffer.internal = NULL
-
-    def __releasebuffer__(self, Py_buffer* buffer):
-        pass
-
-
-cdef class _F64Iter:
-    cdef F64Vec v
-    cdef Py_ssize_t i
-    cdef bint backwards
-
-    def __cinit__(self, F64Vec v, bint backwards):
-        self.v = v
-        self.backwards = backwards
-        self.i = v.n - 1 if backwards else 0
-
-    def __iter__(self):
-        return self
-
-    def __next__(self):
-        cdef Py_ssize_t i = self.i
-        if i < 0 or i >= self.v.n:
-            raise StopIteration
-        self.i = i - 1 if self.backwards else i + 1
-        return self.v.data[i]
 
 
 cdef F64Vec vec_new(Py_ssize_t n):
@@ -298,140 +135,21 @@ cdef int _vec_set_slow(F64Vec v, long long i, double value) except -1:
     return 0
 
 
-def _f64_from_sequence(items):
-    """Unpickling: an F64Vec holding the given floats."""
-    return vec_of(items)
-
-
 # ---------------------------------------------------------------- I64Vec
 cdef class I64Vec:
-    """A read-only sequence of integers (int64) backed by a C buffer."""
+    """Integers (int64) in a C buffer: the cached value of an integer vector cell (see F64Vec)."""
 
     __hash__ = None
 
     def __dealloc__(self):
         PyMem_Free(self.data)
 
-    def __len__(self):
-        return self.n
-
-    def __getitem__(self, key):
-        cdef Py_ssize_t i
-        if isinstance(key, slice):
-            return [self.data[i] for i in range(*key.indices(self.n))]
-        return self.data[_index(key, self.n)]
-
-    def __iter__(self):
-        return _I64Iter(self, False)
-
-    def __reversed__(self):
-        return _I64Iter(self, True)
-
-    def __contains__(self, item):
-        return any(x == item for x in self)
-
-    def index(self, item):
-        for i, x in enumerate(self):
-            if x == item:
-                return i
-        raise ValueError(f'{item!r} is not in list')
-
-    def count(self, item):
-        return sum(1 for x in self if x == item)
-
     def tolist(self):
         cdef Py_ssize_t i
         return [self.data[i] for i in range(self.n)]
 
-    def __richcmp__(self, other, int op):
-        cdef Py_ssize_t i
-        cdef I64Vec w
-        if op == Py_EQ or op == Py_NE:
-            if type(other) is I64Vec:
-                w = <I64Vec>other
-                equal = w.n == self.n
-                if equal:
-                    for i in range(self.n):
-                        if self.data[i] != w.data[i]:
-                            equal = False
-                            break
-                return equal if op == Py_EQ else not equal
-            if type(other) is list or type(other) is tuple:
-                if len(other) != self.n:
-                    return op == Py_NE
-                for i in range(self.n):
-                    item = other[i]
-                    if type(item) is int:
-                        if not (item == self.data[i]):
-                            return op == Py_NE
-                    elif not (self.data[i] == item):
-                        return op == Py_NE
-                return op == Py_EQ
-        return _richcmp_items(self, other, op)
-
-    def __add__(self, other):
-        return list(self) + list(other) if _is_sequence(other) else NotImplemented
-
-    def __radd__(self, other):
-        return list(other) + list(self) if _is_sequence(other) else NotImplemented
-
-    def __mul__(self, count):
-        return list(self) * count
-
-    def __rmul__(self, count):
-        return list(self) * count
-
-    def __copy__(self):
-        return self
-
-    def __deepcopy__(self, memo):
-        return self
-
     def __repr__(self):
         return 'I64Vec(%r)' % (self.tolist(),)
-
-    def __reduce__(self):
-        return (_i64_from_sequence, (self.tolist(),))
-
-    def __getbuffer__(self, Py_buffer* buffer, int flags):
-        if flags & PyBUF_WRITABLE:
-            raise BufferError('I64Vec is read-only')
-        self._itemsize = sizeof(long long)
-        buffer.buf = <void*>self.data
-        buffer.obj = self
-        buffer.len = self.n * sizeof(long long)
-        buffer.readonly = 1
-        buffer.itemsize = sizeof(long long)
-        buffer.format = _I64_FORMAT if flags & PyBUF_FORMAT else NULL
-        buffer.ndim = 1
-        buffer.shape = &self.n if flags & PyBUF_ND else NULL
-        buffer.strides = &self._itemsize if flags & PyBUF_STRIDES == PyBUF_STRIDES else NULL
-        buffer.suboffsets = NULL
-        buffer.internal = NULL
-
-    def __releasebuffer__(self, Py_buffer* buffer):
-        pass
-
-
-cdef class _I64Iter:
-    cdef I64Vec v
-    cdef Py_ssize_t i
-    cdef bint backwards
-
-    def __cinit__(self, I64Vec v, bint backwards):
-        self.v = v
-        self.backwards = backwards
-        self.i = v.n - 1 if backwards else 0
-
-    def __iter__(self):
-        return self
-
-    def __next__(self):
-        cdef Py_ssize_t i = self.i
-        if i < 0 or i >= self.v.n:
-            raise StopIteration
-        self.i = i - 1 if self.backwards else i + 1
-        return self.v.data[i]
 
 
 cdef I64Vec ivec_new(Py_ssize_t n):
@@ -519,11 +237,6 @@ cdef int _ivec_set_slow(I64Vec v, long long i, long long value) except -1:
         raise IndexError("list assignment index out of range")
     v.data[i] = value
     return 0
-
-
-def _i64_from_sequence(items):
-    """Unpickling: an I64Vec holding the given integers."""
-    return ivec_of(items)
 
 
 # ---------------------------------------------------------------- dense cache of vector cells
