@@ -294,6 +294,35 @@ cdef extern from *:
     bint _mx_load_flag "__MX_LOAD_FLAG" (bint *p) noexcept nogil
     void _mx_store_flag "__MX_STORE_FLAG" (bint *p, bint v) noexcept nogil
 
+
+cdef extern from *:
+    """
+    /* The short readiness flags of a dense cache of a shared Space. Workers fill the
+       cache concurrently: the value is stored, then the flag after a release fence;
+       a reader loads the flag, then an acquire fence orders its read of the value. A
+       relaxed 16-bit access and the fences are CPython's (pyatomic.h, 3.13 and later);
+       a build with the GIL keeps plain accesses. On x86 the fences emit no instruction. */
+    static inline short __mx_load_dense_flag(short *p) {
+    #if defined(Py_GIL_DISABLED)
+        short flag = (short)_Py_atomic_load_int16_relaxed((int16_t *)p);
+        _Py_atomic_fence_acquire();
+        return flag;
+    #else
+        return *p;
+    #endif
+    }
+    static inline void __mx_store_dense_flag(short *p, short v) {
+    #if defined(Py_GIL_DISABLED)
+        _Py_atomic_fence_release();
+        _Py_atomic_store_int16_relaxed((int16_t *)p, (int16_t)v);
+    #else
+        *p = v;
+    #endif
+    }
+    """
+    short _mx_load_dense_flag "__mx_load_dense_flag" (short *p) noexcept nogil
+    void _mx_store_dense_flag "__mx_store_dense_flag" (short *p, short v) noexcept nogil
+
 cdef class BaseMxObject:
     pass
 
