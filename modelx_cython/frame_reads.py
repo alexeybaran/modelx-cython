@@ -160,7 +160,7 @@ class FrameReads:
         key = row.slice[0].slice.value
         parts = _parts(key)
         from .row_cells import item_constant
-        if len(parts) >= len(found[1]['levels']) or not all(item_constant(p, self.cached_call) for p in parts):
+        if len(parts) >= len(found[1]['levels']) or not all(self.fixed_part(p) for p in parts):
             return None
         # by traced type: every traced value of P is a frame of the parent's remaining levels and of its columns
         mine = self._schema_of_call(call)
@@ -330,22 +330,22 @@ class FrameReads:
         return out
 
     def _drop_unused_locals(self, body, replaced):
-        """A frame local whose every use was lowered is no longer evaluated (no Cell call, no reference)."""
-        flat = self._flatten(body)
-        module = cst.Module(body=flat)
-        loads = {}
+        """A frame local whose every use was lowered is no longer evaluated (no Cell call, no reference). Repeated
+        until nothing more is dropped: dropping a view's assignment can leave its frame local unused (T-5c)."""
+        out = self._flatten(body)
+        while True:
+            loads = {}
 
-        class Loads(cst.CSTVisitor):
-            def visit_Name(self, name):
-                loads[name.value] = loads.get(name.value, 0) + 1
-        module.visit(Loads())
-        out = []
-        for statement in flat:
-            name = (self._simple_assign(statement) or (None,))[0]
-            if name in replaced and loads.get(name, 0) == 1:     # the target itself only
-                continue
-            out.append(statement)
-        return out
+            class Loads(cst.CSTVisitor):
+                def visit_Name(self, name):
+                    loads[name.value] = loads.get(name.value, 0) + 1
+            cst.Module(body=out).visit(Loads())
+            kept = [statement for statement in out
+                    if not ((name := (self._simple_assign(statement) or (None,))[0]) in replaced
+                            and loads.get(name, 0) == 1)]       # the target itself only
+            if len(kept) == len(out):
+                return out
+            out = kept
 
     def _hold_statements(self, hold):
         """The statements that resolve one hold, placed before the top-level statement of its first read."""
@@ -620,12 +620,39 @@ class FrameReads:
         return name is not None and any(str(c).endswith('._f_' + name)
                                         for c in getattr(self.resolver, 'cached_cells', ()))
 
-    def item_fixed(self, part):
+    def item_fixed(self, part, level_kind=None):
         """A key part whose value is fixed per item (held as a code), in a per-step cell of an item class."""
         from .row_cells import item_constant
-        if isinstance(part, (cst.Integer, cst.SimpleString)):
-            return False            # a literal is passed as it is (a C integer, or an interned str)
-        return self.per_item and self.cells.has_args() and item_constant(part, self.cached_call)
+        if isinstance(part, cst.Integer) or not (self.per_item and self.cells.has_args()):
+            return False            # an integer literal is passed as it is (a C integer)
+        # T-5c: a text literal, an enum member and a field of a cached row cell are fixed too, unless the read takes
+        # the part as a C integer (key_part): their code is held per item instead of looked up at every read
+        return item_constant(part, self.cached_call) or (
+            self._fixed_value(part) and not (level_kind == 'int' and self.facts.is_int(part)))
+
+    def fixed_part(self, part):
+        """A prefix part fixed per item: ``row_cells.item_constant``, or one of ``_fixed_value`` (T-5c)."""
+        from .row_cells import item_constant
+        return item_constant(part, self.cached_call) or self._fixed_value(part)
+
+    def _fixed_value(self, part):
+        """T-5c: a text literal, an enum member ``self.<Enum>.<member>``, or ``self.R()["f"]`` with R a cached
+        zero-argument cell (a field of a row cell): values that do not change while the item's caches hold."""
+        from .row_cells import item_constant
+        if isinstance(part, cst.SimpleString) or self._enum_attribute(part):
+            return True
+        parts = _index_parts(part) if isinstance(part, cst.Subscript) else None
+        return (parts is not None and len(parts) == 1 and _literal_str(parts[0]) is not None
+                and isinstance(part.value, cst.Call) and item_constant(part.value, self.cached_call))
+
+    def _enum_attribute(self, part):
+        """``self.<Enum>.<member>`` (or ``self._mx_definition_<Enum>.<member>``) on an enum Reference."""
+        if not (isinstance(part, cst.Attribute) and isinstance(part.value, cst.Attribute)
+                and isinstance(part.value.value, cst.Name) and part.value.value.value == 'self'):
+            return False
+        ref = part.value.attr.value
+        ref = ref[len('_mx_definition_'):] if ref.startswith('_mx_definition_') else ref
+        return bool(getattr(getattr(self.cls_info, 'refs', {}).get(ref), 'enum', None))
 
     def code_field(self, hold, level, part):
         key = (hold.table, level, _code(part))
@@ -807,7 +834,7 @@ class _Rewrite(cst.CSTTransformer):
         (T-5: the one read path for every key), ``held - 1`` for a part fixed per item (and its condition that the
         part is present), ``lcode``/``ocode`` of the part otherwise."""
         conditions = []
-        codes = [self._held(hold, level, part, conditions) if self.o.item_fixed(part)
+        codes = [self._held(hold, level, part, conditions) if self.o.item_fixed(part, kind)
                  else self.code_of(hold, level, part, kind) for level, (part, kind) in enumerate(zip(parts, levels))]
         return self.code_args(codes), conditions
 
@@ -862,7 +889,7 @@ class _Rewrite(cst.CSTTransformer):
             codes, conditions = self._prefix_holds(hold, parts, cell)
         else:
             for level, part in enumerate(parts):
-                if o.item_fixed(part):
+                if o.item_fixed(part, schema['levels'][level]):
                     codes.append(self._held(hold, level, part, conditions))
                     continue
                 var = f'_mx_vc_{name}_{level}'
@@ -1639,7 +1666,7 @@ class _Rewrite(cst.CSTTransformer):
         receiver = value.value if form != 'item' else value
         if isinstance(receiver, cst.Name):
             self.replaced_names.add(receiver.value)
-        if o.per_item and all(o.item_fixed(part) for part in key_parts):
+        if o.per_item and all(o.item_fixed(part, kind) for part, kind in zip(key_parts, schema['levels'])):
             field = o.row_field(hold, key, None)
             read = self._m('object_field', o.ref(hold), o.slot(hold), cst.parse_expression(f'self.{field}'))
             conditions = [cst.parse_expression(f'self.{field} > 0')]
@@ -1879,7 +1906,7 @@ class _Rewrite(cst.CSTTransformer):
         hold = self._take(view.call, _NO_LABEL, -1)
         codes = list(view.codes)
         for level, part in enumerate(own, start=view.depth):
-            codes.append(self._held(hold, level, part, []) if o.item_fixed(part)
+            codes.append(self._held(hold, level, part, []) if o.item_fixed(part, levels[level])
                          else self.code_of(hold, level, part, levels[level]))
         if count == len(levels):
             suffix, args = self.code_args(codes)
