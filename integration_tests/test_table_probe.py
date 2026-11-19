@@ -236,6 +236,9 @@ T5_ITEMS = {
     'same_name_a': "sub = data.grid().loc['A']\nreturn sub.loc[20 + t % 4, 'q'] + len(sub.index)",
     'same_name_b': "sub = data.grid().loc['B']\nreturn sub.loc[20 + t % 4, 'q'] + float(sub.index[0])",
     # T-5c: a row cell keyed by a field of the model-point row: the row held per item
+    # T-5c: a prefix of a prefix cell's value: one view of the parent table
+    'prefix_of_cell': "sub = psched().loc[sex()]\nreturn sub.loc[2000 + t % 3, 'q'] + len(sub.index) + int(sub.index[-1])",
+    'prefix_of_cell_step': "sub = psched().loc[('F', 'M')[t % 2]]\nreturn ([int(v) for v in sub.index], sub.loc[2001, 'q'])",
     'row_by_field': "return tagrow()['q'] * t + tagrow()['m']",
     'tuple_cell_view': "sub = data.rates().loc[plan()]\na = anchor()\nreturn sub.loc[a, 'q'] + (anchor() in sub.index)",
     'tuple_cell_whole': "return data.rates().loc[full(), 'q'] + data.rates().loc[odd(), 'q'].sum()",
@@ -308,6 +311,7 @@ def build():
     items.new_cells("full", "def full():\\n    return (plan(), sex(), 2000 + i % 3)\\n")
     items.new_cells("odd", "def odd():\\n    return (plan(), sex()) if i % 2 else plan()\\n")
     items.new_cells("mrow", "def mrow():\\n    return data.mixed().loc[pid()]\\n")
+    items.new_cells("psched", "def psched():\\n    return data.rates().loc[plan()]\\n")
     items.new_cells("tagrow", "def tagrow():\\n    return data.bytag().loc[mrow()['tag']]\\n")
     for name, body in T5_ITEMS.items():
         items.new_cells(name, f"def {{name}}(t):\\n" + _indent(body))
