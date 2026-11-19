@@ -13,20 +13,10 @@ def _original_builtin(function, name):
 
 
 cdef object _all = builtins.all if _original_builtin(builtins.all, 'all') else None
-cdef object _any = builtins.any if _original_builtin(builtins.any, 'any') else None
-cdef object _min = builtins.min if _original_builtin(builtins.min, 'min') else None
 
 
 cdef bint all_accepts(object function):
     return _all is not None and function is _all
-
-
-cdef bint any_accepts(object function):
-    return _any is not None and function is _any
-
-
-cdef bint min_accepts(object function):
-    return _min is not None and function is _min
 
 
 cdef double f64_abs(double value) noexcept:
