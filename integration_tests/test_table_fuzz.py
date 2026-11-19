@@ -119,3 +119,52 @@ def test_fuzz_compiled_equals_live(tmp_path):
                  if v != 'same' and not (v.startswith('boundary: ')
                                          and set(v[len('boundary: '):].split('; ')) <= probe.BOUNDARY)}
     assert not differing, '\n'.join(f'{n}: {v}' for n, v in sorted(differing.items())[:40])
+
+
+# Two-formula mode: pairs of formulas of one item class that reuse the same local names, cells and tables with
+# different prefixes and keys. Held fields are per class, so a key shared by two different reads would make one
+# formula read the other's codes or rows; each pair is also generated in the other order.
+PREFIXES = {   # table -> prefix expressions of an item (literals, item cells, per-step choices)
+    'grid': ["'A'", "'B'", 'plan()', "('A', 'B')[t % 2]", "('B', 'A')[t % 2]"],
+    'sgrid': ["'A'", "'B'", 'plan()'],
+    'rates': ["(plan(), sex())", "(plan(), 'F')", "('A', 'M')", "plan()", "('B', sex())"],
+}
+READS = {
+    'grid': ["sub.loc[20 + t % 4, 'q']", "int(sub.index[-1])", "len(sub.index)", "sum(sub.loc[k, 'q'] for k in sub.index)",
+             "float(sub.index.asof(20.5 + t))", "sub.loc[(21, 22)[t % 2], 'n']"],
+    'rates': ["sub.loc[2000 + t % 3, 'q']", "len(sub.index)", "[int(k) for k in sub.index]"],
+}
+
+
+def pairs(count, seed=SEED + 2):
+    """``count`` pairs of item formulas (as T5_ITEMS entries), each also in the other order."""
+    rng = random.Random(seed)
+    out = {}
+    while len(out) < 4 * count:
+        table = rng.choice(sorted(PREFIXES))
+        a, b = rng.sample(PREFIXES[table], 2)
+        reads = READS['grid' if table != 'rates' else 'rates']
+        ra, rb = rng.choice(reads), rng.choice(reads)
+        first = f"sub = data.{table}().loc[{a}]\nreturn {ra}"
+        second = f"sub = data.{table}().loc[{b}]\nreturn {rb}"
+        n = len(out) // 4
+        out[f'pa{n}'], out[f'pb{n}'] = first, second
+        out[f'qb{n}'], out[f'qa{n}'] = second, first          # the other order
+    return out
+
+
+def test_fuzz_two_formulas(tmp_path):
+    items = pairs(int(os.environ.get('MX_CY_FUZZ_PAIRS', '60')))
+    (tmp_path / 'probe_model.py').write_text(
+        probe.MODEL.format(ops={}, stmts={}, data=probe.DATA, t5_items=items), encoding='utf-8')
+    (tmp_path / 'sample.py').write_text(probe.SAMPLE, encoding='utf-8')
+    (tmp_path / 'checks.py').write_text(probe.CHECKS, encoding='utf-8')
+    (tmp_path / 'spec.py').write_text(repr({'parallel_workers': 1, 'strict_lowering': True}), encoding='utf-8')
+    probe._run(tmp_path, 'probe_model.py')
+    built = _build(tmp_path)
+    assert built.returncode == 0, built.stdout[-4000:] + built.stderr[-8000:]
+    verdicts = json.loads(probe._run(tmp_path, 'checks.py').stdout)
+    differing = {name: v for name, v in verdicts.items()
+                 if v != 'same' and not (v.startswith('boundary: ')
+                                         and set(v[len('boundary: '):].split('; ')) <= probe.BOUNDARY)}
+    assert not differing, '\n'.join(f'{n}: {v}' for n, v in sorted(differing.items())[:40])
