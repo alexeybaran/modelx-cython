@@ -836,6 +836,9 @@ _NO_LABEL = object()
 PREPARE_MIN_EVALUATIONS = 8
 
 
+# T-5c: builtins of one iterable whose generator argument is hoisted out of the read's conditional
+WALK_BUILTINS = frozenset(('sorted', 'list', 'tuple', 'set', 'frozenset', 'sum', 'min', 'max', 'any', 'all'))
+
 # T-5c: the run-time conditions that send a lowered read to pandas, by the signature kind of a hold it takes (the
 # report's ``pandas_when``; the kinds of levels and columns apply to every read)
 RUN_TIME = {
@@ -895,6 +898,7 @@ class _Rewrite(cst.CSTTransformer):
         self.asof_rows = {}     # asof local -> (membership hold, prefix cell call, asof expression)
         self.native = {}        # id(lowered read) -> column kind, for float()/int() around it
         self.taken = []         # T-5c: kinds of the holds taken since the last recorded read (its run-time fallbacks)
+        self.generator_walks = set()    # T-5c: ids of lowered generator walks (``gen if test else pandas gen``)
         self.updated_of = {}    # id(original node) -> its rewritten node (key parts are emitted with their reads lowered)
 
     def on_leave(self, original, updated):
@@ -1537,7 +1541,10 @@ class _Rewrite(cst.CSTTransformer):
         if isinstance(original, cst.GeneratorExp):
             native, updated = native.with_changes(**parens), updated.with_changes(**parens)
         self._record(original, 'L8', view.call, view=view)
-        return self._guarded(original, updated, view, test, native)
+        lowered = self._guarded(original, updated, view, test, native)
+        if isinstance(original, cst.GeneratorExp):
+            self.generator_walks.add(id(lowered))
+        return lowered
 
     def leave_ListComp(self, original, updated):
         return self.comprehension(original, updated) or updated
@@ -1940,12 +1947,33 @@ class _Rewrite(cst.CSTTransformer):
             read = self._m(which + '_ll', o.ref(hold))
             self._record(original, 'L5', call)
             return self._lowered(self._native_test(hold, []), read, self._fallback(updated, call), 'i64')
+        hoisted = self._hoist_walk(updated)
+        if hoisted is not None:
+            return hoisted
         if (isinstance(updated.func, cst.Name) and len(updated.args) == 1 and not updated.args[0].keyword
                 and not updated.args[0].star):
             kind = self.native.get(id(updated.args[0].value))
             if (kind, updated.func.value) in (('f64', 'float'), ('i64', 'int')):
                 return updated.args[0].value.with_changes(lpar=[cst.LeftParen()], rpar=[cst.RightParen()])
         return updated
+
+    def _hoist_walk(self, updated):
+        """T-5c: ``f(gen if test else pandas_gen, ...)`` for a builtin f of one iterable -> ``f(gen, ...) if test else
+        f(pandas_gen, ...)``: a generator passed straight to the builtin is a loop for Cython (and for the reduction
+        lowering), where the generator behind a conditional runs as a generator object."""
+        if not (isinstance(updated.func, cst.Name) and updated.func.value in WALK_BUILTINS and updated.args
+                and not updated.args[0].keyword and not updated.args[0].star
+                and all(a.keyword is not None for a in updated.args[1:])
+                and id(updated.args[0].value) in self.generator_walks):
+            return None
+        walk = updated.args[0].value
+        def call(arg):
+            if len(updated.args) == 1:  # a lone generator argument needs no parentheses of its own
+                arg = arg.with_changes(lpar=[], rpar=[])
+            return updated.with_changes(args=[updated.args[0].with_changes(value=arg),
+                                              *updated.args[1:]], lpar=[], rpar=[])
+        return cst.IfExp(test=walk.test, body=call(walk.body), orelse=call(walk.orelse),
+                         lpar=[cst.LeftParen()], rpar=[cst.RightParen()])
 
     def _prefix_holds(self, hold, prefix_parts, name):
         o = self.o
