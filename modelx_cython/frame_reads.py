@@ -85,7 +85,9 @@ class FrameReads:
     """``lower(node)`` returns the formula with recognised reads lowered; ``lowered`` lists what was lowered
     (one dict per read) and ``declined`` why a read of a frame receiver was not."""
 
-    def __init__(self, resolver, cls_info, cells, providers, policy, row_names=None, prefix_cells=None):
+    def __init__(self, resolver, cls_info, cells, providers, policy, row_names=None, prefix_cells=None,
+                 param_cells=None):
+        self.param_cells = param_cells or {}    # T-5c: cell with parameters -> (names, its `T.loc[key]` expression)
         self.row_names = row_names or {}       # code of an inlined row expression -> its row cell (assignments)
         self.prefix_cells = prefix_cells or {}  # zero-argument cell of the class -> its `T.loc[key]` expression
         self.resolver, self.cls_info, self.cells = resolver, cls_info, cells
@@ -134,9 +136,10 @@ class FrameReads:
         return getattr(self.resolver, 'frame_schemas', {}).get(name)
 
     def _receiver(self, expr):
-        """(cell call, schema) when ``expr`` is a frame receiver, else None. In an item class only a table the Data
-        space publishes is one (T-5c): a frame or row the item computes itself would be prepared per item, which
-        costs more than its pandas reads (main leaves them on pandas too)."""
+        """(cell call, schema) when ``expr`` is a frame receiver, else None. In an item class a frame or row the item
+        computes itself is prepared per item: it is one only when the reading formula is evaluated at least
+        ``PREPARE_MIN_EVALUATIONS`` times per item in the sample (T-5c), so that the preparation pays for itself;
+        a formula evaluated fewer times reads it on pandas."""
         schema = self._schema_of_call(expr)
         found = (expr, schema) if schema is not None else None
         if found is None:
@@ -144,8 +147,41 @@ class FrameReads:
             schema = self._schema_of_call(value) if value is not None else None
             found = (value, schema) if schema is not None else None
         if found is not None and getattr(self, 'per_item', False) and self.published(found[0]) is None:
-            return None
+            evaluations = getattr(getattr(self.cells, '_rt', None), 'max_evaluations_per_receiver', 0) or 0
+            if evaluations < PREPARE_MIN_EVALUATIONS:
+                return None
         return found
+
+    def param_prefix(self, expr):
+        """T-5c (shape G): ``self.P(a, ...)`` with P a cell of parameters whose formula is ``return T.loc[key]`` (T a
+        table the reads may read natively): (T call, T schema, the key's parts with the arguments in place of the
+        parameters) when they are fewer than T's levels, else None. Compiled cells with parameters cannot be
+        assigned, so P's value is always its formula's."""
+        if not (isinstance(expr, cst.Call) and isinstance(expr.func, cst.Attribute)
+                and isinstance(expr.func.value, cst.Name) and expr.func.value.value == 'self'):
+            return None
+        entry = self.param_cells.get(expr.func.attr.value)
+        if entry is None or any(a.keyword is not None or a.star for a in expr.args) or len(expr.args) != len(entry[0]):
+            return None
+        params, row = entry
+        found = self._receiver(row.value.value)
+        if found is None or found[1]['kind'] != 'frame' or not found[1].get('unique') or _code(found[0]) in self.mutated:
+            return None
+        arguments = {name: arg.value if isinstance(arg.value, (cst.Name, cst.Integer, cst.SimpleString))
+                     else arg.value.with_changes(lpar=[cst.LeftParen()], rpar=[cst.RightParen()])
+                     for name, arg in zip(params, expr.args)}        # an argument keeps its precedence
+
+        class Put(cst.CSTTransformer):
+            def leave_Name(self, original, updated):
+                return arguments.get(original.value, updated)
+
+            def leave_Attribute(self, original, updated):       # x.p is not the parameter p
+                return updated.with_changes(attr=original.attr)
+        parts = _parts(row.slice[0].slice.value.visit(Put()))
+        if len(parts) >= len(found[1]['levels']) or any(
+                isinstance(p, (cst.Slice, cst.List, cst.ListComp, cst.Tuple, cst.StarredElement)) for p in parts):
+            return None
+        return found[0], found[1], parts
 
     def prefix_receiver(self, expr):
         """T-4 (L3 through a cell): ``self.P()`` (or a local assigned once from it) where the formula of P is
@@ -394,6 +430,9 @@ class FrameReads:
         prefix = self.prefix_receiver(value) if isinstance(value, cst.Call) else None
         if prefix is not None:
             return name, prefix[1], prefix[2], prefix[3], prefix[4]
+        param = self.param_prefix(value)        # T-5c: ``name = self.P(a)``, P a prefix cell of parameters
+        if param is not None:
+            return name, param[0], param[1], param[2], None
         # T-5c: ``name = self.P().loc[more]``, a prefix of a prefix cell's value: one view of the parent table, the
         # cell's parts held per item and ``more`` coded per call
         inner = (value.value.value if isinstance(value, cst.Subscript) and isinstance(value.value, cst.Attribute)
@@ -774,6 +813,10 @@ class FrameReads:
 
 _NO_LABEL = object()
 
+# T-5c: in an item class, a frame the item computes itself is prepared (about 0.3-2M instructions, once per item)
+# only for a formula evaluated at least this many times per item; a pandas read costs about 20-100k instructions
+PREPARE_MIN_EVALUATIONS = 8
+
 
 class _View:
     """T-5: the rows of a frame receiver ``call`` a read walks: the whole table (``start`` None: pandas positions map
@@ -964,7 +1007,8 @@ class _Rewrite(cst.CSTTransformer):
         statements.append(cst.parse_statement(f'{start}: _mx_cy.Py_ssize_t = {m}.range_start(_mx_vr_{name})'))
         statements.append(cst.parse_statement(f'{stop}: _mx_cy.Py_ssize_t = {m}.range_stop(_mx_vr_{name})'))
         value = statement.body[0].value
-        source = value.with_changes(value=value.value.with_changes(value=call)) if cell is None else value
+        source = (value.with_changes(value=value.value.with_changes(value=call))
+                  if cell is None and isinstance(value, cst.Subscript) else value)      # (T-5c: or P(a) itself)
         view = o.views[name] = _View(name, call, schema, len(parts), codes, cst.Name(start), cst.Name(stop),
                                      cell if held is None else None)
         view.setup = [*statements, statement]     # the setup statements are kept only if a use needs them
@@ -1688,6 +1732,16 @@ class _Rewrite(cst.CSTTransformer):
             read = self.view_read(original, updated, value, parts)
             if read is not None:
                 return read
+        # T-5c (shape G): P(a).loc[k, "c"], P a prefix cell of parameters: T.loc[(key(a), k), "c"] on its parent
+        param = o.param_prefix(value.value) if isinstance(value, cst.Attribute) and value.attr.value in (
+            'loc', 'at') and len(parts) == 2 else None
+        label = _literal_str(parts[1]) if param is not None else None
+        if label is not None:
+            call, schema, prefix_parts = param
+            kind = dict(schema['columns']).get(label)
+            if kind in READ:
+                key = cst.Tuple([cst.Element(p) for p in [*prefix_parts, *_parts(parts[0])]])
+                return self._column_read(original, updated, call, schema, key, label, kind, value.value, 'L1') or updated
         # R.loc[key, "c"] / R.at[key, "c"] on a frame; R.loc[k] / R.at[k] / R[k] on a Series
         if isinstance(value, cst.Attribute) and value.attr.value in ('loc', 'at'):
             prefix = o.prefix_receiver(value.value) if len(parts) == 2 else None
