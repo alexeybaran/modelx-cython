@@ -448,7 +448,9 @@ def add_methods(cls, node, shape, *, workers):
     can_reuse = f'type(self) is {cls.name} and not self._mx_roots and not self._mx_spaces'
     callback = 'self._mx_evaluate_serial_collect' if shape is not None else 'None'
     parallel = can_reuse if shape is not None and shape.parallel_reuse else 'False'
-    ordered = bool(shape and shape.ordered)
+    # an individual section is returned in domain order whatever order the parallel chunks finish in
+    ordered = bool(shape and (shape.ordered or isinstance(shape, MultiCollect)
+                              and any(leaf.mode == 'individual' for leaf in shape.leaves)))
     options = cst.parse_statement(
         f'def _mx_collect_options_v2(self):\n    return {workers}, {callback}, {parallel}, {ordered}\n')
     shared = _shared_root_methods(cls, node)

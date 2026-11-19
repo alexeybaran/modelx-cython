@@ -79,8 +79,8 @@ def test_native_and_python_outputs_equal_the_export(tmp_path):
     assert compiled["native"] == {"Mixed": True, "CellDomain": False, "MissingKey": True}
     for key in ("mixed1", "cell1", "missing1"):
         assert compiled[key] == live[key], key
-    # the order of individual entries follows the parallel merge order (as for scalar outputs); the
-    # values and the sums at 4 workers equal the serial ones here (exact binary fractions per chunk)
+    # 4 workers: the individual section in domain order and with the serial values
+    assert compiled["mixed4"]["individual"] == live["mixed1"]["individual"]
     assert compiled["missing4"] == live["missing4"] == live["missing1"]
     assert compiled["missing1"][0] == "ValueError" and "structure changed" in compiled["missing1"][1]
     mixed = compiled["mixed1"]
