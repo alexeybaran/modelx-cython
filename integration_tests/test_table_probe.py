@@ -183,6 +183,7 @@ STMTS = {
                       "    return sum(tbl.loc[k, 'r'] for k in range(20, 22 + t))"),
     'tuple_local_display': ('grid', "key = (('A', 'B')[t % 2], 20 + t)\nreturn (key in T.index, T.loc[key, 'q'] if t < 4 else 0.0)"),
     'text_x': ('grid', "sub = T.loc['A']\nreturn (sub.index.asof('a'), sub.index.searchsorted('a'))"),
+    'search_nan': ('flat shuffled', "return (T.index.searchsorted(float('nan')), T.index.searchsorted(float('nan'), side='right'))"),
     'iterrows_find': ('mixed', "for k, row in T.iterrows():\n    if int(row['n']) >= 1 + t:\n        return (k, str(row['tag']))\nreturn None"),
     'obj_col': ('mixed', "return (T.loc[20 + t, 'tag'], T.at[20 + t, 'tag'] == 'x')"),
     'obj_col_missing': ('mixed', "return T.loc[98 + t, 'tag']"),
