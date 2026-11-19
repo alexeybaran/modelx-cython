@@ -130,7 +130,7 @@ def test_fuzz_compiled_equals_live(tmp_path):
 PREFIXES = {   # table -> prefix expressions of an item (literals, item cells, per-step choices)
     'grid': ["'A'", "'B'", 'plan()', "('A', 'B')[t % 2]", "('B', 'A')[t % 2]"],
     'sgrid': ["'A'", "'B'", 'plan()'],
-    'rates': ["(plan(), sex())", "(plan(), 'F')", "('A', 'M')", "plan()", "('B', sex())"],
+    'rates': ["(plan(), sex())", "(plan(), 'F')", "('A', 'M')", "('B', sex())"],   # a full prefix: year labels
 }
 READS = {
     'grid': ["sub.loc[20 + t % 4, 'q']", "int(sub.index[-1])", "len(sub.index)", "sum(sub.loc[k, 'q'] for k in sub.index)",

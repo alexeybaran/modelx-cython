@@ -776,12 +776,12 @@ class FrameReads:
             self.new_items.append(('free', fields[key], hold.table, name, None))
         return fields[key]
 
-    def row_field(self, hold, key_expr, name):
+    def row_field(self, hold, key_expr, name, emit=None):
         key = (hold.table, _code(key_expr))
         fields = self.row_fields
         if key not in fields:
             fields[key] = hold_table(self.cls_info).field('prepared_row', key)
-            self.new_items.append(('row', fields[key], hold.table, key_expr, name))
+            self.new_items.append(('row', fields[key], hold.table, key_expr if emit is None else emit, name))
         return fields[key]
 
     def hold(self, receiver, label, kind):
@@ -949,9 +949,23 @@ class _Rewrite(cst.CSTTransformer):
                  else self.code_of(hold, level, part, kind) for level, (part, kind) in enumerate(zip(parts, levels))]
         return self.code_args(codes), conditions
 
+    def _detached(self, expr):
+        """T-5c: a key from outside this formula's tree (a prefix or row cell's own key), its reads lowered for a hold
+        to evaluate once per item: ``self.R()["f"]``, a field of a row cell, reads the held row instead of building
+        the pandas row. ``expr`` itself when it has no such read."""
+        found = []
+
+        class Fields(cst.CSTVisitor):
+            def visit_Subscript(inner, node):
+                if isinstance(node.value, cst.Call) and self.o._fixed_value(node):
+                    found.append(node)
+        expr.visit(Fields())
+        return expr.visit(self) if found else expr
+
     def _held(self, hold, level, part, conditions):
         """The code of a key part fixed per item, held per item (``held - 1``); ``conditions`` gets its presence."""
-        field = self.o.code_field(hold, level, part, self.updated_of.get(id(part)))
+        emit = self.updated_of.get(id(part))
+        field = self.o.code_field(hold, level, part, emit if emit is not None else self._detached(part))
         conditions.append(cst.parse_expression(f'self.{field} > 0'))
         return cst.parse_expression(f'self.{field} - 1')
 
@@ -1162,8 +1176,8 @@ class _Rewrite(cst.CSTTransformer):
             return None
         if not (o.facts.is_int(parts[0]) or self.native.get(id(self.updated_of.get(id(parts[0])))) == 'i64'):
             return None
-        if isinstance(parts[0], cst.Name) and parts[0].value in ('True', 'False'):
-            return None         # T-5c: a bool is not a position for pandas (it raises)
+        if isinstance(parts[0], cst.Name) and parts[0].value in ('True', 'False') or isinstance(parts[0], cst.Float):
+            return None         # T-5c: a bool or float is not a position for pandas (it raises)
         hold = self._walk_hold(view)
         start, stop, test = self._view_parts(view, hold)
         i = _cast('_mx_cy.Py_ssize_t', self.updated_of.get(id(parts[0]), parts[0]))
@@ -1871,7 +1885,7 @@ class _Rewrite(cst.CSTTransformer):
         if isinstance(receiver, cst.Name):
             self.replaced_names.add(receiver.value)
         if o.per_item and all(o.item_fixed(part, kind) for part, kind in zip(key_parts, schema['levels'])):
-            field = o.row_field(hold, key, None)
+            field = o.row_field(hold, key, None, self._detached(key))
             read = self._m('object_field', o.ref(hold), o.slot(hold), cst.parse_expression(f'self.{field}'))
             conditions = [cst.parse_expression(f'self.{field} > 0')]
         else:
@@ -1981,8 +1995,9 @@ class _Rewrite(cst.CSTTransformer):
         ``float()`` reads ``float(row[f])`` from the prepared blocks."""
         o = self.o
         call = original.value
-        if isinstance(call, cst.Name):          # T-5c: ``row = self.P()`` then ``row["f"]``
-            call = o._value_of(call.value) or call
+        local = call.value if isinstance(call, cst.Name) else None
+        if local is not None:                   # T-5c: ``row = self.P()`` then ``row["f"]``
+            call = o._value_of(local) or call
         if not (o.per_item and isinstance(call, cst.Call) and not call.args and isinstance(call.func, cst.Attribute)
                 and isinstance(call.func.value, cst.Name) and call.func.value.value == 'self'):
             return None
@@ -1991,6 +2006,8 @@ class _Rewrite(cst.CSTTransformer):
         if row is None or not o.cached_call(call) or len(parts) != 1:
             return None
         if _literal_str(parts[0]) is not None:
+            if local is not None:       # the local is P() for the pandas branch, and is dropped once unread
+                self.swaps.setdefault(local, call)
             return self._row_field(original.with_changes(value=row), updated, parts, cell=name)
         up = o.facts.formula.parents.get(id(original))
         consumer = o.facts.formula.parents.get(id(up)) if isinstance(up, cst.Arg) else None
@@ -2008,7 +2025,7 @@ class _Rewrite(cst.CSTTransformer):
                 o.fixed_part(e.value if isinstance(e, cst.Element) else e) for e in fixed):
             return None
         hold = self._take(found[0], _NO_LABEL, -1)
-        field = o.row_field(hold, key, name)
+        field = o.row_field(hold, key, name, self._detached(key))
         label = self.updated_of.get(id(parts[0]), parts[0])
         read = self._m('field_f64', o.ref(hold), cst.parse_expression(f'self.{field}'), _cast('object', label))
         self._record(original, 'L2', found[0])
@@ -2057,7 +2074,7 @@ class _Rewrite(cst.CSTTransformer):
             if per_read:
                 suffix, cargs = self._codes(hold, [], _parts(key), levels)
                 return self._next(self._m('row' + suffix, o.ref(hold), *cargs)), []
-            field = o.row_field(hold, key, name)
+            field = o.row_field(hold, key, name, self._detached(key))
             return cst.parse_expression(f'self.{field}'), [cst.parse_expression(f'self.{field} > 0')]
         read, kind, test = self._field_read(call, schema, label, position)
         self._record(original, 'L2', call)
