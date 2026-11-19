@@ -848,6 +848,30 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
             from modelx_cython.auto_tables import classify
             cells.table_admission_reads = classify(cells, sites, lowered, cells.pandas_fallbacks)
 
+    def _lower_frames(self, frames, node, cls_info, cells):
+        """T-5c: ``frames.lower(node)``; an internal error leaves the formula as written (every read on pandas): the
+        class's held fields and the read signatures are restored as they were before it, so nothing of the failed
+        lowering is emitted, and the build report records the error. ``strict_lowering`` raises it instead."""
+        import copy
+        holds = copy.deepcopy(getattr(cls_info, 'holds', None))
+        signatures = dict(getattr(self._resolver, 'table_signatures', {}))
+        try:
+            return frames.lower(node)
+        except Exception as error:
+            if getattr(self.module.spec.policy, 'strict_lowering', False):
+                raise
+            cls_info.holds = holds
+            if hasattr(self._resolver, 'table_signatures'):
+                self._resolver.table_signatures.clear()
+                self._resolver.table_signatures.update(signatures)
+            frames.lowered = []
+            frames.declined = [{'expression': cells.name, 'receiver': '', 'form': 'pandas',
+                                'reason': f'declined after internal error: {type(error).__name__}: {error}'}]
+            import logging
+            logging.getLogger(__name__).warning('table reads of %s left to pandas after an internal error: %s: %s',
+                                                cells.name, type(error).__name__, error)
+            return node
+
     def _table_reads_lowered(self, node, cls_info, cells):
         cells.table_reads_typed, cells.table_reads_untyped, cells.table_reads_keys = 0, [], []
         if self._resolver is None:
@@ -857,7 +881,7 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
             from modelx_cython.frame_reads import FrameReads
             frames = FrameReads(self._resolver, cls_info, cells, self.helper_providers, self.module.spec.policy,
                                 getattr(self, '_row_names', None), self._prefix_cells(cls_info))
-            node = frames.lower(node)
+            node = self._lower_frames(frames, node, cls_info, cells)
             cells.frame_reads = frames.lowered + frames.declined
         if getattr(self.module.spec.policy, 'prepared_tables', False):
             # T-5: the pandas fallback of a lowered read runs only when the table cannot answer: not a pandas read
