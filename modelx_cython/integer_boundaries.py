@@ -15,17 +15,22 @@ from .usage import RESOLVED, _extract_self_chain
 _INTEGER_ANNOTATION = cst.Attribute(cst.Name(CY_MOD), cst.Name('longlong'))
 _SIGNED_OPERATIONS = {
     # integer guards: the operators that keep a helper (Python semantics, the checked power);
-    # + - * // are plain C operators, checked by Cython's overflowcheck in the checked mode
+    # + - * are plain C operators, checked by Cython's overflowcheck in the checked mode
+    cst.FloorDivide: '_mx_signed_floordiv',
     cst.Modulo: '_mx_signed_remainder',
     cst.LeftShift: '_mx_signed_left_shift',
     cst.RightShift: '_mx_signed_right_shift',
     cst.Power: '_mx_signed_pow',
 }
-_PLAIN_OPERATIONS = (cst.Add, cst.Subtract, cst.Multiply, cst.FloorDivide)
+_PLAIN_OPERATIONS = (cst.Add, cst.Subtract, cst.Multiply)
 _INTEGER_OPERATIONS = (*_PLAIN_OPERATIONS, *_SIGNED_OPERATIONS)
-_PYTHON_SEMANTICS = (cst.LeftShift, cst.RightShift, cst.Modulo)
+_PYTHON_SEMANTICS = (cst.LeftShift, cst.RightShift, cst.FloorDivide, cst.Modulo)
+_DIVISIONS = {cst.FloorDivide: '_mx_signed_floordiv', cst.Modulo: '_mx_signed_remainder',
+              cst.FloorDivideAssign: '_mx_signed_floordiv', cst.ModuloAssign: '_mx_signed_remainder'}
 _HELPER_OPERATIONS = (*_PYTHON_SEMANTICS, cst.Power)
 _INTEGER_CONVERSION = f'{MX_SYS_MOD}._mx_integer_result'
+# the floor division raises Cython's unnamed OverflowError (LLONG_MIN // -1): the handler names it
+_FLOORDIV = f'{MX_SYS_MOD}._mx_signed_floordiv'
 _SIGNED_HELPERS = frozenset((*_SIGNED_OPERATIONS.values(), '_mx_integer_result', '_mx_exact_int64'))
 
 
@@ -109,6 +114,7 @@ def _name_overflows(node, path):
     if not isinstance(node.body, cst.IndentedBlock) or not any(
             isinstance(part, _ARITHMETIC_NODES)
             or isinstance(part, cst.UnaryOperation) and isinstance(part.operator, cst.Minus)
+            or isinstance(part, cst.Call) and dotted_name(part.func) == _FLOORDIV
             for part in walk(node.body)):
         return node
     lines = list(node.body.body)
@@ -312,12 +318,14 @@ class _GuardIntegers(cst.CSTTransformer):
             # Shifts and the remainder keep their helpers in both modes, for Python's semantics:
             # a right shift rounds a negative value down (C leaves it to the implementation), a
             # left shift of a negative value or by 64 or more is exact in Python (Cython's checked
-            # shift raises), LLONG_MIN % -1 is 0 (C traps). An integer power
+            # shift raises), LLONG_MIN % -1 is 0 and LLONG_MIN // -1 raises (C traps, and Cython
+            # checks the division only where long long is as wide as long). An integer power
             # stored as a C integer takes the checked power in both modes: Cython's own C integer
             # power wraps, and with a variable exponent Cython makes it a double, which a C integer
             # result cannot take (at all, not only beyond 64 bits). Every other
             # operator is plain C: Cython's overflowcheck checks it in the checked mode.
-            if isinstance(value.operator, _HELPER_OPERATIONS) and left_signed and right_signed:
+            if (isinstance(value.operator, _HELPER_OPERATIONS) and left_signed and right_signed
+                    and not (isinstance(value.operator, cst.FloorDivide) and _positive_literal(value.right))):
                 operation = _SIGNED_OPERATIONS[type(value.operator)]
                 checked = _boundary_call(operation, path, left, right)
                 return checked.with_changes(lpar=value.lpar, rpar=value.rpar), True
@@ -568,6 +576,89 @@ def _guard_result(node, cell, cls, resolver, cells_kinds, ref_kinds, signatures,
     return node.with_changes(body=body)
 
 
+def _positive_literal(value):
+    """A divisor that cannot be -1: the division keeps Cython's C operator (no trap)."""
+    return isinstance(value, cst.Integer) and value.evaluated_value > 0
+
+
+class _GuardDivisions(cst.CSTTransformer):
+    """Every ``//`` and ``%`` of two C integers takes the checked helper, in both modes and
+    wherever it is (a float formula's ``12 // m`` as well as a C integer result): C traps on
+    LLONG_MIN // -1 and LLONG_MIN % -1 (see _mx_signed_floordiv). A divisor that is a positive
+    literal cannot be -1 and stays a C operator."""
+
+    def __init__(self, guard):
+        self.guard = guard
+
+    def on_visit(self, node):
+        return not isinstance(node, OPAQUE_SCOPES) and super().on_visit(node)
+
+    def _signed(self, value):
+        return self.guard._signed_expression(value, self.guard.path)[1]
+
+    def leave_BinaryOperation(self, before, after):
+        operation = _DIVISIONS.get(type(after.operator))
+        if (operation is None or _positive_literal(after.right)
+                or not (self._signed(before.left) and self._signed(before.right))):
+            return after
+        return _boundary_call(operation, self.guard.path, after.left, after.right).with_changes(
+            lpar=after.lpar, rpar=after.rpar)
+
+    def leave_AugAssign(self, before, after):
+        operation = _DIVISIONS.get(type(after.operator))
+        if (operation is None or not isinstance(after.target, cst.Name)
+                or _positive_literal(after.value)
+                or not (self._signed(before.target) and self._signed(before.value))):
+            return after
+        return cst.Assign((cst.AssignTarget(after.target),),
+                          _boundary_call(operation, self.guard.path, after.target, after.value))
+
+
+def _guard_divisions(node, cell, cls, signatures, native_helpers=()):
+    """Route the C integer ``//`` and ``%`` of one formula function through the helpers. The
+    operands are recognised as the result lowering recognises them: parameters, declared and
+    assigned locals, fields, casts and calls of C integer type."""
+    if not any(isinstance(part, (cst.BinaryOperation, cst.AugAssign)) and type(part.operator) in _DIVISIONS
+               for part in lexical_nodes(node.body.body)):
+        return node
+    fields, functions, methods = signatures
+    facts = CstFacts(node.body.body)
+    bindings = facts.bindings(lexical_nodes(node.body.body))
+    parameters = {param.name.value for param in (*node.params.posonly_params, *node.params.params,
+                                                 *node.params.kwonly_params)
+                  if param.annotation is not None and param.annotation.annotation.deep_equals(_INTEGER_ANNOTATION)}
+    declared = {statement.target.value for statement in lexical_nodes(node.body.body)
+                if isinstance(statement, cst.AnnAssign) and isinstance(statement.target, cst.Name)
+                and statement.annotation.annotation.deep_equals(_INTEGER_ANNOTATION)}
+    arithmetic = CheckedArithmetic(cls, cell)
+    arithmetic.parameters = parameters
+    guard = _GuardIntegers(cell.model_path, None, native_helpers, arithmetic,
+                           fields.get(cls.name, {}) if MX_SELF not in bindings else {},
+                           functions.difference(bindings),
+                           methods.get(cls.name, set()) if MX_SELF not in bindings else set(),
+                           parameters | declared, False, None, False)
+    # locals Cython infers as C integers: every store an assignment (plain or augmented) of a
+    # C integer expression; any other store (a loop target, a float value) leaves the local out
+    values = {}
+    for part in lexical_nodes(node.body.body):
+        if isinstance(part, cst.AugAssign) and isinstance(part.target, cst.Name):
+            values.setdefault(part.target.value, []).append(part.value)
+        elif (target := local_assignment(part)) is not None:
+            values.setdefault(target.value, []).append(part.value)
+    candidates = {name for name, count in facts.stores.items()
+                  if count and name not in guard.signed_names and len(values.get(name, ())) == count}
+    changed = True
+    while changed:              # greatest fixpoint: assume all, drop the ones an assignment refutes
+        changed = False
+        guard.signed_names |= candidates
+        for name in sorted(candidates):
+            if not all(guard._signed_expression(value, guard.path)[1] for value in values[name]):
+                candidates.discard(name)
+                guard.signed_names.discard(name)
+                changed = True
+    return node.with_changes(body=node.body.visit(_GuardDivisions(guard)))
+
+
 def _signed_signatures(state):
     def signed_result(node):
         return (node.returns is not None and node.returns.annotation.deep_equals(_INTEGER_ANNOTATION)
@@ -687,6 +778,7 @@ def guard_integer_boundaries(state, module_info, resolver, cells_kinds, ref_kind
                                      argument_axes=axes, checked=checked)
                 if checked:
                     node = _name_overflows(node, cell.model_path)
+                node = _guard_divisions(node, cell, cls, signatures)
                 if infer_types:
                     node = _python_locals(node, cell)
                 changed = True
@@ -704,6 +796,8 @@ def guard_integer_boundaries(state, module_info, resolver, cells_kinds, ref_kind
                                        native_helpers.get((cls.name, name), ()), checked=checked)
                 if checked:
                     method = _name_overflows(method, formula.model_path)
+                method = _guard_divisions(method, formula, cls, signatures,
+                                          native_helpers.get((cls.name, name), ()))
                 if infer_types:
                     method = _python_locals(method, formula)
                 methods.append(method)
@@ -720,6 +814,7 @@ def guard_integer_boundaries(state, module_info, resolver, cells_kinds, ref_kind
                                        checked=checked)
                 if checked:
                     method = _name_overflows(method, cell.model_path)
+                method = _guard_divisions(method, cell, cls, signatures)
                 if infer_types:
                     method = _python_locals(method, cell)
                 changed = True

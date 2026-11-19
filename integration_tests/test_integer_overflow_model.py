@@ -11,6 +11,7 @@ checked mode: the conversions at the Python boundary stay checked and named, and
 a C integer takes the checked power in both modes.
 """
 import json
+import re
 import subprocess
 import sys
 import textwrap
@@ -41,16 +42,23 @@ CELLS = {
     "dl": "def dl(t):\n    x = int(h(t) * 1e18)\n    return x // 1000\n",
     "lf": "def lf(t):\n    return h(t) + 4611686018427387904 * 4\n",
     "lg": "def lg(t):\n    return h(t) + (4611686018427387904 * 4) // 8\n",
+    # LLONG_MIN // -1 and LLONG_MIN % -1 trap in C on every platform; Cython checks the division
+    # only where long long is as wide as long (not on Windows) and never the remainder
+    "ff": "def ff(t):\n    x = t * BIG - BIG - BIG\n    return float(x // (h(t) - 1))\n",
+    "mf": "def mf(t):\n    x = t * BIG - BIG - BIG\n    return float(x % (h(t) - 1))\n",
+    "fn": "def fn(t):\n    x = t * BIG - BIG - BIG\n    return x // -1\n",
+    "fa": "def fa(t):\n    x = t * BIG - BIG - BIG\n    x //= h(t) - 1\n    return x\n",
+    "ma": "def ma(t):\n    x = t * BIG - BIG - BIG\n    x %= h(t) - 1\n    return x\n",
 }
 RUNS = {"neg": 0, "pw": 9, "sh": 9, "rs": 3, "fd": 3, "md": 3, "fm": 0, "il": 100000, "ie": 100000,
         "ls": 2097151, "sm": 2097148, "di": 100, "mx": 2097151, "pl": 9, "pf": 9, "pv": 16, "pc": 9,
-        "dl": 100, "lf": 1, "lg": 1}
-EXACT = {"rs", "fd", "md", "dl", "lf", "lg"}
+        "dl": 100, "lf": 1, "lg": 1, "ff": 0, "mf": 0, "fn": 0, "fa": 0, "ma": 0}
+EXACT = {"rs", "fd", "md", "dl", "lf", "lg", "mf", "ma"}
 # checked mode: everything else raises naming the Cell
 UNCHECKED_PLAIN = {"neg", "il", "ie", "ls", "mx", "pf", "pc"}
 # division check, named boundary conversions, the checked power of a power stored as a C integer,
 # the left-shift helper (Python's shift rules, checked in both modes)
-UNCHECKED_RAISES = {"fm", "sm", "di", "pw", "pl", "pv", "sh"}
+UNCHECKED_RAISES = {"fm", "sm", "di", "pw", "pl", "pv", "sh", "ff", "fn", "fa"}
 
 
 @pytest.fixture(scope="module")
@@ -95,7 +103,25 @@ def _build(exported, tmp_path, mode):
     ''')], cwd=build, capture_output=True, text=True, timeout=300)
     assert probe.returncode == 0, probe.stdout + probe.stderr
     report = json.loads((build / "exported_cy" / "_mx_integer_checks.json").read_text())
+    assert _unchecked_divisions(build / "exported_cy" / "_mx_classes.c") == []
     return json.loads(probe.stdout.strip().splitlines()[-1]), live, report
+
+
+_DIVISION = re.compile(r'__Pyx_(div|mod)_\w+\((.*), 0\);')
+_SOURCE = re.compile(r'^\s*/\* "([^"]+)":(\d+)')
+
+
+def _unchecked_divisions(c_file):
+    """Division and remainder sites of C integers with a variable divisor outside _mx_sys.pxd's
+    helpers: each can trap at LLONG_MIN / -1, whatever the platform checks."""
+    found, where = [], None
+    for line in c_file.read_text(encoding="utf-8").splitlines():
+        if (source := _SOURCE.match(line)) is not None:
+            where = source.groups()
+        elif _DIVISION.search(line) and not line.lstrip().startswith("static") and not (
+                where and where[0].endswith("_mx_sys.pxd")):
+            found.append((where, line.strip()))
+    return found
 
 
 def test_checked_mode_is_exact_or_names_the_cell(exported, tmp_path):
