@@ -42,6 +42,10 @@ COLUMN_KIND = {'f64': 0, 'i64': 1}
 READ = ('f64', 'i64')
 CTYPE = {'f64': '_mx_cy.double', 'i64': '_mx_cy.longlong'}
 MAX_PARTS = 6
+# displays whose value as a key part (or an argument of asof/searchsorted) selects several rows, never one label
+SEVERAL_ROWS = (cst.List, cst.ListComp, cst.Set, cst.Slice, cst.Tuple, cst.Lambda)
+# kinds of a call's result in the sample (read_notes.kind) that are a single number
+ONE_NUMBER = frozenset(('int', 'float', 'bool'))
 MUTATORS = frozenset(('__setitem__', '__delitem__', 'update', 'insert', 'pop'))
 
 
@@ -1112,7 +1116,7 @@ class _Rewrite(cst.CSTTransformer):
         if len(parts) > MAX_PARTS:
             return None, f'{len(parts)} key parts'
         for part in parts:
-            if isinstance(part, (cst.List, cst.ListComp, cst.Set, cst.Slice, cst.Tuple, cst.Lambda)):
+            if isinstance(part, SEVERAL_ROWS):
                 return None, 'a key part selects several rows'
         return parts, None
 
@@ -1425,6 +1429,8 @@ class _Rewrite(cst.CSTTransformer):
             left = not side or (side[0].keyword.value == 'side' and _literal_str(side[0].value) == 'left')
             if len(plain) != 1 or len(side) > 1 or not (right or left) or _text(plain[0].value):
                 return None         # (a text x is pandas' own TypeError, never a C double)
+            if self._vector_argument(original, plain[0].value, view):
+                return None
             hold = self._take(view.call, view.depth, -3)
             start, stop, test = self._view_parts(view, hold)
             x = _cast('_mx_cy.double', self.updated_of.get(id(plain[0].value), plain[0].value))
@@ -1445,6 +1451,8 @@ class _Rewrite(cst.CSTTransformer):
         if (func.attr.value == 'asof' and len(original.args) == 1 and not original.args[0].keyword
                 and not _text(original.args[0].value)):
             # T-5c: a bare asof value: the label when one is <= x, else pandas' own asof (NaN stays pandas')
+            if self._vector_argument(original, original.args[0].value, view):
+                return None
             hold = self._take(view.call, view.depth, -3)
             start, stop, test = self._view_parts(view, hold)
             x = _cast('_mx_cy.double', self.updated_of.get(id(original.args[0].value), original.args[0].value))
@@ -1567,6 +1575,23 @@ class _Rewrite(cst.CSTTransformer):
         return (isinstance(subscript, cst.Subscript) and subscript.slice[0] is element
                 and isinstance(subscript.value, cst.Attribute) and subscript.value.attr.value in ('loc', 'at'))
 
+    def _vector_argument(self, call, arg, view):
+        """Whether the argument of ``X.index.asof(x)`` / ``.searchsorted(x)`` is not one number, so the call stays on
+        pandas (recorded): from the text, a display that selects several rows (as a key part); from tracing, a call
+        whose result in the sample was not a single number (an array, a list, a Series). A call with no note is
+        not vetoed."""
+        why = None
+        if isinstance(arg, SEVERAL_ROWS):
+            why = 'the argument is a display of several values (an array result, never one label)'
+        else:
+            note = self.o.note_of(call)
+            if note is not None and any(len(seen) == 3 and seen[1] == call.func.attr.value and seen[2] not in ONE_NUMBER
+                                        for seen in note['seen']):
+                why = 'the sample returned more than one number from this call (its argument holds several values)'
+        if why:
+            self._record(call, 'pandas', view.call, why)
+        return why is not None
+
     def _asof(self, call, updated, error, whole_call=None):
         """``X.index.asof(x)`` on an int level of an ordered view, as the label (C long long); no label: the error
         of its consumer (``int()``: ValueError; a key: KeyError)."""
@@ -1577,6 +1602,8 @@ class _Rewrite(cst.CSTTransformer):
             return None
         view = self._view(func.value.value) if not _text(call.args[0].value) else None
         if view is None or not self._one_level(view) or view.schema['levels'][view.depth] != 'int':
+            return None
+        if self._vector_argument(call, call.args[0].value, view):
             return None
         hold = self._take(view.call, view.depth, -3)
         start, stop, test = self._view_parts(view, hold)
