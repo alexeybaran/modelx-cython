@@ -902,10 +902,10 @@ class FrameReads:
         constant = self.facts.enum_constant(part) if level_kind == 'int' else None
         if constant is not None:        # an IntEnum member: its C constant (enums.py, D79; T-5c: not only under is_int)
             return cst.Name(constant), 'int'
-        if level_kind == 'int' and self.facts.is_int(part):
-            if self.facts.exact_long_long(part):
-                return emit, 'int'
-            return _cast('_mx_cy.longlong', emit), 'int'
+        if level_kind == 'int':
+            # typed dispatch: the C type Cython gives the part chooses the lookup (runtime ``kcode``); no proof here
+            # from the form of the expression that it is an integer
+            return emit, 'typed'
         return _cast('object', emit), 'object'
 
 
@@ -1126,7 +1126,7 @@ class _Rewrite(cst.CSTTransformer):
         of the Python value (looked up as pandas does)."""
         o = self.o
         arg, how = o.key_part(part, kind, self.updated_of.get(id(part)))
-        return self._m('lcode' if how == 'int' else 'ocode', o.ref(hold), cst.Integer(str(level)), arg)
+        return self._m({'int': 'lcode', 'typed': 'kcode'}.get(how, 'ocode'), o.ref(hold), cst.Integer(str(level)), arg)
 
     def _native_test(self, hold, conditions):
         test = self._positive(self.o.slot(hold))

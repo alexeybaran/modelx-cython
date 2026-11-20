@@ -140,6 +140,40 @@ cdef inline Py_ssize_t ocode(PreparedRef ref, int level, object key) except -2:
     return (<PreparedTable>ref).code_obj(level, key)
 
 
+# The code of a key part on an int level, by the C type Cython gives the key (decisions from typing, not from the
+# form of the key expression): a C integer is looked up directly, a C double as pandas finds an integral float, a C
+# bool is no label, any other value as ``ocode`` (looked up as pandas does).
+# The list names every C type a generated key expression can have, so that each selects exactly one version: a type
+# missing from it would be ambiguous between the integer versions and stop the build.
+ctypedef fused _key_t:
+    bint
+    int
+    long
+    long long
+    Py_ssize_t
+    Py_UCS4
+    double
+    object
+
+
+cdef inline Py_ssize_t kcode(PreparedRef ref, int level, _key_t key) except -2:
+    cdef long long whole
+    if _key_t is object:
+        return (<PreparedTable>ref).code_obj(level, key)
+    elif _key_t is bint:
+        return -1
+    elif _key_t is Py_UCS4:             # one character of a text value: the text, looked up as pandas does
+        return (<PreparedTable>ref).code_obj(level, <object>key)
+    elif _key_t is double:
+        if key >= -9.0e18 and key <= 9.0e18:
+            whole = <long long>key
+            if <double>whole == key:
+                return (<PreparedTable>ref).code_ll(level, whole)
+        return -1
+    else:
+        return (<PreparedTable>ref).code_ll(level, key)
+
+
 cdef int missing_codes(PreparedRef ref, const Py_ssize_t* codes, int count) except -1
 
 
