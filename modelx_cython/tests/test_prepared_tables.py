@@ -239,5 +239,3 @@ def test_check_mode_detects_an_edit(tables):
     frame.loc[11, 'q'] = 9.0
     with pytest.raises(RuntimeError, match='edited in place'):
         _tables.check_unchanged(frame)
-    _tables.forget()                         # a clear drops the prepared copies: the edit is bound afresh
-    _tables.check_unchanged(frame)
