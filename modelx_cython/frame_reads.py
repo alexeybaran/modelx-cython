@@ -134,6 +134,14 @@ class FrameReads:
             out.append({'expression': text[:200], 'seen': sorted(repr(o) for o in seen), 'evaluations': note['count'],
                         'per_step': bool(self.cells.has_args()),
                         'reason': reason or 'no rule recognises this form'})
+        # a read of a table the text shows but the sample never reached: declined from the text alone
+        for entry in self.declined:
+            text = normal(entry['expression'])
+            if entry.get('form') == 'pandas' and text not in self.notes and as_written(text) not in self.notes:
+                out.append({'expression': text[:200], 'seen': [], 'evaluations': 0, 'per_step': bool(self.cells.has_args()),
+                            'reason': 'not reached by the sample; ' + (entry.get('reason') or 'left on pandas')})
+        self.unsampled_lowered = sum(1 for e in self.lowered if normal(e['expression']) not in self.notes
+                                     and as_written(normal(e['expression'])) not in self.notes)
         return out
 
     # ------------------------------------------------------------------ facts
@@ -338,6 +346,11 @@ class FrameReads:
             rewriter.new_holds = self.new_items = []
             asof = self._asof_assignment(statement)
             view = self.view_assignment(statement) if asof is None else None
+            if asof is not None or view is not None:    # the whole assignment is rewritten: its read is lowered
+                assigned = self._simple_assign(statement)
+                if assigned is not None:
+                    from .read_notes import normal
+                    self.lowered_text.add(normal(_code(assigned[1])))
             if asof is not None:
                 new = rewriter.asof_statement(statement, asof)
             elif view is not None:
@@ -1051,6 +1064,11 @@ class _Rewrite(cst.CSTTransformer):
                                                              cst.GeneratorExp, cst.ListComp)):
             from .read_notes import normal
             self.o.lowered_text.add(normal(_code(original)))
+        elif result is not updated and isinstance(original, cst.SimpleStatementLine):
+            assigned = self.o._simple_assign(original)      # `row = R.loc[key]`: the statement is rewritten
+            if assigned is not None:
+                from .read_notes import normal
+                self.o.lowered_text.add(normal(_code(assigned[1])))
         return result
 
     def visit_FunctionDef(self, node):
@@ -1156,9 +1174,9 @@ class _Rewrite(cst.CSTTransformer):
             return '_1', codes
         return '_c', [cst.Integer(str(len(codes))), *codes, *[cst.Integer('0')] * (MAX_PARTS - len(codes))]
 
-    def _codes(self, hold, prefix, parts, levels):
+    def _codes(self, hold, prefix, parts, levels, conditions=None):
         """code_args of the codes ``prefix`` followed by those of key ``parts`` on the levels after them."""
-        return self.code_args(list(prefix) + [self.code_of(hold, level, part, levels[level])
+        return self.code_args(list(prefix) + [self.code_of(hold, level, part, levels[level], conditions)
                                               for level, part in enumerate(parts, len(prefix))])
 
     def code_of(self, hold, level, part, kind, conditions=None):
@@ -1997,7 +2015,7 @@ class _Rewrite(cst.CSTTransformer):
         hold.row_columns = True
         conditions = []
         if prefix:
-            suffix, args = self._codes(hold, prefix, own, levels)
+            suffix, args = self._codes(hold, prefix, own, levels, conditions)
         else:
             (suffix, args), conditions = self._read_args(hold, own, levels)
         label = _cast('object', self.updated_of.get(id(name), name))
@@ -2038,8 +2056,10 @@ class _Rewrite(cst.CSTTransformer):
             if view.start is None or isinstance(part, (cst.Slice, cst.List, cst.ListComp, cst.Tuple)):
                 return None
             start, stop, test = self._view_parts(view, self._take(view.call, _NO_LABEL, -1))
-            suffix, args = self._codes(chold, view.codes, [part], view.schema['levels'])
+            labels = []
+            suffix, args = self._codes(chold, view.codes, [part], view.schema['levels'], labels)
             read = self._m(kind + suffix, o.ref(chold), o.slot(chold), *args)
+            test = self._conjunction([test, *labels])
         test = self._conjunction([test, self._positive(o.slot(chold))])
         self._record(original, 'L8' if value.attr.value == 'iloc' else 'L3', view.call, view=view)
         return self._guarded(original, updated, view, test, read, kind)
@@ -2286,7 +2306,8 @@ class _Rewrite(cst.CSTTransformer):
             return updated
         hold = self._take(call, label, COLUMN_KIND[kind])
         codes, conditions = self._prefix_holds(hold, prefix_parts, name)
-        suffix, args = self._codes(hold, codes, own, levels)
+        conditions = list(conditions)
+        suffix, args = self._codes(hold, codes, own, levels, conditions)
         read = self._m(kind + suffix, o.ref(hold), o.slot(hold), *args)
         if isinstance(value.value, cst.Name):
             self.swaps[value.value.value] = pcall

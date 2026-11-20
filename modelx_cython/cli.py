@@ -510,12 +510,26 @@ def main_handler(args: argparse.Namespace, stdout: IO[str], stderr: IO[str]) -> 
             audit = {path_of(cls, cell.name): cell.read_audit
                      for info in module_infos.values() for cls in info.classes.values()
                      for cell in cls.cells.values() if getattr(cell, 'read_audit', None)}
+            cells_all = [cell for info in module_infos.values() for cls in info.classes.values() for cell in cls.cells.values()]
+            lowered = sum(1 for cell in cells_all for e in (getattr(cell, 'frame_reads', None) or ()) if 'reason' not in e)
+            unsampled = sum(getattr(cell, 'read_unsampled_lowered', 0) for cell in cells_all)
+            entries = [e for v in audit.values() for e in v]
+            audit['_summary'] = {
+                'lowered': lowered, 'lowered_not_reached_by_the_sample': unsampled,
+                'left_on_pandas_per_step': sum(1 for e in entries if e['per_step'] and e['evaluations']),
+                'left_on_pandas_per_policy': sum(1 for e in entries if not e['per_step'] and e['evaluations']),
+                'left_on_pandas_not_reached_by_the_sample': sum(1 for e in entries if not e['evaluations'])}
             (model_path / '_mx_read_audit.json').write_text(json.dumps(audit, indent=1, sort_keys=True), encoding='utf-8')
-            for name, entries in sorted(audit.items()):
-                for entry in entries:
+            per_step = []
+            for name, found in sorted(audit.items()):
+                if name == '_summary':
+                    continue
+                for entry in found:
                     if entry['per_step']:
-                        _logger.warning('table read left on pandas in a per-step cell: %s: %s (%s)', name,
-                                        entry['expression'], entry['reason'])
+                        per_step.append(f"{name}: {entry['expression']} ({entry['reason']})")
+                        _logger.warning('table read left on pandas in a per-step cell: %s', per_step[-1])
+            if policy.strict_tables and per_step:
+                raise HandlerError('strict_tables: table reads left on pandas in per-step cells: ' + '; '.join(per_step))
         if getattr(logger, 'read_notes_json', None) is not None:
             (model_path / '_mx_read_notes.json').write_text(json.dumps(logger.read_notes_json, indent=1),
                                                             encoding='utf-8')
