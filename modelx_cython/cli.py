@@ -146,7 +146,12 @@ def run_sample(model_path: pathlib.Path, sample_path: str, new_model_name: str =
             code_filter= MxCodeFilter()):
             if not admission:   # T-3: the sample runs on the user's own frames
                 logger.admission = None
-                runpy.run_path(sample_path, run_name="__main__")
+                from . import read_notes
+                with read_notes.recording(module):      # what arrives at each table read (decisions from tracing)
+                    runpy.run_path(sample_path, run_name="__main__")
+                logger.read_notes = dict(read_notes.NOTES)
+                logger.read_segments = dict(read_notes.SEGMENTS)
+                logger.read_notes_json = read_notes.as_json()
             else:
                 from .auto_tables import sample_admission
                 with sample_admission(module) as admitted:     # auto-tables (D104)
@@ -499,6 +504,9 @@ def main_handler(args: argparse.Namespace, stdout: IO[str], stderr: IO[str]) -> 
                 and frame_cell(cls, cell))
             (model_path / '_mx_table_reads.json').write_text(json.dumps(reads, indent=1, sort_keys=True),
                                                              encoding='utf-8')
+        if getattr(logger, 'read_notes_json', None) is not None:
+            (model_path / '_mx_read_notes.json').write_text(json.dumps(logger.read_notes_json, indent=1),
+                                                            encoding='utf-8')
         _table_admission(logger, report, model_path, policy)
 
     if args.translate_only:
