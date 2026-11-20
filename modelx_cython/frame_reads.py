@@ -151,6 +151,22 @@ class FrameReads:
             if entry.get('form') == 'pandas' and text not in self.notes and as_written(text) not in self.notes:
                 out.append({'expression': text[:200], 'seen': [], 'evaluations': 0, 'per_step': bool(self.cells.has_args()),
                             'reason': 'not reached by the sample; ' + (entry.get('reason') or 'left on pandas')})
+        # every other read this pass declined (left on pandas with a reason) that the sample reached: also reported,
+        # so no compile-time choice of pandas is silent (a note that is not a table read by its observations, or a
+        # text inside a lowered expression)
+        reported = {normal(e['expression']) for e in out}
+        exact = {normal(e) for e in lowered}
+        for entry in self.declined:
+            text = normal(entry['expression'])
+            if entry.get('form') != 'pandas' or text[:200] in reported or text in exact:
+                continue
+            note = self.notes.get(text) or self.notes.get(as_written(text))
+            if note is None:
+                continue
+            reported.add(text[:200])
+            out.append({'expression': text[:200], 'seen': sorted(repr(o) for o in note['seen']),
+                        'evaluations': note['count'], 'per_step': bool(self.cells.has_args()),
+                        'reason': entry.get('reason') or 'left on pandas'})
         self.unsampled_lowered = sum(1 for e in self.lowered if normal(e['expression']) not in self.notes
                                      and as_written(normal(e['expression'])) not in self.notes)
         return out
