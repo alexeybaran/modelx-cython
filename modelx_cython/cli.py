@@ -152,6 +152,7 @@ def run_sample(model_path: pathlib.Path, sample_path: str, new_model_name: str =
                 logger.read_notes = dict(read_notes.NOTES)
                 logger.read_segments = dict(read_notes.SEGMENTS)
                 logger.read_notes_json = read_notes.as_json()
+                logger.read_notes_by_text = read_notes.by_text()
             else:
                 from .auto_tables import sample_admission
                 with sample_admission(module) as admitted:     # auto-tables (D104)
@@ -414,6 +415,7 @@ def main_handler(args: argparse.Namespace, stdout: IO[str], stderr: IO[str]) -> 
         # not provably of its C type is typed object in the formula.
         module_infos = {u.module_info.fqname: u.module_info for u in units}
         resolver = build_resolver(module_infos)
+        resolver.read_notes = getattr(logger, 'read_notes_by_text', None) or {}
         admit_forwarded_views(module_infos, resolver)
         cells_kinds, ref_kinds = build_kind_maps(module_infos)
         cells_by_name = {cell.fqname: cell for module in module_infos.values()
@@ -504,6 +506,16 @@ def main_handler(args: argparse.Namespace, stdout: IO[str], stderr: IO[str]) -> 
                 and frame_cell(cls, cell))
             (model_path / '_mx_table_reads.json').write_text(json.dumps(reads, indent=1, sort_keys=True),
                                                              encoding='utf-8')
+        if getattr(logger, 'read_notes_by_text', None) is not None:
+            audit = {path_of(cls, cell.name): cell.read_audit
+                     for info in module_infos.values() for cls in info.classes.values()
+                     for cell in cls.cells.values() if getattr(cell, 'read_audit', None)}
+            (model_path / '_mx_read_audit.json').write_text(json.dumps(audit, indent=1, sort_keys=True), encoding='utf-8')
+            for name, entries in sorted(audit.items()):
+                for entry in entries:
+                    if entry['per_step']:
+                        _logger.warning('table read left on pandas in a per-step cell: %s: %s (%s)', name,
+                                        entry['expression'], entry['reason'])
         if getattr(logger, 'read_notes_json', None) is not None:
             (model_path / '_mx_read_notes.json').write_text(json.dumps(logger.read_notes_json, indent=1),
                                                             encoding='utf-8')

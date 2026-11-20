@@ -174,6 +174,18 @@ cdef inline Py_ssize_t kcode(PreparedRef ref, int level, _key_t key) except -2:
         return (<PreparedTable>ref).code_ll(level, key)
 
 
+# Whether a key part names one label. A C number does, decided when the model is compiled; any other value is looked
+# at when the read runs: a list, a mask, a slice or a table selects several rows, and the read then runs on pandas.
+cdef bint selects_rows(object key)
+
+
+cdef inline bint is_label(_key_t key) noexcept:
+    if _key_t is object:
+        return not selects_rows(key)
+    else:
+        return True
+
+
 cdef int missing_codes(PreparedRef ref, const Py_ssize_t* codes, int count) except -1
 
 

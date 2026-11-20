@@ -18,6 +18,7 @@ import sys
 from contextlib import contextmanager
 
 NOTES = {}
+COUNTS = {}        # the same key -> evaluations in the sample
 SEGMENTS = {}       # the same key -> the source text of the node (checked against the transformer's node)
 _TABLES, _SUBS, _ROWS, _INDEXES, _KEEP = {}, {}, {}, {}, []
 
@@ -64,6 +65,7 @@ def _shape(key):
 
 def _note(nid, *what):
     NOTES.setdefault(nid, set()).add(what)
+    COUNTS[nid] = COUNTS.get(nid, 0) + 1
 
 
 def _follow(value, origin):
@@ -225,7 +227,7 @@ def recording(package):
     """Record the reads of the model package ``package`` while it is imported and run inside the block."""
     import builtins
     import importlib.util       # noqa: F401  (decode_source)
-    for store in (NOTES, SEGMENTS, _TABLES, _SUBS, _ROWS, _INDEXES):
+    for store in (NOTES, COUNTS, SEGMENTS, _TABLES, _SUBS, _ROWS, _INDEXES):
         store.clear()
     del _KEEP[:]
     hooks = {'_mx_note_sub': r_sub, '_mx_note_call': r_call, '_mx_note_in': r_in, '_mx_note_it': r_it, '_mx_note_v': r_v}
@@ -249,3 +251,54 @@ def as_json():
         out.append({'class': key[0], 'function': key[1], 'at': list(key[2:6]), 'op': key[6],
                     'text': SEGMENTS.get(key), 'seen': sorted(repr(n) for n in NOTES[key])})
     return out
+
+
+def normal(text):
+    """Source text of a node, as both parsers give it: without surrounding spaces and outer parentheses."""
+    text = ' '.join((text or '').split())
+    while text.startswith('(') and text.endswith(')') and _balanced(text[1:-1]):
+        text = text[1:-1].strip()
+    return text
+
+
+def _balanced(text):
+    depth = 0
+    for ch in text:
+        depth += ch in '([{'
+        depth -= ch in ')]}'
+        if depth < 0:
+            return False
+    return depth == 0
+
+
+def by_text():
+    """{(class, function): {text of a node: {'seen': observations, 'count': evaluations, 'ops': operations}}}.
+    The transformer finds a note by the text of its node within the formula (the same text ran in the sample);
+    places of one formula with the same text share their observations."""
+    out = {}
+    for key, seen in NOTES.items():
+        entry = out.setdefault(key[:2], {}).setdefault(normal(SEGMENTS.get(key)), {'seen': set(), 'count': 0, 'ops': set()})
+        entry['seen'] |= seen
+        entry['count'] += COUNTS.get(key, 0)
+        entry['ops'].add(key[6])
+    return out
+
+
+SELECTORS = ('series', 'list', 'ndarray', 'slice', 'frame', 'Index', 'set', 'dict', 'DataFrame', 'Series')
+
+
+def selects_rows(shape):
+    """A recorded key shape with a part that selects several rows (a mask, a list, a slice, a pandas object)."""
+    if isinstance(shape, tuple):
+        return any(selects_rows(part) for part in shape)
+    return shape in SELECTORS or str(shape).startswith(('row:', 'sub:', 'table:', 'index:', 'loc'))
+
+
+def table_read(op, seen):
+    """Whether an observation is a read of a traced table (what the audit expects to be lowered or reported)."""
+    receiver = seen[0]
+    if op == 'sub':
+        return receiver.startswith(('loc:', 'row:'))
+    if op == 'call':
+        return receiver.startswith('index:') and seen[1] in ('max', 'min', 'asof', 'searchsorted')
+    return op in ('in', 'it') and receiver.startswith('index:')

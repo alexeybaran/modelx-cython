@@ -100,6 +100,41 @@ class FrameReads:
         self.resolver, self.cls_info, self.cells = resolver, cls_info, cells
         self.providers, self.policy = providers, policy
         self.lowered, self.declined = [], []
+        # what the sample run saw at each table read of this formula, by the text of the node (read_notes.py)
+        self.notes = (getattr(resolver, 'read_notes', None) or {}).get((cls_info.name, '_f_' + cells.name), {})
+        self.lowered_text = set()   # texts of the nodes this formula's rewrite replaced
+        self.key_count = 0
+
+    def note_of(self, node):
+        from .read_notes import normal
+        return self.notes.get(normal(_code(node)))
+
+    def audit(self):
+        """The table reads the sample saw in this formula that were not lowered: (expression, reason, ...)."""
+        from .read_notes import table_read
+        out = []
+        from .read_notes import normal
+        declined = {entry['expression']: entry.get('reason') for entry in self.declined}
+        lowered = [entry['expression'] for entry in self.lowered]
+
+        def as_written(text):       # a row cell inlined before this pass reads `self.<cell>()` in the sample's text
+            for code, name in self.row_names.items():
+                text = text.replace(normal(code), f'self.{name if isinstance(name, str) else getattr(name, "name", name)}()')
+            return text
+        lowered = lowered + [as_written(e) for e in lowered]
+        self.lowered_text |= {as_written(t) for t in self.lowered_text}
+        for text, note in sorted(self.notes.items()):
+            seen = [o for op in note['ops'] for o in note['seen'] if table_read(op, o)]
+            if not seen or text in self.lowered_text or any(text in e or e in text for e in lowered):
+                continue
+            reason = next((why for e, why in declined.items() if why and (text[:160] in e or e in text)), None)
+            if reason is None and self.cells.name in self.prefix_cells:
+                reason = ('a row or sub-table cell: its readers take the row directly; the cell itself runs on pandas '
+                          'only when its own value is asked for')
+            out.append({'expression': text[:200], 'seen': sorted(repr(o) for o in seen), 'evaluations': note['count'],
+                        'per_step': bool(self.cells.has_args()),
+                        'reason': reason or 'no rule recognises this form'})
+        return out
 
     # ------------------------------------------------------------------ facts
     def _facts(self, node):
@@ -1012,6 +1047,10 @@ class _Rewrite(cst.CSTTransformer):
     def on_leave(self, original, updated):
         result = super().on_leave(original, updated)
         self.updated_of[id(original)] = result
+        if result is not updated and isinstance(original, (cst.Subscript, cst.Call, cst.Comparison, cst.For,
+                                                             cst.GeneratorExp, cst.ListComp)):
+            from .read_notes import normal
+            self.o.lowered_text.add(normal(_code(original)))
         return result
 
     def visit_FunctionDef(self, node):
@@ -1081,7 +1120,8 @@ class _Rewrite(cst.CSTTransformer):
         part is present), ``lcode``/``ocode`` of the part otherwise."""
         conditions = self.o.guards(parts)
         codes = [self._held(hold, level, part, conditions) if self.o.item_fixed(part, kind)
-                 else self.code_of(hold, level, part, kind) for level, (part, kind) in enumerate(zip(parts, levels))]
+                 else self.code_of(hold, level, part, kind, conditions)
+                 for level, (part, kind) in enumerate(zip(parts, levels))]
         return self.code_args(codes), conditions
 
     def _detached(self, expr):
@@ -1121,11 +1161,19 @@ class _Rewrite(cst.CSTTransformer):
         return self.code_args(list(prefix) + [self.code_of(hold, level, part, levels[level])
                                               for level, part in enumerate(parts, len(prefix))])
 
-    def code_of(self, hold, level, part, kind):
+    def code_of(self, hold, level, part, kind, conditions=None):
         """The level code of one key part computed per read: ``lcode`` of a C integer on an int level, else ``ocode``
         of the Python value (looked up as pandas does)."""
         o = self.o
         arg, how = o.key_part(part, kind, self.updated_of.get(id(part)))
+        if how == 'typed' and conditions is not None and not o.facts.is_int(part):
+            # not known to be a C integer from the text: the read is native only while the part names one label.
+            # The test is decided at compile time when Cython gives the part a C type, else it looks at the value;
+            # the part is evaluated once, into a local the read then uses
+            o.key_count += 1
+            name = f'_mx_key_{o.key_count}'
+            conditions.append(cst.parse_expression(f'{o.module}.is_label(({name} := {_code(arg)}))'))
+            arg = cst.Name(name)
         return self._m({'int': 'lcode', 'typed': 'kcode'}.get(how, 'ocode'), o.ref(hold), cst.Integer(str(level)), arg)
 
     def _native_test(self, hold, conditions):
@@ -2010,6 +2058,15 @@ class _Rewrite(cst.CSTTransformer):
         parts = _index_parts(original)
         if parts is None:
             return updated
+        note = o.note_of(original)
+        if note is not None:
+            # decisions from tracing: a read that took a mask, a list or a slice in the sample is not a single-cell
+            # read, whatever its text looks like; it stays on pandas
+            from .read_notes import selects_rows
+            if any(len(seen) == 4 and selects_rows(seen[1]) for seen in note['seen']):
+                self._record(original, 'pandas', value,
+                             'the sample passed a key that selects several rows (a mask, a list or a slice)')
+                return updated
         if (len(parts) == 1 and isinstance(parts[0], cst.Name) and parts[0].value in ('True', 'False')
                 and isinstance(value, cst.Attribute) and value.attr.value in PANDAS_INDEXERS):
             # T-5c: a bool literal as the key of a pandas indexer: Cython compiles X[True] as the integer index 1;

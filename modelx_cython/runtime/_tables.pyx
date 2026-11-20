@@ -671,6 +671,14 @@ cdef Py_ssize_t hold_row(object table, object key, bint assigned) except -2:
     return row + 1 if row >= 0 else -1
 
 
+cdef bint selects_rows(object key):
+    """A key part pandas does not look up as one label: it selects rows (a list, an array, a mask, a slice, an
+    index, a table) or is a key of several parts."""
+    if type(key) is int or type(key) is float or type(key) is str:      # the common labels first
+        return False
+    return isinstance(key, (list, tuple, slice, set, dict, np.ndarray, pd.Series, pd.Index, pd.DataFrame))
+
+
 cdef int missing_codes(PreparedRef ref, const Py_ssize_t* codes, int count) except -1:
     """KeyError for a key given as codes: the labels of the parts found, None for a part absent from its level
     (the type is pandas'; the key shown lists the parts found)."""

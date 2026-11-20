@@ -925,6 +925,7 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
                                 self._param_prefix_cells(cls_info))
             node = self._lower_frames(frames, node, cls_info, cells)
             cells.frame_reads = frames.lowered + frames.declined
+            cells.read_audit = frames.audit()       # table reads the sample saw that were not lowered
         if getattr(self.module.spec.policy, 'prepared_tables', False):
             # T-5: the pandas fallback of a lowered read runs only when the table cannot answer: not a pandas read
             from modelx_cython.frame_reads import without_fallbacks
