@@ -42,8 +42,8 @@ def test_shared_dense_cache_publishes_its_flags(tmp_path):
         m = __import__(sys.argv[1]).mx_model
         out = []
         for workers in (1, 4, 4):
+            m = type(m)()                # a new model instance per run (a compiled model has no clear)
             m.collect_workers = workers
-            m.clear_all()
             out.append(m.Policy.collect().sum.pv)
         print(repr(out))
         """)

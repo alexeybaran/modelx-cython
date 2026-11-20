@@ -54,20 +54,14 @@ One entry per cell that reads a table, one record per read site:
   held in fields of the item and reset with its caches. Later reads take no reference on the frame, on the Data
   Space's cached value, or on the prepared table.
 - In any other Space, the frame is looked up once per formula call.
-- A frame is found by identity. A new frame, assigned or recomputed, is prepared afresh. A clear (`Space.clear_all()`,
-  `Model.clear_all()`) drops every prepared copy.
+- A frame is found by identity: a new frame, recomputed from new inputs, is prepared afresh.
 - A formula that edits a frame in place keeps all its reads of that frame on pandas.
 
 ## Input changes
 
-Compiled models follow live modelx:
+As upstream modelx-cython, a compiled model has no clear and no table-cell assignment. References are plain
+attributes: bind the inputs (a frame held by a Reference, a scalar) on a new model instance before it runs. A value
+cached before a Reference changes stays cached, as upstream.
 
-- assigning a new frame to a Data cell (`Data.T[()] = frame`) replaces it at once for every formula call in a Space
-  without items, and for every item created afterwards. An item that has already bound the old frame keeps it until
-  its Space is cleared, like its cached values;
-- results already cached stay cached until the dependent Space is cleared (`Space.clear_all()`), and are then
-  recomputed from the new frame;
-- `Model.clear_all()` discards assigned inputs (the cell recomputes its formula), as on live modelx;
-- an in-place edit of a bound frame is applied by clearing the dependent Space, as on live modelx. Before the clear,
-  reads made fast use the copy taken when the table was bound. An opt-in check mode (spec key `verify_inputs`,
-  step T-4) detects the edit and raises.
+- An in-place edit of a frame after it was read is not seen by the fast reads, which use the copy prepared at the
+  first read. An opt-in check mode (spec key `verify_inputs`, step T-4) detects the edit and raises.

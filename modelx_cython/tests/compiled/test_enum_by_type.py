@@ -74,8 +74,6 @@ from types import SimpleNamespace
 from http import HTTPStatus
 from exported import mx_model as original
 from exported_cy import mx_model as compiled
-for model in (original, compiled):
-    model.clear_all()
 for t in range(4):
     assert original.Projection.rate(t) == compiled.Projection.rate(t), t
 table, live = compiled.Data.table(), original.Data.table()

@@ -1,15 +1,15 @@
-"""One frame read natively and on pandas at once (T-5c): every read agrees with live through assignments and clears.
+"""One frame read natively and on pandas at once (T-5c): every read agrees with live, for several input frames.
 
 The frame cell ``Data.points`` is read by formulas whose reads the table layer lowers (native) and by formulas it
 leaves to pandas (a boolean mask, ``query``, a column reduction), in three arrangements:
 (a) inside one formula, (b) across formulas of one Space, (c) from two Spaces (an item Space, Projection, and a
 Space without parameters, Report, that Projection reads). The build report must show both kinds on the same frame.
 
-Every value is compared with live modelx, at each stage: the initial frame; after a fitting assignment; after an
-unfit assignment (a float index for the traced integer one, a float32 column for a traced float64 one), which is
-refused with ValueError and changes nothing (the previous frame stays, read natively, every value as before); after
-a second fitting assignment; after ``Model.clear_all()`` (the assignment is discarded). Each stage compares the
-direct values of every cell, and ``collect`` at 1 and 4 workers.
+Every value is compared with live modelx, for each input frame, bound through the Reference ``Data.raw`` on new
+models before they run (a compiled model has no clear and no table-cell assignment, as upstream): the traced
+frame; another frame of the traced kinds; a float index for the traced integer one (its native reads run on
+pandas); a third frame of the traced kinds. Each stage compares the direct values of every cell, and ``collect``
+at 1 and 4 workers.
 
 Tiers: the default suite runs the fixed cases below. ``-m fuzz_full`` adds formulas that combine a random native
 read with a random pandas read of the frame, on the seed MX_CY_FUZZ_SEED or a random one (printed and named in a
@@ -141,49 +141,26 @@ def collected(m, workers):
     return {{cell: round(float(getattr(result, cell)), 6) for cell in PROJECTION}}
 
 
-def clear(m):
-    m.Projection.clear_all()
-    m.Report.clear_all()
-
-
 fit2 = FRAME.assign(sa=FRAME["sa"] * 2, rate=FRAME["rate"][::-1].values, grp=["b", "a", "a", "a"])
-unfit_index = fit2.set_axis(pd.Index([1.0, 2.0, 3.0, 4.0], name="policy_id"))      # float index: unfit
-unfit_column = fit2.assign(sa=fit2["sa"].astype("float32"))                         # float32 column: unfit
-STAGES = [
-    ("initial", None, None),
-    ("fitting assignment", fit2, False),
-    ("unfit assignment: float index", unfit_index, True),
-    ("unfit assignment: float32 column", unfit_column, True),
-    ("second fitting assignment", FRAME.assign(sa=FRAME["sa"] + 50.0), False),
-    ("Model.clear_all", "model clear", None),
+STAGES = [      # (stage, the input frame, whether the compiled reads of its frame stay native)
+    ("the traced frame", FRAME, True),
+    ("another frame of the traced kinds", fit2, True),
+    ("a float index for the traced integer one", fit2.set_axis(pd.Index([1.0, 2.0, 3.0, 4.0], name="policy_id")),
+     False),
+    ("a third frame of the traced kinds", FRAME.assign(sa=FRAME["sa"] + 50.0), True),
 ]
-compiled, live = Model(), build()
-fit = helper.native_slots(compiled.Data.points())
+fit = helper.native_slots(Model().Data.points())
 assert fit > 0, fit
 failures = []
-for stage, frame, unfit in STAGES:
-    if isinstance(frame, pd.DataFrame) and unfit:
-        before = compiled.Data.points()
-        try:
-            compiled.Data.points[()] = frame.copy()
-            failures.append(f"{{stage}}: accepted")
-        except ValueError as error:
-            if "Data.points" not in str(error) or "does not fit" not in str(error):
-                failures.append(f"{{stage}}: {{error}}")
-        if compiled.Data.points() is not before:
-            failures.append(f"{{stage}}: the previous frame was replaced")
-        clear(compiled)
-        clear(live)
-    elif isinstance(frame, pd.DataFrame):
-        compiled.Data.points[()] = frame.copy()
-        live.Data.points[()] = frame.copy()
-        clear(compiled)
-        clear(live)
-    elif frame == "model clear":
-        compiled.clear_all()
-        live.clear_all()
+for stage, frame, native in STAGES:
+    def fresh():
+        compiled, live = Model(), build()       # the input is bound on new models before they run
+        compiled.Data.raw = frame.copy()
+        live.Data.raw = frame.copy()
+        return compiled, live
+    compiled, live = fresh()
     slots = helper.native_slots(compiled.Data.points())
-    if slots != fit:
+    if (slots == fit) != native:
         failures.append(f"{{stage}}: native slots {{slots}}, {{fit}} on the traced frame")
     want = values(live)
     got = values(compiled)
@@ -191,11 +168,10 @@ for stage, frame, unfit in STAGES:
     if all(v[0] == "ok" for v in want.values()):
         expected = sums(want)
         for workers in (1, 4):
-            clear(compiled)
+            compiled, _ = fresh()
             found = collected(compiled, workers)
             failures += [f"{{stage}}: collect at {{workers}} workers: {{c}}: {{found[c]}}, live {{expected[c]}}"
                          for c in expected if abs(found[c] - expected[c]) > 1e-6 * max(1.0, abs(expected[c]))]
-            clear(compiled)
 print(json.dumps(failures))
 '''
 

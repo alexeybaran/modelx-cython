@@ -1,243 +1,25 @@
-"""Python access to the table cells and input References of a compiled model (api-tables, D130).
+"""Python access to the table cells of a compiled model (api-tables).
 
-A compiled table cell keeps its internal table (a ``NativeTable``), which compiled code reads
-natively and every thread shares without locks. Python callers see it through a per-name
-property generated on the Space class (D130, superseding the read-only frames and the automatic
-clears of D101, D109, D119 and D127):
+A compiled table cell keeps the value its formula returned: a plain pandas DataFrame, which compiled code reads
+through the table prepared from it (``runtime._tables``), or a native table. Python callers see it through a
+per-name property generated on the Space class: ``space.cell()`` and ``space.cell[()]`` return the value, the
+same object on every call, as live modelx returns the cached value.
 
-- ``space.cell()`` and ``space.cell[()]`` return the plain pandas DataFrame the internal table was
-  built from (the formula's own result, or the assigned frame), the same object on every call, as
-  live modelx returns the cached value. It may be edited in place.
-- ``space.cell[()] = df`` and ``space.cell = df`` convert ``df`` with the provider's
-  ``table_from_value`` and store it as an input that later clears keep. Nothing is cleared.
-- assigning an input Reference stores the value. Nothing is cleared.
-- two clears, named as in live modelx: ``Model.clear_all()`` and ``Space.clear_all()`` (this Space and
-  the Spaces below it: values, assigned inputs, ItemSpaces). Live's other clears (``Space.clear_cells``,
-  ``clear_items``, ``clear_at``; ``cell.clear``, ``clear_all``, ``clear_at``) are not provided and raise
-  NotImplementedError naming the two: without a dependency graph they would leave dependents stale.
-  ``del space[key]`` deletes one ItemSpace, as before (D114). Every Space not cleared keeps its values; its
-  table cells are rebuilt, on the next read, from the frame they hold, so an in-place edit made before
-  a clear is what compiled code reads afterwards.
-
-Assignment and clear raise RuntimeError while a ``collect`` of the model is running, at any number
-of workers. An assignment made while another thread is calculating a single cell outside ``collect``
-is not synchronised (as in live modelx, which is not thread-safe at all).
+As upstream modelx-cython, a compiled model offers no clear and no assignment of a table cell; its References
+are plain attributes.
 """
 
-import sys
 import threading
 
 _lock = threading.Lock()
 _NO_FRAME = object()
-_running = {}       # id(model) -> number of collect calls in progress
-_clearing = {}      # id(model) -> number of clear_all() calls in progress
-_inputs = {}        # id(model) -> {(id(space), name): (space, name, table)}
-
-
-def _pandas_object(value):
-    """A pandas DataFrame, Series or Index (isinstance against pandas' public classes, looked up only when pandas
-    is already loaded: this module never imports it)."""
-    pd = sys.modules.get('pandas')
-    return pd is not None and isinstance(value, (pd.DataFrame, pd.Series, pd.Index))
-
-
-def collect_begin(model):
-    with _lock:
-        if _clearing.get(id(model)):
-            raise RuntimeError('cannot run a collect while clear_all() or a table assignment of this model is '
-                               'running; run it before or after')
-        _running[id(model)] = _running.get(id(model), 0) + 1
-
-
-def collect_end(model):
-    with _lock:
-        count = _running.get(id(model), 0) - 1
-        if count > 0:
-            _running[id(model)] = count
-        else:
-            _running.pop(id(model), None)
-
-
-def _check_idle(model, what):
-    with _lock:
-        if _running.get(id(model)):
-            raise RuntimeError(f'cannot run {what} while a collect of this model is running; '
-                               'do it before or after the run')
-
-
-def clear_model(model):
-    """Clear every cached value of ``model``, keep the assigned table inputs (a model-level clear).
-
-    Every Space's caches are emptied and its ItemSpaces dropped and released (they are created again,
-    with the current References, on the next access); an ItemSpace object a caller still holds is
-    detached from the model.
-    """
-    for space in model._mx_walk(skip_self=True):
-        space._mx_clear_values()
-    _reapply_inputs(model)
-
-
-def _reapply_inputs(model, spaces=None):
-    with _lock:
-        inputs = list(_inputs.get(id(model), {}).values())
-    for space, name, table in inputs:
-        if spaces is None or any(space is cleared for cleared in spaces):
-            space._mx_set_table_cell(name, table)
-
-
-def frame_unfit(value, schema):
-    """T-5c: why ``value`` does not fit the traced schema of a frame cell (``tracer.frame_schema``), as a list of
-    reasons; empty when it fits. A frame fits when every property the compiled reads were built for is as traced:
-    the kind (DataFrame or Series), the number of index levels and the kind of each (integer or other), the level
-    names, uniqueness, and the columns (the same labels, in the same order, each of the traced kind: float64,
-    int64 or other). An assignment that does not fit is refused (``assign_table_cell``)."""
-    import pandas as pd
-    from pandas.api.types import is_bool_dtype, is_integer_dtype
-    kind = schema.get('kind')
-    wanted = pd.DataFrame if kind == 'frame' else pd.Series
-    if not isinstance(value, wanted):
-        return [f'not a pandas {wanted.__name__}']
-    reasons = []
-    index = value.index
-    levels = tuple(schema.get('levels') or ())
-    if index.nlevels != len(levels):
-        reasons.append(f'{index.nlevels} index levels, compiled for {len(levels)}')
-    else:
-        for position, level in enumerate(levels):
-            values = index.get_level_values(position)
-            integer = is_integer_dtype(values.dtype) and not is_bool_dtype(values.dtype)
-            if level == 'int' and not integer:
-                reasons.append(f'index level {position} holds {values.dtype}, compiled for integers')
-            elif level != 'int' and integer:
-                reasons.append(f'index level {position} holds {values.dtype}, compiled for labels other than integers')
-    names = schema.get('names')
-    if names is not None and tuple(index.names) != tuple(names):
-        reasons.append(f'index level names {list(index.names)}, compiled for {list(names)}')
-    if schema.get('unique') and not index.is_unique:
-        reasons.append('the index is not unique')
-    traced = tuple(schema.get('columns') or ())
-    def column_kind(dtype):
-        return {'float64': 'f64', 'int64': 'i64'}.get(str(dtype), 'obj')
-    names_of = {'f64': 'float64', 'i64': 'int64', 'obj': 'a type other than float64 or int64'}
-    if kind == 'series':
-        found = column_kind(value.dtype)
-        if traced and found != traced[0][1]:
-            reasons.append(f'values of {value.dtype}, compiled for {names_of[traced[0][1]]}')
-        return reasons
-    labels = list(value.columns)
-    for label, column in traced:
-        if label not in labels:
-            reasons.append(f'no column {label!r}')
-            continue
-        dtype = value[label].dtype if labels.count(label) == 1 else 'object'
-        if column_kind(dtype) != column:
-            reasons.append(f'column {label!r} holds {dtype}, compiled for {names_of[column]}')
-    extra = [label for label in labels if label not in dict(traced)]
-    if extra:
-        reasons.append(f'columns {extra} not in the compiled frame')
-    elif not reasons and tuple(labels) != tuple(label for label, _ in traced):
-        reasons.append(f'columns in the order {labels}, compiled for {[label for label, _ in traced]}')
-    return reasons
-
-
-def assign_table_cell(space, name, path, table, schema=None):
-    """Make ``table`` (already converted) the value of the table cell ``name`` of ``space``, as an
-    input that clears keep. Values already computed from the old table stay until the user clears
-    the Spaces that depend on it (D130). A frame that does not fit the cell's traced ``schema``
-    (``frame_unfit``) is refused with ValueError naming the cell and why, as on main; nothing changes (the
-    previous frame stays)."""
-    unfit = frame_unfit(table, schema) if schema is not None else ()
-    if unfit:
-        raise ValueError(f'{path}: the assigned {type(table).__name__} does not fit the compiled reads '
-                         f'({"; ".join(unfit)}); the previous value stays')
-    model = space._model
-    # T-5c: as clear_all, the check and the mark are one step under the lock: the assignment replaces the cell's
-    # published prepared table, which the workers of a collect read without a lock, so no collect may start
-    # until it is done (collect_begin refuses while the mark is set)
-    with _lock:
-        if _running.get(id(model)):
-            raise RuntimeError(f'cannot run the assignment of {path} while a collect of this model is running; '
-                               'do it before or after the run')
-        _clearing[id(model)] = _clearing.get(id(model), 0) + 1
-        _inputs.setdefault(id(model), {})[id(space), name] = (space, name, table)
-    try:
-        space._mx_set_table_cell(name, table)
-    finally:
-        with _lock:
-            count = _clearing.get(id(model), 0) - 1
-            if count > 0:
-                _clearing[id(model)] = count
-            else:
-                _clearing.pop(id(model), None)
-
-
-def before_reference(space, path):
-    """Raise if the Reference ``path`` cannot be assigned now (a collect of the model is running).
-
-    The generated setter then stores the value. It does not clear: computed values stay, as in the
-    exported model, until the user clears (D130).
-    """
-    _check_idle(space._model, f'the assignment of {path}')
-
-
-def _drop_inputs(model, spaces):
-    with _lock:
-        inputs = _inputs.get(id(model), {})
-        for key, (owner, cell, _) in list(inputs.items()):
-            if any(owner is space for space in spaces):
-                del inputs[key]
-
-
-def clear_all(space):
-    """``Space.clear_all()`` as in live modelx (D130): the values and assigned inputs of the cells of this
-    Space and the Spaces below it are cleared and their ItemSpaces dropped (released through P2). Every
-    other cell keeps its value: the compiled model holds no dependency graph, so clearing what depends on
-    a change is the user's call, as on the exported model. The table cells kept are rebuilt from the
-    frames they hold on their next read, so an in-place edit is what compiled code reads. Refused while a
-    collect of the model is running."""
-    model = space._model
-    # the check and the mark are one step under the lock: a collect cannot start between them (collect_begin
-    # refuses while the model is being cleared), so no worker reads a cache while it is cleared
-    with _lock:
-        if _running.get(id(model)):
-            raise RuntimeError(f'cannot run {type(space).__name__[3:]}.clear_all() while a collect of this '
-                               'model is running; do it before or after the run')
-        _clearing[id(model)] = _clearing.get(id(model), 0) + 1
-    try:
-        cleared = list(space._mx_walk())
-        _drop_inputs(model, cleared)
-        for target in cleared:
-            target._mx_clear_values()
-        rebuild_tables(model, cleared)
-        forget_prepared()
-    finally:
-        with _lock:
-            count = _clearing.get(id(model), 0) - 1
-            if count > 0:
-                _clearing[id(model)] = count
-            else:
-                _clearing.pop(id(model), None)
-
-
-# T-3: the PreparedTable caches of the loaded models (runtime _tables, one per compiled model); a clear drops
-# them, so a frame edited in place is prepared again on its next read
-_prepared_caches = []
-
-
 _binders = {}       # top-level package of a compiled model -> its runtime _tables.bind
 
 
-def register_prepared(forget, bind=None, package=None):
+def register_prepared(bind=None, package=None):
     with _lock:
-        _prepared_caches.append(forget)
         if bind is not None:
             _binders[package] = bind
-
-
-def assigned(space, name):
-    """Whether the cell ``name`` of ``space`` holds a value the user assigned (an input), not its formula's."""
-    with _lock:
-        return (id(space), name) in _inputs.get(id(space._model), {})
 
 
 def bind_frame(space, value):
@@ -246,47 +28,6 @@ def bind_frame(space, value):
     preparable frame); None when the model has no fast reads."""
     bind = _binders.get(type(space).__module__.split('.')[0])
     return bind(value) if bind is not None else None
-
-
-def forget_prepared():
-    with _lock:
-        caches = list(_prepared_caches)
-    for forget in caches:
-        forget()
-
-
-CLEARS = ("Clear the Space that depends on the change (Space.clear_all()) or the whole model "
-          "(Model.clear_all()); a compiled model has no dependency graph, so no other clear is provided.")
-CELL_CLEAR = "{path}.{method}() is not provided by a compiled model. " + CLEARS
-
-
-def not_provided(space, method):
-    """The other clears of live modelx's Space (clear_cells, clear_items, clear_at) are not provided."""
-    raise NotImplementedError(f'{type(space).__name__[3:]}.{method}() is not provided by a compiled model. '
-                              + CLEARS)
-
-
-def rebuild_tables(model, skip=()):
-    """Mark every table cell of ``model`` outside ``skip`` for a rebuild from the frame it holds (D130):
-    the next read converts that frame again instead of running the formula, so an in-place edit of
-    the frame reaches compiled code. Values computed from the old table are not touched."""
-    for target in model._mx_walk(skip_self=True):
-        if not any(target is cleared for cleared in skip):
-            stale = getattr(target, '_mx_stale_tables', None)
-            if stale is not None:
-                stale()
-
-
-def rebind_source(table):
-    """What a table cell marked by :func:`rebuild_tables` rebinds from: the frame it holds (the source
-    frame, or the frame handed to Python), else the internal table itself (nothing to rebuild)."""
-    frame = getattr(table, '_mx_python_frame', None)
-    if frame is not None and _pandas_object(frame):
-        return frame
-    from modelx_helpers.immutable_inputs import table_frame
-    owner = getattr(table, '__modelx_table_owner__', None)
-    frame = table_frame(owner()) if owner is not None else None
-    return frame if frame is not None else table
 
 
 _enums = {}
@@ -307,7 +48,6 @@ def enum_member(module, qualname, value):
         _enums[module, qualname] = cls
     member = cls._value2member_map_.get(value)
     return member if member is not None else cls(value)
-
 
 def frame_of(table, path):
     """What a Python caller gets for an internal table, the same object on every request, equal to what
@@ -348,26 +88,6 @@ class TableCell:
         if key != ():
             raise KeyError(f'{self._path} has no parameters: use {self._path}[()]')
         return self()
-
-    def __setitem__(self, key, value):
-        if key != ():
-            raise KeyError(f'{self._path} has no parameters: use {self._path}[()] = table')
-        setattr(self._space, self._name, value)
-
-    def _mx_no_cell_clear(self, method):
-        raise NotImplementedError(CELL_CLEAR.format(path=self._path, method=method))
-
-    def clear(self):
-        """Not provided (D130): live modelx's cell-level clear; use the Space or model clear."""
-        self._mx_no_cell_clear('clear')
-
-    def clear_all(self):
-        """Not provided (D130): live modelx's cell-level clear; use the Space or model clear."""
-        self._mx_no_cell_clear('clear_all')
-
-    def clear_at(self, *args, **kwargs):
-        """Not provided (D130): live modelx's cell-level clear; use the Space or model clear."""
-        self._mx_no_cell_clear('clear_at')
 
     @property
     def name(self):

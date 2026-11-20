@@ -1,16 +1,14 @@
 """Free-threaded stress of the published prepared tables (T-4.2, T-5c), marked ``stress``: left out of the default run.
 
 What is supported, and what this checks:
-- **Clears and table assignments from another thread during four-worker collects.** The runtime makes them one
-  step with its check (``runtime/table_cells.py``: a collect count and a "clearing" mark under the runtime lock).
-  Each one either raises (a collect is running) or runs wholly between two collects. A collect that would start
-  while one runs raises. Every collect that runs returns the intact result. Items read the published table of a
-  Data frame cell without a lock, and the frame cell is cleared and reassigned, MX_CY_STRESS_RUNS rounds (200).
+- **Four-worker collects on a new model each round.** Items read the published table of a Data frame cell without
+  a lock; on a new model its first readers bind and publish it while the other workers read it. Every collect
+  returns the result of the one-worker run, MX_CY_STRESS_RUNS rounds (200).
 - **One read of the published field** (``_mx_prepared_<name>``): the fast path reads the field once and takes the
   locked path when it is None. Checked on the generated source.
 
-Undefined by rule (``doc/source/freethreading.md``, as on main): a clear or an assignment from a user's own thread
-while another of the user's threads evaluates the model. That interleaving is not exercised here.
+A compiled model has no clear and no table-cell assignment (as upstream modelx-cython), so no input changes while a
+collect runs.
 """
 import os
 import subprocess
@@ -44,59 +42,26 @@ def build():
 """
 
 CHECKS = """\
-import math, sys, threading, time
+import math, sys
 from importlib import import_module
-from stress_model import FRAME
 
 m = import_module("stress_nomx_cy").mx_model
+Model = type(m)
 m._mx_collect_set_workers_v2(1)
 base = m.Projection.collect().sum.pv
-m._mx_collect_set_workers_v2(4)
-stop, other = threading.Event(), []
-counts = {"cleared": 0, "assigned": 0, "raised": 0}
-
-def disturber():
-    k = 0
-    while not stop.is_set():
-        k += 1
-        try:
-            if k % 3 == 0:
-                m.Data.points = FRAME.copy()        # a new frame of the same values: a new published table
-                counts["assigned"] += 1
-            else:
-                (m.Data if k % 3 == 1 else m.Projection).clear_all()
-                counts["cleared"] += 1
-        except RuntimeError as error:
-            if "while a collect of this model is running" in str(error):
-                counts["raised"] += 1
-            else:
-                other.append(str(error))
-
-thread = threading.Thread(target=disturber)
-thread.start()
-results, refused = [], 0
-deadline = time.monotonic() + 300
-try:      # RUNS collects at least, and until the other thread has cleared and assigned often enough
-    while len(results) < int(sys.argv[1]) or counts["cleared"] < 20 or counts["assigned"] < 10:
-        assert time.monotonic() < deadline, (counts, refused, len(results))
-        try:
-            results.append(m.Projection.collect().sum.pv)
-        except RuntimeError as error:
-            assert "of this model is running" in str(error), error
-            refused += 1
-finally:
-    stop.set()
-    thread.join()
+results = []
+for run in range(int(sys.argv[1])):
+    fresh = Model()                 # a new model: the first readers publish the table while the others read it
+    fresh._mx_collect_set_workers_v2(4)
+    results.append(fresh.Projection.collect().sum.pv)
 bad = [r for r in results if not math.isclose(r, base, rel_tol=1e-12)]
 assert results and not bad, (base, bad[:3])
-assert not other, other[:3]
-assert counts["raised"], counts          # some clears met a running collect
-print("ok", len(results), "collects,", refused, "refused;", counts)
+print("ok", len(results), "collects")
 """
 
 
 @pytest.mark.stress
-def test_clears_and_assignments_during_four_worker_collects(tmp_path):
+def test_four_worker_collects_on_new_models(tmp_path):
     (tmp_path / 'stress_model.py').write_text(MODEL, encoding='utf-8')
     (tmp_path / 'build_model.py').write_text(textwrap.dedent("""\
         from stress_model import build

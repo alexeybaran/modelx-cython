@@ -103,14 +103,10 @@ a Space are C struct fields whose reference counting is not synchronized,
 so an unlocked Space shared between threads can corrupt memory.  Lock
 every Space that several threads call.
 
-Clearing is not synchronized with evaluation.  `Space.clear_all()` and
-`Model.clear_all()` empty caches that other threads may be reading, so do
-not clear while another thread evaluates the model; change the inputs,
-clear, then run again.  During a `collect` this is enforced: `clear_all()`
-raises `RuntimeError` while a collect of the model is running (also from a
-formula inside it), and a collect started while a clear runs raises too.
-Threads of your own that call compiled cells directly cannot be detected
-without a lock on every read, so for them the rule is yours to keep.
+A compiled model has no clear, as upstream modelx-cython: to run with other
+inputs, bind them on a new model instance.  Assigning a Reference while
+other threads evaluate the model is not synchronized; bind the inputs
+before the run starts.
 
 ## How locked Spaces are translated
 

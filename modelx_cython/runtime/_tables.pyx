@@ -414,9 +414,8 @@ cdef long long _int_part(object part):
 
 
 # ---- binding (T-3) ----------------------------------------------------------------------------------
-# One PreparedTable per frame object, prepared on first use and dropped when the frame dies. A table
-# assigned to a Data cell, or recomputed after a clear, is a new object: it is prepared afresh, and no
-# prepared copy of the old frame is ever used for it.
+# One PreparedTable per frame object, prepared on first use and dropped when the frame dies: a new frame is
+# prepared afresh, and no prepared copy of an old frame is ever used for it.
 cdef dict _prepared = {}               # id(frame) -> (weak reference to the frame, PreparedTable or None)
 _lock = threading.RLock()
 
@@ -426,18 +425,12 @@ def _forget(key):
         _prepared.pop(key, None)
 
 
-def forget():
-    """Drop every prepared copy (a Space was cleared: a frame edited in place is prepared again)."""
-    with _lock:
-        _prepared.clear()
-
-
 try:
     from modelx_cython.runtime.table_cells import register_prepared as _register
 except ImportError:         # the runtime used on its own (tests)
     pass
 else:
-    _register(forget, lambda value: bind_ref(value), __name__.split('.')[0])
+    _register(lambda value: bind_ref(value), __name__.split('.')[0])
 
 
 cdef object prepared(object frame):
@@ -584,7 +577,7 @@ def native_slots(frame):
 
 def check_unchanged(frame):
     """T-4 check mode (spec key ``verify_inputs``): raise if ``frame`` no longer equals the copy prepared when it was
-    bound, i.e. it was edited in place and the dependent Space was not cleared (Space.clear_all())."""
+    bound, i.e. it was edited in place after its first read."""
     cdef PreparedTable table = prepared(frame)
     cdef PreparedTable fresh
     if table is None:
@@ -593,8 +586,8 @@ def check_unchanged(frame):
     if fresh is None or not _same(table, fresh):
         raise RuntimeError(
             f'a table read by compiled code was edited in place after it was bound ({type(frame).__name__} of '
-            f'shape {getattr(frame, "shape", None)}): clear the Space that reads it (Space.clear_all()) so the '
-            f'edit is used, as on live modelx')
+            f'shape {getattr(frame, "shape", None)}): its fast reads use the copy prepared at the first read; give '
+            f'the edited frame to a new model instance instead')
 
 
 cdef bint _same(PreparedTable a, PreparedTable b):

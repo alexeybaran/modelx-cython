@@ -1,9 +1,7 @@
 """diag-run8 F1 on a compiled model: ``T.index.max()[k]`` / ``min()[k]`` read as a C integer keep pandas'
 meaning, the k-th part of the lexicographically largest (smallest) key, not the extreme of level k
-(entries (60, 5), (95, 1), (95, 3), (80, 10): ``max()[1]`` is 3, ``min()[1]`` is 5). Tables are editable
-with no automatic clearing (D130): an in-place edit of the index changes nothing until
-``Space.clear_all()`` / ``Model.clear_all()``, then the next value reads the edited index. The exported
-pure-Python model behaves the same (asserted on both)."""
+(entries (60, 5), (95, 1), (95, 3), (80, 10): ``max()[1]`` is 3, ``min()[1]`` is 5). A new model whose input holds
+other labels reads them. The exported pure-Python model behaves the same (asserted on both)."""
 
 import subprocess
 import sys
@@ -57,13 +55,10 @@ first = values(m)
 assert first[:3] == pandas_values(RAW) == (3, 5, 95), first          # lexicographic, not per level
 assert first[:3] != (RAW.index.get_level_values(1).max(), RAW.index.get_level_values(1).min(), 95)
 edited = pd.MultiIndex.from_tuples([(60, 5), (95, 1), (99, 7), (80, 10), ], names=["age", "dur"])
-m.Data.tbl().index = edited                                        # in place, the same frame object
-assert values(m) == first                                          # D130: nothing cleared yet
-m.Projection.clear_all()
+m = Model()                                                        # a new model whose input holds other labels
+m.Data.RAW = RAW.set_axis(edited)
 after = values(m)
 assert after[:3] == pandas_values(m.Data.tbl()) == (7, 5, 99), after
-m.clear_all()                                                      # the whole model: Data reruns its formula
-assert values(m) == first, values(m)
 print("ok", sys.argv[1])
 """
 

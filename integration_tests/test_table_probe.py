@@ -9,10 +9,9 @@ each step of the table redesign removes entries, and the final state is an empty
 boundary types (``BOUNDARY``: a C-typed cell result returns ``float``/``int``, an array cell a memoryview, as
 upstream modelx-cython does).
 
-Separately, ``test_reassign_and_clear`` checks the input-change contract agreed with the owner: assigning a new
-frame to a Data cell and calling clear_all (on the dependent Space and on the model) gives live's results on the
-new frame; without clear_all, cached results stay, but no prepared copy of the reassigned cell survives.
-Model.clear_all discards an assigned input on live modelx (the cell recomputes its formula); compiled the same.
+Separately, ``test_contract_equal_to_live`` checks the cells a contract script reads after the probe: items, and
+frames a formula computes from a Reference set on a new model before it runs (a compiled model has no clear and no
+table-cell assignment, as upstream).
 """
 import re
 import json
@@ -512,64 +511,14 @@ def items_equal(items=(1, 2, 3, 4)):
 
 
 checks["item: prefix cell, keys in locals: equal to live"] = items_equal()
-# an assigned value of the prefix cell, on an item that has not read it: its reads use the assigned frame
-alt = live.Data.rates().loc[("A", "F")] * 7
-live.Items[6].sched[()] = alt
-compiled.Items[6].sched[()] = alt.copy()
-checks["item: prefix cell holding an assigned value: equal to live"] = all(
-    float(live.Items[6].pre__rates(t)) == float(compiled.Items[6].pre__rates(t)) for t in range(3))
 old_item = item(1, 1)
 checks["item: before: equal to live"] = equal(old_item) and all(
     live.Items[1].in__multi(t) == compiled.Items[1].in__multi(t) for t in range(4))
-frame2 = live.Data.flat().assign(q=live.Data.flat()["q"] * 2)
-live.Data.flat[()] = frame2
-compiled.Data.flat[()] = frame2.copy()
-# assignment without clear_all: the owner's rule is no automatic clearing on input change, so a result
-# cached before stays; a result not cached before reads the NEW frame (no prepared copy survives)
-checks["reassign, no clear: Data cell returns the assigned frame"] = compiled.Data.flat().equals(frame2)
-checks["reassign, no clear: cached result stays"] = float(compiled.Calc.loc_scalar__flat(1)) == float(old[1])
-checks["reassign, no clear: uncached result reads the new frame"] = equal(both("loc_scalar__flat", 2))
-checks["item: reassign, no clear: cached result stays"] = float(compiled.Items[1].v__flat(1)) == float(old_item[1])
-# a new item binds the frame assigned now; an item that already holds keeps its frame until its Space is
-# cleared, as its cached values do (the hold is taken once per item)
-checks["item: reassign, no clear: a new item reads the new frame"] = equal(item(3, 2))
-checks["item: reassign, no clear: an item that already holds reads the new frame"] = equal(item(1, 2))
-compiled.Calc.clear_all()
-checks["reassign + Space.clear_all: equal to live on the new frame"] = equal(both("loc_scalar__flat", 1))
-compiled.Items.clear_all()
-checks["item: reassign + Space.clear_all: equal to live on the new frame"] = equal(item(1, 1)) and equal(item(1, 2))
-# Model.clear_all discards assigned inputs on live modelx (the cell recomputes its formula): compiled the same
-live.clear_all()
-compiled.clear_all()
-checks["reassign + Model.clear_all: assignment discarded, equal to live"] = equal(both("loc_scalar__flat", 1)) and \\
-    compiled.Data.flat().equals(live.Data.flat())
-frame3 = live.Data.flat().assign(q=live.Data.flat()["q"] * 5)
-live.Data.flat[()] = frame3
-compiled.Data.flat[()] = frame3.copy()
-compiled.Calc.clear_all()
-live.Calc.clear_all()
-checks["second reassign + Space.clear_all: equal to live"] = equal(both("loc_scalar__flat", 3))
-# an in-place edit of the bound frame followed by Space.clear_all: as live, the edit is used
-live.Data.flat().loc[21, "q"] = 0.5
-compiled.Data.flat().loc[21, "q"] = 0.5
-compiled.Calc.clear_all()
-live.Calc.clear_all()
-checks["in-place edit + Space.clear_all: equal to live"] = equal(both("loc_scalar__flat", 1))
-compiled.Items.clear_all()
-live.Items.clear_all()
-checks["item: in-place edit + Space.clear_all: equal to live"] = equal(item(1, 1))
-# reassign the table under the prefix cell and rerun: as live after Space.clear_all
-rates2 = live.Data.rates() * 3
-live.Data.rates[()] = rates2
-compiled.Data.rates[()] = rates2.copy()
-live.Items.clear_all()
-compiled.Items.clear_all()
-checks["item: reassign the prefix cell's table + Space.clear_all: equal to live"] = items_equal()
+checks["item: a new item reads the same frame"] = equal(item(3, 2))
 
 
-# T-4 item 0 (owner's rule, as main): an assigned frame of other kinds than the traced ones is refused with
-# ValueError naming the cell; nothing changes (the previous frame stays, every read as before, equal to live).
-# A frame a formula computes with other kinds (here from a Reference) is read on pandas, equal to live.
+# A frame a formula computes with other kinds than the traced ones (here from a Reference, set on a new model
+# before it runs, as upstream allows) is read on pandas, equal to live
 def outcomes(space, cell, ts):
     found = []
     for t in ts:
@@ -586,53 +535,17 @@ def outcomes(space, cell, ts):
     return found
 
 
-def same_outcomes(cell, ts, items=False):
-    if items:
-        return all(outcomes(live.Items[i], cell, ts) == outcomes(compiled.Items[i], cell, ts) for i in (1, 2))
-    return outcomes(live.Calc, cell, ts) == outcomes(compiled.Calc, cell, ts)
-
-
-base = live.Data.flat()
-KINDS = {
-    "int level -> float level": base.set_axis(pd.Index([20.0, 21.0, 22.0, 23.0], name="age"), axis=0),
-    "float column -> int column": base.assign(q=[1, 2, 3, 4]),
-    "int level -> text level": base.set_axis(pd.Index(["20", "21", "22", "23"], name="age"), axis=0),
-}
-
-
-def refused(space, name, frame):
-    before = getattr(space, name)()
-    try:
-        getattr(space, name)[()] = frame.copy()
-    except ValueError as error:
-        return f"Data.{name}" in str(error) and getattr(space, name)() is before
-    return False
-
-
-def clear_both():
-    live.Calc.clear_all(); compiled.Calc.clear_all(); live.Items.clear_all(); compiled.Items.clear_all()
-
-
-for name, frame in KINDS.items():
-    ok = refused(compiled.Data, "flat", frame)
-    clear_both()
-    checks[f"kind: {name}: refused, reads unchanged"] = (ok and same_outcomes("loc_scalar__flat", range(4))
-                                                         and same_outcomes("at__flat", range(4))
-                                                         and same_outcomes("v__flat", range(4), items=True))
-multi = live.Data.multi()
-multi_int = multi.set_axis(multi.index.set_levels([1, 2, 3], level=0), axis=0)
-ok = refused(compiled.Data, "multi", multi_int)
-clear_both()
-checks["kind: text level -> int level (two levels): refused, reads unchanged"] = (
-    ok and same_outcomes("loc_tuple__multi", range(4)) and same_outcomes("at_tuple__multi", range(4)))
+Model = type(compiled)
 source = live.Data.SRC
 for name, frame in {"int level -> float level": source.set_axis(pd.Index([20.0, 21.0, 22.0, 23.0], name="age")),
                     "int level -> text level": source.set_axis(pd.Index(["20", "21", "22", "23"], name="age")),
                     "float column -> int column": source.assign(q=[1, 2, 3, 4])}.items():
-    live.Data.SRC = frame
-    compiled.Data.SRC = frame.copy()
-    live.Data.clear_all(); compiled.Data.clear_all(); clear_both()
-    checks[f"computed kind: {name}: equal to live"] = same_outcomes("loc_ref__refd", range(4))
+    fresh, reference = Model(), build()
+    fresh.Data.SRC = frame.copy()
+    reference.Data.SRC = frame
+    checks[f"computed kind: {name}: equal to live"] = (
+        outcomes(reference.Calc, "loc_ref__refd", range(4)) == outcomes(fresh.Calc, "loc_ref__refd", range(4)))
+    reference.close()
 json.dump(checks, sys.stdout, indent=1)
 '''
 
@@ -641,11 +554,7 @@ json.dump(checks, sys.stdout, indent=1)
 KNOWN_CONTRACT = set()
 
 # Documented differences from live modelx (owner's decision), each with the sentence a user needs
-DOCUMENTED_CONTRACT = {
-    'item: reassign, no clear: an item that already holds reads the new frame':
-        'An item keeps the frame it bound until its Space is cleared, like its cached values: apply an input '
-        'change by reassigning it and clearing the dependent Space (Space.clear_all()).',
-}
+DOCUMENTED_CONTRACT = {}       # a compiled model has no clear and no table-cell assignment (as upstream)
 
 
 def _run(tmp_path, *args):
@@ -680,7 +589,7 @@ def test_probe_compiled_equals_live(probe):
     assert not fixed, f"now equal to live, remove from KNOWN: {fixed}"
 
 
-def test_reassign_and_clear(probe):
+def test_contract_equal_to_live(probe):
     work, _, _ = probe
     checks = json.loads(_run(work, "contract.py").stdout)
     failing = {name for name, ok in checks.items() if not ok}
@@ -756,8 +665,6 @@ FALLBACKS = {   # condition -> (cell, the report's form, a phrase of its pandas_
                      'computed kind: int level -> text level: equal to live')),
     'unordered index': ('Calc.view_index__sgrid', None, "the stored order of the index within the prefix", ()),
     'ambiguous key part': ('Calc.two_part_prefix_amb__tri_amb', None, '`T.loc[a, b]` is not a row prefix', ()),
-    'assigned value': ('Items.pre__rates', None, 'the cell sched holds an assigned value',
-                       ('item: prefix cell holding an assigned value: equal to live',)),
     'unsupported shape': ('Calc.loc_list__flat', 'pandas', 'a key part selects several rows', ()),
     'frame edited in place': ('Calc.mutate_loc__mut', 'pandas', 'the formula edits this frame in place', ()),
     'index not unique': ('Calc.nonunique_key_col__dup', 'pandas', 'the index is not unique', ()),

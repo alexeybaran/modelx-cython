@@ -509,10 +509,8 @@ class FrameReads:
                     value = f'({value} if type({key}) is tuple and len({key}) == {count} else -1)'
             elif what == 'range':       # T-5: the stored rows of a prefix held per item, packed, plus 2 (0: unresolved)
                 value = f'{level_or_key} + 2'
-            elif what == 'free':        # T-4.2: the item's own flag, set when the cell is assigned
-                value = f'(-1 if {self.assigned_flag(level_or_key)} else 1)'
             else:
-                value = f'{m}.hold_row(self.{table}, {_code(level_or_key)}, {self.assigned_flag(extra)})'
+                value = f'{m}.hold_row(self.{table}, {_code(level_or_key)}, False)'
             return [cst.parse_statement(f'if self.{field} == 0:\n    self.{field} = {value}\n')]
         # T-4.2: one binding per receiver and item (or per call outside items): the frame's PreparedTable, or a
         # table whose every slot is -1; each read then takes its slot from the table by its signature id
@@ -751,11 +749,6 @@ class FrameReads:
                     return f'{_code(receiver.func.value)}._mx_prepared_{name}()'
         return None
 
-    def assigned_flag(self, name):
-        """T-4.2: the item's flag of an assigned row or prefix cell ``name`` (False when it cannot be assigned)."""
-        from .table_cells import item_frame_cells
-        return f'self._mx_assigned_{name}' if name and name in item_frame_cells(self.cls_info) else 'False'
-
     def read_signature(self, hold):
         """T-4 item 0 / T-4.2: the id of the kinds a read is compiled for (index levels; every column for a row read by
         field; the column read and its kind), whose slot each prepared table decides once."""
@@ -863,15 +856,6 @@ class FrameReads:
             self.new_items.append(('code', fields[key], hold.table, level, part if emit is None else emit))
         return fields[key]
 
-    def assigned_field(self, hold, name):
-        """One once the cell ``name`` is known to hold its formula's value for this item, -1 when it holds an
-        assigned value (its reads then run on pandas)."""
-        key = (hold.table, 'unassigned', name)
-        fields = self.code_fields
-        if key not in fields:
-            fields[key] = hold_table(self.cls_info).field('prepared_code', key)
-            self.new_items.append(('free', fields[key], hold.table, name, None))
-        return fields[key]
 
     def row_field(self, hold, key_expr, name, emit=None):
         key = (hold.table, _code(key_expr))
@@ -1095,10 +1079,6 @@ class _Rewrite(cst.CSTTransformer):
             when = ['the frame at run time has other index level kinds than '
                     f"{list(schema.get('levels', ()))}, or the column read is of another kind"]
             when += [RUN_TIME[kind] for kind in sorted(set(self.taken) & set(RUN_TIME), key=str)]
-            cells = {view.cell} if view is not None and view.cell else set()
-            cells |= set(re.findall(r'\bself\.(\w+)\(\)', entry['expression'] + ' ' + entry['receiver']))
-            when += [f'the cell {name} holds an assigned value' for name in sorted(cells)
-                     if self.o.assigned_flag(name) != 'False']
             if any(code in entry['expression'] for code in self.o.ambiguous):
                 when.append(RUN_TIME[-5])
             entry['pandas_when'] = '; '.join(dict.fromkeys(when))
@@ -2266,10 +2246,8 @@ class _Rewrite(cst.CSTTransformer):
                          lpar=[cst.LeftParen()], rpar=[cst.RightParen()])
 
     def _prefix_holds(self, hold, prefix_parts, name):
-        o = self.o
         conditions = []
         codes = [self._held(hold, level, part, conditions) for level, part in enumerate(prefix_parts)]
-        conditions.append(cst.parse_expression(f'self.{o.assigned_field(hold, name)} > 0'))
         return codes, conditions
 
     def asof_statement(self, statement, asof):

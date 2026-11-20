@@ -43,6 +43,7 @@ from importlib import import_module
 from extremes_forms import PRODUCT, SPARSE, SINGLE
 
 package = import_module(sys.argv[1])
+Model = type(package.mx_model)
 NAMES = ("p_top1", "p_low1", "s_top1", "s_low0")
 
 
@@ -64,10 +65,9 @@ got = [outcome(getattr(p, n)) for n in NAMES]
 want = [pandas(PRODUCT, 1, True), pandas(PRODUCT, 1, False), pandas(SPARSE, 1, True), pandas(SPARSE, 0, False)]
 assert got == want, (got, want)
 assert got[2] == ("value", 3), got
-for name in ("product", "sparse"):                       # emptied in place, then cleared (D130)
-    frame = getattr(m.Data, name)()
-    frame.drop(frame.index, inplace=True)
-m.Projection.clear_all()
+m = Model()                                              # a new model whose inputs are empty
+m.Data.PRODUCT = PRODUCT.iloc[:0]
+m.Data.SPARSE = SPARSE.iloc[:0]
 p = m.Projection[1]
 empty = [outcome(getattr(p, n)) for n in NAMES[:4]]
 want = [pandas(PRODUCT.iloc[:0], 1, True), pandas(PRODUCT.iloc[:0], 1, False),

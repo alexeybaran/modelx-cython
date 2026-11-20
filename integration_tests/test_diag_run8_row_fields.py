@@ -2,7 +2,7 @@
 every use is a field read are read from the table row by the readers, without building the row; the row
 cell itself, called from Python, still gives its row. A key missing from the table is raised by the
 reader with the type and message live gives. The row position is held per item
-(an integer or a str key, looked up once per item, reset between policies and by clear_all). A model
+(an integer or a str key, looked up once per item, reset between policies). A model
 where the row escapes (returned by a public Cell) keeps the Record path. Compiled equals the exported model, values and errors."""
 
 import json
@@ -53,6 +53,7 @@ CHECKS = """\
 import sys
 from importlib import import_module
 package = import_module(sys.argv[1])
+Model = type(package.mx_model)
 p = package.mx_model.Projection
 out = []
 for i in (1, 2, 3):
@@ -71,15 +72,15 @@ for workers in (1, 4):                   # the held row is reset between policie
     if setter is not None:
         setter(workers)
     out.append(("collect", workers, round(float(m.Projection.collect().sum.pv), 9)))
-# an in-place edit (D130): nothing changes until clear_all, then every reader reads the edited row
-m.Data.points().loc[1, "sa"] = 999.0
-out.append(("edited, not cleared", m.Projection[1].sa()))
-m.Projection.clear_all()
-out.append(("edited, cleared", m.Projection[1].sa(), float(m.Projection[1].pv())))
-# a key removed from the table in place, then cleared (D130): the direct route and a collect at 1 and 4 workers
-frame = m.Data.points()
-frame.drop(2, inplace=True)
-m.Projection.clear_all()
+# a new model whose input has another row value, and one whose input lacks a key: the direct route and a
+# collect at 1 and 4 workers
+edited = m.Data.points().copy()
+edited.loc[1, "sa"] = 999.0
+m = Model()
+m.Data.POINTS = edited
+out.append(("edited input", m.Projection[1].sa(), float(m.Projection[1].pv())))
+m = Model()
+m.Data.POINTS = edited.drop(2)
 for call in ("sa", "pv"):
     try:
         getattr(m.Projection[2], call)()
@@ -139,7 +140,7 @@ def test_row_fields_read_without_the_row(tmp_path):
     assert cells["cost_row"]["row_cell_inlined"] is True, cells["cost_row"]
     assert cells["fee"]["row_fields_inlined"] == 1, cells["fee"]
     assert "hold_row(" in generated         # T-5c: the row held per item on the prepared table
-    assert "'edited, cleared', 999.0" in outs[f"{name}_nomx"], outs
+    assert "'edited input', 999.0" in outs[f"{name}_nomx"], outs
 
 
 def test_an_escaping_row_keeps_the_record_path(tmp_path):

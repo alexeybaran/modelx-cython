@@ -1,26 +1,18 @@
-"""Python access to compiled table cells and input References (api-tables, D101).
+"""Python access to compiled table cells (api-tables, D101).
 
 Generated members, per Space class, by name only (no ``__getattribute__``/``__setattr__``
 override is added):
 
-- a zero-argument cell bound to a native table (``native_result_binder``) keeps its cached
-  value; its C entry is renamed ``_mx_cell_<name>`` (D101a) and every call of it in the
-  module is renamed with it, so native code calls the C entry directly. Cython requires each
-  C member of a cclass to be declared in the ``.pxd`` and rejects a Python property of the same
-  name, and an extension type is immutable, so the public name is freed by the rename. The
-  property of the public name returns a ``runtime.table_cells.TableCell``; its setter converts
-  the assigned value with the provider's ``table_from_value`` against the build-time schema and
-  assigns it, without clearing anything (D130); its miss path rebinds from the frame the cell holds
-  when a clear of another Space marked it (``_mx_stale_tables``), so an in-place edit is read;
-- a Reference holding a table (a pandas DataFrame or Series, or a helper Table) is stored as
-  ``_mx_ref_<name>``, every read of it in the module renamed; the property of its name returns
-  the value and its setter stores the new value (nothing is cleared, D130). Other References keep
-  their names and declarations (integer References keep their generated ``__setattr__``);
-- a name is renamed only when no other class of the module has a member of that name;
-- ``clear_all``: live modelx's ``Space.clear_all()`` (D130); live's other clears (``clear_cells``,
-  ``clear_items``, ``clear_at``) raise, naming ``Space.clear_all()`` and ``Model.clear_all()``;
-  ``_mx_clear_values`` empties the Space's caches and drops its ItemSpaces;
-- ``collect`` counts the run so that an assignment during it raises.
+- a zero-argument cell whose value is a table (a pandas frame, or a native table) keeps its cached
+  value; its C entry is renamed ``_mx_cell_<name>`` (D101a) and every call of it in the module is
+  renamed with it, so native code calls the C entry directly. Cython requires each C member of a
+  cclass to be declared in the ``.pxd`` and rejects a Python property of the same name, and an
+  extension type is immutable, so the public name is freed by the rename. The property of the
+  public name returns a ``runtime.table_cells.TableCell``, whose call gives the value;
+- a name is renamed only when no other class of the module has a member of that name.
+
+As upstream modelx-cython, a compiled model has no clear and no table-cell assignment; its References are
+plain ``cdef public`` attributes (integer References keep their generated ``__setattr__``).
 
 The runtime side is ``modelx_cython.runtime.table_cells``.
 """
@@ -114,7 +106,7 @@ def data_frame_cells(cls_info):
 
 
 def item_frame_cells(cls_info):
-    """T-4.2: the frame cells of an item class: each has an ``_mx_assigned_<name>`` flag set when assigned."""
+    """T-4.2: the frame cells of an item class (a frame each item computes for itself)."""
     if cls_info.name not in cls_info.visitor.itemspace_classes:
         return {}
     mapping = module_renames(cls_info.module)[cls_info.name]
@@ -127,8 +119,6 @@ def pxd_declarations(cls_info):
     for name in data_frame_cells(cls_info):
         lines += [f'cdef object _mx_ptable_{name}\n', f'cdef bint _mx_ptready_{name}\n',
                   f'cdef object _mx_prepared_{name}(self)\n']
-    for name in item_frame_cells(cls_info):
-        lines.append(f'cdef bint _mx_assigned_{name}\n')
     return lines
 
 
@@ -191,23 +181,12 @@ CELL_PREF, REF_PREF = '_mx_cell_', '_mx_ref_'
 _TABLE_TYPES = {('pandas', 'DataFrame'), ('pandas', 'Series'), ('modelx_helpers', 'Table')}
 
 
-def _holds_table(ref):
-    kind = getattr(ref, 'type_', None)
-    if not isinstance(kind, type):
-        return False
-    return any((k.__module__.split('.')[0], k.__name__) in _TABLE_TYPES for k in kind.__mro__)
 
 
 def _members(cls_info):
     return set(cls_info.cells) | set(cls_info.refs) | set(cls_info.spaces)
 
 
-def table_refs(cls_info, integer_refs=()):
-    """Names of the References of ``cls_info`` that hold a table (D101a)."""
-    readonly = set(getattr(cls_info, 'readonly_refs', ()))
-    return [name for name, ref in cls_info.refs.items()
-            if name not in cls_info.spaces and name not in readonly and name not in integer_refs
-            and not getattr(ref, 'decl_type_expr', None) and _holds_table(ref)]
 
 
 def renames(module):
@@ -223,9 +202,6 @@ def renames(module):
                      *vector_cells(cls_info)):
             if owners[name] == {cls_name}:
                 mapping[name] = CELL_PREF + name
-        for name in table_refs(cls_info):
-            if owners[name] == {cls_name}:
-                mapping[name] = REF_PREF + name
         result[cls_name] = mapping
     return result
 
@@ -237,11 +213,6 @@ def module_renames(module):
     return cached
 
 
-def _schema_literal(cells):
-    schema = cells.table_schema
-    if not isinstance(schema, dict) or not schema.get('keys'):
-        return 'None'
-    return repr({'keys': tuple(schema['keys']), 'columns': dict(schema.get('columns') or {})})
 
 
 def _statements(text, config):
@@ -261,10 +232,8 @@ def rewrite_class(cls_info, node, config, integer_refs):
     enums = {n: e for n, e in enum_cells(cls_info).items() if n in mapping}
     records = [n for n in record_cells(cls_info) if n in mapping]
     vectors = {n: v for n, v in vector_cells(cls_info).items() if n in mapping}
-    refs = [n for n in table_refs(cls_info, integer_refs) if n in mapping]
     body = []
     init_names = set()
-    has_collect = False
     signatures = {}     # vector cells: the parameters of the entry, defaults included (keyword calls)
     for statement in node.body.body:
         if isinstance(statement, cst.FunctionDef):
@@ -284,39 +253,17 @@ def rewrite_class(cls_info, node, config, integer_refs):
                     for small in line.body:
                         if isinstance(small, cst.Assign) and isinstance(small.targets[0].target, cst.Attribute):
                             init_names.add(small.targets[0].target.attr.value)
-            elif name == 'collect' and not statement.params.params[1:]:
-                has_collect = True
-                statement = _counted_collect(statement, config)
         body.append(statement)
 
     lines = []
     for name, cells in tables.items():
         path = path_of(cls_info, name)
-        if frame_cell(cls_info, cells):
-            frame = getattr(getattr(cells, '_rt', None), 'frame_schema', None)     # T-5c: an unfit frame is refused
-            assign = f'    {RUNTIME}.assign_table_cell(self, {name!r}, {path!r}, value, {frame!r})\n'
-            if cls_info.name not in cls_info.visitor.itemspace_classes:
-                lines.append(_prepared_method(name, mapping, cells.is_locked))
-            lines.append(
-                f'@property\n'
-                f'def {name}(self):\n'
-                f'    return {RUNTIME}.TableCell(self, {name!r}, {path!r})\n\n'
-                f'@{name}.setter\n'
-                f'def {name}(self, value):\n' + assign)
-            continue
-        helper = cells.native_result_binder.rsplit('.', 1)[0]
-        if cells.native_provider_binding.manifest.provider == STANDARD_PROVIDER:
-            assign = (f'    {RUNTIME}.assign_table_cell(self, {name!r}, {path!r},\n'
-                      f'        {helper}.table_from_value(value, {path!r}, {_schema_literal(cells)}))\n')
-        else:   # another provider's table: no conversion function to rebuild it from a frame
-            assign = (f'    raise NotImplementedError({path!r} + ": this table is bound by the provider "\n'
-                      f'        {cells.native_provider_binding.manifest.provider!r} + ", which cannot rebuild it from an assigned value")\n')
+        if frame_cell(cls_info, cells) and cls_info.name not in cls_info.visitor.itemspace_classes:
+            lines.append(_prepared_method(name, mapping, cells.is_locked))
         lines.append(
             f'@property\n'
             f'def {name}(self):\n'
-            f'    return {RUNTIME}.TableCell(self, {name!r}, {path!r})\n\n'
-            f'@{name}.setter\n'
-            f'def {name}(self, value):\n' + assign)
+            f'    return {RUNTIME}.TableCell(self, {name!r}, {path!r})\n')
     for name in records:
         lines.append(
             f'def {name}(self):\n'
@@ -344,96 +291,17 @@ def rewrite_class(cls_info, node, config, integer_refs):
             f'``{mapping[name]}``, which passes the typed vector without a copy."""\n'
             f'    return {result}\n')
     if tables:
-        # D130: the table cells marked by a clear of another Space rebind from the frame they hold
-        stale = ['def _mx_stale_tables(self):']
-        for name, cells in tables.items():
-            if frame_cell(cls_info, cells):
-                # T-3: a frame cell holds the frame itself; T-4.2: its prepared table is bound again on next use
-                if name in data_frame_cells(cls_info):
-                    stale.append(f'    self._mx_ptready_{name} = False')
-                    stale.append(f'    self._mx_ptable_{name} = None')
-                continue
-            if cells.is_locked:
-                stale.append(f'    {MX_SYS_MOD}._mx_store_flag({CY_MOD}.address(self._has_{name}), False)')
-            else:
-                stale.append(f'    self._has_{name} = False')
-        if len(stale) == 1:
-            stale.append('    pass')
-        lines.append('\n'.join(stale) + '\n')
         get = ['def _mx_table_cell_value(self, name):']
-        put = ['def _mx_set_table_cell(self, name, value):']
         for name, cells in tables.items():
             get += [f'    if name == {name!r}:', f'        return self.{mapping[name]}()']
-            put += [f'    if name == {name!r}:', f'        self._v_{name} = value']
-            if name in data_frame_cells(cls_info):          # T-4.2: the assigned frame's prepared table
-                put += ['        ' + line for line in _publish(name, 'value', cells.is_locked).strip().split('\n')]
-            elif name in item_frame_cells(cls_info):        # T-4.2: its reads by row or prefix keep pandas
-                put.append(f'        self._mx_assigned_{name} = True')
-            if cells.is_locked:
-                put.append(f'        {MX_SYS_MOD}._mx_store_flag({CY_MOD}.address(self._has_{name}), True)')
-            else:
-                put.append(f'        self._has_{name} = True')
-            put.append('        return')
         get.append('    raise KeyError(name)')
-        put.append('    raise KeyError(name)')
-        lines += ['\n'.join(get) + '\n', '\n'.join(put) + '\n']
-    for name in refs:
-        path = path_of(cls_info, name)
-        lines.append(
-            f'@property\n'
-            f'def {name}(self):\n'
-            f'    return self.{mapping[name]}\n\n'
-            f'@{name}.setter\n'
-            f'def {name}(self, value):\n'
-            f'    {RUNTIME}.before_reference(self, {path!r})\n'
-            f'    self.{mapping[name]} = value\n')   # D109: published caches stay, as exported
-    members = _members(cls_info)
-    # D130: of live modelx's clears only Space.clear_all() and Model.clear_all() are provided (no cell-level
-    # or partial clear: without dependency tracking they would leave dependents stale)
-    if 'clear_all' not in members:
-        lines.append(f'def clear_all(self):\n'
-                     f'    """Clear the values of this Space and the Spaces below it, their assigned inputs and '
-                     f'their ItemSpaces, as live modelx."""\n'
-                     f'    {RUNTIME}.clear_all(self)\n')
-    for removed in ('clear_cells', 'clear_items', 'clear_at'):
-        if removed not in members:
-            # D130: live modelx's other Space clears are not provided; calling one names the two clears
-            lines.append(f'def {removed}(self, *args, **kwargs):\n'
-                         f'    {RUNTIME}.not_provided(self, {removed!r})\n')
-    clear = ['def _mx_clear_values(self):',
-             '    """Empty every cache of this Space and drop its ItemSpaces (D101, D130)."""']
-    clear += ['    ' + line for line in _reset_lines(cls_info)]
-    for name in data_frame_cells(cls_info):         # T-4.2: bound again with the cell's next value
-        clear += [f'    self._mx_ptready_{name} = False', f'    self._mx_ptable_{name} = None']
-    for name in item_frame_cells(cls_info):
-        clear.append(f'    self._mx_assigned_{name} = False')
-    if '_mx_itemspaces' in init_names:
-        if cls_info.name in cls_info.visitor.itemspace_classes:
-            # audit-routes P2: the dropped items are released as by __delitem__ (D114, D116), so they
-            # are freed by their reference count instead of waiting for the cyclic GC
-            from modelx_cython.item_roots import release_item
-            clear.append('    for _mx_item in self._mx_itemspaces.values():')
-            clear.append(f'        {release_item(cls_info.name)}(_mx_item)')
-        clear.append('    self._mx_itemspaces.clear()')
-    if has_collect or '_mx_collect_cache' in init_names:
-        clear.append('    self._mx_collect_cache.clear()')
-    lines.append('\n'.join(clear) + '\n')
+        lines.append('\n'.join(get) + '\n')
     added = []
     for text in lines:
         for statement in _statements(text, config):
             added.append(statement.with_changes(leading_lines=(cst.EmptyLine(),)))
     return node.with_changes(body=node.body.with_changes(body=(*body, *added)))
 
-
-def _counted_collect(function, config):
-    """``collect`` marks the model as running for the duration of the call."""
-    inner = function.body.body
-    wrapper = cst.parse_statement(
-        'try:\n    pass\nfinally:\n'
-        f'    {RUNTIME}.collect_end(self._model)\n', config=config)
-    wrapper = wrapper.with_changes(body=wrapper.body.with_changes(body=tuple(inner)))
-    begin = cst.parse_statement(f'{RUNTIME}.collect_begin(self._model)\n', config=config)
-    return function.with_changes(body=function.body.with_changes(body=(begin, wrapper)))
 
 
 class RenameMembers(cst.CSTTransformer):
@@ -755,7 +623,6 @@ class RenameMembers(cst.CSTTransformer):
         return updated
 
 
-MEMSET = 'from cython.cimports.libc.string import memset as _mx_collect_memset'
 
 
 def finish(syntax, module):
@@ -764,7 +631,4 @@ def finish(syntax, module):
     from modelx_cython.transformer import _integer_reference_paths
     result = cst.MetadataWrapper(syntax, unsafe_skip_copy=True).visit(
         RenameMembers(module, syntax.config_for_parsing, _integer_reference_paths))
-    if MEMSET not in syntax.code and '_mx_collect_memset(' in result.code:
-        # _mx_clear_values resets array flags; the module imported memset only for a serial collect
-        result = result.with_changes(body=(cst.parse_statement(MEMSET + '\n'), *result.body))
     return result

@@ -384,7 +384,6 @@ class PXDGenerator:
         """
 
         cls_info = self.module.classes[cls_name]
-        integer_refs = _integer_reference_paths(cls_info)
         renamed = table_cells.module_renames(self.module)[cls_name]
         decl_stmts = []
         for ref in cls_info.refs.values():
@@ -397,7 +396,7 @@ class PXDGenerator:
             if ref.name in getattr(cls_info, 'readonly_refs', ()):
                 continue
 
-            visibility = "readonly " if ref.name in integer_refs else "public "
+            visibility = "public "      # as upstream: every Reference is a plain attribute
             name = renamed.get(ref.name, ref.name)
             if name != ref.name:
                 visibility = ""     # api-tables (D101a): stored renamed; a property serves Python
@@ -1242,22 +1241,6 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
                 updated_node = updated_node.with_changes(body=updated_node.body.with_changes(body=tuple(body)))
             updated_node = updated_node.with_changes(body=updated_node.body.with_changes(
                 body=code_enums.bind_properties(self.module.classes[cls_name], updated_node.body.body)))
-            integer_refs = _integer_reference_paths(cls_info)
-            if integer_refs:
-                lines = ['def __setattr__(self, name, value):']
-                for name, path in integer_refs.items():
-                    lines.extend((
-                        f'    if {MX_SYS_MOD}._mx_ref_name_is(name, {name!r}):',
-                        f'        self.{name} = {MX_SYS_MOD}._mx_exact_int64(value, {path!r})',
-                        '        return',
-                    ))
-                lines.append(f'    {MX_SYS_MOD}._mx_generic_setattr(self, name, value)')
-                setter = cst.parse_statement(
-                    '\n'.join(lines) + '\n', config=self._module_node.config_for_parsing
-                )
-                setter = setter.with_changes(leading_lines=(cst.EmptyLine(),))
-                updated_node = updated_node.with_changes(body=updated_node.body.with_changes(
-                    body=(*updated_node.body.body, setter)))
             if self._collect_workers is not None:
                 from modelx_cython.serial_collect import add_methods
                 updated_node = add_methods(
@@ -1775,11 +1758,6 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
                     formula = f"{MX_SELF}.{FORMULA_PREF}{meth_name}()"
                     if binder:
                         path = f', {cells.method_fqname!r}' if binding_args else ''
-                        if cells.native_provider_binding.manifest.provider == table_cells.STANDARD_PROVIDER:
-                            # D130: a table cell marked by a clear of another Space rebinds from the
-                            # frame it holds (an in-place edit is read); a cleared one runs its formula
-                            formula = (f'({table_cells.RUNTIME}.rebind_source({cache}) '
-                                       f'if {cache} is not None else {formula})')
                         formula = f'{binder}({formula}{path})'
                     shared = (cells.has_formula_def and not cells.is_locked
                               and not numeric_cache.exclusively_owned(cells))

@@ -5,7 +5,7 @@ acquire and release of the one acquisition count every worker shares). The compi
 (``holds`` kind ``array``) and reads elements of its own field (in formulas with parameters; a zero-argument Cell
 runs once per item and keeps its read): the generated formula calls the held read, the
 values equal live; four threads racing on the first reads of a fresh model all get the right values (the Cell's
-first-fill discipline, mv-race); and after ``Data.clear_all()`` between runs, items read the refilled array.
+first-fill discipline, mv-race), on a new model per run.
 A clear concurrent with evaluation is outside the contract (change an input, clear, run again: D191).
 """
 import subprocess
@@ -57,7 +57,7 @@ def test_held_array_reads_values_and_generated_code(tmp_path):
     assert result.returncode == 0 and result.stdout.strip() == "ok", result.stdout + result.stderr
 
 
-def test_held_array_reads_four_threads_and_clear_between_runs(tmp_path):
+def test_held_array_reads_four_threads_on_fresh_models(tmp_path):
     expected = _build(tmp_path)
     probe = textwrap.dedent(f"""\
         import threading
@@ -65,27 +65,25 @@ def test_held_array_reads_four_threads_and_clear_between_runs(tmp_path):
 
         expected = {expected!r}
         errors = []
-        for run in range(200):
-            fresh = type(m)()
-            for phase in range(2):
-                barrier = threading.Barrier(4, timeout=30)
-                def reader(k):
-                    barrier.wait()
-                    try:
-                        for _ in range(5):
-                            for i in range(1 + k, 9, 4):
-                                value = fresh.Projection[i].total()
-                                if value != expected[i]:
-                                    errors.append(f"wrong value {{i}}: {{value}}")
-                                del fresh.Projection[i]
-                    except Exception as error:
-                        errors.append(f"{{type(error).__name__}}: {{error}}")
-                threads = [threading.Thread(target=reader, args=(k,)) for k in range(4)]
-                for t in threads:
-                    t.start()
-                for t in threads:
-                    t.join()
-                fresh.Data.clear_all()          # between runs: the next phase refills and re-holds
+        for run in range(400):
+            fresh = type(m)()           # a new model per run: the first reads of each fill and hold the array
+            barrier = threading.Barrier(4, timeout=30)
+            def reader(k):
+                barrier.wait()
+                try:
+                    for _ in range(5):
+                        for i in range(1 + k, 9, 4):
+                            value = fresh.Projection[i].total()
+                            if value != expected[i]:
+                                errors.append(f"wrong value {{i}}: {{value}}")
+                            del fresh.Projection[i]
+                except Exception as error:
+                    errors.append(f"{{type(error).__name__}}: {{error}}")
+            threads = [threading.Thread(target=reader, args=(k,)) for k in range(4)]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join()
         assert not errors, sorted(set(errors))[:5]
         print("ok")
         """)
