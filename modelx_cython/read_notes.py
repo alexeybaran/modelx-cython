@@ -85,10 +85,18 @@ def _follow(value, origin):
         _KEEP.append(value)
 
 
+RAISES = 'raises'      # the result kind of an evaluation that raised
+
+
 def r_sub(nid, receiver, key, /):
-    out = receiver[key]
-    pd = _pandas()
     found = kind(receiver)
+    try:
+        out = receiver[key]
+    except Exception:
+        column = key[-1] if isinstance(key, tuple) and key and isinstance(key[-1], str) else key if isinstance(key, str) else None
+        _note(nid, found, _shape(key), RAISES, column)
+        raise
+    pd = _pandas()
     if pd is not None and found.startswith('loc:') and not isinstance(key, (pd.Series, list, slice)) \
             and type(key).__name__ != 'ndarray':
         base = found.split(':')[-1]
@@ -102,7 +110,11 @@ def r_sub(nid, receiver, key, /):
 
 
 def r_call(nid, receiver, name, /, *args, **kwargs):
-    out = getattr(receiver, name)(*args, **kwargs)
+    try:
+        out = getattr(receiver, name)(*args, **kwargs)
+    except Exception:
+        _note(nid, kind(receiver), name, RAISES)
+        raise
     pd = _pandas()
     if pd is not None and isinstance(out, pd.DataFrame) and not args and not kwargs \
             and id(out) not in _TABLES and id(out) not in _SUBS:
@@ -113,8 +125,13 @@ def r_call(nid, receiver, name, /, *args, **kwargs):
 
 
 def r_in(nid, left, right):
+    try:
+        out = left in right
+    except Exception:
+        _note(nid, kind(right), _shape(left), RAISES)
+        raise
     _note(nid, kind(right), _shape(left))
-    return left in right
+    return out
 
 
 def r_it(nid, source):
@@ -357,6 +374,12 @@ def selects_rows(shape):
     if isinstance(shape, tuple):
         return any(selects_rows(part) for part in shape)
     return shape in SELECTORS or str(shape).startswith(('row:', 'sub:', 'table:', 'index:', 'loc'))
+
+
+def only_raised(note):
+    """Whether every evaluation the sample made at a place raised (no evidence of what a read there returns)."""
+    seen = note['seen'] if note else ()
+    return bool(seen) and all(len(s) >= 3 and s[2] == RAISES for s in seen)
 
 
 def table_read(op, seen):

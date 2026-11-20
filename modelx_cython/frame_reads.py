@@ -36,6 +36,7 @@ import re
 import libcst as cst
 
 from .holds import hold_table
+from .read_notes import RAISES, only_raised
 
 PROVIDER = 'modelx_cython.runtime._tables'
 COLUMN_KIND = {'f64': 0, 'i64': 1}
@@ -44,6 +45,8 @@ CTYPE = {'f64': '_mx_cy.double', 'i64': '_mx_cy.longlong'}
 MAX_PARTS = 6
 # displays whose value as a key part (or an argument of asof/searchsorted) selects several rows, never one label
 SEVERAL_ROWS = (cst.List, cst.ListComp, cst.Set, cst.Slice, cst.Tuple, cst.Lambda)
+SEVERAL_ROWS_WHY = 'a key part selects several rows'
+ONLY_RAISED_WHY = 'every evaluation of this place raised in the sample (no evidence of a single-cell read)'
 # kinds of a call's result in the sample (read_notes.kind) that are a single number
 ONE_NUMBER = frozenset(('int', 'float', 'bool'))
 MUTATORS = frozenset(('__setitem__', '__delitem__', 'update', 'insert', 'pop'))
@@ -1117,7 +1120,7 @@ class _Rewrite(cst.CSTTransformer):
             return None, f'{len(parts)} key parts'
         for part in parts:
             if isinstance(part, SEVERAL_ROWS):
-                return None, 'a key part selects several rows'
+                return None, SEVERAL_ROWS_WHY
         return parts, None
 
     def _read_args(self, hold, parts, levels):
@@ -1585,8 +1588,8 @@ class _Rewrite(cst.CSTTransformer):
             why = 'the argument is a display of several values (an array result, never one label)'
         else:
             note = self.o.note_of(call)
-            if note is not None and any(len(seen) == 3 and seen[1] == call.func.attr.value and seen[2] not in ONE_NUMBER
-                                        for seen in note['seen']):
+            if note is not None and any(len(seen) == 3 and seen[1] == call.func.attr.value
+                                        and seen[2] not in ONE_NUMBER | {RAISES} for seen in note['seen']):
                 why = 'the sample returned more than one number from this call (its argument holds several values)'
         if why:
             self._record(call, 'pandas', view.call, why)
@@ -2079,6 +2082,14 @@ class _Rewrite(cst.CSTTransformer):
         self._record(original, 'L8' if value.attr.value == 'iloc' else 'L3', view.call, view=view)
         return self._guarded(original, updated, view, test, read, kind)
 
+    def raised_veto(self, node, receiver):
+        """Decision from tracing: a place whose every evaluation raised in the sample is not lowered (it stays as
+        written, recorded with its reason). A place that also returned in the sample is not vetoed by this."""
+        if not only_raised(self.o.note_of(node)):
+            return False
+        self._record(node, 'pandas', receiver, ONLY_RAISED_WHY)
+        return True
+
     def leave_Subscript(self, original, updated):
         o = self.o
         value = original.value
@@ -2099,14 +2110,15 @@ class _Rewrite(cst.CSTTransformer):
             # read, whatever its text looks like; it stays on pandas
             from .read_notes import selects_rows
             if any(len(seen) == 4 and selects_rows(seen[1]) for seen in note['seen']):
-                self._record(original, 'pandas', value,
-                             'the sample passed a key that selects several rows (a mask, a list or a slice)')
+                self._record(original, 'pandas', value, SEVERAL_ROWS_WHY)
                 return updated
         if (len(parts) == 1 and isinstance(parts[0], cst.Name) and parts[0].value in ('True', 'False')
                 and isinstance(value, cst.Attribute) and value.attr.value in PANDAS_INDEXERS):
             # T-5c: a bool literal as the key of a pandas indexer: Cython compiles X[True] as the integer index 1;
             # the call passes the Python bool, as live does (pandas raises or selects by it)
             return cst.Call(func=cst.Attribute(updated.value, cst.Name('__getitem__')), args=[cst.Arg(parts[0])])
+        if self.raised_veto(original, value):     # (after the bool key: Cython would read X[False] as X[0])
+            return updated
         row = (self.row_local_read(original, updated, parts) or self.row_cell_field(original, updated, parts)
                or self._row_field(original, updated, parts))
         if row is not None:
@@ -2231,6 +2243,13 @@ class _Rewrite(cst.CSTTransformer):
         """``float(...)`` around a float64 read and ``int(...)`` around an int64 read are dropped: the read is
         already that C value, and the builtin would box it into a Python object and back. L5: the extremes of a
         one-level int index are read as C integers."""
+        target = original
+        if (isinstance(original.func, cst.Name) and original.func.value == 'int' and len(original.args) == 1
+                and isinstance(original.args[0].value, cst.Call)):
+            target = original.args[0].value         # int(X.index.asof(x)): the place is the asof call
+        if (isinstance(target.func, cst.Attribute) and target.func.attr.value in ('searchsorted', 'asof', 'max', 'min')
+                and self.raised_veto(target, target.func.value)):
+            return updated
         walk = self.index_call(original, updated) or self.level_walk_extreme(original, updated)
         if walk is not None:
             return walk
@@ -2523,6 +2542,8 @@ class _Rewrite(cst.CSTTransformer):
         index = target.comparator
         if not (isinstance(index, cst.Attribute) and index.attr.value == 'index'):
             return updated
+        if self.raised_veto(original, index):
+            return updated
         prefix = self.prefix_membership(original, updated, index, target)
         if prefix is not None:
             return prefix
@@ -2548,7 +2569,10 @@ class _Rewrite(cst.CSTTransformer):
         # is not the tuple the read expects (T-5c) is pandas' own membership
         guards = o.guards(key_parts)
         conditions = conditions[len(guards):]
-        native = self._native_test(hold, guards)
+        # a part that is not one label (the run-time label test of code_of) is pandas' own membership, never False
+        labels = [c for c in conditions if '.is_label(' in _code(c)]
+        conditions = [c for c in conditions if '.is_label(' not in _code(c)]
+        native = self._native_test(hold, guards + labels)
         if conditions:
             test = self._lowered(self._conjunction(conditions), test,
                                  cst.Name('True' if isinstance(target.operator, cst.NotIn) else 'False'))
