@@ -46,6 +46,7 @@ PROJECTION = {
     'grp_total': 'T = data.points()\nreturn float(T[T["grp"] == "a"]["sa"].sum())',
     'mixed_one': ('T = data.points()\nown = T.loc[policy_id, "rate"]\npeers = T[T["grp"] == "a"]\n'
                   'return own * len(peers) + float(peers["sa"].sum()) * 0.001'),
+    'loc_mask': 'T = data.points()\nreturn float(T.loc[T["sa"] > 150, "rate"].sum())',
     'share': 'return sa() / report.total_sa()',
     'pv': ('return sum((sa() + mixed_one() + 0.01 * grp_total() + share()) * (1.0 + report.first_rate()) ** -t\n'
            '           for t in range(6))'),
@@ -61,6 +62,7 @@ EXPECTED = {
     'Projection.mixed_one': ('T.loc[self.policy_id, "rate"]', 'T["grp"]'),
     'Projection.sa': ('T.loc[self.policy_id, "sa"]', None),
     'Projection.grp_total': (None, 'T["grp"]'),
+    'Projection.loc_mask': (None, 'T["sa"] > 150'),
     'Report.first_rate': ('T.loc[T.index[0], "rate"]', None),
     'Report.mixed_r': ('T.loc[2, "sa"]', 'T.query('),
 }

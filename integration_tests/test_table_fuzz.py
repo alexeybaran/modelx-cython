@@ -54,6 +54,20 @@ XS = ['20.5', '21 + t', 't', "'a'", '1e9', 'float("nan")', '-5']
 LEVELS = ['0', '1', '-1', "'age'", "'plan'", '2', '0x1']
 
 
+# T-5c: values that are not scalar labels, for every key, position, argument and level slot (masks, Series, lists,
+# slices, Index and arrays, alone or as a part of a tuple key): their reads must stay pandas' (``vector_cases``)
+NONSCALAR = {
+    'flat': ["T['q'] > 0.002", "T['q']", '[20, 21]', 'slice(20, 22)', 'T.index', 'T.index.values', 'np.array([20, 21])',
+             'pd.Series([20, 21])', "(T['r'] > 1.5).values", "~(T['q'] > 0.002)", '[True, False, True, False]',
+             "T.index[T['q'] > 0.002]", 'pd.Index([20, 22])', "T['r'] == 2.0"],
+    'grid': ["T['q'] > 0.02", "T['n']", "[('A', 20), ('B', 21)]", 'T.index', "(T['n'] % 2 == 0).values",
+             'np.array([True] * 8)', "pd.Series([('A', 20)])", "('A', T['n'] > 2)", "('A', [20, 21])",
+             "('A', np.array([20, 21]))", '(slice(None), 20)', "T.index[T['n'] > 3]"],
+    'tri': ["T['q'] > 0.3", "T['x'] == 0.0", 'T.index', "('A', 'F', [20, 21])", "('A', T['q'] > 0.3, 20)",
+            'np.array([True] * 8)', "[('A', 'F', 20)]", "('A', slice(None), 20)"],
+}
+
+
 def _receivers(source):
     yield 'T', ''
     if source != 'flat':
@@ -87,6 +101,30 @@ def cases(count, seed=SEED):
     return out
 
 
+def vector_cases(count, seed=SEED):
+    """``count`` cases whose key, position, argument or level is a value from ``NONSCALAR`` (one slot per case, the
+    other slots as in ``cases``)."""
+    rng = random.Random(seed)
+    out = []
+    ops = [op for op in OPS if re.search(r'\b[KIXL]\b', op)]
+    while len(out) < count:
+        source = rng.choice(sorted(KEYS))
+        receiver, setup = rng.choice(list(_receivers(source)))
+        op = rng.choice(ops)
+        slot = rng.choice(sorted(set(re.findall(r'\b([KIXL])\b', op))))
+        fill = {'R': receiver, 'K': rng.choice(KEYS[source]), 'C': rng.choice(COLUMNS),
+                'I': rng.choice(INDEXES), 'X': rng.choice(XS), 'L': rng.choice(LEVELS)}
+        fill[slot] = rng.choice(NONSCALAR[source])
+        expression = re.sub(r'\b([RKCIXL])\b', lambda m: fill[m.group(1)], op)
+        body = f'{LOCALS}{setup}return {expression}'
+        try:
+            compile('def f(t):\n' + ''.join('    ' + line + '\n' for line in body.split('\n')), 'case', 'exec')
+        except SyntaxError:
+            continue
+        out.append((f'v{len(out)}', source, body))
+    return out
+
+
 def _model(tmp_path, chosen):
     stmts = {name: (source, body) for name, source, body in chosen}
     (tmp_path / 'probe_model.py').write_text(
@@ -115,8 +153,8 @@ def _full_seed():
     return seed
 
 
-def _translation(tmp_path, count, seed):
-    _model(tmp_path, cases(count, seed))
+def _translation(tmp_path, count, seed, make=cases):
+    _model(tmp_path, make(count, seed))
     built = _build(tmp_path, '--translate-only')
     assert built.returncode == 0, f'seed {seed}\n' + built.stdout[-4000:] + built.stderr[-8000:]
     reads = json.loads((tmp_path / 'probe_nomx_cy' / '_mx_table_reads.json').read_text())
@@ -139,8 +177,8 @@ def _differing(tmp_path, verdicts):
     return {n: v for n, v in differing.items() if n.split('.')[-1] in lowered}
 
 
-def _compiled(tmp_path, count, total, seed):
-    chosen = random.Random(seed + 1).sample(cases(total, seed), min(count, total))
+def _compiled(tmp_path, count, total, seed, make=cases):
+    chosen = random.Random(seed + 1).sample(make(total, seed), min(count, total))
     _model(tmp_path, chosen)
     built = _build(tmp_path)
     assert built.returncode == 0, f'seed {seed}\n' + built.stdout[-4000:] + built.stderr[-8000:]
@@ -164,6 +202,29 @@ def test_fuzz_full_translation_never_raises(tmp_path):
 @pytest.mark.fuzz_full
 def test_fuzz_full_compiled_equals_live(tmp_path):
     _compiled(tmp_path, FULL['compiled'], FULL['translate'], _full_seed())
+
+
+# T-5c: non-scalar keys (masks, Series, lists, slices, Index, arrays) in every slot: never lowered as a label
+VECTOR_SMALL = {'translate': 150, 'compiled': 60}
+VECTOR_FULL = {'translate': 1500, 'compiled': 300}
+
+
+def test_fuzz_vector_keys_translation_never_raises(tmp_path):
+    _translation(tmp_path, VECTOR_SMALL['translate'], SEED, vector_cases)
+
+
+def test_fuzz_vector_keys_compiled_equals_live(tmp_path):
+    _compiled(tmp_path, VECTOR_SMALL['compiled'], VECTOR_SMALL['translate'], SEED, vector_cases)
+
+
+@pytest.mark.fuzz_full
+def test_fuzz_full_vector_keys_translation_never_raises(tmp_path):
+    _translation(tmp_path, VECTOR_FULL['translate'], _full_seed(), vector_cases)
+
+
+@pytest.mark.fuzz_full
+def test_fuzz_full_vector_keys_compiled_equals_live(tmp_path):
+    _compiled(tmp_path, VECTOR_FULL['compiled'], VECTOR_FULL['translate'], _full_seed(), vector_cases)
 
 
 # Two-formula mode: pairs of formulas of one item class that reuse the same local names, cells and tables with
