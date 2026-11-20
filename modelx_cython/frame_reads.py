@@ -117,9 +117,13 @@ class FrameReads:
         declined = {entry['expression']: entry.get('reason') for entry in self.declined}
         lowered = [entry['expression'] for entry in self.lowered]
 
+        inlined = {normal(code): (name if isinstance(name, str) else getattr(name, 'name', str(name)))
+                   for code, name in self.row_names.items()}
+        inlined.update({normal(_code(expr)): name for name, expr in self.prefix_cells.items()})
+
         def as_written(text):       # a row cell inlined before this pass reads `self.<cell>()` in the sample's text
-            for code, name in self.row_names.items():
-                text = text.replace(normal(code), f'self.{name if isinstance(name, str) else getattr(name, "name", name)}()')
+            for code, name in inlined.items():
+                text = text.replace(code, f'self.{name}()')
             return text
         lowered = lowered + [as_written(e) for e in lowered]
         self.lowered_text |= {as_written(t) for t in self.lowered_text}
@@ -1925,10 +1929,11 @@ class _Rewrite(cst.CSTTransformer):
             native = self._assign(var, cst.parse_expression(f'self.{field} - 1'))
             return self._branch(self._native_test(hold, [cst.parse_expression(f'self.{field} > 0')]), [native],
                                 fallback)
-        suffix, args = self._codes(hold, [], parts, schema['levels'])
+        labels = []
+        suffix, args = self._codes(hold, [], parts, schema['levels'], labels)
         lookup = self._m('row' + suffix, o.ref(hold), *args)
         native = self._assign(var, lookup)
-        return self._branch(self._native_test(hold, []), [native], fallback)
+        return self._branch(self._native_test(hold, labels), [native], fallback)
 
     def row_local_read(self, original, updated, parts):
         """``row["c"]`` of a row local: the field from the prepared blocks, of the kind pandas gives it (as L2)."""
@@ -2411,8 +2416,9 @@ class _Rewrite(cst.CSTTransformer):
 
         def position(hold):
             if per_read:
-                suffix, cargs = self._codes(hold, [], _parts(key), levels)
-                return self._next(self._m('row' + suffix, o.ref(hold), *cargs)), []
+                labels = []
+                suffix, cargs = self._codes(hold, [], _parts(key), levels, labels)
+                return self._next(self._m('row' + suffix, o.ref(hold), *cargs)), labels
             field = o.row_field(hold, key, name, self._detached(key))
             return cst.parse_expression(f'self.{field}'), [cst.parse_expression(f'self.{field} > 0')]
         read, kind, test = self._field_read(call, schema, label, position)
