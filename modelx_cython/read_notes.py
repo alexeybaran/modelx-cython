@@ -6,20 +6,20 @@ original operation unchanged and records, for that place in the text, what kind 
 of key it took and what kind of value came back.  A pandas object is followed by identity: the frame a zero-argument
 Cell returned, a row or a sub-table read from it, its index.
 
-``NOTES``: (class, function, line, column, end line, end column, operation) -> set of observations.
+``NOTES``: (class, function, text of the node, operation) -> set of observations.
 The transformer reads them by position in the same text; a place with no note was never reached by the sample and a
 place with more than one observation saw more than one kind of value: both stay as written.
 """
-import ast
 import enum
 import importlib.abc
 import importlib.machinery
 import sys
 from contextlib import contextmanager
 
+import libcst as cst
+
 NOTES = {}
 COUNTS = {}        # the same key -> evaluations in the sample
-SEGMENTS = {}       # the same key -> the source text of the node (checked against the transformer's node)
 _TABLES, _SUBS, _ROWS, _INDEXES, _KEEP = {}, {}, {}, {}, []
 
 
@@ -127,75 +127,142 @@ def r_v(nid, value):
     return value
 
 
-class _Wrap(ast.NodeTransformer):
-    def __init__(self, source):
-        self.source = source
+class _Wrap(cst.CSTTransformer):
+    """Wraps the reads of the formulas (methods ``_f_<cell>`` of a Space class); everything else is left as it is."""
+
+    def __init__(self):
+        super().__init__()
         self.cls = self.fn = None
+        self.depth = 0
+        self.targets = set()        # ids of nodes that are assigned to or deleted, not read
+
+    @staticmethod
+    def code(node):
+        return cst.Module(body=()).code_for_node(node)
 
     def nid(self, node, op):
-        key = (self.cls, self.fn, node.lineno, node.col_offset, node.end_lineno, node.end_col_offset, op)
-        SEGMENTS[key] = ast.get_source_segment(self.source, node)
-        return ast.Constant(key)
+        return cst.parse_expression(repr((self.cls, self.fn, normal(self.code(node)), op)))
 
-    def call(self, name, node, *args, keywords=()):
-        return ast.copy_location(ast.Call(ast.Name(name, ast.Load()), list(args), list(keywords)), node)
+    @staticmethod
+    def call(name, original, *args, keywords=()):
+        return cst.Call(func=cst.Name(name), args=[cst.Arg(a) for a in args] + list(keywords),
+                        lpar=getattr(original, 'lpar', ()), rpar=getattr(original, 'rpar', ()))
+
+    @staticmethod
+    def bare(node):
+        return node.with_changes(lpar=(), rpar=()) if getattr(node, 'lpar', None) else node
+
+    def _mark(self, target):
+        for node in _walk(target):
+            self.targets.add(id(node))
 
     def visit_ClassDef(self, node):
-        outer, self.cls = self.cls, node.name
-        self.generic_visit(node)
-        self.cls = outer
-        return node
+        if self.cls is not None or self.fn is not None:
+            return False
+        self.cls = node.name.value
+        return True
+
+    def leave_ClassDef(self, original, updated):
+        if self.cls == original.name.value and self.fn is None:
+            self.cls = None
+        return updated
 
     def visit_FunctionDef(self, node):
-        if self.cls is None or self.fn is not None or not node.name.startswith('_f_'):
-            return node                     # formulas only: methods ``_f_<cell>`` of a Space class
-        self.fn = node.name
-        self.generic_visit(node)
-        self.fn = None
-        return node
+        if self.cls is None or self.fn is not None or not node.name.value.startswith('_f_'):
+            return False
+        self.fn = node.name.value
+        return True
+
+    def leave_FunctionDef(self, original, updated):
+        if self.fn == original.name.value:
+            self.fn = None
+        return updated
 
     def visit_Lambda(self, node):
-        return node
+        return False
 
-    def visit_Subscript(self, node):
-        nid = self.nid(node, 'sub')
-        self.generic_visit(node)
-        if not isinstance(node.ctx, ast.Load) or isinstance(node.slice, ast.Slice):
-            return node
-        return self.call('_mx_note_sub', node, nid, node.value, node.slice)
+    def visit_Assign(self, node):
+        for target in node.targets:
+            self._mark(target.target)
 
-    def visit_Call(self, node):
-        nid = self.nid(node, 'call')
-        olds = list(node.args)
-        self.generic_visit(node)
-        if isinstance(node.func, ast.Name) and node.func.id in ('int', 'float', 'bool') and len(olds) == 1:
-            node.args = [self.call('_mx_note_v', olds[0], self.nid(olds[0], 'v'), node.args[0])]
-        if not isinstance(node.func, ast.Attribute) or any(isinstance(a, ast.Starred) for a in node.args) \
-                or any(k.arg is None for k in node.keywords):
-            return node
-        return self.call('_mx_note_call', node, nid, node.func.value, ast.Constant(node.func.attr), *node.args,
-                         keywords=node.keywords)
+    def visit_AugAssign(self, node):
+        self._mark(node.target)
 
-    def visit_Compare(self, node):
-        nid = self.nid(node, 'in')
-        self.generic_visit(node)
-        if len(node.ops) == 1 and isinstance(node.ops[0], (ast.In, ast.NotIn)):
-            found = self.call('_mx_note_in', node, nid, node.left, node.comparators[0])
-            return found if isinstance(node.ops[0], ast.In) else ast.copy_location(ast.UnaryOp(ast.Not(), found), node)
-        return node
+    def visit_AnnAssign(self, node):
+        self._mark(node.target)
 
-    def _source(self, holder):
-        nid = self.nid(holder.iter, 'it')
-        self.generic_visit(holder)
-        holder.iter = self.call('_mx_note_it', holder.iter, nid, holder.iter)
-        return holder
+    def visit_Del(self, node):
+        self._mark(node.target)
 
-    visit_For = visit_comprehension = _source
+    def visit_For(self, node):
+        self._mark(node.target)
+
+    def visit_CompFor(self, node):
+        self._mark(node.target)
+
+    def visit_WithItem(self, node):
+        if node.asname is not None:
+            self._mark(node.asname.name)
+
+    def leave_Subscript(self, original, updated):
+        if self.fn is None or id(original) in self.targets:
+            return updated
+        parts = []
+        for element in updated.slice:
+            if not isinstance(element.slice, cst.Index) or element.slice.star is not None:
+                return updated
+            parts.append(element.slice.value)
+        key = parts[0] if len(parts) == 1 else cst.Tuple([cst.Element(p) for p in parts])
+        return self.call('_mx_note_sub', updated, self.nid(original, 'sub'), updated.value, key)
+
+    def leave_Call(self, original, updated):
+        if self.fn is None:
+            return updated
+        if any(arg.star for arg in updated.args):
+            return updated
+        func = updated.func
+        if isinstance(func, cst.Name) and func.value in ('int', 'float', 'bool') and len(updated.args) == 1 \
+                and updated.args[0].keyword is None:
+            inner = self.call('_mx_note_v', None, self.nid(original.args[0].value, 'v'), updated.args[0].value)
+            return updated.with_changes(args=[updated.args[0].with_changes(value=inner)])
+        if not isinstance(func, cst.Attribute):
+            return updated
+        return self.call('_mx_note_call', updated, self.nid(original, 'call'), func.value,
+                         cst.SimpleString(repr(func.attr.value)), keywords=list(updated.args))
+
+    def leave_Comparison(self, original, updated):
+        if self.fn is None or len(updated.comparisons) != 1:
+            return updated
+        target = updated.comparisons[0]
+        if not isinstance(target.operator, (cst.In, cst.NotIn)):
+            return updated
+        found = self.call('_mx_note_in', None, self.nid(original, 'in'), updated.left, target.comparator)
+        if isinstance(target.operator, cst.NotIn):
+            found = cst.UnaryOperation(operator=cst.Not(), expression=found.with_changes(
+                lpar=[cst.LeftParen()], rpar=[cst.RightParen()]))
+        return found.with_changes(lpar=[cst.LeftParen()], rpar=[cst.RightParen()])
+
+    def _source(self, original, updated):
+        if self.fn is None:
+            return updated
+        return updated.with_changes(iter=self.call('_mx_note_it', None, self.nid(original.iter, 'it'), updated.iter))
+
+    def leave_For(self, original, updated):
+        return self._source(original, updated)
+
+    def leave_CompFor(self, original, updated):
+        return self._source(original, updated)
+
+
+def _walk(node):
+    yield node
+    for child in node.children:
+        yield from _walk(child)
 
 
 def instrument(source, filename):
-    tree = ast.fix_missing_locations(_Wrap(source).visit(ast.parse(source, filename)))
-    return compile(tree, filename, 'exec', dont_inherit=True)
+    module = cst.parse_module(source).visit(_Wrap())
+    return compile(module.code, filename, 'exec', dont_inherit=True)
 
 
 class _Loader(importlib.machinery.SourceFileLoader):
@@ -227,7 +294,7 @@ def recording(package):
     """Record the reads of the model package ``package`` while it is imported and run inside the block."""
     import builtins
     import importlib.util       # noqa: F401  (decode_source)
-    for store in (NOTES, COUNTS, SEGMENTS, _TABLES, _SUBS, _ROWS, _INDEXES):
+    for store in (NOTES, COUNTS, _TABLES, _SUBS, _ROWS, _INDEXES):
         store.clear()
     del _KEEP[:]
     hooks = {'_mx_note_sub': r_sub, '_mx_note_call': r_call, '_mx_note_in': r_in, '_mx_note_it': r_it, '_mx_note_v': r_v}
@@ -246,11 +313,9 @@ def recording(package):
 
 def as_json():
     """The notes as a JSON value (the build writes them next to the per-read report)."""
-    out = []
-    for key in sorted(NOTES, key=lambda k: tuple(str(x) for x in k)):
-        out.append({'class': key[0], 'function': key[1], 'at': list(key[2:6]), 'op': key[6],
-                    'text': SEGMENTS.get(key), 'seen': sorted(repr(n) for n in NOTES[key])})
-    return out
+    return [{'class': key[0], 'function': key[1], 'text': key[2], 'op': key[3], 'evaluations': COUNTS.get(key, 0),
+             'seen': sorted(repr(n) for n in NOTES[key])}
+            for key in sorted(NOTES, key=lambda k: tuple(str(x) for x in k))]
 
 
 def normal(text):
@@ -277,10 +342,10 @@ def by_text():
     places of one formula with the same text share their observations."""
     out = {}
     for key, seen in NOTES.items():
-        entry = out.setdefault(key[:2], {}).setdefault(normal(SEGMENTS.get(key)), {'seen': set(), 'count': 0, 'ops': set()})
+        entry = out.setdefault(key[:2], {}).setdefault(key[2], {'seen': set(), 'count': 0, 'ops': set()})
         entry['seen'] |= seen
         entry['count'] += COUNTS.get(key, 0)
-        entry['ops'].add(key[6])
+        entry['ops'].add(key[3])
     return out
 
 

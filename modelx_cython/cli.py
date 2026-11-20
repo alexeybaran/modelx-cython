@@ -150,7 +150,6 @@ def run_sample(model_path: pathlib.Path, sample_path: str, new_model_name: str =
                 with read_notes.recording(module):      # what arrives at each table read (decisions from tracing)
                     runpy.run_path(sample_path, run_name="__main__")
                 logger.read_notes = dict(read_notes.NOTES)
-                logger.read_segments = dict(read_notes.SEGMENTS)
                 logger.read_notes_json = read_notes.as_json()
                 logger.read_notes_by_text = read_notes.by_text()
             else:
