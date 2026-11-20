@@ -254,6 +254,16 @@ def _integer_domain_build(tmp_path_factory, mode):
                 assert exported_result == raw, (case, value)
             for warm_cache in ((False, True) if case in receiving_cases else (False,)):
                 detail = f"{case}, value={value!r}, warm_cache={warm_cache}"
+                if case == "reference":     # as upstream: a plain cdef public integer Reference (Cython's conversion)
+                    if isinstance(value, float) and math.isfinite(value):
+                        assert calculate(compiled, value, warm_cache) == int(value), detail
+                    else:
+                        try:
+                            actual = calculate(compiled, value, warm_cache)
+                        except (ValueError, OverflowError):
+                            continue
+                        raise AssertionError(f"{detail}: compiled calculation returned {actual!r}")
+                    continue
                 try:
                     actual = calculate(compiled, value, warm_cache)
                 except (TypeError, ValueError, OverflowError) as error:
