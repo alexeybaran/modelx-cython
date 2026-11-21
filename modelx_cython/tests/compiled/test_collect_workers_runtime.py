@@ -43,16 +43,17 @@ def test_compiled_with_one_worker_runs_four_after_compilation(tmp_path):
             if key in (0, 4):                                       # the first item of two different chunks
                 together.wait()
             return float(key)
+        m = type(m)()
         m.Policies.probe = probe
         m.collect_workers = 4
-        m.clear_all()
         assert m.Policies.collect().sum.value == serial
         assert len(threads) >= 2 and not together.broken
 
+        m = type(m)()
+        m.collect_workers = 4
         m.collect_workers = None                                    # back to the built default: serial
-        m.clear_all()
-        threads.clear()
-        m.Policies.probe = float
+        from concurrent import futures
+        futures.ThreadPoolExecutor = None                          # any worker pool would fail
         assert m.Policies.collect().sum.value == serial
         print("ok")
         """)

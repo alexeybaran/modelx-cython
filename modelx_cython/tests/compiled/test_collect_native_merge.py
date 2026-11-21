@@ -47,7 +47,7 @@ def test_native_and_python_outputs_equal_the_export(tmp_path):
     probe = textwrap.dedent("""\
         import json, sys
         package = sys.argv[1]
-        m = __import__(package).mx_model
+        Model = type(__import__(package).mx_model)
         def plain(value):
             if hasattr(value, '_fields'):
                 return {k: plain(v) for k, v in value._fields.items()}
@@ -56,8 +56,8 @@ def test_native_and_python_outputs_equal_the_export(tmp_path):
             return repr(value)
         out = {}
         for workers in (1, 4):
+            m = Model()
             m.collect_workers = workers
-            m.clear_all()
             out[f'mixed{workers}'] = plain(m.Mixed.collect())
             out[f'cell{workers}'] = plain(m.CellDomain.collect())
             try:
@@ -126,13 +126,13 @@ def test_collect_with_other_parameters_is_native_per_argument_set(tmp_path):
                     "--spec", "spec.py"], cwd=tmp_path, check=True)
     probe = textwrap.dedent("""\
         import json, sys
-        m = __import__(sys.argv[1]).mx_model
+        Model = type(__import__(sys.argv[1]).mx_model)
         def plain(r):
             return [repr(r.sum.pv), [[k, repr(v)] for k, v in r.sum.cf.items()]]
         out = {}
         for workers in (1, 4):
+            m = Model()
             m.collect_workers = workers
-            m.clear_all()
             out[f'book{workers}'] = [plain(m.Book.collect(a, b)) for a in (0, 12, 24) for b in (-1, 0, 6)]
             out[f'one{workers}'] = [plain(m.One.collect(a, b)) for a in range(0, 300, 12) for b in range(-1, 7)]
         out['native'] = [hasattr(getattr(m, n), '_mx_collect_options_v2') and getattr(m, n)._mx_collect_options_v2()[1] is not None
