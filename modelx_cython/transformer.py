@@ -905,7 +905,7 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
                 self._resolver.table_signatures.clear()
                 self._resolver.table_signatures.update(signatures)
             frames.lowered = []
-            frames.lowered_expressions.clear()
+            frames.lowered_nodes.clear()
             frames.lowered_text.clear()
             frames.param_readers.clear()
             frames.declined = [{'expression': cells.name, 'receiver': '', 'form': 'pandas',
@@ -927,13 +927,13 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
                                 self._param_prefix_cells(cls_info), builtin_int=builtin_int)
             node = self._lower_frames(frames, node, cls_info, cells)
             cells.frame_reads = frames.lowered + frames.declined
-            cells.read_audit = frames.audit()       # table reads the sample saw that were not lowered
-            cells.read_param_readers = frames.param_readers
-            cells.read_unsampled_lowered = getattr(frames, 'unsampled_lowered', 0)
-        if getattr(self.module.spec.policy, 'prepared_tables', False):
             # T-5: the pandas fallback of a lowered read runs only when the table cannot answer: not a pandas read
             from modelx_cython.frame_reads import without_fallbacks
-            pandas = self._pandas_reads(without_fallbacks(node), cls_info, cells)
+            native = without_fallbacks(node)
+            cells.read_audit = frames.audit(native)
+            cells.read_param_readers = frames.param_readers
+            cells.read_unsampled_lowered = frames.unsampled_lowered
+            pandas = self._pandas_reads(native, cls_info, cells)
         else:
             pandas = self._pandas_reads(node, cls_info, cells)
         if not (self._resolver.table_results or cls_info.refs):

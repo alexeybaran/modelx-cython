@@ -422,15 +422,21 @@ def _balanced(text):
 
 
 def by_text():
-    """{(class, function): {text of a node: {'seen': observations, 'count': evaluations, 'ops': operations}}}.
-    The transformer finds a note by the text of its node within the formula (the same text ran in the sample);
-    places of one formula with the same text share their observations."""
+    """Group notes by formula and expression text, keeping counts for operations on pandas receivers."""
     out = {}
     for key, seen in NOTES.items():
-        entry = out.setdefault(key[:2], {}).setdefault(key[2], {'seen': set(), 'count': 0, 'ops': set()})
+        entry = out.setdefault(key[:2], {}).setdefault(key[2], {
+            'seen': set(), 'count': 0, 'table_reads': set(), 'table_count': 0,
+        })
+        count = COUNTS.get(key, 0)
         entry['seen'] |= seen
-        entry['count'] += COUNTS.get(key, 0)
-        entry['ops'].add(key[3])
+        entry['count'] += count
+        # A method call and the loop over its result can share source text but have different receivers.
+        op = key[3]
+        reads = {(op, observation) for observation in seen if table_read(op, observation)}
+        if reads:
+            entry['table_reads'].update(reads)
+            entry['table_count'] += count
     return out
 
 

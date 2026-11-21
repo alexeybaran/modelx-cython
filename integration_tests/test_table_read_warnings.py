@@ -23,6 +23,8 @@ def build():
                              "    return float(T.loc[T['sa'] > 100.0 * t, 'rate'].sum())\\n")
     proj.new_cells("once", "def once():\\n    T = data.points()\\n"
                            "    return float(T.loc[T['sa'] > 150.0, 'rate'].sum())\\n")
+    proj.new_cells("nested_key", "def nested_key(t):\\n    T = data.points()\\n"
+                                 "    return T.loc[T.index.get_loc(t) + 1, 'rate']\\n")
     return model
 '''
 
@@ -37,6 +39,7 @@ def test_mask_read_in_a_per_step_cell_warns(tmp_path):
         '''), encoding='utf-8')
     (tmp_path / 'sample.py').write_text(
         'from warn_nomx import mx_model\nfor t in range(3):\n    mx_model.Projection.masked(t)\n'
+        '    mx_model.Projection.nested_key(t + 1)\n'
         'mx_model.Projection.once()\n', encoding='utf-8')
 
     def run(*args):
@@ -48,7 +51,9 @@ def test_mask_read_in_a_per_step_cell_warns(tmp_path):
     log = done.stdout + done.stderr
     warnings = [line for line in log.splitlines() if 'table read left on pandas in a per-step cell' in line]
     assert len(warnings) == 1 and 'masked' in warnings[0] and "T['sa'] > 100.0 * t" in warnings[0], log[-4000:]
-    audit = json.loads((tmp_path / 'warn_nomx_cy' / '_mx_read_audit.json').read_text(encoding='utf-8'))
+    compiled = tmp_path / 'warn_nomx_cy'
+    audit = json.loads((compiled / '_mx_read_audit.json').read_text(encoding='utf-8'))
+    lowered = json.loads((compiled / '_mx_table_reads.json').read_text(encoding='utf-8'))
     entries = {cell.rsplit('.', 1)[-1]: es for cell, es in audit.items() if cell != '_summary'}
     for cell, per_step in [('masked', True), ('once', False)]:
         reads = [entry for entry in entries[cell] if not entry.get('pandas_operation')]
@@ -56,5 +61,8 @@ def test_mask_read_in_a_per_step_cell_warns(tmp_path):
         operations = [entry for entry in entries[cell] if entry.get('pandas_operation')]
         assert [(entry['expression'], entry['per_step']) for entry in operations] == [("T['sa']", per_step)], audit
     assert audit['_summary']['left_on_pandas_per_step'] == 1, audit
-    assert audit['_summary']['pandas_operations_per_step'] == 1, audit
+    assert audit['_summary']['pandas_operations_per_step'] == 2, audit
     assert audit['_summary']['pandas_operations_per_policy'] == 1, audit
+    assert [read['form'] for cell, reads in lowered.items() if cell.endswith('.nested_key') for read in reads] == ['L1']
+    assert [(entry['expression'], entry['evaluations'], entry.get('pandas_operation'))
+            for entry in entries['nested_key']] == [('T.index.get_loc(t)', 3, True)]

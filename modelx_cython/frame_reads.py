@@ -36,7 +36,7 @@ import re
 import libcst as cst
 
 from .holds import hold_table
-from .read_notes import RAISES, only_raised
+from .read_notes import RAISES, normal, only_raised
 
 PROVIDER = 'modelx_cython.runtime._tables'
 COLUMN_KIND = {'f64': 0, 'i64': 1}
@@ -54,6 +54,23 @@ MUTATORS = frozenset(('__setitem__', '__delitem__', 'update', 'insert', 'pop'))
 
 def _code(node):
     return cst.Module(body=()).code_for_node(node)
+
+
+class _ReadSources(cst.CSTVisitor):
+    """Source text of the expressions the sample recorder can observe as table reads."""
+
+    def __init__(self):
+        self.texts = set()
+
+    def _expression(self, node):
+        self.texts.add(normal(_code(node)))
+
+    visit_Subscript = visit_Call = visit_Comparison = _expression
+
+    def visit_For(self, node):
+        self._expression(node.iter)
+
+    visit_CompFor = visit_For
 
 
 def _literal_str(node):
@@ -108,7 +125,7 @@ class FrameReads:
         self.providers, self.policy = providers, policy
         self.builtin_int = builtin_int
         self.lowered, self.declined = [], []
-        self.lowered_expressions = []  # full text, including the parts truncated in the per-read report
+        self.lowered_nodes = []     # original nodes, including their nested operations
         # what the sample run saw at each table read of this formula, by the text of the node (read_notes.py)
         self.notes = (getattr(resolver, 'read_notes', None) or {}).get((cls_info.name, '_f_' + cells.name), {})
         self.lowered_text = set()   # texts of the nodes this formula's rewrite replaced
@@ -116,15 +133,14 @@ class FrameReads:
         self.key_count = 0
 
     def note_of(self, node):
-        from .read_notes import normal
         return self.notes.get(normal(_code(node)))
 
-    def audit(self):
+    def audit(self, native_node):
         """The table reads the sample saw in this formula that were not lowered: (expression, reason, ...)."""
-        from .read_notes import normal, scalar_table_read, table_read
+        from .read_notes import scalar_table_read
         out = []
         declined = {normal(entry['expression']): entry.get('reason') for entry in self.declined}
-        lowered = list(self.lowered_expressions)
+        lowered = [normal(_code(node)) for node in self.lowered_nodes]
 
         inlined = {normal(code): (name if isinstance(name, str) else getattr(name, 'name', str(name)))
                    for code, name in self.row_names.items()}
@@ -139,21 +155,33 @@ class FrameReads:
             for code, name in inlined.items():
                 text = text.replace(code, f'self.{name}()')
             return text
-        lowered = [normal(e) for e in lowered]
-        lowered += [as_written(e) for e in lowered]
-        lowered_text = self.lowered_text | {as_written(t) for t in self.lowered_text}
+        exact = set(lowered) | {as_written(text) for text in lowered}
+        replaced = _ReadSources()
+        for node in self.lowered_nodes:
+            node.visit(replaced)
+        candidates = replaced.texts | self.lowered_text
+        candidates |= {as_written(text) for text in candidates}
+        native_sources = None
         declined.update({as_written(e): why for e, why in declined.items()})
         for text, note in sorted(self.notes.items()):
-            reads = [(op, o) for op in note['ops'] for o in note['seen'] if table_read(op, o)]
-            if not reads or text in lowered_text or any(text in e for e in lowered):
+            reads = note['table_reads']
+            if not reads or text in exact:
                 continue
+            if text in candidates:
+                # A nested read can survive as a key or as part of a lowered loop body.
+                if native_sources is None:
+                    source = _ReadSources()
+                    native_node.visit(source)
+                    native_sources = source.texts | {as_written(text) for text in source.texts}
+                if text not in native_sources:
+                    continue
             reason = declined.get(normal(text[:160]))
             operation = reason is None and not any(scalar_table_read(op, o) for op, o in reads)
             if reason is None and self.cells.name in self.prefix_cells:
                 reason = ('a row or sub-table cell: its readers take the row directly; the cell itself runs on pandas '
                           'only when its own value is asked for')
             entry = {'expression': text[:200], 'seen': sorted({repr(o) for _, o in reads}),
-                     'evaluations': note['count'], 'per_step': bool(self.cells.has_args()),
+                     'evaluations': note['table_count'], 'per_step': bool(self.cells.has_args()),
                      'reason': reason or 'no rule recognises this form'}
             if operation:
                 entry['pandas_operation'] = True
@@ -168,7 +196,6 @@ class FrameReads:
         # so no compile-time choice of pandas is silent (a note that is not a table read by its observations, or a
         # text inside a lowered expression)
         reported = {normal(e['expression']) for e in out}
-        exact = {normal(e) for e in lowered}
         for entry in self.declined:
             text = normal(entry['expression'])
             if entry.get('form') != 'pandas' or text[:200] in reported or text in exact:
@@ -180,8 +207,8 @@ class FrameReads:
             out.append({'expression': text[:200], 'seen': sorted(repr(o) for o in note['seen']),
                         'evaluations': note['count'], 'per_step': bool(self.cells.has_args()),
                         'reason': entry.get('reason') or 'left on pandas'})
-        self.unsampled_lowered = sum(1 for e in self.lowered_expressions if normal(e) not in self.notes
-                                     and as_written(normal(e)) not in self.notes)
+        self.unsampled_lowered = sum(1 for text in lowered if text not in self.notes
+                                     and as_written(text) not in self.notes)
         return out
 
     # ------------------------------------------------------------------ facts
@@ -390,7 +417,6 @@ class FrameReads:
             if asof is not None or view is not None:    # the whole assignment is rewritten: its read is lowered
                 assigned = self._simple_assign(statement)
                 if assigned is not None:
-                    from .read_notes import normal
                     self.lowered_text.add(normal(_code(assigned[1])))
             if asof is not None:
                 new = rewriter.asof_statement(statement, asof)
@@ -521,7 +547,6 @@ class FrameReads:
     def _drop_unused_locals(self, body, replaced):
         """A frame local whose every use was lowered is no longer evaluated (no Cell call, no reference). Repeated
         until nothing more is dropped: dropping a view's assignment can leave its frame local unused (T-5c)."""
-        from .read_notes import normal
         out = self._flatten(body)
         while True:
             loads = {}
@@ -1079,7 +1104,7 @@ def without_fallbacks(node):
 
 def audit_subtables(module_infos, modules, resolver):
     """Classify table-producing cells after all of their readers have been lowered."""
-    from .usage import RESOLVED, _extract_self_chain
+    from .usage import RESOLVED, UNKNOWN, _extract_self_chain
 
     def target(cls, expr):
         chain = _extract_self_chain(expr)
@@ -1110,8 +1135,17 @@ def audit_subtables(module_infos, modules, resolver):
                 self.cls = cls
 
             def visit_Attribute(self, node):
-                if node.attr.value in names:
-                    remaining.add(target(self.cls, node))
+                name = node.attr.value
+                if name not in names:
+                    return
+                chain = _extract_self_chain(node)
+                status, fqname = (resolver.resolve_chain(self.cls.fqname, chain)
+                                  if isinstance(chain, list) else (UNKNOWN, name))
+                if status == RESOLVED:
+                    remaining.add(fqname)
+                elif status == UNKNOWN:
+                    # This can be a call or method capture through a local alias of a model Space.
+                    remaining.update(resolver.cells_with_name(name))
 
         for name, module in modules.items():
             classes = module_infos[name].classes
@@ -1156,12 +1190,10 @@ class _Rewrite(cst.CSTTransformer):
         self.updated_of[id(original)] = result
         if result is not updated and isinstance(original, (cst.Subscript, cst.Call, cst.Comparison, cst.For,
                                                              cst.GeneratorExp, cst.ListComp)):
-            from .read_notes import normal
             self.o.lowered_text.add(normal(_code(original)))
         elif result is not updated and isinstance(original, cst.SimpleStatementLine):
             assigned = self.o._simple_assign(original)      # `row = R.loc[key]`: the statement is rewritten
             if assigned is not None:
-                from .read_notes import normal
                 self.o.lowered_text.add(normal(_code(assigned[1])))
         return result
 
@@ -1195,7 +1227,7 @@ class _Rewrite(cst.CSTTransformer):
             self.o.declined.append(entry)
         else:
             self.o.lowered.append(entry)
-            self.o.lowered_expressions.append(text)
+            self.o.lowered_nodes.append(node)
 
     def _key(self, key, schema):
         """The parts of a complete key on ``schema``: (parts, None) or (None, why). A key held in a local assigned
