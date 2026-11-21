@@ -100,12 +100,13 @@ class FrameReads:
     (one dict per read) and ``declined`` why a read of a frame receiver was not."""
 
     def __init__(self, resolver, cls_info, cells, providers, policy, row_names=None, prefix_cells=None,
-                 param_cells=None):
+                 param_cells=None, *, builtin_int):
         self.param_cells = param_cells or {}    # T-5c: cell with parameters -> (names, its `T.loc[key]` expression)
         self.row_names = row_names or {}       # code of an inlined row expression -> its row cell (assignments)
         self.prefix_cells = prefix_cells or {}  # zero-argument cell of the class -> its `T.loc[key]` expression
         self.resolver, self.cls_info, self.cells = resolver, cls_info, cells
         self.providers, self.policy = providers, policy
+        self.builtin_int = builtin_int
         self.lowered, self.declined = [], []
         # what the sample run saw at each table read of this formula, by the text of the node (read_notes.py)
         self.notes = (getattr(resolver, 'read_notes', None) or {}).get((cls_info.name, '_f_' + cells.name), {})
@@ -175,7 +176,8 @@ class FrameReads:
     def _facts(self, node):
         """The key-typing facts of table_reads (is_int, exact_long_long, enum constants) for this formula."""
         from .table_reads import TableReads, _Formula
-        facts = TableReads(self.resolver, self.cls_info, self.cells, set(), self.policy, ())
+        facts = TableReads(self.resolver, self.cls_info, self.cells, set(), self.policy, (),
+                           builtin_int=self.builtin_int)
         facts.formula = _Formula(node)
         node.visit(facts.formula)
         facts._params = set(getattr(self.cells, 'params', ()) or ())
@@ -952,9 +954,10 @@ class FrameReads:
                 and subscript.value.attr.value in ('loc', 'at'))
 
     def key_part(self, part, level_kind, emit=None):
-        """A key part whose code is computed per read: a C long long on an int level when it is an integer, else
-        the Python value (the table looks an object key up as pandas does). The facts are of the original ``part``;
-        ``emit`` is what the code evaluates (the part with its own reads lowered; T-5)."""
+        """Emit a key part for typed dispatch on integer levels and object lookup elsewhere.
+
+        The facts apply to the original ``part``. ``emit`` is the same part with its own reads lowered.
+        """
         emit = part if emit is None else emit
         if level_kind == 'int' and isinstance(part, cst.Name) and part.value in self.enum_key_locals:
             return _cast('_mx_cy.longlong', emit), 'int'     # T-5c: bound to the members' C constants
@@ -962,8 +965,11 @@ class FrameReads:
         if constant is not None:        # an IntEnum member: its C constant (enums.py, D79; T-5c: not only under is_int)
             return cst.Name(constant), 'int'
         if level_kind == 'int':
-            # typed dispatch: the C type Cython gives the part chooses the lookup (runtime ``kcode``); no proof here
-            # from the form of the expression that it is an integer
+            # Cython types int() as an object. Give it a C type only when the input fits:
+            # casting int() of a C double directly to long long can skip Python's conversion checks.
+            inner = self.facts.int_argument(part)
+            if inner is not None and self.facts.fits_long_long(inner):
+                return _cast('_mx_cy.longlong', emit), 'typed'
             return emit, 'typed'
         return _cast('object', emit), 'object'
 
@@ -1191,7 +1197,8 @@ class _Rewrite(cst.CSTTransformer):
         of the Python value (looked up as pandas does)."""
         o = self.o
         arg, how = o.key_part(part, kind, self.updated_of.get(id(part)))
-        if how == 'typed' and conditions is not None and not o.facts.is_int(part):
+        if (how == 'typed' and conditions is not None and not o.facts.is_int(part)
+                and o.facts.int_argument(part) is None):
             # not known to be a C integer from the text: the read is native only while the part names one label.
             # The test is decided at compile time when Cython gives the part a C type, else it looks at the value;
             # the part is evaluated once, into a local the read then uses
@@ -1401,7 +1408,7 @@ class _Rewrite(cst.CSTTransformer):
         func = original.func
         if isinstance(func, cst.Name) and len(original.args) == 1 and not original.args[0].keyword:
             arg = original.args[0].value
-            if func.value == 'int' and isinstance(arg, cst.Call):
+            if isinstance(arg, cst.Call) and o.facts.int_argument(original) is not None:
                 return self._asof(arg, updated, 0, whole_call=original)
             view = self._index_of(arg)
             if view is not None and func.value in ('len', 'list', 'tuple', 'set', 'sorted', 'min', 'max'):
@@ -2260,9 +2267,9 @@ class _Rewrite(cst.CSTTransformer):
         already that C value, and the builtin would box it into a Python object and back. L5: the extremes of a
         one-level int index are read as C integers."""
         target = original
-        if (isinstance(original.func, cst.Name) and original.func.value == 'int' and len(original.args) == 1
-                and isinstance(original.args[0].value, cst.Call)):
-            target = original.args[0].value         # int(X.index.asof(x)): the place is the asof call
+        inner = self.o.facts.int_argument(original)
+        if isinstance(inner, cst.Call):
+            target = inner         # int(X.index.asof(x)): the place is the asof call
         if (isinstance(target.func, cst.Attribute) and target.func.attr.value in ('searchsorted', 'asof', 'max', 'min')
                 and self.raised_veto(target, target.func.value)):
             return updated
@@ -2285,7 +2292,7 @@ class _Rewrite(cst.CSTTransformer):
         if (isinstance(updated.func, cst.Name) and len(updated.args) == 1 and not updated.args[0].keyword
                 and not updated.args[0].star):
             kind = self.native.get(id(updated.args[0].value))
-            if (kind, updated.func.value) in (('f64', 'float'), ('i64', 'int')):
+            if (kind == 'f64' and updated.func.value == 'float') or (kind == 'i64' and inner is not None):
                 return updated.args[0].value.with_changes(lpar=[cst.LeftParen()], rpar=[cst.RightParen()])
         return updated
 

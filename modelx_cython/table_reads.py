@@ -389,6 +389,10 @@ class _Formula(cst.CSTVisitor):
             return
         self.loads.setdefault(node.value, []).append((node, self._depth > 1))
 
+    def unshadowed_load(self, node):
+        """Whether this read is in the formula's own scope, with no comprehension binding."""
+        return any(load is node and not nested for load, nested in self.loads.get(node.value, ()))
+
 
 class _Ref:
     """A lowered receiver: kind 'table' (handle expression), 'row', 'column' or 'record';
@@ -423,9 +427,10 @@ class TableReads:
     the reads it can type rewritten; ``typed``, ``lowered``, ``declined`` and ``keys``
     describe what it did."""
 
-    def __init__(self, resolver, cls_info, cells, providers, policy, sites):
+    def __init__(self, resolver, cls_info, cells, providers, policy, sites, *, builtin_int=True):
         self.resolver, self.cls_info, self.cells = resolver, cls_info, cells
         self.providers, self.policy, self.sites = providers, policy, sites
+        self.builtin_int = builtin_int
         self.typed = 0
         self.lowered = set()
         self.declined = {}
@@ -572,6 +577,15 @@ class TableReads:
         name = self.cell_of(expr)
         return name is not None and self.resolver.table_results.get(name) == RECORD_TYPE
 
+    def int_argument(self, expr):
+        """Argument of a one-argument builtin ``int`` call in this formula, or None."""
+        if (self.builtin_int and isinstance(expr, cst.Call) and isinstance(expr.func, cst.Name)
+                and expr.func.value == 'int' and len(expr.args) == 1 and _plain_args(expr)
+                and 'int' not in self._params and 'int' not in self.formula.binds
+                and self.formula.unshadowed_load(expr.func)):
+            return expr.args[0].value
+        return None
+
     def is_int(self, expr, depth=0):
         """Why ``expr`` is a non-bool integer value, or None (original nodes)."""
         if depth > 6:
@@ -638,8 +652,8 @@ class TableReads:
                         else None)
             if isinstance(func, cst.Name) and func.value == 'len' and len(expr.args) == 1:
                 return 'len()'
-            if isinstance(func, cst.Name) and func.value == 'int' and len(expr.args) == 1:
-                inner = expr.args[0].value
+            inner = self.int_argument(expr)
+            if inner is not None:
                 if self.is_int(inner, depth + 1) or self._int_index_read(inner):
                     return 'int() of an integer'
                 return None
@@ -741,6 +755,39 @@ class TableReads:
             return (self.param_type(expr.value) == 'long long' or expr.value in self._key_locals
                     or (expr.value in self.formula.c_long_long and expr.value not in self._params))
         return isinstance(expr, cst.Call) and self.call_rettype(expr)[0] == 'long long'
+
+    def fits_long_long(self, expr, depth=0):
+        """Prove a signed 64-bit integer value from the expression and its local bindings."""
+        if depth > 6:
+            return False
+        if isinstance(expr, cst.Integer):
+            return expr.evaluated_value < 2**63
+        if (isinstance(expr, cst.UnaryOperation) and isinstance(expr.operator, cst.Minus)
+                and isinstance(expr.expression, cst.Integer)):
+            return expr.expression.evaluated_value <= 2**63
+        if isinstance(expr, cst.Name):
+            if not self.formula.unshadowed_load(expr):
+                return False
+            if self.exact_long_long(expr):
+                return True
+            name = expr.value
+            values = self.formula.values.get(name, ())
+            unpacked = self.formula.unpacked.get(name, ())
+            sources = (*values, *unpacked)
+            return (bool(sources) and name not in self._params
+                    and self.formula.binds.get(name, 0) == len(sources)
+                    and all(self.fits_long_long(value, depth + 1) for value in sources))
+        if isinstance(expr, cst.Call):
+            inner = self.int_argument(expr)
+            if inner is not None:
+                return self.fits_long_long(inner, depth + 1)
+            receiver = expr.func
+            while isinstance(receiver, cst.Attribute):
+                receiver = receiver.value
+            return (isinstance(receiver, cst.Name) and receiver.value == 'self'
+                    and 'self' not in self.formula.binds and self.formula.unshadowed_load(receiver)
+                    and self.exact_long_long(expr))
+        return False
 
     def scalar(self, expr):
         """``expr`` is certainly a single key part (not a tuple)."""

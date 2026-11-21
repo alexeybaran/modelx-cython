@@ -649,15 +649,15 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
         from modelx_cython.checked_arithmetic import CheckedArithmetic
         from modelx_cython.rounding import RoundedInputs
         from modelx_cython import vectors, held_arrays
+        builtin_keys = {name for name in ("all", "any", "sum", "min", "max", "float", "int", "round", "range")
+                        if scope[name] and all(isinstance(binding, BuiltinAssignment)
+                                               for binding in scope[name])}
         # a typed-memoryview Cell read by subscript is held per item (no slice copy per evaluation)
         node = held_arrays.lower(node, cls_info, cells, self._held_arrays)
         node = vectors.lower(node, cls_info, cells, scope, self._vector_counter, self.module,
                              self._ref_kinds.get(cls_info.fqname, {}))
-        node = self._table_reads_with_row_fields(node, cls_info, cells)
+        node = self._table_reads_with_row_fields(node, cls_info, cells, 'int' in builtin_keys)
         cells.formula_allows_exact_receiver = allows_exact_receiver(node, cls_info.name)
-        builtin_keys = {name for name in ("all", "any", "sum", "min", "max", "float", "int", "round", "range")
-                        if scope[name] and all(isinstance(binding, BuiltinAssignment)
-                                               for binding in scope[name])}
         node = CheckedArithmetic(cls_info, cells, builtin_keys).rewrite(node)
         if not self.module.spec.policy.native_math:
             builtin_keys.discard('round')
@@ -734,7 +734,7 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
         node, cells.typed_item_locals = type_item_locals(node, cls_info, self.module)
         return node
 
-    def _table_reads(self, node, cls_info, cells):
+    def _table_reads(self, node, cls_info, cells, builtin_int):
         """M1 hook (W1.1): lower table reads (W1.3, ``table_reads.TableReads``) and report the
         rest in the admission report, with a build warning for each per-step untyped read.
         auto-tables (D104): every use of an admitted plain pandas table is listed with its class
@@ -745,7 +745,7 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
         """
         sites = self._admitted_sites(node, cls_info)
         self._lowered = frozenset()
-        result = self._table_reads_lowered(node, cls_info, cells)
+        result = self._table_reads_lowered(node, cls_info, cells, builtin_int)
         self._classify_admitted(cells, sites, self._lowered)
         return result
 
@@ -844,7 +844,7 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
         cached = getattr(self._resolver, 'cached_cells', ())
         return name is not None and any(str(c).endswith('._f_' + name) for c in cached)
 
-    def _table_reads_with_row_fields(self, node, cls_info, cells):
+    def _table_reads_with_row_fields(self, node, cls_info, cells, builtin_int):
         """diag-run8 F3: a formula reading fields of accepted row cells is lowered with each
         ``self.R()`` replaced by the cell's row expression; when a replaced read is not lowered to a
         native row read, the formula is lowered as written instead (its reads keep the Record)."""
@@ -858,7 +858,7 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
                 code_of = cst.Module(body=[]).code_for_node
                 self._row_names = {code_of(expr): name for name, expr in rows.items()}
                 try:
-                    lowered = self._table_reads(candidate, cls_info, cells)
+                    lowered = self._table_reads(candidate, cls_info, cells, builtin_int)
                 finally:
                     self._row_names = None
                 code = code_of(lowered)
@@ -873,7 +873,7 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
                         and code.count('held_row_') >= 1):
                     cells.row_fields_inlined = inline.count
                     return lowered
-        return self._table_reads(node, cls_info, cells)
+        return self._table_reads(node, cls_info, cells, builtin_int)
 
     def _admitted_sites(self, node, cls_info):
         admitted = getattr(self._resolver, 'admitted_tables', None) if self._resolver is not None else None
@@ -912,7 +912,7 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
                                                 cells.name, type(error).__name__, error)
             return node
 
-    def _table_reads_lowered(self, node, cls_info, cells):
+    def _table_reads_lowered(self, node, cls_info, cells, builtin_int):
         cells.table_reads_typed, cells.table_reads_untyped, cells.table_reads_keys = 0, [], []
         if self._resolver is None:
             return node
@@ -921,7 +921,7 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
             from modelx_cython.frame_reads import FrameReads
             frames = FrameReads(self._resolver, cls_info, cells, self.helper_providers, self.module.spec.policy,
                                 getattr(self, '_row_names', None), self._prefix_cells(cls_info),
-                                self._param_prefix_cells(cls_info))
+                                self._param_prefix_cells(cls_info), builtin_int=builtin_int)
             node = self._lower_frames(frames, node, cls_info, cells)
             cells.frame_reads = frames.lowered + frames.declined
             cells.read_audit = frames.audit()       # table reads the sample saw that were not lowered
@@ -942,7 +942,7 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
             return node     # with typed reads on, record field reads (no sites) are lowered too
         from modelx_cython.table_reads import TableReads
         lowering = TableReads(self._resolver, cls_info, cells, self.helper_providers,
-                              self.module.spec.policy, sites)
+                              self.module.spec.policy, sites, builtin_int=builtin_int)
         node = lowering.lower(node)
         self._lowered = frozenset(lowering.lowered)
         per_step = cells.has_args()
