@@ -22,7 +22,7 @@ def test_renamed_comprehension_target_matches_sample_notes():
     resolver = SimpleNamespace(read_notes={('_c_Projection', '_f_rates'): {
         expression: _table_note('sub', observation, 3),
     }})
-    reads = FrameReads(resolver, cls, cell, set(), None)
+    reads = FrameReads(resolver, cls, cell, set(), None, builtin_int=True)
     reads.lowered_nodes = [cst.parse_expression(source) for source in (
         's.loc[s.index[_mx_v10_ci], "rate"]', 'other.loc[8, "rate"]',
     )]
@@ -80,7 +80,7 @@ def test_audit_counts_only_pandas_operations_at_an_items_loop_source():
             assert list(read_notes.r_it((*site, 'it'), source)) == [(1, 0.5), (2, 0.25)]
         assert read_notes.COUNTS[(*site, 'call')] == read_notes.COUNTS[(*site, 'it')] == 4
         resolver = SimpleNamespace(read_notes=read_notes.by_text())
-    reads = FrameReads(resolver, cls, cell, set(), None)
+    reads = FrameReads(resolver, cls, cell, set(), None, builtin_int=True)
     native = cst.parse_statement('for key, rate in series.items():\n    pass\n')
     assert [(entry['expression'], entry['evaluations'], entry['pandas_operation'])
             for entry in reads.audit(native)] == [('series.items()', 4, True)]
@@ -97,7 +97,7 @@ def test_audit_keeps_the_pandas_operation_evaluated_as_a_native_key():
         eliminated: _table_note('call', ('index:table:Data.offsets', 'max', 'int'), 3),
         expression: _table_note('sub', ('loc:table:Data.rates', ('num', 'str'), 'float', 'rate'), 3),
     }})
-    reads = FrameReads(resolver, cls, cell, set(), None)
+    reads = FrameReads(resolver, cls, cell, set(), None, builtin_int=True)
     reads.lowered_nodes = [cst.parse_expression(expression)]
     provider = module_name(PROVIDER)
     compiled = cst.parse_statement(f'return {provider}.f64_1(hold, 0, {key} + limit) '
