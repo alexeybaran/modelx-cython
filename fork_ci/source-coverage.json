@@ -1,5 +1,5 @@
 {
-  "compiler_pin": "092dda465f49228d5df66b9b5cc176213d2659b4",
+  "compiler_pin": "7389e1435b611b53d3d1b45badd6276fa79df3c0",
   "pytest": "8.4.2",
   "suites": {
     "integration": {
