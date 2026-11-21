@@ -20,7 +20,8 @@ import libcst as cst
 
 NOTES = {}
 COUNTS = {}        # the same key -> evaluations in the sample
-_TABLES, _SUBS, _ROWS, _INDEXES, _KEEP = {}, {}, {}, {}, []
+_TABLES, _SUBS, _ROWS, _COLS, _INDEXES, _KEEP = {}, {}, {}, {}, {}, []
+_TRACED = ('table:', 'sub:', 'row:', 'col:', 'index:', 'loc:')
 
 
 def _pandas():
@@ -47,7 +48,9 @@ def kind(value):
                 return 'sub:' + _SUBS[id(value)]
             return 'frame'
         if isinstance(value, pd.Series):
-            return 'row:' + _ROWS[id(value)] if id(value) in _ROWS else 'series'
+            if id(value) in _ROWS:
+                return 'row:' + _ROWS[id(value)]
+            return 'col:' + _COLS[id(value)] if id(value) in _COLS else 'series'
         if isinstance(value, (pd.core.indexing._LocIndexer, pd.core.indexing._AtIndexer)):
             inner = kind(value.obj)
             return 'loc:' + inner if inner not in ('frame', 'series') else 'loc'
@@ -73,16 +76,26 @@ def _follow(value, origin):
     pd = _pandas()
     if pd is None:
         return
+    origin_kind, name = origin
     if isinstance(value, pd.DataFrame):
         if id(value) not in _TABLES and id(value) not in _SUBS:
-            (_SUBS if origin[0] == 'sub' else _TABLES)[id(value)] = origin[1]
+            (_SUBS if origin_kind == 'sub' else _TABLES)[id(value)] = name
             _KEEP.append(value)
-        if id(value.index) not in _INDEXES:
-            _INDEXES[id(value.index)] = ('sub:' if id(value) in _SUBS else 'table:') + origin[1]
-            _KEEP.append(value.index)
-    elif isinstance(value, pd.Series) and origin[0] == 'row' and id(value) not in _ROWS:
-        _ROWS[id(value)] = origin[1]
-        _KEEP.append(value)
+        index = value.index
+        index_origin = ('sub:' if id(value) in _SUBS else 'table:') + name
+    elif isinstance(value, pd.Series):
+        if id(value) not in _ROWS and id(value) not in _COLS:
+            (_ROWS if origin_kind == 'row' else _COLS)[id(value)] = name
+            _KEEP.append(value)
+        index = value.index
+        index_origin = ('row:' if id(value) in _ROWS else 'col:') + name
+    elif isinstance(value, pd.Index):
+        index, index_origin = value, name
+    else:
+        return
+    if id(index) not in _INDEXES:
+        _INDEXES[id(index)] = index_origin
+        _KEEP.append(index)
 
 
 RAISES = 'raises'      # the result kind of an evaluation that raised
@@ -104,6 +117,8 @@ def r_sub(nid, receiver, key, /):
             _follow(out, ('row', base))
         elif isinstance(out, pd.DataFrame) and found.startswith('loc:table:'):
             _follow(out, ('sub', base))
+    elif pd is not None and found.startswith(('table:', 'sub:')) and isinstance(out, pd.Series):
+        _follow(out, ('col', found.split(':')[-1]))
     column = key[-1] if isinstance(key, tuple) and key and isinstance(key[-1], str) else key if isinstance(key, str) else None
     _note(nid, found, _shape(key), kind(out), column)
     return out
@@ -116,11 +131,34 @@ def r_call(nid, receiver, name, /, *args, **kwargs):
         _note(nid, kind(receiver), name, RAISES)
         raise
     pd = _pandas()
+    found = kind(receiver)
     if pd is not None and isinstance(out, pd.DataFrame) and not args and not kwargs \
             and id(out) not in _TABLES and id(out) not in _SUBS:
         owner = type(receiver).__name__
         _follow(out, ('table', (owner[3:] if owner.startswith('_c_') else owner) + '.' + name))     # a Cell's table
-    _note(nid, kind(receiver), name, kind(out))
+    elif pd is not None and isinstance(out, (pd.Index, pd.Series)):
+        if found.startswith(_TRACED):
+            base = found.split(':')[-1]
+            _follow(out, ('col', 'derived:' + base if isinstance(out, pd.Index) else base))
+        elif not args and not kwargs and isinstance(out, pd.Series):
+            owner = type(receiver).__name__
+            if owner.startswith('_c_'):
+                _follow(out, ('col', owner[3:] + '.' + name))
+    _note(nid, found, name, kind(out))
+    return out
+
+
+def r_iter(nid, func, source, /):
+    """Observe the pandas input when the formula constructs an iterator explicitly."""
+    if func is not iter:
+        return func(source)
+    found = kind(source)
+    try:
+        out = func(source)
+    except Exception:
+        _note(nid, found, '__iter__', RAISES)
+        raise
+    _note(nid, found, '__iter__', kind(out))
     return out
 
 
@@ -242,6 +280,9 @@ class _Wrap(cst.CSTTransformer):
                 and updated.args[0].keyword is None:
             inner = self.call('_mx_note_v', None, self.nid(original.args[0].value, 'v'), updated.args[0].value)
             return updated.with_changes(args=[updated.args[0].with_changes(value=inner)])
+        if (isinstance(func, cst.Name) and func.value == 'iter' and len(updated.args) == 1
+                and updated.args[0].keyword is None):
+            return self.call('_mx_note_iter', updated, self.nid(original, 'call'), func, updated.args[0].value)
         if not isinstance(func, cst.Attribute):
             return updated
         return self.call('_mx_note_call', updated, self.nid(original, 'call'), func.value,
@@ -311,10 +352,11 @@ def recording(package):
     """Record the reads of the model package ``package`` while it is imported and run inside the block."""
     import builtins
     import importlib.util       # noqa: F401  (decode_source)
-    for store in (NOTES, COUNTS, _TABLES, _SUBS, _ROWS, _INDEXES):
+    for store in (NOTES, COUNTS, _TABLES, _SUBS, _ROWS, _COLS, _INDEXES):
         store.clear()
     del _KEEP[:]
-    hooks = {'_mx_note_sub': r_sub, '_mx_note_call': r_call, '_mx_note_in': r_in, '_mx_note_it': r_it, '_mx_note_v': r_v}
+    hooks = {'_mx_note_sub': r_sub, '_mx_note_call': r_call, '_mx_note_in': r_in, '_mx_note_it': r_it,
+             '_mx_note_iter': r_iter, '_mx_note_v': r_v}
     finder = _Finder(package)
     sys.meta_path.insert(0, finder)
     for name, hook in hooks.items():
@@ -373,7 +415,7 @@ def selects_rows(shape):
     """A recorded key shape with a part that selects several rows (a mask, a list, a slice, a pandas object)."""
     if isinstance(shape, tuple):
         return any(selects_rows(part) for part in shape)
-    return shape in SELECTORS or str(shape).startswith(('row:', 'sub:', 'table:', 'index:', 'loc'))
+    return shape in SELECTORS or str(shape).startswith((*_TRACED, 'loc'))
 
 
 def only_raised(note):
@@ -383,10 +425,17 @@ def only_raised(note):
 
 
 def table_read(op, seen):
-    """Whether an observation is a read of a traced table (what the audit expects to be lowered or reported)."""
+    """Whether an observation uses a traced pandas receiver."""
+    lengths = {'sub': (4,), 'call': (3,), 'in': (2, 3), 'it': (1,)}
+    return len(seen) in lengths.get(op, ()) and seen[0].startswith(_TRACED)
+
+
+def scalar_table_read(op, seen):
+    """The table reads tracked separately from the general set of pandas operations in the audit."""
     receiver = seen[0]
     if op == 'sub':
-        return receiver.startswith(('loc:', 'row:'))
+        return receiver.startswith(('loc:table:', 'loc:sub:', 'loc:row:', 'row:'))
+    index = receiver.startswith(('index:table:', 'index:sub:'))
     if op == 'call':
-        return receiver.startswith('index:') and seen[1] in ('max', 'min', 'asof', 'searchsorted')
-    return op in ('in', 'it') and receiver.startswith('index:')
+        return index and seen[1] in ('max', 'min', 'asof', 'searchsorted')
+    return op in ('in', 'it') and index

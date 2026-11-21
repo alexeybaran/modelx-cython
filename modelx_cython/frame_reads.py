@@ -108,9 +108,11 @@ class FrameReads:
         self.providers, self.policy = providers, policy
         self.builtin_int = builtin_int
         self.lowered, self.declined = [], []
+        self.lowered_expressions = []  # full text, including the parts truncated in the per-read report
         # what the sample run saw at each table read of this formula, by the text of the node (read_notes.py)
         self.notes = (getattr(resolver, 'read_notes', None) or {}).get((cls_info.name, '_f_' + cells.name), {})
         self.lowered_text = set()   # texts of the nodes this formula's rewrite replaced
+        self.param_readers = set()  # names of parameterised prefix Cells replaced by a native read
         self.key_count = 0
 
     def note_of(self, node):
@@ -119,33 +121,43 @@ class FrameReads:
 
     def audit(self):
         """The table reads the sample saw in this formula that were not lowered: (expression, reason, ...)."""
-        from .read_notes import table_read
+        from .read_notes import normal, scalar_table_read, table_read
         out = []
-        from .read_notes import normal
-        declined = {entry['expression']: entry.get('reason') for entry in self.declined}
-        lowered = [entry['expression'] for entry in self.lowered]
+        declined = {normal(entry['expression']): entry.get('reason') for entry in self.declined}
+        lowered = list(self.lowered_expressions)
 
         inlined = {normal(code): (name if isinstance(name, str) else getattr(name, 'name', str(name)))
                    for code, name in self.row_names.items()}
         inlined.update({normal(_code(expr)): name for name, expr in self.prefix_cells.items()})
+        renames = getattr(self.cells, 'vector_loop_renames', {})
+        targets = re.compile(r'\b(?:' + '|'.join(map(re.escape, renames)) + r')\b') if renames else None
 
-        def as_written(text):       # a row cell inlined before this pass reads `self.<cell>()` in the sample's text
+        def as_written(text):
+            if targets is not None:
+                text = targets.sub(lambda match: renames[match[0]], text)
+            # A row cell inlined before this pass was a `self.<cell>()` call in the sample.
             for code, name in inlined.items():
                 text = text.replace(code, f'self.{name}()')
             return text
-        lowered = lowered + [as_written(e) for e in lowered]
-        self.lowered_text |= {as_written(t) for t in self.lowered_text}
+        lowered = [normal(e) for e in lowered]
+        lowered += [as_written(e) for e in lowered]
+        lowered_text = self.lowered_text | {as_written(t) for t in self.lowered_text}
+        declined.update({as_written(e): why for e, why in declined.items()})
         for text, note in sorted(self.notes.items()):
-            seen = [o for op in note['ops'] for o in note['seen'] if table_read(op, o)]
-            if not seen or text in self.lowered_text or any(text in e or e in text for e in lowered):
+            reads = [(op, o) for op in note['ops'] for o in note['seen'] if table_read(op, o)]
+            if not reads or text in lowered_text or any(text in e for e in lowered):
                 continue
-            reason = next((why for e, why in declined.items() if why and (text[:160] in e or e in text)), None)
+            reason = declined.get(normal(text[:160]))
+            operation = reason is None and not any(scalar_table_read(op, o) for op, o in reads)
             if reason is None and self.cells.name in self.prefix_cells:
                 reason = ('a row or sub-table cell: its readers take the row directly; the cell itself runs on pandas '
                           'only when its own value is asked for')
-            out.append({'expression': text[:200], 'seen': sorted(repr(o) for o in seen), 'evaluations': note['count'],
-                        'per_step': bool(self.cells.has_args()),
-                        'reason': reason or 'no rule recognises this form'})
+            entry = {'expression': text[:200], 'seen': sorted({repr(o) for _, o in reads}),
+                     'evaluations': note['count'], 'per_step': bool(self.cells.has_args()),
+                     'reason': reason or 'no rule recognises this form'}
+            if operation:
+                entry['pandas_operation'] = True
+            out.append(entry)
         # a read of a table the text shows but the sample never reached: declined from the text alone
         for entry in self.declined:
             text = normal(entry['expression'])
@@ -168,8 +180,8 @@ class FrameReads:
             out.append({'expression': text[:200], 'seen': sorted(repr(o) for o in note['seen']),
                         'evaluations': note['count'], 'per_step': bool(self.cells.has_args()),
                         'reason': entry.get('reason') or 'left on pandas'})
-        self.unsampled_lowered = sum(1 for e in self.lowered if normal(e['expression']) not in self.notes
-                                     and as_written(normal(e['expression'])) not in self.notes)
+        self.unsampled_lowered = sum(1 for e in self.lowered_expressions if normal(e) not in self.notes
+                                     and as_written(normal(e)) not in self.notes)
         return out
 
     # ------------------------------------------------------------------ facts
@@ -406,6 +418,8 @@ class FrameReads:
         for view in self.views.values():
             if not view.used:       # no use needed the view's codes or rows: only the assignment stays
                 view.setup[:] = view.setup[-1:]
+            elif isinstance(value := view.setup[-1].body[0].value, cst.Call) and self.param_prefix(value):
+                self.param_readers.add(value.func.attr.value)
         body = self._drop_unused_locals(body, rewriter.replaced_names | set(rewriter.key_locals) | set(rewriter.swaps))
         if self.declarations:
             from .table_reads import _is_docstring
@@ -507,6 +521,7 @@ class FrameReads:
     def _drop_unused_locals(self, body, replaced):
         """A frame local whose every use was lowered is no longer evaluated (no Cell call, no reference). Repeated
         until nothing more is dropped: dropping a view's assignment can leave its frame local unused (T-5c)."""
+        from .read_notes import normal
         out = self._flatten(body)
         while True:
             loads = {}
@@ -515,9 +530,13 @@ class FrameReads:
                 def visit_Name(self, name):
                     loads[name.value] = loads.get(name.value, 0) + 1
             cst.Module(body=out).visit(Loads())
-            kept = [statement for statement in out
-                    if not ((name := (self._simple_assign(statement) or (None,))[0]) in replaced
-                            and loads.get(name, 0) == 1)]       # the target itself only
+            kept = []
+            for statement in out:
+                name, value = self._simple_assign(statement) or (None, None)
+                if name in replaced and loads.get(name, 0) == 1:     # the target itself only
+                    self.lowered_text.add(normal(_code(value)))
+                else:
+                    kept.append(statement)
             if len(kept) == len(out):
                 return out
             out = kept
@@ -1058,6 +1077,64 @@ def without_fallbacks(node):
     return node.visit(Strip())
 
 
+def audit_subtables(module_infos, modules, resolver):
+    """Classify table-producing cells after all of their readers have been lowered."""
+    from .usage import RESOLVED, _extract_self_chain
+
+    def target(cls, expr):
+        chain = _extract_self_chain(expr)
+        if isinstance(chain, list) and chain:
+            status, fqname = resolver.resolve_chain(cls.fqname, chain)
+            if status == RESOLVED:
+                return fqname
+        return None
+
+    native_receivers, parameterised = set(), set()
+    for info in module_infos.values():
+        for cls in info.classes.values():
+            receivers = set()
+            for cell in cls.cells.values():
+                parameterised.update(cls.cells[name].fqname for name in getattr(cell, 'read_param_readers', ()))
+                receivers.update(read['receiver'] for read in getattr(cell, 'frame_reads', ()) if 'reason' not in read)
+            for text in receivers:
+                expr = cst.parse_expression(text)
+                if isinstance(expr, cst.Call) and not expr.args:
+                    native_receivers.add(target(cls, expr.func))
+
+    if parameterised:
+        names = {fqname.rsplit('._f_', 1)[-1] for fqname in parameterised}
+        remaining = set()
+
+        class Readers(cst.CSTVisitor):
+            def __init__(self, cls):
+                self.cls = cls
+
+            def visit_Attribute(self, node):
+                if node.attr.value in names:
+                    remaining.add(target(self.cls, node))
+
+        for name, module in modules.items():
+            classes = module_infos[name].classes
+            for node in module.syntax.body:
+                if isinstance(node, cst.ClassDef) and node.name.value in classes:
+                    without_fallbacks(node).visit(Readers(classes[node.name.value]))
+        parameterised.difference_update(remaining)
+
+    for info in module_infos.values():
+        for cls in info.classes.values():
+            for cell in cls.cells.values():
+                if cell.fqname in parameterised:
+                    reason = ('a parameterised sub-table cell: all compiled readers read the parent table directly '
+                              'when it is prepared')
+                elif cell.fqname in native_receivers:
+                    reason = 'a row or sub-table cell: its readers read its value natively when it is prepared'
+                else:
+                    continue
+                for entry in getattr(cell, 'read_audit', ()):
+                    entry['reason'] = reason
+                    entry['per_step'] = False
+
+
 class _Rewrite(cst.CSTTransformer):
     """Rewrites reads inside one top-level statement; nested functions and lambdas are not entered."""
 
@@ -1102,7 +1179,8 @@ class _Rewrite(cst.CSTTransformer):
         return self.o.hold(receiver, label, kind)
 
     def _record(self, node, form, receiver, why=None, view=None):
-        entry = {'expression': _code(node)[:160], 'receiver': _code(receiver), 'form': form}
+        text = _code(node)
+        entry = {'expression': text[:160], 'receiver': _code(receiver), 'form': form}
         if not why:
             schema = self.o._schema_of_call(receiver) or {}
             when = ['the frame at run time has other index level kinds than '
@@ -1117,6 +1195,7 @@ class _Rewrite(cst.CSTTransformer):
             self.o.declined.append(entry)
         else:
             self.o.lowered.append(entry)
+            self.o.lowered_expressions.append(text)
 
     def _key(self, key, schema):
         """The parts of a complete key on ``schema``: (parts, None) or (None, why). A key held in a local assigned
@@ -2166,7 +2245,11 @@ class _Rewrite(cst.CSTTransformer):
             kind = dict(schema['columns']).get(label)
             if kind in READ:
                 key = cst.Tuple([cst.Element(p) for p in [*prefix_parts, *_parts(parts[0])]])
-                return self._column_read(original, updated, call, schema, key, label, kind, value.value, 'L1') or updated
+                read = self._column_read(original, updated, call, schema, key, label, kind, value.value, 'L1')
+                if read is not None:
+                    o.param_readers.add(value.value.func.attr.value)
+                    return read
+                return updated
         # R.loc[key, "c"] / R.at[key, "c"] on a frame; R.loc[k] / R.at[k] / R[k] on a Series
         if isinstance(value, cst.Attribute) and value.attr.value in ('loc', 'at'):
             prefix = o.prefix_receiver(value.value) if len(parts) == 2 else None

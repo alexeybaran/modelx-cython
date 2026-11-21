@@ -459,6 +459,10 @@ def main_handler(args: argparse.Namespace, stdout: IO[str], stderr: IO[str]) -> 
             u.abs_init_path.write_text("from . cimport _mx_classes", encoding="utf-8")
             modules.append(u.rel_src_path)
 
+        if getattr(logger, 'read_notes_by_text', None) is not None:
+            from modelx_cython.frame_reads import audit_subtables
+            audit_subtables(module_infos, translated_modules, resolver)
+
         provider_sources = install_helpers(helper_providers, model_path, object_providers)
         modules.extend(provider_sources)
         translated_modules = lower_entries(translated_modules, dense_entries, formula_entries, policy)
@@ -513,11 +517,15 @@ def main_handler(args: argparse.Namespace, stdout: IO[str], stderr: IO[str]) -> 
             lowered = sum(1 for cell in cells_all for e in (getattr(cell, 'frame_reads', None) or ()) if 'reason' not in e)
             unsampled = sum(getattr(cell, 'read_unsampled_lowered', 0) for cell in cells_all)
             entries = [e for v in audit.values() for e in v]
+            operations = [e for e in entries if e.get('pandas_operation')]
+            reads = [e for e in entries if not e.get('pandas_operation')]
             audit['_summary'] = {
                 'lowered': lowered, 'lowered_not_reached_by_the_sample': unsampled,
-                'left_on_pandas_per_step': sum(1 for e in entries if e['per_step'] and e['evaluations']),
-                'left_on_pandas_per_policy': sum(1 for e in entries if not e['per_step'] and e['evaluations']),
-                'left_on_pandas_not_reached_by_the_sample': sum(1 for e in entries if not e['evaluations'])}
+                'left_on_pandas_per_step': sum(1 for e in reads if e['per_step'] and e['evaluations']),
+                'left_on_pandas_per_policy': sum(1 for e in reads if not e['per_step'] and e['evaluations']),
+                'left_on_pandas_not_reached_by_the_sample': sum(1 for e in reads if not e['evaluations']),
+                'pandas_operations_per_step': sum(1 for e in operations if e['per_step']),
+                'pandas_operations_per_policy': sum(1 for e in operations if not e['per_step'])}
             (model_path / '_mx_read_audit.json').write_text(json.dumps(audit, indent=1, sort_keys=True), encoding='utf-8')
             per_step = []
             for name, found in sorted(audit.items()):
@@ -525,8 +533,12 @@ def main_handler(args: argparse.Namespace, stdout: IO[str], stderr: IO[str]) -> 
                     continue
                 for entry in found:
                     if entry['per_step']:
-                        per_step.append(f"{name}: {entry['expression']} ({entry['reason']})")
-                        _logger.warning('table read left on pandas in a per-step cell: %s', per_step[-1])
+                        warning = f"{name}: {entry['expression']} ({entry['reason']})"
+                        if entry.get('pandas_operation'):
+                            _logger.warning('pandas operation in a per-step cell: %s', warning)
+                        else:
+                            per_step.append(warning)
+                            _logger.warning('table read left on pandas in a per-step cell: %s', warning)
             if policy.strict_tables and per_step:
                 raise HandlerError('strict_tables: table reads left on pandas in per-step cells: ' + '; '.join(per_step))
         if getattr(logger, 'read_notes_json', None) is not None:

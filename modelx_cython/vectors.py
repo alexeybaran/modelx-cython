@@ -540,6 +540,7 @@ class VectorLowering(cst.CSTTransformer):
         self.builtins = builtins
         self.counter = counter          # shared per module: unique temporaries
         self.temps = set()              # the temporaries temp() made
+        self.loop_renames = {}          # generated loop target -> its name in the formula
         self.env, self.scalars, self.owned = {}, {}, set()
         self.lowered, self.fallbacks = 0, []
         self.bounds_hoisted, self.bounds_checked, self.powers = 0, 0, 0
@@ -1325,6 +1326,7 @@ class VectorLowering(cst.CSTTransformer):
                 new = self.temp(f'{tag}{name}')
                 self.declare(new, SCALARS[e])
                 renames[name] = new
+                self.loop_renames[new] = name
                 body.append(f'{new} = {x}.data[{i}]')
             return pre, f'for {i} in range({n}):', body, renames, n, i
         args = [_code(a) for a in self.range_args(comp_u.iter, True)]
@@ -1335,6 +1337,7 @@ class VectorLowering(cst.CSTTransformer):
         z = self.temp(f'{tag}{comp_o.target.value}')
         self.declare(z, f'{CY_MOD}.longlong')
         renames[comp_o.target.value] = z
+        self.loop_renames[z] = comp_o.target.value
         pre += [_stmt(f'{lo_t} = ({lo}\n)\n'), _stmt(f'{hi_t} = ({hi}\n)\n'),
                 _stmt(f'{n} = {hi_t} - {lo_t} if {hi_t} > {lo_t} else 0\n')]
         return pre, f'for {i} in range({n}):', [f'{z} = {lo_t} + {i}'], renames, n, i
@@ -1808,6 +1811,7 @@ def lower(node, cls_info, cells, scope, counter, module, ref_kinds=None):
     if not touches:
         return _declare_at_top(node, decls)
     body = node.body.visit(lowering)
+    cells.vector_loop_renames = lowering.loop_renames
     vector_locals = sorted(name for name, k in lowering.env.items() if k in ('V', 'I'))
     typed = {name: lowering.env[name] for name in vector_locals}
     for decl in lowering.decls:     # temporaries the lowering declared as vectors

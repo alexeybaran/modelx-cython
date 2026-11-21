@@ -50,6 +50,11 @@ def test_mask_read_in_a_per_step_cell_warns(tmp_path):
     assert len(warnings) == 1 and 'masked' in warnings[0] and "T['sa'] > 100.0 * t" in warnings[0], log[-4000:]
     audit = json.loads((tmp_path / 'warn_nomx_cy' / '_mx_read_audit.json').read_text(encoding='utf-8'))
     entries = {cell.rsplit('.', 1)[-1]: es for cell, es in audit.items() if cell != '_summary'}
-    assert [e['per_step'] for e in entries['masked']] == [True], audit
-    assert [e['per_step'] for e in entries['once']] == [False], audit
+    for cell, per_step in [('masked', True), ('once', False)]:
+        reads = [entry for entry in entries[cell] if not entry.get('pandas_operation')]
+        assert [entry['per_step'] for entry in reads] == [per_step], audit
+        operations = [entry for entry in entries[cell] if entry.get('pandas_operation')]
+        assert [(entry['expression'], entry['per_step']) for entry in operations] == [("T['sa']", per_step)], audit
     assert audit['_summary']['left_on_pandas_per_step'] == 1, audit
+    assert audit['_summary']['pandas_operations_per_step'] == 1, audit
+    assert audit['_summary']['pandas_operations_per_policy'] == 1, audit

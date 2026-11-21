@@ -905,6 +905,9 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
                 self._resolver.table_signatures.clear()
                 self._resolver.table_signatures.update(signatures)
             frames.lowered = []
+            frames.lowered_expressions.clear()
+            frames.lowered_text.clear()
+            frames.param_readers.clear()
             frames.declined = [{'expression': cells.name, 'receiver': '', 'form': 'pandas',
                                 'reason': f'declined after internal error: {type(error).__name__}: {error}'}]
             import logging
@@ -925,6 +928,7 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
             node = self._lower_frames(frames, node, cls_info, cells)
             cells.frame_reads = frames.lowered + frames.declined
             cells.read_audit = frames.audit()       # table reads the sample saw that were not lowered
+            cells.read_param_readers = frames.param_readers
             cells.read_unsampled_lowered = getattr(frames, 'unsampled_lowered', 0)
         if getattr(self.module.spec.policy, 'prepared_tables', False):
             # T-5: the pandas fallback of a lowered read runs only when the table cannot answer: not a pandas read
