@@ -20,6 +20,7 @@ import libcst as cst
 
 NOTES = {}
 COUNTS = {}        # the same key -> evaluations in the sample
+_TRACED_COUNTS = {}  # evaluations whose observed receiver came from a table
 _TABLES, _SUBS, _ROWS, _COLS, _INDEXES, _KEEP = {}, {}, {}, {}, {}, []
 _TRACED = ('table:', 'sub:', 'row:', 'col:', 'index:', 'loc:')
 _PLAIN_SUBS, _PLAIN_CALLS = {}, {}
@@ -71,6 +72,8 @@ def _shape(key):
 def _note(nid, *what):
     NOTES.setdefault(nid, set()).add(what)
     COUNTS[nid] = COUNTS.get(nid, 0) + 1
+    if what[0].startswith(_TRACED) and nid[3] != 'v':
+        _TRACED_COUNTS[nid] = _TRACED_COUNTS.get(nid, 0) + 1
 
 
 def _follow(value, origin):
@@ -378,7 +381,7 @@ def recording(package):
     """Record the reads of the model package ``package`` while it is imported and run inside the block."""
     import builtins
     import importlib.util       # noqa: F401  (decode_source)
-    for store in (NOTES, COUNTS, _TABLES, _SUBS, _ROWS, _COLS, _INDEXES, _PLAIN_SUBS, _PLAIN_CALLS):
+    for store in (NOTES, COUNTS, _TRACED_COUNTS, _TABLES, _SUBS, _ROWS, _COLS, _INDEXES, _PLAIN_SUBS, _PLAIN_CALLS):
         store.clear()
     del _KEEP[:]
     hooks = {'_mx_note_sub': r_sub, '_mx_note_call': r_call, '_mx_note_in': r_in, '_mx_note_it': r_it,
@@ -436,7 +439,7 @@ def by_text():
         reads = {(op, observation) for observation in seen if table_read(op, observation)}
         if reads:
             entry['table_reads'].update(reads)
-            entry['table_count'] += count
+            entry['table_count'] += _TRACED_COUNTS[key]
     return out
 
 

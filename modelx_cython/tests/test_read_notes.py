@@ -26,6 +26,8 @@ def test_mixed_subscripts_retain_exact_counts_and_veto_evidence():
         mixed = notes[site[:2]][site[2]]
         raised = notes[raised_site[:2]][raised_site[2]]
         assert mixed['count'] == 5
+        assert mixed['table_count'] == 1
+        assert raised['table_count'] == 1
         assert mixed['seen'] == {
             ('list', 'num', 'float', None), ('list', 'num', 'str', None),
             ('list', 'num', read_notes.RAISES, None), ('loc:table:Data.table', ('list', 'str'), 'series', 'rate'),
