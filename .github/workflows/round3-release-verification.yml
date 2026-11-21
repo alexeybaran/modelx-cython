@@ -1,0 +1,89 @@
+name: Round 3 release verification
+
+on:
+  push:
+    branches: [verify/round3-release]
+    paths: [fork_ci/pins.json]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: ${{ matrix.os }}-py${{ matrix.python }}-${{ matrix.profile }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 240
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        python: ['3.13', '3.14', '3.14t']
+        profile: [release]
+        include:
+          - {os: ubuntu-24.04, python: '3.9', profile: compatibility-floor}
+          - {os: ubuntu-latest, python: '3.14', profile: cython-floor}
+          - {os: windows-latest, python: '3.14', profile: cython-floor}
+          - {os: ubuntu-latest, python: '3.14t', profile: legacy-helper}
+    env:
+      CI_RUNNER: ${{ matrix.os }}
+      CI_PYTHON: ${{ matrix.python }}
+      CI_PROFILE: ${{ matrix.profile }}
+      PYTHON_GIL: ${{ endsWith(matrix.python, 't') && '0' || '1' }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          path: verifier
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Read reviewed pins
+        id: pins
+        shell: bash
+        run: python verifier/fork_ci/verify.py pins >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@v4
+        with:
+          repository: alexeybaran/modelx-cython
+          ref: ${{ steps.pins.outputs.compiler }}
+          path: compiler
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          repository: alexeybaran/modelx
+          ref: ${{ steps.pins.outputs.modelx }}
+          path: modelx
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          repository: alexeybaran/lifelib
+          ref: ${{ steps.pins.outputs.lifelib }}
+          path: lifelib
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        if: ${{ matrix.profile == 'legacy-helper' }}
+        with:
+          repository: alexeybaran/modelx
+          ref: ac6fc71fa15b0041c0d22eb281de21eefa05e3b4
+          path: legacy-helper-source
+          persist-credentials: false
+      - name: Verify pins and install
+        id: install
+        shell: bash
+        run: python verifier/fork_ci/verify.py install
+      - name: Unit tests
+        timeout-minutes: 100
+        shell: bash
+        run: python verifier/fork_ci/verify.py unit
+      - name: Integration tests
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
+        timeout-minutes: 120
+        shell: bash
+        run: python verifier/fork_ci/verify.py integration
+      - name: Upload test reports
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: junit-${{ matrix.os }}-py${{ matrix.python }}-${{ matrix.profile }}-attempt-${{ github.run_attempt }}
+          path: reports/
+          if-no-files-found: error
