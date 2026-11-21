@@ -113,6 +113,14 @@ def test_builtin_zip_of_one_prefix_walks_native_rows_or_keeps_pandas(tmp_path):
     tbl = data.table().loc[selector()]
     return [(int(k), float(v)) for k, v in zip(tbl.index, tbl["surr_value"])]
 ''')
+        calc.new_cells('tuple_prefix', '''def tuple_prefix():
+    tbl = data.table().loc[selector(),]
+    return [(int(k), float(v)) for k, v in zip(tbl.index, tbl["surr_value"])]
+''')
+        calc.new_cells('tuple_column', '''def tuple_column():
+    tbl = data.table().loc[selector()]
+    return [(int(k), float(v)) for k, v in zip(tbl.index, tbl["surr_value",])]
+''')
         calc.new_cells('row', 'lambda: data.table().loc[("A", -5)]')
         model.export(tmp_path / 'exported', locked_spaces=['Data'])
     finally:
@@ -124,6 +132,11 @@ item.anchors()
 item.other_view()
 item.strict_zip()
 item.shadowed_zip(zip)
+item.tuple_prefix()
+try:
+    item.tuple_column()
+except KeyError:
+    pass
 item.row()
 ''', encoding='utf-8')
     (tmp_path / 'spec.py').write_text(repr({
@@ -142,12 +155,19 @@ item.row()
     assert 'zip(tbl.index, tbl["surr_value"])' in anchors
     assert 'zip(tbl.index, other["surr_value"])' in source
     assert 'zip(tbl.index, tbl["surr_value"], strict=True)' in source
+    tuple_prefix = re.search(r'def _f_tuple_prefix\(.*?(?=\n    @)', source, re.S).group(0)
+    assert re.search(r'\.loc\[[^\n]+,\s*\]', tuple_prefix)
+    assert 'zip(tbl.index, tbl["surr_value",])' in source
     assert 'zip(tbl.index, tbl["surr_value"])' in re.search(
         r'def _f_shadowed_zip\(.*?(?=\n    @)', source, re.S).group(0)
     assert '.loc[' in re.search(r'def _f_row\(.*?(?=\n    @)', source, re.S).group(0)
     reads = json.loads((tmp_path / 'exported_cy' / '_mx_table_reads.json').read_text(encoding='utf-8'))
     entry, = reads['Calc.anchors']
     assert entry['form'] == 'L8' and 'the current frame' in entry['pandas_when']
+    assert entry['expression'] == 'self.data.table().loc[self.selector()]'
+    audit = json.loads((tmp_path / 'exported_cy' / '_mx_read_audit.json').read_text(encoding='utf-8'))
+    assert audit['_summary']['lowered_not_reached_by_the_sample'] == 0
+    assert 'Calc.anchors' not in audit
 
     checked = subprocess.run([sys.executable, '-c', '''
 from contextlib import contextmanager
@@ -261,13 +281,31 @@ def shadow_get_loc(frame):
     return 'A'
 
 
+class UncopyableMetadata:
+    def __deepcopy__(self, memo):
+        raise ValueError('metadata cannot be copied')
+
+
+def attach_metadata(frame):
+    frame.attrs['tag'] = 'surrender scale'
+    return 'A'
+
+
+def attach_uncopyable_metadata(frame):
+    frame.attrs['tag'] = UncopyableMetadata()
+    return 'A'
+
+
 for mutate, native in [(edit_value, True), (replace_column, True), (replace_index, True),
-                       (remove_column, False), (shadow_get_loc, False)]:
+                       (remove_column, False), (shadow_get_loc, False),
+                       (attach_metadata, False), (attach_uncopyable_metadata, False)]:
     expected = outcome(fresh(live, base.copy(), mutate).Calc[1].anchors)
     with count_loc() as calls:
         actual = outcome(fresh(compiled, base.copy(), mutate).Calc[1].anchors)
     assert actual == expected, (mutate, actual, expected)
     assert len(calls) == (0 if native else 1), (mutate, calls)
+    if mutate is attach_uncopyable_metadata:
+        assert actual == (ValueError, ('metadata cannot be copied',))
 
 for template in (live, compiled):
     model = fresh(template, base, 'A')
@@ -289,5 +327,8 @@ assert item.other_view() == [(-5, 7.0), (2**40, 11.0)]
 assert item.strict_zip() == item.anchors()
 assert item.shadowed_zip(lambda x, y: reversed(list(zip(x, y)))) == item.anchors()[::-1]
 assert type(item.row()) is pd.Series and item.row() is item.row()
+assert item.tuple_prefix() == item.anchors()
+assert outcome(item.tuple_column) == outcome(fresh(live, base, 'A').Calc[1].tuple_column)
+assert outcome(item.tuple_column) == (KeyError, (('surr_value',),))
 '''], cwd=tmp_path, capture_output=True, text=True)
     assert checked.returncode == 0, checked.stdout + checked.stderr

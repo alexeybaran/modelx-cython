@@ -60,8 +60,8 @@ One entry per cell that reads a table, one record per read site:
 
 The terminal ZIP form captures the original frame's `.loc` before evaluating the prefix key. It can read an exact
 DataFrame's current int64 index labels and float64 column when the string key selects one contiguous run from a
-unique two-level index. Other inputs use the captured pandas accessor. This walk uses no prepared values and is
-disabled in input check mode.
+unique two-level index and the frame has empty `.attrs`. Other inputs use the captured pandas accessor. This walk
+uses no prepared values and is disabled in input check mode.
 
 ## Input changes
 

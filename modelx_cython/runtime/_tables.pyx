@@ -768,6 +768,9 @@ cdef object zip_live_prefix(object frame, object accessor, object key, object la
             or _LocIndexer.__getitem__ is not _loc_getitem or pd.DataFrame.__getitem__ is not _frame_getitem
             or not _same_method(frame.xs, _frame_xs)):
         return None
+    attrs = frame.attrs
+    if type(attrs) is not dict or attrs:
+        return None     # pandas propagates frame metadata when it slices
     index, columns = frame.index, frame.columns
     if (type(index) is not pd.MultiIndex or index.nlevels != 2 or not index.is_unique
             or type(columns) is not pd.Index or not columns.is_unique

@@ -1939,7 +1939,8 @@ class _Rewrite(cst.CSTTransformer):
         labels = _index_parts(column)
         label = _literal_str(labels[0]) if labels and len(labels) == 1 else None
         parts = _index_parts(subscript)
-        if label is None or not parts or len(parts) != 1:
+        if (label is None or column.slice[0].comma is not cst.MaybeSentinel.DEFAULT
+                or not parts or len(parts) != 1 or subscript.slice[0].comma is not cst.MaybeSentinel.DEFAULT):
             return None
         key = parts[0]
         # Capture this exact key once for the native check and the ordinary pandas fallback.
@@ -1973,10 +1974,10 @@ class _Rewrite(cst.CSTTransformer):
         fallback_read = subscript.with_changes(value=loc, slice=[subscript.slice[0].with_changes(
             slice=subscript.slice[0].slice.with_changes(value=key_name))])
         fallback_assignment = assignment.with_changes(body=[assignment.body[0].with_changes(value=fallback_read)])
-        self._record(comp, 'L8', call)
-        o.lowered[-1]['pandas_when'] = ('the current frame, exact string prefix, row order or numeric column '
+        self._record(subscript, 'L8', call)
+        o.lowered[-1]['pandas_when'] = ('the current frame, metadata, exact string prefix, row order or numeric column '
                                        'does not support the contiguous walk')
-        o.lowered_text.add(normal(_code(subscript)))
+        o.lowered_text.add(normal(_code(column)))
         return [*statements[:head], *prefix_lookup,
                 self._branch(test, [native_return], [fallback_assignment, returned])]
 
