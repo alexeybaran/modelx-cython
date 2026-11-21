@@ -13,12 +13,15 @@ keys, misses included (``tests/test_prepared_tables.py``). The key lookups and v
 inline methods of the .pxd.
 """
 from libc.math cimport isnan
+from libc.stdint cimport int8_t, int16_t, int32_t, int64_t
 
 import threading
+from types import MethodType
 import weakref
 
 import numpy as np
 import pandas as pd
+from pandas.core.indexing import _LocIndexer
 
 cdef Py_ssize_t _GRID_LIMIT = 65536
 cdef long long _COMBINED_LIMIT = 1LL << 62
@@ -687,6 +690,137 @@ cdef object object_field(PreparedRef ref, Py_ssize_t slot, Py_ssize_t row):
 
 
 # ---- T-5: index walks ------------------------------------------------------------------------------------
+cdef object _loc_getitem = _LocIndexer.__getitem__
+cdef object _frame_getitem = pd.DataFrame.__getitem__
+cdef object _frame_xs = pd.DataFrame.xs
+cdef object _index_get_loc = pd.Index.get_loc
+cdef object _multi_get_loc = pd.MultiIndex.get_loc
+cdef object _multi_get_loc_level = pd.MultiIndex._get_loc_level
+cdef object _multi_get_level_indexer = pd.MultiIndex._get_level_indexer
+cdef object _index_to_numpy = pd.Index.to_numpy
+cdef object _series_to_numpy = pd.Series.to_numpy
+
+
+cdef inline bint _same_method(object bound, object expected):
+    return type(bound) is MethodType and bound.__func__ is expected
+
+
+cdef bint _contiguous_prefix(object location, Py_ssize_t size, Py_ssize_t* start, Py_ssize_t* stop) except -1:
+    cdef const unsigned char[::1] mask
+    cdef Py_ssize_t i
+    if type(location) is slice:
+        if location.step not in (None, 1):
+            return False
+        start[0] = 0 if location.start is None else location.start
+        stop[0] = size if location.stop is None else location.stop
+        return 0 <= start[0] < stop[0] <= size
+    if (type(location) is not np.ndarray or location.ndim != 1 or len(location) != size
+            or location.dtype != np.dtype('bool') or not location.flags.c_contiguous):
+        return False
+    mask = location.view(np.uint8)
+    i = 0
+    while i < size and not mask[i]:
+        i += 1
+    start[0] = i
+    while i < size and mask[i]:
+        i += 1
+    stop[0] = i
+    if start[0] == stop[0]:
+        return False
+    while i < size:
+        if mask[i]:
+            return False
+        i += 1
+    return True
+
+
+ctypedef fused _zip_code:
+    int8_t
+    int16_t
+    int32_t
+    int64_t
+
+
+cdef object _zip_pairs(const _zip_code[::1] codes, const int64_t[:] labels, const double[:] values,
+                       Py_ssize_t start, Py_ssize_t stop):
+    cdef Py_ssize_t row
+    cdef int64_t code
+    cdef list pairs = []
+    for row in range(start, stop):
+        code = codes[row]
+        if code < 0 or code >= labels.shape[0]:
+            return None
+        pairs.append((labels[code], values[row]))
+    return pairs
+
+
+cdef object zip_live_prefix(object frame, object accessor, object key, object label):
+    """Walk the current pandas positions and numeric arrays, or decline to the captured .loc."""
+    cdef Py_ssize_t size, start, stop
+    cdef const int8_t[::1] codes8
+    cdef const int16_t[::1] codes16
+    cdef const int32_t[::1] codes32
+    cdef const int64_t[::1] codes64
+    cdef const int64_t[:] labels
+    cdef const double[:] values
+    if (type(frame) is not pd.DataFrame or type(accessor) is not _LocIndexer or type(key) is not str
+            or accessor.obj is not frame or accessor.axis is not None or accessor.name != 'loc'
+            or _LocIndexer.__getitem__ is not _loc_getitem or pd.DataFrame.__getitem__ is not _frame_getitem
+            or not _same_method(frame.xs, _frame_xs)):
+        return None
+    index, columns = frame.index, frame.columns
+    if (type(index) is not pd.MultiIndex or index.nlevels != 2 or not index.is_unique
+            or type(columns) is not pd.Index or not columns.is_unique
+            or not all(type(name) is str for name in columns)
+            or not _same_method(index.get_loc, _multi_get_loc)
+            or not _same_method(index._get_loc_level, _multi_get_loc_level)
+            or not _same_method(index._get_level_indexer, _multi_get_level_indexer)):
+        return None
+    prefix, tail = index.levels
+    if (type(prefix) is not pd.Index or not prefix.is_monotonic_increasing or not prefix.is_unique
+            or not all(type(name) is str for name in prefix)
+            or not _same_method(prefix.get_loc, _index_get_loc)
+            or type(tail) is not pd.Index or tail.dtype != np.dtype('int64')
+            or not _same_method(tail.to_numpy, _index_to_numpy)):
+        return None
+    size = len(index)
+    try:
+        # The scalar string path of .loc uses this same first-level lookup.
+        location = index.get_loc(key)
+    except KeyError:
+        return None
+    if not _contiguous_prefix(location, size, &start, &stop) or label not in columns:
+        return None
+    column = frame[label]
+    if (type(column) is not pd.Series or column.dtype != np.dtype('float64')
+            or not _same_method(column.to_numpy, _series_to_numpy)):
+        return None
+    codes = index.codes[1]
+    label_array = tail.to_numpy(copy=False)
+    value_array = column.to_numpy(copy=False)
+    if (type(codes) is not np.ndarray or codes.ndim != 1 or len(codes) != size
+            or not codes.flags.c_contiguous or not codes.flags.aligned
+            or type(label_array) is not np.ndarray or label_array.ndim != 1
+            or label_array.dtype != np.dtype('int64') or not label_array.flags.aligned
+            or type(value_array) is not np.ndarray or value_array.ndim != 1
+            or value_array.dtype != np.dtype('float64') or not value_array.flags.aligned or len(value_array) != size):
+        return None
+    labels, values = label_array, value_array
+    if codes.dtype == np.dtype('int8'):
+        codes8 = codes
+        return _zip_pairs(codes8, labels, values, start, stop)
+    if codes.dtype == np.dtype('int16'):
+        codes16 = codes
+        return _zip_pairs(codes16, labels, values, start, stop)
+    if codes.dtype == np.dtype('int32'):
+        codes32 = codes
+        return _zip_pairs(codes32, labels, values, start, stop)
+    if codes.dtype == np.dtype('int64'):
+        codes64 = codes
+        return _zip_pairs(codes64, labels, values, start, stop)
+    return None
+
+
 cdef object label_obj(PreparedRef ref, Py_ssize_t row, int level):
     """The label of any level at a stored row, the object pandas holds."""
     return (<PreparedTable>ref).level_labels[level][level_code_at(ref, row, level)]

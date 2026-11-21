@@ -324,6 +324,7 @@ cdef inline Py_ssize_t nrows(PreparedRef ref) noexcept nogil:
 cdef object label_obj(PreparedRef ref, Py_ssize_t row, int level)
 cdef long long view_range(PreparedRef ref, int count, Py_ssize_t c0, Py_ssize_t c1, Py_ssize_t c2, Py_ssize_t c3,
                           Py_ssize_t c4) noexcept
+cdef object zip_live_prefix(object frame, object accessor, object key, object label)
 
 
 cdef inline Py_ssize_t range_start(long long packed) noexcept nogil:
