@@ -22,6 +22,8 @@ NOTES = {}
 COUNTS = {}        # the same key -> evaluations in the sample
 _TABLES, _SUBS, _ROWS, _COLS, _INDEXES, _KEEP = {}, {}, {}, {}, {}, []
 _TRACED = ('table:', 'sub:', 'row:', 'col:', 'index:', 'loc:')
+_PLAIN_SUBS, _PLAIN_CALLS = {}, {}
+_BUILTIN_TYPES = frozenset((bool, int, float, str, bytes, complex, list, tuple, dict, set, range, slice, type(None)))
 
 
 def _pandas():
@@ -102,13 +104,28 @@ RAISES = 'raises'      # the result kind of an evaluation that raised
 
 
 def r_sub(nid, receiver, key, /):
-    found = kind(receiver)
+    receiver_type = type(receiver)
+    plain_sequence = (receiver_type is list or receiver_type is tuple) and type(key) is int
+    found = receiver_type.__name__ if plain_sequence else kind(receiver)
     try:
         out = receiver[key]
     except Exception:
         column = key[-1] if isinstance(key, tuple) and key and isinstance(key[-1], str) else key if isinstance(key, str) else None
         _note(nid, found, _shape(key), RAISES, column)
         raise
+    if plain_sequence:
+        # These observations depend only on the exact result type. Count repeated ones without rebuilding
+        # observations or calling the pandas provenance and key-shape machinery under the sample tracer.
+        result_type = type(out)
+        if nid in _PLAIN_SUBS:
+            last_receiver, last_result = _PLAIN_SUBS[nid]
+            if receiver_type is last_receiver and result_type is last_result:
+                COUNTS[nid] += 1
+                return out
+        _note(nid, found, 'num', kind(out), None)
+        if type(result_type) is type and result_type in _BUILTIN_TYPES:
+            _PLAIN_SUBS[nid] = receiver_type, result_type
+        return out
     pd = _pandas()
     if pd is not None and found.startswith('loc:') and not isinstance(key, (pd.Series, list, slice)) \
             and type(key).__name__ != 'ndarray':
@@ -130,6 +147,12 @@ def r_call(nid, receiver, name, /, *args, **kwargs):
     except Exception:
         _note(nid, kind(receiver), name, RAISES)
         raise
+    receiver_type, result_type = type(receiver), type(out)
+    if nid in _PLAIN_CALLS:
+        last_receiver, last_name, last_result = _PLAIN_CALLS[nid]
+        if receiver_type is last_receiver and name is last_name and result_type is last_result:
+            COUNTS[nid] += 1
+            return out
     pd = _pandas()
     found = kind(receiver)
     if pd is not None and isinstance(out, pd.DataFrame) and not args and not kwargs \
@@ -145,6 +168,9 @@ def r_call(nid, receiver, name, /, *args, **kwargs):
             if owner.startswith('_c_'):
                 _follow(out, ('col', owner[3:] + '.' + name))
     _note(nid, found, name, kind(out))
+    if (found.startswith('_c_') and found == receiver_type.__name__
+            and type(result_type) is type and result_type in _BUILTIN_TYPES):
+        _PLAIN_CALLS[nid] = receiver_type, name, result_type
     return out
 
 
@@ -352,7 +378,7 @@ def recording(package):
     """Record the reads of the model package ``package`` while it is imported and run inside the block."""
     import builtins
     import importlib.util       # noqa: F401  (decode_source)
-    for store in (NOTES, COUNTS, _TABLES, _SUBS, _ROWS, _COLS, _INDEXES):
+    for store in (NOTES, COUNTS, _TABLES, _SUBS, _ROWS, _COLS, _INDEXES, _PLAIN_SUBS, _PLAIN_CALLS):
         store.clear()
     del _KEEP[:]
     hooks = {'_mx_note_sub': r_sub, '_mx_note_call': r_call, '_mx_note_in': r_in, '_mx_note_it': r_it,
