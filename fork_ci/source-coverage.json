@@ -1,5 +1,5 @@
 {
-  "compiler_pin": "a6ee4391704105f072468c81edee96f83c134ad3",
+  "compiler_pin": "f4e4157f0c63189d670c4df9952858f66c863cdd",
   "pytest": "8.4.2",
   "suites": {
     "integration": {
@@ -776,6 +776,7 @@
         "integration_tests/test_native_table_index_semantics.py::test_native_table_index_operators_are_the_pandas_index_operators",
         "integration_tests/test_none_argument.py::test_none_for_a_str_parameter_behaves_as_live",
         "integration_tests/test_prepared_table_integer_keys.py::test_builtin_int_key_uses_native_lookup_only_for_proven_int64",
+        "integration_tests/test_prepared_zip_prefix.py::test_ordered_prefix_uses_only_the_eligible_published_snapshot",
         "integration_tests/test_reduction_lift_table_key.py::test_reduction_key_of_a_lowered_table_read_builds_and_matches",
         "integration_tests/test_table_cells_api.py::test_table_cells_and_references",
         "integration_tests/test_table_forms_w1_9.py::test_w1_9_forms_live_exported_compiled",

@@ -77,7 +77,7 @@ class VerifierTest(unittest.TestCase):
         self.assertEqual(result['jobs']['ubuntu-latest-py3.14t-legacy-helper']['scope'], 'legacy helper compatibility')
         ordinary = result['jobs']['ubuntu-latest-py3.14t-release']['suites']
         self.assertEqual(len(ordinary['integration']['suite_deselections']), 7)
-        self.assertEqual(ordinary['integration']['counts']['tests'], 35)
+        self.assertEqual(ordinary['integration']['counts']['tests'], 36)
         matrix = 'integration_tests/table_matrix/test_table_matrix.py::'
         self.assertIn(matrix + 'test_every_square_is_declared', ordinary['integration']['selected_ids'])
         legacy = result['jobs']['ubuntu-latest-py3.14t-legacy-helper']['suites']['integration']
