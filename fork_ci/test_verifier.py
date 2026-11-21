@@ -72,7 +72,7 @@ class VerifierTest(unittest.TestCase):
         self.assertEqual(len(result['jobs']), 13)
         floor = result['jobs']['ubuntu-24.04-py3.9-compatibility-floor']
         self.assertEqual(floor['scope'], 'compiler and modelx compatibility')
-        self.assertEqual(floor['suites']['unit']['counts']['passed'], 829)
+        self.assertEqual(floor['suites']['unit']['counts']['passed'], 830)
         self.assertEqual(floor['suites']['unit']['counts']['skipped'], 1)
         self.assertEqual(result['jobs']['ubuntu-latest-py3.14t-legacy-helper']['scope'], 'legacy helper compatibility')
         ordinary = result['jobs']['ubuntu-latest-py3.14t-release']['suites']
