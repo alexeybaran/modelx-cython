@@ -68,7 +68,7 @@ def test_parallel_collect_reuse_merges_completed_chunks_and_retries(tmp_path):
         futures.ThreadPoolExecutor = Observer
         futures.as_completed = completion_order
         serial_model = type(m)()
-        serial_model._mx_collect_set_workers_v2(1)
+        serial_model.collect_workers = 1
         assert serial_model.Ordered.collect().sum.value == 10.0
         assert m.Ordered.collect().sum.value == 9.0
         failure = LookupError("retry")

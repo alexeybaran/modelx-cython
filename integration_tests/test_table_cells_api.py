@@ -54,7 +54,7 @@ Model = type(package.mx_model)
 
 
 def total(m, workers):
-    m._mx_collect_set_workers_v2(workers)
+    m.collect_workers = workers
     return m.Projection.collect().sum.pv
 
 

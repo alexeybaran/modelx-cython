@@ -67,10 +67,8 @@ for call in ("sa", "pv"):
     except Exception as e:
         out.append(("raise", call, type(e).__name__, str(e)))
 m = package.mx_model
-setter = getattr(m, "_mx_collect_set_workers_v2", None)
 for workers in (1, 4):                   # the held row is reset between policies, on both routes
-    if setter is not None:
-        setter(workers)
+    m.collect_workers = workers
     out.append(("collect", workers, round(float(m.Projection.collect().sum.pv), 9)))
 # a new model whose input has another row value, and one whose input lacks a key: the direct route and a
 # collect at 1 and 4 workers
@@ -88,9 +86,7 @@ for call in ("sa", "pv"):
     except Exception as e:
         out.append(("raise", "direct", call, type(e).__name__, str(e)))
 for workers in (1, 4):
-    setter = getattr(m, "_mx_collect_set_workers_v2", None)
-    if setter is not None:
-        setter(workers)
+    m.collect_workers = workers
     try:
         m.Projection.collect()
         out.append(("value", "collect", workers))

@@ -95,7 +95,7 @@ def test_shared_table_reads_use_a_held_handle_and_results_stay(tmp_path):
         if sys.argv[1] == 'exported_cy':
             from exported_cy import _mx_sys
             serial = type(m)()
-            serial._mx_collect_set_workers_v2(1)
+            serial.collect_workers = 1
             one = serial.Portfolio.Projection.collect().sum.value
             four = p.collect().sum.value
             print(repr(one), repr(four))

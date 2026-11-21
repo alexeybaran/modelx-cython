@@ -65,7 +65,7 @@ def test_enum_cell_results_are_members_where_they_reach_python(tmp_path):
         total = sum(live.Projection[i].pv() for i in IDS)
         for workers in (1, 4):
             m = type(compiled)()
-            m._mx_collect_set_workers_v2(workers)
+            m.collect_workers = workers
             assert m.Projection.collect().sum.pv == total
         live.close()
         print("ok")

@@ -83,7 +83,7 @@ def test_constant_key_reads_use_enum_constants_and_held_rows(tmp_path):
         p = m.Portfolio.Projection
         if sys.argv[1] == 'exported_cy':
             serial = type(m)()
-            serial._mx_collect_set_workers_v2(1)
+            serial.collect_workers = 1
             print(repr(serial.Portfolio.Projection.collect().sum.value), repr(p.collect().sum.value))
         else:
             print(repr(p.collect().sum.value), repr(p.collect().sum.value))

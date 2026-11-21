@@ -97,7 +97,7 @@ PROBE = textwrap.dedent('''\
     out = {}
     if sys.argv[1] == 'exported_cy':
         serial = type(m)()
-        serial._mx_collect_set_workers_v2(1)
+        serial.collect_workers = 1
         out['collect1'] = serial.Projection.collect().sum.value
         out['collect1_again'] = serial.Projection.collect().sum.value
     else:
