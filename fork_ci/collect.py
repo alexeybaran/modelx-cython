@@ -13,6 +13,9 @@ REQUIRED_STEPS = ('Read reviewed pins', 'Verify pins and install', 'Unit tests',
                   'Upload test reports')
 VERIFICATION_BRANCH = 'verify/round3-release'
 OPTIONAL_COVERAGE = Path(__file__).resolve().parents[1] / 'OPTIONAL-COVERAGE.tsv'
+ENUM_EXCLUSION_PREFIX = 'modelx_cython/tests/test_table_admission.py::test_awkward_keys_are_admitted[index2-'
+ENUM_EXCLUSION_CURRENT = ENUM_EXCLUSION_PREFIX + '1]'
+ENUM_EXCLUSION_PYTHON39 = ENUM_EXCLUSION_PREFIX + 'Sex.M]'
 
 
 def read_json(path):
@@ -63,6 +66,9 @@ def expected_scope(suite, profile, source):
         return expected, {}, {}, []
     expected = full - cases.keys() - under_modules
     opt_in = sorted(case for case in source['opt_in'] if case.split('::', 1)[0] not in modules and not reason(case))
+    if profile == 'compatibility-floor' and ENUM_EXCLUSION_CURRENT in cases:
+        # Pytest renders the same IntEnum parameter differently on CPython 3.9.
+        cases[ENUM_EXCLUSION_PYTHON39] = cases.pop(ENUM_EXCLUSION_CURRENT)
     return expected, modules, cases, opt_in
 
 

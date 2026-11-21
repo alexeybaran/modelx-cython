@@ -6,7 +6,8 @@ from pathlib import Path
 from unittest.mock import patch
 from xml.etree import ElementTree
 
-from collect import REQUIRED_STEPS, VERIFICATION_BRANCH, collect, expected_scope
+from collect import (ENUM_EXCLUSION_CURRENT, ENUM_EXCLUSION_PREFIX, ENUM_EXCLUSION_PYTHON39, REQUIRED_STEPS,
+                     VERIFICATION_BRANCH, collect, expected_scope)
 from verify import (LEGACY_HELPER_SHA, PYTEST_VERSION, SOURCE_COVERAGE, SOURCES, SUITES, expected_lanes, junit_counts, junit_identity,
                     read_product_pins, runtime, write_json)
 
@@ -173,6 +174,27 @@ class VerifierTest(unittest.TestCase):
         self.assertFalse(self.result()['passing'])
         xml.write_bytes(original_xml)
         write_json(receipt, {**original, 'selected_ids': original['selected_ids'][:2]})
+        self.assertFalse(self.result()['passing'])
+
+    def test_linux39_excluded_enum_identity_is_exact_and_lane_specific(self):
+        floor = self.artifacts / 'junit-ubuntu-24.04-py3.9-compatibility-floor-attempt-2' / 'unit.json'
+        original = json.loads(floor.read_text(encoding='utf-8'))
+        expected = original['excluded_ids']
+        self.assertEqual(expected[ENUM_EXCLUSION_PYTHON39], 'modelx_helpers')
+        others = {case: reason for case, reason in expected.items() if case != ENUM_EXCLUSION_PYTHON39}
+        for altered in (others, {**others, ENUM_EXCLUSION_CURRENT: 'modelx_helpers'},
+                        {**others, ENUM_EXCLUSION_PREFIX + 'Sex.F]': 'modelx_helpers'},
+                        {**expected, ENUM_EXCLUSION_CURRENT: 'modelx_helpers'}):
+            with self.subTest(altered_count=len(altered)):
+                write_json(floor, {**original, 'excluded_ids': altered})
+                self.assertFalse(self.result()['passing'])
+        write_json(floor, original)
+
+        ordinary = self.artifacts / 'junit-ubuntu-latest-py3.14-release-attempt-2' / 'unit.json'
+        altered = json.loads(ordinary.read_text(encoding='utf-8'))
+        ids = altered['excluded_ids']
+        ids[ENUM_EXCLUSION_PYTHON39] = ids.pop(ENUM_EXCLUSION_CURRENT)
+        write_json(ordinary, altered)
         self.assertFalse(self.result()['passing'])
 
 

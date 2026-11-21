@@ -60,6 +60,8 @@ python fork_ci/collect.py --run-json run.json --jobs-json jobs.json --artifacts 
 
 A passing summary requires the full matrix, successful named steps, matching source and attempt receipts, exact interpreter and GIL checks, dependency-floor evidence, and complete outcomes for both suites. The collector checks every selected test identity against the source inventory and JUnit cases and recomputes the outcome counts and file hashes. [Run attempts API](https://docs.github.com/en/rest/actions/workflow-runs#get-a-workflow-run-attempt), [artifact download command](https://cli.github.com/manual/gh_run_download)
 
+On the scoped Linux 3.9 lane, pytest records the already-excluded legacy helper case `test_awkward_keys_are_admitted[index2-Sex.M]`. The source inventory generated on Python 3.14 records `[index2-1]` for the same parameter `Sex.M = 1`. The local collector expects the exact 3.9 spelling for this one exclusion. The hosted verifier revision and raw artifacts retain their original identities. [Linux 3.9 job](https://github.com/alexeybaran/modelx-cython/actions/runs/44890477593/job/136804980497)
+
 ## Local verifier checks
 
 ```sh
