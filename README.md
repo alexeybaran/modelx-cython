@@ -42,6 +42,8 @@ In run `44889555465` attempt 1, the macOS job selected and installed the Darwin 
 
 All four Windows jobs reached both test suites. The fresh runners lacked the parent of the configured pytest temporary paths. The verifier now uses flat paths directly under `C:/`, keeping path lengths short for MSVC. The Windows logs also exposed the helper dependency of the 235 table matrix squares. Every square is declared complete in each of the three modes. The compatibility job requires all 705 results with zero skips. [Windows 3.13 job](https://github.com/alexeybaran/modelx-cython/actions/runs/44889555465/job/136802181819)
 
+The matrix's W1.3 compiled cases expected helper lowering that was removed. The revised test checks the Python subtable reads and explicit native provider bindings for `S_F2` and `S_R`. All original result and exception comparisons remain. The full 706-case module passed in 87.10 seconds on Windows CPython 3.14.8t with the GIL disabled and the pinned helper source isolated. Tested compiler `01b702f` and folded release `092dda4` have identical Git trees.
+
 ## Collect a completed attempt
 
 Use the run ID and attempt number shown by GitHub. Keep the API responses and extracted artifacts beside the summary as the evidence for that attempt.
