@@ -42,6 +42,7 @@ MODULES = {
     'test_input_scenarios': 'Fresh-process and fresh-instance input replacement through collect',
     'test_table_admission': 'Retained explicit provider validation and pandas-to-helper conversion',
     'test_table_cells_api': 'Legacy helper table result API and unchanged Reference behavior',
+    'test_table_matrix': 'Legacy helper table vocabulary and explicit native handles, checked in live, exported and compiled modes',
 }
 
 PORTS = {

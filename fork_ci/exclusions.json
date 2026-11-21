@@ -36,7 +36,8 @@
       "modelx_cython/tests/test_table_admission.py::test_unused_multiindex_levels_read_as_pandas",
       "modelx_cython/tests/test_table_admission.py::test_the_admitted_frame_is_the_value_itself",
       "modelx_cython/tests/test_table_admission.py::test_an_admitted_table_pickles_with_its_frame",
-      "integration_tests/test_table_cells_api.py::test_table_cells_and_references"
+      "integration_tests/test_table_cells_api.py::test_table_cells_and_references",
+      "integration_tests/table_matrix/test_table_matrix.py::test_square"
     ]
   },
   "lifelib": {

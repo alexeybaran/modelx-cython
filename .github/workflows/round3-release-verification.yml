@@ -3,7 +3,7 @@ name: Round 3 release verification
 on:
   push:
     branches: [verify/round3-release]
-    paths: [fork_ci/pins.json]
+    paths: [fork_ci/pins.json, .github/workflows/round3-release-verification.yml]
 
 permissions:
   contents: read
@@ -28,7 +28,6 @@ jobs:
       CI_RUNNER: ${{ matrix.os }}
       CI_PYTHON: ${{ matrix.python }}
       CI_PROFILE: ${{ matrix.profile }}
-      PYTHON_GIL: ${{ endsWith(matrix.python, 't') && '0' || '1' }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -41,6 +40,8 @@ jobs:
       - name: Read reviewed pins
         id: pins
         shell: bash
+        env:
+          PYTHON_GIL: ${{ endsWith(matrix.python, 't') && '0' || '1' }}
         run: python verifier/fork_ci/verify.py pins >> "$GITHUB_OUTPUT"
       - uses: actions/checkout@v4
         with:
@@ -70,15 +71,21 @@ jobs:
       - name: Verify pins and install
         id: install
         shell: bash
+        env:
+          PYTHON_GIL: ${{ endsWith(matrix.python, 't') && '0' || '1' }}
         run: python verifier/fork_ci/verify.py install
       - name: Unit tests
         timeout-minutes: 100
         shell: bash
+        env:
+          PYTHON_GIL: ${{ endsWith(matrix.python, 't') && '0' || '1' }}
         run: python verifier/fork_ci/verify.py unit
       - name: Integration tests
         if: ${{ !cancelled() && steps.install.outcome == 'success' }}
         timeout-minutes: 120
         shell: bash
+        env:
+          PYTHON_GIL: ${{ endsWith(matrix.python, 't') && '0' || '1' }}
         run: python verifier/fork_ci/verify.py integration
       - name: Upload test reports
         if: ${{ always() }}

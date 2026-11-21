@@ -289,7 +289,7 @@ def run_suite(workspace, suite, profile, interpreter):
         arguments.extend('--ignore=' + path for path in exclusions['modules'])
     inventory = Inventory(exclusions['ids'])
     if sys.platform == 'win32':
-        arguments.append('--basetemp=C:/t/' + suite)
+        arguments.append('--basetemp=C:/t-' + suite)
     before = runtime(interpreter)
     expose_test_sources(compiler)
     os.chdir(compiler)

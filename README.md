@@ -15,11 +15,11 @@ These jobs cover the signed interpreter, runner and dependency lanes. The releas
 
 `fork_ci/exclusions.json` identifies cases that require the optional legacy `modelx_helpers` package. Module-level exclusions cover direct imports or a shared module fixture. Test-specific exclusions leave the independent cases in normal coverage. The Linux 3.9 lane also excludes lifelib-dependent cases because the final lifelib declares `Requires-Python >=3.10`. `fork_ci/source-coverage.json` records both complete default suites at the reviewed compiler commit and the seven default opt-in test IDs (six fuzz cases and one stress case). Each job reports its exact selected IDs, named exclusions, actual pytest deselections, individual skips and per-suite counts. A successful 3.9 job supports the compiler and modelx scope stated in the receipt.
 
-The legacy compatibility job runs the exact legacy scope omitted from the helper-free lanes. It checks out the historical helper revision, copies only `modelx_helpers` into an isolated import directory, and verifies both the legacy import and the installed final modelx import. The collector requires the exact legacy IDs in `OPTIONAL-COVERAGE.tsv`, 87 unit and 26 integration cases, with zero skips. Its results count toward legacy compatibility. Helper-free release claims use the results from their own lanes.
+The legacy compatibility job runs the exact legacy scope omitted from the helper-free lanes. It checks out the historical helper revision, copies only `modelx_helpers` into an isolated import directory, and verifies both the legacy import and the installed final modelx import. The collector requires the exact legacy IDs in `OPTIONAL-COVERAGE.tsv`, 87 unit and 731 integration cases, with zero skips. These include all 705 table matrix cases. Those cases use the legacy helper fixture in live, exported and compiled modes. The matrix declaration check runs in the helper-free lanes.
 
 ## Preflight and trigger
 
-Use the dedicated branch `verify/round3-release` in `alexeybaran/modelx-cython`. Start the verifier branch from an isolated tree containing only the verifier files so it carries no other workflows. This workflow only triggers on a push that adds or changes `fork_ci/pins.json` on that branch.
+Use the dedicated branch `verify/round3-release` in `alexeybaran/modelx-cython`. Start the verifier branch from an isolated tree containing only the verifier files so it carries no other workflows. This verifier triggers when a push on that branch changes `fork_ci/pins.json` or the verifier workflow.
 
 After approval, put the final 40-character compiler, modelx and lifelib SHAs into `fork_ci/pins.json` under keys `compiler`, `modelx` and `lifelib`. Verify remote reachability and exact SHA for each pinned checkout, including the legacy helper checkout. Regenerate the inventories from the final compiler checkout and review the resulting branch commit before pushing. The verifier rejects an inventory recorded at a different compiler SHA. Retain the verifier commit SHA separately from the product pins.
 
@@ -37,6 +37,10 @@ git push https://github.com/alexeybaran/modelx-cython.git HEAD:refs/heads/verify
 ```
 
 The jobs use standard GitHub-hosted runners. For a retry, rerun the entire workflow so the collector can verify one attempt containing all 13 jobs and their attempt-specific artifacts. A skipped or cancelled job is a failed evidence gate.
+
+In run `44889555465` attempt 1, the macOS job selected and installed the Darwin arm64 free-threaded CPython 3.14.10 archive. Its certificate installer then launched a standard Python with the job-wide `PYTHON_GIL=0` and failed during preinitialization. The workflow sets `PYTHON_GIL` only when it executes the selected interpreter. The install and test verification still checks the actual ABI and GIL state. [macOS 3.14t job](https://github.com/alexeybaran/modelx-cython/actions/runs/44889555465/job/136802181648)
+
+All four Windows jobs reached both test suites. The fresh runners lacked the parent of the configured pytest temporary paths. The verifier now uses flat paths directly under `C:/`, keeping path lengths short for MSVC. The Windows logs also exposed the helper dependency of the 235 table matrix squares. Every square is declared complete in each of the three modes. The compatibility job requires all 705 results with zero skips. [Windows 3.13 job](https://github.com/alexeybaran/modelx-cython/actions/runs/44889555465/job/136802181819)
 
 ## Collect a completed attempt
 

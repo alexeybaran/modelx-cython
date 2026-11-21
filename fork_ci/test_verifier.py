@@ -76,7 +76,12 @@ class VerifierTest(unittest.TestCase):
         self.assertEqual(result['jobs']['ubuntu-latest-py3.14t-legacy-helper']['scope'], 'legacy helper compatibility')
         ordinary = result['jobs']['ubuntu-latest-py3.14t-release']['suites']
         self.assertEqual(len(ordinary['integration']['suite_deselections']), 7)
-        self.assertEqual(ordinary['integration']['counts']['tests'], 740)
+        self.assertEqual(ordinary['integration']['counts']['tests'], 35)
+        matrix = 'integration_tests/table_matrix/test_table_matrix.py::'
+        self.assertIn(matrix + 'test_every_square_is_declared', ordinary['integration']['selected_ids'])
+        legacy = result['jobs']['ubuntu-latest-py3.14t-legacy-helper']['suites']['integration']
+        self.assertEqual(legacy['counts']['tests'], 731)
+        self.assertEqual(sum(case.startswith(matrix + 'test_square[') for case in legacy['selected_ids']), 705)
 
     def test_cancelled_skipped_missing_and_wrong_attempt_are_rejected(self):
         for conclusion in ('cancelled', 'skipped', 'failure', None):
