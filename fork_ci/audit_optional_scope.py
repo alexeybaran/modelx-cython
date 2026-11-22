@@ -63,7 +63,8 @@ def tests(source, suite):
     os.chdir(source)
     try:
         with contextlib.redirect_stdout(io.StringIO()) as diagnostics:
-            status = pytest.main([SUITES[suite], '--collect-only', '-q', '-p', 'no:cacheprovider'], plugins=[inventory])
+            status = pytest.main([SUITES[suite], '--rootdir=' + str(source), '--collect-only', '-q',
+                                  '-p', 'no:cacheprovider'], plugins=[inventory])
     finally:
         os.chdir(previous)
     if status:
@@ -128,7 +129,8 @@ def main():
         writer.writerow(('suite', 'module', 'test id', 'evidence lane', 'subject', 'reason', 'historical Linux 3.14t'))
         for row in rows:
             module = row[1].removesuffix('.py').replace('/', '.')
-            historical = baseline.get((module, row[2].split('::', 1)[1]), 'no matching case' if baseline else '')
+            historical = baseline.get((module, row[2].split('::', 1)[1]),
+                                      'no matching case' if baseline else 'historical artifact not supplied')
             writer.writerow((*row, historical))
     if args.source_coverage:
         write_json(args.source_coverage, coverage)

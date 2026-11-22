@@ -1,21 +1,16 @@
 """Validate one GitHub Actions attempt from its API snapshots and JUnit artifacts."""
 
 import argparse
-import csv
 import json
 from pathlib import Path
 
-from verify import (EXCLUSIONS, LEGACY_HELPER_SHA, PYTEST_VERSION, SHA, SOURCE_COVERAGE, SOURCES, SUITES, expected_lanes,
-                    junit_counts, write_json)
+from verify import (EXCLUSIONS, PYTEST_VERSION, RETAINED_PROFILE, SHA, SOURCE_COVERAGE, SOURCES, SUITES,
+                    expected_lanes, junit_counts, retained_cases, write_json)
 
 
 REQUIRED_STEPS = ('Read reviewed pins', 'Verify pins and install', 'Unit tests', 'Integration tests',
                   'Upload test reports')
-VERIFICATION_BRANCH = 'verify/round3-release'
-OPTIONAL_COVERAGE = Path(__file__).resolve().parents[1] / 'OPTIONAL-COVERAGE.tsv'
-ENUM_EXCLUSION_PREFIX = 'modelx_cython/tests/test_table_admission.py::test_awkward_keys_are_admitted[index2-'
-ENUM_EXCLUSION_CURRENT = ENUM_EXCLUSION_PREFIX + '1]'
-ENUM_EXCLUSION_PYTHON39 = ENUM_EXCLUSION_PREFIX + 'Sex.M]'
+VERIFICATION_BRANCH = 'verify/r3-helper-free-qualification'
 
 
 def read_json(path):
@@ -25,12 +20,6 @@ def read_json(path):
 def require(condition, message):
     if not condition:
         raise ValueError(message)
-
-
-def coverage_ids(suite, lane):
-    with OPTIONAL_COVERAGE.open(encoding='utf-8', newline='') as file:
-        return {row['test id'] for row in csv.DictReader(file, delimiter='\t')
-                if row['suite'] == suite and row['evidence lane'] == lane}
 
 
 def check_runtime(info, runner, interpreter):
@@ -45,7 +34,7 @@ def check_runtime(info, runner, interpreter):
 
 def expected_scope(suite, profile, source):
     allowed = read_json(EXCLUSIONS)
-    dependencies = ('modelx_helpers', 'lifelib') if profile == 'compatibility-floor' else ('modelx_helpers',)
+    dependencies = ('lifelib',) if profile == 'compatibility-floor' else ()
     prefix = SUITES[suite] + '/'
     modules = {path: dependency for dependency in dependencies for path in allowed[dependency]['modules']
                if path.startswith(prefix)}
@@ -59,16 +48,10 @@ def expected_scope(suite, profile, source):
     require(full and len(full) == len(source['selected']), f'{suite} source inventory is invalid')
     cases = {case: reason(case) for case in full if reason(case)}
     under_modules = {case for case in full if case.split('::', 1)[0] in modules}
-    if profile == 'legacy-helper':
-        expected = coverage_ids(suite, 'legacy helper')
-        require(expected == cases.keys() | under_modules,
-                f'{suite} legacy inventory differs from source and approved exclusions')
-        return expected, {}, {}, []
+    if profile == RETAINED_PROFILE:
+        return retained_cases(suite, full), {}, {}, []
     expected = full - cases.keys() - under_modules
     opt_in = sorted(case for case in source['opt_in'] if case.split('::', 1)[0] not in modules and not reason(case))
-    if profile == 'compatibility-floor' and ENUM_EXCLUSION_CURRENT in cases:
-        # Pytest renders the same IntEnum parameter differently on CPython 3.9.
-        cases[ENUM_EXCLUSION_PYTHON39] = cases.pop(ENUM_EXCLUSION_CURRENT)
     return expected, modules, cases, opt_in
 
 
@@ -99,10 +82,7 @@ def check_job(lane, spec, job, artifact, run_id, attempt, pins, coverage):
     check_runtime(environment['runtime'], runner, interpreter)
     dependencies = environment['dependencies']
     versions = dependencies['versions']
-    legacy = profile == 'legacy-helper'
-    require(dependencies['modelx_helpers_present'] is legacy
-            and dependencies['legacy_helper_commit'] == (LEGACY_HELPER_SHA if legacy else None),
-            'job helper availability or source pin differs from its profile')
+    require(dependencies['modelx_helpers_present'] is False, 'unexpected legacy helper import')
     floor = profile == 'compatibility-floor'
     require(dependencies['lifelib_installed'] is (not floor) and ('lifelib' in versions) is (not floor),
             'lifelib scope differs from the compatibility policy')
@@ -128,11 +108,11 @@ def check_job(lane, spec, job, artifact, run_id, attempt, pins, coverage):
         require(counts == receipt['counts'] and counts['passed'] > 0
                 and counts['errors'] == 0 and counts['failures'] == 0,
                 f'{suite} JUnit evidence is invalid or nonpassing')
-        if legacy:
-            require(counts['skipped'] == 0, f'{suite} compatibility suite skipped requested cases')
+        if profile == RETAINED_PROFILE:
+            require(counts['skipped'] == 0, f'{suite} skipped retained-behavior cases')
         suites[suite] = receipt
-    scope = ('compiler and modelx compatibility' if floor else 'legacy helper compatibility'
-             if legacy else 'helper-free compiler and lifelib')
+    scope = ('compiler and modelx compatibility' if floor else 'retained pandas and compiler behavior'
+             if profile == RETAINED_PROFILE else 'helper-free compiler and lifelib')
     return {'job_id': job['id'], 'conclusion': job['conclusion'], 'environment': environment, 'suites': suites,
             'scope': scope}
 

@@ -2,7 +2,7 @@ name: Round 3 release verification
 
 on:
   push:
-    branches: [verify/round3-release]
+    branches: [verify/r3-helper-free-qualification]
     paths: [fork_ci/pins.json, .github/workflows/round3-release-verification.yml]
 
 permissions:
@@ -23,7 +23,7 @@ jobs:
           - {os: ubuntu-24.04, python: '3.9', profile: compatibility-floor}
           - {os: ubuntu-latest, python: '3.14', profile: cython-floor}
           - {os: windows-latest, python: '3.14', profile: cython-floor}
-          - {os: ubuntu-latest, python: '3.14t', profile: legacy-helper}
+          - {os: ubuntu-latest, python: '3.14t', profile: retained-pandas}
     env:
       CI_RUNNER: ${{ matrix.os }}
       CI_PYTHON: ${{ matrix.python }}
@@ -60,13 +60,6 @@ jobs:
           repository: alexeybaran/lifelib
           ref: ${{ steps.pins.outputs.lifelib }}
           path: lifelib
-          persist-credentials: false
-      - uses: actions/checkout@v4
-        if: ${{ matrix.profile == 'legacy-helper' }}
-        with:
-          repository: alexeybaran/modelx
-          ref: ac6fc71fa15b0041c0d22eb281de21eefa05e3b4
-          path: legacy-helper-source
           persist-credentials: false
       - name: Verify pins and install
         id: install
