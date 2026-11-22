@@ -3,7 +3,7 @@
 import libcst as cst
 from libcst.metadata.scope_provider import BuiltinAssignment
 
-from .consts import CY_MOD, HAS_PREF, MX_SELF, SPACE_PREF, VAR_PREF
+from .consts import CY_MOD, HAS_PREF, MX_SELF, MX_SYS_MOD, SPACE_PREF, VAR_PREF
 from .numeric_cache import exclusively_owned
 from .powers import KIND_FLOAT
 from .scopes import Names
@@ -84,17 +84,32 @@ class _HeldCalls(cst.CSTTransformer):
         method = target.cells.get(func.attr.value)
         if (method is None or method.is_special() or not method._can_bind_native_result
                 or not method.has_typeinfo() or method.params_with_defaults or len(original.args) != len(method.params)
-                or method.get_rettype_expr(c_style=True) not in _NATIVE_RESULTS
-                or not all(self._native_argument(arg.value, method.get_argtype_expr(param, c_style=True))
-                           for arg, param in zip(original.args, method.params))):
+                or method.get_rettype_expr(c_style=True) not in _NATIVE_RESULTS):
             return updated
+
+        args = list(updated.args)
+        checked = False
+        for i, (arg, param) in enumerate(zip(original.args, method.params)):
+            ctype = method.get_argtype_expr(param, c_style=True)
+            if self._native_argument(arg.value, ctype):
+                # The Python gate converts after evaluating all arguments. Only
+                # inert integer loads may follow a conversion moved to the call.
+                if checked and ctype != 'long long':
+                    return updated
+                continue
+            if checked or ctype != 'long long' or MX_SYS_MOD in self.names:
+                return updated
+            checked = True
+            conversion = cst.Call(cst.parse_expression(f'{MX_SYS_MOD}._mx_exact_int64'), (
+                cst.Arg(args[i].value), cst.Arg(cst.SimpleString(repr(method.model_path)))))
+            args[i] = args[i].with_changes(value=conversion)
 
         field = f'{MX_SELF}.{VAR_PREF}{producer}'
         ready = cst.parse_expression(
             f'type({MX_SELF}) is {self.owner.name} and {MX_SELF}.{HAS_PREF}{producer} '
             f'and type({field}) is {target.name}')
         cast = cst.parse_expression(f'{CY_MOD}.cast({target.name}, {self.pin}({field}))')
-        native = updated.with_changes(func=cst.Attribute(cast, func.attr), lpar=(), rpar=())
+        native = updated.with_changes(func=cst.Attribute(cast, func.attr), args=args, lpar=(), rpar=())
         # Keep the dynamic call's object result boundary in the exact arm too.
         boxed = cst.Call(cst.parse_expression(f'{CY_MOD}.cast'), (cst.Arg(cst.Name('object')), cst.Arg(native)))
         self.used = True
