@@ -29,6 +29,7 @@ cdef object _original_iat_type = type(pd.Series([], dtype=object).iat)
 cdef object _original_iat_getitem = _original_iat_type.__getitem__
 cdef object _original_series_to_numpy = pd.Series.to_numpy
 cdef object _original_series_array = pd.Series.array
+cdef object _original_string_array_getitem = pd.arrays.StringArray.__getitem__
 cdef object _original_string_array_to_numpy = pd.arrays.StringArray.to_numpy
 cdef object _object_dtype = np.dtype(object)
 cdef object _zip_attrs = pd.DataFrame.attrs
@@ -316,13 +317,14 @@ cdef tuple _object_column_values(object column, object order):
             and _original_iat_type.__getitem__ is _original_iat_getitem):
         dtype = column.dtype
         values = None
-        if dtype is _object_dtype and pd.Series.to_numpy is _original_series_to_numpy:
+        if dtype is _object_dtype and _zip_method(column.to_numpy, column, _original_series_to_numpy):
             values = column.to_numpy(copy=False)
         elif (type(dtype) is pd.StringDtype and dtype.storage == 'python'
                 and pd.Series.array is _original_series_array
-                and pd.arrays.StringArray.to_numpy is _original_string_array_to_numpy):
+                and pd.arrays.StringArray.__getitem__ is _original_string_array_getitem):
             array = column.array
-            if type(array) is pd.arrays.StringArray:
+            if (type(array) is pd.arrays.StringArray
+                    and _zip_method(array.to_numpy, array, _original_string_array_to_numpy)):
                 values = array.to_numpy(dtype=object, copy=False)
         if type(values) is np.ndarray and values.dtype is _object_dtype:
             return tuple(values[order])

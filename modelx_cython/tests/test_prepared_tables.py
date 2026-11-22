@@ -252,6 +252,44 @@ def test_custom_series_and_nullable_columns_keep_scalar_access(tables):
             assert actual is expected or actual == expected
 
 
+def test_object_column_bulk_leaves_an_overridden_series_method_on_scalar_path(tables):
+    _tables, _ = tables
+    index = pd.Index([2, 1])
+    marker = object()
+    column = pd.Series([marker, None], index=index, dtype=object)
+    column.to_numpy = lambda **kwargs: np.array([None, marker], dtype=object)
+
+    class ColumnIndexer:
+        def __getitem__(self, indexer):
+            assert indexer == (slice(None), 0)
+            return column
+
+    class FrameWithColumn(pd.DataFrame):
+        iloc = ColumnIndexer()
+
+    frame = FrameWithColumn({'value': column})
+    table = _tables.prepare(frame)
+    assert table.value(2, 'value') is marker
+    assert table.value(1, 'value') is None
+
+
+def test_object_column_bulk_keeps_replaced_string_array_scalar_lookup(tables, monkeypatch):
+    _tables, _ = tables
+    frame = pd.DataFrame({'value': pd.Series(['a', 'b'], dtype=pd.StringDtype(storage='python'))})
+    original = pd.arrays.StringArray.__getitem__
+    marker = object()
+
+    def scalar_override(array, key):
+        if isinstance(key, (int, np.integer)):
+            return marker
+        return original(array, key)
+
+    monkeypatch.setattr(pd.arrays.StringArray, '__getitem__', scalar_override)
+    table = _tables.prepare(frame)
+    assert frame['value'].iat[0] is marker
+    assert table.value(0, 'value') is marker
+
+
 @pytest.mark.parametrize('name,frame', list(frames()), ids=[n for n, _ in frames()])
 def test_hundred_thousand_reads(tables, name, frame):
     """10^5 random keys per index kind (about 10% absent), one float and one int column: 0 differences."""
