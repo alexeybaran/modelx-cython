@@ -19,7 +19,6 @@ cdef enum:
 cdef class PreparedTable:
     cdef object _source                    # weak reference to the user's frame or Series (``source``): a prepared
                                            # copy never keeps a replaced frame alive
-    cdef object _zip_axes                   # exact index and columns seen before bound preparation
     cdef readonly bint is_series
     cdef readonly Py_ssize_t nrows, nlevels
     cdef readonly tuple level_labels       # per level: its labels in code order (a list)
@@ -58,6 +57,7 @@ cdef class PreparedTable:
     cdef object _slot_array                # T-4.2: per read signature of the model, one plus the slot of its column
     cdef const Py_ssize_t* slots           # (1 for a read of the index), or -1 when this table is not of the kinds
     cdef Py_ssize_t n_slots                # the read was compiled for (decided once, when the table is prepared)
+    cdef object _zip_axes                  # exact index and columns for ZIP; keep the native lookup fields first
 
     cdef inline Py_ssize_t code_ll(self, int level, long long key) noexcept nogil:
         """The code of an int key part at ``level``, or -1 (absent, or an object level)."""
