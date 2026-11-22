@@ -66,19 +66,14 @@ The compiler has one source frontend; it does not parse formula bodies into a
 second Python AST. LibCST's literal token conversion still uses `literal_eval`
 internally. Cython parses and compiles the resulting Space/Cell package.
 
-Exact receiver checks preserve Cell subclass dispatch. `EnumDefinitions` marks
-fixed compiled model-code bindings: changing a declared binding or its marker
-requires rebuilding the model. A compiled Space constructor rejects subclasses
-that shadow those bindings. Ordinary unmarked References remain assignable, and
-Cell overrides retain normal dispatch. This existing schema contract permits
-enum constants without a runtime guard in every formula. Enum values use the
-underlying integer representation, not an overridable conversion method. Facts
-do not cross child scopes or receiver rebinding. Private formula admission uses
-native signatures, binding and override safety, not formula length.
-
-The definitions describe the available category codes. Policy- and period-specific
-selections remain ordinary Cell inputs and results. An unmarked Reference retains
-the normal mutable-Reference contract.
+Exact receiver checks preserve Cell subclass dispatch. A Reference whose traced
+value is an eligible `enum.IntEnum` class defines fixed category codes in the
+compiled model. The compiled Space constructor rejects subclasses that shadow
+such a definition. Ordinary References remain assignable, and policy- and
+period-specific enum selections remain ordinary Cell inputs and results. Enum
+constants use the underlying integer representation. Facts stay within their
+lexical scope and depend on the exact receiver. Private formula admission uses
+native signatures, binding and override safety.
 
 Integer arithmetic specialization proves bounds for every intermediate. The
 emitted input guards and binary64 exact-integer bound determine safety; operation
@@ -87,111 +82,28 @@ Lexically resolved builtin `round` calls use guarded binary64 rounding on
 exact floats. The two-argument path admits exact integer precision in
 `[-22, 22]` and falls back to the original callable when the scaled value
 falls outside its exact domain. Other values retain the callable's behavior,
-including `__round__`. `floor` and `ceil` use ordinary Cython compilation.
+including `__round__`.
 
-## Helper providers
+## Native providers
 
-A Python function Reference can declare `__modelx_cython_helper__` as
-`(provider, operation)`. The packaged provider supplies `.pyx` and `.pxd`
-resources. Its Cython entry receives the current Python callable first and must
-delegate when callable identity, types or data layout are unsupported.
-
-The single `helpers.CAPABILITIES` registry defines optional capability metadata:
-
-| Metadata suffix | Meaning / shape |
-|---|---|
-| `reduction` | `f64_sum`, `bool_any`, `bool_all` or `f64_max` |
-| `iteration`, `iteration_f64`, `iteration_str` | Four identifiers: admission function, span type, count function, element function |
-| `scalar_result` | Physical provider ABI: `float64`, `int64`, `bool`, `unicode` or `object` |
-| `call_layout` | `keywords`: receive original keyword-name tuple after the current callable |
-| `numeric` | Numeric-return operation identifier |
-| `clamped`, `clamped_context` | Clamped lookup operation identifiers |
-| `optional` | Guarded membership/value operation identifier |
-| `grouped` | Two operation identifiers; optionally a third context probe |
-| `bounded`, `bound_bounded` | Bounded lookup operation identifiers |
-| `bound_grouped`, `bound_numeric` | Exactly three operation identifiers |
-
-Suffixes expand to `__modelx_cython_<suffix>__`. Names and tuple arities are
-validated while tracing. The registry is shared by runtime metadata and merged
-References; providers do not need insurance-specific compiler branches.
-`scalar_result` describes the declared `.pxd` result, not an inferred Python
-numeric type or a proof about a replacement callable. An `int64` provider must
-check its public integer range. An object-preserving mutable dispatcher uses
-`object` even when its canonical internal kernel returns `double`.
-
-Registered reduction consumers retain the qualified typed-loop kernels beneath
-this same registry. Direct function References, module members and aliases use
-the current callable and its provider identity guard. Only a call with an explicit
-`reduction` capability enters that stage; ordinary generators and the expression
-stream API continue through their normal Cython/provider paths. Known primitive
-payloads/ranges may use the existing numeric accumulator and private Cell entries.
-Unknown payloads, unsupported scopes and changed callables retain the ordinary
-compiled generator/object path. Receiver rebinding and frame introspection decline
-statement-changing lowering. This uses the shared CST frontend, not a second
-application AST parser or financial formula implementation.
-The first iterable's bounds/value are acquired outside the generator-body error
-boundary. Inner iteration, filters and yielded Cell calls retain PEP479:
-`StopIteration` becomes `RuntimeError` with the original cause. Ordinary Cython
-exception handling implements this boundary; there is no separate exception
-runtime. Native signature parameters may supply proved range bounds; unknown
-parameter types continue through the object path.
-The optional `keywords` call ABI uses the helper's declared Python signature,
-not its body. Missing optional slots receive the provider's declared
-`omitted_argument` token; the original keyword-name tuple excludes these slots.
-Providers preserve original positional/keyword layout when dispatching a
-replacement. Starred or invalid declared call shapes keep ordinary calls.
-
-A constructor helper can declare `__modelx_cython_result_type__` as a qualified
-provider owner type. A pair of that type and a parameter name limits admission
-to calls that omit the parameter or pass an empty tuple. The parameter must have
-an empty tuple default and use the keyword call ABI. A Cell that directly returns
-the call can use the registered native view when the traced owner matches.
-The binder still checks each returned value, and a Cell can declare `object`
-to retain an object return type.
-
-Numeric contexts implement the common `LookupContext` ABI. They cache prepared
-input resources and indices, never policy results or formula execution state.
-Prepared resources must be disposable: normal model pickling retains Cell
-caches, while a context reconstructs empty and prepares resources on demand.
-Resources held by contexts must keep their owners alive. Separate compiled
-packages must not confuse their private native resource types.
-Within one compiled Space, each provider owns a distinct context. Multiple
-providers in the same Cell and generated names resembling authored Cell/cache
-names must remain independent.
-
-Exclusive lookup reuse is enabled only on confined collection receivers whose
-References remain stable. Ordinary public receivers retain checked/synchronized
-resource access. Compiler recognition of optional grouped/clamped sequences is
-conservative; equivalent unsupported sequences keep their ordinary helper calls.
-Generalizing such recognition must not skip binding effects or reorder calls.
+Recognized standard-library math calls, including `math.floor` and `math.ceil`,
+can use guarded native provider operations. The guard checks the current module
+or callable and preserves ordinary dispatch when a Reference changes. See
+[Native providers for Cell results](native_providers.md) for native result types.
 
 ## Generators
 
-Generator operations now use explicit expression helpers with declared Cython
-provider signatures. The former AST generator/reduction recognizer and
-contextual lambda classifier are not activated by the compiler pipeline.
-Ordinary Cython compiles authored callbacks; helper binding does not inspect
-their bodies. Lexical binding follows the actual receiver parameter, including
-inside callbacks, and declines shadowed/rebound receivers.
-Ordinary generator syntax is retained when Cython directly emits its native
-generator/loop. A deliberately authored iterator helper is not an automatic
-replacement for the generator object's protocol. Standard Cython introspection
-differences remain disclosed in the expression-stream contract.
+The compiler specializes supported calls to ordinary `sum`, `min`, `max`, `all`
+and `any` over recognized sequence and generator shapes. Binding and type checks
+keep unsupported shapes on the ordinary Cython path. The first iterable is
+acquired before entering the generator body. An inner `StopIteration` is wrapped
+in `RuntimeError` with the original cause, following PEP 479. Private Cell
+entries and native accumulators can be used when the payload and range permit it.
 
-Multiargument builtin `min`/`max` arguments are packed before normal star
-expansion. This preserves left-to-right effects and Python's NaN/tie behavior
-when Cython's numeric intrinsic would move an argument. The actual builtin
-remains the consumer; no expression interpreter or extra authoring helper is
-introduced. A Cell used as a callable value obtains its ordinary bound method
-through an object receiver; direct typed calls keep the existing override path.
-
-The development vocabulary is documented in modelx's `doc/source/helpers/EXPRESSION_STREAMS.md`.
-`sum_float` normalizes each contribution with standard float conversion and has
-a separate double accumulation kernel. It is not an automatic replacement for
-ordinary sum. One-shot mapping/filtering and lazy flattening preserve producer
-and consumer exception boundaries. Provider compatibility paths preserve legal
-object behavior but do not count as completed native coverage. Generated code,
-runtime identities and differential evidence must prove each admitted path.
+Multiargument builtin `min` and `max` pack their arguments before star expansion
+so Python controls evaluation order and NaN and tie handling. A Cell used as a
+callable value obtains its ordinary bound method through an object receiver.
+Direct typed Cell calls preserve subclass dispatch.
 
 ## Storage and collection
 

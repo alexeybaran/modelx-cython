@@ -16,8 +16,7 @@ def prepare(module):
     identifiers = Names(module.visitor.wrapper.module)
     for cls in module.classes.values():
         # An enum definition is a Reference whose traced value is an enum-safe IntEnum class
-        # (selected by type, no declaration). It is fixed in the compiled model: read-only, and its
-        # members are C constants. A Reference still holding the former declaration marker
+        # and can supply C constants. The compiled Reference is read-only.
         names = tuple(name for name, ref in cls.refs.items()
                       if name not in getattr(cls, 'spaces', ())
                       and getattr(ref, 'enum', None) and getattr(ref, 'enum_safe', False))

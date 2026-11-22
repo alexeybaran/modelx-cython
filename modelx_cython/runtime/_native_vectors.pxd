@@ -19,10 +19,9 @@ cdef extern from *:
     """
     /* One mechanism on every C compiler: CPython's own atomics. From 3.13 Python.h includes
        cpython/pyatomic.h, whose functions are underscore-prefixed interpreter API (not the
-       stable ABI): _Py_atomic_load_ptr_acquire and _Py_atomic_compare_exchange_ptr here,
-       _Py_atomic_add_int64 and _Py_atomic_load_int64_relaxed in _native_inputs. Before 3.13
-       there is no free-threaded build, and every caller (VecCache.put/get, len, items) runs
-       Python object code, so it holds the GIL: plain loads and stores are ordered by it. */
+       stable ABI): _Py_atomic_load_ptr_acquire and _Py_atomic_compare_exchange_ptr.
+       Before 3.13 there is no free-threaded build. Every caller (VecCache.put/get, len,
+       items) runs Python object code under the GIL, which orders plain loads and stores. */
     #if PY_VERSION_HEX >= 0x030D0000
     #define __pyx_vec_load(p) ((PyObject *)_Py_atomic_load_ptr_acquire((p)))
     static CYTHON_INLINE int __pyx_vec_publish(PyObject **slot, PyObject *value) {
