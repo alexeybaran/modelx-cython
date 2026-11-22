@@ -29,6 +29,7 @@ the key is looked up once per item, an integer or a str label alike.
 """
 
 import libcst as cst
+from .scopes import CstFacts, has_scope_effects
 
 DOC_TYPES = (cst.SimpleString, cst.ConcatenatedString)
 NESTED = (cst.FunctionDef, cst.Lambda, cst.ClassDef)
@@ -278,6 +279,31 @@ def _mentions(node, name):
     return finder.found
 
 
+def _independent_field_reads(owner, sibling, name, expr):
+    if not independent_prefix(owner, sibling, name, expr):
+        return False
+    for member in sibling.body.body:
+        if not _mentions(member, name):
+            continue
+        if not isinstance(member, cst.FunctionDef):
+            return False
+        if member.name.value == name:
+            # Generated public accessor only refers to its cached value and formula.
+            if _mentions(member.body, name):
+                return False
+            continue
+        if not member.name.value.startswith(FORMULA):
+            return False
+        body = _body(member)
+        if has_scope_effects(body) or CstFacts(body).stores['self']:
+            return False
+        uses = _Uses(name, tuple(_body(member)))
+        member.visit(uses)
+        if uses.escape or uses.locals:
+            return False
+    return True
+
+
 def analyse(module_node, cls_name):
     """{row cell name: its row expression} for the class ``cls_name`` of the module: the row cells
     whose every use is a field read (see the module docstring), and {name: why} for the others."""
@@ -300,6 +326,8 @@ def analyse(module_node, cls_name):
                 continue
             if any(isinstance(s, cst.FunctionDef) and s.name.value in (FORMULA + name, name)
                    for s in cls.body.body):
+                if _independent_field_reads(own, cls, name, expr):
+                    continue
                 why = f'another class defines {name}'
                 break
             if _mentions(cls, name):

@@ -787,8 +787,10 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
                     if isinstance(func, cst.FunctionDef) and func.name.value.startswith('_f_'):
                         expr = row_cells._row_expression(func)
                         name = func.name.value[3:]
+                        per_item = (cls_info.name in cls_info.visitor.itemspace_classes
+                                    and not getattr(cls_info, 'collect_shared_item', False))
                         if expr is not None and not any(
-                                not row_cells.independent_prefix(own, c, name, expr)
+                                not (per_item and row_cells.independent_prefix(own, c, name, expr))
                                 for c in classes if c is not own and any(
                                     isinstance(f, cst.FunctionDef) and f.name.value in ('_f_' + name, name)
                                     for f in c.body.body)):

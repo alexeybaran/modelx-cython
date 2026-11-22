@@ -92,6 +92,19 @@ def test_identical_table_prefix_requires_independent_generated_spaces():
     assert not row_cells.independent_prefix(own, space('_c_Second', key='self.other'), 'model_point', expr)
 
 
+def test_sibling_row_fields_preserve_cross_space_escape_detection():
+    own = HEADER.replace('_c_Projection:', '_c_Projection(_mx_sys.BaseSpace):')
+    sibling = own[:own.index('    def _f_sex')].replace('_c_Projection', '_c_Second')
+
+    def accepted(extra):
+        module = cst.parse_module(own + '\n' + sibling + textwrap.indent(extra, '    '))
+        return row_cells.analyse(module, '_c_Projection')[0]
+
+    assert 'model_point' in accepted('')
+    assert 'model_point' not in accepted('def _f_x(self):\n    return self.other.model_point()\n')
+    assert 'model_point' not in accepted('def _f_x(self):\n    self = self.other\n    return self.model_point()["x"]\n')
+
+
 def test_inline_replaces_only_calls_of_accepted_cells():
     accepted, _ = analyse()
     node = cst.parse_module('def _f_y(self):\n    return float(self.model_point()["sa"]) + self.other()\n')
