@@ -86,6 +86,15 @@ def check_job(lane, spec, job, artifact, run_id, attempt, pins, coverage):
     floor = profile == 'compatibility-floor'
     require(dependencies['lifelib_installed'] is (not floor) and ('lifelib' in versions) is (not floor),
             'lifelib scope differs from the compatibility policy')
+    if not floor:
+        regional = read_json(artifact / 'regional-contract.json')
+        require(regional == {
+            'Medical_KR_S.mort_table': {'csv': 'mort_table.csv', 'rows': 222},
+            'Medical_KR_S.severity_table': {'csv': 'severity_table.csv', 'rows': 33},
+            'Medical_KR_S.utilisation_table': {'csv': 'utilisation_table.csv', 'rows': 36},
+            'MYGA_US_S.surr_charge_table': {'csv': 'surr_charge_table.csv', 'rows': 10},
+            'IP_UK_S.cached_lists': {'rate_vectors': 3, 'cached_cohorts': 211},
+        }, 'named CSV or cached-list receipt differs from the reconciled lifelib pin')
     require(set(dependencies['requires_python']) == set(SOURCES)
             and all(dependencies['requires_python'].values()), 'missing dependency Requires-Python evidence')
     require({'compiler', 'modelx', 'Cython', 'pandas', 'numpy', 'pytest', 'libcst', 'openpyxl', 'psutil'} <= versions.keys()

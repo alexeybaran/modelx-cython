@@ -343,6 +343,9 @@ def main():
                    'runtime': observed_runtime, 'dependencies': installed}
     path = workspace / 'reports' / 'environment.json'
     if args.phase == 'install':
+        if profile != 'compatibility-floor':
+            from regional_contract import verify_regional_contract
+            write_json(path.with_name('regional-contract.json'), verify_regional_contract(workspace / 'lifelib'))
         write_json(path, environment)
         return 0
     if json.loads(path.read_text(encoding='utf-8')) != environment:

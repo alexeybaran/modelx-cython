@@ -35,6 +35,14 @@ class VerifierTest(unittest.TestCase):
             if has_lifelib:
                 versions['lifelib'] = '0.17.3'
             folder = self.artifacts / f'junit-{lane}-attempt-2'
+            if has_lifelib:
+                write_json(folder / 'regional-contract.json', {
+                    'Medical_KR_S.mort_table': {'csv': 'mort_table.csv', 'rows': 222},
+                    'Medical_KR_S.severity_table': {'csv': 'severity_table.csv', 'rows': 33},
+                    'Medical_KR_S.utilisation_table': {'csv': 'utilisation_table.csv', 'rows': 36},
+                    'MYGA_US_S.surr_charge_table': {'csv': 'surr_charge_table.csv', 'rows': 10},
+                    'IP_UK_S.cached_lists': {'rate_vectors': 3, 'cached_cohorts': 211},
+                })
             write_json(folder / 'environment.json', {'lane': lane, 'run_id': 123, 'run_attempt': 2, 'pins': PINS,
                        'runtime': info, 'dependencies': {'versions': versions, 'requires_python': {
                            'compiler': '>=3.9', 'modelx': '>=3.7', 'lifelib': '>=3.10'},

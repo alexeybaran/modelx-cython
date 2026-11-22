@@ -5,6 +5,8 @@ Each hosted job installs the pinned compiler and modelx checkouts. Except for
 the Python 3.9 floor, it also installs the pinned lifelib checkout. Jobs verify
 source SHAs, interpreter, ABI, GIL state, dependency floors and JUnit identities.
 The legacy helper package is absent from every lane.
+Jobs with lifelib also verify same-named replacement CSVs in the Korean medical
+and MYGA readers and cached list identity in UK Income Protection.
 
 | Profile | Runners and interpreters | Coverage |
 | --- | --- | --- |
