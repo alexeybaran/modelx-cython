@@ -53,7 +53,7 @@ def _public_entry(layout, methods):
     return methods.get((layout.owner, layout.formula[len(FORMULA_PREF):]))
 
 
-def _sibling_accessor_uses(state):
+def _sibling_accessor_uses(state, entries):
     """Count only calls on a typed, unmodified self inside unrelated extension accessors."""
     owners = {cls.name.value for cls in state.syntax.body if isinstance(cls, cst.ClassDef)
               and len(cls.bases) == 1 and dotted_name(cls.bases[0].value) == '_mx_sys.BaseSpace'
@@ -61,9 +61,13 @@ def _sibling_accessor_uses(state):
     total = Counter()
     own = Counter()
     duplicated = Counter(name for owner, name in state.methods if owner in owners)
-    for (owner, name), method in state.methods.items():
-        if (owner not in owners or duplicated[name] < 2 or
-                not any(dotted_name(d.decorator) == f'{CY_MOD}.ccall' for d in method.decorators)):
+    accessors = [(owner, name, method) for (owner, name), method in state.methods.items()
+                 if any(dotted_name(d.decorator) == f'{CY_MOD}.ccall' for d in method.decorators)]
+    # FormulaEntry records the receiver chosen by the emitter of the typed C entry.
+    accessors.extend((entry.owner, entry.formula[len(FORMULA_PREF):], state.functions[symbol])
+                     for symbol, entry in entries.items() if symbol in state.functions)
+    for owner, name, method in accessors:
+        if owner not in owners or duplicated[name] < 2:
             continue
         formula = FORMULA_PREF + name
         nodes = list(walk(method.body))
@@ -75,7 +79,7 @@ def _sibling_accessor_uses(state):
     return owners, total, own
 
 
-def _formula_ranges(state, layouts, guards, uses):
+def _formula_ranges(state, layouts, guards, uses, entries):
     spills = {layout.spill_entry for layout in layouts.values() if layout.spill_entry}
 
     def spill_references(tree):
@@ -83,7 +87,7 @@ def _formula_ranges(state, layouts, guards, uses):
                        and node.value in spills and state.facts.contexts.get(node) is ExpressionContext.LOAD)
 
     spill_uses = spill_references(state.syntax) if spills else Counter()
-    owners, sibling_total, owner_uses = _sibling_accessor_uses(state)
+    owners, sibling_total, owner_uses = _sibling_accessor_uses(state, entries)
     ranges = {}
     for name, guard in guards.items():
         layout = layouts[name]
@@ -111,9 +115,9 @@ class _Domain:
     axes: tuple
 
 
-def _bounds(state, layouts, guards, uses):
+def _bounds(state, layouts, guards, uses, entries):
     guards = {name: guard for name, guard in guards.items() if 0 < len(layouts[name].axes) <= 32}
-    ranges = _formula_ranges(state, layouts, guards, uses)
+    ranges = _formula_ranges(state, layouts, guards, uses, entries)
     # Callers whose arguments lie in known axes: a cached Cell's formula, reached inside its dense
     # window (or behind its own domain test when it checks its spill in the helper), and (D139b) an
     # uncached Cell's private entry, which tests its arguments against its traced domain once and runs
@@ -354,7 +358,7 @@ def _emit(state, layouts, entries, uses, policy):
         return state
     guards = {name: guard for name, layout in layouts.items()
               if (guard := _guard(state.functions.get(name), layout)) is not None}
-    ranges, masks, domains = _bounds(state, layouts, guards, uses) if policy.dense_bounds_proofs else ({}, {}, {})
+    ranges, masks, domains = _bounds(state, layouts, guards, uses, entries) if policy.dense_bounds_proofs else ({}, {}, {})
     targets = {call.func.value for call in masks}
     proof = state.names.reserve('_mx_proven_axes', family=True) if targets else None
     exact = state.names.reserve('_mx_exact_receiver')
