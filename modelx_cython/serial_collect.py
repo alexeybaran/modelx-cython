@@ -36,6 +36,7 @@ class MultiCollect:
     ordered: bool
     leaves: tuple
     extra: tuple = ()       # the collect's other Space parameters: (name, C type or 'object')
+    factory: bool = False
 
     @property
     def native(self):
@@ -160,8 +161,39 @@ def _isolated_leaf(node, cls, *, fresh=False):
                        for hook in hooks) or '_mx_apply_formula' in cls.refs)
 
 
+def _factory_aliases(node):
+    """A factory which validates arguments and returns References bound to those arguments."""
+    formula = _method(node, '_mx_space_formula')
+    if formula is None:
+        return None
+    params = {p.name.value for p in formula.params.params if p.name.value != 'self'}
+    body = list(statements(formula.body))
+    if not body or not isinstance(body[-1], cst.Return):
+        return None
+    for statement in body[:-1]:
+        if not isinstance(statement, cst.If) or statement.orelse is not None:
+            return None
+        branch = list(statements(statement.body))
+        if len(branch) != 1 or not isinstance(branch[0], cst.Raise):
+            return None
+    label, refs = _single_dict(body[-1].value)
+    if label != 'refs' or not isinstance(refs, cst.Dict):
+        return None
+    names = set()
+    for element in refs.elements:
+        if (not isinstance(element, cst.DictElement) or not isinstance(element.key, cst.SimpleString)
+                or type(element.key.evaluated_value) is not str or not isinstance(element.value, cst.Name)
+                or element.value.value not in params):
+            return None
+        names.add(element.key.evaluated_value)
+    return names
+
+
 def _match(node, cls, reuse, parallel_reuse, ordered=False, evaluator_args=False):
-    if not _isolated_leaf(node, cls):
+    factory = _method(node, '_mx_apply_formula') is not None
+    aliases = _factory_aliases(node) if factory else set()
+    if (aliases is None or factory and (reuse or parallel_reuse or bound_checks(cls))
+            or not _isolated_leaf(node, cls, fresh=factory)):
         return None
     contract = collect_contract(node)
     if contract is None:
@@ -179,18 +211,20 @@ def _match(node, cls, reuse, parallel_reuse, ordered=False, evaluator_args=False
     output = _return_expr(_method(node, '_f_collect_outputs'))
     mode, fields = _single_dict(output)
     label, entry = _single_dict(fields)
-    if not extra and mode == 'sum' and label and _scalar_cell(cls, entry):
+    if not factory and not extra and mode == 'sum' and label and _scalar_cell(cls, entry):
         _report(cls, (Leaf('sum', label, 'scalar', cell=_self_attribute(entry.func)),))
         return SerialCollect(label, _self_attribute(entry.func), parameter, reuse, parallel_reuse, ordered)
     leaves = _leaves(cls, output, (parameter, *contract[1]))
     if leaves is None:
+        return None
+    if factory and any(leaf.kind == 'python' or leaf.domain in aliases for leaf in leaves):
         return None
     _report(cls, leaves)
     # The export's ordered worker path folds Python sums one policy at a time.
     # Private chunk totals would change the grouping of arbitrary Python addition.
     if any(leaf.mode == 'sum' and leaf.kind == 'python' for leaf in leaves):
         parallel_reuse = False
-    shape = MultiCollect(parameter, reuse, parallel_reuse, ordered, leaves, tuple(extra))
+    shape = MultiCollect(parameter, reuse, parallel_reuse, ordered, leaves, tuple(extra), factory)
     if not shape.native:
         return None
     if extra and not evaluator_args:
@@ -625,9 +659,10 @@ def _multi_lines(cls, shape):
                 lines += [f'    if type(args[{position}]) is not float:', '        return None']
     for index, leaf in enumerate(leaves):
         if leaf.kind == 'dict':
+            containers = '(tuple,)' if shape.factory else '(tuple, list)'
             lines += [
                 f'    _mx_d{index} = self.{leaf.domain}',
-                f'    if not (type(_mx_d{index}) is range or type(_mx_d{index}) in (tuple, list)',
+                f'    if not (type(_mx_d{index}) is range or type(_mx_d{index}) in {containers}',
                 f'            and all(type(_mx_x) is int for _mx_x in _mx_d{index})):',
                 '        return None',
                 f'    _mx_d{index} = tuple(_mx_d{index})',
@@ -657,6 +692,10 @@ def _multi_lines(cls, shape):
     lines += ['        for coordinate in coords:', '            if not first:']
     lines.extend('                ' + line for line in _restart_lines(cls, shape))
     lines.append(f'            root.{shape.parameter} = coordinate')
+    if shape.factory:
+        bindings = [f'{name}=args[{i}]' for i, (name, _) in enumerate(shape.extra)]
+        bindings.append(f'{shape.parameter}=coordinate')
+        lines.append(f'            root._mx_apply_formula({", ".join(bindings)})')
     if shape.python:
         lines.append('            _mx_sum = {}')
     for index, leaf in enumerate(leaves):
