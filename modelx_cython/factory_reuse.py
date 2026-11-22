@@ -7,11 +7,66 @@ from .syntax import code
 
 _BUILTINS = {'abs', 'bool', 'float', 'int', 'max', 'min', 'round', 'str', 'ValueError'}
 
+_APPLY = """def _mx_apply_formula(self, *args, **kwargs):
+    result = self._parent._mx_space_formula(*args, **kwargs)
+    if result is None:
+        return
+    if not isinstance(result, dict) or result.keys() - {'refs'}:
+        raise ValueError('Exported Space formula must return only dynamic References')
+    refs = result.get('refs')
+    if refs is None:
+        return
+    if type(refs) is not dict or refs.keys() - ALIASES:
+        raise ValueError('Unexpected dynamic Reference')
+    for name, value in refs.items():
+        setattr(self, name, value)
+"""
+
+
+def standard_lifecycle(node, aliases):
+    """Recognize exporter-owned construction, reference copy and alias assignment."""
+    body = ast.parse(code(node)).body[0].body
+    methods = {m.name: m for m in body if isinstance(m, ast.FunctionDef)}
+    if any(name in methods for name in ('__new__', '__del__', '__getattribute__', '__setattr__', '__getattr__')):
+        return False
+    apply = methods.get('_mx_apply_formula')
+    if apply is None or apply.decorator_list:
+        return False
+    # The exporter lists dynamic aliases in declaration order.
+    template = ast.parse(_APPLY.replace('ALIASES', repr(tuple(aliases)))).body[0]
+    if ast.dump(apply) != ast.dump(template):
+        return False
+    for name in ('__init__', '_mx_copy_refs'):
+        method = methods.get(name)
+        if method is None or method.decorator_list:
+            return False
+        for stmt in method.body:
+            if not isinstance(stmt, ast.Assign) or len(stmt.targets) != 1:
+                return False
+            dest = stmt.targets[0]
+            if not (isinstance(dest, ast.Attribute) and isinstance(dest.value, ast.Name)
+                    and dest.value.id == 'self'):
+                return False
+            value = stmt.value
+            if name == '_mx_copy_refs':
+                if not (isinstance(value, ast.Attribute) and value.attr == dest.attr
+                        and isinstance(value.value, ast.Name) and value.value.id == 'base'):
+                    return False
+            elif not (isinstance(value, ast.Constant)
+                      or isinstance(value, ast.Dict) and not value.keys
+                      or isinstance(value, ast.List) and not value.elts
+                      or isinstance(value, ast.Name) and (dest.attr, value.id) in
+                      (('_space', 'self'), ('_parent', 'parent'))
+                      or isinstance(value, ast.Attribute) and isinstance(value.value, ast.Name)
+                      and (dest.attr, value.value.id, value.attr) == ('_model', 'parent', '_model')):
+                return False
+    return True
+
 
 def unshadowed_builtins(module):
     source = module.code
     symbols = symtable.symtable(source, '<export>', 'exec')
-    if any(symbol.get_name() in _BUILTINS and (symbol.is_assigned() or symbol.is_imported())
+    if any(symbol.get_name() in _BUILTINS | {'setattr', 'type', 'isinstance', 'dict'} and (symbol.is_assigned() or symbol.is_imported())
            for symbol in symbols.get_symbols()):
         return False
     return not any(isinstance(item, ast.ImportFrom) and any(alias.name == '*' for alias in item.names)

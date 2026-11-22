@@ -152,8 +152,9 @@ def analyze(module, evaluator_args=False, ordered_rows=False):
                     and all(leaf.mode == 'sum' for leaf in shape.leaves)):
                 shape = replace(shape, ordered_rows=True)
                 if factory_reuse:
-                    from .factory_reuse import scalar_factory_graph, unshadowed_builtins
-                    if scalar_factory_graph(node, cls, shape) and unshadowed_builtins(module.visitor.wrapper.module):
+                    from .factory_reuse import scalar_factory_graph, standard_lifecycle, unshadowed_builtins
+                    if (scalar_factory_graph(node, cls, shape) and standard_lifecycle(node, _factory_aliases(node))
+                            and unshadowed_builtins(module.visitor.wrapper.module)):
                         shape = replace(shape, reuse=True)
             result[node.name.value] = shape
     return result
@@ -190,13 +191,13 @@ def _factory_aliases(node):
     label, refs = _single_dict(body[-1].value)
     if label != 'refs' or not isinstance(refs, cst.Dict):
         return None
-    names = set()
+    names = []
     for element in refs.elements:
         if (not isinstance(element, cst.DictElement) or not isinstance(element.key, cst.SimpleString)
                 or type(element.key.evaluated_value) is not str or not isinstance(element.value, cst.Name)
                 or element.value.value not in params):
             return None
-        names.add(element.key.evaluated_value)
+        names.append(element.key.evaluated_value)
     return names
 
 
@@ -688,7 +689,9 @@ def _multi_lines(cls, shape, *, row_mode=False):
         f'    _mx_i: {c}.Py_ssize_t',
     ]
     if shape.reuse and shape.factory:
-        lines.extend(['    import sys', '    _mx_reuse_private = sys.gettrace() is None and sys.getprofile() is None'])
+        lines.extend(['    import sys',
+                      '    from modelx_cython.runtime.factory_reuse import canonical_factory_builtins',
+                      '    _mx_reuse_private = sys.gettrace() is None and sys.getprofile() is None and canonical_factory_builtins()'])
     if row_mode:
         lines += [f'    _mx_out: {c}.double[::1]', f'    _mx_pos: {c}.Py_ssize_t = 0',
                   f'    _mx_done: {c}.Py_ssize_t = 0', '    _mx_width = 0']

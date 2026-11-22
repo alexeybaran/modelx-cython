@@ -51,3 +51,11 @@ class Product:
 @pytest.mark.parametrize("prefix", ["from other import *", "from other import abs", "round = callback"])
 def test_builtin_bindings(prefix):
     assert not unshadowed_builtins(libcst.parse_module(prefix + '\n'))
+
+
+def test_runtime_substituted_builtin(monkeypatch):
+    import builtins
+    from modelx_cython.runtime.factory_reuse import canonical_factory_builtins
+    assert canonical_factory_builtins()
+    monkeypatch.setattr(builtins, 'round', lambda value: value)
+    assert not canonical_factory_builtins()

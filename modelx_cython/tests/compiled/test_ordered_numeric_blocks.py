@@ -36,6 +36,17 @@ def test_factory_alias_and_rejection(tmp_path):
     finally:
         model.close()
     options = {"serial_collect": "reduce", "factory_collect_reuse": True}
+    from modelx_cython.factory_reuse import standard_lifecycle
+    import libcst
+    classes_path = tmp_path / "exported" / "_mx_classes.py"
+    raw = classes_path.read_text()
+    def runs(text):
+        return next(c for c in libcst.parse_module(text).body
+                    if isinstance(c, libcst.ClassDef) and c.name.value == "_c_Runs")
+    assert standard_lifecycle(runs(raw), ["point"])
+    capture = raw.replace('        result = self._parent._mx_space_formula(',
+                          '        retained.append(self)\n        result = self._parent._mx_space_formula(')
+    assert not standard_lifecycle(runs(capture), ["point"])
     (tmp_path / "spec.py").write_text(repr({"spaces": {"Runs": options, "Other": options}}))
     (tmp_path / "sample.py").write_text("from exported import mx_model as m\nm.Runs.collect(2)\nm.Other.collect(2)\n")
     subprocess.run([sys.executable, "-B", "-m", "modelx_cython", "exported",
