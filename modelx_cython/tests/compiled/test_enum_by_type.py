@@ -41,14 +41,10 @@ print('enum by type ok')
 '''
 
 
-@pytest.mark.parametrize('legacy_marker', [False, True])
-def test_enum_selected_by_type(tmp_path, legacy_marker):
+def test_enum_selected_by_type(tmp_path):
     model = mx.new_model('EnumByType')
     try:
         s = model.new_space('Projection', refs={'Status': HTTPStatus, 'scale': 2})
-        if legacy_marker:
-            from modelx_helpers.typed_inputs import EnumDefinitions
-            s.enum_definitions = EnumDefinitions(('Status', 'scale'))   # 'scale' is not an enum: ignored
         for name, formula in FORMULAS.items():
             s.new_cells(name, formula)
         model.export(tmp_path / 'exported')

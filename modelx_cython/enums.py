@@ -18,7 +18,6 @@ def prepare(module):
         # An enum definition is a Reference whose traced value is an enum-safe IntEnum class
         # (selected by type, no declaration). It is fixed in the compiled model: read-only, and its
         # members are C constants. A Reference still holding the former declaration marker
-        # (modelx_helpers' EnumDefinitions) is an ordinary Reference and is ignored here.
         names = tuple(name for name, ref in cls.refs.items()
                       if name not in getattr(cls, 'spaces', ())
                       and getattr(ref, 'enum', None) and getattr(ref, 'enum_safe', False))

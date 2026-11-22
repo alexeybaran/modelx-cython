@@ -129,7 +129,6 @@ def _guard_associative_cache(cell, body):
 
 
 _logger = logging.getLogger(__name__)
-HELPER_TABLE_READ = 'the receiver is a helper Table and the formula uses its Python methods'
 
 
 class PXDGenerator:
@@ -913,18 +912,7 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
             pandas = self._pandas_reads(native, cls_info, cells)
         else:
             pandas = self._pandas_reads(node, cls_info, cells)
-        if not (self._resolver.table_results or cls_info.refs):
-            cells.table_reads_untyped = pandas      # nothing to lower: the generated code is unchanged
-            return node
-        from modelx_cython.admission import table_read_sites
-        sites = table_read_sites(node, self._resolver, cls_info)
-        if not sites:
-            cells.table_reads_untyped = pandas
-            return node
-        per_step = cells.has_args()
-        cells.table_reads_untyped = sorted(
-            [site.entry(per_step, HELPER_TABLE_READ) for site in sites] + pandas,
-            key=lambda entry: entry['line'])
+        cells.table_reads_untyped = pandas
         return node
 
     def _pandas_reads(self, node, cls_info, cells):
@@ -941,14 +929,7 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
     def _table_reads_kept(self, node, cls_info, cells, why):
         """List the table reads of a formula kept as a Python method (no lowering)."""
         cells.table_reads_typed, cells.table_reads_untyped, cells.table_reads_keys = 0, [], []
-        if self._resolver is None or not (self._resolver.table_results or cls_info.refs
-                                          or getattr(self._resolver, 'pandas_results', None)):
-            return node
-        from modelx_cython.admission import KEPT_PYTHON, table_read_sites
-        cells.table_reads_untyped = sorted(
-            [site.entry(cells.has_args(), KEPT_PYTHON.format(why=why))
-             for site in table_read_sites(node, self._resolver, cls_info)]
-            + self._pandas_reads(node, cls_info, cells), key=lambda entry: entry['line'])
+        cells.table_reads_untyped = self._pandas_reads(node, cls_info, cells)
         self._table_reads_report(cells)
         return node
 

@@ -80,7 +80,7 @@ def test_per_step_reads_through_a_pandas_cell_are_reported_and_warned(tmp_path):
     assert rate['table_reads_typed'] == 0
     assert [(e['read'], e['kind'], e['line'], e['per_step']) for e in rate['table_reads_untyped']] == [
         ('tbl["lo"]', 'column', 3, True), ('tbl["hi"]', 'column', 3, True), ('tbl["rate"]', 'column', 3, True)]
-    assert all(e['reason'].startswith('receiver is a pandas DataFrame, Series or Index, not a helper Table')
+    assert all(e['reason'].startswith('receiver is a pandas DataFrame, Series or Index, read remains in pandas')
                for e in rate['table_reads_untyped'])
     uses = report[PREFIX + 'uses']['table_reads_untyped']      # methods, bare uses, an Index cell
     assert sorted((e['read'], e['kind'], e['line'], e['per_step']) for e in uses) == [

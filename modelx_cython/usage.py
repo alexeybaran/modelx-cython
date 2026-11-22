@@ -125,10 +125,6 @@ class CellsResolver:
         self.unlocked_scalar_results = unlocked_scalar_results or {}
         self.provider_results = {}
         self.observed_provider_results = {}
-        # M1 (W1.1) facts for typed table reads: cells fqname -> helper table_schema(t),
-        # cells fqname -> provider type id of a traced helper Table/Record result,
-        # cells with a cached formula; cell_rettype() reads the final C return type.
-        self.table_schemas = {}
         self.table_results = {}
         # cells fqname -> 'pandas.DataFrame' / 'pandas.Series': zero-argument cells whose every
         # sampled result is that pandas class; reads through them are reported, never lowered.
@@ -578,7 +574,7 @@ def build_resolver(module_infos) -> CellsResolver:
     unlocked_scalar_results: Dict[str, str] = {}
     provider_results = {}
     observed_provider_results = {}
-    table_schemas, table_results, cached_cells, cell_infos = {}, {}, set(), {}
+    table_results, cached_cells, cell_infos = {}, set(), {}
     pandas_results = {}
     frame_schemas = {}
 
@@ -595,9 +591,6 @@ def build_resolver(module_infos) -> CellsResolver:
                 observed = getattr(cells, 'observed_provider_type', None)
                 if observed is not None:
                     observed_provider_results[cells.fqname] = observed
-                schema = getattr(cells, 'table_schema', None)
-                if schema is not None:
-                    table_schemas[cells.fqname] = schema
                 result = getattr(cells, 'table_result', None)
                 if result is not None:
                     table_results[cells.fqname] = result
@@ -636,7 +629,6 @@ def build_resolver(module_infos) -> CellsResolver:
                              scalar_refs_by_class, locked_scalar_results, unlocked_scalar_results)
     resolver.provider_results = provider_results
     resolver.observed_provider_results = observed_provider_results
-    resolver.table_schemas = table_schemas
     resolver.table_results = table_results
     resolver.pandas_results = pandas_results
     resolver.frame_schemas = frame_schemas
