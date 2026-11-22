@@ -10,7 +10,7 @@ import modelx as mx
 
 
 def test_native_held_item_uses_exact_type_and_preserves_fallback(tmp_path, monkeypatch):
-    (tmp_path / 'held_item_test_hook.py').write_text('callback = None\noverride = None\n', encoding='utf-8')
+    (tmp_path / 'held_item_test_hook.py').write_text('callback = None\noverride = None\nraw = 1\n', encoding='utf-8')
     monkeypatch.syspath_prepend(str(tmp_path))
     import held_item_test_hook as hook
 
@@ -18,6 +18,7 @@ def test_native_held_item_uses_exact_type_and_preserves_fallback(tmp_path, monke
     try:
         market = model.new_space('Market', formula='lambda shock=0: None')
         market.new_cells('rate', 'lambda t, tenor: 0.01 + 0.001 * shock + 0.0001 * t + 0.002 * tenor')
+        market.new_cells('price', 'lambda t: 1.0 / (1 + t)')
         other = model.new_space('Other', formula='lambda shock=0: None')
         other.new_cells('rate', 'lambda t, tenor: 1.01 + 0.001 * shock + 0.0001 * t + 0.002 * tenor')
         policy = model.new_space('Policy', formula='lambda key: None',
@@ -48,6 +49,7 @@ def test_native_held_item_uses_exact_type_and_preserves_fallback(tmp_path, monke
     return 1.5
 ''')
         policy.new_cells('ordered', 'lambda t: cold_market().rate(t, tenor(t))')
+        policy.new_cells('computed', 'lambda t: cold_market().price(Hook.raw + t)')
         model.export(tmp_path / 'exported')
     finally:
         model.close()
@@ -60,6 +62,7 @@ def test_native_held_item_uses_exact_type_and_preserves_fallback(tmp_path, monke
             m.Policy[1].shadowed(t)
             m.Policy[1].overridden(t)
             m.Policy[1].ordered(t)
+            m.Policy[1].computed(t)
             m.Other(1).rate(t, 1.5)
         m.Policy[2].mixed_rate(0)
         '''), encoding='utf-8')
@@ -75,6 +78,7 @@ def test_native_held_item_uses_exact_type_and_preserves_fallback(tmp_path, monke
     assert 'type(self._v_explicit) is _c_Market' not in source
     assert 'type(self._v_shadowed_market) is _c_Market' not in source
     assert 'type(self._v_overridable) is _c_Market' in source
+    assert ".price(_mx_sys._mx_exact_int64(" in source
     report = json.loads((tmp_path / 'exported_cy/_mx_admission.json').read_text(encoding='utf-8'))
     assert report['exported_cy._mx_classes._c_Policy._f_market']['return_type'] == 'object'
     c_source = (tmp_path / 'exported_cy/_mx_classes.c').read_text(encoding='utf-8')
@@ -93,6 +97,19 @@ def test_native_held_item_uses_exact_type_and_preserves_fallback(tmp_path, monke
         import sys
         import held_item_test_hook as hook
         m = __import__(sys.argv[1]).mx_model
+        computed = m.Policy[5]
+        computed.cold_market()
+        assert computed.computed(0) == 0.5
+        if sys.argv[1] == 'exported_cy':
+            for t, value, error in [(1, 1.5, TypeError), (2, 2**70, OverflowError)]:
+                hook.raw = value
+                try:
+                    computed.computed(t)
+                except error as exc:
+                    assert 'Market.price' in str(exc), exc
+                else:
+                    raise AssertionError('computed Cell argument escaped its integer check')
+            hook.raw = 1
         values = [m.Policy[key].project(t) for key in (1, 3) for t in (0, 1, 2)]
         values += [m.Policy[key].mixed_rate(t) for key in (1, 2) for t in (0, 1, 2)]
         values += [m.Policy[1].explicit_rate(t) for t in (0, 1, 2)]
