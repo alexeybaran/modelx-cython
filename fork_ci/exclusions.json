@@ -1,45 +1,4 @@
 {
-  "modelx_helpers": {
-    "modules": [
-      "modelx_cython/tests/compiled/test_builtin_reduction_lowering.py",
-      "modelx_cython/tests/compiled/test_native_scalar_math.py",
-      "modelx_cython/tests/compiled/test_provider_contract.py",
-      "modelx_cython/tests/compiled/test_public_object_return_spec.py",
-      "modelx_cython/tests/helper_contracts/test_grouped_report_metadata.py",
-      "modelx_cython/tests/helper_contracts/test_raw_scalar_preparation.py",
-      "modelx_cython/tests/helper_contracts/test_table_operations.py",
-      "modelx_cython/tests/test_complete_key_helper_modes.py",
-      "modelx_cython/tests/test_ordered_index_modes.py",
-      "modelx_cython/tests/test_pandas_preparation_modes.py",
-      "modelx_cython/tests/test_table_keys_provider.py",
-      "integration_tests/table_matrix/test_grid_index_d86.py",
-      "integration_tests/table_matrix/test_table_handles_w1_2.py",
-      "integration_tests/test_bound_table_round2_keys.py",
-      "integration_tests/test_diag_jp_forms.py",
-      "integration_tests/test_held_record_reads.py",
-      "integration_tests/test_native_table_cell_result.py",
-      "integration_tests/test_native_table_index_semantics.py",
-      "integration_tests/test_reduction_lift_table_key.py",
-      "integration_tests/test_table_forms_w1_9.py"
-    ],
-    "ids": [
-      "modelx_cython/tests/compiled/test_enum_by_type.py::test_enum_selected_by_type[True]",
-      "modelx_cython/tests/compiled/test_audit_runtime.py::test_scope_overrides_aliases_and_arithmetic",
-      "modelx_cython/tests/compiled/test_audit_runtime.py::test_prepared_helper_resources_do_not_break_model_pickling",
-      "modelx_cython/tests/test_tracer_table_schema.py::test_schema_comes_from_the_helper_and_merges_row_counts",
-      "modelx_cython/tests/test_table_admission.py::test_a_keyed_frame_is_admitted_whatever_built_it",
-      "modelx_cython/tests/test_table_admission.py::test_values_that_are_not_pandas_pass_through",
-      "modelx_cython/tests/test_table_admission.py::test_a_cell_with_arguments_is_admitted_too",
-      "modelx_cython/tests/test_table_admission.py::test_c8_is_the_helper_contract",
-      "modelx_cython/tests/test_table_admission.py::test_awkward_keys_are_admitted",
-      "modelx_cython/tests/test_table_admission.py::test_nan_values_and_strings_survive",
-      "modelx_cython/tests/test_table_admission.py::test_unused_multiindex_levels_read_as_pandas",
-      "modelx_cython/tests/test_table_admission.py::test_the_admitted_frame_is_the_value_itself",
-      "modelx_cython/tests/test_table_admission.py::test_an_admitted_table_pickles_with_its_frame",
-      "integration_tests/test_table_cells_api.py::test_table_cells_and_references",
-      "integration_tests/table_matrix/test_table_matrix.py::test_square"
-    ]
-  },
   "lifelib": {
     "modules": [],
     "ids": [

@@ -27,7 +27,6 @@ EXCLUSIONS = Path(__file__).with_name('exclusions.json')
 MANIFEST = Path(__file__).with_name('pins.json')
 SOURCE_COVERAGE = Path(__file__).with_name('source-coverage.json')
 SHA = re.compile(r'[0-9a-f]{40}')
-LEGACY_HELPER_SHA = 'ac6fc71fa15b0041c0d22eb281de21eefa05e3b4'
 PYTEST_VERSION = '8.4.2'
 
 
@@ -37,8 +36,7 @@ def expected_lanes():
              for python in ('3.13', '3.14', '3.14t')]
     lanes.extend((('ubuntu-24.04', '3.9', 'compatibility-floor'),
                   ('ubuntu-latest', '3.14', 'cython-floor'),
-                  ('windows-latest', '3.14', 'cython-floor'),
-                  ('ubuntu-latest', '3.14t', 'legacy-helper')))
+                  ('windows-latest', '3.14', 'cython-floor')))
     return {f'{runner}-py{python}-{profile}': (runner, python, profile)
             for runner, python, profile in lanes}
 
@@ -120,27 +118,6 @@ def plain_distribution(name, module_name, source):
     return distribution
 
 
-def activate_legacy_helper(workspace):
-    legacy = workspace / 'legacy-helper-source'
-    if command('git', 'rev-parse', 'HEAD', cwd=legacy) != LEGACY_HELPER_SHA or command(
-            'git', 'status', '--porcelain', '--untracked-files=no', cwd=legacy):
-        raise ValueError('legacy helper source differs from its approved pin')
-    root = workspace / 'legacy-helper-import'
-    source, isolated = legacy / 'modelx_helpers', root / 'modelx_helpers'
-    if importlib.util.find_spec('modelx_helpers') is not None:
-        raise ValueError('an unqualified helper package is already importable')
-    if not isolated.exists():
-        shutil.copytree(source, isolated)
-    for path in source.rglob('*'):
-        if path.is_file() and path.read_bytes() != (isolated / path.relative_to(source)).read_bytes():
-            raise ValueError('isolated helper package differs from its source')
-    sys.path.insert(0, str(root))
-    os.environ['PYTHONPATH'] = str(root)
-    imported = Path(importlib.import_module('modelx_helpers').__file__).resolve()
-    if not imported.is_relative_to(isolated.resolve()):
-        raise ValueError('legacy helper imported outside its isolated package')
-
-
 def dependencies(workspace, profile):
     from packaging.specifiers import SpecifierSet
 
@@ -162,9 +139,8 @@ def dependencies(workspace, profile):
     else:
         core['lifelib'] = plain_distribution('lifelib', 'lifelib', workspace / 'lifelib')
     helpers = importlib.util.find_spec('modelx_helpers') is not None
-    legacy = profile == 'legacy-helper'
-    if helpers != legacy:
-        raise ValueError('available legacy helper package differs from the job profile')
+    if helpers:
+        raise ValueError('modelx_helpers must be absent from release verification')
     versions = {key: dist.version for key, dist in core.items()}
     for name, module in (('Cython', 'Cython'), ('pandas', 'pandas'), ('numpy', 'numpy'),
                          ('pytest', 'pytest'), ('libcst', 'libcst'), ('openpyxl', 'openpyxl'), ('psutil', 'psutil')):
@@ -177,8 +153,7 @@ def dependencies(workspace, profile):
     if versions['pytest'] != PYTEST_VERSION:
         raise ValueError(f'test IDs require pytest {PYTEST_VERSION}')
     return {'versions': versions, 'requires_python': requires_python,
-            'lifelib_installed': available, 'modelx_helpers_present': helpers,
-            'legacy_helper_commit': LEGACY_HELPER_SHA if legacy else None}
+            'lifelib_installed': available, 'modelx_helpers_present': helpers}
 
 
 def junit_identity(nodeid):
@@ -217,7 +192,7 @@ def junit_counts(path, selected=None):
 def exclusions_for(compiler, suite, profile):
     manifest = json.loads(EXCLUSIONS.read_text(encoding='utf-8'))
     result = {'modules': {}, 'ids': {}}
-    for dependency in ('modelx_helpers', 'lifelib') if profile == 'compatibility-floor' else ('modelx_helpers',):
+    for dependency in ('lifelib',) if profile == 'compatibility-floor' else ():
         for kind, targets in manifest[dependency].items():
             for target in targets:
                 path = target.split('::', 1)[0]
@@ -279,7 +254,6 @@ def run_suite(workspace, suite, profile, interpreter):
     report = workspace / 'reports' / (suite + '.xml')
     compiler = workspace / 'compiler'
     exclusions = exclusions_for(compiler, suite, profile)
-    legacy = profile == 'legacy-helper'
     arguments = ['-rfEs', '-q', '--junitxml=' + str(report)]
     if legacy:
         arguments.extend([*exclusions['modules'], *exclusions['ids']])
@@ -287,6 +261,8 @@ def run_suite(workspace, suite, profile, interpreter):
     else:
         arguments.append(SUITES[suite])
         arguments.extend('--ignore=' + path for path in exclusions['modules'])
+    arguments.append(SUITES[suite])
+    arguments.extend('--ignore=' + path for path in exclusions['modules'])
     inventory = Inventory(exclusions['ids'])
     if sys.platform == 'win32':
         arguments.append('--basetemp=C:/t-' + suite)
@@ -333,8 +309,6 @@ def main():
     runtime(interpreter)
     if args.phase == 'install':
         install(workspace, profile)
-    if profile == 'legacy-helper':
-        activate_legacy_helper(workspace)
     installed = dependencies(workspace, profile)
     observed_runtime = runtime(interpreter)
     environment = {'lane': lane, 'run_id': int(os.environ['GITHUB_RUN_ID']),
