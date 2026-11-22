@@ -14,12 +14,12 @@ from .syntax import arguments
 _NATIVE_RESULTS = {'double', 'long long', 'bint'}
 
 
-def pin_function(name):
+def pin_function(name, owner, producer):
     # Cython can defer a bare cast of an object field until after computing
     # the arguments. A C function returning the object forces an owned
     # temporary at receiver evaluation, just as the ordinary call does.
     return cst.parse_statement(f'@{CY_MOD}.cfunc\n@{CY_MOD}.inline\n'
-                               f'def {name}(value: object) -> object:\n    return value\n')
+                               f'def {name}(root: {owner}) -> object:\n    return root.{VAR_PREF}{producer}\n')
 
 
 def _traced_target(cell):
@@ -123,7 +123,8 @@ class _HeldCalls(cst.CSTTransformer):
         ready = cst.parse_expression(
             f'type({MX_SELF}) is {self.owner.name} and {MX_SELF}.{HAS_PREF}{producer} '
             f'and type({field}) is {target.name}')
-        cast = cst.parse_expression(f'{CY_MOD}.cast({target.name}, {self.pin}({field}))')
+        pin = self.pin(self.owner.name, producer)
+        cast = cst.parse_expression(f'{CY_MOD}.cast({target.name}, {pin}({MX_SELF}))')
         native = updated.with_changes(func=cst.Attribute(cast, func.attr), args=args, lpar=(), rpar=())
         fallback = updated.with_changes(lpar=(), rpar=())
         if original in self.double_returns and method.get_rettype_expr(c_style=True) == 'double':

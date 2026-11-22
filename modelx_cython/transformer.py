@@ -734,8 +734,7 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
             cells=cells, providers=self.helper_providers)
         from modelx_cython import space_results
         if self._resolver is not None:
-            node, held = space_results.lower(node, cls_info, cells, scope, operand_kind, self._pin_held_item)
-            self._uses_pin_held_item |= held
+            node, _ = space_results.lower(node, cls_info, cells, scope, operand_kind, self._pin_held_item)
         # D110 P1: a local bound once to an item of a typed ItemSpace Reference is declared its class
         from modelx_cython.item_locals import type_item_locals
         node, cells.typed_item_locals = type_item_locals(node, cls_info, self.module)
@@ -998,9 +997,15 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
         self._next_cold_sum = 0
         self._uses_native_round = False
         from modelx_cython.scopes import Names
-        self._pin_held_item = Names(self._module_node).reserve('_mx_pin_held_item')
-        self._uses_pin_held_item = False
+        self._held_names = Names(self._module_node)
+        self._held_pins = {}
         return self.wrapper.visit(self)
+
+    def _pin_held_item(self, owner, producer):
+        key = owner, producer
+        if key not in self._held_pins:
+            self._held_pins[key] = self._held_names.reserve(f'_mx_pin_held_item_{len(self._held_pins)}')
+        return self._held_pins[key]
 
     def leave_Module(self, original_node: Module, updated_node: Module) -> Module:
         """Prepend cimports of ``_mx_sys`` and each child-space module,
@@ -1055,9 +1060,10 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
         if self._cold_sums or self._cold_spills or self._held_arrays:
             module = module.with_changes(body=(*module.body, *self._cold_sums, *self._cold_spills,
                                                *(stmt for held in self._held_arrays.values() for stmt in held.body)))
-        if self._uses_pin_held_item:
+        if self._held_pins:
             from modelx_cython.space_results import pin_function
-            module = module.with_changes(body=(*module.body, pin_function(self._pin_held_item)))
+            pins = [pin_function(name, *key) for key, name in self._held_pins.items()]
+            module = module.with_changes(body=(*module.body, *pins))
         # D116: one root construction and release per compiled ItemSpace class (collect and direct)
         from modelx_cython import item_roots
         roots = [fn for name in sorted(self.module.visitor.itemspace_classes) if name in self.module.classes

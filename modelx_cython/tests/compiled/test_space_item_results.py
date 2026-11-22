@@ -73,7 +73,7 @@ def test_native_held_item_uses_exact_type_and_preserves_fallback(tmp_path, monke
     assert build.returncode == 0, build.stdout + build.stderr
     source = (tmp_path / 'exported_cy/_mx_classes.py').read_text(encoding='utf-8')
     assert 'type(self._v_market) is _c_Market' in source
-    assert '_mx_cy.cast(_c_Market, _mx_pin_held_item(self._v_market)).rate(' in source
+    assert re.search(r'_mx_cy\.cast\(_c_Market, _mx_pin_held_item_\d+\(self\)\)\.rate\(', source)
     assert 'type(self._v_mixed) is _c_Market' not in source
     assert 'type(self._v_explicit) is _c_Market' not in source
     assert 'type(self._v_shadowed_market) is _c_Market' not in source
@@ -83,9 +83,9 @@ def test_native_held_item_uses_exact_type_and_preserves_fallback(tmp_path, monke
     assert report['exported_cy._mx_classes._c_Policy._f_market']['return_type'] == 'object'
     c_source = (tmp_path / 'exported_cy/_mx_classes.c').read_text(encoding='utf-8')
     # The evaluated receiver is an owned temporary while the tenor Cell runs.
-    pin = re.search(r'(?P<field>__pyx_t_\d+) = \(?__pyx_v_self->_v_cold_market\)?;\s*'
-                    r'__Pyx_INCREF\((?P=field)\);\s*'
-                    r'(?P<held>__pyx_t_\d+) = \w+__mx_pin_held_item\((?P=field)\);', c_source)
+    helper = re.search(r'def (_mx_pin_held_item_\d+)\(root: _c_Policy\) -> object:\s+return root\._v_cold_market', source)
+    assert helper is not None
+    pin = re.search(r'(?P<held>__pyx_t_\d+) = \w+' + helper[1] + r'\(__pyx_v_self\);', c_source)
     assert pin is not None
     argument_start = c_source.index('_has_tenor[', pin.end())
     native_call = c_source.index('->__pyx_vtab)->rate(', argument_start)
