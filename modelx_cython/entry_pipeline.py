@@ -53,6 +53,28 @@ def _public_entry(layout, methods):
     return methods.get((layout.owner, layout.formula[len(FORMULA_PREF):]))
 
 
+def _sibling_accessor_uses(state):
+    """Count only calls on a typed, unmodified self inside unrelated extension accessors."""
+    owners = {cls.name.value for cls in state.syntax.body if isinstance(cls, cst.ClassDef)
+              and len(cls.bases) == 1 and dotted_name(cls.bases[0].value) == '_mx_sys.BaseSpace'
+              and any(dotted_name(d.decorator) == f'{CY_MOD}.cclass' for d in cls.decorators)}
+    total = Counter()
+    own = Counter()
+    duplicated = Counter(name for owner, name in state.methods if owner in owners)
+    for (owner, name), method in state.methods.items():
+        if (owner not in owners or duplicated[name] < 2 or
+                not any(dotted_name(d.decorator) == f'{CY_MOD}.ccall' for d in method.decorators)):
+            continue
+        formula = FORMULA_PREF + name
+        nodes = list(walk(method.body))
+        if any(isinstance(n, OPAQUE_SCOPES) for n in nodes) or MX_SELF in state.facts.bindings(nodes):
+            continue
+        calls = sum(isinstance(n, cst.Call) and dotted_name(n.func) == f'{MX_SELF}.{formula}' for n in nodes)
+        total[formula] += calls
+        own[owner, formula] += calls
+    return owners, total, own
+
+
 def _formula_ranges(state, layouts, guards, uses):
     spills = {layout.spill_entry for layout in layouts.values() if layout.spill_entry}
 
@@ -61,6 +83,7 @@ def _formula_ranges(state, layouts, guards, uses):
                        and node.value in spills and state.facts.contexts.get(node) is ExpressionContext.LOAD)
 
     spill_uses = spill_references(state.syntax) if spills else Counter()
+    owners, sibling_total, owner_uses = _sibling_accessor_uses(state)
     ranges = {}
     for name, guard in guards.items():
         layout = layouts[name]
@@ -69,6 +92,8 @@ def _formula_ranges(state, layouts, guards, uses):
         public = _public_entry(layout, state.methods)
         shared_guard = public is not None and same_expression(guard, checked_dense_guard(public.body, layout))
         uses_here = uses[layout.formula] - (_attribute_counts(public)[layout.formula] if shared_guard else 0)
+        if layout.owner in owners:
+            uses_here -= sibling_total[layout.formula] - owner_uses[layout.owner, layout.formula]
         if layout.checks_spill_in_helper or (not layout.exact_spill and uses_here == 1):
             ranges[name] = layout.axes
         elif layout.exact_spill and layout.spill_entry and uses_here == 2:
