@@ -50,9 +50,6 @@ cdef class NumericCache:
     cdef size_t capacity, used
     cdef PrimaryEntry* primary
     cdef size_t primary_capacity, primary_used
-    cdef size_t hot_rows, hot_cols
-    cdef unsigned char* hot_ready
-    cdef word* hot_values
     cdef bint get(self, word a, word b, word c, bint reflexive, word* value) except? -1
     cdef void put(self, word a, word b, word c, bint reflexive, word value) except *
     cdef bint reserve(self, word a, word b, word c, bint reflexive, Py_ssize_t* slot,

@@ -1,6 +1,6 @@
 # cython: freethreading_compatible=True
 """Exact fixed-signature numeric keys; no formula or policy execution state."""
-from libc.stdlib cimport calloc, free, malloc
+from libc.stdlib cimport calloc, free
 from libc.string cimport memset
 cimport cython
 
@@ -27,13 +27,7 @@ cdef inline size_t position(Entry* entries, size_t capacity, word a, word b, wor
 
 
 cdef inline bint read(NumericCache cache, word a, word b, word c, word* value) noexcept:
-    cdef size_t index
-    if cache.hot_ready != NULL and a < cache.hot_rows and b < cache.hot_cols and c == 0:
-        index = a * cache.hot_cols + b
-        if cache.hot_ready[index]:
-            value[0] = cache.hot_values[index]
-            return True
-    index = position(cache.entries, cache.capacity, a, b, c)
+    cdef size_t index = position(cache.entries, cache.capacity, a, b, c)
     if not cache.entries[index].ready:
         return False
     value[0] = cache.entries[index].value
@@ -66,29 +60,10 @@ cdef inline void write(NumericCache cache, word a, word b, word c, word value) e
     cache.entries[index].c = c
     cache.entries[index].value = value
     cache.entries[index].ready = True
-    if a < cache.hot_rows and b < cache.hot_cols and c == 0:
-        if cache.hot_ready == NULL:
-            cache.hot_values = <word*>malloc(cache.hot_rows * cache.hot_cols * sizeof(word))
-            cache.hot_ready = <unsigned char*>calloc(cache.hot_rows * cache.hot_cols, 1)
-            if cache.hot_ready == NULL or cache.hot_values == NULL:
-                free(cache.hot_values)
-                free(cache.hot_ready)
-                cache.hot_values = NULL
-                cache.hot_ready = NULL
-                cache.hot_rows = cache.hot_cols = 0
-                return
-        index = a * cache.hot_cols + b
-        cache.hot_values[index] = value
-        cache.hot_ready[index] = 1
 
 
 cdef class NumericCache:
-    def __cinit__(self, size_t primary_capacity=0, size_t hot_rows=0, size_t hot_cols=0):
-        if hot_rows and hot_cols:
-            if primary_capacity or hot_rows > 65536 // hot_cols:
-                raise ValueError("invalid shared numeric cache window")
-            self.hot_rows = hot_rows
-            self.hot_cols = hot_cols
+    def __cinit__(self, size_t primary_capacity=0):
         self.capacity = 8
         self.entries = <Entry*>calloc(self.capacity, sizeof(Entry))
         if self.entries == NULL:
@@ -106,8 +81,6 @@ cdef class NumericCache:
             self.primary_capacity = primary_capacity
 
     def __dealloc__(self):
-        free(self.hot_values)
-        free(self.hot_ready)
         free(self.primary)
         free(self.entries)
 
@@ -123,11 +96,7 @@ cdef class NumericCache:
                 if self.primary[index].state == 2:
                     values.append((self.primary[index].a, self.primary[index].b,
                                    self.primary[index].c, self.primary[index].value))
-            if self.hot_rows:
-                args = (self.primary_capacity, self.hot_rows, self.hot_cols)
-            else:
-                args = (self.primary_capacity,)
-        return (NumericCache, args, values)
+        return (NumericCache, (self.primary_capacity,), values)
 
     def __setstate__(self, values):
         cdef word a, b, c, value, ignored
@@ -202,8 +171,6 @@ cdef class NumericCache:
     cpdef reset(self):
         with cython.critical_section(self):
             memset(self.entries, 0, self.capacity * sizeof(Entry))
-            if self.hot_ready != NULL:
-                memset(self.hot_ready, 0, self.hot_rows * self.hot_cols)
             self.used = 0
             if self.primary_capacity:
                 memset(self.primary, 0, self.primary_capacity * sizeof(PrimaryEntry))

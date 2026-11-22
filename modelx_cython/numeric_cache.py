@@ -28,22 +28,12 @@ def providers(module):
 
 
 def constructor(cell):
-    from . import automatic
     if len(cell.params) > 3:
+        from . import automatic
         owned = exclusively_owned(cell)
         capacity = max(8, automatic.primary_capacity(cell)) if owned and automatic.enabled(cell) else 8
         return f'{WIDE_TYPE}({len(cell.params)}, {owned}, {capacity})'
-    capacity = primary_capacity(cell)
-    if (not capacity and len(cell.params) == 2 and cell.is_locked and automatic.enabled(cell)
-            and all(cell.get_argtype_expr(p, c_style=True) == 'long long' for p in cell.params)):
-        sample = cell._rt
-        lower = getattr(sample, 'observed_min_args', {})
-        upper = getattr(sample, 'observed_max_args', {})
-        if all(p in lower and p in upper and lower[p] >= 0 for p in cell.params):
-            rows, cols = (upper[p] + 1 for p in cell.params)
-            if 0 < rows * cols <= min(65536, automatic.max_dense_entries(cell)):
-                return f'{TYPE}(0, {rows}, {cols})'
-    return f'{TYPE}({capacity or ""})'
+    return f'{TYPE}({primary_capacity(cell) or ""})'
 
 
 def classify_shared_items(modules):
