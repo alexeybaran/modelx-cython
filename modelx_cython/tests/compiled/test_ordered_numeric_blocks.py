@@ -30,10 +30,14 @@ def test_factory_alias_and_rejection(tmp_path):
         model.export(tmp_path / "exported")
     finally:
         model.close()
-    (tmp_path / "spec.py").write_text(repr({"spaces": {"Runs": {"serial_collect": "reduce"}}}))
+    (tmp_path / "spec.py").write_text(repr({"spaces": {"Runs": {"serial_collect": "reduce",
+                                                              "factory_collect_reuse": True}}}))
     (tmp_path / "sample.py").write_text("from exported import mx_model as m\nm.Runs.collect(2)\n")
     subprocess.run([sys.executable, "-B", "-m", "modelx_cython", "exported",
                     "--sample", "sample.py", "--spec", "spec.py"], cwd=tmp_path, check=True)
+    generated = (tmp_path / "exported_cy" / "_mx_classes.py").read_text()
+    if "def _mx_fill_ordered_rows" in generated:
+        assert "_mx_reuse_private" in generated
     probe = textwrap.dedent("""\
         import json, math, sys, importlib
         m = __import__(sys.argv[1]).mx_model
@@ -46,6 +50,8 @@ def test_factory_alias_and_rejection(tmp_path):
                 blocks.append(len(coords))
                 return native(instance, coords)
             runtime._OrderedNumericRows.block = witness
+        direct = m.Runs[2, 9]
+        direct_value = direct.total()
         out = []
         for w in (1, 4):
             m.collect_workers = w
@@ -87,6 +93,7 @@ def test_factory_alias_and_rejection(tmp_path):
             assert m.Runs._mx_prepare_ordered_rows_v1(tuple(range(35)), (4,), 8, 4) is None
             blocks.clear()
             assert list(m.Runs.collect(5).sum.by_period) == [3, 1] and not blocks
+        assert m.Runs[2, 9] is direct and direct.total() == direct_value
         print(json.dumps(out))
     """)
     def invoke(package):
