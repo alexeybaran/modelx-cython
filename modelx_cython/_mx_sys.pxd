@@ -6,7 +6,8 @@ from cpython.long cimport PyLong_AsLongLong, PyLong_Check, PyLong_CheckExact
 from cpython.number cimport PyNumber_Index
 from cpython.object cimport Py_TYPE, PyObject_GenericGetAttr, PyObject_GenericSetAttr
 from cpython.unicode cimport PyUnicode_Check, PyUnicode_Compare
-from modelx_cython._rounding cimport _mx_round_one, _mx_round_digits
+from modelx_cython._rounding cimport _mx_round_one, _mx_round_digits, _nearest_even
+from libc.math cimport fabs, copysign
 cimport cython
 
 
@@ -73,6 +74,17 @@ cdef inline long long _mx_integer_result(_mx_integer_source value, str path) exc
         return <long long>value
     else:
         return value
+
+
+cdef inline long long _mx_rounded_index(object constructor, object function,
+                                         _mx_integer_source value, object canonical,
+                                         str path) except? -1:
+    cdef double magnitude
+    if _mx_integer_source is double:
+        magnitude = fabs(value)
+        if constructor is int and canonical is not None and function is canonical and magnitude < 4503599627370496.0:
+            return <long long>copysign(_nearest_even(magnitude, 0.0), value)
+    return _mx_exact_int64(constructor(_mx_round_one(function, value, canonical)), path)
 
 
 cdef extern from *:

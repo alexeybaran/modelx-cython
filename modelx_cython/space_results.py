@@ -8,6 +8,7 @@ from .numeric_cache import exclusively_owned
 from .powers import KIND_FLOAT
 from .scopes import Names
 from .typedefs import primitive_kind
+from .syntax import arguments
 
 
 _NATIVE_RESULTS = {'double', 'long long', 'bint'}
@@ -106,8 +107,16 @@ class _HeldCalls(cst.CSTTransformer):
             if checked or ctype != 'long long' or MX_SYS_MOD in self.names:
                 return updated
             checked = True
-            conversion = cst.Call(cst.parse_expression(f'{MX_SYS_MOD}._mx_exact_int64'), (
-                cst.Arg(args[i].value), cst.Arg(cst.SimpleString(repr(method.model_path)))))
+            value = args[i].value
+            path = cst.Arg(cst.SimpleString(repr(method.model_path)))
+            constructor = arguments(value, 'int', 1)
+            rounded = arguments(constructor[0], f'{MX_SYS_MOD}._mx_round_one', 3) if constructor else None
+            if rounded:
+                conversion = cst.Call(cst.parse_expression(f'{MX_SYS_MOD}._mx_rounded_index'),
+                                      (cst.Arg(value.func), *(cst.Arg(v) for v in rounded), path))
+            else:
+                conversion = cst.Call(cst.parse_expression(f'{MX_SYS_MOD}._mx_integer_result'),
+                                      (cst.Arg(value), path))
             args[i] = args[i].with_changes(value=conversion)
 
         field = f'{MX_SELF}.{VAR_PREF}{producer}'
