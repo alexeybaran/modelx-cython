@@ -110,10 +110,12 @@ class _HeldCalls(cst.CSTTransformer):
             value = args[i].value
             path = cst.Arg(cst.SimpleString(repr(method.model_path)))
             constructor = arguments(value, 'int', 1)
-            rounded = arguments(constructor[0], f'{MX_SYS_MOD}._mx_round_one', 3) if constructor else None
+            rounded = arguments(constructor[0] if constructor else value, f'{MX_SYS_MOD}._mx_round_one', 3)
             if rounded:
-                conversion = cst.Call(cst.parse_expression(f'{MX_SYS_MOD}._mx_rounded_index'),
-                                      (cst.Arg(value.func), *(cst.Arg(v) for v in rounded), path))
+                helper = '_mx_rounded_index' if constructor else '_mx_bare_round_index'
+                prefix = (cst.Arg(value.func),) if constructor else ()
+                conversion = cst.Call(cst.parse_expression(f'{MX_SYS_MOD}.{helper}'),
+                                      (*prefix, *(cst.Arg(v) for v in rounded), path))
             else:
                 conversion = cst.Call(cst.parse_expression(f'{MX_SYS_MOD}._mx_integer_result'),
                                       (cst.Arg(value), path))

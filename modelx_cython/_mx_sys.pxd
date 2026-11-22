@@ -76,15 +76,27 @@ cdef inline long long _mx_integer_result(_mx_integer_source value, str path) exc
         return value
 
 
-cdef inline long long _mx_rounded_index(object constructor, object function,
+cdef inline long long _mx_round_as_index(object constructor, bint convert, object function,
                                          _mx_integer_source value, object canonical,
                                          str path) except? -1:
     cdef double magnitude
     if _mx_integer_source is double:
         magnitude = fabs(value)
-        if constructor is int and canonical is not None and function is canonical and magnitude < 4503599627370496.0:
+        if (not convert or constructor is int) and canonical is not None and function is canonical and magnitude < 4503599627370496.0:
             return <long long>copysign(_nearest_even(magnitude, 0.0), value)
-    return _mx_exact_int64(constructor(_mx_round_one(function, value, canonical)), path)
+    rounded = _mx_round_one(function, value, canonical)
+    return _mx_exact_int64(constructor(rounded) if convert else rounded, path)
+
+
+cdef inline long long _mx_rounded_index(object constructor, object function,
+                                        _mx_integer_source value, object canonical,
+                                        str path) except? -1:
+    return _mx_round_as_index(constructor, True, function, value, canonical, path)
+
+
+cdef inline long long _mx_bare_round_index(object function, _mx_integer_source value,
+                                           object canonical, str path) except? -1:
+    return _mx_round_as_index(None, False, function, value, canonical, path)
 
 
 cdef extern from *:

@@ -50,6 +50,8 @@ def test_native_held_item_uses_exact_type_and_preserves_fallback(tmp_path, monke
 ''')
         policy.new_cells('ordered', 'lambda t: cold_market().rate(t, tenor(t))')
         policy.new_cells('computed', 'lambda t: cold_market().price(Hook.raw + t)')
+        policy.new_cells('rounded', 'lambda t: cold_market().price(round(0.5 + t))')
+        policy.new_cells('wrapped', 'lambda t: cold_market().price(int(round(0.5 + t)))')
         model.export(tmp_path / 'exported')
     finally:
         model.close()
@@ -63,6 +65,8 @@ def test_native_held_item_uses_exact_type_and_preserves_fallback(tmp_path, monke
             m.Policy[1].overridden(t)
             m.Policy[1].ordered(t)
             m.Policy[1].computed(t)
+            m.Policy[1].rounded(t)
+            m.Policy[1].wrapped(t)
             m.Other(1).rate(t, 1.5)
         m.Policy[2].mixed_rate(0)
         '''), encoding='utf-8')
@@ -79,6 +83,8 @@ def test_native_held_item_uses_exact_type_and_preserves_fallback(tmp_path, monke
     assert 'type(self._v_shadowed_market) is _c_Market' not in source
     assert 'type(self._v_overridable) is _c_Market' in source
     assert ".price(_mx_sys._mx_integer_result(" in source
+    assert ".price(_mx_sys._mx_bare_round_index(" in source
+    assert ".price(_mx_sys._mx_rounded_index(" in source
     report = json.loads((tmp_path / 'exported_cy/_mx_admission.json').read_text(encoding='utf-8'))
     assert report['exported_cy._mx_classes._c_Policy._f_market']['return_type'] == 'object'
     c_source = (tmp_path / 'exported_cy/_mx_classes.c').read_text(encoding='utf-8')
@@ -99,6 +105,9 @@ def test_native_held_item_uses_exact_type_and_preserves_fallback(tmp_path, monke
         m = __import__(sys.argv[1]).mx_model
         computed = m.Policy[5]
         computed.cold_market()
+        for index in (0, 1, 2):
+            expected = 1.0 / (1 + round(0.5 + index))
+            assert computed.rounded(index) == computed.wrapped(index) == expected
         assert computed.computed(0) == 0.5
         if sys.argv[1] == 'exported_cy':
             for t, value, error in [(1, 1.5, TypeError), (2, 2**70, OverflowError)]:
