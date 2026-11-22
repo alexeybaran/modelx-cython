@@ -123,7 +123,10 @@ cdef class NumericCache:
                 if self.primary[index].state == 2:
                     values.append((self.primary[index].a, self.primary[index].b,
                                    self.primary[index].c, self.primary[index].value))
-        args = (self.primary_capacity, self.hot_rows, self.hot_cols) if self.hot_rows else (self.primary_capacity,)
+            if self.hot_rows:
+                args = (self.primary_capacity, self.hot_rows, self.hot_cols)
+            else:
+                args = (self.primary_capacity,)
         return (NumericCache, args, values)
 
     def __setstate__(self, values):
