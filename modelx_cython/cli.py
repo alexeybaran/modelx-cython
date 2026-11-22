@@ -398,6 +398,9 @@ def main_handler(args: argparse.Namespace, stdout: IO[str], stderr: IO[str]) -> 
         runtime_path = model_path / (MX_SYS_MOD + '.py')
         runtime = CollectRuntime(runtime_path.read_text(encoding='utf-8'))
         runtime.require_current((u.module_info for u in units), policy.parallel_workers)
+        semantics = model_path / '_mx_collect_semantics.py'
+        if runtime.hook and semantics.is_file():
+            modules.append(rel_model_path / semantics.name)
 
         helper_providers = set()
         object_providers = {}

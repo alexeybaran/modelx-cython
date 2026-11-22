@@ -147,13 +147,17 @@ def analyze(module, evaluator_args=False):
     return result
 
 
-def _isolated_leaf(node, cls):
+def _isolated_leaf(node, cls, *, fresh=False):
     """A slotted leaf ItemSpace without child Spaces, model lock, dynamic References or collect hooks:
     its policy root is exactly ``_mx_new_root_C(base)`` (D116)."""
+    hooks = ('_mx_collect_attach', '_mx_collect_release')
+    if (not fresh or getattr(cls, 'native_contexts', None)
+            or getattr(cls, 'collect_shared_item', False)):
+        hooks += ('_mx_apply_formula',)
     return not (len(node.bases) != 1 or dotted_name(node.bases[0].value) != '_mx_sys.BaseSpace'
                 or cls.spaces or cls.is_locked or node.name.value in cls.visitor.dynamic_ref_classes
                 or any(_method(node, hook) is not None or hook in cls.refs
-                       for hook in ('_mx_apply_formula', '_mx_collect_attach', '_mx_collect_release')))
+                       for hook in hooks) or '_mx_apply_formula' in cls.refs)
 
 
 def _match(node, cls, reuse, parallel_reuse, ordered=False, evaluator_args=False):
@@ -564,7 +568,9 @@ def _shared_root_methods(cls, node):
     same generated functions as the evaluator and the direct route (D116), when the class offers them:
     ``_mx_collect_new_root()`` returns ``_mx_new_root_C(self)`` under the evaluator's own condition, else
     None (the export then keeps its generic walk); ``_mx_collect_release_root(root)`` releases it."""
-    if node.name.value not in cls.visitor.itemspace_classes or not _isolated_leaf(node, cls):
+    # The generic dispatcher assigns parameters and executes the Space factory on
+    # every new root. Only the allocation and the release of that root are shared.
+    if node.name.value not in cls.visitor.itemspace_classes or not _isolated_leaf(node, cls, fresh=True):
         return ()
     from .item_roots import new_root, release_item
     return tuple(cst.parse_module(
