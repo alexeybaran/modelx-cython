@@ -355,6 +355,7 @@ class KeyFacts:
             return 'extreme of an integer level'
         if isinstance(expr, cst.Call) and _plain_args(expr):
             func = expr.func
+            from .vectors import ALIAS as _VECTORS
             if (isinstance(func, cst.Attribute) and isinstance(func.value, cst.Name)
                     and func.value.value == _VECTORS and func.attr.value == 'ivec_get'):
                 return 'element of an integer vector'      # diag-kr: the vector pass's typed read
