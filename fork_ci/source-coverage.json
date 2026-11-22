@@ -1,5 +1,5 @@
 {
-  "compiler_pin": "f4e4157f0c63189d670c4df9952858f66c863cdd",
+  "compiler_pin": "6865e538260c1d72f0c0ed96e34714511fb42eeb",
   "pytest": "8.4.2",
   "suites": {
     "integration": {
@@ -1215,7 +1215,8 @@
         "modelx_cython/tests/test_expression_context.py::test_detached_call_arguments_keep_their_implicit_context[call(\\n    left\\n    * (right - 1)\\n)]",
         "modelx_cython/tests/test_fp_contract.py::test_generated_setup_wraps_the_build_command",
         "modelx_cython/tests/test_fp_contract.py::test_model_modules_get_the_flag_once_on_gcc_style_compilers",
-        "modelx_cython/tests/test_fp_contract.py::test_providers_and_msvc_are_left_alone",
+        "modelx_cython/tests/test_fp_contract.py::test_msvc_release_model_classes_inline_small_helpers",
+        "modelx_cython/tests/test_fp_contract.py::test_providers_keep_their_default_flags",
         "modelx_cython/tests/test_generator_builtin_lowering.py::test_unregistered_builtin_preserves_source_without_an_ast_frontend",
         "modelx_cython/tests/test_helper_members.py::test_aliases_share_capabilities_without_freezing_member_callables",
         "modelx_cython/tests/test_helper_members.py::test_capture_does_not_execute_module_or_object_getattr",
