@@ -276,6 +276,7 @@ def test_object_column_bulk_leaves_an_overridden_series_method_on_scalar_path(ta
 def test_object_column_bulk_keeps_replaced_string_array_scalar_lookup(tables, monkeypatch):
     _tables, _ = tables
     frame = pd.DataFrame({'value': pd.Series(['a', 'b'], dtype=pd.StringDtype(storage='python'))})
+    frame.columns = pd.Index(['value'], dtype=object)
     original = pd.arrays.StringArray.__getitem__
     marker = object()
 
