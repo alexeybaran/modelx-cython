@@ -80,6 +80,18 @@ def test_only_a_plain_row_formula_is_a_row_cell():
         assert not accepted, formula
 
 
+def test_identical_table_prefix_requires_independent_generated_spaces():
+    def space(name, base='_mx_sys.BaseSpace', key='self.policy_id'):
+        source = HEADER.replace('_c_Projection:', name + '(' + base + '):')
+        return cst.parse_module(source.replace('self.policy_id', key)).body[0]
+
+    own = space('_c_First')
+    expr = row_cells._row_expression(own.body.body[0])
+    assert row_cells.independent_prefix(own, space('_c_Second'), 'model_point', expr)
+    assert not row_cells.independent_prefix(own, space('_c_Derived', '_c_First'), 'model_point', expr)
+    assert not row_cells.independent_prefix(own, space('_c_Second', key='self.other'), 'model_point', expr)
+
+
 def test_inline_replaces_only_calls_of_accepted_cells():
     accepted, _ = analyse()
     node = cst.parse_module('def _f_y(self):\n    return float(self.model_point()["sa"]) + self.other()\n')

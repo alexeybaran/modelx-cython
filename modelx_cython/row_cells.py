@@ -111,6 +111,21 @@ def _row_expression(func):
     return expr.with_changes(lpar=(), rpar=())
 
 
+def independent_prefix(owner, sibling, name, expr):
+    """Two independent exported Spaces may define the same self-relative table prefix."""
+    base = cst.parse_expression('_mx_sys.BaseSpace')
+    for cls in (owner, sibling):
+        if (not cls.name.value.startswith('_c_') or len(cls.bases) != 1
+                or not cls.bases[0].value.deep_equals(base) or cls.decorators or cls.keywords):
+            return False
+    formulas = [f for f in sibling.body.body
+                if isinstance(f, cst.FunctionDef) and f.name.value == FORMULA + name]
+    if len(formulas) != 1:
+        return False
+    other = _row_expression(formulas[0])
+    return other is not None and other.deep_equals(expr)
+
+
 def item_constant(node, cached_call):
     """A key part whose value is fixed for an item until its caches are cleared: an integer
     literal, ``self.<name>`` (a Space parameter or Reference), or ``self.<cell>()`` of a cached

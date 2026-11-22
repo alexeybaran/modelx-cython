@@ -788,8 +788,10 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
                         expr = row_cells._row_expression(func)
                         name = func.name.value[3:]
                         if expr is not None and not any(
-                                isinstance(f, cst.FunctionDef) and f.name.value in ('_f_' + name, name)
-                                for c in classes if c is not own for f in c.body.body):
+                                not row_cells.independent_prefix(own, c, name, expr)
+                                for c in classes if c is not own and any(
+                                    isinstance(f, cst.FunctionDef) and f.name.value in ('_f_' + name, name)
+                                    for f in c.body.body)):
                             found[name] = expr
             cache[cls_info.name] = found
         return cache[cls_info.name]

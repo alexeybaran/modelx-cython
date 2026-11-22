@@ -1,7 +1,7 @@
 """Native calls through an exact ItemSpace already held in an owned Cell cache."""
 
 import libcst as cst
-from libcst.metadata.scope_provider import BuiltinAssignment
+from libcst.metadata.scope_provider import BuiltinAssignment, GlobalScope, ImportAssignment
 
 from .consts import CY_MOD, HAS_PREF, MX_SELF, MX_SYS_MOD, SPACE_PREF, VAR_PREF
 from .numeric_cache import exclusively_owned
@@ -117,6 +117,15 @@ class _HeldCalls(cst.CSTTransformer):
                          lpar=(cst.LeftParen(), *updated.lpar), rpar=(*updated.rpar, cst.RightParen()))
 
 
+def _runtime_import(binding):
+    node = binding.node
+    return (isinstance(binding, ImportAssignment) and isinstance(binding.scope, GlobalScope)
+            and isinstance(node, cst.ImportFrom) and node.module is None and len(node.relative) == 1
+            and not isinstance(node.names, cst.ImportStar)
+            and any(isinstance(alias.name, cst.Name) and alias.name.value == MX_SYS_MOD
+                    and alias.asname is None for alias in node.names))
+
+
 def lower(node, owner, cell, scope, operand_kind, pin):
     """Leave the cold or unexpected result expression in its original evaluation order."""
     names = Names(node).names
@@ -127,6 +136,11 @@ def lower(node, owner, cell, scope, operand_kind, pin):
         return node, False
     integers = {param for param in cell.params if _binds_parameter(scope, param)
                 and cell.get_argtype_expr(param, c_style=True, formula=True) == 'long long'}
+    # An earlier transform may have introduced a qualified runtime helper
+    # (for example for round). Its presence is safe with the export's exact import.
+    bindings = tuple(scope[MX_SYS_MOD])
+    if MX_SYS_MOD in names and len(bindings) == 1 and _runtime_import(bindings[0]):
+        names = names - {MX_SYS_MOD}
     calls = _HeldCalls(owner, names, integers, operand_kind, pin)
     body = node.body.visit(calls)
     return (node.with_changes(body=body), True) if calls.used else (node, False)
