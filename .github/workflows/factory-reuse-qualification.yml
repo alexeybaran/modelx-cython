@@ -20,7 +20,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: alexeybaran/modelx-cython
-          ref: e68b7431c42fc751c20a3d2d28bc2a06dc855a51
+          ref: f04f4b02f68170b2b02442c7d51720e61035d30d
           path: compiler
           persist-credentials: false
       - uses: actions/checkout@v4
