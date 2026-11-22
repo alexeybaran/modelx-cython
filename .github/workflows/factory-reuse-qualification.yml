@@ -1,0 +1,42 @@
+name: Private factory reuse qualification
+on:
+  push:
+    branches: [verify/r3-factory-reuse]
+permissions:
+  contents: read
+jobs:
+  differential:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        python: ['3.14t']
+        include:
+          - os: ubuntu-24.04
+            python: '3.9'
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: alexeybaran/modelx-cython
+          ref: e68b7431c42fc751c20a3d2d28bc2a06dc855a51
+          path: compiler
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          repository: alexeybaran/modelx
+          ref: c098af360d2b454ba6e78fbbc4457f435d50fe28
+          path: modelx
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - run: python -m pip install ./modelx ./compiler pytest pandas
+      - name: Verify requested runtime and native differential
+        shell: bash
+        env:
+          PYTHON_GIL: ${{ endsWith(matrix.python, 't') && '0' || '1' }}
+        run: |
+          python -c "import os, sys; assert getattr(sys, '_is_gil_enabled', lambda: True)() == (os.environ['PYTHON_GIL'] == '1')"
+          python -m pytest -q --basetemp=fr-temp compiler/modelx_cython/tests/test_factory_reuse.py compiler/modelx_cython/tests/compiled/test_ordered_numeric_blocks.py
