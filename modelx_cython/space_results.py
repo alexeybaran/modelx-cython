@@ -45,12 +45,14 @@ def _binds_parameter(scope, name):
 
 
 class _HeldCalls(cst.CSTTransformer):
-    def __init__(self, owner, names, integer_params, operand_kind, pin):
+    def __init__(self, owner, names, integer_params, operand_kind, pin, return_type):
         self.owner = owner
         self.names = names
         self.integer_params = integer_params
         self.operand_kind = operand_kind
         self.pin = pin
+        self.return_type = return_type
+        self.double_returns = set()
         self.used = False
 
     def visit_FunctionDef(self, node):
@@ -58,6 +60,10 @@ class _HeldCalls(cst.CSTTransformer):
 
     visit_ClassDef = visit_Lambda = visit_GeneratorExp = visit_FunctionDef
     visit_ListComp = visit_SetComp = visit_DictComp = visit_FunctionDef
+
+    def visit_Return(self, node):
+        if self.return_type == 'double' and isinstance(node.value, cst.Call):
+            self.double_returns.add(node.value)
 
     def _native_argument(self, arg, ctype):
         if ctype == 'double':
@@ -110,10 +116,17 @@ class _HeldCalls(cst.CSTTransformer):
             f'and type({field}) is {target.name}')
         cast = cst.parse_expression(f'{CY_MOD}.cast({target.name}, {self.pin}({field}))')
         native = updated.with_changes(func=cst.Attribute(cast, func.attr), args=args, lpar=(), rpar=())
-        # Keep the dynamic call's object result boundary in the exact arm too.
-        boxed = cst.Call(cst.parse_expression(f'{CY_MOD}.cast'), (cst.Arg(cst.Name('object')), cst.Arg(native)))
+        fallback = updated.with_changes(lpar=(), rpar=())
+        if original in self.double_returns and method.get_rettype_expr(c_style=True) == 'double':
+            # A C-double formula immediately converts the result at return.
+            # Keep this conversion in the dynamic arm, including its exceptions.
+            fallback = cst.Call(cst.parse_expression(f'{CY_MOD}.cast'), (
+                cst.Arg(cst.parse_expression(f'{CY_MOD}.double')), cst.Arg(fallback)))
+        else:
+            native = cst.Call(cst.parse_expression(f'{CY_MOD}.cast'), (
+                cst.Arg(cst.Name('object')), cst.Arg(native)))
         self.used = True
-        return cst.IfExp(test=ready, body=boxed, orelse=updated.with_changes(lpar=(), rpar=()),
+        return cst.IfExp(test=ready, body=native, orelse=fallback,
                          lpar=(cst.LeftParen(), *updated.lpar), rpar=(*updated.rpar, cst.RightParen()))
 
 
@@ -141,6 +154,6 @@ def lower(node, owner, cell, scope, operand_kind, pin):
     bindings = tuple(scope[MX_SYS_MOD])
     if MX_SYS_MOD in names and len(bindings) == 1 and _runtime_import(bindings[0]):
         names = names - {MX_SYS_MOD}
-    calls = _HeldCalls(owner, names, integers, operand_kind, pin)
+    calls = _HeldCalls(owner, names, integers, operand_kind, pin, cell.get_rettype_expr(c_style=True))
     body = node.body.visit(calls)
     return (node.with_changes(body=body), True) if calls.used else (node, False)
