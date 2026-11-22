@@ -24,6 +24,13 @@ import pandas as pd
 cdef Py_ssize_t _GRID_LIMIT = 65536
 cdef long long _COMBINED_LIMIT = 1LL << 62
 cdef int _MAX_LEVELS = 8
+cdef object _original_series_iat = pd.Series.iat
+cdef object _original_iat_type = type(pd.Series([], dtype=object).iat)
+cdef object _original_iat_getitem = _original_iat_type.__getitem__
+cdef object _original_series_to_numpy = pd.Series.to_numpy
+cdef object _original_series_array = pd.Series.array
+cdef object _original_string_array_to_numpy = pd.arrays.StringArray.to_numpy
+cdef object _object_dtype = np.dtype(object)
 cdef object _zip_attrs = pd.DataFrame.attrs
 cdef object _zip_loc = pd.DataFrame.loc
 cdef object _zip_accessor_type = type(pd.DataFrame().loc)
@@ -301,6 +308,27 @@ cdef void _name_map(PreparedTable table):
     table.name_mask = size - 1
 
 
+cdef tuple _object_column_values(object column, object order):
+    # Exact object storage preserves the object returned by Series.iat,
+    # including NumPy scalars held as objects and missing string sentinels.
+    if (type(column) is pd.Series
+            and pd.Series.iat is _original_series_iat
+            and _original_iat_type.__getitem__ is _original_iat_getitem):
+        dtype = column.dtype
+        values = None
+        if dtype is _object_dtype and pd.Series.to_numpy is _original_series_to_numpy:
+            values = column.to_numpy(copy=False)
+        elif (type(dtype) is pd.StringDtype and dtype.storage == 'python'
+                and pd.Series.array is _original_series_array
+                and pd.arrays.StringArray.to_numpy is _original_string_array_to_numpy):
+            array = column.array
+            if type(array) is pd.arrays.StringArray:
+                values = array.to_numpy(dtype=object, copy=False)
+        if type(values) is np.ndarray and values.dtype is _object_dtype:
+            return tuple(values[order])
+    return tuple(column.iat[int(row)] for row in order)
+
+
 cdef PreparedTable _build(object value):
     cdef PreparedTable table = PreparedTable.__new__(PreparedTable)
     cdef Py_ssize_t i, n
@@ -386,7 +414,7 @@ cdef PreparedTable _build(object value):
         else:
             kinds.append(COLUMN_OBJECT)
             slots.append(len(objects))
-            objects.append(tuple(column.iat[int(row)] for row in order))
+            objects.append(_object_column_values(column, order))
     table.column_positions = {label: position for position, label in enumerate(labels)}
     _name_map(table)
     table.column_kind = np.asarray(kinds, dtype=np.intc) if kinds else np.zeros(1, dtype=np.intc)

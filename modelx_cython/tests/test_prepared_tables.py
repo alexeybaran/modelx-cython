@@ -210,6 +210,48 @@ def test_copy_at_bind(tables):
     assert table.value(11, 'q') == 2.0 and table.source is frame
 
 
+def test_object_column_bulk_preserves_pandas_scalar_identity(tables):
+    _tables, _ = tables
+    index = pd.Index([7, 3, 4, 2])
+    marker = object()
+    frame = pd.DataFrame({
+        'object': pd.Series([marker, np.int32(6), np.nan, marker], index=index, dtype=object),
+        'text': pd.Series(['x', None, 'é', 'x'], index=index, dtype=pd.StringDtype(storage='python')),
+    })
+    table = _tables.prepare(frame)
+    for column in frame:
+        for position, key in enumerate(index):
+            assert table.value(key, column) is frame[column].iat[position]
+    frame.loc[7, 'object'] = object()
+    assert table.value(7, 'object') is marker
+
+
+def test_custom_series_and_nullable_columns_keep_scalar_access(tables):
+    _tables, _ = tables
+
+    class CustomSeries(pd.Series):
+        def to_numpy(self, *args, **kwargs):
+            raise AssertionError("a Series subclass requires scalar fallback")
+
+    class CustomFrame(pd.DataFrame):
+        _constructor_sliced = CustomSeries
+
+    marker = object()
+    index = pd.Index([3, 1, 9])
+    source = CustomFrame({
+        'object': pd.Series([marker, marker, pd.NA], index=index, dtype=object),
+        'nullable': pd.Series([1, None, 4], index=index, dtype='Int64'),
+    })
+    assert type(source.iloc[:, 0]) is CustomSeries
+    table = _tables.prepare(source)
+    for name in source:
+        for position, key in enumerate(index):
+            expected = source[name].iat[position]
+            actual = table.value(key, name)
+            assert type(actual) is type(expected)
+            assert actual is expected or actual == expected
+
+
 @pytest.mark.parametrize('name,frame', list(frames()), ids=[n for n, _ in frames()])
 def test_hundred_thousand_reads(tables, name, frame):
     """10^5 random keys per index kind (about 10% absent), one float and one int column: 0 differences."""
