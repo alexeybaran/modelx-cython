@@ -1,7 +1,21 @@
 """Recognize factory computations whose private receiver cannot be published."""
 import ast
+import symtable
 
 from .syntax import code
+
+
+_BUILTINS = {'abs', 'bool', 'float', 'int', 'max', 'min', 'round', 'str', 'ValueError'}
+
+
+def unshadowed_builtins(module):
+    source = module.code
+    symbols = symtable.symtable(source, '<export>', 'exec')
+    if any(symbol.get_name() in _BUILTINS and (symbol.is_assigned() or symbol.is_imported())
+           for symbol in symbols.get_symbols()):
+        return False
+    return not any(isinstance(item, ast.ImportFrom) and any(alias.name == '*' for alias in item.names)
+                   for item in ast.parse(source).body)
 
 
 def scalar_factory_graph(node, cls, shape):
@@ -24,8 +38,16 @@ def scalar_factory_graph(node, cls, shape):
         if method is None:
             return False
         checked.add(name)
-        arguments = {arg.arg for arg in method.args.args}
-        scalar_builtins = {'abs', 'bool', 'float', 'int', 'max', 'min', 'round', 'str', 'ValueError'}
+        sig = method.args
+        arguments = {arg.arg for arg in sig.args}
+        if sig.vararg or sig.kwarg or sig.posonlyargs or sig.kwonlyargs or arguments & _BUILTINS:
+            return False
+        for default in sig.defaults:
+            try:
+                if type(ast.literal_eval(default)) not in (int, float, bool):
+                    return False
+            except (TypeError, ValueError):
+                return False
         body = ast.Module(body=method.body, type_ignores=[])
         parents = {child: parent for parent in ast.walk(body) for child in ast.iter_child_nodes(parent)}
         for expr in ast.walk(body):
@@ -36,7 +58,7 @@ def scalar_factory_graph(node, cls, shape):
                             and target.attr in cls.cells):
                         return False
                     pending.append('_f_' + target.attr)
-                elif not isinstance(expr.func, ast.Name) or expr.func.id not in scalar_builtins:
+                elif not isinstance(expr.func, ast.Name) or expr.func.id not in _BUILTINS:
                     return False
             elif isinstance(expr, ast.Attribute):
                 if not isinstance(expr.value, ast.Name) or expr.value.id != 'self':
@@ -54,7 +76,7 @@ def scalar_factory_graph(node, cls, shape):
                     parent = parents[expr]
                     if not isinstance(parent, ast.Attribute) or parent.value is not expr:
                         return False
-                elif expr.id not in arguments and expr.id not in scalar_builtins:
+                elif expr.id not in arguments and expr.id not in _BUILTINS:
                     return False
             elif not isinstance(expr, (ast.Module, ast.Return, ast.Expr, ast.Constant, ast.If, ast.IfExp,
                                        ast.Raise, ast.Dict, ast.Tuple, ast.Load, ast.BinOp, ast.UnaryOp,

@@ -152,8 +152,8 @@ def analyze(module, evaluator_args=False, ordered_rows=False):
                     and all(leaf.mode == 'sum' for leaf in shape.leaves)):
                 shape = replace(shape, ordered_rows=True)
                 if factory_reuse:
-                    from .factory_reuse import scalar_factory_graph
-                    if scalar_factory_graph(node, cls, shape):
+                    from .factory_reuse import scalar_factory_graph, unshadowed_builtins
+                    if scalar_factory_graph(node, cls, shape) and unshadowed_builtins(module.visitor.wrapper.module):
                         shape = replace(shape, reuse=True)
             result[node.name.value] = shape
     return result
@@ -537,11 +537,12 @@ def _closure(cls, shape, extra=()):
 
 def _restart_lines(cls, shape):
     if shape.reuse and getattr(shape, 'factory', False):
-        # The fresh path takes these References from the base on every policy.
-        # Use the same binding and the existing full cache and provider reset.
+        # Dependencies and the non-policy coordinates are fixed during collect.
+        # The loop rebinds the coordinate and reruns the validated alias factory.
         fresh = replace(shape, reuse=False)
-        return ['if _mx_reuse_private:', *('    ' + line for line in _reset_lines(cls)),
-                '    root._mx_copy_refs(self, self)', *('    ' + line for line in _bind_extra_lines(shape)),
+        return ['if _mx_reuse_private and sys.gettrace() is None and sys.getprofile() is None:',
+                *('    ' + line for line in _reset_lines(cls)),
+                '    pass',
                 'else:', *('    ' + line for line in _restart_lines(cls, fresh))]
     if shape.reuse:
         # D107: collect computes the collected Cell only; between policies it resets what that Cell can

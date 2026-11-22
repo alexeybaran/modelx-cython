@@ -240,8 +240,10 @@ models with current modelx before translating older export formats.
 A leaf Space with a validating factory can request `factory_collect_reuse=True`
 with `serial_collect="reduce"`. For supported scalar Cell calculations this
 reuses a private receiver inside a serial call or an ordered worker block.
-Each new policy clears private caches, copies the base References and reruns
-the factory. Direct calls keep their own persistent ItemSpaces. The compiler
+The receiver takes the current base References when it is constructed.
+Shared dependencies stay fixed for this call. Each new policy clears private
+caches, binds its coordinate and reruns the factory. A later uncached collect
+takes the then-current base References. Direct calls keep their persistent ItemSpaces. The compiler
 checks the reachable Cell expressions and keeps fresh construction for
 unrecognized calls, object References, or expressions that can expose the
 receiver. This option preserves policy addition order.

@@ -3,7 +3,7 @@ from types import SimpleNamespace
 import libcst
 import pytest
 
-from modelx_cython.factory_reuse import scalar_factory_graph
+from modelx_cython.factory_reuse import scalar_factory_graph, unshadowed_builtins
 
 
 @pytest.mark.parametrize(("formula", "admitted"), [
@@ -30,3 +30,24 @@ class Product:
     cls = SimpleNamespace(cells={'balance', 'base'}, refs={'point': numeric})
     shape = SimpleNamespace(native=[SimpleNamespace(cell='balance')], extra=())
     assert scalar_factory_graph(node, cls, shape) is admitted
+
+
+@pytest.mark.parametrize("signature", ["operand=callback", "abs=1", "*rest", "**options"])
+def test_opaque_cell_signature(signature):
+    node = libcst.parse_module(f"""
+class Product:
+    def _mx_space_formula(self, key):
+        return {{'refs': {{'point': key}}}}
+    def _f_balance(self):
+        return self.helper()
+    def _f_helper(self, {signature}):
+        return 1.0
+""").body[0]
+    cls = SimpleNamespace(cells={'balance', 'helper'}, refs={})
+    shape = SimpleNamespace(native=[SimpleNamespace(cell='balance')], extra=())
+    assert not scalar_factory_graph(node, cls, shape)
+
+
+@pytest.mark.parametrize("prefix", ["from other import *", "from other import abs", "round = callback"])
+def test_builtin_bindings(prefix):
+    assert not unshadowed_builtins(libcst.parse_module(prefix + '\n'))
