@@ -32,11 +32,13 @@ def test_native_and_python_outputs_equal_the_export(tmp_path, monkeypatch):
         keys = (3, 1, 4, 5, 9, 2)
         months = (0, 1, 2, 5, 3)            # not contiguous, not sorted: positions in D, not values
         empty = ()
-        common = {"keys": keys, "months": months, "empty": empty, "LeftFold": arithmetic.LeftFold,
+        common = {"keys": keys, "months": months, "empty": empty, "contiguous": (0, 1, 2),
+                  "LeftFold": arithmetic.LeftFold,
                   "keyword_echo": arithmetic.keyword_echo}
         outputs = {
             "Mixed": ('lambda: {"individual": {"state": {t: cf(t) for t in months}}, '
                       '"sum": {"pv": pv(), "cf": {t: cf(t) for t in months}, '
+                      '"native_cf": {t: cf(t) for t in contiguous}, '
                       '"none": {t: cf(t) for t in empty}}}'),
             "MixedPython": ('lambda: {"sum": {"pv": pv(), "keys": [key], '
                            '"fold": LeftFold(str(key))}}'),
@@ -74,20 +76,29 @@ def test_native_and_python_outputs_equal_the_export(tmp_path, monkeypatch):
     subprocess.run([sys.executable, "-m", "modelx_cython", "exported", "--sample", "sample.py",
                     "--spec", "spec.py"], cwd=tmp_path, check=True)
     probe = textwrap.dedent("""\
-        import json, sys
+        import json, pickle, sys
+        from collections.abc import Mapping
         package = sys.argv[1]
         Model = type(__import__(package).mx_model)
         def plain(value):
             if hasattr(value, '_fields'):
                 return {k: plain(v) for k, v in value._fields.items()}
-            if isinstance(value, dict):
+            if isinstance(value, Mapping):
                 return [[repr(k), plain(v)] for k, v in value.items()]
             return repr(value)
         out = {}
         for workers in (1, 4):
             m = Model()
             m.collect_workers = workers
-            out[f'mixed{workers}'] = plain(m.Mixed.collect())
+            result = m.Mixed.collect()
+            if package == 'exported_cy':
+                from exported_cy._mx_collect_semantics import NativeCollectedSeries
+                series = result.sum.native_cf
+                assert type(series) is NativeCollectedSeries
+                assert type(series._storage).__name__ == 'array'
+                assert series(1) == series[1] and list(series) == [0, 1, 2]
+                assert dict(pickle.loads(pickle.dumps(series))) == dict(series)
+            out[f'mixed{workers}'] = plain(result)
             out[f'python{workers}'] = plain(m.MixedPython.collect())
             out[f'root{workers}'] = plain(m.RootLocal.collect())
             out[f'unused{workers}'] = plain(m.RootUnused.collect())
@@ -144,7 +155,7 @@ def test_native_and_python_outputs_equal_the_export(tmp_path, monkeypatch):
                 for leaf in entry["collect_outputs"]}
     mixed_leaves = leaves("Mixed")
     assert {key: native for key, (native, _) in mixed_leaves.items()} == {
-        ("individual", ""): False, ("sum", "pv"): True, ("sum", "cf"): True,
+        ("individual", ""): False, ("sum", "pv"): True, ("sum", "cf"): True, ("sum", "native_cf"): True,
         ("sum", "none"): True}
     assert leaves("MixedPython")[("sum", "pv")][0] and not leaves("MixedPython")[("sum", "fold")][0]
     assert "Reference" in leaves("CellDomain")[("sum", "cf")][1]

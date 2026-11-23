@@ -28,6 +28,14 @@ def test_current_exporter_runtime_is_kept_verbatim():
     assert runtime.syntax.code == source
 
 
+def test_packed_sums_are_an_optional_protocol_two_capability():
+    source = current().replace('_mx_collect_packed_sums_v1 = True', '')
+    legacy = CollectRuntime(source)
+    legacy.require_current()
+    assert not legacy.packed_sums
+    assert CollectRuntime(source + '\n_mx_collect_packed_sums_v1 = True\n').packed_sums
+
+
 @pytest.mark.parametrize('marker', ['', '_mx_collect_adapter_version = 1', '_mx_collect_adapter_version = 17'])
 def test_obsolete_export_requires_reexport(marker):
     # one check of the export's protocol, whatever the model uses (an ordinary collect method

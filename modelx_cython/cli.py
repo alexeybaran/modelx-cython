@@ -409,7 +409,8 @@ def main_handler(args: argparse.Namespace, stdout: IO[str], stderr: IO[str]) -> 
         translated_modules = {}
         for u in units:
             serial_shapes = (serial_collect.analyze(u.module_info, evaluator_args=runtime.evaluator_args,
-                                                   ordered_rows=runtime.ordered_rows)
+                                                   ordered_rows=runtime.ordered_rows,
+                                                   packed_sums=runtime.packed_sums)
                              if runtime.hook else {})
             trans = ModuleTransformer(
                 u.source, u.module_info,

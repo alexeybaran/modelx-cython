@@ -38,6 +38,7 @@ class MultiCollect:
     extra: tuple = ()       # the collect's other Space parameters: (name, C type or 'object')
     factory: bool = False
     ordered_rows: bool = False
+    packed_sums: bool = False
 
     @property
     def native(self):
@@ -105,7 +106,7 @@ def collect_contract(node):
     return None
 
 
-def analyze(module, evaluator_args=False, ordered_rows=False):
+def analyze(module, evaluator_args=False, ordered_rows=False, packed_sums=False):
     """Recognize the numeric sum shape. Policy isolation is a Space contract."""
     options = {name: module.spec.get_spec(cls.fqname)
                for name, cls in module.classes.items()}
@@ -148,6 +149,8 @@ def analyze(module, evaluator_args=False, ordered_rows=False):
             raise ValueError('serial_collect must be reduce or reuse')
         shape = _match(node, cls, option == 'reuse', parallel, order == 'domain', evaluator_args)
         if shape is not None:
+            if packed_sums and isinstance(shape, MultiCollect) and any(leaf.kind == 'dict' for leaf in shape.leaves):
+                shape = replace(shape, packed_sums=True)
             if (ordered_rows and isinstance(shape, MultiCollect) and shape.factory and not shape.python
                     and all(leaf.mode == 'sum' for leaf in shape.leaves)):
                 shape = replace(shape, ordered_rows=True)
@@ -597,8 +600,13 @@ def _detached_numeric_methods(cls, source):
                 f'            buffer[i] = self.{leaf.cell}(key)',
                 f'        outputs[{leaf.label!r}] = packed',
             ]
-    lines += [
-        "    return semantics.detached_numeric_sum(outputs, (_mx_sys.BaseMxObject,))",
+    lines.append("    return semantics.detached_numeric_sum(outputs, (_mx_sys.BaseMxObject,))")
+    return (*cst.parse_module('\n'.join(lines) + '\n').body, *_numeric_add_method())
+
+
+def _numeric_add_method():
+    c = CY_MOD
+    lines = [
         '@staticmethod',
         f'def _mx_collect_add_values_v1(total: {c}.double[::1], values: {c}.double[::1]):',
         f'    i: {c}.Py_ssize_t',
@@ -624,8 +632,10 @@ def add_methods(cls, node, shape, *, workers, source=None):
     options = cst.parse_statement(
         f'def _mx_collect_options_v2(self):\n    return {workers}, {callback}, {parallel}, {ordered}{takes_args}\n')
     shared = _shared_root_methods(cls, node)
-    if source is not None:
-        shared = (*shared, *_detached_numeric_methods(cls, source))
+    numeric = _detached_numeric_methods(cls, source) if source is not None else ()
+    if not numeric and isinstance(shape, MultiCollect) and shape.packed_sums:
+        numeric = _numeric_add_method()
+    shared = (*shared, *numeric)
     if shape is None:
         return node.with_changes(body=node.body.with_changes(body=(*node.body.body, *shared, options)))
     from .item_roots import new_root, release_root     # D116: shared with the direct route
@@ -733,6 +743,7 @@ def _multi_lines(cls, shape, *, row_mode=False):
     from .item_roots import new_root, release_root
     c = CY_MOD
     leaves = shape.leaves
+    packed = shape.packed_sums and not row_mode
     lines = [
         ("def _mx_fill_ordered_rows(self, coords, args, fields, buffer, limit):" if row_mode else
          f"def _mx_evaluate_serial_collect(self, coords{', args' if shape.extra else ''}):"),
@@ -748,6 +759,8 @@ def _multi_lines(cls, shape, *, row_mode=False):
     if row_mode:
         lines += [f'    _mx_out: {c}.double[::1]', f'    _mx_pos: {c}.Py_ssize_t = 0',
                   f'    _mx_done: {c}.Py_ssize_t = 0', '    _mx_width = 0']
+    elif packed:
+        lines += ['    from array import array', '    from . import _mx_collect_semantics as _mx_cs']
     for index, leaf in enumerate(leaves):
         if leaf.kind == 'scalar':
             lines.append(f'    _mx_t{index}: {c}.double = 0.0')
@@ -756,8 +769,9 @@ def _multi_lines(cls, shape, *, row_mode=False):
             if row_mode:
                 lines.append(f'    _mx_k{index}: {c}.longlong[::1]')
             else:
-                lines += [f'    _mx_k{index}: {c}.p_longlong = {c}.NULL',
-                          f'    _mx_a{index}: {c}.p_double = {c}.NULL']
+                lines.append(f'    _mx_k{index}: {c}.p_longlong = {c}.NULL')
+                lines.append(f'    _mx_a{index}: {c}.double[::1]' if packed else
+                             f'    _mx_a{index}: {c}.p_double = {c}.NULL')
     lines += [
         f'    if type(self) is not {cls.name} or self._mx_roots or self._mx_spaces:',
         '        return None',
@@ -810,17 +824,28 @@ def _multi_lines(cls, shape, *, row_mode=False):
                   '        raise ValueError("invalid numeric collect storage")',
                   '    _mx_out = buffer']
     if shape.python:
-        lines += ['    from . import _mx_collect_semantics as _mx_cs',
-                  '    _mx_accumulated = _mx_cs.Accumulator(_mx_sys.CollectResult)']
+        if not packed:
+            lines.append('    from . import _mx_collect_semantics as _mx_cs')
+        lines.append('    _mx_accumulated = _mx_cs.Accumulator(_mx_sys.CollectResult)')
     lines += [f'    root = {new_root(cls.name)}(self)', '    try:']
     lines.extend('        ' + line for line in _bind_extra_lines(shape))
     for index, leaf in enumerate(leaves):
         if leaf.kind == 'dict' and not row_mode:
+            lines.append(f'        _mx_k{index} = {c}.cast({c}.p_longlong, _mx_collect_malloc(({c}.sizeof({c}.longlong)) * (_mx_n{index} + 1)))')
+            if packed:
+                lines += [
+                    f'        if _mx_k{index} == {c}.NULL:',
+                    '            raise MemoryError()',
+                    f"        _mx_buffer{index} = array('d', [0.0]) * _mx_n{index}",
+                    f'        _mx_a{index} = _mx_buffer{index}',
+                ]
+            else:
+                lines += [
+                    f'        _mx_a{index} = {c}.cast({c}.p_double, _mx_collect_malloc(({c}.sizeof({c}.double)) * (_mx_n{index} + 1)))',
+                    f'        if _mx_k{index} == {c}.NULL or _mx_a{index} == {c}.NULL:',
+                    '            raise MemoryError()',
+                ]
             lines += [
-                f'        _mx_k{index} = {c}.cast({c}.p_longlong, _mx_collect_malloc(({c}.sizeof({c}.longlong)) * (_mx_n{index} + 1)))',
-                f'        _mx_a{index} = {c}.cast({c}.p_double, _mx_collect_malloc(({c}.sizeof({c}.double)) * (_mx_n{index} + 1)))',
-                f'        if _mx_k{index} == {c}.NULL or _mx_a{index} == {c}.NULL:',
-                '            raise MemoryError()',
                 f'        for _mx_i in range(_mx_n{index}):',
                 f'            _mx_k{index}[_mx_i] = _mx_d{index}[_mx_i]',
             ]
@@ -884,11 +909,16 @@ def _multi_lines(cls, shape, *, row_mode=False):
             if leaf.kind == 'scalar':
                 fields.append(f'{leaf.label!r}: _mx_t{index}')
             elif leaf.kind == 'dict':
-                fields.append(f'{leaf.label!r}: {{_mx_d{index}[_mx_i]: _mx_a{index}[_mx_i] '
-                              f'for _mx_i in range(_mx_n{index})}}')
+                if packed:
+                    fields.append(f'{leaf.label!r}: _mx_cs.PackedFloatSeries.from_buffer('
+                                  f'_mx_d{index}, _mx_buffer{index}, {cls.name}._mx_collect_add_values_v1)')
+                else:
+                    fields.append(f'{leaf.label!r}: {{_mx_d{index}[_mx_i]: _mx_a{index}[_mx_i] '
+                                  f'for _mx_i in range(_mx_n{index})}}')
             else:
                 fields.append(f"{leaf.label!r}: _mx_python['sum']._fields[{leaf.label!r}]")
-        sections.append(f"'sum': _mx_sys.CollectResult({{{', '.join(fields)}}})")
+        result_type = '_PendingCollectSum' if packed else 'CollectResult'
+        sections.append(f"'sum': _mx_sys.{result_type}({{{', '.join(fields)}}})")
     if row_mode:
         lines += ['        return _mx_done, None', '    except BaseException as _mx_error:',
                   '        return _mx_done, _mx_error']
@@ -897,6 +927,8 @@ def _multi_lines(cls, shape, *, row_mode=False):
     lines.append('    finally:')
     for index, leaf in enumerate(leaves):
         if leaf.kind == 'dict' and not row_mode:
-            lines += [f'        _mx_collect_free(_mx_k{index})', f'        _mx_collect_free(_mx_a{index})']
+            lines.append(f'        _mx_collect_free(_mx_k{index})')
+            if not packed:
+                lines.append(f'        _mx_collect_free(_mx_a{index})')
     lines.append(f'        {release_root(cls.name)}(root)')
     return lines
