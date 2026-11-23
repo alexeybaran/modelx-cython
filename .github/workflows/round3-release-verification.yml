@@ -2,7 +2,7 @@ name: Round 3 release verification
 
 on:
   push:
-    branches: [verify/r3-pv-noarg-full]
+    branches: [verify/r3-pv-noarg-compiler]
     paths: [fork_ci/pins.json, fork_ci/source-coverage.json, .github/workflows/round3-release-verification.yml]
 
 permissions:
@@ -68,26 +68,27 @@ jobs:
           PYTHON_GIL: ${{ endsWith(matrix.python, 't') && '0' || '1' }}
         run: python verifier/fork_ci/verify.py install
       - uses: actions/checkout@v4
+        id: fixtures
         with:
-          repository: alexeybaran/modelx-benchmark-toolkit
-          ref: c5351455ffac5cfe26df8b68581f25ba2f33e7f5
+          repository: alexeybaran/modelx
+          ref: d73180aecc87e6c27fcc5e4a2e3cfab710755256
           path: test-fixtures
-          sparse-checkout: parallel/20261113/round3/handoff/reproduction/modelx_helpers
+          sparse-checkout: modelx_helpers
           persist-credentials: false
       - name: Unit tests
         timeout-minutes: 100
         shell: bash
         env:
           PYTHON_GIL: ${{ endsWith(matrix.python, 't') && '0' || '1' }}
-          CI_TEST_FIXTURES: test-fixtures/parallel/20261113/round3/handoff/reproduction
+          CI_TEST_FIXTURES: test-fixtures
         run: python verifier/fork_ci/verify.py unit
       - name: Integration tests
-        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
+        if: ${{ !cancelled() && steps.install.outcome == 'success' && steps.fixtures.outcome == 'success' }}
         timeout-minutes: 120
         shell: bash
         env:
           PYTHON_GIL: ${{ endsWith(matrix.python, 't') && '0' || '1' }}
-          CI_TEST_FIXTURES: test-fixtures/parallel/20261113/round3/handoff/reproduction
+          CI_TEST_FIXTURES: test-fixtures
         run: python verifier/fork_ci/verify.py integration
       - name: Upload test reports
         if: ${{ always() }}
