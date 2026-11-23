@@ -676,7 +676,7 @@ def _numeric_add_method():
     return cst.parse_module('\n'.join(lines) + '\n').body
 
 
-def _detached_factory_evaluator(cls, shape):
+def _detached_factory_evaluator(cls, shape, memo='', slots=0):
     from .item_roots import new_root, release_root
 
     c = CY_MOD
@@ -684,6 +684,18 @@ def _detached_factory_evaluator(cls, shape):
     resets = '\n'.join('                ' + line for line in _reset_lines(cls))
     bindings = ', '.join([*(f'{name}=args[{index}]' for index, (name, _) in enumerate(shape.extra)),
                           f'{shape.parameter}=coordinate'])
+    hold_init = ''
+    factory_call = f'            root._mx_apply_formula({bindings})\n'
+    if memo:
+        # CPython's immutable generated class cannot replace the factory, and
+        # zero dictionary offset precludes instance-level shadowing.
+        owner = cls.name
+        hold_init = (f'    {memo} = ([None] * {slots} if {owner}.__dictoffset__ == 0 '
+                     f'and {owner}.__flags__ & 256 else None)\n')
+        factory_call = (f'            if {memo} is None:\n'
+                        f'                root._mx_apply_formula({bindings})\n'
+                        f'            else:\n'
+                        f'                root._mx_apply_formula({bindings}, {memo}={memo})\n')
     arg_check = f"""    if (len(args) != {len(shape.extra)}
             or not _mx_sys._mx_collect_native_coords(args)):
         return None
@@ -709,15 +721,14 @@ def _mx_evaluate_serial_collect(self, coords{', args' if shape.extra else ''}):
     first: {c}.bint = True
     layouts = {{}}
     accumulator = semantics.Accumulator(_mx_sys._PendingCollectSum)
-{declarations}    try:
+{declarations}{hold_init}    try:
         for coordinate in coords:
             if not first:
 {resets}
                 root._mx_copy_refs(self, self)
 {assignments}
             root.{shape.parameter} = coordinate
-            root._mx_apply_formula({bindings})
-{fold}            first = False
+{factory_call}{fold}            first = False
         return _mx_sys.CollectResult(accumulator.result()._fields)
     finally:
         {release_root(cls.name)}(root)
@@ -819,7 +830,10 @@ def add_methods(cls, node, shape, *, workers, source=None):
     from .item_roots import new_root, release_root     # D116: shared with the direct route
     if isinstance(shape, MultiCollect):
         if shape.post_factory:
-            helpers = cst.parse_module(_detached_factory_evaluator(cls, shape)).body
+            from .factory_individuals import lower
+            node, memo, slots = lower(cls, node, shape, collect_contract=collect_contract,
+                                      method=_method, return_expr=_return_expr)
+            helpers = cst.parse_module(_detached_factory_evaluator(cls, shape, memo, slots)).body
             return node.with_changes(body=node.body.with_changes(body=(*node.body.body, *helpers, *shared, options)))
         helpers = list(cst.parse_module('\n'.join(_multi_lines(cls, shape)) + '\n').body)
         if shape.ordered_rows:

@@ -269,6 +269,15 @@ between worker partitions. The output domains must be deterministic and
 identical for every policy and worker in the call. The compiler rejects
 domains that read the policy coordinate or a factory-assigned Reference.
 
+`factory_collect_hold_individuals=True` is a narrower opt-in for a private
+factory that indexes a dependent Collect's individual results by the current
+policy coordinate. The dependent Collect must be the generated cached entry
+with a cached domain of exact integer keys. The remaining factory arguments
+and the dependent Collect's domain and result must be stable throughout the
+batch. Each worker holds its own reference to the mapping after the first
+successful lookup at a source site. It still runs the rest of the factory and
+fetches the result for each coordinate. Direct calls use the ordinary path.
+
 A Cell with a bounded right-associated numeric recurrence can opt in to
 `iterative_suffix_sum=True`. When the compiler recognizes the recurrence
 and its dense bounds, it evaluates terms in their original order and fills
