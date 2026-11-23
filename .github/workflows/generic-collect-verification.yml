@@ -2,7 +2,7 @@ name: Generic native Collect and compiler package
 
 on:
   push:
-    branches: [verify/r3-dv01-pv-sum]
+    branches: [verify/r3-dv01-pv-sum-macos]
 
 jobs:
   unit:
@@ -11,13 +11,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.9", "3.10", "3.11", "3.12", "3.13", "3.14"]
-        os: [ubuntu-latest, macos-latest, windows-latest]
-        exclude:
-          - {os: ubuntu-latest, python-version: "3.9"}
-          - {os: macos-latest, python-version: "3.9"}
-        include:
-          - {os: ubuntu-24.04, python-version: "3.9"}
+        python-version: ["3.10", "3.11", "3.13", "3.14"]
+        os: [macos-15-intel]
     steps:
       - uses: actions/checkout@v4
         with:
@@ -47,15 +42,8 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - {os: ubuntu-24.04, python-version: "3.9"}
-          - {os: ubuntu-latest, python-version: "3.11"}
-          - {os: ubuntu-latest, python-version: "3.13"}
-          - {os: ubuntu-latest, python-version: "3.14"}
-          - {os: windows-latest, python-version: "3.11"}
-          - {os: windows-latest, python-version: "3.13"}
-          - {os: windows-latest, python-version: "3.14"}
-          - {os: macos-latest, python-version: "3.11"}
-          - {os: macos-latest, python-version: "3.14"}
+          - {os: macos-15-intel, python-version: "3.11"}
+          - {os: macos-15-intel, python-version: "3.14"}
     env:
       PYTEST_ADDOPTS: ${{ matrix.os == 'windows-latest' && '--basetemp=C:/t' || '' }}
     steps:
@@ -83,7 +71,7 @@ jobs:
       - name: Install released lifelib sample dependencies
         if: matrix.python-version != '3.9'
         shell: bash
-        run: python -m pip install "lifelib>=0.17.3" openpyxl psutil
+        run: python -m pip install "lifelib==0.17.4" openpyxl "psutil==7.2.2"
       - name: Released lifelib model tests
         if: matrix.python-version != '3.9'
         working-directory: ${{ runner.temp }}
@@ -93,31 +81,3 @@ jobs:
             "$GITHUB_WORKSPACE/modelx_cython/tests/test_samples.py::test_mx2cy_with_lifelib" \
             "$GITHUB_WORKSPACE/modelx_cython/tests/test_annuallife.py" \
             "$GITHUB_WORKSPACE/modelx_cython/tests/test_uslib.py"
-
-  free-threaded:
-    runs-on: ubuntu-latest
-    timeout-minutes: 60
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: f7f640c63ebee1f2a4862144e37046fcbf2b38c8
-          persist-credentials: false
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.14t"
-      - name: Install package and test dependencies
-        shell: bash
-        run: python -m pip install . pytest "pandas>=2.2.2" "modelx @ git+https://github.com/alexeybaran/modelx.git@861396000edaae329d4473cdd97c0d1aea52a71f"
-      - name: Verify free-threaded compiled execution
-        working-directory: ${{ runner.temp }}
-        shell: bash
-        env:
-          PYTHON_GIL: "0"
-        run: |
-          python -c "import sys, sysconfig; assert sysconfig.get_config_var('Py_GIL_DISABLED') and not sys._is_gil_enabled()"
-          python -m pytest --import-mode=importlib -q \
-            "$GITHUB_WORKSPACE/modelx_cython/tests/test_samples.py::test_locked_spaces" \
-            "$GITHUB_WORKSPACE/modelx_cython/tests/compiled/test_collect_workers_runtime.py::test_compiled_with_one_worker_runs_four_after_compilation" \
-            "$GITHUB_WORKSPACE/integration_tests/test_table_mixed_reads.py::test_mixed_native_and_pandas_reads_of_one_frame" \
-            "$GITHUB_WORKSPACE/modelx_cython/tests/compiled/test_factory_private_refs.py" \
-            "$GITHUB_WORKSPACE/modelx_cython/tests/compiled/test_space_item_results.py"
