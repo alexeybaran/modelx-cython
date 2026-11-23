@@ -1,8 +1,8 @@
-name: Native vector reference qualification
+name: Native vector and held Collect qualification
 
 on:
   push:
-    branches: [verify/r3-native-vector-ref]
+    branches: [verify/r3-factory-individuals]
 
 jobs:
   native:
@@ -21,7 +21,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: 713d08dbbd3b0ebf1f157da547778bacd5c9810a
+          ref: eee6bbd52077d38e614f499a7be1fb46c277598d
           persist-credentials: false
       - uses: actions/setup-python@v5
         with:
