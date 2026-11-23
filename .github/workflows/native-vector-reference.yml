@@ -1,8 +1,8 @@
-name: Native terminal Collect qualification
+name: DV01 PV sum compiler qualification
 
 on:
   push:
-    branches: [verify/r3-terminal-collect]
+    branches: [verify/r3-dv01-pv-sum]
 
 jobs:
   native:
@@ -21,7 +21,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: 5228d00f534e383cd5bcfd9acd85f16173bc707e
+          ref: f7f640c63ebee1f2a4862144e37046fcbf2b38c8
           persist-credentials: false
       - uses: actions/setup-python@v5
         with:
@@ -38,5 +38,4 @@ jobs:
           python -m pytest --import-mode=importlib -q \
             "$GITHUB_WORKSPACE/modelx_cython/tests/compiled/test_vector_ref_reads.py" \
             "$GITHUB_WORKSPACE/modelx_cython/tests/compiled/test_space_item_results.py" \
-            "$GITHUB_WORKSPACE/modelx_cython/tests/compiled/test_factory_private_refs.py" \
-            "$GITHUB_WORKSPACE/modelx_cython/tests/test_suffix_sums.py"
+            "$GITHUB_WORKSPACE/modelx_cython/tests/compiled/test_factory_private_refs.py"
