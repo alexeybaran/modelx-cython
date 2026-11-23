@@ -24,6 +24,8 @@ def test_native_held_item_uses_exact_type_and_preserves_fallback(tmp_path, monke
         policy = model.new_space('Policy', formula='lambda key: None',
                                  refs={'Market': market, 'Other': other, 'Hook': hook})
         policy.new_cells('market', 'lambda: None if key == 2 else Other(1) if key == 3 else Market(1)')
+        policy.new_cells('select_item', 'lambda t: Hook.override if Hook.override is not None else market()')
+        policy.new_cells('selected_rate', 'lambda t: select_item(t).rate(t, 1.5)')
         policy.new_cells('project', 'lambda t: market().rate(t, 1.5)')
         policy.new_cells('mixed', 'lambda: None if key == 2 else Market(1)')
         policy.new_cells('mixed_rate', 'lambda t: 0.0 if mixed() is None else mixed().rate(t, 1.5)')
@@ -59,6 +61,7 @@ def test_native_held_item_uses_exact_type_and_preserves_fallback(tmp_path, monke
         from exported import mx_model as m
         for t in (0, 1, 2):
             m.Policy[1].project(t)
+            m.Policy[1].selected_rate(t)
             m.Policy[1].mixed_rate(t)
             m.Policy[1].explicit_rate(t)
             m.Policy[1].shadowed(t)
@@ -77,6 +80,7 @@ def test_native_held_item_uses_exact_type_and_preserves_fallback(tmp_path, monke
     assert build.returncode == 0, build.stdout + build.stderr
     source = (tmp_path / 'exported_cy/_mx_classes.py').read_text(encoding='utf-8')
     assert 'type(self._v_market) is _c_Market' in source
+    assert re.search(r'_mx_cy\.cast\(_c_Market, _mx_selected_item\)\.rate\(', source)
     assert re.search(r'_mx_cy\.cast\(_c_Market, _mx_pin_held_item_\d+\(self\)\)\.rate\(', source)
     assert 'type(self._v_mixed) is _c_Market' not in source
     assert 'type(self._v_explicit) is _c_Market' not in source
@@ -120,6 +124,7 @@ def test_native_held_item_uses_exact_type_and_preserves_fallback(tmp_path, monke
                     raise AssertionError('computed Cell argument escaped its integer check')
             hook.raw = 1
         values = [m.Policy[key].project(t) for key in (1, 3) for t in (0, 1, 2)]
+        assert values == [m.Policy[key].selected_rate(t) for key in (1, 3) for t in (0, 1, 2)]
         values += [m.Policy[key].mixed_rate(t) for key in (1, 2) for t in (0, 1, 2)]
         values += [m.Policy[1].explicit_rate(t) for t in (0, 1, 2)]
         values += [m.Policy[1].shadowed(t) for t in (0, 1, 2)]
@@ -127,6 +132,7 @@ def test_native_held_item_uses_exact_type_and_preserves_fallback(tmp_path, monke
             def rate(self, t, tenor):
                 return 42.0 + t + tenor
         hook.override = Override(m.Market)
+        assert m.Policy[6].selected_rate(2) == 45.5
         values += [m.Policy[6].overridden(t) for t in (0, 1, 2)]
         assert values[-3:] == [43.5, 44.5, 45.5]
         policy = m.Policy[7]

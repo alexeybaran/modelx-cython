@@ -1,6 +1,7 @@
 """Native calls through an exact ItemSpace already held in an owned Cell cache."""
 
 import libcst as cst
+from libcst.helpers import parse_template_expression
 from libcst.metadata.scope_provider import BuiltinAssignment, GlobalScope, ImportAssignment
 
 from .consts import CY_MOD, HAS_PREF, MX_SELF, MX_SYS_MOD, SPACE_PREF, VAR_PREF
@@ -24,7 +25,7 @@ def pin_function(name, owner, producer):
 
 def _traced_target(cell):
     """Use the observed exact class to select a guard, never to narrow storage."""
-    if (cell is None or cell.has_args() or cell.is_special() or not cell._can_bind_native_result
+    if (cell is None or cell.is_special() or not cell._can_bind_native_result
             or cell.get_rettype_expr(c_style=True) != 'object' or not exclusively_owned(cell)):
         return None
     trace = getattr(cell._rt, 'ret_type', None)
@@ -80,13 +81,21 @@ class _HeldCalls(cst.CSTTransformer):
         if not isinstance(func, cst.Attribute) or not isinstance(func.value, cst.Call):
             return updated
         call = func.value
-        if (call.args or not isinstance(call.func, cst.Attribute)
+        if (not isinstance(call.func, cst.Attribute)
                 or not isinstance(call.func.value, cst.Name) or call.func.value.value != MX_SELF
                 or any(arg.keyword is not None or arg.star for arg in original.args)):
             return updated
         producer = call.func.attr.value
-        target = _traced_target(self.owner.cells.get(producer))
+        producer_cell = self.owner.cells.get(producer)
+        target = _traced_target(producer_cell)
         if target is None or target.name in self.names:
+            return updated
+        parameterized = producer_cell.has_args()
+        if parameterized:
+            if (not call.args or original not in self.double_returns
+                    or any(arg.keyword is not None or arg.star for arg in call.args)):
+                return updated
+        elif call.args:
             return updated
         method = target.cells.get(func.attr.value)
         if (method is None or method.is_special() or not method._can_bind_native_result
@@ -121,14 +130,25 @@ class _HeldCalls(cst.CSTTransformer):
                                       (cst.Arg(value), path))
             args[i] = args[i].with_changes(value=conversion)
 
-        field = f'{MX_SELF}.{VAR_PREF}{producer}'
-        ready = cst.parse_expression(
-            f'type({MX_SELF}) is {self.owner.name} and {MX_SELF}.{HAS_PREF}{producer} '
-            f'and type({field}) is {target.name}')
-        pin = self.pin(self.owner.name, producer)
-        cast = cst.parse_expression(f'{CY_MOD}.cast({target.name}, {pin}({MX_SELF}))')
+        if parameterized:
+            # Evaluate the real producer once, preserving overrides and its cache.
+            # The strong local survives argument evaluation in both branches.
+            selected = Names(used=self.names).reserve('_mx_selected_item')
+            ready = parse_template_expression(f'type(({selected} := {{receiver}})) is {target.name} '
+                                              f'and type({MX_SELF}) is {self.owner.name}',
+                                              receiver=updated.func.value)
+            cast = cst.parse_expression(f'{CY_MOD}.cast({target.name}, {selected})')
+            fallback = updated.with_changes(func=cst.Attribute(cst.Name(selected), func.attr),
+                                            lpar=(), rpar=())
+        else:
+            field = f'{MX_SELF}.{VAR_PREF}{producer}'
+            ready = cst.parse_expression(
+                f'type({MX_SELF}) is {self.owner.name} and {MX_SELF}.{HAS_PREF}{producer} '
+                f'and type({field}) is {target.name}')
+            pin = self.pin(self.owner.name, producer)
+            cast = cst.parse_expression(f'{CY_MOD}.cast({target.name}, {pin}({MX_SELF}))')
+            fallback = updated.with_changes(lpar=(), rpar=())
         native = updated.with_changes(func=cst.Attribute(cast, func.attr), args=args, lpar=(), rpar=())
-        fallback = updated.with_changes(lpar=(), rpar=())
         if original in self.double_returns and method.get_rettype_expr(c_style=True) == 'double':
             # A C-double formula immediately converts the result at return.
             # Keep this conversion in the dynamic arm, including its exceptions.
