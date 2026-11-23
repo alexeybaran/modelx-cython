@@ -7,7 +7,7 @@ import libcst as cst
 from .consts import CY_MOD
 from .factory_reuse import detached_factory_graph
 from .scopes import Names
-from .syntax import code
+from .syntax import arguments, code, dotted_name, walk
 
 
 def _pattern(body, key, recursive_entry):
@@ -61,11 +61,102 @@ def _native_term(node, cls, key):
             and all(_native_term(arg, cls, key) for arg in node.args))
 
 
+def _terminal_output(original, recurrence):
+    consumers = []
+    for method in original.body:
+        if not isinstance(method, ast.FunctionDef) or not method.name.startswith(('_f_', '_mx_space_formula')):
+            continue
+        if method.name == '_f_' + recurrence:
+            continue
+        if any(isinstance(node, ast.Attribute) and node.attr == recurrence
+               and isinstance(node.value, ast.Name) and node.value.id == 'self' for node in ast.walk(method)):
+            consumers.append(method)
+    if len(consumers) != 1 or not consumers[0].name.startswith('_f_'):
+        return None
+    terminal = consumers[0]
+    body = terminal.body
+    if len(body) != 1 or not isinstance(body[0], ast.Return):
+        return None
+    value = body[0].value
+    sign = ''
+    if isinstance(value, ast.UnaryOp) and isinstance(value.op, (ast.UAdd, ast.USub)):
+        sign = '-' if isinstance(value.op, ast.USub) else '+'
+        value = value.operand
+    if (not isinstance(value, ast.Call) or value.keywords or len(value.args) != 1
+            or not isinstance(value.args[0], ast.Constant) or type(value.args[0].value) is not int
+            or ast.unparse(value.func) != f'self.{recurrence}'):
+        return None
+    name = terminal.name[3:]
+    references = [method.name for method in original.body if isinstance(method, ast.FunctionDef)
+                  and method.name.startswith(('_f_', '_mx_space_formula'))
+                  for part in ast.walk(method) if isinstance(part, ast.Attribute) and part.attr == name
+                  and isinstance(part.value, ast.Name) and part.value.id == 'self']
+    if references != ['_f_collect_outputs']:
+        return None
+    return name, sign, value.args[0].value
+
+
+class _CollectTerminal(cst.CSTTransformer):
+    def __init__(self, call, helper):
+        self.call, self.helper = call, helper
+
+    def leave_Call(self, original, updated):
+        return cst.parse_expression(f'{self.helper}(root)') if original is self.call else updated
+
+
+def _forward_candidate(state, cls, original, cell, axis, bound, index, stop, value, term, worker_replacements):
+    if not cell._spec.get('collect_terminal_suffix_sum', False):
+        return None
+    spec = cls.module.spec.get_spec(cls.fqname)
+    if not (spec.get('factory_collect_private_refs', False) and spec.get('factory_collect_subtotals', False)):
+        return None
+    terminal = _terminal_output(original, cell.name)
+    if terminal is None:
+        return None
+    name, sign, start = terminal
+    output = cls.cells.get(name)
+    if (output is None or not output.has_formula_def or output.has_args() or output.is_locked
+            or output.get_rettype_expr(c_style=True) != 'double' or not axis.lower <= start < axis.stop):
+        return None
+    evaluator = state.methods.get((cls.name, '_mx_evaluate_serial_collect'))
+    current = worker_replacements.get(evaluator, evaluator)
+    if current is None or not any(isinstance(node, cst.Call) and dotted_name(node.func) == 'root._mx_apply_formula'
+                                  for node in walk(current.body)):
+        return None
+    calls = [node for node in walk(current.body) if arguments(node, f'root.{name}', 0) is not None]
+    if len(calls) != 1:
+        return None
+    helper = state.names.reserve(f'_mx_collect_terminal_{cls.name}_{cell.name}')
+    offset = f'{index} - ({axis.lower})'
+    emitted = cst.parse_statement(f'''\
+@{CY_MOD}.cfunc
+def {helper}(self: {cls.name}) -> {CY_MOD}.double:
+    if type(self) is not {cls.name} or self._has_{name} or self._has_{cell.name}[{start - axis.lower}]:
+        return self.{name}()
+    {stop}: {CY_MOD}.longlong = self.{bound}()
+    if {stop} >= {axis.stop}:
+        return self.{name}()
+    {index}: {CY_MOD}.longlong = {start}
+    {value}: {CY_MOD}.double = 0.0
+    _mx_exact_receiver: {CY_MOD}.bint = True
+    while {index} < {stop} and not self._has_{cell.name}[{offset}]:
+        {value} += {term}
+        {index} += 1
+    if self._has_{cell.name}[{offset}]:
+        {value} += self._v_{cell.name}[{offset}]
+    return {sign}{value}
+''')
+    worker = current.with_changes(body=current.body.visit(_CollectTerminal(calls[0], helper)))
+    return evaluator, worker, emitted
+
+
 def lower_suffix_sums(state, module_info, layouts):
     """Evaluate terms in order and add in reverse on an already cached bound."""
     sources = {node.name.value: node for node in module_info.visitor.wrapper.module.body
                if isinstance(node, cst.ClassDef)}
     replacements = {}
+    worker_replacements = {}
+    forwards = []
     malloc = state.names.reserve('_mx_suffix_malloc')
     free = state.names.reserve('_mx_suffix_free')
     for owner, cls in module_info.classes.items():
@@ -162,6 +253,15 @@ if _mx_exact_receiver and self._has_{bound_name} and {axis.lower} <= {key} < {ax
 """)
             replacements[formula] = formula.with_changes(body=formula.body.with_changes(
                 body=(branch, *formula.body.body)))
+            self_calls = any(isinstance(part, ast.Attribute) and part.attr == name
+                             and isinstance(part.value, ast.Name) and part.value.id == 'self'
+                             for part in ast.walk(authored_sum.left))
+            forward = None if self_calls else _forward_candidate(
+                state, cls, original, cell, axis, bound_name, index, stop, value, term, worker_replacements)
+            if forward is not None:
+                prior, updated, emitted = forward
+                worker_replacements[prior] = updated
+                forwards.append(emitted)
     if not replacements:
         return state
     imports = cst.parse_module(
@@ -173,5 +273,8 @@ if _mx_exact_receiver and self._has_{bound_name} and {axis.lower} <= {key} < {ax
         if item in replacements and imports:
             body.extend(imports)
             imports = ()
+        if isinstance(item, cst.ClassDef) and worker_replacements:
+            item = item.with_changes(body=item.body.with_changes(
+                body=tuple(worker_replacements.get(method, method) for method in item.body.body)))
         body.append(replacements.get(item, item))
-    return state.replace(state.syntax.with_changes(body=tuple(body)))
+    return state.replace(state.syntax.with_changes(body=(*body, *forwards)))

@@ -159,6 +159,28 @@ def declared_aliases(node):
     return ()
 
 
+def fixed_factory_refs(node):
+    """Return the insertion order of a factory's identical literal result schemas."""
+    cls = ast.parse(code(node)).body[0]
+    factory = next((method for method in cls.body if isinstance(method, ast.FunctionDef)
+                    and method.name == '_mx_space_formula'), None)
+    if factory is None or factory.decorator_list or not isinstance(factory.body[-1], ast.Return):
+        return ()
+    aliases = set(declared_aliases(node))
+    schema = None
+    for result in (item.value for item in ast.walk(factory) if isinstance(item, ast.Return)):
+        if (not isinstance(result, ast.Dict) or len(result.keys) != 1
+                or not isinstance(result.keys[0], ast.Constant) or result.keys[0].value != 'refs'
+                or not isinstance(refs := result.values[0], ast.Dict)
+                or any(not isinstance(key, ast.Constant) or type(key.value) is not str for key in refs.keys)):
+            return ()
+        names = tuple(key.value for key in refs.keys)
+        if len(set(names)) != len(names) or not set(names) <= aliases or schema is not None and names != schema:
+            return ()
+        schema = names
+    return schema or ()
+
+
 def scalar_factory_graph(node, cls, shape):
     """Prove the reachable graph uses numeric inputs and direct calls to local Cells.
 

@@ -277,6 +277,10 @@ and the dependent Collect's domain and result must be stable throughout the
 batch. Each worker holds its own reference to the mapping after the first
 successful lookup at a source site. It still runs the rest of the factory and
 fetches the result for each coordinate. Direct calls use the ordinary path.
+`factory_collect_bind_fixed_refs=True` also allows private calls to omit
+generic schema validation if every successful factory exit returns the same
+literal Reference dictionary. Each call evaluates the complete factory and
+binds its References in insertion order.
 
 A Cell with a bounded right-associated numeric recurrence can opt in to
 `iterative_suffix_sum=True`. When the compiler recognizes the recurrence
@@ -284,6 +288,10 @@ and its dense bounds, it evaluates terms in their original order and fills
 the cached suffixes in reverse. The stop must come from a ready integer
 Cell. The model author must ensure the term calculation does not change the
 stop or re-enter or inspect the recurrence while it is running.
+`collect_terminal_suffix_sum=True` additionally permits the admitted private
+worker accumulator to sum forward when the recurrence feeds exactly one
+terminal scalar Collect output from a fixed starting index, with no other
+Cell reading it. Direct calls and other consumers use the cached suffix path.
 
 A locked Space can opt in to `native_locked_result_calls=True` for native
 calls through an ItemSpace returned by one of its Cells. The compiler

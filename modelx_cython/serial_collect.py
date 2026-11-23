@@ -676,7 +676,7 @@ def _numeric_add_method():
     return cst.parse_module('\n'.join(lines) + '\n').body
 
 
-def _detached_factory_evaluator(cls, shape, memo='', slots=0):
+def _detached_factory_evaluator(cls, shape, memo='', slots=0, aliases=()):
     from .item_roots import new_root, release_root
 
     c = CY_MOD
@@ -692,10 +692,16 @@ def _detached_factory_evaluator(cls, shape, memo='', slots=0):
         owner = cls.name
         hold_init = (f'    {memo} = ([None] * {slots} if {owner}.__dictoffset__ == 0 '
                      f'and {owner}.__flags__ & 256 else None)\n')
+        memo_bindings = f'{bindings}, {memo}={memo}'
+        checked_call = f'                root._mx_apply_formula({memo_bindings})\n'
+        if aliases:
+            checked_call = f"                refs = self._mx_space_formula({memo_bindings})['refs']\n"
+            checked_call += '                try:\n'
+            checked_call += ''.join(f'                    setattr(root, {alias!r}, refs[{alias!r}])\n' for alias in aliases)
+            checked_call += '                finally:\n                    refs = None\n'
         factory_call = (f'            if {memo} is None:\n'
                         f'                root._mx_apply_formula({bindings})\n'
-                        f'            else:\n'
-                        f'                root._mx_apply_formula({bindings}, {memo}={memo})\n')
+                        f'            else:\n' + checked_call)
     arg_check = f"""    if (len(args) != {len(shape.extra)}
             or not _mx_sys._mx_collect_native_coords(args)):
         return None
@@ -831,9 +837,12 @@ def add_methods(cls, node, shape, *, workers, source=None):
     if isinstance(shape, MultiCollect):
         if shape.post_factory:
             from .factory_individuals import lower
+            from .factory_reuse import fixed_factory_refs
             node, memo, slots = lower(cls, node, shape, collect_contract=collect_contract,
                                       method=_method, return_expr=_return_expr)
-            helpers = cst.parse_module(_detached_factory_evaluator(cls, shape, memo, slots)).body
+            spec = cls.module.spec.get_spec(cls.fqname)
+            aliases = fixed_factory_refs(node) if memo and spec.get('factory_collect_bind_fixed_refs', False) else ()
+            helpers = cst.parse_module(_detached_factory_evaluator(cls, shape, memo, slots, aliases)).body
             return node.with_changes(body=node.body.with_changes(body=(*node.body.body, *helpers, *shared, options)))
         helpers = list(cst.parse_module('\n'.join(_multi_lines(cls, shape)) + '\n').body)
         if shape.ordered_rows:
