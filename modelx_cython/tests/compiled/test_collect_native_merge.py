@@ -36,12 +36,14 @@ def test_native_and_python_outputs_equal_the_export(tmp_path, monkeypatch):
                   "LeftFold": arithmetic.LeftFold,
                   "keyword_echo": arithmetic.keyword_echo}
         outputs = {
-            "Mixed": ('lambda: {"individual": {"state": {t: cf(t) for t in months}}, '
+            "Mixed": ('lambda: {"individual": {"state": {t: cf(t) for t in months}, '
+                      '"metadata": {"label": LeftFold(str(key))}}, '
                       '"sum": {"pv": pv(), "cf": {t: cf(t) for t in months}, '
                       '"native_cf": {t: cf(t) for t in contiguous}, '
                       '"none": {t: cf(t) for t in empty}}}'),
-            "MixedPython": ('lambda: {"sum": {"pv": pv(), "keys": [key], '
-                           '"fold": LeftFold(str(key))}}'),
+            "MixedPython": ('lambda: {"sum": {"pv": pv(), '
+                            '"native_cf": {t: cf(t) for t in contiguous}, "keys": [key], '
+                            '"metadata": {"fold": LeftFold(str(key))}}}'),
             "RootLocal": ('lambda: {"individual": {"state": {root: cf(root) for root in months}}, '
                           '"sum": {"pv": pv()}}'),
             "RootUnused": ('lambda: {"individual": {"state": [cf(0) for root in months]}, '
@@ -78,6 +80,7 @@ def test_native_and_python_outputs_equal_the_export(tmp_path, monkeypatch):
     probe = textwrap.dedent("""\
         import json, pickle, sys
         from collections.abc import Mapping
+        from collect_arithmetic import LeftFold
         package = sys.argv[1]
         Model = type(__import__(package).mx_model)
         def plain(value):
@@ -91,15 +94,28 @@ def test_native_and_python_outputs_equal_the_export(tmp_path, monkeypatch):
             m = Model()
             m.collect_workers = workers
             result = m.Mixed.collect()
+            python_result = m.MixedPython.collect()
             if package == 'exported_cy':
-                from exported_cy._mx_collect_semantics import NativeCollectedSeries
+                from exported_cy._mx_collect_semantics import CollectedSeries, NativeCollectedSeries
                 series = result.sum.native_cf
                 assert type(series) is NativeCollectedSeries
                 assert type(series._storage).__name__ == 'array'
                 assert series(1) == series[1] and list(series) == [0, 1, 2]
                 assert dict(pickle.loads(pickle.dumps(series))) == dict(series)
+                for key, item in result.individual.items():
+                    assert type(item.metadata) is CollectedSeries
+                    assert type(item.metadata['label']) is LeftFold
+                    assert item.metadata['label'].value == str(key)
+
+                assert type(python_result.sum.metadata) is CollectedSeries
+                assert type(python_result.sum.metadata['fold']) is LeftFold
+                if workers == 1 or getattr(sys, '_is_gil_enabled', lambda: True)():
+                    assert type(python_result.sum.native_cf) is NativeCollectedSeries
+                else:
+                    # Python addition keeps its per-policy order on the generic worker path.
+                    assert type(python_result.sum.native_cf) is CollectedSeries
             out[f'mixed{workers}'] = plain(result)
-            out[f'python{workers}'] = plain(m.MixedPython.collect())
+            out[f'python{workers}'] = plain(python_result)
             out[f'root{workers}'] = plain(m.RootLocal.collect())
             out[f'unused{workers}'] = plain(m.RootUnused.collect())
             out[f'keyword{workers}'] = plain(m.Keyword.collect())
@@ -133,7 +149,7 @@ def test_native_and_python_outputs_equal_the_export(tmp_path, monkeypatch):
                 "unused1", "unused4", "keyword1", "keyword4", "duplicate1", "duplicate4"):
         assert compiled[key] == live[key], key
     assert compiled["python4"]["sum"]["keys"] == "[3, 1, 4, 5, 9, 2]"
-    assert compiled["python4"]["sum"]["fold"] == "(((((3+1)+4)+5)+9)+2)"
+    assert compiled["python4"]["sum"]["metadata"] == [["'fold'", "(((((3+1)+4)+5)+9)+2)"]]
     assert compiled["duplicate4"]["sum"]["pv"] == "6"
     # 4 workers: the individual section in domain order and with the serial values
     assert compiled["mixed4"]["individual"] == live["mixed1"]["individual"]
@@ -145,9 +161,10 @@ def test_native_and_python_outputs_equal_the_export(tmp_path, monkeypatch):
     parallel_sum = compiled["mixed4"]["sum"]
     assert parallel_sum["none"] == []
     assert math.isclose(float(parallel_sum["pv"]), float(mixed["sum"]["pv"]), rel_tol=1e-12)
-    assert [key for key, _ in parallel_sum["cf"]] == [key for key, _ in mixed["sum"]["cf"]]
-    for (_, got), (_, want) in zip(parallel_sum["cf"], mixed["sum"]["cf"]):
-        assert math.isclose(float(got), float(want), rel_tol=1e-12)
+    for field in ("cf", "native_cf"):
+        assert [key for key, _ in parallel_sum[field]] == [key for key, _ in mixed["sum"][field]]
+        for (_, got), (_, want) in zip(parallel_sum[field], mixed["sum"][field]):
+            assert math.isclose(float(got), float(want), rel_tol=1e-12)
     report = json.loads((tmp_path / "exported_cy/_mx_admission.json").read_text(encoding="utf-8"))
     def leaves(space):
         entry = report[f"exported_cy._mx_classes._c_{space}._f_collect_outputs"]
@@ -157,9 +174,74 @@ def test_native_and_python_outputs_equal_the_export(tmp_path, monkeypatch):
     assert {key: native for key, (native, _) in mixed_leaves.items()} == {
         ("individual", ""): False, ("sum", "pv"): True, ("sum", "cf"): True, ("sum", "native_cf"): True,
         ("sum", "none"): True}
-    assert leaves("MixedPython")[("sum", "pv")][0] and not leaves("MixedPython")[("sum", "fold")][0]
+    assert {key: native for key, (native, _) in leaves("MixedPython").items()} == {
+        ("sum", "pv"): True, ("sum", "native_cf"): True, ("sum", "keys"): False, ("sum", "metadata"): False}
     assert "Reference" in leaves("CellDomain")[("sum", "cf")][1]
     assert leaves("MissingKey")[("sum", "pv")][0] and not leaves("MissingKey")[("sum", "cf")][0]
+
+
+def test_native_collect_result_supports_native_and_python_consumers(tmp_path):
+    model = mx.new_model("CollectConsumers")
+    try:
+        keys = (1, 2, 3, 4)
+        periods = (0, 1, 2)
+        projection = model.new_space(
+            "Projection", formula="lambda key: None", refs={"keys": keys, "periods": periods},
+            collect_over={"key": keys},
+            collect_outputs='lambda: {"sum": {"cash": {t: cash(t) for t in periods}}}')
+        projection.new_cells("cash", "lambda t: key * 0.5 + t")
+        consumers = model.new_space("Consumers", refs={"projection": projection, "numbers": math})
+        consumers.new_cells(
+            "numeric", "lambda t: numbers.sqrt(float(projection.collect().sum.cash(t)))")
+        consumers.new_cells(
+            "report", 'lambda: {t: f"{value:.2f}" for t, value in projection.collect().sum.cash.items()}')
+        model.export(tmp_path / "exported")
+    finally:
+        model.close()
+
+    spec = {"spaces": {"Projection": {"serial_collect": "reuse", "parallel_collect_reuse": True}}}
+    (tmp_path / "spec.py").write_text(repr(spec), encoding="utf-8")
+    (tmp_path / "sample.py").write_text(
+        "from exported import mx_model as m\n"
+        "m.Consumers.report()\n"
+        "for t in m.Projection.periods:\n    m.Consumers.numeric(t)\n",
+        encoding="utf-8")
+    subprocess.run([sys.executable, "-m", "modelx_cython", "exported", "--sample", "sample.py",
+                    "--spec", "spec.py"], cwd=tmp_path, check=True)
+
+    admission = json.loads((tmp_path / "exported_cy/_mx_admission.json").read_text(encoding="utf-8"))
+    numeric = admission["exported_cy._mx_classes._c_Consumers._f_numeric"]
+    report = admission["exported_cy._mx_classes._c_Consumers._f_report"]
+    assert numeric["return_type"] == "double"
+    assert any(helper.endswith(".m_sqrt") for helper in numeric["native_helpers"])
+    assert report["return_type"] == "object"
+
+    probe = textwrap.dedent("""\
+        import math
+        from array import array
+        from exported import mx_model as exported
+        from exported_cy import mx_model as compiled
+        from exported_cy._mx_collect_semantics import NativeCollectedSeries
+
+        for workers in (1, 4):
+            live, native = type(exported)(), type(compiled)()
+            live.collect_workers = native.collect_workers = workers
+            collected = native.Projection.collect()
+            series = collected.sum.cash
+            assert type(series) is NativeCollectedSeries
+            storage = series._storage
+            assert type(storage) is array
+            assert dict(series) == dict(live.Projection.collect().sum.cash) == {0: 5., 1: 9., 2: 13.}
+            for t in (0, 1, 2):
+                expected = math.sqrt(series[t])
+                assert native.Consumers.numeric(t) == live.Consumers.numeric(t) == expected
+            report = native.Consumers.report()
+            assert type(report) is dict
+            assert report == live.Consumers.report() == {0: "5.00", 1: "9.00", 2: "13.00"}
+            assert native.Projection.collect() is collected
+            assert collected.sum.cash is series and series._storage is storage
+        """)
+    subprocess.run([sys.executable, "-c", probe], cwd=tmp_path, check=True)
 
 
 def test_collect_with_other_parameters_is_native_per_argument_set(tmp_path):
