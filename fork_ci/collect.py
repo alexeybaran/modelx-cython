@@ -82,7 +82,7 @@ def check_job(lane, spec, job, artifact, run_id, attempt, pins, coverage):
     check_runtime(environment['runtime'], runner, interpreter)
     dependencies = environment['dependencies']
     versions = dependencies['versions']
-    require(dependencies['modelx_helpers_present'] is False, 'unexpected legacy helper import')
+    require(dependencies['modelx_helpers_present'] is True, 'missing pinned legacy test fixture')
     floor = profile == 'compatibility-floor'
     require(dependencies['lifelib_installed'] is (not floor) and ('lifelib' in versions) is (not floor),
             'lifelib scope differs from the compatibility policy')

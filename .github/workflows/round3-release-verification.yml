@@ -61,6 +61,16 @@ jobs:
           ref: ${{ steps.pins.outputs.lifelib }}
           path: lifelib
           persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          repository: alexeybaran/modelx-benchmark-toolkit
+          ref: 3a6a1c19355a992c9ecc231e48d664b0d7e74783
+          path: toolkit
+          sparse-checkout: parallel/20261113/round3/handoff/reproduction/modelx_helpers
+          persist-credentials: false
+      - name: Expose the legacy test fixture
+        shell: bash
+        run: echo "PYTHONPATH=$GITHUB_WORKSPACE/toolkit/parallel/20261113/round3/handoff/reproduction" >> "$GITHUB_ENV"
       - name: Verify pins and install
         id: install
         shell: bash

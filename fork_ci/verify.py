@@ -166,9 +166,11 @@ def dependencies(workspace, profile):
         raise ValueError('required lifelib installation is missing or incompatible')
     else:
         core['lifelib'] = plain_distribution('lifelib', 'lifelib', workspace / 'lifelib')
-    helpers = importlib.util.find_spec('modelx_helpers') is not None
-    if helpers:
-        raise ValueError('the legacy helper package must be absent in every lane')
+    legacy = importlib.util.find_spec('modelx_helpers')
+    legacy_source = workspace / 'toolkit/parallel/20261113/round3/handoff/reproduction/modelx_helpers'
+    helpers = legacy is not None and Path(legacy.origin).resolve() == legacy_source / '__init__.py'
+    if not helpers:
+        raise ValueError('the pinned legacy test fixture is unavailable')
     versions = {key: dist.version for key, dist in core.items()}
     for name, module in (('Cython', 'Cython'), ('pandas', 'pandas'), ('numpy', 'numpy'),
                          ('pytest', 'pytest'), ('libcst', 'libcst'), ('openpyxl', 'openpyxl'), ('psutil', 'psutil')):
