@@ -21,7 +21,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: 4b9b851d3d805e0ccbd9e87b9478828edd14f41f
+          ref: b50f7be8dd48fa541b496331e944f091011d1302
           persist-credentials: false
       - uses: actions/setup-python@v5
         with:
@@ -61,7 +61,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: 4b9b851d3d805e0ccbd9e87b9478828edd14f41f
+          ref: b50f7be8dd48fa541b496331e944f091011d1302
           persist-credentials: false
       - uses: actions/setup-python@v5
         with:
@@ -79,6 +79,7 @@ jobs:
             "$GITHUB_WORKSPACE/modelx_cython/tests/compiled/test_compiled_contract.py::test_exported_contract_and_collection" \
             "$GITHUB_WORKSPACE/integration_tests/test_table_mixed_reads.py::test_mixed_native_and_pandas_reads_of_one_frame" \
             "$GITHUB_WORKSPACE/modelx_cython/tests/compiled/test_factory_private_refs.py" \
+            "$GITHUB_WORKSPACE/modelx_cython/tests/test_space_item_results.py" \
             "$GITHUB_WORKSPACE/modelx_cython/tests/test_suffix_sums.py"
       - name: Install released lifelib sample dependencies
         if: matrix.python-version != '3.9'
@@ -100,7 +101,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: 4b9b851d3d805e0ccbd9e87b9478828edd14f41f
+          ref: b50f7be8dd48fa541b496331e944f091011d1302
           persist-credentials: false
       - uses: actions/setup-python@v5
         with:
@@ -120,4 +121,5 @@ jobs:
             "$GITHUB_WORKSPACE/modelx_cython/tests/compiled/test_collect_workers_runtime.py::test_compiled_with_one_worker_runs_four_after_compilation" \
             "$GITHUB_WORKSPACE/integration_tests/test_table_mixed_reads.py::test_mixed_native_and_pandas_reads_of_one_frame" \
             "$GITHUB_WORKSPACE/modelx_cython/tests/compiled/test_factory_private_refs.py" \
+            "$GITHUB_WORKSPACE/modelx_cython/tests/test_space_item_results.py" \
             "$GITHUB_WORKSPACE/modelx_cython/tests/test_suffix_sums.py"
