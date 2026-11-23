@@ -342,7 +342,7 @@ def _dict_leaf(cls, entry, parameters, *, item_domains=False):
                     (attr := _self_attribute(arg)) in parameters and attr in cls.refs
                     and cls.refs[attr].get_type_expr(c_style=True) == 'long long'
                     and target.get_argtype_expr(param, c_style=True) == 'long long'
-                    for arg, param in zip(args, target.params, strict=True))):
+                    for arg, param in zip(args, target.params))):
                 return name, '', code(call)
     if domain is None or domain in cls.cells:
         return ('the domain is not a Reference of the Space (a Cell may give a different domain to each '
@@ -688,6 +688,13 @@ def _detached_factory_evaluator(cls, shape):
             or not _mx_sys._mx_collect_native_coords(args)):
         return None
 """ if shape.extra else ''
+    if shape.parallel_reuse:
+        declarations, fold = _factory_buffer_fold(shape)
+    else:
+        declarations, fold = '', """\
+            outputs = root._mx_collect_numeric_output_v1(layouts)
+            accumulator.add(coordinate, outputs)
+"""
     return f"""\
 def _mx_evaluate_serial_collect(self, coords{', args' if shape.extra else ''}):
     from . import _mx_collect_semantics as semantics
@@ -702,7 +709,7 @@ def _mx_evaluate_serial_collect(self, coords{', args' if shape.extra else ''}):
     first: {c}.bint = True
     layouts = {{}}
     accumulator = semantics.Accumulator(_mx_sys._PendingCollectSum)
-    try:
+{declarations}    try:
         for coordinate in coords:
             if not first:
 {resets}
@@ -710,13 +717,80 @@ def _mx_evaluate_serial_collect(self, coords{', args' if shape.extra else ''}):
 {assignments}
             root.{shape.parameter} = coordinate
             root._mx_apply_formula({bindings})
-            outputs = root._mx_collect_numeric_output_v1(layouts)
-            accumulator.add(coordinate, outputs)
-            first = False
+{fold}            first = False
         return _mx_sys.CollectResult(accumulator.result()._fields)
     finally:
         {release_root(cls.name)}(root)
 """
+
+
+def _factory_buffer_fold(shape):
+    """Use the first gathered policy as the subtotal's storage."""
+    c = CY_MOD
+    declarations = [f'    native_layout: {c}.bint = False', f'    pos: {c}.Py_ssize_t',
+                    '    from array import array']
+    series = [(i, leaf) for i, leaf in enumerate(shape.leaves) if leaf.kind == 'dict']
+    setup, updates, checks = [], [], []
+    for i, leaf in series:
+        declarations.extend((
+            f'    values{i}: {c}.double[::1]', f'    keys{i}: {c}.longlong[::1]',
+            f'    width{i}: {c}.Py_ssize_t', f'    consecutive{i}: {c}.bint',
+            f'    start{i}: {c}.longlong', f'    first_keys{i} = None',
+        ))
+        checks.append(f'type(sums[{leaf.label!r}]) is semantics.PackedFloatSeries')
+        setup.extend((
+            f'                    packed = sums[{leaf.label!r}]',
+            f'                    values{i} = packed.values',
+            f'                    width{i} = len(packed.keys)',
+            f'                    first_keys{i} = packed.keys',
+            f'                    start{i} = packed.keys[0] if width{i} else 0',
+            f'                    consecutive{i} = (start{i} <= 9223372036854775807 - max(0, width{i} - 1)',
+            f'                        and all(key == start{i} + off for off, key in enumerate(packed.keys)))',
+            f'                    if not consecutive{i}:',
+            f'                        keys{i} = array("q", packed.keys)',
+        ))
+    for i, leaf in enumerate(shape.leaves):
+        if leaf.kind == 'scalar':
+            updates.append(f'                sums[{leaf.label!r}] += root.{leaf.cell}()')
+        else:
+            domain = leaf.domain_expression or f'self.{leaf.domain}'
+            domain = cst.parse_expression(domain)
+            receiver_reads = {part for part in walk(domain) if isinstance(part, cst.Name) and part.value == 'self'}
+            domain = domain.visit(_Root(receiver_reads))
+            updates.extend((
+                f'                domain = {code(domain)}',
+                '                current_keys = semantics.numeric_keys(domain, layouts)',
+                f'                if current_keys == first_keys{i}:',
+                f'                    if consecutive{i}:',
+                f'                        for pos in range(width{i}):',
+                f'                            values{i}[pos] += root.{leaf.cell}(start{i} + pos)',
+                '                    else:',
+                f'                        for pos in range(width{i}):',
+                f'                            values{i}[pos] += root.{leaf.cell}(keys{i}[pos])',
+                '                else:',
+                '                    if fallback is None:',
+                '                        fallback = {}',
+                f'                    fallback[{leaf.label!r}] = {{k: root.{leaf.cell}(k) for k in domain}}',
+            ))
+    fold = [
+        '            if native_layout:',
+        '                fallback = None',
+        *updates,
+        '                if fallback is not None:',
+        '                    fields = semantics.detached_numeric_sum(fallback, (_mx_sys.BaseMxObject,))["sum"]',
+        '                    for label, value in fields.items():',
+        '                        sums[label] = semantics._add(sums[label], value, ("sum", label))',
+        '                    native_layout = False',
+        '            else:',
+        '                outputs = root._mx_collect_numeric_output_v1(layouts)',
+        '                accumulator.add(coordinate, outputs)',
+        '                if first:',
+        "                    sums = outputs['sum']",
+        f'                    native_layout = {" and ".join(checks)}',
+        '                    if native_layout:',
+        *('    ' + line for line in setup),
+    ]
+    return '\n'.join(declarations) + '\n', '\n'.join(fold) + '\n'
 
 
 def add_methods(cls, node, shape, *, workers, source=None):
