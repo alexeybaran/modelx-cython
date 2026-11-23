@@ -1,5 +1,6 @@
 """Differential test of the factory path on a non-insurance model."""
 import json
+import math
 import subprocess
 import sys
 import textwrap
@@ -19,21 +20,45 @@ def test_factory_alias_and_rejection(tmp_path):
 """
         keys = tuple(range(35))
         s = model.new_space("Runs", formula=source,
-                            refs={"point": 0, "periods": (3, 1, 2), "keys": keys},
+                            refs={"point": 0, "periods": (3, 1, 2), "keys": keys, "offset": 0.0},
                             collect_over={"key": keys},
                             collect_outputs='lambda: {"sum": {"total": total(), "zero": zero(), "cancel": cancel(), '
                                             '"by_period": {i: charge(i) for i in periods}}}')
-        s.new_cells("charge", "lambda i: point * 0.25 + case + i")
+        s.new_cells("charge", "lambda i: point * 0.25 + case + i + offset")
         s.new_cells("zero", "lambda: -0.0")
         s.new_cells("cancel", "lambda: 1e16 if point % 3 == 0 else (1.0 if point % 3 == 1 else -1e16)")
         s.new_cells("total", "lambda: charge(1) + charge(3)")
+        other = model.new_space("Other", formula=source, refs={"point": 0, "keys": keys, "math": math},
+                                collect_over={"key": keys},
+                                collect_outputs='lambda: {"sum": {"v": value()}}')
+        other.new_cells("value", "lambda: float(math.floor(point + case))")
         model.export(tmp_path / "exported")
     finally:
         model.close()
-    (tmp_path / "spec.py").write_text(repr({"spaces": {"Runs": {"serial_collect": "reduce"}}}))
-    (tmp_path / "sample.py").write_text("from exported import mx_model as m\nm.Runs.collect(2)\n")
+    options = {"serial_collect": "reduce", "factory_collect_reuse": True}
+    from modelx_cython.factory_reuse import standard_lifecycle
+    import libcst
+    classes_path = tmp_path / "exported" / "_mx_classes.py"
+    raw = classes_path.read_text()
+    def runs(text):
+        return next(c for c in libcst.parse_module(text).body
+                    if isinstance(c, libcst.ClassDef) and c.name.value == "_c_Runs")
+    assert standard_lifecycle(runs(raw), ["point"])
+    capture = raw.replace('        result = self._parent._mx_space_formula(',
+                          '        retained.append(self)\n        result = self._parent._mx_space_formula(')
+    assert not standard_lifecycle(runs(capture), ["point"])
+    (tmp_path / "spec.py").write_text(repr({"spaces": {"Runs": options, "Other": options}}))
+    (tmp_path / "sample.py").write_text("from exported import mx_model as m\nm.Runs.collect(2)\nm.Other.collect(2)\n")
     subprocess.run([sys.executable, "-B", "-m", "modelx_cython", "exported",
                     "--sample", "sample.py", "--spec", "spec.py"], cwd=tmp_path, check=True)
+    generated = (tmp_path / "exported_cy" / "_mx_classes.py").read_text()
+    if "def _mx_fill_ordered_rows" in generated:
+        import ast
+        classes = {c.name: c for c in ast.parse(generated).body if isinstance(c, ast.ClassDef)}
+        def evaluator(name):
+            return next(f for f in classes[name].body if getattr(f, 'name', None) == '_mx_evaluate_serial_collect')
+        assert "_mx_reuse_private" in ast.dump(evaluator("_c_Runs"))
+        assert "_mx_reuse_private" not in ast.dump(evaluator("_c_Other"))
     probe = textwrap.dedent("""\
         import json, math, sys, importlib
         m = __import__(sys.argv[1]).mx_model
@@ -46,6 +71,8 @@ def test_factory_alias_and_rejection(tmp_path):
                 blocks.append(len(coords))
                 return native(instance, coords)
             runtime._OrderedNumericRows.block = witness
+        direct = m.Runs[2, 9]
+        direct_value = direct.total()
         out = []
         for w in (1, 4):
             m.collect_workers = w
@@ -87,6 +114,11 @@ def test_factory_alias_and_rejection(tmp_path):
             assert m.Runs._mx_prepare_ordered_rows_v1(tuple(range(35)), (4,), 8, 4) is None
             blocks.clear()
             assert list(m.Runs.collect(5).sum.by_period) == [3, 1] and not blocks
+        assert m.Runs[2, 9] is direct and direct.total() == direct_value
+        m.Runs.offset = 2.0
+        assert m.Runs.collect(7).sum.total == sum(2 * key * .25 + 22 for key in range(35))
+        assert m.Runs[2, 9] is direct and direct.total() == direct_value
+        assert m.Other.collect(1).sum.v == sum(range(1, 36))
         print(json.dumps(out))
     """)
     def invoke(package):

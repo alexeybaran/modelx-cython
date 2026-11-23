@@ -1,6 +1,6 @@
 """Emit an opt-in scalar reduction through ordinary compiled leaf Cells."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import libcst as cst
 from libcst.metadata import ExpressionContext
@@ -122,7 +122,7 @@ def analyze(module, evaluator_args=False, ordered_rows=False):
                              'store; if the Cell is read only on a regular grid, key it on the grid index '
                              '(conversion rule R9)')
     automatic = module.spec.automatic_optimizations
-    if not any('serial_collect' in spec or 'parallel_collect_reuse' in spec
+    if not any('serial_collect' in spec or 'parallel_collect_reuse' in spec or 'factory_collect_reuse' in spec
                for spec in options.values()) and not automatic:
         return {}
     result = {}
@@ -132,6 +132,9 @@ def analyze(module, evaluator_args=False, ordered_rows=False):
         cls = module.classes[node.name.value]
         spec = options[node.name.value]
         option = spec.get('serial_collect', 'reduce' if automatic else None)
+        factory_reuse = spec.get('factory_collect_reuse', False)
+        if type(factory_reuse) is not bool or factory_reuse and option != 'reduce':
+            raise ValueError('factory_collect_reuse requires a boolean and serial_collect reduce')
         parallel = spec.get('parallel_collect_reuse', automatic and option == 'reuse')
         if type(parallel) is not bool or (parallel and option != 'reuse'):
             raise ValueError('parallel_collect_reuse requires serial_collect reuse')
@@ -147,8 +150,12 @@ def analyze(module, evaluator_args=False, ordered_rows=False):
         if shape is not None:
             if (ordered_rows and isinstance(shape, MultiCollect) and shape.factory and not shape.python
                     and all(leaf.mode == 'sum' for leaf in shape.leaves)):
-                from dataclasses import replace
                 shape = replace(shape, ordered_rows=True)
+                if factory_reuse:
+                    from .factory_reuse import scalar_factory_graph, standard_lifecycle, unshadowed_builtins
+                    if (scalar_factory_graph(node, cls, shape) and standard_lifecycle(node, _factory_aliases(node))
+                            and unshadowed_builtins(module.visitor.wrapper.module)):
+                        shape = replace(shape, reuse=True)
             result[node.name.value] = shape
     return result
 
@@ -184,13 +191,13 @@ def _factory_aliases(node):
     label, refs = _single_dict(body[-1].value)
     if label != 'refs' or not isinstance(refs, cst.Dict):
         return None
-    names = set()
+    names = []
     for element in refs.elements:
         if (not isinstance(element, cst.DictElement) or not isinstance(element.key, cst.SimpleString)
                 or type(element.key.evaluated_value) is not str or not isinstance(element.value, cst.Name)
                 or element.value.value not in params):
             return None
-        names.add(element.key.evaluated_value)
+        names.append(element.key.evaluated_value)
     return names
 
 
@@ -530,6 +537,14 @@ def _closure(cls, shape, extra=()):
 
 
 def _restart_lines(cls, shape):
+    if shape.reuse and getattr(shape, 'factory', False):
+        # Dependencies and the non-policy coordinates are fixed during collect.
+        # The loop rebinds the coordinate and reruns the validated alias factory.
+        fresh = replace(shape, reuse=False)
+        return ['if _mx_reuse_private and sys.gettrace() is None and sys.getprofile() is None:',
+                *('    ' + line for line in _reset_lines(cls)),
+                '    pass',
+                'else:', *('    ' + line for line in _restart_lines(cls, fresh))]
     if shape.reuse:
         # D107: collect computes the collected Cell only; between policies it resets what that Cell can
         # reach (static closure; everything when unknown). The reused root is private to this entry.
@@ -726,6 +741,10 @@ def _multi_lines(cls, shape, *, row_mode=False):
         f'    first: {c}.bint = True',
         f'    _mx_i: {c}.Py_ssize_t',
     ]
+    if shape.reuse and shape.factory:
+        lines.extend(['    import sys',
+                      '    from modelx_cython.runtime.factory_reuse import canonical_factory_builtins',
+                      '    _mx_reuse_private = sys.gettrace() is None and sys.getprofile() is None and canonical_factory_builtins()'])
     if row_mode:
         lines += [f'    _mx_out: {c}.double[::1]', f'    _mx_pos: {c}.Py_ssize_t = 0',
                   f'    _mx_done: {c}.Py_ssize_t = 0', '    _mx_width = 0']
