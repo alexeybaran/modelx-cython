@@ -51,6 +51,7 @@ def test_native_held_item_uses_exact_type_and_preserves_fallback(tmp_path, monke
     return 1.5
 ''')
         policy.new_cells('ordered', 'lambda t: cold_market().rate(t, tenor(t))')
+        policy.new_cells('selected_ordered', 'lambda t: select_item(t).rate(t, tenor(t))')
         policy.new_cells('computed', 'lambda t: cold_market().price(Hook.raw + t)')
         policy.new_cells('rounded', 'lambda t: cold_market().price(round(0.5 + t))')
         policy.new_cells('wrapped', 'lambda t: cold_market().price(int(round(0.5 + t)))')
@@ -67,6 +68,7 @@ def test_native_held_item_uses_exact_type_and_preserves_fallback(tmp_path, monke
             m.Policy[1].shadowed(t)
             m.Policy[1].overridden(t)
             m.Policy[1].ordered(t)
+            m.Policy[1].selected_ordered(t)
             m.Policy[1].computed(t)
             m.Policy[1].rounded(t)
             m.Policy[1].wrapped(t)
@@ -80,7 +82,6 @@ def test_native_held_item_uses_exact_type_and_preserves_fallback(tmp_path, monke
     assert build.returncode == 0, build.stdout + build.stderr
     source = (tmp_path / 'exported_cy/_mx_classes.py').read_text(encoding='utf-8')
     assert 'type(self._v_market) is _c_Market' in source
-    assert re.search(r'_mx_cy\.cast\(_c_Market, _mx_selected_item\)\.rate\(', source)
     assert re.search(r'_mx_cy\.cast\(_c_Market, _mx_pin_held_item_\d+\(self\)\)\.rate\(', source)
     assert 'type(self._v_mixed) is _c_Market' not in source
     assert 'type(self._v_explicit) is _c_Market' not in source
@@ -143,6 +144,17 @@ def test_native_held_item_uses_exact_type_and_preserves_fallback(tmp_path, monke
         values.append(policy.ordered(1))
         hook.callback = None
         assert policy is not m.Policy[7]
+        hook.override = None
+        policy = m.Policy[8]
+        original_market = policy.select_item(1)
+        def replace_market():
+            del m.Policy[8]
+            hook.override = Override(m.Market)
+        hook.callback = replace_market
+        values.append(policy.selected_ordered(1))
+        assert values[-1] == original_market.rate(1, 1.5)
+        assert m.Policy[8].selected_rate(1) == 44.5
+        hook.override = hook.callback = None
         for cell, key in [('project', 2), ('ordered', 4)]:
             try:
                 getattr(m.Policy[key], cell)(0)
