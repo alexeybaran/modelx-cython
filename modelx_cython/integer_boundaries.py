@@ -1,6 +1,7 @@
 """Check integer Cell results and ItemSpace keys at their native boundaries."""
 
 import libcst as cst
+from libcst.metadata.scope_provider import BuiltinAssignment
 
 from .checked_arithmetic import (
     CheckedArithmetic, divisibility_enabled, divisibility_operands, signed_local_assignments,
@@ -8,7 +9,7 @@ from .checked_arithmetic import (
 from .consts import CY_MOD, FORMULA_PREF, MX_SELF, MX_SYS_MOD
 from .powers import KIND_FLOAT, OperandKind, kind_of_type_expr
 from .scopes import CstFacts, Names, OPAQUE_SCOPES, has_scope_effects, lexical_nodes
-from .syntax import dotted_name, local_assignment, statements, walk
+from .syntax import arguments, dotted_name, local_assignment, statements, walk
 from .usage import RESOLVED, _extract_self_chain
 
 
@@ -155,7 +156,7 @@ class _GuardCalls(cst.CSTTransformer):
     METADATA_DEPENDENCIES = (cst.metadata.ScopeProvider,)
 
     def __init__(self, receiver, integer_params, counters, owner, resolver, entries, cells, private_entries,
-                 item_cells=None):
+                 item_cells=None, safe_builtins=()):
         self.item_cells = item_cells or {}     # D110 P1: {typed item local: {cell name: cell}}
         self.receiver = receiver
         self.integer_params = integer_params
@@ -166,6 +167,7 @@ class _GuardCalls(cst.CSTTransformer):
         self.entries = entries
         self.cells = cells
         self.private_entries = private_entries
+        self.safe_builtins = safe_builtins
 
     def visit_For_body(self, node):
         self.loop_targets.append(node.target.value if isinstance(node.target, cst.Name) else None)
@@ -189,6 +191,9 @@ class _GuardCalls(cst.CSTTransformer):
         return len(bindings) == 1 and bindings[0].node is self.integer_params[value.value]
 
     def leave_Call(self, before, after):
+        folded = self._native_isinstance(before, after)
+        if folded is not None:
+            return folded
         if isinstance(before.func, cst.Name) and (entry := self.private_entries.get(before.func.value)):
             path, params = entry
             return self._arguments(before, after, path, params, start=1)
@@ -219,6 +224,33 @@ class _GuardCalls(cst.CSTTransformer):
             return after
         return self._arguments(before, after, cell.model_path, params)
 
+    def _builtin(self, node, name):
+        if name not in self.safe_builtins or not isinstance(node, cst.Name) or node.value != name:
+            return False
+        scope = self.get_metadata(cst.metadata.ScopeProvider, node, None)
+        bindings = tuple(scope[name]) if scope is not None else ()
+        return bool(bindings) and all(isinstance(binding, BuiltinAssignment) for binding in bindings)
+
+    def _native_isinstance(self, before, after):
+        if not self._builtin(before.func, 'isinstance'):
+            return None
+        operands = arguments(before, count=2)
+        if operands is None or not self._native_argument(operands[0]):
+            return None
+        selector = operands[1]
+        if self._builtin(selector, 'int'):
+            return cst.Name('True', lpar=after.lpar, rpar=after.rpar)
+        if self._builtin(selector, 'bool'):
+            return cst.Name('False', lpar=after.lpar, rpar=after.rpar)
+        if (isinstance(selector, cst.Tuple) and len(selector.elements) == 2
+                and all(isinstance(item, cst.Element) for item in selector.elements)
+                and self._builtin(selector.elements[0].value, 'int')):
+            # A tuple evaluates its trailing type expression even when the
+            # first type matches. Preserve that read and its exceptions.
+            tail = after.args[1].value.elements[1].value
+            return cst.parse_expression(f'(({cst.Module([]).code_for_node(tail)}) is None or True)')
+        return None
+
     def _arguments(self, before, after, path, params, start=0):
         guarded = {index + start for index, _ in params}
         arguments = tuple(arg.with_changes(value=_checked_integer(arg.value, path))
@@ -227,7 +259,7 @@ class _GuardCalls(cst.CSTTransformer):
         return after.with_changes(args=arguments)
 
 
-def _guard_calls(node, cls, cell, resolver, entries, cells, private_entries, classes=None):
+def _guard_calls(node, cls, cell, resolver, entries, cells, private_entries, classes=None, safe_builtins=()):
     params = (*node.params.posonly_params, *node.params.params, *node.params.kwonly_params)
     if not params or params[0].name.value != MX_SELF:
         return node
@@ -238,7 +270,7 @@ def _guard_calls(node, cls, cell, resolver, entries, cells, private_entries, cla
     item_cells = {local: classes[owner].cells for local, owner in getattr(cell, 'typed_item_locals', {}).items()
                   if classes and owner in classes}
     return wrapper.visit(_GuardCalls(params[0], integer_params, counters, cls.fqname, resolver, entries, cells,
-                                    private_entries, item_cells)).body[0]
+                                    private_entries, item_cells, safe_builtins)).body[0]
 
 
 def _object_parameters(params, checked):
@@ -754,6 +786,10 @@ def guard_integer_boundaries(state, module_info, resolver, cells_kinds, ref_kind
     gate_class = state.names.reserve('_mx_checked_cell_call')
     changed = False
     signatures = _signed_signatures(state)
+    global_bindings = cst.MetadataWrapper(state.syntax, unsafe_skip_copy=True).resolve(
+        cst.metadata.ScopeProvider)[state.syntax]
+    safe_builtins = {name for name in ('isinstance', 'int', 'bool')
+                     if all(isinstance(binding, BuiltinAssignment) for binding in global_bindings[name])}
     native_helpers = {}
     for node in state.syntax.body:
         if (isinstance(node, cst.FunctionDef) and node.returns is not None
@@ -769,7 +805,8 @@ def guard_integer_boundaries(state, module_info, resolver, cells_kinds, ref_kind
                 cls = module_info.classes[owner]
                 # D139: the private entry of an uncached Cell has the Cell's own name as its origin
                 cell = cls.cells[name[len(FORMULA_PREF):] if name.startswith(FORMULA_PREF) else name]
-                node = _guard_calls(node, cls, cell, resolver, entries, cells, private_entries, module_info.classes)
+                node = _guard_calls(node, cls, cell, resolver, entries, cells, private_entries, module_info.classes,
+                                    safe_builtins)
                 # Physical cache misses and compact spill entries both check
                 # the logical domain before reaching the private formula.
                 axes = (cell.dense_logical_axes if cell.has_formula_def and cell.has_args() and cell.has_typeinfo()
@@ -791,7 +828,8 @@ def guard_integer_boundaries(state, module_info, resolver, cells_kinds, ref_kind
                 continue
             name = method.name.value
             if name.startswith(FORMULA_PREF) and (formula := cls.cells.get(name[len(FORMULA_PREF):])):
-                method = _guard_calls(method, cls, formula, resolver, entries, cells, private_entries, module_info.classes)
+                method = _guard_calls(method, cls, formula, resolver, entries, cells, private_entries,
+                                      module_info.classes, safe_builtins)
                 method = _guard_result(method, formula, cls, resolver, cells_kinds, ref_kinds, signatures,
                                        native_helpers.get((cls.name, name), ()), checked=checked)
                 if checked:
@@ -809,7 +847,8 @@ def guard_integer_boundaries(state, module_info, resolver, cells_kinds, ref_kind
                 changed = True
                 continue
             if cell is not None and not cell.has_formula_def:
-                method = _guard_calls(method, cls, cell, resolver, entries, cells, private_entries, module_info.classes)
+                method = _guard_calls(method, cls, cell, resolver, entries, cells, private_entries, module_info.classes,
+                                      safe_builtins)
                 method = _guard_result(method, cell, cls, resolver, cells_kinds, ref_kinds, signatures,
                                        checked=checked)
                 if checked:

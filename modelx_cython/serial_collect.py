@@ -24,6 +24,7 @@ class Leaf:
     domain: str = ''
     expression: str = ''
     reason: str = ''
+    domain_expression: str = ''
 
 
 @dataclass(frozen=True)
@@ -266,7 +267,7 @@ def _scalar_cell(cls, entry):
     return name is not None and _plain_cell(cls, name) and not cls.cells[name].has_args()
 
 
-def _dict_leaf(cls, entry, parameters):
+def _dict_leaf(cls, entry, parameters, *, item_domains=False):
     """``{k: self.cell(k) for k in self.<domain>}``: (cell, domain) or the reason it is not native."""
     if not isinstance(entry, cst.DictComp):
         return 'not a call of a zero-argument double Cell or {k: cell(k) for k in D}'
@@ -287,6 +288,19 @@ def _dict_leaf(cls, entry, parameters):
     if len(cell.params) != 1 or cell.get_argtype_expr(cell.params[0], c_style=True) != 'long long':
         return f'{name} does not take one C-integer argument'
     domain = _self_attribute(part.iter)
+    if domain is None and item_domains:
+        # A detached evaluator runs after the factory on the actual item.
+        # Evaluate the original domain there in formula order.
+        call = part.iter
+        if isinstance(call, cst.Call):
+            target = cls.cells.get(_self_attribute(call.func))
+            args = arguments(call, count=len(target.params)) if target is not None else None
+            if (args is not None and not target.called_with_kwargs and all(
+                    (attr := _self_attribute(arg)) in parameters and attr in cls.refs
+                    and cls.refs[attr].get_type_expr(c_style=True) == 'long long'
+                    and target.get_argtype_expr(param, c_style=True) == 'long long'
+                    for arg, param in zip(args, target.params, strict=True))):
+                return name, '', code(call)
     if domain is None or domain in cls.cells:
         return ('the domain is not a Reference of the Space (a Cell may give a different domain to each '
                 'item)')
@@ -294,7 +308,7 @@ def _dict_leaf(cls, entry, parameters):
         return 'the domain is not a Reference of the Space'
     if domain in parameters:
         return 'a Space parameter domain must be evaluated on the policy item'
-    return name, domain
+    return name, domain, ''
 
 
 class _Root(cst.CSTTransformer):
@@ -322,7 +336,7 @@ def _python_leaf(mode, label, entry, reason):
     return Leaf(mode, label, 'python', expression=code(entry.visit(_Root(receiver_reads))), reason=reason)
 
 
-def _leaves(cls, output, parameters):
+def _leaves(cls, output, parameters, *, item_domains=False):
     """The outputs of ``collect_outputs`` in source order, or None when it is not a literal
     ``{'individual': ..., 'sum': {name: ...}}``."""
     if not isinstance(output, cst.Dict) or not output.elements:
@@ -362,9 +376,10 @@ def _leaves(cls, output, parameters):
             if _scalar_cell(cls, entry):
                 leaves.append(Leaf(mode, label, 'scalar', cell=_self_attribute(entry.func)))
                 continue
-            found = _dict_leaf(cls, entry, parameters)
+            found = _dict_leaf(cls, entry, parameters, item_domains=item_domains)
             if isinstance(found, tuple):
-                leaves.append(Leaf(mode, label, 'dict', cell=found[0], domain=found[1]))
+                cell, domain, expression = found
+                leaves.append(Leaf(mode, label, 'dict', cell=cell, domain=domain, domain_expression=expression))
             else:
                 leaf = _python_leaf(mode, label, entry, found)
                 if leaf is None:
@@ -568,7 +583,7 @@ def _detached_numeric_methods(cls, source):
     if contract is None or cls.is_locked or not _isolated_leaf(source, cls, fresh=True):
         return ()
     output = _return_expr(_method(source, '_f_collect_outputs'))
-    leaves = _leaves(cls, output, (contract[0], *contract[1]))
+    leaves = _leaves(cls, output, (contract[0], *contract[1]), item_domains=True)
     if (not leaves or any(leaf.mode != 'sum' or leaf.kind == 'python' for leaf in leaves)
             or not any(leaf.kind == 'dict' for leaf in leaves)):
         return ()
@@ -588,7 +603,7 @@ def _detached_numeric_methods(cls, source):
             lines.append(f'    outputs[{leaf.label!r}] = self.{leaf.cell}()')
         else:
             lines += [
-                f'    domain = self.{leaf.domain}',
+                f'    domain = {leaf.domain_expression or "self." + leaf.domain}',
                 '    keys = semantics.numeric_keys(domain, layouts)',
                 '    if keys is None:',
                 f'        outputs[{leaf.label!r}] = {{k: self.{leaf.cell}(k) for k in domain}}',
