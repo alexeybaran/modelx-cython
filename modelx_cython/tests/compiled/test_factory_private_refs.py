@@ -39,8 +39,12 @@ def test_factory_private_refs(tmp_path, dependency):
         run.new_cells("value", "lambda t: row[0] + t")
         if admitted:
             run.new_cells('end', 'lambda: case + 1')
-            run.new_cells('suffix', 'def suffix(k):\n    if k >= end():\n        return 0.0\n    return value(k) + suffix(k + 1)\n')
-            run.new_cells('total', 'lambda: suffix(0)')
+            run.new_cells('total', """def total():
+    result = 0.0
+    for k in range(end()):
+        result += value(k)
+    return result
+""")
         else:
             run.new_cells("total", "lambda: value(case)")
         run.new_cells("steps", "lambda case: range(case)")
@@ -56,14 +60,11 @@ def test_factory_private_refs(tmp_path, dependency):
                "factory_collect_subtotals": True, "serial_collect": "reduce",
                'factory_collect_hold_individuals': use_collect,
                'factory_collect_bind_fixed_refs': admitted}
-    if admitted:
-        options['cells'] = {'suffix': {'iterative_suffix_sum': True, 'collect_terminal_suffix_sum': True}}
     (tmp_path / "spec.py").write_text(repr({"spaces": {"Runs": options}, "cells_param_size": {"t": 8, "case": 8, 'k': 9}}))
     (tmp_path / "sample.py").write_text("from exported import mx_model as m\nm.Runs.collect(2)\n")
     subprocess.run([sys.executable, "-m", "modelx_cython", "exported"], cwd=tmp_path, check=True)
     generated = (tmp_path / 'exported_cy/_mx_classes.py').read_text(encoding='utf-8')
     assert ('_mx_factory_individuals' in generated) == admitted
-    assert ('_mx_collect_terminal__c_Runs_suffix' in generated) == admitted
     assert ("refs['row'])" in generated) == admitted
     probe = textwrap.dedent(f"""\
         from exported_cy import mx_model as m
@@ -72,9 +73,9 @@ def test_factory_private_refs(tmp_path, dependency):
         assert options[1] and options[2]
         direct = m.Runs[2, 0]
         use_collect = {use_collect!r}
-        terminal_sum = {admitted!r}
-        assert direct.total() == (612. if terminal_sum else 205. if use_collect else 5.)
-        if terminal_sum:
+        admitted = {admitted!r}
+        assert direct.total() == (612. if admitted else 205. if use_collect else 5.)
+        if admitted:
             memo = [None]
             m.Runs._mx_space_formula(2, 0, _mx_factory_individuals=memo)
             if type(m.Data).__flags__ & 256 and type(m.Data).__dictoffset__ == 0:
@@ -85,7 +86,7 @@ def test_factory_private_refs(tmp_path, dependency):
             m.collect_workers = workers
             result = m.Runs.collect(case)
             total = 26. + (400. * case if use_collect else 0.)
-            expected = (case + 1) * total + 2 * case * (case + 1) if terminal_sum else total + 4 * case
+            expected = (case + 1) * total + 2 * case * (case + 1) if admitted else total + 4 * case
             assert result.sum.total == expected
             assert type(result.sum.series) is NativeCollectedSeries
             assert list(result.sum.series.values()) == [total + 4 * t for t in range(case)]

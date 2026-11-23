@@ -449,8 +449,6 @@ def main_handler(args: argparse.Namespace, stdout: IO[str], stderr: IO[str]) -> 
             )
             from modelx_cython.locked_entries import lower_locked_entries
             state = lower_locked_entries(state, u.module_info)
-            from modelx_cython.suffix_sums import lower_suffix_sums
-            state = lower_suffix_sums(state, u.module_info, dense_entries.get(u.module_info.fqname, {}))
             # api-tables (D101a, D103): the last pass, after every pass that looks cells up by name
             from modelx_cython import table_cells
             state = state.replace(table_cells.finish(state.syntax, u.module_info))
