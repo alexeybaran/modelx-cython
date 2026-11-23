@@ -293,6 +293,14 @@ def run_suite(workspace, suite, profile, interpreter):
         arguments.append('--basetemp=C:/t-' + suite)
     before = runtime(interpreter)
     expose_test_sources(compiler)
+    fixture_path = os.environ.get('CI_TEST_FIXTURES')
+    if fixture_path:
+        fixtures = (workspace / fixture_path).resolve()
+        if not (fixtures / 'modelx_helpers' / '__init__.py').is_file():
+            raise FileNotFoundError('pinned historical test fixtures are missing')
+        sys.path.insert(0, str(fixtures))
+        inherited = os.environ.get('PYTHONPATH')
+        os.environ['PYTHONPATH'] = os.pathsep.join(filter(None, (str(fixtures), inherited)))
     os.chdir(compiler)
     try:
         code = int(pytest.main(arguments, plugins=[inventory]))
