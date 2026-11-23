@@ -1,0 +1,156 @@
+name: Pinned lifelib full CI
+
+on:
+  push:
+    branches: [verify/r3-pv-noarg-full]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Test Python ${{ matrix.python-version }} on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-15-intel]
+        python-version: ['3.10', '3.11', '3.12', '3.13', '3.14']
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        repository: alexeybaran/lifelib
+        ref: e99235ae35276e46c57991416ebe058874152a2e
+        persist-credentials: false
+
+    - name: Set up Python ${{ matrix.python-version }}
+      uses: actions/setup-python@v5
+      with:
+        python-version: ${{ matrix.python-version }}
+        cache: 'pip'
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip setuptools wheel
+        pip install -e .[test]
+    - name: Install modelx from GitHub (for serializer_7 support)
+      # TradLife_A is serialized with modelx serializer_version 7, which is
+      # available on the modelx main branch but not yet released to PyPI
+      # (latest PyPI release ships up to serializer_6). Override the modelx
+      # pulled from PyPI with the main-branch build.
+      run: |
+        pip install --force-reinstall --no-deps "modelx @ git+https://github.com/alexeybaran/modelx.git@861396000edaae329d4473cdd97c0d1aea52a71f"
+
+    - name: Run tests with pytest
+      # uslib's _US_SEC test modules are left to the `sec` job below, as in
+      # lifelib-products' CI: they hold each SEC model to its S twin bit for bit, and
+      # parts of that hold only on the interpreter upstream verifies them on (S's sum()
+      # of floats is compensated from Python 3.12, and 3.14 rewords ZeroDivisionError).
+      # The SEC models themselves, their conventions and sec_support still run here.
+      run: |
+        pytest -v --ignore-glob='*test_*_us_sec.py'
+
+  sec:
+    name: uslib SEC suites on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        repository: alexeybaran/lifelib
+        ref: e99235ae35276e46c57991416ebe058874152a2e
+        persist-credentials: false
+
+    - name: Set up Python 3.13
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.13'
+        cache: 'pip'
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip setuptools wheel
+        pip install -e .[test]
+        pip install docutils
+        pip install --force-reinstall --no-deps "modelx @ git+https://github.com/alexeybaran/modelx.git@861396000edaae329d4473cdd97c0d1aea52a71f"
+
+    - name: Run the _US_SEC test modules with pytest
+      shell: bash
+      run: |
+        pytest -q --durations=10 lifelib/libraries/uslib/tests/test_*_us_sec.py
+
+  lint:
+    name: Lint and code quality checks
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        repository: alexeybaran/lifelib
+        ref: e99235ae35276e46c57991416ebe058874152a2e
+        persist-credentials: false
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+        cache: 'pip'
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -e .[dev]
+
+    - name: Run flake8
+      run: |
+        flake8 lifelib --count --select=E9,F63,F7,F82 --show-source --statistics
+        flake8 lifelib --count --exit-zero --max-complexity=10 --max-line-length=127 --statistics
+      continue-on-error: true
+
+    - name: Check import sorting with isort
+      run: |
+        isort --check-only --diff lifelib
+      continue-on-error: true
+
+    - name: Check code formatting with black
+      run: |
+        black --check lifelib
+      continue-on-error: true
+
+  test-install:
+    name: Test package installation
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        repository: alexeybaran/lifelib
+        ref: e99235ae35276e46c57991416ebe058874152a2e
+        persist-credentials: false
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+
+    - name: Build package
+      run: |
+        python -m pip install --upgrade pip build
+        python -m build
+
+    - name: Install package
+      run: |
+        pip install dist/*.whl
+
+    - name: Test import
+      run: |
+        python -c "import lifelib; print(f'lifelib version: {lifelib.__version__}')"

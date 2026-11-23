@@ -1,5 +1,5 @@
 {
-  "compiler_pin": "4a9e9b038526affb8c0f9241274af37a5557613f",
+  "compiler_pin": "f7f640c63ebee1f2a4862144e37046fcbf2b38c8",
   "pytest": "8.4.2",
   "suites": {
     "integration": {
@@ -857,7 +857,9 @@
         "modelx_cython/tests/compiled/test_enum_by_type.py::test_table_key_levels_converted_through_a_fixed_reference",
         "modelx_cython/tests/compiled/test_enum_reference_compare.py::test_member_reference_compares_as_c_integer",
         "modelx_cython/tests/compiled/test_enum_results.py::test_enum_cell_results_are_members_where_they_reach_python",
-        "modelx_cython/tests/compiled/test_factory_private_refs.py::test_factory_private_refs",
+        "modelx_cython/tests/compiled/test_factory_private_refs.py::test_factory_private_refs[cached_collect]",
+        "modelx_cython/tests/compiled/test_factory_private_refs.py::test_factory_private_refs[row]",
+        "modelx_cython/tests/compiled/test_factory_private_refs.py::test_factory_private_refs[unhashable_default]",
         "modelx_cython/tests/compiled/test_formula_entry_domains.py::test_long_and_hash_formula_contracts",
         "modelx_cython/tests/compiled/test_generator_boolean_ranges.py::test_nested_filtered_boolean_ranges",
         "modelx_cython/tests/compiled/test_generic_composition.py::test_generator_literals_preserve_integer_width_and_sign",
@@ -981,6 +983,7 @@
         "modelx_cython/tests/compiled/test_shifted_cache.py::test_shifted_dense_bounds[explicit-compact]",
         "modelx_cython/tests/compiled/test_shifted_cache.py::test_shifted_dense_bounds[explicit-full]",
         "modelx_cython/tests/compiled/test_shifted_cache.py::test_shifted_dense_bounds[sampled]",
+        "modelx_cython/tests/compiled/test_space_item_results.py::test_locked_item_result_uses_the_public_producer_once",
         "modelx_cython/tests/compiled/test_space_item_results.py::test_native_held_item_uses_exact_type_and_preserves_fallback",
         "modelx_cython/tests/compiled/test_typed_dispatch_locals.py::test_locals_from_typed_cells_are_c_numbers_and_values_match",
         "modelx_cython/tests/compiled/test_uncached_entries.py::test_uncached_cells_take_a_direct_entry_and_equal_live",
@@ -989,6 +992,7 @@
         "modelx_cython/tests/compiled/test_vector_displays.py::test_list_displays_are_written_into_typed_vectors",
         "modelx_cython/tests/compiled/test_vector_extrema_and_cache.py::test_vector_extrema_and_multi_parameter_cache",
         "modelx_cython/tests/compiled/test_vector_python_exits.py::test_vector_python_exits",
+        "modelx_cython/tests/compiled/test_vector_ref_reads.py::test_relative_integer_vector_scalar_reads",
         "modelx_cython/tests/compiled/test_wide_numeric_cache.py::test_wide_numeric_cache",
         "modelx_cython/tests/helper_contracts/test_grouped_report_metadata.py::test_grouped_leaf_keeps_remaining_levels_order_and_public_schema[False]",
         "modelx_cython/tests/helper_contracts/test_grouped_report_metadata.py::test_grouped_leaf_keeps_remaining_levels_order_and_public_schema[True]",
@@ -1594,8 +1598,6 @@
         "modelx_cython/tests/test_scalar_result_variants.py::test_scalar_integral_nonintegral_union_uses_upstream_numeric_abi[values4]",
         "modelx_cython/tests/test_sibling_accessor_counts.py::test_only_direct_calls_on_unchanged_extension_receivers_are_discounted",
         "modelx_cython/tests/test_single_frontend.py::test_compiler_does_not_import_a_second_ast_frontend",
-        "modelx_cython/tests/test_suffix_sums.py::test_compiled_suffix_preserves_cached_values_and_fallback",
-        "modelx_cython/tests/test_suffix_sums.py::test_recognize_right_associated_only",
         "modelx_cython/tests/test_table_admission.py::test_a_cell_with_arguments_is_admitted_too",
         "modelx_cython/tests/test_table_admission.py::test_a_keyed_frame_is_admitted_whatever_built_it",
         "modelx_cython/tests/test_table_admission.py::test_an_admitted_table_pickles_with_its_frame",
