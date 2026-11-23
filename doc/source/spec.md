@@ -217,6 +217,15 @@ keeps the original checked call and Cython error handling; public methods and
 virtual overrides retain their dispatch behavior. No formula-length rule is
 used to select private formula calls.
 
+A compiled collect runs its gathering loop even when a policy's Space formula
+computes References. For eligible numeric sums on a private leaf policy, the
+runtime can gather a scalar and a monthly series after the factory binds those
+References. It reads the period domain from that policy at the point where the
+output expression uses it. A matching immutable integer domain permits ordered
+addition in a double buffer. Other domains use the ordinary mapping on the same
+policy. Each policy's factory and outputs are evaluated once. This optimization
+assumes transient policy roots are discarded after their outputs are detached.
+
 Eligible scalar sum collections use a fresh receiver by default. An explicit
 Space contract `serial_collect="reuse"` additionally declares independent
 policies, confined mutable state and stable Reference bindings. Under that

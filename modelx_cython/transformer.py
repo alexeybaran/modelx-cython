@@ -1236,7 +1236,7 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
                 from modelx_cython.serial_collect import add_methods
                 updated_node = add_methods(
                     self.module.classes[cls_name], updated_node, self._serial_shapes.get(cls_name),
-                    workers=self._collect_workers)
+                    workers=self._collect_workers, source=original_node)
             decorator = cst.Decorator(
                 decorator=cst.Attribute(value=cst.Name(CY_MOD), attr=cst.Name("cclass"))
             )

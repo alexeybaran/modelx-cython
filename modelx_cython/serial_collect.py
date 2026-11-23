@@ -544,7 +544,58 @@ def _bind_extra_lines(shape):
     return [f'root.{name} = args[{position}]' for position, (name, _) in enumerate(shape.extra)]
 
 
-def add_methods(cls, node, shape, *, workers):
+def _detached_numeric_methods(cls, source):
+    """Gather fixed-width financial Cells on the actual policy root after its factory."""
+    contract = collect_contract(source)
+    if contract is None or cls.is_locked or not _isolated_leaf(source, cls, fresh=True):
+        return ()
+    output = _return_expr(_method(source, '_f_collect_outputs'))
+    leaves = _leaves(cls, output, (contract[0], *contract[1]))
+    if (not leaves or any(leaf.mode != 'sum' or leaf.kind == 'python' for leaf in leaves)
+            or not any(leaf.kind == 'dict' for leaf in leaves)):
+        return ()
+    c = CY_MOD
+    lines = [
+        'def _mx_collect_numeric_output_v1(self, layouts):',
+        f'    if type(self) is not {cls.name} or self._has_collect_outputs:',
+        '        return None',
+        '    from . import _mx_collect_semantics as semantics',
+        f'    buffer: {c}.double[::1]',
+        f'    i: {c}.Py_ssize_t',
+        f'    key: {c}.longlong',
+        '    outputs = {}',
+    ]
+    for leaf in leaves:
+        if leaf.kind == 'scalar':
+            lines.append(f'    outputs[{leaf.label!r}] = self.{leaf.cell}()')
+        else:
+            lines += [
+                f'    domain = self.{leaf.domain}',
+                '    keys = semantics.numeric_keys(domain, layouts)',
+                '    if keys is None:',
+                f'        outputs[{leaf.label!r}] = {{k: self.{leaf.cell}(k) for k in domain}}',
+                '    else:',
+                f'        packed = semantics.PackedFloatSeries(keys, {cls.name}._mx_collect_add_values_v1)',
+                '        buffer = packed.values',
+                '        for i in range(len(keys)):',
+                '            key = keys[i]',
+                f'            buffer[i] = self.{leaf.cell}(key)',
+                f'        outputs[{leaf.label!r}] = packed',
+            ]
+    lines += [
+        "    return semantics.detached_numeric_sum(outputs, (_mx_sys.BaseMxObject,))",
+        '@staticmethod',
+        f'def _mx_collect_add_values_v1(total: {c}.double[::1], values: {c}.double[::1]):',
+        f'    i: {c}.Py_ssize_t',
+        '    if len(total) != len(values):',
+        "        raise ValueError('incompatible numeric collect widths')",
+        '    for i in range(len(values)):',
+        '        total[i] += values[i]',
+    ]
+    return cst.parse_module('\n'.join(lines) + '\n').body
+
+
+def add_methods(cls, node, shape, *, workers, source=None):
     """Add a private evaluator to the existing generated collect entry."""
     if collect_contract(node) is None:
         return node
@@ -558,6 +609,8 @@ def add_methods(cls, node, shape, *, workers):
     options = cst.parse_statement(
         f'def _mx_collect_options_v2(self):\n    return {workers}, {callback}, {parallel}, {ordered}{takes_args}\n')
     shared = _shared_root_methods(cls, node)
+    if source is not None:
+        shared = (*shared, *_detached_numeric_methods(cls, source))
     if shape is None:
         return node.with_changes(body=node.body.with_changes(body=(*node.body.body, *shared, options)))
     from .item_roots import new_root, release_root     # D116: shared with the direct route
