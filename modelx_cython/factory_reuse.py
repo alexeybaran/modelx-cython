@@ -23,7 +23,7 @@ _APPLY = """def _mx_apply_formula(self, *args, **kwargs):
 """
 
 
-def standard_lifecycle(node, aliases):
+def standard_lifecycle(node, aliases, *, remap_references=False):
     """Recognize exporter-owned construction, reference copy and alias assignment."""
     body = ast.parse(code(node)).body[0].body
     methods = {m.name: m for m in body if isinstance(m, ast.FunctionDef)}
@@ -49,8 +49,9 @@ def standard_lifecycle(node, aliases):
                 return False
             value = stmt.value
             if name == '_mx_copy_refs':
-                if not (isinstance(value, ast.Attribute) and value.attr == dest.attr
-                        and isinstance(value.value, ast.Name) and value.value.id == 'base'):
+                direct = _source_reference(value, dest.attr)
+                remapped = remap_references and _remapped_reference(value, dest.attr)
+                if not (direct or remapped):
                     return False
             elif not (isinstance(value, ast.Constant)
                       or isinstance(value, ast.Dict) and not value.keys
@@ -63,6 +64,25 @@ def standard_lifecycle(node, aliases):
     return True
 
 
+def _source_reference(value, name):
+    return (isinstance(value, ast.Attribute) and value.attr == name
+            and isinstance(value.value, ast.Name) and value.value.id == 'base')
+
+
+def _remapped_reference(value, name):
+    if not (isinstance(value, ast.IfExp) and _source_reference(value.orelse, name)
+            and isinstance(value.test, ast.Call) and isinstance(value.test.func, ast.Attribute)
+            and value.test.func.attr == '_mx_is_in' and _source_reference(value.test.func.value, name)
+            and not value.test.keywords and len(value.test.args) == 1
+            and isinstance(value.test.args[0], ast.Name) and value.test.args[0].id == 'base_root'):
+        return False
+    target = value.body
+    while isinstance(target, ast.Attribute) and target.attr != '_parent':
+        target = target.value
+    return (isinstance(target, ast.Attribute) and isinstance(target.value, ast.Name)
+            and target.value.id == 'self')
+
+
 def unshadowed_builtins(module):
     source = module.code
     symbols = symtable.symtable(source, '<export>', 'exec')
@@ -71,6 +91,72 @@ def unshadowed_builtins(module):
         return False
     return not any(isinstance(item, ast.ImportFrom) and any(alias.name == '*' for alias in item.names)
                    for item in ast.parse(source).body)
+
+
+def detached_factory_graph(node, cls, cells, *, forbidden_refs=(), forbidden_cells=(), include_factory=True):
+    """Check that the policy receiver cannot become an input or an output.
+
+    This opt-in permits calls on fixed external dependencies. The model author
+    must keep those dependencies fixed for the call and use ordinary Cells
+    that do not inspect caller frames. A bound policy method may only appear
+    as the target of a direct call.
+    """
+    methods = {m.name: m for m in ast.parse(code(node)).body[0].body if isinstance(m, ast.FunctionDef)}
+    pending = ['_f_' + name for name in cells]
+    if include_factory:
+        pending.append('_mx_space_formula')
+    seen = set()
+    while pending:
+        name = pending.pop()
+        if name in seen:
+            continue
+        seen.add(name)
+        method = methods.get(name)
+        if method is None or name in forbidden_cells:
+            return False
+        body = ast.Module(body=method.body, type_ignores=[])
+        parents = {child: parent for parent in ast.walk(body) for child in ast.iter_child_nodes(parent)}
+        reflective = {'locals', 'globals', 'vars', 'eval', 'exec', 'super', 'getattr', 'setattr',
+                      '_getframe', 'currentframe', 'f_back', 'f_locals'}
+        for expr in ast.walk(body):
+            if isinstance(expr, (ast.Global, ast.Nonlocal, ast.Yield, ast.YieldFrom, ast.Await,
+                                 ast.Lambda, ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                return False
+            if isinstance(expr, (ast.Attribute, ast.Subscript)) and not isinstance(expr.ctx, ast.Load):
+                return False
+            if isinstance(expr, ast.Attribute) and (expr.attr in reflective or expr.attr.startswith('__')):
+                return False
+            if isinstance(expr, ast.Name):
+                if expr.id in reflective:
+                    return False
+                if expr.id == 'self' and not isinstance(expr.ctx, ast.Load):
+                    return False
+                if expr.id == 'self' and not isinstance(parents[expr], ast.Attribute):
+                    return False
+            if (isinstance(expr, ast.Attribute) and isinstance(expr.value, ast.Name)
+                    and expr.value.id == 'self'):
+                if expr.attr in cls.cells:
+                    parent = parents[expr]
+                    if not isinstance(parent, ast.Call) or parent.func is not expr:
+                        return False
+                    pending.append('_f_' + expr.attr)
+                elif expr.attr not in cls.refs or expr.attr.startswith('_') or expr.attr in forbidden_refs:
+                    return False
+    return True
+
+
+def declared_aliases(node):
+    """Read the aliases from the exporter-owned apply method."""
+    for method in ast.parse(code(node)).body[0].body:
+        if not isinstance(method, ast.FunctionDef) or method.name != '_mx_apply_formula':
+            continue
+        for expr in ast.walk(method):
+            if (isinstance(expr, ast.BinOp) and isinstance(expr.op, ast.Sub)
+                    and isinstance(expr.right, ast.Tuple)
+                    and all(isinstance(key, ast.Constant) and type(key.value) is str
+                            for key in expr.right.elts)):
+                return tuple(key.value for key in expr.right.elts)
+    return ()
 
 
 def scalar_factory_graph(node, cls, shape):

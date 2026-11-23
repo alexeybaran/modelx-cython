@@ -257,6 +257,25 @@ checks the reachable Cell expressions and keeps fresh construction for
 unrecognized calls, object References, or expressions that can expose the
 receiver. This option preserves policy addition order.
 
+`factory_collect_private_refs=True` extends that opt-in to leaf factories
+that read stable inputs through object References and return detached numeric
+sums. The factory is called for every policy and output keys are evaluated
+after the factory. The author guarantees that dependencies stay fixed during
+the call and that external code does not inspect caller frames or reach the
+private policy instance. The compiler checks for direct exposure of the
+receiver and uses the existing evaluator for unsupported patterns.
+`factory_collect_subtotals=True` also permits regrouping floating-point sums
+between worker partitions. The output domains must be deterministic and
+identical for every policy and worker in the call. The compiler rejects
+domains that read the policy coordinate or a factory-assigned Reference.
+
+A Cell with a bounded right-associated numeric recurrence can opt in to
+`iterative_suffix_sum=True`. When the compiler recognizes the recurrence
+and its dense bounds, it evaluates terms in their original order and fills
+the cached suffixes in reverse. The stop must come from a ready integer
+Cell. The model author must ensure the term calculation does not change the
+stop or re-enter or inspect the recurrence while it is running.
+
 Individual switches and legacy per-Cell options remain available for controlled
 ablations and compatibility diagnostics. `automatic_optimizations=False`
 disables automatic selection and the default dense miss binding on each

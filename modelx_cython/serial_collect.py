@@ -40,6 +40,7 @@ class MultiCollect:
     factory: bool = False
     ordered_rows: bool = False
     packed_sums: bool = False
+    post_factory: bool = False
 
     @property
     def native(self):
@@ -137,6 +138,12 @@ def analyze(module, evaluator_args=False, ordered_rows=False, packed_sums=False)
         factory_reuse = spec.get('factory_collect_reuse', False)
         if type(factory_reuse) is not bool or factory_reuse and option != 'reduce':
             raise ValueError('factory_collect_reuse requires a boolean and serial_collect reduce')
+        private_refs = spec.get('factory_collect_private_refs', False)
+        if type(private_refs) is not bool or private_refs and not factory_reuse:
+            raise ValueError('factory_collect_private_refs requires factory_collect_reuse')
+        subtotals = spec.get('factory_collect_subtotals', False)
+        if type(subtotals) is not bool or subtotals and not private_refs:
+            raise ValueError('factory_collect_subtotals requires factory_collect_private_refs')
         parallel = spec.get('parallel_collect_reuse', automatic and option == 'reuse')
         if type(parallel) is not bool or (parallel and option != 'reuse'):
             raise ValueError('parallel_collect_reuse requires serial_collect reuse')
@@ -149,6 +156,11 @@ def analyze(module, evaluator_args=False, ordered_rows=False, packed_sums=False)
         if option not in ('reduce', 'reuse'):
             raise ValueError('serial_collect must be reduce or reuse')
         shape = _match(node, cls, option == 'reuse', parallel, order == 'domain', evaluator_args)
+        if shape is None and private_refs and evaluator_args and packed_sums:
+            shape = _match_detached_factory(node, cls, module.visitor.wrapper.module, subtotals)
+            if shape is not None:
+                result[node.name.value] = shape
+                continue
         if shape is not None:
             if packed_sums and isinstance(shape, MultiCollect) and any(leaf.kind == 'dict' for leaf in shape.leaves):
                 shape = replace(shape, packed_sums=True)
@@ -162,6 +174,37 @@ def analyze(module, evaluator_args=False, ordered_rows=False, packed_sums=False)
                         shape = replace(shape, reuse=True)
             result[node.name.value] = shape
     return result
+
+
+def _match_detached_factory(node, cls, module, subtotals):
+    from .factory_reuse import declared_aliases, detached_factory_graph, standard_lifecycle, unshadowed_builtins
+
+    contract = collect_contract(node)
+    if (contract is None or _method(node, '_mx_apply_formula') is None
+            or not _isolated_leaf(node, cls, fresh=True) or bound_checks(cls)):
+        return None
+    parameter, extra = contract[:2]
+    parameters = (parameter, *extra)
+    if any(name not in cls.refs or cls.refs[name].get_type_expr(c_style=True) != 'long long'
+           for name in parameters):
+        return None
+    leaves = _leaves(cls, _return_expr(_method(node, '_f_collect_outputs')), parameters, item_domains=True)
+    if (not leaves or any(leaf.mode != 'sum' or leaf.kind == 'python' for leaf in leaves)
+            or not any(leaf.kind == 'dict' for leaf in leaves)):
+        return None
+    domains = [_self_attribute(cst.parse_expression(leaf.domain_expression).func)
+               for leaf in leaves if leaf.domain_expression]
+    aliases = declared_aliases(node)
+    if not (standard_lifecycle(node, aliases, remap_references=True) and unshadowed_builtins(module)
+            and detached_factory_graph(node, cls, [*(leaf.cell for leaf in leaves), *domains])):
+        return None
+    varying = {parameter, *aliases}
+    fixed_domains = (all(leaf.domain not in varying for leaf in leaves)
+                     and detached_factory_graph(node, cls, domains, forbidden_refs=varying, include_factory=False))
+    _report(cls, leaves)
+    return MultiCollect(parameter, True, subtotals and fixed_domains, True, leaves,
+                        tuple((name, 'long long') for name in extra),
+                        factory=True, packed_sums=True, post_factory=True)
 
 
 def _isolated_leaf(node, cls, *, fresh=False):
@@ -633,6 +676,49 @@ def _numeric_add_method():
     return cst.parse_module('\n'.join(lines) + '\n').body
 
 
+def _detached_factory_evaluator(cls, shape):
+    from .item_roots import new_root, release_root
+
+    c = CY_MOD
+    assignments = '\n'.join('            ' + line for line in _bind_extra_lines(shape))
+    resets = '\n'.join('                ' + line for line in _reset_lines(cls))
+    bindings = ', '.join([*(f'{name}=args[{index}]' for index, (name, _) in enumerate(shape.extra)),
+                          f'{shape.parameter}=coordinate'])
+    arg_check = f"""    if (len(args) != {len(shape.extra)}
+            or not _mx_sys._mx_collect_native_coords(args)):
+        return None
+""" if shape.extra else ''
+    return f"""\
+def _mx_evaluate_serial_collect(self, coords{', args' if shape.extra else ''}):
+    from . import _mx_collect_semantics as semantics
+    from modelx_cython.runtime.factory_reuse import canonical_factory_builtins
+    import sys
+    if (type(self) is not {cls.name} or self._mx_roots or self._mx_spaces or not coords
+            or not _mx_sys._mx_collect_native_coords(coords)
+            or sys.gettrace() is not None or sys.getprofile() is not None or not canonical_factory_builtins()):
+        return None
+{arg_check}    root: {cls.name} = {new_root(cls.name)}(self)
+    coordinate: {c}.longlong
+    first: {c}.bint = True
+    layouts = {{}}
+    accumulator = semantics.Accumulator(_mx_sys._PendingCollectSum)
+    try:
+        for coordinate in coords:
+            if not first:
+{resets}
+                root._mx_copy_refs(self, self)
+{assignments}
+            root.{shape.parameter} = coordinate
+            root._mx_apply_formula({bindings})
+            outputs = root._mx_collect_numeric_output_v1(layouts)
+            accumulator.add(coordinate, outputs)
+            first = False
+        return _mx_sys.CollectResult(accumulator.result()._fields)
+    finally:
+        {release_root(cls.name)}(root)
+"""
+
+
 def add_methods(cls, node, shape, *, workers, source=None):
     """Add a private evaluator to the existing generated collect entry."""
     if collect_contract(node) is None:
@@ -648,6 +734,9 @@ def add_methods(cls, node, shape, *, workers, source=None):
         f'def _mx_collect_options_v2(self):\n    return {workers}, {callback}, {parallel}, {ordered}{takes_args}\n')
     shared = _shared_root_methods(cls, node)
     numeric = _detached_numeric_methods(cls, source) if source is not None else ()
+    if getattr(shape, 'post_factory', False) and not numeric:
+        shape = None
+        options = cst.parse_statement(f'def _mx_collect_options_v2(self):\n    return {workers}, None, False, False\n')
     if not numeric and isinstance(shape, MultiCollect) and shape.packed_sums:
         numeric = _numeric_add_method()
     shared = (*shared, *numeric)
@@ -655,6 +744,9 @@ def add_methods(cls, node, shape, *, workers, source=None):
         return node.with_changes(body=node.body.with_changes(body=(*node.body.body, *shared, options)))
     from .item_roots import new_root, release_root     # D116: shared with the direct route
     if isinstance(shape, MultiCollect):
+        if shape.post_factory:
+            helpers = cst.parse_module(_detached_factory_evaluator(cls, shape)).body
+            return node.with_changes(body=node.body.with_changes(body=(*node.body.body, *helpers, *shared, options)))
         helpers = list(cst.parse_module('\n'.join(_multi_lines(cls, shape)) + '\n').body)
         if shape.ordered_rows:
             helpers.extend(cst.parse_module('\n'.join(_multi_lines(cls, shape, row_mode=True)) + '\n').body)
