@@ -2,7 +2,7 @@ name: Round 3 release verification
 
 on:
   push:
-    branches: [verify/r3-helper-free-qualification]
+    branches: [verify/r3-helper-free-qualification, verify/r3-generic-private-collect]
     paths: [fork_ci/pins.json, .github/workflows/round3-release-verification.yml]
 
 permissions:
