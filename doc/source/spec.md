@@ -283,6 +283,14 @@ receiver alive through the enclosing Cell's return, and dispatches natively
 only on the exact observed class.
 The ordinary call handles other returned types.
 
+`native_vector_ref_reads=True` permits a scalar Cell to read a short integer
+vector directly through a typed relative Space Reference. Admission requires
+an exact receiver, one vector-producing call and an entirely numeric use of
+the local vector. Indexes must come from native integers. The compiler checks
+the length and magnitude of the actual vector and other integer inputs
+before using native arithmetic. Inputs outside that domain use the ordinary
+formula. Public vector calls continue to return lists.
+
 Individual switches and legacy per-Cell options remain available for controlled
 ablations and compatibility diagnostics. `automatic_optimizations=False`
 disables automatic selection and the default dense miss binding on each
