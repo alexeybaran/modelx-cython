@@ -1,8 +1,8 @@
-name: Native vector and held Collect qualification
+name: Native terminal Collect qualification
 
 on:
   push:
-    branches: [verify/r3-factory-individuals]
+    branches: [verify/r3-terminal-collect]
 
 jobs:
   native:
@@ -21,7 +21,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: eee6bbd52077d38e614f499a7be1fb46c277598d
+          ref: 5228d00f534e383cd5bcfd9acd85f16173bc707e
           persist-credentials: false
       - uses: actions/setup-python@v5
         with:
