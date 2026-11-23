@@ -23,10 +23,11 @@ def pin_function(name, owner, producer):
                                f'def {name}(root: {owner}) -> object:\n    return root.{VAR_PREF}{producer}\n')
 
 
-def _traced_target(cell):
+def _traced_target(cell, allow_locked=False):
     """Use the observed exact class to select a guard, never to narrow storage."""
     if (cell is None or cell.is_special() or not cell._can_bind_native_result
-            or cell.get_rettype_expr(c_style=True) != 'object' or not exclusively_owned(cell)):
+            or cell.get_rettype_expr(c_style=True) != 'object'
+            or not (exclusively_owned(cell) or allow_locked and cell.is_locked)):
         return None
     trace = getattr(cell._rt, 'ret_type', None)
     if trace is None or trace.is_array:
@@ -47,13 +48,15 @@ def _binds_parameter(scope, name):
 
 
 class _HeldCalls(cst.CSTTransformer):
-    def __init__(self, owner, names, integer_params, operand_kind, pin, return_type):
+    def __init__(self, owner, names, integer_params, operand_kind, pin, return_type, allow_locked):
         self.owner = owner
         self.names = names
+        self.locals = Names(used=names)
         self.integer_params = integer_params
         self.operand_kind = operand_kind
         self.pin = pin
         self.return_type = return_type
+        self.allow_locked = allow_locked
         self.double_returns = set()
         self.used = False
 
@@ -87,10 +90,12 @@ class _HeldCalls(cst.CSTTransformer):
             return updated
         producer = call.func.attr.value
         producer_cell = self.owner.cells.get(producer)
-        target = _traced_target(producer_cell)
+        target = _traced_target(producer_cell, self.allow_locked)
         if target is None or target.name in self.names:
             return updated
         parameterized = producer_cell.has_args()
+        if producer_cell.is_locked and original not in self.double_returns:
+            return updated
         if parameterized:
             if (not call.args or original not in self.double_returns
                     or any(arg.keyword is not None or arg.star for arg in call.args)):
@@ -130,10 +135,10 @@ class _HeldCalls(cst.CSTTransformer):
                                       (cst.Arg(value), path))
             args[i] = args[i].with_changes(value=conversion)
 
-        if parameterized:
+        if parameterized or producer_cell.is_locked:
             # Evaluate the real producer once, preserving overrides and its cache.
             # The strong local survives argument evaluation in both branches.
-            selected = Names(used=self.names).reserve('_mx_selected_item')
+            selected = self.locals.reserve('_mx_selected_item')
             ready = parse_template_expression(f'type(({selected} := {{receiver}})) is {target.name} '
                                               f'and type({MX_SELF}) is {self.owner.name}',
                                               receiver=updated.func.value)
@@ -174,7 +179,8 @@ def _runtime_import(binding):
 def lower(node, owner, cell, scope, operand_kind, pin):
     """Leave the cold or unexpected result expression in its original evaluation order."""
     names = Names(node).names
-    if (not exclusively_owned(cell) or 'object' in names or 'type' in names or owner.name in names
+    allow_locked = cell.is_locked and owner.module.spec.get_spec(owner.fqname).get('native_locked_result_calls', False)
+    if (not (exclusively_owned(cell) or allow_locked) or 'object' in names or 'type' in names or owner.name in names
             or not _binds_parameter(scope, MX_SELF) or tuple(scope[CY_MOD])
             or not all(scope[name] and all(isinstance(binding, BuiltinAssignment) for binding in scope[name])
                        for name in ('type', 'object'))):
@@ -186,6 +192,6 @@ def lower(node, owner, cell, scope, operand_kind, pin):
     bindings = tuple(scope[MX_SYS_MOD])
     if MX_SYS_MOD in names and len(bindings) == 1 and _runtime_import(bindings[0]):
         names = names - {MX_SYS_MOD}
-    calls = _HeldCalls(owner, names, integers, operand_kind, pin, cell.get_rettype_expr(c_style=True))
+    calls = _HeldCalls(owner, names, integers, operand_kind, pin, cell.get_rettype_expr(c_style=True), allow_locked)
     body = node.body.visit(calls)
     return (node.with_changes(body=body), True) if calls.used else (node, False)

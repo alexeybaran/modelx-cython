@@ -276,6 +276,13 @@ the cached suffixes in reverse. The stop must come from a ready integer
 Cell. The model author must ensure the term calculation does not change the
 stop or re-enter or inspect the recurrence while it is running.
 
+A locked Space can opt in to `native_locked_result_calls=True` for native
+calls through an ItemSpace returned by one of its Cells. The compiler
+evaluates the producer once through its existing locked entry, keeps the
+receiver alive through the enclosing Cell's return, and dispatches natively
+only on the exact observed class.
+The ordinary call handles other returned types.
+
 Individual switches and legacy per-Cell options remain available for controlled
 ablations and compatibility diagnostics. `automatic_optimizations=False`
 disables automatic selection and the default dense miss binding on each

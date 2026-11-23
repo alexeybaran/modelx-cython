@@ -170,3 +170,28 @@ def test_native_held_item_uses_exact_type_and_preserves_fallback(tmp_path, monke
     assert results[1] == results[0]
     assert results[0][-2:] == [['AttributeError', "'NoneType' object has no attribute 'rate'"],
                                ['ValueError', 'getter']]
+
+
+def test_locked_item_result_uses_the_public_producer_once(tmp_path):
+    model = mx.new_model('LockedSpaceResults')
+    try:
+        target = model.new_space('Target', formula='lambda key: None')
+        target.new_cells('value', 'lambda t: 0.5 + 10 * key + t')
+        caller = model.new_space('Caller', formula='lambda key: None', refs={'Target': target})
+        caller.new_cells('selected', 'lambda: Target(key)')
+        caller.new_cells('other', 'lambda: Target(key + 1)')
+        caller.new_cells('report', 'lambda t: selected().value(int(other().value(t)))')
+        model.export(tmp_path / 'exported', locked_spaces=['Target', 'Caller'])
+    finally:
+        model.close()
+    (tmp_path / 'spec.py').write_text(repr({'spaces': {'Caller': {'native_locked_result_calls': True}}}))
+    (tmp_path / 'sample.py').write_text('from exported import mx_model as m\nm.Caller(2).report(1)\n')
+    subprocess.run([sys.executable, '-m', 'modelx_cython', 'exported'], cwd=tmp_path, check=True)
+    source = (tmp_path / 'exported_cy/_mx_classes.py').read_text(encoding='utf-8')
+    assert re.search(r'type\(\(_mx_selected_item\s*:=\s*self.selected\(\)\)\) is _c_Target', source)
+    probe = '''\
+from exported_cy import mx_model as m
+from exported import mx_model as original
+assert m.Caller(2).report(1) == original.Caller(2).report(1) == 51.5
+'''
+    subprocess.run([sys.executable, '-c', probe], cwd=tmp_path, check=True)
