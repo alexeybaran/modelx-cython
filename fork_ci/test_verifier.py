@@ -72,15 +72,14 @@ class VerifierTest(unittest.TestCase):
     def result(self, jobs=None, run=None):
         return collect(run or RUN, jobs or self.jobs, self.artifacts, 123, 2, PINS, COVERAGE)
 
-    def test_accepts_all_exact_jobs_and_counts_scoped_floor(self):
+    def test_accepts_all_exact_jobs_and_counts_integrated_floor(self):
         result = self.result()
         self.assertTrue(result['passing'], result['errors'])
         self.assertEqual(len(result['jobs']), 13)
-        floor = result['jobs']['ubuntu-24.04-py3.9-compatibility-floor']
-        self.assertEqual(floor['scope'], 'compiler and modelx compatibility')
-        removed = floor['suites']['unit']['excluded_ids']
-        self.assertEqual(set(removed.values()), {'lifelib'})
-        self.assertEqual(len(removed), 8)
+        floor = result['jobs']['ubuntu-latest-py3.10-release']
+        self.assertEqual(floor['scope'], 'helper-free compiler and lifelib')
+        self.assertTrue(floor['environment']['dependencies']['lifelib_installed'])
+        self.assertEqual(floor['suites']['unit']['excluded_ids'], {})
         self.assertEqual(floor['suites']['unit']['counts']['skipped'], 1)
         retained = result['jobs']['ubuntu-latest-py3.14t-retained-pandas']
         self.assertEqual(retained['scope'], 'retained pandas and compiler behavior')
@@ -122,7 +121,7 @@ class VerifierTest(unittest.TestCase):
                    ('macos-latest-py3.13-release', lambda env: env['pins'].update(modelx='z' * 40)),
                    ('windows-latest-py3.14-cython-floor', lambda env: env['dependencies']['versions'].update(Cython='3.3.1')),
                    ('windows-latest-py3.14-release', lambda env: env['dependencies']['versions'].update(pytest='9.2.0')),
-                   ('ubuntu-24.04-py3.9-compatibility-floor', lambda env: env['dependencies']['versions'].update(pandas='2.3.1'))]
+                   ('ubuntu-latest-py3.10-release', lambda env: env['dependencies'].update(lifelib_installed=False))]
         for lane, operation in options:
             with self.subTest(lane=lane):
                 path = self.artifacts / f'junit-{lane}-attempt-2' / 'environment.json'

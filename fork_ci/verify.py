@@ -61,7 +61,7 @@ def expected_lanes():
     lanes = [(runner, python, 'release')
              for runner in ('ubuntu-latest', 'macos-latest', 'windows-latest')
              for python in ('3.13', '3.14', '3.14t')]
-    lanes.extend((('ubuntu-24.04', '3.9', 'compatibility-floor'),
+    lanes.extend((('ubuntu-latest', '3.10', 'release'),
                   ('ubuntu-latest', '3.14', 'cython-floor'),
                   ('windows-latest', '3.14', 'cython-floor'),
                   ('ubuntu-latest', '3.14t', RETAINED_PROFILE)))

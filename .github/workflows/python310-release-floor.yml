@@ -1,0 +1,94 @@
+name: Round 3 integrated Python 3.10 floor
+
+on:
+  push:
+    branches: [verify/r3-dv01-python310-floor]
+    paths: [fork_ci/pins.json, fork_ci/source-coverage.json, .github/workflows/python310-release-floor.yml]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: ${{ matrix.os }}-py${{ matrix.python }}-${{ matrix.profile }}
+    runs-on: ${{ matrix.os == 'macos-latest' && matrix.python != '3.14t' && 'macos-15-intel' || matrix.os }}
+    timeout-minutes: 240
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest]
+        python: ['3.10']
+        profile: [release]
+    env:
+      CI_RUNNER: ${{ matrix.os }}
+      CI_PYTHON: ${{ matrix.python }}
+      CI_PROFILE: ${{ matrix.profile }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          path: verifier
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Read reviewed pins
+        id: pins
+        shell: bash
+        env:
+          PYTHON_GIL: ${{ endsWith(matrix.python, 't') && '0' || '1' }}
+        run: python verifier/fork_ci/verify.py pins >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@v4
+        with:
+          repository: alexeybaran/modelx-cython
+          ref: ${{ steps.pins.outputs.compiler }}
+          path: compiler
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          repository: alexeybaran/modelx
+          ref: ${{ steps.pins.outputs.modelx }}
+          path: modelx
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          repository: alexeybaran/lifelib
+          ref: ${{ steps.pins.outputs.lifelib }}
+          path: lifelib
+          persist-credentials: false
+      - name: Verify pins and install
+        id: install
+        shell: bash
+        env:
+          PYTHON_GIL: ${{ endsWith(matrix.python, 't') && '0' || '1' }}
+        run: python verifier/fork_ci/verify.py install
+      - uses: actions/checkout@v4
+        id: fixtures
+        with:
+          repository: alexeybaran/modelx
+          ref: d73180aecc87e6c27fcc5e4a2e3cfab710755256
+          path: test-fixtures
+          sparse-checkout: modelx_helpers
+          persist-credentials: false
+      - name: Unit tests
+        timeout-minutes: 100
+        shell: bash
+        env:
+          PYTHON_GIL: ${{ endsWith(matrix.python, 't') && '0' || '1' }}
+          CI_TEST_FIXTURES: test-fixtures
+        run: python verifier/fork_ci/verify.py unit
+      - name: Integration tests
+        if: ${{ !cancelled() && steps.install.outcome == 'success' && steps.fixtures.outcome == 'success' }}
+        timeout-minutes: 120
+        shell: bash
+        env:
+          PYTHON_GIL: ${{ endsWith(matrix.python, 't') && '0' || '1' }}
+          CI_TEST_FIXTURES: test-fixtures
+        run: python verifier/fork_ci/verify.py integration
+      - name: Upload test reports
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: junit-${{ matrix.os }}-py${{ matrix.python }}-${{ matrix.profile }}-attempt-${{ github.run_attempt }}
+          path: reports/
+          if-no-files-found: error

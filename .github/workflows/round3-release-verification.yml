@@ -20,7 +20,7 @@ jobs:
         python: ['3.13', '3.14', '3.14t']
         profile: [release]
         include:
-          - {os: ubuntu-24.04, python: '3.9', profile: compatibility-floor}
+          - {os: ubuntu-latest, python: '3.10', profile: release}
           - {os: ubuntu-latest, python: '3.14', profile: cython-floor}
           - {os: windows-latest, python: '3.14', profile: cython-floor}
           - {os: ubuntu-latest, python: '3.14t', profile: retained-pandas}

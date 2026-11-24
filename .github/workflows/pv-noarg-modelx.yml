@@ -5,17 +5,16 @@ name: Pinned modelx full CI
 
 on:
   push:
-    branches: [verify/r3-pv-noarg-full]
+    branches: [verify/r3-dv01-ci-repair-models]
 
 jobs:
   build:
 
-    runs-on: ${{ matrix.os == 'ubuntu-latest' && matrix.python-version.py == '3.9' && 'ubuntu-24.04' || matrix.os }}
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        python-version: [{py: "3.9", nx: "2.6"},
-                         {py: "3.10", nx: "2.7"},
+        python-version: [{py: "3.10", nx: "2.7"},
                          {py: "3.11", nx: "2.8"},
                          {py: "3.12", nx: "3.2"},
                          {py: "3.13", nx: "3.4"},
@@ -26,7 +25,7 @@ jobs:
     - uses: actions/checkout@v4
       with:
         repository: alexeybaran/modelx
-        ref: 861396000edaae329d4473cdd97c0d1aea52a71f
+        ref: f0e91ec74f3363104f27a220d6584a639a4cf1e2
         persist-credentials: false
     - name: Set up Python ${{ matrix.python-version.py }}
       uses: actions/setup-python@v5
@@ -38,9 +37,6 @@ jobs:
       shell: bash
       run: |
         python -m pip install --upgrade pip
-        if [ '${{ matrix.python-version.py }}' = '3.9' ]; then
-          python -c "from pathlib import Path; p = Path('requirements-travis.txt'); p.write_text(p.read_text().replace('-e git+https://github.com/fumitoh/lifelib.git#egg=lifelib', 'lifelib==0.17.2'))"
-        fi
         python -m pip install -r requirements-travis.txt
 #    - name: Increase Stack for MacOS
 #      run: |
@@ -68,7 +64,7 @@ jobs:
     - uses: actions/checkout@v4
       with:
         repository: alexeybaran/modelx
-        ref: 861396000edaae329d4473cdd97c0d1aea52a71f
+        ref: f0e91ec74f3363104f27a220d6584a639a4cf1e2
         persist-credentials: false
     - name: Set up free-threaded Python 3.14
       uses: actions/setup-python@v5
@@ -81,25 +77,3 @@ jobs:
     - name: Test the exported models with pytest
       run: |
         pytest modelx/tests/export --deselect modelx/tests/export/test_lifelib.py::test_assets
-
-  serializer-baseline:
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        ref: [2097f7b0e4b169377deffc61d3f93232d2828d5d, 861396000edaae329d4473cdd97c0d1aea52a71f]
-    env:
-      NETWORKX_VERSION: '3.4'
-    steps:
-    - uses: actions/checkout@v4
-      with:
-        repository: alexeybaran/modelx
-        ref: ${{ matrix.ref }}
-        persist-credentials: false
-    - uses: actions/setup-python@v5
-      with:
-        python-version: '3.13'
-    - name: Install matched test dependencies
-      run: python -m pip install -r requirements-travis.txt
-    - name: Reproduce the serializer fixture on both revisions
-      run: python -m pytest -q modelx/tests/lifelib/test_deserializer.py
