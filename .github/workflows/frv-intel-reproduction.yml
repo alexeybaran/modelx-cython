@@ -1,8 +1,8 @@
-name: FRV Intel macOS larger-stack probe
+name: FRV Intel macOS worker-stack probe
 
 on:
   push:
-    branches: [verify/r3-frv-stack-probe]
+    branches: [verify/r3-frv-thread-stack]
 
 permissions:
   contents: read
@@ -17,8 +17,8 @@ jobs:
       matrix:
         include:
           - name: current
-            lifelib: e99235ae35276e46c57991416ebe058874152a2e
-            modelx: 861396000edaae329d4473cdd97c0d1aea52a71f
+            lifelib: df21bf5beb2207f72c437e8e805a0c51dc4f5525
+            modelx: f0e91ec74f3363104f27a220d6584a639a4cf1e2
     env:
       PYTHONFAULTHANDLER: "1"
     steps:
@@ -41,11 +41,18 @@ jobs:
           python -m pip install --no-deps -e .
           python -m pip freeze
           python -c "import platform, resource, sys; assert platform.machine() == 'x86_64'; print(sys.version, sys.getrecursionlimit(), resource.getrlimit(resource.RLIMIT_STACK))"
-      - name: Reproduce isolated reduction in yield
-        id: isolated
+      - name: Run identical FRV calculation on an explicitly sized Python thread
         shell: bash
         run: |
-          ulimit -s 32768
-          ulimit -s
           test=lifelib/libraries/delib/tests/test_fondsgebundene_rentenversicherung_de.py::test_the_reduction_in_yield_across_the_four_charge_scales
-          python -m pytest -vv "${test}[5]"
+          python - "${test}[5]" <<'PY'
+          from concurrent.futures import ThreadPoolExecutor
+          import sys
+          import threading
+          import pytest
+          threading.stack_size(128 * 1024 * 1024)
+          print("requested stack size", threading.stack_size(), flush=True)
+          with ThreadPoolExecutor(max_workers=1) as executor:
+              result = executor.submit(pytest.main, ["-vv", *sys.argv[1:]]).result()
+          raise SystemExit(result)
+          PY
