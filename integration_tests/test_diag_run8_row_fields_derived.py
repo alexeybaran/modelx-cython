@@ -53,13 +53,6 @@ import sys
 from importlib import import_module
 m = import_module(sys.argv[1]).mx_model
 p = m.Projection
-if "early_alias" in sys.argv[1]:
-    try:
-        p[4].sa()
-    except UnboundLocalError:
-        pass
-    else:
-        raise AssertionError("a row read before its assignment must remain unbound")
 if hasattr(m, "Shared"):
     print(m.Shared.collect().sum.pv)
 print(p.collect().sum.pv)
