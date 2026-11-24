@@ -35,6 +35,7 @@ def build(override):
         other.new_cells("points", "def points():\\n    return POINTS.copy()\\n")
         proj.data = other
         if override == "shared":
+            proj.sa.formula = 'def sa():\\n    row = model_point()\\n    return float(row["sa"])\\n'
             model.new_space("Shared", formula="lambda policy_id: None", refs={"projection": proj, "ids": IDS},
                             collect_over={"policy_id": IDS},
                             collect_outputs='lambda: {"sum": {"pv": projection[policy_id].pv()}}')

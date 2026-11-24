@@ -206,7 +206,6 @@ class _Uses(cst.CSTVisitor):
                 and isinstance(outer.targets[0].target, cst.Name) and len(parents) > 2
                 and isinstance(parents[-3], cst.SimpleStatementLine) and parents[-3] in self.top):
             self.locals.setdefault(outer.targets[0].target.value, []).append(outer)
-            self.calls.add(call)
             return
         self.escape = self.escape or 'the value is used (returned, passed, stored, compared or iterated)'
 
@@ -374,6 +373,7 @@ class Inline(cst.CSTTransformer):
         self.calls = {}
         self.reads = {}
         self.sites = {}
+        self.assignments = {}
         self.lowered_sites = set()
 
     def visit_FunctionDef(self, node):
@@ -387,12 +387,20 @@ class Inline(cst.CSTTransformer):
             reads = uses.reads | aliases.reads
             if reads and not aliases.bad:
                 self.calls.update(dict.fromkeys(uses.calls, name))
+                for read in aliases.reads:
+                    self.calls[uses.locals[read.value.value][0].value] = name
                 self.reads.update(dict.fromkeys(reads, name))
 
     def leave_Call(self, original, updated):
         name = self.calls.get(original)
         if name is not None:
             return self.rows[name].deep_clone().with_changes(lpar=updated.lpar, rpar=updated.rpar)
+        return updated
+
+    def leave_Assign(self, original, updated):
+        name = self.calls.get(original.value) if isinstance(original.value, cst.Call) else None
+        if name is not None:
+            self.assignments[updated] = name
         return updated
 
     def leave_Subscript(self, original, updated):

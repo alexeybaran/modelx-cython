@@ -910,6 +910,8 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
             frames.lowered_nodes.clear()
             frames.lowered_text.clear()
             frames.param_readers.clear()
+            if frames.row_inline is not None:
+                frames.row_inline.lowered_sites.clear()
             frames.held_string_selector = None
             frames.declined = [{'expression': cells.name, 'receiver': '', 'form': 'pandas',
                                 'reason': f'declined after internal error: {type(error).__name__}: {error}'}]

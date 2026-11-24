@@ -2200,9 +2200,11 @@ class _Rewrite(cst.CSTTransformer):
         var = f'_mx_rw_{name.value}'
         if var not in o.declarations:
             o.declarations.append(var)
+        row_cell = o.row_inline.assignments.get(assign) if o.row_inline is not None else None
+        fallback_value = (cst.parse_expression(f'self.{row_cell}()') if row_cell is not None
+                          else self._fallback(assign.value, call))
         fallback = [cst.parse_statement(f'{var} = -1'),
-                    original.with_changes(body=[original.body[0].with_changes(
-                        value=self._fallback(original.body[0].value, call))])]
+                    original.with_changes(body=[assign.with_changes(value=fallback_value)])]
         self._record(assign.value, 'L2', call)
         parts = _parts(key)
         if (o.per_item and o.cells.has_args() and len(parts) == len(schema['levels'])
@@ -2238,6 +2240,9 @@ class _Rewrite(cst.CSTTransformer):
         read, kind, _ = self._field_read(call, schema, label, lambda hold: (
             cst.parse_expression(f'_mx_rw_{value.value} + 1'), []))
         self._record(original, 'L2', call)
+        if (o.row_inline is not None and original in o.row_inline.sites
+                and o.row_inline.assignments.get(found[2]) == o.row_inline.sites[original]):
+            o.row_inline.lowered_sites.add(original)
         return self._lowered(cst.parse_expression(f'_mx_rw_{value.value} >= 0'), read, updated, kind)
 
     def _field_read(self, call, schema, label, position):

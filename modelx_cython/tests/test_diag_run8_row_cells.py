@@ -116,6 +116,19 @@ def test_inline_replaces_only_calls_of_accepted_cells():
                         '+ self.other()\n'), out.code
 
 
+def test_unused_row_assignment_is_left_as_a_public_call():
+    accepted, _ = analyse()
+    node = cst.parse_module(
+        'def _f_y(self):\n'
+        '    unused = self.model_point()\n'
+        '    return self.model_point()["sa"]\n'
+    )
+    inline = row_cells.Inline(accepted)
+    out = node.visit(inline)
+    assert 'unused = self.model_point()' in out.code
+    assert 'return self.data.points().loc[self.policy_id]["sa"]' in out.code
+    assert not inline.assignments
+
 def test_unrelated_native_read_cannot_admit_an_unlowered_row_field():
     accepted, _ = analyse()
     original = cst.parse_statement(
@@ -156,3 +169,23 @@ def test_unrelated_native_read_cannot_admit_an_unlowered_row_field():
 
     out = ModuleTransformer._table_reads_with_row_fields(Probe(), original, cls, cells, ())
     assert out is original and cells.row_fields_inlined == 0
+
+
+def test_frame_lowering_failure_clears_derivation_proof():
+    function = cst.parse_statement('def _f_x(self):\n    return 0\n')
+    site = cst.parse_expression('self.model_point()["sa"]')
+    inline = SimpleNamespace(sites={site: 'model_point'}, lowered_sites=set())
+
+    def fail_after_marking(node):
+        inline.lowered_sites.add(site)
+        raise RuntimeError('injected error after the last read')
+
+    owner = SimpleNamespace(module=SimpleNamespace(spec=SimpleNamespace(policy=object())),
+                            _resolver=SimpleNamespace(table_signatures={}))
+    frames = SimpleNamespace(lower=fail_after_marking, row_inline=inline, lowered=[],
+                             lowered_nodes=set(), lowered_text=set(), param_readers={})
+    result = ModuleTransformer._lower_frames(owner, frames, function, SimpleNamespace(),
+                                             SimpleNamespace(name='x'))
+    assert result is function
+    assert not inline.lowered_sites
+    assert 'injected error after the last read' in frames.declined[0]['reason']

@@ -50,14 +50,14 @@ def standard_lifecycle(node, aliases, *, remap_references=False):
     if any(name in methods for name in ('__new__', '__del__', '__getattribute__', '__setattr__', '__getattr__')):
         return False
     apply = methods.get('_mx_apply_formula')
-    if apply is None or apply.decorators:
+    if apply is None or apply.asynchronous is not None or apply.decorators:
         return False
     template = cst.parse_statement(_APPLY.replace('ALIASES', repr(tuple(aliases))))
     if not same_expression(apply, template):
         return False
     for name in ('__init__', '_mx_copy_refs'):
         method = methods.get(name)
-        if method is None or method.decorators:
+        if method is None or method.asynchronous is not None or method.decorators:
             return False
         for stmt in statements(method.body):
             if not isinstance(stmt, cst.Assign) or len(stmt.targets) != 1:
@@ -129,7 +129,7 @@ def detached_factory_graph(node, cls, cells, *, forbidden_refs=(), forbidden_cel
             continue
         seen.add(name)
         method = methods.get(name)
-        if method is None or name in forbidden_cells:
+        if method is None or method.asynchronous is not None or name in forbidden_cells:
             return False
         contexts = CstFacts(statements(method.body)).contexts
         for expr, parent in _nodes_with_parents(method.body):
@@ -187,7 +187,8 @@ def declared_aliases(node):
 def fixed_factory_refs(node):
     """Return the insertion order of a factory's identical literal result schemas."""
     factory = _methods(node).get('_mx_space_formula')
-    if factory is None or factory.decorators or not isinstance(statements(factory.body)[-1], cst.Return):
+    if (factory is None or factory.asynchronous is not None or factory.decorators
+            or not isinstance(statements(factory.body)[-1], cst.Return)):
         return ()
     aliases = set(declared_aliases(node))
     schema = None
@@ -221,7 +222,7 @@ def scalar_factory_graph(node, cls, shape):
         if name in checked:
             continue
         method = methods.get(name)
-        if method is None:
+        if method is None or method.asynchronous is not None:
             return False
         checked.add(name)
         sig = method.params

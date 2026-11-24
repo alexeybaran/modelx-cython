@@ -3,7 +3,7 @@ from types import SimpleNamespace
 import libcst
 import pytest
 
-from modelx_cython.factory_reuse import scalar_factory_graph, unshadowed_builtins
+from modelx_cython.factory_reuse import detached_factory_graph, scalar_factory_graph, unshadowed_builtins
 
 
 @pytest.mark.parametrize(("formula", "admitted"), [
@@ -59,3 +59,19 @@ def test_runtime_substituted_builtin(monkeypatch):
     assert canonical_factory_builtins()
     monkeypatch.setattr(builtins, 'round', lambda value: value)
     assert not canonical_factory_builtins()
+
+
+@pytest.mark.parametrize('name', ['_f_balance', '_mx_space_formula'])
+def test_coroutine_cannot_take_a_private_policy_receiver(name):
+    source = """
+class Product:
+    def _mx_space_formula(self, key):
+        return {'refs': {'point': key}}
+    def _f_balance(self):
+        return 2.0
+"""
+    node = libcst.parse_module(source.replace(f'def {name}', f'async def {name}')).body[0]
+    cls = SimpleNamespace(cells={'balance'}, refs={})
+    shape = SimpleNamespace(native=[SimpleNamespace(cell='balance')], extra=())
+    assert not detached_factory_graph(node, cls, ['balance'])
+    assert not scalar_factory_graph(node, cls, shape)
