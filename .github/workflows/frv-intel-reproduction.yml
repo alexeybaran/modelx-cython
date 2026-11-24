@@ -1,8 +1,8 @@
-name: FRV Intel macOS native backtrace
+name: FRV Intel macOS and its mapped stack limit
 
 on:
   push:
-    branches: [verify/r3-frv-native-backtrace]
+    branches: [verify/r3-frv-stack-limit]
 
 permissions:
   contents: read
@@ -41,11 +41,19 @@ jobs:
           python -m pip install --no-deps -e .
           python -m pip freeze
           python -c "import platform, resource, sys; assert platform.machine() == 'x86_64'; print(sys.version, sys.getrecursionlimit(), resource.getrlimit(resource.RLIMIT_STACK))"
-      - name: Record the native stop and stack mapping
+      - name: Compare an increased limit with the actual mapped stack size
         shell: bash
         run: |
+          ulimit -Ss "$(ulimit -Hs)"
+          python - <<'PY'
+          import ctypes
+          import resource
+          lib = ctypes.CDLL(None)
+          lib.pthread_self.restype = ctypes.c_void_p
+          lib.pthread_get_stacksize_np.argtypes = (ctypes.c_void_p,)
+          lib.pthread_get_stacksize_np.restype = ctypes.c_size_t
+          print("pthread stack size", lib.pthread_get_stacksize_np(lib.pthread_self()))
+          print("resource limit", resource.getrlimit(resource.RLIMIT_STACK))
+          PY
           test=lifelib/libraries/delib/tests/test_fondsgebundene_rentenversicherung_de.py::test_the_reduction_in_yield_across_the_four_charge_scales
-          xcrun lldb --batch --no-lldbinit \
-            -o 'settings set target.disable-aslr false' \
-            -o run -k 'thread backtrace -c 50' -k 'register read sp' -k 'memory region $sp' \
-            -- "$(command -v python)" -m pytest -p no:faulthandler -vv "${test}[5]"
+          python -m pytest -vv "${test}[5]"
