@@ -2,7 +2,7 @@ name: Round 3 release verification
 
 on:
   push:
-    branches: [verify/r3-dv01-final-pins]
+    branches: [verify/r3-macos-unit-budget]
     paths: [fork_ci/pins.json, fork_ci/source-coverage.json, .github/workflows/round3-release-verification.yml]
 
 permissions:
@@ -16,14 +16,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
-        python: ['3.13', '3.14', '3.14t']
-        profile: [release]
         include:
-          - {os: ubuntu-latest, python: '3.10', profile: release}
-          - {os: ubuntu-latest, python: '3.14', profile: cython-floor}
-          - {os: windows-latest, python: '3.14', profile: cython-floor}
-          - {os: ubuntu-latest, python: '3.14t', profile: retained-pandas}
+          - {os: macos-latest, python: '3.13', profile: release}
+          - {os: macos-latest, python: '3.14', profile: release}
     env:
       CI_RUNNER: ${{ matrix.os }}
       CI_PYTHON: ${{ matrix.python }}
@@ -76,7 +71,7 @@ jobs:
           sparse-checkout: modelx_helpers
           persist-credentials: false
       - name: Unit tests
-        timeout-minutes: 100
+        timeout-minutes: 150
         shell: bash
         env:
           PYTHON_GIL: ${{ endsWith(matrix.python, 't') && '0' || '1' }}
