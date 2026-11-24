@@ -1,8 +1,8 @@
-name: Round 3 release verification
+name: Round 3 macOS free-threaded retry
 
 on:
   push:
-    branches: [verify/r3-integrated-cold]
+    branches: [verify/r3-integrated-macos-ft]
     paths: [fork_ci/pins.json, fork_ci/source-coverage.json, .github/workflows/round3-release-verification.yml]
 
 permissions:
@@ -16,14 +16,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
-        python: ['3.13', '3.14', '3.14t']
+        os: [macos-latest]
+        python: ['3.14t']
         profile: [release]
-        include:
-          - {os: ubuntu-latest, python: '3.10', profile: release}
-          - {os: ubuntu-latest, python: '3.14', profile: cython-floor}
-          - {os: windows-latest, python: '3.14', profile: cython-floor}
-          - {os: ubuntu-latest, python: '3.14t', profile: retained-pandas}
     env:
       CI_RUNNER: ${{ matrix.os }}
       CI_PYTHON: ${{ matrix.python }}
