@@ -1,8 +1,8 @@
-name: FRV Intel macOS and its mapped stack limit
+name: FRV Intel macOS existing threaded executor
 
 on:
   push:
-    branches: [verify/r3-frv-stack-limit]
+    branches: [verify/r3-frv-existing-executor]
 
 permissions:
   contents: read
@@ -17,7 +17,7 @@ jobs:
       matrix:
         include:
           - name: current
-            lifelib: df21bf5beb2207f72c437e8e805a0c51dc4f5525
+            lifelib: aef70a0de23b3ca677cdaf3b61aa9a302243e7b4
             modelx: f0e91ec74f3363104f27a220d6584a639a4cf1e2
     env:
       PYTHONFAULTHANDLER: "1"
@@ -41,19 +41,21 @@ jobs:
           python -m pip install --no-deps -e .
           python -m pip freeze
           python -c "import platform, resource, sys; assert platform.machine() == 'x86_64'; print(sys.version, sys.getrecursionlimit(), resource.getrlimit(resource.RLIMIT_STACK))"
-      - name: Compare an increased limit with the actual mapped stack size
+      - name: Evaluate the same formulas through the existing large-stack executor
+        timeout-minutes: 8
         shell: bash
         run: |
-          ulimit -Ss "$(ulimit -Hs)"
-          python - <<'PY'
-          import ctypes
-          import resource
-          lib = ctypes.CDLL(None)
-          lib.pthread_self.restype = ctypes.c_void_p
-          lib.pthread_get_stacksize_np.argtypes = (ctypes.c_void_p,)
-          lib.pthread_get_stacksize_np.restype = ctypes.c_size_t
-          print("pthread stack size", lib.pthread_get_stacksize_np(lib.pthread_self()))
-          print("resource limit", resource.getrlimit(resource.RLIMIT_STACK))
-          PY
           test=lifelib/libraries/delib/tests/test_fondsgebundene_rentenversicherung_de.py::test_the_reduction_in_yield_across_the_four_charge_scales
-          python -m pytest -vv "${test}[5]"
+          python - "${test}[5]" <<'PY'
+          import sys
+          import modelx
+          import pytest
+          from modelx.core.execution.executor import ThreadedExecutor
+          from modelx.core.system import mxsys
+
+          executor = ThreadedExecutor(maxdepth=mxsys.callstack.maxdepth)
+          mxsys.executor = executor
+          mxsys.callstack = executor.callstack
+          mxsys.refstack = executor.refstack
+          raise SystemExit(pytest.main(["-vv", *sys.argv[1:]]))
+          PY
