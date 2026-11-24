@@ -1,8 +1,8 @@
-name: FRV Intel macOS existing threaded executor
+name: FRV Intel macOS aligned threaded executor
 
 on:
   push:
-    branches: [verify/r3-frv-existing-executor]
+    branches: [verify/r3-frv-aligned-executor]
 
 permissions:
   contents: read
@@ -48,12 +48,23 @@ jobs:
           test=lifelib/libraries/delib/tests/test_fondsgebundene_rentenversicherung_de.py::test_the_reduction_in_yield_across_the_four_charge_scales
           python - "${test}[5]" <<'PY'
           import sys
+          import threading
+          from unittest.mock import patch
           import modelx
           import pytest
           from modelx.core.execution.executor import ThreadedExecutor
           from modelx.core.system import mxsys
 
-          executor = ThreadedExecutor(maxdepth=mxsys.callstack.maxdepth)
+          original_stack_size = threading.stack_size
+
+          def aligned_stack_size(size):
+              if size == 0x10000000 - 1:
+                  size = 0x10000000
+                  print(f"Requesting aligned worker stack: {size} bytes", flush=True)
+              return original_stack_size(size)
+
+          with patch.object(threading, "stack_size", aligned_stack_size):
+              executor = ThreadedExecutor(maxdepth=mxsys.callstack.maxdepth)
           mxsys.executor = executor
           mxsys.callstack = executor.callstack
           mxsys.refstack = executor.refstack
