@@ -5,7 +5,9 @@ reader with the type and message live gives. The row position is held per item
 (an integer or a str key, looked up once per item, reset between policies). A model
 where the row escapes (returned by a public Cell) keeps the Record path. Compiled equals the exported model, values and errors."""
 
+import ast
 import json
+import re
 import subprocess
 import sys
 import textwrap
@@ -40,6 +42,7 @@ def build(escape=False):
     proj.new_cells("age", 'lambda: int(model_point()["age"])')
     proj.new_cells("sex", 'lambda: Sex[model_point()["sex"]]')
     proj.new_cells("both", 'def both():\\n    mp = model_point()\\n    return mp["sa"] * mp["age"]\\n')
+    proj.new_cells("mixed", 'def mixed():\\n    unused = model_point()\\n    return float(model_point()["sa"])\\n')
     proj.new_cells("cost_id", 'lambda: "A" if policy_id < 3 else "B"')
     proj.new_cells("cost_row", "lambda: data.costs().loc[cost_id()]")      # a str key, held per item
     proj.new_cells("fee", 'lambda: float(cost_row()["fee"])')
@@ -57,7 +60,7 @@ Model = type(package.mx_model)
 p = package.mx_model.Projection
 out = []
 for i in (1, 2, 3):
-    out.append([p[i].sa(), p[i].age(), int(p[i].sex()), float(p[i].both()), float(p[i].pv())])
+    out.append([p[i].sa(), p[i].age(), int(p[i].sex()), float(p[i].both()), float(p[i].pv()), p[i].mixed()])
     row = p[i].model_point()
     out.append(sorted((str(k), str(v)) for k, v in row.items()))
 for call in ("sa", "pv"):
@@ -77,6 +80,12 @@ edited.loc[1, "sa"] = 999.0
 m = Model()
 m.Data.POINTS = edited
 out.append(("edited input", m.Projection[1].sa(), float(m.Projection[1].pv())))
+m = Model()
+m.Data.POINTS = edited.assign(sa=edited["sa"].astype(object))
+item = m.Projection[1]
+value = item.sa()
+row = item.model_point()
+out.append(("schema fallback", value, row is item.model_point()))
 m = Model()
 m.Data.POINTS = edited.drop(2)
 for call in ("sa", "pv"):
@@ -105,7 +114,7 @@ def _build(tmp_path, escape):
         m.export("{name}_nomx", locked_spaces=["Data"])
         m.close()
         """), encoding="utf-8")
-    calls = "".join(f"    p[k].{c}()\n" for c in ("sa", "age", "sex", "both", "fee", "pv", "model_point"))
+    calls = "".join(f"    p[k].{c}()\n" for c in ("sa", "age", "sex", "both", "mixed", "fee", "pv", "model_point"))
     (tmp_path / f"sample_{name}.py").write_text(
         f"from {name}_nomx import mx_model\np = mx_model.Projection\nfor k in (1, 2, 3):\n{calls}"
         + ("    p[k].whole()\n" if escape else "") + "mx_model.Projection.collect()\n", encoding="utf-8")
@@ -131,18 +140,28 @@ def test_row_fields_read_without_the_row(tmp_path):
     for route in ("'direct', 'sa'", "'collect', 1", "'collect', 4"):          # a removed key, as live
         assert f"('raise', {route}, 'KeyError', '2')" in outs[f"{name}_nomx"], (route, outs)
     assert cells["model_point"]["row_cell_inlined"] is True, cells["model_point"]
-    expected_fields = {"sa": 1, "age": 1, "sex": 1, "both": 2}
+    expected_fields = {"sa": 1, "age": 1, "sex": 1, "both": 2, "mixed": 1}
     assert {name: cells[name]["row_fields_inlined"] for name in expected_fields} == expected_fields
     # a str key is held per item too (diag-run8 F3 held row): read once per item, then by position
     assert cells["cost_row"]["row_cell_inlined"] is True, cells["cost_row"]
     assert cells["fee"]["row_fields_inlined"] == 1, cells["fee"]
     assert "hold_row(" in generated         # T-5c: the row held per item on the prepared table
+    mixed, = (function for function in ast.walk(ast.parse(generated))
+              if isinstance(function, ast.FunctionDef) and any(
+                  isinstance(statement, ast.Assign) and any(
+                      isinstance(target, ast.Name) and target.id == "unused" for target in statement.targets)
+                  for statement in function.body))
+    mixed_source = ast.get_source_segment(generated, mixed)
+    assert 'self._mx_cell_model_point()["sa"]' in mixed_source
+    assert "mp = self._mx_cell_model_point()" in generated
+    assert re.search(r"unused = [^\n]*_mx_cache_entry_\d+\(self\)", mixed_source)
     assert "'edited input', 999.0" in outs[f"{name}_nomx"], outs
+    assert "('schema fallback', 999.0, True)" in outs[f"{name}_nomx"], outs
 
 
 def test_an_escaping_row_keeps_the_record_path(tmp_path):
     outs, cells, generated, name = _build(tmp_path, escape=True)
     assert outs[f"{name}_nomx_cy"] == outs[f"{name}_nomx"], outs
     assert cells["model_point"]["row_cell_inlined"] is False and cells["model_point"]["row_cell_kept"], cells
-    assert all(cells[c]["row_fields_inlined"] == 0 for c in ("sa", "age", "sex", "both")), cells
+    assert all(cells[c]["row_fields_inlined"] == 0 for c in ("sa", "age", "sex", "both", "mixed")), cells
     assert "return self.data._mx_cell_points().loc[self.policy_id]" in generated   # T-5c: the escaping row is pandas'

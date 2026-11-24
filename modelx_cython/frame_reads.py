@@ -2204,7 +2204,7 @@ class _Rewrite(cst.CSTTransformer):
         row_cell = o.row_inline.assignments.get(assign) if o.row_inline is not None else None
         if row_cell is not None:
             self.emitted_inline_assignments.add(assign)
-        fallback_value = (cst.parse_expression(f'self.{row_cell}()') if row_cell is not None
+        fallback_value = (self._row_cell_fallback(row_cell) if row_cell is not None
                           else self._fallback(assign.value, call))
         fallback = [cst.parse_statement(f'{var} = -1'),
                     original.with_changes(body=[assign.with_changes(value=fallback_value)])]
@@ -2744,10 +2744,22 @@ class _Rewrite(cst.CSTTransformer):
         self._record(original, 'L2', call)
         if inlined is not None:
             o.row_inline.lowered_sites.add(original)
-            fallback = updated.with_changes(value=cst.parse_expression(f'self.{inlined}()'))
+            fallback = updated.with_changes(value=self._row_cell_fallback(inlined))
         else:
             fallback = self._fallback(updated, call)
         return self._lowered(test, read, fallback, kind)
+
+    def _row_cell_fallback(self, name):
+        """Use the existing virtual Cell cache on the cold side of a row read."""
+        from .table_cells import module_renames
+
+        owner = self.o.cls_info
+        cell = owner.cells[name]
+        if (owner.name not in owner.visitor.dynamic_ref_classes and not cell.is_locked
+                and cell.get_rettype_expr(c_style=True) == 'object'):
+            # A renamed accessor stays out of the private-entry pass.
+            name = module_renames(owner.module)[owner.name].get(name, name)
+        return cst.parse_expression(f'self.{name}()')
 
     @staticmethod
     def _conjunction(conditions):
