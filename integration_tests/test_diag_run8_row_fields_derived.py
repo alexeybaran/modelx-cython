@@ -1,7 +1,4 @@
-"""diag-run8 F3 with a derived Space: the exported model writes the base and the derived Space as classes
-that each define the row cell, so the rule refuses it (another class defines it) whether the derived
-Space overrides the row cell, overrides a reader, or overrides nothing; every reader keeps the Record path.
-Compiled equals the exported model."""
+"""Match derived row admissions and the public values on both collect ownership routes."""
 
 import json
 import subprocess
@@ -33,21 +30,36 @@ def build(override):
         proj.model_point.formula = "lambda: data.other().loc[policy_id]"
     elif override == "reader":
         proj.sa.formula = 'lambda: float(model_point()["sa"]) + 1.0'
+    elif override in ("reference", "shared"):
+        other = model.new_space("Other", refs={"POINTS": OTHER.iloc[::-1]})
+        other.new_cells("points", "def points():\\n    return POINTS.copy()\\n")
+        proj.data = other
+        if override == "shared":
+            model.new_space("Shared", formula="lambda policy_id: None", refs={"projection": proj, "ids": IDS},
+                            collect_over={"policy_id": IDS},
+                            collect_outputs='lambda: {"sum": {"pv": projection[policy_id].pv()}}')
     return model
 """
 
 CHECKS = """\
+import json
 import sys
 from importlib import import_module
-p = import_module(sys.argv[1]).mx_model.Projection
-# row values compared as numbers; the type of the public row is compared in the test below
-print(repr([(p[i].sa(), p[i].pv(), sorted((str(k), float(v)) for k, v in p[i].model_point().items())) for i in (1, 2, 3)]))
-print(type(p[1].model_point()).__name__)
+m = import_module(sys.argv[1]).mx_model
+p = m.Projection
+if hasattr(m, "Shared"):
+    print(m.Shared.collect().sum.pv)
+print(p.collect().sum.pv)
+print(json.dumps([(p[i].sa(), p[i].pv(), type(p[i].model_point()).__name__,
+                   sorted((str(k), float(v)) for k, v in p[i].model_point().items()))
+                  for i in (1, 2, 3)]))
 """
 
 
-@pytest.mark.parametrize("override", ["row", "reader", "none"])
-def test_derived_space_keeps_the_record_path(tmp_path, override):
+@pytest.mark.parametrize(("override", "total"), [
+    ("row", 12000), ("reader", 1206), ("none", 1200), ("reference", 12000), ("shared", 12000),
+])
+def test_derived_space_field_admission_preserves_public_rows(tmp_path, override, total):
     (tmp_path / "derived_model.py").write_text(MODEL, encoding="utf-8")
     name = f"d_{override}"
     (tmp_path / "build_model.py").write_text(textwrap.dedent(f"""\
@@ -58,7 +70,8 @@ def test_derived_space_keeps_the_record_path(tmp_path, override):
         """), encoding="utf-8")
     (tmp_path / "sample.py").write_text(
         f"from {name} import mx_model\nfor k in (1, 2, 3):\n    mx_model.Projection[k].collect_outputs()\n"
-        "    mx_model.Projection[k].model_point()\nmx_model.Projection.collect()\n", encoding="utf-8")
+        "    mx_model.Projection[k].model_point()\nmx_model.Projection.collect()\n"
+        "if hasattr(mx_model, 'Shared'):\n    mx_model.Shared.collect()\n", encoding="utf-8")
     (tmp_path / "spec.py").write_text(
         repr({"parallel_workers": 1, "spaces": {"Projection": {"serial_collect": "reuse"}}}), encoding="utf-8")
     (tmp_path / "checks.py").write_text(CHECKS, encoding="utf-8")
@@ -67,19 +80,18 @@ def test_derived_space_keeps_the_record_path(tmp_path, override):
     run("build_model.py")
     run("-m", "modelx_cython", name, "--sample", "sample.py", "--spec", "spec.py")
     outs = {pkg: run("checks.py", pkg).stdout.splitlines() for pkg in (name + "_cy", name)}
-    assert outs[name + "_cy"][0] == outs[name][0], outs
+    assert outs[name + "_cy"] == outs[name], outs
+    assert all(float(value) == total for value in outs[name][:-1])
+    assert all(row[2] == "Series" for row in json.loads(outs[name][-1]))
     report = json.loads((tmp_path / f"{name}_cy/_mx_admission.json").read_text(encoding="utf-8"))
     rows = {k: v for k, v in report.items() if isinstance(v, dict) and k.endswith("._f_model_point")}
-    assert rows and all(v["row_cell_inlined"] is False and "another class" in (v["row_cell_kept"] or "")
-                        for v in rows.values()), rows
-    readers = [v for k, v in report.items() if isinstance(v, dict) and k.endswith("._f_sa")]
-    assert readers and all(v["row_fields_inlined"] == 0 for v in readers), readers
-
-
-# T-5c: was an open difference on the helper layer (the compiled public row cell returned the helper Record); on
-# prepared tables the row is live's pandas Series
-def test_derived_space_public_row_is_a_pandas_row(tmp_path):
-    test_derived_space_keeps_the_record_path(tmp_path, "none")
-    out = subprocess.run([sys.executable, "checks.py", "d_none_cy"], cwd=tmp_path, check=True,
-                         capture_output=True, text=True).stdout.splitlines()
-    assert out[1] == "Series", out
+    assert len(rows) == 2
+    reader, = (v for k, v in report.items() if k.endswith("._c_Projection._f_sa"))
+    if override == "row":
+        assert all(not v["row_cell_inlined"] and "another class" in v["row_cell_kept"]
+                   for v in rows.values())
+        assert reader["row_fields_inlined"] == 0
+    elif override == "reference":
+        assert reader["row_fields_inlined"] == 0
+    else:
+        assert reader["row_fields_inlined"] == 1

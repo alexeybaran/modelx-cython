@@ -117,9 +117,10 @@ class FrameReads:
     (one dict per read) and ``declined`` why a read of a frame receiver was not."""
 
     def __init__(self, resolver, cls_info, cells, providers, policy, row_names=None, prefix_cells=None,
-                 param_cells=None, *, builtin_int, builtin_zip_walk=False):
+                 param_cells=None, *, builtin_int, builtin_zip_walk=False, row_inline=None):
         self.param_cells = param_cells or {}    # T-5c: cell with parameters -> (names, its `T.loc[key]` expression)
         self.row_names = row_names or {}       # code of an inlined row expression -> its row cell (assignments)
+        self.row_inline = row_inline
         self.prefix_cells = prefix_cells or {}  # zero-argument cell of the class -> its `T.loc[key]` expression
         self.resolver, self.cls_info, self.cells = resolver, cls_info, cells
         self.providers, self.policy = providers, policy
@@ -2713,7 +2714,8 @@ class _Rewrite(cst.CSTTransformer):
             return updated
         if isinstance(row.value.value, cst.Name):
             self.replaced_names.add(row.value.value.value)
-        name = cell or (o.row_names.get(_code(row)) if o.row_names else None)
+        inlined = o.row_inline.sites.get(original) if o.row_inline is not None else None
+        name = cell or inlined or (o.row_names.get(_code(row)) if o.row_names else None)
 
         held_state = None
 
@@ -2730,7 +2732,12 @@ class _Rewrite(cst.CSTTransformer):
         if held_state is not None and kind == 'obj' and not o.cells.has_args() and o.cells.get_rettype_expr() == 'str':
             self.held_string_read = read, test, held_state
         self._record(original, 'L2', call)
-        return self._lowered(test, read, self._fallback(updated, call), kind)
+        if inlined is not None:
+            o.row_inline.lowered_sites.add(original)
+            fallback = updated.with_changes(value=cst.parse_expression(f'self.{inlined}()'))
+        else:
+            fallback = self._fallback(updated, call)
+        return self._lowered(test, read, fallback, kind)
 
     @staticmethod
     def _conjunction(conditions):

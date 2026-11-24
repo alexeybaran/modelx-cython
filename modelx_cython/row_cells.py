@@ -160,7 +160,8 @@ class _Uses(cst.CSTVisitor):
         self.name, self.top = name, top
         self.escape = None
         self.locals = {}            # local -> [assignments]
-        self.local_loads = {}       # local -> [ok?]
+        self.calls = set()
+        self.reads = set()
         self._parents = []
         self._depth = 0
 
@@ -196,6 +197,8 @@ class _Uses(cst.CSTVisitor):
         outer = parents[-2] if len(parents) > 1 else None
         if isinstance(outer, cst.Subscript) and outer.value is call:
             if _literal_field(outer) and not self._stored(parents[:-2], outer):
+                self.calls.add(call)
+                self.reads.add(outer)
                 return
             self.escape = self.escape or 'a field read with a non-literal key, or a store'
             return
@@ -203,6 +206,7 @@ class _Uses(cst.CSTVisitor):
                 and isinstance(outer.targets[0].target, cst.Name) and len(parents) > 2
                 and isinstance(parents[-3], cst.SimpleStatementLine) and parents[-3] in self.top):
             self.locals.setdefault(outer.targets[0].target.value, []).append(outer)
+            self.calls.add(call)
             return
         self.escape = self.escape or 'the value is used (returned, passed, stored, compared or iterated)'
 
@@ -223,6 +227,7 @@ class _LocalLoads(cst.CSTVisitor):
     def __init__(self, names, assignments):
         self.names, self.assignments = set(names), assignments
         self.bad = set()
+        self.reads = set()
         self._parents, self._depth = [], 0
 
     def on_visit(self, node):
@@ -256,6 +261,7 @@ class _LocalLoads(cst.CSTVisitor):
             return
         if (isinstance(parent, cst.Subscript) and parent.value is node and _literal_field(parent)
                 and not _Uses._stored(parents[:-1], parent)):
+            self.reads.add(parent)
             return
         self.bad.add(node.value)
 
@@ -364,12 +370,33 @@ class Inline(cst.CSTTransformer):
 
     def __init__(self, rows):
         super().__init__()
-        self.rows, self.count = rows, 0
+        self.rows = rows
+        self.calls = {}
+        self.reads = {}
+        self.sites = {}
+        self.lowered_sites = set()
+
+    def visit_FunctionDef(self, node):
+        for name in self.rows:
+            uses = _Uses(name, tuple(_body(node)))
+            node.visit(uses)
+            if uses.escape or any(len(assignments) != 1 for assignments in uses.locals.values()):
+                continue
+            aliases = _LocalLoads(uses.locals, uses.locals)
+            node.visit(aliases)
+            reads = uses.reads | aliases.reads
+            if reads and not aliases.bad:
+                self.calls.update(dict.fromkeys(uses.calls, name))
+                self.reads.update(dict.fromkeys(reads, name))
 
     def leave_Call(self, original, updated):
-        func = updated.func
-        if (not updated.args and isinstance(func, cst.Attribute) and isinstance(func.value, cst.Name)
-                and func.value.value == 'self' and func.attr.value in self.rows):
-            self.count += 1
-            return self.rows[func.attr.value].deep_clone().with_changes(lpar=updated.lpar, rpar=updated.rpar)
+        name = self.calls.get(original)
+        if name is not None:
+            return self.rows[name].deep_clone().with_changes(lpar=updated.lpar, rpar=updated.rpar)
+        return updated
+
+    def leave_Subscript(self, original, updated):
+        name = self.reads.get(original)
+        if name is not None:
+            self.sites[updated] = name
         return updated

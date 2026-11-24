@@ -743,9 +743,9 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
             node = lower(node, cls_info, cells, scope)
         return node
 
-    def _table_reads(self, node, cls_info, cells, builtin_keys):
+    def _table_reads(self, node, cls_info, cells, builtin_keys, *, row_inline=None):
         """Lower and report table reads before the remaining formula transforms."""
-        return self._table_reads_lowered(node, cls_info, cells, builtin_keys)
+        return self._table_reads_lowered(node, cls_info, cells, builtin_keys, row_inline=row_inline)
 
     def _row_cells(self, cls_info):
         """diag-run8 F3: the row cells of the class whose every use is a field read
@@ -852,20 +852,42 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
         rows = {name: expr for name, expr in self._row_cells(cls_info).items() if name != cells.name}
         cells.row_fields_inlined = 0
         if rows:
+            from copy import deepcopy
             from modelx_cython import row_cells
             inline = row_cells.Inline(rows)
             candidate = node.visit(inline)
-            if inline.count:
-                code_of = cst.Module(body=[]).code_for_node
-                self._row_names = {code_of(expr): name for name, expr in rows.items()}
+            if inline.sites:
+                class_state = vars(cls_info)
+                holds = deepcopy(class_state['holds']) if 'holds' in class_state else None
+                had_holds = 'holds' in class_state
+                resolver_state = vars(self._resolver)
+                signatures = resolver_state.get('table_signatures')
+                signature_snapshot = dict(signatures) if signatures is not None else None
+                providers = self.helper_providers.copy()
+                cell_state = vars(cells).copy()
+                accepted = False
                 try:
-                    lowered = self._table_reads(candidate, cls_info, cells, builtin_keys)
+                    lowered = self._table_reads(candidate, cls_info, cells, builtin_keys,
+                                                row_inline=inline)
+                    accepted = inline.lowered_sites == inline.sites.keys()
+                    if accepted:
+                        cells.row_fields_inlined = len(inline.sites)
+                        return lowered
                 finally:
-                    self._row_names = None
-                # Every inlined field read must be an L2 read of a row held per item.
-                if sum(1 for e in getattr(cells, 'frame_reads', ()) if e['form'] == 'L2') >= inline.count:
-                    cells.row_fields_inlined = inline.count
-                    return lowered
+                    if not accepted:
+                        if had_holds:
+                            cls_info.holds = holds
+                        else:
+                            class_state.pop('holds', None)
+                        if signatures is not None:
+                            signatures.clear()
+                            signatures.update(signature_snapshot)
+                        else:
+                            resolver_state.pop('table_signatures', None)
+                        self.helper_providers.clear()
+                        self.helper_providers.update(providers)
+                        vars(cells).clear()
+                        vars(cells).update(cell_state)
         return self._table_reads(node, cls_info, cells, builtin_keys)
 
     def _lower_frames(self, frames, node, cls_info, cells):
@@ -896,17 +918,22 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
                                                 cells.name, type(error).__name__, error)
             return node
 
-    def _table_reads_lowered(self, node, cls_info, cells, builtin_keys):
+    def _table_reads_lowered(self, node, cls_info, cells, builtin_keys, *, row_inline=None):
         cells.table_reads_typed, cells.table_reads_untyped, cells.table_reads_keys = 0, [], []
         if self._resolver is None:
             return node
         if getattr(self.module.spec.policy, 'prepared_tables', False):
             # T-3: reads of a traced pandas frame onto its PreparedTable (frame_reads.py)
             from modelx_cython.frame_reads import FrameReads
+            row_names = None
+            if row_inline is not None:
+                code_of = cst.Module(body=[]).code_for_node
+                row_names = {code_of(row_inline.rows[name]): name for name in row_inline.sites.values()}
             frames = FrameReads(self._resolver, cls_info, cells, self.helper_providers, self.module.spec.policy,
-                                getattr(self, '_row_names', None), self._prefix_cells(cls_info),
+                                row_names, self._prefix_cells(cls_info),
                                 self._param_prefix_cells(cls_info), builtin_int='int' in builtin_keys,
-                                builtin_zip_walk={'zip', 'int', 'float', 'str', 'type'} <= builtin_keys)
+                                builtin_zip_walk={'zip', 'int', 'float', 'str', 'type'} <= builtin_keys,
+                                row_inline=row_inline)
             node = self._lower_frames(frames, node, cls_info, cells)
             cells.held_string_selector = frames.held_string_selector
             cells.frame_reads = frames.lowered + frames.declined

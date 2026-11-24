@@ -2,10 +2,13 @@
 readers read the table row natively; every escape keeps the Record path."""
 
 import textwrap
+from types import SimpleNamespace
 
 import libcst as cst
 
 from modelx_cython import row_cells
+from modelx_cython.holds import hold_table
+from modelx_cython.transformer import ModuleTransformer
 
 HEADER = '''\
 class _c_Projection:
@@ -111,3 +114,45 @@ def test_inline_replaces_only_calls_of_accepted_cells():
     out = node.visit(row_cells.Inline(accepted))
     assert out.code == ('def _f_y(self):\n    return float(self.data.points().loc[self.policy_id]["sa"]) '
                         '+ self.other()\n'), out.code
+
+
+def test_unrelated_native_read_cannot_admit_an_unlowered_row_field():
+    accepted, _ = analyse()
+    original = cst.parse_statement(
+        'def _f_y(self):\n'
+        '    row = self.model_point()\n'
+        '    return row["sa"] + row["age"] + self.other().loc[1]["sa"]\n'
+    )
+    cls = SimpleNamespace()
+    cells = SimpleNamespace(name='y', read_audit=['existing'])
+    original_audit = cells.read_audit
+    original_provider = 'existing.provider'
+    resolver = SimpleNamespace(table_signatures={'existing': 0})
+
+    class Probe:
+        _resolver = resolver
+        helper_providers = {original_provider}
+
+        def _row_cells(self, cls_info):
+            return accepted
+
+        def _table_reads(self, node, cls_info, cell, keys, *, row_inline=None):
+            if row_inline is not None:
+                assert len(row_inline.sites) == 2
+                row_inline.lowered_sites.add(next(iter(row_inline.sites)))
+                cell.frame_reads = [{'form': 'L2'}, {'form': 'L2'}]
+                cell.read_audit = ['discarded']
+                hold_table(cls_info).field('prepared', 'discarded')
+                self._resolver.table_signatures['discarded'] = 1
+                self.helper_providers.add('discarded.provider')
+                return node
+            assert node is original
+            assert not hasattr(cls_info, 'holds')
+            assert cell.read_audit is original_audit
+            assert not hasattr(cell, 'frame_reads')
+            assert self._resolver.table_signatures == {'existing': 0}
+            assert self.helper_providers == {original_provider}
+            return node
+
+    out = ModuleTransformer._table_reads_with_row_fields(Probe(), original, cls, cells, ())
+    assert out is original and cells.row_fields_inlined == 0
