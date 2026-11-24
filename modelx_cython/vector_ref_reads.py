@@ -1,118 +1,131 @@
 """Use a small integer vector directly inside an admitted scalar formula."""
 
-import ast
 import textwrap
 
 import libcst as cst
 from libcst.metadata.scope_provider import BuiltinAssignment
 
 from .consts import CY_MOD
-from .scopes import Names, has_scope_effects
-from .syntax import arguments, code, dotted_name, local_assignment, single_statement
+from .scopes import CstFacts, Names, has_scope_effects
+from .syntax import arguments, dotted_name, literal_value, local_assignment, single_statement, statements
 from .table_cells import module_renames, vector_cells
 from .vectors import ALIAS, TYPES
 
 
 _LIMIT = 1 << 20
-_OPERATORS = (ast.Add, ast.Sub, ast.Div, ast.UAdd, ast.USub, ast.Not,
-              ast.And, ast.Or, ast.Eq, ast.NotEq, ast.Lt, ast.LtE, ast.Gt, ast.GtE)
-
-
+_OPERATIONS = {
+    cst.Add, cst.Subtract, cst.Divide, cst.Plus, cst.Minus, cst.Not, cst.And, cst.Or,
+    cst.Equal, cst.NotEqual, cst.LessThan, cst.LessThanEqual, cst.GreaterThan, cst.GreaterThanEqual,
+}
 def _builtin(scope, name):
     return scope[name] and all(isinstance(binding, BuiltinAssignment) for binding in scope[name])
 
 
-class _ScalarTail(ast.NodeTransformer):
+def _tail_size(lines):
+    """Count semantic nodes and their load/store contexts in the existing size limit."""
+    def cost(node):
+        if isinstance(node, cst.Attribute):
+            return 2 + cost(node.value)
+        if isinstance(node, cst.Name):
+            return 1 if node.value in ('True', 'False', 'None') else 2
+        count = isinstance(node, (cst.BaseExpression, cst.BaseSmallStatement, cst.BaseCompoundStatement))
+        return count + (type(node) in _OPERATIONS) + isinstance(node, cst.Subscript) + sum(map(cost, node.children))
+    return sum(map(cost, lines))
+
+
+class _UnsupportedTail(Exception):
+    pass
+
+
+class _ScalarTail:
     def __init__(self, vector, held, cls, cell, scope, names):
         self.vector, self.held = vector, held
         self.cls, self.cell, self.scope, self.names = cls, cell, scope, names
         self.reads = set()
         self.locals = {}
-        self.interpret = False
 
-    def generic_visit(self, node):
-        if not isinstance(node, (ast.Assign, ast.If, ast.Return, ast.Compare, ast.BoolOp,
-                                 ast.BinOp, ast.UnaryOp, ast.Load, *_OPERATORS)):
-            self.interpret = True
+    def _is_vector(self, node):
+        return isinstance(node, cst.Name) and node.value == self.vector
+
+    def _integer_index(self, node):
+        if isinstance(node, cst.Name):
+            return node.value in self.cell.params
+        if isinstance(node, (cst.Integer, cst.Attribute)):
+            return True
+        if isinstance(node, cst.UnaryOperation) and isinstance(node.operator, (cst.Plus, cst.Minus)):
+            return self._integer_index(node.expression)
+        return (isinstance(node, cst.BinaryOperation) and isinstance(node.operator, (cst.Add, cst.Subtract))
+                and isinstance(node.right, cst.Integer) and self._integer_index(node.left))
+
+    def expression(self, node):
+        if isinstance(node, (cst.Integer, cst.Float)) and -_LIMIT <= literal_value(node) <= _LIMIT:
             return node
-        return super().generic_visit(node)
-
-    def visit_Constant(self, node):
-        if type(node.value) not in (float, int) or not -_LIMIT <= node.value <= _LIMIT:
-            self.interpret = True
-        return node
-
-    def visit_Name(self, node):
-        if node.id in self.locals:
-            return ast.copy_location(ast.Name(id=self.locals[node.id], ctx=node.ctx), node)
-        if (node.id not in self.cell.params
-                or self.cell.get_argtype_expr(node.id, c_style=True, formula=True) != 'long long'):
-            self.interpret = True
-        self.reads.add(node.id)
-        return node
-
-    def visit_Assign(self, node):
-        if (len(node.targets) != 1 or not isinstance(target := node.targets[0], ast.Name)
-                or target.id in (*self.cell.params, 'self', self.vector) or target.id in self.locals):
-            self.interpret = True
-            return node
-        node.value = self.visit(node.value)
-        local = self.names.reserve('_mx_vec_scalar_' + target.id)
-        self.locals[target.id] = local
-        target.id = local
-        return node
-
-    def visit_If(self, node):
-        node.test = self.visit(node.test)
-        outer = self.locals.copy()
-        node.body = [self.visit(part) for part in node.body]
-        self.locals = outer.copy()
-        node.orelse = [self.visit(part) for part in node.orelse]
-        self.locals = outer
-        return node
-
-    def visit_Attribute(self, node):
-        ref = self.cls.refs.get(node.attr)
-        if (not isinstance(node.value, ast.Name) or node.value.id != 'self'
-                or ref is None or ref.get_type_expr(c_style=True) != 'long long'
-                or not isinstance(node.ctx, ast.Load)):
-            self.interpret = True
-        self.reads.add(ast.unparse(node))
-        return node
-
-    def _is_vector(self, expr):
-        return isinstance(expr, ast.Name) and expr.id == self.vector
-
-    def _integer_index(self, expr):
-        if isinstance(expr, ast.Constant):
-            return type(expr.value) is int
-        if isinstance(expr, ast.Name):
-            return expr.id in self.cell.params
-        if isinstance(expr, ast.Attribute):
-            return True  # visit_Attribute checks the receiver and C type.
-        if isinstance(expr, ast.UnaryOp) and isinstance(expr.op, (ast.UAdd, ast.USub)):
-            return self._integer_index(expr.operand)
-        return (isinstance(expr, ast.BinOp) and isinstance(expr.op, (ast.Add, ast.Sub))
-                and isinstance(expr.right, ast.Constant) and type(expr.right.value) is int
-                and self._integer_index(expr.left))
-
-    def visit_Subscript(self, node):
-        index = node.slice
-        if (not self._is_vector(node.value) or not isinstance(node.ctx, ast.Load)
-                or not self._integer_index(index)):
-            self.interpret = True
-            return node
-        return ast.parse(f'{ALIAS}.ivec_get({self.held}, {ast.unparse(self.visit(index))})', mode='eval').body
-
-    def visit_Call(self, node):
-        if (isinstance(node.func, ast.Name) and not node.keywords and _builtin(self.scope, node.func.id)):
-            if node.func.id == 'len' and len(node.args) == 1 and self._is_vector(node.args[0]):
-                return ast.parse(f'{self.held}.n', mode='eval').body
-            if node.func.id in ('min', 'max') and len(node.args) == 2:
-                node.args = [self.visit(arg) for arg in node.args]
+        if isinstance(node, cst.Name):
+            name = node.value
+            if name in self.locals:
+                return node.with_changes(value=self.locals[name])
+            if name in self.cell.params and self.cell.get_argtype_expr(name, c_style=True, formula=True) == 'long long':
+                self.reads.add(name)
                 return node
-        self.interpret = True
-        return node
+        if isinstance(node, cst.Attribute):
+            ref = self.cls.refs.get(node.attr.value)
+            if dotted_name(node.value) == 'self' and ref and ref.get_type_expr(c_style=True) == 'long long':
+                self.reads.add(f'self.{node.attr.value}')
+                return node
+        if isinstance(node, cst.Subscript) and self._is_vector(node.value) and len(node.slice) == 1:
+            part, = node.slice
+            if (part.comma is cst.MaybeSentinel.DEFAULT and isinstance(part.slice, cst.Index)
+                    and part.slice.star is None and self._integer_index(part.slice.value)):
+                index = self.expression(part.slice.value)
+                return cst.Call(cst.Attribute(cst.Name(ALIAS), cst.Name('ivec_get')),
+                                (cst.Arg(cst.Name(self.held)), cst.Arg(index)), lpar=node.lpar, rpar=node.rpar)
+        if isinstance(node, cst.Call) and isinstance(node.func, cst.Name) and _builtin(self.scope, node.func.value):
+            args = arguments(node)
+            if args is not None and node.func.value == 'len' and len(args) == 1 and self._is_vector(args[0]):
+                return cst.Attribute(cst.Name(self.held), cst.Name('n'), lpar=node.lpar, rpar=node.rpar)
+            if args is not None and node.func.value in ('min', 'max') and len(args) == 2:
+                return node.with_changes(args=tuple(arg.with_changes(value=self.expression(arg.value)) for arg in node.args))
+        if isinstance(node, (cst.BinaryOperation, cst.BooleanOperation)) and type(node.operator) in _OPERATIONS:
+            return node.with_changes(left=self.expression(node.left), right=self.expression(node.right))
+        if isinstance(node, cst.UnaryOperation) and type(node.operator) in _OPERATIONS:
+            return node.with_changes(expression=self.expression(node.expression))
+        if isinstance(node, cst.Comparison) and all(type(part.operator) in _OPERATIONS for part in node.comparisons):
+            return node.with_changes(left=self.expression(node.left), comparisons=tuple(
+                part.with_changes(comparator=self.expression(part.comparator)) for part in node.comparisons))
+        raise _UnsupportedTail
+
+    def small_statement(self, stmt):
+        if isinstance(stmt, cst.Return):
+            return stmt.with_changes(value=self.expression(stmt.value))
+        target = local_assignment(stmt)
+        if target is not None and target.value not in (*self.cell.params, 'self', self.vector, *self.locals):
+            value = self.expression(stmt.value)
+            renamed = self.names.reserve('_mx_vec_scalar_' + target.value)
+            self.locals[target.value] = renamed
+            return stmt.with_changes(value=value, targets=(stmt.targets[0].with_changes(
+                target=target.with_changes(value=renamed)),))
+        raise _UnsupportedTail
+
+    def suite(self, node):
+        body = (self.line if isinstance(node, cst.IndentedBlock) else self.small_statement)
+        return node.with_changes(body=tuple(body(stmt) for stmt in node.body))
+
+    def line(self, node):
+        if isinstance(node, cst.SimpleStatementLine):
+            return node.with_changes(body=tuple(self.small_statement(stmt) for stmt in node.body))
+        if isinstance(node, cst.If):
+            test = self.expression(node.test)
+            outer = self.locals.copy()
+            body = self.suite(node.body)
+            self.locals = outer.copy()
+            otherwise = node.orelse
+            if isinstance(otherwise, cst.If):
+                otherwise = self.line(otherwise)
+            elif otherwise is not None:
+                otherwise = otherwise.with_changes(body=self.suite(otherwise.body))
+            self.locals = outer
+            return node.with_changes(test=test, body=body, orelse=otherwise)
+        raise _UnsupportedTail
 
 
 def lower(node, cls, cell, scope):
@@ -138,22 +151,20 @@ def lower(node, cls, cell, scope):
                 or vector_cells(target).get(name) != 'I'
                 or name not in module_renames(cls.module).get(target.name, {})):
             continue
-        original = ast.parse(code(cst.Module(lines[i + 1:]))).body
-        if (not original or not isinstance(original[-1], ast.Return)
-                or sum(len(list(ast.walk(part))) for part in original) > 128):
+        tail = lines[i + 1:]
+        body = statements(tail)
+        if not body or not isinstance(body[-1], cst.Return) or _tail_size(tail) > 128:
             continue
         # A native tail cannot delay release of an object held by a prefix local.
-        prefix = ast.parse(code(cst.Module(lines[:i])))
-        existing = {part.id for part in ast.walk(prefix)
-                    if isinstance(part, ast.Name) and isinstance(part.ctx, ast.Store)}
-        rebound = {part.id for stmt in original for part in ast.walk(stmt)
-                   if isinstance(part, ast.Name) and isinstance(part.ctx, ast.Store)}
-        if existing & (rebound | {local.value}) or 'self' in existing:
+        existing = CstFacts(lines[:i]).stores
+        rebound = CstFacts(tail).stores
+        if set(existing) & (set(rebound) | {local.value}) or 'self' in existing:
             continue
         receiver, held = (names.reserve('_mx_vector_' + label) for label in ('owner', 'held'))
         rewrite = _ScalarTail(local.value, held, cls, cell, scope, names)
-        native = [rewrite.visit(part) for part in original]
-        if rewrite.interpret:
+        try:
+            native = tuple(rewrite.line(part) for part in tail)
+        except _UnsupportedTail:
             continue
         checks = ''.join(f' and -{_LIMIT} <= {value} <= {_LIMIT}' for value in sorted(rewrite.reads))
         # Keep Python reference lookup for unexpected classes and retain the
@@ -164,10 +175,10 @@ def lower(node, cls, cell, scope):
 if type(self) is {cls.name} and type({receiver}) is {target.name}:
     {held} = {CY_MOD}.cast({target.name}, {receiver}).{name}()
     if {ALIAS}.ivec_small_for_reads({held}){checks}:
-{textwrap.indent(ast.unparse(ast.Module(body=native, type_ignores=[])), '        ')}
+{textwrap.indent(cst.Module(native).code.rstrip(), '        ')}
     {local.value} = {held}.tolist()
 else:
     {local.value} = {receiver}.{name}()
 ''').body
-        return node.with_changes(body=node.body.with_changes(body=(*lines[:i], *branch, *lines[i + 1:])))
+        return node.with_changes(body=node.body.with_changes(body=(*lines[:i], *branch, *tail)))
     return node

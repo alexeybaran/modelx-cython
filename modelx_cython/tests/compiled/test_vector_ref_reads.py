@@ -2,7 +2,18 @@ import subprocess
 import sys
 import textwrap
 
+import libcst as cst
 import modelx as mx
+import pytest
+
+from modelx_cython.vector_ref_reads import _ScalarTail, _UnsupportedTail
+
+
+def test_starred_index_does_not_enter_the_integer_vector_tail():
+    node = cst.parse_expression('knots[*i]')
+    tail = _ScalarTail('knots', 'held', None, None, None, None)
+    with pytest.raises(_UnsupportedTail):
+        tail.expression(node)
 
 
 def test_relative_integer_vector_scalar_reads(tmp_path):
