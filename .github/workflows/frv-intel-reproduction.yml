@@ -1,0 +1,72 @@
+name: FRV Intel macOS reproduction
+
+on:
+  push:
+    branches: [verify/r3-frv-intel-reproduction]
+
+permissions:
+  contents: read
+
+jobs:
+  reproduce:
+    name: FRV ${{ matrix.name }} on Intel macOS
+    runs-on: macos-15-intel
+    timeout-minutes: 75
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: current
+            lifelib: e99235ae35276e46c57991416ebe058874152a2e
+            modelx: 861396000edaae329d4473cdd97c0d1aea52a71f
+          - name: pre-PV
+            lifelib: c4df773fab5dd3c498b3df0cb35c19964084d09c
+            modelx: 861396000edaae329d4473cdd97c0d1aea52a71f
+          - name: upstream runtime
+            lifelib: e99235ae35276e46c57991416ebe058874152a2e
+            modelx: 2097f7b0e4b169377deffc61d3f93232d2828d5d
+    env:
+      PYTHONFAULTHANDLER: "1"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: alexeybaran/lifelib
+          ref: ${{ matrix.lifelib }}
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10.21"
+          architecture: x64
+      - name: Install matched dependencies
+        shell: bash
+        run: |
+          python -m pip install "modelx @ git+https://github.com/alexeybaran/modelx.git@${{ matrix.modelx }}" \
+            numpy==2.2.6 pandas==2.3.3 networkx==3.4.2 libcst==1.9.0 \
+            openpyxl==3.1.5 asttokens==3.0.2 pytest==9.2.0 pytest-cov==7.1.0 pytest-xdist==3.8.0 \
+            pluggy==1.7.0 python-dateutil==3.0.0 pytz==2026.6 pyyaml==6.0.4 tzdata==2026.6
+          python -m pip install --no-deps -e .
+          python -m pip freeze
+          python -c "import platform, resource, sys; assert platform.machine() == 'x86_64'; print(sys.version, sys.getrecursionlimit(), resource.getrlimit(resource.RLIMIT_STACK))"
+      - name: Reproduce isolated reduction in yield
+        id: isolated
+        shell: bash
+        run: |
+          test=lifelib/libraries/delib/tests/test_fondsgebundene_rentenversicherung_de.py::test_the_reduction_in_yield_across_the_four_charge_scales
+          python -m pytest -vv "${test}[5]"
+      - name: Reproduce ordered suite prefix
+        if: steps.isolated.outcome == 'success'
+        shell: bash
+        run: |
+          python -m pytest --collect-only -q --ignore-glob='*test_*_us_sec.py' > collected.txt
+          python - <<'PY'
+          from pathlib import Path
+          import subprocess
+          import sys
+          end = ("lifelib/libraries/delib/tests/test_fondsgebundene_rentenversicherung_de.py"
+                 "::test_the_reduction_in_yield_across_the_four_charge_scales[5]")
+          ids = [line for line in Path("collected.txt").read_text().splitlines()
+                 if line.startswith("lifelib/") and "::" in line]
+          prefix = ids[: ids.index(end) + 1]
+          print(f"Running {len(prefix)} ordered cases through {end}", flush=True)
+          raise SystemExit(subprocess.call([sys.executable, "-m", "pytest", "-vv", *prefix]))
+          PY
