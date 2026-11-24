@@ -131,7 +131,8 @@ def test_row_fields_read_without_the_row(tmp_path):
     for route in ("'direct', 'sa'", "'collect', 1", "'collect', 4"):          # a removed key, as live
         assert f"('raise', {route}, 'KeyError', '2')" in outs[f"{name}_nomx"], (route, outs)
     assert cells["model_point"]["row_cell_inlined"] is True, cells["model_point"]
-    assert sum(cells[c]["row_fields_inlined"] for c in ("sa", "age", "sex", "both")) == 4, cells
+    expected_fields = {"sa": 1, "age": 1, "sex": 1, "both": 2}
+    assert {name: cells[name]["row_fields_inlined"] for name in expected_fields} == expected_fields
     # a str key is held per item too (diag-run8 F3 held row): read once per item, then by position
     assert cells["cost_row"]["row_cell_inlined"] is True, cells["cost_row"]
     assert cells["fee"]["row_fields_inlined"] == 1, cells["fee"]
