@@ -1,8 +1,8 @@
-name: FRV Intel macOS worker-stack probe
+name: FRV Intel macOS native backtrace
 
 on:
   push:
-    branches: [verify/r3-frv-thread-stack]
+    branches: [verify/r3-frv-native-backtrace]
 
 permissions:
   contents: read
@@ -41,18 +41,11 @@ jobs:
           python -m pip install --no-deps -e .
           python -m pip freeze
           python -c "import platform, resource, sys; assert platform.machine() == 'x86_64'; print(sys.version, sys.getrecursionlimit(), resource.getrlimit(resource.RLIMIT_STACK))"
-      - name: Run identical FRV calculation on an explicitly sized Python thread
+      - name: Record the native stop and stack mapping
         shell: bash
         run: |
           test=lifelib/libraries/delib/tests/test_fondsgebundene_rentenversicherung_de.py::test_the_reduction_in_yield_across_the_four_charge_scales
-          python - "${test}[5]" <<'PY'
-          from concurrent.futures import ThreadPoolExecutor
-          import sys
-          import threading
-          import pytest
-          threading.stack_size(128 * 1024 * 1024)
-          print("requested stack size", threading.stack_size(), flush=True)
-          with ThreadPoolExecutor(max_workers=1) as executor:
-              result = executor.submit(pytest.main, ["-vv", *sys.argv[1:]]).result()
-          raise SystemExit(result)
-          PY
+          xcrun lldb --batch --no-lldbinit \
+            -o 'settings set target.disable-aslr false' \
+            -o run -k 'thread backtrace -c 50' -k 'register read sp' -k 'memory region $sp' \
+            -- "$(command -v python)" -m pytest -p no:faulthandler -vv "${test}[5]"
