@@ -1,8 +1,8 @@
-name: FRV Intel macOS reproduction
+name: FRV Intel macOS larger-stack probe
 
 on:
   push:
-    branches: [verify/r3-frv-intel-reproduction]
+    branches: [verify/r3-frv-stack-probe]
 
 permissions:
   contents: read
@@ -19,12 +19,6 @@ jobs:
           - name: current
             lifelib: e99235ae35276e46c57991416ebe058874152a2e
             modelx: 861396000edaae329d4473cdd97c0d1aea52a71f
-          - name: pre-PV
-            lifelib: c4df773fab5dd3c498b3df0cb35c19964084d09c
-            modelx: 861396000edaae329d4473cdd97c0d1aea52a71f
-          - name: upstream runtime
-            lifelib: e99235ae35276e46c57991416ebe058874152a2e
-            modelx: 2097f7b0e4b169377deffc61d3f93232d2828d5d
     env:
       PYTHONFAULTHANDLER: "1"
     steps:
@@ -51,22 +45,7 @@ jobs:
         id: isolated
         shell: bash
         run: |
+          ulimit -s 32768
+          ulimit -s
           test=lifelib/libraries/delib/tests/test_fondsgebundene_rentenversicherung_de.py::test_the_reduction_in_yield_across_the_four_charge_scales
           python -m pytest -vv "${test}[5]"
-      - name: Reproduce ordered suite prefix
-        if: steps.isolated.outcome == 'success'
-        shell: bash
-        run: |
-          python -m pytest --collect-only -q --ignore-glob='*test_*_us_sec.py' > collected.txt
-          python - <<'PY'
-          from pathlib import Path
-          import subprocess
-          import sys
-          end = ("lifelib/libraries/delib/tests/test_fondsgebundene_rentenversicherung_de.py"
-                 "::test_the_reduction_in_yield_across_the_four_charge_scales[5]")
-          ids = [line for line in Path("collected.txt").read_text().splitlines()
-                 if line.startswith("lifelib/") and "::" in line]
-          prefix = ids[: ids.index(end) + 1]
-          print(f"Running {len(prefix)} ordered cases through {end}", flush=True)
-          raise SystemExit(subprocess.call([sys.executable, "-m", "pytest", "-vv", *prefix]))
-          PY
