@@ -1,8 +1,8 @@
-name: Pinned lifelib full CI
+name: Pinned lifelib Python floor on default macOS
 
 on:
   push:
-    branches: [verify/r3-dv01-final-lifelib]
+    branches: [verify/r3-dv01-lifelib-mac310-arm]
 
 permissions:
   contents: read
@@ -14,8 +14,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-15-intel]
-        python-version: ['3.10', '3.11', '3.12', '3.13', '3.14']
+        os: [macos-latest]
+        python-version: ['3.10']
 
     steps:
     - name: Checkout code
