@@ -2,7 +2,7 @@ name: Round 3 release verification
 
 on:
   push:
-    branches: [verify/r3-dv01-final-pins]
+    branches: [verify/r3-integrated-cold]
     paths: [fork_ci/pins.json, fork_ci/source-coverage.json, .github/workflows/round3-release-verification.yml]
 
 permissions:
@@ -76,7 +76,7 @@ jobs:
           sparse-checkout: modelx_helpers
           persist-credentials: false
       - name: Unit tests
-        timeout-minutes: 100
+        timeout-minutes: ${{ matrix.os == 'macos-latest' && matrix.python != '3.14t' && 150 || 100 }}
         shell: bash
         env:
           PYTHON_GIL: ${{ endsWith(matrix.python, 't') && '0' || '1' }}

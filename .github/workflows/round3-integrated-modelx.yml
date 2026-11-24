@@ -1,0 +1,83 @@
+# This workflow will install Python dependencies, run tests and lint with a variety of Python versions
+# For more information see: https://help.github.com/actions/language-and-framework-guides/using-python-with-github-actions
+
+name: Pinned modelx full CI
+
+on:
+  push:
+    branches: [verify/r3-integrated-cold]
+
+jobs:
+  build:
+
+    runs-on: ${{ matrix.os == 'ubuntu-latest' && matrix.python-version.py == '3.9' && 'ubuntu-24.04' || matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: [{py: "3.9", nx: "2.6"},
+                         {py: "3.10", nx: "2.7"},
+                         {py: "3.11", nx: "2.8"},
+                         {py: "3.12", nx: "3.2"},
+                         {py: "3.13", nx: "3.4"},
+                         {py: "3.14", nx: "3.5"}
+        ]
+        os: ["ubuntu-latest", "macos-15-intel", "windows-latest"]
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        repository: alexeybaran/modelx
+        ref: 636877bfe1a8f1398044c15cbc70802d8f15fc4e
+        persist-credentials: false
+    - name: Set up Python ${{ matrix.python-version.py }}
+      uses: actions/setup-python@v5
+      with:
+        python-version: ${{ matrix.python-version.py }}
+    - name: Install dependencies
+      env:
+        NETWORKX_VERSION: ${{ matrix.python-version.nx }}
+      shell: bash
+      run: |
+        python -m pip install --upgrade pip
+        if [ '${{ matrix.python-version.py }}' = '3.9' ]; then
+          python -c "from pathlib import Path; p = Path('requirements-travis.txt'); p.write_text(p.read_text().replace('-e git+https://github.com/fumitoh/lifelib.git#egg=lifelib', 'lifelib==0.17.2'))"
+        fi
+        python -m pip install -r requirements-travis.txt
+#    - name: Increase Stack for MacOS
+#      run: |
+#          ulimit -s 65532
+#      if: ${{ matrix.os == 'macos-15-intel' }}
+
+#    - name: Lint with flake8
+#      run: |
+#        # stop the build if there are Python syntax errors or undefined names
+#        flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics
+#        # exit-zero treats all errors as warnings. The GitHub editor is 127 chars wide
+#        flake8 . --count --exit-zero --max-complexity=10 --max-line-length=127 --statistics
+    - name: Test with pytest
+      run: |
+        pytest modelx/tests/
+
+  free-threaded:
+    # The exported models support free-threaded Python (locked_spaces).
+    # QuantLib has no free-threaded wheel, so its test is left out.
+    runs-on: ubuntu-latest
+    env:
+      PYTHON_GIL: "0"
+      NETWORKX_VERSION: "3.5"
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        repository: alexeybaran/modelx
+        ref: 636877bfe1a8f1398044c15cbc70802d8f15fc4e
+        persist-credentials: false
+    - name: Set up free-threaded Python 3.14
+      uses: actions/setup-python@v5
+      with:
+        python-version: "3.14t"
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements-freethreaded.txt
+    - name: Test the exported models with pytest
+      run: |
+        pytest modelx/tests/export --deselect modelx/tests/export/test_lifelib.py::test_assets
