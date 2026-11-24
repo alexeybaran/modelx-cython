@@ -1210,6 +1210,7 @@ class _Rewrite(cst.CSTTransformer):
         self.asof_rows = {}     # asof local -> (membership hold, prefix cell call, asof expression)
         self.native = {}        # id(lowered read) -> column kind, for float()/int() around it
         self.taken = []         # T-5c: kinds of the holds taken since the last recorded read (its run-time fallbacks)
+        self.emitted_inline_assignments = set()
         self.generator_walks = set()    # T-5c: ids of lowered generator walks (``gen if test else pandas gen``)
         self.updated_of = {}    # id(original node) -> its rewritten node (key parts are emitted with their reads lowered)
         self.held_string_read = None
@@ -2201,6 +2202,8 @@ class _Rewrite(cst.CSTTransformer):
         if var not in o.declarations:
             o.declarations.append(var)
         row_cell = o.row_inline.assignments.get(assign) if o.row_inline is not None else None
+        if row_cell is not None:
+            self.emitted_inline_assignments.add(assign)
         fallback_value = (cst.parse_expression(f'self.{row_cell}()') if row_cell is not None
                           else self._fallback(assign.value, call))
         fallback = [cst.parse_statement(f'{var} = -1'),
@@ -2228,7 +2231,10 @@ class _Rewrite(cst.CSTTransformer):
         found = o.row_locals.get(value.value) if isinstance(value, cst.Name) else None
         if found is None or len(parts) != 1:
             return None
-        call, schema, _ = found
+        call, schema, assignment = found
+        row_cell = o.row_inline.sites.get(original) if o.row_inline is not None else None
+        if row_cell is not None and assignment not in self.emitted_inline_assignments:
+            return None
         label = _literal_str(parts[0])
         if label is None:           # float(row[name]): the field chosen at run time
             hold = self._take(call, _NO_LABEL, -4)
@@ -2240,8 +2246,7 @@ class _Rewrite(cst.CSTTransformer):
         read, kind, _ = self._field_read(call, schema, label, lambda hold: (
             cst.parse_expression(f'_mx_rw_{value.value} + 1'), []))
         self._record(original, 'L2', call)
-        if (o.row_inline is not None and original in o.row_inline.sites
-                and o.row_inline.assignments.get(found[2]) == o.row_inline.sites[original]):
+        if row_cell is not None and o.row_inline.assignments.get(assignment) == row_cell:
             o.row_inline.lowered_sites.add(original)
         return self._lowered(cst.parse_expression(f'_mx_rw_{value.value} >= 0'), read, updated, kind)
 

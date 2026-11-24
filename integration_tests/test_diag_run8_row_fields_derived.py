@@ -30,6 +30,11 @@ def build(override):
         proj.model_point.formula = "lambda: data.other().loc[policy_id]"
     elif override == "reader":
         proj.sa.formula = 'lambda: float(model_point()["sa"]) + 1.0'
+    elif override == "alias_line":
+        proj.sa.formula = 'def sa():\\n    row = model_point(); extra = 1\\n    return float(row["sa"]) + extra\\n'
+    elif override == "early_alias":
+        proj.sa.formula = ('def sa():\\n    if policy_id == 4:\\n        return float(row["sa"])\\n'
+                           '    row = model_point()\\n    return float(row["sa"])\\n')
     elif override in ("reference", "shared"):
         other = model.new_space("Other", refs={"POINTS": OTHER.iloc[::-1]})
         other.new_cells("points", "def points():\\n    return POINTS.copy()\\n")
@@ -48,6 +53,13 @@ import sys
 from importlib import import_module
 m = import_module(sys.argv[1]).mx_model
 p = m.Projection
+if "early_alias" in sys.argv[1]:
+    try:
+        p[4].sa()
+    except UnboundLocalError:
+        pass
+    else:
+        raise AssertionError("a row read before its assignment must remain unbound")
 if hasattr(m, "Shared"):
     print(m.Shared.collect().sum.pv)
 print(p.collect().sum.pv)
@@ -59,6 +71,7 @@ print(json.dumps([(p[i].sa(), p[i].pv(), type(p[i].model_point()).__name__,
 
 @pytest.mark.parametrize(("override", "total"), [
     ("row", 12000), ("reader", 1206), ("none", 1200), ("reference", 12000), ("shared", 12000),
+    ("alias_line", 1206), ("early_alias", 1200),
 ])
 def test_derived_space_field_admission_preserves_public_rows(tmp_path, override, total):
     (tmp_path / "derived_model.py").write_text(MODEL, encoding="utf-8")
@@ -92,7 +105,7 @@ def test_derived_space_field_admission_preserves_public_rows(tmp_path, override,
         assert all(not v["row_cell_inlined"] and "another class" in v["row_cell_kept"]
                    for v in rows.values())
         assert reader["row_fields_inlined"] == 0
-    elif override == "reference":
+    elif override in ("reference", "alias_line", "early_alias"):
         assert reader["row_fields_inlined"] == 0
     else:
         assert reader["row_fields_inlined"] == 1
