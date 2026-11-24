@@ -1,8 +1,8 @@
-name: Round 3 macOS free-threaded retry
+name: Round 3 macOS 15 ARM free-threaded verification
 
 on:
   push:
-    branches: [verify/r3-integrated-macos-ft]
+    branches: [verify/r3-integrated-macos15-ft]
     paths: [fork_ci/pins.json, fork_ci/source-coverage.json, .github/workflows/round3-release-verification.yml]
 
 permissions:
@@ -10,8 +10,8 @@ permissions:
 
 jobs:
   test:
-    name: ${{ matrix.os }}-py${{ matrix.python }}-${{ matrix.profile }}
-    runs-on: ${{ matrix.os == 'macos-latest' && matrix.python != '3.14t' && 'macos-15-intel' || matrix.os }}
+    name: macos-15-arm-py3.14t-release
+    runs-on: macos-15
     timeout-minutes: 240
     strategy:
       fail-fast: false
