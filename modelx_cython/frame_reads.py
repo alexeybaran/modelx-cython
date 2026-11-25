@@ -413,19 +413,19 @@ class FrameReads:
 
     def _receiver(self, expr):
         """(cell call, schema) when ``expr`` is a frame receiver, else None. In an item class a frame or row the item
-        computes itself is prepared per item: it is one only when the reading formula is evaluated at least
-        ``PREPARE_MIN_EVALUATIONS`` times per item in the sample (T-5c), so that the preparation pays for itself;
-        a formula evaluated fewer times reads it on pandas."""
+        computes itself is prepared per item (about 0.3-2M instructions; a pandas read costs 20-100k): it is one only
+        for a formula with parameters, evaluated once per step, so that the preparation pays for itself; a formula
+        without parameters, evaluated once per item, reads it on pandas. Decided from the text, not from how often
+        the sample evaluated the formula."""
         schema = self._schema_of_call(expr)
         found = (expr, schema) if schema is not None else None
         if found is None:
             value = self._value_of(expr.value) if isinstance(expr, cst.Name) else None
             schema = self._schema_of_call(value) if value is not None else None
             found = (value, schema) if schema is not None else None
-        if found is not None and getattr(self, 'per_item', False) and self.published(found[0]) is None:
-            evaluations = getattr(getattr(self.cells, '_rt', None), 'max_evaluations_per_receiver', 0) or 0
-            if evaluations < PREPARE_MIN_EVALUATIONS:
-                return None
+        if (found is not None and getattr(self, 'per_item', False) and not self.cells.has_args()
+                and self.published(found[0]) is None):
+            return None
         return found
 
     def param_prefix(self, expr):
@@ -1104,10 +1104,6 @@ class FrameReads:
 
 
 _NO_LABEL = object()
-
-# T-5c: in an item class, a frame the item computes itself is prepared (about 0.3-2M instructions, once per item)
-# only for a formula evaluated at least this many times per item; a pandas read costs about 20-100k instructions
-PREPARE_MIN_EVALUATIONS = 8
 
 
 # T-5c: attributes of a pandas object whose subscript is a pandas selection (a bool key is passed as the Python bool)
