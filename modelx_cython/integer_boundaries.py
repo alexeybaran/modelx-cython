@@ -721,8 +721,10 @@ def signed_local_assignments(body, name, facts, native_value):
 
 class _GuardIntegers(cst.CSTTransformer):
     def __init__(self, path, kinds, native_helpers, signed_fields,
-                 signed_functions, signed_methods, signed_names, signed_return, error):
+                 signed_functions, signed_methods, signed_names, signed_return, error, minus_as_subtraction=True):
         self.path = path
+        # results and conversions: -x as 0 - x; the flag pass's own guard keeps -x for _FlagArithmetic
+        self.minus_as_subtraction = minus_as_subtraction
         self.kinds = kinds
         self.native_helpers = native_helpers
         self.signed_fields = signed_fields
@@ -789,8 +791,8 @@ class _GuardIntegers(cst.CSTTransformer):
             return value.with_changes(body=body, orelse=orelse), body_signed and else_signed
         if isinstance(value, cst.UnaryOperation) and isinstance(value.operator, (cst.Plus, cst.Minus)):
             operand, signed = self._signed_expression(value.expression, path)
-            if signed and isinstance(value.operator, cst.Minus):
-                # Cython's overflowcheck does not check a unary minus (-LLONG_MIN): as 0 - x it does
+            if signed and isinstance(value.operator, cst.Minus) and self.minus_as_subtraction:
+                # a result or conversion: -LLONG_MIN as 0 - x, which the flag arithmetic checks
                 return cst.BinaryOperation(cst.Integer('0'), cst.Subtract(), operand,
                                            lpar=(cst.LeftParen(), *value.lpar),
                                            rpar=(*value.rpar, cst.RightParen())), True
@@ -1032,7 +1034,7 @@ def _integer_guard(node, cell, cls, signatures, native_helpers=(), inferred=True
                            fields.get(cls.name, {}) if MX_SELF not in bindings else {},
                            functions.difference(bindings),
                            methods.get(cls.name, set()) if MX_SELF not in bindings else set(),
-                           parameters | declared, False, None, False)
+                           parameters | declared, False, None, minus_as_subtraction=False)
     # locals Cython infers as C integers: every store an assignment (plain or augmented) of a
     # C integer expression; any other store (a loop target, a float value) leaves the local out
     if not inferred:
