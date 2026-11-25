@@ -15,8 +15,8 @@ import sys
 import modelx as mx
 
 FORMULAS = {
-    "ids": ("def ids(t):\n    if t % 4 == 0:\n        return []\n"
-            "    return [s + 1 for s in range(t % 3 + 1)]\n"),
+    "ids": ("def ids(t):\n    if t % 4 == 0:\n        return ()\n"
+            "    return tuple(s + 1 for s in range(t % 3 + 1))\n"),
     "w": "def w(t, s):\n    return 0.1 * s + 0.013 * t\n",
     "g": "def g(t):\n    return 1.0 / (t - 7) if t != 7 else float(t)\n",
     "h": "def h(t):\n    if t == 9:\n        raise ValueError('h')\n    return 0.5 * t\n",

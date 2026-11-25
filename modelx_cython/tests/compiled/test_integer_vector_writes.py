@@ -6,14 +6,14 @@ from vector_live import build, live_and_compiled
 FORMULAS = {
     # an object-typed cell: an int on the sampled calls of the vector cells, a float with scale 1.5
     'raw': 'def raw(i, scale):\n    return i if scale == 1.0 else i * scale\n',
-    'comp': 'def comp(t, scale):\n    return [raw(z, scale) for z in range(t)]\n',
+    'comp': 'def comp(t, scale):\n    return tuple(raw(z, scale) for z in range(t))\n',
     'written': ('def written(t, scale):\n    acc = [0] * t\n    for i in range(t):\n        acc[i] = raw(i, scale)\n'
-                '    return acc\n'),
+                '    return tuple(acc)\n'),
     'appended': ('def appended(t, scale):\n    acc = []\n    for i in range(t):\n        acc.append(raw(i, scale))\n'
-                 '    return acc\n'),
-    'filled': 'def filled(t, scale):\n    return [raw(3, scale)] * t\n',
+                 '    return tuple(acc)\n'),
+    'filled': 'def filled(t, scale):\n    return (raw(3, scale),) * t\n',
     'updated': ('def updated(t, scale):\n    acc = [1] * t\n    for i in range(t):\n        acc[i] += raw(i, scale)\n'
-                '    return acc\n'),
+                '    return tuple(acc)\n'),
     'local_sum': ('def local_sum(t, scale):\n    acc = [0] * t\n    for i in range(t):\n        acc[i] = raw(i, scale)\n'
                   '    return sum(acc) * 1.0 + len(acc)\n'),
 }

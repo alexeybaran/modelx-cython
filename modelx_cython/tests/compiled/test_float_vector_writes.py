@@ -6,15 +6,15 @@ from vector_live import build, live_and_compiled
 FORMULAS = {
     # an object-typed cell: floats on the sampled calls of the vector cells, a large int with scale 2.0
     'obj': 'def obj(z, scale):\n    return None if scale == 0.0 else (z + 0.5 if scale == 1.0 else 2 ** 60 + 1 + z)\n',
-    'comp': 'def comp(t, scale):\n    return [obj(z, scale) for z in range(t)]\n',
+    'comp': 'def comp(t, scale):\n    return tuple(obj(z, scale) for z in range(t))\n',
     'written': ('def written(t, scale):\n    v = [0.0] * t\n    for i in range(t):\n        v[i] = obj(i, scale)\n'
-                '    return v\n'),
+                '    return tuple(v)\n'),
     'appended': ('def appended(t, scale):\n    v = []\n    for i in range(t):\n        v.append(obj(i, scale))\n'
-                 '    return v\n'),
-    'filled': 'def filled(t, scale):\n    return [obj(1, scale)] * t\n',
+                 '    return tuple(v)\n'),
+    'filled': 'def filled(t, scale):\n    return (obj(1, scale),) * t\n',
     'local': ('def local(t, scale):\n    v = [0.0] * 2\n    v[0] = obj(t, scale)\n'
               '    return int(v[0]) - int(obj(t, scale)) + vec(t)[0]\n'),
-    'vec': 'def vec(t):\n    return [0.5 * t, 1.0]\n',
+    'vec': 'def vec(t):\n    return tuple([0.5 * t, 1.0])\n',
 }
 CELLS = ['comp', 'written', 'appended', 'filled', 'local']
 SAMPLE = ('m.Space1.obj(0, 0.0)\n'

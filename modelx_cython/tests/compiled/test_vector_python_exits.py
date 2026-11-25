@@ -1,9 +1,9 @@
-"""D154: every exit by which a vector cell's value reaches Python code gives the list live gives.
+"""D154: every exit by which a vector cell's value reaches Python code gives a tuple equal to live's.
 
 Compiled code passes the typed vector between compiled cells without a copy; wherever the value reaches
 Python (a loop or builtin left on Python objects, a cell that is not itself a vector cell, a dict or tuple
 value, a call through another Space's Reference, a keyword call, a closure, collect's ``individual``),
-it is a new list, with the values, element types and Python behaviour of the exported model.
+it is a new tuple, with the values, element types and Python behaviour of the exported model.
 """
 import subprocess
 import sys
@@ -12,10 +12,10 @@ import textwrap
 import modelx as mx
 
 PROJECTION = {
-    'keys': 'lambda: [1, 2, 3]',
-    'fv': 'lambda: [0.5 * policy_id, 1.5, 2.5]',
-    'pairs': 'lambda: ([1.0, 2.0], [3.0, 4.0])',
-    'kw': 'lambda n=2: [float(i) for i in range(n)]',
+    'keys': 'lambda: tuple([1, 2, 3])',
+    'fv': 'lambda: tuple([0.5 * policy_id, 1.5, 2.5])',
+    'pairs': 'lambda: (tuple([1.0, 2.0]), tuple([3.0, 4.0]))',
+    'kw': 'lambda n=2: tuple(float(i) for i in range(n))',
     # not vector cells themselves: the vector reaches Python through their results
     'maybe': 'lambda flag: fv() if flag else None',
     'as_dict': 'lambda: {"values": fv(), "n": len(fv())}',
@@ -66,16 +66,9 @@ def kinds(value):
         return (type(value).__name__, [kinds(v) for v in value])
     return type(value).__name__
 print(repr({k: (v, kinds(v)) for k, v in values.items()}))
-# a vector cell's list never aliases its typed cache, whatever the exit; a cell that is not a vector cell
-# caches its own Python value as live does, but changing it never reaches the vector cell it came from
-if sys.argv[1] == 'exported_cy':
-    for name, got in (('fv', p.fv), ('first_pair', p.first_pair), ('held', q.held), ('kw', p.kw)):
-        first = got()
-        first.append(99)
-        assert 99 not in got(), name
-    for value in (p.maybe(True), p.as_dict()['values'], p.as_tuple()[0]):
-        value.append(99)
-        assert 99 not in p.fv()
+# a vector cell's value is an immutable tuple, whatever the exit
+for value in (p.fv(), p.first_pair(), q.held(), p.kw(), p.maybe(True), p.as_dict()['values'], p.as_tuple()[0]):
+    assert type(value) is tuple
 '''
 
 

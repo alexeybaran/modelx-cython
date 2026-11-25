@@ -1,7 +1,7 @@
-"""D87 (diag-vec): a list display of typed floats (or typed integers) returned by a vector cell, or bound to
-a local used as a vector, is written straight into the typed vector (no Python list). Elements are evaluated
-left to right; an exception in an element leaves no cached value; mixed or untyped elements and the empty
-display keep the list path. Compiled = exported, value by value, bit by bit and by type.
+"""D87 (diag-vec): a list display of typed floats (or typed integers) returned as ``tuple([...])`` by a vector
+cell, or bound to a local used as a vector, is written straight into the typed vector (no Python list).
+Elements are evaluated left to right; an exception in an element leaves no cached value; mixed or untyped
+elements and the empty display keep the list path. Compiled = exported, value by value, bit by bit and by type.
 """
 import json
 import subprocess
@@ -13,15 +13,16 @@ FORMULAS = {
     "rate": "def rate(t):\n    return 0.01 * (t + 1) + 1e-17 * t\n",
     "count": "def count(t):\n    return t % 4\n",
     "trans": ("def trans(t, g):\n    q = rate(t) * g\n    stay = 1.0 - q\n"
-              "    return [stay, q * 0.25, q * 0.75, -0.0 * q]\n"),
-    "ints": "def ints(t):\n    return [count(t), count(t) + 1, 7]\n",
+              "    return tuple([stay, q * 0.25, q * 0.75, -0.0 * q])\n"),
+    "ints": "def ints(t):\n    return tuple([count(t), count(t) + 1, 7])\n",
     "local": ("def local(t):\n    v = [rate(t), rate(t) * 2.0]\n    acc = 0.0\n"
               "    for x in v:\n        acc += x\n    return acc + v[1]\n"),
     "risky": ("def risky(t):\n    q = rate(t)\n"
-              "    return [q, 1.0 / (q - rate(4)), q * 2.0]\n"),       # ZeroDivisionError at t == 4
-    "mixed": "def mixed(t):\n    return [rate(t), float(count(t)), 1.5] if t > 100 else [rate(t), 2.0]\n",
-    "untyped": "def untyped(t):\n    return [rate(t), float(str(t))]\n",
-    "empty": "def empty(t):\n    return [] if t % 2 else [rate(t)]\n",
+              "    return tuple([q, 1.0 / (q - rate(4)), q * 2.0])\n"),       # ZeroDivisionError at t == 4
+    "mixed": ("def mixed(t):\n"
+              "    return tuple([rate(t), float(count(t)), 1.5]) if t > 100 else tuple([rate(t), 2.0])\n"),
+    "untyped": "def untyped(t):\n    return tuple([rate(t), float(str(t))])\n",
+    "empty": "def empty(t):\n    return () if t % 2 else tuple([rate(t)])\n",
     "reader": ("def reader(t):\n    p = trans(t, 2)\n"
                "    return p[0] + p[1] * 2.0 + sum(trans(t, 3)) + sum(ints(t)) + len(empty(t))\n"),
 }
@@ -49,8 +50,8 @@ def bits(value):
         return ('f', value.hex())
     if isinstance(value, int):
         return ('i', value)
-    if type(value).__name__ in ('list', 'F64Vec', 'I64Vec'):
-        return ('v',) + tuple(bits(v) for v in value)
+    if type(value).__name__ in ('list', 'tuple', 'F64Vec', 'I64Vec'):
+        return (type(value).__name__,) + tuple(bits(v) for v in value)
     return ('r', repr(value))
 
 
@@ -63,7 +64,7 @@ for repeat in range(2):
             assert bits(o.trans(t, g)) == bits(c.trans(t, g)), (t, g)
         if t != 4:
             assert bits(o.risky(t)) == bits(c.risky(t)), t
-assert type(c.trans(3, 2)).__name__ == 'list' and type(c.ints(3)).__name__ == 'list'     # D154
+assert type(c.trans(3, 2)).__name__ == 'tuple' and type(c.ints(3)).__name__ == 'tuple'     # D154
 for attempt in range(2):           # raises every time: no partial value was cached
     for model in (o, c):
         try:

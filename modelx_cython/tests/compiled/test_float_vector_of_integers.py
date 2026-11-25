@@ -3,8 +3,8 @@ path the sample did not reach converts the integers (``vec_of`` of an I64Vec); i
 from vector_live import build, live_and_compiled
 
 FORMULAS = {
-    'iv': 'def iv(t):\n    return [t + 7, t + 8]\n',
-    'fv': 'def fv(t, x):\n    if x > 1.0:\n        return iv(t)\n    return [0.5 * t, 1.5]\n',
+    'iv': 'def iv(t):\n    return tuple([t + 7, t + 8])\n',
+    'fv': 'def fv(t, x):\n    if x > 1.0:\n        return tuple(iv(t))\n    return tuple([0.5 * t, 1.5])\n',
 }
 
 

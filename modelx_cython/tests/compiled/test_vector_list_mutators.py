@@ -1,17 +1,14 @@
-"""R1 (review r4 vectors): a local list the formula changes in place (a list method other than append,
-``del v[i]``, a callee that may change it, a second name for it) stays a Python list, in a module with
-vector cells and in one without (D94), so compiled equals live. A cached vector changed in place stops
-the build."""
-import subprocess
-import sys
-
-import modelx as mx
-import pytest
-
+"""R1 (review r4 vectors), tuples only: a cell returning a list is a Python object and a local list the
+formula changes in place (a list method other than append, ``del v[i]``, a callee, a second name, a
+container) is a Python list, in a module with vector cells and in one without (D94): compiled equals live.
+A list built, changed in place and returned as ``tuple(out)`` gives a vector cell equal to live. A cached
+vector is a tuple: changing it in place raises as live does."""
 from vector_live import build, live_and_compiled
 
 MUTATORS = {
-    'vec': 'def vec(t):\n    return [0.5 * (3 - i) + t for i in range(4)]\n',
+    'vec': 'def vec(t):\n    return tuple(0.5 * (3 - i) + t for i in range(4))\n',
+    'sorted_tuple': ('def sorted_tuple(t):\n    out = []\n    for i in range(4):\n        out.append(0.5 * (3 - i) + t)\n'
+                     '    out.sort()\n    return tuple(out)\n'),
     'sorted_out': ('def sorted_out(t):\n    out = []\n    for i in range(4):\n        out.append(0.5 * (3 - i) + t)\n'
                    '    out.sort()\n    return out\n'),
     'reversed_out': 'def reversed_out(t):\n    out = [0.0] * 3\n    out[0] = 1.5 * t\n    out.reverse()\n    return out\n',
@@ -50,21 +47,13 @@ def test_list_mutators_in_a_module_without_vector_cells(tmp_path):
     _check(tmp_path, NO_VECTOR_CELL)
 
 
-@pytest.mark.parametrize('formula', [
-    'def changes(t):\n    v = vec(t)\n    v.sort()\n    return v[0]\n',
-    'def changes(t):\n    vec(t).reverse()\n    return 1.0\n',
-])
-def test_a_cached_vector_changed_in_place_stops_the_build(tmp_path, formula):
-    model = mx.new_model('CachedChanged')
-    try:
-        space = model.new_space('Space1')
-        space.new_cells(formula=MUTATORS['vec'])
-        space.new_cells(formula=formula)
-        model.export(tmp_path / 'exported')
-    finally:
-        model.close()
-    (tmp_path / 'sample.py').write_text('from exported import mx_model as m\nm.Space1.changes(1)\n')
-    result = subprocess.run([sys.executable, '-m', 'modelx_cython', 'exported', '--sample', 'sample.py',
-                             '--no-spec'], cwd=tmp_path, capture_output=True, text=True)
-    assert result.returncode != 0
-    assert 'cached vectors are immutable' in result.stdout + result.stderr
+def test_a_cached_vector_changed_in_place_raises_as_live(tmp_path):
+    formulas = {'vec': MUTATORS['vec'],
+                'sorts': 'def sorts(t):\n    v = vec(t)\n    v.sort()\n    return v[0]\n',
+                'reverses': 'def reverses(t):\n    vec(t).reverse()\n    return 1.0\n',
+                'writes': 'def writes(t):\n    v = vec(t)\n    v[0] = 1.0\n    return v[0]\n'}
+    build(tmp_path, {'Space1': (formulas, {})}, 'm.Space1.vec(1)\n')
+    exprs = [f'm.Space1.{name}(1)' for name in ('sorts', 'reverses', 'writes', 'vec')]
+    live, compiled = live_and_compiled(tmp_path, exprs)
+    assert compiled == live
+    assert live[:3] == [('raises', 'AttributeError'), ('raises', 'AttributeError'), ('raises', 'TypeError')]

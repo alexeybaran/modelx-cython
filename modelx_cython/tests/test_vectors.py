@@ -8,9 +8,10 @@ from modelx_cython.tracer import merge_vector_shapes, vector_shape
 
 
 @pytest.mark.parametrize('value, shape', [
-    ([1.0, 2.0], 'V'), ([], 'E'), ([1, 2], 'I'), ([1, 2.0], None), ([True], None),
-    ([1 << 63], None), ((1.0, 2.0), 'v'), ((1, 2), 'i'), ((1, 2.0), None), (([1.0], [2.0]), ('T', ('V', 'V'))),
-    (([1.0], [2]), ('T', ('V', 'I'))), (([1.0], 2.0), None), ((), None), (1.0, None),
+    ((1.0, 2.0), 'V'), ((1, 2), 'I'), ((1, 2.0), None), ((True,), None), ((1 << 63,), None), ((), 'E'),
+    (((1.0,), (2.0,)), ('T', ('V', 'V'))), (((1.0,), (2,)), ('T', ('V', 'I'))), (((1.0,), 2.0), None),
+    (((1.0,), ()), ('T', ('V', 'E'))), (((1.0,), ((2.0,),)), None), ([1.0, 2.0], None), ([1, 2], None),
+    (([1.0], [2.0]), None), (1.0, None),
 ])
 def test_vector_shape(value, shape):
     assert vector_shape(value) == shape
@@ -69,9 +70,9 @@ def test_preallocated_loop_is_versioned():
     out[0] = self.rate(t)
     for z in range(1, n):
         out[z] = prev[z - 1] * 2.0
-    return out
+    return tuple(out)
 ''', 'V')
-    assert f'out = {A}.vec_full(n, 0.0)' in code
+    assert f'out = {A}.vec_full(n, 0.0)' in code and 'return out' in code     # returned: no copy
     assert f'{A}.vec_set(out, 0, self.rate(t))' in code
     assert f'{A}.in_range(_mx_v1_blo - 1, _mx_v2_bhi - 1, prev.n)' in code
     assert 'out.data[z] = prev.data[z - 1] * 2.0' in code           # the proven loop
@@ -89,7 +90,7 @@ def test_tuple_of_vectors_and_derived_index():
         if cy > 1:
             cy = 1
         pols[i + 1] = a[i] * b[cy]
-    return (pols, a)
+    return (tuple(pols), a)
 ''', ('T', ('V', 'V')))
     assert f'a = {A}.vec_of(_mx_v1_u)' in code
     assert 'cy: _mx_cy.longlong' in code and report['derived_index_locals'] == ['cy']
@@ -105,7 +106,7 @@ def test_comprehensions_sums_and_powers():
     v = self.vec(t)
     s = sum(x * y for x, y in zip(v, v) if x > 0.0)
     w = [1.0 - (1.0 - q * f) ** (1.0 / 12.0) for f in v]
-    return [z * 0.5 + s + sum(w) + sum(w[1:]) for z in range(len(v))]
+    return tuple(z * 0.5 + s + sum(w) + sum(w[1:]) for z in range(len(v)))
 ''', 'V')
     assert f'{A}.f64_add(' in code and f'{A}.f64_result(' in code
     assert '_mx_sys._mx_pow((1.0 - q * _mx_v' in code
@@ -120,7 +121,7 @@ def test_integer_vectors_and_append():
     for k in range(len(src)):
         if src[k] > 2:
             out.append(src[k] * 2)
-    return out
+    return tuple(out)
 ''', 'I')
     assert f'out = {A}.ivec_new(0)' in code and f'{A}.ivec_append(out, ' in code
     assert report['vector_locals'] == {'out': 'I', 'src': 'I'}
@@ -141,10 +142,26 @@ def test_for_over_vectors_and_slices():
     assert any('step' in f for f in report['fallbacks'])
 
 
-def test_write_to_a_vector_the_formula_did_not_allocate():
+def test_a_cells_value_changed_in_place_is_the_python_tuple():
+    # live raises TypeError (AttributeError): the local is the cell's value as a tuple, nothing is lowered
     for body in ('    v[0] = 1.0\n', '    v.append(1.0)\n', '    v[0] += 1.0\n'):
-        with pytest.raises(vectors.VectorWriteError, match='did not allocate'):
-            lower('def _f_w(self, t):\n    v = self.vec(t)\n' + body + '    return 0.0\n')
+        code, report = lower('def _f_w(self, t):\n    v = self.vec(t)\n' + body + '    return 0.0\n')
+        assert 'v = self.vec(t).totuple()' in code and 'vec_set' not in code, code
+        assert not report['vector_locals']
+    code, report = lower('def _f_w(self, t):\n    v = self.vec(t)\n    v.sort()\n    return v[0]\n')
+    assert 'v.totuple().sort()' in code and report['vector_locals'] == {'v': 'V'}     # a tuple: AttributeError
+
+
+@pytest.mark.parametrize('use, typed', [
+    ('out.sort()', False), ('out.reverse()', False), ('del out[0]', False),
+    ('other = out', True), ('other = out\n    other.insert(0, 9.5)', False), ('box = (out, 1)', False), ('fix = out.sort', False), ('self.fill(out)', False), ('out[0:1] = [2.0]', False),
+    ('m = max(out)', True), ('m = sorted(out)', True), ('m = [x for x in out]', True), ('m = 2.0 in out', True),
+    ('m = out[1:]', True), ('m = max(x for x in out)', True), ('m = iter(out)', False), ('m = zip(out, out)', False),
+])
+def test_a_local_list_is_typed_only_where_python_cannot_change_it(use, typed):
+    code, report = lower(f'def _f_u(self, t):\n    out = [0.5] * 3\n    out[1] = 1.5\n    {use}\n'
+                         f'    return tuple(out)\n', 'V')
+    assert ('out' in report['vector_locals']) is typed, (use, code)
 
 
 def test_a_list_returned_by_a_cell_that_is_not_a_vector_stays_a_list():
@@ -157,7 +174,7 @@ def test_element_update_and_modules_without_vectors():
     out = [0.0] * 3
     for i in range(3):
         out[i] += i * 0.5
-    return out
+    return tuple(out)
 ''', 'V')
     assert f'{A}.vec_set(out, _mx_v1_k, {A}.vec_get(out, _mx_v1_k) + (i * 0.5))' in code
     plain = 'def _f_p(self, t):\n    for i in range(3):\n        pass\n    return [0.0] * 3\n'

@@ -9,7 +9,7 @@ import sys
 import modelx as mx
 
 FORMULAS = {
-    "rates": "def rates(t):\n    return [0.01 * (k + 1) + 0.001 * t for k in range(3)]\n",
+    "rates": "def rates(t):\n    return tuple(0.01 * (k + 1) + 0.001 * t for k in range(3))\n",
     "q": "def q(t):\n    return 0.02 if t < 6 else 0.03\n",
     "q_mth": "def q_mth(t):\n    return 1.0 - (1.0 - q(t)) ** (1.0 / 12.0)\n",
     "vec_pow": "def vec_pow(t):\n    return sum((1.0 + r) ** (-1.0 / 12.0) for r in rates(t))\n",
