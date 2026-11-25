@@ -25,12 +25,13 @@ print(json.dumps(out))
 
 
 def build(tmp_path, spaces, sample, name='VectorRepro'):
-    """``spaces``: {Space name: ({cell name: formula text}, {ref name: Space name})}, in order."""
+    """``spaces``: {Space name: ({cell name: formula text}, {ref name: Space name or value})}, in order."""
     model = mx.new_model(name)
     try:
         made = {}
         for space_name, (formulas, refs) in spaces.items():
-            space = model.new_space(space_name, refs={k: made[v] for k, v in refs.items()})
+            space = model.new_space(space_name, refs={k: made.get(v, v) if isinstance(v, str) else v
+                                                      for k, v in refs.items()})
             for formula in formulas.values():
                 space.new_cells(formula=formula)
             made[space_name] = space
