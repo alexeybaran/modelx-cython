@@ -48,7 +48,7 @@ from modelx_cython.parser import ModuleVisitor
 from modelx_cython.enums import literals as enum_literals
 from modelx_cython.transformer import ModuleTransformer, PXDGenerator
 from modelx_cython.usage import (
-    admit_forwarded_views, analyze_usage, apply_verdicts, build_resolver)
+    analyze_usage, apply_verdicts, build_resolver)
 from modelx_cython.powers import build_kind_maps, demote_rebound_params
 from modelx_cython.admission import describe
 from modelx_cython.cell_entries import EntryModule
@@ -386,7 +386,6 @@ def main_handler(args: argparse.Namespace, stdout: IO[str], stderr: IO[str]) -> 
         module_infos = {u.module_info.fqname: u.module_info for u in units}
         resolver = build_resolver(module_infos)
         resolver.read_notes = getattr(logger, 'read_notes_by_text', None) or {}
-        admit_forwarded_views(module_infos, resolver)
         cells_kinds, ref_kinds = build_kind_maps(module_infos)
         cells_by_name = {cell.fqname: cell for module in module_infos.values()
                          for cls in module.classes.values() for cell in cls.cells.values()}
@@ -405,7 +404,6 @@ def main_handler(args: argparse.Namespace, stdout: IO[str], stderr: IO[str]) -> 
             modules.append(rel_model_path / semantics.name)
 
         helper_providers = set()
-        object_providers = {}
         dense_entries = {}
         formula_entries = {}
         translated_modules = {}
@@ -427,7 +425,6 @@ def main_handler(args: argparse.Namespace, stdout: IO[str], stderr: IO[str]) -> 
             translated_modules[u.fqname] = EntryModule(trans.transformed, function_origins=trans.function_origins,
                                                      entry_domains=trans.entry_domains)
             helper_providers.update(trans.helper_providers)
-            object_providers.update(trans.object_providers)
             if trans.dense_entries:
                 dense_entries[u.module_info.fqname] = trans.dense_entries
             if trans.formula_entries:
@@ -440,7 +437,7 @@ def main_handler(args: argparse.Namespace, stdout: IO[str], stderr: IO[str]) -> 
             from modelx_cython.frame_reads import audit_subtables
             audit_subtables(module_infos, translated_modules, resolver)
 
-        provider_sources = install_helpers(helper_providers, model_path, object_providers)
+        provider_sources = install_helpers(helper_providers, model_path)
         modules.extend(provider_sources)
         translated_modules = lower_entries(translated_modules, dense_entries, formula_entries, policy)
         cell_sources = {}
