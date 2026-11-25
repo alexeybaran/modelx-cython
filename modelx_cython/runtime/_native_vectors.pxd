@@ -81,12 +81,14 @@ cdef F64Vec vec_new(Py_ssize_t n)
 cdef F64Vec vec_full(Py_ssize_t n, double value)
 cdef F64Vec vec_of(object value)
 cdef F64Vec vec_slice(F64Vec v, long long a, long long b)
+cdef F64Vec vec_cat(F64Vec a, F64Vec b)
 cdef int _vec_grow(F64Vec v) except -1
 
 cdef I64Vec ivec_new(Py_ssize_t n)
 cdef I64Vec ivec_full(Py_ssize_t n, long long value)
 cdef I64Vec ivec_of(object value)
 cdef I64Vec ivec_slice(I64Vec v, long long a, long long b)
+cdef I64Vec ivec_cat(I64Vec a, I64Vec b)
 cdef int _ivec_grow(I64Vec v) except -1
 cdef long long _ivec_sum_slow(I64Vec v, Py_ssize_t a, Py_ssize_t b) except? -1
 
