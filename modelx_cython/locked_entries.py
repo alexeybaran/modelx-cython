@@ -7,7 +7,7 @@ from .cell_entries import exact_receiver
 from .consts import CY_MOD, FORMULA_PREF, MX_LOCK, MX_SELF
 from .inline_entries import allows_exact_receiver
 from .scopes import Names, OPAQUE_SCOPES
-from .syntax import code, dotted_name, statements, walk
+from .syntax import dotted_name, walk
 
 
 @dataclass(frozen=True)
@@ -93,69 +93,13 @@ def _as_function(node, owner, name, body):
                              decorators=(cst.Decorator(cst.parse_expression(f'{CY_MOD}.cfunc')),))
 
 
-class _HeldHits(cst.CSTTransformer):
-    def __init__(self, calls):
-        self.calls = calls
-
-    def leave_Call(self, original, updated):
-        if original not in self.calls:
-            return updated
-        helper = self.calls[original]
-        return updated.with_changes(func=cst.Name(helper), args=(cst.Arg(updated.func.value), *updated.args))
-
-
-def lower_held_hits(state, entries):
-    """Inline a checked native read on an already pinned exact Space."""
-    calls, helpers = {}, {}
-    for call in walk(state.syntax):
-        if not isinstance(call, cst.Call) or not isinstance(call.func, cst.Attribute):
-            continue
-        cast = call.func.value
-        if (not isinstance(cast, cst.Call) or dotted_name(cast.func) != f'{CY_MOD}.cast' or len(cast.args) != 2
-                or not isinstance(cast.args[0].value, cst.Name)):
-            continue
-        owner = cast.args[0].value.value
-        pin = cast.args[1].value
-        if not (isinstance(pin, cst.Call) and isinstance(pin.func, cst.Name)
-                and pin.func.value.startswith('_mx_pin_held_item_') and pin.func.value in state.functions):
-            continue
-        cell = call.func.attr.value
-        entry = entries.get((owner, cell))
-        if entry is None or len(call.args) != len(entry.keys) or any(arg.keyword or arg.star for arg in call.args):
-            continue
-        if (owner, cell) not in helpers:
-            guard = entry.wrapper.body.body[0]
-            hit = guard.body.body[0]
-            if (not isinstance(hit, cst.If) or not isinstance(hit.test, cst.Call)
-                    or dotted_name(hit.test.func) != '_mx_sys._mx_load_flag'
-                    or len(statements(hit.body)) != 1 or not isinstance(statements(hit.body)[0], cst.Return)):
-                continue
-            name = state.names.reserve(f'_mx_pinned_hit_{owner}_{cell}')
-            args = ', '.join(entry.keys)
-            body = cst.parse_statement(
-                f'if ({code(guard.test)}) and ({code(hit.test)}):\n'
-                f'    {code(statements(hit.body)[0])}\n')
-            miss = cst.parse_statement(f'return self.{cell}({args})\n')
-            helper = _as_function(entry.wrapper, owner, name, cst.IndentedBlock((body, miss)))
-            helper = helper.with_changes(decorators=(*helper.decorators,
-                cst.Decorator(cst.parse_expression(f'{CY_MOD}.inline'))))
-            helpers[owner, cell] = helper
-        calls[call] = helpers[owner, cell].name.value
-    if not calls:
-        return state
-    module = state.syntax.visit(_HeldHits(calls))
-    return state.replace(module.with_changes(body=(*module.body, *helpers.values())))
-
-
 def lower_locked_entries(state, module_info):
     """Fork the native miss body only for an actual lexical lock and exact receiver."""
     replacements = {}
     helpers = []
     origins = dict(state.function_origins)
-    exact_entries = {}
     for cls in module_info.classes.values():
         entries = {cell.name: entry for cell in cls.cells.values() if (entry := _entry(state, cls, cell))}
-        exact_entries.update(((cls.name, name), entry) for name, entry in entries.items())
         calls = {name: found for name, entry in entries.items()
                  if (found := _same_receiver_calls(entry.formula, entries))}
         if not calls:
@@ -195,8 +139,8 @@ def lower_locked_entries(state, module_info):
                                         entry.wrapper.body.with_changes(body=(branch,))))
             origins[helper] = (cls.name, entry.formula.name.value)
     if not helpers:
-        return lower_held_hits(state, exact_entries)
+        return state
     body = tuple(node.with_changes(body=node.body.with_changes(
         body=tuple(replacements.get(item, item) for item in node.body.body)))
         if isinstance(node, cst.ClassDef) else node for node in state.syntax.body)
-    return lower_held_hits(state.replace(state.syntax.with_changes(body=(*body, *helpers)), origins), exact_entries)
+    return state.replace(state.syntax.with_changes(body=(*body, *helpers)), origins)

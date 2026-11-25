@@ -98,9 +98,7 @@ def __getattribute__(self, name):
 class _GuardCalls(cst.CSTTransformer):
     METADATA_DEPENDENCIES = (cst.metadata.ScopeProvider,)
 
-    def __init__(self, receiver, integer_params, owner, resolver, entries, cells, private_entries,
-                 item_cells=None, safe_builtins=()):
-        self.item_cells = item_cells or {}     # D110 P1: {typed item local: {cell name: cell}}
+    def __init__(self, receiver, integer_params, owner, resolver, entries, cells, private_entries, safe_builtins=()):
         self.receiver = receiver
         self.integer_params = integer_params
         self.owner = owner
@@ -126,14 +124,6 @@ class _GuardCalls(cst.CSTTransformer):
         if isinstance(before.func, cst.Name) and (entry := self.private_entries.get(before.func.value)):
             path, params = entry
             return self._arguments(before, after, path, params, start=1)
-        if (isinstance(before.func, cst.Attribute) and isinstance(before.func.value, cst.Name)
-                and (owned := self.item_cells.get(before.func.value.value)) is not None):
-            # D110 P1: a call on a typed item local checks its integer arguments as a call on self does
-            cell = owned.get(before.func.attr.value)
-            if (cell is None or any(arg.star for arg in before.args) or cell.called_with_kwargs
-                    or not (params := self.entries.get(cell.fqname))):
-                return after
-            return self._arguments(before, after, cell.model_path, params)
         chain = _extract_self_chain(before.func)
         if not isinstance(chain, list) or any(arg.star for arg in before.args):
             return after
@@ -188,17 +178,15 @@ class _GuardCalls(cst.CSTTransformer):
         return after.with_changes(args=arguments)
 
 
-def _guard_calls(node, cls, cell, resolver, entries, cells, private_entries, classes=None, safe_builtins=()):
+def _guard_calls(node, cls, resolver, entries, cells, private_entries, safe_builtins=()):
     params = (*node.params.posonly_params, *node.params.params, *node.params.kwonly_params)
     if not params or params[0].name.value != MX_SELF:
         return node
     integer_params = {param.name.value: param for param in params if param.annotation is not None
                       and param.annotation.annotation.deep_equals(_INTEGER_ANNOTATION)}
     wrapper = cst.MetadataWrapper(cst.Module(body=(node,)), unsafe_skip_copy=True)
-    item_cells = {local: classes[owner].cells for local, owner in getattr(cell, 'typed_item_locals', {}).items()
-                  if classes and owner in classes}
     return wrapper.visit(_GuardCalls(params[0], integer_params, cls.fqname, resolver, entries, cells,
-                                    private_entries, item_cells, safe_builtins)).body[0]
+                                    private_entries, safe_builtins)).body[0]
 
 
 def _object_parameters(params, checked):
@@ -262,11 +250,10 @@ def _python_locals(node, cell):
                                                           *body.body[doc_end:])))
 
 
-def _guard_formula(node, cls, cell, resolver, entries, cells, private_entries, classes, safe_builtins, types,
-                   owner):
+def _guard_formula(node, cls, cell, resolver, entries, cells, private_entries, safe_builtins, types, owner):
     """Integer arguments, arithmetic and results of one formula function (a method of ``owner`` or,
     with ``owner`` None, a module function whose receiver parameter is annotated)."""
-    node = _guard_calls(node, cls, cell, resolver, entries, cells, private_entries, classes, safe_builtins)
+    node = _guard_calls(node, cls, resolver, entries, cells, private_entries, safe_builtins)
     # a dense cache's parameters range over its domain: every entry checks it before the formula
     bounds = ({axis.key: (axis.lower, axis.stop) for axis in cell.dense_logical_axes}
               if cell.has_formula_def and cell.has_args() and cell.has_typeinfo() and cell.is_arrayable()
@@ -298,8 +285,8 @@ def guard_integer_boundaries(state, module_info, resolver, cells):
                      if all(isinstance(binding, BuiltinAssignment) for binding in global_bindings[name])}
 
     def formula(node, cls, cell, owner):
-        return _guard_formula(node, cls, cell, resolver, entries, cells, private_entries, module_info.classes,
-                              safe_builtins, types, owner)
+        return _guard_formula(node, cls, cell, resolver, entries, cells, private_entries, safe_builtins, types,
+                              owner)
 
     for node in state.syntax.body:
         cls = module_info.classes.get(node.name.value) if isinstance(node, cst.ClassDef) else None

@@ -689,43 +689,6 @@ def _integer_locals(body, facts, lower, taken):
     return {name: _span([lower.kind(value) for value in values]) for name, values in pending.items()}
 
 
-_DIVISIBLE = {cst.Subtract: '_mx_divisible_after_decrement', cst.Add: '_mx_divisible_after_increment'}
-
-
-def _divisibility(body, lower):
-    """``(x - 1) % k == 0`` and ``(x + 1) % k == 0`` (or ``!= 0``) of two 64-bit C integers: the
-    runtime's exact test, where ``x - 1`` itself could overflow and would be a Python int."""
-    def test(node):
-        if not (isinstance(node, cst.Comparison) and len(node.comparisons) == 1
-                and isinstance(node.comparisons[0].operator, (cst.Equal, cst.NotEqual))
-                and isinstance(zero := node.comparisons[0].comparator, cst.Integer) and zero.evaluated_value == 0
-                and isinstance(remainder := node.left, cst.BinaryOperation)
-                and isinstance(remainder.operator, cst.Modulo)
-                and isinstance(shifted := remainder.left, cst.BinaryOperation)
-                and type(shifted.operator) in _DIVISIBLE
-                and isinstance(shifted.right, cst.Integer) and shifted.right.evaluated_value == 1):
-            return None
-        kinds = lower.kind(shifted.left), lower.kind(remainder.right)
-        if not all(isinstance(kind, CInt) and kind.width == 64 for kind in kinds):
-            return None
-        call = cst.Call(cst.Attribute(cst.Name(MX_SYS_MOD), cst.Name(_DIVISIBLE[type(shifted.operator)])),
-                        (cst.Arg(shifted.left.with_changes(lpar=(), rpar=())),
-                         cst.Arg(remainder.right.with_changes(lpar=(), rpar=()))))
-        if isinstance(node.comparisons[0].operator, cst.NotEqual):
-            call = cst.UnaryOperation(cst.Not(), call, lpar=(cst.LeftParen(),), rpar=(cst.RightParen(),))
-        return call.with_changes(lpar=node.lpar, rpar=node.rpar)
-
-    tests = {node: call for node in lexical_nodes(body) if (call := test(node)) is not None}
-    if not tests:
-        return body
-
-    class Replace(cst.CSTTransformer):
-        def leave_Comparison(self, before, after):
-            return tests.get(before, after)
-
-    return cst.Module(list(body)).visit(Replace()).body
-
-
 def lower_integer_arithmetic(node, types, owner, path, bounds=None):
     """Lower the integer arithmetic of the formula function ``node`` (see the module docstring).
 
@@ -763,8 +726,7 @@ def lower_integer_arithmetic(node, types, owner, path, bounds=None):
             env[name] = counter
             lower.kinds.clear()
     lower.kinds.clear()
-    body = _divisibility(body, lower)
-    lowered = node.body.with_changes(body=body).visit(lower)
+    lowered = node.body.visit(lower)
     if declarations:
         doc_end = 1 if node.get_docstring() is not None else 0
         lines = tuple(cst.SimpleStatementLine((cst.AnnAssign(
