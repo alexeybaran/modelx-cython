@@ -1,0 +1,130 @@
+From 501f7f264d0a59acfa187ad3d03daefa42805df9 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Wed, 25 Nov 2026 16:22:13 +0000
+Subject: [PATCH 2/2] Accept a Space formula naming its own Space as the base
+ when exporting dynamic References
+
+Upstream modelx exports a Space formula returning {'base': _space}: the base is
+the Space itself, the default, so the export computes what modelx computes.
+The dynamic References analysis refused every key but 'refs'. Accept 'base'
+when it is the unrebound name _space, check it again when the formula runs,
+and keep refusing any other base, which the export cannot reproduce.
+---
+ modelx/export/exporter.py                     | 18 +++++-
+ .../tests/export/test_dynamic_references.py   | 56 +++++++++++++++++++
+ 2 files changed, 72 insertions(+), 2 deletions(-)
+
+diff --git a/modelx/export/exporter.py b/modelx/export/exporter.py
+index d6dd66d..3e89409 100644
+--- a/modelx/export/exporter.py
++++ b/modelx/export/exporter.py
+@@ -218,6 +218,7 @@ def _dynamic_ref_names(space, source, definition, ref_names):
+     error = (
+         f"Cannot export Space formula for {space.fullname}: "
+         "return None or a dict whose 'refs' maps statically named References"
++        " and whose 'base', if any, is _space"
+     )
+     resolved_uses = collections.defaultdict(set)
+ 
+@@ -241,11 +242,23 @@ def _dynamic_ref_names(space, source, definition, ref_names):
+         else:
+             raise ValueError(error)
+ 
++    def is_own_space(expr):
++        # ``_space`` names the Space whose formula this is, the default base
++        # of its ItemSpaces, unless the formula binds the name itself.
++        if not (isinstance(expr, ast.Name) and expr.id == '_space'):
++            return False
++        if '_space' not in scope.get_identifiers():
++            return True
++        symbol = scope.lookup('_space')
++        return symbol.is_global() and not symbol.is_declared_global()
++
+     keys = set()
+     for node in nodes:
+         if isinstance(node, ast.Return):
+             for params in mappings(node.value):
+-                if params.keys() - {'refs'}:
++                if params.keys() - {'refs', 'base'}:
++                    raise ValueError(error)
++                if 'base' in params and not is_own_space(params['base']):
+                     raise ValueError(error)
+                 for refs in mappings(params.get('refs')):
+                     keys.update(refs)
+@@ -995,7 +1008,8 @@ class SpaceTranslator(ParentTranslator):
+                     result = self._parent._mx_space_formula(*args, **kwargs)
+                     if result is None:
+                         return
+-                    if not isinstance(result, dict) or result.keys() - {'refs'}:
++                    if (not isinstance(result, dict) or result.keys() - {'refs', 'base'}
++                            or 'base' in result and result['base'] is not self._parent._space):
+                         raise ValueError('Exported Space formula must return only dynamic References')
+                     refs = result.get('refs')
+                     if refs is None:
+diff --git a/modelx/tests/export/test_dynamic_references.py b/modelx/tests/export/test_dynamic_references.py
+index 9ece4d7..36dd218 100644
+--- a/modelx/tests/export/test_dynamic_references.py
++++ b/modelx/tests/export/test_dynamic_references.py
+@@ -84,3 +84,59 @@ def test_unsupported_dynamic_references_fail_at_export(formula, tmp_path):
+             model.export(tmp_path / "unsupported_refs")
+     finally:
+         model.close()
++
++
++@pytest.mark.parametrize(
++    "formula",
++    [
++        'lambda i: {"base": _space}',
++        'lambda i: dict(base=_space)',
++        'lambda i: {"base": _space, "refs": {"scale": i * 10}}',
++        '''
++def formula(i):
++    if i < 0:
++        return {"base": _space, "refs": {"offset": -i}}
++    return {"base": _space}
++''',
++    ],
++    ids=["base-only", "dict-call-base", "base-and-refs", "branches-base"],
++)
++@pytest.mark.parametrize("use_slots", [True, False])
++def test_own_space_base_matches_live(formula, use_slots, tmp_path, monkeypatch):
++    # Upstream modelx exports a formula naming its own Space as the base; it
++    # is the default base, so the export must still accept it.
++    model = mx.new_model()
++    try:
++        space = model.new_space("S", formula=formula.strip(), refs={"scale": 1, "offset": 1})
++        space.new_cells("value", "lambda: scale + offset")
++        package = f"own_base_{tmp_path.name.replace('-', '_')}"
++        model.export(tmp_path / package, use_slots=use_slots)
++        monkeypatch.syspath_prepend(str(tmp_path))
++        exported = importlib.import_module(package).mx_model
++        for i in (-3, 0, 1, 2, 3):
++            assert exported.S[i].value() == space[i].value()
++    finally:
++        model.close()
++
++
++@pytest.mark.parametrize(
++    "formula",
++    [
++        'lambda i: {"base": Other}',
++        '''
++def formula(i):
++    _space = Other
++    return {"base": _space}
++''',
++    ],
++    ids=["other-base", "rebound-space"],
++)
++def test_other_base_fails_at_export(formula, tmp_path):
++    model = mx.new_model()
++    try:
++        other = model.new_space("Other")
++        model.new_space("S", formula=formula.strip(), refs={"Other": other})
++        with pytest.raises(ValueError, match=r"Cannot export Space formula for .*\.S:.*statically named"):
++            model.export(tmp_path / "unsupported_base")
++    finally:
++        model.close()
+-- 
+2.43.0
+
