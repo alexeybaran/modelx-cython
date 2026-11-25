@@ -1326,6 +1326,14 @@ class _Rewrite(cst.CSTTransformer):
             name = f'_mx_key_{o.key_count}'
             conditions.append(cst.parse_expression(f'{o.module}.is_label(({name} := {_code(arg)}))'))
             arg = cst.Name(name)
+        elif how == 'object' and conditions is not None and not _text(part) and not isinstance(
+                part, (cst.Integer, cst.Float)):
+            # any other level: a list, a mask or a slice selects several rows (and a list has no hash): the same
+            # test at run time, whatever the sample saw at this place
+            o.key_count += 1
+            name = f'_mx_key_{o.key_count}'
+            conditions.append(cst.parse_expression(f'{o.module}.is_label(({name} := {_code(arg)}))'))
+            arg = cst.Name(name)
         return self._m({'int': 'lcode', 'typed': 'kcode'}.get(how, 'ocode'), o.ref(hold), cst.Integer(str(level)), arg)
 
     def _native_test(self, hold, conditions):
