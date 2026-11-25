@@ -43,3 +43,51 @@ Micro timing, best of 5 processes, one compiled driver cell running the whole pr
 
 The tuple form compiles to the list form's speed: 9.6x faster than without the experiment. The list form's
 generated code is unchanged apart from temporary numbering.
+
+## Tuples only (owner's decision after the experiment)
+
+A tuple of numbers built as a sequence is the vector form. A list is an ordinary Python object again: it is
+correct but no longer accelerated.
+
+- A cell returning a list compiles to an ordinary object cell with the dictionary cache. Its value is the
+  cached list itself, as live's is, so it equals live (`test_vector_list_mutators`, `test_vector_cells`
+  `listed`).
+- Building a local list and returning `tuple(out)` stays a typed buffer. The returned buffer is the list's
+  own, with no copy. `(x,) + tuple(...)`, `(x,) * n` and `tuple(<generator>)` are built natively.
+- A local list is a typed buffer only where every use is native or an eager read. Eager reads are an eager
+  builtin, a comprehension's source, `in` or a slice, and they get a copy (`tolist()`). Any other Python use
+  (a method, a callee, a second name, a container) makes the local a Python list in a second lowering round.
+  This one rule replaces the R1 escape analysis, the `VectorWriteError` build errors and the list copies at
+  Python exits. A write to a cell's value (a tuple) raises `TypeError` as live does.
+- Python code gets an equal new tuple (`totuple()`), never the cache. A tuple cannot change, so the copy
+  cannot be told apart from live's tuple, apart from identity.
+- D94 is gone: a module without vector cells is not lowered.
+
+### Note for the model text (lifelib `r4/l1-lean-b`)
+
+In the regional `_S` models (the `_SEC` variants have the same cells), 12 cells already return tuples built
+as sequences and compile as vectors. These include IP_UK_S `claim_rate_vectors` and `sick_cohorts`, BU_DE_S
+`recov_rates` and the other rate vectors, Medical_JP_S `los_days` and `los_probs`, VA_KR_S `fund_ids` and
+WP_UK_S `guarantee_years`.
+
+17 cells return lists and are now plain Python objects. The hot ones are the cohort vectors:
+- BU_DE_S `dis_cohorts`, `runoff_cohorts` and their `_first` variants
+- ADE_FR_S `itt_cohorts`, `itt_cohorts_raw` and `itt_rate_vectors`
+- Dep_FR_S `dep_cohorts`
+
+The others are small id or anchor lists:
+- Obseques_FR_S `surr_scale_anchors`
+- Annuity_JP_S `mort_anchor_ages`
+- Child_KR_S `inc_pivots`
+- CI_KR_S `ci_cohort_ids`
+- Medical_KR_S `sev_points` and `shape_buckets`
+- DIA_US_S `qlac_flags`
+- VA_US_S `sub_ids`
+- VUL_US_S `subaccount_ids`
+
+To keep the hot ones fast, keep building the lists exactly as now and return tuples:
+`return tuple(part), tuple(tot), tuple(totr), tuple(val)` in Dep_FR_S, and `return tuple(out)` elsewhere.
+The local lists stay typed buffers and the returned tuples are those buffers, with no copy. Readers need no
+change, since `v[z - 1]`, `len`, `sum`, `zip` and loops read tuples as they read lists. Two things would make
+a reader stop working: changing a returned value in place (live raises on a tuple) and comparing it with a
+list (a tuple is never equal to a list).
