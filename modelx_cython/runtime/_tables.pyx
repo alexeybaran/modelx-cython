@@ -13,7 +13,6 @@ A lookup equals ``value.loc[key, column]`` on the tables ``prepare`` accepts: th
 keys, misses included (``tests/test_prepared_tables.py``). The key lookups and value reads compiled code uses are
 inline methods of the .pxd.
 """
-import threading
 from types import MethodType
 import weakref
 
@@ -430,7 +429,7 @@ def _forget(key, ref):
 cdef object _prepare_new(object frame):
     """Prepare ``frame`` as it is now and make it the table its reads find (None: they stay pandas)."""
     key = id(frame)
-    signatures = _thread_signatures()
+    signatures = model_signatures()
     axes = _zip_origin(frame, signatures)
     table = prepare(frame)
     if table is not None:
@@ -470,7 +469,6 @@ cdef object bind_ref(object frame):
 
 
 cdef object _signatures = None
-_own = threading.local()        # T-5c: each worker thread's copy of the signatures (see _thread_signatures)
 
 
 cdef object model_signatures():
@@ -488,39 +486,10 @@ cdef object model_signatures():
     return _signatures
 
 
-cdef object _fresh(object value):
-    """A copy of a signature element that shares no object with the original (texts and tuples rebuilt; small ints
-    and None are immortal)."""
-    if type(value) is str:
-        return ''.join([c for c in value])
-    if type(value) is tuple:
-        return tuple([_fresh(v) for v in value])
-    return value
-
-
-cdef object _thread_signatures():
-    """T-5c: the model's read signatures as this thread's own objects: a per-item preparation (a frame each item
-    computes itself) under several worker threads then touches no Python object another thread reads (no shared
-    reference counts)."""
-    found = getattr(_own, 'signatures', None)
-    if found is None:
-        found = _own.signatures = _fresh(tuple(model_signatures()))
-    return found
-
-
 cdef object bind_own(object frame):
-    """T-5c: an item's binding of a frame it computes itself (a receiver no Data space publishes): its prepared
-    table, prepared for this item only. The shared prepared-table map is only looked up (without the lock: a frame
-    another item already prepared is reused); a new preparation is not registered (no lock, no weak reference),
-    and its verdicts are decided on this thread's own signatures. The item holds it until its Space is cleared."""
-    entry = _prepared.get(id(frame))
-    if entry is not None and entry[0]() is frame:
-        return _NOT_PREPARED if entry[1] is None else entry[1]
-    table = prepare(frame)
-    if table is None:
-        return _NOT_PREPARED
-    _decide(table, _thread_signatures(), None)
-    return table
+    """An item's binding of a frame it computes itself (a receiver no Data space publishes): as ``bind_ref``.
+    Kept as the entry the compiler emits for such a receiver."""
+    return bind_ref(frame)
 
 
 cdef object _zip_origin(object frame, object signatures):
