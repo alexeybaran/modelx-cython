@@ -108,28 +108,12 @@ _NOT_INTEGER_BUILTINS = frozenset(('float', 'str', 'repr', 'list', 'tuple', 'dic
                                    'format', 'range', 'zip', 'enumerate', 'map', 'filter', 'reversed', 'getattr'))
 
 
-def _provider_returns():
-    """{function name: 'int' or 'float'} of the bundled provider pxd files (helper modules are
-    cimported under ``_mx_helper_<hash>`` aliases): C integer and C double results."""
-    import pathlib
-    import re
-    kinds = {}
-    pattern = re.compile(r'^\s*cdef\s+(?:inline\s+)?(long long|Py_ssize_t|int|long|double)\s+(\w+)\s*\(', re.M)
-    root = pathlib.Path(__file__).parent
-    for path in (*root.glob('*.pxd'), *(root / 'runtime').glob('*.pxd')):
-        if path.name == '_mx_sys.pxd':
-            continue
-        for ctype, name in pattern.findall(path.read_text(encoding='utf-8')):
-            kind = 'float' if ctype == 'double' else 'int'
-            kinds[name] = kind if kinds.get(name, kind) == kind else None
-    return kinds
-
-
-_PROVIDER_RETURNS = _provider_returns()
+# C results of the numeric cache helper (_numeric_cache.pxd, cimported as ``_mx_helper_<hash>``)
+_PROVIDER_RETURNS = {'word_int': 'int', 'word_double': 'float'}
 
 
 def _provider_call(value, kind):
-    """A call of a provider function (``_mx_helper_<hash>.name(...)``) whose C result is ``kind``."""
+    """A call of a numeric cache helper (``_mx_helper_<hash>.name(...)``) whose C result is ``kind``."""
     return (isinstance(value, cst.Call) and isinstance(value.func, cst.Attribute)
             and isinstance(value.func.value, cst.Name) and value.func.value.value.startswith('_mx_helper_')
             and _PROVIDER_RETURNS.get(value.func.attr.value) == kind)
