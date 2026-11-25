@@ -5,7 +5,6 @@ module or callable and must preserve its behavior when it is replaced.
 """
 import hashlib
 from importlib import resources
-import keyword
 
 import libcst as cst
 
@@ -14,10 +13,6 @@ from .consts import CY_MOD
 
 def module_name(provider):
     return '_mx_helper_' + hashlib.sha256(provider.encode()).hexdigest()[:12]
-
-
-def valid_identifier(name):
-    return isinstance(name, str) and name.isidentifier() and not keyword.iskeyword(name)
 
 
 def read_resource(package, name):
@@ -396,45 +391,15 @@ def _declared_reference(function, refs):
     return helper_reference(function, refs)
 
 
-def install(providers, model_path, object_providers=None):
+def install(providers, model_path):
+    """Copy each provider's .pyx/.pxd pair into the model package; returns the .pyx paths to compile."""
     modules = []
-    expected = {}
-    object_providers = object_providers or {}
     for provider in sorted(providers):
         package, _, name = provider.rpartition('.')
         if not package:
             raise ValueError('helper provider must belong to a package')
         alias = module_name(provider)
-        sources = {suffix: read_resource(package, name + suffix) for suffix in ('.pyx', '.pxd')}
-        manifest = object_providers.get(provider)
-        if manifest:
-            digest = hashlib.sha256()
-            for payload in (read_resource(package, name + '.provider.json'), *sources.values()):
-                digest.update(len(payload).to_bytes(8, 'little'))
-                digest.update(payload)
-            fingerprint = digest.hexdigest()
-            expected[alias] = ((manifest.protocol, manifest.provider, manifest.abi), fingerprint)
-            sources['.pyx'] += f'\n\n__modelx_cython_provider_build__ = {fingerprint!r}\n'.encode()
-        for suffix, payload in sources.items():
-            (model_path / (alias + suffix)).write_bytes(payload)
-        modules.append(model_path.relative_to(model_path.parent)
-                       / (alias + '.pyx'))
-    if expected:
-        guard = model_path / '_mx_provider_guard.py'
-        guard.write_text(f'''from importlib import import_module
-
-for _alias, (_contract, _fingerprint) in {expected!r}.items():
-    _message = (f'Native provider {{_contract[1]}} requires ABI {{_contract[2]}} '
-                f'and build fingerprint {{_fingerprint}}')
-    try:
-        _provider = import_module('.' + _alias, __package__)
-    except ImportError as _error:
-        raise ImportError(_message) from _error
-    if (getattr(_provider, '__modelx_cython_provider__', None) != _contract
-            or getattr(_provider, '__modelx_cython_provider_build__', None) != _fingerprint):
-        raise ImportError(_message)
-''', encoding='utf-8')
-        init = model_path / '__init__.py'
-        init.write_text('from . import _mx_provider_guard\n' + init.read_text(encoding='utf-8'),
-                        encoding='utf-8')
+        for suffix in ('.pyx', '.pxd'):
+            (model_path / (alias + suffix)).write_bytes(read_resource(package, name + suffix))
+        modules.append(model_path.relative_to(model_path.parent) / (alias + '.pyx'))
     return modules
