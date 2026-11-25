@@ -56,17 +56,6 @@ cdef class I64Vec:
     cdef Py_ssize_t cap
 
 
-cdef inline bint ivec_small_for_reads(I64Vec v) noexcept:
-    """Cloned scalar formulas use bounded int operations on short vectors."""
-    cdef Py_ssize_t i
-    if v is None or v.n > 64:
-        return False
-    for i in range(v.n):
-        if v.data[i] < -1048576 or v.data[i] > 1048576:
-            return False
-    return True
-
-
 cdef class VecCache:
     """The values of a vector cell with one integer parameter, by index (dense cache).
 
