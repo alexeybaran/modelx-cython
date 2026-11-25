@@ -1834,6 +1834,8 @@ class _ObjectUses(cst.CSTTransformer):
                 _is_name(c.comparator, 'None') for c in comp.comparisons)
         if isinstance(parent, cst.AssignTarget):
             return True
+        if isinstance(parent, cst.IfExp) and parent.test is not node:
+            return self._native(parent, shape)      # a branch: judged where the conditional's value is used
         if isinstance(parent, cst.Return):
             return self.own is not None and self.own == shape     # the formula returns this typed vector
         if isinstance(parent, cst.Assign) and parent.value is node:
