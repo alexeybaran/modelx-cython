@@ -21,12 +21,23 @@ OPAQUE_SCOPES = (
 )
 
 
+_NAME_KINDS = {}    # node class -> whether it is a Name
+
+
 class Names(cst.CSTVisitor):
     """Allocate identifiers from syntax, never comments or literal text."""
     def __init__(self, node=None, used=()):
         self.names = set(used)
         if node is not None:
-            visit(node, self)
+            # visit_Name of every Name node: the Name nodes the shared traversal yields
+            kinds = _NAME_KINDS
+            for item in walk(node):
+                kind = type(item)
+                is_name = kinds.get(kind)
+                if is_name is None:
+                    is_name = kinds[kind] = issubclass(kind, cst.Name)
+                if is_name:
+                    self.visit_Name(item)
 
     def visit_Name(self, node):
         self.names.add(node.value)
