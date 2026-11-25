@@ -2,17 +2,18 @@
 
 Branch `r4/p1-fast-sec`, against upstream modelx-cython `d22426f`. It compiles models exported by upstream
 modelx with no change to the model and runs them several times faster than upstream's compiled package,
-with the same values: all three SEC models built here (Term_US_SEC, MYGA_US_SEC, SPIA_US_SEC) equal live
-modelx on every point. Stack: CPython 3.10 to 3.14 (free-threaded 3.13t and 3.14t too), Cython 3.3.1,
+with the same values: the three SEC models built and swept here (Term_US_SEC, MYGA_US_SEC, SPIA_US_SEC) equal
+live modelx on every point, and all twelve SEC models translate on unmodified upstream modelx (only the SEC
+DV01 example's dynamic Space reference needs a modelx change, outside this pull request). Stack: CPython 3.10 to 3.14 (free-threaded 3.13t and 3.14t too), Cython 3.3.1,
 modelx and lifelib from upstream.
 
-## What the compiler adds, by mechanism (non-test lines, 13,001 against upstream's 6,300)
+## What the compiler adds, by mechanism (non-test lines, 13,029 against upstream's 6,300)
 
 | mechanism | modules (lines) |
 |---|---|
-| typed entries: a dense cache per Cell over its declared or sampled domain, checked once at entry; private formula entries on an exact receiver; locked Spaces | entry_pipeline 522, inline_entries 348, cell_entries 150, locked_entries 202, item_roots 48; transformer +477, builder +167 |
+| typed entries: a dense cache per Cell over its declared or sampled domain, checked once at entry; private formula entries on an exact receiver; locked Spaces | entry_pipeline 522, inline_entries 348, cell_entries 150, locked_entries 202, item_roots 48; transformer +494 (with the fast item construction, also under dynamic References), builder +167 |
 | native storage: numeric key caches, unwritten-value allocation, held arrays and holds | _numeric_cache .pyx/.pxd 236, _wide_numeric_cache .pyx/.pxd 203, numeric_cache 146, native_sources 31, value_storage 82, held_arrays 125, holds 77 |
-| integer guards: C `+ - *` and negation set an overflow flag tested once per formula; checked conversions at arguments, results, ItemSpace keys and References | integer_boundaries 1,244; _mx_sys.pxd +537 (with the other runtime helpers) |
+| integer guards: C `+ - *` and negation set an overflow flag tested once per formula; checked conversions at arguments, results, ItemSpace keys and References | integer_boundaries 1,244; _mx_sys.pxd +548 (with the other runtime helpers) |
 | powers: real powers on C `pow` with a one-entry memo; argument order kept where Python's semantics need it | powers +362, ordered_arguments 117 |
 | held items of a shared Space (the SEC DV01 example reads one) | space_results 195 |
 | cache sizing from the declared or sampled range | automatic 107 |
@@ -26,13 +27,14 @@ I(1 pass)) / (3 x points), inclusive cost of the three entries), same machine, P
 
 | model | trial cut (start) | this branch | change |
 |---|---|---|---|
-| Term_US_SEC | 7.601M | 7.654M | +0.7% |
-| MYGA_US_SEC | 8.650M | 8.728M | +0.9% |
-| SPIA_US_SEC | 8.943M | 9.134M | +2.1% |
+| Term_US_SEC | 7.601M | 7.286M | -4.1% |
+| MYGA_US_SEC | 8.650M | 8.416M | -2.7% |
+| SPIA_US_SEC | 8.943M | 8.846M | -1.1% |
 
 The trial cut ran about 4.0x (Term) and 4.4x (MYGA) fewer instructions than upstream's compiled package.
 Steps: the flag design +0.5 / +0.7 / +2.1%; removing the divisibility test, item locals and dead paths
--0.1 / +0.1 / 0.0%; range-based cache sizing +0.3 / +0.04 / +0.1%. Values: lifelib's own C4 check (every point
+-0.1 / +0.1 / 0.0%; range-based cache sizing +0.3 / +0.04 / +0.1%; reading a fitting int at the checked
+64-bit boundary without exception handling -4.8 / -3.6 / -3.2%. Values: lifelib's own C4 check (every point
 swept, every cached value and raise compared, the compiled run in a child) at rel 1e-12 finds no difference
 on any of the three.
 
@@ -47,6 +49,9 @@ was built and measured: +3.7% Term, +15.8% MYGA and SPIA. The flag design replac
   returns, and before a loop or call that receives a flagged value, and raises OverflowError naming the Cell.
   A formula with an operation whose C type cannot be told keeps Cython's overflowcheck for itself alone
   (`overflowcheck_fallback` in `_mx_integer_checks.json`). `"unchecked"` is the opt-out: plain C, as upstream.
+  In the twelve SEC models the fallback covers mostly `Data` table builders (run once per model) and 0 to 12
+  `Projection` cells per model (Term 1, MYGA 0, SPIA 4; VA 3, RILA 9, IUL 12); no SEC model has an integer power
+  or shift, whose helpers raise per operation.
 - The mode never depends on the sample: the sample-magnitude switch and the `auto` mode are gone.
 - `//`, `%`, shifts and integer powers of C integers keep Python's results through exact helpers.
 - Arguments, results, ItemSpace keys and References typed as C integers cross a checked conversion: a
@@ -70,7 +75,7 @@ was built and measured: +3.7% Term, +15.8% MYGA and SPIA. The flag design replac
 
 ## Tests
 
-- Upstream's own tests at `d22426f`, untouched, on this branch: (run in progress; filled in when it completes). The failures are the
+- Upstream's own tests at `d22426f`, untouched, on this branch: 247 passed, 7 skipped, 4 failed. The failures are the
   deliberate differences 2 (`test_various_types` x2: a dictionary cache outside the sampled range raises)
   and 5 (`test_fractional_power`, `test_mx2cy_with_uslib`: the source text of integer and memoized
   powers); the repository's copies assert the new forms and pass.
