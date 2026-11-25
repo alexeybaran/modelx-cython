@@ -60,3 +60,21 @@ def test_cached_cell_call_still_follows_pandas_result_and_records_exceptions():
             ('_c_Data', 'values', 'list'), ('_c_Data', 'values', 'col:Data.values'),
             ('_c_Data', 'values', read_notes.RAISES),
         }
+
+
+def test_trailing_comma_key_is_a_tuple_of_one():
+    source = ('class _c_S:\n'
+              '    def _f_one(self, d, k):\n'
+              '        return d[k,]\n'
+              '    def _f_two(self, d, k):\n'
+              '        return d[k, 2]\n'
+              '    def _f_plain(self, d, k):\n'
+              '        return d[k]\n')
+    scope = {}
+    with read_notes.recording('unused'):
+        exec(read_notes.instrument(source, '<test>'), scope)
+        space = scope['_c_S']()
+        data = {(1,): 'tuple of one', 1: 'scalar', (1, 2): 'pair'}
+        assert space._f_one(data, 1) == 'tuple of one'
+        assert space._f_two(data, 1) == 'pair'
+        assert space._f_plain(data, 1) == 'scalar'
