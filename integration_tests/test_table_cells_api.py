@@ -13,7 +13,6 @@ import textwrap
 MODEL = """\
 import modelx as mx
 import pandas as pd
-from modelx_helpers import pdn
 
 FRAME = pd.DataFrame({"sa": [100.0, 200.0, 300.0, 400.0], "rate": [0.01, 0.02, 0.03, 0.04]},
                      index=pd.Index([1, 2, 3, 4], name="policy_id"))
@@ -22,7 +21,7 @@ IDS = (1, 2, 3, 4)
 
 def build():
     model = mx.new_model("Tables")
-    data = model.new_space("Data", refs={"pd": pd, "pdn": pdn})
+    data = model.new_space("Data", refs={"pd": pd})
     data.raw = FRAME
     data.new_cells("points", "def points():\\n    return raw.copy()\\n")       # plain pandas (D121)
     data.new_cells("table", "def table():\\n    return FRAME2.copy()\\n")
@@ -41,7 +40,6 @@ import sys, threading
 from importlib import import_module
 from importlib.machinery import ExtensionFileLoader
 import pandas as pd
-from modelx_helpers import pdn
 from tables_model import FRAME, build
 
 name = sys.argv[1]

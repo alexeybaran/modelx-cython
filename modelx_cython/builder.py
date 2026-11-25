@@ -616,19 +616,9 @@ class CombinedCellsInfo(LexicalCellsInfo):
         return getattr(self._rt, 'admission_record', None)
 
     @property
-    def frame_row_result(self):
-        """auto-tables (D119): every sampled value is a row (Record) of a table admitted from a frame."""
-        return getattr(self._rt, 'frame_row_result', False)
-
-    @property
     def pandas_fallbacks(self):
         """auto-tables: pandas fallbacks on admitted tables in the sample, ``{line: {operation: calls}}``."""
         return getattr(self._rt, 'pandas_fallbacks', None) or {}
-
-    @property
-    def table_schema(self):
-        """M1: key and column kinds of a traced helper Table result (tracer.table_schema)."""
-        return getattr(self._rt, 'table_schema', None)
 
     @property
     def table_result(self):
@@ -1262,5 +1252,3 @@ class ModuleInfo:
         for cls in self.visitor.spaces:
             result.append(MODULE_PREF + cls[len(SPACE_PREF):])    # replace _c_ with _m_
         return result
-
-

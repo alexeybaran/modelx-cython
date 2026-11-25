@@ -346,10 +346,7 @@ def expressions_object(cell):
 
 
 # ---------------------------------------------------------------- M1 table reads (W1.1)
-TABLE_TYPE = 'modelx_helpers.immutable_inputs.Table'
 TABLE_READ_ATTRS = ('loc', 'at', 'index', 'iterrows')
-NOT_LOWERED = 'not lowered to a typed handle read; runs as a Python call'
-KEPT_PYTHON = 'formula kept as a Python method ({why}): runs as a Python call'
 PANDAS_RECEIVER = ('receiver is a pandas DataFrame, Series or Index, not a helper Table: never lowered; '
                    'pandas runs on every evaluation')
 TABLE_READ_WARNING = '{cell}: per-step table read is not typed: {read} (formula line {line}): {reason}'
@@ -369,52 +366,37 @@ def _binds_local(statement, local):
 
 
 class TableReadSite:
-    """One pandas-spelled read on a traced helper Table in a formula (before lowering)."""
+    """One read through a pandas receiver in a formula."""
     __slots__ = ('node', 'kind', 'read', 'line')
 
     def __init__(self, node, kind, read, line):
         self.node, self.kind, self.read, self.line = node, kind, read, line
 
-    def entry(self, per_step, reason=None):
+    def entry(self, per_step, reason):
         return {'read': self.read, 'kind': self.kind, 'line': self.line,
-                'per_step': per_step, 'reason': reason or NOT_LOWERED}
+                'per_step': per_step, 'reason': reason}
 
 
-def table_read_sites(node, resolver, cls_info, pandas=False, receivers=None):
+def table_read_sites(node, resolver, cls_info):
     """The table reads of one formula FunctionDef, in source order. Read-only.
 
-    A receiver is a traced helper Table when it is a self-rooted call to a Cell whose every
-    sampled result is a helper Table (``resolver.table_results``), a ``self.<ref>`` whose value
-    is a helper Table, or a local name assigned (anywhere in the formula) from such a
-    receiver or from ``<receiver>.loc[...]`` / ``.at[...]`` (a sub-table or a row), or bound
-    by ``for ... in <receiver>.iterrows()``. A site is ``<receiver>.loc|at|index|iterrows``
-    (kind = the attribute) or ``<receiver>[...]`` (kind ``column`` on a table, ``row`` on a
-    row local). Reads inside comprehensions and generators count. ``line`` is the line within
-    the formula, 1 being the ``def`` line.
-
-    With ``pandas`` true the receivers are pandas objects instead: zero-argument Cells whose
-    every sampled result is a pandas DataFrame, Series or Index (``resolver.pandas_results``)
-    and ``self.<ref>`` References holding one. Every use of such a receiver is a site, not
-    only the table-read spellings: any attribute or method (kind = the attribute name, or
-    ``attribute``), a subscript, and the receiver itself used as a value (kind ``use``:
-    iterated, passed to a call, returned). Those sites are reported, never lowered.
+    The receivers are pandas objects: zero-argument Cells whose every sampled result is a
+    pandas DataFrame, Series or Index (``resolver.pandas_results``), ``self.<ref>`` References
+    holding one, and locals assigned from them (or from ``<receiver>.loc[...]`` / ``.at[...]``,
+    or bound by ``for ... in <receiver>.iterrows()``). Every use of such a receiver is a site,
+    not only the table-read spellings: any attribute or method (kind = the attribute name, or
+    ``attribute``), a subscript (``column``, or ``row`` on a row local), and the receiver itself
+    used as a value (kind ``use``: iterated, passed to a call, returned). Reads inside
+    comprehensions and generators count. ``line`` is the line within the formula, 1 being the
+    ``def`` line. Those sites are reported, never lowered.
     """
     import libcst as cst
     from libcst.metadata import MetadataWrapper, PositionProvider
-    from .usage import RESOLVED, _extract_self_chain
+    from .usage import RESOLVED, _extract_self_chain, pandas_type_id
 
-    if receivers is not None:      # auto-tables: every use of the given cells (admitted tables)
-        pandas, tables, refs = True, set(receivers), set()
-    elif pandas:
-        from .usage import pandas_type_id
-        tables = set(getattr(resolver, 'pandas_results', {}))
-        refs = {name for name, ref in getattr(cls_info, 'refs', {}).items()
-                if getattr(ref, 'type_', None) is not None and pandas_type_id(ref.type_)}
-    else:
-        tables = {name for name, kind in resolver.table_results.items() if kind == TABLE_TYPE}
-        refs = {name for name, ref in getattr(cls_info, 'refs', {}).items()
-                if getattr(ref, 'type_', None) is not None
-                and f'{ref.type_.__module__}.{ref.type_.__qualname__}' == TABLE_TYPE}
+    tables = set(getattr(resolver, 'pandas_results', {}))
+    refs = {name for name, ref in getattr(cls_info, 'refs', {}).items()
+            if getattr(ref, 'type_', None) is not None and pandas_type_id(ref.type_)}
     if not tables and not refs:
         return []
 
@@ -478,16 +460,16 @@ def table_read_sites(node, resolver, cls_info, pandas=False, receivers=None):
 
     sites = []
 
-    bare = []      # pandas mode: receivers used as values, filtered once parents are known
+    bare = []      # receivers used as values, filtered once parents are known
 
     class Sites(cst.CSTVisitor):
         def visit_Attribute(self, expr):
             if receiver(expr.value, local):
                 if expr.attr.value in TABLE_READ_ATTRS:
                     sites.append((expr, expr.attr.value))
-                elif pandas:
+                else:
                     sites.append((expr, 'attribute'))
-            if pandas and receiver(expr, local):
+            if receiver(expr, local):
                 bare.append(expr)
 
         def visit_Subscript(self, expr):
@@ -496,11 +478,11 @@ def table_read_sites(node, resolver, cls_info, pandas=False, receivers=None):
                               and expr.value.value in rows else 'column'))
 
         def visit_Call(self, expr):
-            if pandas and receiver(expr, local):
+            if receiver(expr, local):
                 bare.append(expr)
 
         def visit_Name(self, expr):
-            if pandas and receiver(expr, local):
+            if receiver(expr, local):
                 bare.append(expr)
 
     node.visit(Sites())
@@ -522,7 +504,7 @@ def table_read_sites(node, resolver, cls_info, pandas=False, receivers=None):
     for expr in bare:
         parent = parents.get(id(expr))
         if isinstance(parent, (cst.Attribute, cst.Subscript)) and parent.value is expr:
-            continue        # a read already listed (or self.<ref>.x on a non-pandas path)
+            continue        # a read already listed
         if isinstance(parent, cst.Attribute) and parent.attr is expr:
             continue        # an attribute name that happens to spell a local
         if isinstance(parent, cst.AssignTarget) or (

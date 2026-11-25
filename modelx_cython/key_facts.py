@@ -2,8 +2,7 @@
 
 ``is_int`` (why an expression is a non-bool integer), ``exact_long_long`` (statically a C ``long long``),
 ``enum_constant`` (the module constant of an admitted IntEnum member) and ``_int_index_read`` (an extreme or asof of
-an integer level), on the bindings of one formula (``_Formula``). Moved out of ``table_reads`` unchanged, for the
-prepared-table lowering (``frame_reads``) and the old helper-table lowering alike.
+an integer level), on the bindings of one formula (``_Formula``), for the prepared-table lowering (``frame_reads``).
 """
 
 import libcst as cst
@@ -11,7 +10,6 @@ import libcst as cst
 from .usage import RESOLVED, _extract_self_chain
 from .syntax import dotted_name
 
-TABLE_TYPE = 'modelx_helpers.immutable_inputs.Table'
 INT_TYPES = frozenset(('long long', 'long', 'int', 'short', 'Py_ssize_t', 'size_t'))
 SKIPPED_SCOPES = (cst.FunctionDef, cst.Lambda, cst.ClassDef)
 COMPREHENSIONS = (cst.ListComp, cst.SetComp, cst.DictComp, cst.GeneratorExp)
@@ -23,13 +21,6 @@ def _code(node):
 
 def _plain_args(call):
     return not any(arg.keyword or arg.star for arg in call.args)
-
-
-def _index_attr(node, attr):
-    """``X.attr`` -> X, else None."""
-    if isinstance(node, cst.Attribute) and node.attr.value == attr:
-        return node.value
-    return None
 
 
 def _bound_names(target):
@@ -52,32 +43,6 @@ def _is_docstring(statement):
     return (isinstance(statement, cst.SimpleStatementLine) and len(statement.body) == 1
             and isinstance(statement.body[0], cst.Expr)
             and isinstance(statement.body[0].value, (cst.SimpleString, cst.ConcatenatedString)))
-
-
-class Schema:
-    """Levels and column kinds of a traced table (helper ``table_schema(t)``)."""
-    __slots__ = ('levels', 'keys', 'columns')
-
-    def __init__(self, keys, columns):
-        self.keys, self.columns = tuple(keys), dict(columns)
-        self.levels = len(self.keys)
-
-    @classmethod
-    def of(cls, schema):
-        if not isinstance(schema, dict) or not schema.get('keys'):
-            return None
-        return cls(schema['keys'], schema.get('columns') or {})
-
-    def child(self, depth):
-        return Schema(self.keys[depth:], self.columns)
-
-    def same(self, other):
-        return self.keys == other.keys and self.columns == other.columns
-
-    @property
-    def int_key(self):
-        """A single integer level (enum-labelled levels are 'int', W1.H D27)."""
-        return self.levels == 1 and self.keys[0] == 'int'
 
 
 class _Formula(cst.CSTVisitor):
@@ -281,12 +246,6 @@ class KeyFacts:
         status, name = self.resolver.resolve_chain(self.cls_info.fqname, chain)
         return (name, chain) if status == RESOLVED else (None, chain)
 
-    def cell_of(self, expr):
-        """Cells fqname of a self-rooted zero-argument call, else None."""
-        if not (isinstance(expr, cst.Call) and not expr.args):
-            return None
-        return self.resolve(expr.func)[0]
-
     def call_rettype(self, expr):
         """(C return type, cell name) of a self-rooted cell call, else (None, None)."""
         if not isinstance(expr, cst.Call) or not _plain_args(expr):
@@ -328,13 +287,6 @@ class KeyFacts:
         entry = (getattr(module, 'code_enum_symbols', None) or {}).get(
             (getattr(self.cls_info, 'name', None), ref, expr.attr.value))
         return entry[0] if entry else None
-
-    def table_cell(self, expr):
-        """Schema of a zero-argument Cell call traced as a helper Table, else None."""
-        name = self.cell_of(expr)
-        if name is None or self.resolver.table_results.get(name) != TABLE_TYPE:
-            return None
-        return Schema.of(self.resolver.table_schemas.get(name))
 
     def int_argument(self, expr):
         """Argument of a one-argument builtin ``int`` call in this formula, or None."""
@@ -422,62 +374,9 @@ class KeyFacts:
         return None
 
     def _int_index_read(self, expr):
-        """``T.index.min()/max()`` or ``T.index.asof(k)`` on a single integer level; or
-        (diag-us2, D91) ``T.index.min()[k]`` / ``T.index.max()[k]`` on several levels whose
-        level k is an integer: the k-th part of the smallest or largest key."""
-        if (isinstance(expr, cst.Subscript) and len(expr.slice) == 1
-                and isinstance(expr.slice[0].slice, cst.Index)
-                and isinstance(expr.slice[0].slice.value, cst.Integer)
-                and isinstance(expr.value, cst.Call) and not expr.value.args
-                and isinstance(expr.value.func, cst.Attribute)
-                and expr.value.func.attr.value in ('min', 'max')):
-            schema = self._index_schema(expr.value.func.value)
-            k = expr.slice[0].slice.value.evaluated_value
-            return (schema is not None and schema.levels > 1 and 0 <= k < schema.levels
-                    and schema.keys[k] == 'int')
-        if not (isinstance(expr, cst.Call) and isinstance(expr.func, cst.Attribute)
-                and expr.func.attr.value in ('min', 'max', 'asof')):
-            return False
-        receiver = _index_attr(expr.func.value, 'index')
-        if receiver is None and isinstance(expr.func.value, cst.Name):     # an index local
-            values = self.formula.values.get(expr.func.value.value) or ()
-            if len(values) == 1 and expr.func.value.value not in self.formula.other:
-                receiver = _index_attr(values[0], 'index')
-        if receiver is None:
-            return False
-        schema = self.table_cell(receiver)
-        if schema is None and isinstance(receiver, cst.Name):
-            values = self.formula.values.get(receiver.value) or ()
-            schemas = [self.table_cell(value) or self._sub_table(value) for value in values]
-            schema = schemas[0] if schemas and all(s is not None and s.same(schemas[0]) for s in schemas) else None
-        return schema is not None and schema.int_key
-
-    def _index_schema(self, index_expr):
-        """Schema of the table whose ``.index`` is ``index_expr`` (a table cell or a table local
-        assigned table cells of one schema), else None."""
-        receiver = _index_attr(index_expr, 'index')
-        if receiver is None:
-            return None
-        schema = self.table_cell(receiver)
-        if schema is None and isinstance(receiver, cst.Name) and receiver.value not in self.formula.other:
-            values = self.formula.values.get(receiver.value) or ()
-            schemas = [self.table_cell(value) for value in values]
-            schema = schemas[0] if schemas and all(x is not None and x.same(schemas[0]) for x in schemas) else None
-        return schema
-
-    def _sub_table(self, expr):
-        """Schema of ``T.loc[prefix]`` with fewer key parts than ``T`` has levels (a sub-table),
-        else None (diag-us2: ``int(tbl.index.max())`` on such a local is an integer)."""
-        if not (isinstance(expr, cst.Subscript) and len(expr.slice) == 1
-                and isinstance(expr.slice[0].slice, cst.Index)):
-            return None
-        base = _index_attr(expr.value, 'loc')
-        schema = self.table_cell(base) if base is not None else None
-        if schema is None:
-            return None
-        key = expr.slice[0].slice.value
-        parts = len(key.elements) if isinstance(key, cst.Tuple) else 1
-        return schema.child(parts) if parts < schema.levels else None
+        """``expr`` reads an integer key of a table index; the prepared-table lowering (``frame_reads``)
+        supplies this fact for its frames."""
+        return False
 
     def exact_long_long(self, expr):
         """``expr`` is statically a C ``long long`` (a cell result or a parameter)."""

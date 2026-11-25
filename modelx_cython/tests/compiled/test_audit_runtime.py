@@ -50,16 +50,14 @@ def compile_model(tmp_path, sample, integer_checks=None):
 
 
 def test_scope_overrides_aliases_and_arithmetic(tmp_path):
-    from modelx_helpers.typed_inputs import lookup, sum_f64
-
     model=mx.new_model('AuditContracts')
     try:
         foreign=SimpleNamespace(Status=SimpleNamespace(OK=999),
-            lookup=functools.partial(float,7), sum_f64=sum_f64,
+            lookup=functools.partial(float,7), aggregate=sum,
             term=functools.partial(float), count=functools.partial(int,2))
         s=model.new_space('Values',refs={'Status':HTTPStatus,
             'other':foreign,
-            'lookup':lookup,'sum_f64':sum_f64,'numbers':math,
+            'lookup':float,'aggregate':sum,'numbers':math,
             'downward':math.floor,'round_alias':round})
         s.new_cells('term','lambda k: 1.0 + k')
         s.new_cells('coded','lambda t, code: t + code')
@@ -79,7 +77,7 @@ def test_scope_overrides_aliases_and_arithmetic(tmp_path):
 ''')
         s.new_cells('nested_sum','''def nested_sum():
     def nested(self):
-        return self.sum_f64(self.term(k) for k in range(self.count()))
+        return self.aggregate(self.term(k) for k in range(self.count()))
     return nested(other)
 ''')
         s.new_cells('matches','lambda t: t == Status.OK').is_cached=False
@@ -253,26 +251,4 @@ assert s.reference()==2**80
 assert s.zero_at()==1.25
 assert s.a32_at(1)==s.swapped_at(1)==s.native_at(1)==2.5
 assert s.i32_at(1)==22
-'''],cwd=tmp_path,check=True)
-
-
-def test_prepared_helper_resources_do_not_break_model_pickling(tmp_path):
-    from modelx_helpers.immutable_inputs import Table
-    from modelx_helpers.typed_inputs import lookup
-
-    model=mx.new_model('HelperSerialization')
-    try:
-        s=model.new_space('Values',refs={'lookup':lookup,
-            'table':Table((0,1),((0.5,),(1.5,)),('value',))})
-        s.new_cells('value',"lambda k: lookup(table, k, 'value')")
-        model.export(tmp_path/'exported')
-    finally:model.close()
-    compile_model(tmp_path,'from exported import mx_model\n'
-        'mx_model.Values.value(0);mx_model.Values.value(1)\n')
-    subprocess.run([sys.executable,'-B','-c','''import pickle
-from exported_cy import mx_model
-assert mx_model.Values.value(0)==0.5
-restored=pickle.loads(pickle.dumps(mx_model))
-assert restored.Values.value(0)==0.5
-assert restored.Values.value(1)==1.5
 '''],cwd=tmp_path,check=True)
