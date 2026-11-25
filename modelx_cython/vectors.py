@@ -449,6 +449,7 @@ class _Facts(cst.CSTVisitor):
         self.assigns = {}           # name -> [('value', expr) | ('unpack', expr, i, n) | ('aug', op, expr)
                                     #          | ('for', iter, i, n) | ('other',)]
         self.writes = []            # (base expr, value expr) of v[i] = x
+        self.updates = []           # (base expr, operator, value expr) of v[i] op= x
         self.appends = []           # (base expr, value expr, call) of v.append(x)
         self.returns = []           # return value expressions
         self.statement_comps = set()
@@ -521,6 +522,7 @@ class _Facts(cst.CSTVisitor):
         elif isinstance(node.target, cst.Subscript):
             self.store_targets.add(id(node.target))
             self.writes.append((node.target.value, None))
+            self.updates.append((node.target.value, node.operator, node.value))
 
     def visit_AnnAssign(self, node):
         for name in _names(node.target):
@@ -888,6 +890,12 @@ class VectorLowering(cst.CSTTransformer):
                     and self.strict_locals and self.scalar(value) != INT:
                 self.env[base.value] = None
                 self.fallback(base, 'integer vector written with a value not proven an integer: kept as a list')
+        for base, op, value in facts.updates:
+            # an integer vector local whose element update gives a float (v[i] += 0.5, v[i] /= 2) stays a list
+            if _is_name(base) and self.env.get(base.value) == 'I' and (
+                    isinstance(op, cst.DivideAssign) or self.scalar(value) in (FLOAT, NUM)):
+                self.env[base.value] = None
+                self.fallback(base, 'integer vector updated with a float: kept as a list')
         self.owned = {name for name, items in assigns.items() if self.env.get(name) in ('V', 'I')
                       and all(item[0] == 'value' and isinstance(self.kind(item[1]), str)
                               and self.kind(item[1])[0] == 'A' for item in items)}
