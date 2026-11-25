@@ -97,6 +97,11 @@ a Space are C struct fields whose reference counting is not synchronized,
 so an unlocked Space shared between threads can corrupt memory.  Lock
 every Space that several threads call.
 
+A compiled model has no clear, as upstream modelx-cython: to run with other
+inputs, bind them on a new model instance.  Assigning a Reference while
+other threads evaluate the model is not synchronized; bind the inputs
+before the run starts.
+
 ## How locked Spaces are translated
 
 A locked Space class is recognized by the `self._mx_lock = ...` assignment
