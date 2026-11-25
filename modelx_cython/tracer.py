@@ -111,28 +111,21 @@ class ReturnTypeInfo:
 def vector_shape(val):
     """The vector shape of a traced value (vector cells, ``vectors.py``).
 
-    'V' for a list of exact floats, 'I' for a list of exact ints within int64,
-    'E' for an empty list (either), 'v' / 'i' for a non-empty tuple of exact floats / ints
-    (a vector only where the formula builds it as a sequence, vectors.cell_vector_shape),
-    ('T', kinds) for a non-empty tuple of such lists or tuples, else None. Keyed on the value only.
+    'V' for a tuple of exact floats, 'I' for one of exact ints within int64, 'E' for the empty tuple
+    (either), ('T', kinds) for a non-empty tuple of such tuples, else None (a list is a Python object).
+    Keyed on the value only; the cell is a vector cell only where its formula builds the tuples as
+    sequences (vectors.cell_vector_shape).
     """
-    if type(val) is list:
-        if not val:
-            return 'E'
-        if all(type(x) is float for x in val):
-            return 'V'
-        if all(type(x) is int and -(1 << 63) <= x < (1 << 63) for x in val):
-            return 'I'
+    if type(val) is not tuple:
         return None
-    if type(val) is tuple and val:
-        shape = vector_shape(list(val))
-        if shape in ('V', 'I'):
-            return shape.lower()
-        kinds = tuple(vector_shape(x) if type(x) in (list, tuple) else None for x in val)
-        if any(isinstance(k, tuple) for k in kinds):
-            return None
-        return ('T', kinds) if None not in kinds else None
-    return None
+    if not val:
+        return 'E'
+    if all(type(x) is float for x in val):
+        return 'V'
+    if all(type(x) is int and -(1 << 63) <= x < (1 << 63) for x in val):
+        return 'I'
+    kinds = tuple(vector_shape(x) if type(x) is tuple else None for x in val)
+    return ('T', kinds) if all(k in ('V', 'I', 'E') for k in kinds) else None
 
 
 def merge_vector_shapes(a, b):
