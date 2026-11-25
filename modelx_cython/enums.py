@@ -113,11 +113,17 @@ def _target_names(target):
 class _Model:
     """What the trace knows of the whole model: enum definitions, Space References and Cell signatures."""
 
-    def __init__(self, ref_info, cells_info):
-        self.members, self.reach, self.spaces = {}, {}, {}
+    def __init__(self, ref_info, cells_info, param_info):
+        self.members, self.reach, self.spaces, self.values = {}, {}, {}, {}
+        for owner, params in (param_info or {}).items():        # the parameters of item Spaces
+            for name, info in params.items():
+                if isinstance(_kind(getattr(info, 'type_', None)), tuple):
+                    self.values[owner, name] = _kind(info.type_)
         for fqname, info in ref_info.items():
             owner, _, ref = fqname.rpartition('.')
             enum = getattr(info, 'enum', None)
+            if isinstance(_kind(getattr(info, 'type_', None)), tuple):
+                self.values[owner, ref] = _kind(info.type_)     # a Reference whose value is a member: a C integer
             if enum and getattr(info, 'enum_safe', False):
                 self.members[owner, ref] = (enum[:2], {name: value for name, value in enum[2].items()
                                                        if -(1 << 63) <= value < (1 << 63)})
@@ -125,8 +131,8 @@ class _Model:
             if getattr(info, 'mx_class', ''):
                 self.spaces[owner, ref] = info.mx_class
         self.cells = {key: _signature(info) for key, info in (cells_info or {}).items()}
-        self.typed = any(isinstance(kind, tuple) for _, kinds, result in self.cells.values()
-                         for kind in (*kinds.values(), result))
+        self.typed = bool(self.values) or any(isinstance(kind, tuple) for _, kinds, result in self.cells.values()
+                                              for kind in (*kinds.values(), result))
 
     def concerns(self, module):
         return self.typed or any(owner.rpartition('.')[0] == module for owner, _ in self.members)
@@ -252,6 +258,12 @@ class _Formula:
                 return cls, members[node.attr.value]
         return None
 
+    def value(self, node):
+        """The class of ``self.<Ref>`` whose value is a member (an item Space's parameter too), else None."""
+        if isinstance(node, cst.Attribute) and isinstance(node.value, cst.Name) and node.value.value == 'self':
+            return self.model.values.get((self.owner, node.attr.value))
+        return None
+
     def space(self, node):
         """The class path of the Space that ``self.<name>`` holds (a child Space or a Reference to a Space), else None."""
         if isinstance(node, cst.Attribute) and isinstance(node.value, cst.Name) and node.value.value == 'self':
@@ -285,10 +297,11 @@ class _Formula:
             return f'self.{ref}'
         return f"__import__('importlib').import_module({cls[0]!r}).{cls[1]}"
 
-    def analyse(self):
+    def analyse(self, forced=frozenset()):
+        """``forced``: expressions that must give the member although their use takes an integer."""
         banned = set()
         while True:
-            uses = _Uses(self, banned)
+            uses = _Uses(self, banned, forced)
             self.node.body.visit(uses)
             if uses.objects <= banned:
                 self.uses = uses
@@ -301,15 +314,20 @@ class _Uses(cst.CSTVisitor):
     convert to their member; ``objects``: locals and loop variables that must hold objects (they have a use that
     needs the member), found under the assumption that those in ``banned`` already do."""
 
-    def __init__(self, formula, banned):
-        self.f, self.banned = formula, banned
+    def __init__(self, formula, banned, forced=frozenset()):
+        self.f, self.banned, self.forced = formula, banned, forced
         self.int_ok, self.elements, self.nonload, self.stores = set(), set(), set(), set()
         self.literal, self.convert, self.objects = {}, {}, set()
+        self.needs, self.flows, self.loops = set(), [], {}
         self.depth = self.foreign = 0
         # a held name: (class, key, whether it may be turned into an object by banning it)
-        scope = {name: (kind if name not in formula.bindings else None, ('param', name), False)
+        scope = {name: (kind, ('param', formula.key, name), False)
                  for name, kind in formula.kinds.items() if isinstance(kind, tuple)}
         self.scopes = [scope]
+        for name, (kind, _, _) in list(scope.items()):     # a parameter the formula rebinds: to its own class only
+            values = [value for values in formula.bindings.get(name, ()) for value in values or (None,)]
+            if any(value is None or self.classify(value) != kind for value in values):
+                scope[name] = (None, ('param', formula.key, name), False)
         grown = True
         while grown:
             grown = False
@@ -333,6 +351,9 @@ class _Uses(cst.CSTVisitor):
         if isinstance(node, cst.IfExp):
             body, orelse = self.classify(node.body), self.classify(node.orelse)
             return body if body == orelse else None
+        if isinstance(node, cst.BooleanOperation):
+            left, right = self.classify(node.left), self.classify(node.right)
+            return left if left == right else None
         if isinstance(node, cst.Name):
             entry = self.resolve(node.value)
             return entry[0] if entry else None
@@ -342,7 +363,7 @@ class _Uses(cst.CSTVisitor):
         if member is not None:
             return member[0]
         callee = self.f.callee(node) if isinstance(node, cst.Call) else None
-        return callee[1][2] if callee and isinstance(callee[1][2], tuple) else None
+        return callee[1][2] if callee and isinstance(callee[1][2], tuple) else self.f.value(node)
 
     def numeric(self, node):
         """Whether ``node`` is known to be a number (so that ``node % x`` is arithmetic, not formatting)."""
@@ -375,8 +396,42 @@ class _Uses(cst.CSTVisitor):
             self.target(node.value)
         elif isinstance(node, cst.Subscript):
             self.stores.add(id(node))
+        elif isinstance(node, cst.Attribute):
+            self.nonload.add(id(node))
 
-    def needs_member(self, node, cls):
+    def sources(self, node, seen=()):
+        """Where the value of ``node`` comes from: (class, holder key or None for a member written here) for each
+        enum value, (None, None) for anything else."""
+        if isinstance(node, cst.IfExp):
+            return self.sources(node.body, seen) + self.sources(node.orelse, seen)
+        if isinstance(node, cst.BooleanOperation):
+            return self.sources(node.left, seen) + self.sources(node.right, seen)
+        if isinstance(node, cst.Name):
+            entry = self.resolve(node.value)
+            if entry is None or entry[0] is None or entry[1] in seen:
+                return [(None, None)]
+            if not entry[2]:
+                return [(entry[0], entry[1])]
+            values = self.loops.get(entry[1]) or [value for values in self.f.bindings[node.value] for value in values]
+            return [found for value in values for found in self.sources(value, (*seen, entry[1]))]
+        member = None if self.foreign else self.f.member(node)
+        if member is not None:
+            return [(member[0], None)]
+        callee = self.f.callee(node) if isinstance(node, cst.Call) and not self.foreign else None
+        if callee is not None and isinstance(callee[1][2], tuple):
+            return [(callee[1][2], ('result', callee[0]))]
+        held = None if self.foreign else self.f.value(node)
+        return [(held, ('value', self.f.owner, node.attr.value) if held else None)]
+
+    def flow(self, sink, cls, node):
+        """``node`` goes to a parameter or result held as an integer of ``cls``; True if it may go as an integer."""
+        if id(node) in self.forced:
+            return False
+        self.flows.append((sink, cls, node, self.sources(node)))
+        return True
+
+    def needs_member(self, node, cls, key):
+        self.needs.add(key)
         if cls is None:
             raise TypeError(f'{self.f.where()}: `{_code(node)}` needs the IntEnum member of a parameter that the '
                             'formula rebinds; compiled code holds the parameter as an integer. Bind another name')
@@ -396,7 +451,7 @@ class _Uses(cst.CSTVisitor):
         if bannable:
             self.objects.add(key)
         else:
-            self.needs_member(node, cls)
+            self.needs_member(node, cls, key)
 
     def visit_Attribute(self, node):
         self.nonload.add(id(node.attr))
@@ -404,6 +459,11 @@ class _Uses(cst.CSTVisitor):
         if member is not None:
             if id(node) in self.int_ok:
                 self.literal[id(node)] = member[1]
+            return False
+        held = None if self.foreign else self.f.value(node)
+        if held is not None:
+            if id(node) not in self.int_ok and id(node) not in self.nonload:
+                self.needs_member(node, held, ('value', self.f.owner, node.attr.value))
             return False
 
     def visit_Call(self, node):
@@ -419,12 +479,13 @@ class _Uses(cst.CSTVisitor):
             if callee is not None:
                 names, kinds, _ = callee[1]
                 name = arg.keyword.value if arg.keyword is not None else (names[position:position + 1] or (None,))[0]
-                if kinds.get(name) is not None:
+                kind = kinds.get(name)
+                if kind is not None and (kind == 'number' or self.flow(('param', callee[0], name), kind, arg.value)):
                     self.int_ok.add(id(arg.value))
             elif builtin in _NUMERIC or builtin in _EXTREMES and id(node) in self.int_ok:
                 self.int_ok.add(id(arg.value))
         if callee is not None and isinstance(callee[1][2], tuple) and id(node) not in self.int_ok:
-            self.needs_member(node, callee[1][2])
+            self.needs_member(node, callee[1][2], ('result', callee[0]))
 
     def visit_Comparison(self, node):
         operands = [node.left, *(item.comparator for item in node.comparisons)]
@@ -480,12 +541,14 @@ class _Uses(cst.CSTVisitor):
         self.int_ok.add(id(node.value))
 
     def visit_Return(self, node):
-        if node.value is not None and not self.depth and self.f.result is not None:
+        kind = self.f.result
+        if node.value is not None and not self.depth and kind is not None and (
+                kind == 'number' or self.flow(('result', self.f.key), kind, node.value)):
             self.int_ok.add(id(node.value))
 
     def held_local(self, target):
         entry = self.resolve(target.value) if isinstance(target, cst.Name) else None
-        return entry is not None and entry[2] and entry[1] == ('local', target.value)
+        return entry is not None and entry[0] is not None and not self.depth
 
     def visit_Assign(self, node):
         for target in node.targets:
@@ -530,6 +593,7 @@ class _Uses(cst.CSTVisitor):
                 classes = {self.classify(element.value) for element in part.iter.elements}
                 if len(classes) == 1 and None not in classes:
                     scope[part.target.value] = (classes.pop(), ('loop', id(part)), True)
+                    self.loops['loop', id(part)] = [element.value for element in part.iter.elements]
                     self.elements.add(id(part.iter))
         self.scopes.append(scope)
 
@@ -589,9 +653,21 @@ class _Uses(cst.CSTVisitor):
 
 
 class _Rewrite(cst.CSTTransformer):
-    def __init__(self, literal, convert):
+    def __init__(self, literal, convert, checks):
         super().__init__()
-        self.literal, self.convert = literal, convert
+        self.literal, self.convert, self.checks = literal, convert, checks
+
+    def on_leave(self, original, updated):
+        updated = super().on_leave(original, updated)
+        cls = self.convert.get(id(original))
+        if cls is not None:
+            updated = cst.Call(cst.parse_expression(cls), [cst.Arg(updated.with_changes(lpar=(), rpar=()))],
+                               lpar=updated.lpar, rpar=updated.rpar)
+        cls = self.checks.get(id(original))
+        if cls is not None:
+            updated = cst.Call(cst.parse_expression(f'{MX_SYS_MOD}._mx_enum_member'),
+                               [cst.Arg(cst.parse_expression(cls)), cst.Arg(updated)])
+        return updated
 
     def leave_Attribute(self, original, updated):
         value = self.literal.get(id(original))
@@ -602,50 +678,73 @@ class _Rewrite(cst.CSTTransformer):
             literal = cst.UnaryOperation(cst.Minus(), literal, lpar=[cst.LeftParen()], rpar=[cst.RightParen()])
         return literal.with_changes(lpar=(*original.lpar, *literal.lpar), rpar=(*literal.rpar, *original.rpar))
 
-    def leave_Name(self, original, updated):
-        cls = self.convert.get(id(original))
-        if cls is None:
-            return updated
-        return cst.Call(cst.parse_expression(cls), [cst.Arg(updated.with_changes(lpar=(), rpar=()))],
-                        lpar=updated.lpar, rpar=updated.rpar)
 
-    leave_Call = leave_Name
-
-
-def plan(sources, ref_info, cells_info=None):
+def plan(sources, ref_info, cells_info=None, param_info=None):
     """{module: source} with IntEnum members and values written for their uses (see the module docstring), for all
-    modules of a model at once: a Cell's parameters and result are known wherever it is called."""
-    model = _Model(ref_info, cells_info)
-    result = dict(sources)
+    modules of a model at once: a Cell's parameters and result are known wherever it is called.
+
+    A parameter or result that some formula converts to its member must hold a value of its traced class. Where a
+    formula gives it a member of another class, or a value whose class the text does not show, that value goes
+    as an object through a check that raises ``TypeError`` unless it is a member of the class."""
+    model = _Model(ref_info, cells_info, param_info)
+    trees, formulas = {}, []
     for module, source in sources.items():
         if not model.concerns(module):
             continue
-        tree = cst.parse_module(source)
-        literal, convert = {}, {}
-        for cls in tree.body:
+        trees[module] = cst.parse_module(source)
+        for cls in trees[module].body:
             if not isinstance(cls, cst.ClassDef):
                 continue
             methods = [node for node in cls.body.body if isinstance(node, cst.FunctionDef)]
-            children = {name for node in methods if node.name.value == '__init__'
+            children = {target.target.attr.value for node in methods if node.name.value == '__init__'
                         for line in node.body.body if isinstance(line, cst.SimpleStatementLine)
                         for small in line.body if isinstance(small, cst.Assign) and isinstance(small.value, cst.Call)
                         and _code(small.value.func).rpartition('.')[2].startswith('_c_')
-                        for target in small.targets if isinstance(target.target, cst.Attribute)
-                        for name in [target.target.attr.value]}
+                        for target in small.targets if isinstance(target.target, cst.Attribute)}
+            formulas_of = {node.name.value for node in methods}
             for node in methods:
-                if node.name.value.startswith(('_mx_', '__')):
-                    continue
+                name = node.name.value
+                if name.startswith(('_mx_', '__')) or '_f_' + name in formulas_of:
+                    continue                # the model's own methods; the cache method of a formula
                 formula = _Formula(model, module, cls.name.value, node)
-                formula.children = children
+                formula.children, formula.forced = children, set()
                 if formula.own:
                     formula.analyse()
-                    literal.update(formula.uses.literal)
-                    convert.update(formula.uses.convert)
-        if literal or convert:
-            result[module] = tree.visit(_Rewrite(literal, convert)).code
+                    formulas.append(formula)
+    while True:                 # which parameters and results must be of their class, and what reaches them unproved
+        needy, grown = set().union(*(formula.uses.needs for formula in formulas)), True
+        while grown:
+            grown = False
+            for formula in formulas:
+                for sink, cls, node, found in formula.uses.flows:
+                    held = {key for source, key in found if key is not None and source == cls} if sink in needy else set()
+                    grown = grown or not held <= needy
+                    needy.update(held)
+        again = False
+        for formula in formulas:
+            forced = {id(node) for sink, cls, node, found in formula.uses.flows
+                      if sink in needy and any(source != cls for source, _ in found)}
+            if not forced <= formula.forced:
+                formula.forced |= forced
+                formula.checks = {id(node): formula.reach(cls) for sink, cls, node, found in formula.uses.flows
+                                  if id(node) in formula.forced} | getattr(formula, 'checks', {})
+                formula.analyse(formula.forced)
+                again = True
+        if not again:
+            break
+    result = dict(sources)
+    for module, tree in trees.items():
+        literal, convert, checks = {}, {}, {}
+        for formula in formulas:
+            if formula.module == module:
+                literal.update(formula.uses.literal)
+                convert.update(formula.uses.convert)
+                checks.update(getattr(formula, 'checks', {}))
+        if literal or convert or checks:
+            result[module] = tree.visit(_Rewrite(literal, convert, checks)).code
     return result
 
 
-def literals(module, source, ref_info, cells_info=None):
+def literals(module, source, ref_info, cells_info=None, param_info=None):
     """``plan`` for one module."""
-    return plan({module: source}, ref_info, cells_info)[module]
+    return plan({module: source}, ref_info, cells_info, param_info)[module]
