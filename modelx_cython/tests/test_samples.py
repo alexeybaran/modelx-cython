@@ -201,9 +201,11 @@ def test_locked_spaces(sample_dir):
     unlocked = work_dir / "LockedSpacesU_nomx_cy"
 
     top = (locked / "_mx_classes.py").read_text(encoding="utf-8")
-    data = top.split("class _c_Data")[1].split("\nclass ")[0]
-    proj = top.split("class _c_Projection")[1].split("\nclass ")[0]
-    table = top.split("class _c_Table")[1].split("\nclass ")[0]
+    import ast
+    lines = top.splitlines(keepends=True)
+    classes = {node.name: ''.join(lines[node.lineno - 1:node.end_lineno])
+               for node in ast.parse(top).body if isinstance(node, ast.ClassDef)}
+    data, proj, table = (classes[name] for name in ('_c_Data', '_c_Projection', '_c_Table'))
     child = (locked / "_m_Table" / "_mx_classes.py").read_text(encoding="utf-8")
 
     # locked classes: atomic flag accessors on the fast path, the model
@@ -397,14 +399,18 @@ def test_fractional_power(sample_dir, model):
     pxd = (work_dir / (model + "_nomx_cy") / "_mx_classes.pxd").read_text()
     assert "cdef double[11] _v_mth_rate\n" in pxd
     assert "cdef double[11] _v_mth_q\n" in pxd
-    assert "cdef double _f_int_pow(_c_Space1 self, long long t)\n" in pxd
+    import re
+    # The ordinary numeric Cell ABI widens integer/float observations without
+    # changing their values, as upstream does. Object ABI is separately tested.
+    assert re.search(r'cdef double _f_int_pow\(_c_Space1 self, long long t\)(?: except\? -1)?\n',pxd)
 
     # only the two floating-exponent powers are rewritten
     src = (work_dir / (model + "_nomx_cy") / "_mx_classes.py").read_text(
         encoding="utf-8")
     assert "_mx_sys._mx_pow((1 + self.ann_rate(t)), (1 / 12))" in src
     assert "_mx_sys._mx_pow((1 - self.ann_q(t)), (1 / 12))" in src
-    assert "return 2 ** -t" in src
+    # the C integer exponent is negated through the flagged helper (integer guards); the power stays
+    assert "2 ** _mx_sys._mx_flag_neg(t, _mx_cy.address(_mx_overflow))" in src
     # uncached_rate has no _f_ method, so its public method carries the
     # formula and goes through the transformer's other rewrite site
     assert "def uncached_rate(" in src
@@ -420,6 +426,10 @@ def test_fractional_power(sample_dir, model):
     assert subprocess.run(
         [sys.executable, str(work_dir / "assert_cy.py")], env=env
     ).returncode == 0
+    assert subprocess.run([sys.executable, '-c',
+        'from FractionalPower_nomx_cy import mx_model; s=mx_model.Space1; '
+        'assert s.int_pow(0) == 1; assert s.int_pow(1) == .5'],
+        cwd=work_dir, env=env).returncode == 0
 
 
 @pytest.mark.parametrize("sample_dir, model", [["array_usage", "ArrayUsage"]],
@@ -529,6 +539,7 @@ def test_size_spec_change(sample_dir, model, spec):
     assert subprocess.run([sys.executable, str(work_dir / "assert_cy_old.py")], env=env).returncode == 0
     assert subprocess.run([sys.executable, str(work_dir / "assert_cy_new.py")], env=env
                           ).returncode == (1 if spec == 'spec_old.py' else 0)
+
 
 def run_text(argv, env, **kwargs):
     """subprocess.run capturing text output, decoded as UTF-8 whatever
