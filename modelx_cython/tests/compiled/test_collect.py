@@ -139,3 +139,85 @@ def test_collect_workers_key():
     for bad in (0, 2.0, True):
         with pytest.raises(ValueError, match='collect_workers'):
             CompilerPolicy.resolve({'collect_workers': bad})
+
+
+PEAK_PROBE = textwrap.dedent('''\
+    import resource, sys
+    from exported_cy import mx_model as compiled
+    compiled.Projection.n = int(sys.argv[1])
+    compiled._mx_collect_workers = int(sys.argv[2])
+    compiled.Projection.collect()
+    print(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss // 1024)
+''')
+
+STALE_PROBE = textwrap.dedent('''\
+    import json
+    from exported import mx_model as export
+    from exported_cy import mx_model as compiled
+
+    def flat(result):
+        return {str(c): {k: (dict(v) if isinstance(v, dict) else v) for k, v in r._fields.items()}
+                for c, r in result.individual.items()}
+
+    out = {'export': flat(export.Projection.collect())}
+    for workers in (1, 4):
+        compiled._mx_collect_workers = workers
+        compiled.Projection._mx_collect_cache.clear()
+        out[workers] = flat(compiled.Projection.collect())
+    print(json.dumps(out))
+''')
+
+
+def test_reused_items_hold_nothing_from_the_previous_policy(tmp_path):
+    """Each worker reuses one item: values of every kind of cache differ from one policy to the next, one
+    Cell is reached by one policy only and one by every other policy, so a value left from an earlier
+    policy on the same item would show. Peak memory does not grow with the number of items."""
+    model = mx.new_model('StaleCollect')
+    try:
+        proj = model.new_space('Projection', formula='lambda key: None', refs={'n': 24})
+        proj.new_cells('keys', 'lambda: tuple(range(1, n + 1))')
+        proj.new_cells('wide', 'lambda t: key * 0.5 + t')
+        proj.new_cells('dense', 'lambda t: key * 10.0 + t')
+        proj.new_cells('scalar', 'lambda: key * 1.5 + dense(3)')
+        proj.new_cells('count', 'lambda: key * 7')
+        proj.new_cells('keyed', 'lambda name: key * len(name)')
+        proj.new_cells('only', 'lambda: key * 100.0')
+        proj.new_cells('odd', 'lambda t: key * 0.25 + t')
+        proj.new_cells('pv', '''def pv():
+    total = 0.0
+    for t in range(6):
+        total = total + dense(t) / (1.03 ** t)
+    return total
+''')
+        proj.set_collect(over={'key': proj.keys}, outputs='''lambda: {'individual': {
+    'scalar': scalar(), 'count': count(), 'wide': sum(wide(t) for t in range(4000)), 'keyed': keyed('xyz'), 'pv': pv(),
+    'dense': {t: dense(t) for t in range(4)},
+    'only': only() if key == 5 else 0.0,
+    'odd': odd(2) if key % 2 else 0.0}}''')
+        model.export(tmp_path / 'exported')
+    finally:
+        model.close()
+    (tmp_path / 'sample.py').write_text(
+        'from exported import mx_model as m\nm.Projection.collect()\n', encoding='utf-8')
+    subprocess.run([sys.executable, '-m', 'modelx_cython', 'exported', '--sample', 'sample.py', '--no-spec'],
+                   cwd=tmp_path, check=True, capture_output=True)
+    assert '_mx_reset_root__c_Projection' in (tmp_path / 'exported_cy' / '_mx_classes.pxd').read_text()
+    run = subprocess.run([sys.executable, '-c', STALE_PROBE], cwd=tmp_path, check=True,
+                         capture_output=True, text=True)
+    out = json.loads(run.stdout)
+    assert out['1'] == out['export'] and out['4'] == out['export']
+    assert out['export']['5']['only'] == 500.0 and out['export']['3']['odd'] == 2.75
+    # items are released at one worker as at four: kept, 3,000 items of 40 kB would add 120 MB
+    def peak(n, workers):
+        return int(subprocess.run([sys.executable, '-c', PEAK_PROBE, str(n), workers], cwd=tmp_path,
+                                  check=True, capture_output=True, text=True).stdout)
+    for workers in ('1', '4'):
+        small, large = peak(20, workers), peak(3000, workers)
+        assert large - small < 30, (workers, small, large)
+
+
+def test_a_declaration_without_reset_rule_stops_the_build():
+    from modelx_cython import collect
+    block = 'cdef class _c_P(_mx_sys.BaseSpace):\n    cdef RateTable _v_rate\n'
+    with pytest.raises(ValueError, match=r"P: collect cannot reset .*_v_rate.* \(Cell rate\)"):
+        collect.reset_function('_c_P', block, {'_c_P': None}, set())
