@@ -1,5 +1,6 @@
-"""An IntEnum Reference converts the key level of a table at load; the table is read in the compiled model."""
-from http import HTTPStatus
+"""An IntEnum Reference converts the key level of a table at load; the table is read in the compiled model.
+
+The class is an enum family (values 0..n-1), so its Reference is fixed in the compiled model (enums.plan)."""
 import subprocess
 import sys
 
@@ -7,13 +8,13 @@ import modelx as mx
 
 DATA_CHECK = '''\
 from types import SimpleNamespace
-from http import HTTPStatus
+from bytype_status import Status
 from exported import mx_model as original
 from exported_cy import mx_model as compiled
 for t in range(4):
     assert original.Projection.rate(t) == compiled.Projection.rate(t), t
 table, live = compiled.Data.table(), original.Data.table()
-assert list(table.index) == list(live.index) == [(HTTPStatus.OK, 0), (HTTPStatus.OK, 1), (HTTPStatus.NOT_FOUND, 0), (HTTPStatus.NOT_FOUND, 1)]
+assert list(table.index) == list(live.index) == [(Status.OK, 0), (Status.OK, 1), (Status.NOT_FOUND, 0), (Status.NOT_FOUND, 1)]
 assert [type(k) for k, _ in table.index] == [type(k) for k, _ in live.index]     # the key level is converted the same way
 for space in (compiled.Data, compiled.Projection):
     try:
@@ -24,22 +25,26 @@ for space in (compiled.Data, compiled.Projection):
         raise AssertionError('an IntEnum Reference was rebindable in the compiled model')
 print('data key levels ok')
 '''
+STATUS = 'import enum\n\nclass Status(enum.IntEnum):\n    OK = 0\n    NOT_FOUND = 1\n'
 
 
-def test_table_key_levels_converted_through_a_fixed_reference(tmp_path):
+def test_table_key_levels_converted_through_a_fixed_reference(tmp_path, monkeypatch):
     """A Data Space converts a table's key level with its IntEnum Reference at load (``Status[name]``); the
     Reference is fixed in the compiled model and the conversion only reads the class, so it works as live."""
     import pandas as pd
+    (tmp_path / 'bytype_status.py').write_text(STATUS, encoding='utf-8')
+    monkeypatch.syspath_prepend(str(tmp_path))
+    from bytype_status import Status
     model = mx.new_model('EnumKeyLevels')
     try:
-        data = model.new_space('Data', refs={'Status': HTTPStatus, 'pd': pd})
+        data = model.new_space('Data', refs={'Status': Status, 'pd': pd})
         data.new_cells('table', '''def table():
     frame = pd.DataFrame({"status": ["OK", "OK", "NOT_FOUND", "NOT_FOUND"], "t": [0, 1, 0, 1],
                           "rate": [0.01, 0.02, 0.5, 0.6]})
     frame["status"] = [Status[name] for name in frame["status"]]
     return frame.set_index(["status", "t"]).sort_index()
 ''')
-        proj = model.new_space('Projection', refs={'Status': HTTPStatus, 'data': data})
+        proj = model.new_space('Projection', refs={'Status': Status, 'data': data})
         proj.new_cells('rate', 'lambda t: float(data.table().loc[(Status.OK if t < 2 else Status.NOT_FOUND, t % 2), "rate"])')
         model.export(tmp_path / 'exported')
     finally:
