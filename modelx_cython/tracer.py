@@ -646,9 +646,10 @@ class MxCallTracer(CallTracer):
             return
         arg_names = code.co_varnames[0: code.co_argcount]
         arg_vals = {}
+        local_vals = frame.f_locals     # one view of the frame's locals (a new proxy per read)
         for name in arg_names:
-            if name in frame.f_locals:
-                arg_vals[name] = frame.f_locals[name]
+            if name in local_vals:
+                arg_vals[name] = local_vals[name]
 
         self.traces[frame] = CallTrace(func, arg_vals)
 
