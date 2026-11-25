@@ -175,6 +175,27 @@ def _visit_attributes(node, visitor):
     visitor.on_leave(node)
 
 
+_KINDS = {}     # (node class, class or tuple of classes) -> issubclass
+
+
+def instances(node, kind):
+    """The nodes of ``walk(node)`` that are instances of ``kind`` (a node class or a tuple of
+    them), the test made once per node class."""
+    kinds = _KINDS
+    for item in walk(node):
+        key = type(item), kind
+        found = kinds.get(key)
+        if found is None:
+            found = kinds[key] = issubclass(type(item), kind)
+        if found:
+            yield item
+
+
+def has_power(node):
+    """Whether ``node`` holds a ``**`` anywhere (nested scopes included)."""
+    return any(isinstance(item.operator, cst.Power) for item in instances(node, cst.BinaryOperation))
+
+
 def walk(node):
     """``node`` and every node below it, depth first in source order."""
     stack = [node]

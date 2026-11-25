@@ -72,7 +72,7 @@ from modelx_cython.consts import CY_MOD, MX_POW, MX_SELF, MX_SYS_MOD
 from modelx_cython.typedefs import CY_FLOAT_T, CY_INT_T
 from modelx_cython.usage import RESOLVED, CellsResolver, _extract_self_chain
 from modelx_cython.scopes import CstFacts, OPAQUE_SCOPES as _OPAQUE_SCOPES, has_scope_effects, lexical_nodes
-from modelx_cython.syntax import local_assignment, single_statement, walk
+from modelx_cython.syntax import has_power, local_assignment, single_statement, walk
 
 _logger = logging.getLogger(__name__)
 
@@ -472,6 +472,10 @@ def rewrite_powers(
             param_kinds.update((name, KIND_FLOAT) for name in declarations
                                if facts.stores[name] == 1 and name not in cells.params
                                and name not in facts.deleted)
+    if not has_power(node.body):
+        # the rewriter changes only a '**': none to rewrite, decline or report
+        cells.powers_in_loops = []
+        return node
     kind = OperandKind(resolver, cells_kinds, ref_kinds, cls_fqname, param_kinds)
     return_operands = None
     if native_return:

@@ -114,11 +114,9 @@ class _OrderedArguments(cst.CSTTransformer):
 def _rewrites(node):
     """Whether :class:`_OrderedArguments` can change ``node``: it rewrites only a ``**`` and a
     call of the name ``int``, ``min`` or ``max``."""
-    from .syntax import walk
-    return any(isinstance(part, cst.BinaryOperation) and isinstance(part.operator, cst.Power)
-               or isinstance(part, cst.Call) and isinstance(part.func, cst.Name)
-               and part.func.value in ('int', 'min', 'max')
-               for part in walk(node))
+    from .syntax import has_power, instances
+    return has_power(node) or any(isinstance(part.func, cst.Name) and part.func.value in ('int', 'min', 'max')
+                                  for part in instances(node, cst.Call))
 
 
 def preserve_argument_order(formula, native_result=False, operand_kind=None):
