@@ -302,6 +302,24 @@ def test_row_of_a_narrow_number_column_is_pandas(model_tables, dtype, native):
     assert model_tables.native_slots(frame) == native
 
 
+def test_object_columns_hold_what_pandas_returns(tables):
+    """Every value of a column kept as objects is the value ``.loc`` returns, in type too: text of both pandas
+    text dtypes (a missing one included), Python objects, and columns of other dtypes."""
+    _tables, _ = tables
+    frame = pd.DataFrame({
+        'text': pd.Series(['a', None, 'c', 'd'], dtype='str'),
+        'objects': pd.Series(['a', 3, None, (1, 2)], dtype=object),
+        'small': np.array([1, 2, 3, 4], dtype=np.int32),
+        'flag': [True, False, True, False],
+        'when': pd.to_datetime(['2020-01-01', '2020-01-02', '2020-01-03', '2020-01-04']),
+        'q': [0.5, 1.5, 2.5, 3.5]}).set_axis(pd.Index([4, 2, 3, 1]))
+    table = _tables.prepare(frame)
+    for key in frame.index:
+        for column in frame.columns:
+            want, got = frame.loc[key, column], table.value(key, column)
+            assert type(want) is type(got) and (want == got or (want != want and got != got)), (key, column, want, got)
+
+
 def test_copy_at_bind(tables):
     _tables, _ = tables
     frame = pd.DataFrame({'q': [1.0, 2.0, 3.0]}, index=pd.Index([10, 11, 12]))

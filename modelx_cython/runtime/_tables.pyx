@@ -398,7 +398,11 @@ cdef PreparedTable _build(object value):
         else:
             kinds.append(COLUMN_OBJECT)
             slots.append(len(objects))
-            objects.append(tuple(column.iat[int(row)] for row in order))
+            if column.dtype == object or isinstance(column.dtype, pd.StringDtype):
+                # the stored objects themselves, in one pass (not one pandas call per value)
+                objects.append(tuple(column.to_numpy(dtype=object)[order]))
+            else:
+                objects.append(tuple(column.iat[int(row)] for row in order))
     table.column_positions = {label: position for position, label in enumerate(labels)}
     _name_map(table)
     table.column_kind = np.asarray(kinds, dtype=np.intc) if kinds else np.zeros(1, dtype=np.intc)
