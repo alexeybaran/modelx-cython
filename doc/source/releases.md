@@ -23,8 +23,7 @@ formula neither binds the parameter again nor gives it a default that is no memb
   the position only, an object equal to a member's value (its text, its integer, a member
   of another class with that value) is taken as that member, as modelx compares it. Any
   other value raises `ValueError` naming the Cell; so does anything but a member where the
-  Cell uses the member itself. An exact integer from Python is taken as the position (for an
-  `IntEnum`, its value) where the Cell uses only the position.
+  Cell uses the member itself. An integer or a bool is equal to no `StrEnum` member.
 - Other enum classes (an `IntEnum` with other values or its own `==`) are objects throughout.
 
 Rebinding such a Reference on a compiled model raises `AttributeError`;

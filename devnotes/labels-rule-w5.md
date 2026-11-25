@@ -63,6 +63,10 @@ Lost: D31 (a Reference holding a member, compared in a loop through a local alia
 text. Measured on its own micro model (a 20-step loop comparing a member Reference through a local, 4 million
 comparisons): 0.058 s on 15454b7, 0.566 s here, about 10x. Restoring it means holding References and locals bound
 to them again, which the old code did in about 100 lines; not done.
+In the text going forward (lifelib `r4/l1-lean-b` 1956487, all 56 StrEnum models) no Reference holds an enum
+member. A scan loaded each model and checked every formula for a member Reference compared directly or through a
+local, and found none. SPIA_US_S's `commute_disc_convention` is now the text `"compound"`, compared with text
+literals. So D31 has no instance there and stays lost.
 
 ## Behaviours not equal to live
 - A value that is no member's value, given to a held parameter, raises `ValueError` at the named Cell where
@@ -73,9 +77,9 @@ to them again, which the old code did in about 100 lines; not done.
 - A value equal to a member, given to a parameter that is not strict, is the member in the uses that don't show
   the class. Arithmetic, comparison, truth and f-string give the same; so does a read subscript, as long as
   the container doesn't key the member and the text apart.
-- A Python call that gives an exact integer to a non-strict StrEnum parameter takes it as the position; live
-  sees an integer equal to no member. Ints stay accepted because a Python subclass of a compiled Space passes
-  positions through the gate. That subclass then raises at strict parameters (clear error).
+- An integer or a bool given to a StrEnum parameter raises `ValueError` at the named Cell (it is equal to no
+  member; live takes the non-matching branch). The cost: a Python subclass of a compiled Space, which passes
+  positions through the gate, raises there too. For an IntEnum an integer or bool is its value, equal to live.
 - Gone from the previous list: a text read as a member (now a clear error), a Cell returning an IntEnum's
   integer (it returns the member), and `TypeError`s without the Cell's name.
 

@@ -236,15 +236,12 @@ cdef inline object _mx_enum_at(object cls, long long position):
 
 cdef inline long long _mx_enum_code(object cls, object value, bint strict, str cell) except? -1:
     """The position of ``value`` for a parameter of ``cell`` held for the enum family ``cls``: a member of ``cls``;
-    where the Cell uses only the position (not ``strict``), also a position (an exact integer, as compiled code
-    gives it through a Python subclass) or an object equal to a member's value, as modelx compares it. Anything
-    else raises."""
+    where the Cell uses only the position (not ``strict``), also an object equal to a member's value, as modelx
+    compares it (an IntEnum's value is its position). Anything else raises."""
     cdef object member = None
     if type(value) is cls:
         return cls._member_names_.index(value._name_)
     if not strict:
-        if type(value) is int and 0 <= value < len(cls._member_names_):
-            return value
         try:
             member = cls._value2member_map_.get(value)
         except TypeError:

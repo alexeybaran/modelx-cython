@@ -60,8 +60,9 @@ SAMPLE = 'for t in range(3):\n    p.net(t); p.both(t); p.call_named(t)\n'
 PROBES = ['p.net(2)', 'p.claims(2)', 'p.claims(2, p.Kind.LAPSE)', 'p.claims(2, "LAPSE")', 'p.rate(2, p.Kind.DEATH)',
           'p.rate(2, "DEATH")', 'p.both(2)', 'p.price(2, p.Leg.PUT)', 'p.scaled(2, p.Leg.PUT)', 'p.scaled(2, 1)',
           'p.named(2, p.Kind.DEATH)', 'p.call_named(1)', 'p.tagged(2, p.Kind.DEATH)', 'p.tagged(2, "LAPSE")',
-          'p.tagged(1, p.Kind.LAPSE)', 'p.untagged(2, p.Kind.DEATH)', 'p.untagged(2, "DEATH")']
-RAISE = ['p.rate(2, "NOPE")', 'p.named(2, "DEATH")', 'p.price(2, 1.0)', 'p.price(2, 1)']
+          'p.tagged(1, p.Kind.LAPSE)', 'p.scaled(2, True)', 'p.scaled(1, 0)', 'p.untagged(2, p.Kind.DEATH)', 'p.untagged(2, "DEATH")']
+RAISE = ['p.rate(2, "NOPE")', 'p.named(2, "DEATH")', 'p.price(2, 1.0)', 'p.price(2, 1)', 'p.rate(2, 0)',
+         'p.rate(2, True)']
 
 
 def test_a_family_stored_with_the_model_equals_live(tmp_path):
@@ -106,6 +107,8 @@ def test_a_family_stored_with_the_model_equals_live(tmp_path):
         "p.rate(2, \"NOPE\") ValueError P.rate: 'NOPE' is not a member of Kind",
         "p.named(2, \"DEATH\") ValueError P.named: 'DEATH' is not a member of Kind, which this Cell uses as a member",
         'p.price(2, 1.0) ValueError P.price: 1.0 is not a member of Leg, which this Cell uses as a member',
-        'p.price(2, 1) ValueError P.price: 1 is not a member of Leg, which this Cell uses as a member']
+        'p.price(2, 1) ValueError P.price: 1 is not a member of Leg, which this Cell uses as a member',
+        'p.rate(2, 0) ValueError P.rate: 0 is not a member of Kind',          # an int or a bool is no text
+        'p.rate(2, True) ValueError P.rate: True is not a member of Kind']
     pxd = (tmp_path / 'exported_cy/_mx_classes.pxd').read_text(encoding='utf-8')
     assert 'object kind=*' in pxd and 'long long leg' in pxd and 'double[3][2] _v_rate' in pxd, pxd
