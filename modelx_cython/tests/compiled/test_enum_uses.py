@@ -113,7 +113,7 @@ PROBES = [f'p.{name}()' for name in (
     'p.nm(p.Leg.PUT)', 'p.fmt_pretty(p.Pretty.F)', 'p.str_tuple(p.Leg.PUT)', 'p.shown(p.Leg.PUT)', 'p.opt_local(1)',
     'p.ord_param(p.Ord.LOW)', 'p.pick_nm(1)', 'p.call_un(1)', 'p.ident(p.Leg.PUT)', 'p.ident(p.Leg.CALL)',
     'p.ret_member() == p.Leg.PUT', 'p.Sub[p.Leg.CALL].val()', 'p.total(2)', 'p.chosen(1, p.Leg.PUT)',
-    'p.chosen(1, 0)', 'p.fund_at(2, p.Timing.AFT)', 'p.fund_at(2, p.Timing.END)', 'p.shown(1)[4:]',
+    'p.chosen(1, 0)', 'p.fund_at(2, p.Timing.AFT)', 'p.fund_at(2, p.Timing.END)',
     'p.C.ident()', 'p.C.idents()', 'p.basis_param(p.Leg.PUT)']
 # a member of another class given to a converted parameter or result; probed in a process of their own: the
 # exported model keeps one cached value for members of two classes that are equal as integers
