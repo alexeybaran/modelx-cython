@@ -4,8 +4,8 @@ The cases of two reviews of the enum pass and two shapes of real models, in one 
 enum-typed value where its class shows (``repr``, ``str``, ``format``, ``isinstance``, a container), read by
 ``.name``, tested by identity, passed to a helper function, appended to a list, used as the key of an item Space
 or of a table by its name, in a comprehension, from an untraced Cell, across Spaces, and of a class with its own
-operators. Three probes raise ``TypeError`` where the model gives a value, because a member of another class
-reaches a parameter or result that is compiled as an integer of its traced class and converted back.
+operators. Two probes raise ``ValueError`` at the named Cell where the model gives a value, because a member of
+another class reaches a parameter that is held as a position of its traced class and used as a member.
 """
 import os
 import subprocess
@@ -111,13 +111,13 @@ PROBES = [f'p.{name}()' for name in (
     'comp_name', 'comp_repr', 'comp_isinst', 'list_loop', 'fmt_r', 'app_names', 'ord_lt', 'lab', 'ret_name',
     'is_tuple', 'ref_nm', 'sub_nm', 'basis')] + [
     'p.nm(p.Leg.PUT)', 'p.fmt_pretty(p.Pretty.F)', 'p.str_tuple(p.Leg.PUT)', 'p.shown(p.Leg.PUT)', 'p.opt_local(1)',
-    'p.ord_param(p.Ord.LOW)', 'p.pick_nm(1)', 'p.call_un(1)', 'p.ident(p.Leg.PUT)', 'p.ident(p.Leg.CALL)',
+    'p.ord_param(p.Ord.LOW)', 'p.pick_nm(1)', 'p.pick_nm(0)', 'p.call_un(1)', 'p.ident(p.Leg.PUT)', 'p.ident(p.Leg.CALL)',
     'p.ret_member() == p.Leg.PUT', 'p.Sub[p.Leg.CALL].val()', 'p.total(2)', 'p.chosen(1, p.Leg.PUT)',
     'p.chosen(1, 0)', 'p.fund_at(2, p.Timing.AFT)', 'p.fund_at(2, p.Timing.END)',
     'p.C.ident()', 'p.C.idents()', 'p.basis_param(p.Leg.PUT)']
 # a member of another class given to a converted parameter or result; probed in a process of their own: the
 # exported model keeps one cached value for members of two classes that are equal as integers
-RAISES = ['p.cross()', 'p.pick_nm(0)', 'p.nm(p.Kind.Y)']       # the last: given from Python
+RAISES = ['p.cross()', 'p.nm(p.Kind.Y)']       # the last: given from Python
 
 
 def test_every_use_equals_live(tmp_path, monkeypatch):
@@ -164,5 +164,6 @@ def test_every_use_equals_live(tmp_path, monkeypatch):
     assert compiled == live, '\n'.join(f'{a}  |  {b}' for a, b in zip(live, compiled) if a != b)
     assert "p.shown(p.Leg.PUT) ('<Leg.PUT: 1>'," in ''.join(compiled)
     assert "p.fund_at(2, p.Timing.END) ValueError invalid timing: 2 <Timing.END: 2>" in compiled
-    assert out['exported'][:len(RAISES)] == ["p.cross() ['X', 'Y']", "p.pick_nm(0) 'X'", "p.nm(p.Kind.Y) 'Y'"]
-    assert [line.split()[1] for line in out['exported_cy'][:len(RAISES)]] == ['TypeError'] * 3, out['exported_cy']
+    assert out['exported'][:len(RAISES)] == ["p.cross() ['X', 'Y']", "p.nm(p.Kind.Y) 'Y'"]
+    assert all(line.split()[1] == 'ValueError' and line.endswith('is not a member of Leg, which this Cell uses as a '
+               'member') for line in out['exported_cy'][:len(RAISES)]), out['exported_cy']

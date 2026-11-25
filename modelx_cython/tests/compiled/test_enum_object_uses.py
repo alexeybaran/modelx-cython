@@ -7,7 +7,7 @@ integer that is not a member raises AttributeError, as live. A member stored as 
 "name")`` and ``.name`` of a child Space's Cell result work. A sum over a literal tuple whose loop variable is an
 operand of arithmetic is exact beyond 64 bits. Identity tests and an enum value held as an integer where its
 class shows give what the model gives; a member of another class given to a parameter whose member the Cell
-reads raises TypeError when the call is reached (these were build errors of the first literal pass).
+reads raises ValueError when the call is reached (these were build errors of the first literal pass).
 """
 import os
 import subprocess
@@ -117,7 +117,7 @@ def test_results_where_the_class_shows_equal_live(tmp_path, monkeypatch):
 
 def test_values_that_were_build_errors_equal_live(tmp_path, monkeypatch):
     """Four formulas that the first literal pass refused. Three now give what the model gives; a member of another
-    class given to a parameter whose member the Cell reads raises TypeError when it is reached."""
+    class given to a parameter whose member the Cell reads raises ValueError when it is reached."""
     cells = {'nm': 'lambda k: k.name', 'other': 'lambda: nm(Kind.Y)',
              'is_tuple': 'lambda: tuple(x for x in (Leg.CALL,))[0] is (Leg.CALL, Leg.PUT)[0]',
              'pretty_param': 'lambda s: "sex=" + str(s)', 'rp': 'lambda k: repr(k)'}
@@ -130,8 +130,8 @@ def test_values_that_were_build_errors_equal_live(tmp_path, monkeypatch):
         p = import_module(sys.argv[1]).mx_model.P
         try:                # nm is not called with Leg.PUT: the exported model keeps one cached value for both
             print(p.other())
-        except TypeError as error:
-            print('TypeError')
+        except ValueError as error:
+            print('ValueError')
         print(repr((p.is_tuple(), p.pretty_param(p.Pretty.F), p.rp(p.Leg.PUT), p.nm(p.Leg.CALL))))
         ''')
     out = {}
@@ -141,4 +141,4 @@ def test_values_that_were_build_errors_equal_live(tmp_path, monkeypatch):
         assert run.returncode == 0, package + run.stdout + run.stderr
         out[package] = run.stdout.splitlines()
     assert out['exported'] == ['Y', "(True, 'sex=F', '<Leg.PUT: 1>', 'CALL')"]
-    assert out['exported_cy'] == ['TypeError', "(True, 'sex=F', '<Leg.PUT: 1>', 'CALL')"]
+    assert out['exported_cy'] == ['ValueError', "(True, 'sex=F', '<Leg.PUT: 1>', 'CALL')"]
