@@ -130,3 +130,25 @@ literals. So D31 has no instance there and stays lost.
   an unconverted member would reach a C integer.
 - `integer_boundaries.py` skips Cells with closures (`integer_parameters`), so they get no gate. The new test
   covers such a Cell (`scaled`) and passes.
+
+## On r4/integration 61602c4 (branch `r4/w5-labels-2`)
+The branch's net change was applied to 61602c4 as one patch; the branch carries a merge of the integration tree,
+so its commits don't replay. The edits to `test_audit_contracts` and `test_enum_by_type` were ported to their
+split files (`_b1`, `_b4`). Tests of the integration tree that asserted the previous rule were updated. Each
+still compares compiled with live:
+- `test_diag_scale_int_items`: `Leg` (1..3) is no family, so `comp`'s parameter (members, an int subclass, a
+  bool) is an object. Compiled now equals live, which gives `1.5 * 2**70 + 1` and `7.25`; before, compiled
+  raised `OverflowError` and `TypeError` there. The items are now integers, so the native tuple loop and the
+  64-bit boundary are tested unchanged. Lost: that loop for a parameter given non-family IntEnum members.
+- `test_audit_runtime_b2`: `HTTPStatus` is no family, so its Reference is ordinary. Rebinding it is accepted
+  and the formulas read the new value, as live. Before, rebinding raised in the compiled model only, a
+  difference from live. A family's Reference still raises (`test_enum_by_type`).
+- `test_param_bounds_join`: the domain is checked on a family `Phase` (0..3). Members the sample never passed
+  work, as live. `HTTPStatus` has no domain: its parameter is an object.
+- `test_constant_key_reads`: the table key `P.OK` stays the member, read per call; the read is still a
+  prepared one (`kcode`). Lost: the key as an integer literal (D79 part 1).
+- `test_diag_kr_forms`, `test_diag_mt_shared_refs`: a loop over `HTTPStatus` members and a local bound to
+  `Kind` (1, 2) members hold the members. Lost: C-integer loop variables and locals for non-family members,
+  and locals of members for families too.
+- `test_enum_stored_module` skips where modelx lacks the export of stored classes (modelx 0883979,
+  `r4/modelx-integration`); it runs and passes with it.
