@@ -364,9 +364,19 @@ cdef long long _int_part(object part):
 # ---- binding (T-3) ----------------------------------------------------------------------------------
 # A frame Cell prepares its frame when it binds it (``bind_new``, every time: a frame edited in place and given
 # to a new model is prepared from what it holds then). A read that has only the frame finds that table by the
-# identity of the frame (``prepared``); the entry is dropped when the frame dies. Each operation on the map is one
-# dict operation (no lock): two threads that miss prepare the same frame twice, and one table stays.
-cdef dict _prepared = {}               # id(frame) -> (weak reference to the frame, PreparedTable or None)
+# identity of the frame (``prepared``) within the generation it was prepared in: each new model of this package
+# starts a generation (``renew``, called by its top-level Spaces), so a frame any Cell returns, a Reference's frame
+# returned as it is included, is prepared again for a new model and never read from a copy an earlier model made.
+# The entry is dropped when the frame dies. Each operation on the map is one dict operation (no lock): two
+# threads that miss prepare the same frame twice, and one table stays.
+cdef dict _prepared = {}               # id(frame) -> (weak reference to the frame, PreparedTable or None, generation)
+cdef Py_ssize_t _generation = 0
+
+
+def renew():
+    """A new model of this package: every frame is prepared again at its first read in it."""
+    global _generation
+    _generation += 1
 cdef PreparedTable _NOT_PREPARED = PreparedTable.__new__(PreparedTable)     # every slot -1: reads stay pandas
 
 
@@ -384,7 +394,7 @@ cdef object _prepare_new(object frame):
     table = prepare(frame)
     if table is not None:
         _decide(table, signatures, axes)
-    _prepared[key] = (weakref.ref(frame, lambda ref, key=key: _forget(key, ref)), table)
+    _prepared[key] = (weakref.ref(frame, lambda ref, key=key: _forget(key, ref)), table, _generation)
     return table
 
 
@@ -399,14 +409,14 @@ try:
 except ImportError:         # the runtime used on its own (tests)
     pass
 else:
-    _register(lambda value: bind_new(value), __name__.split('.')[0])
+    _register(lambda value: bind_new(value), __name__.split('.')[0], renew)
 
 
 cdef object prepared(object frame):
-    """The PreparedTable of ``frame`` (None when its reads must stay pandas): the one its Cell bound, else prepared
-    at this first read."""
+    """The PreparedTable of ``frame`` (None when its reads must stay pandas): the one its Cell bound, or prepared
+    at an earlier read, in this model's generation; else prepared at this first read."""
     entry = _prepared.get(id(frame))
-    if entry is not None and entry[0]() is frame:
+    if entry is not None and <Py_ssize_t>entry[2] == _generation and entry[0]() is frame:
         return entry[1]
     return _prepare_new(frame)
 

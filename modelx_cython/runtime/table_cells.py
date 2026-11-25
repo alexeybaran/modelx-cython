@@ -13,12 +13,23 @@ import threading
 
 _lock = threading.Lock()
 _binders = {}       # top-level package of a compiled model -> its runtime _tables.bind
+_renewers = {}      # top-level package of a compiled model -> its runtime _tables.renew
 
 
-def register_prepared(bind=None, package=None):
+def register_prepared(bind=None, package=None, renew=None):
     with _lock:
         if bind is not None:
             _binders[package] = bind
+        if renew is not None:
+            _renewers[package] = renew
+
+
+def new_model(space):
+    """A top-level Space of a new model is created: frames are prepared again at their first read in it (a frame
+    edited in place since an earlier model prepared it is read as it is now)."""
+    renew = _renewers.get(type(space).__module__.split('.')[0])
+    if renew is not None:
+        renew()
 
 
 def bind_frame(space, value):
