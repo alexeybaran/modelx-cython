@@ -188,6 +188,35 @@ def expression_contexts(module):
     return contexts
 
 
+# Nodes that bind a name of their own (``name`` field) without an expression context
+_NAMED_BINDERS = tuple(getattr(cst, kind) for kind in (
+    'FunctionDef', 'ClassDef', 'Param', 'TypeAlias', 'TypeVar', 'TypeVarTuple', 'ParamSpec')
+    if hasattr(cst, kind))
+# Nodes whose names may bind although LibCST reads them as loads
+_NAME_BINDERS = tuple(getattr(cst, kind) for kind in (
+    'Import', 'ImportFrom', 'Global', 'Nonlocal', 'Match') if hasattr(cst, kind))
+
+
+def binds_none_of(module, names):
+    """True when no node of ``module`` can bind any of ``names``: no store of one, no def,
+    class, parameter, type parameter or import of one, no global, nonlocal or match naming
+    one. ScopeProvider then gives each of ``names`` its builtin binding alone, in every scope.
+    False when one may be bound (ask ScopeProvider)."""
+    names = frozenset(names)
+    contexts = expression_contexts(module)
+    for node in walk(module):
+        if isinstance(node, cst.Name):
+            if node.value in names and contexts.get(node, ExpressionContext.LOAD) is not ExpressionContext.LOAD:
+                return False
+        elif isinstance(node, _NAMED_BINDERS):
+            if node.name.value in names:
+                return False
+        elif isinstance(node, _NAME_BINDERS):
+            if any(isinstance(item, cst.Name) and item.value in names for item in walk(node)):
+                return False
+    return True
+
+
 def has_scope_effects(body):
     effects = (cst.Global, cst.Nonlocal, cst.Import, cst.ImportFrom, cst.ExceptHandler,
                cst.Del, cst.NamedExpr, cst.FunctionDef, cst.ClassDef, cst.Lambda)

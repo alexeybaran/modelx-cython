@@ -8,7 +8,7 @@ from .checked_arithmetic import (
 )
 from .consts import CY_MOD, FORMULA_PREF, MX_SELF, MX_SYS_MOD
 from .powers import KIND_FLOAT, OperandKind, kind_of_type_expr
-from .scopes import CstFacts, Names, OPAQUE_SCOPES, has_scope_effects, lexical_nodes
+from .scopes import CstFacts, Names, OPAQUE_SCOPES, binds_none_of, has_scope_effects, lexical_nodes
 from .syntax import arguments, dotted_name, local_assignment, statements, walk
 from .usage import RESOLVED, _extract_self_chain
 
@@ -786,10 +786,14 @@ def guard_integer_boundaries(state, module_info, resolver, cells_kinds, ref_kind
     gate_class = state.names.reserve('_mx_checked_cell_call')
     changed = False
     signatures = _signed_signatures(state)
-    global_bindings = cst.MetadataWrapper(state.syntax, unsafe_skip_copy=True).resolve(
-        cst.metadata.ScopeProvider)[state.syntax]
-    safe_builtins = {name for name in ('isinstance', 'int', 'bool')
-                     if all(isinstance(binding, BuiltinAssignment) for binding in global_bindings[name])}
+    builtins = ('isinstance', 'int', 'bool')
+    if binds_none_of(state.syntax, builtins):     # what ScopeProvider gives then, without resolving it
+        safe_builtins = set(builtins)
+    else:
+        global_bindings = cst.MetadataWrapper(state.syntax, unsafe_skip_copy=True).resolve(
+            cst.metadata.ScopeProvider)[state.syntax]
+        safe_builtins = {name for name in builtins
+                         if all(isinstance(binding, BuiltinAssignment) for binding in global_bindings[name])}
     native_helpers = {}
     for node in state.syntax.body:
         if (isinstance(node, cst.FunctionDef) and node.returns is not None

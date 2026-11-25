@@ -111,3 +111,32 @@ def test_expression_contexts_match_libcst(index):
     actual = expression_contexts(module)
     assert [(id(node), context) for node, context in actual.items()] == \
         [(id(node), context) for node, context in expected.items()]
+
+
+@pytest.mark.parametrize('source, bound', [
+    ('x = int(y)\nisinstance(x, bool)\nz: int = 1\n', False),
+    ('int = 3\n', True),
+    ('def f():\n    global int\n    int = 1\n', True),
+    ('from m import bool\n', True),
+    ('import int.x\n', True),
+    ('def isinstance(a, b): pass\n', True),
+    ('class C:\n    def m(self, int): pass\n', True),
+    ('for bool in y: pass\n', True),
+    ('[(int := 1) for _ in y]\n', True),
+    ('with a as int: pass\n', True),
+    ('try:\n    pass\nexcept E as bool:\n    pass\n', True),
+    ('match v:\n    case int(): pass\n', True),
+    ('def f[int](): pass\n', True),
+    ('del bool\n', True),
+])
+def test_binds_none_of_agrees_with_scope_provider(source, bound):
+    from libcst.metadata import MetadataWrapper, ScopeProvider
+    from libcst.metadata.scope_provider import BuiltinAssignment
+    from modelx_cython.scopes import binds_none_of
+    names = ('isinstance', 'int', 'bool')
+    module = cst.parse_module(source)
+    scope = MetadataWrapper(module, unsafe_skip_copy=True).resolve(ScopeProvider)[module]
+    builtin = all(isinstance(binding, BuiltinAssignment) for name in names for binding in scope[name])
+    assert binds_none_of(module, names) is not bound
+    if not bound:
+        assert builtin
