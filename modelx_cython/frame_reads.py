@@ -112,6 +112,13 @@ class _Hold:
         self.table, self.state, self.receiver, self.label, self.kind = table, state, receiver, label, kind
 
 
+class _EveryReceiver(frozenset):
+    """The receivers a formula edits when an edit goes through a name that may be any of them: all."""
+
+    def __contains__(self, item):
+        return True
+
+
 class FrameReads:
     """``lower(node)`` returns the formula with recognised reads lowered; ``lowered`` lists what was lowered
     (one dict per read) and ``declined`` why a read of a frame receiver was not."""
@@ -522,13 +529,23 @@ class FrameReads:
     def _mutated(self, node):
         """Codes of the receivers the formula itself edits in place (an assignment or ``del`` through them,
         ``__setitem__``/``__delitem__``/``update``/``insert``/``pop``, or any call with ``inplace``): their
-        reads stay pandas, so an edit is read as it is made, as live."""
-        owner, found = self, set()
+        reads stay pandas, so an edit is read as it is made, as live. An edit through a local bound to a receiver
+        (``w = df``) edits the receiver; one through a name bound in a way not followed (a loop target, unpacking,
+        ``self``) may edit any of them: every read of the formula then stays pandas."""
+        owner, found, f = self, set(), self.facts.formula
+        unknown = []
 
-        def note(expr):
-            got = owner._receiver(owner._root(expr))
+        def note(expr, seen=()):
+            root = owner._root(expr)
+            got = owner._receiver(root)
             if got is not None:
                 found.add(_code(got[0]))
+            if not isinstance(root, cst.Name) or root.value in seen:
+                return
+            if root.value == 'self' or root.value in f.other:
+                unknown.append(root.value)
+            for value in f.values.get(root.value, ()):
+                note(value, (*seen, root.value))
 
         class Scan(cst.CSTVisitor):
             def visit_Assign(self, n):
@@ -553,7 +570,7 @@ class FrameReads:
                         or any(a.keyword is not None and a.keyword.value == 'inplace' for a in n.args)):
                     note(n.func.value)
         node.visit(Scan())
-        return found
+        return _EveryReceiver() if unknown else found
 
     @staticmethod
     def _flatten(body):
