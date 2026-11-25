@@ -48,11 +48,22 @@ def test_obsolete_export_requires_reexport(marker):
             runtime.require_current((module(source),), workers=1)
 
 
-@pytest.mark.parametrize('options,workers', [({'serial_collect': 'reuse'}, 1), ({}, 4), ({}, 1)])
+@pytest.mark.parametrize('options,workers', [({'serial_collect': 'reuse'}, 1), ({}, 4),
+                                             ({'parallel_collect_reuse': True}, 1)])
 def test_a_runtime_without_the_protocol_requires_a_current_export(options, workers):
     runtime = CollectRuntime('pass\n')
     with pytest.raises(ValueError, match='Re-export the model'):
         runtime.require_current((module('pass\n', options),), workers)
+
+
+@pytest.mark.parametrize('marker', ['', '_mx_collect_adapter_version = 1'])
+def test_a_build_without_collect_or_workers_takes_any_export(marker):
+    # an export of a modelx without protocol 2 (a released modelx) compiles when the build uses
+    # neither collect nor parallel workers, as upstream does
+    runtime = CollectRuntime(current().replace('_mx_collect_adapter_version = 2', marker))
+    assert not runtime.hook
+    runtime.require_current((module('class Projection:\n    def value(self): return 1\n'),), workers=1)
+    CollectRuntime('pass\n').require_current((module('pass\n'),), workers=1)
 
 
 def test_duplicate_current_hook_does_not_enable_native_collection():

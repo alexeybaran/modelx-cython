@@ -1,12 +1,9 @@
 """diag-mt2: a module math member call passes the math Reference borrowed (no reference per step).
 
-``self.math.log(x)`` compiles to ``_native_math.m_log(<the Reference>, x)``. The Reference was passed
-as an ``object`` argument, so Cython took a reference on the module around every call (an atomic
-increment and decrement on the one ``math`` module that every worker shares; Pflege_DE_S at four
-workers was slower than at one). The provider now takes the Reference as a borrowed ``void*``
-(``_mx_cy.cast(_mx_cy.p_void, self.math)``): identity checks compare the pointer, the Python fallback
-of another namespace is unchanged. Results must not change: compiled at one and at four workers
-equals the exported model.
+``self.math.log(x)`` compiles to ``_native_math.m_log(<the Reference>, x)``, the Reference passed as a
+borrowed ``void*`` (``_mx_cy.cast(_mx_cy.p_void, self.math)``). Results must not change: compiled items
+equal the exported model. Direct-route twin of ``test_diag_mt2_math_borrowed_collect`` (the same model
+without ``collect_over``; items are called directly).
 """
 import math
 import json
@@ -23,8 +20,7 @@ def _model(tmp_path):
     try:
         portfolio = model.new_space('Portfolio')
         projection = portfolio.new_space(
-            'Projection', formula='lambda key: None', refs={'math': math, 'keys': keys},
-            collect_over={'key': keys}, collect_outputs='lambda: {"sum": {"value": value()}}')
+            'Projection', formula='lambda key: None', refs={'math': math, 'keys': keys})
         projection.new_cells('rate', '''\
 def rate(t):
     return 0.001 * (t + key % 7 + 1)
@@ -46,13 +42,9 @@ def value():
         model.export(tmp_path / 'exported')
     finally:
         model.close()
-    spec = {'parallel_workers': 4, 'spaces': {'Portfolio': {'spaces': {'Projection': {
-        'serial_collect': 'reuse', 'parallel_collect_reuse': True, 'parallel_collect_order': 'domain'}}}}}
-    (tmp_path / 'spec.py').write_text(repr(spec), encoding='utf-8')
     (tmp_path / 'sample.py').write_text(
         'from exported import mx_model\n'
         'p = mx_model.Portfolio.Projection\n'
-        'p.collect()\n'
         'for key in (1, 2, 3):\n'
         '    [p[key].surv(t) for t in range(48)]; p[key].value()\n',
         encoding='utf-8')
@@ -61,7 +53,7 @@ def value():
 def test_math_reference_is_borrowed_and_results_stay(tmp_path):
     _model(tmp_path)
     done = subprocess.run([sys.executable, '-m', 'modelx_cython', 'exported', '--sample', 'sample.py',
-                           '--spec', 'spec.py'], cwd=tmp_path, capture_output=True, text=True)
+                           '--no-spec'], cwd=tmp_path, capture_output=True, text=True)
     assert done.returncode == 0, done.stdout[-3000:] + done.stderr[-3000:]
     # the build report: the math calls are native provider operations
     admission = json.loads((tmp_path / 'exported_cy/_mx_admission.json').read_text(encoding='utf-8'))
@@ -72,16 +64,7 @@ def test_math_reference_is_borrowed_and_results_stay(tmp_path):
         from importlib import import_module
         m = import_module(sys.argv[1]).mx_model
         p = m.Portfolio.Projection
-        if sys.argv[1] == 'exported_cy':
-            serial = type(m)()
-            serial.collect_workers = 1
-            one = serial.Portfolio.Projection.collect().sum.value
-            four = p.collect().sum.value
-            again = p.collect().sum.value
-            assert again == four
-            print(repr(one), repr(four))
-        else:
-            print(repr(p.collect().sum.value), repr(p.collect().sum.value))
+        print(repr(sum(p[key].value() for key in range(1, 61))))
         item = p[7]
         print(repr([item.surv(t) for t in range(48)] + [item.value()]))
         ''')
@@ -90,7 +73,4 @@ def test_math_reference_is_borrowed_and_results_stay(tmp_path):
         run = subprocess.run([sys.executable, '-c', probe, name], cwd=tmp_path, capture_output=True, text=True)
         assert run.returncode == 0, name + run.stdout + run.stderr
         out[name] = run.stdout.splitlines()
-    one, four = out['exported_cy'][0].split()
-    assert one == out['exported'][0].split()[0], (out, 'one worker equals the exported model')
-    assert abs(float(four) - float(one)) <= 1e-12 * abs(float(one)), out
-    assert out['exported_cy'][1:] == out['exported'][1:], out
+    assert out['exported_cy'] == out['exported'], out

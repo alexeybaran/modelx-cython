@@ -10,7 +10,7 @@ from types import BuiltinFunctionType, ModuleType, SimpleNamespace
 import libcst as cst
 
 
-_SCALAR_MATH = {erf: 'float64', exp: 'float64', isinf: 'bool', log: 'float64', sqrt: 'float64'}
+_SCALAR_MATH = {erf, exp, isinf, log, sqrt}     # the members bound on a module other than math
 MATH_PROVIDER = 'modelx_cython.runtime._native_math'
 # W1.4: members of a module Reference resolved at build time (``_native_math.m_<name>``
 # receives the Reference itself). floor/ceil return the module's int; see m_floor_ll.
@@ -27,15 +27,12 @@ def module_helpers(value):
     stdlib = value is math
     for name, function in vars(value).copy().items():
         if type(function) is BuiltinFunctionType and function in _MODULE_MATH:
-            if function not in _SCALAR_MATH and not stdlib:
-                continue          # floor/ceil only on the math module itself
-            result[name] = SimpleNamespace(
-                helper=(MATH_PROVIDER, function.__name__), scalar_result=_MODULE_MATH[function],
-                module_math=function.__name__ if stdlib or name == function.__name__ else None,
-            )
+            if not stdlib and (function not in _SCALAR_MATH or name != function.__name__):
+                continue          # floor/ceil only on the math module itself; no aliased member
+            result[name] = SimpleNamespace(scalar_result=_MODULE_MATH[function], module_math=function.__name__)
             continue
         if stdlib and name in MATH_CONSTANTS and type(function) is float:
-            result[name] = SimpleNamespace(helper=None, module_constant=MATH_CONSTANTS.index(name))
+            result[name] = SimpleNamespace(module_constant=MATH_CONSTANTS.index(name))
     return result
 
 
@@ -54,27 +51,31 @@ def helper_reference(function, refs):
 _KINDS = {'double': 'double', 'long long': 'longlong', 'bint': 'bint'}
 
 
-def argument_kind(node, current, cells, refs):
+def argument_kind(node, current, cells, refs, own=None):
     """C kind of a math argument from declared types only: 'double', 'longlong', 'bint' or None.
 
     ``current`` is the formula's cells (parameter types), ``cells`` the class cells by name,
-    ``refs`` the class References. Unknown or object operands give None.
+    ``refs`` the class References. Unknown or object operands give None. ``own(name)`` tells
+    whether a name node is the formula's parameter (not a lambda's or comprehension's own name
+    that shadows it); without it every parameter name is taken as the formula's.
     """
     if isinstance(node, cst.Float):
         return 'double'
     if isinstance(node, cst.Integer):
         return 'longlong' if node.evaluated_value < (1 << 63) else None
     if isinstance(node, cst.Name):
+        if own is not None and not own(node):
+            return None
         if current is not None and node.value in getattr(current, 'params', ()) and current.has_typeinfo():
             return _KINDS.get(current.get_argtype_expr(node.value, c_style=True, formula=True))
         return None
     if isinstance(node, cst.UnaryOperation) and isinstance(node.operator, (cst.Minus, cst.Plus)):
-        kind = argument_kind(node.expression, current, cells, refs)
+        kind = argument_kind(node.expression, current, cells, refs, own)
         return 'longlong' if kind == 'bint' else kind
     if isinstance(node, cst.BinaryOperation) and isinstance(
             node.operator, (cst.Add, cst.Subtract, cst.Multiply, cst.Divide)):
-        left = argument_kind(node.left, current, cells, refs)
-        right = argument_kind(node.right, current, cells, refs)
+        left = argument_kind(node.left, current, cells, refs, own)
+        right = argument_kind(node.right, current, cells, refs, own)
         if left is None or right is None:
             return None
         if isinstance(node.operator, cst.Divide) or 'double' in (left, right):

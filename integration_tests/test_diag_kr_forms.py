@@ -9,9 +9,9 @@
   (Cancer_KR_S ``for k in range(1, 7): tbl.loc[k, "c"]``), not an object key;
 - ``min``/``max`` of a generator over an integer vector cell (Cancer_KR_S tier_share), with
   Python's empty-iterable ValueError, and a vector sum whose element holds ``max(0.0, ...)``
-  (CI_KR_S claims) are C loops; an element of an integer vector and ``T.index.asof(a)`` at an
-  integer ``a`` are integer keys; a returned ``[... for s in range(..)] + list(range(..))`` is
-  built into one integer vector without Python lists (CI_KR_S ci_cohort_ids); a vector rebuilt
+  (CI_KR_S claims) are C loops; an element of an integer vector is an integer key; a returned
+  ``[... for s in range(..)] + list(range(..))`` equals live (CI_KR_S ci_cohort_ids; built as Python
+  lists, then one integer vector); a vector rebuilt
   from itself (``val = [v * g for v in val]``, Dep_FR_S dep_cohorts) is a typed vector;
 - ``for x in (E.A, E.B, ...)`` over enum members is a loop over a literal tuple of integers
   (enums.literals), which Cython compiles with a C integer target (Child_KR_S benefit_pp).
@@ -219,8 +219,6 @@ def test_forms_compile_natively_and_equal_the_interpreter(tmp_path):
     assert 'n: object' not in within, within
     scaled = _formula(source, 'scaled')
     assert 'val: ' in scaled and 'F64Vec' in scaled and 'vec_of(val)' not in scaled, scaled
-    ids = _formula(source, 'ids')
-    assert 'ivec_of(' not in ids and '.data[' in ids, ids
     probe = textwrap.dedent('''\
         import json, sys
         from importlib import import_module

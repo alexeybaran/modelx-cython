@@ -4,7 +4,6 @@ from functools import cached_property
 import libcst as cst
 from libcst.metadata import ExpressionContext
 
-from .cell_entries import exact_receiver
 from .consts import CY_MOD
 from .helpers import module_name
 from .helper_members import helper_reference
@@ -33,7 +32,6 @@ def untyped_entry(lines, node, form, reason):
             'line': lines(node) if lines is not None else 0, 'reason': reason}
 
 
-BUILTIN_PROVIDER = 'modelx_cython._native_iterables'
 STREAMS_PROVIDER = 'modelx_cython.runtime._native_streams'
 BUILTIN_REDUCTIONS = frozenset(('all', 'any', 'max', 'min', 'sum'))
 
@@ -45,35 +43,6 @@ def has_reduction_contract(formula, refs, builtin_reductions=frozenset()):
                for node in lexical_nodes(formula.body.body))
 
 
-def _int64_literals(node):
-    """A literal tuple whose every element is an integer literal (or its negation) within 64 bits."""
-    def value(item):
-        if isinstance(item, cst.UnaryOperation) and isinstance(item.operator, cst.Minus):
-            inner = value(item.expression)
-            return None if inner is None else -inner
-        return int(item.value, 0) if isinstance(item, cst.Integer) else None
-    values = [value(e.value) if isinstance(e, cst.Element) else None for e in getattr(node, 'elements', ())]
-    return (isinstance(node, cst.Tuple) and bool(values)
-            and all(v is not None and -(1 << 63) <= v < (1 << 63) for v in values)) and values
-
-
-def _literal_loop(node):
-    """The iterable a C integer loop takes over a literal tuple of integers: a range when consecutive."""
-    values = _int64_literals(node)
-    consecutive = values == list(range(values[0], values[0] + len(values))) and values[-1] < (1 << 63) - 1
-    return f'range({values[0]}, {values[0] + len(values)})' if consecutive else code(node)
-
-
-def _in_arithmetic(name, tree):
-    """Whether ``name`` is an operand of arithmetic, ``abs`` or ``pow`` in ``tree``: as a C integer it could overflow
-    where live's Python integer does not."""
-    operand = lambda node: isinstance(node, cst.Name) and node.value == name
-    return any(isinstance(n, cst.BinaryOperation) and (operand(n.left) or operand(n.right))
-               or isinstance(n, cst.UnaryOperation) and operand(n.expression)
-               or isinstance(n, cst.Call) and isinstance(n.func, cst.Name) and n.func.value in ('abs', 'pow')
-               and any(operand(arg.value) for arg in n.args) for n in walk(tree))
-
-
 def _one_iterable(call):
     """``R(iterable)`` (and ``sum(iterable, start)``): the built-in reduction form (W1.4)."""
     if not call.args or any(arg.star for arg in call.args) or call.args[0].keyword is not None:
@@ -82,10 +51,6 @@ def _one_iterable(call):
         return True
     return (len(call.args) == 2 and call.func.value == 'sum'
             and (call.args[1].keyword is None or call.args[1].keyword.value == 'start'))
-
-
-def _call(node, name, count):
-    return arguments(node, name, count) is not None
 
 
 def _parts(generator):
@@ -121,7 +86,7 @@ class _Unsupported(Exception):
     """A form the general reduction lowering leaves to the interpreter (the reason)."""
 
 
-_ATOMIC = (cst.Name, cst.Attribute, cst.Integer, cst.Float, cst.SimpleString)
+_ATOMIC = (cst.Name, cst.Attribute, cst.Float, cst.SimpleString)   # an integer before .attr needs parentheses
 _UNROLL_LIMIT = 32            # literal-tuple instances unrolled per reduction
 def _empty_message():
     """The running interpreter's own message for min() of an empty iterable, with the function
@@ -152,6 +117,10 @@ class _Substitute(cst.CSTTransformer):
             value = value.with_changes(lpar=(cst.LeftParen(),), rpar=(cst.RightParen(),))
         return value
 
+    def leave_Arg(self, before, after):
+        # a keyword is a parameter name of the callee, never the generator variable
+        return after if after.keyword is before.keyword else after.with_changes(keyword=before.keyword)
+
 
 def _names(target):
     if isinstance(target, cst.Name):
@@ -166,12 +135,13 @@ def _names(target):
 class GeneralReductions:
     """W1.4: built-in sum/min/max/all/any over one iterable as native loops.
 
-    Applies where the specialised lowerings above decline. The iterable is a generator
+    The iterable is a generator
     or list comprehension (any number of ``for``/``if`` clauses over ``range`` with C
     integer bounds, a literal tuple, which is unrolled, or any other iterable: a cell
     value, a tuple-valued cell, ``zip``), or a direct iterable argument. The result is
-    the built-in's: ``sum`` through ``_float_sum_state.PySum`` (CPython 3.14 branch by
-    branch), ``min``/``max`` keep the first extreme and raise on empty input, ``all``/
+    the built-in's: ``sum`` through ``_float_sum_state.PySum`` (the running CPython branch by
+    branch; ``F64Sum`` when every item is a double and the result is read as one),
+    ``min``/``max`` keep the first extreme and raise on empty input, ``all``/
     ``any`` short-circuit as the generator would. Generator variables are renamed;
     StopIteration raised in a generator body becomes RuntimeError as in a generator.
     The statement is ``return R(...)``, ``x = R(...)`` or ``x op= R(...)``.
@@ -256,7 +226,10 @@ class GeneralReductions:
 
     def substituted(self, node, mapping):
         state = self.general_state
-        if state['facts'] is None or not mapping:
+        if state['facts'] is None:
+            # a direct iterable: the element is the loop variable itself
+            return mapping.get(node.value, node) if isinstance(node, cst.Name) else node
+        if not mapping:
             return node
         return node.visit(_Substitute(mapping, state['facts'].contexts))
 
@@ -320,6 +293,17 @@ class GeneralReductions:
                 exact_float = True
             result = (f'{alias}.sum_result_f64(_mx_cy.address({p}_state))' if exact_float
                       else f'{alias}.sum_result(_mx_cy.address({p}_state))')
+            # Every item a double and the result read as a double: the two-double float state
+            # gives the same bits (the int start 0 plus the first item is exact, an empty sum is
+            # 0.0 at the double boundary) and holds no object, so it needs no release.
+            double_state = exact_float and kinds == {'double'}
+            if double_state:
+                add = f'{alias}.sum_add_f64(_mx_cy.address({p}_state), '
+                body = [line.replace(add, f'{alias}.f64_add(_mx_cy.address({p}_state), ', 1)
+                        if line.lstrip().startswith(add) else line for line in body]
+                init = f'{alias}.f64_init(_mx_cy.address({p}_state))'
+                declarations[-1] = f'{p}_state: {alias}.F64Sum'
+                result = f'{alias}.f64_result(_mx_cy.address({p}_state))'
             prologue.append(init)
         elif name in ('min', 'max'):
             typed = next(iter(kinds)) if len(kinds) == 1 and None not in kinds else None
@@ -351,7 +335,7 @@ class GeneralReductions:
         else:
             final = f'{state["target"]} {code(statement.operator).strip()} {result}'
         lines.append(final)
-        if name == 'sum':
+        if name == 'sum' and not double_state:
             lines = (lines[:len(declarations)] + lines[len(declarations):len(declarations) + len(prologue)]
                      + ['try:'] + ['    ' + line for line in lines[len(declarations) + len(prologue):]]
                      + ['finally:', f'    {alias}.sum_clear(_mx_cy.address({p}_state))'])
@@ -545,7 +529,10 @@ class GeneralReductions:
             return [f'if {test}:', f'    return {hit}']
         if state['flag_exit']:
             return [f'if {test}:', f'    {p}_result = {hit}', f'    {p}_done = True', '    break']
-        return [f'if {test}:', f'    {p}_result = {hit}']
+        # over a list comprehension every element is evaluated, then the built-in tests them
+        # in order and stops at the deciding one: no truth is asked of a later element
+        decided = f'{p}_result and not {p}_element' if name == 'all' else f'not {p}_result and {p}_element'
+        return [f'{p}_element = ({value})', f'if {decided}:', f'    {p}_result = {hit}']
 
 
     # ---------------------------------------------------------------- W1.8: nested sites
@@ -564,12 +551,16 @@ class GeneralReductions:
         site, preceding = self.first_site(root)
         if site is None:
             return None
-        if any(not self.effect_free(node) and _compile_time(node) for node in preceding):
+        callees = {id(node.func) for node in _subtree(root) if isinstance(node, cst.Call)}
+        if any(not self.effect_free(node) and (_compile_time(node) or id(node) in callees and _inserted(node))
+               for node in preceding):
             # Cython syntax put in by an earlier lowering (a cast, a C type, a method of a
-            # typed handle) has no run-time value to keep in a temporary: lift nothing
+            # typed handle, a provider function and its typed arguments) has no run-time
+            # value to keep in a temporary: lift nothing
             self.general_declined.setdefault(id(site), (site, (
-                'evaluated after compiler-inserted Cython syntax (a cast, a C type or a typed-handle '
-                'method) in the same statement, which cannot be held in a temporary: built-in call')))
+                'evaluated after compiler-inserted Cython syntax (a cast, a C type, a typed-handle '
+                'method or a provider call) in the same statement, which cannot be held in a temporary: '
+                'built-in call')))
             return None
         names, replacements, lines = self.names, {}, []
         for node in preceding:
@@ -743,6 +734,15 @@ def _compile_time(node):
     return any(isinstance(item, cst.Name) and item.value == CY_MOD for item in _subtree(node))
 
 
+def _inserted(node):
+    """A callee an earlier lowering put in (a provider member or a private entry, named
+    ``_mx_...``): a C function whose typed arguments cannot be held in object temporaries."""
+    while isinstance(node, cst.Attribute):
+        node = node.value
+    return (isinstance(node, cst.Name) and node.value.startswith('_mx_')
+            and not node.value.startswith('_mx_hoist'))
+
+
 def _subtree(node):
     yield node
     for child in node.children:
@@ -783,7 +783,7 @@ def _evaluation_order(node):
 
 
 class NativeReductions(GeneralReductions, FormulaTransformer):
-    def __init__(self, cls_info, cells, providers, formula, reserve_fallback, builtin_bounds,
+    def __init__(self, cls_info, cells, providers, formula, builtin_bounds,
                  builtin_reductions=frozenset(), formula_kinds=None):
         super().__init__()
         # diag-jp: kinds of the formula's own locals (powers.formula_local_kinds), for names no
@@ -794,71 +794,28 @@ class NativeReductions(GeneralReductions, FormulaTransformer):
         self.formula_kinds = {name: kind for name, kind in (formula_kinds or {}).items() if name not in bound}
         self.object_loops = []
         self.cls_info, self.cells, self.providers = cls_info, cells, providers
-        self.formula, self.reserve_fallback = formula, reserve_fallback
+        self.formula = formula
         self.builtin_bounds = builtin_bounds
         self.builtin_reductions = builtin_reductions
-        self.fallbacks, self.exact_receiver_guards, self.count = [], set(), 0
         self.general_count, self.general_done, self.general_declined = 0, set(), {}
         self.general_sites, self.general_lines = [], None
         self.nested_sites, self.elifs, self.conditional_sites = set(), set(), set()      # W1.8
         self.builtin_names = {name for name in ('bool', 'int', 'float', 'abs', 'len', 'min', 'max',
                                                 'sum', 'all', 'any', 'round')
                               if name in builtin_reductions or name not in self.body_facts.stores}
-        self.captures = {}
         self.scope_safe = (not has_scope_effects(formula.body.body)
                            and 'self' not in self.body_facts.stores
                            and not {'locals', 'vars', 'eval', 'exec'} & self.body_facts.reads
                            and not {'StopIteration', 'RuntimeError'} & (
                                self.body_facts.stores.keys() | set(cells.params)))
         self.names = Names(formula)
-        if isinstance(formula.body, cst.IndentedBlock):
-            lines = formula.body.body
-            for assignment, consumer in zip(lines, lines[1:]):
-                if (not isinstance(assignment, cst.SimpleStatementLine) or len(assignment.body) != 1
-                        or not isinstance(assignment.body[0], cst.Assign)
-                        or not isinstance(consumer, cst.SimpleStatementLine) or len(consumer.body) != 1
-                        or not isinstance(consumer.body[0], (cst.Return, cst.Assign))):
-                    continue
-                expression = assignment.body[0]
-                if len(expression.targets) != 1:
-                    continue
-                target, rhs = expression.targets[0].target, expression.value
-                if isinstance(target, cst.Name):
-                    if self.double_expression(rhs):
-                        self.captures[id(consumer)] = target.value
 
     @cached_property
     def body_facts(self):
         return CstFacts(self.formula.body.body)
 
-    def double_expression(self, node):
-        if isinstance(node, cst.Float):
-            return True
-        if (isinstance(node, cst.Attribute) and isinstance(node.value, cst.Name)
-                and node.value.value == 'self'):
-            ref = self.cls_info.refs.get(node.attr.value)
-            return ref is not None and ref.get_type_expr(c_style=True) == 'double'
-        if isinstance(node, cst.UnaryOperation) and isinstance(node.operator, (cst.Plus, cst.Minus)):
-            return self.double_expression(node.expression)
-        if isinstance(node, cst.BinaryOperation) and isinstance(node.operator, (cst.Add, cst.Subtract, cst.Multiply, cst.Divide)):
-            return self.double_expression(node.left) and self.double_expression(node.right)
-        return False
-
     def reserve_prefix(self):
-        return self.names.reserve(f'_mx_reduce_{self.count}', family=True)
-
-    def callable_name(self, func, prefix):
-        """The name the lowered reduction uses for its callable, and the line binding it ('' when none).
-
-        diag-mt: a reduction whose callable is the builtin itself (``sum``, ``min``, ... resolved to the
-        builtin by the scope pass) reads that name where it is used. Cython reads a builtin name from
-        the module's import-time cache, so the name is the same object at every read and needs no
-        local: binding it to an ``object`` local took a reference on the one builtin function per
-        call, which threads running the same cells contended on (free-threaded reference counts).
-        Any other callable keeps the evaluated-once local."""
-        if isinstance(func, cst.Name) and func.value in self.builtin_reductions:
-            return func.value, ''
-        return f'{prefix}_function', f'{prefix}_function: object = {code(func)}'
+        return self.names.reserve('_mx_reduce_0', family=True)
 
     def visit_FunctionDef(self, node):
         self.general_sites = [n for n in lexical_nodes(node.body.body) if self.builtin_site(n)]
@@ -894,25 +851,6 @@ class NativeReductions(GeneralReductions, FormulaTransformer):
     def builtin_site(self, node):
         return (isinstance(node, cst.Call) and isinstance(node.func, cst.Name)
                 and node.func.value in self.builtin_reductions and _one_iterable(node))
-
-    def native_truth(self, node, locals_):
-        if self.kind(node, locals_) in ('double', 'longlong', 'bint'):
-            return True
-        if isinstance(node, cst.UnaryOperation) and isinstance(node.operator, cst.Not):
-            return self.native_truth(node.expression, locals_)
-        if isinstance(node, cst.BooleanOperation):
-            return self.native_truth(node.left, locals_) and self.native_truth(node.right, locals_)
-        if isinstance(node, cst.Comparison) and all(isinstance(part.operator, (
-                cst.Equal, cst.NotEqual, cst.LessThan, cst.LessThanEqual, cst.GreaterThan, cst.GreaterThanEqual))
-                for part in node.comparisons):
-            operands = [node.left, *(part.comparator for part in node.comparisons)]
-            kinds = [self.kind(value, locals_) for value in operands]
-            if not all(kind in ('double', 'longlong', 'bint') for kind in kinds):
-                return False
-            return 'double' not in kinds or all(kind != 'longlong' or (
-                isinstance(value, cst.Integer) and abs(value.evaluated_value) <= (1 << 53))
-                for value, kind in zip(operands, kinds))
-        return False
 
     def kind(self, node, locals_):
         if isinstance(node, (cst.Integer, cst.Float, cst.Imaginary, cst.SimpleString)):
@@ -997,262 +935,8 @@ class NativeReductions(GeneralReductions, FormulaTransformer):
                 return 'longlong'
         return None
 
-    def cold_fallback(self, source, generator, capture, function, capture_type='_mx_cy.double'):
-        original = f'{function}({source})'
-        if not self.cells.has_formula_def or not self.scope_safe:
-            return original
-        names = CstFacts(generator).reads
-        targets = {part.target.value for part in _parts(generator)}
-        stores = self.body_facts.stores
-        if ((names - targets) & stores.keys()) - {capture}:
-            return original
-        if capture is not None and stores[capture] != 1:
-            return original
-        params = self.formula.params
-        parameters = [*params.posonly_params, *params.params, *params.kwonly_params]
-        parameters += [param for param in (params.star_arg, params.star_kwarg) if isinstance(param, cst.Param)]
-        param_names = {param.name.value for param in parameters}
-        if targets & param_names or not (names & param_names) <= {'self', *self.cells.params}:
-            return original
-        args = []
-        for name in self.cells.params:
-            if name in names:
-                kind = self.cells.get_argtype_expr(name, c_style=True, formula=True)
-                if kind not in ('double', 'long long', 'bint', 'object'):
-                    return original
-                args.append((name, self.cells.get_argtype_expr(name, formula=True)))
-        if capture is not None:
-            args.append((capture, capture_type))
-        helper = self.reserve_fallback()
-        formals = ', '.join([f'self: {self.cls_info.name}', f'{function}: object']
-                            + [f'{name}: {kind}' for name, kind in args])
-        self.fallbacks.append(cst.parse_statement(
-            f'\n\n@_mx_cy.cfunc\ndef {helper}({formals}) -> object:\n    return {original}\n'))
-        actuals = ', '.join(['self', function] + [name for name, _ in args])
-        return f'{helper}({actuals})'
-
-    def single_range(self, after, func, provider, operation, source, tree):
-        parts = tuple(_parts(tree))
-        if len(parts) != 1 or not self.cells.formula_allows_exact_receiver:
-            return after
-        part, = parts
-        if not isinstance(part.target, cst.Name) or part.ifs or part.asynchronous is not None:
-            return after
-        index = part.target.value
-        if index in {'self', 'range', 'abs', 'max', *self.cells.params}:
-            return after
-        alias, prefix = module_name(provider), self.reserve_prefix()
-        counter, guard = f'{prefix}_index', f'{prefix}_native'
-        function, binding = self.callable_name(func, prefix)
-        predicate = tree.elt
-        args = arguments(part.iter, 'range', 1)
-        if not (args is not None and arguments(args[0], count=0) is not None
-                and self.kind(args[0], {}) == 'longlong'
-                and self.cells.get_rettype_expr(c_style=True) == 'bint'):
-            return after
-        iterator = f'range({prefix}_limit)'
-        if isinstance(predicate, cst.Comparison):
-            if len(predicate.comparisons) != 1:
-                return after
-            comparison = predicate.comparisons[0]
-            absolute = arguments(predicate.left, 'abs', 1)
-            if not (isinstance(comparison.operator, (cst.LessThan, cst.LessThanEqual, cst.GreaterThan, cst.GreaterThanEqual))
-                    and absolute is not None and self.kind(comparison.comparator, {}) == 'double'
-                    and isinstance(comparison.comparator, (cst.Float, cst.Attribute))):
-                return after
-            value = self.indexed_cell(absolute[0], index, 'double', counter)
-            if value is None:
-                return after
-            operator = {cst.LessThan: '<', cst.LessThanEqual: '<=', cst.GreaterThan: '>', cst.GreaterThanEqual: '>='}[type(comparison.operator)]
-            test = f'{alias}.f64_abs({value}) {operator} {code(comparison.comparator)}'
-        else:
-            test = self.indexed_cell(predicate, index, 'bint', counter)
-            if test is None:
-                return after
-        loop = f"""    {prefix}_limit: _mx_cy.longlong = {code(args[0])}
-    try:
-        for {counter} in {iterator}:
-            if not ({test}):
-                return False
-    except StopIteration as {prefix}_error:
-        raise RuntimeError("generator raised StopIteration") from {prefix}_error
-    return True"""
-        count = len(self.fallbacks)
-        fallback = self.cold_fallback(source, tree, None, function)
-        if len(self.fallbacks) == count:
-            return after
-        self.providers.add(provider)
-        self.count += 1
-        return cst.FlattenSentinel(cst.parse_module(f"""
-{binding}
-{guard}: _mx_cy.bint = {alias}.{operation}_accepts({function})
-if {exact_receiver(self.cls_info.name)} and {guard}:
-    {counter}: _mx_cy.longlong
-{loop}
-return {fallback}
-""").body)
-
-    def indexed_cell(self, node, index, kind, counter):
-        args = arguments(node, count=1)
-        if not (args is not None and isinstance(args[0], cst.Name) and args[0].value == index
-                and self.kind(node, {index: 'longlong'}) == kind):
-            return None
-        cell = self.cls_info.cells[node.func.attr.value]
-        if len(cell.params) != 1 or cell.get_argtype_expr(cell.params[0], c_style=True) != 'long long':
-            return None
-        return f'self.{node.func.attr.value}({counter})'
-
     def leave_SimpleStatementLine(self, before, after):
-        result = self._specialized(before, after)
-        if result is not after:
-            if len(before.body) == 1 and isinstance(getattr(before.body[0], 'value', None), cst.Call):
-                self.general_done.add(id(before.body[0].value))
-            return result
         result = self.general(before, after)
         if result is not after:
             return result
         return self.nested(before, after)
-
-    def _specialized(self, before, after):
-        if len(before.body) != 1:
-            return after
-        statement = before.body[0]
-        assignment = isinstance(statement, cst.Assign)
-        if not (isinstance(statement, cst.Return) or assignment and len(statement.targets) == 1
-                and isinstance(statement.targets[0].target, cst.Name)):
-            return after
-        value = statement.value
-        args = arguments(value)
-        if not args or not isinstance(args[0], cst.GeneratorExp) or not self.builtin_bounds:
-            return after
-        func, tree = value.func, args[0]
-        source = code(tree)
-        builtin = func.value if isinstance(func, cst.Name) and func.value in self.builtin_reductions else None
-        if len(args) != 1:
-            return after
-        if builtin == 'all':
-            return after if assignment else self.single_range(
-                after, func, BUILTIN_PROVIDER, 'all', source, tree)
-        if builtin != 'sum':
-            return after
-        provider = STREAMS_PROVIDER
-        if assignment:
-            return after
-        if self.cells.get_rettype_expr(c_style=True) != 'double':
-            # Ordinary sum keeps integer/mixed/object semantics. Only an existing
-            # double return boundary may normalize empty integer zero to double.
-            return after
-        capture = self.captures.get(id(before))
-        if capture == 'range':
-            return after
-        generator_facts = CstFacts(tree)
-        if capture is not None and capture not in generator_facts.reads:
-            capture = None
-        local_types = {capture: 'double'} if capture is not None else {}
-        for part in _parts(tree):
-            if part.asynchronous is not None or not isinstance(part.target, cst.Name):
-                return after
-            name, iterator = part.target.value, part.iter
-            if name == capture:
-                return after
-            if name not in local_types and name in CstFacts(iterator).reads:
-                return after
-            bounds = arguments(iterator, 'range')
-            if (bounds is not None and 'range' not in local_types and 1 <= len(bounds) <= 3
-                    and all(self.kind(arg, local_types) in ('longlong', 'bint') for arg in bounds)
-                    and safe_range_increment(iterator)):
-                local_types[name] = 'longlong'
-            elif (isinstance(iterator, cst.Tuple)
-                    and all(isinstance(element, cst.Element) for element in iterator.elements)):
-                kind = (self.kind(iterator.elements[0].value, local_types)
-                        if len(iterator.elements) == 1 else None)
-                # Literal domains need no sampled category schema or size limit.
-                # Integer literals within 64 bits loop as a C long long (over a range when
-                # consecutive; an object argument gets an equal int). Other
-                # literal objects stay intact: no new loop coercion.
-                if kind is None:
-                    try:
-                        values = [literal_value(element.value) for element in iterator.elements]
-                    except (ValueError, TypeError):
-                        return after
-                    if not all(type(value) in (int, float, bool, str, type(None)) for value in values):
-                        return after
-                    kind = 'longlong' if _int64_literals(iterator) and not _in_arithmetic(name, tree) else 'object'
-                local_types[name] = kind
-            else:
-                return after
-            if not all(self.native_truth(condition.test, local_types) for condition in part.ifs):
-                return after
-        if self.kind(tree.elt, local_types) != 'double':
-            return after
-        alias, prefix = module_name(provider), self.reserve_prefix()
-        count = len(self.fallbacks)
-        function, binding = self.callable_name(func, prefix)
-        fallback = self.cold_fallback(source, tree, capture, function)
-        if len(self.fallbacks) == count:
-            return after
-        # Iterator/capture names must not alias the accumulator or call-layout
-        # temporaries (e.g. an authored iterator named `state`).
-        for role in ('function', 'state', 'iterable', 'error', 'bound_0', 'bound_1', 'bound_2'):
-            self.names.reserve(f'{prefix}_{role}')
-        renamed = {name: self.names.reserve(f'{prefix}_{name}') for name in local_types}
-        contexts = generator_facts.contexts
-
-        class Rename(cst.CSTTransformer):
-            def leave_Name(self, before, after):
-                if before.value in renamed and before in contexts:
-                    return after.with_changes(value=renamed[before.value])
-                return after
-
-        tree = tree.visit(Rename())
-        declarations = [f'{prefix}_state: {alias}.F64Sum']
-        declarations += [f'{renamed[name]}: _mx_cy.{kind}' for name, kind in local_types.items()]
-        guard = f'{alias}.f64_accepts({function})'
-        lines = declarations + [binding] * bool(binding) + [f'if {guard}:',
-                               f'    {alias}.f64_init(_mx_cy.address({prefix}_state))']
-        if capture is not None:
-            lines.append(f'    {renamed[capture]} = {capture}')
-        parts = tuple(_parts(tree))
-        outer = parts[0]
-        bounds = arguments(outer.iter, 'range')
-        if bounds is not None:
-            bound_names = [f'{prefix}_bound_{index}' for index in range(len(bounds))]
-            lines.extend(f'    {name}: _mx_cy.longlong = {code(value)}'
-                         for name, value in zip(bound_names, bounds))
-            outer_iterator = f'range({", ".join(bound_names)})'
-        elif len(outer.iter.elements) == 1:
-            # A generator acquires its first iterable before entering its body.
-            # Keep that evaluation outside the PEP479 boundary as well.
-            lines.append(f'    {outer.target.value} = ({code(outer.iter.elements[0].value)})')
-            outer_iterator = None
-        elif _int64_literals(outer.iter):
-            outer_iterator = _literal_loop(outer.iter)      # evaluates nothing
-        else:
-            lines.append(f'    {prefix}_iterable: object = {code(outer.iter)}')
-            outer_iterator = f'{prefix}_iterable'
-        lines.append('    try:')
-        indent = '        '
-        for index, part in enumerate(parts):
-            if index == 0 and outer_iterator is None:
-                pass
-            elif index == 0:
-                lines.append(indent + f'for {part.target.value} in {outer_iterator}:')
-                indent += '    '
-            elif isinstance(part.iter, cst.Tuple) and len(part.iter.elements) == 1:
-                lines.append(indent + f'{part.target.value} = ({code(part.iter.elements[0].value)})')
-            else:
-                iterable = _literal_loop(part.iter) if _int64_literals(part.iter) else code(part.iter)
-                lines.append(indent + f'for {part.target.value} in {iterable}:')
-                indent += '    '
-            for condition in part.ifs:
-                lines.append(indent + f'if ({code(condition.test)}):')
-                indent += '    '
-        result = code(statement.targets[0].target) + ' = ' if assignment else 'return '
-        lines += [indent + f'{alias}.f64_add(_mx_cy.address({prefix}_state), {code(tree.elt)})',
-                  f'    except StopIteration as {prefix}_error:',
-                  f'        raise RuntimeError("generator raised StopIteration") from {prefix}_error',
-                  f'    {result}{alias}.f64_result(_mx_cy.address({prefix}_state))',
-                  'else:', f'    {result}{fallback}']
-        self.providers.add(provider)
-        self.count += 1
-        return cst.FlattenSentinel(cst.parse_module('\n'.join(lines) + '\n').body)

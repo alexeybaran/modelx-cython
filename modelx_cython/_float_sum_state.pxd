@@ -34,21 +34,24 @@ cdef inline double f64_result(F64Sum* state) noexcept:
 
 
 # ---------------------------------------------------------------- exact built-in sum
-# ``PySum`` reproduces CPython 3.14 ``builtin_sum_impl`` (Python/bltinmodule.c) for
+# ``PySum`` reproduces ``builtin_sum_impl`` (Python/bltinmodule.c) of the running CPython for
 # one ``sum(iterable[, start])`` whose items are produced by native code: the C
 # integer fast loop (Py_ssize_t accumulator, overflow leaves it), the compensated
 # float loop (Neumaier, ints added through PyLong_AsDouble), the compensated complex
 # loop and the generic PyNumber_Add loop, with the same transitions between them.
 # Typed items (double, long long, bint) are the exact float/int/bool objects the
 # interpreter would see, so they take the same branch without being boxed.
+# Before 3.14 the float loop adds an int item that fits a C long without compensation and
+# leaves for the generic loop on a larger one, and there is no complex loop.
 from cpython.object cimport PyObject
 from cpython.ref cimport Py_INCREF, Py_XDECREF
-from cpython.long cimport PyLong_Check, PyLong_CheckExact, PyLong_AsLongLongAndOverflow, PyLong_AsDouble
+from cpython.long cimport (PyLong_Check, PyLong_CheckExact, PyLong_AsLongLongAndOverflow, PyLong_AsDouble,
+                           PyLong_AsLongAndOverflow)
 from cpython.float cimport PyFloat_Check, PyFloat_CheckExact, PyFloat_AS_DOUBLE, PyFloat_AsDouble, PyFloat_FromDouble
 from cpython.complex cimport PyComplex_CheckExact, PyComplex_AsCComplex, PyComplex_FromDoubles, Py_complex
 from cpython.bool cimport PyBool_Check
 from cpython.number cimport PyNumber_Add
-from libc.limits cimport LLONG_MAX, LLONG_MIN
+from libc.limits cimport LLONG_MAX, LLONG_MIN, LONG_MAX, LONG_MIN
 
 cdef enum:
     SUM_INT = 0
@@ -113,7 +116,7 @@ cdef inline int _sum_generic(PySum* state, object item) except -1:
     if source == SUM_INT and PyFloat_CheckExact(result):
         state.mode = SUM_FLOAT
         state.hi, state.lo = PyFloat_AS_DOUBLE(result), 0.0
-    elif source <= SUM_FLOAT and PyComplex_CheckExact(result):
+    elif source <= SUM_FLOAT and PY_VERSION_HEX >= 0x030E0000 and PyComplex_CheckExact(result):
         z = PyComplex_AsCComplex(result)
         state.mode = SUM_COMPLEX
         state.hi, state.lo, state.ihi, state.ilo = z.real, 0.0, z.imag, 0.0
@@ -149,7 +152,12 @@ cdef inline int sum_add_ll(PySum* state, long long v) except -1:
         if not _sum_whole(state, v):
             _sum_generic(state, v)
     elif state.mode == SUM_FLOAT:
-        _cs_add(&state.hi, &state.lo, <double>v)
+        if PY_VERSION_HEX >= 0x030E0000:
+            _cs_add(&state.hi, &state.lo, <double>v)
+        elif LONG_MIN <= v <= LONG_MAX:
+            state.hi += <double>v
+        else:
+            _sum_generic(state, v)
     elif state.mode == SUM_COMPLEX:
         _cs_add(&state.hi, &state.lo, <double>v)
     else:
@@ -170,6 +178,7 @@ cdef inline int sum_add_object(PySum* state, object item) except -1:
     """Add any item object, branch for branch as builtin_sum_impl."""
     cdef int overflow = 0
     cdef long long b
+    cdef long small
     cdef Py_complex z
     if state.mode == SUM_INT:
         if PyLong_CheckExact(item) or PyBool_Check(item):
@@ -181,8 +190,13 @@ cdef inline int sum_add_object(PySum* state, object item) except -1:
             _cs_add(&state.hi, &state.lo, PyFloat_AS_DOUBLE(item))
             return 0
         if PyLong_Check(item):
-            _cs_add(&state.hi, &state.lo, PyLong_AsDouble(item))
-            return 0
+            if PY_VERSION_HEX >= 0x030E0000:
+                _cs_add(&state.hi, &state.lo, PyLong_AsDouble(item))
+                return 0
+            small = PyLong_AsLongAndOverflow(item, &overflow)
+            if overflow == 0:
+                state.hi += <double>small
+                return 0
     elif state.mode == SUM_COMPLEX:
         if PyComplex_CheckExact(item):
             z = PyComplex_AsCComplex(item)

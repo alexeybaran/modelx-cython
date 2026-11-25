@@ -36,8 +36,7 @@ def table_cells(cls_info):
         if (cells.is_special() or cells.has_args() or not cells.has_formula_def
                 or cells.body_has_closure or cells.called_with_kwargs or cells.formula_is_generator):
             continue
-        binder = cells.native_result_binder
-        if binder or frame_cell(cls_info, cells):
+        if frame_cell(cls_info, cells):
             result[name] = cells
     return result
 
@@ -125,7 +124,7 @@ def frame_cell(cls_info, cells):
     """T-3: a zero-argument cell whose traced value is a pandas DataFrame or Series, compiled with prepared
     tables: it is a table cell whose value is the frame itself (assigned as it is, never converted)."""
     policy = getattr(getattr(getattr(cls_info, 'module', None), 'spec', None), 'policy', None)
-    return (bool(getattr(policy, 'prepared_tables', False)) and not cells.native_result_binder
+    return (bool(getattr(policy, 'prepared_tables', False))
             and getattr(getattr(cells, '_rt', None), 'frame_schema', None) is not None)
 
 
@@ -515,4 +514,21 @@ def finish(syntax, module):
     from modelx_cython.transformer import _integer_reference_paths
     result = cst.MetadataWrapper(syntax, unsafe_skip_copy=True).visit(
         RenameMembers(module, syntax.config_for_parsing, _integer_reference_paths))
-    return result
+    return _drop_unused_import(result)
+
+
+def _drop_unused_import(syntax):
+    """The module without the runtime import when nothing reads ``_mx_table_cells``: a compiled model
+    without table cells imports without modelx_cython installed, as upstream's does."""
+    from .syntax import walk
+    imports = [statement for statement in syntax.body
+               if isinstance(statement, cst.SimpleStatementLine) and len(statement.body) == 1
+               and isinstance(statement.body[0], cst.ImportFrom)
+               and any(isinstance(alias.asname, cst.AsName) and alias.asname.name.value == RUNTIME
+                       for alias in (statement.body[0].names if isinstance(statement.body[0].names, tuple) else ()))]
+    if len(imports) != 1:
+        return syntax
+    used = any(isinstance(node, cst.Name) and node.value == RUNTIME
+               for statement in syntax.body if statement is not imports[0] for node in walk(statement))
+    return syntax if used else syntax.with_changes(
+        body=tuple(statement for statement in syntax.body if statement is not imports[0]))

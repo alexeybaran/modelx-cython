@@ -5,7 +5,6 @@ module or callable and must preserve its behavior when it is replaced.
 """
 import hashlib
 from importlib import resources
-import keyword
 
 import libcst as cst
 
@@ -14,10 +13,6 @@ from .consts import CY_MOD
 
 def module_name(provider):
     return '_mx_helper_' + hashlib.sha256(provider.encode()).hexdigest()[:12]
-
-
-def valid_identifier(name):
-    return isinstance(name, str) and name.isidentifier() and not keyword.iskeyword(name)
 
 
 def read_resource(package, name):
@@ -73,7 +68,7 @@ class HelperCalls(FormulaTransformer):
             return updated
         operation = 'm_' + name
         if name in ('floor', 'ceil'):
-            kind = argument_kind(updated.args[0].value, self.current, self.cells, self.refs)
+            kind = argument_kind(original.args[0].value, self.current, self.cells, self.refs, self.formula_name)
             if kind in ('double', 'longlong'):
                 operation += '_ll'
         self.used.add(MATH_PROVIDER)
@@ -111,7 +106,9 @@ class HelperCalls(FormulaTransformer):
                      or isinstance(value, cst.Name)
                      or isinstance(value, cst.Attribute) and isinstance(value.value, cst.Name)
                      and value.value.value == 'self')
-            if not plain or argument_kind(value, self.current, self.cells, self.refs) not in ('double', 'longlong'):
+            written = next(arg.value for arg in original.args if arg.keyword is not None and arg.keyword.value == name)
+            if not plain or argument_kind(written, self.current, self.cells, self.refs,
+                                          self.formula_name) not in ('double', 'longlong'):
                 self.decline(original, f'math.isclose {name} is not a float or integer literal, '
                              'typed Reference or parameter; runs as a Python call')
                 return updated
@@ -150,6 +147,10 @@ class HelperCalls(FormulaTransformer):
         _ScopedHelperCalls); the base binder knows no lexical scopes and finds none."""
         return False
 
+    def formula_name(self, node):
+        """``node`` (a Name) is the formula's own parameter; the base binder knows no scopes."""
+        return True
+
     def namespace(self, value):
         """The borrowed namespace argument of a math provider call: the module Reference itself, or
         the provider's own ``math`` module for a formula-local ``import math`` (the module that
@@ -167,26 +168,7 @@ class HelperCalls(FormulaTransformer):
 
     def leave_Call(self, original, updated):
         math = self.module_math(original, updated)
-        if math is not None:
-            return math
-        from .helper_members import MATH_PROVIDER
-        func = updated.func
-        ref = _declared_reference(func, self.refs)
-        contract = ref.helper if ref is not None else None
-        # A module member that is a math builtin under another name has no ``m_`` form: the
-        # provider operation receives the member itself and checks it.
-        if not contract or contract[0] != MATH_PROVIDER or any(arg.star or arg.keyword for arg in updated.args):
-            return updated
-        provider, operation = contract
-        self.used.add(provider)
-        self.operations.add(provider + '.' + operation)
-        args = tuple(arg.with_changes(value=arg.value.with_changes(
-                     lpar=(cst.LeftParen(),), rpar=(cst.RightParen(),)))
-                     if isinstance(arg.value, cst.GeneratorExp) and not arg.value.lpar else arg
-                     for arg in updated.args)
-        return updated.with_changes(
-            func=cst.Attribute(cst.Name(module_name(provider)), cst.Name(operation)),
-            args=(cst.Arg(func), *args))
+        return updated if math is None else math
 
     def rewrite(self, formula):
         """Bind registered symbols across lexical scopes, without body analysis.
@@ -217,6 +199,7 @@ class _ScopedHelperCalls(HelperCalls):
         self.math_imports = {}          # diag-scale P1: top-level ``import math [as n]`` node -> name
         self.math_aliases = set()
         self.math_lowered = set()       # alias names with at least one lowered member
+        self.formula_params = frozenset()   # ids of the formula's parameter nodes
 
     def local_math(self, node):
         """``node`` is a load of a name whose only binding in the formula is a top-level
@@ -242,6 +225,15 @@ class _ScopedHelperCalls(HelperCalls):
         self.math_aliases.add(node.value)
         return True
 
+    def formula_name(self, node):
+        """``node`` is read where its only binding is a parameter of the formula itself: a lambda or
+        comprehension name that shadows a typed parameter has another type."""
+        scope = self.get_metadata(cst.metadata.ScopeProvider, node, None)
+        if scope is None:
+            return False
+        assignments = tuple(scope[node.value])
+        return bool(assignments) and all(id(a.node) in self.formula_params for a in assignments)
+
     def line_of(self, node):
         position = self.get_metadata(cst.metadata.PositionProvider, node, None)
         if position is None or self.first_line is None:
@@ -253,6 +245,7 @@ class _ScopedHelperCalls(HelperCalls):
             parameters = (*node.params.posonly_params, *node.params.params)
             if parameters and parameters[0].name.value == 'self':
                 self.receiver = parameters[0]
+            self.formula_params = frozenset(id(p) for p in (*parameters, *node.params.kwonly_params))
             position = self.get_metadata(cst.metadata.PositionProvider, node.name, None)
             self.first_line = position.start.line if position is not None else None
         return cst.CSTTransformer.on_visit(self, node)
@@ -313,9 +306,6 @@ class _ScopedHelperCalls(HelperCalls):
             return updated
         if not self._owns_receiver(function):
             return updated
-        if _declared_reference(function, self.refs) is None:
-            self.module_math(original, updated)       # lists math members with no native form
-            return updated
         return super().leave_Call(original, updated)
 
 
@@ -373,51 +363,23 @@ def _drop_unused_math_imports(formula, names):
     return formula.with_changes(body=formula.body.with_changes(body=statements))
 
 
-def _declared_reference(function, refs):
-    # Kept lazy to avoid the shared registry/resolver import cycle.
-    from .helper_members import helper_reference
-    return helper_reference(function, refs)
-
-
-def install(providers, model_path, object_providers=None):
+def install(providers, model_path):
+    """Copy each provider's .pyx/.pxd pair into the model package; returns the .pyx paths to compile.
+    A provider with only a .pxd is a header: the .pxd is copied and nothing is compiled for it."""
     modules = []
-    expected = {}
-    object_providers = object_providers or {}
     for provider in sorted(providers):
         package, _, name = provider.rpartition('.')
         if not package:
             raise ValueError('helper provider must belong to a package')
         alias = module_name(provider)
-        sources = {suffix: read_resource(package, name + suffix) for suffix in ('.pyx', '.pxd')}
-        manifest = object_providers.get(provider)
-        if manifest:
-            digest = hashlib.sha256()
-            for payload in (read_resource(package, name + '.provider.json'), *sources.values()):
-                digest.update(len(payload).to_bytes(8, 'little'))
-                digest.update(payload)
-            fingerprint = digest.hexdigest()
-            expected[alias] = ((manifest.protocol, manifest.provider, manifest.abi), fingerprint)
-            sources['.pyx'] += f'\n\n__modelx_cython_provider_build__ = {fingerprint!r}\n'.encode()
+        try:
+            sources = {'.pyx': read_resource(package, name + '.pyx')}
+        except FileNotFoundError:
+            # a header: inline functions only, compiled into the modules that cimport it
+            (model_path / (alias + '.pxd')).write_bytes(read_resource(package, name + '.pxd'))
+            continue
+        sources['.pxd'] = read_resource(package, name + '.pxd')
         for suffix, payload in sources.items():
             (model_path / (alias + suffix)).write_bytes(payload)
-        modules.append(model_path.relative_to(model_path.parent)
-                       / (alias + '.pyx'))
-    if expected:
-        guard = model_path / '_mx_provider_guard.py'
-        guard.write_text(f'''from importlib import import_module
-
-for _alias, (_contract, _fingerprint) in {expected!r}.items():
-    _message = (f'Native provider {{_contract[1]}} requires ABI {{_contract[2]}} '
-                f'and build fingerprint {{_fingerprint}}')
-    try:
-        _provider = import_module('.' + _alias, __package__)
-    except ImportError as _error:
-        raise ImportError(_message) from _error
-    if (getattr(_provider, '__modelx_cython_provider__', None) != _contract
-            or getattr(_provider, '__modelx_cython_provider_build__', None) != _fingerprint):
-        raise ImportError(_message)
-''', encoding='utf-8')
-        init = model_path / '__init__.py'
-        init.write_text('from . import _mx_provider_guard\n' + init.read_text(encoding='utf-8'),
-                        encoding='utf-8')
+        modules.append(model_path.relative_to(model_path.parent) / (alias + '.pyx'))
     return modules

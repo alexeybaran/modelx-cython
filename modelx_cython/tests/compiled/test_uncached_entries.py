@@ -1,13 +1,14 @@
 """D139: a compiled call to an uncached Cell on a proven receiver is a direct C call.
 
-`surv(s, t)` and `tick(t)` are uncached (``is_cached = False``). A caller in the same class (collect
-route) and a caller holding a typed item local (direct route) call the Cell's private entry behind the
-same exact-receiver test as a cached Cell's entry: no cache lookup, no storage, no readiness flag. The
+`surv(s, t)` and `tick(t)` are uncached (``is_cached = False``). A caller in the same class and a
+caller holding a typed item local call the Cell's private entry behind the same exact-receiver test
+as a cached Cell's entry: no cache lookup, no storage, no readiness flag. The
 entry checks integer arguments as the cached entries do, and Python callers keep the public method.
 `surv` recurses through itself and the cached `rate`; the cached `inforce` recurses through `surv`
 (mixed cached/uncached recursion). Each call of `tick` evaluates it: `ticks(n)` calls it n times and
 appends n entries to a shared log, a second `ticks(n)` is a cache hit, and each Python call evaluates
-again. Compiled values equal the exported model at one and four workers and on the direct route.
+again. Compiled values equal the exported model on the direct route. Direct-route twin of
+``test_uncached_entries_collect`` (the same model without ``collect_over``).
 """
 import json
 import subprocess
@@ -24,8 +25,7 @@ def _build(tmp_path):
     model = mx.new_model('UncachedEntries')
     try:
         projection = model.new_space(
-            'Projection', formula='lambda key: None', refs={'keys': keys, 'log': []},
-            collect_over={'key': keys}, collect_outputs='lambda: {"sum": {"value": value()}}')
+            'Projection', formula='lambda key: None', refs={'keys': keys, 'log': []})
         projection.new_cells('rate', 'lambda t: 0.01 * ((t + key) % 7)')
         projection.new_cells('surv', textwrap.dedent('''\
             def surv(s, t):
@@ -79,7 +79,7 @@ def _build(tmp_path):
     (tmp_path / 'sample.py').write_text(
         'from exported import mx_model\n'
         'p = mx_model.Projection\n'
-        'p.collect(); mx_model.Portfolio.direct()\n'
+        'mx_model.Portfolio.direct()\n'
         'for key in (1, 2, 3):\n'
         '    p[key].value(); p[key].ticks(5); p[key].tick(2)\n'
         '    [p[key].surv(s, t) for s in range(12) for t in range(12)]\n'
@@ -95,14 +95,7 @@ PROBE = textwrap.dedent('''\
     m = import_module(sys.argv[1]).mx_model
     p = m.Projection
     out = {}
-    if sys.argv[1] == 'exported_cy':
-        serial = type(m)()
-        serial.collect_workers = 1
-        out['collect1'] = serial.Projection.collect().sum.value
-        out['collect1_again'] = serial.Projection.collect().sum.value
-    else:
-        out['collect1'] = out['collect1_again'] = p.collect().sum.value
-    out['collect4'] = p.collect().sum.value
+    out['values'] = sum(p[key].value() for key in range(1, 9))
     out['direct'] = m.Portfolio.direct()
     item = p[5]
     out['surv'] = [item.surv(s, t) for s in range(12) for t in range(12)]
@@ -148,7 +141,7 @@ def test_uncached_cells_take_a_direct_entry_and_equal_live(tmp_path):
     assert all(admission[PREFIX + '_f_' + name]['inline_entry'] for name in ('surv', 'tick', 'rate', 'discount'))
 
     live, compiled = _run(tmp_path, 'exported'), _run(tmp_path, 'exported_cy')
-    for key in ('collect1', 'collect1_again', 'collect4', 'direct', 'value'):
+    for key in ('values', 'direct', 'value'):
         assert abs(compiled[key] - live[key]) <= 1e-7 + 1e-10 * abs(live[key]), key
     for key in ('surv', 'inforce', 'discount'):
         assert all(abs(a - b) <= 1e-7 + 1e-10 * abs(b) for a, b in zip(compiled[key], live[key])), key

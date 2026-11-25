@@ -2,15 +2,7 @@
 
 import re
 
-from .consts import FORMULA_PREF, MODULE_PREF, SPACE_PREF
 
-
-def _lock_reason(source, kind, resource='table'):
-    _, *parents, _, cls, cell = source.split('.')
-    space = '.'.join([*(name[len(MODULE_PREF):] for name in parents),
-                      cls[len(SPACE_PREF):]])
-    name = cell[len(FORMULA_PREF):]
-    return f'native {kind} {resource} read from {space}.{name} requires {space} in export locked_spaces'
 
 
 def describe(module_infos):
@@ -49,10 +41,6 @@ def describe(module_infos):
                     reasons.append('keyword call retains the Python public boundary')
                 if cell.is_locked:
                     reasons.append('exported shared-Space lock retained')
-                if cell.observed_native_binding is not None and cell.native_provider_binding is None:
-                    reasons.append('native provider result requires a matching return annotation or direct forwarding from a typed Cell')
-                reasons.extend(_lock_reason(source, 'cached', resource)
-                               for source, resource in getattr(cell, 'unlocked_provider_sources', ()))
                 result[cell.fqname] = {
                     'formula': 'python-method' if formula_python else 'cython-cfunction',
                     'public_entry': 'python-method' if public_python else 'cython-cpdef',
@@ -86,7 +74,6 @@ def describe(module_infos):
                     'exact_spill': cache == 'dense' and bool(cell.has_dense_spill),
                     'nogil_qualified': False,
                     'native_helpers': getattr(cell, 'native_helpers', []),
-                    'native_numeric_helpers': getattr(cell, 'native_numeric_helpers', []),
                     'table_reads_typed': getattr(cell, 'table_reads_typed', 0),
                     'table_reads_untyped': getattr(cell, 'table_reads_untyped', []),
                     'record_reads_untyped': getattr(cell, 'record_reads_untyped', []),
@@ -98,7 +85,7 @@ def describe(module_infos):
                     'row_cell_kept': getattr(cell, 'row_cell_kept', None),
                     'native_tuple_int_loops': getattr(cell, 'native_tuple_int_loops', 0),
                     'native_expressions': sum(getattr(cell, key, 0) for key in (
-                        'reductions_native', 'minmax_native', 'math_native')),
+                        'reductions_native', 'math_native')),
                     'expressions_untyped': expressions_untyped(cell),
                     'powers_in_loops': list(getattr(cell, 'powers_in_loops', ())),
                     'guarded_integer_ops': getattr(cell, 'guarded_integer_ops', 0),
@@ -338,7 +325,7 @@ def expressions_object(cell):
     """Built-in forms (W1.8) compiled with comparisons or calls on Python objects, because
     an operand's class is not known at build time; each with its line and the operand
     classes. They no longer call the built-in."""
-    entries = [entry for key in ('minmax_object', 'reductions_object', 'math_object')
+    entries = [entry for key in ('reductions_object', 'math_object')
                for entry in getattr(cell, key, ())]
     return sorted(entries, key=lambda entry: (entry['line'], entry['form'], entry['expr']))
 

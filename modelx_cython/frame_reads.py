@@ -36,19 +36,17 @@ import re
 import libcst as cst
 
 from .holds import hold_table
-from .read_notes import RAISES, normal, only_raised
+from .read_notes import normal, only_raised
 
 PROVIDER = 'modelx_cython.runtime._tables'
 COLUMN_KIND = {'f64': 0, 'i64': 1}
 READ = ('f64', 'i64')
 CTYPE = {'f64': '_mx_cy.double', 'i64': '_mx_cy.longlong'}
 MAX_PARTS = 6
-# displays whose value as a key part (or an argument of asof/searchsorted) selects several rows, never one label
+# displays whose value as a key part selects several rows, never one label
 SEVERAL_ROWS = (cst.List, cst.ListComp, cst.Set, cst.Slice, cst.Tuple, cst.Lambda)
 SEVERAL_ROWS_WHY = 'a key part selects several rows'
 ONLY_RAISED_WHY = 'every evaluation of this place raised in the sample (no evidence of a single-cell read)'
-# kinds of a call's result in the sample (read_notes.kind) that are a single number
-ONE_NUMBER = frozenset(('int', 'float', 'bool'))
 MUTATORS = frozenset(('__setitem__', '__delitem__', 'update', 'insert', 'pop'))
 # the native reads of a cell value (pandas returns numpy.float64 / numpy.int64 for them)
 VALUE_READS = frozenset(('f64_1', 'f64_c', 'i64_1', 'i64_c', 'f64_row', 'i64_row'))
@@ -56,6 +54,11 @@ VALUE_READS = frozenset(('f64_1', 'f64_c', 'i64_1', 'i64_c', 'f64_row', 'i64_row
 NUMPY_NEUTRAL_CALLS = frozenset(('float', 'int', 'bool'))
 # calls that return one of their numeric arguments (its type goes on)
 NUMPY_PASSING_CALLS = frozenset(('abs', 'min', 'max', 'sum'))
+
+
+def _several(part):
+    """A key part whose display selects several rows (or is unpacked): never one label."""
+    return isinstance(part, (*SEVERAL_ROWS, cst.StarredElement))
 
 
 def _code(node):
@@ -96,11 +99,6 @@ def _literal_str(node):
     return None
 
 
-def _text(node):
-    """A text literal (T-5c: never cast to a C number; pandas raises its own TypeError)."""
-    return isinstance(node, (cst.SimpleString, cst.ConcatenatedString, cst.FormattedString))
-
-
 def _cast(type_expr, value):
     return cst.Call(func=cst.Attribute(cst.Name('_mx_cy'), cst.Name('cast')),
                     args=[cst.Arg(cst.parse_expression(type_expr)), cst.Arg(value)])
@@ -120,6 +118,32 @@ def _index_parts(subscript):
     return parts
 
 
+def _walk_extreme(call):
+    """``max(a for a, s in X)`` / ``min(...)``, no condition, the element one name of the tuple target:
+    (X, the target's names, the element's position), else None."""
+    if not (isinstance(call.func, cst.Name) and call.func.value in ('max', 'min') and len(call.args) == 1
+            and not call.args[0].keyword and not call.args[0].star and isinstance(call.args[0].value, cst.GeneratorExp)):
+        return None
+    gen = call.args[0].value
+    comp, target = gen.for_in, gen.for_in.target
+    if (comp.ifs or comp.inner_for_in is not None or comp.asynchronous is not None or not isinstance(gen.elt, cst.Name)
+            or not isinstance(target, cst.Tuple) or not all(isinstance(e, cst.Element) and isinstance(e.value, cst.Name)
+                                                            for e in target.elements)):
+        return None
+    names = [e.value.value for e in target.elements]
+    return (comp.iter, names, names.index(gen.elt.value)) if names.count(gen.elt.value) == 1 else None
+
+
+def _extreme_part(subscript):
+    """``X.max()[k]`` / ``X.min()[k]``, k an integer literal: (the call, k), else None."""
+    parts = _index_parts(subscript)
+    call = subscript.value
+    if not (parts and len(parts) == 1 and isinstance(parts[0], cst.Integer) and isinstance(call, cst.Call)
+            and not call.args and isinstance(call.func, cst.Attribute) and call.func.attr.value in ('max', 'min')):
+        return None
+    return call, int(parts[0].value, 0)
+
+
 class _Hold:
     """One (receiver, column, kind) a formula reads natively; ``table`` (and ``state`` in items) are the fields of
     the receiver's binding, shared by every read of that receiver."""
@@ -128,12 +152,19 @@ class _Hold:
         self.table, self.state, self.receiver, self.label, self.kind = table, state, receiver, label, kind
 
 
+class _EveryReceiver(frozenset):
+    """The receivers a formula edits when an edit goes through a name that may be any of them: all."""
+
+    def __contains__(self, item):
+        return True
+
+
 class FrameReads:
     """``lower(node)`` returns the formula with recognised reads lowered; ``lowered`` lists what was lowered
     (one dict per read) and ``declined`` why a read of a frame receiver was not."""
 
     def __init__(self, resolver, cls_info, cells, providers, policy, row_names=None, prefix_cells=None,
-                 param_cells=None, *, builtin_int, builtin_zip_walk=False, row_inline=None):
+                 param_cells=None, *, builtin_int, row_inline=None):
         self.param_cells = param_cells or {}    # T-5c: cell with parameters -> (names, its `T.loc[key]` expression)
         self.row_names = row_names or {}       # code of an inlined row expression -> its row cell (assignments)
         self.row_inline = row_inline
@@ -141,7 +172,6 @@ class FrameReads:
         self.resolver, self.cls_info, self.cells = resolver, cls_info, cells
         self.providers, self.policy = providers, policy
         self.builtin_int = builtin_int
-        self.builtin_zip_walk = builtin_zip_walk
         self.lowered, self.declined = [], []
         self.lowered_nodes = []     # original nodes, including their nested operations
         # what the sample run saw at each table read of this formula, by the text of the node (read_notes.py)
@@ -149,7 +179,6 @@ class FrameReads:
         self.lowered_text = set()   # texts of the nodes this formula's rewrite replaced
         self.param_readers = set()  # names of parameterised prefix Cells replaced by a native read
         self.key_count = 0
-        self.held_string_selector = None
 
     def note_of(self, node):
         return self.notes.get(normal(_code(node)))
@@ -254,31 +283,18 @@ class FrameReads:
     def _extreme_part_int(self, expr):
         """``R.index.max()[k]`` / ``.min()[k]``, R a unique frame of several levels whose level k is int; or
         ``max(a for a, s in R.index)`` with ``a`` naming an int level (``level_walk_extreme``)."""
-        if (isinstance(expr, cst.Call) and isinstance(expr.func, cst.Name) and expr.func.value in ('max', 'min')
-                and len(expr.args) == 1 and isinstance(expr.args[0].value, cst.GeneratorExp)):
-            gen = expr.args[0].value
-            target, it = gen.for_in.target, gen.for_in.iter
-            if (gen.for_in.ifs or gen.for_in.inner_for_in is not None or not isinstance(gen.elt, cst.Name)
-                    or not isinstance(target, cst.Tuple) or not isinstance(it, cst.Attribute) or it.attr.value != 'index'
-                    or not all(isinstance(e.value, cst.Name) for e in target.elements)):
-                return False
-            names = [e.value.value for e in target.elements]
-            found = self._receiver(it.value)
-            if names.count(gen.elt.value) != 1 or found is None or not found[1].get('unique'):
-                return False
-            levels = found[1]['levels']
-            return len(levels) == len(names) and levels[names.index(gen.elt.value)] == 'int'
-        if not (isinstance(expr, cst.Subscript) and len(expr.slice) == 1 and isinstance(expr.slice[0].slice, cst.Index)
-                and isinstance(expr.slice[0].slice.value, cst.Integer) and isinstance(expr.value, cst.Call)
-                and not expr.value.args and isinstance(expr.value.func, cst.Attribute)
-                and expr.value.func.attr.value in ('max', 'min') and isinstance(expr.value.func.value, cst.Attribute)
-                and expr.value.func.value.attr.value == 'index'):
+        walk = _walk_extreme(expr) if isinstance(expr, cst.Call) else None
+        part = _extreme_part(expr) if isinstance(expr, cst.Subscript) else None
+        index = walk[0] if walk else part[0].func.value if part else None
+        if not (isinstance(index, cst.Attribute) and index.attr.value == 'index'):
             return False
-        found = self._receiver(expr.value.func.value.value)
+        found = self._receiver(index.value)
         if found is None or not found[1].get('unique'):
             return False
-        levels, level = found[1]['levels'], int(expr.slice[0].slice.value.value, 0)
-        return 1 < len(levels) <= 8 and 0 <= level < len(levels) and levels[level] == 'int'
+        levels = found[1]['levels']
+        if walk:
+            return len(levels) == len(walk[1]) and levels[walk[2]] == 'int'
+        return 1 < len(levels) <= 8 and 0 <= part[1] < len(levels) and levels[part[1]] == 'int'
 
     def numpy_use(self, node, kind, seen=None):
         """Whether the value of the cell read ``node`` (an original node of this formula) reaches a use where a
@@ -343,7 +359,7 @@ class FrameReads:
                 parent = call
             elif isinstance(parent, cst.Return):
                 try:
-                    result = '' if self.cells.native_result_binder else self.cells.get_rettype_expr()
+                    result = self.cells.get_rettype_expr()
                 except Exception:
                     result = ''
                 return not (result.startswith('_mx_cy.') and result != '_mx_cy.object')
@@ -408,19 +424,19 @@ class FrameReads:
 
     def _receiver(self, expr):
         """(cell call, schema) when ``expr`` is a frame receiver, else None. In an item class a frame or row the item
-        computes itself is prepared per item: it is one only when the reading formula is evaluated at least
-        ``PREPARE_MIN_EVALUATIONS`` times per item in the sample (T-5c), so that the preparation pays for itself;
-        a formula evaluated fewer times reads it on pandas."""
+        computes itself is prepared per item (about 0.3-2M instructions; a pandas read costs 20-100k): it is one only
+        for a formula with parameters, evaluated once per step, so that the preparation pays for itself; a formula
+        without parameters, evaluated once per item, reads it on pandas. Decided from the text, not from how often
+        the sample evaluated the formula."""
         schema = self._schema_of_call(expr)
         found = (expr, schema) if schema is not None else None
         if found is None:
             value = self._value_of(expr.value) if isinstance(expr, cst.Name) else None
             schema = self._schema_of_call(value) if value is not None else None
             found = (value, schema) if schema is not None else None
-        if found is not None and getattr(self, 'per_item', False) and self.published(found[0]) is None:
-            evaluations = getattr(getattr(self.cells, '_rt', None), 'max_evaluations_per_receiver', 0) or 0
-            if evaluations < PREPARE_MIN_EVALUATIONS:
-                return None
+        if (found is not None and getattr(self, 'per_item', False) and not self.cells.has_args()
+                and self.published(found[0]) is None):
+            return None
         return found
 
     def param_prefix(self, expr):
@@ -449,8 +465,7 @@ class FrameReads:
             def leave_Attribute(self, original, updated):       # x.p is not the parameter p
                 return updated.with_changes(attr=original.attr)
         parts = _parts(row.slice[0].slice.value.visit(Put()))
-        if len(parts) >= len(found[1]['levels']) or any(
-                isinstance(p, (cst.Slice, cst.List, cst.ListComp, cst.Tuple, cst.StarredElement)) for p in parts):
+        if len(parts) >= len(found[1]['levels']) or any(map(_several, parts)):
             return None
         return found[0], found[1], parts
 
@@ -471,7 +486,6 @@ class FrameReads:
             return None
         key = row.slice[0].slice.value
         parts = _parts(key)
-        from .row_cells import item_constant
         if len(parts) >= len(found[1]['levels']) or not all(self.fixed_part(p) for p in parts):
             return None
         # by traced type: every traced value of P is a frame of the parent's remaining levels and of its columns
@@ -504,7 +518,6 @@ class FrameReads:
         self.code_fields, self.row_fields = {}, {}
         self.tuple_guards = {}  # T-5c: code of a part ``k[i]`` of a key tuple held at run time -> (code of k, count)
         self.mutated = self._mutated(node)
-        self.asof_locals = self._asof_locals(node)
         self.views = {}         # T-5: view local -> _View
         self.ambiguous = set()  # T-5: codes of `T.loc[a, b]` prefixes (row prefix or row and column)
         self.columns = {}       # T-5: column local -> (view expression, column label)
@@ -512,25 +525,17 @@ class FrameReads:
         self.declarations = []  # T-5: C Py_ssize_t locals of the formula (loop positions)
         self.local_count = 0
         rewriter = _Rewrite(self)
-        if self.builtin_zip_walk and not getattr(self.policy, 'verify_inputs', False):
-            zipped = rewriter.zip_prefix(node.body.body)
-            if zipped is not None:
-                self.providers.add(PROVIDER)
-                return node.with_changes(body=node.body.with_changes(body=zipped))
         body = []
         changed = False
         for statement in node.body.body:
             before = len(self.holds)
             rewriter.new_holds = self.new_items = []
-            asof = self._asof_assignment(statement)
-            view = self.view_assignment(statement) if asof is None else None
-            if asof is not None or view is not None:    # the whole assignment is rewritten: its read is lowered
+            view = self.view_assignment(statement)
+            if view is not None:    # the whole assignment is rewritten: its read is lowered
                 assigned = self._simple_assign(statement)
                 if assigned is not None:
                     self.lowered_text.add(normal(_code(assigned[1])))
-            if asof is not None:
-                new = rewriter.asof_statement(statement, asof)
-            elif view is not None:
+            if view is not None:
                 new = rewriter.view_statement(statement, view)
             else:
                 new = statement.visit(rewriter)
@@ -562,60 +567,7 @@ class FrameReads:
             head = 1 if body and _is_docstring(body[0]) else 0
             body[head:head] = [cst.parse_statement(f'{name}: _mx_cy.Py_ssize_t') for name in self.declarations]
         self.providers.add(PROVIDER)
-        lowered = self._flatten(body)
-        from .key_facts import _is_docstring
-        original = [s for s in node.body.body if not _is_docstring(s)]
-        if (rewriter.held_string_read is not None and len(original) == 1
-                and isinstance(original[0], cst.SimpleStatementLine) and len(original[0].body) == 1
-                and isinstance(original[0].body[0], cst.Return)
-                and isinstance(lowered[-1], cst.SimpleStatementLine) and isinstance(lowered[-1].body[0], cst.Return)):
-            read, test, state = rewriter.held_string_read
-            expr = lowered[-1].body[0].value
-            if isinstance(expr, cst.IfExp) and expr.body.deep_equals(read) and expr.test.deep_equals(test):
-                self.held_string_selector = f'self.{state} > 0 and ({_code(test)})'
-        return node.with_changes(body=node.body.with_changes(body=lowered))
-
-    def _asof_assignment(self, statement):
-        assign = self._simple_assign(statement)
-        return self.asof_locals.get(assign[0]) if assign else None
-
-    def _asof_locals(self, node):
-        """T-4: ``lo = P.index.asof(x)`` at the top level of an item formula, P the value of a prefix cell with one
-        remaining int level, and every load of ``lo`` the key of a keyed read ``P.loc[lo, "c"]`` of that value:
-        {name: (P name, x)}. ``lo`` is then the row of the label in the parent table, never a Python value."""
-        if not self.per_item:
-            return {}
-        f, found = self.facts.formula, {}
-        for statement in node.body.body:
-            name, value = self._simple_assign(statement) or (None, None)
-            if not (isinstance(value, cst.Call) and len(value.args) == 1 and not value.args[0].keyword
-                    and isinstance(value.func, cst.Attribute) and value.func.attr.value == 'asof'
-                    and isinstance(value.func.value, cst.Attribute) and value.func.value.attr.value == 'index'):
-                continue
-            if not self._once(name):
-                continue
-            prefix = self.prefix_receiver(value.func.value.value)
-            if prefix is None or len(prefix[2]['levels']) - len(prefix[3]) != 1 or prefix[2]['levels'][-1] != 'int':
-                continue
-            uses = [use for use, nested in f.loads.get(name, ()) if not nested]
-            if len(uses) != len(f.loads.get(name, ())) or not uses or not all(
-                    self._keyed_use(use, prefix[4]) for use in uses):
-                continue
-            found[name] = (prefix, value.args[0].value, value)
-        return found
-
-    def _keyed_use(self, use, cell):
-        """``use`` (a Name load) is the first key part of ``X.loc[use, "c"]`` with X the value of prefix cell ``cell``."""
-        parents = self.facts.formula.parents
-        index = parents.get(id(use))
-        element = parents.get(id(index)) if isinstance(index, cst.Index) else None
-        subscript = parents.get(id(element)) if isinstance(element, cst.SubscriptElement) else None
-        parts = _index_parts(subscript) if isinstance(subscript, cst.Subscript) else None
-        if not (parts is not None and len(parts) == 2 and subscript.slice[0] is element
-                and _literal_str(parts[1]) is not None and isinstance(subscript.value, cst.Attribute) and subscript.value.attr.value == 'loc'):
-            return False
-        prefix = self.prefix_receiver(subscript.value.value)
-        return prefix is not None and prefix[4] == cell
+        return node.with_changes(body=node.body.with_changes(body=self._flatten(body)))
 
     def _root(self, expr):
         while isinstance(expr, (cst.Attribute, cst.Subscript)):
@@ -625,13 +577,23 @@ class FrameReads:
     def _mutated(self, node):
         """Codes of the receivers the formula itself edits in place (an assignment or ``del`` through them,
         ``__setitem__``/``__delitem__``/``update``/``insert``/``pop``, or any call with ``inplace``): their
-        reads stay pandas, so an edit is read as it is made, as live."""
-        owner, found = self, set()
+        reads stay pandas, so an edit is read as it is made, as live. An edit through a local bound to a receiver
+        (``w = df``) edits the receiver; one through a name bound in a way not followed (a loop target, unpacking,
+        ``self``) may edit any of them: every read of the formula then stays pandas."""
+        owner, found, f = self, set(), self.facts.formula
+        unknown = []
 
-        def note(expr):
-            got = owner._receiver(owner._root(expr))
+        def note(expr, seen=()):
+            root = owner._root(expr)
+            got = owner._receiver(root)
             if got is not None:
                 found.add(_code(got[0]))
+            if not isinstance(root, cst.Name) or root.value in seen:
+                return
+            if root.value == 'self' or root.value in f.other:
+                unknown.append(root.value)
+            for value in f.values.get(root.value, ()):
+                note(value, (*seen, root.value))
 
         class Scan(cst.CSTVisitor):
             def visit_Assign(self, n):
@@ -656,7 +618,7 @@ class FrameReads:
                         or any(a.keyword is not None and a.keyword.value == 'inplace' for a in n.args)):
                     note(n.func.value)
         node.visit(Scan())
-        return found
+        return _EveryReceiver() if unknown else found
 
     @staticmethod
     def _flatten(body):
@@ -688,7 +650,10 @@ class FrameReads:
             out = kept
 
     def _hold_statements(self, hold):
-        """The statements that resolve one hold, placed before the top-level statement of its first read."""
+        """The statements that resolve one hold, placed before the top-level statement of its first read. That
+        statement may not reach the read (a branch not taken): a hold whose evaluation raises is left unresolved (a
+        table: one whose every read stays pandas), so that the error is raised by the read's own pandas branch, where
+        live raises it, or not at all."""
         m = self.module
         if isinstance(hold, tuple):         # T-4: a held code or row, after the hold of its table
             what, field, table, level_or_key, extra = hold
@@ -701,7 +666,8 @@ class FrameReads:
                 value = f'{level_or_key} + 2'
             else:
                 value = f'{m}.hold_row(self.{table}, {_code(level_or_key)}, False)'
-            return [cst.parse_statement(f'if self.{field} == 0:\n    self.{field} = {value}\n')]
+            return [cst.parse_statement(f'if self.{field} == 0:\n    try:\n        self.{field} = {value}\n'
+                                        f'    except Exception:\n        pass\n')]
         # T-4.2: one binding per receiver and item (or per call outside items): the frame's PreparedTable, or a
         # table whose every slot is -1; each read then takes its slot from the table by its signature id
         function = 'bind_ref_checked' if getattr(self.policy, 'verify_inputs', False) else 'bind_ref'
@@ -713,9 +679,13 @@ class FrameReads:
             value = held if held is not None and function == 'bind_ref' else f'{m}.{function}({receiver})'
             return [cst.parse_statement(
                 f'if self.{hold.state} == 0:\n'
-                f'    self.{hold.table} = {value}\n'
-                f'    self.{hold.state} = 1\n')]
-        return [cst.parse_statement(f'{hold.table}: object = {m}.{function}({receiver})')]
+                f'    try:\n'
+                f'        self.{hold.table} = {value}\n'
+                f'        self.{hold.state} = 1\n'
+                f'    except Exception:\n'
+                f'        self.{hold.table} = {m}.bind_own(None)\n')]
+        return [cst.parse_statement(f'try:\n    {hold.table} = {m}.{function}({receiver})\n'
+                                    f'except Exception:\n    {hold.table} = {m}.bind_own(None)\n')]
 
     # ------------------------------------------------------------------ T-5: views of a prefix
     def view_assignment(self, statement):
@@ -739,8 +709,7 @@ class FrameReads:
         extra = _index_parts(value) if prefix is not None else None
         if extra is not None and len(extra) == 1:
             more = _parts(extra[0])
-            if len(prefix[3]) + len(more) < len(prefix[2]['levels']) and not any(
-                    isinstance(p, (cst.Slice, cst.List, cst.ListComp, cst.Tuple, cst.StarredElement)) for p in more):
+            if len(prefix[3]) + len(more) < len(prefix[2]['levels']) and not any(map(_several, more)):
                 return name, prefix[1], prefix[2], [*prefix[3], *more], prefix[4], len(prefix[3])
         got = self.prefix_of(value)
         if got is None:
@@ -798,12 +767,12 @@ class FrameReads:
         return name, source, label
 
     def int_label(self, expr):
-        """T-5: ``X.index[i]``, ``X.index.asof(x)``, ``.max()``, ``.min()`` or ``.searchsorted(x)`` of a view or frame
-        whose one remaining level is an int level: an integer (key facts)."""
+        """T-5: ``X.index[i]``, ``.max()`` or ``.min()`` of a view or frame whose one remaining level is an int level:
+        an integer (key facts)."""
         if isinstance(expr, cst.Subscript):
             index = expr.value
         elif isinstance(expr, cst.Call) and isinstance(expr.func, cst.Attribute) and expr.func.attr.value in (
-                'asof', 'max', 'min', 'searchsorted'):
+                'max', 'min'):
             index = expr.func.value
         else:
             return False
@@ -819,8 +788,7 @@ class FrameReads:
             if found is None and prefix is None:
                 return False
             schema, depth = (found[1], 0) if found is not None else (prefix[0][1], len(prefix[1]))
-        return len(schema['levels']) - depth == 1 and (schema['levels'][depth] == 'int' or (
-            isinstance(expr, cst.Call) and expr.func.attr.value == 'searchsorted'))
+        return len(schema['levels']) - depth == 1 and schema['levels'][depth] == 'int'
 
     def prefix_of(self, value):
         """``R.loc[prefix]`` with R a frame receiver (unique index, not edited) of more levels than the prefix:
@@ -839,8 +807,7 @@ class FrameReads:
         elif len(parts) > 1 and _literal_str(parts[-1]) is not None:
             return None                     # a key and a column (L1)
         levels = found[1]['levels']
-        if not 0 < len(parts) < len(levels) or any(isinstance(p, (cst.Slice, cst.List, cst.ListComp, cst.Tuple))
-                                                   for p in parts):
+        if not 0 < len(parts) < len(levels) or any(map(_several, parts)):
             return None
         if len(_index_parts(value)) > 1:
             if len(parts) != 2:
@@ -1045,12 +1012,12 @@ class FrameReads:
         return fields[key]
 
 
-    def row_field(self, hold, key_expr, name, emit=None):
+    def row_field(self, hold, key_expr, emit=None):
         key = (hold.table, _code(key_expr))
         fields = self.row_fields
         if key not in fields:
             fields[key] = hold_table(self.cls_info).field('prepared_row', key)
-            self.new_items.append(('row', fields[key], hold.table, key_expr if emit is None else emit, name))
+            self.new_items.append(('row', fields[key], hold.table, key_expr if emit is None else emit, None))
         return fields[key]
 
     def hold(self, receiver, label, kind):
@@ -1098,10 +1065,6 @@ class FrameReads:
 
 
 _NO_LABEL = object()
-
-# T-5c: in an item class, a frame the item computes itself is prepared (about 0.3-2M instructions, once per item)
-# only for a formula evaluated at least this many times per item; a pandas read costs about 20-100k instructions
-PREPARE_MIN_EVALUATIONS = 8
 
 
 # T-5c: attributes of a pandas object whose subscript is a pandas selection (a bool key is passed as the Python bool)
@@ -1176,7 +1139,7 @@ def without_fallbacks(node):
 
         def leave_If(self, original, updated):       # a lowered loop and its pandas copy
             test = _code(original.test)
-            if (f'{module}.slot(' in test or f'{module}.zip_prepared_prefix(' in test) and updated.orelse is not None:
+            if f'{module}.slot(' in test and updated.orelse is not None:
                 return updated.with_changes(orelse=None)
             return updated
     return node.visit(Strip())
@@ -1259,13 +1222,11 @@ class _Rewrite(cst.CSTTransformer):
         self.replaced_names = set()
         self.swaps = {}         # frame or prefix local -> the call it stands for (fallbacks, dropped locals)
         self.key_locals = {}    # name of a key local -> its tuple display (the fallback evaluates the display)
-        self.asof_rows = {}     # asof local -> (membership hold, prefix cell call, asof expression)
         self.native = {}        # id(lowered read) -> column kind, for float()/int() around it
         self.taken = []         # T-5c: kinds of the holds taken since the last recorded read (its run-time fallbacks)
         self.emitted_inline_assignments = set()
         self.generator_walks = set()    # T-5c: ids of lowered generator walks (``gen if test else pandas gen``)
         self.updated_of = {}    # id(original node) -> its rewritten node (key parts are emitted with their reads lowered)
-        self.held_string_read = None
 
     def on_leave(self, original, updated):
         result = super().on_leave(original, updated)
@@ -1298,7 +1259,7 @@ class _Rewrite(cst.CSTTransformer):
         self.taken.append(kind)
         return self.o.hold(receiver, label, kind)
 
-    def _record(self, node, form, receiver, why=None, view=None):
+    def _record(self, node, form, receiver, why=None):
         text = _code(node)
         entry = {'expression': text[:160], 'receiver': _code(receiver), 'form': form}
         if not why:
@@ -1396,13 +1357,15 @@ class _Rewrite(cst.CSTTransformer):
         of the Python value (looked up as pandas does)."""
         o = self.o
         arg, how = o.key_part(part, kind, self.updated_of.get(id(part)))
-        if (how == 'typed' and conditions is not None and not o.facts.is_int(part)
-                and o.facts.int_argument(part) is None):
-            # not known to be a C integer from the text: the read is native only while the part names one label.
+        if conditions is not None and (
+                (how == 'typed' and not o.facts.is_int(part) and o.facts.int_argument(part) is None)
+                or (how == 'object' and _literal_str(part) is None)):
+            # not known to be one label from the text (a C integer, a text literal): the read is native only while the
+            # part names one label (a list or a mask selects rows, as pandas does whether or not the sample saw one).
             # The test is decided at compile time when Cython gives the part a C type, else it looks at the value;
             # the part is evaluated once, into a local the read then uses
             o.key_count += 1
-            name = f'_mx_key_{o.key_count}'
+            name = f'_mx_{"key" if how == "typed" else "okey"}_{o.key_count}'
             conditions.append(cst.parse_expression(f'{o.module}.is_label(({name} := {_code(arg)}))'))
             arg = cst.Name(name)
         return self._m({'int': 'lcode', 'typed': 'kcode'}.get(how, 'ocode'), o.ref(hold), cst.Integer(str(level)), arg)
@@ -1426,7 +1389,7 @@ class _Rewrite(cst.CSTTransformer):
             test = f'{test} and {_code(self._native_test(self._take(call, 1, -5), []))}'
         statements, codes, conditions = [], [], []
         if cell is not None:
-            codes, conditions = self._prefix_holds(hold, parts if held is None else parts[:held], cell)
+            codes, conditions = self._prefix_holds(hold, parts if held is None else parts[:held])
         if cell is None or held is not None:
             for level, part in enumerate(parts[len(codes):], len(codes)):
                 if o.item_fixed(part, schema['levels'][level]):
@@ -1455,6 +1418,9 @@ class _Rewrite(cst.CSTTransformer):
                   if cell is None and isinstance(value, cst.Subscript) else value)      # (T-5c: or P(a) itself)
         view = o.views[name] = _View(name, call, schema, len(parts), codes, cst.Name(start), cst.Name(stop),
                                      cell if held is None else None)
+        # an absent prefix (or a table that is not prepared) evaluates the assignment as written: pandas raises its
+        # KeyError there, as live, even when no read of the view runs afterwards
+        statements.append(cst.If(test=cst.parse_expression(f'{start} < 0'), body=cst.IndentedBlock(body=[statement])))
         view.setup = [*statements, statement]     # the setup statements are kept only if a use needs them
         self.swaps[name] = source
         return view.setup
@@ -1472,7 +1438,7 @@ class _Rewrite(cst.CSTTransformer):
             # T-5c: ``self.P()`` itself (P a prefix cell): a view of its table, P's parts held per item
             _, call, schema, parts, cell = prefix
             hold = self._take(call, _NO_LABEL, -1)
-            codes, conditions = self._prefix_holds(hold, parts, cell)
+            codes, conditions = self._prefix_holds(hold, parts)
             args = [o.ref(hold), cst.Integer(str(len(parts))), *self._padded(codes)]
             start = self._lowered(self._conjunction(conditions), self._m('view_start', *args), cst.parse_expression('-1'))
             return _View(None, call, schema, len(parts), codes, start, self._m('view_stop', *args))
@@ -1556,7 +1522,7 @@ class _Rewrite(cst.CSTTransformer):
         table (signature kind -3)."""
         return self._take(view.call, _NO_LABEL, -1) if view.start is None else self._take(view.call, view.depth, -3)
 
-    def _guarded(self, original, updated, view, test, native, kind=None):
+    def _guarded(self, updated, view, test, native, kind=None):
         return self._lowered(test, native, self._fallback(updated, view.call), kind)
 
     def _boxed(self, lowered, kind):
@@ -1575,7 +1541,11 @@ class _Rewrite(cst.CSTTransformer):
 
     def _lowered(self, test, read, fallback, kind=None):
         """``read if test else fallback``: the pandas read cast to the read's C type when the read is typed (both
-        branches native), and the lowered read marked as of that kind (``float()``/``int()`` around it dropped)."""
+        branches native), and the lowered read marked as of that kind (``float()``/``int()`` around it dropped). A
+        read whose test checks that a text-level key part names one label (``_mx_okey_``) stays a Python object: its
+        pandas branch may be a selection (a list key gives a Series)."""
+        if '_mx_okey_' in _code(test):
+            kind = None
         if kind in CTYPE:
             fallback = _cast(CTYPE[kind], fallback)
         lowered = cst.IfExp(test=test, body=read, orelse=fallback, lpar=[cst.LeftParen()], rpar=[cst.RightParen()])
@@ -1610,19 +1580,16 @@ class _Rewrite(cst.CSTTransformer):
         start, stop, test = self._view_parts(view, hold)
         i = _cast('_mx_cy.Py_ssize_t', self.updated_of.get(id(parts[0]), parts[0]))
         row = self._row_at(view, hold, self._m('position', start, stop, i))
-        self._record(original, 'L8', view.call, view=view)
+        self._record(original, 'L8', view.call)
         int_level = view.schema['levels'][view.depth] == 'int'
-        return self._guarded(original, updated, view, test, self._label(view, hold, row), 'i64' if int_level else None)
+        return self._guarded(updated, view, test, self._label(view, hold, row), 'i64' if int_level else None)
 
     def index_call(self, original, updated):
-        """``X.index.searchsorted(x, side=...)``, ``int(X.index.asof(x))`` / ``X.index.asof(x)`` as a key part,
-        ``X.index.max()`` / ``.min()`` of a prefix view, and len/list/tuple/set/sorted/min/max of ``X.index``."""
+        """``X.index.max()`` / ``.min()`` of a prefix view, and len/list/tuple/set/sorted/min/max of ``X.index``."""
         o = self.o
         func = original.func
         if isinstance(func, cst.Name) and len(original.args) == 1 and not original.args[0].keyword:
             arg = original.args[0].value
-            if isinstance(arg, cst.Call) and o.facts.int_argument(original) is not None:
-                return self._asof(arg, updated, 0, whole_call=original)
             view = self._index_of(arg)
             if view is not None and func.value in ('len', 'list', 'tuple', 'set', 'sorted', 'min', 'max'):
                 return self._builtin(func.value, view, original, updated)
@@ -1643,9 +1610,9 @@ class _Rewrite(cst.CSTTransformer):
         if (view is not None and view.start is None and func.attr.value in ('max', 'min') and not original.args
                 and o.extreme(original) is None):
             hold = self._take(view.call, _NO_LABEL, -2)          # pandas' own max/min of a non-empty index
-            self._record(original, 'L5', view.call, view=view)
+            self._record(original, 'L5', view.call)
             native = self._m(func.attr.value + '_obj', o.ref(hold))
-            return self._guarded(original, updated, view, self._native_test(hold, []), native)
+            return self._guarded(updated, view, self._native_test(hold, []), native)
         levels = view.schema['levels'] if view is not None else ()
         if (view is not None and view.start is not None and func.attr.value in ('max', 'min') and not original.args
                 and len(levels) - view.depth > 1):
@@ -1657,50 +1624,16 @@ class _Rewrite(cst.CSTTransformer):
             row = start if func.attr.value == 'min' else cst.BinaryOperation(stop, cst.Subtract(), cst.Integer('1'))
             native = cst.Tuple([cst.Element(self._label(view, holds[0], row, level))
                                 for level in range(view.depth, len(levels))])
-            self._record(original, 'L5', view.call, view=view)
-            return self._guarded(original, updated, view, test, native)
+            self._record(original, 'L5', view.call)
+            return self._guarded(updated, view, test, native)
         if view is None or not self._one_level(view) or view.schema['levels'][view.depth] != 'int':
             return None
-        if func.attr.value == 'searchsorted':
-            side = [a for a in original.args if a.keyword is not None]
-            plain = [a for a in original.args if a.keyword is None]
-            right = side and side[0].keyword.value == 'side' and _literal_str(side[0].value) == 'right'
-            left = not side or (side[0].keyword.value == 'side' and _literal_str(side[0].value) == 'left')
-            if len(plain) != 1 or len(side) > 1 or not (right or left) or _text(plain[0].value):
-                return None         # (a text x is pandas' own TypeError, never a C double)
-            if self._vector_argument(original, plain[0].value, view):
-                return None
-            hold = self._take(view.call, view.depth, -3)
-            start, stop, test = self._view_parts(view, hold)
-            x = _cast('_mx_cy.double', self.updated_of.get(id(plain[0].value), plain[0].value))
-            native = self._m('search', o.ref(hold), start, stop, cst.Integer(str(view.depth)), x,
-                             cst.Name('True' if right else 'False'))
-            # T-5c: NaN (pandas sorts it last) is pandas' own
-            test = self._conjunction([test, cst.Comparison(x, [cst.ComparisonTarget(cst.Equal(), x)])])
-            self._record(original, 'L8', view.call, view=view)
-            return self._guarded(original, updated, view, test, native, 'i64')
         if func.attr.value in ('max', 'min') and not original.args and view.start is not None:
             hold = self._take(view.call, _NO_LABEL, -1)
             start, stop, test = self._view_parts(view, hold)
             row = start if func.attr.value == 'min' else cst.BinaryOperation(stop, cst.Subtract(), cst.Integer('1'))
-            self._record(original, 'L5', view.call, view=view)
-            return self._guarded(original, updated, view, test, self._label(view, hold, row), 'i64')
-        if func.attr.value == 'asof' and self._key_position(original):
-            return self._asof(original, updated, 1)
-        if (func.attr.value == 'asof' and len(original.args) == 1 and not original.args[0].keyword
-                and not _text(original.args[0].value)):
-            # T-5c: a bare asof value: the label when one is <= x, else pandas' own asof (NaN stays pandas')
-            if self._vector_argument(original, original.args[0].value, view):
-                return None
-            hold = self._take(view.call, view.depth, -3)
-            start, stop, test = self._view_parts(view, hold)
-            x = _cast('_mx_cy.double', self.updated_of.get(id(original.args[0].value), original.args[0].value))
-            found = self._m('search', o.ref(hold), start, stop, cst.Integer(str(view.depth)), x, cst.Name('True'))
-            row = cst.BinaryOperation(cst.BinaryOperation(start, cst.Add(), found), cst.Subtract(), cst.Integer('1'))
-            test = self._conjunction([test, cst.Comparison(found, [cst.ComparisonTarget(cst.GreaterThan(),
-                                                                                       cst.Integer('0'))])])
-            self._record(original, 'L6', view.call, view=view)
-            return self._guarded(original, updated, view, test, self._label(view, hold, row))
+            self._record(original, 'L5', view.call)
+            return self._guarded(updated, view, test, self._label(view, hold, row), 'i64')
         return None
 
     def level_extreme(self, original, updated):
@@ -1740,7 +1673,7 @@ class _Rewrite(cst.CSTTransformer):
             self.replaced_names.add(inner.func.value.value.value)
         native = self._m(f'level_{func.attr.value}_ll', o.ref(hold), cst.Integer(str(index)))
         self._record(original, 'L5', call)
-        return self._guarded(original, updated, _View(None, call, schema),
+        return self._guarded(updated, _View(None, call, schema),
                              self._native_test(hold, []), native, 'i64')
 
     def level_walk_extreme(self, original, updated):
@@ -1749,23 +1682,11 @@ class _Rewrite(cst.CSTTransformer):
         ``R.index.get_level_values(i).max()`` (signature kind -6), not a walk of every row per evaluation."""
         o = self.o
         func = original.func
-        if not (isinstance(func, cst.Name) and func.value in ('max', 'min') and len(original.args) == 1
-                and not original.args[0].keyword and not original.args[0].star
-                and isinstance(original.args[0].value, cst.GeneratorExp)):
+        shape = _walk_extreme(original)
+        if shape is None:
             return None
-        gen = original.args[0].value
-        comp = gen.for_in
-        if comp.ifs or comp.inner_for_in is not None or comp.asynchronous is not None or not isinstance(gen.elt, cst.Name):
-            return None
-        target = comp.target
-        if not (isinstance(target, cst.Tuple) and all(isinstance(e, cst.Element) and isinstance(e.value, cst.Name)
-                                                       for e in target.elements)):
-            return None
-        names = [e.value.value for e in target.elements]
-        if names.count(gen.elt.value) != 1:
-            return None
-        level = names.index(gen.elt.value)
-        view = self._index_of(comp.iter)
+        it, names, level = shape
+        view = self._index_of(it)
         if view is None or view.start is not None or not view.schema.get('unique'):
             return None
         levels = view.schema['levels']
@@ -1773,87 +1694,34 @@ class _Rewrite(cst.CSTTransformer):
             return None
         hold = self._take(view.call, (None, level), -6)
         native = self._m(f'level_{func.value}_ll', o.ref(hold), cst.Integer(str(level)))
-        self._record(original, 'L5', view.call, view=view)
+        self._record(original, 'L5', view.call)
         arg = updated.args[0].value         # the pandas branch: the generator as written, not its lowered walk
         if id(arg) in self.generator_walks:
             updated = updated.with_changes(args=[updated.args[0].with_changes(value=arg.orelse.with_changes(
                 lpar=[], rpar=[]))])
         return self._lowered(self._native_test(hold, []), native, self._fallback(updated, view.call), 'i64')
 
-    def extreme_part(self, original, updated, parts):
+    def extreme_part(self, original, updated):
         """T-5c: ``R.index.max()[k]`` / ``.min()[k]`` on a whole frame of several levels, ``k`` an integer literal
         naming an int level: that part of pandas' extreme as a C integer (signature kind -2: the index is not
         empty), where the label tuple would be one Python object shared by every thread."""
         o = self.o
-        call = original.value
-        if not (len(parts) == 1 and isinstance(parts[0], cst.Integer) and isinstance(call, cst.Call) and not call.args
-                and isinstance(call.func, cst.Attribute) and call.func.attr.value in ('max', 'min')):
+        shape = _extreme_part(original)
+        if shape is None:
             return None
+        call, level = shape
         view = self._index_of(call.func.value)
         if view is None or view.start is not None:
             return None
         levels = view.schema['levels']
-        level = int(parts[0].value, 0)
         if not (1 < len(levels) <= 8 and 0 <= level < len(levels) and levels[level] == 'int'):
             return None
         hold = self._take(view.call, _NO_LABEL, -2)
         inner = updated.value
         pandas = updated.with_changes(value=inner.orelse) if isinstance(inner, cst.IfExp) else updated
         native = self._m(f'{call.func.attr.value}_part_ll', o.ref(hold), cst.Integer(str(level)))
-        self._record(original, 'L5', view.call, view=view)
+        self._record(original, 'L5', view.call)
         return self._lowered(self._native_test(hold, []), native, self._fallback(pandas, view.call), 'i64')
-
-    def _key_position(self, node):
-        """``node`` is the key (or a key part) of a ``.loc[...]`` / ``.at[...]`` read."""
-        parents = self.o.facts.formula.parents
-        up = parents.get(id(node))
-        if isinstance(up, cst.Element):
-            up = parents.get(id(parents.get(id(up))))       # a part of a tuple key
-        element = parents.get(id(up)) if isinstance(up, cst.Index) else None
-        subscript = parents.get(id(element)) if isinstance(element, cst.SubscriptElement) else None
-        return (isinstance(subscript, cst.Subscript) and subscript.slice[0] is element
-                and isinstance(subscript.value, cst.Attribute) and subscript.value.attr.value in ('loc', 'at'))
-
-    def _vector_argument(self, call, arg, view):
-        """Whether the argument of ``X.index.asof(x)`` / ``.searchsorted(x)`` is not one number, so the call stays on
-        pandas (recorded): from the text, a display that selects several rows (as a key part); from tracing, a call
-        whose result in the sample was not a single number (an array, a list, a Series). A call with no note is
-        not vetoed."""
-        why = None
-        if isinstance(arg, SEVERAL_ROWS):
-            why = 'the argument is a display of several values (an array result, never one label)'
-        else:
-            note = self.o.note_of(call)
-            if note is not None and any(len(seen) == 3 and seen[1] == call.func.attr.value
-                                        and seen[2] not in ONE_NUMBER | {RAISES} for seen in note['seen']):
-                why = 'the sample returned more than one number from this call (its argument holds several values)'
-        if why:
-            self._record(call, 'pandas', view.call, why)
-        return why is not None
-
-    def _asof(self, call, updated, error, whole_call=None):
-        """``X.index.asof(x)`` on an int level of an ordered view, as the label (C long long); no label: the error
-        of its consumer (``int()``: ValueError; a key: KeyError)."""
-        o = self.o
-        func = call.func
-        if not (isinstance(func, cst.Attribute) and func.attr.value == 'asof' and isinstance(func.value, cst.Attribute)
-                and func.value.attr.value == 'index' and len(call.args) == 1 and not call.args[0].keyword):
-            return None
-        view = self._view(func.value.value) if not _text(call.args[0].value) else None
-        if view is None or not self._one_level(view) or view.schema['levels'][view.depth] != 'int':
-            return None
-        if self._vector_argument(call, call.args[0].value, view):
-            return None
-        hold = self._take(view.call, view.depth, -3)
-        start, stop, test = self._view_parts(view, hold)
-        x = call.args[0].value
-        x = _cast('_mx_cy.double', self.updated_of.get(id(x), x))
-        # T-5c: pandas' asof of NaN differs by version (NaN on pandas 3, the last label on pandas 2.2): NaN is read
-        # on pandas, so the result is live's on every supported version
-        test = self._conjunction([test, cst.Comparison(x, [cst.ComparisonTarget(cst.Equal(), x)])])
-        row = self._m('asof_at', o.ref(hold), start, stop, cst.Integer(str(view.depth)), x, cst.Integer(str(error)))
-        self._record(call, 'L6', view.call, view=view)
-        return self._guarded(whole_call or call, updated, view, test, self._label(view, hold, row), 'i64')
 
     def _values(self, view, hold, value, test, name):
         """``name([value(row) for each position])`` of a one-level view in pandas order (``list``: the list itself)."""
@@ -1871,29 +1739,29 @@ class _Rewrite(cst.CSTTransformer):
             hold = self._take(view.call, _NO_LABEL, -1)
             start, stop, test = self._view_parts(view, hold)
             native = cst.BinaryOperation(stop, cst.Subtract(), start) if view.start is not None else stop
-            self._record(original, 'L8', view.call, view=view)
-            return self._guarded(original, updated, view, test, native, 'i64')
+            self._record(original, 'L8', view.call)
+            return self._guarded(updated, view, test, native, 'i64')
         if name in ('min', 'max'):      # T-5c: the extreme itself, no list of labels
             if view.start is None and view.schema['levels'] == ('int',):
                 # the extreme of a non-empty int index (signature kind -2) as the C integer the builtin's Python
                 # ints give; another level kind keeps the list (iteration gives Python floats, pandas numpy ones)
                 hold = self._take(view.call, _NO_LABEL, -2)
-                self._record(original, 'L5', view.call, view=view)
-                return self._guarded(original, updated, view, self._native_test(hold, []),
+                self._record(original, 'L5', view.call)
+                return self._guarded(updated, view, self._native_test(hold, []),
                                      self._m(name + '_ll', self.o.ref(hold)), 'i64')
         if name in ('min', 'max') and view.start is not None:
             hold = self._walk_hold(view)        # an ordered prefix view: its first or last row (empty: pandas)
             start, stop, test = self._view_parts(view, hold)
             row = start if name == 'min' else cst.BinaryOperation(stop, cst.Subtract(), cst.Integer('1'))
             test = self._conjunction([test, cst.Comparison(stop, [cst.ComparisonTarget(cst.GreaterThan(), start)])])
-            self._record(original, 'L5', view.call, view=view)
+            self._record(original, 'L5', view.call)
             int_level = view.schema['levels'][view.depth] == 'int'
-            return self._guarded(original, updated, view, test, self._label(view, hold, row),
+            return self._guarded(updated, view, test, self._label(view, hold, row),
                                  'i64' if int_level else None)
         hold = self._walk_hold(view)
         native, test = self._values(view, hold, lambda row: self._label(view, hold, row), [], name)
-        self._record(original, 'L8', view.call, view=view)
-        return self._guarded(original, updated, view, test, native)
+        self._record(original, 'L8', view.call)
+        return self._guarded(updated, view, test, native)
 
     def _column_builtin(self, name, column, original, updated):
         """``C.tolist()``, list/tuple/len of a column of a view: its values in pandas order (Python floats or ints,
@@ -1907,8 +1775,8 @@ class _Rewrite(cst.CSTTransformer):
         chold = self._take(view.call, label, COLUMN_KIND[kind])
         native, test = self._values(view, hold, lambda row: self._column_value(chold, kind, row),
                                     [self._positive(self.o.slot(chold))], name)
-        self._record(original, 'L8', view.call, view=view)
-        return self._guarded(original, updated, view, test, native)
+        self._record(original, 'L8', view.call)
+        return self._guarded(updated, view, test, native)
 
     def _column_value(self, chold, kind, row):
         """The value of a float64 or int64 column at a stored row."""
@@ -1988,114 +1856,6 @@ class _Rewrite(cst.CSTTransformer):
         start, stop, test = self._view_parts(view, hold)
         return view, self._conjunction([test, *extra]), start, stop, lambda row: make(self._row_at(view, hold, row))
 
-    def zip_prefix(self, statements):
-        """Walk a string prefix once for a terminal list of int/float pairs from the same view."""
-        from .key_facts import _is_docstring
-        head = int(bool(statements) and _is_docstring(statements[0]))
-        if len(statements) - head != 2:
-            return None
-        assignment, returned = statements[head:]
-        o = self.o
-        name, subscript = o._simple_assign(assignment) or (None, None)
-        if not (isinstance(subscript, cst.Subscript) and isinstance(subscript.value, cst.Attribute)
-                and subscript.value.attr.value == 'loc' and isinstance(subscript.value.value, cst.Call)
-                and isinstance(returned, cst.SimpleStatementLine) and len(returned.body) == 1
-                and isinstance(returned.body[0], cst.Return) and isinstance(returned.body[0].value, cst.ListComp)):
-            return None
-        comp = returned.body[0].value
-        walk, pair = comp.for_in, comp.elt
-        if not (isinstance(pair, cst.Tuple) and len(pair.elements) == 2 and walk.asynchronous is None
-                and not walk.ifs and walk.inner_for_in is None and isinstance(walk.target, cst.Tuple)
-                and len(walk.target.elements) == 2 and isinstance(walk.iter, cst.Call)
-                and isinstance(walk.iter.func, cst.Name) and walk.iter.func.value == 'zip'
-                and len(walk.iter.args) == 2 and all(not arg.star and arg.keyword is None for arg in walk.iter.args)
-                and name not in ('zip', 'int', 'float') and o._once(name)):
-            return None
-        names = []
-        for target, output, convert in zip(walk.target.elements, pair.elements, ('int', 'float')):
-            if not (isinstance(target, cst.Element) and isinstance(target.value, cst.Name)
-                    and isinstance(output, cst.Element) and isinstance(output.value, cst.Call)
-                    and isinstance(output.value.func, cst.Name) and output.value.func.value == convert
-                    and len(output.value.args) == 1):
-                return None
-            arg = output.value.args[0]
-            if (arg.star or arg.keyword is not None or not isinstance(arg.value, cst.Name)
-                    or arg.value.value != target.value.value):
-                return None
-            names.append(target.value.value)
-        if names[0] == names[1] or set(names) & {name, 'int', 'float'}:
-            return None
-        index, column = (arg.value for arg in walk.iter.args)
-        if not (isinstance(index, cst.Attribute) and index.attr.value == 'index'
-                and isinstance(index.value, cst.Name) and index.value.value == name
-                and isinstance(column, cst.Subscript) and isinstance(column.value, cst.Name)
-                and column.value.value == name):
-            return None
-        labels = _index_parts(column)
-        label = _literal_str(labels[0]) if labels and len(labels) == 1 else None
-        parts = _index_parts(subscript)
-        if (label is None or column.slice[0].comma is not cst.MaybeSentinel.DEFAULT
-                or not parts or len(parts) != 1 or subscript.slice[0].comma is not cst.MaybeSentinel.DEFAULT):
-            return None
-        key = parts[0]
-        if not (o.per_item and isinstance(key, cst.Call) and not key.args and isinstance(key.func, cst.Attribute)
-                and isinstance(key.func.value, cst.Name) and key.func.value.value == 'self'):
-            return None
-        key_name = key.func.attr.value
-        selector = o.cls_info.cells.get(key_name)
-        if (selector is None or not selector.has_formula_def or selector.has_args() or selector.is_locked
-                or selector.get_rettype_expr() != 'str'):
-            return None
-        prefix = o.prefix_of(subscript)
-        if prefix is None:
-            return None
-        (call, schema), _ = prefix
-        provider = o.published_provider(call)
-        owner = call.func.value
-        if not (schema['kind'] == 'frame' and schema['levels'] == ('obj', 'int')
-                and dict(schema['columns']).get(label) == 'f64' and provider is not None
-                and isinstance(owner, cst.Attribute) and isinstance(owner.value, cst.Name)
-                and owner.value.value == 'self'):
-            return None
-        cls, table_name = provider
-        ref = o.cls_info.refs.get(owner.attr.value)
-        if ref is None or ref.get_type_expr() != cls.name or name == cls.name:
-            return None
-
-        occupied = set(o.facts.formula.loads) | set(o.facts.formula.binds) | o.facts._params
-        temps = []
-        while len(temps) < 6:
-            fresh = o.position_name()
-            if fresh not in occupied:
-                temps.append(fresh)
-        data, frame, loc, snapshot, captured_key, result = map(cst.Name, temps)
-        key_safe = f'(self._has_{key_name} and type(self._v_{key_name}) is str)'
-        cold = getattr(selector, 'held_string_selector', None)
-        if cold is not None:
-            key_safe = f'({key_safe} or (not self._has_{key_name} and ({cold})))'
-        guard = f'type(self) is {o.cls_info.name} and type({data.value}) is {cls.name} and {key_safe}'
-        receiver = call.with_changes(func=call.func.with_changes(value=data))
-        prefix_lookup = (
-            cst.parse_statement(f'{data.value}: {cls.name} = {_code(owner)}'),
-            self._assign(frame.value, receiver),
-            self._assign(loc.value, cst.Attribute(frame, cst.Name('loc'))),
-            cst.parse_statement(f'{snapshot.value} = {data.value}._mx_ptable_{table_name} if {guard} else None'),
-            self._assign(captured_key.value, key),
-        )
-        signature = o.signature('oi', None, label, -7)
-        native = self._m('zip_prepared_prefix', snapshot, frame, loc, captured_key, cst.Integer(str(signature)))
-        test = cst.parse_expression(f'({result.value} := {_code(native)}) is not None')
-        native_return = returned.with_changes(body=[returned.body[0].with_changes(value=result)])
-        fallback_read = subscript.with_changes(value=loc, slice=[subscript.slice[0].with_changes(
-            slice=subscript.slice[0].slice.with_changes(value=captured_key))])
-        fallback_assignment = assignment.with_changes(body=[assignment.body[0].with_changes(value=fallback_read)])
-        self._record(subscript, 'L8', call)
-        o.lowered[-1]['pandas_when'] = ('the selector was not already proven safe; or the bound frame, metadata, '
-                                       'prefix or column cannot use the ordered snapshot')
-        o.lowered_text.add(normal(_code(column)))
-        return [*statements[:head], *prefix_lookup,
-                self._branch(test, [native_return], [fallback_assignment, returned])]
-
     def comprehension(self, original, updated):
         """A comprehension whose first ``for`` walks ``X.index``, a column of a view or its ``.items()``: positions
         in pandas order, the target names read as the labels (values) of each position's row."""
@@ -2135,8 +1895,8 @@ class _Rewrite(cst.CSTTransformer):
         parens = {'lpar': [cst.LeftParen()], 'rpar': [cst.RightParen()]}
         if isinstance(original, cst.GeneratorExp):
             native, updated = native.with_changes(**parens), updated.with_changes(**parens)
-        self._record(original, 'L8', view.call, view=view)
-        lowered = self._guarded(original, updated, view, test, native)
+        self._record(original, 'L8', view.call)
+        lowered = self._guarded(updated, view, test, native)
         if isinstance(original, cst.GeneratorExp):
             self.generator_walks.add(id(lowered))
         return lowered
@@ -2173,7 +1933,7 @@ class _Rewrite(cst.CSTTransformer):
         self.o.declarations.append(position.value)
         native = self._loop(updated, position, self._range(start, stop),
                             [self._assign(n, expr) for n, expr in make(position).items()])
-        self._record(original, 'L8', view.call, view=view)
+        self._record(original, 'L8', view.call)
         return self._branch(test, [native], [self._fallback(updated, view.call)])
 
     @staticmethod
@@ -2243,8 +2003,8 @@ class _Rewrite(cst.CSTTransformer):
         suffix, args = self.code_args(codes)
         test = self._conjunction([test, *conditions])
         native = self._m(kind + suffix, o.ref(hold), o.slot(hold), *args)
-        self._record(original, 'L3', view.call, view=view)
-        return self._guarded(original, updated, view, test, native, None if o.guards(own) else kind)
+        self._record(original, 'L3', view.call)
+        return self._guarded(updated, view, test, native, None if o.guards(own) else kind)
 
     # ------------------------------------------------------------------ T-5: row locals
     def leave_SimpleStatementLine(self, original, updated):
@@ -2277,7 +2037,7 @@ class _Rewrite(cst.CSTTransformer):
                 and all(o.fixed_part(p) for p in parts)):
             # T-5c: a key fixed per item (``row = T.loc[cost_id()]`` in a per-step cell): the row held per item,
             # looked up once (as a row cell's), not at every step
-            field = o.row_field(hold, key, None, self._detached(key))
+            field = o.row_field(hold, key, self._detached(key))
             native = self._assign(var, cst.parse_expression(f'self.{field} - 1'))
             return self._branch(self._native_test(hold, [cst.parse_expression(f'self.{field} > 0')]), [native],
                                 fallback)
@@ -2370,8 +2130,7 @@ class _Rewrite(cst.CSTTransformer):
         kind = kinds.pop() if len(kinds) == 1 and kinds <= set(READ) else None
         levels = schema['levels']
         own = [e.value for e in key.elements] if isinstance(key, cst.Tuple) and len(levels) - len(prefix) > 1 else [key]
-        if len(prefix) + len(own) != len(levels) or any(isinstance(p, (cst.Slice, cst.List, cst.ListComp, cst.Tuple))
-                                                       for p in own):
+        if len(prefix) + len(own) != len(levels) or any(map(_several, own)):
             return None
         hold = self._take(call, _NO_LABEL, -4)
         hold.row_columns = True
@@ -2415,7 +2174,7 @@ class _Rewrite(cst.CSTTransformer):
             row = self._row_at(view, hold, self._m('position', start, stop, _cast('_mx_cy.Py_ssize_t', emit)))
             read = self._column_value(chold, kind, row)
         else:
-            if view.start is None or isinstance(part, (cst.Slice, cst.List, cst.ListComp, cst.Tuple)):
+            if view.start is None or _several(part):
                 return None
             start, stop, test = self._view_parts(view, self._take(view.call, _NO_LABEL, -1))
             labels = []
@@ -2423,8 +2182,8 @@ class _Rewrite(cst.CSTTransformer):
             read = self._m(kind + suffix, o.ref(chold), o.slot(chold), *args)
             test = self._conjunction([test, *labels])
         test = self._conjunction([test, self._positive(o.slot(chold))])
-        self._record(original, 'L8' if value.attr.value == 'iloc' else 'L3', view.call, view=view)
-        return self._guarded(original, updated, view, test, read, kind)
+        self._record(original, 'L8' if value.attr.value == 'iloc' else 'L3', view.call)
+        return self._guarded(updated, view, test, read, kind)
 
     def raised_veto(self, node, receiver):
         """Decision from tracing: a place whose every evaluation raised in the sample is not lowered (it stays as
@@ -2434,17 +2193,22 @@ class _Rewrite(cst.CSTTransformer):
         self._record(node, 'pandas', receiver, ONLY_RAISED_WHY)
         return True
 
+    @staticmethod
+    def _pandas_value(lowered):
+        """The pandas branch of a read lowered to a C scalar, not cast to the C type: the numpy scalar live has."""
+        pandas = lowered.orelse
+        if (isinstance(pandas, cst.Call) and _code(pandas.func) == '_mx_cy.cast' and len(pandas.args) == 2
+                and _code(pandas.args[0].value) in CTYPE.values()):
+            pandas = pandas.args[1].value
+        return pandas.with_changes(lpar=[cst.LeftParen()], rpar=[cst.RightParen()])
+
     def leave_Subscript(self, original, updated):
         o = self.o
         value = original.value
         if self.native.get(id(updated.value)) in CTYPE and isinstance(updated.value, cst.IfExp):
             # T-5c: a subscript of a read lowered to a C scalar (``T.index.max()[0]`` on one level): the pandas
             # value, which pandas subscripts (or raises on) as live does
-            pandas = updated.value.orelse
-            if (isinstance(pandas, cst.Call) and _code(pandas.func) == '_mx_cy.cast' and len(pandas.args) == 2
-                    and _code(pandas.args[0].value) in CTYPE.values()):
-                pandas = pandas.args[1].value       # the read's own value, not cast to the C type
-            return updated.with_changes(value=pandas.with_changes(lpar=[cst.LeftParen()], rpar=[cst.RightParen()]))
+            return updated.with_changes(value=self._pandas_value(updated.value))
         parts = _index_parts(original)
         if parts is None:
             return updated
@@ -2467,7 +2231,7 @@ class _Rewrite(cst.CSTTransformer):
                or self._row_field(original, updated, parts))
         if row is not None:
             return row
-        part = self.extreme_part(original, updated, parts)
+        part = self.extreme_part(original, updated)
         if part is not None:
             return part
         walk = (self.index_item(original, updated) or self.column_keyed(original, updated, parts)
@@ -2577,7 +2341,7 @@ class _Rewrite(cst.CSTTransformer):
         if isinstance(receiver, cst.Name):
             self.replaced_names.add(receiver.value)
         if o.per_item and all(o.item_fixed(part, kind) for part, kind in zip(key_parts, schema['levels'])):
-            field = o.row_field(hold, key, None, self._detached(key))
+            field = o.row_field(hold, key, self._detached(key))
             read = self._m('object_field', o.ref(hold), o.slot(hold), cst.parse_expression(f'self.{field}'))
             conditions = [cst.parse_expression(f'self.{field} > 0')]
         else:
@@ -2591,12 +2355,14 @@ class _Rewrite(cst.CSTTransformer):
         """``float(...)`` around a float64 read and ``int(...)`` around an int64 read are dropped: the read is
         already that C value, and the builtin would box it into a Python object and back. L5: the extremes of a
         one-level int index are read as C integers."""
-        target = original
+        if (isinstance(updated.func, cst.Name) and updated.func.value in ('isinstance', 'type') and updated.args
+                and isinstance(updated.args[0].value, cst.IfExp) and self.native.get(id(updated.args[0].value)) in CTYPE):
+            # the type of a read is the numpy scalar's pandas returns, not the C number's
+            return updated.with_changes(args=[updated.args[0].with_changes(
+                value=self._pandas_value(updated.args[0].value)), *updated.args[1:]])
         inner = self.o.facts.int_argument(original)
-        if isinstance(inner, cst.Call):
-            target = inner         # int(X.index.asof(x)): the place is the asof call
-        if (isinstance(target.func, cst.Attribute) and target.func.attr.value in ('searchsorted', 'asof', 'max', 'min')
-                and self.raised_veto(target, target.func.value)):
+        if (isinstance(original.func, cst.Attribute) and original.func.attr.value in ('max', 'min')
+                and self.raised_veto(original, original.func.value)):
             return updated
         walk = self.index_call(original, updated) or self.level_walk_extreme(original, updated)
         if walk is not None:
@@ -2639,30 +2405,10 @@ class _Rewrite(cst.CSTTransformer):
         return cst.IfExp(test=walk.test, body=call(walk.body), orelse=call(walk.orelse),
                          lpar=[cst.LeftParen()], rpar=[cst.RightParen()])
 
-    def _prefix_holds(self, hold, prefix_parts, name):
+    def _prefix_holds(self, hold, prefix_parts):
         conditions = []
         codes = [self._held(hold, level, part, conditions) for level, part in enumerate(prefix_parts)]
         return codes, conditions
-
-    def asof_statement(self, statement, asof):
-        """``lo = P.index.asof(x)`` -> ``_mx_asof_lo = <row of the label in the parent table, or -1>``, through a
-        membership hold of the parent (codes of the prefix held per item)."""
-        o = self.o
-        (pcall, call, schema, prefix_parts, name), x, original = asof
-        target = statement.body[0].targets[0].target.value
-        hold = self._take(call, len(prefix_parts), -3)     # T-5: asof needs pandas order within the prefix
-        codes, conditions = self._prefix_holds(hold, prefix_parts, name)
-        search = self._m('asof_row', o.ref(hold), cst.Integer(str(len(prefix_parts))), *self._padded(codes), _cast('_mx_cy.double', x))
-        value = cst.IfExp(test=self._native_test(hold, conditions), body=search, orelse=cst.parse_expression('-1'))
-        self.asof_rows[target] = (hold, pcall, original)
-        # the fallback of a read evaluates the pandas asof again, on the cell's value
-        receiver = original.func.value.value
-        self.swaps.setdefault(target, original.with_changes(func=original.func.with_changes(
-            value=original.func.value.with_changes(value=pcall))) if isinstance(receiver, cst.Name) else original)
-        if isinstance(receiver, cst.Name):
-            self.swaps[receiver.value] = pcall
-        self._record(original, 'L6', pcall)
-        return cst.parse_statement(f'_mx_asof_{target}: _mx_cy.Py_ssize_t = {_code(value)}')
 
     def _prefix_read(self, original, updated, value, parts, prefix):
         """``P.loc[k, "c"]`` on the value of a prefix cell P (``T.loc[prefix]``): ``T.loc[prefix + k, "c"]`` with
@@ -2676,8 +2422,6 @@ class _Rewrite(cst.CSTTransformer):
                          'on a non-unique index, or of a frame the formula edits')
             return updated
         key = parts[0]
-        if isinstance(key, cst.Name) and key.value in self.asof_rows:     # a key found by a lowered asof
-            return self._asof_read(original, updated, value, label, kind, call, pcall, key.value)
         own = _parts(key)
         levels = schema['levels']
         if len(prefix_parts) + len(own) != len(levels) or not o.per_item:
@@ -2685,7 +2429,7 @@ class _Rewrite(cst.CSTTransformer):
                          if o.per_item else 'a prefix cell outside an item space')
             return updated
         hold = self._take(call, label, COLUMN_KIND[kind])
-        codes, conditions = self._prefix_holds(hold, prefix_parts, name)
+        codes, conditions = self._prefix_holds(hold, prefix_parts)
         conditions = list(conditions)
         suffix, args = self._codes(hold, codes, own, levels, conditions)
         read = self._m(kind + suffix, o.ref(hold), o.slot(hold), *args)
@@ -2693,20 +2437,6 @@ class _Rewrite(cst.CSTTransformer):
             self.swaps[value.value.value] = pcall
         self._record(original, 'L3', pcall)
         return self._lowered(self._native_test(hold, conditions), read, self._fallback(updated, call), kind)
-
-    def _asof_read(self, original, updated, value, label, kind, call, pcall, name):
-        o = self.o
-        asof_hold = self.asof_rows[name][0]
-        hold = self._take(call, label, COLUMN_KIND[kind])
-        row = f'_mx_asof_{name}'
-        read = self._m(kind + '_row', o.ref(hold), o.slot(hold), cst.parse_expression(f'{row} + 1'))
-        # the row is a row of the table the asof searched: the same prepared table object
-        test = self._conjunction([cst.parse_expression(f'{row} >= 0'), self._native_test(hold, []),
-                                  cst.parse_expression(f'self.{hold.table} is self.{asof_hold.table}')])
-        if isinstance(value.value, cst.Name):
-            self.swaps[value.value.value] = pcall
-        self._record(original, 'L3', pcall)
-        return self._lowered(test, read, self._fallback(updated, call), kind)
 
     def row_cell_field(self, original, updated, parts):
         """T-5: ``self.P()["f"]`` with P a row cell (``return T.loc[key]``, the key complete and fixed per item) that
@@ -2727,7 +2457,7 @@ class _Rewrite(cst.CSTTransformer):
         if _literal_str(parts[0]) is not None:
             if local is not None:       # the local is P() for the pandas branch, and is dropped once unread
                 self.swaps.setdefault(local, call)
-            return self._row_field(original.with_changes(value=row), updated, parts, cell=name)
+            return self._row_field(original.with_changes(value=row), updated, parts)
         up = o.facts.formula.parents.get(id(original))
         consumer = o.facts.formula.parents.get(id(up)) if isinstance(up, cst.Arg) else None
         if not (isinstance(consumer, cst.Call) and isinstance(consumer.func, cst.Name) and consumer.func.value == 'float'
@@ -2738,19 +2468,18 @@ class _Rewrite(cst.CSTTransformer):
         if found is None or found[1]['kind'] != 'frame' or not found[1].get('unique') or _code(found[0]) in o.mutated:
             return None
         levels = found[1]['levels']
-        from .row_cells import item_constant
         fixed = key.elements if isinstance(key, cst.Tuple) else [key]
         if (len(fixed) if isinstance(key, cst.Tuple) else 1) != len(levels) or not all(
                 o.fixed_part(e.value if isinstance(e, cst.Element) else e) for e in fixed):
             return None
         hold = self._take(found[0], _NO_LABEL, -1)
-        field = o.row_field(hold, key, name, self._detached(key))
+        field = o.row_field(hold, key, self._detached(key))
         label = self.updated_of.get(id(parts[0]), parts[0])
         read = self._m('field_f64', o.ref(hold), cst.parse_expression(f'self.{field}'), _cast('object', label))
         self._record(original, 'L2', found[0])
         return self._lowered(self._native_test(hold, [cst.parse_expression(f'self.{field} > 0')]), read, updated, 'f64')
 
-    def _row_field(self, original, updated, parts, cell=None):
+    def _row_field(self, original, updated, parts):
         """L2 (T-4): ``R.loc[key]["f"]``, a field of a row of a frame, the key fixed per item (the model-point row,
         also as inlined from its row cell): the row is held per item (``_mx_tw_``) and the field read from the
         prepared table, of the kind pandas gives it: the column's own on a row with an object column, else the
@@ -2777,7 +2506,6 @@ class _Rewrite(cst.CSTTransformer):
                 not isinstance(key, cst.Tuple) and len(levels) != 1):
             self._record(original, 'pandas', call, 'the row key is not complete')
             return updated
-        from .row_cells import item_constant
         # T-5: a key not fixed per item finds its row per read (KeyError as pandas when it has none)
         per_read = not (o.per_item and all(o.fixed_part(e.value if isinstance(e, cst.Element) else e)
                                            for e in fixed))
@@ -2788,22 +2516,15 @@ class _Rewrite(cst.CSTTransformer):
         if isinstance(row.value.value, cst.Name):
             self.replaced_names.add(row.value.value.value)
         inlined = o.row_inline.sites.get(original) if o.row_inline is not None else None
-        name = cell or inlined or (o.row_names.get(_code(row)) if o.row_names else None)
-
-        held_state = None
 
         def position(hold):
-            nonlocal held_state
             if per_read:
                 labels = []
                 suffix, cargs = self._codes(hold, [], _parts(key), levels, labels)
                 return self._next(self._m('row' + suffix, o.ref(hold), *cargs)), labels
-            field = o.row_field(hold, key, name, self._detached(key))
-            held_state = hold.state
+            field = o.row_field(hold, key, self._detached(key))
             return cst.parse_expression(f'self.{field}'), [cst.parse_expression(f'self.{field} > 0')]
         read, kind, test = self._field_read(call, schema, label, position)
-        if held_state is not None and kind == 'obj' and not o.cells.has_args() and o.cells.get_rettype_expr() == 'str':
-            self.held_string_read = read, test, held_state
         self._record(original, 'L2', call)
         if inlined is not None:
             o.row_inline.lowered_sites.add(original)
@@ -2861,8 +2582,7 @@ class _Rewrite(cst.CSTTransformer):
             own, runtime = runtime, None        # a local bound once to a tuple display: its parts, as a display
         levels = view.schema['levels']
         count = view.depth + len(own)
-        if (view.start is None and count >= len(levels)) or count > len(levels) or any(
-                isinstance(p, (cst.StarredElement, cst.Slice, cst.List, cst.ListComp)) for p in own):
+        if (view.start is None and count >= len(levels)) or count > len(levels) or any(map(_several, own)):
             return None         # a complete key on the whole table: L7
         view.used = True
         hold = self._take(view.call, _NO_LABEL, -1)
@@ -2889,8 +2609,8 @@ class _Rewrite(cst.CSTTransformer):
         native = self._conjunction([native, *shape])
         if name is None and isinstance(index.value, cst.Name):
             self.replaced_names.add(index.value.value)
-        self._record(original, 'L7', view.call, view=view)
-        return self._guarded(original, updated, view, native, test)
+        self._record(original, 'L7', view.call)
+        return self._guarded(updated, view, native, test)
 
     def leave_Comparison(self, original, updated):
         o = self.o

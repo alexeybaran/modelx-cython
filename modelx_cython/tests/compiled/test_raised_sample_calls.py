@@ -3,6 +3,7 @@
 A Cell that raises for some sampled items (its own guard) keeps the type of the calls that
 returned; a Cell whose every sampled call raised keeps the previous behaviour (its result is
 traced as None, so it returns a Python object). Compiled values and raised exceptions equal live.
+Direct-route twin of ``test_raised_sample_calls_collect`` (the same model without ``collect_over``).
 """
 import json
 import os
@@ -19,9 +20,7 @@ def _build(tmp_path):
     model = mx.new_model('RaisedSample')
     try:
         p = model.new_space('Projection', formula='lambda policy_id: None',
-                            refs={'keys': KEYS},
-                            collect_over={'policy_id': KEYS},
-                            collect_outputs='lambda: {"sum": {"total": total()}}')
+                            refs={'keys': KEYS})
         p.new_cells('life', 'lambda: policy_id % 2 == 0')
         p.new_cells('rate', 'lambda: 0.01 * policy_id')
         p.new_cells('proj_len', 'lambda: 5 + policy_id')
@@ -53,10 +52,8 @@ def _build(tmp_path):
                 except (ValueError, LookupError):
                     pass
         '''))
-    (tmp_path / 'spec.py').write_text(repr({'parallel_workers': 1,
-                                            'spaces': {'Projection': {'serial_collect': 'reuse'}}}))
     build = subprocess.run([sys.executable, '-B', '-m', 'modelx_cython', 'exported',
-                            '--sample', 'sample.py', '--spec', 'spec.py'],
+                            '--sample', 'sample.py', '--no-spec'],
                            cwd=tmp_path, env=dict(os.environ), capture_output=True, text=True)
     (tmp_path / 'build.log').write_text(build.stdout + build.stderr)
     assert build.returncode == 0, build.stdout + build.stderr

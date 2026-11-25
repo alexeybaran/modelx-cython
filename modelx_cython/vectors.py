@@ -260,6 +260,12 @@ class _LocalAllocations(cst.CSTVisitor):
             self._stack[-1][1].add(f.value.value)
 
 
+def _not_a_number(node):
+    """None, a string or a display: a value no vector holds."""
+    return (_is_name(node, 'None') or isinstance(node, (cst.SimpleString, cst.ConcatenatedString, cst.FormattedString,
+                                                         cst.List, cst.Tuple, cst.Dict, cst.Set)))
+
+
 def _numeric_literal(node):
     if isinstance(node, cst.UnaryOperation) and isinstance(node.operator, cst.Minus):
         node = node.expression
@@ -337,15 +343,6 @@ def _int_literal(node):
     return None
 
 
-def _list_range(node):
-    """diag-kr: the arguments of ``list(range(a))`` / ``list(range(a, b))``, else None."""
-    if (isinstance(node, cst.Call) and _is_name(node.func, 'list') and _plain_args(node, 1, 1)
-            and isinstance(inner := node.args[0].value, cst.Call) and _is_name(inner.func, 'range')
-            and _plain_args(inner, 1, 2)):
-        return [a.value for a in inner.args]
-    return None
-
-
 def _plain_args(call, low, high):
     return (low <= len(call.args) <= high
             and all(a.keyword is None and a.star == '' for a in call.args))
@@ -361,6 +358,17 @@ def _names(target):
     return []
 
 
+def _held_names(node):
+    """The names a value holds as they are: the value itself, or the items of a display."""
+    if isinstance(node, cst.Name):
+        return [node.value]
+    if isinstance(node, (cst.Tuple, cst.List, cst.Set)):
+        return [n for e in node.elements for n in _held_names(e.value)]
+    if isinstance(node, cst.Dict):
+        return [n for e in node.elements if isinstance(e, cst.DictElement) for n in _held_names(e.value)]
+    return []
+
+
 def _walk(node):
     found = []
 
@@ -372,7 +380,33 @@ def _walk(node):
     return found
 
 
+def _call_shape(func, shapes, ref_shapes):
+    """The vector shape of a call of ``self.<cell>`` or ``self.<Reference>.<cell>``, else None."""
+    if not isinstance(func, cst.Attribute):
+        return None
+    if _is_name(func.value, 'self'):
+        return shapes.get(func.attr.value)
+    if isinstance(func.value, cst.Attribute) and _is_name(func.value.value, 'self'):
+        return ref_shapes.get(func.value.attr.value, {}).get(func.attr.value)
+    return None
+
+
+def reference_shapes(cls_info, module):
+    """{Reference: {cell: shape}} of the vector cells of the Spaces that References of ``cls_info`` are
+    declared with (a class of ``module``, as table_cells.RenameMembers resolves a receiver)."""
+    found = {}
+    for name, ref in getattr(cls_info, 'refs', {}).items():
+        decl = getattr(ref, 'decl_type_expr', '')
+        target = getattr(module, 'classes', {}).get(decl.rsplit('.', 1)[-1]) if decl else None
+        shapes = {c: cell.vector_shape for c, cell in target.cells.items() if cell.vector_shape} if target else {}
+        if shapes:
+            found[name] = shapes
+    return found
+
+
 class _Rename(cst.CSTTransformer):
+    """Rename variables; an attribute name or a keyword argument's name is not a variable."""
+
     def __init__(self, names):
         self.names = names
 
@@ -380,19 +414,36 @@ class _Rename(cst.CSTTransformer):
         new = self.names.get(updated.value)
         return updated.with_changes(value=new) if new else updated
 
+    def leave_Attribute(self, original, updated):
+        return updated.with_changes(attr=original.attr)
+
+    def leave_Arg(self, original, updated):
+        return updated.with_changes(keyword=original.keyword)
+
 
 # ---------------------------------------------------------------- facts of one formula
+# builtins that only read a list passed to them, and list methods that do not change the list
+READERS = ('sum', 'len', 'zip', 'range', 'min', 'max', 'list', 'tuple', 'sorted', 'enumerate', 'reversed',
+           'any', 'all', 'map', 'filter', 'set', 'frozenset', 'iter', 'isinstance', 'str', 'repr', 'float', 'int')
+_LIST_READS = ('count', 'index', 'copy')
+
+
 class _Facts(cst.CSTVisitor):
     """Bindings, element writes, appends and returns of one formula body."""
 
-    def __init__(self):
+    def __init__(self, readers=frozenset(READERS)):
+        self.readers = readers      # the READERS that resolve to the builtins in this formula
+        self.escapes = set()        # locals a method, a callee or an alias may change in place: lists
+        self.mutated = set()        # locals that are the receiver of a list method other than append
+        self.aliases = []           # (a, b) of ``a = b``: one object under two names
+        self._appending = set()     # ids of the ``v.append`` of the recorded appends
         self.assigns = {}           # name -> [('value', expr) | ('unpack', expr, i, n) | ('aug', op, expr)
                                     #          | ('for', iter, i, n) | ('other',)]
         self.writes = []            # (base expr, value expr) of v[i] = x
+        self.updates = []           # (base expr, operator, value expr) of v[i] op= x
         self.appends = []           # (base expr, value expr, call) of v.append(x)
         self.returns = []           # return value expressions
         self.statement_comps = set()
-        self.concat_values = {}     # diag-kr: id of a returned concatenation -> its operands
         self.store_targets = set()  # ids of subscripts that are assignment targets
         self.comp_targets = set()
 
@@ -406,6 +457,8 @@ class _Facts(cst.CSTVisitor):
             tgt = t.target
             if isinstance(tgt, cst.Name):
                 self.add(tgt.value, ('value', node.value))
+                if isinstance(node.value, cst.Name):
+                    self.aliases.append((tgt.value, node.value.value))
             elif isinstance(tgt, (cst.Tuple, cst.List)):
                 n = len(tgt.elements)
                 for i, e in enumerate(tgt.elements):
@@ -419,32 +472,14 @@ class _Facts(cst.CSTVisitor):
             elif isinstance(tgt, cst.Subscript):
                 self.store_targets.add(id(tgt))
                 self.writes.append((tgt.value, node.value))
-
-    def concatenation(self, value):
-        """diag-kr: ``A + B + ...`` whose every operand is a list comprehension or
-        ``list(range(...))``: the operands, left to right, else None."""
-        if not (isinstance(value, cst.BinaryOperation) and isinstance(value.operator, cst.Add)):
-            return None
-        parts = []
-        def flatten(node):
-            if isinstance(node, cst.BinaryOperation) and isinstance(node.operator, cst.Add):
-                return flatten(node.left) and flatten(node.right)
-            if isinstance(node, cst.ListComp) or _list_range(node) is not None:
-                parts.append(node)
-                return True
-            return False
-        return parts if flatten(value) else None
+        if not isinstance(node.value, cst.Name) or not all(isinstance(t.target, cst.Name) for t in node.targets):
+            self.escapes.update(_held_names(node.value))    # a list stored in a container or attribute
 
     def visit_Return(self, node):
         if node.value is not None:
             self.returns.append(node.value)
         if isinstance(node.value, cst.ListComp):
             self.statement_comps.add(id(node.value))
-        parts = self.concatenation(node.value)
-        if parts is not None:
-            # built left to right into one typed vector: the order of evaluation is kept
-            self.concat_values[id(node.value)] = parts
-            self.statement_comps.update(id(part) for part in parts if isinstance(part, cst.ListComp))
         if isinstance(node.value, cst.Tuple) and all(
                 isinstance(e.value, (cst.Name, cst.Integer, cst.Float, cst.ListComp)) for e in node.value.elements):
             # no other element has effects, so building a comprehension first keeps the order
@@ -457,6 +492,7 @@ class _Facts(cst.CSTVisitor):
         elif isinstance(node.target, cst.Subscript):
             self.store_targets.add(id(node.target))
             self.writes.append((node.target.value, None))
+            self.updates.append((node.target.value, node.operator, node.value))
 
     def visit_AnnAssign(self, node):
         for name in _names(node.target):
@@ -504,6 +540,10 @@ class _Facts(cst.CSTVisitor):
     def visit_Del(self, node):
         for name in _names(node.target):
             self.add(name, ('other',))
+        targets = [e.value for e in node.target.elements] if isinstance(node.target, cst.Tuple) else [node.target]
+        for target in targets:
+            if isinstance(target, cst.Subscript) and isinstance(target.value, cst.Name):
+                self.mutated.add(target.value.value)
 
     def visit_Import(self, node):
         for alias in node.names:
@@ -519,6 +559,29 @@ class _Facts(cst.CSTVisitor):
         if (isinstance(f, cst.Attribute) and f.attr.value == 'append' and len(node.args) == 1
                 and node.args[0].keyword is None and node.args[0].star == ''):
             self.appends.append((f.value, node.args[0].value, node))
+            self._appending.add(id(f))
+        if not (isinstance(f, cst.Name) and f.value in self.readers):
+            # R1: a callee may change a list passed to it, so the list stays the one it changes
+            self.escapes.update(a.value.value for a in node.args if isinstance(a.value, cst.Name))
+
+    def visit_Attribute(self, node):
+        # R1: v.sort(), v.extend(w), v.pop(), f = v.sort, ...: the list itself changes, so it stays a list
+        if (isinstance(node.value, cst.Name) and id(node) not in self._appending
+                and node.attr.value not in _LIST_READS):
+            self.mutated.add(node.value.value)
+
+    def escaping(self, seed=None):
+        """The locals that stay lists: changed in place or handed to code that may change them, and
+        every name bound to the same object (``a = b``); with ``seed``, the names bound with those."""
+        found = set(self.escapes | self.mutated if seed is None else seed)
+        changed = True
+        while changed:
+            changed = False
+            for a, b in self.aliases:
+                if (a in found) != (b in found):
+                    found.update((a, b))
+                    changed = True
+        return found
 
     def visit_FunctionDef(self, node):
         self.add(node.name.value, ('other',))
@@ -537,6 +600,7 @@ class VectorLowering(cst.CSTTransformer):
         self.cls_info = cls_info
         self.cells = cells
         self.shapes = {name: c.vector_shape for name, c in cls_info.cells.items() if c.vector_shape}
+        self.ref_shapes = {}            # cross-Space reads: {Reference: {cell: shape}} (reference_shapes)
         self.builtins = builtins
         self.counter = counter          # shared per module: unique temporaries
         self.temps = set()              # the temporaries temp() made
@@ -551,6 +615,8 @@ class VectorLowering(cst.CSTTransformer):
         self.ref_scalars = {}
         self.param_scalars = {}         # D87: C-typed parameters, unless the formula rebinds them
         self.strict_locals = False      # D94: module without vector cells: untyped writes keep a list
+        self.readers = frozenset(READERS)   # the READERS that are the builtins in this formula
+        self.escaping = set()
         self.scope_stack = []           # per enclosing comprehension/lambda: expanded here
 
     # ---------------------------------------------------------------- kinds
@@ -567,10 +633,7 @@ class VectorLowering(cst.CSTTransformer):
     def kind(self, node):
         """'V', 'I', 'AV', 'AI' (fresh allocations), ('T', kinds) or None for an original node."""
         if isinstance(node, cst.Call):
-            f = node.func
-            if isinstance(f, cst.Attribute) and _is_name(f.value, 'self') and f.attr.value in self.shapes:
-                return self.shapes[f.attr.value]
-            return None
+            return _call_shape(node.func, self.shapes, self.ref_shapes)
         if isinstance(node, cst.Name):
             return self.env.get(node.value)
         if isinstance(node, cst.Subscript):
@@ -589,6 +652,8 @@ class VectorLowering(cst.CSTTransformer):
                         and isinstance(one.elements[0], cst.Element)
                         and not isinstance(other, (cst.List, cst.ListComp))):
                     elem = self.scalar(one.elements[0].value)
+                    if elem is None and _not_a_number(one.elements[0].value):
+                        return None     # [None] * n: a list, converted where it is stored into a vector
                     return {FLOAT: 'AV', INT: 'AI'}.get(elem, 'A?')
             return None
         if isinstance(node, cst.List) and not node.elements:
@@ -751,9 +816,10 @@ class VectorLowering(cst.CSTTransformer):
 
     # ---------------------------------------------------------------- analysis
     def analyse(self, body):
-        facts = _Facts()
+        facts = _Facts(self.readers)
         body.visit(facts)
         self.facts = facts
+        self.escaping = facts.escaping()
         self.statement_comps = facts.statement_comps
         assigns = facts.assigns
         for name, kind in self.param_scalars.items():
@@ -794,9 +860,30 @@ class VectorLowering(cst.CSTTransformer):
                     and self.strict_locals and self.scalar(value) != INT:
                 self.env[base.value] = None
                 self.fallback(base, 'integer vector written with a value not proven an integer: kept as a list')
+        for base, op, value in facts.updates:
+            # an integer vector local whose element update gives a float (v[i] += 0.5, v[i] /= 2) stays a list
+            if _is_name(base) and self.env.get(base.value) == 'I' and (
+                    isinstance(op, cst.DivideAssign) or self.scalar(value) in (FLOAT, NUM)):
+                self.env[base.value] = None
+                self.fallback(base, 'integer vector updated with a float: kept as a list')
         self.owned = {name for name, items in assigns.items() if self.env.get(name) in ('V', 'I')
                       and all(item[0] == 'value' and isinstance(self.kind(item[1]), str)
                               and self.kind(item[1])[0] == 'A' for item in items)}
+        for name in sorted(facts.escaping(facts.mutated)):
+            for item in assigns.get(name, ()):
+                if item[0] in ('value', 'unpack') and self.cached_value(item[1]):
+                    raise VectorWriteError(
+                        f'{self.cells.model_path}: {name!r} holds the cached value of a vector cell and is '
+                        f'changed in place; cached vectors are immutable: change a copy (list(...))')
+
+    def cached_value(self, node):
+        """Whether ``node`` gives the cached value of a vector cell (or a tuple of them) as it is."""
+        if isinstance(node, cst.Subscript) and _index(node) is not None:
+            return self.cached_value(node.value)
+        if isinstance(node, cst.IfExp):
+            return self.cached_value(node.body) or self.cached_value(node.orelse)
+        k = self.kind(node) if isinstance(node, cst.Call) else None
+        return k is not None and not (isinstance(k, str) and k[0] == 'A')
 
     def returned_kinds(self, facts):
         """Kinds that a local takes from the cell's own traced shape when it is returned;
@@ -842,7 +929,7 @@ class VectorLowering(cst.CSTTransformer):
                     self.env[name] = None
                 if all(isinstance(k, str) and k[-1] in (candidate, '?') for k in trial):
                     kinds = trial
-        if not kinds or any(k is None for k in kinds) or returned.get(name) == 'X':
+        if not kinds or any(k is None for k in kinds) or returned.get(name) == 'X' or name in self.escaping:
             return None
         if all(isinstance(k, tuple) for k in kinds):
             return kinds[0] if len(set(kinds)) == 1 else None
@@ -913,6 +1000,15 @@ class VectorLowering(cst.CSTTransformer):
 
     def call(self, op, elem, *args):
         return cst.Call(_expr(fn(op, elem)), [cst.Arg(a) for a in args])
+
+    def item(self, e, value_o, value_u):
+        """value_u entering a vector of kind e, checked where it is not proven of the vector's kind
+        (vec_item, ivec_item: a number equal to the value live holds, else TypeError); a C conversion
+        would truncate a float into an integer vector or round a large int into a float vector."""
+        if self.scalar(value_o) == (FLOAT if e == 'V' else INT):
+            return value_u
+        check = 'vec_item' if e == 'V' else 'ivec_item'
+        return cst.Call(_expr(f'{ALIAS}.{check}'), [cst.Arg(value_u.with_changes(lpar=(), rpar=()))])
 
     # ---------------------------------------------------------------- expressions
     def leave_Subscript(self, original, updated):
@@ -1064,7 +1160,8 @@ class VectorLowering(cst.CSTTransformer):
                         f'{self.cells.model_path}: append to vector {_code(base)!r}, which this formula '
                         f'did not allocate; cached vectors are immutable: build a new one')
                 self.lowered += 1
-                return self.call('append', e, updated.func.value, updated.args[0].value)
+                return self.call('append', e, updated.func.value,
+                                 self.item(e, original.args[0].value, updated.args[0].value))
         if isinstance(f, cst.Name) and f.value in self.builtins and _plain_args(original, 1, 1):
             arg_o, arg_u = original.args[0].value, updated.args[0].value
             e = self.elem(arg_o)
@@ -1103,7 +1200,8 @@ class VectorLowering(cst.CSTTransformer):
                 if _index(tgt_o) is not None:
                     self.lowered += 1
                     tgt_u = su.targets[0].target
-                    call = self.call('set', self.elem(base), tgt_u.value, _index(tgt_u), su.value)
+                    call = self.call('set', self.elem(base), tgt_u.value, _index(tgt_u),
+                                     self.item(self.elem(base), so.value, su.value))
                     return updated.with_changes(body=[cst.Expr(call)])
                 raise VectorWriteError(f'{self.cells.model_path}: slice assignment to vector '
                                        f'{_code(base)!r} is not supported: write the elements')
@@ -1170,10 +1268,12 @@ class VectorLowering(cst.CSTTransformer):
         self.declare(k, f'{CY_MOD}.longlong')
         v = _code(su.target.value)
         self.lowered += 1
+        new = f'{fn("get", e)}({v}, {k}) {op} ({_code(su.value)})'
+        if e == 'I' and self.scalar(so.value) != INT:
+            new = f'{ALIAS}.ivec_item({new})'
         return cst.FlattenSentinel([
             updated.with_changes(body=[_stmt(f'{k} = {_code(index)}\n').body[0]]),
-            updated.with_changes(body=[_stmt(
-                f'{fn("set", e)}({v}, {k}, {fn("get", e)}({v}, {k}) {op} ({_code(su.value)}))\n').body[0]])])
+            updated.with_changes(body=[_stmt(f'{fn("set", e)}({v}, {k}, {new})\n').body[0]])])
 
     def destination(self, value_o, value_u, e):
         """(statements, value) storing value_o into a typed vector of kind e: allocations
@@ -1186,8 +1286,9 @@ class VectorLowering(cst.CSTTransformer):
                 item, count = value_u.left.elements[0].value, value_u.right
             else:
                 item, count = value_u.right.elements[0].value, value_u.left
+            item_o = (value_o.left if isinstance(value_o.left, cst.List) else value_o.right).elements[0].value
             self.lowered += 1
-            return [], self.call('full', e, count, item)
+            return [], self.call('full', e, count, self.item(e, item_o, item))
         if isinstance(value_o, cst.List) and not value_o.elements:
             self.lowered += 1
             return [], self.call('new', e, cst.Integer('0'))
@@ -1203,9 +1304,6 @@ class VectorLowering(cst.CSTTransformer):
             return [], value_u
         if _is_name(value_u) and value_u.value in self.temps:
             return [], value_u
-        concat = self.concatenation(value_o, value_u, e)
-        if concat is not None:
-            return concat
         return [], self.call('of', e, value_u)
 
     def display(self, value_u, e):
@@ -1224,63 +1322,6 @@ class VectorLowering(cst.CSTTransformer):
         pre += [_stmt(f'{r}.data[{i}] = {t}\n') for i, t in enumerate(temps)]
         self.lowered += 1
         return pre, cst.Name(r)
-
-    def concatenation(self, value_o, value_u, e):
-        """diag-kr: ``[... for ...] + list(range(a, b)) + ...`` stored into a typed vector of kind
-        e, each operand built in turn (left to right, as Python evaluates them) and copied into
-        one allocation, instead of Python lists converted by vec_of. None when an operand is not
-        of kind e."""
-        parts_o = self.facts.concat_values.get(id(value_o))
-        if parts_o is None or 'list' not in self.builtins or 'range' not in self.builtins:
-            return None
-        parts_u = []
-        def flatten(node):
-            if isinstance(node, cst.BinaryOperation) and isinstance(node.operator, cst.Add):
-                flatten(node.left)
-                flatten(node.right)
-            else:
-                parts_u.append(node)
-        flatten(value_u)
-        if len(parts_u) != len(parts_o):
-            return None
-        for part in parts_o:
-            if isinstance(part, cst.ListComp):
-                if self.kind(part) != 'A' + e:
-                    return None
-            elif e != 'I' or any(self.scalar(arg) != INT for arg in _list_range(part)):
-                return None
-        pre, names = [], []
-        for po, pu in zip(parts_o, parts_u):
-            if isinstance(po, cst.ListComp):
-                more, value = self.expand_comp(po, pu, e)
-                pre += more
-                names.append(value.value)
-                continue
-            args = [_code(a) for a in _list_range(pu)]
-            lo, hi = ('0', args[0]) if len(args) == 1 else (args[0], args[1])
-            lo_t, hi_t, n, i, r = (self.temp('clo'), self.temp('chi'), self.temp('cn'), self.temp('ci'),
-                                   self.temp('cr'))
-            for name in (lo_t, hi_t):
-                self.declare(name, f'{CY_MOD}.longlong')
-            for name in (n, i):
-                self.declare(name, f'{CY_MOD}.Py_ssize_t')
-            self.declare(r, TYPES[e])
-            pre += [_stmt(f'{lo_t} = ({lo}\n)\n'), _stmt(f'{hi_t} = ({hi}\n)\n'),
-                    _stmt(f'{n} = {hi_t} - {lo_t} if {hi_t} > {lo_t} else 0\n'),
-                    _stmt(f'{r} = {fn("new", e)}({n})\n'),
-                    _stmt(f'for {i} in range({n}):\n    {r}.data[{i}] = {lo_t} + {i}\n')]
-            names.append(r)
-        out, at, i = self.temp('cat'), self.temp('cat_at'), self.temp('cat_i')
-        self.declare(out, TYPES[e])
-        self.declare(at, f'{CY_MOD}.Py_ssize_t')
-        self.declare(i, f'{CY_MOD}.Py_ssize_t')
-        pre.append(_stmt(f'{out} = {fn("new", e)}({" + ".join(f"{name}.n" for name in names)})\n'))
-        pre.append(_stmt(f'{at} = 0\n'))
-        for name in names:
-            pre.append(_stmt(f'for {i} in range({name}.n):\n    {out}.data[{at} + {i}] = {name}.data[{i}]\n'))
-            pre.append(_stmt(f'{at} += {name}.n\n'))
-        self.lowered += 1
-        return pre, cst.Name(out)
 
     def wrap_return(self, so, su, pre):
         shape = self.cells.vector_shape
@@ -1347,6 +1388,8 @@ class VectorLowering(cst.CSTTransformer):
         r = self.temp('r')
         self.declare(r, TYPES[e])
         elt = _code(comp_u.elt.visit(_Rename(renames)))
+        if self.comp_elem(comp_o) != (FLOAT if e == 'V' else INT):
+            elt = f'{ALIAS}.{"vec_item" if e == "V" else "ivec_item"}({elt}\n)'
         pre.append(_stmt(f'{r} = {fn("new", e)}({n})\n'))
         # the element may span lines (as written in the formula): parenthesised, closed on its own line
         loop = '\n'.join([head] + ['    ' + line for line in body] + [f'    {r}.data[{i}] = ({elt}\n)']) + '\n'
@@ -1357,10 +1400,10 @@ class VectorLowering(cst.CSTTransformer):
     def expand_sum(self, gen_o, gen_u):
         pre, head, body, renames, n, i = self.loop_head(gen_o.for_in, gen_u.for_in, 's')
         s = self.temp('sum')
-        self.declare(s, f'{ALIAS}.VecSum')
+        self.declare(s, f'{ALIAS}.F64Sum')
         elt = _code(gen_u.elt.visit(_Rename(renames)))
-        pre.append(_stmt(f'{ALIAS}.sum_init({CY_MOD}.address({s}))\n'))
-        add = f'{ALIAS}.sum_add({CY_MOD}.address({s}), {elt})'
+        pre.append(_stmt(f'{ALIAS}.f64_init({CY_MOD}.address({s}))\n'))
+        add = f'{ALIAS}.f64_add({CY_MOD}.address({s}), {elt})'
         if gen_u.for_in.ifs:
             cond = ' and '.join(f'({_code(c.test.visit(_Rename(renames)))})' for c in gen_u.for_in.ifs)
             lines = body + [f'if {cond}:', f'    {add}']
@@ -1368,7 +1411,7 @@ class VectorLowering(cst.CSTTransformer):
             lines = body + [add]
         pre.append(_stmt('\n'.join([head] + ['    ' + line for line in lines]) + '\n'))
         self.lowered += 1
-        return pre, _expr(f'{ALIAS}.sum_result({CY_MOD}.address({s}))')
+        return pre, _expr(f'{ALIAS}.f64_result({CY_MOD}.address({s}))')
 
     def expand_extreme(self, gen_o, gen_u, name, elem):
         """diag-kr: ``min``/``max`` of a generator over vectors, as Python computes it: the first
@@ -1702,9 +1745,10 @@ class _ObjectUses(cst.CSTTransformer):
     A tuple of vectors in such a position becomes a tuple of lists."""
     METADATA_DEPENDENCIES = (__import__('libcst.metadata', fromlist=['ParentNodeProvider']).ParentNodeProvider,)
 
-    def __init__(self, names, shapes, own=None):
+    def __init__(self, names, shapes, own=None, ref_shapes=None):
         super().__init__()
         self.names, self.shapes = names, shapes     # {name: shape}, {vector cell: shape}
+        self.ref_shapes = ref_shapes or {}          # {Reference: {vector cell: shape}}
         self.own = own                              # the shape this formula returns, if it is a vector cell
         self.converted = []
 
@@ -1718,9 +1762,8 @@ class _ObjectUses(cst.CSTTransformer):
     def _shape(self, node):
         if isinstance(node, cst.Name):
             return self.names.get(node.value)
-        if (isinstance(node, cst.Call) and isinstance(node.func, cst.Attribute)
-                and _is_name(node.func.value, 'self')):
-            return self.shapes.get(node.func.attr.value)
+        if isinstance(node, cst.Call):
+            return _call_shape(node.func, self.shapes, self.ref_shapes)
         if isinstance(node, cst.Subscript):
             base = self._shape(node.value)
             if isinstance(base, tuple) and _index(node) is not None and _int_literal(_index(node)) is not None:
@@ -1747,6 +1790,8 @@ class _ObjectUses(cst.CSTTransformer):
                 _is_name(c.comparator, 'None') for c in comp.comparisons)
         if isinstance(parent, cst.AssignTarget):
             return True
+        if isinstance(parent, cst.IfExp) and parent.test is not node:
+            return self._native(parent, shape)      # a branch: judged where the conditional's value is used
         if isinstance(parent, cst.Return):
             return self.own is not None and self.own == shape     # the formula returns this typed vector
         if isinstance(parent, cst.Assign) and parent.value is node:
@@ -1769,6 +1814,11 @@ class _ObjectUses(cst.CSTTransformer):
         shape = self._shape(original)
         if shape is None or self._native(original, shape):
             return updated
+        parent = self._parent(original)
+        if (isinstance(original, cst.Call) and isinstance(parent, cst.Attribute)
+                and parent.attr.value not in _LIST_READS):
+            raise VectorWriteError(f'{_code(original)}.{parent.attr.value}: the cached value of a vector cell '
+                                   f'is changed in place; cached vectors are immutable: change a copy (list(...))')
         self.converted.append(_code(original)[:80])
         if isinstance(shape, tuple):
             return _expr(f'tuple([_mx_vector.tolist() for _mx_vector in {_code(updated)}])')
@@ -1784,11 +1834,11 @@ class _ObjectUses(cst.CSTTransformer):
         return self._leave(original, updated)
 
 
-def _object_uses(body, names, shapes, own=None):
+def _object_uses(body, names, shapes, own=None, ref_shapes=None):
     """``body`` (an IndentedBlock) with every Python use of a vector made a list (``_ObjectUses``)."""
     from libcst.metadata import MetadataWrapper
     wrapper = MetadataWrapper(cst.Module(body=body.body), unsafe_skip_copy=True)
-    uses = _ObjectUses(names, shapes, own)
+    uses = _ObjectUses(names, shapes, own, ref_shapes)
     module = wrapper.visit(uses)
     return body.with_changes(body=module.body), uses.converted
 
@@ -1802,10 +1852,13 @@ def lower(node, cls_info, cells, scope, counter, module, ref_kinds=None):
     if not module_uses_vectors(module) or not isinstance(node.body, cst.IndentedBlock):
         return node
     cells.vector_report = report = {'shape': _shape_json(cells.vector_shape), 'lowered': 0, 'fallbacks': []}
-    builtins = {name for name in ('sum', 'len', 'zip', 'range', 'min', 'max', 'list')
-                if scope[name] and all(isinstance(b, BuiltinAssignment) for b in scope[name])}
+    def is_builtin(name):
+        return scope[name] and all(isinstance(b, BuiltinAssignment) for b in scope[name])
+    builtins = {name for name in ('sum', 'len', 'zip', 'range', 'min', 'max', 'list') if is_builtin(name)}
     loops = [name for name in range_loop_locals(node.body, builtins) if name not in cells.params]
     lowering = VectorLowering(cls_info, cells, builtins, counter)
+    lowering.readers = frozenset(name for name in READERS if is_builtin(name))
+    lowering.ref_shapes = reference_shapes(cls_info, module)
     from .powers import KIND_FLOAT, KIND_INT
     lowering.strict_locals = not module_vector_cells(module)
     lowering.ref_scalars = {name: {KIND_FLOAT: FLOAT, KIND_INT: INT}.get(kind)
@@ -1832,6 +1885,7 @@ def lower(node, cls_info, cells, scope, counter, module, ref_kinds=None):
     decls = [_stmt(f'{name}: {CY_MOD}.longlong\n') for name in loops + derived]
     touches = (any(lowering.env.values()) or cells.vector_shape or any(
         isinstance(n, cst.Attribute) and n.attr.value in lowering.shapes for n in _walk(node.body))
+        or any(isinstance(n, cst.Call) and _call_shape(n.func, {}, lowering.ref_shapes) for n in _walk(node.body))
         or any(isinstance(n, cst.Power) for n in _walk(node.body)))
     report['range_loop_locals'] = loops
     if derived:
@@ -1849,7 +1903,8 @@ def lower(node, cls_info, cells, scope, counter, module, ref_kinds=None):
                 typed[small.target.value] = next(k for k, t in TYPES.items() if t == _code(small.annotation.annotation))
     body, converted = _object_uses(body, typed, {n: s for n, s in lowering.shapes.items()
                                                  if s in ('V', 'I') or isinstance(s, tuple)},
-                                   cells.vector_shape if cells.vector_shape in ("V", "I") or isinstance(cells.vector_shape, tuple) else None)
+                                   cells.vector_shape if cells.vector_shape in ("V", "I") or isinstance(cells.vector_shape, tuple) else None,
+                                   lowering.ref_shapes)
     if derived:
         body = body.visit(_CheckedFloatReads(typed, set(derived)))
     for name, items in lowering.facts.assigns.items():
