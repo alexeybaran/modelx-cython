@@ -1,7 +1,7 @@
 """D79 (diag-vec): table reads whose key parts are build-time constants.
 
-(1) An IntEnum member admitted at build (enum definition) used as a table key part is its module
-constant (``_mx_enum_const_N``), not an attribute read of the enum class per call.
+(1) An IntEnum member used as a table key part is its integer literal (enums.literals), an integer key
+part, not an attribute read of the enum class per call.
 (2) A prepared read holds the codes of constant string labels next to the table handle.
 The first read resolves them, a missing key raises KeyError at the read, and collect resets the holds.
 Results must not change: compiled at one and four workers equals the exported model.
@@ -73,7 +73,7 @@ def test_constant_key_reads_use_enum_constants_and_held_codes(tmp_path):
     assert done.returncode == 0, done.stdout[-3000:] + done.stderr[-3000:]
     generated = (tmp_path / 'exported_cy/_m_Portfolio/_mx_classes.py').read_text(encoding='utf-8')
     enum_read = next(line for line in generated.splitlines() if line.lstrip().startswith('mix ='))
-    assert '.lcode(' in enum_read and ', 0, _mx_enum_const_' in enum_read
+    assert '.kcode(' in enum_read and ', 0, 200)' in enum_read and 'P.OK' not in enum_read, enum_read
     assert generated.count('.hold_code(') == 3
     assert all(f'root._mx_tk_{slot} = 0' in generated for slot in range(3))
     assert 'root._mx_tp_0 = None' in generated
