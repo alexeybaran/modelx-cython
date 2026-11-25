@@ -161,7 +161,7 @@ class _Calls(cst.CSTTransformer):
             return direct
         # D59: the virtual branch converts to the Cell's C return type, as the typed entry
         # returns it, so the whole expression has that type and a local assigned from it
-        # is inferred as a C number (infer_types) rather than an object.
+        # can be inferred as a C number rather than an object.
         virtual = updated
         if rettype in _C_CASTS:
             virtual = cst.Call(func=cst.parse_expression(f'{CY_MOD}.cast'), args=(

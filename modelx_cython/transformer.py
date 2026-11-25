@@ -592,20 +592,15 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
         See :mod:`modelx_cython.powers`; the node is returned unchanged
         when no operand pair can be typed.
         """
-        from modelx_cython.checked_arithmetic import CheckedArithmetic
         from modelx_cython import held_arrays
-        builtin_keys = {name for name in ("all", "any", "sum", "min", "max", "float", "int", "round", "range",
-                                         "zip", "str", "type")
-                        if scope[name] and all(isinstance(binding, BuiltinAssignment)
-                                               for binding in scope[name])}
+        builtin_float = bool(scope['float']) and all(isinstance(binding, BuiltinAssignment)
+                                                     for binding in scope['float'])
         # a typed-memoryview Cell read by subscript is held per item (no slice copy per evaluation)
         node = held_arrays.lower(node, cls_info, cells, self._held_arrays)
         cells.formula_allows_exact_receiver = allows_exact_receiver(node, cls_info.name)
-        node = CheckedArithmetic(cls_info, cells, builtin_keys).rewrite(node)
         node = rewrite_powers(
             node, self._resolver, self._cells_kinds, self._ref_kinds,
-            cls_info.fqname, cells, builtin_float='float' in builtin_keys,
-            checked_integer_powers=self.module.spec.policy.integer_checks != 'unchecked',
+            cls_info.fqname, cells, builtin_float=builtin_float,
         )
         from modelx_cython.ordered_arguments import preserve_argument_order
         from modelx_cython.powers import OperandKind, kind_of_type_expr, formula_local_kinds
@@ -712,16 +707,9 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
             # Native memo structs contain only scalars. Use Cython's standard
             # serializer; the module directive also works in pure-Python mode.
             directives.append('auto_pickle=True')
-        # integer guards: overflow checks only in the checked mode (owner's rule), with or without type
-        # inference: a formula's typed C integer arithmetic (Cell results, typed parameters) is C
-        # arithmetic either way
-        checked = self.module.spec.policy.integer_checks != 'unchecked'
-        if self.module.spec.policy.infer_types:
-            # M1 (spec key infer_types): C integer inference in generated model modules; providers keep
-            # their own directives.
-            directives.append(f'infer_types=True, overflowcheck={checked}')
-        elif checked:
-            directives.append('overflowcheck=True')
+        # no overflowcheck and no infer_types: Cython's default inference leaves a local used in integer
+        # arithmetic a Python int, and integer_arithmetic keeps a C integer operation only where it cannot
+        # overflow
         if directives:
             module = module.with_changes(header=(
                 cst.EmptyLine(comment=cst.Comment('# cython: ' + ', '.join(directives))), *module.header))
