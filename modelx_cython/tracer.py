@@ -790,10 +790,22 @@ class MxCodeFilter:
     def __init__(self):
         # code object -> is_uncached_cells_code(code), as computed once
         self._public = {}
+        # id(code object) -> (code object, whether it is traced)
+        self._decisions = {}
 
     def __call__(self, code):
         """Return ``True`` if the code object should be traced."""
-        # Since called many times, check module name and function name only
+        # Called on every call and return event: the answer is kept per code object
+        # (by identity, the object held with it, so that its id is not reused)
+        entry = self._decisions.get(id(code))
+        if entry is not None and entry[0] is code:
+            return entry[1]
+        decision = self._decide(code)
+        self._decisions[id(code)] = code, decision
+        return decision
+
+    def _decide(self, code):
+        # check module name and function name only
         if (
             code.co_filename[-len(MX_MODEL_MOD) - 3: -3] == MX_MODEL_MOD
             or code.co_filename[-len(MX_SPACE_MOD) - 3: -3] == MX_SPACE_MOD
