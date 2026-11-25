@@ -985,6 +985,13 @@ class VectorLowering(cst.CSTTransformer):
     def call(self, op, elem, *args):
         return cst.Call(_expr(fn(op, elem)), [cst.Arg(a) for a in args])
 
+    def item(self, e, value_o, value_u):
+        """value_u entering a vector of kind e: checked (an exact int, else TypeError) where the
+        vector holds integers and the value is not proven one; a C conversion would truncate."""
+        if e != 'I' or self.scalar(value_o) == INT:
+            return value_u
+        return cst.Call(_expr(f'{ALIAS}.ivec_item'), [cst.Arg(value_u.with_changes(lpar=(), rpar=()))])
+
     # ---------------------------------------------------------------- expressions
     def leave_Subscript(self, original, updated):
         if id(original) in self.facts.store_targets:
@@ -1135,7 +1142,8 @@ class VectorLowering(cst.CSTTransformer):
                         f'{self.cells.model_path}: append to vector {_code(base)!r}, which this formula '
                         f'did not allocate; cached vectors are immutable: build a new one')
                 self.lowered += 1
-                return self.call('append', e, updated.func.value, updated.args[0].value)
+                return self.call('append', e, updated.func.value,
+                                 self.item(e, original.args[0].value, updated.args[0].value))
         if isinstance(f, cst.Name) and f.value in self.builtins and _plain_args(original, 1, 1):
             arg_o, arg_u = original.args[0].value, updated.args[0].value
             e = self.elem(arg_o)
@@ -1174,7 +1182,8 @@ class VectorLowering(cst.CSTTransformer):
                 if _index(tgt_o) is not None:
                     self.lowered += 1
                     tgt_u = su.targets[0].target
-                    call = self.call('set', self.elem(base), tgt_u.value, _index(tgt_u), su.value)
+                    call = self.call('set', self.elem(base), tgt_u.value, _index(tgt_u),
+                                     self.item(self.elem(base), so.value, su.value))
                     return updated.with_changes(body=[cst.Expr(call)])
                 raise VectorWriteError(f'{self.cells.model_path}: slice assignment to vector '
                                        f'{_code(base)!r} is not supported: write the elements')
@@ -1241,10 +1250,12 @@ class VectorLowering(cst.CSTTransformer):
         self.declare(k, f'{CY_MOD}.longlong')
         v = _code(su.target.value)
         self.lowered += 1
+        new = f'{fn("get", e)}({v}, {k}) {op} ({_code(su.value)})'
+        if e == 'I' and self.scalar(so.value) != INT:
+            new = f'{ALIAS}.ivec_item({new})'
         return cst.FlattenSentinel([
             updated.with_changes(body=[_stmt(f'{k} = {_code(index)}\n').body[0]]),
-            updated.with_changes(body=[_stmt(
-                f'{fn("set", e)}({v}, {k}, {fn("get", e)}({v}, {k}) {op} ({_code(su.value)}))\n').body[0]])])
+            updated.with_changes(body=[_stmt(f'{fn("set", e)}({v}, {k}, {new})\n').body[0]])])
 
     def destination(self, value_o, value_u, e):
         """(statements, value) storing value_o into a typed vector of kind e: allocations
@@ -1257,8 +1268,9 @@ class VectorLowering(cst.CSTTransformer):
                 item, count = value_u.left.elements[0].value, value_u.right
             else:
                 item, count = value_u.right.elements[0].value, value_u.left
+            item_o = (value_o.left if isinstance(value_o.left, cst.List) else value_o.right).elements[0].value
             self.lowered += 1
-            return [], self.call('full', e, count, item)
+            return [], self.call('full', e, count, self.item(e, item_o, item))
         if isinstance(value_o, cst.List) and not value_o.elements:
             self.lowered += 1
             return [], self.call('new', e, cst.Integer('0'))
@@ -1418,6 +1430,8 @@ class VectorLowering(cst.CSTTransformer):
         r = self.temp('r')
         self.declare(r, TYPES[e])
         elt = _code(comp_u.elt.visit(_Rename(renames)))
+        if e == 'I' and self.comp_elem(comp_o) != INT:
+            elt = f'{ALIAS}.ivec_item({elt}\n)'
         pre.append(_stmt(f'{r} = {fn("new", e)}({n})\n'))
         # the element may span lines (as written in the formula): parenthesised, closed on its own line
         loop = '\n'.join([head] + ['    ' + line for line in body] + [f'    {r}.data[{i}] = ({elt}\n)']) + '\n'
