@@ -66,7 +66,7 @@ from modelx_cython.monkeytype_tracing import (
     EVENT_RETURN,
 )
 
-from modelx_cython.enums import enum_safe
+from modelx_cython.enums import enum_safe, positions, text_safe
 from modelx_cython.consts import (
     MX_ASSIGN_REFS,
     FORMULA_PREF,
@@ -212,6 +212,7 @@ class RuntimeCellsInfo:     # TODO: Create base class RuntimeBaseMemberInfo
         self.observed_min_args = {}
         self.observed_max_args = {}
         self.enum_args = {}         # argument -> (module, qualname, member count) of its IntEnum
+        self.enum_codes = {}        # argument -> its text-safe StrEnum class: held as the member's position
         if receiver_calls is None:
             receiver_calls = {}
             for trace in traces:
@@ -256,6 +257,7 @@ class RuntimeCellsInfo:     # TODO: Create base class RuntimeBaseMemberInfo
         # Public Cell formulas are uncached. Preserve an authored object
         # argument there even when the sample supplies only one scalar type.
         annotations = traces[0].func.__annotations__ if is_user_defined(self.name) else {}
+        texts = {}      # argument -> the plain texts it was given
 
         for trace in traces:
 
@@ -273,6 +275,8 @@ class RuntimeCellsInfo:     # TODO: Create base class RuntimeBaseMemberInfo
                     self.min_args[arg] = min(self.min_args.get(arg, 0), val)
                     self.observed_min_args[arg] = min(self.observed_min_args.get(arg, val), val)
                     self.observed_max_args[arg] = max(self.observed_max_args.get(arg, val), val)
+                if tp is str and len(texts.setdefault(arg, set())) < 256:
+                    texts[arg].add(val)
                 types = arg_type_val.setdefault(arg, {})
                 if tp not in types:
                     types[tp] = val
@@ -285,6 +289,16 @@ class RuntimeCellsInfo:     # TODO: Create base class RuntimeBaseMemberInfo
             if annotations.get(arg) is object or arg in wide_arguments or any(
                     issubclass(tp, IntEnum) and not enum_safe(tp) for tp in type_val):   # its own operators
                 self.arg_types[arg] = object
+                continue
+
+            families = [tp for tp in type_val if text_safe(tp) and '<locals>' not in tp.__qualname__]
+            if len(families) == 1 and set(type_val) <= {families[0], str} and len(texts.get(arg, ())) < 256 and (
+                    texts.get(arg, set()) <= {member.value for member in families[0]}):
+                # members of one text-valued class, or their texts: a C integer, the member's position
+                self.arg_types[arg], self.enum_codes[arg], size = int, families[0], len(families[0])
+                self.max_args[arg], self.min_args[arg] = size - 1, 0
+                self.observed_min_args[arg], self.observed_max_args[arg] = 0, size - 1
+                self.enum_args[arg] = (families[0].__module__, families[0].__qualname__, size)
                 continue
 
             if len(type_val) == 1:
@@ -545,11 +559,15 @@ class RuntimeValueInfo:
         self.mx_class = mx_class
         from .helper_members import module_helpers
         self.helper_members = module_helpers(value)
-        self.enum_safe = enum_safe(value)
+        self.enum_safe = enum_safe(value) or text_safe(value)
         self.enum = ((value.__module__, value.__qualname__,
                       {name: int.__int__(member) for name, member in value.__members__.items()})
                      if isinstance(value, type) and issubclass(value, IntEnum)
                      and '<locals>' not in value.__qualname__ else None)
+        self.enum_texts = None      # a text-valued class: its members stand as their positions
+        if text_safe(value) and '<locals>' not in value.__qualname__:
+            names, self.enum_texts = positions(value)
+            self.enum = value.__module__, value.__qualname__, names
 
     @classmethod
     def init_mxobj(cls, value, module):
