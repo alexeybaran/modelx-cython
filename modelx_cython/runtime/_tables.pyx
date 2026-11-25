@@ -6,7 +6,8 @@ stored sorted by their level codes, one ascending array of combined codes (and a
 lookups, typed column blocks copied from the frame, and the index extremes and asof keys. The user's object is
 never changed or replaced: it stays what every formula sees (``source``). ``prepare`` returns None, and
 ``unprepared_reason`` says why, for a table whose reads must stay pandas (a non-unique index, NaN labels, labels
-that compare equal although pandas keeps them apart, duplicate column labels, too many key combinations).
+that compare equal although pandas keeps them apart, duplicate column labels, too many key combinations, an index
+level pandas looks up by rules of its own: dates, periods, intervals, categories, bools, labels of mixed types).
 
 A lookup equals ``value.loc[key, column]`` on the tables ``prepare`` accepts: the tests compare them on random
 keys, misses included (``tests/test_prepared_tables.py``). The key lookups and value reads compiled code uses are
@@ -225,8 +226,8 @@ def unprepared_reason(value):
     """Why ``prepare(value)`` returns None (None when it does not)."""
     try:
         _build(value)
-    except ValueError as error:
-        return str(error)
+    except Exception as error:
+        return str(error) or type(error).__name__
     return None
 
 
@@ -234,7 +235,7 @@ def prepare(value):
     """The PreparedTable of a DataFrame or Series, or None when its reads must stay pandas."""
     try:
         return _build(value)
-    except ValueError:
+    except Exception:       # also whatever pandas raises on labels it cannot order or convert: the reads stay pandas
         return None
 
 
@@ -320,6 +321,13 @@ cdef PreparedTable _build(object value):
         raise ValueError('duplicate column labels')
     if index.nlevels > _MAX_LEVELS:
         raise ValueError(f'more than {_MAX_LEVELS} index levels')
+    for level_index in (index.levels if index.nlevels > 1 else (index,)):
+        # a level is prepared only when pandas finds a label by its equality: not a date found by a text, a number
+        # found inside an interval, a category, a bool
+        if type(level_index) not in (pd.Index, pd.RangeIndex) or level_index.inferred_type not in (
+                'integer', 'string', 'floating', 'mixed-integer-float', 'empty'):
+            raise ValueError(f'an index level pandas looks up by rules of its own ({type(level_index).__name__} of '
+                             f'{level_index.inferred_type} labels)')
     table._source = weakref.ref(value)
     table.nrows = n = len(index)
     table.nlevels = index.nlevels
