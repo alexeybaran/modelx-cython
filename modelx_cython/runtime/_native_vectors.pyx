@@ -3,6 +3,7 @@
 from cpython.float cimport PyFloat_AS_DOUBLE
 from cpython.mem cimport PyMem_Malloc, PyMem_Realloc, PyMem_Free, PyMem_Calloc
 from cpython.ref cimport Py_INCREF, Py_XDECREF
+from cpython.tuple cimport PyTuple_New, PyTuple_SET_ITEM
 import operator
 
 cdef extern from "Python.h":
@@ -21,7 +22,8 @@ cdef class F64Vec:
 
     Compiled code reads and writes the buffer through the functions below; it is immutable once
     the formula that built it has returned, so threads read it without a lock. Python never sees
-    it (D154): a cell's public method and every use in Python code get ``tolist()``, a new list.
+    it (D154): a cell's public method and every use in Python code get ``totuple()``, a new tuple (a local
+    list read by an eager builtin gets ``tolist()``).
     """
 
     __hash__ = None
@@ -32,6 +34,16 @@ cdef class F64Vec:
     def tolist(self):
         cdef Py_ssize_t i
         return [self.data[i] for i in range(self.n)]
+
+    def totuple(self):
+        cdef Py_ssize_t i
+        cdef object item
+        cdef tuple out = PyTuple_New(self.n)
+        for i in range(self.n):
+            item = self.data[i]
+            Py_INCREF(item)
+            PyTuple_SET_ITEM(out, i, item)
+        return out
 
     def __repr__(self):
         return 'F64Vec(%r)' % (self.tolist(),)
@@ -166,6 +178,16 @@ cdef class I64Vec:
     def tolist(self):
         cdef Py_ssize_t i
         return [self.data[i] for i in range(self.n)]
+
+    def totuple(self):
+        cdef Py_ssize_t i
+        cdef object item
+        cdef tuple out = PyTuple_New(self.n)
+        for i in range(self.n):
+            item = self.data[i]
+            Py_INCREF(item)
+            PyTuple_SET_ITEM(out, i, item)
+        return out
 
     def __repr__(self):
         return 'I64Vec(%r)' % (self.tolist(),)
