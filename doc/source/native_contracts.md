@@ -89,7 +89,7 @@ including `__round__`. `floor` and `ceil` use ordinary Cython compilation.
 Recognized standard-library math calls, including `math.floor` and `math.ceil`,
 can use guarded native provider operations. The guard checks the current module
 or callable and preserves ordinary dispatch when a Reference changes. See
-[Native providers for Cell results](native_providers.md) for native result types.
+[Reusing compiled provider binaries](native_providers.md) for the provider build cache.
 
 ## Generators
 

@@ -65,3 +65,24 @@ def test_direct_items_and_collect_roots_equal_live(tmp_path):
     run = subprocess.run([sys.executable, '-c', probe], cwd=tmp_path, capture_output=True, text=True)
     assert run.returncode == 0, run.stdout + run.stderr
     assert run.stdout.strip() == 'ok'
+
+
+def test_removed_private_lookup_spec_key(tmp_path):
+    """audit-routes P6: the removed spec key is refused with its reason, not silently ignored."""
+    model = mx.new_model('RemovedKey')
+    try:
+        keys = (1, 2)
+        pricing = model.new_space('Pricing', formula='lambda key: None', refs={'keys': keys},
+                                  collect_over={'key': keys}, collect_outputs='lambda: {"sum": {"total": total()}}')
+        pricing.new_cells('total', 'lambda: 1.5 * key')
+        model.export(tmp_path / 'exported')
+    finally:
+        model.close()
+    (tmp_path / 'sample.py').write_text('from exported import mx_model\nmx_model.Pricing.collect()\n',
+                                        encoding='utf-8')
+    (tmp_path / 'spec.py').write_text(
+        repr({'spaces': {'Pricing': {'serial_collect': 'reuse', 'serial_private_lookups': True}}}), encoding='utf-8')
+    run = subprocess.run([sys.executable, '-m', 'modelx_cython', 'exported', '--sample', 'sample.py',
+                          '--spec', 'spec.py', '--translate-only'], cwd=tmp_path, capture_output=True, text=True)
+    assert run.returncode != 0
+    assert 'Pricing: the spec key serial_private_lookups was removed' in run.stdout + run.stderr
