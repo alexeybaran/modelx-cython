@@ -1,4 +1,6 @@
 """The emitted module text must parse back to the grouping of the compiled tree."""
+import os
+
 import libcst as cst
 import pytest
 
@@ -73,3 +75,16 @@ def test_nested_boolean_operations_of_one_operator_are_one_chain():
     # libcst nests `a or b or c`; with every operator node in parentheses ast would nest it too
     module = cst.parse_module('def cell(a, b, c, d):\n    return d > 2 or a or b or c and (a or b) or c\n')
     check(module)
+
+
+def test_the_test_suite_checks_every_translated_module(monkeypatch):
+    from modelx_cython.cli import REPARSE_CHECK, emitted_text
+    assert os.environ.get(REPARSE_CHECK)        # set by conftest, inherited by mx2cy subprocesses
+    module = cst.parse_module('def cell(a, b, x, p, q):\n    return a and x in (p, q)\n')
+    faulty = module.visit(_DropParens(keep=False))
+    with pytest.raises(PrecedenceError, match='function cell'):
+        emitted_text(faulty, '_mx_classes.py')
+    assert emitted_text(module, '_mx_classes.py') == module.code
+    # a build outside the tests writes the text without the check
+    monkeypatch.delenv(REPARSE_CHECK)
+    assert emitted_text(faulty, '_mx_classes.py') == faulty.code

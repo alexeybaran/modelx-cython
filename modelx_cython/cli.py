@@ -152,6 +152,21 @@ def run_sample(model_path: pathlib.Path, sample_path: str, new_model_name: str =
     return logger
 
 
+# Set (the test suite sets it): every translated module's text is re-parsed and must mean the
+# tree the passes built, no parenthesis dropped (modelx_cython.reparse_check).
+REPARSE_CHECK = 'MX2CY_REPARSE_CHECK'
+
+
+def emitted_text(module, name):
+    """The text of a translated module; checked by :mod:`modelx_cython.reparse_check` when the
+    environment sets :data:`REPARSE_CHECK`, as the test suite does."""
+    text = module.code
+    if os.environ.get(REPARSE_CHECK):
+        from modelx_cython import reparse_check
+        reparse_check.check(module, text=text, name=name)
+    return text
+
+
 class HandlerError(Exception):
     """Error type reserved for failures in the command-line handlers."""
     pass
@@ -415,10 +430,7 @@ def main_handler(args: argparse.Namespace, stdout: IO[str], stderr: IO[str]) -> 
             from modelx_cython.locked_entries import lower_locked_entries
             state = lower_locked_entries(state, u.module_info)
             translated_modules[u.fqname] = state
-            # the printed text must mean the tree the passes built (no dropped parentheses)
-            from modelx_cython import reparse_check
-            u.abs_src_path.write_text(reparse_check.check(state.syntax, name=u.rel_src_path.as_posix()),
-                                      encoding='utf-8')
+            u.abs_src_path.write_text(emitted_text(state.syntax, u.rel_src_path.as_posix()), encoding='utf-8')
             cell_sources[u.rel_src_path.as_posix()] = cell_locations(state, u.module_info)
         create_setup(model_name, modules=modules, setup_file=setup_file, source_root=work_dir,
                      source_modules=(runtime_syntax, *(state.syntax for state in translated_modules.values())),
