@@ -235,6 +235,25 @@ def test_index_pandas_looks_up_by_its_own_rules(tables, name, frame, keys):
         assert (key in frame.index) == table.contains(key), (name, key)
 
 
+def test_bool_and_huge_keys(tables):
+    """A bool is no label of a number level although it equals 1 or 0 (pandas raises KeyError; the dict of the level
+    would find 1.0), and an integer beyond 64 bits is absent from an int level (KeyError, not OverflowError)."""
+    _tables, _ = tables
+    floats = pd.DataFrame({'q': [1.0, 2.0, 3.0]}, index=pd.Index([0.0, 1.0, 2.5]))
+    two = pd.DataFrame({'q': [1.0, 2.0]}, index=pd.MultiIndex.from_tuples([('a', 1.0), ('b', 0.0)]))
+    ints = pd.DataFrame({'q': [1.0, 2.0]}, index=pd.Index([1, 2]))
+    cases = [(floats, [True, False, np.True_, np.False_, 1, 0, 1.0, 2.5]),
+             (two, [('a', True), ('b', False), ('a', 1), ('a', 1.0), ('b', 0)]),
+             (ints, [2 ** 70, -2 ** 70, True, np.True_, 1, 2.0])]
+    for frame, keys in cases:
+        table = _tables.prepare(frame)
+        assert table is not None
+        for key in keys:
+            want, got = outcome(lambda: frame.loc[key, 'q']), outcome(lambda: table.value(key, 'q'))
+            assert want[0] == got[0] and (want[0] != 'ok' or want[1] == got[1]), (key, want, got)
+            assert (key in frame.index) == table.contains(key), key
+
+
 def test_copy_at_bind(tables):
     _tables, _ = tables
     frame = pd.DataFrame({'q': [1.0, 2.0, 3.0]}, index=pd.Index([10, 11, 12]))
