@@ -52,6 +52,7 @@ from modelx_cython.powers import build_kind_maps, demote_rebound_params
 from modelx_cython.admission import describe
 from modelx_cython.cell_entries import EntryModule
 from modelx_cython.entry_pipeline import lower_entries
+from modelx_cython.scopes import shared_facts
 from modelx_cython.integer_boundaries import guard_integer_boundaries
 from modelx_cython.build import cell_locations, create_setup
 from modelx_cython.syntax import read_literal
@@ -402,13 +403,15 @@ def main_handler(args: argparse.Namespace, stdout: IO[str], stderr: IO[str]) -> 
 
         provider_sources = install_native_sources(helper_providers, model_path)
         modules.extend(provider_sources)
-        translated_modules = lower_entries(translated_modules, dense_entries, formula_entries, policy)
+        with shared_facts():    # passes read the facts of formulas they leave unchanged again
+            translated_modules = lower_entries(translated_modules, dense_entries, formula_entries, policy)
         cell_sources = {}
         for u in units:
-            state = guard_integer_boundaries(
-                translated_modules[u.fqname], u.module_info, resolver, cells_kinds, ref_kinds,
-                cells_by_name, infer_types=policy.infer_types,
-            )
+            with shared_facts():
+                state = guard_integer_boundaries(
+                    translated_modules[u.fqname], u.module_info, resolver, cells_kinds, ref_kinds,
+                    cells_by_name, infer_types=policy.infer_types,
+                )
             from modelx_cython.locked_entries import lower_locked_entries
             state = lower_locked_entries(state, u.module_info)
             translated_modules[u.fqname] = state
