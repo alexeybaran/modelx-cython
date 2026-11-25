@@ -83,6 +83,13 @@ cdef inline double _exact_float(object item) except? -1.0:
     raise TypeError(f'a float vector holds floats, not {type(item).__name__}')
 
 
+cdef double _vec_item_object(object item) except? -1.0:
+    """vec_item of a Python object."""
+    if type(item) is bool:
+        return 1.0 if item else 0.0
+    return _exact_float(item)
+
+
 cdef F64Vec vec_of(object value):
     """The value itself if it is an F64Vec, else a copy of a sequence of floats."""
     cdef F64Vec v

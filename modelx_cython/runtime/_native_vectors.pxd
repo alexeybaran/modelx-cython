@@ -143,7 +143,21 @@ ctypedef fused item_t:
     object
 
 
+cdef double _vec_item_object(object item) except? -1.0
 cdef long long _ivec_item_object(object item) except? -1
+
+
+cdef inline double vec_item(item_t item) except? -1.0:
+    """A value not proven a float entering a float vector: a float, or an int or bool a double holds
+    exactly (equal to what live holds), else TypeError; a C conversion would round a large int."""
+    if item_t is double:
+        return item
+    elif item_t is cython.longlong:
+        if -9007199254740992 <= item <= 9007199254740992:
+            return <double>item
+        return _vec_item_object(item)
+    else:
+        return _vec_item_object(item)
 
 
 cdef inline long long ivec_item(item_t item) except? -1:
