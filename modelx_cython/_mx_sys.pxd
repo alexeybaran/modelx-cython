@@ -229,11 +229,26 @@ cdef inline int _mx_check_enum_schema(object receiver, object owner, tuple bindi
     return 0
 
 
+cdef inline object _mx_enum_of(object cls, long long value):
+    """The member of the IntEnum class ``cls`` that compiled code holds as the integer ``value``; an integer that
+    is no member's value was that plain integer in modelx too, and is returned as it is."""
+    try:
+        return cls(value)
+    except ValueError:
+        return value
+
+
 cdef inline object _mx_enum_member(object cls, object value):
-    """``value`` if it is a member of the IntEnum class ``cls``: a parameter or result that compiled code holds as
-    an integer and converts back through ``cls`` must not be given a member of another class or a plain integer."""
+    """``value`` if it may go to a parameter or result that compiled code holds as an integer and converts back
+    through the IntEnum class ``cls``: a member of ``cls``, or an integer that is no member's value. A member of
+    another class and a plain integer equal to a member would come back as a member of ``cls``."""
     if type(value) is cls:
         return value
+    if not hasattr(type(value), '__members__'):
+        try:
+            cls(value)
+        except (ValueError, TypeError):
+            return value
     raise TypeError(f"{value!r} is not a member of {cls.__name__}: this Cell is compiled for {cls.__name__} members")
 
 
