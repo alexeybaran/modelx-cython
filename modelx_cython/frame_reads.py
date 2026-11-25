@@ -58,6 +58,11 @@ NUMPY_NEUTRAL_CALLS = frozenset(('float', 'int', 'bool'))
 NUMPY_PASSING_CALLS = frozenset(('abs', 'min', 'max', 'sum'))
 
 
+def _several(part):
+    """A key part whose display selects several rows (or is unpacked): never one label."""
+    return isinstance(part, (*SEVERAL_ROWS, cst.StarredElement))
+
+
 def _code(node):
     return cst.Module(body=()).code_for_node(node)
 
@@ -454,8 +459,7 @@ class FrameReads:
             def leave_Attribute(self, original, updated):       # x.p is not the parameter p
                 return updated.with_changes(attr=original.attr)
         parts = _parts(row.slice[0].slice.value.visit(Put()))
-        if len(parts) >= len(found[1]['levels']) or any(
-                isinstance(p, (cst.Slice, cst.List, cst.ListComp, cst.Tuple, cst.StarredElement)) for p in parts):
+        if len(parts) >= len(found[1]['levels']) or any(map(_several, parts)):
             return None
         return found[0], found[1], parts
 
@@ -745,8 +749,7 @@ class FrameReads:
         extra = _index_parts(value) if prefix is not None else None
         if extra is not None and len(extra) == 1:
             more = _parts(extra[0])
-            if len(prefix[3]) + len(more) < len(prefix[2]['levels']) and not any(
-                    isinstance(p, (cst.Slice, cst.List, cst.ListComp, cst.Tuple, cst.StarredElement)) for p in more):
+            if len(prefix[3]) + len(more) < len(prefix[2]['levels']) and not any(map(_several, more)):
                 return name, prefix[1], prefix[2], [*prefix[3], *more], prefix[4], len(prefix[3])
         got = self.prefix_of(value)
         if got is None:
@@ -845,8 +848,7 @@ class FrameReads:
         elif len(parts) > 1 and _literal_str(parts[-1]) is not None:
             return None                     # a key and a column (L1)
         levels = found[1]['levels']
-        if not 0 < len(parts) < len(levels) or any(isinstance(p, (cst.Slice, cst.List, cst.ListComp, cst.Tuple))
-                                                   for p in parts):
+        if not 0 < len(parts) < len(levels) or any(map(_several, parts)):
             return None
         if len(_index_parts(value)) > 1:
             if len(parts) != 2:
@@ -2272,8 +2274,7 @@ class _Rewrite(cst.CSTTransformer):
         kind = kinds.pop() if len(kinds) == 1 and kinds <= set(READ) else None
         levels = schema['levels']
         own = [e.value for e in key.elements] if isinstance(key, cst.Tuple) and len(levels) - len(prefix) > 1 else [key]
-        if len(prefix) + len(own) != len(levels) or any(isinstance(p, (cst.Slice, cst.List, cst.ListComp, cst.Tuple))
-                                                       for p in own):
+        if len(prefix) + len(own) != len(levels) or any(map(_several, own)):
             return None
         hold = self._take(call, _NO_LABEL, -4)
         hold.row_columns = True
@@ -2317,7 +2318,7 @@ class _Rewrite(cst.CSTTransformer):
             row = self._row_at(view, hold, self._m('position', start, stop, _cast('_mx_cy.Py_ssize_t', emit)))
             read = self._column_value(chold, kind, row)
         else:
-            if view.start is None or isinstance(part, (cst.Slice, cst.List, cst.ListComp, cst.Tuple)):
+            if view.start is None or _several(part):
                 return None
             start, stop, test = self._view_parts(view, self._take(view.call, _NO_LABEL, -1))
             labels = []
@@ -2764,8 +2765,7 @@ class _Rewrite(cst.CSTTransformer):
             own, runtime = runtime, None        # a local bound once to a tuple display: its parts, as a display
         levels = view.schema['levels']
         count = view.depth + len(own)
-        if (view.start is None and count >= len(levels)) or count > len(levels) or any(
-                isinstance(p, (cst.StarredElement, cst.Slice, cst.List, cst.ListComp)) for p in own):
+        if (view.start is None and count >= len(levels)) or count > len(levels) or any(map(_several, own)):
             return None         # a complete key on the whole table: L7
         view.used = True
         hold = self._take(view.call, _NO_LABEL, -1)
