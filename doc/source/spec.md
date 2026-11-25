@@ -60,6 +60,15 @@ value observed for the cell and parameter:
       ("i", "j"): (3, 6)}}   # cells with parameters (i, j)
 ```
 
+A bound may also be a `(lower, stop)` pair, which declares the parameter's
+range as `range(lower, stop)`: storage covers only that range (a parameter
+such as a birth year needs none below `lower`), and an argument below `lower`
+raises like one at or beyond `stop`:
+
+```python
+{"cells_param_size": {"year": (1900, 2100)}}
+```
+
 A tuple entry applies to each cached Cell in the space with that exact parameter
 tuple. A single-name entry applies to Cells with that one parameter and also
 bounds that parameter's axis of every other cached Cell in scope whose
@@ -92,34 +101,16 @@ If the sample run passes an argument value equal to or larger than the
 declared size, the size is automatically raised to the observed maximum
 plus one, and the adjustment is logged at `INFO` level.  For parameter
 tuples with no spec entry, the upper bound is the observed maximum plus
-one. Calling a cached Cell with an integer coordinate outside its accepted
-range raises {py:exc}`IndexError`. To extend the negative range, include
-the required negative indices in the sample.
-
-### `param_bound_checks`
-
-Optional. Maps a sized parameter name to a zero-argument cached Cell of the Space
-whose value is a policy's need for that parameter, for example its projection
-length:
-
-```python
-{"spaces": {"Projection": {"param_bound_checks": {"t": "proj_len"}}}}
-```
-
-The sample fixes the offset between the Cell's value and the largest argument
-the model then passes (the *margin*: the sampled stop of the parameter minus
-the sampled maximum of the Cell). The opt-in collect entry (`serial_collect`)
-evaluates the Cell for every policy before projecting any, and raises
-{py:exc}`IndexError` naming the policy, the parameter, its bound and the
-largest accepted value when value + margin exceeds the bound of any cached
-Cell with that parameter. If the check Cell itself raises, collect raises
-{py:exc}`RuntimeError` naming the Cell and the policy. The pre-pass changes no
-result: the caches are reset before the projection. Direct Cell calls outside
-collect keep the per-Cell {py:exc}`IndexError`.
+one; a sampled argument below a declared lower bound lowers it the same way.
+Calling a cached Cell with an integer coordinate outside its accepted range
+raises {py:exc}`IndexError` naming the Cell, each argument's accepted range and
+the key `cells_param_size`. To extend the negative range, include the required
+negative indices in the sample or declare a `(lower, stop)` pair.
 
 ### `cells`
 
-Maps cells names to per-cells settings.  Currently one setting is defined:
+Maps cells names to per-cells settings: `return_type`, below, and the cache
+settings described under {ref}`cache-settings`.
 
 `return_type`
 : Overrides the return type inferred from the sample run.  A
@@ -179,148 +170,75 @@ hands you a memoryview, set `"return_type": "object"` for that cells;
 conversely, `"return_type": "memoryview"` forces the memoryview even when
 the analysis would fall back.
 
-## Automatic cache and collection policy (experimental)
+(cache-settings)=
+## Cache settings
 
-`automatic_optimizations` defaults to `True`. The compiler uses the same
-policy for every model; no per-Cell cache window, capacity or memo setting is
-required. The existing representative sample supplies types and working-set
-observations. It does not supply timing feedback to the native compiler, and
-the build uses no PGO.
+The compiler chooses each Cell's cache from the sample's types and from the
+declared or sampled range of its arguments; none of these settings is
+required, and none follows how often the sample called a Cell.
 
-For eligible native scalar results and integer arguments, the compiler chooses
-dense storage within a common 65,536-entry resource ceiling. An observed window
-may reduce physical storage when its saved data/readiness bytes cover the added
-pointer and cold dictionary. This never narrows the logical key domain:
-keys in that domain outside the physical window retain exact spill storage. A nearly full
-window stays full, preserving its simple range proofs.
+A cached Cell whose results are numeric scalars and whose arguments are
+integers gets *dense* storage, an array inside the Space object indexed by
+its arguments, when the range's rectangle has at most `max_dense_entries`
+entries (65,536 by default). Keys of the logical range outside a smaller
+physical window keep exact spill storage. Otherwise numeric keys and results
+use a native hash store and other signatures Python dictionaries.
 
-For an eligible cached Cell, `dense_window` may declare a half-open physical
-window for each parameter, in parameter order. An explicit window may exceed
-the automatic size ceiling and must fit inside the logical domain. This
-setting changes storage for a cached Cell. The modelx cache flag still
-determines whether the Cell caches results.
+`max_dense_entries`
+: Space or per-cells setting: the dense ceiling, a positive integer. A Cell
+  above it uses the hash store, and the build warns, naming the Cell and its
+  traced range.
 
-Eligible native numeric associative keys/results use the native store; other
-signatures retain Python dictionaries. An exclusively owned receiver gets a
-power-of-two primary table sized for at most 50% observed load, capped at 4,096
-entries, with growing exact overflow storage. The synchronized path remains
-for shared receivers. Published cache entries survive normal model pickling.
-The ceilings are common resource policies, not domain or correctness limits.
+`dense_window`
+: Per-cells setting: half-open `(lower, stop)` physical windows, one per
+  parameter in parameter order, for a dense cache. A window must fit inside
+  the logical range and may exceed the automatic ceiling.
 
-Range proofs, receiver propagation, one-axis checks, guarded arithmetic and
-exact-operand power reuse apply under their existing safety checks.
-`native_math` defaults to `true` and enables guarded builtin `round` lowering.
-Set it to `false` for ordinary Cython compilation of rounding.
-`native_cache_hits` defaults to `"auto"`: scalar hits and dense hits that already
-have a proven index can read the existing cache fields directly. Every miss
-keeps the original checked call and Cython error handling; public methods and
-virtual overrides retain their dispatch behavior. No formula-length rule is
-used to select private formula calls.
+`native_numeric_cache`
+: Per-cells setting: `true` or `false` overrides the automatic choice of the
+  native hash store for numeric keys and results.
 
-A compiled collect runs its gathering loop even when a policy's Space formula
-computes References. For eligible numeric sums on a private leaf policy, the
-runtime can gather a scalar and a monthly series after the factory binds those
-References. It reads the period domain from that policy at the point where the
-output expression uses it. A matching immutable integer domain permits ordered
-addition in a double buffer. Other domains use the ordinary mapping on the same
-policy. Each policy's factory and outputs are evaluated once. This optimization
-assumes transient policy roots are discarded after their outputs are detached.
+`numeric_cache_capacity`
+: Per-cells setting: the initial capacity of a privately owned native hash
+  store, a power of two from 2 to 4,096 (by default twice the entries of the
+  declared or sampled range, at most 4,096; the table grows past it). Setting
+  it also selects the native store unless `native_numeric_cache` is `false`.
 
-Eligible scalar sum collections use a fresh receiver by default. An explicit
-Space contract `serial_collect="reuse"` additionally declares independent
-policies, confined mutable state and stable Reference bindings. Under that
-contract the automatic policy can reuse one receiver serially or per parallel
-chunk and reuse private lookup resources. This semantic declaration cannot be
-inferred from the timing sample. Custom lifecycle hooks and unsupported shapes
-keep ordinary collection. Chunk totals merge as workers finish, so floating
-point totals can differ by roundoff.
+`memoize_power`
+: Per-cells setting: `true` keeps a one-entry memo of a real power's operands
+  and result for a Cell of a privately owned Space (default: on with
+  `automatic_optimizations`).
 
-Set the Space option `parallel_collect_order="domain"` to merge reused chunks
-in domain order. It requires parallel reuse. The default is `"completion"`.
-Domain order is reproducible for a fixed worker count; changing chunk boundaries
-can still change floating-point sums. Both choices propagate worker failures in
-domain order. Ordinary collection always retains its existing ordered behavior.
+`native_locked_result_calls`
+: Space setting for a locked Space: `true` lets a Cell call another Cell's
+  result natively when that result is an ItemSpace of the exact class the
+  sample saw; any other result takes the ordinary call.
 
-Native collection uses the exporter's version 2 evaluator hook. The compiler
-adds the native evaluator and its worker policy to the generated Space. The
-exporter owns validation, dispatch and the result cache. Re-export collection
-models with current modelx before translating older export formats.
+## Integer arithmetic
 
-A leaf Space with a validating factory can request `factory_collect_reuse=True`
-with `serial_collect="reduce"`. For supported scalar Cell calculations this
-reuses a private receiver inside a serial call or an ordered worker block.
-The receiver takes the current base References when it is constructed.
-Shared dependencies stay fixed for this call. Each new policy clears private
-caches, binds its coordinate and reruns the factory. A later uncached collect
-takes the then-current base References. Direct calls keep their persistent ItemSpaces. The compiler
-checks the reachable Cell expressions and keeps fresh construction for
-unrecognized calls, object References, or expressions that can expose the
-receiver. This option preserves policy addition order.
+`integer_checks`
+: `"checked"` (default): C integer `+`, `-`, `*` and unary minus in a formula
+  set an overflow flag that the formula tests before it returns, raising
+  {py:exc}`OverflowError` naming the Cell when an exact result would leave
+  64 bits. A formula with an operation whose C type the compiler cannot tell
+  keeps Cython's own overflow checks; such formulas are listed under
+  `overflowcheck_fallback` in `_mx_integer_checks.json` of the generated
+  package. `"unchecked"`: plain C arithmetic, which wraps beyond 64 bits. In
+  both modes `//`, `%`, shifts and integer powers keep Python's results or
+  raise, and a float or an int beyond 64 bits passed where an integer was
+  traced raises naming the Cell. The mode never depends on the sample.
 
-`factory_collect_private_refs=True` extends that opt-in to leaf factories
-that read stable inputs through object References and return detached numeric
-sums. The factory is called for every policy and output keys are evaluated
-after the factory. The author guarantees that dependencies stay fixed during
-the call and that external code does not inspect caller frames or reach the
-private policy instance. The compiler checks for direct exposure of the
-receiver and uses the existing evaluator for unsupported patterns.
-`factory_collect_subtotals=True` also permits regrouping floating-point sums
-between worker partitions. The output domains must be deterministic and
-identical for every policy and worker in the call. The compiler rejects
-domains that read the policy coordinate or a factory-assigned Reference.
+`infer_types`
+: `true` (default) compiles generated model modules with Cython's C type
+  inference for untyped locals; `false` keeps Cython's default.
 
-`factory_collect_hold_individuals=True` is a narrower opt-in for a private
-factory that indexes a dependent Collect's individual results by the current
-policy coordinate. The dependent Collect must be the generated cached entry
-with a cached domain of exact integer keys. The remaining factory arguments
-and the dependent Collect's domain and result must be stable throughout the
-batch. Each worker holds its own reference to the mapping after the first
-successful lookup at a source site. It still runs the rest of the factory and
-fetches the result for each coordinate. Direct calls use the ordinary path.
-`factory_collect_bind_fixed_refs=True` also allows private calls to omit
-generic schema validation if every successful factory exit returns the same
-literal Reference dictionary. Each call evaluates the complete factory and
-binds its References in insertion order.
+## Compiler switches
 
-A locked Space can opt in to `native_locked_result_calls=True` for native
-calls through an ItemSpace returned by one of its Cells. The compiler
-evaluates the producer once through its existing locked entry, keeps the
-receiver alive through the enclosing Cell's return, and dispatches natively
-only on the exact observed class.
-The ordinary call handles other returned types.
-
-`native_vector_ref_reads=True` permits a scalar Cell to read a short integer
-vector directly through a typed relative Space Reference. Admission requires
-an exact receiver, one vector-producing call and an entirely numeric use of
-the local vector. Indexes must come from native integers. The compiler checks
-the length and magnitude of the actual vector and other integer inputs
-before using native arithmetic. Inputs outside that domain use the ordinary
-formula. Public vector calls continue to return lists.
-
-Individual switches and legacy per-Cell options remain available for controlled
-ablations and compatibility diagnostics. `automatic_optimizations=False`
-disables automatic selection and the default dense miss binding on each
-platform. Set `dense_miss_binding=True` to request that mechanism in an
-otherwise manual configuration.
-`native_cache_hits` also accepts `"none"`, `"scalar"`, `"dense"` and `"both"`;
-non-`"none"` modes require `dense_miss_binding`. Checked dense hits can repeat
-domain work, so the automatic mode admits the existing proven-index form.
-
-## Registered helper providers
-
-The shared safety and provider ABI rules are documented in
-[Native specialization contracts](native_contracts.md).
-
-An exported Python function Reference may declare `__modelx_cython_helper__` as a
-`(provider, operation)` tuple. The provider names a Python package resource
-with matching Cython `.pxd` and `.pyx` files. The operation receives the
-current callable first. It must delegate to that callable when its
-identity, argument types, or table layout fall outside the native path.
-
-A provider owns the table representation and the rules for exact keys,
-predecessors, column identifiers, grouped keys, and defaults. The Python
-Reference remains the behavioral oracle for live modelx, Python export,
-and compiled calls. The compiler checks operation names and only selects
-numeric capabilities where the generated call has a justified signature.
-It leaves user-defined key expressions and arbitrary generators on the
-ordinary path when their types or bindings are uncertain.
+`automatic_optimizations` (default `true`) turns on the policy above for
+every model. The following switches default to it and exist for diagnosis
+and comparison: `dense_bounds_proofs`, `dense_one_axis`,
+`dense_miss_binding`, `propagate_exact_receiver` (requires
+`dense_miss_binding`), and `native_cache_hits` (`"auto"` by default; also
+`"none"`, `"scalar"`, `"dense"` or `"both"`; any but `"none"` requires
+`dense_miss_binding`). They change how a cache hit is reached, never a value:
+every miss keeps the checked call and Cython's error handling.

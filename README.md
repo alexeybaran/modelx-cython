@@ -79,19 +79,16 @@ conda install -c conda-forge modelx-cython
 
 ## Requirements
 
-modelx-cython requires Python 3.9+.
+modelx-cython requires Python 3.10+.
 
-- modelx v0.33.1.dev0+ with export protocol 2
+- modelx v0.33.0+
 - Cython v3.2.4+
 - setuptools
 - libcst
 - MonkeyType
 
-Install this compiler after the companion modelx release that supplies export
-protocol 2 is available. Every export translated by this compiler requires
-protocol 2, including with `--translate-only` and for models that do not use
-`collect()`. Re-export models created with an older protocol. The compiler
-supports both slotted and non-slotted Space classes in a compatible export.
+The compiler translates models exported by modelx with or without `__slots__`
+on the Space classes.
 
 Use the exporter's `locked_spaces` option for shared Cells that require
 synchronized evaluation on free-threaded Python (3.13t and 3.14t).

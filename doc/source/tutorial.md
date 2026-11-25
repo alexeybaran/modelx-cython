@@ -136,26 +136,27 @@ print(timeit.timeit(lambda: cy_model.Projection[1].pv_net_cf(), number=1))
 
 In live modelx, assigning new input References refreshes dependent calculations.
 An exported or compiled model can reuse results from earlier calculations on the
-same instance, including earlier calls to `collect()`. For each new scenario,
-create a fresh model with `type(model)()` and assign all input References before
-calling any Cell or running `collect()`.
+same instance. For each new scenario, create a fresh model with `type(model)()`
+and assign all input References before calling any Cell.
 
 For example, suppose the model exposes a benefit table, a multiplier, and a
-string category on `Data`. Its `Projection` Space collects the sum of benefits.
-After calculating the base scenario, run the next scenario on its own instance.
+string category on `Data`, and its `Projection` ItemSpace computes each
+policy's benefit. After calculating the base scenario, run the next scenario on
+its own instance.
 
 ```python
 import pandas as pd
 
 from Benefits_nomx_cy import mx_model
 
-base_total = mx_model.Projection.collect().sum.benefit
+policies = mx_model.Data.benefit_amounts.index
+base_total = sum(mx_model.Projection[p].benefit() for p in policies)
 
 scenario = type(mx_model)()
 scenario.Data.benefit_amounts = pd.read_csv("next_benefits.csv", index_col="policy_id")
 scenario.Data.multiplier = 1.1
 scenario.Data.category = "ADJUSTED"
-scenario_total = scenario.Projection.collect().sum.benefit
+scenario_total = sum(scenario.Projection[p].benefit() for p in policies)
 ```
 
 The category is a string label that the model resolves to an enum member in its
