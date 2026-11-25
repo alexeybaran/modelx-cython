@@ -1346,6 +1346,9 @@ class _Rewrite(cst.CSTTransformer):
                   if cell is None and isinstance(value, cst.Subscript) else value)      # (T-5c: or P(a) itself)
         view = o.views[name] = _View(name, call, schema, len(parts), codes, cst.Name(start), cst.Name(stop),
                                      cell if held is None else None)
+        # an absent prefix (or a table that is not prepared) evaluates the assignment as written: pandas raises its
+        # KeyError there, as live, even when no read of the view runs afterwards
+        statements.append(cst.If(test=cst.parse_expression(f'{start} < 0'), body=cst.IndentedBlock(body=[statement])))
         view.setup = [*statements, statement]     # the setup statements are kept only if a use needs them
         self.swaps[name] = source
         return view.setup
