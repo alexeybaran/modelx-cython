@@ -100,3 +100,14 @@ def test_lexical_nodes_stop_at_nested_scopes():
     body = cst.parse_module('a = 1\ndef f():\n    b = 2\nc = [d for d in e]\n').body
     names = [node.value for node in lexical_nodes(body) if isinstance(node, cst.Name)]
     assert names == ['a', 'c']
+
+
+@pytest.mark.parametrize('index', range(len(sources())))
+def test_expression_contexts_match_libcst(index):
+    from libcst.metadata import ExpressionContextProvider, MetadataWrapper
+    from modelx_cython.scopes import expression_contexts
+    module = cst.parse_module(sources()[index])
+    expected = MetadataWrapper(module, unsafe_skip_copy=True).resolve(ExpressionContextProvider)
+    actual = expression_contexts(module)
+    assert [(id(node), context) for node, context in actual.items()] == \
+        [(id(node), context) for node, context in expected.items()]
