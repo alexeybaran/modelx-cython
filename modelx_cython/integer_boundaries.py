@@ -240,8 +240,7 @@ def _python_locals(node, cell):
     declared local (``object_locals``).
     """
     body = node.body
-    # the overflow handler the guard itself wraps around the body is an except clause; any
-    # other binding construct leaves the formula as it is
+    # any other binding construct leaves the formula as it is
     effects = (cst.Global, cst.Nonlocal, cst.Import, cst.ImportFrom, cst.Del, cst.NamedExpr,
                cst.FunctionDef, cst.ClassDef, cst.Lambda)
     if not isinstance(body, cst.IndentedBlock) or any(
@@ -260,12 +259,19 @@ def _python_locals(node, cell):
             names.update(item.value for item in walk(part) if isinstance(item, cst.Name))
     names = sorted(name for name in names
                    if facts.stores[name] and name not in parameters and name not in annotated)
+    # with the locals integer_arithmetic declared object (read unbound on some path)
+    cell.python_object_locals = tuple(sorted({*names, *(
+        line.body[0].target.value for line in body.body
+        if isinstance(line, cst.SimpleStatementLine) and len(line.body) == 1
+        and isinstance(line.body[0], cst.AnnAssign) and line.body[0].value is None
+        and isinstance(line.body[0].target, cst.Name)
+        and isinstance(line.body[0].annotation.annotation, cst.Name)
+        and line.body[0].annotation.annotation.value == 'object')}))
     if not names:
         return node
     declarations = tuple(cst.SimpleStatementLine((cst.AnnAssign(
         cst.Name(name), cst.Annotation(cst.Name('object'))),)) for name in names)
     doc_end = 1 if node.get_docstring() is not None else 0
-    cell.python_object_locals = tuple(names)
     return node.with_changes(body=body.with_changes(body=(*body.body[:doc_end], *declarations,
                                                           *body.body[doc_end:])))
 

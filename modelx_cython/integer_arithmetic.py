@@ -250,6 +250,7 @@ class _Lower(cst.CSTTransformer):
         self.path = path
         self.nested = []        # names bound by enclosing lambdas and comprehensions
         self.lowered_ints = {}  # id -> integer operation lowered to Python ints (kept alive)
+        self.counters = set()   # range counters declared C integers
         self.lowered = 0
         self.kinds = {}
 
@@ -505,6 +506,17 @@ class _Lower(cst.CSTTransformer):
         self.lowered += 1
         value = cst.BinaryOperation(_object(after.target), operator(), after.value)
         return cst.Assign((cst.AssignTarget(after.target),), _integer_result(value, self.path))
+
+    def leave_For(self, before, after):
+        args = _range_arguments(after.iter)
+        if not (isinstance(after.target, cst.Name) and after.target.value in self.counters and args):
+            return after
+        # a C counter's bounds that are Python ints are converted as the loop starts: the checked
+        # conversion names the Cell where one does not fit (Python's range would run, or be empty)
+        checked = tuple(arg.with_changes(value=value if isinstance(self.kind(value), CInt)
+                                         else _integer_result(value, self.path))
+                        for arg, value in zip(after.iter.args, args))
+        return after.with_changes(iter=after.iter.with_changes(args=checked))
 
     def leave_Return(self, before, after):
         if not self.returns_integer or after.value is None:
@@ -824,6 +836,7 @@ def lower_integer_arithmetic(node, types, owner, path, bounds=None):
         if counter is not None:
             declarations[name] = f'{CY_MOD}.longlong'
             env[name] = counter
+            lower.counters.add(name)
             lower.kinds.clear()
     lower.kinds.clear()
     lowered = node.body.visit(lower)
