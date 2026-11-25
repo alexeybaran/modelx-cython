@@ -12,6 +12,7 @@ cdef extern from "Python.h":
     PyObject* PyTuple_GET_ITEM(object, Py_ssize_t)
 
 cdef double _TWO53 = 9007199254740992.0
+cdef double _TWO63 = 9223372036854775808.0
 
 
 # ---------------------------------------------------------------- F64Vec
@@ -190,6 +191,19 @@ cdef inline long long _exact_int(object item) except? -1:
     raise TypeError(f'an integer vector holds integers, not {type(item).__name__}')
 
 
+cdef long long _ivec_item_object(object item) except? -1:
+    """ivec_item of a Python object."""
+    cdef double x
+    if type(item) is float:
+        x = PyFloat_AS_DOUBLE(item)
+        if -_TWO63 <= x < _TWO63 and x == <double>(<long long>x):
+            return <long long>x
+        raise TypeError(f'an integer vector holds integers, not the float {item!r}')
+    if type(item) is bool:
+        return 1 if item else 0
+    return _exact_int(item)
+
+
 cdef I64Vec ivec_of(object value):
     """The value itself if it is an I64Vec, else a copy of a sequence of integers."""
     cdef I64Vec v
@@ -203,7 +217,7 @@ cdef I64Vec ivec_of(object value):
     n = len(value)
     v = ivec_new(n)
     for i in range(n):
-        v.data[i] = _exact_int(value[i])
+        v.data[i] = ivec_item(value[i])
     return v
 
 
