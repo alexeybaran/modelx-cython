@@ -262,6 +262,22 @@ def test_copy_at_bind(tables):
     assert table.value(11, 'q') == 2.0 and table.source is frame
 
 
+def test_frame_bound_again_is_prepared_again(tables):
+    """A frame Cell prepares its frame every time it binds it: a frame edited in place and then given to a new
+    model is read as it is then, not from the copy an earlier model prepared for the same object."""
+    _tables, _ = tables
+    from modelx_cython.runtime import table_cells
+    bind = table_cells._binders[_tables.__name__]       # what a frame Cell calls when it stores its value
+    frame = pd.DataFrame({'q': [1.0, 2.0, 3.0], 'k': np.arange(3, dtype=np.int64)}, index=pd.Index([10, 11, 12]))
+    first = bind(frame)
+    assert first.value(11, 'q') == 2.0
+    frame.loc[11, 'q'] = 99.0
+    second = bind(frame)                    # the frame Cell of the new model
+    assert second is not first and second.value(11, 'q') == 99.0
+    assert first.value(11, 'q') == 2.0      # what the first model's items hold is not changed under them
+    _tables.check_unchanged(frame)          # a read that looks the frame up finds the table bound last
+
+
 @pytest.mark.parametrize('name,frame', list(frames()), ids=[n for n, _ in frames()])
 def test_hundred_thousand_reads(tables, name, frame):
     """10^5 random keys per index kind (about 10% absent), one float and one int column: 0 differences."""
