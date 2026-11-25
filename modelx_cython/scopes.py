@@ -212,20 +212,20 @@ def expression_contexts(module):
     return contexts
 
 
-class _Parents(cst.CSTVisitor):
-    """LibCST's ``ParentNodeProvider`` (its ``ParentNodeVisitor``) on the shared traversal."""
-    def __init__(self, parents):
-        self.parents = parents
-
-    def on_leave(self, original_node):
-        for child in children(original_node):
-            self.parents[child] = original_node
-
-
 def parent_nodes(module):
-    """What ``MetadataWrapper(module, unsafe_skip_copy=True).resolve(ParentNodeProvider)`` holds."""
+    """What ``MetadataWrapper(module, unsafe_skip_copy=True).resolve(ParentNodeProvider)`` holds:
+    each node's children recorded as it is left, in the order LibCST leaves the nodes."""
     parents = {}
-    visit(module, _Parents(parents))
+    stack = [(module, None)]
+    while stack:
+        node, found = stack.pop()
+        if found is None:
+            found = children(node)
+            stack.append((node, found))
+            stack.extend((child, None) for child in reversed(found))
+        else:
+            for child in found:
+                parents[child] = node
     return parents
 
 

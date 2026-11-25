@@ -192,3 +192,40 @@ def test_metadata_wrapper_resolves_as_libcst(index):
         {id(node): id(parent) for node, parent in expected.resolve(ParentNodeProvider).items()}
     copied = metadata_wrapper(module, copy=True)
     assert copied.module is not module and copied.module.deep_equals(module)
+
+
+class Handlers(cst.CSTVisitor):
+    """Per-node handlers only: the traversal looks them up once per node class."""
+    def __init__(self):
+        self.log = []
+
+    def visit_Name(self, node):
+        self.log.append(('name', id(node)))
+
+    def leave_Call(self, node):
+        self.log.append(('call', id(node)))
+
+    def visit_Lambda(self, node):
+        self.log.append(('lambda', id(node)))
+        return False
+
+
+@pytest.mark.parametrize('index', range(len(sources())))
+def test_visit_with_node_handlers_matches_libcst(index):
+    module = cst.parse_module(sources()[index])
+    expected, actual = Handlers(), Handlers()
+    module.visit(expected)
+    syntax.visit(module, actual)
+    assert actual.log == expected.log
+
+
+def test_parent_nodes_keep_the_last_parent_left():
+    from libcst.metadata import MetadataWrapper, ParentNodeProvider
+    from modelx_cython.scopes import parent_nodes
+    shared = cst.Name('shared')
+    module = cst.Module([cst.SimpleStatementLine([cst.Expr(cst.Tuple([cst.Element(shared)]))]),
+                         cst.SimpleStatementLine([cst.Expr(cst.Call(shared))])])
+    expected = MetadataWrapper(module, unsafe_skip_copy=True).resolve(ParentNodeProvider)
+    actual = parent_nodes(module)
+    assert list((id(node), id(parent)) for node, parent in actual.items()) == \
+        list((id(node), id(parent)) for node, parent in expected.items())

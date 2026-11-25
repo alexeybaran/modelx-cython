@@ -127,8 +127,62 @@ def visit(node, visitor):
     """
     if _attribute_hooks(type(visitor)):
         _visit_attributes(node, visitor)
+    elif (type(visitor).on_visit is _BASE_ON_VISIT and type(visitor).on_leave is _BASE_ON_LEAVE
+          and not any(name.startswith(('visit_', 'leave_')) for name in getattr(visitor, '__dict__', ()))):
+        _visit_dispatched(node, visitor, _dispatch(type(visitor)))
     else:
         _visit(node, visitor)
+
+
+_BASE_ON_VISIT, _BASE_ON_LEAVE = cst.CSTVisitor.on_visit, cst.CSTVisitor.on_leave
+_DISPATCH = {}  # visitor class -> {node class: (visit function or None, leave function or None)}
+
+
+def _dispatch(kind):
+    table = _DISPATCH.get(kind)
+    if table is None:
+        table = _DISPATCH[kind] = {}
+    return table
+
+
+def _handlers(kind, table, node_kind):
+    """The ``visit_<Node>``/``leave_<Node>`` functions CSTVisitor.on_visit/on_leave call for a
+    node class, None for LibCST's own no-op ones."""
+    found = table.get(node_kind)
+    if found is None:
+        name = node_kind.__name__
+        visit_function = getattr(kind, 'visit_' + name, None)
+        leave_function = getattr(kind, 'leave_' + name, None)
+        found = table[node_kind] = (
+            None if visit_function is getattr(cst.CSTVisitor, 'visit_' + name, None) else visit_function,
+            None if leave_function is getattr(cst.CSTVisitor, 'leave_' + name, None) else leave_function)
+    return found
+
+
+def _visit_dispatched(node, visitor, table):
+    # CSTVisitor.on_visit and on_leave, their handlers looked up once per node class
+    node_kind = type(node)
+    handlers = table.get(node_kind) or _handlers(type(visitor), table, node_kind)
+    if handlers[0] is None or handlers[0](visitor, node) is not False:
+        names = _FIELDS.get(node_kind)
+        if names is None:
+            if node_kind.__name__ in _CONDITIONAL:
+                node._visit_and_replace_children(visitor)
+                if handlers[1] is not None:
+                    handlers[1](visitor, node)
+                return
+            _learn(node)
+            names = _FIELDS[node_kind]
+        for name in names:
+            value = getattr(node, name)
+            kind = _value_kind(value)
+            if kind == _NODE:
+                _visit_dispatched(value, visitor, table)
+            elif kind == _MANY:
+                for item in value:
+                    _visit_dispatched(item, visitor, table)
+    if handlers[1] is not None:
+        handlers[1](visitor, node)
 
 
 def _visit(node, visitor):
