@@ -120,11 +120,11 @@ def _tuple_call(node):
     return arg if isinstance(arg, (cst.GeneratorExp, cst.ListComp)) else None
 
 
-def _repeat(node):
-    """(element, count) of ``(x,) * n`` / ``n * (x,)``, else None."""
+def _repeat(node, displays=(cst.List, cst.Tuple)):
+    """(element, count) of ``[x] * n`` / ``(x,) * n`` / ``n * [x]``, a display of ``displays``, else None."""
     if isinstance(node, cst.BinaryOperation) and isinstance(node.operator, cst.Multiply):
         for one, other in ((node.left, node.right), (node.right, node.left)):
-            if (isinstance(one, cst.Tuple) and len(one.elements) == 1 and isinstance(one.elements[0], cst.Element)
+            if (isinstance(one, displays) and len(one.elements) == 1 and isinstance(one.elements[0], cst.Element)
                     and not isinstance(other, (cst.List, cst.Tuple, cst.ListComp))):
                 return one.elements[0].value, other
     return None
@@ -139,7 +139,7 @@ def _tuple_parts(node):
     def flatten(item):
         if isinstance(item, cst.BinaryOperation) and isinstance(item.operator, cst.Add):
             return flatten(item.left) and flatten(item.right)
-        if _tuple_arg(item) is not None or _repeat(item) is not None or (
+        if _tuple_arg(item) is not None or _repeat(item, cst.Tuple) is not None or (
                 isinstance(item, cst.Tuple) and all(isinstance(e, cst.Element) for e in item.elements)):
             parts.append(item)
             return True
@@ -653,17 +653,9 @@ class VectorLowering(cst.CSTTransformer):
             return kinds.pop() if len(kinds) == 1 and None not in kinds else None
         if _repeat(node) is not None:
             elem = self.scalar(_repeat(node)[0])
-            return {FLOAT: 'AV', INT: 'AI'}.get(elem)
-        if isinstance(node, cst.BinaryOperation) and isinstance(node.operator, cst.Multiply):
-            for one, other in ((node.left, node.right), (node.right, node.left)):
-                if (isinstance(one, cst.List) and len(one.elements) == 1
-                        and isinstance(one.elements[0], cst.Element)
-                        and not isinstance(other, (cst.List, cst.ListComp))):
-                    elem = self.scalar(one.elements[0].value)
-                    if elem is None and _not_a_number(one.elements[0].value):
-                        return None     # [None] * n: a list, converted where it is stored into a vector
-                    return {FLOAT: 'AV', INT: 'AI'}.get(elem, 'A?')
-            return None
+            if elem is None and _not_a_number(_repeat(node)[0]):
+                return None     # [None] * n: a list, converted where it is stored into a vector
+            return {FLOAT: 'AV', INT: 'AI'}.get(elem, 'A?')
         if isinstance(node, cst.List) and not node.elements:
             return 'A?'
         if isinstance(node, cst.List):
@@ -908,21 +900,18 @@ class VectorLowering(cst.CSTTransformer):
         return found
 
     def returned_kinds(self, facts):
-        """Kinds that a local takes from the cell's own traced shape when it is returned;
-        'X' for a local returned where the cell's value is not a vector (it stays a list)."""
-        shape = self.cells.vector_shape
-        out = {}
+        """Kinds that a local takes from the cell's own traced shape when it is returned (``return v``,
+        ``return tuple(v)``, an element of a returned tuple of vectors)."""
+        shape, out = self.cells.vector_shape, {}
         for value in facts.returns:
-            if _tuple_arg(value) is not None and _is_name(_tuple_arg(value)) and shape in ('V', 'I'):
-                out.setdefault(_tuple_arg(value).value, set()).add(shape)      # return tuple(out)
-            if _is_name(value):
-                out.setdefault(value.value, set()).add(shape if shape in ('V', 'I') else 'X')
-            elif isinstance(value, cst.Tuple):
-                kinds = shape[1] if isinstance(shape, tuple) and len(shape[1]) == len(value.elements) else None
-                for i, e in enumerate(value.elements):
-                    if _is_name(e.value):
-                        out.setdefault(e.value.value, set()).add(kinds[i] if kinds else 'X')
-        return {name: kinds.pop() if len(kinds) == 1 else 'X' for name, kinds in out.items()}
+            pairs = [(value, shape)]
+            if isinstance(value, cst.Tuple) and isinstance(shape, tuple) and len(shape[1]) == len(value.elements):
+                pairs = [(e.value, k) for e, k in zip(value.elements, shape[1])]
+            for item, kind in pairs:
+                item = _tuple_arg(item) if _tuple_arg(item) is not None else item
+                if _is_name(item) and kind in ('V', 'I'):
+                    out.setdefault(item.value, set()).add(kind)
+        return {name: kinds.pop() for name, kinds in out.items() if len(kinds) == 1}
 
     def _item_kinds(self, items):
         kinds = []
@@ -953,7 +942,7 @@ class VectorLowering(cst.CSTTransformer):
                     self.env[name] = None
                 if all(isinstance(k, str) and k[-1] in (candidate, '?') for k in trial):
                     kinds = trial
-        if not kinds or any(k is None for k in kinds) or returned.get(name) == 'X' or name in self.excluded:
+        if not kinds or any(k is None for k in kinds) or name in self.excluded:
             return None
         if all(isinstance(k, tuple) for k in kinds):
             return kinds[0] if len(set(kinds)) == 1 else None
@@ -1161,16 +1150,12 @@ class VectorLowering(cst.CSTTransformer):
         self.scope_stack.pop()
         if id(original) in self.expanding:
             self.comp_scalars.pop()
-        elif self.iter_vectors(original.for_in.iter):
-            self.fallback(original, 'generator over vectors not lowered')
         return updated
 
     def leave_ListComp(self, original, updated):
         self.scope_stack.pop()
         if id(original) in self.expanding:
             self.comp_scalars.pop()
-        if id(original) not in self.expanding and self.iter_vectors(original.for_in.iter):
-            self.fallback(original, 'list comprehension over vectors not lowered')
         return updated
 
     def leave_Call(self, original, updated):
@@ -1199,11 +1184,6 @@ class VectorLowering(cst.CSTTransformer):
                     hi = sl.upper if sl.upper is not None else _expr(LL_MAX)
                     self.lowered += 1
                     return self.call('sum_range', self.elem(arg_o.value), arg_u.value, lo, hi)
-        if isinstance(f, cst.Name) and f.value != 'tuple' and f.value in self.builtins | {
-                'min', 'max', 'any', 'all', 'sorted', 'list', 'enumerate', 'reversed', 'map'}:
-            for a in original.args:
-                if self.elem(a.value) and f.value not in ('len', 'sum', 'zip', 'range'):
-                    self.fallback(original, f'{f.value}() over a vector runs through the sequence protocol')
         return updated
 
     # ---------------------------------------------------------------- statements
@@ -1521,10 +1501,7 @@ class VectorLowering(cst.CSTTransformer):
     def leave_For(self, original, updated):
         if id(original) in self.vector_fors:
             return self.lower_vector_for(original, updated)
-        if self.iter_vectors(original.iter):
-            self.fallback(original.iter, 'for statement over vectors not lowered')
-            return updated
-        return self.version_range_for(original, updated)
+        return updated if self.iter_vectors(original.iter) else self.version_range_for(original, updated)
 
     def lower_vector_for(self, original, updated):
         vecs_o = self.iter_vectors(original.iter)
@@ -2010,9 +1987,7 @@ def _lower_round(node, cls_info, cells, builtins, eager, counter, module, ref_ki
             elem = lowering.elem(lowering.iter_vectors(items[0][1])[items[0][2]])
             decls.append(_stmt(f'{name}: {SCALARS[elem]}\n'))
     decls += [_stmt(f'{name}: {TYPES[lowering.env[name]]}\n') for name in vector_locals] + lowering.decls
-    for code in converted:      # the report names every Python use of a vector (D154), recorded or not above
-        if not any(code in item for item in lowering.fallbacks):
-            lowering.fallbacks.append(f'vector used in Python code: a copy: {code}')
+    lowering.fallbacks += [f'vector used in Python code: a copy: {code}' for code in converted]     # D154
     report.update({'lowered': lowering.lowered, 'fallbacks': lowering.fallbacks, 'lists': converted,
                    'bounds_hoisted': lowering.bounds_hoisted, 'powers': lowering.powers,
                    'vector_locals': {name: lowering.env[name] for name in vector_locals}})
