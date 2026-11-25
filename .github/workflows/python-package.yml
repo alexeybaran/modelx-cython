@@ -9,11 +9,12 @@ on:
 # One job per lane (system x interpreter). Each lane runs, as separate steps that all run
 # even when an earlier one fails:
 #   unit       the full non-compiled unit suite (modelx_cython/tests without compiled/)
-#   compiled   compiled and integration tests, less the 11 that build models with
-#              new_space(collect_over=...), development modelx API not in upstream modelx
+#   compiled   compiled and integration tests (the tests that built models with development
+#              modelx's collect_over have direct-route twins), less the allocation tests
 #   allocation the compiled tests of the allocation change: unwritten values, pickling and
 #              copying, and the two-thread test on a locked Space
-#   sec        released lifelib SEC models built with mx2cy and compared with live modelx
+#   sec        released lifelib SEC models (Term, MYGA, SPIA) built with mx2cy and compared with
+#              live modelx
 # Upstream modelx and lifelib come from PyPI (modelx 0.33.0 is upstream main's version);
 # scipy, libcst, numpy and pandas from wheels only: their newest releases lack some 3.13t
 # wheels; libcst (also a modelx dependency) does not build for 3.13t, and numpy and pandas
@@ -76,14 +77,6 @@ jobs:
           C=modelx_cython/tests/compiled
           python -m pytest --import-mode=importlib --rootdir "$GITHUB_WORKSPACE" -p no:cacheprovider \
             -n auto --dist loadfile -q -rfEs \
-            --deselect $C/test_compiled_contract.py::test_exported_contract_and_collection \
-            --deselect $C/test_input_scenarios.py::test_new_input_scenario_after_collect \
-            --deselect $C/test_locked_numeric_domains.py::test_locked_native_calls_and_dependent_collect_domain \
-            --deselect $C/test_over_limit_hash_store.py::test_over_limit_cell_is_one_hash_store_on_both_routes \
-            --deselect $C/test_over_limit_hash_store.py::test_removed_spec_key_reuse_dense_windows_is_refused \
-            --deselect $C/test_raised_sample_calls.py::test_raised_sample_calls_keep_the_returned_type \
-            --deselect $C/test_shared_dense_publish.py::test_shared_dense_cache_publishes_its_flags \
-            --deselect $C/test_uncached_entries.py::test_uncached_cells_take_a_direct_entry_and_equal_live \
             --deselect $C/test_value_storage.py \
             "$GITHUB_WORKSPACE/$C" "$GITHUB_WORKSPACE/integration_tests"
       - name: allocation
@@ -104,6 +97,7 @@ jobs:
         run: |
           python "$GITHUB_WORKSPACE/.github/scripts/sec_compare.py" sec_term Term_US_SEC term_life
           python "$GITHUB_WORKSPACE/.github/scripts/sec_compare.py" sec_myga MYGA_US_SEC fixed_deferred_annuity
+          python "$GITHUB_WORKSPACE/.github/scripts/sec_compare.py" sec_spia SPIA_US_SEC immediate_annuity
       - name: Summary
         if: always()
         shell: bash
