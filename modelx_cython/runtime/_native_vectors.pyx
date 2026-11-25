@@ -99,7 +99,7 @@ cdef F64Vec vec_of(object value):
     if value is None:
         raise TypeError("a float vector cell or local holds None, not a list of floats")
     if type(value) is I64Vec:
-        value = list(value)
+        value = (<I64Vec>value).tolist()     # an integer vector cell's value where floats are expected
     if type(value) is list:
         n = len(value)
         v = vec_new(n)
