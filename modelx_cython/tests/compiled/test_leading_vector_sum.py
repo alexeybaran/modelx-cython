@@ -108,7 +108,7 @@ def test_leading_vector_sum(tmp_path):
         assert not reports[name]["vectors"]["fallbacks"], (name, reports[name]["vectors"])
     for name in TRAILING:
         assert reports[name]["vectors"]["lowered"] == 0, (name, reports[name]["vectors"])
-        assert any("generator over vectors not lowered" in f for f in reports[name]["vectors"]["fallbacks"]), name
+        assert any(f.startswith("vector used in Python code") for f in reports[name]["vectors"]["fallbacks"]), name
     (tmp_path / "check.py").write_text(CHECK.format(names=NAMES), encoding="utf-8")
     result = subprocess.run([sys.executable, "check.py"], cwd=tmp_path, capture_output=True, text=True)
     assert result.returncode == 0, result.stdout + result.stderr
