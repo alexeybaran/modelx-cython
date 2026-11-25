@@ -1,0 +1,168 @@
+diff --git a/modelx_cython/enums.py b/modelx_cython/enums.py
+index 168e6ad..5c45f5a 100644
+--- a/modelx_cython/enums.py
++++ b/modelx_cython/enums.py
+@@ -7,6 +7,7 @@ compiled model (``prepare``, ``bind_properties``), because its values are now in
+ """
+ import builtins
+ import re
++import sys
+ 
+ import libcst as cst
+ 
+@@ -96,11 +97,12 @@ def _names(cls):
+     if (isinstance(cls, type) and issubclass(cls, enum.IntEnum) and type(cls) is type(enum.IntEnum)
+             and cls.__eq__ is int.__eq__ and cls.__ne__ is int.__ne__):
+         table = _Table((int(member), member.name) for member in cls)
+-        table.plain = all(getattr(cls, m) is getattr(enum.IntEnum, m) for m in ('__str__', '__format__'))
++        table.plain = all(str(m) == str(int(m)) and format(m) == format(int(m)) for m in cls)
+         return table
+ 
+ 
+ _code = cst.Module([]).code_for_node
++_STR_IS_INT = sys.version_info >= (3, 11)      # before, str() of an IntEnum member shows its class
+ _SHOWN = ('repr', 'ascii', 'type', 'isinstance', 'getattr', 'hasattr', 'id', 'str', 'format')   # the class shows
+ 
+ 
+@@ -148,8 +150,18 @@ class _Literals(cst.CSTTransformer):
+             self.scopes[-1] = (own, typed)
+         else:                       # a nested scope: the method's `self` and names unless it binds its own
+             own, typed = self.scopes[-1]
++            loops, part = [], getattr(node, 'for_in', None)
++            while part is not None:
++                loops.append(part)
++                part = part.inner_for_in
++            found = {}
++            for part in loops:      # a comprehension variable bound once, over a display of members of one class
++                if isinstance(part.target, cst.Name) and isinstance(part.iter, (cst.Tuple, cst.List, cst.Set)):
++                    keys = {self._names_key(e.value) for e in part.iter.elements}
++                    if len(keys) == 1 and None not in keys and bound.count(part.target.value) == 1:
++                        found[part.target.value] = dict(keys.pop())
+             self.scopes.append((own and 'self' not in bound,
+-                                {k: v for k, v in typed.items() if k not in bound}))
++                                {**{k: v for k, v in typed.items() if k not in bound}, **(found if own else {})}))
+ 
+     def _member_locals(self, body, typed):
+         """{local: names} of the locals bound (by ``=`` or ``for`` over a literal tuple) only to members of one class."""
+@@ -157,7 +169,7 @@ class _Literals(cst.CSTTransformer):
+         for part in lexical_nodes(body):
+             if isinstance(part, cst.Assign) and len(part.targets) == 1 and isinstance(part.targets[0].target, cst.Name):
+                 name, values = part.targets[0].target.value, [part.value]
+-            elif isinstance(part, cst.For) and isinstance(part.target, cst.Name) and isinstance(part.iter, cst.Tuple):
++            elif isinstance(part, cst.For) and isinstance(part.target, cst.Name) and isinstance(part.iter, (cst.Tuple, cst.List, cst.Set)):
+                 name, values = part.target.value, [e.value for e in part.iter.elements]
+             else:
+                 continue
+@@ -236,8 +248,12 @@ class _Literals(cst.CSTTransformer):
+     def _shown(self, node, through_str):
+         """A member where its class shows stays an object; an enum value held as an integer is a build error.
+         ``through_str``: only a class with its own __str__/__format__ shows."""
++        if isinstance(node, (cst.Tuple, cst.List, cst.Set)):        # a container shows its items by repr
++            for element in node.elements:
++                self._shown(element.value, False)
++            return
+         if self.value(node) is not None or self.names(node) is None:
+-            return self.kept.update(() if through_str or self.value(node) is None else (id(node),))
++            return self.kept.update(() if through_str and _STR_IS_INT or self.value(node) is None else (id(node),))
+         if not (through_str and getattr(self.names(node), 'plain', True)):
+             raise TypeError(f'{self.where()}: `{_code(node)}` holds an IntEnum value as an integer where its class '
+                             'shows (repr, type, str), so the result would differ from live modelx')
+@@ -245,6 +261,10 @@ class _Literals(cst.CSTTransformer):
+     def visit_Call(self, node):
+         if isinstance(node.func, cst.Name) and node.func.value in _SHOWN and node.args:
+             self._shown(node.args[0].value, node.func.value in ('str', 'format'))
++        if (isinstance(node.func, cst.Attribute) and node.func.attr.value == 'format'
++                and isinstance(node.func.value, (cst.SimpleString, cst.ConcatenatedString))):
++            for arg in node.args:
++                self._shown(arg.value, not re.search(r'![ra]', _code(node.func.value)))
+         traced = self._traced_call(node)
+         for position, arg in enumerate(node.args):
+             expected, given = traced.get(arg.keyword.value if arg.keyword else position), self.names(arg.value)
+@@ -252,6 +272,22 @@ class _Literals(cst.CSTTransformer):
+                 raise TypeError(f'{self.where()}: `{_code(node)}` passes a value of one IntEnum class to a parameter '
+                                 'traced as another IntEnum class, so its .name would differ from live modelx')
+ 
++    def visit_Return(self, node):
++        expected = (self.traced.get(f'{self.module}.{self.cls}.{self.method}', {}).get(None)
++                    if len(self.scopes) == 1 and self.scopes[-1][0] else None)
++        branches = [node.value] if expected and node.value is not None else []
++        while branches:
++            branch = branches.pop()
++            if isinstance(branch, cst.IfExp):
++                branches += [branch.body, branch.orelse]
++            elif self.names(branch) is not None and dict(self.names(branch)) != dict(expected):
++                raise TypeError(f'{self.where()}: `{_code(node)}` returns a value of one IntEnum class from a Cell '
++                                'traced as returning another, so its .name would differ from live modelx')
++
++    def visit_Attribute(self, node):
++        if self.value(node.value) is not None and node.attr.value not in ('name', 'value'):
++            self.kept.add(id(node.value))
++
+     def visit_FormattedStringExpression(self, node):
+         self._shown(node.expression, node.conversion not in ('r', 'a'))
+ 
+@@ -264,8 +300,11 @@ class _Literals(cst.CSTTransformer):
+ 
+     def leave_Comparison(self, original, updated):
+         # as live: identity with None, a bool, a builtin type, or a member of a Reference that is not substituted
+-        fixed = lambda n: isinstance(n, cst.Name) and (n.value in ('None', 'True', 'False')
+-                                                       or isinstance(getattr(builtins, n.value, None), type))
++        fixed = lambda n: (isinstance(n, cst.Name) and (n.value in ('None', 'True', 'False', 'NotImplemented', 'Ellipsis')
++                                                        or isinstance(getattr(builtins, n.value, None), type))
++                           or isinstance(n, cst.Ellipsis)
++                           or isinstance(n, cst.Call) and isinstance(n.func, cst.Name) and n.func.value == 'type'
++                           or isinstance(n, cst.Attribute) and isinstance(n.value, cst.Name) and n.value.value != 'self')
+         foreign = lambda n: (isinstance(n, cst.Attribute) and isinstance(n.value, cst.Attribute)
+                              and isinstance(n.value.value, cst.Name) and n.value.value.value == 'self'
+                              and (self.cls, n.value.attr.value) not in self.members)
+@@ -324,7 +363,7 @@ class _Literals(cst.CSTTransformer):
+                     self.value(e.value) is None and self.names(e.value) is not None for e in receiver.value.elements)):
+             raise TypeError(f'{self.where()}: `{_code(original)}` holds an IntEnum value as an integer in a container, '
+                             f'so .{attr} would fail where live modelx works')
+-        if names is None:
++        if names is None or id(original.value) in self.kept:
+             return updated
+         if attr == 'value':
+             return inner.with_changes(lpar=(*original.lpar, cst.LeftParen()), rpar=(cst.RightParen(), *original.rpar))
+diff --git a/modelx_cython/tracer.py b/modelx_cython/tracer.py
+index 0ad472a..87a22e2 100644
+--- a/modelx_cython/tracer.py
++++ b/modelx_cython/tracer.py
+@@ -288,7 +288,8 @@ class RuntimeCellsInfo:     # TODO: Create base class RuntimeBaseMemberInfo
+ 
+         for arg, type_val in arg_type_val.items():
+ 
+-            if annotations.get(arg) is object or arg in wide_arguments:
++            if annotations.get(arg) is object or arg in wide_arguments or any(
++                    issubclass(tp, enum.IntEnum) and not enum_safe(tp) for tp in type_val):   # its own operators
+                 self.arg_types[arg] = object
+                 continue
+ 
+@@ -526,6 +527,14 @@ class _ReturnTypeMerger:
+         return changed or logged or after != before
+ 
+ 
++def enum_safe(cls):
++    """An IntEnum class whose members behave as their integers in every operation of int, str and format aside."""
++    return (isinstance(cls, type) and issubclass(cls, IntEnum) and type(cls) is type(IntEnum)
++            and all(getattr(cls, m, None) is getattr(IntEnum, m, None)
++                    for m in {*vars(int), '__str__'} - {'__doc__'} if m.startswith('__'))
++            and all(type(m.value) is int and m.value == int(m) for m in cls))
++
++
+ class RuntimeValueInfo:
+     """Runtime type information for a single traced value.
+ 
+@@ -554,11 +563,7 @@ class RuntimeValueInfo:
+         for capability, (name, _) in CAPABILITIES.items():
+             setattr(self, name, helper_capability(value, capability)
+                     if self.helper is not None else None)
+-        self.enum_safe = (isinstance(value, type) and issubclass(value, IntEnum)
+-                          and type(value) is type(IntEnum)
+-                          and value.__eq__ is int.__eq__ and value.__ne__ is int.__ne__
+-                          and all(getattr(value, m) is getattr(IntEnum, m)
+-                                  for m in ('__str__', '__format__', '__repr__', '__hash__')))
++        self.enum_safe = enum_safe(value)
+         self.enum = ((value.__module__, value.__qualname__,
+                       {name: int.__int__(member) for name, member in value.__members__.items()})
+                      if isinstance(value, type) and issubclass(value, IntEnum)
