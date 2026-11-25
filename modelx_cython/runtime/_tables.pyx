@@ -343,6 +343,7 @@ cdef PreparedTable _build(object value):
     table.objects = tuple(objects)
     # the dtype pandas gives a row (it widens number columns to one dtype: int32 beside float64 reads as float64)
     table.row_object = table.is_series or n == 0 or getattr(frame.iloc[0].dtype, 'kind', 'O') not in 'iufc'
+    table.row_float = not table.row_object and frame.iloc[0].dtype.kind == 'f'     # a row of float64 fields
     # index extremes, as pandas gives them
     table.max_label = index.max() if n else None
     table.min_label = index.min() if n else None
@@ -671,6 +672,25 @@ cdef int missing_codes(PreparedRef ref, const Py_ssize_t* codes, int count) exce
 
 cdef object object_field(PreparedRef ref, Py_ssize_t slot, Py_ssize_t row):
     return (<PreparedTable>ref).object_at(row - 1, slot - 1)
+
+
+# The numpy scalar pandas returns for a cell value, for a read whose value meets numpy's own rules (``round`` of it,
+# a method of it, a division by zero, an integer power): such a read is boxed, the others stay C numbers.
+cdef object _float64 = np.float64
+cdef object _int64 = np.int64
+
+
+cdef object f64_box(double value):
+    """``numpy.float64``, as pandas returns a value of a float64 column."""
+    return _float64(value)
+
+
+cdef object i64_box(PreparedRef ref, long long value, bint field):
+    """``numpy.int64`` as pandas returns a value of an int64 column; a field of a row pandas widens to float64
+    (``field``, the table's rows of number columns) is ``numpy.float64``."""
+    if field and (<PreparedTable>ref).row_float:
+        return _float64(value)
+    return _int64(value)
 
 
 # ---- T-5: index walks ------------------------------------------------------------------------------------
