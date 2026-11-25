@@ -25,7 +25,7 @@ No compiler source changed. Upstream modelx 0.33.0 and lifelib 0.17.4 from PyPI 
 | windows 3.14t / 3.13t | pass | pass | pass | pass |
 | macos (clang, arm64) 3.10 (run 2) / 3.12 / 3.14 | pass | pass | pass | pass |
 | macos 3.14t (runs 3 and 4) | pass | pass | pass | pass |
-| macos 3.13t | pending (run 4) | | | |
+| macos 3.13t | not run: cancelled each run after waiting for a runner (rerun API returned 500) | | | |
 
 Free-threaded lanes assert `Py_GIL_DISABLED` and `sys._is_gil_enabled() is False` before testing.
 ## Real failures (compiler defects)
