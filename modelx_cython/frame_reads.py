@@ -50,10 +50,26 @@ ONLY_RAISED_WHY = 'every evaluation of this place raised in the sample (no evide
 # kinds of a call's result in the sample (read_notes.kind) that are a single number
 ONE_NUMBER = frozenset(('int', 'float', 'bool'))
 MUTATORS = frozenset(('__setitem__', '__delitem__', 'update', 'insert', 'pop'))
+# the native reads of a cell value (pandas returns numpy.float64 / numpy.int64 for them)
+VALUE_READS = frozenset(('f64_1', 'f64_c', 'i64_1', 'i64_c', 'f64_row', 'i64_row'))
+# calls whose result does not depend on whether the argument is a numpy scalar or a Python number
+NUMPY_NEUTRAL_CALLS = frozenset(('float', 'int', 'bool'))
+# calls that return one of their numeric arguments (its type goes on)
+NUMPY_PASSING_CALLS = frozenset(('abs', 'min', 'max', 'sum'))
 
 
 def _code(node):
     return cst.Module(body=()).code_for_node(node)
+
+
+def _value_read(read):
+    """The native read of a cell value in ``read`` (possibly cast to a C type), else None."""
+    if (isinstance(read, cst.Call) and _code(read.func) == '_mx_cy.cast' and len(read.args) == 2
+            and _code(read.args[0].value) in CTYPE.values()):
+        read = read.args[1].value
+    if isinstance(read, cst.Call) and isinstance(read.func, cst.Attribute) and read.func.attr.value in VALUE_READS:
+        return read
+    return None
 
 
 class _ReadSources(cst.CSTVisitor):
@@ -270,6 +286,93 @@ class FrameReads:
             return False
         levels, level = found[1]['levels'], int(expr.slice[0].slice.value.value, 0)
         return 1 < len(levels) <= 8 and 0 <= level < len(levels) and levels[level] == 'int'
+
+    def numpy_use(self, node, kind, seen=None):
+        """Whether the value of the cell read ``node`` (an original node of this formula) reaches a use where a
+        numpy scalar and a C number give different values without raising: ``round`` or a method of it, an
+        integer power, a container, an argument of a call other than ``float``/``int``/``bool``, ``math.*`` or a Cell
+        of the model, a return of a Cell that is not of a C type. Through ``+ - * / // %`` (equal values; a
+        division by zero raises where numpy gives inf or nan), unary minus, ``abs``/``min``/``max``/``sum``,
+        conditionals and locals the value keeps its type (live: numpy's); a comparison, a truth test, a key part,
+        ``float()``/``int()`` and a C result end it."""
+        parents = self.facts.formula.parents
+        seen = set() if seen is None else seen
+        current = node
+        while True:
+            parent = parents.get(id(current))
+            if isinstance(parent, cst.BinaryOperation):
+                op = parent.operator
+                if isinstance(op, cst.Power):
+                    if kind != 'f64' and not (current is parent.left and isinstance(parent.right, cst.Integer)):
+                        return True
+                elif not isinstance(op, (cst.Add, cst.Subtract, cst.Multiply, cst.Divide, cst.FloorDivide,
+                                         cst.Modulo)):
+                    return True     # (a division by zero raises where numpy gives inf or nan: compiled raises)
+            elif isinstance(parent, cst.UnaryOperation):
+                if isinstance(parent.operator, cst.Not):
+                    return False
+                if not isinstance(parent.operator, (cst.Minus, cst.Plus)):
+                    return True
+            elif isinstance(parent, (cst.ComparisonTarget, cst.Comparison)):
+                return False
+            elif isinstance(parent, (cst.If, cst.While)):
+                return False
+            elif isinstance(parent, cst.IfExp):
+                if current is parent.test:
+                    return False
+            elif isinstance(parent, cst.BooleanOperation):
+                pass
+            elif isinstance(parent, (cst.Index, cst.SubscriptElement)):
+                return False        # a key part: looked up by its value
+            elif isinstance(parent, cst.Arg):
+                call = parents.get(id(parent))
+                if not isinstance(call, cst.Call) or parent.keyword is not None or parent.star:
+                    return True
+                func = call.func
+                if isinstance(func, cst.Name) and func.value in NUMPY_NEUTRAL_CALLS:
+                    return False
+                if isinstance(func, cst.Name) and func.value in NUMPY_PASSING_CALLS:
+                    parent = call
+                elif (isinstance(func, cst.Attribute) and isinstance(func.value, cst.Name)
+                      and func.value.value == 'math'):
+                    return False
+                elif (isinstance(func, cst.Attribute) and isinstance(func.value, cst.Name)
+                      and func.value.value == 'self' and self.cached_call(cst.Call(func=func))):
+                    return False    # a Cell of the model: its C parameter, as upstream
+                else:
+                    return True
+            elif isinstance(parent, cst.GeneratorExp) and current is parent.elt:
+                arg = parents.get(id(parent))
+                call = parents.get(id(arg))
+                if not (isinstance(arg, cst.Arg) and isinstance(call, cst.Call) and isinstance(call.func, cst.Name)
+                        and call.func.value in NUMPY_PASSING_CALLS):
+                    return True
+                parent = call
+            elif isinstance(parent, cst.Return):
+                try:
+                    result = '' if self.cells.native_result_binder else self.cells.get_rettype_expr()
+                except Exception:
+                    result = ''
+                return not (result.startswith('_mx_cy.') and result != '_mx_cy.object')
+            elif isinstance(parent, cst.Expr):
+                return False
+            elif isinstance(parent, (cst.Assign, cst.AnnAssign, cst.AugAssign)) and current is parent.value:
+                if isinstance(parent, cst.AugAssign) and not isinstance(
+                        parent.operator, (cst.AddAssign, cst.SubtractAssign, cst.MultiplyAssign, cst.DivideAssign,
+                                          cst.FloorDivideAssign, cst.ModuloAssign)):
+                    return True
+                targets = ([t.target for t in parent.targets] if isinstance(parent, cst.Assign) else [parent.target])
+                if len(targets) != 1 or not isinstance(targets[0], cst.Name):
+                    return True
+                name = targets[0].value
+                if name in seen:
+                    return False
+                seen.add(name)
+                loads = self.facts.formula.loads.get(name) or ()
+                return any(nested or self.numpy_use(load, kind, seen) for load, nested in loads)
+            else:
+                return True
+            current = parent
 
     def _once(self, name):
         """``name`` is bound once by an assignment of the formula (not a parameter, a loop target or another binding)."""
@@ -1242,6 +1345,12 @@ class _Rewrite(cst.CSTTransformer):
 
     def on_leave(self, original, updated):
         result = super().on_leave(original, updated)
+        kind = self.native.get(id(result))
+        if (kind in CTYPE and result is not updated and isinstance(original, cst.Subscript)
+                and isinstance(result, cst.IfExp) and _value_read(result.body) is not None
+                and self.o.numpy_use(original, kind)):
+            del self.native[id(result)]
+            result = self._boxed(result, kind)
         self.updated_of[id(original)] = result
         if result is not updated and isinstance(original, (cst.Subscript, cst.Call, cst.Comparison, cst.For,
                                                              cst.GeneratorExp, cst.ListComp)):
@@ -1530,6 +1639,20 @@ class _Rewrite(cst.CSTTransformer):
 
     def _guarded(self, original, updated, view, test, native, kind=None):
         return self._lowered(test, native, self._fallback(updated, view.call), kind)
+
+    def _boxed(self, lowered, kind):
+        """A lowered cell value whose use meets numpy's rules: the native branch boxed as the numpy scalar pandas
+        returns, the pandas branch as pandas returns it (not cast); no longer a C value."""
+        read, fallback = lowered.body, lowered.orelse
+        if (isinstance(fallback, cst.Call) and _code(fallback.func) == '_mx_cy.cast' and len(fallback.args) == 2
+                and _code(fallback.args[0].value) in CTYPE.values()):
+            fallback = fallback.args[1].value
+        if kind == 'f64':
+            boxed = self._m('f64_box', read)        # (an int64 field of a row pandas widens is read as a double)
+        else:
+            field = _value_read(read).func.attr.value == 'i64_row'
+            boxed = self._m('i64_box', _value_read(read).args[0].value, read, cst.Name('True' if field else 'False'))
+        return lowered.with_changes(body=boxed, orelse=fallback)
 
     def _lowered(self, test, read, fallback, kind=None):
         """``read if test else fallback``: the pandas read cast to the read's C type when the read is typed (both
