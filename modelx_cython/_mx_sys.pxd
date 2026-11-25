@@ -410,7 +410,10 @@ cdef extern from *:
             }
         }
         PyObject *result = PyObject_CallOneArg(l->reduce, copy);
-        if (Py_REFCNT(copy) == 1) PyObject_GC_Del(copy);  /* else kept: it must never be deallocated */
+        if (Py_REFCNT(copy) == 1) {                       /* else kept: it must never be deallocated */
+            if (PyType_HasFeature(t, Py_TPFLAGS_HEAPTYPE)) Py_DECREF(t);   /* taken by PyObject_GC_New */
+            PyObject_GC_Del(copy);
+        }
         return result;
     }
 

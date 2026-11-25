@@ -48,6 +48,10 @@ PROBE = textwrap.dedent("""\
             # cached values survive: the counter of the formula does not move
             out[name] = (q.pv() == p.pv(), q.grid(7, 2) == p.grid(7, 2), q.n(11), q.alive(3),
                          q.counted(4), q.counted(6), q.seen[0] - seen)
+        before = sys.getallocatedblocks()
+        for _ in range(50):              # the scrubbed copy is freed: no item is kept per pickle
+            p.__reduce__()
+        out['blocks_per_reduce'] = (sys.getallocatedblocks() - before) // 50
         out['installed'] = sys.modules[type(p).__module__]._mx_uninitialised_values
         poison = {struct.unpack('<d', b'\\xa5' * 8)[0], int.from_bytes(b'\\xa5' * 8, 'little', signed=True)}
         def leaves(value):
@@ -117,6 +121,7 @@ def _check(tmp_path, mode):
         got = _run(tmp_path, package, mode)
         assert got.pop('installed') == {'_c_Data': True, '_c_Policy': True}
         assert got.pop('poisoned_state') is False
+        assert got.pop('blocks_per_reduce') == 0
         for name in ('copy',) + (('pickle', 'deepcopy') if mode != 'collect' else ()):
             assert got.pop(name) == (True, True, 55, True, 8.0, 12.0, 0), name
         if mode == 'collect':
