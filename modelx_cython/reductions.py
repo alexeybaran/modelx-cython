@@ -783,7 +783,7 @@ def _evaluation_order(node):
 
 
 class NativeReductions(GeneralReductions, FormulaTransformer):
-    def __init__(self, cls_info, cells, providers, formula, reserve_fallback, builtin_bounds,
+    def __init__(self, cls_info, cells, providers, formula, builtin_bounds,
                  builtin_reductions=frozenset(), formula_kinds=None):
         super().__init__()
         # diag-jp: kinds of the formula's own locals (powers.formula_local_kinds), for names no
@@ -794,10 +794,9 @@ class NativeReductions(GeneralReductions, FormulaTransformer):
         self.formula_kinds = {name: kind for name, kind in (formula_kinds or {}).items() if name not in bound}
         self.object_loops = []
         self.cls_info, self.cells, self.providers = cls_info, cells, providers
-        self.formula, self.reserve_fallback = formula, reserve_fallback
+        self.formula = formula
         self.builtin_bounds = builtin_bounds
         self.builtin_reductions = builtin_reductions
-        self.fallbacks, self.exact_receiver_guards, self.count = [], set(), 0
         self.general_count, self.general_done, self.general_declined = 0, set(), {}
         self.general_sites, self.general_lines = [], None
         self.nested_sites, self.elifs, self.conditional_sites = set(), set(), set()      # W1.8
@@ -816,7 +815,7 @@ class NativeReductions(GeneralReductions, FormulaTransformer):
         return CstFacts(self.formula.body.body)
 
     def reserve_prefix(self):
-        return self.names.reserve(f'_mx_reduce_{self.count}', family=True)
+        return self.names.reserve('_mx_reduce_0', family=True)
 
     def visit_FunctionDef(self, node):
         self.general_sites = [n for n in lexical_nodes(node.body.body) if self.builtin_site(n)]
