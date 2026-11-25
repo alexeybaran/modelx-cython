@@ -247,7 +247,10 @@ def rewrite_class(cls_info, node, config, integer_refs):
     for name, shape in vectors.items():
         params = ', '.join(cls_info.cells[name].params)
         value = f'self.{mapping[name]}({params})'
-        result = (f'tuple([v.tolist() for v in {value}])' if isinstance(shape, tuple) else f'{value}.tolist()')
+        from modelx_cython.vectors import cell_vector_container
+        item = 'tuple(v.tolist())' if cell_vector_container(cls_info.cells[name]) == 'tuple' else 'v.tolist()'
+        result = (f'tuple([{item} for v in {value}])' if isinstance(shape, tuple)
+                  else f'tuple({value}.tolist())' if item != 'v.tolist()' else f'{value}.tolist()')
         declared = params
         cell = cls_info.cells[name]
         if name in signatures and (cell.called_with_kwargs or cell.body_has_closure):
