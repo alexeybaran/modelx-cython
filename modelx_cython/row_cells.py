@@ -101,6 +101,7 @@ def _row_expression(func):
         return None
     expr = ret.value
     if not (isinstance(expr, cst.Subscript) and len(expr.slice) == 1
+            and expr.slice[0].comma is cst.MaybeSentinel.DEFAULT       # `T.loc[k,]` is `T.loc[(k,)]`
             and isinstance(expr.slice[0].slice, cst.Index) and expr.slice[0].slice.star is None
             and isinstance(expr.value, cst.Attribute) and expr.value.attr.value == 'loc'
             and _self_chain_call(expr.value.value)):
@@ -147,7 +148,8 @@ def key_parts(expr):
 
 
 def _literal_field(subscript):
-    return (len(subscript.slice) == 1 and isinstance(subscript.slice[0].slice, cst.Index)
+    return (len(subscript.slice) == 1 and subscript.slice[0].comma is cst.MaybeSentinel.DEFAULT
+            and isinstance(subscript.slice[0].slice, cst.Index)
             and subscript.slice[0].slice.star is None
             and isinstance(subscript.slice[0].slice.value, cst.SimpleString))
 

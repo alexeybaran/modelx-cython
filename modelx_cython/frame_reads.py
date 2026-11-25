@@ -96,6 +96,8 @@ def _parts(key):
 
 
 def _index_parts(subscript):
+    if len(subscript.slice) == 1 and subscript.slice[0].comma is not cst.MaybeSentinel.DEFAULT:
+        return None         # `x[k,]` is `x[(k,)]`, a tuple of one: not the read of `x[k]`
     parts = []
     for element in subscript.slice:
         if not isinstance(element.slice, cst.Index) or element.slice.star is not None:
