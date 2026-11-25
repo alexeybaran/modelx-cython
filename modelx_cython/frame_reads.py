@@ -47,6 +47,8 @@ MAX_PARTS = 6
 # displays whose value as a key part (or an argument of asof/searchsorted) selects several rows, never one label
 SEVERAL_ROWS = (cst.List, cst.ListComp, cst.Set, cst.Slice, cst.Tuple, cst.Lambda)
 SEVERAL_ROWS_WHY = 'a key part selects several rows'
+# displays that are not one part of a prefix or of a view's key
+NOT_ONE_PART = (cst.Slice, cst.List, cst.ListComp, cst.Tuple)
 ONLY_RAISED_WHY = 'every evaluation of this place raised in the sample (no evidence of a single-cell read)'
 # kinds of a call's result in the sample (read_notes.kind) that are a single number
 ONE_NUMBER = frozenset(('int', 'float', 'bool'))
@@ -105,6 +107,34 @@ def _index_parts(subscript):
             return None
         parts.append(element.slice.value)
     return parts
+
+
+def _self_call(node):
+    """``self.<name>(...)``."""
+    return (isinstance(node, cst.Call) and isinstance(node.func, cst.Attribute)
+            and isinstance(node.func.value, cst.Name) and node.func.value.value == 'self')
+
+
+def _level_generator(call):
+    """``max(a for a, s in X)`` / ``min(...)``: one generator argument, a tuple target of distinct use of ``a``, no
+    condition, no second ``for``: (its ``for``, the target names, the position of ``a`` among them), else None."""
+    func = call.func
+    if not (isinstance(func, cst.Name) and func.value in ('max', 'min') and len(call.args) == 1
+            and not call.args[0].keyword and not call.args[0].star
+            and isinstance(call.args[0].value, cst.GeneratorExp)):
+        return None
+    gen = call.args[0].value
+    comp = gen.for_in
+    if comp.ifs or comp.inner_for_in is not None or comp.asynchronous is not None or not isinstance(gen.elt, cst.Name):
+        return None
+    target = comp.target
+    if not (isinstance(target, cst.Tuple) and all(isinstance(e, cst.Element) and isinstance(e.value, cst.Name)
+                                                   for e in target.elements)):
+        return None
+    names = [e.value.value for e in target.elements]
+    if names.count(gen.elt.value) != 1:
+        return None
+    return comp, names, names.index(gen.elt.value)
 
 
 class _Hold:
@@ -239,20 +269,17 @@ class FrameReads:
     def _extreme_part_int(self, expr):
         """``R.index.max()[k]`` / ``.min()[k]``, R a unique frame of several levels whose level k is int; or
         ``max(a for a, s in R.index)`` with ``a`` naming an int level (``level_walk_extreme``)."""
-        if (isinstance(expr, cst.Call) and isinstance(expr.func, cst.Name) and expr.func.value in ('max', 'min')
-                and len(expr.args) == 1 and isinstance(expr.args[0].value, cst.GeneratorExp)):
-            gen = expr.args[0].value
-            target, it = gen.for_in.target, gen.for_in.iter
-            if (gen.for_in.ifs or gen.for_in.inner_for_in is not None or not isinstance(gen.elt, cst.Name)
-                    or not isinstance(target, cst.Tuple) or not isinstance(it, cst.Attribute) or it.attr.value != 'index'
-                    or not all(isinstance(e.value, cst.Name) for e in target.elements)):
-                return False
-            names = [e.value.value for e in target.elements]
-            found = self._receiver(it.value)
-            if names.count(gen.elt.value) != 1 or found is None or not found[1].get('unique'):
+        walk = _level_generator(expr) if isinstance(expr, cst.Call) else None
+        if walk is not None:
+            comp, names, level = walk
+            it = comp.iter
+            found = self._receiver(it.value) if isinstance(it, cst.Attribute) and it.attr.value == 'index' else None
+            if found is None or not found[1].get('unique'):
                 return False
             levels = found[1]['levels']
-            return len(levels) == len(names) and levels[names.index(gen.elt.value)] == 'int'
+            return len(levels) == len(names) and levels[level] == 'int'
+        if isinstance(expr, cst.Call):
+            return False
         if not (isinstance(expr, cst.Subscript) and len(expr.slice) == 1 and isinstance(expr.slice[0].slice, cst.Index)
                 and isinstance(expr.slice[0].slice.value, cst.Integer) and isinstance(expr.value, cst.Call)
                 and not expr.value.args and isinstance(expr.value.func, cst.Attribute)
@@ -326,8 +353,7 @@ class FrameReads:
         table the reads may read natively): (T call, T schema, the key's parts with the arguments in place of the
         parameters) when they are fewer than T's levels, else None. Compiled cells with parameters cannot be
         assigned, so P's value is always its formula's."""
-        if not (isinstance(expr, cst.Call) and isinstance(expr.func, cst.Attribute)
-                and isinstance(expr.func.value, cst.Name) and expr.func.value.value == 'self'):
+        if not _self_call(expr):
             return None
         entry = self.param_cells.get(expr.func.attr.value)
         if entry is None or any(a.keyword is not None or a.star for a in expr.args) or len(expr.args) != len(entry[0]):
@@ -348,7 +374,7 @@ class FrameReads:
                 return updated.with_changes(attr=original.attr)
         parts = _parts(row.slice[0].slice.value.visit(Put()))
         if len(parts) >= len(found[1]['levels']) or any(
-                isinstance(p, (cst.Slice, cst.List, cst.ListComp, cst.Tuple, cst.StarredElement)) for p in parts):
+                isinstance(p, (*NOT_ONE_PART, cst.StarredElement)) for p in parts):
             return None
         return found[0], found[1], parts
 
@@ -357,8 +383,7 @@ class FrameReads:
         ``return T.loc[prefix]``, T a frame receiver and every prefix part fixed per item: (P call, T call, T's
         schema, prefix parts, P). The keyed reads of P's value read T with the prefix held as codes."""
         call = self._value_of(expr.value) if isinstance(expr, cst.Name) else expr
-        if not (isinstance(call, cst.Call) and not call.args and isinstance(call.func, cst.Attribute)
-                and isinstance(call.func.value, cst.Name) and call.func.value.value == 'self'):
+        if not (_self_call(call) and not call.args):
             return None
         name = call.func.attr.value
         row = self.prefix_cells.get(name)
@@ -652,7 +677,7 @@ class FrameReads:
         if extra is not None and len(extra) == 1:
             more = _parts(extra[0])
             if len(prefix[3]) + len(more) < len(prefix[2]['levels']) and not any(
-                    isinstance(p, (cst.Slice, cst.List, cst.ListComp, cst.Tuple, cst.StarredElement)) for p in more):
+                    isinstance(p, (*NOT_ONE_PART, cst.StarredElement)) for p in more):
                 return name, prefix[1], prefix[2], [*prefix[3], *more], prefix[4], len(prefix[3])
         got = self.prefix_of(value)
         if got is None:
@@ -751,7 +776,7 @@ class FrameReads:
         elif len(parts) > 1 and _literal_str(parts[-1]) is not None:
             return None                     # a key and a column (L1)
         levels = found[1]['levels']
-        if not 0 < len(parts) < len(levels) or any(isinstance(p, (cst.Slice, cst.List, cst.ListComp, cst.Tuple))
+        if not 0 < len(parts) < len(levels) or any(isinstance(p, NOT_ONE_PART)
                                                    for p in parts):
             return None
         if len(_index_parts(value)) > 1:
@@ -1647,23 +1672,10 @@ class _Rewrite(cst.CSTTransformer):
         int level, with no condition, over a whole frame of unique keys: that level's extreme as a C integer, as
         ``R.index.get_level_values(i).max()`` (signature kind -6), not a walk of every row per evaluation."""
         o = self.o
-        func = original.func
-        if not (isinstance(func, cst.Name) and func.value in ('max', 'min') and len(original.args) == 1
-                and not original.args[0].keyword and not original.args[0].star
-                and isinstance(original.args[0].value, cst.GeneratorExp)):
+        found = _level_generator(original)
+        if found is None:
             return None
-        gen = original.args[0].value
-        comp = gen.for_in
-        if comp.ifs or comp.inner_for_in is not None or comp.asynchronous is not None or not isinstance(gen.elt, cst.Name):
-            return None
-        target = comp.target
-        if not (isinstance(target, cst.Tuple) and all(isinstance(e, cst.Element) and isinstance(e.value, cst.Name)
-                                                       for e in target.elements)):
-            return None
-        names = [e.value.value for e in target.elements]
-        if names.count(gen.elt.value) != 1:
-            return None
-        level = names.index(gen.elt.value)
+        func, comp, names, level = original.func, *found
         view = self._index_of(comp.iter)
         if view is None or view.start is not None or not view.schema.get('unique'):
             return None
@@ -2161,7 +2173,7 @@ class _Rewrite(cst.CSTTransformer):
         kind = kinds.pop() if len(kinds) == 1 and kinds <= set(READ) else None
         levels = schema['levels']
         own = [e.value for e in key.elements] if isinstance(key, cst.Tuple) and len(levels) - len(prefix) > 1 else [key]
-        if len(prefix) + len(own) != len(levels) or any(isinstance(p, (cst.Slice, cst.List, cst.ListComp, cst.Tuple))
+        if len(prefix) + len(own) != len(levels) or any(isinstance(p, NOT_ONE_PART)
                                                        for p in own):
             return None
         hold = self._take(call, _NO_LABEL, -4)
@@ -2206,7 +2218,7 @@ class _Rewrite(cst.CSTTransformer):
             row = self._row_at(view, hold, self._m('position', start, stop, _cast('_mx_cy.Py_ssize_t', emit)))
             read = self._column_value(chold, kind, row)
         else:
-            if view.start is None or isinstance(part, (cst.Slice, cst.List, cst.ListComp, cst.Tuple)):
+            if view.start is None or isinstance(part, NOT_ONE_PART):
                 return None
             start, stop, test = self._view_parts(view, self._take(view.call, _NO_LABEL, -1))
             labels = []
@@ -2521,8 +2533,7 @@ class _Rewrite(cst.CSTTransformer):
         local = call.value if isinstance(call, cst.Name) else None
         if local is not None:                   # T-5c: ``row = self.P()`` then ``row["f"]``
             call = o._value_of(local) or call
-        if not (o.per_item and isinstance(call, cst.Call) and not call.args and isinstance(call.func, cst.Attribute)
-                and isinstance(call.func.value, cst.Name) and call.func.value.value == 'self'):
+        if not (o.per_item and _self_call(call) and not call.args):
             return None
         name = call.func.attr.value
         row = o.prefix_cells.get(name)
