@@ -453,7 +453,8 @@ class FrameReads:
                 view.setup[:] = view.setup[-1:]
             elif isinstance(value := view.setup[-1].body[0].value, cst.Call) and self.param_prefix(value):
                 self.param_readers.add(value.func.attr.value)
-        body = self._drop_unused_locals(body, rewriter.replaced_names | set(rewriter.key_locals) | set(rewriter.swaps))
+        body = self._drop_unused_locals(body, rewriter.replaced_names | set(rewriter.key_locals) | set(rewriter.swaps),
+                                        rewriter)
         if self.declarations:
             from .key_facts import _is_docstring
             head = 1 if body and _is_docstring(body[0]) else 0
@@ -562,9 +563,11 @@ class FrameReads:
             out.extend(item if isinstance(item, list) else [item])
         return out
 
-    def _drop_unused_locals(self, body, replaced):
+    def _drop_unused_locals(self, body, replaced, rewriter):
         """A frame local whose every use was lowered is no longer evaluated (no Cell call, no reference). Repeated
-        until nothing more is dropped: dropping a view's assignment can leave its frame local unused (T-5c)."""
+        until nothing more is dropped: dropping a view's assignment can leave its frame local unused (T-5c).
+        The assignment of a view local stays for a prefix with no row (or a table that is not prepared): it then
+        raises as live does, whether or not a read of the view is evaluated."""
         out = self._flatten(body)
         while True:
             loads = {}
@@ -573,14 +576,19 @@ class FrameReads:
                 def visit_Name(self, name):
                     loads[name.value] = loads.get(name.value, 0) + 1
             cst.Module(body=out).visit(Loads())
-            kept = []
+            kept, dropped = [], False
             for statement in out:
                 name, value = self._simple_assign(statement) or (None, None)
                 if name in replaced and loads.get(name, 0) == 1:     # the target itself only
                     self.lowered_text.add(normal(_code(value)))
+                    dropped = True
+                    view = self.views.get(name)
+                    if view is not None and view.used and isinstance(view.start, cst.Name):
+                        source = rewriter._fallback(cst.Name(name), view.call)
+                        kept.append(cst.parse_statement(f'if {view.start.value} < 0:\n    {name} = {_code(source)}\n'))
                 else:
                     kept.append(statement)
-            if len(kept) == len(out):
+            if not dropped:
                 return out
             out = kept
 
