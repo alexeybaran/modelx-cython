@@ -296,7 +296,8 @@ class _Wrap(cst.CSTTransformer):
             if not isinstance(element.slice, cst.Index) or element.slice.star is not None:
                 return updated
             parts.append(element.slice.value)
-        key = parts[0] if len(parts) == 1 else cst.Tuple([cst.Element(p) for p in parts])
+        one = len(parts) == 1 and not isinstance(updated.slice[0].comma, cst.Comma)     # ``x[k,]`` is ``x[(k,)]``
+        key = parts[0] if one else cst.Tuple([cst.Element(p) for p in parts])
         return self.call('_mx_note_sub', updated, self.nid(original, 'sub'), updated.value, key)
 
     def leave_Call(self, original, updated):
