@@ -52,7 +52,6 @@ from modelx_cython.consts import (
     SPACE_PREF,
 )
 from modelx_cython.parser import ParentScopeAddin
-from modelx_cython.helper_members import helper_reference
 from modelx_cython.scopes import CstFacts
 from modelx_cython.syntax import arguments, statements
 
@@ -124,12 +123,6 @@ class CellsResolver:
         self.locked_scalar_results = locked_scalar_results or {}
         self.unlocked_scalar_results = unlocked_scalar_results or {}
         self.provider_results = {}
-        self.observed_provider_results = {}
-        # M1 (W1.1) facts for typed table reads: cells fqname -> helper table_schema(t),
-        # cells fqname -> provider type id of a traced helper Table/Record result,
-        # cells with a cached formula; cell_rettype() reads the final C return type.
-        self.table_schemas = {}
-        self.table_results = {}
         # cells fqname -> 'pandas.DataFrame' / 'pandas.Series': zero-argument cells whose every
         # sampled result is that pandas class; reads through them are reported, never lowered.
         self.pandas_results = {}
@@ -577,8 +570,7 @@ def build_resolver(module_infos) -> CellsResolver:
     locked_scalar_results: Dict[str, str] = {}
     unlocked_scalar_results: Dict[str, str] = {}
     provider_results = {}
-    observed_provider_results = {}
-    table_schemas, table_results, cached_cells, cell_infos = {}, {}, set(), {}
+    cached_cells, cell_infos = set(), {}
     pandas_results = {}
     frame_schemas = {}
 
@@ -592,15 +584,6 @@ def build_resolver(module_infos) -> CellsResolver:
                 binding = getattr(cells, 'native_provider_binding', None)
                 if binding is not None:
                     provider_results[cells.fqname] = binding
-                observed = getattr(cells, 'observed_provider_type', None)
-                if observed is not None:
-                    observed_provider_results[cells.fqname] = observed
-                schema = getattr(cells, 'table_schema', None)
-                if schema is not None:
-                    table_schemas[cells.fqname] = schema
-                result = getattr(cells, 'table_result', None)
-                if result is not None:
-                    table_results[cells.fqname] = result
                 pandas_result = _pandas_result(cells)
                 if pandas_result is not None:
                     pandas_results[cells.fqname] = pandas_result
@@ -635,32 +618,11 @@ def build_resolver(module_infos) -> CellsResolver:
     resolver = CellsResolver(cells_by_class, refs_by_class, spaces_by_class,
                              scalar_refs_by_class, locked_scalar_results, unlocked_scalar_results)
     resolver.provider_results = provider_results
-    resolver.observed_provider_results = observed_provider_results
-    resolver.table_schemas = table_schemas
-    resolver.table_results = table_results
     resolver.pandas_results = pandas_results
     resolver.frame_schemas = frame_schemas
     resolver.cached_cells = cached_cells
     resolver._cell_infos = cell_infos
     return resolver
-
-
-def _declares_result(helper, call, binding):
-    result = getattr(helper, 'helper_result_type', None)
-    if (result is None or result[0] != binding.type_id
-            or helper.helper[0] != binding.manifest.provider or any(arg.star for arg in call.args)):
-        return False
-    if result[1] is None:
-        return True
-    name = result[1]
-    positional = [key for key, _, keyword_only in helper.helper_parameters if not keyword_only]
-    values = [arg.value for arg in call.args if arg.keyword and arg.keyword.value == name]
-    if name in positional:
-        args = [arg.value for arg in call.args if arg.keyword is None]
-        index = positional.index(name)
-        if index < len(args):
-            values.append(args[index])
-    return not values or len(values) == 1 and isinstance(values[0], cst.Tuple) and not values[0].elements
 
 
 def admit_forwarded_views(module_infos, resolver):
@@ -686,9 +648,6 @@ def admit_forwarded_views(module_infos, resolver):
             continue
         chain = _extract_self_chain(call.func)
         if not isinstance(chain, list) or CstFacts(formula.body.body).stores[MX_SELF]:
-            continue
-        if _declares_result(helper_reference(call.func, info.refs), call, cell.observed_native_binding):
-            pending.append(cell)
             continue
         if arguments(call) is None:
             continue

@@ -26,7 +26,6 @@ from libcst.metadata import ParentNodeProvider
 from modelx_cython.consts import CY_MOD, MX_SYS_MOD, SPACE_PREF, MODULE_PREF
 
 RUNTIME = '_mx_table_cells'
-STANDARD_PROVIDER = 'modelx_cython.runtime._native_inputs'
 IMPORT = f'from modelx_cython.runtime import table_cells as {RUNTIME}\n'
 
 
@@ -130,19 +129,6 @@ def frame_cell(cls_info, cells):
             and getattr(getattr(cells, '_rt', None), 'frame_schema', None) is not None)
 
 
-def record_cells(cls_info):
-    """Names of the zero-argument cells whose value is a row of a table admitted from a frame (D119):
-    compiled code reads the Record; a Python caller gets the read-only pandas row, as live."""
-    result = {}
-    for name, cells in cls_info.cells.items():
-        if (cells.is_special() or cells.has_args() or not cells.has_formula_def or cells.body_has_closure
-                or cells.called_with_kwargs or cells.formula_is_generator or cells.native_result_binder):
-            continue
-        if getattr(cells, 'frame_row_result', False):
-            result[name] = cells
-    return result
-
-
 def vector_cells(cls_info):
     """``{name: shape}`` of the cells whose C result is a typed vector or a tuple of them (D154): compiled
     code passes the vector itself; a Python caller gets a new list (a tuple of new lists), never the cache."""
@@ -163,7 +149,6 @@ def path_of(cls_info, name):
 
 
 CELL_PREF, REF_PREF = '_mx_cell_', '_mx_ref_'
-_TABLE_TYPES = {('pandas', 'DataFrame'), ('pandas', 'Series'), ('modelx_helpers', 'Table')}
 
 
 
@@ -183,7 +168,7 @@ def renames(module):
     result = {}
     for cls_name, cls_info in module.classes.items():
         mapping = {}
-        for name in (*table_cells(cls_info), *record_cells(cls_info), *vector_cells(cls_info)):
+        for name in (*table_cells(cls_info), *vector_cells(cls_info)):
             if owners[name] == {cls_name}:
                 mapping[name] = CELL_PREF + name
         result[cls_name] = mapping
@@ -213,7 +198,6 @@ def rewrite_class(cls_info, node, config, integer_refs):
     """Add the members described in the module docstring to a generated Space class."""
     mapping = module_renames(cls_info.module)[cls_info.name]
     tables = {n: c for n, c in table_cells(cls_info).items() if n in mapping}
-    records = [n for n in record_cells(cls_info) if n in mapping]
     vectors = {n: v for n, v in vector_cells(cls_info).items() if n in mapping}
     body = []
     init_names = set()
@@ -221,7 +205,7 @@ def rewrite_class(cls_info, node, config, integer_refs):
     for statement in node.body.body:
         if isinstance(statement, cst.FunctionDef):
             name = statement.name.value
-            if name in tables or name in records or name in vectors:
+            if name in tables or name in vectors:
                 if name in vectors:
                     signatures[name] = statement.params
                 statement = statement.with_changes(name=cst.Name(mapping[name]))
@@ -247,11 +231,6 @@ def rewrite_class(cls_info, node, config, integer_refs):
             f'@property\n'
             f'def {name}(self):\n'
             f'    return {RUNTIME}.TableCell(self, {name!r}, {path!r})\n')
-    for name in records:
-        lines.append(
-            f'def {name}(self):\n'
-            f'    """The pandas row, as live (D130); compiled code calls ``{mapping[name]}``."""\n'
-            f'    return {RUNTIME}.row_series(self.{mapping[name]}(), {path_of(cls_info, name)!r})\n')
     for name, shape in vectors.items():
         params = ', '.join(cls_info.cells[name].params)
         value = f'self.{mapping[name]}({params})'

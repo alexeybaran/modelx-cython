@@ -130,7 +130,6 @@ def _guard_associative_cache(cell, body):
 
 
 _logger = logging.getLogger(__name__)
-HELPER_TABLE_READ = 'the receiver is a helper Table and the formula uses its Python methods'
 
 
 class PXDGenerator:
@@ -944,18 +943,7 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
             pandas = self._pandas_reads(native, cls_info, cells)
         else:
             pandas = self._pandas_reads(node, cls_info, cells)
-        if not (self._resolver.table_results or cls_info.refs):
-            cells.table_reads_untyped = pandas      # nothing to lower: the generated code is unchanged
-            return node
-        from modelx_cython.admission import table_read_sites
-        sites = table_read_sites(node, self._resolver, cls_info)
-        if not sites:
-            cells.table_reads_untyped = pandas
-            return node
-        per_step = cells.has_args()
-        cells.table_reads_untyped = sorted(
-            [site.entry(per_step, HELPER_TABLE_READ) for site in sites] + pandas,
-            key=lambda entry: entry['line'])
+        cells.table_reads_untyped = pandas
         return node
 
     def _pandas_reads(self, node, cls_info, cells):
@@ -967,19 +955,12 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
             return []
         from modelx_cython.admission import PANDAS_RECEIVER, table_read_sites
         return [site.entry(cells.has_args(), PANDAS_RECEIVER)
-                for site in table_read_sites(node, self._resolver, cls_info, pandas=True)]
+                for site in table_read_sites(node, self._resolver, cls_info)]
 
-    def _table_reads_kept(self, node, cls_info, cells, why):
+    def _table_reads_kept(self, node, cls_info, cells):
         """List the table reads of a formula kept as a Python method (no lowering)."""
         cells.table_reads_typed, cells.table_reads_untyped, cells.table_reads_keys = 0, [], []
-        if self._resolver is None or not (self._resolver.table_results or cls_info.refs
-                                          or getattr(self._resolver, 'pandas_results', None)):
-            return node
-        from modelx_cython.admission import KEPT_PYTHON, table_read_sites
-        cells.table_reads_untyped = sorted(
-            [site.entry(cells.has_args(), KEPT_PYTHON.format(why=why))
-             for site in table_read_sites(node, self._resolver, cls_info)]
-            + self._pandas_reads(node, cls_info, cells), key=lambda entry: entry['line'])
+        cells.table_reads_untyped = self._pandas_reads(node, cls_info, cells)
         self._table_reads_report(cells)
         return node
 
@@ -1503,7 +1484,7 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
                 if cells.formula_is_generator:
                     # yield is not supported inside cdef functions;
                     # leave as a plain Python method
-                    updated_node = self._table_reads_kept(updated_node, cls_info, cells, 'generator')
+                    updated_node = self._table_reads_kept(updated_node, cls_info, cells)
                     return self._bind_declared_helpers(updated_node, cls_info, cells)
 
                 scope = self.get_metadata(ScopeProvider, original_node.body)
@@ -1515,7 +1496,7 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
                     # initialized in the closure. A compiled def binds them
                     # through its normal Python argument handling.
                     cells.formula_has_captured_default = True
-                    updated_node = self._table_reads_kept(updated_node, cls_info, cells, 'captured default')
+                    updated_node = self._table_reads_kept(updated_node, cls_info, cells)
                     return self._bind_declared_helpers(updated_node, cls_info, cells)
                 updated_node = self._rewrite_powers(
                     updated_node, cls_info, cells, scope)
@@ -1596,7 +1577,7 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
                 if cells.body_has_closure:
                     # closures cannot be compiled inside cpdef functions;
                     # leave as a plain Python method
-                    updated_node = self._table_reads_kept(updated_node, cls_info, cells, 'closure')
+                    updated_node = self._table_reads_kept(updated_node, cls_info, cells)
                     return self._bind_declared_helpers(updated_node, cls_info, cells)
 
                 if not cells.has_formula_def:

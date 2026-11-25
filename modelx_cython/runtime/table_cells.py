@@ -12,7 +12,6 @@ are plain attributes.
 import threading
 
 _lock = threading.Lock()
-_NO_FRAME = object()
 _binders = {}       # top-level package of a compiled model -> its runtime _tables.bind
 
 
@@ -30,31 +29,6 @@ def bind_frame(space, value):
     return bind(value) if bind is not None else None
 
 
-def frame_of(table, path):
-    """What a Python caller gets for an internal table, the same object on every request, equal to what
-    live modelx returns (D130): the plain DataFrame the table was admitted from (a formula's result or
-    an assigned frame), which may be edited in place (compiled code reads the edit after a clear); for a
-    table the model text builds with the helper (``pdn.table``), the helper Table itself, as live.
-
-    Only the standard provider's ``NativeTable`` has a frame; another provider's object (bound by its own
-    result binder) is returned as it is, as before D101.
-    """
-    frame = getattr(table, '_mx_python_frame', _NO_FRAME)
-    if frame is _NO_FRAME:
-        return table
-    if frame is None:
-        with _lock:
-            frame = table._mx_python_frame
-            if frame is None:
-                from modelx_helpers.immutable_inputs import table_frame
-                owner = table.__modelx_table_owner__()
-                frame = table_frame(owner)          # a table admitted from a frame
-                if frame is None:
-                    frame = owner                   # a helper Table: what the formula returned, as live
-                table._mx_python_frame = frame
-    return frame
-
-
 class TableCell:
     """What ``space.cell`` gives a Python caller for a compiled table cell."""
     __slots__ = ('_space', '_name', '_path')
@@ -63,7 +37,7 @@ class TableCell:
         self._space, self._name, self._path = space, name, path
 
     def __call__(self):
-        return frame_of(self._space._mx_table_cell_value(self._name), self._path)
+        return self._space._mx_table_cell_value(self._name)
 
     def __getitem__(self, key):
         if key != ():
@@ -76,22 +50,3 @@ class TableCell:
 
     def __repr__(self):
         return f'<compiled table cell {self._path}>'
-
-
-def row_series(record, path):
-    """What a Python caller gets for a cell whose value is a row of a table admitted from a frame: the
-    plain pandas row (``frame.loc[key]``, as live gives it), the same object on every call of the
-    cached cell (D130, superseding D119's read-only Series). Any other value is returned as it is.
-    Compiled code keeps reading the Record."""
-    from modelx_helpers.immutable_inputs import record_row
-    found = record_row(record)
-    if found is None:
-        return record
-    row, cached = found
-    if cached is None:
-        with _lock:
-            cached = record_row(record)[1]
-            if cached is None:
-                cached = row()
-                object.__setattr__(record, '_frame_row', (row, cached))
-    return cached

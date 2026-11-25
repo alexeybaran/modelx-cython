@@ -7,7 +7,6 @@ import libcst as cst
 from modelx_cython.enums import literals
 from modelx_cython.helpers import HelperCalls
 from modelx_cython.reductions import NativeReductions
-from modelx_cython.helpers import helper_capability
 import pytest
 
 
@@ -98,17 +97,6 @@ def test_declared_code_enum_uses_its_fixed_definition():
 def test_enum_constants_decline_receiver_rebinding():
     source=in_class('def formula(self, value, other):\n    self = other\n    return value == self.Status.OK')
     assert literals('m', source, STATUS) == source
-
-
-@pytest.mark.parametrize('name,value',[
-    ('scalar_result','float'),
-    ('call_layout','positional'),
-])
-def test_helper_capability_shape_is_validated_at_registration(name,value):
-    def function():pass
-    setattr(function,'__modelx_cython_'+name+'__',value)
-    with pytest.raises(ValueError,match='invalid helper capability'):
-        helper_capability(function,name)
 
 
 def test_cache_hit_optimization_does_not_depend_on_ast_unparse(monkeypatch):

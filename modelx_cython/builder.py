@@ -606,44 +606,6 @@ class CombinedCellsInfo(LexicalCellsInfo):
         return getattr(self._rt, 'observed_provider_binding', None)
 
     @property
-    def admitted_table(self):
-        """auto-tables (D104): the sampled value was a plain pandas frame admitted as a table."""
-        return getattr(self._rt, 'admitted_table', False)
-
-    @property
-    def admission_record(self):
-        """auto-tables: the admission record of a zero-argument formula that returned a DataFrame."""
-        return getattr(self._rt, 'admission_record', None)
-
-    @property
-    def frame_row_result(self):
-        """auto-tables (D119): every sampled value is a row (Record) of a table admitted from a frame."""
-        return getattr(self._rt, 'frame_row_result', False)
-
-    @property
-    def pandas_fallbacks(self):
-        """auto-tables: pandas fallbacks on admitted tables in the sample, ``{line: {operation: calls}}``."""
-        return getattr(self._rt, 'pandas_fallbacks', None) or {}
-
-    @property
-    def table_schema(self):
-        """M1: key and column kinds of a traced helper Table result (tracer.table_schema)."""
-        return getattr(self._rt, 'table_schema', None)
-
-    @property
-    def table_result(self):
-        """M1: the provider type id when every sampled result is that provider type's
-        exact owner (a helper Table or Record), whether or not it is bound natively."""
-        binding = self.observed_provider_type
-        return binding.type_id if binding is not None else None
-
-    @property
-    def native_table_result(self):
-        binding = self.native_provider_binding
-        handle = binding.declaration.handle if binding is not None else None
-        return handle is not None and handle.type == 'TableHandle'
-
-    @property
     def native_provider_binding(self):
         binding = self.observed_native_binding
         if binding and (binding.declaration.admission == 'observed'
@@ -892,7 +854,6 @@ class CombinedRefInfo:
     mx_class: str = ''
     decl_type_expr: str = ''
     is_relative: bool = False
-    helper = None
     enum = None
     enum_safe = False
 
@@ -905,14 +866,8 @@ class CombinedRefInfo:
         When ``rt_info`` is falsy, only ``module``, ``cls`` and
         ``name`` are set; the class-level defaults remain in effect.
         """
-        from .helpers import CAPABILITIES
         self.helper_members = getattr(rt_info, 'helper_members', {})
-        self.helper_parameters = getattr(rt_info, 'helper_parameters', None)
-        self.helper_result_type = getattr(rt_info, 'helper_result_type', None)
-        for field_name, _ in CAPABILITIES.values():
-            setattr(self, field_name, getattr(rt_info, field_name, None))
         if rt_info:
-            self.helper = getattr(rt_info, 'helper', None)
             self.enum = getattr(rt_info, 'enum', None)
             self.enum_safe = getattr(rt_info, 'enum_safe', False)
 
@@ -1262,5 +1217,3 @@ class ModuleInfo:
         for cls in self.visitor.spaces:
             result.append(MODULE_PREF + cls[len(SPACE_PREF):])    # replace _c_ with _m_
         return result
-
-

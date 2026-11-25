@@ -1,4 +1,4 @@
-"""Only registered helper kernels specialize, through the shared CST frontend."""
+"""Builtin reductions specialize through the shared CST frontend only."""
 import ast
 from types import SimpleNamespace
 import libcst as cst

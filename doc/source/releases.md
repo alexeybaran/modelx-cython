@@ -23,9 +23,7 @@ integer literal before compilation. Compiled code holds members and values trace
   caller can still do it: `.name` then gives the traced class's name for that value.
 
 Rebinding such a Reference on a compiled model raises `AttributeError`;
-rebuild the model to change it.  The former declaration Reference
-(`modelx_helpers.typed_inputs.EnumDefinitions`) is no longer needed; a model
-that still holds one builds as before, and the marker is ignored.
+rebuild the model to change it.
 
 ### Uncached cells are typed
 

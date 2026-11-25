@@ -7,7 +7,6 @@ import sys
 import textwrap
 
 import modelx as mx
-from modelx_cython.helpers import module_name
 from modelx_cython.rounding import NATIVE_ROUNDING_PROVIDER
 
 
@@ -55,7 +54,6 @@ def cached_digits(x, n):
     # the build report: the repeated rounding of cached_digits is the native rounding operation
     assert (f'{NATIVE_ROUNDING_PROVIDER}.repeated_round_float'
             in report['exported_cy._mx_classes._c_Values._f_cached_digits']['native_helpers'])
-    assert not (package / f"{module_name('modelx_cython.runtime._native_inputs')}.pyx").exists()
     probe = textwrap.dedent('''\
         import math
         import random

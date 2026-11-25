@@ -4,28 +4,19 @@ Compiled per-item code holds what it reads from a shared input. The first read i
 resolves the value into a field of the item, and later reads use that field borrowed. The fields are
 reset with the item's per-policy caches.
 
-A class's ``HoldTable`` has one entry per held value, in three kinds:
+A class's ``HoldTable`` has one entry per held value, by kind:
 
-- ``handle``: the TableHandle or RecordHandle of a zero-argument cached table or record Cell
-  (``_mx_th_<n>``; None until resolved), keyed by the source expression of the Cell call;
-- ``column``: the column index, or record field slot, of one literal name read through a held handle
-  (``_mx_tc_<n>``; 0 until resolved), keyed by (held field, name);
-- ``row``: the row of a key fixed per item and read through a held handle (``_mx_tr_<n>``; 0 until
-  resolved), keyed by (held field, key parts);
 - ``array``: the slice of a zero-argument cached Cell with a typed-memoryview result read by subscript
   (``_mx_ta_<n>`` of the Cell's memoryview type, valid while ``_mx_ta_<n>_ready``), keyed by (receiver, Cell);
   see ``held_arrays``.
 - ``prepared`` and ``prepared_slot`` (T-3): the PreparedTable of a pandas frame and the slot of a column in it.
 
-Which reads are held is decided in ``table_reads`` by traced type and data flow, never by how a read is
-spelled. This module only names the fields and gives their declarations and reset lines.
+Which reads are held is decided in ``frame_reads`` and ``held_arrays`` by traced type and data flow, never by
+how a read is spelled. This module only names the fields and gives their declarations and reset lines.
 """
 
 _KINDS = {
     # kind: (field prefix, C type of the .pxd, annotation of the .py, reset value)
-    'handle': ('_mx_th_', 'object', 'object', 'None'),
-    'column': ('_mx_tc_', 'Py_ssize_t', '_mx_cy.Py_ssize_t', '0'),
-    'row': ('_mx_tr_', 'Py_ssize_t', '_mx_cy.Py_ssize_t', '0'),
     'array': ('_mx_ta_', None, None, None),     # typed per field; reset clears the ready flag
     # T-3/T-4.2 (frame_reads): the PreparedTable an item holds for one frame receiver (a table whose every slot is
     # -1 when the frame is not prepared), and whether it is bound (0 until bound), keyed by the receiver
@@ -57,7 +48,7 @@ class HoldTable:
         return field
 
     def fields(self):
-        """(field, kind) of every held field: handles, then columns, then rows."""
+        """(field, kind) of every held field, by kind in ``_KINDS`` order."""
         for kind, fields in self._fields.items():
             for field in fields.values():
                 yield field, kind
