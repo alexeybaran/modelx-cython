@@ -43,16 +43,18 @@ was built and measured: +3.7% Term, +15.8% MYGA and SPIA. The flag design replac
 
 ## Integers
 
-- Checked by default (`integer_checks: "checked"`): each formula's C integer `+ - *` and unary minus go
+- Always checked (no switch): each formula's C integer `+ - *` and unary minus go
   through helpers that return the wrapped result and set a flag (GCC/Clang `__builtin_*_overflow`; MSVC
   unsigned arithmetic, `_mul128` on x64, `__mulh` on ARM64). The formula tests the flag once before it
   returns, and before a loop or call that receives a flagged value, and raises OverflowError naming the Cell.
-  A formula with an operation whose C type cannot be told keeps Cython's overflowcheck for itself alone
-  (`overflowcheck_fallback` in `_mx_integer_checks.json`). `"unchecked"` is the opt-out: plain C, as upstream.
-  In the twelve SEC models the fallback covers mostly `Data` table builders (run once per model) and 0 to 12
-  `Projection` cells per model (Term 1, MYGA 0, SPIA 4; VA 3, RILA 9, IUL 12); no SEC model has an integer power
-  or shift, whose helpers raise per operation.
-- The mode never depends on the sample: the sample-magnitude switch and the `auto` mode are gone.
+  A formula keeps Cython's overflowcheck for itself alone (`overflowcheck_fallback` in
+  `_mx_integer_checks.json`) when a `+ - *` or unary minus is left unflagged (in a nested scope, a generator,
+  or a formula whose handler could catch OverflowError) and neither operand is a literal or provably a C
+  double or object. It is taken by 239 formulas of the twelve SEC models (63 in `Projection`: Term 1, MYGA 0,
+  SPIA 4, DIA 9, FIA 3, ULSG 8, IUL 12, RILA 9, UL 6, VA 3, VUL 7, WholeLife 1; the rest mostly `Data` table
+  builders, run once) and 46 of the nine lifelib basiclife and savings models; a build stop in its place would
+  stop all 21 builds. No SEC model has an integer power or shift, whose helpers raise per operation.
+- Nothing depends on the sample's magnitudes; there is no unchecked mode.
 - `//`, `%`, shifts and integer powers of C integers keep Python's results through exact helpers.
 - Arguments, results, ItemSpace keys and References typed as C integers cross a checked conversion: a
   float or an int beyond 64 bits raises naming the Cell or Reference; nothing is truncated.
@@ -72,6 +74,8 @@ was built and measured: +3.7% Term, +15.8% MYGA and SPIA. The flag design replac
 5. An integer power of C integers goes through a checked helper that raises beyond 64 bits (upstream:
    Cython's C power, which wraps); a real power uses C `pow` with a one-entry memo per Cell (`_mx_memo_pow`).
 6. The generated package imports nothing from modelx_cython at run time (tested with it blocked).
+7. The package declares Python 3.10 and later (`requires-python`), the versions CI runs and lifelib's own
+   floor; upstream declares 3.8.
 
 ## Tests
 
@@ -101,10 +105,10 @@ was built and measured: +3.7% Term, +15.8% MYGA and SPIA. The flag design replac
 
 Only `cells_param_size`, where a run calls a Cell with arguments beyond those the sample reached (every SEC
 model's `spec_sec.py` does). Everything else is chosen from the sample's types and the declared or sampled
-ranges; `integer_checks: "unchecked"` is an opt-out, not a requirement.
+ranges.
 
 ## Removed from the trial cut
 
 The typed item locals, the native divisibility test (+0.7% on MYGA, -0.1% on SPIA without it), the
-`auto` integer mode with its sample-magnitude switch, and the two cache-sizing rules that read the sample's
+`auto` and `unchecked` integer modes with the sample-magnitude switch, and the two cache-sizing rules that read the sample's
 call counts (and the tracer's per-receiver counting).
