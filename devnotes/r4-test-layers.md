@@ -63,6 +63,7 @@ with the same 8 skips. The counts above are the current tree, after the merges l
 | `review/r4-rest-b` | ea67e1d | `helper_contracts/test_native_rounding_provider.py` (the round memo provider, deleted), `test_provider_manifest.py` and `compiled/test_native_object_provider.py` with its twin and collect half (object providers, deleted). `test_removed_private_lookup_spec_key` was in the deleted file but checks a collect spec key that `serial_collect.py` still refuses: it moved unchanged to `compiled/test_private_lookup_roots_collect.py` | `compiled/test_private_lookup_roots*.py`: the memo probe is dropped, the value checks on both routes stay (applied to the collect file and to its direct-route twin). `compiled/test_native_builtin_math.py`: the guarded round in place of the memo operation. `compiled/test_native_typed_extrema.py`, `compiled/test_native_builtins_w18.py` (and its `_b2` file), `test_ordered_arguments.py`: min/max in object-result Cells is the built-in call again, so they assert the built-in in the report instead of the C comparison; value checks kept | `compiled/test_round_threads.py`, `compiled/test_export_without_collect_protocol.py`, `compiled/test_import_without_compiler.py`, `compiled/test_math_in_nested_scopes.py` (all P1) |
 | `review/r4-table-forms-b` | 3732197 | `integration_tests/test_prepared_zip_prefix.py`: the zip spelling it tested is removed | `integration_tests/test_table_probe.py`: an asof or searchsorted inside the key of a lowered read is now the formula's own pandas call, so the check that native branches call no pandas skips those two calls only. `integration_tests/test_diag_kr_forms.py`: docstring (asof is no longer an integer key) | `integration_tests/forms_probe.py` (helper) and `test_forms_alias_edit`, `test_forms_hold_branch`, `test_forms_list_key`, `test_forms_own_frame`, `test_forms_scalar_type` (B4), `test_forms_view_keyerror` (B6); a case in `test_read_notes.py` (B7) |
 | `r4/w1-vectors` (after the marker: tuples only) | d89c23e | none | vector tests converted to tuple cells (15 compiled files, `test_vectors.py`, `test_diag_kr_forms.py`); `test_local_vectors_without_vector_cells.py`: D94 removed, it now asserts that no formula is lowered and no `F64Vec` appears, and the checks of lowered local vectors go with D94; `test_collect_direct_isolation.py`: `is` became `==` (Python gets a new equal tuple per call); `test_leading_vector_sum.py`: the fallback text is "vector used in Python code" (as the branch's notes `devnotes/w1-vectors-tuple-experiment.md` state) | `compiled/test_tuple_vectors.py` (B3) |
+| `review/r4-table-base-b` 2961ac2 (runtime only) | 2961ac2 | none | none | none: the zip and ordered-lookup runtime left unreachable by the table forms is removed from `_tables.pyx/.pxd` |
 
 The review documents of these branches (`devnotes/REVIEW-BRIEF.md`, `devnotes/review-reductions-a.md`,
 `devnotes/review-table-base-a.md`) were left out. The edits of the two reduction cases in `test_audit_contracts.py` were applied to `test_audit_contracts_b2.py`,
@@ -140,9 +141,9 @@ table while the first readers bind it on a new model, so collect is the subject.
 - `test_table_safety_net.py` and `test_table_fuzz.py` import `test_table_probe` (B6), so they are B6 as well.
 - `test_read_audit.py` and `test_read_audit_b7.py` are both B7 now (the split was made under the earlier meaning
   of B6 and B7); they can be joined again.
-- The runtime's ordered-lookup and zip helpers (`asof_row`, `asof_at`, `search`, `zip_*` in `_tables.pyx`) have no
-  compiled caller since the table-forms branch, and are listed as unused. The table-forms branch left them to the
-  runtime's owner.
+- The runtime's ordered-lookup and zip helpers that the table forms left without a caller were removed
+  with 2961ac2.
+
 - `integration_tests/conftest.py` and `modelx_cython/tests/conftest.py` set strict table lowering and the
   fuzz/stress markers. They are listed as P1 because the setting is harmless without tables.
 
@@ -385,8 +386,8 @@ is the shared wiring, and only the integrator resolves conflicts in it.
 | `modelx_cython/frame_reads.py` | shared: B4 ≈1189, B5 ≈307, B6 ≈975, B7 ≈188 | 2659 | by recogniser: L1/L4, the shared machinery and the numpy-scalar boxing of reads (B4); L2 row fields (B5); L3 prefixes, L5 extremes, L7 membership, L8 index walks, comprehensions, iterrows (B6); the read audit (`audit`, `audit_subtables`, `without_fallbacks`) (B7) |
 | `modelx_cython/holds.py` | shared: P1 ≈90, B4 ≈13 | 103 | `hold_table` (B4); the registry is P1 |
 | `modelx_cython/parser.py` | shared: P1 ≈660, collect ≈16 | 676 | `collect_cache_classes` (collect) |
-| `modelx_cython/runtime/_tables.pxd` | shared: B4 ≈231, B5 ≈15, B6 ≈49, unused ≈63 | 358 | declarations of the above |
-| `modelx_cython/runtime/_tables.pyx` | shared: B4 ≈530, B5 ≈40, B6 ≈110, unused ≈176 | 856 | preparation, binding and keyed reads (B4); `hold_row` (B5); `prefix_range`, views, extremes (B6); `asof_row`, `asof_at`, `search`, `position`, `zip_*`: no compiled caller since the table-forms branch (unused) |
+| `modelx_cython/runtime/_tables.pxd` | shared: B4 ≈231, B5 ≈15, B6 ≈106 | 352 | declarations of the above |
+| `modelx_cython/runtime/_tables.pyx` | shared: B4 ≈530, B5 ≈40, B6 ≈131 | 701 | preparation, binding and keyed reads (B4); `hold_row` (B5); `prefix_range`, views, extremes and the view walks `view_start`, `view_stop`, `position` (B6) |
 | `modelx_cython/table_cells.py` | shared: B3 ≈250, B4 ≈284 | 534 | `vector_cells` and the vector exits of `RenameMembers` (B3); table cells, frame binding and publication (B4) |
 | `modelx_cython/tracer.py` | shared: P1 ≈1010, collect ≈15, B1 ≈75, B3 ≈100, B4 ≈60 | 1260 | IntEnum value info and enum-argument widening (B1); vector shapes and their merge (B3); frame schema and read notes hooks (B4); collect-adapter filter (collect) |
 | `modelx_cython/transformer.py` | shared: P1 ≈1538, collect ≈80, B1 ≈10, B2 ≈22, B3 ≈50, B4 ≈97, B5 ≈70, B6 ≈63 | 1930 | shared wiring; table hooks `_table_reads*`, `_lower_frames`, `_pandas_reads` (B4), `_row_cells`, `_table_reads_with_row_fields` (B5), `_prefix_cells`, `_param_prefix_cells` (B6); reduction and vector passes in `_rewrite_powers`/`update_method`; collect hooks in `__init__`, `leave_Module`, `leave_ClassDef`; enum `prepare`/storage |
@@ -455,7 +456,7 @@ is the shared wiring, and only the integrator resolves conflicts in it.
 | B3 | 3146 |
 | B4 | 3156 |
 | B5 | 842 |
-| B6 | 1197 |
+| B6 | 1275 |
 | B7 | 705 |
-| unused | 239 |
-| total | 26618 |
+| unused | 0 |
+| total | 26457 |
