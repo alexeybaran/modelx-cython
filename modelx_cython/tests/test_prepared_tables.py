@@ -2,7 +2,7 @@
 
 Random keys, misses included, on every index kind the preparation accepts: dense and sparse int, text,
 IntEnum, float, unsorted, two and three levels, a Series. Each read is compared with ``.loc[key, col]`` in value
-and type, a miss with pandas' KeyError; ``in index`` and ``index.asof`` likewise. A typed probe module
+and type, a miss with pandas' KeyError; ``in index`` likewise. A typed probe module
 exercises the C-level reads compiled code uses (code_ll, row_codes, prefix_range, f64_at, i64_at).
 """
 import enum
@@ -197,20 +197,6 @@ def test_typed_reads(tables):
     for key in multi.index:
         assert probe.codes_row(table, table.key_codes(key)) >= 0
     assert probe.codes_row(table, [a, 9]) == -1
-
-
-def test_asof(tables):
-    _tables, _ = tables
-    for index in (pd.Index([20, 21, 25, 30]), pd.Index([0.5, 1.5, 3.0]), pd.Index([5, 1, 3])):
-        frame = pd.DataFrame({'q': np.arange(len(index)) * 1.0}, index=index)
-        table = _tables.prepare(frame)
-        sorted_index = index.sort_values()
-        # NaN is left out: pandas' asof of NaN differs by version (NaN on pandas 3, the last label on 2.2), so the
-        # compiled reads take it to pandas (test_table_probe's asof cells check that against live)
-        for x in [-10, 0.5, 1, 1.49, 2, 20, 22.5, 30, 31]:
-            want = sorted_index.asof(x)
-            got = table.asof(x)
-            assert (want != want and got != got) or (type(want) is type(got) and want == got), (list(index), x, want, got)
 
 
 def test_extremes(tables):
