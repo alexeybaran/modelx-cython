@@ -45,6 +45,35 @@ def has_reduction_contract(formula, refs, builtin_reductions=frozenset()):
                for node in lexical_nodes(formula.body.body))
 
 
+def _int64_literals(node):
+    """A literal tuple whose every element is an integer literal (or its negation) within 64 bits."""
+    def value(item):
+        if isinstance(item, cst.UnaryOperation) and isinstance(item.operator, cst.Minus):
+            inner = value(item.expression)
+            return None if inner is None else -inner
+        return int(item.value, 0) if isinstance(item, cst.Integer) else None
+    values = [value(e.value) if isinstance(e, cst.Element) else None for e in getattr(node, 'elements', ())]
+    return (isinstance(node, cst.Tuple) and bool(values)
+            and all(v is not None and -(1 << 63) <= v < (1 << 63) for v in values)) and values
+
+
+def _literal_loop(node):
+    """The iterable a C integer loop takes over a literal tuple of integers: a range when consecutive."""
+    values = _int64_literals(node)
+    consecutive = values == list(range(values[0], values[0] + len(values))) and values[-1] < (1 << 63) - 1
+    return f'range({values[0]}, {values[0] + len(values)})' if consecutive else code(node)
+
+
+def _in_arithmetic(name, tree):
+    """Whether ``name`` is an operand of arithmetic, ``abs`` or ``pow`` in ``tree``: as a C integer it could overflow
+    where live's Python integer does not."""
+    operand = lambda node: isinstance(node, cst.Name) and node.value == name
+    return any(isinstance(n, cst.BinaryOperation) and (operand(n.left) or operand(n.right))
+               or isinstance(n, cst.UnaryOperation) and operand(n.expression)
+               or isinstance(n, cst.Call) and isinstance(n.func, cst.Name) and n.func.value in ('abs', 'pow')
+               and any(operand(arg.value) for arg in n.args) for n in walk(tree))
+
+
 def _one_iterable(call):
     """``R(iterable)`` (and ``sum(iterable, start)``): the built-in reduction form (W1.4)."""
     if not call.args or any(arg.star for arg in call.args) or call.args[0].keyword is not None:
@@ -350,11 +379,7 @@ class GeneralReductions:
             return True
         if isinstance(node, cst.UnaryOperation) and isinstance(node.operator, cst.Minus):
             return isinstance(node.expression, (cst.Integer, cst.Float))
-        if isinstance(node, cst.Name) and node.value in ('True', 'False', 'None'):
-            return True
-        return (isinstance(node, cst.Attribute) and isinstance(node.value, cst.Attribute)
-                and isinstance(node.value.value, cst.Name) and node.value.value.value == 'self'
-                and (self.cls_info.name, node.value.attr.value, node.attr.value) in self.enum_symbols)
+        return isinstance(node, cst.Name) and node.value in ('True', 'False', 'None')
 
     def tuple_temps(self, values, lines, mapping, level):
         """Evaluate a literal tuple's elements in order; constants are substituted."""
@@ -759,7 +784,7 @@ def _evaluation_order(node):
 
 class NativeReductions(GeneralReductions, FormulaTransformer):
     def __init__(self, cls_info, cells, providers, formula, reserve_fallback, builtin_bounds,
-                 builtin_reductions=frozenset(), enum_symbols=None, formula_kinds=None):
+                 builtin_reductions=frozenset(), formula_kinds=None):
         super().__init__()
         # diag-jp: kinds of the formula's own locals (powers.formula_local_kinds), for names no
         # comprehension in the formula binds; a term `pols_lapse(s) * (1.0 - rho) ** k` with
@@ -772,7 +797,6 @@ class NativeReductions(GeneralReductions, FormulaTransformer):
         self.formula, self.reserve_fallback = formula, reserve_fallback
         self.builtin_bounds = builtin_bounds
         self.builtin_reductions = builtin_reductions
-        self.enum_symbols = enum_symbols or {}
         self.fallbacks, self.exact_receiver_guards, self.count = [], set(), 0
         self.general_count, self.general_done, self.general_declined = 0, set(), {}
         self.general_sites, self.general_lines = [], None
@@ -806,50 +830,6 @@ class NativeReductions(GeneralReductions, FormulaTransformer):
     @cached_property
     def body_facts(self):
         return CstFacts(self.formula.body.body)
-
-    def enum_range(self, tree):
-        """Use a native range for a declared enum tuple feeding a typed Cell argument."""
-        part = tree.for_in
-        if (not self.enum_symbols or not self.cells.formula_allows_exact_receiver
-                or part.inner_for_in or part.ifs or part.asynchronous
-                or not isinstance(part.target, cst.Name) or not isinstance(part.iter, cst.Tuple)
-                or not part.iter.elements):
-            return None
-        operands = arguments(tree.elt)
-        if (operands is None or not isinstance(tree.elt.func, cst.Attribute)
-                or not isinstance(tree.elt.func.value, cst.Name) or tree.elt.func.value.value != 'self'):
-            return None
-        cell = self.cls_info.cells.get(tree.elt.func.attr.value)
-        if cell is None or cell.called_with_kwargs or cell.body_has_closure or len(operands) != len(cell.params):
-            return None
-        name = part.target.value
-        positions = [index for index, operand in enumerate(operands) if name in CstFacts(operand).reads]
-        if len(positions) != 1:
-            return None
-        index, = positions
-        if (not isinstance(operands[index], cst.Name) or operands[index].value != name
-                or cell.get_argtype_expr(cell.params[index], c_style=True) != 'long long'):
-            return None
-        values = []
-        owner = None
-        for element in part.iter.elements:
-            if not isinstance(element, cst.Element):
-                return None
-            member = element.value
-            if (not isinstance(member, cst.Attribute) or not isinstance(member.value, cst.Attribute)
-                    or not isinstance(member.value.value, cst.Name) or member.value.value.value != 'self'):
-                return None
-            ref = member.value.attr.value
-            entry = self.enum_symbols.get((self.cls_info.name, ref, member.attr.value))
-            if entry is None or owner is not None and ref != owner:
-                return None
-            owner = ref
-            values.append(entry[1])
-        start = values[0]
-        if all(value == start + index for index, value in enumerate(values)):
-            bounds = str(len(values)) if start == 0 else f'{start}, {start + len(values)}'
-            return cst.parse_expression(f'range({bounds})')
-        return None
 
     def double_expression(self, node):
         if isinstance(node, cst.Float):
@@ -1162,10 +1142,6 @@ return {fallback}
             # Ordinary sum keeps integer/mixed/object semantics. Only an existing
             # double return boundary may normalize empty integer zero to double.
             return after
-        original_tree = tree
-        enum_range = self.enum_range(tree)
-        if enum_range is not None:
-            tree = tree.with_changes(for_in=tree.for_in.with_changes(iter=enum_range))
         capture = self.captures.get(id(before))
         if capture == 'range':
             return after
@@ -1191,8 +1167,9 @@ return {fallback}
                 kind = (self.kind(iterator.elements[0].value, local_types)
                         if len(iterator.elements) == 1 else None)
                 # Literal domains need no sampled category schema or size limit.
-                # Keep literal objects intact: even a homogeneous numeric domain
-                # can flow into an object-argument Cell. No new loop coercion.
+                # Integer literals within 64 bits loop as a C long long (over a range when
+                # consecutive; an object argument gets an equal int). Other
+                # literal objects stay intact: no new loop coercion.
                 if kind is None:
                     try:
                         values = [literal_value(element.value) for element in iterator.elements]
@@ -1200,7 +1177,7 @@ return {fallback}
                         return after
                     if not all(type(value) in (int, float, bool, str, type(None)) for value in values):
                         return after
-                    kind = 'object'
+                    kind = 'longlong' if _int64_literals(iterator) and not _in_arithmetic(name, tree) else 'object'
                 local_types[name] = kind
             else:
                 return after
@@ -1211,7 +1188,7 @@ return {fallback}
         alias, prefix = module_name(provider), self.reserve_prefix()
         count = len(self.fallbacks)
         function, binding = self.callable_name(func, prefix)
-        fallback = self.cold_fallback(source, original_tree, capture, function)
+        fallback = self.cold_fallback(source, tree, capture, function)
         if len(self.fallbacks) == count:
             return after
         # Iterator/capture names must not alias the accumulator or call-layout
@@ -1231,8 +1208,6 @@ return {fallback}
         declarations = [f'{prefix}_state: {alias}.F64Sum']
         declarations += [f'{renamed[name]}: _mx_cy.{kind}' for name, kind in local_types.items()]
         guard = f'{alias}.f64_accepts({function})'
-        if enum_range is not None:
-            guard += f' and {exact_receiver(self.cls_info.name)}'
         lines = declarations + [binding] * bool(binding) + [f'if {guard}:',
                                f'    {alias}.f64_init(_mx_cy.address({prefix}_state))']
         if capture is not None:
@@ -1250,6 +1225,8 @@ return {fallback}
             # Keep that evaluation outside the PEP479 boundary as well.
             lines.append(f'    {outer.target.value} = ({code(outer.iter.elements[0].value)})')
             outer_iterator = None
+        elif _int64_literals(outer.iter):
+            outer_iterator = _literal_loop(outer.iter)      # evaluates nothing
         else:
             lines.append(f'    {prefix}_iterable: object = {code(outer.iter)}')
             outer_iterator = f'{prefix}_iterable'
@@ -1264,7 +1241,8 @@ return {fallback}
             elif isinstance(part.iter, cst.Tuple) and len(part.iter.elements) == 1:
                 lines.append(indent + f'{part.target.value} = ({code(part.iter.elements[0].value)})')
             else:
-                lines.append(indent + f'for {part.target.value} in {code(part.iter)}:')
+                iterable = _literal_loop(part.iter) if _int64_literals(part.iter) else code(part.iter)
+                lines.append(indent + f'for {part.target.value} in {iterable}:')
                 indent += '    '
             for condition in part.ifs:
                 lines.append(indent + f'if ({code(condition.test)}):')
