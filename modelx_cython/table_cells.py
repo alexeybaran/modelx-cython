@@ -219,6 +219,19 @@ def _statements(text, config):
     return cst.parse_module(text, config=config).body
 
 
+def _renew_on_new_model(cls_info, init, config):
+    """In a Space class without items of a model that reads frames: its ``__init__``, when the Space is a top-level
+    Space of a new model (its parent is the model), starts a new generation of prepared tables (runtime
+    ``table_cells.new_model``)."""
+    params = [p.name.value for p in init.params.params]
+    if (cls_info.name in cls_info.visitor.itemspace_classes or params[:2] != ['self', 'parent']
+            or not any(frame_cell(c, cells) for c in cls_info.module.classes.values()
+                       for cells in table_cells(c).values())):
+        return init
+    hook = _statements(f'if parent is self._model:\n    {RUNTIME}.new_model(self)\n', config)
+    return init.with_changes(body=init.body.with_changes(body=(*init.body.body, *hook)))
+
+
 def rewrite_class(cls_info, node, config, integer_refs):
     """Add the members described in the module docstring to a generated Space class."""
     mapping = module_renames(cls_info.module)[cls_info.name]
@@ -247,6 +260,7 @@ def rewrite_class(cls_info, node, config, integer_refs):
                     for small in line.body:
                         if isinstance(small, cst.Assign) and isinstance(small.targets[0].target, cst.Attribute):
                             init_names.add(small.targets[0].target.attr.value)
+                statement = _renew_on_new_model(cls_info, statement, config)
         body.append(statement)
 
     lines = []
