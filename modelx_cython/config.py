@@ -42,6 +42,8 @@ class CompilerPolicy:
     native_cache_hits: str
     # '# cython: infer_types=True' on generated model modules (spec key infer_types, default on).
     infer_types: bool = True
+    # the default number of worker threads of a compiled collect() (collect.py)
+    collect_workers: int = 1
     @classmethod
     def resolve(cls, data):
         automatic = data.get('automatic_optimizations', True)
@@ -51,10 +53,13 @@ class CompilerPolicy:
             dense_miss_binding=miss, dense_one_axis=data.get('dense_one_axis', automatic),
             propagate_exact_receiver=data.get('propagate_exact_receiver', automatic and miss),
             native_cache_hits=data.get('native_cache_hits', 'auto' if automatic and miss else 'none'),
-            infer_types=data.get('infer_types', True))
+            infer_types=data.get('infer_types', True),
+            collect_workers=data.get('collect_workers', 1))
         for name, value in values.items():
-            if name != 'native_cache_hits' and type(value) is not bool:
+            if name not in ('native_cache_hits', 'collect_workers') and type(value) is not bool:
                 raise ValueError(f'{name} must be a boolean')
+        if type(values['collect_workers']) is not int or values['collect_workers'] < 1:
+            raise ValueError('collect_workers must be a positive integer')
         if type(values['native_cache_hits']) is not str or values['native_cache_hits'] not in (
                 'none', 'scalar', 'dense', 'both', 'auto'):
             raise ValueError('native_cache_hits must be none, scalar, dense, both or auto')
@@ -85,6 +90,9 @@ class TransSpec:
       tuple; a single-name key bounds that parameter's axis of every
       cached Cell in scope whose parameter tuple has no tuple entry.
     * ``"cells"``: dict mapping cells names to per-cells dicts.
+    * ``"collect_workers"`` (model level, default 1): the worker threads of a
+      compiled ``collect()``; ``_mx_collect_workers`` set on the compiled model
+      object overrides it. See :mod:`modelx_cython.collect`.
     * ``"cells_params"`` (deprecated): older form of
       ``"cells_param_size"``; maps a parameter name (or tuple) to a
       dict with a ``"size"`` key.  Consulted only when
