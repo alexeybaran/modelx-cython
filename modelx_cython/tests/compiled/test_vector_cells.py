@@ -1,7 +1,8 @@
-"""Vector cells (W1.6): lists of floats and integers compiled to typed buffers.
+"""Vector cells (W1.6): tuples of floats and integers built as sequences compiled to typed buffers.
 
 One model covers every lowered form; the exported (Python) model and the compiled one must
 agree exactly, value by value and bit by bit, and the compiled values must be typed vectors.
+A cell returning a list (``listed``) is a Python object, equal to live, its cached list shared as live's.
 """
 import subprocess
 import sys
@@ -11,8 +12,9 @@ import modelx as mx
 FORMULAS = {
     "size": "def size(t):\n    return 5 + t % 4\n",
     "rate": "def rate(t):\n    return 0.01 * (t + 1) + 1e-17 * t\n",
-    "factors": "def factors():\n    return [0.5, 0.75, 1.0, 1.25, 1.5, 2.0]\n",
-    "ids": "def ids(t):\n    out = []\n    for k in range(size(t)):\n        if k % 2 == 0:\n            out.append(k * 3 + t)\n    return out\n",
+    "factors": "def factors():\n    return tuple([0.5, 0.75, 1.0, 1.25, 1.5, 2.0])\n",
+    "ids": ("def ids(t):\n    out = []\n    for k in range(size(t)):\n        if k % 2 == 0:\n"
+            "            out.append(k * 3 + t)\n    return tuple(out)\n"),
     "cohorts": '''def cohorts(t):
     n = size(t)
     pols = [0.0] * n
@@ -20,7 +22,7 @@ FORMULAS = {
     if t <= 0:
         pols[0] = 1.0
         val[0] = 2.0
-        return (pols, val)
+        return (tuple(pols), tuple(val))
     ppols, pval = cohorts(t - 1)
     q = factors()
     for i in range(min(len(ppols), n - 1)):
@@ -33,9 +35,9 @@ FORMULAS = {
         val[i + 1] = pval[i] * keep * step
     pols[0] = rate(t - 1)
     val[0] = pols[0] * 3.0
-    return (pols, val)
+    return (tuple(pols), tuple(val))
 ''',
-    "powered": "def powered(t):\n    q = rate(t)\n    return [1.0 - (1.0 - q * f) ** (1.0 / 12.0) for f in factors()]\n",
+    "powered": "def powered(t):\n    q = rate(t)\n    return tuple(1.0 - (1.0 - q * f) ** (1.0 / 12.0) for f in factors())\n",
     "shifted": '''def shifted(t):
     v = cohorts(t)[0]
     n = len(v)
@@ -43,11 +45,11 @@ FORMULAS = {
     for z in range(1, n):
         out[z] = v[z - 1] * 0.5
     out[0] += 1.0
-    return out
+    return tuple(out)
 ''',
-    "zipped": "def zipped(t):\n    a, b = cohorts(t)\n    return [x * y for x, y in zip(a, b)]\n",
-    "ranged": "def ranged(t):\n    zs = range(1, size(t) + 1)\n    return [z * 0.25 for z in zs]\n",
-    "sliced": "def sliced(t):\n    v = cohorts(t)[1]\n    head = v[1:4]\n    return head\n",
+    "zipped": "def zipped(t):\n    a, b = cohorts(t)\n    return tuple(x * y for x, y in zip(a, b))\n",
+    "ranged": "def ranged(t):\n    zs = range(1, size(t) + 1)\n    return tuple(z * 0.25 for z in zs)\n",
+    "sliced": "def sliced(t):\n    v = cohorts(t)[1]\n    head = v[1:4]\n    return tuple(head)\n",
     "total": "def total(t):\n    return sum(cohorts(t)[0])\n",
     "part": "def part(t):\n    v = cohorts(t)[1]\n    return sum(v[2:]) + sum(v[:-1]) + sum(v[1:3])\n",
     "filtered": "def filtered(t):\n    a, b = cohorts(t)\n    return sum(x * y for x, y in zip(a, b) if x > 0.05)\n",
@@ -70,7 +72,7 @@ FORMULAS = {
     return 0.0
 """,
     "fallback": "def fallback(t):\n    v = shifted(t)\n    return max(v) + len([x for x in v if x > 0.1]) + sum(v[::2])\n",
-    "values": "def values():\n    return [float(k) * 0.1 for k in range(1, 9)]\n",
+    "values": "def values():\n    return tuple(float(k) * 0.1 for k in range(1, 9))\n",
     "noise": '''def noise(k):
     out = [0.0] * 200
     x = 0.123456789 + k
@@ -78,7 +80,7 @@ FORMULAS = {
         x = (x * 3.9) % 1.0
         out[i] = (x - 0.5) * 10.0 ** ((i % 31) - 15)
     out[7] = -0.0
-    return out
+    return tuple(out)
 ''',
     "noise_sum": "def noise_sum(k):\n    return sum(noise(k)) + sum(noise(k)[k:k + 50])\n",
     "listed": "def listed(t):\n    return [rate(t), float(t)]\n",
@@ -133,12 +135,12 @@ for t in range(-1, 9):
 
 for name, kind in VECTORS.items():
     value = getattr(c, name)(3)
-    parts = value if isinstance(value, tuple) else (value,)
+    parts = value if name == 'cohorts' else (value,)     # a tuple of vectors, or one vector
     assert all(type(p).__name__ == kind for p in parts), (name, type(value))
     for p in parts:
         assert pickle.loads(pickle.dumps(p)) == p
-        assert list(p) == p and len(p) == len(list(p))      # D154: a list (never equal to a tuple)
-assert type(c.listed(2)).__name__ == 'list' and c.listed(2) == [o.rate(2), 2.0]
+        assert tuple(p) == p and len(p) == len(list(p))     # D154: a tuple, as live
+assert type(c.listed(2)).__name__ == 'list' and c.listed(2) == [o.rate(2), 2.0]    # a list cell: a Python list
 
 for k in range(-3, 3):
     assert bits(o.checked(k)) == bits(c.checked(k)), k
@@ -170,18 +172,13 @@ for th in threads:
     th.join()
 assert not errors
 
-# D154: a Python caller gets new lists; changing them never reaches the cache
+# D154: a Python caller gets equal tuples (of tuples); a list cell's cached list is shared, as live's
 mine = c.cohorts(6)
-assert type(mine) is tuple and all(type(part) is list for part in mine)
-again = c.cohorts(6)
-assert all(a == b and a is not b for a, b in zip(mine, again))     # each inner list is fresh
-before = [list(part) for part in mine]
-mine[1][0] = 1.0
-mine[0].append(2.0)
-assert [list(part) for part in c.cohorts(6)] == before
-single = c.listed(2)
-single[0] = -1.0
-assert c.listed(2) == [o.rate(2), 2.0]
+assert type(mine) is tuple and all(type(part) is tuple for part in mine) and mine == c.cohorts(6)
+for model in (o, c):
+    single = model.listed(2)
+    single[0] = -1.0
+    assert model.listed(2) == [-1.0, 2.0]
 print('vector cells ok')
 """
 
@@ -223,23 +220,28 @@ def test_vector_cells_compile_to_typed_buffers(tmp_path):
     assert reports["cohorts"]["bounds_hoisted"] == 4
     assert reports["cohorts"]["derived_index_locals"] == ["cy"]
     assert reports["fallback"]["fallbacks"], reports["fallback"]
-    # D154: Python callers get lists (a tuple of lists for a tuple of vectors)
-    vectors = {"cohorts": "list", "powered": "list", "shifted": "list", "zipped": "list",
-               "ranged": "list", "sliced": "list", "ids": "list", "listed": "list"}
+    assert "shape" not in reports.get("listed", {}) or not reports["listed"]["shape"]     # a list: no vector
+    # D154: Python callers get tuples (a tuple of tuples for a tuple of vectors)
+    vectors = {"cohorts": "tuple", "powered": "tuple", "shifted": "tuple", "zipped": "tuple",
+               "ranged": "tuple", "sliced": "tuple", "ids": "tuple"}
     (tmp_path / "check.py").write_text(CHECK.format(names=names, vectors=vectors), encoding="utf-8")
     result = subprocess.run([sys.executable, "check.py"], cwd=tmp_path, check=True,
                             capture_output=True, text=True)
     assert "vector cells ok" in result.stdout
 
 
-def test_write_to_a_cached_vector_is_a_build_error(tmp_path):
+def test_write_to_a_cached_vector_raises_as_live(tmp_path):
+    # a cached vector is a tuple: live raises TypeError, so does compiled (the build used to stop)
     _build(tmp_path, {
-        "vec": "def vec(t):\n    return [1.0, 2.0, float(t)]\n",
+        "vec": "def vec(t):\n    return (1.0, 2.0) + tuple([float(t)])\n",
         "reader": "def reader(t):\n    v = vec(t)\n    v[0] = 5.0\n    return v[0]\n",
     })
     (tmp_path / "sample.py").write_text(
         "from exported import mx_model\nmx_model.Projection.vec(1)\n", encoding="utf-8")
-    result = subprocess.run([sys.executable, "-m", "modelx_cython", "exported", "--no-spec"],
-                            cwd=tmp_path, capture_output=True, text=True)
-    assert result.returncode != 0
-    assert "VectorWriteError" in result.stderr and "did not allocate" in result.stderr
+    subprocess.run([sys.executable, "-m", "modelx_cython", "exported", "--no-spec"], cwd=tmp_path, check=True)
+    probe = ("import sys\nfrom importlib import import_module\nm = import_module(sys.argv[1]).mx_model\n"
+             "try:\n    m.Projection.reader(1)\nexcept TypeError:\n    print('TypeError', m.Projection.vec(1))\n")
+    (tmp_path / "probe.py").write_text(probe, encoding="utf-8")
+    out = [subprocess.run([sys.executable, "probe.py", package], cwd=tmp_path, check=True, capture_output=True,
+                          text=True).stdout for package in ("exported", "exported_cy")]
+    assert out[0] == out[1] == "TypeError (1.0, 2.0, 1.0)\n", out

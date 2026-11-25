@@ -14,8 +14,8 @@ import modelx as mx
 FORMULAS = {
     "limit": "def limit():\n    return 60\n",
     "floor": "def floor():\n    return 5.0\n",
-    "days": "def days(band):\n    return [2, 8, 20, 45 + band, 160 - band]\n",
-    "probs": "def probs(band):\n    return [0.3 - 0.01 * band, 0.25, 0.2, 0.15, 0.1 + 0.01 * band]\n",
+    "days": "def days(band):\n    return tuple([2, 8, 20, 45 + band, 160 - band])\n",
+    "probs": "def probs(band):\n    return tuple([0.3 - 0.01 * band, 0.25, 0.2, 0.15, 0.1 + 0.01 * band])\n",
     # lowered: a float times a mixed min/max is a float
     "capped": "def capped(t):\n    b = t % 3\n    return sum(p * min(g, limit()) for g, p in zip(days(b), probs(b)))\n",
     "floored": ("def floored(t):\n    b = t % 3\n    f = floor()\n"
@@ -28,20 +28,20 @@ FORMULAS = {
     "mixed": "def mixed(t):\n    b = t % 3\n    return sum(max(floor(), g) for g, p in zip(days(b), probs(b)))\n",
     "ints": "def ints(t):\n    return sum(min(g, limit()) for g in days(t % 3))\n",
     # ties and signed zeros: Python returns the first of equal arguments; elementwise, bit by bit
-    "zeros": "def zeros(band):\n    return [0.0, -0.0, 0.0, -0.0, 1.5]\n",
-    "nzeros": "def nzeros(band):\n    return [-0.0, 0.0, 0.0, -0.0, 1.5]\n",
-    "fives": "def fives(band):\n    return [5, 4, 6, 5, 2 + band]\n",
-    "days2": "def days2(band):\n    return [2, 9, 20, 44, 160 - band]\n",
-    "tie_ff": "def tie_ff(t):\n    return [max(a, b) * 1.0 for a, b in zip(zeros(t % 3), nzeros(t % 3))]\n",
-    "tie_ff_min": "def tie_ff_min(t):\n    return [min(a, b) * 1.0 for a, b in zip(zeros(t % 3), nzeros(t % 3))]\n",
-    "tie_ii": "def tie_ii(t):\n    return [min(g, h) * 1.0 for g, h in zip(days(t % 3), days2(t % 3))]\n",
-    "tie_if": "def tie_if(t):\n    return [max(5.0, g) * 1.0 + max(g, 5.0) * 0.5 for g in fives(t % 3)]\n",
+    "zeros": "def zeros(band):\n    return tuple([0.0, -0.0, 0.0, -0.0, 1.5])\n",
+    "nzeros": "def nzeros(band):\n    return tuple([-0.0, 0.0, 0.0, -0.0, 1.5])\n",
+    "fives": "def fives(band):\n    return tuple([5, 4, 6, 5, 2 + band])\n",
+    "days2": "def days2(band):\n    return tuple([2, 9, 20, 44, 160 - band])\n",
+    "tie_ff": "def tie_ff(t):\n    return tuple([max(a, b) * 1.0 for a, b in zip(zeros(t % 3), nzeros(t % 3))])\n",
+    "tie_ff_min": "def tie_ff_min(t):\n    return tuple([min(a, b) * 1.0 for a, b in zip(zeros(t % 3), nzeros(t % 3))])\n",
+    "tie_ii": "def tie_ii(t):\n    return tuple([min(g, h) * 1.0 for g, h in zip(days(t % 3), days2(t % 3))])\n",
+    "tie_if": "def tie_if(t):\n    return tuple([max(5.0, g) * 1.0 + max(g, 5.0) * 0.5 for g in fives(t % 3)])\n",
     "tie_zero": ("def tie_zero(t):\n"
-                 "    return [max(0, z) * -1.0 + max(z, 0) * -1.0 for z in zeros(t % 3)]\n"),
+                 "    return tuple([max(0, z) * -1.0 + max(z, 0) * -1.0 for z in zeros(t % 3)])\n"),
     "sum_ff": "def sum_ff(t):\n    return sum(max(a, b) * 1.0 for a, b in zip(zeros(t % 3), nzeros(t % 3)))\n",
     # vector cells with two and three integer parameters
-    "pairs": "def pairs(t, g):\n    q = 0.001 * (t + 1) * g\n    return [q, 1.0 - q, float(g)]\n",
-    "triple": "def triple(t, g, z):\n    return [0.5 * t + g, float(z), 1e-17 * (t * g * z)]\n",
+    "pairs": "def pairs(t, g):\n    q = 0.001 * (t + 1) * g\n    return tuple([q, 1.0 - q, float(g)])\n",
+    "triple": "def triple(t, g, z):\n    return tuple([0.5 * t + g, float(z), 1e-17 * (t * g * z)])\n",
     "reader": ("def reader(t, g):\n    if t <= 0:\n        return pairs(t, g)[1]\n"
                "    p = pairs(t - 1, g)\n    return reader(t - 1, g) * p[1] + p[0] * pairs(t, g)[2]\n"),
     "reader3": "def reader3(t):\n    return sum(triple(t, g, z)[0] + triple(t, g, z)[2] for g in range(1, 4) for z in range(2))\n",
@@ -73,8 +73,8 @@ def bits(value):
         return ('f', value.hex())
     if isinstance(value, int):
         return ('i', value)
-    if type(value).__name__ in ('list', 'F64Vec', 'I64Vec'):
-        return ('v',) + tuple(bits(v) for v in value)
+    if type(value).__name__ in ('list', 'tuple', 'F64Vec', 'I64Vec'):
+        return (type(value).__name__,) + tuple(bits(v) for v in value)
     return ('r', repr(value))
 
 
@@ -89,8 +89,8 @@ for repeat in range(2):          # the second pass reads the caches
             assert bits(o.pairs(t, g)) == bits(c.pairs(t, g)), (t, g)
             for z in range(2):
                 assert bits(o.triple(t, g, z)) == bits(c.triple(t, g, z)), (t, g, z)
-assert type(c.pairs(3, 2)).__name__ == 'list' and type(c.triple(3, 2, 1)).__name__ == 'list'
-# D154: a new list per Python call, equal values; the cache itself is the compiled entry's value
+assert type(c.pairs(3, 2)).__name__ == 'tuple' and type(c.triple(3, 2, 1)).__name__ == 'tuple'
+# D154: a new tuple per Python call, equal values; the cache itself is the compiled entry's value
 assert c.pairs(3, 2) == c.pairs(3, 2) and c.pairs(3, 2) is not c.pairs(3, 2)
 assert c._mx_cell_pairs(3, 2) is c._mx_cell_pairs(3, 2)      # cached, not rebuilt
 assert type(o.mixed(1)) is type(c.mixed(1)) is float and type(c.ints(1)) is int

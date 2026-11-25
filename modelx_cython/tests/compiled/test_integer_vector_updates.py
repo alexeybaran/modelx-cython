@@ -6,10 +6,10 @@ from vector_live import build, live_and_compiled
 FORMULAS = {
     'rate': 'def rate(t):\n    return 0.25 * t\n',
     'halves': 'def halves(t):\n    v = [0] * 3\n    v[0] += 0.5\n    v[1] = t\n    return v[0] + v[1] + sum(v)\n',
-    'divided': 'def divided(t):\n    v = [t] * 3\n    v[2] /= 2\n    return v\n',
+    'divided': 'def divided(t):\n    v = [t] * 3\n    v[2] /= 2\n    return tuple(v)\n',
     'scaled': ('def scaled(t):\n    v = []\n    for i in range(3):\n        v.append(i + t)\n    v[1] *= rate(t)\n'
                '    return sum(v) * 1.0\n'),
-    'kept': 'def kept(t):\n    v = [1] * 3\n    v[0] += t\n    return v\n',
+    'kept': 'def kept(t):\n    v = [1] * 3\n    v[0] += t\n    return tuple(v)\n',
 }
 
 

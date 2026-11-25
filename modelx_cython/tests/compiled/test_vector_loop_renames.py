@@ -6,12 +6,12 @@ import math
 from vector_live import build, live_and_compiled
 
 FORMULAS = {
-    'iv': 'def iv(t):\n    return [t, t + 1, t + 2]\n',
-    'fv': 'def fv(t):\n    return [0.5 * t, 1.5]\n',
+    'iv': 'def iv(t):\n    return tuple([t, t + 1, t + 2])\n',
+    'fv': 'def fv(t):\n    return tuple([0.5 * t, 1.5])\n',
     'w': 'def w(t, s=0):\n    return 0.25 * t + s\n',
     'summed': 'def summed(t):\n    return sum(w(t, s=s) for s in iv(t)) + 0.0\n',
-    'listed': 'def listed(t):\n    return [w(t, s=s) for s in iv(t)]\n',
-    'attribute': 'def attribute(t):\n    return [math.e * e for e in fv(t)]\n',
+    'listed': 'def listed(t):\n    return tuple(w(t, s=s) for s in iv(t))\n',
+    'attribute': 'def attribute(t):\n    return tuple(math.e * e for e in fv(t))\n',
 }
 NAMES = ['summed', 'listed', 'attribute']
 

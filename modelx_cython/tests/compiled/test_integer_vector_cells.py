@@ -1,4 +1,4 @@
-"""D81 (diag-vec): a cell returning a list of integers built by comprehension (or an empty list) is an
+"""D81 (diag-vec): a cell returning a tuple of integers built from a generator (or the empty tuple) is an
 integer vector (I64Vec) on the dense vector cache; iteration, filtered generator sums, len, index and the
 empty vector are lowered and equal the exported model. Integer results keep exact integer values and
 type; a float sum over an empty vector is 0.0 compiled where Python gives int 0 (D24(2)): equal as a number.
@@ -10,8 +10,8 @@ import sys
 import modelx as mx
 
 FORMULAS = {
-    "entries": ("def entries(t):\n    if t % 3 == 0:\n        return []\n"
-                "    return [s for s in range(t % 5 + 1)]\n"),
+    "entries": ("def entries(t):\n    if t % 3 == 0:\n        return ()\n"
+                "    return tuple(s for s in range(t % 5 + 1))\n"),
     "w": "def w(t, s):\n    return 0.1 * (s + 1) + 0.01 * t\n",
     "total": "def total(t):\n    return sum(w(t, s) for s in entries(t))\n",
     "filt": "def filt(t):\n    return sum(w(t, s) * 2.0 for s in entries(t) if w(t, s) > 0.25)\n",
@@ -38,7 +38,7 @@ o, c = original.Projection, compiled.Projection
 empty_float = 0
 for t in range(0, 12):
     v = c.entries(t)
-    assert type(v).__name__ == 'list' and list(v) == o.entries(t) and v == o.entries(t), t     # D154
+    assert type(v).__name__ == 'tuple' and v == o.entries(t), t     # D154
     assert all(type(x) is int for x in v), t
     for name in {names!r}:
         a, b = getattr(o, name)(t), getattr(c, name)(t)
@@ -50,13 +50,9 @@ for t in range(0, 12):
         if name in ('total', 'filt') and type(a) is float:
             assert a.hex() == b.hex(), (name, t)
 assert empty_float > 0
-# D154: a new list per Python call; changing it never reaches the cache
+# D154: an equal new tuple per Python call
 assert c.entries(4) == c.entries(4) and c.entries(4) is not c.entries(4)
 assert c._mx_cell_entries(4) is c._mx_cell_entries(4)        # cached, not rebuilt
-mine = c.entries(4)
-mine[0] = 7
-mine.append(8)
-assert c.entries(4) == o.entries(4)
 print('integer vectors ok')
 """
 

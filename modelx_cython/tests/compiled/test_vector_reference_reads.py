@@ -1,14 +1,14 @@
 """Cross-Space vector reads (review r4 vectors): ``projection.vec(n)[i]`` through a Reference to a Space
 declared with its class reads the typed vector (vec_get on the compiled entry), where it built a new list
-per read (4,000 reads: 0.46 s compiled, 0.001 s live). Python uses still get a new list."""
+per read (4,000 reads: 0.46 s compiled, 0.001 s live). Python uses get an equal new tuple."""
 import subprocess
 import sys
 
 from vector_live import build, live_and_compiled
 
 PROJECTION = {
-    'vec': 'def vec(n):\n    return [0.5 * i for i in range(n)]\n',
-    'ivec': 'def ivec(n):\n    return [i % 7 for i in range(n)]\n',
+    'vec': 'def vec(n):\n    return tuple(0.5 * i for i in range(n))\n',
+    'ivec': 'def ivec(n):\n    return tuple(i % 7 for i in range(n))\n',
 }
 PORTFOLIO = {
     'total': 'def total(n):\n    s = 0.0\n    for i in range(n):\n        s += projection.vec(n)[i]\n    return s\n',

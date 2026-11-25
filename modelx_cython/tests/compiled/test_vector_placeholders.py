@@ -4,11 +4,11 @@ from vector_live import build, live_and_compiled
 
 FORMULAS = {
     'floats': ('def floats(t):\n    out = [None] * t\n    for i in range(t):\n        out[i] = 0.5 * i\n'
-               '    return out\n'),
+               '    return tuple(out)\n'),
     'ints': ('def ints(t):\n    out = [None] * t\n    for i in range(t):\n        out[i] = 2 * i\n'
-             '    return out\n'),
+             '    return tuple(out)\n'),
     'texts': ('def texts(t):\n    out = [""] * t\n    for i in range(t):\n        out[i] = 1.5 * i\n'
-              '    return out\n'),
+              '    return tuple(out)\n'),
     'reader': 'def reader(t):\n    return sum(floats(t)) + sum(ints(t)) + len(texts(t))\n',
 }
 
