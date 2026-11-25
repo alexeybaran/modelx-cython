@@ -34,13 +34,13 @@ together. **upstream** means the file is untouched since d22426f.
 | collect | 31 | 73 | 2928 |
 | B1 | 10 | 101 | 963 |
 | B2 | 16 | 21 | 1437 |
-| B3 | 12 | 63 | 1440 |
+| B3 | 21 | 73 | 1690 |
 | B4 | 4 | 6 | 297 |
 | B5 | 2 | 13 | 319 |
 | B6 | 4 | 44 | 678 |
-| B7 | 6 | 16 | 1601 |
+| B7 | 6 | 16 | 1599 |
 | join | 14 | 22 | 1580 |
-| total | 189 | 986 | 21174 |
+| total | 198 | 996 | 21422 |
 
 The tests counts are collected cases (parametrized cases counted one by one). Before the sort the suite
 collected 950 cases (942 passed, 8 skipped). After the sort it collected 962: the same 950 under their
@@ -55,6 +55,7 @@ with the same 8 skips. The counts above are the current tree, after the merges l
 | `review/r4-reductions-b` (5b78f14, test only) | 5b78f14 | | | `test_a_provider_with_only_a_pxd_is_installed_as_a_header` in `test_audit_contracts.py` (P1); the rest of that branch was not needed (same edits as 945787c and 4a5f979) |
 | `review/r4-table-base-a` | e17f329 | `test_prepared_tables.py::test_asof`: it tested only `PreparedTable.asof`, removed with the ordered-lookup arrays no compiled read used | `test_prepared_tables.py`: the lookups removed from the runtime (`key_codes`, `row`, `value`, `contains`, `column`) are made in the test's own probe through the methods compiled code uses; every comparison with pandas is kept | in `test_prepared_tables.py`: `test_index_pandas_looks_up_by_its_own_rules`, `test_bool_and_huge_keys`, `test_frame_bound_again_is_prepared_again`, `test_row_of_a_narrow_number_column_is_pandas`, `test_object_columns_hold_what_pandas_returns`; `integration_tests/test_table_runtime_contract.py` (B6: cell reads, a row field and index membership, no collect) |
 | `review/r4-table-base-b` (the three commits after the nine of -a) | 35eb09d | | `integration_tests/test_table_runtime_contract.py`: cases added (a frame Cell that publishes no table, an item Cell returning a Reference's frame); nothing removed | `integration_tests/test_table_numpy_values.py` (B5: cell reads and a row field kept as numpy scalars, no collect) |
+| `r4/w1-vectors` (up to and including the marker) | 8725799 | `compiled/test_vector_ref_reads.py`: `vector_ref_reads.py` and its opt-in spec key `native_vector_ref_reads` are removed (a spec that sets the key still builds, on the general path) | `integration_tests/test_diag_kr_forms.py`: the generated-text check that `[...] + list(range(...))` is built without `ivec_of` is dropped with that one-model spelling; the value comparisons with live stay. `test_vectors.py`: the vector sum now uses `_float_sum_state`'s `f64_add`/`f64_result` | `compiled/vector_live.py` (helper) and nine `compiled/test_*vector*` files (B3) |
 
 The review documents of these branches (`devnotes/REVIEW-BRIEF.md`, `devnotes/review-reductions-a.md`,
 `devnotes/review-table-base-a.md`) were left out. The edits of the two reduction cases in `test_audit_contracts.py` were applied to `test_audit_contracts_b2.py`,
@@ -268,16 +269,25 @@ helper `_check` stays in the P1 file.
 | `modelx_cython/tests/test_audit_contracts_b2.py` | B2 | 4 | 42 |
 | `modelx_cython/tests/test_exact_sum_state.py` | B2 | 3 | 167 |
 | `modelx_cython/tests/test_generator_builtin_lowering.py` | B2 | 1 | 20 |
+| `modelx_cython/tests/compiled/test_float_vector_of_integers.py` | B3 | 1 | 17 |
+| `modelx_cython/tests/compiled/test_float_vector_writes.py` | B3 | 1 | 34 |
 | `modelx_cython/tests/compiled/test_integer_vector_cells.py` | B3 | 1 | 98 |
+| `modelx_cython/tests/compiled/test_integer_vector_updates.py` | B3 | 1 | 21 |
+| `modelx_cython/tests/compiled/test_integer_vector_writes.py` | B3 | 1 | 36 |
 | `modelx_cython/tests/compiled/test_leading_vector_sum.py` | B3 | 1 | 115 |
 | `modelx_cython/tests/compiled/test_local_vectors_without_vector_cells.py` | B3 | 1 | 117 |
 | `modelx_cython/tests/compiled/test_power_memo_with_vectors.py` | B3 | 1 | 73 |
 | `modelx_cython/tests/compiled/test_reduction_in_vector_subscript.py` | B3 | 1 | 17 |
 | `modelx_cython/tests/compiled/test_vector_cells.py` | B3 | 2 | 245 |
+| `modelx_cython/tests/compiled/test_vector_conditionals.py` | B3 | 1 | 22 |
 | `modelx_cython/tests/compiled/test_vector_displays.py` | B3 | 1 | 110 |
 | `modelx_cython/tests/compiled/test_vector_extrema_and_cache.py` | B3 | 1 | 147 |
+| `modelx_cython/tests/compiled/test_vector_list_mutators.py` | B3 | 4 | 70 |
+| `modelx_cython/tests/compiled/test_vector_loop_renames.py` | B3 | 1 | 25 |
+| `modelx_cython/tests/compiled/test_vector_placeholders.py` | B3 | 1 | 22 |
 | `modelx_cython/tests/compiled/test_vector_python_exits.py` | B3 | 1 | 111 |
-| `modelx_cython/tests/compiled/test_vector_ref_reads.py` | B3 | 2 | 117 |
+| `modelx_cython/tests/compiled/test_vector_reference_reads.py` | B3 | 1 | 50 |
+| `modelx_cython/tests/compiled/vector_live.py` | B3 | 0 | 70 |
 | `modelx_cython/tests/test_vector_extrema_typing.py` | B3 | 24 | 121 |
 | `modelx_cython/tests/test_vectors.py` | B3 | 27 | 169 |
 | `integration_tests/table_matrix/test_pandas_read_report.py` | B4 | 2 | 113 |
@@ -290,7 +300,7 @@ helper `_check` stays in the P1 file.
 | `integration_tests/test_table_runtime_contract.py` | B6 | 1 | 143 |
 | `modelx_cython/tests/test_prepared_tables.py` | B6 | 40 | 390 |
 | `modelx_cython/tests/test_read_audit.py` | B6 | 2 | 66 |
-| `integration_tests/test_diag_kr_forms.py` | B7 | 1 | 264 |
+| `integration_tests/test_diag_kr_forms.py` | B7 | 1 | 262 |
 | `integration_tests/test_prepared_zip_prefix.py` | B7 | 1 | 241 |
 | `integration_tests/test_table_fuzz.py` | B7 | 5 | 290 |
 | `integration_tests/test_table_probe.py` | B7 | 5 | 689 |
@@ -331,7 +341,7 @@ is the shared wiring, and only the integrator resolves conflicts in it.
 | `modelx_cython/runtime/_tables.pyx` | shared: B4 ≈530, B5 ≈40, B6 ≈110, B7 ≈176 | 856 | preparation, binding and keyed reads (B4); `hold_row` (B5); `prefix_range`, views, extremes (B6); `asof_row`, `asof_at`, `search`, `position`, `zip_*` (B7) |
 | `modelx_cython/table_cells.py` | shared: B3 ≈250, B4 ≈268 | 518 | `vector_cells` and the vector exits of `RenameMembers` (B3); table cells, frame binding and publication (B4) |
 | `modelx_cython/tracer.py` | shared: P1 ≈1013, collect ≈15, B1 ≈75, B3 ≈100, B4 ≈60 | 1263 | IntEnum value info and enum-argument widening (B1); vector shapes and their merge (B3); frame schema and read notes hooks (B4); collect-adapter filter (collect) |
-| `modelx_cython/transformer.py` | shared: P1 ≈1603, collect ≈80, B1 ≈10, B2 ≈22, B3 ≈50, B4 ≈97, B5 ≈70, B6 ≈63 | 1995 | shared wiring; table hooks `_table_reads*`, `_lower_frames`, `_pandas_reads` (B4), `_row_cells`, `_table_reads_with_row_fields` (B5), `_prefix_cells`, `_param_prefix_cells` (B6); reduction and vector passes in `_rewrite_powers`/`update_method`; collect hooks in `__init__`, `leave_Module`, `leave_ClassDef`; enum `prepare`/storage |
+| `modelx_cython/transformer.py` | shared: P1 ≈1600, collect ≈80, B1 ≈10, B2 ≈22, B3 ≈50, B4 ≈97, B5 ≈70, B6 ≈63 | 1992 | shared wiring; table hooks `_table_reads*`, `_lower_frames`, `_pandas_reads` (B4), `_row_cells`, `_table_reads_with_row_fields` (B5), `_prefix_cells`, `_param_prefix_cells` (B6); reduction and vector passes in `_rewrite_powers`/`update_method`; collect hooks in `__init__`, `leave_Module`, `leave_ClassDef`; enum `prepare`/storage |
 | `modelx_cython/usage.py` | shared: P1 ≈680, B4 ≈25 | 705 | pandas receiver resolution (B4); the memoryview usage classifier is P1 |
 | `modelx_cython/__init__.py` | P1 | 35 | |
 | `modelx_cython/__main__.py` | P1 | 24 | |
@@ -384,10 +394,9 @@ is the shared wiring, and only the integrator resolves conflicts in it.
 | `modelx_cython/_float_sum_state.pxd` | B2 | 233 | |
 | `modelx_cython/reductions.py` | B2 | 942 | |
 | `modelx_cython/runtime/_native_streams.pxd` | B2 | 28 | |
-| `modelx_cython/runtime/_native_vectors.pxd` | B3 | 252 | |
-| `modelx_cython/runtime/_native_vectors.pyx` | B3 | 299 | |
-| `modelx_cython/vector_ref_reads.py` | B3 | 184 | |
-| `modelx_cython/vectors.py` | B3 | 1950 | |
+| `modelx_cython/runtime/_native_vectors.pxd` | B3 | 250 | |
+| `modelx_cython/runtime/_native_vectors.pyx` | B3 | 320 | |
+| `modelx_cython/vectors.py` | B3 | 2005 | |
 | `modelx_cython/key_facts.py` | B4 | 403 | |
 | `modelx_cython/read_notes.py` | B4 | 476 | |
 | `modelx_cython/runtime/table_cells.py` | B4 | 63 | |
@@ -395,13 +404,13 @@ is the shared wiring, and only the integrator resolves conflicts in it.
 
 | layer | lines (shared modules by the estimated split) |
 |---|---|
-| P1 | 14868 |
+| P1 | 14865 |
 | collect | 1822 |
 | B1 | 455 |
 | B2 | 1240 |
-| B3 | 3150 |
+| B3 | 3040 |
 | B4 | 3756 |
 | B5 | 851 |
 | B6 | 822 |
 | B7 | 974 |
-| total | 27938 |
+| total | 27825 |
