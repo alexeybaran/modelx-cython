@@ -97,8 +97,10 @@ def _entry_function(method, entry, owner, optional_receiver, body=None):
 
 
 class _Calls(cst.CSTTransformer):
-    def __init__(self, owner, entries, proven=False):
+    def __init__(self, owner, entries, item_entries=None, proven=False):
         self.entries = entries
+        # D114 item 5: {typed item local: (its class, that class's entries)}
+        self.item_entries = item_entries or {}
         self.exact_receiver = cst.parse_expression(exact_receiver(owner))
         # D139: the body of an uncached Cell's private entry runs on a proven exact receiver
         self.exact_depth = 1 if proven else 0
@@ -135,6 +137,12 @@ class _Calls(cst.CSTTransformer):
 
     def leave_Call(self, original, updated):
         func = updated.func
+        if (isinstance(func, cst.Attribute) and isinstance(func.value, cst.Name)
+                and (item := self.item_entries.get(func.value.value)) is not None
+                and func.attr.value in item[1]):
+            # a call on a typed item local takes the item class's entry behind its own exact-type test
+            return self._entry_call(updated, item[1][func.attr.value],
+                                    cst.parse_expression(f'type({func.value.value}) is {item[0]}'), False)
         if not (isinstance(func, cst.Attribute) and isinstance(func.value, cst.Name)
                 and func.value.value == MX_SELF and func.attr.value in self.entries):
             return updated
@@ -153,7 +161,7 @@ class _Calls(cst.CSTTransformer):
             return direct
         # D59: the virtual branch converts to the Cell's C return type, as the typed entry
         # returns it, so the whole expression has that type and a local assigned from it
-        # can be inferred as a C number rather than an object.
+        # is inferred as a C number (infer_types) rather than an object.
         virtual = updated
         if rettype in _C_CASTS:
             virtual = cst.Call(func=cst.parse_expression(f'{CY_MOD}.cast'), args=(
@@ -295,7 +303,7 @@ def add_inline_entries(module, classes, dense_layouts):
             continue
         statement, owner, cells, entries, methods = next(pending_iter)
         authored = list(methods)
-        if entries:
+        if entries or any(getattr(cell, 'typed_item_locals', None) for cell in cells.values()):
             for index, method in enumerate(methods):
                 if not isinstance(method, cst.FunctionDef):
                     continue
@@ -315,11 +323,16 @@ def add_inline_entries(module, classes, dense_layouts):
                 if guard_allowed is None:
                     guard_allowed = allows_exact_receiver(method, owner)
                 if guard_allowed:
-                    calls = _Calls(owner, entries)
+                    item_entries = {
+                        local: (target, all_entries[target])
+                        for local, target in getattr(cell, 'typed_item_locals', {}).items()
+                        # the class name is in the formula only as P1's own annotation of the local
+                        if all_entries.get(target)}
+                    calls = _Calls(owner, entries, item_entries)
                     methods[index] = method.with_changes(body=method.body.visit(calls))
                     if (entry := uncached.get((owner, cell.name))) is not None and not name.startswith(FORMULA_PREF):
                         # D139: the entry is the authored formula with its calls taken on the proven receiver
-                        proven = _Calls(owner, entries, proven=True)
+                        proven = _Calls(owner, entries, item_entries, proven=True)
                         functions.append(_entry_function(
                             authored[index], entry, owner, optional_receiver, authored[index].body.visit(proven)))
                         continue

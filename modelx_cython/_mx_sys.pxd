@@ -2,8 +2,7 @@ from libc.math cimport (
     pow as _mx_c_pow, floor as _mx_c_floor, isfinite as _mx_c_isfinite)
 from libc.limits cimport LLONG_MAX, LLONG_MIN
 from libc.string cimport memcmp
-from cpython.long cimport (
-    PyLong_AsDouble, PyLong_AsLongLong, PyLong_AsLongLongAndOverflow, PyLong_Check, PyLong_CheckExact)
+from cpython.long cimport PyLong_AsLongLong, PyLong_Check, PyLong_CheckExact
 from cpython.number cimport PyNumber_Index
 from cpython.object cimport Py_TYPE, PyObject_GenericGetAttr, PyObject_GenericSetAttr
 from cpython.unicode cimport PyUnicode_Check, PyUnicode_Compare
@@ -17,7 +16,22 @@ cdef inline object _mx_named(object error, str path):
     return error
 
 
-cdef inline long long _mx_exact_int64_checked(object value, str path) except? -1:
+cdef inline object _mx_named_overflow(object error, str path):
+    """The OverflowError to raise from Cell ``path``: ``error`` itself when a Cell already named it,
+    else a new one naming ``path``, caused by ``error``."""
+    if getattr(error, '_mx_cell', None) is not None:
+        return error
+    named = _mx_named(OverflowError(f"{path}: {error} (integer arithmetic beyond 64 bits)"), path)
+    named.__cause__ = error
+    return named
+
+
+cdef inline long long _mx_exact_int64(object value, str path) except? -1:
+    """Cross a signed 64-bit boundary through the Python index protocol.
+
+    An int or any int subclass (IntEnum, bool) is read directly: PyNumber_Index returns such an
+    object unchanged, so the value and the OverflowError are the same, without taking and
+    releasing a reference on it (diag-scale P3: enum members are shared by every worker)."""
     try:
         if PyLong_Check(value):
             return PyLong_AsLongLong(value)
@@ -30,30 +44,6 @@ cdef inline long long _mx_exact_int64_checked(object value, str path) except? -1
         raise _mx_named(OverflowError(
             f"{path} requires an exact signed 64-bit integer. Rebuild with a wider sample or spec."
         ), path) from error
-
-
-cdef inline long long _mx_exact_int64(object value, str path) except? -1:
-    """Cross a signed 64-bit boundary through the Python index protocol.
-
-    An int or any int subclass (IntEnum, bool) is read directly: PyNumber_Index returns such an
-    object unchanged, so the value and the OverflowError are the same, without taking and
-    releasing a reference on it (diag-scale P3: enum members are shared by every worker). An int
-    that fits is read without the exception handling, which every other value takes."""
-    cdef int overflow = 0
-    cdef long long result
-    if PyLong_CheckExact(value):
-        result = PyLong_AsLongLongAndOverflow(value, &overflow)
-        if not overflow:
-            return result
-    return _mx_exact_int64_checked(value, path)
-
-
-cdef inline double _mx_int_as_double(object value) except? -1.0:
-    """A Python int beside a double, converted as Python's mixed arithmetic converts it (correctly
-    rounded, OverflowError beyond a double), without a float object in between."""
-    if PyLong_CheckExact(value):
-        return PyLong_AsDouble(value)
-    return value
 
 
 ctypedef unsigned long _mx_native_ulong
@@ -87,12 +77,40 @@ cdef inline long long _mx_integer_result(_mx_integer_source value, str path) exc
 
 cdef extern from *:
     """
-    /* Python's a % b on C integers, which always fits: Cython's remainder (zero check, sign
-       adaptation), and 0 for b == -1, where C's a % b traps (LLONG_MIN % -1) and Cython does not
-       check it. A Python remainder is smaller than b in magnitude, so LLONG_MAX is never one: the
-       error value. */
-    static CYTHON_INLINE long long __mx_signed_remainder(long long a, long long b) {
+    /* Python's a // b on C integers with the branches Cython emits on LP64 platforms, on every
+       platform: Cython 3.3.1 compiles its LLONG_MIN // -1 check only where long long is as wide as
+       long, so the C division traps there (STATUS_INTEGER_OVERFLOW on Windows). The error value
+       is LLONG_MAX (a quotient only of LLONG_MAX // 1), so a quotient of -1 needs no error check.
+       The path is the Cell's, for the signature of the integer helpers; the checked mode's
+       handler names the OverflowError after it. */
+    static CYTHON_INLINE long long __mx_signed_floordiv(long long a, long long b, PyObject *path) {
+        long long q, r;
+        (void)path;
+        if (b == 0) {
+            PyErr_SetString(PyExc_ZeroDivisionError, "integer division or modulo by zero");
+            return LLONG_MAX;
+        }
+        if (b == -1 && a == LLONG_MIN) {
+            PyErr_SetString(PyExc_OverflowError, "value too large to perform division");
+            return LLONG_MAX;
+        }
+        q = a / b;
+        r = a - q * b;
+        return q - ((r != 0) & ((r ^ b) < 0));
+    }
+    """
+    long long _mx_signed_floordiv "__mx_signed_floordiv"(long long left, long long right, str path) \
+        except? 9223372036854775807
+
+
+cdef extern from *:
+    """
+    /* Python's a % b on C integers: Cython's remainder (zero check, sign adaptation), and 0 for
+       b == -1, where C's a % b traps (LLONG_MIN % -1) and Cython does not check it. A Python
+       remainder is smaller than b in magnitude, so LLONG_MAX is never one: the error value. */
+    static CYTHON_INLINE long long __mx_signed_remainder(long long a, long long b, PyObject *path) {
         long long r;
+        (void)path;
         if (b == 0) {
             PyErr_SetString(PyExc_ZeroDivisionError, "integer division or modulo by zero");
             return LLONG_MAX;
@@ -103,8 +121,61 @@ cdef extern from *:
         return r + ((r != 0) & ((r ^ b) < 0)) * b;
     }
     """
-    long long _mx_signed_remainder "__mx_signed_remainder"(long long left, long long right) \
+    long long _mx_signed_remainder "__mx_signed_remainder"(long long left, long long right, str path) \
         except 9223372036854775807
+
+
+@cython.overflowcheck(True)
+cdef inline long long _mx_signed_left_shift(long long value, long long count, str path) except? -1:
+    """Python's ``value << count`` on C integers: a negative count raises ValueError, a count of
+    64 or more is exact for 0 (and -1 << 63), and a result beyond 64 bits raises OverflowError
+    naming the Cell. Cython's own checked shift raises for negative values (-3 << 2)."""
+    if count < 0:
+        raise ValueError("negative shift count")
+    if count >= 63:
+        if value == 0:
+            return 0
+        if count == 63 and value == -1:
+            return LLONG_MIN
+        raise _mx_named(OverflowError(f"{path}: value too large (integer arithmetic beyond 64 bits)"), path)
+    try:
+        return value * ((<long long>1) << count)
+    except OverflowError as error:
+        raise _mx_named_overflow(error, path)
+
+
+@cython.overflowcheck(True)
+cdef inline long long _mx_signed_pow(long long base, long long exponent, str path) except? -1:
+    """``base ** exponent`` of two C integers, exactly or OverflowError (Cython's overflowcheck on
+    the products; Cython's own C integer power wraps). A negative exponent has a float value in
+    Python, which a C integer result cannot hold: TypeError naming the Cell. By squaring: each
+    square taken is at most the result in magnitude (|base| >= 2), so no check fails for a power
+    that fits."""
+    cdef long long result = 1
+    if exponent < 0:
+        raise _mx_named(TypeError(
+            f"{path} requires an exact signed 64-bit integer. Rebuild with a wider sample or spec."), path)
+    try:
+        while True:
+            if exponent & 1:
+                result = result * base
+            exponent >>= 1
+            if exponent == 0:
+                return result
+            base = base * base
+    except OverflowError as error:
+        raise _mx_named_overflow(error, path)
+
+
+cdef inline long long _mx_signed_right_shift(long long value, long long count, str path) except? -1:
+    if count < 0:
+        raise ValueError("negative shift count")
+    if count >= 63:
+        return -1 if value < 0 else 0
+    # Only shift nonnegative C values. Python rounds negative shifts down.
+    if value < 0:
+        return -1 - ((-1 - value) >> count)
+    return value >> count
 
 
 cdef inline bint _mx_ref_name_is(object name, str expected) except? -1:
@@ -167,6 +238,25 @@ cdef inline double _mx_memo_pow(PowerMemo* memo, double base, double exponent) e
         memo.value = value
         memo.ready = True
     return value
+
+
+@cython.cdivision(True)
+cdef inline bint _mx_divisible(long long dividend, long long divisor) except? -1:
+    if divisor == 0:
+        raise ZeroDivisionError("integer division or modulo by zero")
+    return divisor == -1 or dividend % divisor == 0
+
+
+cdef inline bint _mx_divisible_after_decrement(long long dividend, long long divisor) except? -1:
+    if dividend == LLONG_MIN:
+        return ((<object>dividend) - 1) % divisor == 0
+    return _mx_divisible(dividend - 1, divisor)
+
+
+cdef inline bint _mx_divisible_after_increment(long long dividend, long long divisor) except? -1:
+    if dividend == LLONG_MAX:
+        return ((<object>dividend) + 1) % divisor == 0
+    return _mx_divisible(dividend + 1, divisor)
 
 
 cdef extern from *:

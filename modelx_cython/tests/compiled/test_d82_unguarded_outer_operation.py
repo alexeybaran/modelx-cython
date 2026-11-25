@@ -22,12 +22,17 @@ OPERATIONS = {
 
 
 def test_unguarded_outer_operations_are_exact_or_raise(tmp_path):
-    # each operation of full-range C integers is a Python one; its result reaches the C integer
-    # argument of term(index) through the checked conversion, which raises beyond 64 bits
-    _outer_operations(tmp_path)
+    # checked mode (owner's rule): the small sample would resolve the unchecked mode
+    _outer_operations(tmp_path, 'checked')
 
 
-def _outer_operations(tmp_path):
+def test_unguarded_outer_operations_unchecked_mode(tmp_path):
+    """Unchecked mode: results inside the 64-bit range are exact; beyond it the arithmetic is plain
+    C (no check, as on upstream), except the remainder, which keeps Python's rule (LLONG_MIN % -1)."""
+    _outer_operations(tmp_path, 'unchecked')
+
+
+def _outer_operations(tmp_path, mode):
     model = mx.new_model('D82Outer')
     try:
         values = model.new_space('Values')
@@ -45,11 +50,14 @@ def _outer_operations(tmp_path):
     calls = ''.join(f'v.{name}(7, 3)\n' for name in OPERATIONS)
     (tmp_path / 'sample.py').write_text(
         'from exported import mx_model\nv = mx_model.Values\nv.flag(); v.width()\n' + calls, encoding='utf-8')
+    (tmp_path / 'spec.py').write_text(repr({'integer_checks': mode}), encoding='utf-8')
     subprocess.run(
-        [sys.executable, '-m', 'modelx_cython', 'exported', '--sample', 'sample.py', '--no-spec'],
+        [sys.executable, '-m', 'modelx_cython', 'exported', '--sample', 'sample.py', '--spec', 'spec.py'],
         cwd=tmp_path, check=True)
 
     probe = textwrap.dedent('''\
+        import sys
+        checked_mode = sys.argv[1] == 'checked'
         from exported_cy import mx_model
         v = mx_model.Values
         LO, HI = -(1 << 63), (1 << 63) - 1
@@ -76,22 +84,28 @@ def _outer_operations(tmp_path):
                         got = cell(a, b)
                         assert got == float(expected), (name, a, b, got, expected)
                         checked += 1
-                    else:
+                    elif checked_mode:
                         try:
                             got = cell(a, b)
                         except OverflowError:
                             raised += 1
                             continue
                         raise AssertionError((name, a, b, 'wrapped to', got, 'exact', expected))
-        assert checked and raised
-        try:
-            v.neg(LO, 0)               # -(-2**63) is outside the range
-        except OverflowError:
-            pass
-        else:
-            raise AssertionError('-(-2**63) did not raise')
+                    else:
+                        try:           # unchecked mode: plain C beyond the range
+                            cell(a, b)
+                        except OverflowError:
+                            assert name == 'fdiv' and (a, b) == (LO, -1), (name, a, b)   # division check
+        assert checked and (raised or not checked_mode)
+        if checked_mode:
+            try:
+                v.neg(LO, 0)               # -(-2**63) is outside the range
+            except OverflowError:
+                pass
+            else:
+                raise AssertionError('-(-2**63) did not raise')
         ''')
-    subprocess.run([sys.executable, '-c', probe], cwd=tmp_path, check=True)
+    subprocess.run([sys.executable, '-c', probe, mode], cwd=tmp_path, check=True)
 
 
 def test_seg_shaped_cell_keeps_its_window_proof(tmp_path):

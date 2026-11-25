@@ -2,8 +2,8 @@
 
 A same-Space call to an admitted Cell compiles to ``(entry(self, ...) if exact else
 self.cell(...))``. The virtual branch converts to the Cell's C return type, so the whole
-expression has that type and the local assigned from it is a C number (a C integer declared
-by integer_arithmetic, a double inferred by Cython) instead of an object. The values are compared with the interpreter, also through a
+expression has that type and ``infer_types`` declares the local assigned from it as a C
+number instead of an object. The values are compared with the interpreter, also through a
 ``while`` loop whose counter and bound come from such locals.
 """
 

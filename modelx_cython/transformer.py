@@ -592,15 +592,20 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
         See :mod:`modelx_cython.powers`; the node is returned unchanged
         when no operand pair can be typed.
         """
+        from modelx_cython.checked_arithmetic import CheckedArithmetic
         from modelx_cython import held_arrays
-        builtin_float = bool(scope['float']) and all(isinstance(binding, BuiltinAssignment)
-                                                     for binding in scope['float'])
+        builtin_keys = {name for name in ("all", "any", "sum", "min", "max", "float", "int", "round", "range",
+                                         "zip", "str", "type")
+                        if scope[name] and all(isinstance(binding, BuiltinAssignment)
+                                               for binding in scope[name])}
         # a typed-memoryview Cell read by subscript is held per item (no slice copy per evaluation)
         node = held_arrays.lower(node, cls_info, cells, self._held_arrays)
         cells.formula_allows_exact_receiver = allows_exact_receiver(node, cls_info.name)
+        node = CheckedArithmetic(cls_info, cells, builtin_keys).rewrite(node)
         node = rewrite_powers(
             node, self._resolver, self._cells_kinds, self._ref_kinds,
-            cls_info.fqname, cells, builtin_float=builtin_float,
+            cls_info.fqname, cells, builtin_float='float' in builtin_keys,
+            checked_integer_powers=self.module.spec.policy.integer_checks != 'unchecked',
         )
         from modelx_cython.ordered_arguments import preserve_argument_order
         from modelx_cython.powers import OperandKind, kind_of_type_expr, formula_local_kinds
@@ -615,6 +620,12 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
         node = preserve_argument_order(node,
             native_result=cells.get_rettype_expr(c_style=True) in ('double', 'long long', 'bint'),
             operand_kind=operand_kind)
+        from modelx_cython import space_results
+        if self._resolver is not None:
+            node, _ = space_results.lower(node, cls_info, cells, scope, operand_kind, self._pin_held_item)
+        # D110 P1: a local bound once to an item of a typed ItemSpace Reference is declared its class
+        from modelx_cython.item_locals import type_item_locals
+        node, cells.typed_item_locals = type_item_locals(node, cls_info, self.module)
         return node
 
     @property   # cannot use cached_property in Transformer
@@ -627,7 +638,16 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
         self._cold_spills = []
         self._held_arrays = {}
         self._dense_layouts = {}
+        from modelx_cython.scopes import Names
+        self._held_names = Names(self._module_node)
+        self._held_pins = {}
         return self.wrapper.visit(self)
+
+    def _pin_held_item(self, owner, producer):
+        key = owner, producer
+        if key not in self._held_pins:
+            self._held_pins[key] = self._held_names.reserve(f'_mx_pin_held_item_{len(self._held_pins)}')
+        return self._held_pins[key]
 
     def leave_Module(self, original_node: Module, updated_node: Module) -> Module:
         """Prepend cimports of ``_mx_sys`` and each child-space module,
@@ -671,6 +691,10 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
         if self._cold_spills or self._held_arrays:
             module = module.with_changes(body=(*module.body, *self._cold_spills,
                                                *(stmt for held in self._held_arrays.values() for stmt in held.body)))
+        if self._held_pins:
+            from modelx_cython.space_results import pin_function
+            pins = [pin_function(name, *key) for key, name in self._held_pins.items()]
+            module = module.with_changes(body=(*module.body, *pins))
         # D116: one root construction and release per compiled ItemSpace class (collect and direct)
         from modelx_cython import item_roots
         roots = [fn for name in sorted(self.module.visitor.itemspace_classes) if name in self.module.classes
@@ -688,9 +712,16 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
             # Native memo structs contain only scalars. Use Cython's standard
             # serializer; the module directive also works in pure-Python mode.
             directives.append('auto_pickle=True')
-        # no overflowcheck and no infer_types: Cython's default inference leaves a local used in integer
-        # arithmetic a Python int, and integer_arithmetic keeps a C integer operation only where it cannot
-        # overflow
+        # integer guards: overflow checks only in the checked mode (owner's rule), with or without type
+        # inference: a formula's typed C integer arithmetic (Cell results, typed parameters) is C
+        # arithmetic either way
+        checked = self.module.spec.policy.integer_checks != 'unchecked'
+        if self.module.spec.policy.infer_types:
+            # M1 (spec key infer_types): C integer inference in generated model modules; providers keep
+            # their own directives.
+            directives.append(f'infer_types=True, overflowcheck={checked}')
+        elif checked:
+            directives.append('overflowcheck=True')
         if directives:
             module = module.with_changes(header=(
                 cst.EmptyLine(comment=cst.Comment('# cython: ' + ', '.join(directives))), *module.header))

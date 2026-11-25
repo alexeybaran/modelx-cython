@@ -409,9 +409,7 @@ def test_fractional_power(sample_dir, model):
         encoding="utf-8")
     assert "_mx_sys._mx_pow((1 + self.ann_rate(t)), (1 / 12))" in src
     assert "_mx_sys._mx_pow((1 - self.ann_q(t)), (1 / 12))" in src
-    # a power of two C integers is Python's (an exact int for a non-negative exponent, as live),
-    # never C's integer power, which wraps
-    assert "return _mx_cy.cast(object, 2) ** -t" in src
+    assert "return 2 ** -t" in src
     # uncached_rate has no _f_ method, so its public method carries the
     # formula and goes through the transformer's other rewrite site
     assert "def uncached_rate(" in src

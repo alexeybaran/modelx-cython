@@ -296,6 +296,17 @@ def main_handler(args: argparse.Namespace, stdout: IO[str], stderr: IO[str]) -> 
 
         spec = TransSpec(d)
         logger = run_sample(orig_path, args.sample, new_model_name=model_name)
+        # integer guards (owner's rule): the mode follows the largest traced integer
+        from .config import UNCHECKED_LIMIT, UNCHECKED_LIMIT_NOTE, resolve_integer_checks
+        mode = resolve_integer_checks(spec.policy, logger.max_integer)
+        integer_report = {'mode': mode, 'requested': spec.policy.integer_checks,
+                          'largest_traced_integer': logger.max_integer, 'seen_at': logger.max_integer_at,
+                          'unchecked_below': UNCHECKED_LIMIT}
+        if mode == 'unchecked':
+            integer_report['limit'] = UNCHECKED_LIMIT_NOTE
+        spec.policy = dataclasses.replace(spec.policy, integer_checks=mode)
+        _logger.info('integer checks: %s (largest traced integer %d at %s)',
+                     mode, logger.max_integer, logger.max_integer_at)
         rel_model_path = model_path.relative_to(model_path.parent)
 
         modules = [rel_model_path / (MX_SYS_MOD + ".py")]
@@ -399,7 +410,10 @@ def main_handler(args: argparse.Namespace, stdout: IO[str], stderr: IO[str]) -> 
         translated_modules = lower_entries(translated_modules, dense_entries, formula_entries, policy)
         cell_sources = {}
         for u in units:
-            state = guard_integer_boundaries(translated_modules[u.fqname], u.module_info, resolver, cells_by_name)
+            state = guard_integer_boundaries(
+                translated_modules[u.fqname], u.module_info, resolver, cells_kinds, ref_kinds,
+                cells_by_name, infer_types=policy.infer_types,
+            )
             from modelx_cython.locked_entries import lower_locked_entries
             state = lower_locked_entries(state, u.module_info)
             translated_modules[u.fqname] = state
@@ -413,6 +427,7 @@ def main_handler(args: argparse.Namespace, stdout: IO[str], stderr: IO[str]) -> 
                      cell_sources=cell_sources, providers=provider_sources)
         report = describe(module_infos)
         (model_path / '_mx_admission.json').write_text(json.dumps(report, indent=2), encoding='utf-8')
+        (model_path / '_mx_integer_checks.json').write_text(json.dumps(integer_report, indent=2), encoding='utf-8')
 
     if args.translate_only:
         return 0
