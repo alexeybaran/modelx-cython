@@ -390,12 +390,20 @@ def _walk(node):
 
 
 class _Rename(cst.CSTTransformer):
+    """Rename variables; an attribute name or a keyword argument's name is not a variable."""
+
     def __init__(self, names):
         self.names = names
 
     def leave_Name(self, original, updated):
         new = self.names.get(updated.value)
         return updated.with_changes(value=new) if new else updated
+
+    def leave_Attribute(self, original, updated):
+        return updated.with_changes(attr=original.attr)
+
+    def leave_Arg(self, original, updated):
+        return updated.with_changes(keyword=original.keyword)
 
 
 # ---------------------------------------------------------------- facts of one formula
