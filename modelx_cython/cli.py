@@ -45,7 +45,7 @@ from modelx_cython.config import TransSpec
 from modelx_cython.tracer import trace_calls, MxCallTraceLogger, MxCodeFilter
 from modelx_cython.builder import ModuleInfo
 from modelx_cython.parser import ModuleVisitor
-from modelx_cython.enums import literals as enum_literals
+from modelx_cython.enums import plan as enum_plan
 from modelx_cython.transformer import ModuleTransformer, PXDGenerator
 from modelx_cython.usage import (
     admit_forwarded_views, analyze_usage, apply_verdicts, build_resolver)
@@ -329,6 +329,9 @@ def main_handler(args: argparse.Namespace, stdout: IO[str], stderr: IO[str]) -> 
         # other modules may reference their classes in pxd declarations,
         # so their pxd files must exist.
         units = []
+        # IntEnum members and values written for their uses, first and for all modules at once
+        sources = enum_plan({m: path.read_text(encoding="utf-8") for m, path in iter_module_files(model_path)},
+                            logger.ref_info, logger.cells_info, logger.param_info)
         for m, src_path in iter_module_files(model_path):
             subs = m.split(".")
             assert subs.pop(0) == model_path.name
@@ -345,8 +348,7 @@ def main_handler(args: argparse.Namespace, stdout: IO[str], stderr: IO[str]) -> 
             rel_src_path = rel_model_path / "/".join(subs)
             abs_pxd_path = model_path / "/".join(pxd_path)
             abs_init_path = model_path / "/".join(subs[:-1] + ["__init__.pxd"])
-            source = abs_src_path.read_text(encoding="utf-8")
-            source = enum_literals(m, source, logger.ref_info, logger.cells_info)     # IntEnum members as integers, first
+            source = sources[m]
             visitor = ModuleVisitor(module=m, source=source)
             module_info = ModuleInfo(m, visitor, logger, spec)
             for cls in sorted(visitor.locked_classes):
