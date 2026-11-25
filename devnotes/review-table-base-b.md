@@ -66,7 +66,8 @@ All reproductions are in scratch probes P1-P3; live is modelx 636877b on the sam
 | R6 | speed depends on sample | G4, and the three vetoes of M9 | - | - | C1, static gate instead of sampled counts |
 
 Built fixes R3 and R4: the probes then equal live on every case listed; `test_prepared_tables`, `test_read_notes`,
-`test_read_audit`, `test_tracer` pass (65). The integration probe result with the fixes is in section 7.
+`test_read_audit`, `test_tracer` pass (65), and `integration_tests/test_table_probe.py` with
+`test_prepared_tables.py` pass (29) with both fixes applied.
 R2 fix (not built): emit the native lookup unchanged, but box the value (`numpy.float64(x)` / `numpy.int64(x)`,
 about 30-50 ns) unless every use of it, through `+ - *`, unary minus, parentheses and locals bound once
 (`key_facts._Formula.loads`/`parents` already give this), ends in a comparison, `float()`, `int()`, `abs()`, a key
@@ -104,4 +105,6 @@ unmodified model that rounds or divides table values). R3/R4 fixes are built and
 ## 7. Runs
 - Table-base unit tests: 65 passed. The full unit suite was stopped at 8% (each compiled test builds a model;
   too slow here); no failure had appeared.
+- With the R3 and R4 fixes applied: `test_table_probe.py` + `test_prepared_tables.py`: 29 passed (4 min 44 s).
+  The fixes (9 lines) are not committed here.
 - P1 (13 cells), P2 (7), P3 (2), P4 (timing, 2 spaces), each compared with live for t = 0..3.
