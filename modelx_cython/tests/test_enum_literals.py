@@ -66,7 +66,7 @@ def refs():
 
 
 def cells():
-    return {'m._c_P.f': held(float, {'k': Kind}, t=int, k=Kind),          # the formula under test: k is a Kind
+    return {'m._c_P._f_f': held(float, {'k': Kind}, t=int, k=Kind),       # the formula under test: k is a Kind
             'm._c_P._f_g': held(float, {'k': Kind}, t=int, k=Kind),       # a Cell with a Kind parameter
             'm._c_P._f_h': held(float, {}, t=int, x=float),               # numbers only
             'm._c_P._f_obj': held(str, {}, k=object),                     # an object parameter
@@ -80,7 +80,7 @@ STUBS = ('    def _f_g(self, t, k):\n        pass\n    def _f_h(self, t, x):\n  
          'class _c_Q:\n    def _f_q(self, k):\n        pass\n')       # the formulas of the other Cells
 
 
-def formula(body, params='self, t, k', name='f'):
+def formula(body, params='self, t, k', name='_f_f'):
     return f'class _c_P:\n    def {name}({params}):\n        ' + body.replace('\n', '\n        ') + '\n'
 
 
@@ -159,7 +159,7 @@ def test_every_other_use_of_a_held_value_sees_its_member(body, expected):
 ])
 def test_a_member_used_as_an_object_stays(body):
     infos = cells()
-    infos['m._c_P.f'] = held(float, {}, t=int)
+    infos['m._c_P._f_f'] = held(float, {}, t=int)
     assert translate(body, params='self, t', infos=infos) == body + '\n'
 
 
@@ -221,7 +221,16 @@ def test_a_strict_parameter_that_the_sample_gave_a_plain_value_is_an_object():
 def test_a_parameter_that_cannot_be_held_is_an_object(params, body):
     infos = cells()
     assert translate(body, params, infos) == body + '\n'
-    assert infos['m._c_P.f'].arg_types['k'] is object and not infos['m._c_P.f'].enum_codes
+    assert infos['m._c_P._f_f'].arg_types['k'] is object and not infos['m._c_P._f_f'].enum_codes
+
+
+def test_a_parameter_of_an_uncached_formula_with_a_closure_is_an_object():
+    infos = cells()          # its public method, the formula itself, stays a Python method with untyped parameters
+    infos['m._c_P.u'] = held(float, {'k': Kind}, t=int, k=Kind)
+    body = 'return sum(t for _ in (1, 2)) if k == self.Kind.A else 0.0'
+    assert translate(body, infos=infos) == f"return sum(t for _ in (1, 2)) if k == 0 else 0.0\n"
+    source = formula(body, name='u') + STUBS
+    assert literals('m', source, refs(), infos) == source and infos['m._c_P.u'].arg_types['k'] is object
 
 
 def test_a_parameter_whose_space_has_no_reference_to_its_class_or_given_by_star_is_an_object():
@@ -236,7 +245,7 @@ def test_a_parameter_whose_space_has_no_reference_to_its_class_or_given_by_star_
 def test_a_default_that_is_a_member_value_is_its_position():
     assert translate('return k == self.Kind.C', 'self, t, k=2').startswith('return k == 2')
     assert literals('m', formula('return k', 'self, t, k=1') + STUBS, refs(), cells()).startswith(
-        'class _c_P:\n    def f(self, t, k=1):')
+        'class _c_P:\n    def _f_f(self, t, k=1):')
 
 
 def test_a_module_without_held_parameters_is_not_parsed():
@@ -281,7 +290,7 @@ def text(body, params='self, t, kind'):
                  'm._c_P.default_kind': RuntimeRefInfo('LAPSE')}
     stubs = ('    def _f_claims(self, t, kind):\n        pass\n    def _f_rate(self, t, s):\n        pass\n'
              '    def _f_sex(self):\n        pass\n')
-    out = literals('m', formula(body, params=params) + stubs, text_refs, infos)
+    out = literals('m', formula(body, params=params, name='f') + stubs, text_refs, infos)
     return out[:out.index('    def _f_claims(')].split('\n', 1)[1][4:].replace('\n        ', '\n')
 
 

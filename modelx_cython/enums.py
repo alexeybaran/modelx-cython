@@ -16,12 +16,14 @@ import enum
 import functools
 
 import libcst as cst
+import libcst.matchers as m
 from libcst.metadata import MetadataWrapper, ParentNodeProvider, ScopeProvider
 
 from .consts import MX_SYS_MOD
 
 _code = cst.Module([]).code_for_node
 _DISPLAYS = (cst.Tuple, cst.List, cst.Set)
+_CLOSURE = m.FunctionDef() | m.Lambda() | m.GeneratorExp() | m.Yield()     # as parser.ModuleVisitor._has_closure
 
 
 def storage(name):
@@ -77,8 +79,8 @@ def family(cls):
         if (base is not None and isinstance(cls, type) and issubclass(cls, base) and type(cls) is type(base)
                 and len(cls)
                 and all(getattr(cls, name) is getattr(base, name) for name in ('__eq__', '__ne__', '__hash__'))
-                and [m._value_ for m in cls] == (list(range(len(cls))) if kind is int else [str(m._value_) for m in cls])
-                and all(type(m._value_) is kind and (kind is int or str.__str__(m) == m._value_) for m in cls)):
+                and [x._value_ for x in cls] == (list(range(len(cls))) if kind is int else [str(x._value_) for x in cls])
+                and all(type(x._value_) is kind and (kind is int or str.__str__(x) == x._value_) for x in cls)):
             return kind
     return None
 
@@ -322,12 +324,13 @@ def plan(sources, ref_info, cells_info=None):
 
 def _settle(f, model, edits):
     """Release the parameters that cannot be held: bound again, seen where `self` is another, a default that is
-    no member's value, given by a starred argument."""
+    no member's value, given by a starred argument, of an uncached formula that stays Python (a closure)."""
+    python = not f.node.name.value.startswith('_f_') and m.findall(f.node.body, _CLOSURE)
     for name, (cls, _) in list(f.held.items()):
         param = f.params.get(name)
         refs = f.refs(param) if param is not None else None
         default = None if param is None or param.default is None else f.code(param.default, cls, {})
-        if refs is None or not all(map(f.own, refs)) or param.default is not None and default in (None, -1):
+        if python or refs is None or not all(map(f.own, refs)) or param.default is not None and default in (None, -1):
             release(model.infos[f.key], name)
         elif default is not None:
             edits.setdefault(id(param.default), []).append(_literal(default))
