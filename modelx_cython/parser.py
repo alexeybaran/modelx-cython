@@ -40,6 +40,7 @@ import libcst as cst
 import libcst.matchers as m
 from libcst.metadata import ParentNodeProvider, ScopeProvider, GlobalScope, ClassScope
 from modelx_cython.scopes import metadata_wrapper
+from modelx_cython.syntax import walk
 
 from modelx_cython.consts import (
     FORMULA_PREF,
@@ -295,7 +296,11 @@ class ModuleVisitor(m.MatcherDecoratableVisitor, ParentScopeAddin):
         in the module. Cython compiles C-level calls as positional-only, so
         cells called with keyword arguments must stay plain Python methods."""
         names = set()
-        for call in m.findall(self.wrapper.module, m.Call()):
+        # every Call node of the module (what m.findall(module, m.Call()) finds), on the shared
+        # traversal
+        for call in walk(self.wrapper.module):
+            if not isinstance(call, cst.Call):
+                continue
             if any(a.keyword is not None or a.star == "**" for a in call.args):
                 func = call.func
                 if isinstance(func, cst.Attribute):
