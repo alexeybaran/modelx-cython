@@ -13,7 +13,7 @@ import libcst as cst
 
 from .consts import FORMULA_PREF, MODULE_PREF, SPACE_PREF
 from .scopes import code_positions, lexical_nodes
-from .syntax import statements, walk
+from .syntax import instances, statements
 
 
 def cell_locations(state, module_info):
@@ -166,10 +166,9 @@ def create_setup(model_name: str, modules: Sequence[str], setup_file: pathlib.Pa
                           for module in modules if (source := source_root / module).suffix == '.py'
                           and source.is_file())
     for module in source_modules:
-        for node in walk(module):
-            if isinstance(node, cst.ClassDef):
-                members = sum(isinstance(child, cst.AnnAssign) for child in statements(node.body))
-                recursion_budget = max(recursion_budget, 64 * (members + 32))
+        for node in instances(module, cst.ClassDef):
+            members = sum(isinstance(child, cst.AnnAssign) for child in statements(node.body))
+            recursion_budget = max(recursion_budget, 64 * (members + 32))
 
     modules_str = textwrap.indent(",\n".join(
         ['"' + s.as_posix() + '"' for s in modules]

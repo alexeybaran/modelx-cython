@@ -7,7 +7,7 @@ from .cell_entries import exact_receiver
 from .consts import CY_MOD, FORMULA_PREF, MX_LOCK, MX_SELF
 from .inline_entries import allows_exact_receiver
 from .scopes import Names, OPAQUE_SCOPES, metadata_wrapper
-from .syntax import code, dotted_name, statements, walk
+from .syntax import code, dotted_name, instances, statements, walk
 
 
 @dataclass(frozen=True)
@@ -107,8 +107,8 @@ class _HeldHits(cst.CSTTransformer):
 def lower_held_hits(state, entries):
     """Inline a checked native read on an already pinned exact Space."""
     calls, helpers = {}, {}
-    for call in walk(state.syntax):
-        if not isinstance(call, cst.Call) or not isinstance(call.func, cst.Attribute):
+    for call in instances(state.syntax, cst.Call):
+        if not isinstance(call.func, cst.Attribute):
             continue
         cast = call.func.value
         if (not isinstance(cast, cst.Call) or dotted_name(cast.func) != f'{CY_MOD}.cast' or len(cast.args) != 2

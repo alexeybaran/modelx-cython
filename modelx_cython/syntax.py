@@ -90,9 +90,12 @@ def children(node):
     if names is None:
         return _learn(node)
     found = []
+    kinds = _VALUE_KINDS
     for name in names:
         value = getattr(node, name)
-        kind = _value_kind(value)
+        kind = kinds.get(type(value))
+        if kind is None:
+            kind = _value_kind(value)
         if kind == _NODE:
             found.append(value)
         elif kind == _MANY:

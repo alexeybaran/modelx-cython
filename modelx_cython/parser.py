@@ -40,7 +40,7 @@ import libcst as cst
 import libcst.matchers as m
 from libcst.metadata import ParentNodeProvider, ScopeProvider, GlobalScope, ClassScope
 from modelx_cython.scopes import metadata_wrapper
-from modelx_cython.syntax import walk
+from modelx_cython.syntax import instances
 
 from modelx_cython.consts import (
     FORMULA_PREF,
@@ -298,9 +298,7 @@ class ModuleVisitor(m.MatcherDecoratableVisitor, ParentScopeAddin):
         names = set()
         # every Call node of the module (what m.findall(module, m.Call()) finds), on the shared
         # traversal
-        for call in walk(self.wrapper.module):
-            if not isinstance(call, cst.Call):
-                continue
+        for call in instances(self.wrapper.module, cst.Call):
             if any(a.keyword is not None or a.star == "**" for a in call.args):
                 func = call.func
                 if isinstance(func, cst.Attribute):

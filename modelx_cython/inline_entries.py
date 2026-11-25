@@ -5,7 +5,7 @@ import libcst as cst
 from modelx_cython.cell_entries import DenseAxis, FormulaEntry, cache_hit, exact_receiver
 from modelx_cython.consts import CY_MOD, FORMULA_PREF, MX_POW, MX_SELF, MX_SYS_MOD
 from modelx_cython.scopes import Names
-from modelx_cython.syntax import statements, walk
+from modelx_cython.syntax import instances, statements
 from modelx_cython.typedefs import primitive_kind
 
 
@@ -214,8 +214,8 @@ def _referenced_entries(body, functions, uncached, classes, origins, domains):
     candidates = {entry: key for key, entry in uncached.items()}
     kept = list(functions)
     while True:
-        names = [(fn, {n.value for n in walk(fn) if isinstance(n, cst.Name)}) for fn in kept]
-        used = {n.value for node in body if node is not None for n in walk(node) if isinstance(n, cst.Name)}
+        names = [(fn, {n.value for n in instances(fn, cst.Name)}) for fn in kept]
+        used = {n.value for node in body if node is not None for n in instances(node, cst.Name)}
         for fn, found in names:
             used |= found - {fn.name.value}
         dead = {fn.name.value for fn in kept if fn.name.value in candidates and fn.name.value not in used}

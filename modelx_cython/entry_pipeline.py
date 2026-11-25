@@ -9,13 +9,13 @@ from libcst.metadata import ExpressionContext
 from .cell_entries import checked_dense_guard, dense_condition, exact_receiver
 from .consts import CY_MOD, FORMULA_PREF, MX_SELF
 from .scopes import CstFacts, OPAQUE_SCOPES
-from .syntax import arguments, children, dotted_name, literal_value, same_expression, walk
+from .syntax import arguments, children, dotted_name, instances, literal_value, same_expression, walk
 from .typedefs import primitive_kind
 
 
 def _attribute_counts(tree):
-    return Counter(node.attr.value for node in walk(tree)
-                   if isinstance(node, cst.Attribute) and node.attr.value.startswith(FORMULA_PREF))
+    return Counter(node.attr.value for node in instances(tree, cst.Attribute)
+                   if node.attr.value.startswith(FORMULA_PREF))
 
 
 def _argument_range(node, ranges, types, target_type):
@@ -83,8 +83,8 @@ def _formula_ranges(state, layouts, guards, uses, entries):
     spills = {layout.spill_entry for layout in layouts.values() if layout.spill_entry}
 
     def spill_references(tree):
-        return Counter(node.value for node in walk(tree) if isinstance(node, cst.Name)
-                       and node.value in spills and state.facts.contexts.get(node) is ExpressionContext.LOAD)
+        return Counter(node.value for node in instances(tree, cst.Name)
+                       if node.value in spills and state.facts.contexts.get(node) is ExpressionContext.LOAD)
 
     spill_uses = spill_references(state.syntax) if spills else Counter()
     owners, sibling_total, owner_uses = _sibling_accessor_uses(state, entries)
