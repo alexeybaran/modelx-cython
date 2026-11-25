@@ -625,4 +625,21 @@ def finish(syntax, module):
     from modelx_cython.transformer import _integer_reference_paths
     result = cst.MetadataWrapper(syntax, unsafe_skip_copy=True).visit(
         RenameMembers(module, syntax.config_for_parsing, _integer_reference_paths))
-    return result
+    return _drop_unused_import(result)
+
+
+def _drop_unused_import(syntax):
+    """The module without the runtime import when nothing reads ``_mx_table_cells``: a compiled model
+    without table cells imports without modelx_cython installed, as upstream's does."""
+    from .syntax import walk
+    imports = [statement for statement in syntax.body
+               if isinstance(statement, cst.SimpleStatementLine) and len(statement.body) == 1
+               and isinstance(statement.body[0], cst.ImportFrom)
+               and any(isinstance(alias.asname, cst.AsName) and alias.asname.name.value == RUNTIME
+                       for alias in (statement.body[0].names if isinstance(statement.body[0].names, tuple) else ()))]
+    if len(imports) != 1:
+        return syntax
+    used = any(isinstance(node, cst.Name) and node.value == RUNTIME
+               for statement in syntax.body if statement is not imports[0] for node in walk(statement))
+    return syntax if used else syntax.with_changes(
+        body=tuple(statement for statement in syntax.body if statement is not imports[0]))
