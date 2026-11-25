@@ -163,3 +163,32 @@ def test_visit_without_attribute_callbacks_matches_libcst(index):
     module.visit(expected)
     syntax.visit(module, actual)
     assert actual.log == expected.log
+
+
+def _scope_summary(module, scopes):
+    tree = {id(node) for node in syntax.walk(module)}
+    numbers = {}
+    summary = [(id(node), numbers.setdefault(id(scope), len(numbers)), type(scope).__name__)
+               if scope is not None else (id(node), None)
+               for node, scope in scopes.items() if id(node) in tree]
+    for scope in {id(scope): scope for scope in scopes.values() if scope is not None}.values():
+        summary.append((numbers[id(scope)],
+                        sorted((item.name, type(item).__name__, id(item.node), len(item.references))
+                               for item in scope.assignments),
+                        sorted((str(getattr(item.node, 'value', '')), id(item.node) if id(item.node) in tree else 0,
+                                len(item.referents)) for item in scope.accesses)))
+    return summary
+
+
+@pytest.mark.parametrize('index', range(len(sources())))
+def test_metadata_wrapper_resolves_as_libcst(index):
+    from libcst.metadata import MetadataWrapper, ParentNodeProvider, ScopeProvider
+    from modelx_cython.scopes import metadata_wrapper
+    module = cst.parse_module(sources()[index])
+    expected, actual = MetadataWrapper(module, unsafe_skip_copy=True), metadata_wrapper(module, parents=True)
+    assert _scope_summary(module, actual.resolve(ScopeProvider)) == \
+        _scope_summary(module, expected.resolve(ScopeProvider))
+    assert {id(node): id(parent) for node, parent in actual.resolve(ParentNodeProvider).items()} == \
+        {id(node): id(parent) for node, parent in expected.resolve(ParentNodeProvider).items()}
+    copied = metadata_wrapper(module, copy=True)
+    assert copied.module is not module and copied.module.deep_equals(module)

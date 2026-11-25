@@ -8,7 +8,7 @@ from .checked_arithmetic import (
 )
 from .consts import CY_MOD, FORMULA_PREF, MX_SELF, MX_SYS_MOD
 from .powers import KIND_FLOAT, OperandKind, kind_of_type_expr
-from .scopes import CstFacts, Names, OPAQUE_SCOPES, binds_none_of, has_scope_effects, lexical_nodes
+from .scopes import CstFacts, Names, OPAQUE_SCOPES, binds_none_of, has_scope_effects, lexical_nodes, metadata_wrapper
 from .syntax import arguments, dotted_name, local_assignment, statements, walk
 from .usage import RESOLVED, _extract_self_chain
 
@@ -266,7 +266,7 @@ def _guard_calls(node, cls, cell, resolver, entries, cells, private_entries, cla
     integer_params = {param.name.value: param for param in params if param.annotation is not None
                       and param.annotation.annotation.deep_equals(_INTEGER_ANNOTATION)}
     counters = getattr(cell, 'signed_range_counters', ())
-    wrapper = cst.MetadataWrapper(cst.Module(body=(node,)), unsafe_skip_copy=True)
+    wrapper = metadata_wrapper(cst.Module(body=(node,)))
     item_cells = {local: classes[owner].cells for local, owner in getattr(cell, 'typed_item_locals', {}).items()
                   if classes and owner in classes}
     return wrapper.visit(_GuardCalls(params[0], integer_params, counters, cls.fqname, resolver, entries, cells,

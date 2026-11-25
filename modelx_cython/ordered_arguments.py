@@ -125,5 +125,6 @@ def preserve_argument_order(formula, native_result=False, operand_kind=None):
     """Keep unproved powers on Cython's ordinary Python-object operator."""
     if not _rewrites(formula):
         return formula      # the pass would return an equal copy
-    wrapper = cst.MetadataWrapper(cst.Module(body=(formula,)))
+    from .scopes import metadata_wrapper
+    wrapper = metadata_wrapper(cst.Module(body=(formula,)), copy=True, parents=True)
     return wrapper.visit(_OrderedArguments(native_result, operand_kind)).body[0]

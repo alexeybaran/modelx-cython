@@ -3,7 +3,9 @@
 import libcst as cst
 from collections import Counter
 from collections.abc import Sequence
-from libcst.metadata import ExpressionContext
+from types import MappingProxyType
+
+from libcst.metadata import ExpressionContext, ExpressionContextProvider, MetadataWrapper, ParentNodeProvider
 
 from .syntax import children, dotted_name, visit, walk
 
@@ -192,6 +194,37 @@ def expression_contexts(module):
     contexts = {}
     visit(module, _Contexts(contexts, ExpressionContext.LOAD))
     return contexts
+
+
+class _Parents(cst.CSTVisitor):
+    """LibCST's ``ParentNodeProvider`` (its ``ParentNodeVisitor``) on the shared traversal."""
+    def __init__(self, parents):
+        self.parents = parents
+
+    def on_leave(self, original_node):
+        for child in children(original_node):
+            self.parents[child] = original_node
+
+
+def parent_nodes(module):
+    """What ``MetadataWrapper(module, unsafe_skip_copy=True).resolve(ParentNodeProvider)`` holds."""
+    parents = {}
+    visit(module, _Parents(parents))
+    return parents
+
+
+def metadata_wrapper(module, copy=False, parents=False):
+    """``MetadataWrapper(module, unsafe_skip_copy=not copy)`` with its ExpressionContextProvider
+    (on which ScopeProvider depends) and, with ``parents``, its ParentNodeProvider metadata
+    already resolved, from the shared traversal: LibCST resolves the same mappings with two
+    traversals each that rebuild every node. Any other provider resolves as LibCST does."""
+    wrapper = MetadataWrapper(module, unsafe_skip_copy=not copy)
+    resolved = getattr(wrapper, '_metadata', None)
+    if type(resolved) is dict and not resolved:
+        resolved[ExpressionContextProvider] = MappingProxyType(expression_contexts(wrapper.module))
+        if parents:
+            resolved[ParentNodeProvider] = MappingProxyType(parent_nodes(wrapper.module))
+    return wrapper
 
 
 # Nodes that bind a name of their own (``name`` field) without an expression context

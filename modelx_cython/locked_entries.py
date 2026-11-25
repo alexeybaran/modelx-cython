@@ -6,7 +6,7 @@ import libcst as cst
 from .cell_entries import exact_receiver
 from .consts import CY_MOD, FORMULA_PREF, MX_LOCK, MX_SELF
 from .inline_entries import allows_exact_receiver
-from .scopes import Names, OPAQUE_SCOPES
+from .scopes import Names, OPAQUE_SCOPES, metadata_wrapper
 from .syntax import code, dotted_name, statements, walk
 
 
@@ -51,7 +51,7 @@ def _entry(state, cls, cell):
 
 
 def _same_receiver_calls(formula, entries):
-    scopes = cst.MetadataWrapper(cst.Module((formula,)), unsafe_skip_copy=True).resolve(cst.metadata.ScopeProvider)
+    scopes = metadata_wrapper(cst.Module((formula,))).resolve(cst.metadata.ScopeProvider)
     receiver = formula.params.params[0]
     calls = {}
     for node in walk(formula.body):

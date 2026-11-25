@@ -63,6 +63,7 @@ from libcst.metadata import ParentNodeProvider, ScopeProvider, GlobalScope, Clas
 from libcst.metadata.scope_provider import BuiltinAssignment
 
 from modelx_cython.parser import ParentScopeAddin
+from modelx_cython.scopes import metadata_wrapper
 from modelx_cython.builder import ModuleInfo, CombinedCellsInfo
 from modelx_cython.config import TransSpec
 from modelx_cython.powers import rewrite_powers
@@ -558,7 +559,7 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
         """
         super().__init__()
         self.wrapper = (module.visitor.wrapper if module.visitor.source == source else
-                        cst.metadata.MetadataWrapper(cst.parse_module(source)))
+                        metadata_wrapper(cst.parse_module(source), parents=True))
         self._module_node = self.wrapper.module
         self._source = source
         self.module = module

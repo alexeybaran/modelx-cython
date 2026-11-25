@@ -39,6 +39,7 @@ from functools import cached_property
 import libcst as cst
 import libcst.matchers as m
 from libcst.metadata import ParentNodeProvider, ScopeProvider, GlobalScope, ClassScope
+from modelx_cython.scopes import metadata_wrapper
 
 from modelx_cython.consts import (
     FORMULA_PREF,
@@ -284,7 +285,8 @@ class ModuleVisitor(m.MatcherDecoratableVisitor, ParentScopeAddin):
         self.locked_classes = set()  # classes whose __init__ assigns self._mx_lock
         self.itemspace_classes = set()
         self.dynamic_ref_classes = set()
-        self.wrapper = cst.metadata.MetadataWrapper(cst.parse_module(source))
+        # a module just parsed holds no node twice: the wrapper needs no copy of it
+        self.wrapper = metadata_wrapper(cst.parse_module(source), parents=True)
         self.wrapper.visit(self)
         self.kwarg_called_names = self._collect_kwarg_called_names()
 
