@@ -10,8 +10,8 @@
 - ``min``/``max`` of a generator over an integer vector cell (Cancer_KR_S tier_share), with
   Python's empty-iterable ValueError, and a vector sum whose element holds ``max(0.0, ...)``
   (CI_KR_S claims) are C loops; an element of an integer vector is an integer key; a returned
-  ``[... for s in range(..)] + list(range(..))`` equals live (CI_KR_S ci_cohort_ids; built as Python
-  lists, then one integer vector); a vector rebuilt
+  ``tuple(... for s in range(..)) + tuple(range(..))`` equals live (CI_KR_S ci_cohort_ids, written as
+  tuples); a vector rebuilt
   from itself (``val = [v * g for v in val]``, Dep_FR_S dep_cohorts) is a typed vector;
 - ``for x in (E.A, E.B, ...)`` over enum members is a loop over a literal tuple of integers
   (enums.literals), which Cython compiles with a C integer target (Child_KR_S benefit_pp).
@@ -56,7 +56,7 @@ def _build(tmp_path):
         s.new_cells('guarantee', 'lambda: 2')
         # a vector cell: range loop targets are C integers in a module with vector cells (W1.6),
         # as in the models this test stands for
-        s.new_cells('vec', 'lambda: [0.5 * k for k in range(4)]')
+        s.new_cells('vec', 'lambda: tuple(0.5 * k for k in range(4))')
         s.new_cells('surv', 'lambda s, u: 1.0 / (1.0 + s + u)')
         s.new_cells('pay', textwrap.dedent('''\
             def pay(t):
@@ -135,7 +135,7 @@ def _build(tmp_path):
                 if t % 2 == 0:
                     g = 1.0 + 0.5
                     val = [v * g for v in val]
-                return val
+                return tuple(val)
             '''))
         s.new_cells('within', textwrap.dedent('''\
             def within(t):
@@ -144,7 +144,7 @@ def _build(tmp_path):
                     return flow(n - 1)
                 return 0.0
             '''))
-        s.new_cells('ages', 'lambda: [1, 2, 3, 4]')
+        s.new_cells('ages', 'lambda: tuple([1, 2, 3, 4])')
         s.new_cells('above', textwrap.dedent('''\
             def above(t):
                 ages_ = ages()
@@ -161,7 +161,7 @@ def _build(tmp_path):
                 loan = flow(t) * 0.5
                 return sum(flow(s) * max(0.0, flow(t) - loan) for s in ages())
             '''))
-        s.new_cells('ids', 'lambda t: [-s for s in range(1, min(max(t, 0), 3) + 1)] + list(range(1, max(t, 0) + 1))')
+        s.new_cells('ids', 'lambda t: tuple(-s for s in range(1, min(max(t, 0), 3) + 1)) + tuple(range(1, max(t, 0) + 1))')
         s.new_cells('over_ids', 'lambda t: sum(flow(abs(s)) * 0.5 for s in ids(t))')
         s.new_cells('weight', 'lambda code: 0.5 if code == Status.OK else 0.25 * (code - 200)')
         s.new_cells('members', textwrap.dedent('''\
