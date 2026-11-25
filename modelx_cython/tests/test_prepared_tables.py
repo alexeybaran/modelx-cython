@@ -202,6 +202,39 @@ def test_left_to_pandas(tables, frame, reason):
     assert reason in _tables.unprepared_reason(frame)
 
 
+def own_rule_frames():
+    """Indexes whose labels pandas finds by rules of its own (a text for a date, a number inside an interval), or
+    whose labels it cannot order: a read of them is pandas' (the table is not prepared), never a wrong answer or an
+    error of the preparation."""
+    import datetime
+    q = {'q': [1.0, 2.0]}
+    yield 'datetime', pd.DataFrame(q, index=pd.to_datetime(['2020-01-01', '2021-01-01'])), [
+        '2020-01-01', '2021-01-01', '2019-01-01', datetime.datetime(2020, 1, 1), pd.Timestamp('2021-01-01')]
+    yield 'interval', pd.DataFrame(q, index=pd.IntervalIndex.from_breaks([0, 10, 20])), [5, 10, 15, 25, pd.Interval(0, 10)]
+    yield 'period', pd.DataFrame(q, index=pd.period_range('2020-01', periods=2, freq='M')), [
+        '2020-01', '2020-02', '2020-03', pd.Period('2020-02', 'M')]
+    yield 'timedelta', pd.DataFrame(q, index=pd.to_timedelta(['1D', '2D'])), ['1D', '2D', '3D', pd.Timedelta('1D')]
+    yield 'categorical', pd.DataFrame(q, index=pd.CategoricalIndex(['a', 'b'])), ['a', 'b', 'c']
+    yield 'mixed types', pd.DataFrame({'q': [1.0, 2.0, 3.0]}, index=pd.Index([1, 'a', 2.5], dtype=object)), [1, 'a', 2.5, 'b']
+    yield 'beyond 64 bits', pd.DataFrame(q, index=pd.Index([1, 2 ** 63 + 5], dtype='uint64')), [1, 2 ** 63 + 5, 7]
+    yield 'bool', pd.DataFrame(q, index=pd.Index([True, False])), [True, False, 1, 0, 1.0]
+    yield 'date level', pd.DataFrame(q, index=pd.MultiIndex.from_arrays(
+        [['a', 'b'], pd.to_datetime(['2020-01-01', '2021-01-01'])])), [('a', '2020-01-01'), ('b', '2021-01-01'), ('a', '2021-01-01')]
+
+
+@pytest.mark.parametrize('name,frame,keys', list(own_rule_frames()), ids=[n for n, _, _ in own_rule_frames()])
+def test_index_pandas_looks_up_by_its_own_rules(tables, name, frame, keys):
+    _tables, _ = tables
+    table = _tables.prepare(frame)          # must not raise: a frame Cell binds its frame when it is computed
+    if table is None:
+        assert _tables.unprepared_reason(frame)
+        return
+    for key in keys:
+        want, got = outcome(lambda: frame.loc[key, 'q']), outcome(lambda: table.value(key, 'q'))
+        assert want[0] == got[0] and (want[0] != 'ok' or want[1] == got[1]), (name, key, want, got)
+        assert (key in frame.index) == table.contains(key), (name, key)
+
+
 def test_copy_at_bind(tables):
     _tables, _ = tables
     frame = pd.DataFrame({'q': [1.0, 2.0, 3.0]}, index=pd.Index([10, 11, 12]))
