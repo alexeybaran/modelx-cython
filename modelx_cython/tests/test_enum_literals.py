@@ -254,3 +254,101 @@ def test_a_value_of_unknown_class_is_checked_where_its_receiver_converts():
         'def nm(self, k):\n        return self._f_nm(k)',                       # the cache method is not a formula
     ]:
         assert expected in text, expected + '\n' + text
+
+
+# ---------------------------------------------------------------- text-valued classes: a member is its position
+needs_strenum = pytest.mark.skipif(not hasattr(enum, 'StrEnum'), reason='enum.StrEnum is of Python 3.11')
+if hasattr(enum, 'StrEnum'):
+    class Claim(enum.StrEnum):
+        DEATH = 'DEATH'
+        LAPSE = 'LAPSE'
+        MAT = 'MATURITY'
+
+    class Sex(enum.StrEnum):
+        M = 'M'
+        F = 'F'
+
+    class Shouting(enum.StrEnum):       # not text-safe: its own str
+        A = 'a'
+
+        def __str__(self):
+            return self.value.upper()
+
+
+def held(result_type, classes, **arg_types):
+    """A traced Cell whose parameters in ``classes`` are held as positions (the tracer types them as int)."""
+    return SimpleNamespace(arg_types={name: int if name in classes else tp for name, tp in arg_types.items()},
+                           ret_type=result(result_type), enum_codes=classes)
+
+
+@needs_strenum
+def test_text_safe_needs_every_operation_of_str_and_the_text_as_value():
+    from modelx_cython.enums import positions, text_safe
+    assert text_safe(Claim) and text_safe(Sex) and not text_safe(Shouting) and not text_safe(Kind)
+    assert positions(Claim) == ({'DEATH': 0, 'LAPSE': 1, 'MAT': 2}, {'DEATH': 0, 'LAPSE': 1, 'MATURITY': 2})
+    info = RuntimeRefInfo(Claim)
+    assert info.enum_safe and info.enum[2] == {'DEATH': 0, 'LAPSE': 1, 'MAT': 2} and info.enum_texts['MATURITY'] == 2
+
+
+@needs_strenum
+def test_the_tracer_holds_members_and_their_texts_as_positions():
+    from modelx_cython.tracer import RuntimeCellsInfo
+
+    def formula(self, t, kind, sex, label):
+        return 0.0
+
+    def trace(*values):
+        names = ('self', 't', 'kind', 'sex', 'label')
+        return SimpleNamespace(func=formula, funcname='m._c_P._f_f', arg_vals=dict(zip(names, (None, *values))),
+                               ret_val=0.0)
+    info = RuntimeCellsInfo([trace(0, Claim.DEATH, 'M', 'a'), trace(1, 'MATURITY', 'F', Claim.LAPSE)])
+    assert info.enum_codes == {'kind': Claim}           # sex was given texts only; label a text that is no member
+    assert info.arg_types['kind'] is int and (info.min_args['kind'], info.max_args['kind']) == (0, 2)
+    assert info.arg_types['sex'] is str and info.arg_types['label'] is str
+
+
+TEXT_REFS = {}
+TEXT_CELLS = {}
+if hasattr(enum, 'StrEnum'):
+    TEXT_REFS = {'m._c_P.Claim': RuntimeRefInfo(Claim), 'm._c_P.Sex': RuntimeRefInfo(Sex),
+                 'm._c_P.default_kind': RuntimeRefInfo('LAPSE')}
+    TEXT_CELLS = {'m._c_P.f': held(float, {'kind': Claim}, t=int, kind=Claim),
+                  'm._c_P._f_claims': held(float, {'kind': Claim}, t=int, kind=Claim),
+                  'm._c_P._f_rate': held(float, {'s': Sex}, t=int, s=Sex), 'm._c_P._f_sex': cell(str)}
+
+
+def text(body, params='self, t, kind'):
+    source = formula(body, params=params)
+    return literals('m', source, TEXT_REFS, TEXT_CELLS).split('\n', 1)[1][4:].replace('\n        ', '\n')
+
+
+@needs_strenum
+@pytest.mark.parametrize('body, expected', [
+    ('return kind == self.Claim.DEATH', 'return kind == 0'),                        # compared with a member
+    ('return kind != "LAPSE"', 'return kind != 1'),                                  # or with its text
+    ('return kind in (self.Claim.MAT, "LAPSE")', 'return kind in (2, 1)'),
+    ('return kind == "NOPE"', 'return kind == (-2)'),                                # a text that no member has
+    ('return self.claims(t, self.Claim.MAT) + self.claims(t, "DEATH")', 'return self.claims(t, 2) + self.claims(t, 0)'),
+    ('return self.claims(t, kind) + self.claims(t, kind=self.Claim.LAPSE)', 'return self.claims(t, kind) + self.claims(t, kind=1)'),
+    ('return sum(self.claims(t, k) for k in (self.Claim.DEATH, self.Claim.LAPSE))', 'for k in (0, 1))'),
+    ('x = self.Claim.LAPSE if t else self.Claim.MAT\nreturn self.claims(t, x)', 'x = 1 if t else 2'),
+    ('return self.claims(t, self.default_kind)',                                    # a text that is known when it runs
+     'return self.claims(t, _mx_sys._mx_enum_code(self.Claim, self.default_kind))'),
+    ('return self.rate(t, self.sex())', 'return self.rate(t, _mx_sys._mx_enum_code(self.Sex, self.sex()))'),
+    # every other use sees the member: text operations, ordering, truth, a key, an unknown counterpart
+    ('return kind.name + kind', 'return _mx_sys._mx_enum_at(self.Claim, kind).name + _mx_sys._mx_enum_at(self.Claim, kind)'),
+    ('return kind < self.Claim.MAT', 'return _mx_sys._mx_enum_at(self.Claim, kind) < self.Claim.MAT'),
+    ('return T[kind] if kind else d[self.Claim.MAT]',
+     'return T[_mx_sys._mx_enum_at(self.Claim, kind)] if _mx_sys._mx_enum_at(self.Claim, kind) else d[self.Claim.MAT]'),
+    ('return kind == other, self.sex() == self.Sex.M', 'return _mx_sys._mx_enum_at(self.Claim, kind) == other, self.sex() == self.Sex.M'),
+    ('return f"{kind}", [self.Claim.DEATH], self.Claim.MAT == "MATURITY"',       # two constants: equal either way
+     'return f"{_mx_sys._mx_enum_at(self.Claim, kind)}", [self.Claim.DEATH], 2 == 2'),
+])
+def test_a_text_valued_member_is_its_position_where_members_are_told_apart(body, expected):
+    assert expected in text(body)
+
+
+@needs_strenum
+def test_a_text_default_of_a_held_parameter_is_its_position():
+    assert text('return kind == self.Claim.MAT', params='self, t, kind="MATURITY"').startswith(
+        'def f(self, t, kind=2):\nreturn kind == 2')
