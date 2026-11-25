@@ -52,7 +52,6 @@ from modelx_cython.consts import (
     SPACE_PREF,
 )
 from modelx_cython.parser import ParentScopeAddin
-from modelx_cython.helper_members import helper_reference
 from modelx_cython.scopes import CstFacts
 from modelx_cython.syntax import arguments, statements
 
@@ -626,24 +625,6 @@ def build_resolver(module_infos) -> CellsResolver:
     return resolver
 
 
-def _declares_result(helper, call, binding):
-    result = getattr(helper, 'helper_result_type', None)
-    if (result is None or result[0] != binding.type_id
-            or helper.helper[0] != binding.manifest.provider or any(arg.star for arg in call.args)):
-        return False
-    if result[1] is None:
-        return True
-    name = result[1]
-    positional = [key for key, _, keyword_only in helper.helper_parameters if not keyword_only]
-    values = [arg.value for arg in call.args if arg.keyword and arg.keyword.value == name]
-    if name in positional:
-        args = [arg.value for arg in call.args if arg.keyword is None]
-        index = positional.index(name)
-        if index < len(args):
-            values.append(args[index])
-    return not values or len(values) == 1 and isinstance(values[0], cst.Tuple) and not values[0].elements
-
-
 def admit_forwarded_views(module_infos, resolver):
     """Follow native result contracts through direct Cell returns."""
     cells = {cell.fqname: cell for module in module_infos.values()
@@ -667,9 +648,6 @@ def admit_forwarded_views(module_infos, resolver):
             continue
         chain = _extract_self_chain(call.func)
         if not isinstance(chain, list) or CstFacts(formula.body.body).stores[MX_SELF]:
-            continue
-        if _declares_result(helper_reference(call.func, info.refs), call, cell.observed_native_binding):
-            pending.append(cell)
             continue
         if arguments(call) is None:
             continue

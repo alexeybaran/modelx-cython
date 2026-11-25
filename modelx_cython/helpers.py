@@ -1,26 +1,16 @@
-"""Bind explicitly registered helpers without freezing exported References.
+"""Bind module math members to the math provider without freezing exported References.
 
 Providers supply a .pyx/.pxd pair. Their Cython functions receive the current
-Python callable first and must preserve its behavior when it is replaced.
+module or callable and must preserve its behavior when it is replaced.
 """
 import hashlib
 from importlib import resources
 import keyword
-import inspect
 
 import libcst as cst
 
 from .scopes import FormulaTransformer
 from .consts import CY_MOD
-
-# One registry for tracing, merged References and validation. Tuple lengths
-# describe provider ABI operations, not model or formula source patterns.
-CAPABILITIES = {
-    'scalar_result': ('scalar_result', None),
-    'call_layout': ('call_layout', None),
-}
-SCALAR_RESULTS = frozenset(('float64', 'int64', 'bool', 'unicode', 'object'))
-
 
 def module_name(provider):
     return '_mx_helper_' + hashlib.sha256(provider.encode()).hexdigest()[:12]
@@ -33,66 +23,6 @@ def valid_identifier(name):
 def read_resource(package, name):
     return (resources.files(package).joinpath(name).read_bytes()
             if hasattr(resources, 'files') else resources.read_binary(package, name))
-
-
-def registered_helper(value):
-    contract = value.__dict__.get('__modelx_cython_helper__')
-    if contract is None:
-        return None
-    if not (isinstance(contract, tuple) and len(contract) == 2
-            and all(isinstance(item, str) for item in contract)):
-        raise ValueError('helper registration must be (provider, operation)')
-    provider, operation = contract
-    if '.' not in provider or not all(valid_identifier(part) for part in (*provider.split('.'), operation)):
-        raise ValueError('helper registration must name a packaged provider and an operation')
-    return contract
-
-
-def helper_capability(value, name):
-    capability = value.__dict__.get(f'__modelx_cython_{name}__')
-    if capability is None:
-        return None
-    lengths = CAPABILITIES[name][1]
-    if lengths:
-        valid = (isinstance(capability, tuple) and len(capability) in lengths
-                 and all(valid_identifier(part) for part in capability))
-    else:
-        valid = valid_identifier(capability)
-    if not valid or name == 'scalar_result' and capability not in SCALAR_RESULTS:
-        raise ValueError(f'invalid helper capability {name!r} on {value.__qualname__}')
-    if name == 'call_layout' and capability != 'keywords':
-        raise ValueError(f'invalid helper capability {name!r} on {value.__qualname__}')
-    return capability
-
-
-def helper_parameters(value):
-    """Read declared call parameters, never formula bodies or sampled values."""
-    if helper_capability(value, 'call_layout') != 'keywords':
-        return None
-    parameters = inspect.signature(value).parameters.values()
-    if any(p.kind in (p.VAR_POSITIONAL, p.VAR_KEYWORD) for p in parameters):
-        return None
-    return tuple((p.name, p.default is not p.empty, p.kind is p.KEYWORD_ONLY)
-                 for p in parameters)
-
-
-def helper_result_type(value):
-    """Read an owner type and optional parameter that must retain its empty default."""
-    identity = vars(value).get('__modelx_cython_result_type__')
-    if identity is None:
-        return None
-    conditional = type(identity) is tuple
-    if conditional and len(identity) == 2:
-        owner, parameter = identity
-        declared = inspect.signature(value).parameters.get(parameter) if valid_identifier(parameter) else None
-    else:
-        owner, parameter, declared = identity, None, None
-    if (not isinstance(owner, str) or '.' not in owner
-            or not all(valid_identifier(part) for part in owner.split('.'))
-            or conditional and (declared is None or type(declared.default) is not tuple
-                                or declared.default or helper_parameters(value) is None)):
-        raise ValueError(f'invalid native helper result type on {value.__qualname__}')
-    return owner, parameter
 
 
 def borrowed_namespace(reference):
@@ -243,8 +173,8 @@ class HelperCalls(FormulaTransformer):
         func = updated.func
         ref = _declared_reference(func, self.refs)
         contract = ref.helper if ref is not None else None
-        # Only registered math operations have a native provider; other registered helpers stay
-        # ordinary Python calls.
+        # A module member that is a math builtin under another name has no ``m_`` form: the
+        # provider operation receives the member itself and checks it.
         if not contract or contract[0] != MATH_PROVIDER or any(arg.star or arg.keyword for arg in updated.args):
             return updated
         provider, operation = contract

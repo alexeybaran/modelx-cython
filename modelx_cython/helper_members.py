@@ -1,16 +1,13 @@
-"""Registered functions behind module References, using the existing registry.
+"""Math members behind module References.
 
 These records contain capabilities, not frozen callable bindings. Emission must
 still evaluate the current member callable and let the provider check identity.
-The shared tracer/merged-Reference wiring is a separately owned integration.
 """
 import math
 from math import ceil, erf, exp, floor, isclose, isinf, log, sqrt
-from types import BuiltinFunctionType, FunctionType, ModuleType, SimpleNamespace
+from types import BuiltinFunctionType, ModuleType, SimpleNamespace
 
 import libcst as cst
-
-from .helpers import CAPABILITIES, helper_capability, helper_parameters, helper_result_type, registered_helper
 
 
 _SCALAR_MATH = {erf: 'float64', exp: 'float64', isinf: 'bool', log: 'float64', sqrt: 'float64'}
@@ -33,36 +30,20 @@ def module_helpers(value):
             if function not in _SCALAR_MATH and not stdlib:
                 continue          # floor/ceil only on the math module itself
             result[name] = SimpleNamespace(
-                helper=(MATH_PROVIDER, function.__name__),
-                helper_parameters=None, scalar_result=_MODULE_MATH[function],
+                helper=(MATH_PROVIDER, function.__name__), scalar_result=_MODULE_MATH[function],
                 module_math=function.__name__ if stdlib or name == function.__name__ else None,
             )
             continue
         if stdlib and name in MATH_CONSTANTS and type(function) is float:
             result[name] = SimpleNamespace(helper=None, module_constant=MATH_CONSTANTS.index(name))
-            continue
-        if type(function) is not FunctionType:
-            continue
-        helper = registered_helper(function)
-        if helper is None:
-            continue
-        capabilities = {field: helper_capability(function, suffix)
-                        for suffix, (field, _) in CAPABILITIES.items()}
-        result[name] = SimpleNamespace(helper=helper, helper_parameters=helper_parameters(function),
-                                       helper_result_type=helper_result_type(function),
-                                       module_math=(helper[1] if helper[0] == MATH_PROVIDER
-                                                    and helper[1] == name else None),
-                                       **capabilities)
     return result
 
 
 def helper_reference(function, refs):
-    """Resolve direct References or one declared module member in this scope."""
+    """Resolve one math member of a module Reference in this scope."""
     if not isinstance(function, cst.Attribute):
         return None
     receiver = function.value
-    if isinstance(receiver, cst.Name) and receiver.value == 'self':
-        return refs.get(function.attr.value)
     if (isinstance(receiver, cst.Attribute) and isinstance(receiver.value, cst.Name)
             and receiver.value.value == 'self'):
         namespace = refs.get(receiver.attr.value)

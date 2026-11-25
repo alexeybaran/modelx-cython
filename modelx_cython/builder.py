@@ -854,7 +854,6 @@ class CombinedRefInfo:
     mx_class: str = ''
     decl_type_expr: str = ''
     is_relative: bool = False
-    helper = None
     enum = None
     enum_safe = False
 
@@ -867,14 +866,8 @@ class CombinedRefInfo:
         When ``rt_info`` is falsy, only ``module``, ``cls`` and
         ``name`` are set; the class-level defaults remain in effect.
         """
-        from .helpers import CAPABILITIES
         self.helper_members = getattr(rt_info, 'helper_members', {})
-        self.helper_parameters = getattr(rt_info, 'helper_parameters', None)
-        self.helper_result_type = getattr(rt_info, 'helper_result_type', None)
-        for field_name, _ in CAPABILITIES.values():
-            setattr(self, field_name, getattr(rt_info, field_name, None))
         if rt_info:
-            self.helper = getattr(rt_info, 'helper', None)
             self.enum = getattr(rt_info, 'enum', None)
             self.enum_safe = getattr(rt_info, 'enum_safe', False)
 

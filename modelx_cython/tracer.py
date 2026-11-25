@@ -47,13 +47,12 @@ import itertools
 from enum import IntEnum
 from dataclasses import dataclass
 from contextlib import contextmanager
-from types import CodeType, FrameType, FunctionType, MemberDescriptorType
+from types import CodeType, FrameType, MemberDescriptorType
 from typing import Any, Mapping, Iterator, Sequence, Optional, Dict, List
 import logging
 
 import numpy as np
 
-from modelx_cython.helpers import helper_capability, registered_helper
 from modelx_cython.monkeytype_tracing import (
     CallTraceLogger,
     get_func,
@@ -538,16 +537,8 @@ class RuntimeValueInfo:
         self.type_ = (object if isinstance(value, numbers.Integral)
                       and not -(1 << 63) <= value < (1 << 63) else type(value))
         self.mx_class = mx_class
-        self.helper = registered_helper(value) if type(value) is FunctionType else None
         from .helper_members import module_helpers
         self.helper_members = module_helpers(value)
-        from .helpers import helper_parameters, helper_result_type
-        self.helper_parameters = helper_parameters(value) if self.helper is not None else None
-        self.helper_result_type = helper_result_type(value) if self.helper is not None else None
-        from .helpers import CAPABILITIES
-        for capability, (name, _) in CAPABILITIES.items():
-            setattr(self, name, helper_capability(value, capability)
-                    if self.helper is not None else None)
         self.enum_safe = (isinstance(value, type) and issubclass(value, IntEnum)
                           and type(value) is type(IntEnum)
                           and value.__eq__ is int.__eq__ and value.__ne__ is int.__ne__)
