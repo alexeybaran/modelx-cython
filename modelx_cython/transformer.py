@@ -73,6 +73,7 @@ from modelx_cython import numeric_cache
 from modelx_cython import enums as code_enums
 from modelx_cython import table_cells
 from modelx_cython import holds
+from modelx_cython import value_storage
 
 from modelx_cython.consts import (
     FORMULA_PREF,
@@ -173,6 +174,7 @@ class PXDGenerator:
 
     {private_var_defs}
     {public_var_defs}
+    {value_var_defs}
 
         cpdef {MX_COPY_REFS}({class_name} self, object base, object base_root)
 
@@ -261,15 +263,19 @@ class PXDGenerator:
             ``cls_template`` filled with the class's variable and
             method declarations, indented for the class body.
         """
-        return self.cls_template.format(
+        block = self.cls_template.format(
             class_name=name,
             MX_SYS_MOD=MX_SYS_MOD,
             private_var_defs=textwrap.indent(self.private_var_defs(name), ' ' * 4),
             public_var_defs=textwrap.indent(self.public_var_defs(name), ' ' * 4),
+            value_var_defs=textwrap.indent(
+                ''.join(value_storage.pxd_declarations(self.module.classes[name])), ' ' * 4),
             MX_COPY_REFS=MX_COPY_REFS,
             private_meth_defs=textwrap.indent(self.private_meth_defs(name), ' ' * 4),
             public_meth_defs=textwrap.indent(self.public_meth_defs(name), ' ' * 4)
         )
+        value_storage.check_last(block, self.module.classes[name])
+        return block
 
     @cached_property
     def child_cimports(self):
@@ -341,10 +347,7 @@ class PXDGenerator:
             if cells.has_args():
                 if cells.has_typeinfo() and cells.is_arrayable():
 
-                    var_name = VAR_PREF + cells.name
-                    var_type = cells.get_array_decl_expr(c_style=True)
-                    decl_stmts.append(f"cdef {var_type} {var_name}\n")
-
+                    # S1: the value array is declared with the class's last members (value_var_defs)
                     has_name = HAS_PREF + cells.name
                     has_type = cells.get_readiness_array_decl_expr(c_style=True)
                     decl_stmts.append(f"cdef {has_type} {has_name}\n")
@@ -1104,6 +1107,11 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
                      else getattr(self.module.classes[name], 'native_contexts', {}))]
         if roots:
             module = module.with_changes(body=(*module.body, *roots))
+        # S1: dense cache values left unwritten at allocation, installed when the module is imported
+        values = ''.join(value_storage.functions(cls) for cls in self.module.classes.values())
+        if values:
+            values += value_storage.install(self.module.classes.values())
+            module = module.with_changes(body=(*module.body, *cst.parse_module(values).body))
         directives = []
         if any(getattr(cell, 'power_memo', None) for cls in self.module.classes.values()
                for cell in cls.cells.values()):
@@ -1155,15 +1163,7 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
 
                 if cells.has_args():
                     if cells.has_typeinfo() and cells.is_arrayable():
-                        decl_stmts.append(
-                            cst.parse_statement(
-                                VAR_PREF
-                                + cells.name
-                                + ": "
-                                + cells.get_array_decl_expr(),
-                                config=self._module_node.config_for_parsing,
-                            )
-                        )
+                        # S1: the value array is annotated after every other member (value_storage)
                         decl_stmts.append(
                             cst.parse_statement(
                                 HAS_PREF
@@ -1252,6 +1252,8 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
                 decl_stmts.append(cst.parse_statement(f'{name}: {module_name(provider)}.LookupContext\n'))
             decl_stmts.extend(cst.parse_statement(line)
                               for line in holds.py_declarations(self.module.classes[cls_name]))
+            decl_stmts.extend(cst.parse_statement(line)
+                              for line in value_storage.py_declarations(self.module.classes[cls_name]))
             if contexts:
                 body = []
                 for statement in updated_node.body.body:

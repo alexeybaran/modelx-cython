@@ -347,6 +347,146 @@ cdef extern from *:
     short _mx_load_dense_flag "__mx_load_dense_flag" (short *p) noexcept nogil
     void _mx_store_dense_flag "__mx_store_dense_flag" (short *p, short v) noexcept nogil
 
+
+cdef extern from *:
+    """
+    /* S1 (value_storage.py): the value arrays of dense Cell caches are not zero-filled when an
+       object is allocated. A value is read only after its flag is set, and a flag is set only after
+       its value is stored. A class registers its value arrays from a probe instance; finish()
+       requires them to be adjacent members and installs an allocator that zeroes every other byte,
+       as PyType_GenericAlloc zeroes all of them. Pickling and copying reduce a copy of the object
+       whose unflagged values are zero, so no unwritten byte leaves the process. Without the CPython
+       C API nothing is installed. MX_POISON_UNWRITTEN_VALUES (tests) fills the values with 0xA5. */
+    typedef struct { Py_ssize_t value, bytes, value_size, flag, flag_size; } __mx_value_array;
+    typedef struct __mx_values_layout {
+        PyTypeObject *type; char *probe; PyObject *reduce;
+        Py_ssize_t lo, hi, count, capacity, failed;
+        __mx_value_array *arrays; struct __mx_values_layout *next;
+    } __mx_values_layout;
+
+    static inline __mx_values_layout **__mx_values_head(void) {
+        static __mx_values_layout *head = NULL;
+        return &head;
+    }
+
+    static inline __mx_values_layout *__mx_values_find(PyTypeObject *t) {
+        for (; t != NULL; t = t->tp_base)
+            for (__mx_values_layout *l = *__mx_values_head(); l != NULL; l = l->next)
+                if (l->type == t) return l;
+        return NULL;
+    }
+
+    static inline PyObject *__mx_values_alloc(PyTypeObject *t, Py_ssize_t nitems) {
+        __mx_values_layout *l = nitems == 0 ? __mx_values_find(t) : NULL;
+        if (l == NULL || t->tp_itemsize != 0 || !PyType_IS_GC(t)) return PyType_GenericAlloc(t, nitems);
+        PyObject *obj = PyObject_GC_New(PyObject, t);     /* header initialised, body not zeroed */
+        if (obj == NULL) return NULL;
+        memset((char *)obj + sizeof(PyObject), 0, (size_t)(l->lo - (Py_ssize_t)sizeof(PyObject)));
+    #ifdef MX_POISON_UNWRITTEN_VALUES
+        memset((char *)obj + l->lo, 0xA5, (size_t)(l->hi - l->lo));
+    #endif
+        memset((char *)obj + l->hi, 0, (size_t)(t->tp_basicsize - l->hi));
+        PyObject_GC_Track(obj);
+        return obj;
+    }
+
+    static inline PyObject *__mx_values_reduce(PyObject *self, PyObject *unused) {
+        PyTypeObject *t = Py_TYPE(self);
+        __mx_values_layout *l = __mx_values_find(t);
+        (void)unused;
+        if (l == NULL) { PyErr_SetString(PyExc_SystemError, "no dense value layout"); return NULL; }
+        if (t->tp_alloc != __mx_values_alloc) return PyObject_CallOneArg(l->reduce, self);  /* zero-filled */
+        PyObject *copy = PyObject_GC_New(PyObject, t);    /* untracked; its members are borrowed */
+        if (copy == NULL) return NULL;
+        memcpy((char *)copy + sizeof(PyObject), (char *)self + sizeof(PyObject),
+               (size_t)(t->tp_basicsize - (Py_ssize_t)sizeof(PyObject)));
+        for (Py_ssize_t a = 0; a < l->count; a++) {
+            __mx_value_array *v = &l->arrays[a];
+            for (Py_ssize_t i = 0, n = v->bytes / v->value_size; i < n; i++) {
+                const char *f = (char *)copy + v->flag + i * v->flag_size;
+                char set = 0;
+                for (Py_ssize_t b = 0; b < v->flag_size; b++) set |= f[b];
+                if (!set) memset((char *)copy + v->value + i * v->value_size, 0, (size_t)v->value_size);
+            }
+        }
+        PyObject *result = PyObject_CallOneArg(l->reduce, copy);
+        if (Py_REFCNT(copy) == 1) PyObject_GC_Del(copy);  /* else kept: it must never be deallocated */
+        return result;
+    }
+
+    static inline void *__mx_values_begin(PyObject *type, PyObject *probe) {
+        __mx_values_layout *l = (__mx_values_layout *)PyMem_RawCalloc(1, sizeof(__mx_values_layout));
+        if (l != NULL) { l->type = (PyTypeObject *)type; l->probe = (char *)probe; }
+        return l;
+    }
+
+    static inline void __mx_values_add(void *layout, void *values, Py_ssize_t bytes, Py_ssize_t value_size,
+                                       void *flags, Py_ssize_t flag_bytes, Py_ssize_t flag_size) {
+        __mx_values_layout *l = (__mx_values_layout *)layout;
+        if (l == NULL || l->failed) return;
+        if (l->count == l->capacity) {
+            Py_ssize_t capacity = 2 * l->capacity + 8;
+            void *arrays = PyMem_RawRealloc(l->arrays, (size_t)capacity * sizeof(__mx_value_array));
+            if (arrays == NULL) { l->failed = 1; return; }
+            l->arrays = (__mx_value_array *)arrays; l->capacity = capacity;
+        }
+        __mx_value_array v = {(char *)values - l->probe, bytes, value_size, (char *)flags - l->probe, flag_size};
+        if (value_size <= 0 || flag_size <= 0 || bytes % value_size || flag_bytes != bytes / value_size * flag_size)
+            l->failed = 1;
+        l->arrays[l->count++] = v;
+    }
+
+    static inline int __mx_values_finish(void *layout) {
+        __mx_values_layout *l = (__mx_values_layout *)layout;
+        if (l == NULL) { PyErr_Clear(); return 0; }
+        int ok = !l->failed && l->count > 0;
+    #if !CYTHON_COMPILING_IN_CPYTHON || CYTHON_COMPILING_IN_LIMITED_API
+        ok = 0;
+    #else
+        PyTypeObject *t = l->type;
+        if (ok) {   /* adjacent value arrays only: no other member lies in [lo, hi) */
+            l->lo = l->arrays[0].value;
+            for (Py_ssize_t a = 0; a < l->count; a++) if (l->arrays[a].value < l->lo) l->lo = l->arrays[a].value;
+            l->hi = l->lo;
+            for (Py_ssize_t a = 0; a < l->count && ok; a++) {
+                Py_ssize_t b = 0;
+                while (b < l->count && l->arrays[b].value != l->hi) b++;
+                ok = b < l->count;
+                if (ok) l->hi += l->arrays[b].bytes;
+            }
+            ok = ok && l->lo >= (Py_ssize_t)sizeof(PyObject) && l->hi <= t->tp_basicsize && PyType_IS_GC(t)
+                 && t->tp_itemsize == 0 && t->tp_alloc == PyType_GenericAlloc && __mx_values_find(t) == NULL;
+        #ifdef Py_TPFLAGS_INLINE_VALUES
+            ok = ok && !(t->tp_flags & Py_TPFLAGS_INLINE_VALUES);
+        #endif
+        }
+        static PyMethodDef reduce_def = {"__reduce__", (PyCFunction)__mx_values_reduce, METH_NOARGS, NULL};
+        PyObject *descr = NULL;
+        if (ok) {   /* the class's own __reduce__ (Cython's auto-pickle) is reduced from a scrubbed copy */
+            l->reduce = PyDict_GetItemString(t->tp_dict, "__reduce__");
+            descr = l->reduce != NULL ? PyDescr_NewMethod(t, &reduce_def) : NULL;
+            ok = descr != NULL;
+            if (ok) Py_INCREF(l->reduce);
+        }
+        if (ok && PyDict_SetItemString(t->tp_dict, "__reduce__", descr) < 0) { Py_DECREF(l->reduce); ok = 0; }
+        Py_XDECREF(descr);
+        if (ok) {
+            PyType_Modified(t);
+            l->probe = NULL;
+            l->next = *__mx_values_head();
+            *__mx_values_head() = l;
+            t->tp_alloc = __mx_values_alloc;
+        }
+    #endif
+        if (!ok) { PyMem_RawFree(l->arrays); PyMem_RawFree(l); PyErr_Clear(); }
+        return ok;
+    }
+    """
+    void *_mx_values_begin "__mx_values_begin" (object type, object probe)
+    void _mx_values_add "__mx_values_add" (void *layout, void *values, Py_ssize_t value_bytes, Py_ssize_t value_size,
+                                           void *flags, Py_ssize_t flag_bytes, Py_ssize_t flag_size) noexcept
+    bint _mx_values_finish "__mx_values_finish" (void *layout) noexcept
+
 cdef class BaseMxObject:
     pass
 
