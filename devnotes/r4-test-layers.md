@@ -33,19 +33,30 @@ together. **upstream** means the file is untouched since d22426f.
 | P1 | 87 | 575 | 9444 |
 | collect | 31 | 73 | 2928 |
 | B1 | 10 | 101 | 963 |
-| B2 | 12 | 18 | 1358 |
-| B3 | 11 | 62 | 1423 |
+| B2 | 16 | 21 | 1437 |
+| B3 | 12 | 63 | 1440 |
 | B4 | 4 | 6 | 297 |
 | B5 | 1 | 11 | 191 |
 | B6 | 2 | 3 | 145 |
 | B7 | 7 | 40 | 1842 |
 | join | 14 | 22 | 1580 |
-| total | 182 | 962 | 20642 |
+| total | 187 | 966 | 20738 |
 
 The tests counts are collected cases (parametrized cases counted one by one). Before the sort the suite
-collected 950 cases (942 passed, 8 skipped). After the sort it collects 962: the same 950 under their
-original names, plus 12 cases from 11 twins (`test_param_bounds_inherit` has two parameters). All 962 pass,
-with the same 8 skips.
+collected 950 cases (942 passed, 8 skipped). After the sort it collected 962: the same 950 under their
+original names, plus 12 cases from 11 twins (`test_param_bounds_inherit` has two parameters). All 962 passed,
+with the same 8 skips. The counts above are the current tree, after the merges listed below.
+
+## Merged since the sort
+
+| branch | head | tests deleted | tests edited | tests added (layer) |
+|---|---|---|---|---|
+| `review/r4-reductions-a` | 945787c | `compiled/test_builtin_iterable_provider.py`: the `_native_iterables` provider it tested is removed with the specialised lanes | `compiled/test_native_reductions.py` and `integration_tests/test_diag_mt_shared_refs.py`: the removed builtin guard (`*_accepts`) and the specialised-site count are replaced by stronger checks (no generator, guard or cold fallback is left; the float state `f64_add` is used). `test_exact_sum_state.py`: every bit is now compared instead of a tolerance. `test_audit_contracts_b2.py` and `test_generator_builtin_lowering.py`: the constructor no longer takes a fallback factory, and they assert `general_count == 0` | `compiled/reduction_cases.py` (helper), `test_reduction_boolean_list`, `test_reduction_direct_literals`, `test_reduction_integer_attribute`, `test_reduction_keyword_arguments` (B2); `test_reduction_in_vector_subscript` (B3: a reduction inside a typed vector read) |
+
+The review documents of that branch (`devnotes/REVIEW-BRIEF.md`, `devnotes/review-reductions-a.md`) were left
+out. The edits of the two reduction cases in `test_audit_contracts.py` were applied to `test_audit_contracts_b2.py`,
+where the sort had moved them. `runtime/_native_streams.pxd` is now listed as B2; the first version of this
+document wrongly listed it as P1, and it is used only by `reductions.py`.
 
 ## Direct-route twins (new tests, P1) and their collect halves
 
@@ -235,22 +246,27 @@ helper `_check` stays in the P1 file.
 | `modelx_cython/tests/compiled/test_native_enums.py` | B1 | 2 | 88 |
 | `modelx_cython/tests/test_audit_contracts_b1.py` | B1 | 5 | 56 |
 | `modelx_cython/tests/test_enum_literals.py` | B1 | 83 | 243 |
+| `modelx_cython/tests/compiled/reduction_cases.py` | B2 | 0 | 68 |
 | `modelx_cython/tests/compiled/test_audit_runtime_b2.py` | B2 | 1 | 177 |
-| `modelx_cython/tests/compiled/test_builtin_iterable_provider.py` | B2 | 1 | 41 |
 | `modelx_cython/tests/compiled/test_diag_scale_int_items.py` | B2 | 2 | 143 |
 | `modelx_cython/tests/compiled/test_generator_boolean_ranges.py` | B2 | 1 | 252 |
 | `modelx_cython/tests/compiled/test_generic_composition.py` | B2 | 1 | 84 |
 | `modelx_cython/tests/compiled/test_native_builtins_w18_b2.py` | B2 | 1 | 61 |
 | `modelx_cython/tests/compiled/test_native_generator_reductions.py` | B2 | 1 | 125 |
 | `modelx_cython/tests/compiled/test_native_reduction_cases.py` | B2 | 1 | 117 |
-| `modelx_cython/tests/compiled/test_native_reductions.py` | B2 | 1 | 105 |
+| `modelx_cython/tests/compiled/test_native_reductions.py` | B2 | 1 | 109 |
+| `modelx_cython/tests/compiled/test_reduction_boolean_list.py` | B2 | 1 | 23 |
+| `modelx_cython/tests/compiled/test_reduction_direct_literals.py` | B2 | 1 | 18 |
+| `modelx_cython/tests/compiled/test_reduction_integer_attribute.py` | B2 | 1 | 15 |
+| `modelx_cython/tests/compiled/test_reduction_keyword_arguments.py` | B2 | 1 | 16 |
 | `modelx_cython/tests/test_audit_contracts_b2.py` | B2 | 4 | 42 |
-| `modelx_cython/tests/test_exact_sum_state.py` | B2 | 3 | 191 |
+| `modelx_cython/tests/test_exact_sum_state.py` | B2 | 3 | 167 |
 | `modelx_cython/tests/test_generator_builtin_lowering.py` | B2 | 1 | 20 |
 | `modelx_cython/tests/compiled/test_integer_vector_cells.py` | B3 | 1 | 98 |
 | `modelx_cython/tests/compiled/test_leading_vector_sum.py` | B3 | 1 | 115 |
 | `modelx_cython/tests/compiled/test_local_vectors_without_vector_cells.py` | B3 | 1 | 117 |
 | `modelx_cython/tests/compiled/test_power_memo_with_vectors.py` | B3 | 1 | 73 |
+| `modelx_cython/tests/compiled/test_reduction_in_vector_subscript.py` | B3 | 1 | 17 |
 | `modelx_cython/tests/compiled/test_vector_cells.py` | B3 | 2 | 245 |
 | `modelx_cython/tests/compiled/test_vector_displays.py` | B3 | 1 | 110 |
 | `modelx_cython/tests/compiled/test_vector_extrema_and_cache.py` | B3 | 1 | 147 |
@@ -307,7 +323,7 @@ is the shared wiring, and only the integrator resolves conflicts in it.
 | `modelx_cython/runtime/_tables.pyx` | shared: B4 ≈560, B5 ≈40, B6 ≈120, B7 ≈186 | 906 | preparation, binding and keyed reads (B4); `hold_row` (B5); `prefix_range`, views, extremes, `contains` (B6); `asof*`, `search`, `position`, `zip_*` (B7) |
 | `modelx_cython/table_cells.py` | shared: B3 ≈250, B4 ≈254 | 504 | `vector_cells` and the vector exits of `RenameMembers` (B3); table cells, frame binding and publication (B4) |
 | `modelx_cython/tracer.py` | shared: P1 ≈1013, collect ≈15, B1 ≈75, B3 ≈100, B4 ≈60 | 1263 | IntEnum value info and enum-argument widening (B1); vector shapes and their merge (B3); frame schema and read notes hooks (B4); collect-adapter filter (collect) |
-| `modelx_cython/transformer.py` | shared: P1 ≈1605, collect ≈80, B1 ≈10, B2 ≈40, B3 ≈50, B4 ≈97, B5 ≈70, B6 ≈63 | 2015 | shared wiring; table hooks `_table_reads*`, `_lower_frames`, `_pandas_reads` (B4), `_row_cells`, `_table_reads_with_row_fields` (B5), `_prefix_cells`, `_param_prefix_cells` (B6); reduction and vector passes in `_rewrite_powers`/`update_method`; collect hooks in `__init__`, `leave_Module`, `leave_ClassDef`; enum `prepare`/storage |
+| `modelx_cython/transformer.py` | shared: P1 ≈1603, collect ≈80, B1 ≈10, B2 ≈22, B3 ≈50, B4 ≈97, B5 ≈70, B6 ≈63 | 1995 | shared wiring; table hooks `_table_reads*`, `_lower_frames`, `_pandas_reads` (B4), `_row_cells`, `_table_reads_with_row_fields` (B5), `_prefix_cells`, `_param_prefix_cells` (B6); reduction and vector passes in `_rewrite_powers`/`update_method`; collect hooks in `__init__`, `leave_Module`, `leave_ClassDef`; enum `prepare`/storage |
 | `modelx_cython/usage.py` | shared: P1 ≈680, B4 ≈25 | 705 | pandas receiver resolution (B4); the memoryview usage classifier is P1 |
 | `modelx_cython/__init__.py` | P1 | 35 | |
 | `modelx_cython/__main__.py` | P1 | 24 | |
@@ -327,7 +343,7 @@ is the shared wiring, and only the integrator resolves conflicts in it.
 | `modelx_cython/expression_kinds.py` | P1 | 264 | |
 | `modelx_cython/held_arrays.py` | P1 | 126 | |
 | `modelx_cython/helper_members.py` | P1 | 98 | |
-| `modelx_cython/helpers.py` | P1 | 423 | |
+| `modelx_cython/helpers.py` | P1 | 429 | |
 | `modelx_cython/inline_entries.py` | P1 | 402 | |
 | `modelx_cython/integer_boundaries.py` | P1 | 869 | |
 | `modelx_cython/item_locals.py` | P1 | 200 | |
@@ -346,8 +362,6 @@ is the shared wiring, and only the integrator resolves conflicts in it.
 | `modelx_cython/runtime/_native_math.pyx` | P1 | 218 | |
 | `modelx_cython/runtime/_native_rounding.pxd` | P1 | 29 | |
 | `modelx_cython/runtime/_native_rounding.pyx` | P1 | 31 | |
-| `modelx_cython/runtime/_native_streams.pxd` | P1 | 29 | |
-| `modelx_cython/runtime/_native_streams.pyx` | P1 | 17 | |
 | `modelx_cython/scopes.py` | P1 | 110 | |
 | `modelx_cython/space_results.py` | P1 | 197 | |
 | `modelx_cython/syntax.py` | P1 | 132 | |
@@ -359,10 +373,9 @@ is the shared wiring, and only the integrator resolves conflicts in it.
 | `modelx_cython/runtime/factory_reuse.py` | collect | 22 | |
 | `modelx_cython/serial_collect.py` | collect | 1138 | |
 | `modelx_cython/enums.py` | B1 | 339 | |
-| `modelx_cython/_float_sum_state.pxd` | B2 | 219 | |
-| `modelx_cython/_native_iterables.pxd` | B2 | 3 | |
-| `modelx_cython/_native_iterables.pyx` | B2 | 24 | |
-| `modelx_cython/reductions.py` | B2 | 1258 | |
+| `modelx_cython/_float_sum_state.pxd` | B2 | 233 | |
+| `modelx_cython/reductions.py` | B2 | 942 | |
+| `modelx_cython/runtime/_native_streams.pxd` | B2 | 28 | |
 | `modelx_cython/runtime/_native_vectors.pxd` | B3 | 252 | |
 | `modelx_cython/runtime/_native_vectors.pyx` | B3 | 299 | |
 | `modelx_cython/vector_ref_reads.py` | B3 | 184 | |
@@ -374,13 +387,13 @@ is the shared wiring, and only the integrator resolves conflicts in it.
 
 | layer | lines (shared modules by the estimated split) |
 |---|---|
-| P1 | 14910 |
+| P1 | 14868 |
 | collect | 1822 |
 | B1 | 455 |
-| B2 | 1559 |
+| B2 | 1240 |
 | B3 | 3150 |
 | B4 | 3637 |
 | B5 | 851 |
 | B6 | 833 |
 | B7 | 984 |
-| total | 28201 |
+| total | 27840 |
