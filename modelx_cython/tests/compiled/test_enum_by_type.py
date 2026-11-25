@@ -1,16 +1,12 @@
-"""Enum definitions are selected by traced type; the former declaration marker is accepted and ignored.
+"""Enum definitions are selected by traced type.
 
 A Reference whose value is an enum-safe IntEnum class is an enum definition: fixed in the compiled
-model and its members are C constants. No declaration is needed. A model saved with the former
-``EnumDefinitions`` Reference still builds: the marker is an ordinary Reference, and a name it lists
-that is not an IntEnum Reference is no longer an error. Both builds select the same enums.
+model and its members are C constants. No declaration is needed.
 """
 from http import HTTPStatus
 import json
 import subprocess
 import sys
-
-import pytest
 
 import modelx as mx
 
