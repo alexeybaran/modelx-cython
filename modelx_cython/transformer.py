@@ -259,6 +259,9 @@ class PXDGenerator:
             public_meth_defs=textwrap.indent(self.public_meth_defs(name), ' ' * 4)
         )
         value_storage.check_last(block, self.module.classes[name])
+        if collect.reuses_items(self.module.visitor, name):
+            values = {line.strip() for line in value_storage.pxd_declarations(self.module.classes[name])}
+            block += '\n\n' + collect.reset_function(name, block, self.module.classes, values)
         return block
 
     @cached_property
@@ -853,7 +856,8 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
             decl_stmts.extend(cst.parse_statement(line)
                               for line in value_storage.py_declarations(self.module.classes[cls_name]))
             if cls_name in self.module.visitor.collect_spaces:
-                hook = collect.hook(original_node, cls_name, sorted(self.module.classes[cls_name].refs))
+                hook = collect.hook(original_node, cls_name, sorted(self.module.classes[cls_name].refs),
+                                    reuse=collect.reuses_items(self.module.visitor, cls_name))
                 if hook:
                     self._collect_hooks = True
                     updated_node = updated_node.with_changes(
