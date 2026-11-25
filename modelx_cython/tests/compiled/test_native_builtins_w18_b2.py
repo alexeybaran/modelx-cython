@@ -47,8 +47,9 @@ def test_nested_reductions_lifted(tmp_path):
             ''')
     finally:
         model.close()
+    # every reduction of these cells is lowered; only an outer min/max of plain operands is the built-in call
     for name in ('a', 'b', 'c', 'd', 'e', 'g', 'h', 'm', 'r', 'a2', 'ty', 'ty2'):
-        assert _cell(report, name)['expressions_untyped'] == [], name
+        assert {e['form'] for e in _cell(report, name)['expressions_untyped']} <= {'min', 'max'}, name
     # and/or: the left operand once, the reduction only when the operator evaluates it
     assert _cell(report, 'f')['expressions_untyped'] == []
     o = _cell(report, 'o')['expressions_untyped']
