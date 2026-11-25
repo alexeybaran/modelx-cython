@@ -79,7 +79,8 @@ was built and measured: +3.7% Term, +15.8% MYGA and SPIA. The flag design replac
   deliberate differences 2 (`test_various_types` x2: a dictionary cache outside the sampled range raises)
   and 5 (`test_fractional_power`, `test_mx2cy_with_uslib`: the source text of integer and memoized
   powers); the repository's copies assert the new forms and pass.
-- The repository's suite on upstream modelx: (run in progress; filled in when it completes).
+- The repository's suite on upstream modelx (Python 3.14t, local): 560 passed, 9 skipped; the skip added here,
+  `test_dynamic_ref_items`, needs an export that applies dynamic References (the DV01 example's modelx change).
 - New here: `test_upstream_regressions.py` (runs with modelx_cython blocked; range errors name the Cell,
   argument and spec key; unbound locals; no truncation of floats; a lambda and a generator shadowing a
   typed parameter), `test_flagged_integer_arithmetic.py`, `test_integer_overflow_model.py`,
