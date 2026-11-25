@@ -60,8 +60,6 @@ def test_native_transfers(tmp_path, mode):
         # both integer-check modes (owner's rule); they differ only at the signed range's edges
         'integer_checks': mode,
         'spaces': {'Policy': {'cells_param_size': {'i': 5}, 'cells': {
-            'divisible': {'native_divisibility': True},
-            'offset': {'native_divisibility': True},
             'factor': {'memoize_power': True},
         }}},
     }), encoding='utf-8')
@@ -105,10 +103,26 @@ def test_native_transfers(tmp_path, mode):
         for t in (-(1 << 63), -7, 0, 7, (1 << 63) - 1):
             for n in (-(1 << 63), -3, -1, 1, 3):
                 assert s.divisible(t, n) == (t % n == 0)
-                assert s.offset(t, n) == ((t - 1) % n != 0)
+                if CHECKED and t == -(1 << 63):     # t - 1 leaves the signed range: raises naming the Cell
+                    try:
+                        s.offset(t, n)
+                    except OverflowError as error:
+                        assert 'Policy.offset' in str(error)
+                    else:
+                        raise AssertionError('offset: an intermediate beyond the signed range did not raise')
+                elif t != -(1 << 63):
+                    assert s.offset(t, n) == ((t - 1) % n != 0)
             for n in (-(1 << 63), -3, -1, 1, 3, 12):
                 for advance in (True, False):
-                    assert s.periodic(t, n, advance) == ((t + (not advance)) % (12 // n) == 0)
+                    if CHECKED and not advance and t == (1 << 63) - 1:   # t + 1 leaves the signed range
+                        try:
+                            s.periodic(t, n, advance)
+                        except OverflowError as error:
+                            assert 'Policy.periodic' in str(error)
+                        else:
+                            raise AssertionError('periodic: an intermediate beyond the signed range did not raise')
+                    elif advance or t != (1 << 63) - 1:
+                        assert s.periodic(t, n, advance) == ((t + (not advance)) % (12 // n) == 0)
         assert alternate.periodic(3, 4, False) == ((3 + 1) % (12 // 3) == 0)
         for n in (0, 13):
             try:
