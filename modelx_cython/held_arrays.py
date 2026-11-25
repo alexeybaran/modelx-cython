@@ -10,9 +10,8 @@ mv-race) and stores the slice in the field, once; later reads index the field, w
 Rule (recognised by traced type, never by spelling): the receiver is ``self`` or a Reference of ``self`` typed as
 a compiled Space of this module; the Cell is cached, takes no arguments, and its traced result is a typed
 memoryview; the formula has parameters (it runs many times per item); the reading class has items (its instances are items, used by one thread at a time, as their own
-caches are). The held field is reset with the item's per-policy caches (``holds.reset_lines``), so a cleared or
-reassigned input is read afresh by the next policy; an item that holds an array keeps the slice it took, as an
-item keeps the table it first bound (D130, R-4), and the slice keeps its buffer alive.
+caches are). An item that holds an array keeps the slice it took for its lifetime (D130, R-4), and the slice
+keeps its buffer alive.
 """
 import libcst as cst
 
@@ -121,6 +120,6 @@ def lower(node, cls_info, cells, functions):
     lowered: it runs many times per item, while a zero-argument Cell runs once per item, where holding costs more
     than the one slice copy it saves."""
     if (cls_info.name not in cls_info.visitor.itemspace_classes
-            or getattr(cls_info, 'collect_shared_item', False) or not cells.has_args()):
+            or not cells.has_args()):
         return node
     return node.visit(_HoldArrays(cls_info, functions))

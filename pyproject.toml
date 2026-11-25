@@ -17,7 +17,7 @@ authors = [
   { name = "Fumito Hamamura", email = "fumito.ham@gmail.com" },
 ]
 dependencies = [
-    "modelx>=0.33.1.dev0",
+    "modelx",
     "libcst",
     "Cython>=3.2.4",
     "setuptools",
@@ -59,10 +59,6 @@ classifiers=[
 ]
 
 
-[project.optional-dependencies]
-tables = ["pandas>=2.2.2"]
-
-
 [project.urls]
 Homepage = "https://modelx.io"
 Documentation = "https://docs.modelx.io"
@@ -81,4 +77,3 @@ exclude = ["doc", "temp*", "modelx_cython.tests*", "samples"]
 
 [tool.setuptools.package-data]
 modelx_cython = ["*.pxd", "*.pyx"]
-"modelx_cython.runtime" = ["*.pxd", "*.pyx", "*.provider.json", "LICENSE.lifelib.txt"]

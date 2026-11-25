@@ -283,7 +283,6 @@ class ModuleVisitor(m.MatcherDecoratableVisitor, ParentScopeAddin):
         self.param_rebinds = {}  # {class_name: {method name: {param: [binding]}}}
         self.locked_classes = set()  # classes whose __init__ assigns self._mx_lock
         self.itemspace_classes = set()
-        self.collect_cache_classes = set()
         self.dynamic_ref_classes = set()
         self.wrapper = cst.metadata.MetadataWrapper(cst.parse_module(source))
         self.wrapper.visit(self)
@@ -363,9 +362,6 @@ class ModuleVisitor(m.MatcherDecoratableVisitor, ParentScopeAddin):
 
             if target.value.value == MX_SELF and target.attr.value == MX_LOCK:
                 self.locked_classes.add(cls_name)
-                return
-            if target.value.value == MX_SELF and target.attr.value == "_mx_collect_cache":
-                self.collect_cache_classes.add(cls_name)
                 return
             if target.value.value == MX_SELF and target.attr.value == "_mx_itemspaces":
                 self.itemspace_classes.add(cls_name)

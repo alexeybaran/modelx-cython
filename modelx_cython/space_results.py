@@ -9,7 +9,6 @@ from .numeric_cache import exclusively_owned
 from .powers import KIND_FLOAT
 from .scopes import Names
 from .typedefs import primitive_kind
-from .syntax import arguments
 
 
 _NATIVE_RESULTS = {'double', 'long long', 'bint'}
@@ -25,7 +24,7 @@ def pin_function(name, owner, producer):
 
 def _traced_target(cell, allow_locked=False):
     """Use the observed exact class to select a guard, never to narrow storage."""
-    if (cell is None or cell.is_special() or not cell._can_bind_native_result
+    if (cell is None or cell.is_special() or not _plain_formula(cell)
             or cell.get_rettype_expr(c_style=True) != 'object'
             or not (exclusively_owned(cell) or allow_locked and cell.is_locked)):
         return None
@@ -103,7 +102,7 @@ class _HeldCalls(cst.CSTTransformer):
         elif call.args:
             return updated
         method = target.cells.get(func.attr.value)
-        if (method is None or method.is_special() or not method._can_bind_native_result
+        if (method is None or method.is_special() or not _plain_formula(method)
                 or not method.has_typeinfo() or method.params_with_defaults or len(original.args) != len(method.params)
                 or method.get_rettype_expr(c_style=True) not in _NATIVE_RESULTS):
             return updated
@@ -123,16 +122,8 @@ class _HeldCalls(cst.CSTTransformer):
             checked = True
             value = args[i].value
             path = cst.Arg(cst.SimpleString(repr(method.model_path)))
-            constructor = arguments(value, 'int', 1)
-            rounded = arguments(constructor[0] if constructor else value, f'{MX_SYS_MOD}._mx_round_one', 3)
-            if rounded:
-                helper = '_mx_rounded_index' if constructor else '_mx_bare_round_index'
-                prefix = (cst.Arg(value.func),) if constructor else ()
-                conversion = cst.Call(cst.parse_expression(f'{MX_SYS_MOD}.{helper}'),
-                                      (*prefix, *(cst.Arg(v) for v in rounded), path))
-            else:
-                conversion = cst.Call(cst.parse_expression(f'{MX_SYS_MOD}._mx_integer_result'),
-                                      (cst.Arg(value), path))
+            conversion = cst.Call(cst.parse_expression(f'{MX_SYS_MOD}._mx_integer_result'),
+                                  (cst.Arg(value), path))
             args[i] = args[i].with_changes(value=conversion)
 
         if parameterized or producer_cell.is_locked:
@@ -195,3 +186,10 @@ def lower(node, owner, cell, scope, operand_kind, pin):
     calls = _HeldCalls(owner, names, integers, operand_kind, pin, cell.get_rettype_expr(c_style=True), allow_locked)
     body = node.body.visit(calls)
     return (node.with_changes(body=body), True) if calls.used else (node, False)
+
+
+def _plain_formula(cell):
+    """A cached formula compiled as a C function with its typed public entry."""
+    return (cell.has_formula_def and not cell.body_has_closure and not cell.formula_is_generator
+            and not cell.formula_has_captured_default and not cell.called_with_kwargs
+            and not cell.has_spec_rettype)

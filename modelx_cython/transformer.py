@@ -62,7 +62,6 @@ import libcst.matchers as m
 from libcst.metadata import ParentNodeProvider, ScopeProvider, GlobalScope, ClassScope
 from libcst.metadata.scope_provider import BuiltinAssignment
 
-from modelx_cython import vectors
 from modelx_cython.parser import ParentScopeAddin
 from modelx_cython.builder import ModuleInfo, CombinedCellsInfo
 from modelx_cython.config import TransSpec
@@ -70,8 +69,6 @@ from modelx_cython.powers import rewrite_powers
 from modelx_cython.inline_entries import add_inline_entries, allows_exact_receiver
 from modelx_cython.cell_entries import CacheHit, DenseEntry, dense_condition
 from modelx_cython import numeric_cache
-from modelx_cython import enums as code_enums
-from modelx_cython import table_cells
 from modelx_cython import holds
 from modelx_cython import value_storage
 
@@ -99,14 +96,12 @@ from modelx_cython.typedefs import CY_BOOL_T, CY_INT_T, primitive_kind
 def _integer_reference_paths(cls_info):
     """Return qualified names of writable References stored as C integers."""
     lexical_refs = cls_info.visitor.ref_info.get(cls_info.name, {})
-    fixed_refs = getattr(cls_info, 'readonly_refs', ())
     owners = [part[len(MODULE_PREF):] for part in cls_info.module.fqname.split('.')[1:-1]]
     owners.append(cls_info.name[len(SPACE_PREF):])
     return {
         name: '.'.join((*owners, name))
         for name in lexical_refs
         if name not in cls_info.spaces
-        and name not in fixed_refs
         and cls_info.refs[name].get_type_expr(c_style=True) == CY_INT_T
     }
 
@@ -130,7 +125,6 @@ def _guard_associative_cache(cell, body):
 
 
 _logger = logging.getLogger(__name__)
-HELPER_TABLE_READ = 'the receiver is a helper Table and the formula uses its Python methods'
 
 
 class PXDGenerator:
@@ -204,22 +198,11 @@ class PXDGenerator:
         with newlines.
         """
         stmts = []
-        from modelx_cython.helpers import module_name
-        from modelx_cython import vectors
-        for provider in sorted(numeric_cache.providers(self.module) | vectors.providers(self.module)):
+        from modelx_cython.native_sources import module_name
+        for provider in sorted(numeric_cache.providers(self.module)):
             stmts.append(f'from {self.package} cimport {module_name(provider)}')
         for ci in self.module.cimports:
             stmts.append(f"cimport {ci}")
-        contexts = {provider for cls in self.module.classes.values()
-                    for provider in getattr(cls, 'native_contexts', {}).values()}
-        contexts.update(c.native_provider_binding.manifest.provider
-                        for cls in self.module.classes.values() for c in cls.cells.values()
-                        if c.native_provider_binding is not None)
-        for provider in sorted(contexts):
-            stmts.append(f'from {self.package} cimport {module_name(provider)}')
-        enum_declarations = code_enums.declarations(self.module)
-        if enum_declarations:
-            stmts.append(enum_declarations)
         return "\n".join(stmts)
 
     @cached_property
@@ -316,19 +299,10 @@ class PXDGenerator:
 
         cls_info = self.module.classes[cls_name]
         decl_stmts = []
-        if cls_name in self.module.visitor.collect_cache_classes:
-            decl_stmts.append("cdef dict _mx_collect_cache\n")
         if cls_name in self.module.visitor.dynamic_ref_classes:
             decl_stmts.append("cdef dict __dict__\n")
-        for name in getattr(cls_info, 'readonly_refs', ()):
-            decl_stmts.append(f'cdef object {code_enums.storage(name)}\n')
-        from modelx_cython.helpers import module_name
-        for name, provider in getattr(cls_info, 'native_contexts', {}).items():
-            decl_stmts.append(f'cdef {module_name(provider)}.LookupContext {name}\n')
         # R-4: what an item holds from shared inputs (holds.HoldTable)
         decl_stmts.extend(holds.pxd_declarations(cls_info))
-        if getattr(self.module.spec.policy, 'prepared_tables', False):
-            decl_stmts.extend(table_cells.pxd_declarations(cls_info))     # T-4.2
         for cells in cls_info.cells.values():
 
             assert cells.module == self.module.fqname
@@ -356,8 +330,6 @@ class PXDGenerator:
 
                 elif cells.uses_native_numeric_cache:
                     decl_stmts.append(f'cdef {numeric_cache.storage(cells)} {VAR_PREF + cells.name}\n')
-                elif cells.uses_vector_cache:
-                    decl_stmts.append(f'cdef {vectors.CACHE_TYPE} {VAR_PREF + cells.name}\n')
                 else:
                     decl_stmts.append(f"cdef dict {VAR_PREF + cells.name}\n")
             else:
@@ -388,7 +360,6 @@ class PXDGenerator:
         """
 
         cls_info = self.module.classes[cls_name]
-        renamed = table_cells.module_renames(self.module)[cls_name]
         decl_stmts = []
         for ref in cls_info.refs.values():
 
@@ -397,14 +368,8 @@ class PXDGenerator:
             if ref.name in cls_info.spaces:
                 # declared below as a child space
                 continue
-            if ref.name in getattr(cls_info, 'readonly_refs', ()):
-                continue
 
-            visibility = "public "      # as upstream: every Reference is a plain attribute
-            name = renamed.get(ref.name, ref.name)
-            if name != ref.name:
-                visibility = ""     # api-tables (D101a): stored renamed; a property serves Python
-            stmt = f"cdef {visibility}{ref.get_type_expr(c_style=True)} {name}\n"
+            stmt = f"cdef public {ref.get_type_expr(c_style=True)} {ref.name}\n"
             decl_stmts.append(stmt)
 
         # Declare child spaces
@@ -480,7 +445,7 @@ class PXDGenerator:
                 continue
 
             if cells and cells.has_typeinfo():
-                rettype = 'object' if cells.native_result_binder else cells.get_rettype_expr(c_style=True)
+                rettype = cells.get_rettype_expr(c_style=True)
                 parameters = self._add_param_type_hints(
                     cls_name=cls_name, cells_name=cells.name, formula=True
                 )
@@ -532,10 +497,8 @@ class PXDGenerator:
                 parameters = self._add_param_type_hints(
                     cls_name=cls_name, cells_name=cells.name
                 )
-                # api-tables (D101a): a table cell's C entry is renamed; a property serves Python
-                entry = table_cells.module_renames(self.module)[cls_name].get(cells.name, cells.name)
                 decl_stmts.append(
-                    f"cpdef {rettype} {entry}({parameters})\n"
+                    f"cpdef {rettype} {cells.name}({parameters})\n"
                 )
             else:
                 parameters = self._add_param_type_hints(
@@ -585,8 +548,6 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
         resolver=None,
         cells_kinds=None,
         ref_kinds=None,
-        serial_shapes=None,
-        collect_workers=None,
     ) -> None:
         """Parse ``source`` and record the module info and package.
 
@@ -605,31 +566,12 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
         self._resolver = resolver
         self._cells_kinds = cells_kinds or {}
         self._ref_kinds = ref_kinds or {}
-        self._serial_shapes = serial_shapes or {}
-        self._collect_workers = collect_workers
-        self._uses_native_round = False
         self.helper_providers = set()
-        cells = [cell for cls in module.classes.values() for cell in cls.cells.values()]
-        self.object_providers = {binding.manifest.provider: binding.manifest
-                                 for cell in cells if (binding := cell.observed_provider_type)}
-        self.helper_providers.update(binding.manifest.provider for cell in cells
-                                     if (binding := cell.native_provider_binding))
         self.dense_entries = {}
         self.formula_entries = {}
         self.function_origins = {}      # D139: {private entry of an uncached Cell: (class, Cell)}
         self.entry_domains = {}         # D139b: {private entry of an uncached Cell: its argument domain}
         self.helper_providers.update(numeric_cache.providers(module))
-        from modelx_cython import vectors
-        self.helper_providers.update(vectors.providers(module))
-        self._vector_counter = [0]
-        code_enums.prepare(module)
-
-    def _reserve_cold_sum(self):
-        while True:
-            name = f'_mx_cold_sum_{self._next_cold_sum}'
-            self._next_cold_sum += 1
-            if name not in self._source:
-                return name
 
     def _compact_spill(self, cells, cls_name, source):
         index = len(self._cold_spills)
@@ -651,71 +593,15 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
         when no operand pair can be typed.
         """
         from modelx_cython.checked_arithmetic import CheckedArithmetic
-        from modelx_cython.rounding import RoundedInputs
-        from modelx_cython import vectors, held_arrays
+        from modelx_cython import held_arrays
         builtin_keys = {name for name in ("all", "any", "sum", "min", "max", "float", "int", "round", "range",
                                          "zip", "str", "type")
                         if scope[name] and all(isinstance(binding, BuiltinAssignment)
                                                for binding in scope[name])}
         # a typed-memoryview Cell read by subscript is held per item (no slice copy per evaluation)
         node = held_arrays.lower(node, cls_info, cells, self._held_arrays)
-        node = vectors.lower(node, cls_info, cells, scope, self._vector_counter, self.module,
-                             self._ref_kinds.get(cls_info.fqname, {}))
-        node = self._table_reads_with_row_fields(node, cls_info, cells, builtin_keys)
         cells.formula_allows_exact_receiver = allows_exact_receiver(node, cls_info.name)
         node = CheckedArithmetic(cls_info, cells, builtin_keys).rewrite(node)
-        if not self.module.spec.policy.native_math:
-            builtin_keys.discard('round')
-        rounded_inputs = RoundedInputs(cls_info, cells, self.helper_providers, builtin_keys,
-                                        self._resolver)
-        node = node.visit(rounded_inputs)
-        self._table_reads_report(cells)
-        if 'round' in builtin_keys and '_mx_canonical_round' not in self._source:
-            from modelx_cython.rounding import NativeRounding
-            rounding = NativeRounding()
-            node = node.with_changes(body=node.body.visit(rounding))
-            self._uses_native_round |= rounding.used
-        if not hasattr(cls_info, 'native_contexts'):
-            cls_info.native_contexts = {}
-        cls_info.native_contexts.update(rounded_inputs.contexts)
-        # Keep the qualified typed kernels behind the common helper contracts.
-        # The same CST/type facts select their native domain; unsupported source
-        # and values keep ordinary object-capable Cython and current callables.
-        from modelx_cython.reductions import BUILTIN_REDUCTIONS, NativeReductions, has_reduction_contract
-        reductions = None
-        cells.native_reductions = 0
-        cells.exact_reduction_guards = ()
-        builtin_reductions = builtin_keys & BUILTIN_REDUCTIONS
-        if has_reduction_contract(node, cls_info.refs, builtin_reductions):
-            builtin_bounds = all(isinstance(binding, BuiltinAssignment)
-                                 for name in ("range", "min", "max", "abs", "StopIteration", "RuntimeError")
-                                 for binding in scope[name])
-            from modelx_cython.powers import formula_local_kinds, kind_of_type_expr, KIND_INT, KIND_FLOAT
-            param_kinds = ({name: kind_of_type_expr(cells.get_argtype_expr(name, c_style=True, formula=True))
-                            for name in cells.params} if cells.has_args() and cells.has_typeinfo() else {})
-            local_kinds = formula_local_kinds(node, cells.params, self._resolver, self._cells_kinds,
-                                              self._ref_kinds, cls_info.fqname, param_kinds)
-            reductions = NativeReductions(
-                cls_info, cells, self.helper_providers, node, self._reserve_cold_sum, builtin_bounds,
-                builtin_reductions, self.module.code_enum_symbols,
-                formula_kinds={name: {KIND_INT: 'longlong', KIND_FLOAT: 'double'}[kind]
-                               for name, kind in local_kinds.items() if kind in (KIND_INT, KIND_FLOAT)})
-            node = node.visit(reductions)
-            cells.native_reductions = reductions.count
-            cells.native_tuple_int_loops = getattr(reductions, 'tuple_int_loops', 0)   # diag-scale P3
-            cells.exact_reduction_guards = reductions.exact_receiver_guards
-        enum_comparisons = code_enums.Constants(cls_info, cells, self.module.code_enum_symbols)
-        node = node.visit(enum_comparisons)
-        cells.native_enum_comparisons = enum_comparisons.comparisons
-        cells.native_enum_constants = enum_comparisons.count
-        operations = set(rounded_inputs.operations)
-        node = self._bind_declared_helpers(node, cls_info, cells, operations)
-        admitted_helpers = set(cells.native_helpers)
-        for fallback in reductions.fallbacks if reductions is not None else ():
-            self._cold_sums.append(self._bind_declared_helpers(fallback, cls_info, cells, rounded_inputs.operations))
-            admitted_helpers.update(cells.native_helpers)
-        cells.native_helpers = sorted(admitted_helpers)
-        cells.native_numeric_helpers = sorted(rounded_inputs.operations)
         node = rewrite_powers(
             node, self._resolver, self._cells_kinds, self._ref_kinds,
             cls_info.fqname, cells, builtin_float='float' in builtin_keys,
@@ -733,289 +619,13 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
                                    cls_info.fqname, {**local_kinds, **param_kinds})
         node = preserve_argument_order(node,
             native_result=cells.get_rettype_expr(c_style=True) in ('double', 'long long', 'bint'),
-            operand_kind=operand_kind,
-            cells=cells, providers=self.helper_providers)
+            operand_kind=operand_kind)
         from modelx_cython import space_results
         if self._resolver is not None:
             node, _ = space_results.lower(node, cls_info, cells, scope, operand_kind, self._pin_held_item)
         # D110 P1: a local bound once to an item of a typed ItemSpace Reference is declared its class
         from modelx_cython.item_locals import type_item_locals
         node, cells.typed_item_locals = type_item_locals(node, cls_info, self.module)
-        if cells._spec.get('native_vector_ref_reads', False):
-            from modelx_cython.vector_ref_reads import lower
-            node = lower(node, cls_info, cells, scope)
-        return node
-
-    def _table_reads(self, node, cls_info, cells, builtin_keys, *, row_inline=None):
-        """Lower and report table reads before the remaining formula transforms."""
-        return self._table_reads_lowered(node, cls_info, cells, builtin_keys, row_inline=row_inline)
-
-    def _row_cells(self, cls_info):
-        """diag-run8 F3: the row cells of the class whose every use is a field read
-        (``row_cells.analyse``), computed once per class; {} without typed table reads."""
-        cache = self.__dict__.setdefault('_row_cells_cache', {})
-        if cls_info.name not in cache:
-            accepted, refused = {}, {}
-            if self._resolver is not None and getattr(self.module.spec.policy, 'typed_table_reads', False):
-                from modelx_cython import row_cells
-                accepted, refused = row_cells.analyse(self._module_node, cls_info.name)
-                for name in list(accepted):
-                    cell = cls_info.cells.get(name)
-                    if cell is None or cell.has_args() or not cell.has_formula_def:
-                        refused[name] = 'not a cached zero-argument Cell'
-                        del accepted[name]
-                    elif not all(row_cells.item_constant(part, self._cached_call)
-                                 for part in row_cells.key_parts(accepted[name])):
-                        # A reader can hold the prepared row only when every key part is fixed per item.
-                        refused[name] = 'a key part is not fixed per item'
-                        del accepted[name]
-            for name, why in refused.items():
-                if name in cls_info.cells:
-                    cls_info.cells[name].row_cell_kept = why
-            for name in accepted:
-                cls_info.cells[name].row_cell_inlined = True
-            cache[cls_info.name] = accepted
-        return cache[cls_info.name]
-
-    def _prefix_cells(self, cls_info):
-        """T-4: {cell: its ``T.loc[key]``} for the zero-argument cells of the class whose formula is ``return
-        T.loc[key]`` and that no other class of the module defines (frame_reads decides prefix from row)."""
-        cache = self.__dict__.setdefault('_prefix_cache', {})
-        if cls_info.name not in cache:
-            from modelx_cython import row_cells
-            found = {}
-            module = getattr(self, '_module_node', None)
-            classes = [n for n in getattr(module, 'body', ()) if isinstance(n, cst.ClassDef)]
-            own = next((c for c in classes if c.name.value == cls_info.name), None)
-            if own is not None:
-                for func in own.body.body:
-                    if isinstance(func, cst.FunctionDef) and func.name.value.startswith('_f_'):
-                        expr = row_cells._row_expression(func)
-                        name = func.name.value[3:]
-                        per_item = (cls_info.name in cls_info.visitor.itemspace_classes
-                                    and not getattr(cls_info, 'collect_shared_item', False))
-                        if expr is not None and not any(
-                                not (per_item and row_cells.independent_prefix(own, c, name, expr))
-                                for c in classes if c is not own and any(
-                                    isinstance(f, cst.FunctionDef) and f.name.value in ('_f_' + name, name)
-                                    for f in c.body.body)):
-                            found[name] = expr
-            cache[cls_info.name] = found
-        return cache[cls_info.name]
-
-    def _param_prefix_cells(self, cls_info):
-        """T-5c (shape G): {cell: (parameter names, its ``T.loc[key]``)} for the cells of the class with positional
-        parameters whose formula is ``return T.loc[key]``, the key's names among the parameters, T a self-rooted
-        zero-argument call, and that no other class of the module defines."""
-        cache = self.__dict__.setdefault('_param_prefix_cache', {})
-        if cls_info.name not in cache:
-            from modelx_cython import row_cells
-            found = {}
-            module = getattr(self, '_module_node', None)
-            classes = [n for n in getattr(module, 'body', ()) if isinstance(n, cst.ClassDef)]
-            own = next((c for c in classes if c.name.value == cls_info.name), None)
-            for func in (own.body.body if own is not None else ()):
-                if not (isinstance(func, cst.FunctionDef) and func.name.value.startswith('_f_')):
-                    continue
-                params = func.params
-                names = [p.name.value for p in params.params]
-                if (len(names) < 2 or names[0] != 'self' or params.star_arg not in (None, cst.MaybeSentinel.DEFAULT)
-                        or params.kwonly_params or params.star_kwarg or params.posonly_params
-                        or any(p.default is not None for p in params.params)):
-                    continue
-                body = row_cells._body(func)
-                ret = body[0].body[0] if (len(body) == 1 and isinstance(body[0], cst.SimpleStatementLine)
-                                          and len(body[0].body) == 1) else None
-                expr = ret.value if isinstance(ret, cst.Return) else None
-                if not (isinstance(expr, cst.Subscript) and len(expr.slice) == 1
-                        and isinstance(expr.slice[0].slice, cst.Index) and expr.slice[0].slice.star is None
-                        and isinstance(expr.value, cst.Attribute) and expr.value.attr.value == 'loc'
-                        and row_cells._self_chain_call(expr.value.value)):
-                    continue
-                free = row_cells._Names()
-                expr.slice[0].slice.value.visit(free)
-                name = func.name.value[3:]
-                if (free.plain and free.names <= set(names) and not any(
-                        isinstance(f, cst.FunctionDef) and f.name.value in ('_f_' + name, name)
-                        for c in classes if c is not own for f in c.body.body)):
-                    found[name] = (names[1:], expr.with_changes(lpar=(), rpar=()))
-            cache[cls_info.name] = found
-        return cache[cls_info.name]
-
-    def _cached_call(self, call):
-        """A self-rooted zero-argument call of a cached Cell (the resolver's cached_cells)."""
-        name = call.func.attr.value if isinstance(call.func, cst.Attribute) else None
-        cached = getattr(self._resolver, 'cached_cells', ())
-        return name is not None and any(str(c).endswith('._f_' + name) for c in cached)
-
-    def _table_reads_with_row_fields(self, node, cls_info, cells, builtin_keys):
-        """diag-run8 F3: a formula reading fields of accepted row cells is lowered with each
-        ``self.R()`` replaced by the cell's row expression; when a replaced read is not lowered to a
-        native row read, the formula is lowered as written instead (its reads keep the Record)."""
-        rows = {name: expr for name, expr in self._row_cells(cls_info).items() if name != cells.name}
-        cells.row_fields_inlined = 0
-        if rows:
-            from copy import deepcopy
-            from modelx_cython import row_cells
-            inline = row_cells.Inline(rows)
-            candidate = node.visit(inline)
-            if inline.sites:
-                class_state = vars(cls_info)
-                holds = deepcopy(class_state['holds']) if 'holds' in class_state else None
-                had_holds = 'holds' in class_state
-                resolver_state = vars(self._resolver)
-                signatures = resolver_state.get('table_signatures')
-                signature_snapshot = dict(signatures) if signatures is not None else None
-                providers = self.helper_providers.copy()
-                cell_state = vars(cells).copy()
-                accepted = False
-                try:
-                    lowered = self._table_reads(candidate, cls_info, cells, builtin_keys,
-                                                row_inline=inline)
-                    accepted = inline.lowered_sites == inline.sites.keys()
-                    if accepted:
-                        cells.row_fields_inlined = len(inline.sites)
-                        return lowered
-                finally:
-                    if not accepted:
-                        if had_holds:
-                            cls_info.holds = holds
-                        else:
-                            class_state.pop('holds', None)
-                        if signatures is not None:
-                            signatures.clear()
-                            signatures.update(signature_snapshot)
-                        else:
-                            resolver_state.pop('table_signatures', None)
-                        self.helper_providers.clear()
-                        self.helper_providers.update(providers)
-                        vars(cells).clear()
-                        vars(cells).update(cell_state)
-        return self._table_reads(node, cls_info, cells, builtin_keys)
-
-    def _lower_frames(self, frames, node, cls_info, cells):
-        """T-5c: ``frames.lower(node)``; an internal error leaves the formula as written (every read on pandas): the
-        class's held fields and the read signatures are restored as they were before it, so nothing of the failed
-        lowering is emitted, and the build report records the error. ``strict_lowering`` raises it instead."""
-        import copy
-        holds = copy.deepcopy(getattr(cls_info, 'holds', None))
-        signatures = dict(getattr(self._resolver, 'table_signatures', {}))
-        try:
-            return frames.lower(node)
-        except Exception as error:
-            if getattr(self.module.spec.policy, 'strict_lowering', False):
-                raise
-            cls_info.holds = holds
-            if hasattr(self._resolver, 'table_signatures'):
-                self._resolver.table_signatures.clear()
-                self._resolver.table_signatures.update(signatures)
-            frames.lowered = []
-            frames.lowered_nodes.clear()
-            frames.lowered_text.clear()
-            frames.param_readers.clear()
-            if frames.row_inline is not None:
-                frames.row_inline.lowered_sites.clear()
-            frames.held_string_selector = None
-            frames.declined = [{'expression': cells.name, 'receiver': '', 'form': 'pandas',
-                                'reason': f'declined after internal error: {type(error).__name__}: {error}'}]
-            import logging
-            logging.getLogger(__name__).warning('table reads of %s left to pandas after an internal error: %s: %s',
-                                                cells.name, type(error).__name__, error)
-            return node
-
-    def _table_reads_lowered(self, node, cls_info, cells, builtin_keys, *, row_inline=None):
-        cells.table_reads_typed, cells.table_reads_untyped, cells.table_reads_keys = 0, [], []
-        if self._resolver is None:
-            return node
-        if getattr(self.module.spec.policy, 'prepared_tables', False):
-            # T-3: reads of a traced pandas frame onto its PreparedTable (frame_reads.py)
-            from modelx_cython.frame_reads import FrameReads
-            row_names = None
-            if row_inline is not None:
-                code_of = cst.Module(body=[]).code_for_node
-                row_names = {code_of(row_inline.rows[name]): name for name in row_inline.sites.values()}
-            frames = FrameReads(self._resolver, cls_info, cells, self.helper_providers, self.module.spec.policy,
-                                row_names, self._prefix_cells(cls_info),
-                                self._param_prefix_cells(cls_info), builtin_int='int' in builtin_keys,
-                                builtin_zip_walk={'zip', 'int', 'float', 'str', 'type'} <= builtin_keys,
-                                row_inline=row_inline)
-            node = self._lower_frames(frames, node, cls_info, cells)
-            cells.held_string_selector = frames.held_string_selector
-            cells.frame_reads = frames.lowered + frames.declined
-            # T-5: the pandas fallback of a lowered read runs only when the table cannot answer: not a pandas read
-            from modelx_cython.frame_reads import without_fallbacks
-            native = without_fallbacks(node)
-            cells.read_audit = frames.audit(native)
-            cells.read_param_readers = frames.param_readers
-            cells.read_unsampled_lowered = frames.unsampled_lowered
-            pandas = self._pandas_reads(native, cls_info, cells)
-        else:
-            pandas = self._pandas_reads(node, cls_info, cells)
-        if not (self._resolver.table_results or cls_info.refs):
-            cells.table_reads_untyped = pandas      # nothing to lower: the generated code is unchanged
-            return node
-        from modelx_cython.admission import table_read_sites
-        sites = table_read_sites(node, self._resolver, cls_info)
-        if not sites:
-            cells.table_reads_untyped = pandas
-            return node
-        per_step = cells.has_args()
-        cells.table_reads_untyped = sorted(
-            [site.entry(per_step, HELPER_TABLE_READ) for site in sites] + pandas,
-            key=lambda entry: entry['line'])
-        return node
-
-    def _pandas_reads(self, node, cls_info, cells):
-        """Report entries for reads through pandas objects (never lowered): a zero-argument
-        Cell that returns a pandas DataFrame or Series, a Reference holding one, or a local
-        assigned from either. Without them a formula that runs pandas on every step reads as
-        clean in the report."""
-        if self._resolver is None or not (getattr(self._resolver, 'pandas_results', None) or cls_info.refs):
-            return []
-        from modelx_cython.admission import PANDAS_RECEIVER, table_read_sites
-        return [site.entry(cells.has_args(), PANDAS_RECEIVER)
-                for site in table_read_sites(node, self._resolver, cls_info, pandas=True)]
-
-    def _table_reads_kept(self, node, cls_info, cells, why):
-        """List the table reads of a formula kept as a Python method (no lowering)."""
-        cells.table_reads_typed, cells.table_reads_untyped, cells.table_reads_keys = 0, [], []
-        if self._resolver is None or not (self._resolver.table_results or cls_info.refs
-                                          or getattr(self._resolver, 'pandas_results', None)):
-            return node
-        from modelx_cython.admission import KEPT_PYTHON, table_read_sites
-        cells.table_reads_untyped = sorted(
-            [site.entry(cells.has_args(), KEPT_PYTHON.format(why=why))
-             for site in table_read_sites(node, self._resolver, cls_info)]
-            + self._pandas_reads(node, cls_info, cells), key=lambda entry: entry['line'])
-        self._table_reads_report(cells)
-        return node
-
-    @staticmethod
-    def _table_reads_report(cells):
-        """Warn once per per-step untyped table read."""
-        from modelx_cython.admission import untyped_read_warning
-        for entry in cells.table_reads_untyped:
-            if entry['per_step']:
-                _logger.warning(untyped_read_warning(cells.fqname, entry))
-
-    def _bind_declared_helpers(self, node, cls_info, cells, inherited=()):
-        """Bind declared provider symbols in either C functions or compiled defs.
-
-        Keeping a formula as a def preserves Cython's closure/default handling;
-        it does not require calling the Python implementation of its helpers.
-        This stage reads registered signatures and lexical receiver identity only.
-        """
-        from modelx_cython.helpers import HelperCalls
-        helpers = HelperCalls(cls_info.refs, self.helper_providers, cells=cls_info.cells, current=cells)
-        node = helpers.rewrite(node)
-        cells.native_helpers = sorted(helpers.operations | set(inherited))
-        # W1.4 math branch: module math members bound at build time (helpers.module_math).
-        # A cold reduction fallback adds to its formula's counts; a formula sets them.
-        if getattr(node, 'name', None) is not None and node.name.value.startswith('_mx_cold_sum_'):
-            cells.math_native = getattr(cells, 'math_native', 0) + helpers.math_native
-            cells.math_untyped = [*getattr(cells, 'math_untyped', ()), *helpers.math_untyped]
-        else:
-            cells.math_native, cells.math_untyped = helpers.math_native, helpers.math_untyped
         return node
 
     @property   # cannot use cached_property in Transformer
@@ -1025,12 +635,9 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
         Each access re-runs the transformation by visiting the
         wrapped module with this transformer.
         """
-        self._cold_sums = []
         self._cold_spills = []
         self._held_arrays = {}
         self._dense_layouts = {}
-        self._next_cold_sum = 0
-        self._uses_native_round = False
         from modelx_cython.scopes import Names
         self._held_names = Names(self._module_node)
         self._held_pins = {}
@@ -1049,18 +656,8 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
         # cimports for child spaces
         parent = ".".join(self.module.fqname.split(".")[:-1])
         stmts = []
-        if any(shape.reuse for shape in self._serial_shapes.values()):
-            stmts.append(cst.parse_statement(
-                'from cython.cimports.libc.string import memset as _mx_collect_memset'))
-        if any(leaf.kind == 'dict' for shape in self._serial_shapes.values()
-               for leaf in getattr(shape, 'leaves', ())):
-            stmts.append(cst.parse_statement(
-                'from cython.cimports.libc.stdlib import malloc as _mx_collect_malloc, free as _mx_collect_free'))
-        from modelx_cython.helpers import module_name
+        from modelx_cython.native_sources import module_name
         from modelx_cython.exceptions import NumericExceptions
-        if self._uses_native_round:
-            from modelx_cython.rounding import ROUND_BINDING
-            stmts.extend(cst.parse_module(ROUND_BINDING).body)
         for provider in sorted(self.helper_providers):
             stmts.append(cst.parse_statement(
                 f'from cython.cimports.{self.package} import {module_name(provider)}'))
@@ -1080,7 +677,6 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
                 cst.parse_statement(
                     f"import cython as {CY_MOD}", config=updated_node.config_for_parsing
                 ),
-                cst.parse_statement(table_cells.IMPORT, config=updated_node.config_for_parsing),
                 *updated_node.body,
             )
         )
@@ -1092,8 +688,8 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
             (module, self.dense_entries, self.formula_entries, self.function_origins,
              self.entry_domains) = add_inline_entries(
                 module, ordinary, self._dense_layouts)
-        if self._cold_sums or self._cold_spills or self._held_arrays:
-            module = module.with_changes(body=(*module.body, *self._cold_sums, *self._cold_spills,
+        if self._cold_spills or self._held_arrays:
+            module = module.with_changes(body=(*module.body, *self._cold_spills,
                                                *(stmt for held in self._held_arrays.values() for stmt in held.body)))
         if self._held_pins:
             from modelx_cython.space_results import pin_function
@@ -1102,9 +698,7 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
         # D116: one root construction and release per compiled ItemSpace class (collect and direct)
         from modelx_cython import item_roots
         roots = [fn for name in sorted(self.module.visitor.itemspace_classes) if name in self.module.classes
-                 for fn in item_roots.functions(
-                     name, {} if self.module.classes[name].collect_shared_item
-                     else getattr(self.module.classes[name], 'native_contexts', {}))]
+                 for fn in item_roots.functions(name)]
         if roots:
             module = module.with_changes(body=(*module.body, *roots))
         # S1: dense cache values left unwritten at allocation, installed when the module is imported
@@ -1178,8 +772,6 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
                     elif cells.uses_native_numeric_cache:
                         decl_stmts.append(cst.parse_statement(
                             f'{VAR_PREF + cells.name}: {numeric_cache.storage(cells)}\n'))
-                    elif cells.uses_vector_cache:
-                        decl_stmts.append(cst.parse_statement(f'{VAR_PREF + cells.name}: {vectors.CACHE_TYPE}\n'))
                     else:
                         decl_stmts.append(
                             cst.parse_statement(
@@ -1213,7 +805,7 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
                     continue
 
                 stmt = cst.parse_statement(
-                    f"{code_enums.storage(ref.name) if ref.name in getattr(self.module.classes[cls_name], 'readonly_refs', ()) else ref.name}: {ref.get_type_expr()}",
+                    f"{ref.name}: {ref.get_type_expr()}",
                     config=self._module_node.config_for_parsing,
                 )
                 if is_first:
@@ -1243,34 +835,13 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
 
                 decl_stmts.append(stmt)
 
-            from modelx_cython.helpers import module_name
             for cell in self.module.classes[cls_name].cells.values():
                 if memo := getattr(cell, 'power_memo', None):
                     decl_stmts.append(cst.parse_statement(f'{memo}: {MX_SYS_MOD}.PowerMemo\n'))
-            contexts = getattr(self.module.classes[cls_name], 'native_contexts', {})
-            for name, provider in contexts.items():
-                decl_stmts.append(cst.parse_statement(f'{name}: {module_name(provider)}.LookupContext\n'))
             decl_stmts.extend(cst.parse_statement(line)
                               for line in holds.py_declarations(self.module.classes[cls_name]))
             decl_stmts.extend(cst.parse_statement(line)
                               for line in value_storage.py_declarations(self.module.classes[cls_name]))
-            if contexts:
-                body = []
-                for statement in updated_node.body.body:
-                    if isinstance(statement, cst.FunctionDef) and statement.name.value == '__init__':
-                        assignments = [cst.parse_statement(f'self.{name} = {module_name(provider)}.LookupContext()\n')
-                                       for name,provider in contexts.items()]
-                        statement = statement.with_changes(body=statement.body.with_changes(
-                            body=(*statement.body.body, *assignments)))
-                    body.append(statement)
-                updated_node = updated_node.with_changes(body=updated_node.body.with_changes(body=tuple(body)))
-            updated_node = updated_node.with_changes(body=updated_node.body.with_changes(
-                body=code_enums.bind_properties(self.module.classes[cls_name], updated_node.body.body)))
-            if self._collect_workers is not None:
-                from modelx_cython.serial_collect import add_methods
-                updated_node = add_methods(
-                    self.module.classes[cls_name], updated_node, self._serial_shapes.get(cls_name),
-                    workers=self._collect_workers, source=original_node)
             decorator = cst.Decorator(
                 decorator=cst.Attribute(value=cst.Name(CY_MOD), attr=cst.Name("cclass"))
             )
@@ -1325,7 +896,7 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
         ):
             attr = original_node.body[0].targets[0].target.attr.value
             cls_info = self.module.classes.get(clsdef.name.value)
-            if (cls_info is not None and (cls_info.is_locked or cls_info.collect_shared_item)
+            if (cls_info is not None and cls_info.is_locked
                     and attr[: len(VAR_PREF)] == VAR_PREF):
                 cells = cls_info.cells.get(attr[len(VAR_PREF):])
                 if cells is not None and cells.uses_dict_cache:
@@ -1494,9 +1065,6 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
                         initializers.append(cst.parse_statement(
                             f'self._v_{cell.name} = {numeric_cache.constructor(cell)}\n'
                         ))
-                    elif cell.uses_vector_cache:
-                        initializers.append(cst.parse_statement(
-                            f'self._v_{cell.name} = {vectors.cache_constructor(cell)}\n'))
                 return updated_node.with_changes(body=updated_node.body.with_changes(
                     body=(*updated_node.body.body, *initializers)))
 
@@ -1510,8 +1078,7 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
                 if cells.formula_is_generator:
                     # yield is not supported inside cdef functions;
                     # leave as a plain Python method
-                    updated_node = self._table_reads_kept(updated_node, cls_info, cells, 'generator')
-                    return self._bind_declared_helpers(updated_node, cls_info, cells)
+                    return updated_node
 
                 scope = self.get_metadata(ScopeProvider, original_node.body)
                 if any(isinstance(binding.node, cst.Param)
@@ -1522,8 +1089,7 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
                     # initialized in the closure. A compiled def binds them
                     # through its normal Python argument handling.
                     cells.formula_has_captured_default = True
-                    updated_node = self._table_reads_kept(updated_node, cls_info, cells, 'captured default')
-                    return self._bind_declared_helpers(updated_node, cls_info, cells)
+                    return updated_node
                 updated_node = self._rewrite_powers(
                     updated_node, cls_info, cells, scope)
 
@@ -1536,7 +1102,7 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
                 ]
                 returns = cst.Annotation(
                     annotation=cst.parse_expression(
-                        'object' if cells.native_result_binder else cells.get_rettype_expr(),
+                        cells.get_rettype_expr(),
                         config=self._module_node.config_for_parsing,
                     )
                 )
@@ -1603,8 +1169,7 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
                 if cells.body_has_closure:
                     # closures cannot be compiled inside cpdef functions;
                     # leave as a plain Python method
-                    updated_node = self._table_reads_kept(updated_node, cls_info, cells, 'closure')
-                    return self._bind_declared_helpers(updated_node, cls_info, cells)
+                    return updated_node
 
                 if not cells.has_formula_def:
                     # uncached cells: the body is the formula itself
@@ -1631,10 +1196,6 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
                         config=self._module_node.config_for_parsing,
                     )
                 )
-                binder = cells.native_result_binder
-                binding = cells.native_provider_binding
-                binding_args = ((cst.Arg(cst.SimpleString(repr(cells.method_fqname))),)
-                                if binding is not None and binding.declaration.bind_cell else ())
                 if cells.has_args():
                     # Add parameter type hints
                     parameters = self._add_param_type_hints(
@@ -1746,20 +1307,12 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
                             _logger.warning(warning)
                         if (warning := use_warning(cells)) is not None:
                             _logger.warning(warning)
-                    elif cells.uses_vector_cache:
-                        body = vectors.cache_body(cells)
                     else:
-                        if cells.is_locked or cls_info.collect_shared_item:
+                        if cells.is_locked:
                             # __init__ installs the dict before any worker can read it.
                             body = updated_node.body
                         else:
                             body = self._add_dict_assign(meth_name, updated_node)
-                        if binder:
-                            constructor = cst.parse_expression(binder)
-                            formula = m.Call(func=m.Attribute(
-                                value=m.Name(MX_SELF), attr=m.Name(FORMULA_PREF + meth_name)))
-                            body = m.replace(body, formula, lambda call, _: cst.Call(
-                                constructor, (cst.Arg(call), *binding_args)))
                         key_types = {"bint", "long long", "double"}
                         if not cells.is_locked:
                             key_types.add("str")
@@ -1780,23 +1333,13 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
                     flag = f"{MX_SELF}.{HAS_PREF}{meth_name}"
                     cache = f"{MX_SELF}.{VAR_PREF}{meth_name}"
                     formula = f"{MX_SELF}.{FORMULA_PREF}{meth_name}()"
-                    if binder:
-                        path = f', {cells.method_fqname!r}' if binding_args else ''
-                        formula = f'{binder}({formula}{path})'
                     shared = (cells.has_formula_def and not cells.is_locked
                               and not numeric_cache.exclusively_owned(cells))
-                    if cells.is_locked or binder or shared:
+                    if cells.is_locked or shared:
                         if cells.is_locked:
                             body = self._locked_body(flag, cache, formula)
-                        elif shared:
-                            body = self._shared_body(flag, cache, formula, cells.get_rettype_expr())
                         else:
-                            body = (f'if {flag}:\n'
-                                    f'    return {cache}\n'
-                                    'else:\n'
-                                    f'    {cache} = {formula}\n'
-                                    f'    {flag} = True\n'
-                                    f'    return {cache}\n')
+                            body = self._shared_body(flag, cache, formula, cells.get_rettype_expr())
                         stmts = cst.parse_module(
                             body,
                             config=self._module_node.config_for_parsing

@@ -22,7 +22,6 @@ cells return type or declaring maximum cells parameter sizes.
 """
 
 from typing import Union, Sequence, Mapping
-import os
 from dataclasses import dataclass
 from modelx_cython.consts import (
     FILE_PREF,
@@ -36,66 +35,34 @@ from modelx_cython.consts import (
 class CompilerPolicy:
     """Resolve dependent diagnostic options once, before code generation."""
     automatic_optimizations: bool
-    parallel_workers: int
     dense_bounds_proofs: bool
     dense_miss_binding: bool
     dense_one_axis: bool
     propagate_exact_receiver: bool
     native_cache_hits: str
-    native_math: bool  # Guarded builtin rounding.
     # M1 (W1.1, default on since W1.5): '# cython: infer_types=True, overflowcheck=True'
     # on generated model modules.
     infer_types: bool = True
-    # M1 (W1.3): lower pandas-spelled table reads to typed handle reads (table_reads.py).
-    # On by default since the runtime handles (W1.2) landed (D45).
-    typed_table_reads: bool = True
-    # diag-4w (D71): the handle of a zero-argument table Cell is held per instance and read
-    # borrowed (no Cell call, no reference count per read); false resolves it per call.
-    held_table_handles: bool = True
-    # auto-tables (D104): a plain pandas table that is not admitted, or pandas run on an admitted
-    # table in a per-step cell (class C), stops the build instead of a warning.
-    strict_tables: bool = False
     # integer guards (owner's rule): 'auto' (default) compiles without overflow checks when no
     # traced integer reaches UNCHECKED_LIMIT in magnitude, with them otherwise; 'checked' and
     # 'unchecked' force a mode. The build resolves 'auto' after the trace (resolve_integer_checks).
     integer_checks: str = 'auto'
-    # T-3 (toolkit p2/tables/DESIGN.md): the sample runs on the user's frames (no table admission or
-    # substitution); reads of a traced DataFrame or Series are lowered onto a PreparedTable bound to
-    # the real frame (frame_reads.py). False restores the admission of the older table layer.
-    prepared_tables: bool = True
-    # T-4: opt-in check mode: each hold of a prepared table first checks that the frame still equals the copy
-    # prepared when it was bound, and raises if it was edited in place without a clear
-    verify_inputs: bool = False
-    # T-5c: a formula whose table-read lowering raises an internal error is compiled as written (its reads on
-    # pandas) and the build report says so; strict turns that internal error into a build failure (test suites)
-    strict_lowering: bool = False
-
     @classmethod
     def resolve(cls, data):
         automatic = data.get('automatic_optimizations', True)
         miss = data.get('dense_miss_binding', automatic)
         values = dict(automatic_optimizations=automatic,
-            parallel_workers=data.get('parallel_workers', 1),
             dense_bounds_proofs=data.get('dense_bounds_proofs', automatic),
             dense_miss_binding=miss, dense_one_axis=data.get('dense_one_axis', automatic),
             propagate_exact_receiver=data.get('propagate_exact_receiver', automatic and miss),
             native_cache_hits=data.get('native_cache_hits', 'auto' if automatic and miss else 'none'),
-            native_math=data.get('native_math', True),
             infer_types=data.get('infer_types', True),
-            typed_table_reads=data.get('typed_table_reads', True),
-            held_table_handles=data.get('held_table_handles', True),
-            strict_tables=data.get('strict_tables', os.environ.get('MX_CY_STRICT_TABLES') == '1'),
-            integer_checks=data.get('integer_checks', 'auto'),
-            prepared_tables=data.get('prepared_tables', True),
-            verify_inputs=data.get('verify_inputs', False),
-            strict_lowering=data.get('strict_lowering', os.environ.get('MX_CY_STRICT_LOWERING') == '1'))
+            integer_checks=data.get('integer_checks', 'auto'))
         for name, value in values.items():
-            if name not in ('parallel_workers', 'native_cache_hits', 'integer_checks') and type(value) is not bool:
+            if name not in ('native_cache_hits', 'integer_checks') and type(value) is not bool:
                 raise ValueError(f'{name} must be a boolean')
         if values['integer_checks'] not in ('auto', 'checked', 'unchecked'):
             raise ValueError('integer_checks must be auto, checked or unchecked')
-        if type(values['parallel_workers']) is not int or values['parallel_workers'] < 1:
-            raise ValueError('parallel_workers must be a positive integer')
         if type(values['native_cache_hits']) is not str or values['native_cache_hits'] not in (
                 'none', 'scalar', 'dense', 'both', 'auto'):
             raise ValueError('native_cache_hits must be none, scalar, dense, both or auto')
@@ -143,26 +110,6 @@ class TransSpec:
       tuple; a single-name key bounds that parameter's axis of every
       cached Cell in scope whose parameter tuple has no tuple entry.
     * ``"cells"``: dict mapping cells names to per-cells dicts.
-    * ``"serial_collect"``: optional experimental scalar collection for an
-      isolated slotted leaf Space. Use ``"reduce"`` for fresh receivers or
-      ``"reuse"`` for one receiver. The collect Space owns policy execution:
-      policies are independent and their live receiver and cache stay inside
-      collect. In reuse mode, Reference bindings are captured at entry.
-    * ``"parallel_collect_reuse"``: with ``"serial_collect": "reuse"``, give
-      each ordered collect chunk its own reusable receiver. The same policy
-      isolation and stable Reference contract applies across workers. Scalar
-      chunk totals merge in domain order unless ``"parallel_collect_order"``
-      says ``"completion"``.
-    * ``"parallel_collect_order"``: ``"domain"`` (default with parallel reuse)
-      or ``"completion"``. Domain order gives reproducible chunk merging at a
-      fixed worker count and requires parallel reuse. It does not imply serial
-      sum equivalence: the four-worker total can differ from the one-worker
-      total in the last bits. Completion order merges each chunk as it finishes.
-    * ``"param_bound_checks"``: dict mapping a sized parameter name to a
-      zero-argument cached Cell of the Space whose value is the policy's
-      need for that parameter (for example ``{"t": "proj_len"}``). The
-      opt-in collect entry checks every policy against the bound before
-      any projection and raises IndexError naming the policy.
     * ``"cells_params"`` (deprecated): older form of
       ``"cells_param_size"``; maps a parameter name (or tuple) to a
       dict with a ``"size"`` key.  Consulted only when
@@ -200,8 +147,7 @@ class TransSpec:
     The top-level ``"dense_one_axis"`` experiment separates checked and proven
     calls to an existing one-axis dense cache body.
     ``"propagate_exact_receiver"`` carries the receiver fact through those
-    entries and private dense formula calls. ``"native_math"`` enables guarded
-    builtin rounding by default.
+    entries and private dense formula calls.
     ``"infer_types"`` (default true): C type inference (``# cython: infer_types=True``) in
     generated model modules; false keeps Cython's default (no inference of C types for untyped
     locals). Overflow checks follow ``"integer_checks"`` either way.
@@ -212,14 +158,6 @@ class TransSpec:
     mode used and the largest traced integer. Limit of the unchecked mode: intermediate values are
     not traced, so a product of several large terms or an integer power could exceed 64 bits and
     would wrap, as on upstream; set ``"integer_checks": "checked"`` to force the checked mode.
-    ``"typed_table_reads"`` (default true) allows inlining a row Cell into eligible field reads
-    on the prepared pandas table path.
-    ``"strict_tables"`` (default false, or true when the environment sets
-    ``MX_CY_STRICT_TABLES=1``): a table read that remains on pandas in a cell with arguments
-    stops a prepared-table build with an error instead of a warning.
-    ``"held_table_handles"`` (default true): the handle of a zero-argument table Cell
-    read by a lowered read is resolved once per instance into a field (reset with the
-    per-policy caches) and used borrowed; false resolves it on every call.
     ``"native_cache_hits"`` defaults to ``"auto"`` when automatic optimization
     and dense miss binding are enabled. It selects scalar hits and already-proven
     dense hits; explicit alternatives are ``"none"``, ``"scalar"``, ``"dense"``
@@ -257,7 +195,6 @@ class TransSpec:
     CELLS = "cells"
     CELLS_PARAM_SIZE = "cells_param_size"
     CELLS_PARAMS = "cells_params"   # deprecated
-    PARAM_BOUND_CHECKS = "param_bound_checks"
     SIZE = "size"   # deprecated
     RET_T = "return_type"
     DENSE_WINDOW = "dense_window"
