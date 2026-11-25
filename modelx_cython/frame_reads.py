@@ -1312,13 +1312,15 @@ class _Rewrite(cst.CSTTransformer):
         of the Python value (looked up as pandas does)."""
         o = self.o
         arg, how = o.key_part(part, kind, self.updated_of.get(id(part)))
-        if (how == 'typed' and conditions is not None and not o.facts.is_int(part)
-                and o.facts.int_argument(part) is None):
-            # not known to be a C integer from the text: the read is native only while the part names one label.
+        if conditions is not None and (
+                (how == 'typed' and not o.facts.is_int(part) and o.facts.int_argument(part) is None)
+                or (how == 'object' and _literal_str(part) is None)):
+            # not known to be one label from the text (a C integer, a text literal): the read is native only while the
+            # part names one label (a list or a mask selects rows, as pandas does whether or not the sample saw one).
             # The test is decided at compile time when Cython gives the part a C type, else it looks at the value;
             # the part is evaluated once, into a local the read then uses
             o.key_count += 1
-            name = f'_mx_key_{o.key_count}'
+            name = f'_mx_{"key" if how == "typed" else "okey"}_{o.key_count}'
             conditions.append(cst.parse_expression(f'{o.module}.is_label(({name} := {_code(arg)}))'))
             arg = cst.Name(name)
         return self._m({'int': 'lcode', 'typed': 'kcode'}.get(how, 'ocode'), o.ref(hold), cst.Integer(str(level)), arg)
@@ -1480,7 +1482,11 @@ class _Rewrite(cst.CSTTransformer):
 
     def _lowered(self, test, read, fallback, kind=None):
         """``read if test else fallback``: the pandas read cast to the read's C type when the read is typed (both
-        branches native), and the lowered read marked as of that kind (``float()``/``int()`` around it dropped)."""
+        branches native), and the lowered read marked as of that kind (``float()``/``int()`` around it dropped). A
+        read whose test checks that a text-level key part names one label (``_mx_okey_``) stays a Python object: its
+        pandas branch may be a selection (a list key gives a Series)."""
+        if '_mx_okey_' in _code(test):
+            kind = None
         if kind in CTYPE:
             fallback = _cast(CTYPE[kind], fallback)
         lowered = cst.IfExp(test=test, body=read, orelse=fallback, lpar=[cst.LeftParen()], rpar=[cst.RightParen()])
