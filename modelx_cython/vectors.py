@@ -58,6 +58,7 @@ FUNCS = {  # operation -> (float vector, integer vector)
     'get': ('vec_get', 'ivec_get'), 'set': ('vec_set', 'ivec_set'),
     'append': ('vec_append', 'ivec_append'), 'slice': ('vec_slice', 'ivec_slice'),
     'sum': ('vec_sum', 'ivec_sum'), 'sum_range': ('vec_sum_range', 'ivec_sum_range'),
+    'cat': ('vec_cat', 'ivec_cat'),
 }
 LL_MAX = '9223372036854775807'
 LL_MIN = '(-9223372036854775807 - 1)'
@@ -75,11 +76,20 @@ def vector_type(kind):
 
 
 def _normal_shape(shape):
-    if shape == 'E':
+    if shape in ('E', 'v'):
         return 'V'
+    if shape == 'i':
+        return 'I'
     if isinstance(shape, tuple):
         return ('T', tuple(_normal_shape(k) for k in shape[1]))
     return shape
+
+
+def _containers(shape):
+    """{'tuple'} / {'list'} (or both) of the vectors of a traced shape: 'v'/'i' are tuples of numbers."""
+    if isinstance(shape, tuple):
+        return {c for k in shape[1] for c in _containers(k)}
+    return {'tuple'} if shape in ('v', 'i') else {'list'}
 
 
 def cell_vector_shape(cell):
@@ -89,9 +99,91 @@ def cell_vector_shape(cell):
     if cell.body_has_closure or cell.formula_is_generator or cell.formula_has_captured_default:
         return None
     ret = cell._rt.ret_type
-    if ret.is_array or ret.value_type not in (list, tuple):
+    if ret.is_array or ret.value_type not in (list, tuple) or not ret.vector_shape:
         return None
-    return _normal_shape(ret.vector_shape) if ret.vector_shape else None
+    if _containers(ret.vector_shape) != {'list'}:
+        built = getattr(cell, '_mx_sequence_built', None)
+        if built is None:
+            built = _sequence_built(cell, ret.vector_shape)
+            try:
+                cell._mx_sequence_built = built
+            except AttributeError:
+                pass
+        if not built:
+            return None     # a tuple of numbers that is a record, a key or an argument: a Python tuple
+    return _normal_shape(ret.vector_shape)
+
+
+def cell_vector_container(cell):
+    """'tuple' for a vector cell whose value is a tuple of numbers (or a tuple of such), else 'list'."""
+    ret = getattr(getattr(cell, '_rt', None), 'ret_type', None)
+    shape = getattr(ret, 'vector_shape', None)
+    return 'tuple' if shape and _containers(shape) == {'tuple'} else 'list'
+
+
+def _tuple_call(node):
+    """The comprehension of ``tuple(<generator or list comprehension>)``, else None."""
+    if (isinstance(node, cst.Call) and _is_name(node.func, 'tuple') and _plain_args(node, 1, 1)
+            and isinstance(node.args[0].value, (cst.GeneratorExp, cst.ListComp))):
+        return node.args[0].value
+    return None
+
+
+def _repeat(node, display=cst.Tuple):
+    """(element, count) of ``(x,) * n`` / ``n * (x,)`` (a list display with ``display=cst.List``), else None."""
+    if isinstance(node, cst.BinaryOperation) and isinstance(node.operator, cst.Multiply):
+        for one, other in ((node.left, node.right), (node.right, node.left)):
+            if (isinstance(one, display) and len(one.elements) == 1 and isinstance(one.elements[0], cst.Element)
+                    and not isinstance(other, (cst.List, cst.Tuple, cst.ListComp))):
+                return one.elements[0].value, other
+    return None
+
+
+def _tuple_parts(node):
+    """A tuple of numbers built as a sequence: the operands of ``tuple(...)``, ``(x,) * n``, or a
+    concatenation of those and displays (``(x,) + tuple(...)``) with at least one of them, else None.
+    A display alone is a record, a key or an argument: never a vector."""
+    parts = []
+
+    def flatten(item):
+        if isinstance(item, cst.BinaryOperation) and isinstance(item.operator, cst.Add):
+            return flatten(item.left) and flatten(item.right)
+        if _tuple_call(item) is not None or _repeat(item) is not None or (
+                isinstance(item, cst.Tuple) and all(isinstance(e, cst.Element) for e in item.elements)):
+            parts.append(item)
+            return True
+        return False
+    if flatten(node) and any(not isinstance(part, cst.Tuple) for part in parts):
+        return parts
+    return None
+
+
+def _sequence_built(cell, shape):
+    """Whether every value the formula returns is a tuple of numbers built as a sequence (``_tuple_parts``)
+    where ``shape`` has one, directly or through a local bound only to such values."""
+    cls = getattr(cell, 'parent', None)
+    node = getattr(getattr(cls, 'visitor', None), 'formula_defs', {}).get(getattr(cls, 'name', None), {}).get(cell.name)
+    if node is None or _containers(shape) != {'tuple'}:
+        return False
+    facts = _Facts()
+    node.body.visit(facts)
+
+    def built(value, seen=()):
+        if isinstance(value, cst.IfExp):
+            return built(value.body, seen) and built(value.orelse, seen)
+        if isinstance(value, cst.Name) and value.value not in seen:
+            items = facts.assigns.get(value.value, [])
+            return bool(items) and all(item[0] == 'value' and built(item[1], (*seen, value.value)) for item in items)
+        return _tuple_parts(value) is not None
+
+    for value in facts.returns:
+        if isinstance(shape, tuple):
+            if not (isinstance(value, cst.Tuple) and len(value.elements) == len(shape[1])
+                    and all(built(e.value) for e in value.elements)):
+                return False
+        elif not built(value):
+            return False
+    return bool(facts.returns)
 
 
 CACHE_TYPE = f'{ALIAS}.VecCache'
@@ -404,6 +496,17 @@ def reference_shapes(cls_info, module):
     return found
 
 
+def reference_cells(cls_info, module):
+    """{Reference: {cell: cells info}} of the vector cells of ``reference_shapes``."""
+    found = {}
+    for name, ref in getattr(cls_info, 'refs', {}).items():
+        decl = getattr(ref, 'decl_type_expr', '')
+        target = getattr(module, 'classes', {}).get(decl.rsplit('.', 1)[-1]) if decl else None
+        if target is not None:
+            found[name] = {c: cell for c, cell in target.cells.items() if cell.vector_shape}
+    return found
+
+
 class _Rename(cst.CSTTransformer):
     """Rename variables; an attribute name or a keyword argument's name is not a variable."""
 
@@ -444,15 +547,29 @@ class _Facts(cst.CSTVisitor):
         self.appends = []           # (base expr, value expr, call) of v.append(x)
         self.returns = []           # return value expressions
         self.statement_comps = set()
+        self.tuple_concats = {}     # tuple experiment: id of a concatenation -> its operands
         self.store_targets = set()  # ids of subscripts that are assignment targets
         self.comp_targets = set()
 
     def add(self, name, item):
         self.assigns.setdefault(name, []).append(item)
 
+    def statement_tuple(self, value):
+        """Tuple experiment: a tuple built as a sequence, the whole value of a statement, is built in order."""
+        parts = _tuple_parts(value)
+        if parts is None:
+            return
+        if len(parts) > 1 or isinstance(value, cst.BinaryOperation) and isinstance(value.operator, cst.Add):
+            self.tuple_concats[id(value)] = parts
+        for part in parts:
+            if _tuple_call(part) is not None:
+                self.statement_comps.update((id(part), id(_tuple_call(part))))
+
     def visit_Assign(self, node):
         if isinstance(node.value, cst.ListComp) and len(node.targets) == 1:
             self.statement_comps.add(id(node.value))
+        if len(node.targets) == 1:
+            self.statement_tuple(node.value)
         for t in node.targets:
             tgt = t.target
             if isinstance(tgt, cst.Name):
@@ -480,11 +597,17 @@ class _Facts(cst.CSTVisitor):
             self.returns.append(node.value)
         if isinstance(node.value, cst.ListComp):
             self.statement_comps.add(id(node.value))
+        if node.value is not None:
+            self.statement_tuple(node.value)
         if isinstance(node.value, cst.Tuple) and all(
-                isinstance(e.value, (cst.Name, cst.Integer, cst.Float, cst.ListComp)) for e in node.value.elements):
+                isinstance(e.value, (cst.Name, cst.Integer, cst.Float, cst.ListComp)) or _tuple_call(e.value)
+                for e in node.value.elements):
             # no other element has effects, so building a comprehension first keeps the order
             self.statement_comps.update(id(e.value) for e in node.value.elements
                                         if isinstance(e.value, cst.ListComp))
+            for e in node.value.elements:
+                if _tuple_call(e.value) is not None:
+                    self.statement_comps.update((id(e.value), id(_tuple_call(e.value))))
 
     def visit_AugAssign(self, node):
         if isinstance(node.target, cst.Name):
@@ -601,6 +724,8 @@ class VectorLowering(cst.CSTTransformer):
         self.cells = cells
         self.shapes = {name: c.vector_shape for name, c in cls_info.cells.items() if c.vector_shape}
         self.ref_shapes = {}            # cross-Space reads: {Reference: {cell: shape}} (reference_shapes)
+        self.ref_cells = {}             # {Reference: {cell: cells info}} of the same Spaces
+        self.tuple_names = set()        # tuple experiment: locals holding tuple vectors
         self.builtins = builtins
         self.counter = counter          # shared per module: unique temporaries
         self.temps = set()              # the temporaries temp() made
@@ -633,6 +758,11 @@ class VectorLowering(cst.CSTTransformer):
     def kind(self, node):
         """'V', 'I', 'AV', 'AI' (fresh allocations), ('T', kinds) or None for an original node."""
         if isinstance(node, cst.Call):
+            comp = _tuple_call(node)
+            if comp is not None and 'tuple' in self.builtins:
+                if id(node) in self.statement_comps and self.comp_ok(comp):
+                    return {FLOAT: 'AV', INT: 'AI'}.get(self.comp_elem(comp), 'A?')
+                return None
             return _call_shape(node.func, self.shapes, self.ref_shapes)
         if isinstance(node, cst.Name):
             return self.env.get(node.value)
@@ -646,6 +776,12 @@ class VectorLowering(cst.CSTTransformer):
             if base in ('V', 'I', 'AV', 'AI') and _slice(node) is not None:
                 return 'A' + base[-1]
             return None
+        if isinstance(node, cst.BinaryOperation) and id(node) in self.facts.tuple_concats:
+            kinds = {self.part_kind(part) for part in self.facts.tuple_concats[id(node)]}
+            return kinds.pop() if len(kinds) == 1 and None not in kinds else None
+        if _repeat(node) is not None:
+            elem = self.scalar(_repeat(node)[0])
+            return {FLOAT: 'AV', INT: 'AI'}.get(elem)
         if isinstance(node, cst.BinaryOperation) and isinstance(node.operator, cst.Multiply):
             for one, other in ((node.left, node.right), (node.right, node.left)):
                 if (isinstance(one, cst.List) and len(one.elements) == 1
@@ -675,6 +811,15 @@ class VectorLowering(cst.CSTTransformer):
             if a and b and isinstance(a, str) and isinstance(b, str) and a[-1] == b[-1] and a[-1] in 'VI':
                 return 'A' + a[-1] if a[0] == b[0] == 'A' else a[-1]
         return None
+
+    def part_kind(self, part):
+        """The kind of an operand of a tuple concatenation: a display of typed numbers, or a tuple
+        built as a sequence; None (a Python tuple) otherwise."""
+        if isinstance(part, cst.Tuple):
+            kinds = {self.scalar(e.value) for e in part.elements}
+            return {frozenset({FLOAT}): 'AV', frozenset({INT}): 'AI'}.get(frozenset(kinds))
+        k = self.kind(part)
+        return k if k in ('AV', 'AI') else None
 
     def elem(self, node):
         """'V' or 'I' when the node is a (typed) vector, else None. A slice is a vector only
@@ -828,6 +973,8 @@ class VectorLowering(cst.CSTTransformer):
         self.range_names = {name for name, items in assigns.items() if name not in facts.comp_targets
                             and len(items) == 1 and items[0][0] == 'value'
                             and self.range_args(items[0][1]) is not None}
+        self.tuple_names = self.tuple_locals(facts)
+        self.escaping -= self.tuple_names      # a tuple cannot be changed in place
         returned = self.returned_kinds(facts)
         changed, rounds = True, 0
         while changed and rounds < 50:
@@ -867,6 +1014,7 @@ class VectorLowering(cst.CSTTransformer):
                 self.env[base.value] = None
                 self.fallback(base, 'integer vector updated with a float: kept as a list')
         self.owned = {name for name, items in assigns.items() if self.env.get(name) in ('V', 'I')
+                      and name not in self.tuple_names
                       and all(item[0] == 'value' and isinstance(self.kind(item[1]), str)
                               and self.kind(item[1])[0] == 'A' for item in items)}
         for name in sorted(facts.escaping(facts.mutated)):
@@ -875,6 +1023,41 @@ class VectorLowering(cst.CSTTransformer):
                     raise VectorWriteError(
                         f'{self.cells.model_path}: {name!r} holds the cached value of a vector cell and is '
                         f'changed in place; cached vectors are immutable: change a copy (list(...))')
+
+    def tuple_value(self, node):
+        """Whether ``node`` is a tuple vector: built as a sequence, or the value of a tuple vector cell."""
+        if isinstance(node, cst.IfExp):
+            return self.tuple_value(node.body) and self.tuple_value(node.orelse)
+        if _tuple_parts(node) is not None:
+            return True
+        if isinstance(node, cst.Subscript) and _index(node) is not None:
+            node = node.value
+        return isinstance(node, cst.Call) and self.call_container(node.func) == 'tuple'
+
+    def call_container(self, func):
+        if not isinstance(func, cst.Attribute):
+            return None
+        if _is_name(func.value, 'self'):
+            cell = self.cls_info.cells.get(func.attr.value)
+        elif isinstance(func.value, cst.Attribute) and _is_name(func.value.value, 'self'):
+            cell = self.ref_cells.get(func.value.attr.value, {}).get(func.attr.value)
+        else:
+            cell = None
+        return cell_vector_container(cell) if cell is not None and getattr(cell, 'vector_shape', None) else None
+
+    def tuple_locals(self, facts):
+        """The locals every binding of which is a tuple vector (directly, unpacked, or through another)."""
+        found, changed = set(), True
+        while changed:
+            changed = False
+            for name, items in facts.assigns.items():
+                if name in found or name in facts.comp_targets:
+                    continue
+                if items and all(item[0] in ('value', 'unpack') and (
+                        self.tuple_value(item[1]) or _is_name(item[1]) and item[1].value in found) for item in items):
+                    found.add(name)
+                    changed = True
+        return found
 
     def cached_value(self, node):
         """Whether ``node`` gives the cached value of a vector cell (or a tuple of them) as it is."""
@@ -1102,7 +1285,7 @@ class VectorLowering(cst.CSTTransformer):
         return True
 
     def visit_GeneratorExp(self, node):
-        expand = id(node) in self.sum_gens
+        expand = id(node) in self.sum_gens or (id(node) in self.statement_comps and self.comp_ok(node))
         self.scope_stack.append(expand)
         if expand:
             self.comp_scalars.append(self.loop_scalars(node.for_in))
@@ -1281,12 +1464,16 @@ class VectorLowering(cst.CSTTransformer):
         k = self.kind(value_o)
         if isinstance(value_o, cst.ListComp) and isinstance(k, str) and k[0] == 'A':
             return self.expand_comp(value_o, value_u, e)
+        if _tuple_call(value_o) is not None and isinstance(k, str) and k[0] == 'A':
+            return self.expand_comp(_tuple_call(value_o), value_u.args[0].value, e)
+        if id(value_o) in self.facts.tuple_concats and k == 'A' + e:
+            return self.tuple_concat(value_o, value_u, e)
         if isinstance(value_o, cst.BinaryOperation) and isinstance(k, str) and k[0] == 'A':
-            if isinstance(value_u.left, cst.List):
+            if isinstance(value_u.left, (cst.List, cst.Tuple)):
                 item, count = value_u.left.elements[0].value, value_u.right
             else:
                 item, count = value_u.right.elements[0].value, value_u.left
-            item_o = (value_o.left if isinstance(value_o.left, cst.List) else value_o.right).elements[0].value
+            item_o = (value_o.left if isinstance(value_o.left, (cst.List, cst.Tuple)) else value_o.right).elements[0].value
             self.lowered += 1
             return [], self.call('full', e, count, self.item(e, item_o, item))
         if isinstance(value_o, cst.List) and not value_o.elements:
@@ -1323,6 +1510,34 @@ class VectorLowering(cst.CSTTransformer):
         self.lowered += 1
         return pre, cst.Name(r)
 
+    def tuple_concat(self, value_o, value_u, e):
+        """Tuple experiment: ``(x,) + tuple(...) + ...`` into one new vector, the operands built in turn."""
+        parts_u = []
+
+        def flatten(item):
+            if isinstance(item, cst.BinaryOperation) and isinstance(item.operator, cst.Add) \
+                    and not (_repeat(item) or _tuple_call(item)):
+                flatten(item.left)
+                flatten(item.right)
+            else:
+                parts_u.append(item)
+        flatten(value_u)
+        pre, names = [], []
+        for po, pu in zip(self.facts.tuple_concats[id(value_o)], parts_u):
+            more, value = (self.display(pu, e) if isinstance(po, cst.Tuple) else self.destination(po, pu, e))
+            t = self.temp('cat')
+            self.declare(t, TYPES[e])
+            pre += more + [_stmt(f'{t} = {_code(value)}\n')]
+            names.append(t)
+        out = names[0]
+        for name in names[1:]:
+            new = self.temp('cat')
+            self.declare(new, TYPES[e])
+            pre.append(_stmt(f'{new} = {fn("cat", e)}({out}, {name})\n'))
+            out = new
+        self.lowered += 1
+        return pre, cst.Name(out)
+
     def wrap_return(self, so, su, pre):
         shape = self.cells.vector_shape
         if shape in ('V', 'I'):
@@ -1337,8 +1552,11 @@ class VectorLowering(cst.CSTTransformer):
                 elements.append(eu.with_changes(value=value))
             return pre, su.with_changes(value=su.value.with_changes(elements=elements))
         if self.kind(so.value) in ('V', 'I'):
-            # a typed vector returned where the cell's value is not a vector: give a list back
-            return pre, su.with_changes(value=cst.Call(cst.Attribute(su.value, cst.Name('tolist'))))
+            # a typed vector returned where the cell's value is not a vector: give a list (a tuple) back
+            value = cst.Call(cst.Attribute(su.value, cst.Name('tolist')))
+            if self.tuple_value(so.value) or _is_name(so.value) and so.value.value in self.tuple_names:
+                value = cst.Call(cst.Name('tuple'), [cst.Arg(value)])
+            return pre, su.with_changes(value=value)
         return pre, su
 
     def loop_head(self, comp_o, comp_u, tag):
@@ -1745,10 +1963,11 @@ class _ObjectUses(cst.CSTTransformer):
     A tuple of vectors in such a position becomes a tuple of lists."""
     METADATA_DEPENDENCIES = (__import__('libcst.metadata', fromlist=['ParentNodeProvider']).ParentNodeProvider,)
 
-    def __init__(self, names, shapes, own=None, ref_shapes=None):
+    def __init__(self, names, shapes, own=None, ref_shapes=None, tuples=None):
         super().__init__()
         self.names, self.shapes = names, shapes     # {name: shape}, {vector cell: shape}
         self.ref_shapes = ref_shapes or {}          # {Reference: {vector cell: shape}}
+        self.tuples = tuples or (lambda node: False)    # tuple experiment: whether a node is a tuple vector
         self.own = own                              # the shape this formula returns, if it is a vector cell
         self.converted = []
 
@@ -1820,9 +2039,11 @@ class _ObjectUses(cst.CSTTransformer):
             raise VectorWriteError(f'{_code(original)}.{parent.attr.value}: the cached value of a vector cell '
                                    f'is changed in place; cached vectors are immutable: change a copy (list(...))')
         self.converted.append(_code(original)[:80])
+        item = 'tuple(_mx_vector.tolist())' if self.tuples(original) else '_mx_vector.tolist()'
         if isinstance(shape, tuple):
-            return _expr(f'tuple([_mx_vector.tolist() for _mx_vector in {_code(updated)}])')
-        return cst.Call(cst.Attribute(updated, cst.Name('tolist')), ())
+            return _expr(f'tuple([{item} for _mx_vector in {_code(updated)}])')
+        value = cst.Call(cst.Attribute(updated, cst.Name('tolist')), ())
+        return cst.Call(cst.Name('tuple'), [cst.Arg(value)]) if self.tuples(original) else value
 
     def leave_Name(self, original, updated):
         return self._leave(original, updated)
@@ -1834,11 +2055,11 @@ class _ObjectUses(cst.CSTTransformer):
         return self._leave(original, updated)
 
 
-def _object_uses(body, names, shapes, own=None, ref_shapes=None):
+def _object_uses(body, names, shapes, own=None, ref_shapes=None, tuples=None):
     """``body`` (an IndentedBlock) with every Python use of a vector made a list (``_ObjectUses``)."""
     from libcst.metadata import MetadataWrapper
     wrapper = MetadataWrapper(cst.Module(body=body.body), unsafe_skip_copy=True)
-    uses = _ObjectUses(names, shapes, own, ref_shapes)
+    uses = _ObjectUses(names, shapes, own, ref_shapes, tuples)
     module = wrapper.visit(uses)
     return body.with_changes(body=module.body), uses.converted
 
@@ -1854,11 +2075,12 @@ def lower(node, cls_info, cells, scope, counter, module, ref_kinds=None):
     cells.vector_report = report = {'shape': _shape_json(cells.vector_shape), 'lowered': 0, 'fallbacks': []}
     def is_builtin(name):
         return scope[name] and all(isinstance(b, BuiltinAssignment) for b in scope[name])
-    builtins = {name for name in ('sum', 'len', 'zip', 'range', 'min', 'max', 'list') if is_builtin(name)}
+    builtins = {name for name in ('sum', 'len', 'zip', 'range', 'min', 'max', 'list', 'tuple') if is_builtin(name)}
     loops = [name for name in range_loop_locals(node.body, builtins) if name not in cells.params]
     lowering = VectorLowering(cls_info, cells, builtins, counter)
     lowering.readers = frozenset(name for name in READERS if is_builtin(name))
     lowering.ref_shapes = reference_shapes(cls_info, module)
+    lowering.ref_cells = reference_cells(cls_info, module)
     from .powers import KIND_FLOAT, KIND_INT
     lowering.strict_locals = not module_vector_cells(module)
     lowering.ref_scalars = {name: {KIND_FLOAT: FLOAT, KIND_INT: INT}.get(kind)
@@ -1904,7 +2126,9 @@ def lower(node, cls_info, cells, scope, counter, module, ref_kinds=None):
     body, converted = _object_uses(body, typed, {n: s for n, s in lowering.shapes.items()
                                                  if s in ('V', 'I') or isinstance(s, tuple)},
                                    cells.vector_shape if cells.vector_shape in ("V", "I") or isinstance(cells.vector_shape, tuple) else None,
-                                   lowering.ref_shapes)
+                                   lowering.ref_shapes,
+                                   lambda n: (n.value in lowering.tuple_names if isinstance(n, cst.Name)
+                                              else lowering.tuple_value(n)))
     if derived:
         body = body.visit(_CheckedFloatReads(typed, set(derived)))
     for name, items in lowering.facts.assigns.items():

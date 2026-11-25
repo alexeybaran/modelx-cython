@@ -126,6 +126,17 @@ cdef F64Vec vec_slice(F64Vec v, long long a, long long b):
     return r
 
 
+cdef F64Vec vec_cat(F64Vec a, F64Vec b):
+    """a + b as a new vector (tuple concatenation)."""
+    cdef F64Vec r = vec_new(a.n + b.n)
+    cdef Py_ssize_t i
+    for i in range(a.n):
+        r.data[i] = a.data[i]
+    for i in range(b.n):
+        r.data[a.n + i] = b.data[i]
+    return r
+
+
 cdef double _vec_get_slow(F64Vec v, long long i) except? -1.0:
     if i < 0:
         i += v.n
@@ -235,6 +246,16 @@ cdef I64Vec ivec_slice(I64Vec v, long long a, long long b):
     r = ivec_new(b - a if b > a else 0)
     for i in range(r.n):
         r.data[i] = v.data[a + i]
+    return r
+
+
+cdef I64Vec ivec_cat(I64Vec a, I64Vec b):
+    cdef I64Vec r = ivec_new(a.n + b.n)
+    cdef Py_ssize_t i
+    for i in range(a.n):
+        r.data[i] = a.data[i]
+    for i in range(b.n):
+        r.data[a.n + i] = b.data[i]
     return r
 
 
