@@ -4,23 +4,32 @@
 
 ### Enum definitions are recognised by type
 
-A Reference in any Space whose value is an `IntEnum` class (one that compares, hashes,
-prints and formats as its integers) is an enum definition without any declaration: it is
-fixed in the compiled model, and each member written in a formula (`Sex.M`) becomes its
-integer literal before compilation. Compiled code holds members and values traced as an
-`IntEnum` as integers, so:
+A Reference in any Space whose value is an `IntEnum` class (one whose members behave as
+their integers in every operation of `int`) or, from Python 3.11, a `StrEnum` class (one
+whose members behave as their texts) is an enum definition without any declaration: it is
+fixed in the compiled model. Compiled code holds a member as an integer only where that
+makes the speed, and as the member everywhere else:
 
-- A Cell that returns a member returns its integer; a tuple, list, set or dict display keeps
-  its members. `.name` and `.value` of a member, of a parameter or Cell result traced as one
-  `IntEnum` class, and of a local bound only to its members work; `.name` of an integer that
-  is not a member raises `AttributeError`, as in modelx. Any other attribute is a build error.
-- Where the class shows (`repr`, `type`, `isinstance`, `getattr`, `!r`, `%`), a member written
-  in place stays a member; a parameter, local or Cell result held as an integer there is a
-  build error, as is `str` or `format` of one whose class defines its own.
-- In a model with such members, an identity test (`is`) is a build error unless one side is
-  `None`, a bool, a builtin type or a member of a Reference that is not substituted.
-- Passing a member of one class to a parameter traced as another is a build error. A Python
-  caller can still do it: `.name` then gives the traced class's name for that value.
+- An `IntEnum` member written in a formula (`Sex.M`) becomes its integer as an operand of a
+  comparison or of arithmetic, as an argument of a Cell whose parameter is a number, as a
+  subscript that is read, and in a tuple, list or set that a loop iterates when the loop
+  variable is used only in such ways. A parameter or Cell result whose traced values are
+  members of one such class is a C integer with a cache of the size of the class.
+- A `StrEnum` member is held as its position in the class, and only where members are told
+  apart: `==`, `!=` and `in` against members or their texts, an argument of a parameter
+  traced as members of the class or their texts, a loop over members. A caller, in a formula
+  or from Python, gives the member or its text; a text that is no member's value raises
+  `ValueError` at the Cell. A Cell result that is a member or a text stays an object.
+- Every other use sees the member: `.name`, `.value` and any other attribute, `repr`, `str`,
+  `format`, `isinstance`, `type`, `is`, a container, a stored key, an item Space's argument,
+  a helper function. A value held as an integer is converted through its class there; an
+  integer that is no member's value stays that integer, as in modelx.
+- A Cell that returns an `IntEnum` member returns its integer, as before.
+- A parameter or result that some formula converts back must be of its traced class: a
+  member of another class, or a plain integer equal to a member, given to it by a formula
+  or from Python raises `TypeError`. A parameter that is only compared takes any integer.
+- A text given from Python to a Cell that reads the member (`kind.name`) is taken as the
+  member, where modelx raises `AttributeError`.
 
 Rebinding such a Reference on a compiled model raises `AttributeError`;
 rebuild the model to change it.
