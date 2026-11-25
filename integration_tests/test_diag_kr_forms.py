@@ -9,9 +9,8 @@
   (Cancer_KR_S ``for k in range(1, 7): tbl.loc[k, "c"]``), not an object key;
 - ``min``/``max`` of a generator over an integer vector cell (Cancer_KR_S tier_share), with
   Python's empty-iterable ValueError, and a vector sum whose element holds ``max(0.0, ...)``
-  (CI_KR_S claims) are C loops; an element of an integer vector and ``T.index.asof(a)`` at an
-  integer ``a`` are integer keys; a returned ``[... for s in range(..)] + list(range(..))`` is
-  built into one integer vector without Python lists (CI_KR_S ci_cohort_ids); a vector rebuilt
+  (CI_KR_S claims) are C loops; an element of an integer vector is an integer key; a returned
+  ``[... for s in range(..)] + list(range(..))`` is built into one integer vector without Python lists (CI_KR_S ci_cohort_ids); a vector rebuilt
   from itself (``val = [v * g for v in val]``, Dep_FR_S dep_cohorts) is a typed vector;
 - ``for x in (E.A, E.B, ...)`` over enum members is a loop over a literal tuple of integers
   (enums.literals), which Cython compiles with a C integer target (Child_KR_S benefit_pp).

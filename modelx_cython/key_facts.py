@@ -1,7 +1,7 @@
 """Key-typing facts of a formula (T-6 step 0): what the table-read lowering knows of a key part's type.
 
 ``is_int`` (why an expression is a non-bool integer), ``exact_long_long`` (statically a C ``long long``)
-and ``_int_index_read`` (an extreme or asof of an integer level), on the bindings of one formula (``_Formula``),
+and ``_int_index_read`` (an extreme of an integer level), on the bindings of one formula (``_Formula``),
 for the prepared-table lowering (``frame_reads``).
 """
 
@@ -334,9 +334,8 @@ class KeyFacts:
             return 'part of an extreme key on an integer level'
         if isinstance(expr, cst.Call) and _plain_args(expr):
             func = expr.func
-            if (self._int_index_read(expr) and (expr.func.attr.value != 'asof' or (
-                    len(expr.args) == 1 and self.is_int(expr.args[0].value, depth + 1)))):
-                # diag-kr: a key of a single integer level (min/max, or asof at an integer)
+            if self._int_index_read(expr):
+                # diag-kr: a key of a single integer level (min/max)
                 return 'key of an integer index'
             from .vectors import ALIAS as _VECTORS
             if (isinstance(func, cst.Attribute) and isinstance(func.value, cst.Name)
