@@ -238,10 +238,6 @@ class RuntimeCellsInfo:     # TODO: Create base class RuntimeBaseMemberInfo
         self.observed_provider_binding = observed_provider_binding(returned)
         self.frame_schema = frame_schema(returned)
 
-    admitted_table = False     # auto-tables: the traced value was a pandas frame admitted as a table
-    pandas_fallbacks = {}      # auto-tables: {formula line: {operation: calls}} on admitted tables
-    admission_record = None    # auto-tables: what admission decided for this zero-argument formula
-
     def has_args(self):
         """Return whether the cells method takes arguments.
 

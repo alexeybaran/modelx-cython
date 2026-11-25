@@ -606,34 +606,6 @@ class CombinedCellsInfo(LexicalCellsInfo):
         return getattr(self._rt, 'observed_provider_binding', None)
 
     @property
-    def admitted_table(self):
-        """auto-tables (D104): the sampled value was a plain pandas frame admitted as a table."""
-        return getattr(self._rt, 'admitted_table', False)
-
-    @property
-    def admission_record(self):
-        """auto-tables: the admission record of a zero-argument formula that returned a DataFrame."""
-        return getattr(self._rt, 'admission_record', None)
-
-    @property
-    def pandas_fallbacks(self):
-        """auto-tables: pandas fallbacks on admitted tables in the sample, ``{line: {operation: calls}}``."""
-        return getattr(self._rt, 'pandas_fallbacks', None) or {}
-
-    @property
-    def table_result(self):
-        """M1: the provider type id when every sampled result is that provider type's
-        exact owner (a helper Table or Record), whether or not it is bound natively."""
-        binding = self.observed_provider_type
-        return binding.type_id if binding is not None else None
-
-    @property
-    def native_table_result(self):
-        binding = self.native_provider_binding
-        handle = binding.declaration.handle if binding is not None else None
-        return handle is not None and handle.type == 'TableHandle'
-
-    @property
     def native_provider_binding(self):
         binding = self.observed_native_binding
         if binding and (binding.declaration.admission == 'observed'

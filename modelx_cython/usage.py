@@ -124,8 +124,6 @@ class CellsResolver:
         self.locked_scalar_results = locked_scalar_results or {}
         self.unlocked_scalar_results = unlocked_scalar_results or {}
         self.provider_results = {}
-        self.observed_provider_results = {}
-        self.table_results = {}
         # cells fqname -> 'pandas.DataFrame' / 'pandas.Series': zero-argument cells whose every
         # sampled result is that pandas class; reads through them are reported, never lowered.
         self.pandas_results = {}
@@ -573,8 +571,7 @@ def build_resolver(module_infos) -> CellsResolver:
     locked_scalar_results: Dict[str, str] = {}
     unlocked_scalar_results: Dict[str, str] = {}
     provider_results = {}
-    observed_provider_results = {}
-    table_results, cached_cells, cell_infos = {}, set(), {}
+    cached_cells, cell_infos = set(), {}
     pandas_results = {}
     frame_schemas = {}
 
@@ -588,12 +585,6 @@ def build_resolver(module_infos) -> CellsResolver:
                 binding = getattr(cells, 'native_provider_binding', None)
                 if binding is not None:
                     provider_results[cells.fqname] = binding
-                observed = getattr(cells, 'observed_provider_type', None)
-                if observed is not None:
-                    observed_provider_results[cells.fqname] = observed
-                result = getattr(cells, 'table_result', None)
-                if result is not None:
-                    table_results[cells.fqname] = result
                 pandas_result = _pandas_result(cells)
                 if pandas_result is not None:
                     pandas_results[cells.fqname] = pandas_result
@@ -628,8 +619,6 @@ def build_resolver(module_infos) -> CellsResolver:
     resolver = CellsResolver(cells_by_class, refs_by_class, spaces_by_class,
                              scalar_refs_by_class, locked_scalar_results, unlocked_scalar_results)
     resolver.provider_results = provider_results
-    resolver.observed_provider_results = observed_provider_results
-    resolver.table_results = table_results
     resolver.pandas_results = pandas_results
     resolver.frame_schemas = frame_schemas
     resolver.cached_cells = cached_cells

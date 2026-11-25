@@ -46,14 +46,9 @@ class CompilerPolicy:
     # M1 (W1.1, default on since W1.5): '# cython: infer_types=True, overflowcheck=True'
     # on generated model modules.
     infer_types: bool = True
-    # M1 (W1.3): lower pandas-spelled table reads to typed handle reads (table_reads.py).
-    # On by default since the runtime handles (W1.2) landed (D45).
+    # diag-run8 F3: inline a row Cell into eligible field reads on the prepared pandas table path.
     typed_table_reads: bool = True
-    # diag-4w (D71): the handle of a zero-argument table Cell is held per instance and read
-    # borrowed (no Cell call, no reference count per read); false resolves it per call.
-    held_table_handles: bool = True
-    # auto-tables (D104): a plain pandas table that is not admitted, or pandas run on an admitted
-    # table in a per-step cell (class C), stops the build instead of a warning.
+    # a table read left on pandas in a per-step cell stops a prepared-table build instead of a warning.
     strict_tables: bool = False
     # integer guards (owner's rule): 'auto' (default) compiles without overflow checks when no
     # traced integer reaches UNCHECKED_LIMIT in magnitude, with them otherwise; 'checked' and
@@ -61,7 +56,7 @@ class CompilerPolicy:
     integer_checks: str = 'auto'
     # T-3 (toolkit p2/tables/DESIGN.md): the sample runs on the user's frames (no table admission or
     # substitution); reads of a traced DataFrame or Series are lowered onto a PreparedTable bound to
-    # the real frame (frame_reads.py). False restores the admission of the older table layer.
+    # the real frame (frame_reads.py). False leaves those reads on pandas.
     prepared_tables: bool = True
     # T-4: opt-in check mode: each hold of a prepared table first checks that the frame still equals the copy
     # prepared when it was bound, and raises if it was edited in place without a clear
@@ -83,7 +78,6 @@ class CompilerPolicy:
             native_math=data.get('native_math', True),
             infer_types=data.get('infer_types', True),
             typed_table_reads=data.get('typed_table_reads', True),
-            held_table_handles=data.get('held_table_handles', True),
             strict_tables=data.get('strict_tables', os.environ.get('MX_CY_STRICT_TABLES') == '1'),
             integer_checks=data.get('integer_checks', 'auto'),
             prepared_tables=data.get('prepared_tables', True),
@@ -217,9 +211,6 @@ class TransSpec:
     ``"strict_tables"`` (default false, or true when the environment sets
     ``MX_CY_STRICT_TABLES=1``): a table read that remains on pandas in a cell with arguments
     stops a prepared-table build with an error instead of a warning.
-    ``"held_table_handles"`` (default true): the handle of a zero-argument table Cell
-    read by a lowered read is resolved once per instance into a field (reset with the
-    per-policy caches) and used borrowed; false resolves it on every call.
     ``"native_cache_hits"`` defaults to ``"auto"`` when automatic optimization
     and dense miss binding are enabled. It selects scalar hits and already-proven
     dense hits; explicit alternatives are ``"none"``, ``"scalar"``, ``"dense"``

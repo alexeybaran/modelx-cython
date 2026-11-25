@@ -11,19 +11,11 @@ from .helpers import read_resource, valid_identifier
 
 
 @dataclass(frozen=True)
-class TypedHandle:
-    """M1 typed handle of a provider type: the cdef class and the function that builds it."""
-    type: str
-    build: str
-
-
-@dataclass(frozen=True)
 class ProviderType:
     view_type: Optional[str]
     bind: Optional[str]
     admission: str
     bind_cell: bool
-    handle: Optional[TypedHandle] = None
 
 
 @dataclass(frozen=True)
@@ -106,18 +98,11 @@ def _require_fields(value, label, required, optional=()):
         raise ValueError(f'invalid fields for {label}')
 
 
-def _read_symbols(cls, value, label, required, optional=()):
-    _require_fields(value, label, required, optional)
-    if not all(valid_identifier(symbol) for symbol in value.values()):
-        raise ValueError(f'invalid native symbol for {label}')
-    return cls(**value)
-
-
 def _read_type(type_id, declaration):
     if not _qualified_identifier(type_id):
         raise ValueError(f'invalid qualified type identity {type_id!r}')
     _require_fields(declaration, type_id, (),
-                    ('view_type', 'bind', 'admission', 'bind_cell', 'handle'))
+                    ('view_type', 'bind', 'admission', 'bind_cell'))
     view_type = declaration.get('view_type')
     bind = declaration.get('bind')
     if ('view_type' in declaration or 'bind' in declaration) and not (
@@ -130,11 +115,7 @@ def _read_type(type_id, declaration):
         raise ValueError(f'invalid view admission or bind_cell declaration for {type_id}')
     if view_type is None and (bind_cell or admission != 'observed'):
         raise ValueError(f'{type_id} cannot configure binding without a view_type')
-    handle = None
-    if 'handle' in declaration:
-        handle = _read_symbols(TypedHandle, declaration['handle'], f'{type_id}.handle', ('type', 'build'))
-
-    return ProviderType(view_type, bind, admission, bind_cell, handle)
+    return ProviderType(view_type, bind, admission, bind_cell)
 
 
 def read_provider_manifest(provider: str, expected_abi: str) -> Optional[ProviderManifest]:

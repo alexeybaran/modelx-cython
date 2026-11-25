@@ -156,8 +156,7 @@ class _Calls(cst.CSTTransformer):
                 and func.value.value.value == MX_SELF):
             source = self.provider_receivers.get((func.value.attr.value, func.attr.value))
             if source is not None and not source.is_locked:
-                kind = 'table' if source.native_table_result else 'provider'
-                self.unlocked_provider_sources.add((source.fqname, kind))
+                self.unlocked_provider_sources.add((source.fqname, 'provider'))
             elif source is not None:
                 receiver = cst.Module([]).code_for_node(func.value)
                 return cst.IfExp(
