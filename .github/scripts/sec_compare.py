@@ -22,6 +22,17 @@ work = pathlib.Path(sys.argv[1]).resolve()
 model = sys.argv[2] if len(sys.argv) > 2 else 'Term_US_SEC'
 product = sys.argv[3] if len(sys.argv) > 3 else 'term_life'
 
+if sys.version_info < (3, 11):
+    # lifelib's harness runs its child as ``python -P``, an option added in 3.11; before it, the
+    # child runs without it (the only difference: the runner's directory is first on sys.path).
+    _run = subprocess.run
+
+    def _run_without_safe_path(args, *rest, **kwargs):
+        if isinstance(args, list) and args[1:2] == ['-P']:
+            args = args[:1] + args[2:]
+        return _run(args, *rest, **kwargs)
+    subprocess.run = _run_without_safe_path
+
 lib = work / 'uslib'
 if not lib.exists():
     lifelib.create('uslib', lib)
