@@ -614,7 +614,10 @@ class FrameReads:
                 value = f'{level_or_key} + 2'
             else:
                 value = f'{m}.hold_row(self.{table}, {_code(level_or_key)}, False)'
-            return [cst.parse_statement(f'if self.{field} == 0:\n    self.{field} = {value}\n')]
+            # the key is evaluated before the statement of its read: if it raises, the hold stays unresolved and
+            # the read's pandas branch evaluates it in place (or the read's branch is never taken, as live)
+            return [cst.parse_statement(f'if self.{field} == 0:\n    try:\n        self.{field} = {value}\n'
+                                        f'    except Exception:\n        pass\n')]
         # T-4.2: one binding per receiver and item (or per call outside items): the frame's PreparedTable, or a
         # table whose every slot is -1; each read then takes its slot from the table by its signature id
         function = 'bind_ref_checked' if getattr(self.policy, 'verify_inputs', False) else 'bind_ref'
@@ -624,11 +627,22 @@ class FrameReads:
             if held is None and function == 'bind_ref':     # T-5c: a frame the item computes: prepared for it alone
                 function = 'bind_own'
             value = held if held is not None and function == 'bind_ref' else f'{m}.{function}({receiver})'
-            return [cst.parse_statement(
-                f'if self.{hold.state} == 0:\n'
-                f'    self.{hold.table} = {value}\n'
-                f'    self.{hold.state} = 1\n')]
-        return [cst.parse_statement(f'{hold.table}: object = {m}.{function}({receiver})')]
+            bind = f'self.{hold.table} = {value}\nself.{hold.state} = 1\n'
+            return [cst.parse_statement(f'if self.{hold.state} == 0:\n' + self._deferred(bind, f'self.{hold.table}',
+                                                                                        function, '    '))]
+        return [cst.parse_statement(f'{hold.table}: object'),
+                cst.parse_statement(self._deferred(f'{hold.table} = {m}.{function}({receiver})\n', hold.table,
+                                                   function, ''))]
+
+    def _deferred(self, bind, table, function, indent):
+        """``bind`` (statements binding ``table``) placed before the statement of the read: when the receiver raises,
+        ``table`` is a table that answers no read (``bind_own`` of a value that is not a frame), so the read's
+        pandas branch raises in its own place, or is never reached, as live. The check mode's own error is kept."""
+        lines = bind.splitlines()
+        if function == 'bind_ref_checked':
+            return ''.join(f'{indent}{line}\n' for line in lines)
+        return (f'{indent}try:\n' + ''.join(f'{indent}    {line}\n' for line in lines)
+                + f'{indent}except Exception:\n{indent}    {table} = {self.module}.bind_own(None)\n')
 
     # ------------------------------------------------------------------ T-5: views of a prefix
     def view_assignment(self, statement):
