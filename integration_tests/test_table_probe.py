@@ -634,7 +634,7 @@ def test_item_holds_take_no_lookup_or_lock(probe):
 def test_native_branches_call_no_pandas(probe):
     """T-5: the native branch of every lowered read (the body of its ``... if <slot> > 0 ... else <pandas>``), with
     the pandas branches of the reads nested in it removed, makes no pandas call (a read nested in a key part is
-    lowered there too)."""
+    lowered there too; an ``asof`` or ``searchsorted`` in a key, a form not lowered, is the formula's own call)."""
     import libcst as cst
     work, _, _ = probe
     module = cst.parse_module((work / "probe_nomx_cy" / "_mx_classes.py").read_text(encoding="utf-8"))
@@ -644,6 +644,12 @@ def test_native_branches_call_no_pandas(probe):
     class Strip(cst.CSTTransformer):
         def leave_IfExp(self, original, updated):
             return updated.with_changes(orelse=cst.Name("None")) if ".slot(" in code(original.test) else updated
+
+        def leave_Call(self, original, updated):
+            # asof and searchsorted are not lowered: such a call in a key is the formula's own pandas, as in live
+            if isinstance(updated.func, cst.Attribute) and updated.func.attr.value in ("asof", "searchsorted"):
+                return cst.Name("None")
+            return updated
 
     class Scan(cst.CSTVisitor):
         def visit_IfExp(self, node):
