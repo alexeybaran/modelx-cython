@@ -132,6 +132,22 @@ def test_provider_resources_use_the_legacy_resource_api(monkeypatch, tmp_path):
     assert len(modules)==1
 
 
+def test_a_provider_with_only_a_pxd_is_installed_as_a_header(monkeypatch, tmp_path):
+    """No .pyx: the .pxd is copied next to the model and no extension module is built for it."""
+    from modelx_cython import helpers
+    def read_resource(package, resource):
+        if resource.endswith('.pyx'):
+            raise FileNotFoundError(resource)
+        return resource.encode()
+    monkeypatch.setattr(helpers, 'read_resource', read_resource)
+    model = tmp_path/'compiled'
+    model.mkdir()
+    alias = helpers.module_name('sample.header')
+    assert helpers.install({'sample.header'}, model) == []
+    assert (model/(alias+'.pxd')).read_bytes() == b'header.pxd'
+    assert not (model/(alias+'.pyx')).exists()
+
+
 def test_enum_constants_follow_underlying_integer_not_overridden_conversion():
     from enum import IntEnum
     from modelx_cython.tracer import RuntimeValueInfo
