@@ -30,17 +30,17 @@ together. **upstream** means the file is untouched since d22426f.
 | layer | files | tests | lines |
 |---|---|---|---|
 | upstream | 3 | 51 | 471 |
-| P1 | 87 | 576 | 9460 |
-| collect | 31 | 73 | 2928 |
+| P1 | 88 | 559 | 9136 |
+| collect | 30 | 74 | 2786 |
 | B1 | 10 | 101 | 963 |
-| B2 | 16 | 21 | 1437 |
+| B2 | 16 | 21 | 1438 |
 | B3 | 21 | 73 | 1690 |
 | B4 | 4 | 6 | 297 |
 | B5 | 2 | 13 | 319 |
 | B6 | 4 | 44 | 678 |
 | B7 | 6 | 16 | 1599 |
 | join | 14 | 22 | 1580 |
-| total | 198 | 996 | 21422 |
+| total | 198 | 980 | 20957 |
 
 The tests counts are collected cases (parametrized cases counted one by one). Before the sort the suite
 collected 950 cases (942 passed, 8 skipped). After the sort it collected 962: the same 950 under their
@@ -56,6 +56,7 @@ with the same 8 skips. The counts above are the current tree, after the merges l
 | `review/r4-table-base-a` | e17f329 | `test_prepared_tables.py::test_asof`: it tested only `PreparedTable.asof`, removed with the ordered-lookup arrays no compiled read used | `test_prepared_tables.py`: the lookups removed from the runtime (`key_codes`, `row`, `value`, `contains`, `column`) are made in the test's own probe through the methods compiled code uses; every comparison with pandas is kept | in `test_prepared_tables.py`: `test_index_pandas_looks_up_by_its_own_rules`, `test_bool_and_huge_keys`, `test_frame_bound_again_is_prepared_again`, `test_row_of_a_narrow_number_column_is_pandas`, `test_object_columns_hold_what_pandas_returns`; `integration_tests/test_table_runtime_contract.py` (B6: cell reads, a row field and index membership, no collect) |
 | `review/r4-table-base-b` (the three commits after the nine of -a) | 35eb09d | | `integration_tests/test_table_runtime_contract.py`: cases added (a frame Cell that publishes no table, an item Cell returning a Reference's frame); nothing removed | `integration_tests/test_table_numpy_values.py` (B5: cell reads and a row field kept as numpy scalars, no collect) |
 | `r4/w1-vectors` (up to and including the marker) | 8725799 | `compiled/test_vector_ref_reads.py`: `vector_ref_reads.py` and its opt-in spec key `native_vector_ref_reads` are removed (a spec that sets the key still builds, on the general path) | `integration_tests/test_diag_kr_forms.py`: the generated-text check that `[...] + list(range(...))` is built without `ivec_of` is dropped with that one-model spelling; the value comparisons with live stay. `test_vectors.py`: the vector sum now uses `_float_sum_state`'s `f64_add`/`f64_result` | `compiled/vector_live.py` (helper) and nine `compiled/test_*vector*` files (B3) |
+| `review/r4-rest-b` | ea67e1d | `helper_contracts/test_native_rounding_provider.py` (the round memo provider, deleted), `test_provider_manifest.py` and `compiled/test_native_object_provider.py` with its twin and collect half (object providers, deleted). `test_removed_private_lookup_spec_key` was in the deleted file but checks a collect spec key that `serial_collect.py` still refuses: it moved unchanged to `compiled/test_private_lookup_roots_collect.py` | `compiled/test_private_lookup_roots*.py`: the memo probe is dropped, the value checks on both routes stay (applied to the collect file and to its direct-route twin). `compiled/test_native_builtin_math.py`: the guarded round in place of the memo operation. `compiled/test_native_typed_extrema.py`, `compiled/test_native_builtins_w18.py` (and its `_b2` file), `test_ordered_arguments.py`: min/max in object-result Cells is the built-in call again, so they assert the built-in in the report instead of the C comparison; value checks kept | `compiled/test_round_threads.py`, `compiled/test_export_without_collect_protocol.py`, `compiled/test_import_without_compiler.py`, `compiled/test_math_in_nested_scopes.py` (all P1) |
 
 The review documents of these branches (`devnotes/REVIEW-BRIEF.md`, `devnotes/review-reductions-a.md`,
 `devnotes/review-table-base-a.md`) were left out. The edits of the two reduction cases in `test_audit_contracts.py` were applied to `test_audit_contracts_b2.py`,
@@ -70,12 +71,12 @@ are relabelled when the table compiler branches arrive (B7 ordered lookups are b
 |---|---|---|
 | `compiled/test_diag_mt2_math_borrowed.py` | `compiled/test_diag_mt2_math_borrowed_collect.py` | collect at 1 and 4 workers; the twin compares 60 direct items |
 | `compiled/test_over_limit_hash_store.py` | `compiled/test_over_limit_hash_store_collect.py` (with `test_removed_spec_key_reuse_dense_windows_is_refused`) | collect totals; report, warning and item values kept |
-| `compiled/test_private_lookup_roots.py` | `compiled/test_private_lookup_roots_collect.py` | collect total; the direct item's memo probe kept |
+| `compiled/test_private_lookup_roots.py` | `compiled/test_private_lookup_roots_collect.py` | collect total (the memo probe left with the memo in rest-b) |
 | `compiled/test_uncached_entries.py` | `compiled/test_uncached_entries_collect.py` | collect totals, replaced by the sum of direct `value()` calls |
 | `compiled/test_shared_dense_publish.py` | `compiled/test_shared_dense_publish_collect.py` | four collect workers; the fence code is checked the same way |
 | `compiled/test_locked_numeric_domains.py` | `compiled/test_locked_numeric_domains_collect.py` | collect domain `periods(close)`; locked Market calls from four threads kept |
 | `compiled/test_raised_sample_calls.py` | `compiled/test_raised_sample_calls_collect.py` | `collect_over` and the collect spec only (the probe was already direct) |
-| `compiled/test_native_object_provider.py` | `compiled/test_native_object_provider_collect.py` (with `test_removed_private_lookup_spec_key`) | `Pricing.collect()`, replaced by the sum of direct items |
+| (`compiled/test_native_object_provider.py`, deleted with object providers) | (`compiled/test_native_object_provider_collect.py`, deleted; `test_removed_private_lookup_spec_key` moved to `test_private_lookup_roots_collect.py`) | `Pricing.collect()`, replaced by the sum of direct items |
 | `compiled/test_param_bounds.py` | `compiled/test_param_bounds_collect.py` | `param_bound_checks` at collect entry |
 | `compiled/test_input_scenarios.py` | `compiled/test_input_scenarios_collect.py` | `collect().sum` in `check_results` |
 | `test_tracer_export_contract.py` | `test_tracer_export_contract_collect.py` | the collect adapter method |
@@ -138,9 +139,11 @@ helper `_check` stays in the P1 file.
 | `modelx_cython/tests/compiled/test_dense_negative_bound.py` | P1 | 6 | 49 |
 | `modelx_cython/tests/compiled/test_diag_mt2_math_borrowed.py` | P1 | 1 | 76 |
 | `modelx_cython/tests/compiled/test_diag_scale_local_math.py` | P1 | 1 | 131 |
+| `modelx_cython/tests/compiled/test_export_without_collect_protocol.py` | P1 | 1 | 34 |
 | `modelx_cython/tests/compiled/test_formula_entry_domains.py` | P1 | 1 | 95 |
 | `modelx_cython/tests/compiled/test_guarded_integer_slow_paths.py` | P1 | 2 | 71 |
 | `modelx_cython/tests/compiled/test_held_array_reads.py` | P1 | 2 | 92 |
+| `modelx_cython/tests/compiled/test_import_without_compiler.py` | P1 | 1 | 33 |
 | `modelx_cython/tests/compiled/test_inferred_cache_domain.py` | P1 | 2 | 86 |
 | `modelx_cython/tests/compiled/test_input_scenarios.py` | P1 | 1 | 112 |
 | `modelx_cython/tests/compiled/test_integer_checks_without_inference.py` | P1 | 2 | 52 |
@@ -149,14 +152,14 @@ helper `_check` stays in the P1 file.
 | `modelx_cython/tests/compiled/test_item_locals_compiled.py` | P1 | 2 | 157 |
 | `modelx_cython/tests/compiled/test_local_fractional_power.py` | P1 | 1 | 63 |
 | `modelx_cython/tests/compiled/test_locked_numeric_domains.py` | P1 | 1 | 70 |
+| `modelx_cython/tests/compiled/test_math_in_nested_scopes.py` | P1 | 1 | 35 |
 | `modelx_cython/tests/compiled/test_multiline_expressions.py` | P1 | 1 | 44 |
-| `modelx_cython/tests/compiled/test_native_builtin_math.py` | P1 | 1 | 113 |
-| `modelx_cython/tests/compiled/test_native_builtins_w18.py` | P1 | 3 | 214 |
+| `modelx_cython/tests/compiled/test_native_builtin_math.py` | P1 | 1 | 112 |
+| `modelx_cython/tests/compiled/test_native_builtins_w18.py` | P1 | 3 | 213 |
 | `modelx_cython/tests/compiled/test_native_cache_hits.py` | P1 | 1 | 84 |
 | `modelx_cython/tests/compiled/test_native_integer_boundaries.py` | P1 | 30 | 577 |
 | `modelx_cython/tests/compiled/test_native_module_math.py` | P1 | 1 | 135 |
-| `modelx_cython/tests/compiled/test_native_object_provider.py` | P1 | 1 | 214 |
-| `modelx_cython/tests/compiled/test_native_typed_extrema.py` | P1 | 1 | 68 |
+| `modelx_cython/tests/compiled/test_native_typed_extrema.py` | P1 | 1 | 66 |
 | `modelx_cython/tests/compiled/test_numeric_cache.py` | P1 | 1 | 61 |
 | `modelx_cython/tests/compiled/test_object_power_contract.py` | P1 | 1 | 80 |
 | `modelx_cython/tests/compiled/test_ordered_arguments_contract.py` | P1 | 1 | 88 |
@@ -164,11 +167,12 @@ helper `_check` stays in the P1 file.
 | `modelx_cython/tests/compiled/test_over_limit_hash_store.py` | P1 | 1 | 93 |
 | `modelx_cython/tests/compiled/test_param_bounds.py` | P1 | 2 | 88 |
 | `modelx_cython/tests/compiled/test_power_sinks.py` | P1 | 1 | 87 |
-| `modelx_cython/tests/compiled/test_private_lookup_roots.py` | P1 | 1 | 90 |
+| `modelx_cython/tests/compiled/test_private_lookup_roots.py` | P1 | 1 | 64 |
 | `modelx_cython/tests/compiled/test_provider_build_cache.py` | P1 | 1 | 37 |
 | `modelx_cython/tests/compiled/test_public_cache_bounds_proofs.py` | P1 | 6 | 63 |
 | `modelx_cython/tests/compiled/test_public_one_axis.py` | P1 | 10 | 45 |
 | `modelx_cython/tests/compiled/test_raised_sample_calls.py` | P1 | 1 | 109 |
+| `modelx_cython/tests/compiled/test_round_threads.py` | P1 | 1 | 58 |
 | `modelx_cython/tests/compiled/test_scalar_union_contract.py` | P1 | 1 | 55 |
 | `modelx_cython/tests/compiled/test_serial_native_transfers.py` | P1 | 2 | 162 |
 | `modelx_cython/tests/compiled/test_shared_dense_publish.py` | P1 | 1 | 46 |
@@ -181,7 +185,6 @@ helper `_check` stays in the P1 file.
 | `modelx_cython/tests/compiled/test_wide_numeric_cache.py` | P1 | 1 | 76 |
 | `modelx_cython/tests/conftest.py` | P1 | 0 | 4 |
 | `modelx_cython/tests/helper_contracts/__init__.py` | P1 | 0 | 0 |
-| `modelx_cython/tests/helper_contracts/test_native_rounding_provider.py` | P1 | 3 | 108 |
 | `modelx_cython/tests/test_audit_contracts.py` | P1 | 5 | 87 |
 | `modelx_cython/tests/test_automatic_cache_policy.py` | P1 | 4 | 34 |
 | `modelx_cython/tests/test_build_diagnostics.py` | P1 | 2 | 68 |
@@ -198,11 +201,10 @@ helper `_check` stays in the P1 file.
 | `modelx_cython/tests/test_literal_syntax.py` | P1 | 39 | 35 |
 | `modelx_cython/tests/test_numeric_cache_reservation.py` | P1 | 1 | 80 |
 | `modelx_cython/tests/test_object_return_annotation.py` | P1 | 7 | 38 |
-| `modelx_cython/tests/test_ordered_arguments.py` | P1 | 11 | 159 |
+| `modelx_cython/tests/test_ordered_arguments.py` | P1 | 11 | 143 |
 | `modelx_cython/tests/test_param_bounds_spec.py` | P1 | 3 | 35 |
 | `modelx_cython/tests/test_parser.py` | P1 | 25 | 147 |
 | `modelx_cython/tests/test_powers.py` | P1 | 111 | 540 |
-| `modelx_cython/tests/test_provider_manifest.py` | P1 | 17 | 116 |
 | `modelx_cython/tests/test_range_increment.py` | P1 | 11 | 18 |
 | `modelx_cython/tests/test_reparse_check.py` | P1 | 9 | 75 |
 | `modelx_cython/tests/test_samples.py` | P1 | 30 | 654 |
@@ -223,21 +225,20 @@ helper `_check` stays in the P1 file.
 | `modelx_cython/tests/compiled/test_factory_private_refs.py` | collect | 3 | 101 |
 | `modelx_cython/tests/compiled/test_input_scenarios_collect.py` | collect | 1 | 113 |
 | `modelx_cython/tests/compiled/test_locked_numeric_domains_collect.py` | collect | 1 | 71 |
-| `modelx_cython/tests/compiled/test_native_object_provider_collect.py` | collect | 2 | 147 |
 | `modelx_cython/tests/compiled/test_ordered_numeric_blocks.py` | collect | 1 | 129 |
 | `modelx_cython/tests/compiled/test_over_limit_hash_store_collect.py` | collect | 2 | 122 |
 | `modelx_cython/tests/compiled/test_parallel_collect_domain_default.py` | collect | 1 | 68 |
 | `modelx_cython/tests/compiled/test_parallel_collect_reuse.py` | collect | 2 | 158 |
 | `modelx_cython/tests/compiled/test_param_bounds_collect.py` | collect | 2 | 114 |
 | `modelx_cython/tests/compiled/test_post_factory_numeric.py` | collect | 1 | 180 |
-| `modelx_cython/tests/compiled/test_private_lookup_roots_collect.py` | collect | 1 | 94 |
+| `modelx_cython/tests/compiled/test_private_lookup_roots_collect.py` | collect | 2 | 88 |
 | `modelx_cython/tests/compiled/test_raised_sample_calls_collect.py` | collect | 1 | 112 |
 | `modelx_cython/tests/compiled/test_shared_dense_publish_collect.py` | collect | 1 | 57 |
 | `modelx_cython/tests/compiled/test_uncached_entries_collect.py` | collect | 1 | 158 |
 | `modelx_cython/tests/compiled/test_value_storage_collect.py` | collect | 1 | 7 |
 | `modelx_cython/tests/test_audit_contracts_collect.py` | collect | 1 | 13 |
 | `modelx_cython/tests/test_automatic_cache_policy_collect.py` | collect | 3 | 22 |
-| `modelx_cython/tests/test_collect_adapter.py` | collect | 10 | 73 |
+| `modelx_cython/tests/test_collect_adapter.py` | collect | 12 | 84 |
 | `modelx_cython/tests/test_collect_factory_alias.py` | collect | 5 | 16 |
 | `modelx_cython/tests/test_factory_reuse.py` | collect | 18 | 77 |
 | `modelx_cython/tests/test_parser_collect.py` | collect | 1 | 22 |
@@ -258,7 +259,7 @@ helper `_check` stays in the P1 file.
 | `modelx_cython/tests/compiled/test_diag_scale_int_items.py` | B2 | 2 | 143 |
 | `modelx_cython/tests/compiled/test_generator_boolean_ranges.py` | B2 | 1 | 252 |
 | `modelx_cython/tests/compiled/test_generic_composition.py` | B2 | 1 | 84 |
-| `modelx_cython/tests/compiled/test_native_builtins_w18_b2.py` | B2 | 1 | 61 |
+| `modelx_cython/tests/compiled/test_native_builtins_w18_b2.py` | B2 | 1 | 62 |
 | `modelx_cython/tests/compiled/test_native_generator_reductions.py` | B2 | 1 | 125 |
 | `modelx_cython/tests/compiled/test_native_reduction_cases.py` | B2 | 1 | 117 |
 | `modelx_cython/tests/compiled/test_native_reductions.py` | B2 | 1 | 109 |
@@ -330,19 +331,19 @@ is the shared wiring, and only the integrator resolves conflicts in it.
 | module | layer | lines | split |
 |---|---|---|---|
 | `modelx_cython/_mx_sys.pxd` | shared: P1 ≈573, B1 ≈15 | 588 | `_mx_check_enum_schema` (B1) |
-| `modelx_cython/admission.py` | shared: P1 ≈275, collect ≈15, B1 ≈3, B2 ≈15, B3 ≈30, B4 ≈200 | 538 | report keys: reductions (B2), vector cache/refusals (B3), `table_read_sites` and read warnings (B4, with form names of B5-B7), collect bound checks (collect) |
-| `modelx_cython/builder.py` | shared: P1 ≈1170, collect ≈4, B1 ≈10, B3 ≈35 | 1219 | vector shape/cache of a Cell (B3); enum Reference info (B1) |
-| `modelx_cython/cli.py` | shared: P1 ≈630, collect ≈16, B1 ≈3, B4 ≈70 | 719 | `enums.literals` call (B1); read-note recording and table setup in `run_sample`/`main_handler` (B4); collect runtime check (collect) |
+| `modelx_cython/admission.py` | shared: P1 ≈262, collect ≈15, B1 ≈3, B2 ≈15, B3 ≈30, B4 ≈200 | 525 | report keys: reductions (B2), vector cache/refusals (B3), `table_read_sites` and read warnings (B4, with form names of B5-B7), collect bound checks (collect) |
+| `modelx_cython/builder.py` | shared: P1 ≈1138, collect ≈4, B1 ≈10, B3 ≈35 | 1187 | vector shape/cache of a Cell (B3); enum Reference info (B1) |
+| `modelx_cython/cli.py` | shared: P1 ≈627, collect ≈16, B1 ≈3, B4 ≈70 | 716 | `enums.literals` call (B1); read-note recording and table setup in `run_sample`/`main_handler` (B4); collect runtime check (collect) |
 | `modelx_cython/config.py` | shared: P1 ≈360, collect ≈35, B4 ≈32 | 427 | collect spec keys (collect); table policy keys (B4) |
 | `modelx_cython/frame_reads.py` | shared: B4 ≈1288, B5 ≈316, B6 ≈600, B7 ≈735 | 2939 | by recogniser: L1/L4, the shared machinery and the numpy-scalar boxing of reads (B4); L2 row fields (B5); L3 prefixes, L5 extremes, L7 membership, sub-table audit (B6); L6 asof, L8 walks, zip prefixes, comprehensions, iterrows (B7) |
 | `modelx_cython/holds.py` | shared: P1 ≈90, B4 ≈13 | 103 | `hold_table` (B4); the registry is P1 |
 | `modelx_cython/parser.py` | shared: P1 ≈660, collect ≈16 | 676 | `collect_cache_classes` (collect) |
 | `modelx_cython/runtime/_tables.pxd` | shared: B4 ≈231, B5 ≈15, B6 ≈49, B7 ≈63 | 358 | declarations of the above |
 | `modelx_cython/runtime/_tables.pyx` | shared: B4 ≈530, B5 ≈40, B6 ≈110, B7 ≈176 | 856 | preparation, binding and keyed reads (B4); `hold_row` (B5); `prefix_range`, views, extremes (B6); `asof_row`, `asof_at`, `search`, `position`, `zip_*` (B7) |
-| `modelx_cython/table_cells.py` | shared: B3 ≈250, B4 ≈268 | 518 | `vector_cells` and the vector exits of `RenameMembers` (B3); table cells, frame binding and publication (B4) |
-| `modelx_cython/tracer.py` | shared: P1 ≈1013, collect ≈15, B1 ≈75, B3 ≈100, B4 ≈60 | 1263 | IntEnum value info and enum-argument widening (B1); vector shapes and their merge (B3); frame schema and read notes hooks (B4); collect-adapter filter (collect) |
-| `modelx_cython/transformer.py` | shared: P1 ≈1600, collect ≈80, B1 ≈10, B2 ≈22, B3 ≈50, B4 ≈97, B5 ≈70, B6 ≈63 | 1992 | shared wiring; table hooks `_table_reads*`, `_lower_frames`, `_pandas_reads` (B4), `_row_cells`, `_table_reads_with_row_fields` (B5), `_prefix_cells`, `_param_prefix_cells` (B6); reduction and vector passes in `_rewrite_powers`/`update_method`; collect hooks in `__init__`, `leave_Module`, `leave_ClassDef`; enum `prepare`/storage |
-| `modelx_cython/usage.py` | shared: P1 ≈680, B4 ≈25 | 705 | pandas receiver resolution (B4); the memoryview usage classifier is P1 |
+| `modelx_cython/table_cells.py` | shared: P1 ≈16, B3 ≈250, B4 ≈268 | 534 | `vector_cells` and the vector exits of `RenameMembers` (B3); table cells, frame binding and publication (B4) |
+| `modelx_cython/tracer.py` | shared: P1 ≈1011, collect ≈15, B1 ≈75, B3 ≈100, B4 ≈60 | 1261 | IntEnum value info and enum-argument widening (B1); vector shapes and their merge (B3); frame schema and read notes hooks (B4); collect-adapter filter (collect) |
+| `modelx_cython/transformer.py` | shared: P1 ≈1541, collect ≈80, B1 ≈10, B2 ≈22, B3 ≈50, B4 ≈97, B5 ≈70, B6 ≈63 | 1933 | shared wiring; table hooks `_table_reads*`, `_lower_frames`, `_pandas_reads` (B4), `_row_cells`, `_table_reads_with_row_fields` (B5), `_prefix_cells`, `_param_prefix_cells` (B6); reduction and vector passes in `_rewrite_powers`/`update_method`; collect hooks in `__init__`, `leave_Module`, `leave_ClassDef`; enum `prepare`/storage |
+| `modelx_cython/usage.py` | shared: P1 ≈630, B4 ≈25 | 655 | pandas receiver resolution (B4); the memoryview usage classifier is P1 |
 | `modelx_cython/__init__.py` | P1 | 35 | |
 | `modelx_cython/__main__.py` | P1 | 24 | |
 | `modelx_cython/_call_layout.pxd` | P1 | 12 | |
@@ -358,38 +359,34 @@ is the shared wiring, and only the integrator resolves conflicts in it.
 | `modelx_cython/consts.py` | P1 | 121 | |
 | `modelx_cython/entry_pipeline.py` | P1 | 520 | |
 | `modelx_cython/exceptions.py` | P1 | 20 | |
-| `modelx_cython/expression_kinds.py` | P1 | 264 | |
 | `modelx_cython/held_arrays.py` | P1 | 126 | |
-| `modelx_cython/helper_members.py` | P1 | 98 | |
-| `modelx_cython/helpers.py` | P1 | 429 | |
-| `modelx_cython/inline_entries.py` | P1 | 402 | |
+| `modelx_cython/helper_members.py` | P1 | 99 | |
+| `modelx_cython/helpers.py` | P1 | 385 | |
+| `modelx_cython/inline_entries.py` | P1 | 372 | |
 | `modelx_cython/integer_boundaries.py` | P1 | 869 | |
 | `modelx_cython/item_locals.py` | P1 | 200 | |
-| `modelx_cython/item_roots.py` | P1 | 60 | |
+| `modelx_cython/item_roots.py` | P1 | 49 | |
 | `modelx_cython/locked_entries.py` | P1 | 202 | |
 | `modelx_cython/monkeytype_tracing.py` | P1 | 396 | |
 | `modelx_cython/numeric_cache.py` | P1 | 169 | |
-| `modelx_cython/ordered_arguments.py` | P1 | 235 | |
+| `modelx_cython/ordered_arguments.py` | P1 | 145 | |
 | `modelx_cython/powers.py` | P1 | 815 | |
 | `modelx_cython/provider_build_cache.py` | P1 | 144 | |
-| `modelx_cython/provider_manifest.py` | P1 | 166 | |
 | `modelx_cython/reparse_check.py` | P1 | 105 | |
-| `modelx_cython/rounding.py` | P1 | 178 | |
+| `modelx_cython/rounding.py` | P1 | 35 | |
 | `modelx_cython/runtime/__init__.py` | P1 | 1 | |
-| `modelx_cython/runtime/_native_math.pxd` | P1 | 94 | |
-| `modelx_cython/runtime/_native_math.pyx` | P1 | 218 | |
-| `modelx_cython/runtime/_native_rounding.pxd` | P1 | 29 | |
-| `modelx_cython/runtime/_native_rounding.pyx` | P1 | 31 | |
+| `modelx_cython/runtime/_native_math.pxd` | P1 | 35 | |
+| `modelx_cython/runtime/_native_math.pyx` | P1 | 180 | |
 | `modelx_cython/scopes.py` | P1 | 110 | |
 | `modelx_cython/space_results.py` | P1 | 197 | |
 | `modelx_cython/syntax.py` | P1 | 132 | |
 | `modelx_cython/typedefs.py` | P1 | 145 | |
 | `modelx_cython/value_storage.py` | P1 | 82 | |
-| `modelx_cython/collect_adapter.py` | collect | 69 | |
+| `modelx_cython/collect_adapter.py` | collect | 88 | |
 | `modelx_cython/factory_individuals.py` | collect | 141 | |
 | `modelx_cython/factory_reuse.py` | collect | 271 | |
 | `modelx_cython/runtime/factory_reuse.py` | collect | 22 | |
-| `modelx_cython/serial_collect.py` | collect | 1138 | |
+| `modelx_cython/serial_collect.py` | collect | 1137 | |
 | `modelx_cython/enums.py` | B1 | 339 | |
 | `modelx_cython/_float_sum_state.pxd` | B2 | 233 | |
 | `modelx_cython/reductions.py` | B2 | 942 | |
@@ -404,8 +401,8 @@ is the shared wiring, and only the integrator resolves conflicts in it.
 
 | layer | lines (shared modules by the estimated split) |
 |---|---|
-| P1 | 14865 |
-| collect | 1822 |
+| P1 | 13818 |
+| collect | 1840 |
 | B1 | 455 |
 | B2 | 1240 |
 | B3 | 3040 |
@@ -413,4 +410,4 @@ is the shared wiring, and only the integrator resolves conflicts in it.
 | B5 | 851 |
 | B6 | 822 |
 | B7 | 974 |
-| total | 27825 |
+| total | 26796 |
