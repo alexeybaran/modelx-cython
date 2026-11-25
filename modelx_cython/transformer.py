@@ -619,9 +619,6 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
         from modelx_cython import space_results
         if self._resolver is not None:
             node, _ = space_results.lower(node, cls_info, cells, scope, operand_kind, self._pin_held_item)
-        # D110 P1: a local bound once to an item of a typed ItemSpace Reference is declared its class
-        from modelx_cython.item_locals import type_item_locals
-        node, cells.typed_item_locals = type_item_locals(node, cls_info, self.module)
         return node
 
     @property   # cannot use cached_property in Transformer

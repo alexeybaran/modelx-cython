@@ -555,8 +555,7 @@ class _GuardCalls(cst.CSTTransformer):
     METADATA_DEPENDENCIES = (cst.metadata.ScopeProvider,)
 
     def __init__(self, receiver, integer_params, owner, resolver, entries, cells, private_entries,
-                 item_cells=None, safe_builtins=()):
-        self.item_cells = item_cells or {}     # D110 P1: {typed item local: {cell name: cell}}
+                 safe_builtins=()):
         self.receiver = receiver
         self.integer_params = integer_params
         self.owner = owner
@@ -582,14 +581,6 @@ class _GuardCalls(cst.CSTTransformer):
         if isinstance(before.func, cst.Name) and (entry := self.private_entries.get(before.func.value)):
             path, params = entry
             return self._arguments(before, after, path, params, start=1)
-        if (isinstance(before.func, cst.Attribute) and isinstance(before.func.value, cst.Name)
-                and (owned := self.item_cells.get(before.func.value.value)) is not None):
-            # D110 P1: a call on a typed item local checks its integer arguments as a call on self does
-            cell = owned.get(before.func.attr.value)
-            if (cell is None or any(arg.star for arg in before.args) or cell.called_with_kwargs
-                    or not (params := self.entries.get(cell.fqname))):
-                return after
-            return self._arguments(before, after, cell.model_path, params)
         chain = _extract_self_chain(before.func)
         if not isinstance(chain, list) or any(arg.star for arg in before.args):
             return after
@@ -651,10 +642,8 @@ def _guard_calls(node, cls, cell, resolver, entries, cells, private_entries, cla
     integer_params = {param.name.value: param for param in params if param.annotation is not None
                       and param.annotation.annotation.deep_equals(_INTEGER_ANNOTATION)}
     wrapper = cst.MetadataWrapper(cst.Module(body=(node,)), unsafe_skip_copy=True)
-    item_cells = {local: classes[owner].cells for local, owner in getattr(cell, 'typed_item_locals', {}).items()
-                  if classes and owner in classes}
     return wrapper.visit(_GuardCalls(params[0], integer_params, cls.fqname, resolver, entries, cells,
-                                    private_entries, item_cells, safe_builtins)).body[0]
+                                    private_entries, safe_builtins)).body[0]
 
 
 def _object_parameters(params, checked):
