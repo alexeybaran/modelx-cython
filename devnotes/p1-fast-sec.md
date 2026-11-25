@@ -7,18 +7,18 @@ live modelx on every point, and all twelve SEC models translate on unmodified up
 DV01 example's dynamic Space reference needs a modelx change, outside this pull request). Stack: CPython 3.10 to 3.14 (free-threaded 3.13t and 3.14t too), Cython 3.3.1,
 modelx and lifelib from upstream.
 
-## What the compiler adds, by mechanism (non-test lines, 13,029 against upstream's 6,300)
+## What the compiler adds, by mechanism (non-test lines, 13,211 against upstream's 6,300)
 
 | mechanism | modules (lines) |
 |---|---|
-| typed entries: a dense cache per Cell over its declared or sampled domain, checked once at entry; private formula entries on an exact receiver; locked Spaces | entry_pipeline 522, inline_entries 348, cell_entries 150, locked_entries 202, item_roots 48; transformer +494 (with the fast item construction, also under dynamic References), builder +167 |
+| typed entries: a dense cache per Cell over its declared or sampled domain, checked once at entry; private formula entries on an exact receiver; locked Spaces | entry_pipeline 522, inline_entries 348, cell_entries 150, locked_entries 202, item_roots 48; transformer +509 (with the fast item construction, also under dynamic References), builder +167 |
 | native storage: numeric key caches, unwritten-value allocation, held arrays and holds | _numeric_cache .pyx/.pxd 236, _wide_numeric_cache .pyx/.pxd 203, numeric_cache 146, native_sources 31, value_storage 82, held_arrays 125, holds 77 |
-| integer guards: C `+ - *` and negation set an overflow flag tested once per formula; checked conversions at arguments, results, ItemSpace keys and References | integer_boundaries 1,244; _mx_sys.pxd +548 (with the other runtime helpers) |
-| powers: real powers on C `pow` with a one-entry memo; argument order kept where Python's semantics need it | powers +362, ordered_arguments 117 |
+| integer guards: C `+ - *` and negation set an overflow flag tested once per formula; checked conversions at arguments, results, ItemSpace keys and References | integer_boundaries 1,260; _mx_sys.pxd +548 (with the other runtime helpers) |
+| powers: real powers on C `pow` with a one-entry memo; argument order kept where Python's semantics need it | powers +367, ordered_arguments 129 |
 | held items of a shared Space (the SEC DV01 example reads one) | space_results 195 |
 | cache sizing from the declared or sampled range | automatic 107 |
-| build infrastructure: setup (fp-contract off), Cython errors named by Cell, re-parse check, build report, shared CST helpers (definite assignment) | build 220, reparse_check 105, exceptions 20, admission 228, syntax 132, scopes 260 |
-| grown upstream modules | tracer +120, config +177, usage +28, parser +14, typedefs +15, cli +5 |
+| build infrastructure: setup (fp-contract off), Cython errors named by Cell, re-parse check, build report, shared CST helpers (definite assignment; expression contexts and scopes computed once per tree and shared by the passes) | build 220, reparse_check 135, exceptions 20, admission 228, syntax 164, scopes 288 |
+| grown upstream modules | tracer +154, config +177, usage +34, parser +15, typedefs +15, cli +8 |
 
 ## Measurements
 
