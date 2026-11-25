@@ -229,6 +229,29 @@ cdef inline int _mx_check_enum_schema(object receiver, object owner, tuple bindi
     return 0
 
 
+cdef inline object _mx_enum_at(object cls, long long position):
+    """The member of the enum family ``cls`` that compiled code holds as its position."""
+    return cls._member_map_[cls._member_names_[position]]
+
+
+cdef inline long long _mx_enum_code(object cls, object value, bint strict, str cell) except? -1:
+    """The position of ``value`` for a parameter of ``cell`` held for the enum family ``cls``: a member of ``cls``;
+    where the Cell uses only the position (not ``strict``), also an object equal to a member's value, as modelx
+    compares it (an IntEnum's value is its position). Anything else raises."""
+    cdef object member = None
+    if type(value) is cls:
+        return cls._member_names_.index(value._name_)
+    if not strict:
+        try:
+            member = cls._value2member_map_.get(value)
+        except TypeError:
+            pass
+        if member is not None:
+            return cls._member_names_.index(member._name_)
+    raise ValueError(f"{cell}: {value!r} is not a member of {cls.__name__}"
+                     + (", which this Cell uses as a member" if strict else ""))
+
+
 cdef inline double _mx_pow(double b, double e) except? -1.0:
     """``**`` between operands mx2cy has typed as C numbers.
 
