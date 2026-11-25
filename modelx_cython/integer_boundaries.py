@@ -95,6 +95,26 @@ def __getattribute__(self, name):
     return (declaration,), (method,)
 
 
+def _reference_gate(cls, names):
+    """A Reference held as a C integer is set from Python through the checked conversion, as the
+    generated assignments are: Cython's own setter of a public C integer field truncates a float
+    (2.5 to 2). The check names the Reference."""
+    from .transformer import _integer_reference_paths
+    refs = _integer_reference_paths(cls)
+    if not refs:
+        return (), ()
+    field = names.reserve(f'_mx_integer_references_{cls.name}')
+    declaration = cst.parse_statement(f'{field} = {refs!r}\n')
+    method = cst.parse_statement(f"""\
+def __setattr__(self, name, value):
+    path = {field}.get(name)
+    if path is not None:
+        value = {MX_SYS_MOD}._mx_exact_int64(value, path)
+    {MX_SYS_MOD}._mx_generic_setattr(self, name, value)
+""")
+    return (declaration,), (method,)
+
+
 class _GuardCalls(cst.CSTTransformer):
     METADATA_DEPENDENCIES = (cst.metadata.ScopeProvider,)
 
@@ -278,7 +298,7 @@ def guard_integer_boundaries(state, module_info, resolver, cells):
     declarations = []
     call_gate = state.names.reserve('_mx_checked_cell_callable')
     gate_class = state.names.reserve('_mx_checked_cell_call')
-    changed = False
+    changed = gated = False
     global_bindings = cst.MetadataWrapper(state.syntax, unsafe_skip_copy=True).resolve(
         cst.metadata.ScopeProvider)[state.syntax]
     safe_builtins = {name for name in ('isinstance', 'int', 'bool')
@@ -320,10 +340,14 @@ def guard_integer_boundaries(state, module_info, resolver, cells):
             methods.append(method)
         added, gates = _python_call_gate(cls, entries, state.names, call_gate)
         declarations.extend(added)
+        gated |= bool(gates)
+        added, setter = _reference_gate(cls, state.names)
+        declarations.extend(added)
+        gates = (*gates, *setter)
         changed |= bool(gates)
         classes.append(node.with_changes(body=node.body.with_changes(body=(*methods, *gates))))
-    if declarations:
-        classes.extend(declarations)
+    classes.extend(declarations)
+    if gated:
         classes.extend(cst.parse_module(_CALL_GATE.format(
             cy=CY_MOD, name=call_gate, gate=gate_class, runtime=MX_SYS_MOD)).body)
     return state.replace(state.syntax.with_changes(body=classes)) if changed else state
