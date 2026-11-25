@@ -43,17 +43,16 @@ class CompilerPolicy:
     propagate_exact_receiver: bool
     native_cache_hits: str
     native_math: bool  # Guarded builtin rounding.
-    # M1 (W1.1, default on since W1.5): '# cython: infer_types=True, overflowcheck=True'
-    # on generated model modules.
+    # M1 (W1.1, default on since W1.5): '# cython: infer_types=True' on generated model modules.
     infer_types: bool = True
     # diag-run8 F3: inline a row Cell into eligible field reads on the prepared pandas table path.
     typed_table_reads: bool = True
     # a table read left on pandas in a per-step cell stops a prepared-table build instead of a warning.
     strict_tables: bool = False
-    # integer guards (owner's rule): 'auto' (default) compiles without overflow checks when no
-    # traced integer reaches UNCHECKED_LIMIT in magnitude, with them otherwise; 'checked' and
-    # 'unchecked' force a mode. The build resolves 'auto' after the trace (resolve_integer_checks).
-    integer_checks: str = 'auto'
+    # integer guards: 'checked' (default) raises OverflowError naming the Cell when C integer
+    # arithmetic of a formula leaves 64 bits (flagged operations, integer_boundaries.py); 'unchecked'
+    # is the documented opt-out: plain C arithmetic, which wraps, as on upstream. Not from the sample.
+    integer_checks: str = 'checked'
     # T-3 (toolkit p2/tables/DESIGN.md): the sample runs on the user's frames (no table admission or
     # substitution); reads of a traced DataFrame or Series are lowered onto a PreparedTable bound to
     # the real frame (frame_reads.py). False leaves those reads on pandas.
@@ -79,15 +78,15 @@ class CompilerPolicy:
             infer_types=data.get('infer_types', True),
             typed_table_reads=data.get('typed_table_reads', True),
             strict_tables=data.get('strict_tables', os.environ.get('MX_CY_STRICT_TABLES') == '1'),
-            integer_checks=data.get('integer_checks', 'auto'),
+            integer_checks=data.get('integer_checks', 'checked'),
             prepared_tables=data.get('prepared_tables', True),
             verify_inputs=data.get('verify_inputs', False),
             strict_lowering=data.get('strict_lowering', os.environ.get('MX_CY_STRICT_LOWERING') == '1'))
         for name, value in values.items():
             if name not in ('parallel_workers', 'native_cache_hits', 'integer_checks') and type(value) is not bool:
                 raise ValueError(f'{name} must be a boolean')
-        if values['integer_checks'] not in ('auto', 'checked', 'unchecked'):
-            raise ValueError('integer_checks must be auto, checked or unchecked')
+        if values['integer_checks'] not in ('checked', 'unchecked'):
+            raise ValueError('integer_checks must be checked or unchecked')
         if type(values['parallel_workers']) is not int or values['parallel_workers'] < 1:
             raise ValueError('parallel_workers must be a positive integer')
         if type(values['native_cache_hits']) is not str or values['native_cache_hits'] not in (
@@ -99,23 +98,6 @@ class CompilerPolicy:
             if values['native_cache_hits'] != 'none':
                 raise ValueError('native_cache_hits requires dense_miss_binding')
         return cls(**values)
-
-
-# integer guards: with every traced integer below 2**31 in magnitude, a product of two stays below
-# 2**62, so the ordinary arithmetic of a formula keeps far from the 64-bit limit
-UNCHECKED_LIMIT = 1 << 31
-UNCHECKED_LIMIT_NOTE = (
-    'Unchecked mode: intermediate values are not traced, so a product of several large terms or an '
-    'integer power could exceed 64 bits and would wrap, as on upstream; set "integer_checks": "checked" '
-    'in the spec to force the checked mode.')
-
-
-def resolve_integer_checks(policy, largest_traced_integer):
-    """The integer-check mode for this build: the spec's, or for 'auto' 'unchecked' when the
-    largest traced integer is below UNCHECKED_LIMIT in magnitude and 'checked' otherwise."""
-    if policy.integer_checks != 'auto':
-        return policy.integer_checks
-    return 'unchecked' if largest_traced_integer < UNCHECKED_LIMIT else 'checked'
 
 
 class TransSpec:
@@ -199,13 +181,12 @@ class TransSpec:
     ``"infer_types"`` (default true): C type inference (``# cython: infer_types=True``) in
     generated model modules; false keeps Cython's default (no inference of C types for untyped
     locals). Overflow checks follow ``"integer_checks"`` either way.
-    ``"integer_checks"`` (default ``"auto"``): ``"unchecked"`` compiles C integer arithmetic
-    without overflow checks (as plain C), ``"checked"`` with them; ``"auto"`` chooses unchecked when
-    no traced integer (Cell arguments and results, References, ItemSpace parameters, integer
-    columns of input tables) reaches 2**31 in magnitude. ``_mx_integer_checks.json`` records the
-    mode used and the largest traced integer. Limit of the unchecked mode: intermediate values are
-    not traced, so a product of several large terms or an integer power could exceed 64 bits and
-    would wrap, as on upstream; set ``"integer_checks": "checked"`` to force the checked mode.
+    ``"integer_checks"`` (default ``"checked"``): C integer ``+ - *`` and unary minus of a
+    formula set an overflow flag that the formula tests once before it returns, raising
+    OverflowError naming the Cell; a formula with an operation whose C type the compiler cannot
+    tell keeps Cython's overflowcheck (listed in ``_mx_integer_checks.json`` under
+    ``overflowcheck_fallback``). ``"unchecked"`` is the opt-out: plain C arithmetic, which wraps
+    beyond 64 bits, as on upstream. The mode never depends on the sample.
     ``"typed_table_reads"`` (default true) allows inlining a row Cell into eligible field reads
     on the prepared pandas table path.
     ``"strict_tables"`` (default false, or true when the environment sets

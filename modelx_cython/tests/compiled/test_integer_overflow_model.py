@@ -126,7 +126,7 @@ def _unchecked_divisions(c_file):
 
 def test_checked_mode_is_exact_or_names_the_cell(exported, tmp_path):
     outcome, live, report = _build(exported, tmp_path, "checked")
-    assert report["mode"] == "checked" and report["requested"] == "checked"
+    assert report["mode"] == "checked"
     for name in RUNS:
         kind, text = outcome[name]
         if name in EXACT:
@@ -137,7 +137,7 @@ def test_checked_mode_is_exact_or_names_the_cell(exported, tmp_path):
 
 def test_unchecked_mode_is_plain_c_outside_the_boundary(exported, tmp_path):
     outcome, live, report = _build(exported, tmp_path, "unchecked")
-    assert report["mode"] == "unchecked" and "intermediate values are not traced" in report["limit"]
+    assert report["mode"] == "unchecked" and "wraps beyond 64 bits" in report["limit"]
     for name in EXACT:
         assert outcome[name] == ["value", live[name]], name
     for name in UNCHECKED_RAISES:
@@ -148,8 +148,17 @@ def test_unchecked_mode_is_plain_c_outside_the_boundary(exported, tmp_path):
         assert outcome[name][0] == "value", (name, outcome[name])
 
 
-def test_auto_mode_follows_the_largest_traced_integer(exported, tmp_path):
-    _, _, report = _build(exported, tmp_path, "auto")
-    # the Reference BIG = 2**62 is traced: beyond 2**31, so the checked mode
-    assert report["mode"] == "checked" and report["requested"] == "auto"
-    assert report["largest_traced_integer"] >= 2 ** 62
+def test_default_mode_is_checked_whatever_the_sample(exported, tmp_path):
+    """No spec key: the checked mode, the same whatever the sample traced (the Reference BIG = 2**62
+    is traced here; a model whose integers are all small gets the same mode): nothing in the build
+    follows the magnitude of a traced integer."""
+    outcome, live, report = _build(exported, tmp_path, "auto")
+    assert report["mode"] == "checked" and "largest_traced_integer" not in report
+    for name in RUNS:
+        kind, text = outcome[name]
+        if name in EXACT:
+            assert outcome[name] == ["value", live[name]], name
+        else:
+            assert kind == "OverflowError" and text.startswith(f"Sp.{name}"), (name, outcome[name])
+
+
