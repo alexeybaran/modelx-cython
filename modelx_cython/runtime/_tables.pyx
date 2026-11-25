@@ -3,7 +3,7 @@
 
 ``prepare(value)`` turns the user's DataFrame or Series into a ``PreparedTable`` the compiled reads use: the rows
 stored sorted by their level codes, one ascending array of combined codes (and a dense grid when small) for keyed
-lookups, typed column blocks copied from the frame, and the index extremes and asof keys. The user's object is
+lookups, typed column blocks copied from the frame, and the index extremes. The user's object is
 never changed or replaced: it stays what every formula sees (``source``). ``prepare`` returns None, and
 ``unprepared_reason`` says why, for a table whose reads must stay pandas (a non-unique index, NaN labels, labels
 that compare equal although pandas keeps them apart, duplicate column labels, too many key combinations, an index
@@ -13,8 +13,6 @@ A lookup equals ``value.loc[key, column]`` on the tables ``prepare`` accepts: th
 keys, misses included (``tests/test_prepared_tables.py``). The key lookups and value reads compiled code uses are
 inline methods of the .pxd.
 """
-from libc.math cimport isnan
-
 import threading
 from types import MethodType
 import weakref
@@ -153,19 +151,6 @@ cdef class PreparedTable:
         stop[0] = lo
         return stop[0] > start[0]
 
-    cdef Py_ssize_t asof_position(self, double x) noexcept nogil:
-        """Position in asof_labels of the last label <= x, or -1 (x below the first label, or NaN)."""
-        cdef Py_ssize_t lo = 0, hi = self.asof_keys.shape[0], mid
-        if isnan(x):
-            return -1
-        while lo < hi:
-            mid = (lo + hi) >> 1
-            if self.asof_keys[mid] <= x:
-                lo = mid + 1
-            else:
-                hi = mid
-        return lo - 1
-
     cdef object object_at(self, Py_ssize_t row, Py_ssize_t slot):
         return (<tuple>self.objects[slot])[row]
 
@@ -218,12 +203,6 @@ cdef class PreparedTable:
     def contains(self, key):
         """``key in source.index``."""
         return self.row(key) >= 0
-
-    def asof(self, x):
-        """``source.index.asof(x)`` for a flat numeric index and a number x (pandas' asof of NaN differs by version:
-        the compiled reads read NaN on pandas, and this returns NaN for it)."""
-        position = self.asof_position(float(x))
-        return self.asof_labels[position] if position >= 0 else np.nan
 
 
 def unprepared_reason(value):
@@ -415,20 +394,13 @@ cdef PreparedTable _build(object value):
     table.objects = tuple(objects)
     # the dtype pandas gives a row (it widens number columns to one dtype: int32 beside float64 reads as float64)
     table.row_object = table.is_series or n == 0 or getattr(frame.iloc[0].dtype, 'kind', 'O') not in 'iufc'
-    # index extremes and asof keys, as pandas gives them
+    # index extremes, as pandas gives them
     table.max_label = index.max() if n else None
     table.min_label = index.min() if n else None
     if n and table.nlevels > 1:
         for level in range(min(table.nlevels, 8)):
             table.max_parts[level] = _int_part(table.max_label[level])
             table.min_parts[level] = _int_part(table.min_label[level])
-    if table.nlevels == 1 and n and index.dtype.kind in 'iuf':
-        sorted_index = index.sort_values()
-        table.asof_keys = np.ascontiguousarray(sorted_index.to_numpy(dtype=np.float64))
-        table.asof_labels = [sorted_index[i] for i in range(n)]
-    else:
-        table.asof_keys = np.zeros(0)
-        table.asof_labels = []
     return table
 
 
