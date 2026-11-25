@@ -211,8 +211,7 @@ def _isolated_leaf(node, cls, *, fresh=False):
     """A slotted leaf ItemSpace without child Spaces, model lock, dynamic References or collect hooks:
     its policy root is exactly ``_mx_new_root_C(base)`` (D116)."""
     hooks = ('_mx_collect_attach', '_mx_collect_release')
-    if (not fresh or getattr(cls, 'native_contexts', None)
-            or getattr(cls, 'collect_shared_item', False)):
+    if not fresh or getattr(cls, 'collect_shared_item', False):
         hooks += ('_mx_apply_formula',)
     return not (len(node.bases) != 1 or dotted_name(node.bases[0].value) != '_mx_sys.BaseSpace'
                 or cls.spaces or cls.is_locked or node.name.value in cls.visitor.dynamic_ref_classes
