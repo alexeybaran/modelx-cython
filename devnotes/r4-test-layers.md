@@ -5,9 +5,13 @@ whole files. Layers: **P1** is the fast compiler for the unchanged SEC models (e
 allocation, holds, powers, integer handling, ranges, item release, the math and rounding providers, n-argument
 min/max). **collect** stands on P1 alone. The syntax bridge stands on P1 and comes in this order:
 **B1** labels (IntEnum members as integers), **B2** reductions, **B3** vectors, **B4** table base with scalar
-reads (L1, L4), **B5** table rows (L2), **B6** sub-tables with index extremes and membership (L3, L5, L7),
-**B7** ordered lookups and index walks (L6, L8). **join** means the file needs collect and a bridge layer
-together. **upstream** means the file is untouched since d22426f.
+reads (L1, L4, and the build report of the reads, `_mx_table_reads.json`), **B5** table rows (L2), **B6**
+sub-tables with index extremes, membership and index walks (L3, L5, L7, L8), **B7** the read recorder and the
+read audit (`read_notes.py`, `_mx_read_audit.json`, the report and warnings of reads left to pandas). Ordered
+lookups (asof, searchsorted: L6) and the zip spelling are no longer lowered (`review/r4-table-forms-b`); until that
+branch, B7 meant "ordered lookups and index walks", and the first versions of this record used that meaning.
+**join** means the file needs collect and a bridge layer together. **upstream** means the file is untouched
+since d22426f.
 
 ## Rules used
 
@@ -31,16 +35,16 @@ together. **upstream** means the file is untouched since d22426f.
 |---|---|---|---|
 | upstream | 3 | 51 | 471 |
 | P1 | 88 | 559 | 9136 |
-| collect | 30 | 74 | 2786 |
-| B1 | 10 | 101 | 963 |
+| collect | 30 | 74 | 2787 |
+| B1 | 13 | 104 | 1146 |
 | B2 | 16 | 21 | 1438 |
-| B3 | 21 | 73 | 1690 |
-| B4 | 4 | 6 | 297 |
-| B5 | 2 | 13 | 319 |
-| B6 | 4 | 44 | 678 |
-| B7 | 6 | 16 | 1599 |
-| join | 14 | 22 | 1580 |
-| total | 198 | 980 | 20957 |
+| B3 | 22 | 93 | 1778 |
+| B4 | 10 | 9 | 582 |
+| B5 | 4 | 21 | 556 |
+| B6 | 14 | 63 | 2592 |
+| B7 | 5 | 10 | 367 |
+| join | 13 | 22 | 1554 |
+| total | 218 | 1027 | 22407 |
 
 The tests counts are collected cases (parametrized cases counted one by one). Before the sort the suite
 collected 950 cases (942 passed, 8 skipped). After the sort it collected 962: the same 950 under their
@@ -57,13 +61,15 @@ with the same 8 skips. The counts above are the current tree, after the merges l
 | `review/r4-table-base-b` (the three commits after the nine of -a) | 35eb09d | | `integration_tests/test_table_runtime_contract.py`: cases added (a frame Cell that publishes no table, an item Cell returning a Reference's frame); nothing removed | `integration_tests/test_table_numpy_values.py` (B5: cell reads and a row field kept as numpy scalars, no collect) |
 | `r4/w1-vectors` (up to and including the marker) | 8725799 | `compiled/test_vector_ref_reads.py`: `vector_ref_reads.py` and its opt-in spec key `native_vector_ref_reads` are removed (a spec that sets the key still builds, on the general path) | `integration_tests/test_diag_kr_forms.py`: the generated-text check that `[...] + list(range(...))` is built without `ivec_of` is dropped with that one-model spelling; the value comparisons with live stay. `test_vectors.py`: the vector sum now uses `_float_sum_state`'s `f64_add`/`f64_result` | `compiled/vector_live.py` (helper) and nine `compiled/test_*vector*` files (B3) |
 | `review/r4-rest-b` | ea67e1d | `helper_contracts/test_native_rounding_provider.py` (the round memo provider, deleted), `test_provider_manifest.py` and `compiled/test_native_object_provider.py` with its twin and collect half (object providers, deleted). `test_removed_private_lookup_spec_key` was in the deleted file but checks a collect spec key that `serial_collect.py` still refuses: it moved unchanged to `compiled/test_private_lookup_roots_collect.py` | `compiled/test_private_lookup_roots*.py`: the memo probe is dropped, the value checks on both routes stay (applied to the collect file and to its direct-route twin). `compiled/test_native_builtin_math.py`: the guarded round in place of the memo operation. `compiled/test_native_typed_extrema.py`, `compiled/test_native_builtins_w18.py` (and its `_b2` file), `test_ordered_arguments.py`: min/max in object-result Cells is the built-in call again, so they assert the built-in in the report instead of the C comparison; value checks kept | `compiled/test_round_threads.py`, `compiled/test_export_without_collect_protocol.py`, `compiled/test_import_without_compiler.py`, `compiled/test_math_in_nested_scopes.py` (all P1) |
+| `review/r4-table-forms-b` | 3732197 | `integration_tests/test_prepared_zip_prefix.py`: the zip spelling it tested is removed | `integration_tests/test_table_probe.py`: an asof or searchsorted inside the key of a lowered read is now the formula's own pandas call, so the check that native branches call no pandas skips those two calls only. `integration_tests/test_diag_kr_forms.py`: docstring (asof is no longer an integer key) | `integration_tests/forms_probe.py` (helper) and `test_forms_alias_edit`, `test_forms_hold_branch`, `test_forms_list_key`, `test_forms_own_frame`, `test_forms_scalar_type` (B4), `test_forms_view_keyerror` (B6); a case in `test_read_notes.py` (B7) |
+| `r4/w1-vectors` (after the marker: tuples only) | d89c23e | none | vector tests converted to tuple cells (15 compiled files, `test_vectors.py`, `test_diag_kr_forms.py`); `test_local_vectors_without_vector_cells.py`: D94 removed, it now asserts that no formula is lowered and no `F64Vec` appears, and the checks of lowered local vectors go with D94; `test_collect_direct_isolation.py`: `is` became `==` (Python gets a new equal tuple per call); `test_leading_vector_sum.py`: the fallback text is "vector used in Python code" (as the branch's notes `devnotes/w1-vectors-tuple-experiment.md` state) | `compiled/test_tuple_vectors.py` (B3) |
 
 The review documents of these branches (`devnotes/REVIEW-BRIEF.md`, `devnotes/review-reductions-a.md`,
 `devnotes/review-table-base-a.md`) were left out. The edits of the two reduction cases in `test_audit_contracts.py` were applied to `test_audit_contracts_b2.py`,
 where the sort had moved them. `runtime/_native_streams.pxd` is now listed as B2; the first version of this
 document wrongly listed it as P1, and it is used only by `reductions.py`. `test_prepared_tables.py` moved from B7 to B6:
-after the table-base branch its probe uses no ordered lookup, only `prefix_range` (B6). The table layers B4 to B7
-are relabelled when the table compiler branches arrive (B7 ordered lookups are being deleted; index walks join B6).
+after the table-base branch its probe uses no ordered lookup, only `prefix_range` (B6). After the table-forms branch the table
+layers were relabelled (B6 takes the index walks, B7 is the recorder and audit; see the top of this record).
 
 ## Direct-route twins (new tests, P1) and their collect halves
 
@@ -102,20 +108,41 @@ helper `_check` stays in the P1 file.
 | `compiled/test_value_storage.py` | `_collect` | `test_unwritten_values_on_collect_and_direct_routes` |
 | `compiled/test_param_bounds_collect.py` | `compiled/test_param_bounds_join.py` (join) | `test_enum_argument_domain_is_the_enum` (B1 enum domain on the collect build) |
 
+## Direct-route twins of the join files (new tests) and their join halves
+
+The table and label tests whose models used `collect_over` only to build the sample, or to read the result
+through collect as well as directly, each got a twin with the same model without `collect_over`. The twin is in
+the file's former name, in its bridge layer. The original moved unchanged to `<file>_join.py`. A twin keeps every
+assertion of the generated code and the reports, and compares the direct items with live. It drops only the
+collect totals and the collect spec keys.
+
+| twin (layer) | join half |
+|---|---|
+| `integration_tests/test_held_table_handles.py` (B4) | `test_held_table_handles_join.py` |
+| `integration_tests/test_table_cells_api.py` (B4) | `test_table_cells_api_join.py` |
+| `integration_tests/test_constant_key_reads.py` (B4) | `test_constant_key_reads_join.py` |
+| `integration_tests/test_diag_run8_row_fields.py`, `test_diag_run8_row_fields_derived.py` (B5) | their `_join` files |
+| `integration_tests/test_diag_mt_shared_refs.py` (B6), `test_diag_mt_shared_refs_b1.py` (B1, the IntEnum case) | `test_diag_mt_shared_refs_join.py` |
+| `integration_tests/test_diag_run8_extreme_part_forms.py`, `test_diag_run8_extreme_part_tables.py`, `test_diag_run8_scalar_index_subscript.py`, `test_table_mixed_reads.py` (B6) | their `_join` files |
+| `compiled/test_enum_results.py`, `compiled/test_param_bounds_b1.py` (B1) | `test_enum_results_join.py`, `test_param_bounds_join.py` |
+
+The `shared` case of `test_diag_run8_row_fields_derived` is only in the join half. Its subject is a Shared ItemSpace
+that reaches Projection's items through collect. Without collect, the row field of that shape is not inlined
+(the values still equal live).
+
+`integration_tests/test_table_stress.py` has no twin. Its subject is four collect workers reading a published
+table while the first readers bind it on a new model, so collect is the subject.
+
 ## Observations for the carve
 
-- B4, B5 and B6 have few tests of their own (6, 11 and 3 cases). Most table coverage sits in B7 (the probe,
-  the fuzz, `test_diag_kr_forms`) and in join. In the join files, collect mostly
-  builds the sample or a probe while the subject is a table form. Before B4 to B6 are carved, direct-route
-  twins of these would give those layers their own coverage:
-  `test_table_cells_api`, `test_held_table_handles` (B4); `test_diag_run8_row_fields*` (B5);
-  `test_diag_run8_extreme_part_*`, `test_diag_run8_scalar_index_subscript` (B6); `test_constant_key_reads`
-  (B4 with B1). For B1: `test_enum_results`, `test_param_bounds_join`, and the second test of
-  `test_diag_mt_shared_refs`.
-- `test_prepared_tables.py` is B6 since the table-base branch (it was B7: its probe called `asof`). Its probe
-  still calls `prefix_range`, so its B4 cases can move only once `_tables.pyx` is split.
-
-- `test_table_safety_net.py` and `test_table_fuzz.py` import `test_table_probe` (B7), so they are B7 as well.
+- `test_prepared_tables.py` is B6. Its probe calls `prefix_range`, so its B4 cases can move only once
+  `_tables.pyx` is split.
+- `test_table_safety_net.py` and `test_table_fuzz.py` import `test_table_probe` (B6), so they are B6 as well.
+- `test_read_audit.py` and `test_read_audit_b7.py` are both B7 now (the split was made under the earlier meaning
+  of B6 and B7); they can be joined again.
+- The runtime's ordered-lookup and zip helpers (`asof_row`, `asof_at`, `search`, `zip_*` in `_tables.pyx`) have no
+  compiled caller since the table-forms branch, and are listed as unused. The table-forms branch left them to the
+  runtime's owner.
 - `integration_tests/conftest.py` and `modelx_cython/tests/conftest.py` set strict table lowering and the
   fuzz/stress markers. They are listed as P1 because the setting is harmless without tables.
 
@@ -214,7 +241,7 @@ helper `_check` stays in the P1 file.
 | `modelx_cython/tests/test_tracer.py` | P1 | 34 | 475 |
 | `modelx_cython/tests/test_tracer_export_contract.py` | P1 | 1 | 37 |
 | `modelx_cython/tests/test_uslib.py` | P1 | 1 | 123 |
-| `modelx_cython/tests/compiled/test_collect_direct_isolation.py` | collect | 1 | 150 |
+| `modelx_cython/tests/compiled/test_collect_direct_isolation.py` | collect | 1 | 151 |
 | `modelx_cython/tests/compiled/test_collect_fallback_roots.py` | collect | 1 | 108 |
 | `modelx_cython/tests/compiled/test_collect_name_collision.py` | collect | 1 | 55 |
 | `modelx_cython/tests/compiled/test_collect_native_merge.py` | collect | 3 | 333 |
@@ -244,14 +271,17 @@ helper `_check` stays in the P1 file.
 | `modelx_cython/tests/test_parser_collect.py` | collect | 1 | 22 |
 | `modelx_cython/tests/test_tracer_collect.py` | collect | 1 | 19 |
 | `modelx_cython/tests/test_tracer_export_contract_collect.py` | collect | 1 | 37 |
+| `integration_tests/test_diag_mt_shared_refs_b1.py` | B1 | 1 | 77 |
 | `modelx_cython/tests/compiled/test_d98_enum_identity.py` | B1 | 1 | 77 |
 | `modelx_cython/tests/compiled/test_diag_scale_enum_conditionals.py` | B1 | 1 | 111 |
 | `modelx_cython/tests/compiled/test_enum_by_type.py` | B1 | 1 | 61 |
 | `modelx_cython/tests/compiled/test_enum_containers.py` | B1 | 1 | 67 |
 | `modelx_cython/tests/compiled/test_enum_object_uses.py` | B1 | 5 | 128 |
 | `modelx_cython/tests/compiled/test_enum_reference_compare.py` | B1 | 1 | 65 |
+| `modelx_cython/tests/compiled/test_enum_results.py` | B1 | 1 | 77 |
 | `modelx_cython/tests/compiled/test_native_enum_membership.py` | B1 | 1 | 67 |
 | `modelx_cython/tests/compiled/test_native_enums.py` | B1 | 2 | 88 |
+| `modelx_cython/tests/compiled/test_param_bounds_b1.py` | B1 | 1 | 29 |
 | `modelx_cython/tests/test_audit_contracts_b1.py` | B1 | 5 | 56 |
 | `modelx_cython/tests/test_enum_literals.py` | B1 | 83 | 243 |
 | `modelx_cython/tests/compiled/reduction_cases.py` | B2 | 0 | 68 |
@@ -272,54 +302,71 @@ helper `_check` stays in the P1 file.
 | `modelx_cython/tests/test_generator_builtin_lowering.py` | B2 | 1 | 20 |
 | `modelx_cython/tests/compiled/test_float_vector_of_integers.py` | B3 | 1 | 17 |
 | `modelx_cython/tests/compiled/test_float_vector_writes.py` | B3 | 1 | 34 |
-| `modelx_cython/tests/compiled/test_integer_vector_cells.py` | B3 | 1 | 98 |
+| `modelx_cython/tests/compiled/test_integer_vector_cells.py` | B3 | 1 | 94 |
 | `modelx_cython/tests/compiled/test_integer_vector_updates.py` | B3 | 1 | 21 |
 | `modelx_cython/tests/compiled/test_integer_vector_writes.py` | B3 | 1 | 36 |
 | `modelx_cython/tests/compiled/test_leading_vector_sum.py` | B3 | 1 | 115 |
-| `modelx_cython/tests/compiled/test_local_vectors_without_vector_cells.py` | B3 | 1 | 117 |
+| `modelx_cython/tests/compiled/test_local_vectors_without_vector_cells.py` | B3 | 1 | 108 |
 | `modelx_cython/tests/compiled/test_power_memo_with_vectors.py` | B3 | 1 | 73 |
 | `modelx_cython/tests/compiled/test_reduction_in_vector_subscript.py` | B3 | 1 | 17 |
-| `modelx_cython/tests/compiled/test_vector_cells.py` | B3 | 2 | 245 |
+| `modelx_cython/tests/compiled/test_tuple_vectors.py` | B3 | 1 | 99 |
+| `modelx_cython/tests/compiled/test_vector_cells.py` | B3 | 2 | 247 |
 | `modelx_cython/tests/compiled/test_vector_conditionals.py` | B3 | 1 | 22 |
-| `modelx_cython/tests/compiled/test_vector_displays.py` | B3 | 1 | 110 |
+| `modelx_cython/tests/compiled/test_vector_displays.py` | B3 | 1 | 111 |
 | `modelx_cython/tests/compiled/test_vector_extrema_and_cache.py` | B3 | 1 | 147 |
-| `modelx_cython/tests/compiled/test_vector_list_mutators.py` | B3 | 4 | 70 |
+| `modelx_cython/tests/compiled/test_vector_list_mutators.py` | B3 | 3 | 59 |
 | `modelx_cython/tests/compiled/test_vector_loop_renames.py` | B3 | 1 | 25 |
 | `modelx_cython/tests/compiled/test_vector_placeholders.py` | B3 | 1 | 22 |
-| `modelx_cython/tests/compiled/test_vector_python_exits.py` | B3 | 1 | 111 |
+| `modelx_cython/tests/compiled/test_vector_python_exits.py` | B3 | 1 | 104 |
 | `modelx_cython/tests/compiled/test_vector_reference_reads.py` | B3 | 1 | 50 |
 | `modelx_cython/tests/compiled/vector_live.py` | B3 | 0 | 70 |
 | `modelx_cython/tests/test_vector_extrema_typing.py` | B3 | 24 | 121 |
-| `modelx_cython/tests/test_vectors.py` | B3 | 27 | 169 |
-| `integration_tests/table_matrix/test_pandas_read_report.py` | B4 | 2 | 113 |
-| `integration_tests/test_table_read_warnings.py` | B4 | 1 | 68 |
+| `modelx_cython/tests/test_vectors.py` | B3 | 47 | 186 |
+| `integration_tests/forms_probe.py` | B4 | 0 | 122 |
+| `integration_tests/test_constant_key_reads.py` | B4 | 1 | 102 |
+| `integration_tests/test_forms_alias_edit.py` | B4 | 1 | 14 |
+| `integration_tests/test_forms_hold_branch.py` | B4 | 1 | 16 |
+| `integration_tests/test_forms_list_key.py` | B4 | 1 | 11 |
+| `integration_tests/test_forms_own_frame.py` | B4 | 1 | 17 |
+| `integration_tests/test_forms_scalar_type.py` | B4 | 1 | 16 |
+| `integration_tests/test_held_table_handles.py` | B4 | 1 | 91 |
+| `integration_tests/test_table_cells_api.py` | B4 | 1 | 139 |
 | `modelx_cython/tests/compiled/test_enum_by_type_b4.py` | B4 | 1 | 54 |
-| `modelx_cython/tests/test_read_notes.py` | B4 | 2 | 62 |
+| `integration_tests/test_diag_run8_row_fields.py` | B5 | 2 | 138 |
+| `integration_tests/test_diag_run8_row_fields_derived.py` | B5 | 6 | 99 |
 | `integration_tests/test_table_numpy_values.py` | B5 | 2 | 128 |
 | `modelx_cython/tests/test_diag_run8_row_cells.py` | B5 | 11 | 191 |
+| `integration_tests/_diag_run8_c.py` | B6 | 0 | 26 |
+| `integration_tests/test_diag_kr_forms.py` | B6 | 1 | 262 |
+| `integration_tests/test_diag_mt_shared_refs.py` | B6 | 1 | 92 |
+| `integration_tests/test_diag_run8_extreme_part_forms.py` | B6 | 1 | 101 |
+| `integration_tests/test_diag_run8_extreme_part_tables.py` | B6 | 1 | 93 |
+| `integration_tests/test_diag_run8_scalar_index_subscript.py` | B6 | 3 | 101 |
+| `integration_tests/test_forms_view_keyerror.py` | B6 | 1 | 16 |
 | `integration_tests/test_prepared_table_integer_keys.py` | B6 | 1 | 79 |
+| `integration_tests/test_table_fuzz.py` | B6 | 5 | 290 |
+| `integration_tests/test_table_mixed_reads.py` | B6 | 1 | 234 |
+| `integration_tests/test_table_probe.py` | B6 | 5 | 695 |
 | `integration_tests/test_table_runtime_contract.py` | B6 | 1 | 143 |
+| `integration_tests/test_table_safety_net.py` | B6 | 2 | 70 |
 | `modelx_cython/tests/test_prepared_tables.py` | B6 | 40 | 390 |
-| `modelx_cython/tests/test_read_audit.py` | B6 | 2 | 66 |
-| `integration_tests/test_diag_kr_forms.py` | B7 | 1 | 262 |
-| `integration_tests/test_prepared_zip_prefix.py` | B7 | 1 | 241 |
-| `integration_tests/test_table_fuzz.py` | B7 | 5 | 290 |
-| `integration_tests/test_table_probe.py` | B7 | 5 | 689 |
-| `integration_tests/test_table_safety_net.py` | B7 | 2 | 70 |
+| `integration_tests/table_matrix/test_pandas_read_report.py` | B7 | 2 | 113 |
+| `integration_tests/test_table_read_warnings.py` | B7 | 1 | 68 |
+| `modelx_cython/tests/test_read_audit.py` | B7 | 2 | 66 |
 | `modelx_cython/tests/test_read_audit_b7.py` | B7 | 2 | 47 |
-| `integration_tests/_diag_run8_c.py` | join | 0 | 26 |
-| `integration_tests/test_constant_key_reads.py` | join | 1 | 115 |
-| `integration_tests/test_diag_mt_shared_refs.py` | join | 2 | 194 |
-| `integration_tests/test_diag_run8_extreme_part_forms.py` | join | 1 | 102 |
-| `integration_tests/test_diag_run8_extreme_part_tables.py` | join | 1 | 94 |
-| `integration_tests/test_diag_run8_row_fields.py` | join | 2 | 148 |
-| `integration_tests/test_diag_run8_row_fields_derived.py` | join | 7 | 104 |
-| `integration_tests/test_diag_run8_scalar_index_subscript.py` | join | 3 | 101 |
-| `integration_tests/test_held_table_handles.py` | join | 1 | 106 |
-| `integration_tests/test_table_cells_api.py` | join | 1 | 144 |
-| `integration_tests/test_table_mixed_reads.py` | join | 1 | 251 |
+| `modelx_cython/tests/test_read_notes.py` | B7 | 3 | 73 |
+| `integration_tests/test_constant_key_reads_join.py` | join | 1 | 115 |
+| `integration_tests/test_diag_mt_shared_refs_join.py` | join | 2 | 194 |
+| `integration_tests/test_diag_run8_extreme_part_forms_join.py` | join | 1 | 102 |
+| `integration_tests/test_diag_run8_extreme_part_tables_join.py` | join | 1 | 94 |
+| `integration_tests/test_diag_run8_row_fields_derived_join.py` | join | 7 | 104 |
+| `integration_tests/test_diag_run8_row_fields_join.py` | join | 2 | 148 |
+| `integration_tests/test_diag_run8_scalar_index_subscript_join.py` | join | 3 | 101 |
+| `integration_tests/test_held_table_handles_join.py` | join | 1 | 106 |
+| `integration_tests/test_table_cells_api_join.py` | join | 1 | 144 |
+| `integration_tests/test_table_mixed_reads_join.py` | join | 1 | 251 |
 | `integration_tests/test_table_stress.py` | join | 0 | 87 |
-| `modelx_cython/tests/compiled/test_enum_results.py` | join | 1 | 79 |
+| `modelx_cython/tests/compiled/test_enum_results_join.py` | join | 1 | 79 |
 | `modelx_cython/tests/compiled/test_param_bounds_join.py` | join | 1 | 29 |
 
 ## Source modules (`modelx_cython`, no tests)
@@ -333,16 +380,16 @@ is the shared wiring, and only the integrator resolves conflicts in it.
 | `modelx_cython/_mx_sys.pxd` | shared: P1 ≈573, B1 ≈15 | 588 | `_mx_check_enum_schema` (B1) |
 | `modelx_cython/admission.py` | shared: P1 ≈262, collect ≈15, B1 ≈3, B2 ≈15, B3 ≈30, B4 ≈200 | 525 | report keys: reductions (B2), vector cache/refusals (B3), `table_read_sites` and read warnings (B4, with form names of B5-B7), collect bound checks (collect) |
 | `modelx_cython/builder.py` | shared: P1 ≈1138, collect ≈4, B1 ≈10, B3 ≈35 | 1187 | vector shape/cache of a Cell (B3); enum Reference info (B1) |
-| `modelx_cython/cli.py` | shared: P1 ≈627, collect ≈16, B1 ≈3, B4 ≈70 | 716 | `enums.literals` call (B1); read-note recording and table setup in `run_sample`/`main_handler` (B4); collect runtime check (collect) |
+| `modelx_cython/cli.py` | shared: P1 ≈627, collect ≈16, B1 ≈3, B4 ≈30, B7 ≈40 | 716 | `enums.literals` call (B1); table setup in `run_sample`/`main_handler` (B4); read-note recording and the read audit file (B7); collect runtime check (collect) |
 | `modelx_cython/config.py` | shared: P1 ≈360, collect ≈35, B4 ≈32 | 427 | collect spec keys (collect); table policy keys (B4) |
-| `modelx_cython/frame_reads.py` | shared: B4 ≈1288, B5 ≈316, B6 ≈600, B7 ≈735 | 2939 | by recogniser: L1/L4, the shared machinery and the numpy-scalar boxing of reads (B4); L2 row fields (B5); L3 prefixes, L5 extremes, L7 membership, sub-table audit (B6); L6 asof, L8 walks, zip prefixes, comprehensions, iterrows (B7) |
+| `modelx_cython/frame_reads.py` | shared: B4 ≈1189, B5 ≈307, B6 ≈975, B7 ≈188 | 2659 | by recogniser: L1/L4, the shared machinery and the numpy-scalar boxing of reads (B4); L2 row fields (B5); L3 prefixes, L5 extremes, L7 membership, L8 index walks, comprehensions, iterrows (B6); the read audit (`audit`, `audit_subtables`, `without_fallbacks`) (B7) |
 | `modelx_cython/holds.py` | shared: P1 ≈90, B4 ≈13 | 103 | `hold_table` (B4); the registry is P1 |
 | `modelx_cython/parser.py` | shared: P1 ≈660, collect ≈16 | 676 | `collect_cache_classes` (collect) |
-| `modelx_cython/runtime/_tables.pxd` | shared: B4 ≈231, B5 ≈15, B6 ≈49, B7 ≈63 | 358 | declarations of the above |
-| `modelx_cython/runtime/_tables.pyx` | shared: B4 ≈530, B5 ≈40, B6 ≈110, B7 ≈176 | 856 | preparation, binding and keyed reads (B4); `hold_row` (B5); `prefix_range`, views, extremes (B6); `asof_row`, `asof_at`, `search`, `position`, `zip_*` (B7) |
-| `modelx_cython/table_cells.py` | shared: P1 ≈16, B3 ≈250, B4 ≈268 | 534 | `vector_cells` and the vector exits of `RenameMembers` (B3); table cells, frame binding and publication (B4) |
-| `modelx_cython/tracer.py` | shared: P1 ≈1011, collect ≈15, B1 ≈75, B3 ≈100, B4 ≈60 | 1261 | IntEnum value info and enum-argument widening (B1); vector shapes and their merge (B3); frame schema and read notes hooks (B4); collect-adapter filter (collect) |
-| `modelx_cython/transformer.py` | shared: P1 ≈1541, collect ≈80, B1 ≈10, B2 ≈22, B3 ≈50, B4 ≈97, B5 ≈70, B6 ≈63 | 1933 | shared wiring; table hooks `_table_reads*`, `_lower_frames`, `_pandas_reads` (B4), `_row_cells`, `_table_reads_with_row_fields` (B5), `_prefix_cells`, `_param_prefix_cells` (B6); reduction and vector passes in `_rewrite_powers`/`update_method`; collect hooks in `__init__`, `leave_Module`, `leave_ClassDef`; enum `prepare`/storage |
+| `modelx_cython/runtime/_tables.pxd` | shared: B4 ≈231, B5 ≈15, B6 ≈49, unused ≈63 | 358 | declarations of the above |
+| `modelx_cython/runtime/_tables.pyx` | shared: B4 ≈530, B5 ≈40, B6 ≈110, unused ≈176 | 856 | preparation, binding and keyed reads (B4); `hold_row` (B5); `prefix_range`, views, extremes (B6); `asof_row`, `asof_at`, `search`, `position`, `zip_*`: no compiled caller since the table-forms branch (unused) |
+| `modelx_cython/table_cells.py` | shared: B3 ≈250, B4 ≈284 | 534 | `vector_cells` and the vector exits of `RenameMembers` (B3); table cells, frame binding and publication (B4) |
+| `modelx_cython/tracer.py` | shared: P1 ≈1010, collect ≈15, B1 ≈75, B3 ≈100, B4 ≈60 | 1260 | IntEnum value info and enum-argument widening (B1); vector shapes and their merge (B3); frame schema and read notes hooks (B4); collect-adapter filter (collect) |
+| `modelx_cython/transformer.py` | shared: P1 ≈1538, collect ≈80, B1 ≈10, B2 ≈22, B3 ≈50, B4 ≈97, B5 ≈70, B6 ≈63 | 1930 | shared wiring; table hooks `_table_reads*`, `_lower_frames`, `_pandas_reads` (B4), `_row_cells`, `_table_reads_with_row_fields` (B5), `_prefix_cells`, `_param_prefix_cells` (B6); reduction and vector passes in `_rewrite_powers`/`update_method`; collect hooks in `__init__`, `leave_Module`, `leave_ClassDef`; enum `prepare`/storage |
 | `modelx_cython/usage.py` | shared: P1 ≈630, B4 ≈25 | 655 | pandas receiver resolution (B4); the memoryview usage classifier is P1 |
 | `modelx_cython/__init__.py` | P1 | 35 | |
 | `modelx_cython/__main__.py` | P1 | 24 | |
@@ -391,23 +438,24 @@ is the shared wiring, and only the integrator resolves conflicts in it.
 | `modelx_cython/_float_sum_state.pxd` | B2 | 233 | |
 | `modelx_cython/reductions.py` | B2 | 942 | |
 | `modelx_cython/runtime/_native_streams.pxd` | B2 | 28 | |
-| `modelx_cython/runtime/_native_vectors.pxd` | B3 | 250 | |
-| `modelx_cython/runtime/_native_vectors.pyx` | B3 | 320 | |
-| `modelx_cython/vectors.py` | B3 | 2005 | |
-| `modelx_cython/key_facts.py` | B4 | 403 | |
-| `modelx_cython/read_notes.py` | B4 | 476 | |
+| `modelx_cython/runtime/_native_vectors.pxd` | B3 | 252 | |
+| `modelx_cython/runtime/_native_vectors.pyx` | B3 | 363 | |
+| `modelx_cython/vectors.py` | B3 | 2066 | |
+| `modelx_cython/key_facts.py` | B4 | 402 | |
 | `modelx_cython/runtime/table_cells.py` | B4 | 63 | |
 | `modelx_cython/row_cells.py` | B5 | 410 | |
+| `modelx_cython/read_notes.py` | B7 | 477 | |
 
 | layer | lines (shared modules by the estimated split) |
 |---|---|
-| P1 | 13818 |
+| P1 | 13798 |
 | collect | 1840 |
 | B1 | 455 |
 | B2 | 1240 |
-| B3 | 3040 |
-| B4 | 3756 |
-| B5 | 851 |
-| B6 | 822 |
-| B7 | 974 |
-| total | 26796 |
+| B3 | 3146 |
+| B4 | 3156 |
+| B5 | 842 |
+| B6 | 1197 |
+| B7 | 705 |
+| unused | 239 |
+| total | 26618 |
