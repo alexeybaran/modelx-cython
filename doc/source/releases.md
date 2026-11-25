@@ -4,9 +4,24 @@
 
 ### Enum definitions are recognised by type
 
-A Reference in any Space whose value is an `IntEnum` class (one whose members compare as
-their integer values) is an enum definition without any declaration: it is
-fixed in the compiled model and its members compile to C constants.
+A Reference in any Space whose value is an `IntEnum` class (one that compares, hashes,
+prints and formats as its integers) is an enum definition without any declaration: it is
+fixed in the compiled model, and each member written in a formula (`Sex.M`) becomes its
+integer literal before compilation. Compiled code holds members and values traced as an
+`IntEnum` as integers, so:
+
+- A Cell that returns a member returns its integer; a tuple, list, set or dict display keeps
+  its members. `.name` and `.value` of a member, of a parameter or Cell result traced as one
+  `IntEnum` class, and of a local bound only to its members work; `.name` of an integer that
+  is not a member raises `AttributeError`, as in modelx. Any other attribute is a build error.
+- Where the class shows (`repr`, `type`, `isinstance`, `getattr`, `!r`, `%`), a member written
+  in place stays a member; a parameter, local or Cell result held as an integer there is a
+  build error, as is `str` or `format` of one whose class defines its own.
+- In a model with such members, an identity test (`is`) is a build error unless one side is
+  `None`, a bool, a builtin type or a member of a Reference that is not substituted.
+- Passing a member of one class to a parameter traced as another is a build error. A Python
+  caller can still do it: `.name` then gives the traced class's name for that value.
+
 Rebinding such a Reference on a compiled model raises `AttributeError`;
 rebuild the model to change it.  The former declaration Reference
 (`modelx_helpers.typed_inputs.EnumDefinitions`) is no longer needed; a model
