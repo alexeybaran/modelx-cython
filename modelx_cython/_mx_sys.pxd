@@ -229,42 +229,29 @@ cdef inline int _mx_check_enum_schema(object receiver, object owner, tuple bindi
     return 0
 
 
-cdef inline object _mx_enum_of(object cls, long long value):
-    """The member of the IntEnum class ``cls`` that compiled code holds as the integer ``value``; an integer that
-    is no member's value was that plain integer in modelx too, and is returned as it is."""
-    try:
-        return cls(value)
-    except ValueError:
-        return value
-
-
 cdef inline object _mx_enum_at(object cls, long long position):
-    """The member of the text-valued enum class ``cls`` that compiled code holds as its position."""
-    if position < 0:
-        raise ValueError(f"a text that is not a member of {cls.__name__} was given where a member is needed")
+    """The member of the enum family ``cls`` that compiled code holds as its position."""
     return cls._member_map_[cls._member_names_[position]]
 
 
-cdef inline long long _mx_enum_code(object cls, object value) except? -1:
-    """The position of ``value``, a member of the text-valued enum class ``cls`` or a member's text. An integer
-    is a position already (a compiled caller); any other value raises ``ValueError``, as it is no member."""
-    if PyLong_Check(value):
-        return PyLong_AsLongLong(value)
-    return cls._member_names_.index((value if type(value) is cls else cls(value))._name_)
-
-
-cdef inline object _mx_enum_member(object cls, object value):
-    """``value`` if it may go to a parameter or result that compiled code holds as an integer and converts back
-    through the IntEnum class ``cls``: a member of ``cls``, or an integer that is no member's value. A member of
-    another class and a plain integer equal to a member would come back as a member of ``cls``."""
+cdef inline long long _mx_enum_code(object cls, object value, bint strict, str cell) except? -1:
+    """The position of ``value`` for a parameter of ``cell`` held for the enum family ``cls``: a member of ``cls``,
+    a position (an exact integer, as compiled code gives it), or, where the Cell uses only the position (not
+    ``strict``), an object equal to a member's value, as modelx compares it. Anything else raises."""
+    cdef object member = None
     if type(value) is cls:
+        return cls._member_names_.index(value._name_)
+    if type(value) is int and 0 <= value < len(cls._member_names_):
         return value
-    if not hasattr(type(value), '__members__'):
+    if not strict:
         try:
-            cls(value)
-        except (ValueError, TypeError):
-            return value
-    raise TypeError(f"{value!r} is not a member of {cls.__name__}: this Cell is compiled for {cls.__name__} members")
+            member = cls._value2member_map_.get(value)
+        except TypeError:
+            pass
+        if member is not None:
+            return cls._member_names_.index(member._name_)
+    raise ValueError(f"{cell}: {value!r} is not a member of {cls.__name__}"
+                     + (", which this Cell uses as a member" if strict else ""))
 
 
 cdef inline double _mx_pow(double b, double e) except? -1.0:

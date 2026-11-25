@@ -18,7 +18,13 @@ def native_cell(result='double', params=()):
         get_argtype_expr=lambda *args, **kw: 'long long')
 
 
-STATUS = {'m._c_Values.Status': SimpleNamespace(enum=('m', 'Status', {'OK': 200}), enum_safe=True)}
+class Status(__import__('enum').IntEnum):
+    OK = 0
+    FAILED = 1
+
+
+STATUS = {'m._c_Values.Status': SimpleNamespace(enum=('m', 'Status', {'OK': 0, 'FAILED': 1}), enum_safe=True,
+                                                enum_class=Status)}
 
 
 def in_class(source):
@@ -84,14 +90,15 @@ def test_enum_constants_do_not_capture_a_comprehension_receiver():
 
 
 def test_declared_code_enum_uses_its_fixed_definition():
-    transformed=literals('m', in_class('def formula(self, value):\n    return value == self.Status.OK'), STATUS)
+    held = {'m._c_Values.formula': SimpleNamespace(arg_types={'value': int}, enum_codes={'value': Status})}
+    transformed=literals('m', in_class('def formula(self, value):\n    return value == self.Status.FAILED'), STATUS, held)
     expression=ast.parse(transformed).body[0].body[0].body[0].value
     assert isinstance(expression,ast.Compare)
-    assert isinstance(expression.comparators[0],ast.Constant) and expression.comparators[0].value == 200
+    assert isinstance(expression.comparators[0],ast.Constant) and expression.comparators[0].value == 1
     namespace={}
     exec(transformed,namespace)
-    assert namespace['_c_Values'].formula(object(),200) is True
-    assert namespace['_c_Values'].formula(object(),201) is False
+    assert namespace['_c_Values'].formula(object(),1) is True
+    assert namespace['_c_Values'].formula(object(),0) is False
 
 
 def test_enum_constants_decline_receiver_rebinding():
@@ -136,6 +143,7 @@ def test_enum_constants_follow_underlying_integer_not_overridden_conversion():
     from enum import IntEnum
     from modelx_cython.tracer import RuntimeValueInfo
     class Codes(IntEnum):
+        OTHER=0
         VALUE=1
         def __int__(self):return 999
     info=RuntimeValueInfo(Codes)

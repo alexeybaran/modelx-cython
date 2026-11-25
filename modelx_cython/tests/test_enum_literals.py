@@ -1,33 +1,37 @@
-"""IntEnum members in formulas (enums.plan): integers where the use is a number, member objects everywhere else.
+"""Enum members in formulas (enums.plan): positions where that makes the speed, member objects everywhere else.
 
-A member becomes its integer as an operand of a comparison or of arithmetic, as an argument of a Cell whose
-parameter is a number, as a subscript that is read, and in a display that a loop iterates when the loop variable
-is used only in such ways. A parameter or Cell result traced as one IntEnum class is a C integer; where its
-member is needed it is converted through its class. What reaches such a parameter or result from a value whose
-class the text does not show goes through a check of its class.
+A parameter given members of one family is a C integer, the member's position. It is an integer in three uses:
+compared by ``==``, ``!=``, ``in`` with members, values or a held name of its class; given to a Cell parameter
+held for its class; a loop over a display of members. Every other use sees the member. What reaches a held
+parameter from elsewhere goes through ``_mx_enum_code``.
 """
 import enum
 from types import SimpleNamespace
 
 import pytest
 
-from modelx_cython.enums import enum_safe, literals, plan
-from modelx_cython.tracer import RuntimeRefInfo, RuntimeParamInfo
+from modelx_cython.enums import family, literals, plan, positions
+from modelx_cython.tracer import RuntimeCellsInfo, RuntimeParamInfo, RuntimeRefInfo
 
 
 class Kind(enum.IntEnum):
-    A = 1
-    B = 2
-    LOW = -3
+    A = 0
+    B = 1
+    C = 2
 
 
 class Leg(enum.IntEnum):
-    CALL = 1
-    PUT = 2
+    CALL = 0
+    PUT = 1
 
 
-class Loose(enum.IntEnum):          # not enum-safe: its own == is kept as written
-    X = 1
+class Gapped(enum.IntEnum):         # not a family: its values are not 0..n-1
+    A = 1
+    B = 2
+
+
+class Loose(enum.IntEnum):          # not a family: its own ==
+    X = 0
 
     def __eq__(self, other):
         return False
@@ -35,228 +39,228 @@ class Loose(enum.IntEnum):          # not enum-safe: its own == is kept as writt
     __hash__ = enum.IntEnum.__hash__
 
 
-class Ordered(enum.IntEnum):        # not enum-safe: its own ordering
-    LOW = 2
+class Ordered(enum.IntEnum):        # a family: its own ordering is seen where the member is used
+    LOW = 0
     HIGH = 1
 
     def __lt__(self, other):
         return int(self) > int(other)
 
 
-class Pretty(enum.IntEnum):         # not enum-safe: its own str and format
-    M = 0
-
-    def __str__(self):
-        return self.name
-
-    __format__ = lambda self, spec: self.name
-
-
-class Texted(enum.IntEnum):         # not enum-safe: its value is not its integer
-    A = 1
-
-    def __new__(cls, number):
-        member = int.__new__(cls, number)
-        member._value_ = 'one'
-        return member
-
-
 def result(tp):
     return SimpleNamespace(value_type=tp, is_array=False)
 
 
-def cell(result_type, **arg_types):
-    return SimpleNamespace(arg_types=arg_types, ret_type=result(result_type))
+def held(result_type, classes, **arg_types):
+    """A traced Cell whose parameters in ``classes`` are held as positions (the tracer types them as int)."""
+    return SimpleNamespace(arg_types={name: int if name in classes else tp for name, tp in arg_types.items()},
+                           ret_type=result(result_type), enum_codes=dict(classes))
 
 
-REFS = {'m._c_P.Kind': RuntimeRefInfo(Kind), 'm._c_P.Leg': RuntimeRefInfo(Leg), 'm._c_P.Loose': RuntimeRefInfo(Loose),
-        'm._c_Q.Other': RuntimeRefInfo(Kind), 'other._c_P.Kind': RuntimeRefInfo(Kind),
-        'm._c_P.rate': RuntimeRefInfo(0.5), 'm._c_P.first': RuntimeRefInfo(Kind.A),
-        'm._c_P.far': SimpleNamespace(mx_class='m._c_Q', type_=object)}
-CELLS = {'m._c_P.f': cell(float, k=Kind),                       # the formula under test: k is a Kind
-         'm._c_P._f_g': cell(float, t=int, k=Kind),             # a Cell with a Kind parameter, only compared
-         'm._c_P._f_h': cell(float, t=int, x=float),            # numbers only
-         'm._c_P._f_obj': cell(str, k=object),                  # an object parameter
-         'm._c_P._f_kind': cell(Kind, t=int),                   # a Kind result
-         'm._c_P._f_leg': cell(Leg),
-         'm._c_Q._f_pick': cell(Kind),                          # a Cell of the Space that P.far holds
-         '_m_P._mx_classes._c_O._f_pick': cell(Kind)}         # a Cell of P's child Space O
+def refs():
+    return {'m._c_P.Kind': RuntimeRefInfo(Kind), 'm._c_P.Leg': RuntimeRefInfo(Leg), 'm._c_P.Loose': RuntimeRefInfo(Loose),
+            'm._c_P.Ordered': RuntimeRefInfo(Ordered), 'm._c_Q.Kind': RuntimeRefInfo(Kind),
+            'm._c_P.rate': RuntimeRefInfo(0.5), 'm._c_P.first': RuntimeRefInfo(Kind.A),
+            'm._c_P.far': SimpleNamespace(mx_class='m._c_Q', type_=object),
+            '_m_P._mx_classes._c_O.Kind': RuntimeRefInfo(Kind)}
 
 
-def formula(body, params='self, k', name='f'):
+def cells():
+    return {'m._c_P.f': held(float, {'k': Kind}, t=int, k=Kind),          # the formula under test: k is a Kind
+            'm._c_P._f_g': held(float, {'k': Kind}, t=int, k=Kind),       # a Cell with a Kind parameter
+            'm._c_P._f_h': held(float, {}, t=int, x=float),               # numbers only
+            'm._c_P._f_obj': held(str, {}, k=object),                     # an object parameter
+            'm._c_P._f_o': held(float, {'w': Ordered}, w=Ordered),
+            'm._c_Q._f_q': held(float, {'k': Kind}, k=Kind),              # a Cell of the Space that P.far holds
+            '_m_P._mx_classes._c_O._f_q': held(float, {'k': Kind}, k=Kind)}     # a Cell of P's child Space O
+
+
+STUBS = ('    def _f_g(self, t, k):\n        pass\n    def _f_h(self, t, x):\n        pass\n'
+         '    def _f_obj(self, k):\n        pass\n    def _f_o(self, w):\n        pass\n'
+         'class _c_Q:\n    def _f_q(self, k):\n        pass\n')       # the formulas of the other Cells
+
+
+def formula(body, params='self, t, k', name='f'):
     return f'class _c_P:\n    def {name}({params}):\n        ' + body.replace('\n', '\n        ') + '\n'
 
 
-def translate(body, cells=CELLS, **more):
-    return literals('m', formula(body, **more), REFS, cells).split('\n', 2)[2][8:].replace('\n        ', '\n')
+def translate(body, params='self, t, k', infos=None):
+    infos = cells() if infos is None else infos
+    sources = {'m': formula(body, params) + STUBS, '_m_P._mx_classes': 'class _c_O:\n    def _f_q(self, k):\n        pass\n'}
+    text = plan(sources, refs(), infos)['m']
+    return text[:text.index('    def _f_g(')].split('\n', 2)[2][8:].replace('\n        ', '\n')
 
 
-def test_enum_safe_needs_every_operation_of_int_and_the_integer_as_value():
-    assert enum_safe(Kind) and enum_safe(Leg)
-    assert not any(enum_safe(cls) for cls in (Loose, Ordered, Pretty, Texted, int, enum.Enum))
+def at(name, cls='Kind'):
+    return f'_mx_sys._mx_enum_at(self.{cls}, {name})'
+
+
+def test_a_family_compares_and_hashes_as_its_values():
+    assert family(Kind) is int and family(Leg) is int and family(Ordered) is int
+    assert not any(family(cls) for cls in (Gapped, Loose, int, enum.Enum, enum.IntEnum))
+    assert positions(Kind) == ({'A': 0, 'B': 1, 'C': 2}, {0: 0, 1: 1, 2: 2})
+    info = RuntimeRefInfo(Kind)
+    assert info.enum_safe and info.enum_class is Kind and info.enum[2] == {'A': 0, 'B': 1, 'C': 2}
+    assert not RuntimeRefInfo(Gapped).enum_safe
 
 
 @pytest.mark.parametrize('body, expected', [
-    ('return k == self.Kind.A', 'return k == 1'),                                   # a comparison
-    ('return self.Kind.B != k or k < self.Kind.B', 'return 2 != k or k < 2'),
-    ('return k in (self.Kind.A, self.Kind.B)', 'return k in (1, 2)'),               # right of `in`
-    ('return k not in {self.Kind.A, self.Kind.B}', 'return k not in {1, 2}'),
-    ('return self.g(t, self.Kind.B)', 'return self.g(t, 2)'),                       # an argument that is a number
-    ('return self.g(t, k=self.Kind.B)', 'return self.g(t, k=2)'),
-    ('return self.h(self.Kind.A, self.Kind.B)', 'return self.h(1, 2)'),
-    ('return self.g(t, self.Kind.A if t else self.Kind.B)', 'return self.g(t, 1 if t else 2)'),
-    ('return 10.0 * t + self.Kind.B', 'return 10.0 * t + 2'),                       # arithmetic
-    ('return self.Kind.LOW ** 2', 'return (-3) ** 2'),
-    ('return -(self.Kind.LOW)', 'return -((-3))'),
-    ('return self.Kind.A if k else self.Kind.B', 'return 1 if k else 2'),           # the result is a number
-    ('return T.loc[(self.Kind.A, k), "q"]', 'return T.loc[(1, k), "q"]'),           # a subscript that is read
-    ('return rates[self.Kind.A] + rows[t:self.Kind.B]', 'return rates[1] + rows[t:2]'),
-    ('return range(self.Kind.B), int(self.Kind.A)', 'return range(2), int(1)'),     # builtins that take a number
-    ('return max(k, self.Kind.B) == self.Kind.B', 'return max(k, 2) == 2'),
-    ('return sum(self.g(t, x) for x in (self.Kind.A, self.Kind.B))', 'for x in (1, 2))'),    # a loop of numbers
-    ('for x in [self.Kind.A, self.Kind.B]:\n    y = self.g(t, x)', 'for x in [1, 2]:'),
-    ('return [x == k for x in (self.Kind.A, self.Kind.B)]', 'for x in (1, 2)]'),
-    ('x = self.Kind.A if t else self.Kind.B\nreturn self.g(t, x)', 'x = 1 if t else 2'),      # a local of numbers
-    ('match k:\n    case self.Kind.A:\n        return 1.0', 'case 1:'),
+    ('return k == self.Kind.B', 'return k == 1'),                                   # compared with a member
+    ('return self.Kind.B != k', 'return 1 != k'),
+    ('return k == 2, k != 7', 'return k == 2, k != -1'),                           # with a value; of no member
+    ('return k in (self.Kind.A, self.Kind.B)', 'return k in (0, 1)'),               # in a display of members
+    ('return k not in {self.Kind.A, self.Kind.C}', 'return k not in {0, 2}'),
+    ('return k == self.Kind.A or k == self.Kind.C', 'return k == 0 or k == 2'),
+    ('return self.g(t, self.Kind.B), self.g(t, k=self.Kind.C)', 'return self.g(t, 1), self.g(t, k=2)'),
+    ('return self.g(t, k) + self.g(t, 2)', 'return self.g(t, k) + self.g(t, 2)'),     # given to a held parameter
+    ('return sum(self.g(t, x) for x in (self.Kind.A, self.Kind.B))', 'return sum(self.g(t, x) for x in (0, 1))'),
+    ('for x in [self.Kind.A, self.Kind.B]:\n    y = self.g(t, x)', 'for x in [0, 1]:'),
+    ('return [x == k for x in (self.Kind.A, self.Kind.B)]', 'return [x == k for x in (0, 1)]'),
+    ('return self.far.q(self.Kind.B), self.O.q(self.Kind.C)', 'return self.far.q(1), self.O.q(2)'),
 ])
-def test_a_member_used_as_a_number_is_its_integer(body, expected):
-    assert expected in translate(body)
+def test_a_held_value_is_an_integer_where_members_are_told_apart(body, expected):
+    assert translate(body).startswith(expected)
+
+
+@pytest.mark.parametrize('body, expected', [
+    ('return k.name, k.value + 1', f'return {at("k")}.name, {at("k")}.value + 1'),
+    ('return k + 1, T[k], not k, -k', f'return {at("k")} + 1, T[{at("k")}], not {at("k")}, -{at("k")}'),
+    ('return k < self.Kind.B, k == -1', f'return {at("k")} < self.Kind.B, {at("k")} == -1'),
+    ('return repr(k), str(k), f"{k}"', f'return repr({at("k")}), str({at("k")}), f"{{{at("k")}}}"'),
+    ('return type(k), isinstance(k, int), k is self.Kind.A', f'return type({at("k")}), isinstance({at("k")}, int), {at("k")} is self.Kind.A'),
+    ('return (k, 1), [k], {k: 1.0}', f'return ({at("k")}, 1), [{at("k")}], {{{at("k")}: 1.0}}'),
+    ('return self.label(k), self.obj(k), self.h(t, k)', f'return self.label({at("k")}), self.obj({at("k")}), self.h(t, {at("k")})'),
+    ('d = {}\nd[k] = 1.0', f'd = {{}}\nd[{at("k")}] = 1.0'),
+    ('return [lambda: k.name, lambda k: k.name]', f'return [lambda: {at("k")}.name, lambda k: k.name]'),
+    ('return [k.name for k in names]', 'return [k.name for k in names]'),           # shadowed by a comprehension
+    ('return k', f'return {at("k")}'),
+    ('return max(k, self.Kind.B), k == other', f'return max({at("k")}, self.Kind.B), {at("k")} == other'),
+    ('return self.Kind.A <= k <= self.Kind.B', f'return self.Kind.A <= {at("k")} <= self.Kind.B'),
+    ('match k:\n    case self.Kind.A:\n        return 1.0', f'match {at("k")}:\n    case self.Kind.A:'),
+])
+def test_every_other_use_of_a_held_value_sees_its_member(body, expected):
+    assert translate(body).startswith(expected)
 
 
 @pytest.mark.parametrize('body', [
     'return (self.Kind.A, self.Kind.B)', 'return [self.Kind.A]', 'return {self.Kind.A: 1.0, "x": self.Kind.B}',
-    'x = self.Kind.A\nreturn x.name', 'x = self.Kind.A if t else None\nreturn x',
-    'return self.Kind.A.name, self.Kind.B.value, self.Kind.A.label',
-    'return repr(self.Kind.A), str(self.Kind.A), format(self.Kind.A), ascii(self.Kind.A)',
-    'return type(self.Kind.A), isinstance(self.Kind.A, self.Kind), getattr(self.Kind.B, "name"), id(self.Kind.A)',
-    'return f"{self.Kind.A}|{self.Kind.A!r}|{self.Kind.B:>3}"', 'return "%s %r" % (self.Kind.A, self.Kind.B)',
-    'return "%d" % self.Kind.A', 'return "{!r}".format(self.Kind.A)',
-    'return self.label(self.Kind.A)', 'return self.obj(self.Kind.A)', 'return self.unknown(self.Kind.A)',
-    'out = []\nout.append(self.Kind.A)\nreturn out', 'return d.get(self.Kind.A)',
-    'd = {}\nd[self.Kind.A] = 1.0\nreturn d', 'return self.O[self.Kind.A].val()', 'return self.far[self.Kind.A]',
-    'return x is self.Kind.A', 'return self.Kind.A is not x', 'return a is b',
+    'return 10.0 * t + self.Kind.B', 'return rates[self.Kind.A], range(self.Kind.B)',       # numbers: members
+    'return self.Kind.A == self.Kind.B, t == self.Kind.A',          # no held value: members compare as in modelx
+    'x = self.Kind.A\nreturn x.name', 'return self.Kind.A.name, self.Kind.B.value',
+    'return repr(self.Kind.A), f"{self.Kind.A!r}", "%s" % self.Kind.A',
+    'return self.label(self.Kind.A), self.obj(self.Kind.A), self.h(t, self.Kind.A)',
+    'out = []\nout.append(self.Kind.A)\nreturn out', 'return self.O[self.Kind.A].val()',
+    'return x is self.Kind.A, a is b',
     'return [x.name for x in (self.Kind.A, self.Kind.B)]',                  # a loop variable used as a member
-    'return {x.name: self.g(t, x) for x in (self.Kind.A, self.Kind.B)}',
     'for x in [self.Kind.A, self.Kind.B]:\n    y = repr(x)',
     'return [isinstance(x, self.Kind) for x in (self.Kind.A, self.Kind.B)]',
-    'return sorted((self.Kind.A, self.Kind.B)), max((self.Kind.A, self.Kind.B)).name',
-    'y = max(x, self.Kind.B)', 'return fmt % self.Kind.A',
-    'return self.Loose.X == k',                 # not enum-safe
-    'return self.rate',                         # not an enum
-    'return self.Other.A == k',                 # a Reference of another class
-    'return self.Kind.MISSING == k',            # not a member
-    'self = t\nreturn self.Kind.A == 1',        # `self` rebound
-    'def inner(self):\n    return self.Kind.A == 1\nreturn inner',          # a function with its own `self`
+    'return self.Loose.X == self.Kind.A, self.rate', 'return self.Kind.MISSING == t',
+    'def inner(self):\n    return self.Kind.A == 1\nreturn inner',
 ])
 def test_a_member_used_as_an_object_stays(body):
-    assert translate(body, params='self, t') == body + '\n'
+    infos = cells()
+    infos['m._c_P.f'] = held(float, {}, t=int)
+    assert translate(body, params='self, t', infos=infos) == body + '\n'
 
 
-@pytest.mark.parametrize('body, expected', [
-    ('return k.name', 'return _mx_sys._mx_enum_of(self.Kind, k).name'),                                  # a parameter
-    ('return k.value + 1, k.bit_length()', 'return _mx_sys._mx_enum_of(self.Kind, k).value + 1, _mx_sys._mx_enum_of(self.Kind, k).bit_length()'),
-    ('return repr(k), str(k), f"{k}"', 'return repr(_mx_sys._mx_enum_of(self.Kind, k)), str(_mx_sys._mx_enum_of(self.Kind, k)), f"{_mx_sys._mx_enum_of(self.Kind, k)}"'),
-    ('return "%r" % k, "%s" % (k, 1)', 'return "%r" % _mx_sys._mx_enum_of(self.Kind, k), "%s" % (_mx_sys._mx_enum_of(self.Kind, k), 1)'),
-    ('return type(k), isinstance(k, int)', 'return type(_mx_sys._mx_enum_of(self.Kind, k)), isinstance(_mx_sys._mx_enum_of(self.Kind, k), int)'),
-    ('return (k, 1), [k], {k: 1.0}', 'return (_mx_sys._mx_enum_of(self.Kind, k), 1), [_mx_sys._mx_enum_of(self.Kind, k)], {_mx_sys._mx_enum_of(self.Kind, k): 1.0}'),
-    ('return k is self.Kind.A', 'return _mx_sys._mx_enum_of(self.Kind, k) is self.Kind.A'),
-    ('return self.label(k), self.obj(k)', 'return self.label(_mx_sys._mx_enum_of(self.Kind, k)), self.obj(_mx_sys._mx_enum_of(self.Kind, k))'),
-    ('d = {}\nd[k] = 1.0', 'd = {}\nd[_mx_sys._mx_enum_of(self.Kind, k)] = 1.0'),
-    ('return [lambda: k.name, lambda k: k.name]', 'return [lambda: _mx_sys._mx_enum_of(self.Kind, k).name, lambda k: k.name]'),
-    ('return [k.name for k in names]', 'return [k.name for k in names]'),           # shadowed by a comprehension
-    ('return self.kind(t).name', 'return _mx_sys._mx_enum_of(self.Kind, self.kind(t)).name'),            # a Cell result
-    ('return self.O.pick().name', 'return _mx_sys._mx_enum_of(self.Kind, self.O.pick()).name'),          # of a child Space
-    ('return self.far.pick().name', 'return _mx_sys._mx_enum_of(self.Kind, self.far.pick()).name'),      # of a Space in a Reference
-    ('x = self.kind(t)\nreturn x.name', 'x = _mx_sys._mx_enum_of(self.Kind, self.kind(t))\nreturn x.name'),      # a local used as a member
-    ('x = self.kind(t)\nreturn self.g(t, x) if x == self.Kind.A else 0.0',                  # a local of numbers
-     'x = self.kind(t)\nreturn self.g(t, x) if x == 1 else 0.0'),
-    ('k = k or self.Kind.A\nreturn k.name', 'k = k or 1\nreturn _mx_sys._mx_enum_of(self.Kind, k).name'),         # rebound to its class
-    ('return self.first.name, self.first == k', 'return _mx_sys._mx_enum_of(self.Kind, self.first).name, self.first == k'),
-    ('return k == self.Kind.A, self.g(t, k), k + 1, T[k], not k', 'return k == 1, self.g(t, k), k + 1, T[k], not k'),
-    ('y = max(k, self.Kind.B)', 'y = max(_mx_sys._mx_enum_of(self.Kind, k), self.Kind.B)'),
-])
-def test_a_value_held_as_an_integer_is_converted_where_its_member_is_needed(body, expected):
-    assert translate(body).startswith(expected)
+def test_what_reaches_a_held_parameter_from_elsewhere_is_converted_at_the_cell():
+    code = "_mx_sys._mx_enum_code(self.Kind, {}, False, 'P.g')"
+    assert translate('return self.g(t, self.first), self.g(t, x)') == \
+        f'return self.g(t, {code.format("self.first")}), self.g(t, {code.format("x")})\n'
+    assert translate('x = self.Kind.A\nreturn self.g(t, x)') == f'x = self.Kind.A\nreturn self.g(t, {code.format("x")})\n'
+    assert translate('return {x.name: self.g(t, x) for x in (self.Kind.A, self.Kind.B)}') == \
+        f'return {{x.name: self.g(t, {code.format("x")}) for x in (self.Kind.A, self.Kind.B)}}\n'
+    assert translate('return self.o(k)') == f"return self.o(_mx_sys._mx_enum_code(self.Ordered, {at('k')}, False, 'P.o'))\n"
+    assert translate('return self.far.q(x)') == "return self.far.q(_mx_sys._mx_enum_code(self.far.Kind, x, False, 'Q.q'))\n"
 
 
-def test_the_class_is_imported_where_no_reference_holds_it():
-    source = 'class _c_R:\n    def f(self, k):\n        return k.name\n'
-    assert (f"_mx_sys._mx_enum_of(__import__('importlib').import_module({Kind.__module__!r}).Kind, k).name"
-            in literals('m', source, REFS, {'m._c_R.f': cell(str, k=Kind)}))
-
-
-def test_the_parameter_of_an_item_space_is_converted():
-    source = 'class _c_S:\n    def _f_val(self):\n        return self.leg.name, self.leg == 1\n'
-    params = {'m._c_S': {'leg': RuntimeParamInfo(Leg.PUT)}}
-    assert f'({Leg.__module__!r}).Leg, self.leg).name, self.leg == 1' in literals('m', source, REFS, CELLS, params)
-
-
-def test_a_parameter_rebound_to_something_else_cannot_give_its_member():
-    assert translate('k = t + 1\nreturn k == self.Kind.A') == 'k = t + 1\nreturn k == 1\n'
-    with pytest.raises(TypeError, match=r'^P\.f: `k` needs the IntEnum member of a parameter that the formula rebinds'):
-        translate('k = t + 1\nreturn k.name')
-
-
-def test_a_module_without_enum_values_is_not_parsed():
-    source = 'class _c_P:\n    def f(self):  return  self.Kind.A\n'
-    assert literals('n', source, {'m._c_P.Kind': RuntimeRefInfo(Kind)}) is source
-
-
-# ---------------------------------------------------------------- the class of what a converted value was given
-CHECKED = '''\
+CHAIN = '''\
 class _c_P:
     def _f_nm(self, k):
         return k.name
     def _f_cmp(self, k):
-        return k == self.Leg.PUT
-    def _f_pick(self, t):
-        if t > 5:
-            return self.legs()[0]
-        return self.Leg.PUT if t > 0 else self.Kind.A
-    def _f_same(self, t):
-        return self.Leg.PUT if t > 0 else self.pick(t)
-    def _f_use(self, t):
-        return self.pick(t).name
-    def _f_calls(self, k, t):
-        a = [self.nm(x) for x in (self.Kind.A, self.Kind.B)]
-        b = [self.cmp(x) for x in (self.Kind.A, self.Kind.B)]
-        c = [self.nm(x) for x in (self.Leg.CALL, self.Leg.PUT)]
-        return self.nm(self.Leg.PUT), self.nm(self.Kind.A), self.nm(k), self.nm(self.legs()[0]), self.nm(t), self.cmp(t)
+        return k == self.Kind.B
     def _f_through(self, j):
-        return self.nm(j)
-    def _f_start(self):
-        return self.through(self.Kind.A), self.through(self.Leg.PUT)
+        return self.nm(j), self.cmp(j)
+    def _f_start(self, t):
+        return self.through(t), self.cmp(t), self.nm(self.Kind.A)
     def nm(self, k):
         return self._f_nm(k)
 '''
-CHECKED_CELLS = {'m._c_P._f_nm': cell(str, k=Leg), 'm._c_P._f_cmp': cell(bool, k=Leg),
-                 'm._c_P._f_pick': cell(Leg, t=int), 'm._c_P._f_same': cell(Leg, t=int),
-                 'm._c_P._f_use': cell(str, t=int), 'm._c_P._f_calls': cell(object, k=Kind, t=int),
-                 'm._c_P._f_through': cell(str, j=Leg), 'm._c_P._f_start': cell(object)}
 
 
-def test_a_value_of_unknown_class_is_checked_where_its_receiver_converts():
-    text = plan({'m': CHECKED}, REFS, CHECKED_CELLS)['m']
-    check = '_mx_sys._mx_enum_member(self.Leg, '
-    for expected in [
-        'return _mx_sys._mx_enum_of(self.Leg, k).name',                                              # nm converts its parameter
-        'return k == 2',                                                        # cmp only compares: any integer
-        f'return {check}self.legs()[0])',                                       # pick's result is converted by use
-        f'return {check}self.Leg.PUT if t > 0 else self.Kind.A)',               # a member of another class: raises
-        'return 2 if t > 0 else self.pick(t)',                                  # of its own class: as integers
-        f'a = [self.nm({check}x)) for x in (self.Kind.A, self.Kind.B)]',
-        'b = [self.cmp(x) for x in (1, 2)]',
-        'c = [self.nm(x) for x in (1, 2)]',
-        f'return self.nm(2), self.nm({check}self.Kind.A)), self.nm({check}_mx_sys._mx_enum_of(self.Kind, k))), '
-        f'self.nm({check}self.legs()[0])), self.nm({check}t)), self.cmp(t)',
-        'return self.nm(j)',                                                    # through's parameter is of the class
-        f'return self.through({check}self.Kind.A)), self.through(2)',           # so what reaches it is checked too
-        'def nm(self, k):\n        return self._f_nm(k)',                       # the cache method is not a formula
-    ]:
+def test_a_parameter_whose_member_is_used_or_given_on_to_one_is_strict():
+    infos = {'m._c_P._f_nm': held(str, {'k': Kind}, k=Kind), 'm._c_P._f_cmp': held(bool, {'k': Kind}, k=Kind),
+             'm._c_P._f_through': held(str, {'j': Kind}, j=Kind), 'm._c_P._f_start': held(object, {}, t=object)}
+    text = plan({'m': CHAIN}, refs(), infos)['m']
+    for expected in [f'return {at("k")}.name', 'return k == 1', 'return self.nm(j), self.cmp(j)',
+                     "return self.through(_mx_sys._mx_enum_code(self.Kind, t, True, 'P.through')), "
+                     "self.cmp(_mx_sys._mx_enum_code(self.Kind, t, False, 'P.cmp')), self.nm(0)",
+                     'def nm(self, k):\n        return self._f_nm(k)']:     # the cache method is not a formula
         assert expected in text, expected + '\n' + text
+    assert {key.rpartition('.')[2]: info.enum_gate for key, info in infos.items() if hasattr(info, 'enum_gate')} == {
+        '_f_nm': {'k': ('Kind', True)}, '_f_cmp': {'k': ('Kind', False)}, '_f_through': {'j': ('Kind', True)}}
 
 
-# ---------------------------------------------------------------- text-valued classes: a member is its position
+def test_a_strict_parameter_that_the_sample_gave_a_plain_value_is_an_object():
+    infos = {'m._c_P._f_nm': held(str, {'k': Kind}, k=Kind), 'm._c_P._f_cmp': held(bool, {'k': Kind}, k=Kind),
+             'm._c_P._f_through': held(str, {'j': Kind}, j=Kind), 'm._c_P._f_start': held(object, {}, t=object)}
+    infos['m._c_P._f_nm'].enum_plain = infos['m._c_P._f_cmp'].enum_plain = {'k'}     # given 1 as well as Kind.B
+    text = plan({'m': CHAIN}, refs(), infos)['m']
+    assert 'return k.name' in text and 'return k == 1' in text and f"return self.nm({at('j')}), self.cmp(j)" in text
+    assert infos['m._c_P._f_nm'].arg_types['k'] is object and infos['m._c_P._f_cmp'].enum_gate == {'k': ('Kind', False)}
+    assert infos['m._c_P._f_through'].enum_gate == {'j': ('Kind', True)}      # it gives nm the member
+
+
+@pytest.mark.parametrize('params, body', [
+    ('self, t, k', 'k = t + 1\nreturn k == self.Kind.A'),                 # bound again
+    ('self, t, k=None', 'return k is None or k == self.Kind.A'),          # a default that is no member
+    ('self, t, k=7', 'return k == self.Kind.A'),
+    ('self, t, k', 'return [self for self in t if k == self.Kind.A]'),     # seen where `self` is another
+])
+def test_a_parameter_that_cannot_be_held_is_an_object(params, body):
+    infos = cells()
+    assert translate(body, params, infos) == body + '\n'
+    assert infos['m._c_P.f'].arg_types['k'] is object and not infos['m._c_P.f'].enum_codes
+
+
+def test_a_parameter_whose_space_has_no_reference_to_its_class_or_given_by_star_is_an_object():
+    infos = cells()
+    infos['m._c_R.f'] = held(float, {'k': Kind}, k=Kind)
+    source = 'class _c_R:\n    def f(self, k):\n        return k.name\n' + STUBS
+    assert literals('m', source, refs(), infos) == source and infos['m._c_R.f'].arg_types['k'] is object
+    assert translate('return self.g(*args)', infos=infos) == 'return self.g(*args)\n'
+    assert infos['m._c_P._f_g'].arg_types['k'] is object
+
+
+def test_a_default_that_is_a_member_value_is_its_position():
+    assert translate('return k == self.Kind.C', 'self, t, k=2').startswith('return k == 2')
+    assert literals('m', formula('return k', 'self, t, k=1') + STUBS, refs(), cells()).startswith(
+        'class _c_P:\n    def f(self, t, k=1):')
+
+
+def test_a_module_without_held_parameters_is_not_parsed():
+    source = 'class _c_P:\n    def f(self):  return  self.Kind.A == 1\n'
+    assert literals('m', source, refs(), {'m._c_P.f': held(bool, {})}) is source
+
+
+def test_the_tracer_holds_members_of_one_family_and_their_values_as_positions():
+    def f(self, t, kind, leg, mixed, gapped, label):
+        return Kind.A
+
+    def trace(*values):
+        names = ('self', 't', 'kind', 'leg', 'mixed', 'gapped', 'label')
+        return SimpleNamespace(func=f, funcname='m._c_P._f_f', arg_vals=dict(zip(names, (None, *values))),
+                               ret_val=Kind.A)
+    info = RuntimeCellsInfo([trace(0, Kind.A, Leg.PUT, Kind.A, Gapped.A, 3), trace(1, 2, Leg.CALL, Leg.PUT, Gapped.B, 4)])
+    assert info.enum_codes == {'kind': Kind, 'leg': Leg}       # mixed: two classes; label: plain integers only
+    assert info.arg_types['kind'] is int and (info.min_args['kind'], info.max_args['kind']) == (0, 2)
+    assert info.arg_types['mixed'] is object and info.arg_types['gapped'] is object and info.arg_types['label'] is int
+    assert info.ret_type.value_type is object                   # a member is returned as itself
+    assert RuntimeRefInfo(Kind.B).type_ is object and RuntimeParamInfo(Leg.PUT).type_ is object
+
+
+# ---------------------------------------------------------------- text-valued families
 needs_strenum = pytest.mark.skipif(not hasattr(enum, 'StrEnum'), reason='enum.StrEnum is of Python 3.11')
 if hasattr(enum, 'StrEnum'):
     class Claim(enum.StrEnum):
@@ -268,58 +272,39 @@ if hasattr(enum, 'StrEnum'):
         M = 'M'
         F = 'F'
 
-    class Shouting(enum.StrEnum):       # not text-safe: its own str
-        A = 'a'
 
-        def __str__(self):
-            return self.value.upper()
+def text(body, params='self, t, kind'):
+    infos = {'m._c_P.f': held(float, {'kind': Claim}, t=int, kind=Claim),
+             'm._c_P._f_claims': held(float, {'kind': Claim}, t=int, kind=Claim),
+             'm._c_P._f_rate': held(float, {'s': Sex}, t=int, s=Sex), 'm._c_P._f_sex': held(str, {})}
+    text_refs = {'m._c_P.Claim': RuntimeRefInfo(Claim), 'm._c_P.Sex': RuntimeRefInfo(Sex),
+                 'm._c_P.default_kind': RuntimeRefInfo('LAPSE')}
+    stubs = ('    def _f_claims(self, t, kind):\n        pass\n    def _f_rate(self, t, s):\n        pass\n'
+             '    def _f_sex(self):\n        pass\n')
+    out = literals('m', formula(body, params=params) + stubs, text_refs, infos)
+    return out[:out.index('    def _f_claims(')].split('\n', 1)[1][4:].replace('\n        ', '\n')
 
 
-def held(result_type, classes, **arg_types):
-    """A traced Cell whose parameters in ``classes`` are held as positions (the tracer types them as int)."""
-    return SimpleNamespace(arg_types={name: int if name in classes else tp for name, tp in arg_types.items()},
-                           ret_type=result(result_type), enum_codes=classes)
+def text_body(body):
+    return text(body).split('\n', 1)[1]
 
 
 @needs_strenum
-def test_text_safe_needs_every_operation_of_str_and_the_text_as_value():
-    from modelx_cython.enums import positions, text_safe
-    assert text_safe(Claim) and text_safe(Sex) and not text_safe(Shouting) and not text_safe(Kind)
+def test_a_text_valued_family_holds_positions():
+    assert family(Claim) is str and family(Sex) is str
     assert positions(Claim) == ({'DEATH': 0, 'LAPSE': 1, 'MAT': 2}, {'DEATH': 0, 'LAPSE': 1, 'MATURITY': 2})
-    info = RuntimeRefInfo(Claim)
-    assert info.enum_safe and info.enum[2] == {'DEATH': 0, 'LAPSE': 1, 'MAT': 2} and info.enum_texts['MATURITY'] == 2
 
-
-@needs_strenum
-def test_the_tracer_holds_members_and_their_texts_as_positions():
-    from modelx_cython.tracer import RuntimeCellsInfo
-
-    def formula(self, t, kind, sex, label):
+    def f(self, t, kind, sex, label):
         return 0.0
 
     def trace(*values):
         names = ('self', 't', 'kind', 'sex', 'label')
-        return SimpleNamespace(func=formula, funcname='m._c_P._f_f', arg_vals=dict(zip(names, (None, *values))),
+        return SimpleNamespace(func=f, funcname='m._c_P._f_f', arg_vals=dict(zip(names, (None, *values))),
                                ret_val=0.0)
     info = RuntimeCellsInfo([trace(0, Claim.DEATH, 'M', 'a'), trace(1, 'MATURITY', 'F', Claim.LAPSE)])
     assert info.enum_codes == {'kind': Claim}           # sex was given texts only; label a text that is no member
     assert info.arg_types['kind'] is int and (info.min_args['kind'], info.max_args['kind']) == (0, 2)
-    assert info.arg_types['sex'] is str and info.arg_types['label'] is str
-
-
-TEXT_REFS = {}
-TEXT_CELLS = {}
-if hasattr(enum, 'StrEnum'):
-    TEXT_REFS = {'m._c_P.Claim': RuntimeRefInfo(Claim), 'm._c_P.Sex': RuntimeRefInfo(Sex),
-                 'm._c_P.default_kind': RuntimeRefInfo('LAPSE')}
-    TEXT_CELLS = {'m._c_P.f': held(float, {'kind': Claim}, t=int, kind=Claim),
-                  'm._c_P._f_claims': held(float, {'kind': Claim}, t=int, kind=Claim),
-                  'm._c_P._f_rate': held(float, {'s': Sex}, t=int, s=Sex), 'm._c_P._f_sex': cell(str)}
-
-
-def text(body, params='self, t, kind'):
-    source = formula(body, params=params)
-    return literals('m', source, TEXT_REFS, TEXT_CELLS).split('\n', 1)[1][4:].replace('\n        ', '\n')
+    assert info.arg_types['sex'] is str and info.arg_types['label'] is object
 
 
 @needs_strenum
@@ -327,25 +312,19 @@ def text(body, params='self, t, kind'):
     ('return kind == self.Claim.DEATH', 'return kind == 0'),                        # compared with a member
     ('return kind != "LAPSE"', 'return kind != 1'),                                  # or with its text
     ('return kind in (self.Claim.MAT, "LAPSE")', 'return kind in (2, 1)'),
-    ('return kind == "NOPE"', 'return kind == (-2)'),                                # a text that no member has
+    ('return kind == "NOPE"', 'return kind == -1'),                                  # a text that no member has
     ('return self.claims(t, self.Claim.MAT) + self.claims(t, "DEATH")', 'return self.claims(t, 2) + self.claims(t, 0)'),
     ('return self.claims(t, kind) + self.claims(t, kind=self.Claim.LAPSE)', 'return self.claims(t, kind) + self.claims(t, kind=1)'),
-    ('return sum(self.claims(t, k) for k in (self.Claim.DEATH, self.Claim.LAPSE))', 'for k in (0, 1))'),
-    ('x = self.Claim.LAPSE if t else self.Claim.MAT\nreturn self.claims(t, x)', 'x = 1 if t else 2'),
+    ('return sum(self.claims(t, k) for k in (self.Claim.DEATH, self.Claim.LAPSE))', 'return sum(self.claims(t, k) for k in (0, 1))'),
     ('return self.claims(t, self.default_kind)',                                    # a text that is known when it runs
-     'return self.claims(t, _mx_sys._mx_enum_code(self.Claim, self.default_kind))'),
-    ('return self.rate(t, self.sex())', 'return self.rate(t, _mx_sys._mx_enum_code(self.Sex, self.sex()))'),
-    # every other use sees the member: text operations, ordering, truth, a key, an unknown counterpart
-    ('return kind.name + kind', 'return _mx_sys._mx_enum_at(self.Claim, kind).name + _mx_sys._mx_enum_at(self.Claim, kind)'),
-    ('return kind < self.Claim.MAT', 'return _mx_sys._mx_enum_at(self.Claim, kind) < self.Claim.MAT'),
-    ('return T[kind] if kind else d[self.Claim.MAT]',
-     'return T[_mx_sys._mx_enum_at(self.Claim, kind)] if _mx_sys._mx_enum_at(self.Claim, kind) else d[self.Claim.MAT]'),
-    ('return kind == other, self.sex() == self.Sex.M', 'return _mx_sys._mx_enum_at(self.Claim, kind) == other, self.sex() == self.Sex.M'),
-    ('return f"{kind}", [self.Claim.DEATH], self.Claim.MAT == "MATURITY"',       # two constants: equal either way
-     'return f"{_mx_sys._mx_enum_at(self.Claim, kind)}", [self.Claim.DEATH], 2 == 2'),
+     "return self.claims(t, _mx_sys._mx_enum_code(self.Claim, self.default_kind, False, 'P.claims'))"),
+    ('return self.rate(t, self.sex())', "return self.rate(t, _mx_sys._mx_enum_code(self.Sex, self.sex(), False, 'P.rate'))"),
+    ('return kind.name + kind', f'return {at("kind", "Claim")}.name + {at("kind", "Claim")}'),
+    ('return kind < self.Claim.MAT, kind == 0', f'return {at("kind", "Claim")} < self.Claim.MAT, {at("kind", "Claim")} == 0'),
+    ('return f"{kind}", self.Claim.MAT == "MATURITY"', f'return f"{{{at("kind", "Claim")}}}", self.Claim.MAT == "MATURITY"'),
 ])
 def test_a_text_valued_member_is_its_position_where_members_are_told_apart(body, expected):
-    assert expected in text(body)
+    assert text_body(body).startswith(expected)
 
 
 @needs_strenum

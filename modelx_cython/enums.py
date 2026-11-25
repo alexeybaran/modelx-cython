@@ -1,20 +1,27 @@
-"""IntEnum members in model text: integers where that makes the speed, members everywhere else.
+"""Enum members as integers where that makes the speed, members everywhere else.
 
-An enum definition is a Reference whose traced value is an enum-safe IntEnum class (selected by
-type, no declaration). ``literals`` replaces ``self.<Ref>.<member>`` by the member's value only in an
-integer context: an operand of a comparison or of arithmetic, an argument of a Cell whose parameter
-is a number, a subscript that is read, a loop over a display of members whose variable is used only
-in such ways. Every other use keeps the member object. A parameter or Cell result that the tracer
-typed as a C integer because every traced value was a member of one class is converted back through
-its class (the member with that value; an integer that is no member's value stays the integer it
-was in modelx) wherever the object is needed. The definition is read-only in the compiled model (``prepare``, ``bind_properties``),
-because its values are now in the code.
+A *family* is an IntEnum class whose values are 0..n-1, or a StrEnum class (Python 3.11+), whose members compare
+and hash as their values. The tracer types a Cell parameter given members of one family, or their values, as a C
+integer: the member's position in its class (an IntEnum member's value), with a cache of the size of the class.
+``plan`` writes the formulas of a model for that, by use. A held name (such a parameter, or a loop variable over a
+display of members) is an integer in three uses only: compared by ``==``, ``!=`` or ``in`` with members, their
+values or a held name of its class; given to a Cell parameter held for its class; iterated as a display of
+members. Members written in those uses become their positions; every other use sees the member
+(``_mx_enum_at``). A value from elsewhere reaches a held parameter through ``_mx_enum_code``: a member of its
+class; also an object equal to a member where the Cell uses only the position (not *strict*); anything else
+raises at the Cell. A parameter is held only where a Reference of its Space holds its class, which the compiled
+model then keeps read-only (``prepare``, ``bind_properties``): its members are in the code.
 """
-import numbers
+import enum
+import functools
 
 import libcst as cst
+from libcst.metadata import MetadataWrapper, ParentNodeProvider, ScopeProvider
 
 from .consts import MX_SYS_MOD
+
+_code = cst.Module([]).code_for_node
+_DISPLAYS = (cst.Tuple, cst.List, cst.Set)
 
 
 def storage(name):
@@ -23,22 +30,20 @@ def storage(name):
 
 def prepare(module):
     for cls in module.classes.values():
-        names = tuple(name for name, ref in cls.refs.items()
-                      if name not in getattr(cls, 'spaces', ())
-                      and getattr(ref, 'enum', None) and getattr(ref, 'enum_safe', False))
-        cls.readonly_refs = names
-        for name in names:
+        cls.readonly_refs = tuple(name for name, ref in cls.refs.items()
+                                  if name not in getattr(cls, 'spaces', ()) and getattr(ref, 'enum_safe', False))
+        for name in cls.readonly_refs:
             if storage(name) in cls.refs:
                 raise ValueError(f'{cls.fqname}: reserved enum storage name {storage(name)}')
 
 
-class Bindings(cst.CSTTransformer):
+class _Stored(cst.CSTTransformer):
     def __init__(self, names):
         self.names = names
 
     def leave_AssignTarget(self, before, after):
         target = after.target
-        if (isinstance(target, cst.Attribute) and isinstance(target.value,cst.Name)
+        if (isinstance(target, cst.Attribute) and isinstance(target.value, cst.Name)
                 and target.value.value == 'self' and target.attr.value in self.names):
             return after.with_changes(target=target.with_changes(attr=cst.Name(storage(target.attr.value))))
         return after
@@ -48,795 +53,363 @@ def bind_properties(cls, body):
     names = getattr(cls, 'readonly_refs', ())
     result = []
     for statement in body:
-        if names and isinstance(statement,cst.FunctionDef) and statement.name.value=='__init__':
-            statements=list(statement.body.body)
-            docstring=(statements and isinstance(statements[0],cst.SimpleStatementLine)
-                and len(statements[0].body)==1 and isinstance(statements[0].body[0],cst.Expr)
-                and isinstance(statements[0].body[0].value,(cst.SimpleString,cst.ConcatenatedString)))
-            check=cst.parse_statement(f'{MX_SYS_MOD}._mx_check_enum_schema(self, {cls.name}, {names!r})\n')
-            statements.insert(int(bool(docstring)),check)
-            statement=statement.with_changes(body=statement.body.with_changes(body=tuple(statements)))
-        if isinstance(statement, cst.FunctionDef) and statement.name.value in ('_mx_assign_refs','_mx_copy_refs'):
-            statement = statement.visit(Bindings(names))
+        if names and isinstance(statement, cst.FunctionDef) and statement.name.value == '__init__':
+            lines = list(statement.body.body)
+            first = lines[0].body[0] if lines and isinstance(lines[0], cst.SimpleStatementLine) else None
+            docstring = isinstance(first, cst.Expr) and isinstance(first.value, (cst.SimpleString,
+                                                                                 cst.ConcatenatedString))
+            lines.insert(int(docstring), cst.parse_statement(
+                f'{MX_SYS_MOD}._mx_check_enum_schema(self, {cls.name}, {names!r})\n'))
+            statement = statement.with_changes(body=statement.body.with_changes(body=tuple(lines)))
+        if isinstance(statement, cst.FunctionDef) and statement.name.value in ('_mx_assign_refs', '_mx_copy_refs'):
+            statement = statement.visit(_Stored(names))
         result.append(statement)
     for name in names:
         result.extend(cst.parse_module(f'@property\ndef {name}(self):\n    return self.{storage(name)}\n').body)
     return tuple(result)
 
 
-# ---------------------------------------------------------------- members as integers, by use
-_code = cst.Module([]).code_for_node
-_NUMERIC = ('int', 'float', 'bool', 'abs', 'round', 'range', 'divmod', 'pow', 'hash', 'len')    # give a plain number
-_EXTREMES = ('min', 'max')          # give one of their arguments
-_DISPLAYS = (cst.Tuple, cst.List, cst.Set)
-
-
-def enum_safe(cls):
-    """Whether ``cls`` is an IntEnum class whose members behave as their integers in every operation of ``int``
-    and whose ``value`` is that integer: its integer can then stand for a member wherever only the number counts."""
-    import enum
-    return (isinstance(cls, type) and issubclass(cls, enum.IntEnum) and type(cls) is type(enum.IntEnum)
-            and all(getattr(cls, name, None) is getattr(enum.IntEnum, name, None)
-                    for name in {*vars(int), '__str__'} - {'__doc__'} if name.startswith('__'))
-            and all(type(member.value) is int and member.value == int(member) for member in cls))
-
-
-def text_safe(cls):
-    """Whether ``cls`` is a StrEnum class whose members behave as their text in every operation of ``str`` and
-    whose ``value`` is that text: its position in the class can then stand for a member where members are only
-    told apart."""
-    import enum
-    base = getattr(enum, 'StrEnum', None)
-    return (base is not None and isinstance(cls, type) and issubclass(cls, base) and type(cls) is type(base)
-            and all(getattr(cls, name, None) is getattr(base, name, None)
-                    for name in vars(str) if name.startswith('__') and name != '__doc__')
-            and all(type(member.value) is str and member.value == str.__str__(member) for member in cls))
-
-
-def positions(cls):
-    """({member name: position}, {member text: position}) of a text-safe class, by declaration order."""
-    order = {member: position for position, member in enumerate(cls)}
-    return ({name: order[member] for name, member in cls.__members__.items()},
-            {member.value: position for member, position in order.items()})
-
-
-def _kind(tp):
-    """How a traced type is held: (module, qualname) of an enum-safe IntEnum class (a C integer that stands for a
-    member), 'number' for another numeric type, None for an object."""
-    import enum
-    if enum_safe(tp):
-        return tp.__module__, tp.__qualname__
-    if tp in (numbers.Integral, numbers.Real) or (isinstance(tp, type) and issubclass(tp, numbers.Real)
-                                                  and not issubclass(tp, enum.Enum)):
-        return 'number'
+# ---------------------------------------------------------------- families
+@functools.cache
+def family(cls):
+    """The type of the values of ``cls``, ``int`` or ``str``, if it is a family, else None."""
+    for base, kind in ((enum.IntEnum, int), (getattr(enum, 'StrEnum', None), str)):
+        if (base is not None and isinstance(cls, type) and issubclass(cls, base) and type(cls) is type(base)
+                and len(cls)
+                and all(getattr(cls, name) is getattr(base, name) for name in ('__eq__', '__ne__', '__hash__'))
+                and [m._value_ for m in cls] == (list(range(len(cls))) if kind is int else [str(m._value_) for m in cls])
+                and all(type(m._value_) is kind and (kind is int or str.__str__(m) == m._value_) for m in cls)):
+            return kind
     return None
 
 
-def _signature(info):
-    """(parameter names, {name: kind}, result kind) of a traced Cell. A parameter traced as members of a text-safe
-    class (``enum_codes``) is a C integer too: the member's position."""
-    held = getattr(info, 'enum_codes', None) or {}
-    kinds = {name: (held[name].__module__, held[name].__qualname__) if name in held else _kind(tp)
-             for name, tp in (getattr(info, 'arg_types', None) or {}).items()}
-    ret = getattr(info, 'ret_type', None)
-    result = _kind(getattr(ret, 'value_type', None)) if not getattr(ret, 'is_array', True) else None
-    return tuple(kinds), kinds, result
+@functools.cache
+def positions(cls):
+    """({member name: position}, {member value: position}) of a family, by declaration order."""
+    order = {member: position for position, member in enumerate(cls)}
+    return ({name: order[member] for name, member in cls.__members__.items()},
+            {member._value_: position for member, position in order.items()})
 
 
-def _target_names(target):
-    """The names a target binds (subscripts and attributes bind none)."""
-    if isinstance(target, cst.Name):
-        return [target.value]
-    if isinstance(target, (cst.Tuple, cst.List)):
-        return [name for element in target.elements for name in _target_names(element.value)]
-    return []
+def release(info, name):
+    """Type a parameter that the tracer held for a family as an object after all."""
+    info.arg_types[name] = object
+    for table in ('enum_codes', 'enum_args', 'max_args', 'min_args', 'observed_min_args', 'observed_max_args'):
+        getattr(info, table, {}).pop(name, None)
 
 
+def _path(key):
+    """The Cell of a key (``module._c_Space._f_cell``) as the model names it (``Space.cell``)."""
+    module, cls, name = key.rsplit('.', 2)
+    return '.'.join((*(part[3:] for part in module.split('.')[1:-1]), cls[3:], name.removeprefix('_f_')))
+
+
+# ---------------------------------------------------------------- the pass
 class _Model:
-    """What the trace knows of the whole model: enum definitions, Space References and Cell signatures."""
+    """What the trace knows of the whole model: References holding a family, Spaces and Cell parameters."""
 
-    def __init__(self, ref_info, cells_info, param_info):
-        self.members, self.reach, self.spaces, self.values, self.texts = {}, {}, {}, {}, {}
-        for info in (cells_info or {}).values():                # text-valued classes: {text: position}
-            for cls in (getattr(info, 'enum_codes', None) or {}).values():
-                self.texts[cls.__module__, cls.__qualname__] = positions(cls)[1]
-        for owner, params in (param_info or {}).items():        # the parameters of item Spaces
-            for name, info in params.items():
-                if isinstance(_kind(getattr(info, 'type_', None)), tuple):
-                    self.values[owner, name] = _kind(info.type_)
+    def __init__(self, ref_info, cells_info):
+        self.refs, self.spaces, self.cells, self.strict = {}, {}, {}, set()
         for fqname, info in ref_info.items():
             owner, _, ref = fqname.rpartition('.')
-            enum = getattr(info, 'enum', None)
-            if isinstance(_kind(getattr(info, 'type_', None)), tuple):
-                self.values[owner, ref] = _kind(info.type_)     # a Reference whose value is a member: a C integer
-            if enum and getattr(info, 'enum_safe', False):
-                self.members[owner, ref] = (enum[:2], {name: value for name, value in enum[2].items()
-                                                       if -(1 << 63) <= value < (1 << 63)})
-                self.reach.setdefault((owner, enum[:2]), ref)
-                if getattr(info, 'enum_texts', None) is not None:
-                    self.texts[enum[:2]] = info.enum_texts
+            if getattr(info, 'enum_class', None) is not None:
+                self.refs[owner, ref] = info.enum_class
             if getattr(info, 'mx_class', ''):
                 self.spaces[owner, ref] = info.mx_class
-        self.cells = {key: _signature(info) for key, info in (cells_info or {}).items()}
-        self.typed = bool(self.values) or any(isinstance(kind, tuple) for _, kinds, result in self.cells.values()
-                                              for kind in (*kinds.values(), result))
+        self.infos = cells_info
+        self.held()
 
-    def concerns(self, module):
-        return self.typed or any(owner.rpartition('.')[0] == module for owner, _ in self.members)
+    def held(self):
+        """{Cell key: (parameter names, {held parameter: (class, Reference)})}; a parameter whose Space has no
+        Reference to its class is an object."""
+        for key, info in self.infos.items():
+            owner, held = key.rpartition('.')[0], {}
+            for name, cls in sorted((getattr(info, 'enum_codes', None) or {}).items()):
+                ref = min((ref for (where, ref), value in self.refs.items() if where == owner and value is cls),
+                          default=None)
+                if ref is None:
+                    release(info, name)
+                else:
+                    held[name] = (cls, ref)
+            self.cells[key] = (tuple(getattr(info, 'arg_types', None) or ()), held)
 
     def cell(self, owner, name):
-        return self.cells.get(f'{owner}._f_{name}') or self.cells.get(f'{owner}.{name}')
-
-
-class _Bindings(cst.CSTVisitor):
-    """{name: [values of each binding, or None for a binding that is not `name = value` or `for name in display`]}
-    of a method's own scope."""
-
-    def __init__(self):
-        self.found, self.depth = {}, 0
-
-    def other(self, target):
-        for name in _target_names(target):
-            self.found.setdefault(name, []).append(None)
-
-    def visit_Assign(self, node):
-        if self.depth:
-            return
-        if len(node.targets) == 1 and isinstance(node.targets[0].target, cst.Name):
-            self.found.setdefault(node.targets[0].target.value, []).append([node.value])
-        else:
-            for target in node.targets:
-                self.other(target.target)
-
-    def visit_For(self, node):
-        if self.depth:
-            return
-        if (isinstance(node.target, cst.Name) and isinstance(node.iter, _DISPLAYS)
-                and all(isinstance(element, cst.Element) for element in node.iter.elements)):
-            self.found.setdefault(node.target.value, []).append([element.value for element in node.iter.elements])
-        else:
-            self.other(node.target)
-
-    def visit_AugAssign(self, node):
-        if not self.depth:
-            self.other(node.target)
-
-    visit_AnnAssign = visit_Del = visit_AugAssign
-
-    def visit_NamedExpr(self, node):        # binds in the function, also from inside a comprehension
-        self.other(node.target)
-
-    def visit_AsName(self, node):
-        if not self.depth:
-            self.other(node.name)
-
-    def visit_ImportAlias(self, node):
-        if not self.depth and node.asname is None:
-            root = node.name
-            while isinstance(root, cst.Attribute):
-                root = root.value
-            self.other(root)
-
-    def visit_Global(self, node):
-        for item in node.names:
-            self.found.setdefault(item.name.value, []).append(None)
-
-    visit_Nonlocal = visit_Global
-
-    def visit_FunctionDef(self, node):
-        if not self.depth:
-            self.other(node.name)
-        self.depth += 1
-
-    visit_ClassDef = visit_FunctionDef
-
-    def leave_FunctionDef(self, node):
-        self.depth -= 1
-
-    leave_ClassDef = leave_FunctionDef
-
-    def visit_Lambda(self, node):
-        self.depth += 1
-
-    def leave_Lambda(self, node):
-        self.depth -= 1
-
-    def visit_MatchAs(self, node):
-        if not self.depth and node.name is not None:
-            self.other(node.name)
-
-    def visit_MatchStar(self, node):
-        self.visit_MatchAs(node)
-
-    def visit_MatchMapping(self, node):
-        if not self.depth and node.rest is not None:
-            self.other(node.rest)
+        for key in (f'{owner}._f_{name}', f'{owner}.{name}'):
+            if key in self.cells:
+                return key, *self.cells[key]
+        return None
 
 
 class _Formula:
-    """One method of a Space class: its signature, bindings and, after ``analyse``, its uses."""
+    """One method of a Space class: its held names and their uses."""
 
-    def __init__(self, model, module, cls, node):
-        self.model, self.module, self.cls, self.node = model, module, cls, node
+    def __init__(self, model, module, cls, node, scopes, parents):
+        self.model, self.module, self.cls, self.node, self.parents = model, module, cls, node, parents
         self.owner = f'{module}.{cls}'
         self.key = f'{self.owner}.{node.name.value}'
-        names, kinds, self.result = model.cells.get(self.key) or ((), {}, None)
-        params = node.params
-        self.params = [p.name.value for p in (*params.posonly_params, *params.params, *params.kwonly_params,
-                                              *(p for p in (params.star_arg, params.star_kwarg)
-                                                if isinstance(p, cst.Param)))]
-        finder = _Bindings()
-        node.body.visit(finder)
-        self.bindings = finder.found
-        self.own = self.params[:1] == ['self'] and 'self' not in self.bindings
-        self.kinds = {name: kinds.get(name) for name in self.params[1:]}
+        self.scopes, scope = scopes, scopes[node.body]
+        params = [*node.params.posonly_params, *node.params.params, *node.params.kwonly_params]
+        self.params = {p.name.value: p for p in params}
+        first = params[0].name.value if params else None
+        mine = [a for a in scope.assignments[first] if a.node is params[0]] if first == 'self' else []
+        self.me = mine[0] if mine else None
+        self.selves = {id(a.node) for a in (self.me.references if self.me else ())
+                       if set(scopes[a.node]['self']) == {self.me}}
+        self.held = dict(model.cells.get(self.key, ((), {}))[1])
+        self.calls, self.loops = [], []
+        for found in _Found(self).collect(node.body):
+            (self.calls if isinstance(found, cst.Call) else self.loops).append(found)
 
-    def where(self):
-        """The Cell as the model names it (``Space.cell``, as ``builder`` ``model_path``)."""
-        spaces = [part[3:] for part in self.module.split('.')[1:-1]]
-        return '.'.join((*spaces, self.cls.removeprefix('_c_'), self.node.name.value.removeprefix('_f_')))
+    def refs(self, node):
+        """The uses of the name a parameter or loop target binds, if this is its only binding."""
+        name = node.name.value if isinstance(node, cst.Param) else node.value
+        bound = self.scopes[node].assignments[name]
+        return [a.node for a in next(iter(bound)).references] if len(bound) == 1 else None
+
+    def own(self, node):
+        """Whether ``node``, a use, sees this method's ``self``."""
+        return set(self.scopes[node]['self']) == {self.me}
 
     def member(self, node):
-        """(class, integer) of ``self.<Ref>.<member>``, else None."""
+        """(class, position) of ``self.<Ref>.<member>``, else None."""
         if (isinstance(node, cst.Attribute) and isinstance(node.value, cst.Attribute)
-                and isinstance(node.value.value, cst.Name) and node.value.value.value == 'self'):
-            cls, members = self.model.members.get((self.owner, node.value.attr.value), (None, {}))
-            if node.attr.value in members:
-                return cls, members[node.attr.value]
+                and id(node.value.value) in self.selves):
+            cls = self.model.refs.get((self.owner, node.value.attr.value))
+            if cls is not None:
+                return cls, positions(cls)[0].get(node.attr.value)
         return None
 
-    def value(self, node):
-        """The class of ``self.<Ref>`` whose value is a member (an item Space's parameter too), else None."""
-        if isinstance(node, cst.Attribute) and isinstance(node.value, cst.Name) and node.value.value == 'self':
-            return self.model.values.get((self.owner, node.attr.value))
-        return None
-
-    def space(self, node):
-        """The class path of the Space that ``self.<name>`` holds (a child Space or a Reference to a Space), else None."""
-        if isinstance(node, cst.Attribute) and isinstance(node.value, cst.Name) and node.value.value == 'self':
-            name = node.attr.value
-            found = self.model.spaces.get((self.owner, name))
-            if found is not None:           # the model may have been renamed since the trace
-                return '.'.join((self.module.partition('.')[0], *found.split('.')[1:]))
-            child = '.'.join(filter(None, (self.module.rpartition('.')[0], f'_m_{self.cls[3:]}', '_mx_classes',
-                                           f'_c_{name}')))
-            if name in self.children or any(key.startswith(child + '.') for key in self.model.cells):
-                return child
-        return None
-
-    def callee(self, node):
-        """(Cell key, signature) of ``self.<cell>(...)`` or ``self.<Space>.<cell>(...)``, else None."""
-        func = node.func
+    def callee(self, call):
+        """(key, parameter names, held parameters) of ``self.<cell>(...)`` or ``self.<Space>.<cell>(...)``."""
+        func = call.func
         if not isinstance(func, cst.Attribute):
             return None
-        if isinstance(func.value, cst.Name) and func.value.value == 'self':
-            owner = self.owner
-        else:
-            owner = self.space(func.value)
-        for key in (f'{owner}._f_{func.attr.value}', f'{owner}.{func.attr.value}') if owner else ():
-            if key in self.model.cells:
-                return key, self.model.cells[key]
+        if id(func.value) in self.selves:
+            return self.model.cell(self.owner, func.attr.value)
+        if isinstance(func.value, cst.Attribute) and id(func.value.value) in self.selves:
+            name = func.value.attr.value
+            found = self.model.spaces.get((self.owner, name))       # the model may be renamed since the trace
+            child = '.'.join(filter(None, (self.module.rpartition('.')[0], f'_m_{self.cls[3:]}', '_mx_classes')))
+            for owner in ('.'.join((self.module.partition('.')[0], *found.split('.')[1:])) if found else None,
+                          f'{child}._c_{name}'):
+                if owner and self.model.cell(owner, func.attr.value):
+                    return self.model.cell(owner, func.attr.value)
         return None
 
-    def reach(self, cls):
-        """The expression that gives the class ``cls`` in this method."""
-        ref = self.model.reach.get((self.owner, cls))
-        if ref is not None:
-            return f'self.{ref}'
-        return f"__import__('importlib').import_module({cls[0]!r}).{cls[1]}"
+    def slots(self, call, callee):
+        """[(argument, held parameter)] of a call; None where a starred argument hides them."""
+        names, held, found = callee[1], callee[2], []
+        for position, arg in enumerate(call.args):
+            if arg.star:
+                return None if held else []
+            name = arg.keyword.value if arg.keyword else (names[position] if position < len(names) else None)
+            if name in held:
+                found.append((arg, name))
+        return found
 
-    def analyse(self, forced=frozenset()):
-        """``forced``: expressions that must give the member although their use takes an integer."""
-        banned = set()
-        while True:
-            uses = _Uses(self, banned, forced)
-            for param in (*self.node.params.posonly_params, *self.node.params.params, *self.node.params.kwonly_params):
-                kind = self.kinds.get(param.name.value)
-                if param.default is not None and kind in self.model.texts and uses.codeable(param.default, kind):
-                    uses.wants(kind, param.default)         # a text default of a parameter held as a position
-                    param.default.visit(uses)
-            self.node.body.visit(uses)
-            if uses.objects <= banned:
-                self.uses = uses
-                return
-            banned |= uses.objects
-
-
-class _Uses(cst.CSTVisitor):
-    """The contexts of one method. ``literal``: members to write as integers; ``convert``: integer-held values to
-    convert to their member; ``objects``: locals and loop variables that must hold objects (they have a use that
-    needs the member), found under the assumption that those in ``banned`` already do."""
-
-    def __init__(self, formula, banned, forced=frozenset()):
-        self.f, self.banned, self.forced = formula, banned, forced
-        self.int_ok, self.elements, self.nonload, self.stores = set(), set(), set(), set()
-        self.literal, self.convert, self.objects = {}, {}, set()
-        self.needs, self.flows, self.loops = set(), [], {}
-        self.code, self.encode, self.texts = {}, {}, formula.model.texts    # code: {id: class whose code is wanted}
-        self.depth = self.foreign = 0
-        # a held name: (class, key, whether it may be turned into an object by banning it)
-        scope = {name: (kind, ('param', formula.key, name), False)
-                 for name, kind in formula.kinds.items() if isinstance(kind, tuple)}
-        self.scopes = [scope]
-        for name, (kind, _, _) in list(scope.items()):     # a parameter the formula rebinds: to its own class only
-            values = [value for values in formula.bindings.get(name, ()) for value in values or (None,)]
-            if any(value is None or self.classify(value) != kind for value in values):
-                scope[name] = (None, ('param', formula.key, name), False)
-        grown = True
-        while grown:
-            grown = False
-            for name, bindings in formula.bindings.items():
-                if name in scope or name in formula.params or ('local', name) in banned or None in bindings:
-                    continue
-                classes = {self.classify(value) for values in bindings for value in values}
-                if len(classes) == 1 and None not in classes:
-                    scope[name] = (classes.pop(), ('local', name), True)
-                    grown = True
-
-    # ---- names and classes
-    def resolve(self, name):
-        for scope in reversed(self.scopes):
-            if name in scope:
-                return scope[name]
-        return None
-
-    def classify(self, node):
-        """The class of an expression that is an enum value held as an integer (or a member written here)."""
-        if isinstance(node, cst.IfExp):
-            body, orelse = self.classify(node.body), self.classify(node.orelse)
-            return body if body == orelse else None
-        if isinstance(node, cst.BooleanOperation):
-            left, right = self.classify(node.left), self.classify(node.right)
-            return left if left == right else None
-        if isinstance(node, cst.Name):
-            entry = self.resolve(node.value)
-            return entry[0] if entry else None
-        if self.foreign:
-            return None
-        member = self.f.member(node)
+    def code(self, node, cls, held):
+        """What ``node`` stands for beside a held value of ``cls``: the position of a member or of a value
+        literal (-1 for one of no member), True for a held name of ``cls``, else None."""
+        member = self.member(node)
         if member is not None:
-            return member[0]
-        callee = self.f.callee(node) if isinstance(node, cst.Call) else None
-        return callee[1][2] if callee and isinstance(callee[1][2], tuple) else self.f.value(node)
-
-    def held(self, node, cls):
-        """Whether the use of ``node``, a value of ``cls``, takes the integer that stands for it."""
-        if cls is None or cls not in self.texts:
-            return id(node) in self.int_ok or cls is not None and id(node) in self.code
-        return self.code.get(id(node)) == cls
-
-    def codeable(self, node, cls):
-        """Whether ``node`` can be written or is held as the code of a member of the text-valued ``cls``."""
-        return self.classify(node) == cls or isinstance(node, cst.SimpleString) and node.prefix == ''
-
-    def wants(self, cls, *nodes):
-        for node in nodes:
-            self.code[id(node)] = cls
-
-    def numeric(self, node):
-        """Whether ``node`` is known to be a number (so that ``node % x`` is arithmetic, not formatting)."""
-        if isinstance(node, (cst.Integer, cst.Float)) or self.classify(node) not in (None, *self.texts):
+            return member[1] if member[0] is cls and member[1] is not None else None
+        if held.get(id(node)) is cls:
             return True
-        if isinstance(node, cst.Name):
-            return self.resolve(node.value) is None and self.f.kinds.get(node.value) == 'number' \
-                and node.value not in self.f.bindings
-        if isinstance(node, cst.UnaryOperation):
-            return self.numeric(node.expression)
-        if isinstance(node, cst.BinaryOperation):
-            return not isinstance(node.operator, cst.Modulo) or self.numeric(node.left)
-        if isinstance(node, cst.Call):
-            callee = self.f.callee(node) if not self.foreign else None
-            return callee is not None and callee[1][2] is not None or self.builtin(node) in _NUMERIC
-        return False
+        literal = node.evaluated_value if isinstance(node, (cst.SimpleString, cst.Integer)) else None
+        return None if literal is None or not isinstance(literal, family(cls)) else positions(cls)[1].get(literal, -1)
 
-    def builtin(self, node):
-        name = node.func.value if isinstance(node.func, cst.Name) else None
-        return name if name not in self.f.bindings and name not in self.f.params and self.resolve(name) is None \
-            else None
+    def use(self, node, cls, held):
+        """The literals to write as positions where the use of a held ``node`` takes the integer: a list of
+        (node, position), with the parameter it is given to (key, name) or None; else None (an object use)."""
+        parent = self.parents[node]
+        comparison = self.parents[parent] if isinstance(parent, cst.ComparisonTarget) else parent
+        if isinstance(comparison, cst.Comparison) and len(comparison.comparisons) == 1:
+            target = comparison.comparisons[0]
+            sides = [target.comparator if comparison.left is node else comparison.left]
+            if isinstance(target.operator, (cst.In, cst.NotIn)):
+                display = target.comparator
+                if comparison.left is not node or not isinstance(display, _DISPLAYS) or not all(
+                        isinstance(element, cst.Element) for element in display.elements):
+                    return None
+                sides = [element.value for element in display.elements]
+            elif not isinstance(target.operator, (cst.Equal, cst.NotEqual)):
+                return None
+            codes = [self.code(side, cls, held) for side in sides]
+            return None if None in codes else ([(s, c) for s, c in zip(sides, codes) if c is not True], None)
+        call = self.parents.get(parent)
+        if isinstance(parent, cst.Arg) and parent.value is node and isinstance(call, cst.Call):
+            callee = self.callee(call)
+            for arg, name in (self.slots(call, callee) or ()) if callee else ():
+                if arg is parent and callee[2][name][0] is cls:
+                    return [], (callee[0], name)
+        return None
 
-    def target(self, node):
-        if isinstance(node, cst.Name):
-            self.nonload.add(id(node))
-        elif isinstance(node, (cst.Tuple, cst.List)):
-            for element in node.elements:
-                self.target(element.value)
-        elif isinstance(node, cst.StarredElement):
-            self.target(node.value)
-        elif isinstance(node, cst.Subscript):
-            self.stores.add(id(node))
-        elif isinstance(node, cst.Attribute):
-            self.nonload.add(id(node))
 
-    def sources(self, node, seen=()):
-        """Where the value of ``node`` comes from: (class, holder key or None for a member written here) for each
-        enum value, (None, None) for anything else."""
-        if isinstance(node, cst.IfExp):
-            return self.sources(node.body, seen) + self.sources(node.orelse, seen)
-        if isinstance(node, cst.BooleanOperation):
-            return self.sources(node.left, seen) + self.sources(node.right, seen)
-        if isinstance(node, cst.Name):
-            entry = self.resolve(node.value)
-            if entry is None or entry[0] is None or entry[1] in seen:
-                return [(None, None)]
-            if not entry[2]:
-                return [(entry[0], entry[1])]
-            values = self.loops.get(entry[1]) or [value for values in self.f.bindings[node.value] for value in values]
-            return [found for value in values for found in self.sources(value, (*seen, entry[1]))]
-        member = None if self.foreign else self.f.member(node)
-        if member is not None:
-            return [(member[0], None)]
-        callee = self.f.callee(node) if isinstance(node, cst.Call) and not self.foreign else None
-        if callee is not None and isinstance(callee[1][2], tuple):
-            return [(callee[1][2], ('result', callee[0]))]
-        held = None if self.foreign else self.f.value(node)
-        return [(held, ('value', self.f.owner, node.attr.value) if held else None)]
+class _Found(cst.CSTVisitor):
+    """The calls of Cells with held parameters and the loops over displays of members in a method."""
 
-    def flow(self, sink, cls, node):
-        """``node`` goes to a parameter or result held as an integer of ``cls``; True if it may go as an integer."""
-        if id(node) in self.forced:
-            return False
-        self.flows.append((sink, cls, node, self.sources(node)))
-        return True
+    def __init__(self, formula):
+        self.f, self.found = formula, []
 
-    def needs_member(self, node, cls, key):
-        self.needs.add(key)
-        if cls is None:
-            raise TypeError(f'{self.f.where()}: `{_code(node)}` needs the IntEnum member of a parameter that the '
-                            'formula rebinds; compiled code holds the parameter as an integer. Bind another name')
-        if self.foreign:
-            raise TypeError(f'{self.f.where()}: `{_code(node)}` needs an IntEnum member inside a function that has '
-                            'its own `self`; compiled code holds the value as an integer')
-        self.convert[id(node)] = ('_mx_enum_at' if cls in self.texts else '_mx_enum_of', self.f.reach(cls))
-
-    # ---- uses
-    def visit_SimpleString(self, node):
-        cls = self.code.get(id(node))
-        if cls in self.texts:           # a text that is no member's value equals no member: a code that none has
-            self.literal[id(node)] = self.texts[cls].get(node.evaluated_value, -2)
-
-    def visit_Name(self, node):
-        if id(node) in self.nonload:
-            return
-        entry = self.resolve(node.value)
-        if entry is None or self.held(node, entry[0]):
-            return
-        cls, key, bannable = entry
-        if bannable:
-            self.objects.add(key)
-        else:
-            self.needs_member(node, cls, key)
-
-    def visit_Attribute(self, node):
-        self.nonload.add(id(node.attr))
-        member = None if self.foreign else self.f.member(node)
-        if member is not None:
-            if self.held(node, member[0]):
-                self.literal[id(node)] = member[1]
-            return False
-        held = None if self.foreign else self.f.value(node)
-        if held is not None:
-            if not self.held(node, held) and id(node) not in self.nonload:
-                self.needs_member(node, held, ('value', self.f.owner, node.attr.value))
-            return False
+    def collect(self, node):
+        node.visit(self)
+        return self.found
 
     def visit_Call(self, node):
-        callee = None if self.foreign else self.f.callee(node)
-        builtin = self.builtin(node)
-        starred = False
-        for position, arg in enumerate(node.args):
-            starred = starred or bool(arg.star)
-            if arg.keyword is not None:
-                self.nonload.add(id(arg.keyword))
-            if arg.star or starred and arg.keyword is None:
-                continue
-            if callee is not None:
-                names, kinds, _ = callee[1]
-                name = arg.keyword.value if arg.keyword is not None else (names[position:position + 1] or (None,))[0]
-                kind = kinds.get(name)
-                if kind in self.texts:              # the position of a member, or a conversion when it runs
-                    if self.codeable(arg.value, kind):
-                        self.wants(kind, arg.value)
-                    else:
-                        self.encode[id(arg.value)] = self.f.reach(kind)
-                elif kind is not None and (kind == 'number' or self.flow(('param', callee[0], name), kind, arg.value)):
-                    self.int_ok.add(id(arg.value))
-            elif builtin in _NUMERIC or builtin in _EXTREMES and id(node) in self.int_ok:
-                self.int_ok.add(id(arg.value))
-        if callee is not None and isinstance(callee[1][2], tuple) and not self.held(node, callee[1][2]):
-            self.needs_member(node, callee[1][2], ('result', callee[0]))
+        callee = self.f.callee(node)
+        if callee and callee[2]:
+            self.found.append(node)
 
-    def visit_Comparison(self, node):
-        operands = [node.left, *(item.comparator for item in node.comparisons)]
-        operators = [item.operator for item in node.comparisons]
-        for position, operand in enumerate(operands):
-            near = operators[max(position - 1, 0):position + 1]
-            if any(isinstance(operator, (cst.Is, cst.IsNot)) for operator in near):
-                continue
-            self.int_ok.add(id(operand))
-            if position and isinstance(operators[position - 1], (cst.In, cst.NotIn)) and isinstance(operand, _DISPLAYS):
-                self.elements.add(id(operand))
-        if len(operands) == 2:          # a text-valued class: both sides as codes, or both as objects
-            left, right = operands
-            if isinstance(operators[0], (cst.Equal, cst.NotEqual)):
-                sides = [left, right]
-            elif isinstance(operators[0], (cst.In, cst.NotIn)) and isinstance(right, _DISPLAYS) and all(
-                    isinstance(element, cst.Element) for element in right.elements):
-                sides = [left, *(element.value for element in right.elements)]
-            else:
-                return
-            classes = {self.classify(side) for side in sides} & set(self.texts)
-            if len(classes) == 1 and all(self.codeable(side, cls) for cls in classes for side in sides):
-                self.wants(classes.pop(), *sides)
+    def loop(self, node):
+        elements = node.iter.elements if isinstance(node.iter, _DISPLAYS) else ()
+        members = [self.f.member(e.value) if isinstance(e, cst.Element) else None for e in elements]
+        if (isinstance(node.target, cst.Name) and members and None not in members
+                and len({cls for cls, _ in members}) == 1 and None not in {position for _, position in members}):
+            self.found.append(node)
 
-    def visit_BinaryOperation(self, node):
-        if not isinstance(node.operator, cst.Modulo) or self.numeric(node.left):
-            self.int_ok.update((id(node.left), id(node.right)))
-
-    def visit_UnaryOperation(self, node):
-        self.int_ok.add(id(node.expression))
-
-    def visit_BooleanOperation(self, node):
-        if id(node) in self.int_ok:
-            self.int_ok.update((id(node.left), id(node.right)))
-        if id(node) in self.code:
-            self.wants(self.code[id(node)], node.left, node.right)
-
-    def visit_IfExp(self, node):
-        self.int_ok.add(id(node.test))
-        if id(node) in self.int_ok:
-            self.int_ok.update((id(node.body), id(node.orelse)))
-        if id(node) in self.code:
-            self.wants(self.code[id(node)], node.body, node.orelse)
-
-    def visit_If(self, node):
-        self.int_ok.add(id(node.test))
-
-    visit_While = visit_Assert = visit_CompIf = visit_If
-
-    def visit_Subscript(self, node):
-        if id(node) in self.stores or not self.foreign and self.f.space(node.value) is not None:
-            return                      # a stored key and the argument of an item Space stay objects
-        for element in node.slice:
-            part = element.slice
-            if isinstance(part, cst.Index):
-                self.int_ok.add(id(part.value))
-                if isinstance(part.value, cst.Tuple):
-                    self.elements.add(id(part.value))
-            else:
-                self.int_ok.update(id(bound) for bound in (part.lower, part.upper, part.step) if bound is not None)
-
-    def visit_Tuple(self, node):
-        if id(node) in self.elements:
-            self.int_ok.update(id(element.value) for element in node.elements if isinstance(element, cst.Element))
-
-    visit_List = visit_Set = visit_Tuple
-
-    def visit_MatchValue(self, node):
-        self.int_ok.add(id(node.value))
-
-    def visit_Return(self, node):
-        kind = self.f.result
-        if node.value is not None and not self.depth and kind is not None and (
-                kind == 'number' or self.flow(('result', self.f.key), kind, node.value)):
-            self.int_ok.add(id(node.value))
-
-    def held_local(self, target):
-        entry = self.resolve(target.value) if isinstance(target, cst.Name) else None
-        return entry[0] if entry is not None and entry[0] is not None and not self.depth else None
-
-    def visit_Assign(self, node):
-        for target in node.targets:
-            self.target(target.target)
-        cls = self.held_local(node.targets[0].target) if len(node.targets) == 1 else None
-        if cls is not None:
-            self.int_ok.add(id(node.value))
-            self.wants(cls, node.value)
-
-    def visit_AugAssign(self, node):
-        self.target(node.target)
-        if not isinstance(node.operator, cst.ModuloAssign):
-            self.int_ok.add(id(node.value))
-
-    def visit_AnnAssign(self, node):
-        self.target(node.target)
-
-    visit_Del = visit_AnnAssign
-
-    def visit_NamedExpr(self, node):
-        self.target(node.target)
-
-    def visit_AsName(self, node):
-        self.target(node.name)
-
-    def visit_For(self, node):
-        self.target(node.target)
-        cls = self.held_local(node.target)
-        if cls is not None and isinstance(node.iter, _DISPLAYS):
-            self.elements.add(id(node.iter))
-            self.wants(cls, *(element.value for element in node.iter.elements))
-
-    # ---- scopes
-    def _comprehension(self, node):
-        parts, part = [], node.for_in
-        while part is not None:
-            parts.append(part)
-            part = part.inner_for_in
-        bound = [name for part in parts for name in _target_names(part.target)]
-        scope = dict.fromkeys(bound)
-        for part in parts:
-            self.target(part.target)
-            if (isinstance(part.target, cst.Name) and isinstance(part.iter, _DISPLAYS) and part.iter.elements
-                    and bound.count(part.target.value) == 1 and ('loop', id(part)) not in self.banned
-                    and all(isinstance(element, cst.Element) for element in part.iter.elements)):
-                classes = {self.classify(element.value) for element in part.iter.elements}
-                if len(classes) == 1 and None not in classes:
-                    scope[part.target.value] = (classes.pop(), ('loop', id(part)), True)
-                    self.loops['loop', id(part)] = [element.value for element in part.iter.elements]
-                    self.elements.add(id(part.iter))
-                    self.wants(scope[part.target.value][0], *self.loops['loop', id(part)])
-        self.scopes.append(scope)
-        self.foreign += 'self' in scope
-
-    def _leave(self, node):
-        self.foreign -= 'self' in self.scopes.pop()
-
-    visit_GeneratorExp = visit_ListComp = visit_SetComp = visit_DictComp = _comprehension
-    leave_GeneratorExp = leave_ListComp = leave_SetComp = leave_DictComp = _leave
-
-    def _function(self, node, bound):
-        finder = _Bindings()
-        node.body.visit(finder)
-        bound = {*bound, *finder.found}
-        self.scopes.append(dict.fromkeys(bound))
-        self.depth += 1
-        self.foreign += 'self' in bound
-
-    def visit_FunctionDef(self, node):
-        self.nonload.add(id(node.name))
-        params = node.params
-        self._function(node, [p.name.value for p in (*params.posonly_params, *params.params, *params.kwonly_params,
-                                                     *(p for p in (params.star_arg, params.star_kwarg)
-                                                       if isinstance(p, cst.Param)))])
-
-    def visit_Lambda(self, node):
-        params = node.params
-        self._function(node, [p.name.value for p in (*params.posonly_params, *params.params, *params.kwonly_params,
-                                                     *(p for p in (params.star_arg, params.star_kwarg)
-                                                       if isinstance(p, cst.Param)))])
-
-    def leave_FunctionDef(self, node):
-        self.foreign -= 'self' in self.scopes.pop()
-        self.depth -= 1
-
-    leave_Lambda = leave_FunctionDef
-
-    def visit_Param(self, node):
-        self.nonload.add(id(node.name))
-
-    def visit_Annotation(self, node):
-        return False
-
-    visit_ClassDef = visit_Import = visit_ImportFrom = visit_Global = visit_Nonlocal = visit_Annotation
-
-    def visit_MatchAs(self, node):
-        if node.name is not None:
-            self.nonload.add(id(node.name))
-
-    visit_MatchStar = visit_MatchAs
-
-    def visit_MatchMapping(self, node):
-        if node.rest is not None:
-            self.nonload.add(id(node.rest))
-
-    def visit_MatchKeywordElement(self, node):
-        self.nonload.add(id(node.key))
+    visit_For = visit_CompFor = loop
 
 
-class _Rewrite(cst.CSTTransformer):
-    def __init__(self, literal, convert, checks, encode):
-        super().__init__()
-        self.literal, self.convert, self.checks, self.encode = literal, convert, checks, encode
-
-    def on_leave(self, original, updated):
-        updated = super().on_leave(original, updated)
-        value = self.literal.get(id(original))
-        if value is not None:
-            updated = self.integer(original, value)
-        function, cls = self.convert.get(id(original), (None, None))
-        if cls is not None:
-            updated = cst.Call(cst.parse_expression(f'{MX_SYS_MOD}.{function}'), [
-                cst.Arg(cst.parse_expression(cls)), cst.Arg(updated.with_changes(lpar=(), rpar=()))],
-                lpar=updated.lpar, rpar=updated.rpar)
-        cls = self.encode.get(id(original))
-        if cls is not None:
-            updated = cst.Call(cst.parse_expression(f'{MX_SYS_MOD}._mx_enum_code'),
-                               [cst.Arg(cst.parse_expression(cls)), cst.Arg(updated)])
-        cls = self.checks.get(id(original))
-        if cls is not None:
-            updated = cst.Call(cst.parse_expression(f'{MX_SYS_MOD}._mx_enum_member'),
-                               [cst.Arg(cst.parse_expression(cls)), cst.Arg(updated)])
-        return updated
-
-    @staticmethod
-    def integer(original, value):
-        literal = cst.Integer(str(abs(value)))
-        if value < 0:
-            literal = cst.UnaryOperation(cst.Minus(), literal, lpar=[cst.LeftParen()], rpar=[cst.RightParen()])
-        return literal.with_changes(lpar=(*original.lpar, *literal.lpar), rpar=(*literal.rpar, *original.rpar))
-
-
-def plan(sources, ref_info, cells_info=None, param_info=None):
-    """{module: source} with IntEnum members and values written for their uses (see the module docstring), for all
-    modules of a model at once: a Cell's parameters and result are known wherever it is called.
-
-    A parameter or result that some formula converts to its member must hold a value of its traced class. Where a
-    formula gives it a member of another class, or a value whose class the text does not show, that value goes
-    as an object through a check that raises ``TypeError`` unless it is a member of the class."""
-    model = _Model(ref_info, cells_info, param_info)
-    trees, formulas = {}, []
+def plan(sources, ref_info, cells_info=None):
+    """{module: source} with the formulas of all modules of a model written for held enum members (see the
+    module docstring). Sets ``enum_gate``, {parameter: (Reference, strict)}, on the info of each Cell with a held
+    parameter, for its calls from Python."""
+    model = _Model(ref_info, cells_info or {})
+    names = {key.rpartition('.')[2].removeprefix('_f_') for key, (_, held) in model.cells.items() if held}
+    formulas, wrappers = [], {}
     for module, source in sources.items():
-        if not model.concerns(module):
+        if not names or not any(name + '(' in source for name in names):
             continue
-        trees[module] = cst.parse_module(source)
-        for cls in trees[module].body:
-            if not isinstance(cls, cst.ClassDef):
-                continue
-            methods = [node for node in cls.body.body if isinstance(node, cst.FunctionDef)]
-            children = {target.target.attr.value for node in methods if node.name.value == '__init__'
-                        for line in node.body.body if isinstance(line, cst.SimpleStatementLine)
-                        for small in line.body if isinstance(small, cst.Assign) and isinstance(small.value, cst.Call)
-                        and _code(small.value.func).rpartition('.')[2].startswith('_c_')
-                        for target in small.targets if isinstance(target.target, cst.Attribute)}
-            formulas_of = {node.name.value for node in methods}
-            for node in methods:
-                name = node.name.value
-                if name.startswith(('_mx_', '__')) or '_f_' + name in formulas_of:
-                    continue                # the model's own methods; the cache method of a formula
-                formula = _Formula(model, module, cls.name.value, node)
-                formula.children, formula.forced = children, set()
-                if formula.own:
-                    formula.analyse()
-                    formulas.append(formula)
-    while True:                 # which parameters and results must be of their class, and what reaches them unproved
-        needy, grown = set().union(*(formula.uses.needs for formula in formulas)), True
-        while grown:
-            grown = False
-            for formula in formulas:
-                for sink, cls, node, found in formula.uses.flows:
-                    held = {key for source, key in found if key is not None and source == cls} if sink in needy else set()
-                    grown = grown or not held <= needy
-                    needy.update(held)
-        again = False
-        for formula in formulas:
-            forced = {id(node) for sink, cls, node, found in formula.uses.flows
-                      if sink in needy and any(source != cls for source, _ in found)}
-            if not forced <= formula.forced:
-                formula.forced |= forced
-                formula.checks = {id(node): formula.reach(cls) for sink, cls, node, found in formula.uses.flows
-                                  if id(node) in formula.forced} | getattr(formula, 'checks', {})
-                formula.analyse(formula.forced)
-                again = True
-        if not again:
+        wrappers[module] = wrapper = MetadataWrapper(cst.parse_module(source), unsafe_skip_copy=True)
+        scopes, parents = wrapper.resolve(ScopeProvider), wrapper.resolve(ParentNodeProvider)
+        for cls in wrapper.module.body:
+            methods = {node.name.value: node for node in (cls.body.body if isinstance(cls, cst.ClassDef) else ())
+                       if isinstance(node, cst.FunctionDef)}
+            for name, node in methods.items():      # not the model's own methods, nor the cache of a formula
+                if not name.startswith(('_mx_', '__')) and '_f_' + name not in methods:
+                    formulas.append(_Formula(model, module, cls.name.value, node, scopes, parents))
+    seen = {f.key for f in formulas}
+    for key, (_, held) in model.cells.items():      # a formula that is not read here cannot hold its parameters
+        for name in held if key not in seen else ():
+            release(model.infos[key], name)
+    while True:
+        edits = {module: {} for module in wrappers}     # {id of a node: [functions of the rewritten node]}
+        for f in formulas:
+            _settle(f, model, edits[f.module])
+        model.held()
+        flows, objects = [], set()
+        for f in formulas:
+            _uses(f, model, edits[f.module], flows, objects)
+        grown = True
+        while grown:            # a parameter given on to a strict one is strict
+            grown = not objects.issuperset(caller for caller, given in flows if given in objects)
+            objects.update(caller for caller, given in flows if given in objects)
+        texts = {(key, name) for key, name in objects if name in getattr(model.infos[key], 'enum_plain', ())}
+        if not texts:           # a strict parameter that the sample gave a plain value is an object
             break
-    for kind, *key in needy:        # for the gate of calls from Python: the class such a parameter must be given
-        info = (cells_info or {}).get(key[0]) if kind == 'param' else None
-        cls = (getattr(info, 'arg_types', None) or {}).get(key[1]) if info is not None else None
-        if enum_safe(cls):
-            vars(info).setdefault('enum_members', {})[key[1]] = cls
+        for key, name in texts:
+            release(model.infos[key], name)
+    model.strict = objects
+    for key, (_, held) in model.cells.items():
+        if held:
+            model.infos[key].enum_gate = {name: (ref, (key, name) in objects) for name, (_, ref) in held.items()}
     result = dict(sources)
-    for module, tree in trees.items():
-        literal, convert, checks, encode = {}, {}, {}, {}
-        for formula in formulas:
-            if formula.module == module:
-                literal.update(formula.uses.literal)
-                convert.update(formula.uses.convert)
-                encode.update(formula.uses.encode)
-                checks.update(getattr(formula, 'checks', {}))
-        if literal or convert or checks or encode:
-            result[module] = tree.visit(_Rewrite(literal, convert, checks, encode)).code
+    for module, wrapper in wrappers.items():
+        if edits[module]:
+            result[module] = wrapper.module.visit(_Rewrite(edits[module])).code
     return result
 
 
-def literals(module, source, ref_info, cells_info=None, param_info=None):
+def _settle(f, model, edits):
+    """Release the parameters that cannot be held: bound again, seen where `self` is another, a default that is
+    no member's value, given by a starred argument."""
+    for name, (cls, _) in list(f.held.items()):
+        param = f.params.get(name)
+        refs = f.refs(param) if param is not None else None
+        default = None if param is None or param.default is None else f.code(param.default, cls, {})
+        if refs is None or not all(map(f.own, refs)) or param.default is not None and default in (None, -1):
+            release(model.infos[f.key], name)
+        elif default is not None:
+            edits.setdefault(id(param.default), []).append(_literal(default))
+    for call in f.calls:
+        callee = f.callee(call)
+        if f.slots(call, callee) is None:
+            for name in callee[2]:
+                release(model.infos[callee[0]], name)
+
+
+def _uses(f, model, edits, flows, objects):
+    """The edits of one formula by use; ``flows``: (its parameter, the parameter of a Cell it is given to);
+    ``objects``: its parameters that have a use of the member."""
+    def edit(node, function):
+        edits.setdefault(id(node), []).append(function)
+
+    f.held = dict(model.cells.get(f.key, ((), {}))[1])
+    refs = {name: f.refs(f.params[name]) for name in f.held}
+    loops = {id(loop): loop for loop in f.loops}
+    while True:                 # a loop variable is held while every use takes the integer
+        spans = {i: (f.member(loop.iter.elements[0].value)[0], f.refs(loop.target)) for i, loop in loops.items()}
+        held = {id(n): cls for name, (cls, _) in f.held.items() for n in refs[name]}
+        held.update((id(n), cls) for cls, uses in spans.values() for n in uses or ())
+        dropped = [i for i, (cls, uses) in spans.items() if uses is None or any(f.use(n, cls, held) is None
+                                                                                for n in uses)]
+        for i in dropped:
+            del loops[i]
+        if not dropped:
+            break
+    for i, loop in loops.items():
+        for element in loop.iter.elements:
+            edit(element.value, _literal(f.member(element.value)[1]))
+        for n in spans[i][1]:
+            for side, position in f.use(n, spans[i][0], held)[0]:
+                edit(side, _literal(position))
+    for name, (cls, ref) in f.held.items():
+        for n in refs[name]:
+            found = f.use(n, cls, held)
+            if found is None:
+                objects.add((f.key, name))
+                edit(n, _call('_mx_enum_at', f'self.{ref}'))
+                continue
+            for side, position in found[0]:
+                edit(side, _literal(position))
+            if found[1]:
+                flows.append(((f.key, name), found[1]))
+    for call in f.calls:
+        callee = f.callee(call)
+        for arg, name in f.slots(call, callee):
+            cls, ref = callee[2][name]
+            position = f.code(arg.value, cls, held)
+            if position is not True:
+                edit(arg.value, _literal(position) if isinstance(position, int) and position >= 0 else _call(
+                    '_mx_enum_code', f'{_code(call.func.value)}.{ref}', (callee[0], name), model))
+
+
+def _literal(position):
+    return lambda node: cst.parse_expression(str(position)).with_changes(lpar=node.lpar, rpar=node.rpar)
+
+
+def _call(function, cls, target=None, model=None):
+    """``node`` given to ``function`` with the class ``cls``; for ``_mx_enum_code``, whether the parameter it is
+    given to is strict (known once all formulas are read) and its Cell."""
+    def edit(node):
+        extra = (str(target in model.strict), repr(_path(target[0]))) if target else ()
+        return cst.Call(cst.parse_expression(f'{MX_SYS_MOD}.{function}'),
+                        [cst.Arg(value) for value in (cst.parse_expression(cls), node, *map(cst.parse_expression, extra))])
+    return edit
+
+
+class _Rewrite(cst.CSTTransformer):
+    def __init__(self, edits):
+        super().__init__()
+        self.edits = edits
+
+    def on_leave(self, original, updated):
+        updated = super().on_leave(original, updated)
+        for edit in self.edits.get(id(original), ()):
+            updated = edit(updated)
+        return updated
+
+
+def literals(module, source, ref_info, cells_info=None):
     """``plan`` for one module."""
-    return plan({module: source}, ref_info, cells_info, param_info)[module]
+    return plan({module: source}, ref_info, cells_info)[module]

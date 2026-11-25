@@ -329,9 +329,9 @@ def main_handler(args: argparse.Namespace, stdout: IO[str], stderr: IO[str]) -> 
         # other modules may reference their classes in pxd declarations,
         # so their pxd files must exist.
         units = []
-        # IntEnum members and values written for their uses, first and for all modules at once
+        # enum members written for their uses (enums.py), first and for all modules at once
         sources = enum_plan({m: path.read_text(encoding="utf-8") for m, path in iter_module_files(model_path)},
-                            logger.ref_info, logger.cells_info, logger.param_info)
+                            logger.ref_info, logger.cells_info)
         for m, src_path in iter_module_files(model_path):
             subs = m.split(".")
             assert subs.pop(0) == model_path.name

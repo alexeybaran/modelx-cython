@@ -49,20 +49,13 @@ class {gate}:
         values = list(args)
         for position, name in self.params:
             where = self.enums.get(name) if self.enums else None
-            if where is not None:
-                cls = __import__('importlib').import_module(where[0])
-                for part in where[1].split('.'):
-                    cls = getattr(cls, part)
-                if where[2]:            # a member of a text-valued enum class, or its text: its position
-                    if position < len(values):
-                        values[position] = {runtime}._mx_enum_code(cls, values[position])
-                    if name in kwargs:
-                        kwargs[name] = {runtime}._mx_enum_code(cls, kwargs[name])
-                    continue
-                if position < len(values):      # an IntEnum parameter that the Cell converts back: of its class
-                    values[position] = {runtime}._mx_enum_member(cls, values[position])
+            if where is not None:       # an enum member, or a value equal to one: its position
+                cls = getattr(self.method.__self__, where[0])
+                if position < len(values):
+                    values[position] = {runtime}._mx_enum_code(cls, values[position], where[1], self.path)
                 if name in kwargs:
-                    kwargs[name] = {runtime}._mx_enum_member(cls, kwargs[name])
+                    kwargs[name] = {runtime}._mx_enum_code(cls, kwargs[name], where[1], self.path)
+                continue
             if position < len(values):
                 values[position] = {runtime}._mx_exact_int64(values[position], self.path)
             if name in kwargs:
@@ -149,9 +142,7 @@ def _name_overflows(node, path):
 def _python_call_gate(cls, entries, names, call_gate):
     """Check Python-bound Cells while preserving their Cython vtable types."""
     routes = {cell.name: (entries[cell.fqname], cell.model_path,
-                          {name: (held.__module__, held.__qualname__, text)
-                           for text, attribute in ((False, 'enum_members'), (True, 'enum_codes'))
-                           for name, held in (getattr(getattr(cell, '_rt', None), attribute, None) or {}).items()})
+                          getattr(getattr(cell, '_rt', None), 'enum_gate', None) or {})
               for cell in cls.cells.values() if cell.fqname in entries}
     if not routes:
         return (), ()
