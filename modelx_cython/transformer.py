@@ -71,6 +71,7 @@ from modelx_cython.cell_entries import CacheHit, DenseEntry, dense_condition
 from modelx_cython import numeric_cache
 from modelx_cython import holds
 from modelx_cython import value_storage
+from modelx_cython import collect
 
 from modelx_cython.consts import (
     FORMULA_PREF,
@@ -301,6 +302,8 @@ class PXDGenerator:
         decl_stmts = []
         if cls_name in self.module.visitor.dynamic_ref_classes:
             decl_stmts.append("cdef dict __dict__\n")
+        if cls_name in self.module.visitor.collect_spaces:
+            decl_stmts.append("cdef public dict _mx_collect_cache\n")
         # R-4: what an item holds from shared inputs (holds.HoldTable)
         decl_stmts.extend(holds.pxd_declarations(cls_info))
         for cells in cls_info.cells.values():
@@ -709,6 +712,9 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
                  for fn in item_roots.functions(name)]
         if roots:
             module = module.with_changes(body=(*module.body, *roots))
+        if getattr(self, '_collect_hooks', False):
+            module = module.with_changes(body=(*module.body, *collect.evaluator(
+                self.module.spec.policy.collect_workers)))
         # S1: dense cache values left unwritten at allocation, installed when the module is imported
         values = ''.join(value_storage.functions(cls) for cls in self.module.classes.values())
         if values:
@@ -846,6 +852,12 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
                               for line in holds.py_declarations(self.module.classes[cls_name]))
             decl_stmts.extend(cst.parse_statement(line)
                               for line in value_storage.py_declarations(self.module.classes[cls_name]))
+            if cls_name in self.module.visitor.collect_spaces:
+                hook = collect.hook(original_node, cls_name, sorted(self.module.classes[cls_name].refs))
+                if hook:
+                    self._collect_hooks = True
+                    updated_node = updated_node.with_changes(
+                        body=updated_node.body.with_changes(body=(*updated_node.body.body, *hook)))
             decorator = cst.Decorator(
                 decorator=cst.Attribute(value=cst.Name(CY_MOD), attr=cst.Name("cclass"))
             )
