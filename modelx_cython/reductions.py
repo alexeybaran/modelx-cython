@@ -92,7 +92,7 @@ class _Unsupported(Exception):
     """A form the general reduction lowering leaves to the interpreter (the reason)."""
 
 
-_ATOMIC = (cst.Name, cst.Attribute, cst.Integer, cst.Float, cst.SimpleString)
+_ATOMIC = (cst.Name, cst.Attribute, cst.Float, cst.SimpleString)   # an integer before .attr needs parentheses
 _UNROLL_LIMIT = 32            # literal-tuple instances unrolled per reduction
 def _empty_message():
     """The running interpreter's own message for min() of an empty iterable, with the function
