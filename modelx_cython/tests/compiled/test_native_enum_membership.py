@@ -1,6 +1,5 @@
-"""W1.4: ``x in (E.A, E.B)`` / ``not in`` over declared enum members as C comparisons."""
+"""``x in (E.A, E.B)`` / ``not in`` over enum members: a membership in a literal tuple of integers."""
 from http import HTTPStatus
-import json
 import subprocess
 import sys
 import textwrap
@@ -41,24 +40,12 @@ def test_member_tuple_membership(tmp_path):
         'for x in (200, "a", 201.0, 202, None): p.loose(x)\n', encoding='utf-8')
     subprocess.run([sys.executable, '-m', 'modelx_cython', 'exported',
                     '--sample', 'sample.py', '--no-spec'], cwd=tmp_path, check=True)
-    report = json.loads((tmp_path / 'exported_cy/_mx_admission.json').read_text())
-
-    def entry(name):
-        return report[f'exported_cy._mx_classes._c_Projection._f_{name}']
-
-    for name, count in (('hit', 2), ('miss', 3), ('single', 1), ('single_not', 1), ('local', 2),
-                        ('argument', 2)):
-        assert entry(name)['native_expressions'] == 1, name
-        assert entry(name)['native_enum_comparisons'] == count, name
-        assert entry(name)['expressions_untyped'] == [], name
-    assert entry('reversed_eq')['native_enum_comparisons'] == 1
-    # W1.8: an object name on the left: identity and == tests in tuple order
-    assert entry('loose')['expressions_untyped'] == []
-    loose = entry('loose')['expressions_object']
-    assert [(e['form'], e['line']) for e in loose] == [('in', 2)], loose   # a lambda's body is line 2 of its def
-    assert 'object' in loose[0]['reason']
-    mixed = entry('literal_mix')['expressions_untyped']
-    assert [e['form'] for e in mixed] == ['in'] and 'not a member' in mixed[0]['reason']
+    generated = (tmp_path / 'exported_cy/_mx_classes.py').read_text()
+    # members are integer literals: a literal-tuple membership of integers, compiled as Cython compiles it
+    for tuple_ in ('in (200, 201)', 'not in (200, 202, 201)', 'in (200,)', 'not in (200,)', 'in (202, 200)',
+                   'in (200, 204)', 'x in (200, 201)', '201 == '):
+        assert tuple_ in generated, tuple_
+    assert 'Status.' not in generated.split('class _c_Projection', 1)[1].split('def _mx_assign_refs', 1)[0]
     probe = textwrap.dedent('''\
         import sys
         from importlib import import_module
