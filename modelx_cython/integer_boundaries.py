@@ -43,10 +43,21 @@ class {gate}:
     method: object
     params: tuple
     path: str
+    enums: dict
 
     def __call__(self, *args, **kwargs):
         values = list(args)
         for position, name in self.params:
+            where = self.enums.get(name) if self.enums else None
+            if where is not None:       # a member of a text-valued enum class, or its text: its position
+                cls = __import__('importlib').import_module(where[0])
+                for part in where[1].split('.'):
+                    cls = getattr(cls, part)
+                if position < len(values):
+                    values[position] = {runtime}._mx_enum_code(cls, values[position])
+                if name in kwargs:
+                    kwargs[name] = {runtime}._mx_enum_code(cls, kwargs[name])
+                continue
             if position < len(values):
                 values[position] = {runtime}._mx_exact_int64(values[position], self.path)
             if name in kwargs:
@@ -71,9 +82,9 @@ class {gate}:
 
 
 @{cy}.cfunc
-def {name}(method: object, params: tuple, path: str) -> object:
+def {name}(method: object, params: tuple, path: str, enums: dict) -> object:
     gate: {gate} = {gate}.__new__({gate})
-    gate.method, gate.params, gate.path = method, params, path
+    gate.method, gate.params, gate.path, gate.enums = method, params, path, enums
     return gate
 """
 
@@ -132,7 +143,9 @@ def _name_overflows(node, path):
 
 def _python_call_gate(cls, entries, names, call_gate):
     """Check Python-bound Cells while preserving their Cython vtable types."""
-    routes = {cell.name: (entries[cell.fqname], cell.model_path)
+    routes = {cell.name: (entries[cell.fqname], cell.model_path,
+                          {name: (held.__module__, held.__qualname__) for name, held in
+                           (getattr(getattr(cell, '_rt', None), 'enum_codes', None) or {}).items()})
               for cell in cls.cells.values() if cell.fqname in entries}
     if not routes:
         return (), ()
@@ -146,7 +159,7 @@ def __getattribute__(self, name):
         type(self) is {cls.name}
         or getattr(type(self), name) is getattr({CY_MOD}.cast(object, {cls.name}), name)
     ):
-        return {call_gate}(method, entry[0], entry[1])
+        return {call_gate}(method, entry[0], entry[1], entry[2])
     return method
 """)
     return (declaration,), (method,)
