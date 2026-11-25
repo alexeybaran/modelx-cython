@@ -202,6 +202,18 @@ def test_a_parameter_whose_member_is_used_or_given_on_to_one_is_strict():
         '_f_nm': {'k': ('Kind', True)}, '_f_cmp': {'k': ('Kind', False)}, '_f_through': {'j': ('Kind', True)}}
 
 
+@pytest.mark.parametrize('body, strict', [
+    ('return 10.0 * t + k, -k, k < 2, T[k], f"{k}", 1.0 if k else 0.0', False),   # the member acts as its value
+    ('return [x for x in T if k]', False),
+    ('return k.name', True), ('return repr(k)', True), ('return k is None', True), ('return k', True),
+    ('return self.h(t, k)', True), ('d = {}\nd[k] = 1.0', True), ('return k or 1', True),
+])
+def test_a_parameter_is_strict_where_its_member_shows_its_class(body, strict):
+    infos = cells()
+    translate(body, infos=infos)
+    assert infos['m._c_P._f_f'].enum_gate == {'k': ('Kind', strict)}
+
+
 def test_a_strict_parameter_that_the_sample_gave_a_plain_value_is_an_object():
     infos = {'m._c_P._f_nm': held(str, {'k': Kind}, k=Kind), 'm._c_P._f_cmp': held(bool, {'k': Kind}, k=Kind),
              'm._c_P._f_through': held(str, {'j': Kind}, j=Kind), 'm._c_P._f_start': held(object, {}, t=object)}

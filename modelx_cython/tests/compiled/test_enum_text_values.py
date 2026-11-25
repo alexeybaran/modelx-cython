@@ -3,9 +3,9 @@
 A parameter given members of one text-safe class, or their texts, is a C integer (the position, with a cache of
 the size of the class); comparisons with members or their texts and loops over displays of members are integer
 operations. Every other use sees the member. A caller passes the member or its text, from Python and from a
-formula (a text Reference, a text result), to a Cell that only tells members apart. Compiled equals the exported
-model. A text that is no member's value, or a text given to a Cell that uses the member itself, raises
-``ValueError`` at the Cell.
+formula (a text Reference, a text result), to a Cell whose uses do not show the class. Compiled equals the
+exported model. A text that is no member's value, or a text given to a Cell that reads ``.name`` or tests ``is``,
+raises ``ValueError`` at the Cell.
 """
 import enum
 import os
@@ -61,8 +61,8 @@ p.rate(1, "F")
 '''
 PROBES = ['p.total(2)', 'p.use(2)', 'p.claims(2, p.Kind.MAT)', 'p.claims(2, "MATURITY")', 'p.claims(1, "LAPSE")',
           'p.claims(kind="DEATH", t=2)', 'p.rate(2, "F")', 'p.rate(2, p.Sex.M)', 'p.nm(p.Kind.MAT)',
-          'p.lookup(p.Kind.LAPSE)', 'p.ident(p.Kind.DEATH)', 'p.sex()', 'p.claims(1, "XYZ")']
-DIFFERENT = ['p.nm("LAPSE")', 'p.claims(1, "NOPE")', 'p.lookup("DEATH")', 'p.ident("MATURITY")']
+          'p.lookup(p.Kind.LAPSE)', 'p.lookup("DEATH")', 'p.ident(p.Kind.DEATH)', 'p.sex()', 'p.claims(1, "XYZ")']
+DIFFERENT = ['p.nm("LAPSE")', 'p.claims(1, "NOPE")', 'p.ident("MATURITY")']
 
 
 def test_text_valued_members_equal_live(tmp_path, monkeypatch):
@@ -104,9 +104,9 @@ def test_text_valued_members_equal_live(tmp_path, monkeypatch):
     assert 'p.total(2) 148.0' in compiled and 'p.claims(1, "XYZ") ValueError' in compiled
     assert "p.ident(p.Kind.DEATH) (True, True, False, True, 5)" in compiled
     # where compiled is not live it raises at the Cell: a text that is no member's value; a text given to a Cell
-    # that uses the member
-    assert live[len(PROBES):] == ['p.nm("LAPSE") AttributeError', 'p.claims(1, "NOPE") 0.0', 'p.lookup("DEATH") 1.5',
+    # whose use of the member shows its class (``.name``, ``is``)
+    assert live[len(PROBES):] == ['p.nm("LAPSE") AttributeError', 'p.claims(1, "NOPE") 0.0',
                                   'p.ident("MATURITY") (False, False, True, False, 8)']
-    assert [line.split()[-1] for line in compiled[len(PROBES):]] == ['ValueError'] * 4
+    assert [line.split()[-1] for line in compiled[len(PROBES):]] == ['ValueError'] * 3
     pxd = (tmp_path / 'exported_cy/_mx_classes.pxd').read_text(encoding='utf-8')
     assert 'double[3][3] _v_claims' in pxd and 'long long kind' in pxd, pxd        # a cache of the size of the class

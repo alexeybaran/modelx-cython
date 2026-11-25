@@ -107,6 +107,6 @@ def test_enum_members_through_conditional_expressions(tmp_path, monkeypatch):
     # a result keeps its members; a conditional given to a held parameter (used in arithmetic) is converted there
     generated = (tmp_path / 'exported_cy/_mx_classes.py').read_text(encoding='utf-8')
     assert 'self.Kind.A if t % 2 == 0 else self.Kind.B' in generated, generated
-    assert ("_mx_enum_code(self.Kind, self.Kind.A if t % 2 else self.Kind.C, True, 'Projection.by_arg')"
+    assert ("_mx_enum_code(self.Kind, self.Kind.A if t % 2 else self.Kind.C, False, 'Projection.by_arg')"
             in generated), generated
     assert 'return [self.Kind.B, self.Kind.C]' in generated, generated     # a list display keeps its members

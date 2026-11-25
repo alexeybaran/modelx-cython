@@ -247,6 +247,25 @@ class _Formula:
         return None
 
 
+    def reveals(self, node):
+        """Whether an object use of a held ``node`` can tell its member from an object equal to it: anything but
+        an operand of arithmetic or of a comparison (not ``is``), a truth test, a field of an f-string or a read
+        subscript, where the member acts as its value."""
+        parent = self.parents[node]
+        outer = self.parents.get(parent)
+        if isinstance(parent, (cst.BinaryOperation, cst.UnaryOperation, cst.FormattedStringExpression)):
+            return False
+        if isinstance(parent, (cst.If, cst.While, cst.IfExp, cst.CompIf, cst.Assert)):
+            return parent.test is not node
+        if isinstance(parent, cst.ComparisonTarget) or isinstance(parent, cst.Comparison):
+            comparison = outer if isinstance(parent, cst.ComparisonTarget) else parent
+            return any(isinstance(c.operator, (cst.Is, cst.IsNot)) for c in comparison.comparisons)
+        if isinstance(parent, cst.Index) and isinstance(outer, cst.SubscriptElement):
+            subscript = self.parents[outer]
+            return isinstance(self.parents[subscript], (cst.AssignTarget, cst.AugAssign, cst.Del, cst.AnnAssign))
+        return True
+
+
 class _Found(cst.CSTVisitor):
     """The calls of Cells with held parameters and the loops over displays of members in a method."""
 
@@ -370,7 +389,8 @@ def _uses(f, model, edits, flows, objects):
         for n in refs[name]:
             found = f.use(n, cls, held)
             if found is None:
-                objects.add((f.key, name))
+                if f.reveals(n):
+                    objects.add((f.key, name))
                 edit(n, _call('_mx_enum_at', f'self.{ref}'))
                 continue
             for side, position in found[0]:
