@@ -66,6 +66,7 @@ from modelx_cython.monkeytype_tracing import (
     EVENT_RETURN,
 )
 
+from modelx_cython.enums import enum_safe
 from modelx_cython.consts import (
     MX_ASSIGN_REFS,
     FORMULA_PREF,
@@ -281,7 +282,8 @@ class RuntimeCellsInfo:     # TODO: Create base class RuntimeBaseMemberInfo
 
         for arg, type_val in arg_type_val.items():
 
-            if annotations.get(arg) is object or arg in wide_arguments:
+            if annotations.get(arg) is object or arg in wide_arguments or any(
+                    issubclass(tp, IntEnum) and not enum_safe(tp) for tp in type_val):   # its own operators
                 self.arg_types[arg] = object
                 continue
 
@@ -446,7 +448,9 @@ class _ReturnTypeMerger:
                 self._array_formats.add(signature)
         else:
             tp = ReturnTypeInfo(object if isinstance(val, numbers.Integral)
-                                and not -(1 << 63) <= val < (1 << 63) else type(val),
+                                and (not -(1 << 63) <= val < (1 << 63)
+                                     or isinstance(val, IntEnum) and not enum_safe(type(val)))   # its own operators
+                                else type(val),
                                 vector_shape=vector_shape(val))
             if self._integral_double_exact and isinstance(val, numbers.Integral):
                 try:
@@ -539,11 +543,7 @@ class RuntimeValueInfo:
         self.mx_class = mx_class
         from .helper_members import module_helpers
         self.helper_members = module_helpers(value)
-        self.enum_safe = (isinstance(value, type) and issubclass(value, IntEnum)
-                          and type(value) is type(IntEnum)
-                          and value.__eq__ is int.__eq__ and value.__ne__ is int.__ne__
-                          and all(getattr(value, m) is getattr(IntEnum, m)
-                                  for m in ('__str__', '__format__', '__repr__', '__hash__')))
+        self.enum_safe = enum_safe(value)
         self.enum = ((value.__module__, value.__qualname__,
                       {name: int.__int__(member) for name, member in value.__members__.items()})
                      if isinstance(value, type) and issubclass(value, IntEnum)
