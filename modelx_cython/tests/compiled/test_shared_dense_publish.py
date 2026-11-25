@@ -1,7 +1,7 @@
 """The dense cache of a shared Space read by items: its readiness flag is published after the value (release
 fence) and read before it (acquire fence), so a reader never takes the flag without the value (arm64 and
-compiler reordering). An owned item's dense cache keeps plain flags. Values on the direct route equal the
-export. Direct-route twin of ``test_shared_dense_publish_collect`` (the same model without ``collect_over``)."""
+compiler reordering). An owned item's dense cache keeps plain flags. Values equal the
+export."""
 import subprocess
 import sys
 import textwrap

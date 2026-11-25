@@ -1,4 +1,4 @@
-"""S1: dense cache values that are not zero-filled when an item is allocated.
+"""Dense cache values that are not zero-filled when an item is allocated.
 
 Every dense Cell cache of a compiled class is a value array (``_v_<cell>``) and a readiness flag array
 (``_has_<cell>``) declared inline in the class. ``PyType_GenericAlloc`` zero-fills the whole object, and

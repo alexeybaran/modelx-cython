@@ -1,4 +1,4 @@
-"""Generated model modules compile without floating-point contraction (W1.5)."""
+"""Generated model modules compile without floating-point contraction."""
 import pathlib
 from types import SimpleNamespace
 

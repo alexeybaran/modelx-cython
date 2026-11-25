@@ -401,7 +401,7 @@ def test_fractional_power(sample_dir, model):
     assert "cdef double[11] _v_mth_q\n" in pxd
     import re
     # The ordinary numeric Cell ABI widens integer/float observations without
-    # changing their values, as in upstream/c8. Object ABI is separately tested.
+    # changing their values, as upstream does. Object ABI is separately tested.
     assert re.search(r'cdef double _f_int_pow\(_c_Space1 self, long long t\)(?: except\? -1)?\n',pxd)
 
     # only the two floating-exponent powers are rewritten

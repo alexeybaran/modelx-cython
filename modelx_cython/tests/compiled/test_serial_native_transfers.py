@@ -57,7 +57,7 @@ def test_native_transfers(tmp_path, mode):
         'dense_one_axis': True,
         'dense_miss_binding': True,
         'propagate_exact_receiver': True,
-        # both integer-check modes (owner's rule); they differ only at the signed range's edges
+        # both integer-check modes; they differ only at the signed range's edges
         'integer_checks': mode,
         'spaces': {'Policy': {'cells_param_size': {'i': 5}, 'cells': {
             'factor': {'memoize_power': True},

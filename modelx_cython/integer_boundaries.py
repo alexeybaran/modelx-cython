@@ -37,7 +37,7 @@ _SIGNED_HELPERS = frozenset((*_SIGNED_OPERATIONS.values(), '_mx_integer_result',
 _CALL_GATE = """\
 @{cy}.cclass
 class {gate}:
-    # D110 P0: a Python-bound Cell with integer arguments, checked as before, then the compiled method;
+    # a Cell called from Python with integer arguments: the arguments are checked, then the compiled method runs;
     # built without functools.wraps (its attributes are read from the method on demand)
     method: object
     params: tuple
@@ -929,7 +929,7 @@ def _type_signed_locals(body, guard, facts, parameters):
         values = _signed_local_assignments(body, name, operands, guard, facts)
         if not values:
             guard.signed_names.remove(name)
-            guard.python_locals.add(name)       # D72: examined and left to Python
+            guard.python_locals.add(name)       # examined and left to Python
             continue
         declarations.append(cst.SimpleStatementLine((cst.AnnAssign(
             cst.Name(name), cst.Annotation(_INTEGER_ANNOTATION)),)))
@@ -1104,9 +1104,9 @@ def _signed_signatures(state):
 
 
 def _python_locals(node, cell):
-    """D72/D76: declare ``object`` the locals compared by identity.
+    """Declare ``object`` the locals compared by identity.
 
-    With ``infer_types`` (W1.5 0005) Cython infers a C type for every untyped local; a local
+    With ``infer_types`` Cython infers a C type for every untyped local; a local
     compared with ``is``/``is not`` would lose its identity (``x is saved[0]`` on a re-boxed
     int gives a wrong answer), so it is declared ``object``. Integer locals and ``range``
     targets otherwise stay C integers (their arithmetic: plain C, checked by overflowcheck in the checked mode).
@@ -1127,7 +1127,7 @@ def _python_locals(node, cell):
                   (*node.params.posonly_params, *node.params.params, *node.params.kwonly_params)}
     annotated = {statement.target.value for statement in lexical_nodes(body.body)
                  if isinstance(statement, cst.AnnAssign) and isinstance(statement.target, cst.Name)}
-    # D76: integer locals and range targets stay C integers with guarded arithmetic
+    # Integer locals and range targets stay C integers with guarded arithmetic
     # (integer guards); only identity keeps the Python object
     names = set()
     for part in lexical_nodes(body.body):
@@ -1183,7 +1183,7 @@ def guard_integer_boundaries(state, module_info, resolver, cells_kinds, ref_kind
             if origin:
                 owner, name = origin
                 cls = module_info.classes[owner]
-                # D139: the private entry of an uncached Cell has the Cell's own name as its origin
+                # The private entry of an uncached Cell has the Cell's own name as its origin
                 cell = cls.cells[name[len(FORMULA_PREF):] if name.startswith(FORMULA_PREF) else name]
                 unbound = _unbound_locals(node)
                 node = _guard_calls(unbound, cls, cell, resolver, entries, cells, private_entries, module_info.classes,

@@ -4,7 +4,7 @@
 
 The model's library is copied by ``lifelib.create('uslib')``.  The model is exported by
 upstream modelx and compiled with its own ``sample_sec.py`` and ``spec_sec.py``; then the
-library's own C4 check (``sec_support.compiled_mismatches``: every point swept, every
+library's own check (``sec_support.compiled_mismatches``: every point swept, every
 cached value and raise of modelx against the compiled package, in a child process) must
 find nothing, to the library's relative tolerance ``COMPILED_RTOL`` (1e-12), not bit for
 bit: the cut's own report compares at rel 1e-10, and MYGA_US_SEC differs from modelx in the

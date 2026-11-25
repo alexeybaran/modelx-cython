@@ -1,7 +1,6 @@
 """Integer locals whose exact values leave the 64-bit range, compiled.
 
-Formerly the slow paths of the D76 guards (an exact Python fallback). The guards are gone
-(owner's rule): in the checked mode each of these formulas raises OverflowError naming the
+There is no exact Python fallback for them: in the checked mode each of these formulas raises OverflowError naming the
 Cell where the exported model carries on with a big int; a small value is exact. In the
 unchecked mode a small value is exact and the large ones are plain C arithmetic.
 """

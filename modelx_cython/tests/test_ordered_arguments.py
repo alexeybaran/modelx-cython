@@ -85,7 +85,7 @@ def test_native_return_keeps_existing_cython_conversion_boundary():
 
 
 def test_integer_local_exponent_keeps_the_native_power():
-    """diag-us (SPIA/DIA mort_rate): ``k = calendar_year(t) - year`` then ``b ** k``: with the
+    """As in the SEC models' mort_rate: ``k = calendar_year(t) - year`` then ``b ** k``: with the
     formula's local kinds the exponent is an integer, as the inline expression was."""
     from modelx_cython.powers import OperandKind, KIND_INT, KIND_FLOAT
     source = 'def formula(x, n):\n    k = n - 3\n    q = x * (1.0 - x) ** k\n    return min(1.0, q)\n'
@@ -99,7 +99,7 @@ def test_integer_local_exponent_keeps_the_native_power():
 
 
 def test_int_of_a_proven_integer_is_the_integer():
-    """diag-us (DIA_US_S annuity_factor): ``n = int((last - start) // step)`` keeps ``n`` a C
+    """As in a SEC annuity_factor: ``n = int((last - start) // step)`` keeps ``n`` a C
     integer; a float, an unknown operand, a shadowed ``int`` or a comprehension keep the call."""
     from modelx_cython.powers import OperandKind, KIND_INT, KIND_FLOAT
     kinds = OperandKind(None, {}, {}, '', {'a': KIND_INT, 'b': KIND_INT, 'x': KIND_FLOAT})

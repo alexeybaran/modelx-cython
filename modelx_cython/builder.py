@@ -635,7 +635,7 @@ class CombinedCellsInfo(LexicalCellsInfo):
         return tuple(axis.lower for axis in self.dense_axes)
 
     def _axis_lower(self, key):
-        """Lower bound of a logical axis: a declared (lower, stop) pair gives lower (R-3-lower; a sampled
+        """Lower bound of a logical axis: a declared (lower, stop) pair gives lower (a sampled
         argument below it replaces it, as a sampled one above a declared stop replaces the stop);
         otherwise min(0, sampled minimum), as before."""
         minimums = getattr(self._rt, 'min_args', {})
@@ -721,7 +721,7 @@ class CombinedCellsInfo(LexicalCellsInfo):
 
     def get_readiness_array_decl_expr(self, c_style=False):
         # Cython pickles unsigned-char arrays as NUL-terminated strings, which
-        # loses zero flags (and can read beyond the array). D110 P2a: 2-byte short
+        # loses zero flags (and can read beyond the array). 2-byte short
         # flags halve the flag bytes of every item and keep their full shape through
         # the standard compiled-class serializer, as bint arrays did. A locked Cell's
         # flags are read and written atomically (_mx_load_flag / _mx_store_flag on
@@ -909,7 +909,7 @@ class ClassInfo:
         self._cells_max_args = {}
         self._associative_max_args = {}
         self.declared_axes = {}     # parameter tuple -> {parameter: where its size is declared}
-        self.declared_lowers = {}   # parameter tuple -> {parameter: declared lower bound} (R-3-lower pairs)
+        self.declared_lowers = {}   # parameter tuple -> {parameter: declared lower bound} of (lower, stop) declarations
         self.refs = {}
         self.spaces = []
         self._init_cells()
@@ -1071,7 +1071,7 @@ class ClassInfo:
         return sizes
 
 
-# R-3-lower: a sampled argument outside a declared range widens it (as upstream does for a declared size);
+# A sampled argument outside a declared range widens it (as upstream does for a declared size);
 # the build says so, one line per cell and parameter. For the stop, the cell named is the one whose sample
 # widened it; the widened range applies to every Cell with the same parameter tuple in that Space.
 RANGE_WIDENED = ('{cell} ({params}): parameter {key} declared range [{lower}, {stop}), sampled {sampled} '

@@ -1,6 +1,6 @@
-"""D110: a compiled Cell that loops over the items of an ItemSpace Reference computes the live values,
-whether its item local is typed (bound once) or not (rebound), and integer arguments keep the
-checks and errors of the Python gate (P1); Python callers keep the gate's checks and errors (P0)."""
+"""A compiled Cell that loops over the items of an ItemSpace Reference computes the live values,
+whether its item local is bound once or rebound; integer arguments, from compiled and from Python
+callers, keep the checks and errors of the Python gate."""
 
 import json
 import subprocess
@@ -46,7 +46,7 @@ FORMULAS = {
 
 
 def build(tmp_path, mode='checked'):
-    # the checks below are the checked mode's (owner's rule): the small sample resolves unchecked
+    # the checks below are the checked mode's, declared explicitly
     model = mx.new_model('ItemLocals')
     try:
         projection = model.new_space('Projection', formula=lambda point_id: None)

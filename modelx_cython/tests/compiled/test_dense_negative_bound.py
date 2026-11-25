@@ -1,4 +1,4 @@
-"""D15: the public one-axis range check is overflow-free.
+"""The public one-axis range check is overflow-free.
 
 A signed ``key - lower`` overflows for a key far below a positive lower bound (or above a negative
 one), so the offset is taken in unsigned arithmetic, which wraps by definition:

@@ -1,4 +1,4 @@
-"""What an item class holds from shared inputs: one registry per class (R-4).
+"""What an item class holds from shared inputs: one registry per class.
 
 Compiled per-item code holds what it reads from a shared input. The first read in an item's lifetime
 resolves the value into a field of the item, and later reads use that field borrowed. The fields are

@@ -1,4 +1,4 @@
-"""R-3-lower: a cells_param_size declaration may be a (lower, stop) pair. The declared range is the cell's
+"""A cells_param_size declaration may be a (lower, stop) pair. The declared range is the cell's
 logical domain: dense storage covers [lower, stop) (an absolute-valued parameter such as a birth year needs
 no storage below lower), an argument below lower raises IndexError like one at or above stop, and a plain
 size keeps its meaning [min(0, sampled minimum), size)."""

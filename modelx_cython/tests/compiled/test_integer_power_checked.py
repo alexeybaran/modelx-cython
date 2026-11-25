@@ -32,7 +32,7 @@ OUTSIDE = {"const_exponent": 9, "local_base": 9, "float_context": 9, "variable_e
 
 @pytest.fixture(scope="module")
 def power_build(tmp_path_factory):
-    # the checked mode (owner's rule): the small sample would resolve the unchecked mode
+    # the checked mode, declared explicitly
     return _power_build(tmp_path_factory, "checked")
 
 

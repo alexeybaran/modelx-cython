@@ -1,4 +1,4 @@
-"""D116: one construction and one release of a top-level item.
+"""One construction and one release of a top-level item.
 
 A directly created item is ``C(base)`` with the base's References and itself as its only root, built
 once per key. ``__delitem__`` releases the item it drops through one shared function. Releasing breaks the item's references to itself (``_space``,

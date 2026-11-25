@@ -1,10 +1,9 @@
-"""D135: a Cell above the dense limit is held in the hash store on the direct route.
+"""A Cell above the dense limit is held in the hash store.
 
 `surv(s, t)` has a 2-D integer window. With ``max_dense_entries`` below its size it is not inline dense;
 a direct item keeps its own hash store. Values differ by policy, so a stale entry would change the result.
-The build warns, naming the cell, its traced range and the grid-key rule (R9); the report states the cache
-kind and why it is not dense. Compiled items equal the exported model. Direct-route twin of
-``test_over_limit_hash_store_collect`` (the same model without ``collect_over``).
+The build warns, naming the cell, its traced range and the grid-position remedy; the report states the cache
+kind and why it is not dense. Compiled items equal the exported model.
 """
 import json
 import subprocess
@@ -87,7 +86,7 @@ def test_over_limit_cell_is_a_hash_store_on_the_direct_route(tmp_path):
     assert 'reused_root' not in detail, detail
     assert any(e['kind'] == 'hash-cache' for e in report[PREFIX + 'surv']['slow_paths'])
     warning = [line for line in log.splitlines() if 'Projection.surv: window' in line]
-    assert warning and 'exceeds max_dense_entries 16' in warning[0] and 'every route' in warning[0], log[-3000:]
-    assert 's in [' in warning[0] and 't in [' in warning[0] and 'R9' in warning[0], warning
+    assert warning and 'exceeds max_dense_entries 16' in warning[0] and 'hash store' in warning[0], log[-3000:]
+    assert 's in [' in warning[0] and 't in [' in warning[0] and 'grid position' in warning[0], warning
     out = _run(tmp_path)
     assert out['exported_cy'] == out['exported'], out

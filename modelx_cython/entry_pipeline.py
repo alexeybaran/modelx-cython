@@ -119,7 +119,7 @@ def _bounds(state, layouts, guards, uses, entries):
     guards = {name: guard for name, guard in guards.items() if 0 < len(layouts[name].axes) <= 32}
     ranges = _formula_ranges(state, layouts, guards, uses, entries)
     # Callers whose arguments lie in known axes: a cached Cell's formula, reached inside its dense
-    # window (or behind its own domain test when it checks its spill in the helper), and (D139b) an
+    # window (or behind its own domain test when it checks its spill in the helper), and an
     # uncached Cell's private entry, which tests its arguments against its traced domain once and runs
     # on a proven receiver. Every caller takes the same proofs below.
     callers = []
@@ -199,7 +199,7 @@ def _unsigned_check(layout):
     axis, = layout.axes
     span = axis.stop - axis.lower
     if 0 < span < 1 << 64:
-        # D15: the offset is taken in unsigned arithmetic, which wraps by definition: a signed
+        # The offset is taken in unsigned arithmetic, which wraps by definition: a signed
         # key - lower overflows for a key far below a positive lower bound (or above a negative one)
         offset = f"{CY_MOD}.cast({CY_MOD}.ulonglong, {axis.key})"
         if axis.lower:
@@ -430,7 +430,7 @@ def _emit(state, layouts, entries, uses, policy):
             misses[entry] = layout.formula, layout.keys, direct
 
     if hit_layouts:
-        # D139: the private entry of an uncached Cell is a formula on a proven receiver; its reads of
+        # The private entry of an uncached Cell is a formula on a proven receiver; its reads of
         # cached Cells expose their hits as the hoisted formulas' reads do
         for name, fn in state.functions.items():
             origin = state.function_origins.get(name)
@@ -441,7 +441,7 @@ def _emit(state, layouts, entries, uses, policy):
             if expose is not None:
                 body = fn.body.visit(calls(expose=expose))
                 if (domain := domains.get(fn)) is not None:
-                    # D139b: the entry's own domain test, as the module pass adds to other formulas
+                    # The entry's own domain test, as the module pass adds to other formulas
                     body = _with_domain(body, domain)
                 methods[fn] = fn.with_changes(body=body)
 

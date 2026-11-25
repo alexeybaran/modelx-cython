@@ -1,4 +1,4 @@
-"""The integer overflow model in both integer-check modes (owner's rule).
+"""The integer overflow model in both integer-check modes.
 
 Each Cell computes a C integer value whose exact (Python) result leaves 64 bits, or depends on
 Python's integer semantics. The sample keeps every value small, as a real book does, so the Cells

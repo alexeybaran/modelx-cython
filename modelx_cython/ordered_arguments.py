@@ -1,6 +1,6 @@
 """Preserve object power semantics outside the proved native domain.
 
-Numeric Cells keep c8's power and extrema mechanics unchanged. Object-result
+Numeric Cells keep the native power and extrema mechanics unchanged. Object-result
 Cells and child scopes use ordinary object operators when Cython's native
 promotion would change their scalar-class contract.
 """
@@ -36,7 +36,7 @@ class _OrderedArguments(cst.CSTTransformer):
             return after
         if self.native_result and self.opaque_depth == 1:
             # Proven floating powers were lowered earlier. An integral exponent
-            # retains c8's arithmetic; other unproved powers need the existing
+            # keeps the native arithmetic; other unproved powers need the existing
             # object operator so Cython cannot infer an unordered complex value.
             from .powers import KIND_INT
             if self.operand_kind is None or self.operand_kind.kind(before.right) == KIND_INT:
@@ -64,12 +64,12 @@ class _OrderedArguments(cst.CSTTransformer):
         return after.with_changes(left=boxed(after.left), right=boxed(after.right))
 
     def integer_identity(self, before, after):
-        """``int(x)`` of a proven C integer is ``x`` (diag-us).
+        """``int(x)`` of a proven C integer is ``x``.
 
         Builtin ``int`` of an int returns that int, but Cython types the call as a Python
         object, so ``n = int((last - start) // step)`` made ``n`` an object and with it every
         local derived from it (``for k in range(1, n + 1)``: boxed ``k``, ``k * step``, ...),
-        although the local-kind analysis proves ``n`` an integer (D59, ded875f). Only the
+        although the local-kind analysis proves ``n`` an integer. Only the
         builtin, one positional argument, at the formula's own level (not in a comprehension,
         lambda or nested def, where names may be bound otherwise)."""
         from .powers import KIND_INT

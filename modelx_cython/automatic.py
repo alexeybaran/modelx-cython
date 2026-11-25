@@ -62,8 +62,8 @@ def max_dense_entries_set(cell):
 
 
 def max_dense_entries(cell):
-    """D74: the inline dense ceiling of a Cell: spec key ``max_dense_entries`` of the Cell, else of its
-    Space, else MAX_DENSE_ENTRIES. Inline dense storage is part of every instance on every route."""
+    """The inline dense ceiling of a Cell: spec key ``max_dense_entries`` of the Cell, else of its
+    Space, else MAX_DENSE_ENTRIES. Inline dense storage is part of every instance."""
     value = getattr(cell, '_spec', {}).get('max_dense_entries')
     if value is None:
         parent = getattr(cell, 'parent', None)

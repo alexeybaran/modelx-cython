@@ -1,6 +1,4 @@
-"""Verify input replacement in live, exported, and compiled models on the direct route.
-
-Direct-route twin of ``test_input_scenarios_collect`` (the same model without ``collect_over``)."""
+"""Verify input replacement in live, exported, and compiled models."""
 
 import subprocess
 import sys

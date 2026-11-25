@@ -167,7 +167,7 @@ class RuntimeCellsInfo:     # TODO: Create base class RuntimeBaseMemberInfo
         self.min_args = {}
         self.observed_min_args = {}
         self.observed_max_args = {}
-        # D111: a call that raised gives its arguments but no return value; a Cell whose every
+        # A call that raised gives its arguments but no return value; a Cell whose every
         # traced call raised keeps them all (its result is then traced as None, as before).
         returned = [trace for trace in traces if not getattr(trace, 'raised', False)] or list(traces)
         arrays = [trace.ret_val for trace in returned if isinstance(trace.ret_val, np.ndarray)]
@@ -664,7 +664,7 @@ class MxCallTracer(CallTracer):
             if last_opcode in ret_opcodes:
                 trace.ret_val = arg
             else:
-                trace.raised = True     # unwound by an exception: no return value (D111)
+                trace.raised = True     # unwound by an exception: no return value
 
             # Extract and store local variables
             # code = frame.f_code

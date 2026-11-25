@@ -88,12 +88,12 @@ def _window(axes):
 
 
 OVER_LIMIT_WARNING = ('{cell}: window {window} (traced {ranges}) = {count:,} entries exceeds max_dense_entries '
-                      '{limit:,}; its values are kept in the hash store on every route (D135). If the cell is '
-                      'read only on a regular grid, key it on the grid index (conversion rule R9, grid key).')
+                      '{limit:,}; its values are kept in the hash store. If the cell is '
+                      'read only on a regular grid, give it one parameter for the grid position.')
 
 
 def over_limit_warning(cell):
-    """D135: the build warning for a hash-cached Cell whose integer window exceeds the dense limit, else None."""
+    """The build warning for a hash-cached Cell whose integer window exceeds the dense limit, else None."""
     if not (cell.has_args() and cell.has_typeinfo() and cell.uses_native_numeric_cache and cell.is_int_args):
         return None
     from .automatic import max_dense_entries
@@ -111,7 +111,7 @@ def over_limit_warning(cell):
 
 USE_WARNING = ('{cell} ({params}): hash store: rectangle {ranges} = {count:,} entries, beyond the dense '
                'ceiling of {limit:,} entries. Remedies, in order: re-parametrise the cell if its parameters are tied '
-               '(one grid key, conversion rule R9); mark it not cached if each value is read once; tighten or '
+               '(one parameter for a grid position); mark it not cached if each value is read once; tighten or '
                'correct the declaration.')
 
 
@@ -161,8 +161,8 @@ def store_reason(cell, cache):
 
 
 def cache_detail(cell, cache):
-    """The cache of a Cell with parameters: kind, window, entries, bytes, and why it is not dense (D74;
-    D135: one storage on every route, no collect-only window)."""
+    """The cache of a Cell with parameters: kind, window, entries, bytes, and why it is not dense
+    (one storage for the Cell, whatever calls it)."""
     if not cell.params or cache in ('none', 'scalar'):
         return {'kind': cache}
     detail = {'kind': cache}
@@ -195,7 +195,7 @@ def cache_detail(cell, cache):
 
 
 def slow_paths(cell, cache):
-    """diag-jp: work of a compiled formula that still runs on Python objects or a slow cache,
+    """Work of a compiled formula that still runs on Python objects or a slow cache,
     which the other report keys do not flag as such: a cell with parameters on a hash or
     dictionary cache (and why it is not dense), lowered reductions that iterate or add Python
     objects, table reads whose key parts are Python objects, powers left on Python semantics in

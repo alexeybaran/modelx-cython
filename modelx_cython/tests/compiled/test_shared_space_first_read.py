@@ -1,6 +1,6 @@
 """The first read of a zero-argument cached Cell of a shared, unlocked Space from four threads at once.
 
-A Space that is not an ItemSpace (here ``Data``) is read by every worker of a collect. Exported
+A Space that is not an ItemSpace (here ``Data``) can be read by several threads. Exported
 without ``locked_spaces`` (as an upstream-style model is), its zero-argument cached Cells publish
 their value once: four threads racing on the first read of a fresh model each get the one stored
 value, for every result type (typed memoryview, object, C double), and none sees the flag before

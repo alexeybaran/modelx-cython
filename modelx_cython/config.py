@@ -40,7 +40,7 @@ class CompilerPolicy:
     dense_one_axis: bool
     propagate_exact_receiver: bool
     native_cache_hits: str
-    # M1 (W1.1, default on since W1.5): '# cython: infer_types=True' on generated model modules.
+    # '# cython: infer_types=True' on generated model modules (spec key infer_types, default on).
     infer_types: bool = True
     # integer guards: 'checked' (default) raises OverflowError naming the Cell when C integer
     # arithmetic of a formula leaves 64 bits (flagged operations, integer_boundaries.py); 'unchecked'
@@ -235,7 +235,7 @@ class TransSpec:
         """Return ``(tuples, names)`` of the declared lower bounds in force for a Space, with the same
         precedence as :meth:`get_declared_sizes`: ``{parameter tuple: {parameter: lower}}`` and
         ``{parameter name: lower}``. A declaration is a size (lower bound: today's default) or a
-        ``(lower, stop)`` pair; only pairs appear here (R-3-lower)."""
+        ``(lower, stop)`` pair; only pairs appear here."""
         tuples, names = {}, {}
 
         def merge(data):

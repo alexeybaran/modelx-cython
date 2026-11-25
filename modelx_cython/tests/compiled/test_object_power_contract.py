@@ -1,4 +1,4 @@
-"""Object-result compatibility stays separate from c8's numeric execution."""
+"""Object-result compatibility stays separate from the native numeric execution."""
 import os
 import subprocess
 import sys

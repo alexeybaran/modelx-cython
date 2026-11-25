@@ -1,4 +1,4 @@
-"""Powers whose value flows into a C double are native (D59, D62).
+"""Powers whose value flows into a C double are native.
 
 ``total = 0.0; total += c * v ** e`` in a loop: the accumulator is a double without the
 power, so the power is computed by ``_mx_sys._mx_pow`` (C pow with Python's real-domain

@@ -67,7 +67,7 @@ def test_generator_literals_preserve_integer_width_and_sign(tmp_path):
             'for name,value in expected.items():\n'
             '    actual=getattr(mx_model.Values,name)()\n'
             '    assert actual==value,(name,actual,value)\n'], cwd=tmp_path, check=True, timeout=30)
-    # 'assigned' .. 'empty' are sums with a start argument, not lowered since R-6; the value oracles stay.
+    # 'assigned' .. 'empty' are sums with a start argument, which are not lowered; the value oracles stay.
     for package in ('exported', 'exported_cy'):
         script=f'''from {package} import mx_model
 s=mx_model.Values

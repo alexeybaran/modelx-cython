@@ -1,10 +1,10 @@
-"""D82 conditions (a) and (c) for diag-us2 0001 (D76 guards read as their native expression).
+"""Integer operations without a guard of their own, and a window proof that must survive.
 
-(a) Where a value is taken as long long and only its outer operation is unproven, the guard is
+Where a value is taken as long long and only its outer operation is unproven, the guard is
 dropped. Each operator on full-range C integer leaves must then either give the exact value or
 raise OverflowError, never wrap: +, -, *, //, %, unary minus (including -(-2**63)), with leaves of
 the widths the passes produce (long long parameters, a bint cell, an integer cell result).
-(c) A seg_*-shaped cell (local ``m = t - age``, recursive call ``f(t - 1, t - 1 - m)``, argument
+A cell shaped like a segment balance (local ``m = t - age``, recursive call ``f(t - 1, t - 1 - m)``, argument
 ``t - m``) keeps its window proof: the cache entry carries ``_mx_proven_axes``, ``m`` is a plain C
 difference, and no guard is emitted, so a later change of pass order cannot silently undo it.
 """
@@ -22,7 +22,7 @@ OPERATIONS = {
 
 
 def test_unguarded_outer_operations_are_exact_or_raise(tmp_path):
-    # checked mode (owner's rule): the small sample would resolve the unchecked mode
+    # the checked mode, declared explicitly
     _outer_operations(tmp_path, 'checked')
 
 

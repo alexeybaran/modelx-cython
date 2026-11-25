@@ -1,4 +1,4 @@
-"""Native numeric extrema retain c8's values and Cython evaluation mechanics."""
+"""Native numeric extrema keep their values and Cython's evaluation mechanics."""
 import os
 import subprocess
 import sys

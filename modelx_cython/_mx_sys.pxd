@@ -46,7 +46,7 @@ cdef inline long long _mx_exact_int64(object value, str path) except? -1:
 
     An int or any int subclass (IntEnum, bool) is read directly: PyNumber_Index returns such an
     object unchanged, so the value and the OverflowError are the same, without taking and
-    releasing a reference on it (diag-scale P3: enum members are shared by every worker). An exact
+    releasing a reference on it (enum members are shared by every worker thread). An exact
     int that fits is read without the exception handling, which every other value takes."""
     cdef int overflow = 0
     cdef long long result
@@ -389,7 +389,7 @@ cdef extern from *:
 
 cdef extern from *:
     """
-    /* S1 (value_storage.py): the value arrays of dense Cell caches are not zero-filled when an
+    /* Unwritten values (value_storage.py): the value arrays of dense Cell caches are not zero-filled when an
        object is allocated. A value is read only after its flag is set, and a flag is set only after
        its value is stored. A class registers its value arrays from a probe instance; finish()
        requires them to be adjacent members and installs an allocator that zeroes every other byte,

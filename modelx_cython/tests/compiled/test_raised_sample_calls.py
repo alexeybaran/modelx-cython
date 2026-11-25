@@ -1,9 +1,8 @@
-"""D111: a sampled call that raised contributes its argument ranges but no return type.
+"""A sampled call that raised contributes its argument ranges but no return type.
 
 A Cell that raises for some sampled items (its own guard) keeps the type of the calls that
 returned; a Cell whose every sampled call raised keeps the previous behaviour (its result is
 traced as None, so it returns a Python object). Compiled values and raised exceptions equal live.
-Direct-route twin of ``test_raised_sample_calls_collect`` (the same model without ``collect_over``).
 """
 import json
 import os
@@ -40,7 +39,7 @@ def _build(tmp_path):
         model.export(tmp_path / 'exported')
     finally:
         model.close()
-    # The shipped-sample pattern (D102): project, then call every zero-argument Cell, recording raises.
+    # The SEC samples' pattern: project, then call every zero-argument Cell, recording raises.
     (tmp_path / 'sample.py').write_text(textwrap.dedent('''\
         from exported import mx_model as m
         for key in (1, 2, 3, 4):

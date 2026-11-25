@@ -1,16 +1,14 @@
-"""S1: dense cache values are not zero-filled when an item is allocated (``value_storage.py``, ``_mx_sys.pxd``).
+"""Dense cache values are not zero-filled when an item is allocated (``value_storage.py``, ``_mx_sys.pxd``).
 
 Each model is built three times: as shipped; with ``MX_POISON_UNWRITTEN_VALUES``, which fills every value array of a
 new object with 0xA5 bytes (the plain model also with heap types, ``CYTHON_USE_TYPE_SPECS``); and with
-``MX_TEST_VALUES_FALLBACK``, which makes the layout check fail (plain model: a RuntimeWarning names each class) or the
-mechanism unavailable (collect model: silent), so every byte is zeroed as before. Every build must give the exported
-model's values on the direct route (new items, and the same keys again after release), on collect (a reused root,
-one and four workers, a shared dense cache filled concurrently), on a Python subclass (zero-filled as before, and
-copied through the class's own reduce), and after a copy or pickle round trip, where cached values survive. The
+``MX_TEST_VALUES_FALLBACK``, which makes the layout check fail (a RuntimeWarning names each class), so every byte is
+zeroed as before. Every build must give the exported model's values (new items, and the same keys again after
+release), on a Python subclass (zero-filled as before, and copied through the class's own reduce), and after a copy
+or pickle round trip, where cached values survive. The
 reduced state of a fresh and of a partly filled item is the same in all three builds, so no unwritten byte is carried;
 the reduce has Cython's name; a reduce leaves no block and no type reference behind. On the free-threaded interpreter
-one thread fills an item's caches and assigns its public attributes while another copies (and, without collect,
-pickles) it: no crash, and every restored item returns the live model's values. The same holds for a locked Space,
+one thread fills an item's caches and assigns its public attributes while another copies (and pickles) it: no crash, and every restored item returns the live model's values. The same holds for a locked Space,
 whose flags are ``bint``.
 """
 import os
@@ -25,14 +23,7 @@ import modelx as mx
 PROBE = textwrap.dedent("""\
     import copy, gc, pickle, sys
     m = __import__(sys.argv[1]).mx_model
-    collect = sys.argv[2] == 'collect'
     out = {}
-    if collect:
-        for workers in (1, 4):
-            m = type(m)()                    # a new model instance per run
-            m.collect_workers = workers
-            out['collect', workers] = m.Policy.collect().sum.pv
-        m = type(m)()
     for rep in range(3):                     # new items, then the same keys again after release
         for key in (1, 2, 5, 9):
             p = m.Policy[key]
@@ -45,9 +36,8 @@ PROBE = textwrap.dedent("""\
     d._mx_copy_refs(m.Data, m)
     out['subclass'] = (d.factor(3), d.factor(40))
     if sys.argv[1].endswith('_cy'):
-        clones = [('copy', copy.copy)]
-        if not collect:                      # a model with collect holds a thread-local state: no pickle
-            clones += [('pickle', lambda x: pickle.loads(pickle.dumps(x))), ('deepcopy', copy.deepcopy)]
+        clones = [('copy', copy.copy), ('pickle', lambda x: pickle.loads(pickle.dumps(x))),
+                  ('deepcopy', copy.deepcopy)]
         # the Python subclass is copied through the class's own reduce (zero-filled, not scrubbed)
         out['subclass_clones'] = [(type(q) is Derived, q.factor(3), q.factor(40))
                                   for q in (clone(d) for name, clone in clones)]
@@ -92,15 +82,13 @@ THREADS = textwrap.dedent("""\
     import copy, pickle, random, sys, threading
     native = __import__(sys.argv[1]).mx_model
     live = __import__(sys.argv[2]).mx_model
-    mode = sys.argv[3]                       # plain: Policy items; collect: the shared Data; locked: Market
+    mode = sys.argv[3]                       # plain: Policy items; locked: Market
     if getattr(sys, '_is_gil_enabled', lambda: True)():   # before 3.13 there is always a GIL
         print(repr({'gil': True}))
         sys.exit(0)
     months = range(48)
 
     def entries(item):                       # every entry of the item's dense caches
-        if mode == 'collect':
-            return [(item.factor, (t,)) for t in months]
         if mode == 'locked':                 # bint flags, stored with release semantics under the model lock
             return [(item.price, (t,)) for t in months] + [(item.up, (t,)) for t in months]
         return ([(item.cf, (t,)) for t in months] + [(item.n, (t,)) for t in months]
@@ -111,11 +99,11 @@ THREADS = textwrap.dedent("""\
         return [cell(*args) for cell, args in entries(item)] + ([item.pv()] if mode == 'plain' else [])
 
     def item_of(model, key):
-        return model.Policy[key] if mode == 'plain' else model.Data if mode == 'collect' else model.Market
+        return model.Policy[key] if mode == 'plain' else model.Market
 
     keys = list(range(1, 41)) if mode == 'plain' else [None]
     expected = {key: values(item_of(live, key)) for key in keys}
-    # a model with collect holds a thread-local state, a locked model a lock: neither pickles
+    # a locked model holds a lock: it does not pickle
     clones = [copy.copy] + ([lambda x: pickle.loads(pickle.dumps(x))] if mode == 'plain' else [])
     current, copies, mismatches, errors = [None], [0], [], []
     done = threading.Event()
@@ -136,9 +124,7 @@ THREADS = textwrap.dedent("""\
             done.set()
 
     def churn(item):                         # fresh but equal public members: the old ones are freed
-        if mode == 'collect':
-            item._name = ''.join(['Da', 'ta'])
-        elif mode == 'locked':
+        if mode == 'locked':
             item.months = tuple(range(48))
         else:
             item.months = tuple(range(48))
@@ -178,15 +164,14 @@ THREADS = textwrap.dedent("""\
     """)
 
 
-def _build(tmp_path, name, collect, env):
+def _build(tmp_path, name, env):
     model = mx.new_model('ValueStorage')
     try:
         data = model.new_space('Data')
         data.new_cells('factor', 'lambda t: 1.0 + 0.01 * t')
         keys = tuple(range(1, 41))
-        options = {'collect_over': {'key': keys}, 'collect_outputs': 'lambda: {"sum": {"pv": pv()}}'} if collect else {}
         policy = model.new_space('Policy', formula='lambda key: None',
-                                 refs={'Data': data, 'keys': keys, 'months': tuple(range(48)), 'seen': [0]}, **options)
+                                 refs={'Data': data, 'keys': keys, 'months': tuple(range(48)), 'seen': [0]})
         policy.new_cells('cf', 'lambda t: key * 0.5 * Data.factor(t)')
         policy.new_cells('n', 'lambda t: t * key')
         policy.new_cells('alive', 'lambda t: t < key')
@@ -196,9 +181,8 @@ def _build(tmp_path, name, collect, env):
         model.export(tmp_path / name)
     finally:
         model.close()
-    spec = {'spaces': {'Policy': {'serial_collect': 'reuse', 'parallel_collect_reuse': True}}} if collect else {}
-    (tmp_path / f'spec_{name}.py').write_text(repr(spec), encoding='utf-8')
-    run = 'm.Policy.collect()\n' if collect else 'm.Policy[1].pv(); m.Policy[40].pv()\n'
+    (tmp_path / f'spec_{name}.py').write_text(repr({}), encoding='utf-8')
+    run = 'm.Policy[1].pv(); m.Policy[40].pv()\n'
     (tmp_path / f'sample_{name}.py').write_text(
         f'from {name} import mx_model as m\n{run}p = m.Policy[3]\n'
         'p.grid(0, 0); p.grid(47, 2); p.counted(0); p.counted(47); p.n(0); p.alive(0)\n', encoding='utf-8')
@@ -236,7 +220,7 @@ def _check(tmp_path, mode):
              'fallback': f'{poison} -DMX_TEST_VALUES_FALLBACK={1 if mode == "plain" else 2}'}
     for build, cppflags in flags.items():
         env = _with_macros(plain, cppflags) if cppflags else plain
-        log = _build(tmp_path, f'{build}_{mode}', mode == 'collect', env)
+        log = _build(tmp_path, f'{build}_{mode}', env)
         assert MSVC or all(flag in log for flag in cppflags.split()), build
     source = (tmp_path / f'shipped_{mode}_cy/_mx_classes.pxd').read_text(encoding='utf-8')
     policy = source.split('cdef class _c_Policy')[1].split('cpdef')[0]
@@ -263,15 +247,11 @@ def _check(tmp_path, mode):
         shared.setdefault('states', got['states'])
         # the same descriptor and the same reduced states as a fully zeroed build: no unwritten byte is carried
         assert (reduce, got.pop('states')) == (shared['reduce'], shared['states']), package
-        names = ('copy',) + (('pickle', 'deepcopy') if mode != 'collect' else ())
+        names = ('copy', 'pickle', 'deepcopy')
         for name in names:
             assert got.pop(name) == (True, True, 55, True, 8.0, 12.0, 0), name
         assert got.pop('subclass_clones') == [(True, *got['subclass'])] * len(names), package
-        if mode == 'collect':
-            serial = expected[('collect', 1)]
-            assert got.pop(('collect', 1)) == serial
-            assert abs(got.pop(('collect', 4)) - serial) <= 1e-12 * abs(serial)
-        assert got == {key: value for key, value in expected.items() if key[0] != 'collect'}, package
+        assert got == expected, package
         if build != 'fallback':
             _assert_threads(tmp_path, package, f'shipped_{mode}', mode)
 

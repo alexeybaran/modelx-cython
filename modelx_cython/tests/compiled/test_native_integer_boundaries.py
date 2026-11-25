@@ -18,7 +18,7 @@ def run_python(work, *args):
 
 @pytest.fixture(scope="module")
 def integer_domain_build(tmp_path_factory):
-    # these checks are the checked mode's (owner's rule): the small model would resolve unchecked
+    # these checks are the checked mode's, declared explicitly
     return _integer_domain_build(tmp_path_factory, "checked")
 
 
@@ -445,7 +445,7 @@ def test_terminal_product_checks_the_final_signed_result(integer_domain_build):
         minimum = -(1 << 63)
         for name in ('terminal_product', 'reordered_product'):
             # (0, minimum): the intermediate divisor - 1 leaves the range although the product
-            # is 0; the exact terminal arithmetic is gone (owner's rule), it raises naming the Cell
+            # is 0; with no exact terminal arithmetic, it raises naming the Cell
             projection = type(compiled)().Outer.Projection
             projection.amount, projection.divisor, projection.reads = 0, minimum, []
             try:
@@ -517,7 +517,7 @@ def test_native_signed_shift_and_remainder(integer_domain_build, cell, amount, o
 
 
 def test_unchecked_mode_arithmetic_is_plain_c(integer_domain_build_unchecked):
-    """Unchecked mode (owner's rule): the overflowing arithmetic of the checked-mode tests above is
+    """Unchecked mode: the overflowing arithmetic of the checked-mode tests above is
     plain C (no check, no exception, as on upstream); values inside the range, the conversions at
     the Python boundary and the shift and division rules stay as in the checked mode."""
     run_python(integer_domain_build_unchecked, "-c", textwrap.dedent("""\

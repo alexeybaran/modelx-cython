@@ -1,4 +1,4 @@
-"""D139: a compiled call to an uncached Cell on a proven receiver is a direct C call.
+"""A compiled call to an uncached Cell on a proven receiver is a direct C call.
 
 `surv(s, t)` and `tick(t)` are uncached (``is_cached = False``). A caller in the same class and a
 caller holding a typed item local call the Cell's private entry behind the same exact-receiver test
@@ -7,8 +7,7 @@ entry checks integer arguments as the cached entries do, and Python callers keep
 `surv` recurses through itself and the cached `rate`; the cached `inforce` recurses through `surv`
 (mixed cached/uncached recursion). Each call of `tick` evaluates it: `ticks(n)` calls it n times and
 appends n entries to a shared log, a second `ticks(n)` is a cache hit, and each Python call evaluates
-again. Compiled values equal the exported model on the direct route. Direct-route twin of
-``test_uncached_entries_collect`` (the same model without ``collect_over``).
+again. Compiled values equal the exported model.
 """
 import json
 import subprocess
@@ -39,7 +38,7 @@ def _build(tmp_path):
                     return 1.0
                 return inforce(t - 1) * surv(t - 1, t)
             '''))
-        # D139b: an uncached reader of a dense Cell at its own argument takes the proven inline hit
+        # An uncached reader of a dense Cell at its own argument takes the proven inline hit
         projection.new_cells('df', 'lambda t: 1.0 / (1.0 + 0.01 * key) ** t')
         projection.new_cells('discount', 'lambda t: surv(0, t) * df(t)', is_cached=False)
         projection.new_cells('tick', textwrap.dedent('''\

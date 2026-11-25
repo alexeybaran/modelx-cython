@@ -1,5 +1,4 @@
-"""Exercise native locked calls from Python threads and from per-item Cells on the direct route.
-Direct-route twin of ``test_locked_numeric_domains_collect`` (the same model without ``collect_over``)."""
+"""Exercise native locked calls from Python threads and from per-item Cells."""
 import subprocess
 import sys
 import textwrap

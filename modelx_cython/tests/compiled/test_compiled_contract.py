@@ -1,10 +1,9 @@
-"""Mandatory integration contract, separate from upstream's dependency matrix, on the direct route.
+"""Mandatory integration contract, separate from upstream's dependency matrix.
 
-Direct-route twin of the collect-layer ``test_exported_contract_and_collection`` (the same model
-without ``collect_over``, so it builds on upstream modelx): inherited References, ItemSpaces and their
+On a model that builds on upstream modelx: inherited References, ItemSpaces and their
 identity, no live dependency invalidation, an uncached Cell, exceptions passed through, locked
-Spaces, a read-only vector value; the collect totals are the sums of the direct items, and the
-ItemSpace formula's Reference is computed by its Cell.
+Spaces, a read-only vector value, totals over the items, and a Cell of an ItemSpace reading a
+shared Space through a Reference.
 """
 import json
 import os
@@ -93,12 +92,12 @@ def test_exported_contract_on_the_direct_route(tmp_path):
             raise AssertionError('missing exception')
         b.adjust = lambda v: v + 2.0
         assert b.total() == 4.5
-        # the direct items as they now are (b's own adjust); collect's fresh items summed to 27.5
+        # the items as they now are (b's own adjust)
         assert sum(m.Policies[key].total() for key in m.Policies.keys) == 25.0 + 4.5
         calls = []
         m.Shared.adjust = lambda v: calls.append(v) or v
         assert [m.Nested(2, key).state() for key in (7, 3)] == [[19.0], [15.0]]
-        # A compiled vector cell value is read-only (W1.6, D50); live modelx lets a caller
+        # A compiled vector cell value is read-only; live modelx lets a caller
         # mutate the cached list. Callers copy first and the cached value stays as it was.
         state = list(m.Nested(2, 7).state())
         state[0] = -1.0

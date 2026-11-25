@@ -19,7 +19,7 @@ def allows_exact_receiver(node, owner):
 
 
 def _eligible(cell, params):
-    # D139: an uncached Cell (no ``_f_`` method: its public method is the formula) takes the same
+    # An uncached Cell (no ``_f_`` method: its public method is the formula) takes the same
     # private entry, the formula itself with no cache lookup, storage or readiness flag
     return (
         not cell.is_locked
@@ -100,7 +100,7 @@ class _Calls(cst.CSTTransformer):
     def __init__(self, owner, entries, proven=False):
         self.entries = entries
         self.exact_receiver = cst.parse_expression(exact_receiver(owner))
-        # D139: the body of an uncached Cell's private entry runs on a proven exact receiver
+        # The body of an uncached Cell's private entry runs on a proven exact receiver
         self.exact_depth = 1 if proven else 0
 
     def proves_exact_receiver(self, node):
@@ -151,7 +151,7 @@ class _Calls(cst.CSTTransformer):
             func=cst.Name(entry), args=(cst.Arg(func.value), *updated.args, *supplied))
         if proven:
             return direct
-        # D59: the virtual branch converts to the Cell's C return type, as the typed entry
+        # The virtual branch converts to the Cell's C return type, as the typed entry
         # returns it, so the whole expression has that type and a local assigned from it
         # is inferred as a C number (infer_types) rather than an object.
         virtual = updated
@@ -200,7 +200,7 @@ class _Calls(cst.CSTTransformer):
 def _referenced_entries(body, functions, uncached, classes, origins, domains):
     """``functions`` without the private entry of an uncached Cell that no emitted code calls.
 
-    An uncached Cell's entry (D139) exists for its callers on a proven receiver. With none it is
+    An uncached Cell's private entry exists for its callers on a proven receiver. With none it is
     an unreachable module-level C function and is not emitted; an entry called only by such an
     entry is unreachable too."""
     candidates = {entry: key for key, entry in uncached.items()}
@@ -232,9 +232,9 @@ def add_inline_entries(module, classes, dense_layouts):
     next_entry = 0
     body = []
     all_entries, pending = {}, []
-    uncached = {}          # D139: {(owner, cell name): entry} of uncached Cells
+    uncached = {}          # {(owner, cell name): entry} of uncached Cells
     origins = {}
-    domains = {}           # D139b: {entry of an uncached Cell: its traced argument domain}
+    domains = {}           # {entry of an uncached Cell: its traced argument domain}
     for statement in module.body:
         if not isinstance(statement, cst.ClassDef) or statement.name.value not in classes:
             body.append(statement)
@@ -261,7 +261,7 @@ def add_inline_entries(module, classes, dense_layouts):
             cell.inline_entry = entry
             entries[cell.name] = entry, len(cell.params), defaults, cell.get_rettype_expr(c_style=True)
             if not cell.has_formula_def:
-                # D139: emitted below from the formula, once every class's entries are known
+                # Emitted below from the formula, once every class's entries are known
                 uncached[owner, cell.name] = entry
                 origins[entry] = owner, cell.name
                 if domain := _entry_domain(cell):
@@ -287,8 +287,8 @@ def add_inline_entries(module, classes, dense_layouts):
         all_entries[owner] = entries
         pending.append((statement, owner, cells, entries, methods))
         body.append(None)
-    # D114 item 5: formulas are rewritten after every class's entries are known, so a call on a
-    # typed item local can take the entry of the item's class
+    # Formulas are rewritten after every class's entries are known, so a call can take the entry
+    # of its receiver's class
     pending_iter = iter(pending)
     for position, placed in enumerate(body):
         if placed is not None:
@@ -318,7 +318,7 @@ def add_inline_entries(module, classes, dense_layouts):
                     calls = _Calls(owner, entries)
                     methods[index] = method.with_changes(body=method.body.visit(calls))
                     if (entry := uncached.get((owner, cell.name))) is not None and not name.startswith(FORMULA_PREF):
-                        # D139: the entry is the authored formula with its calls taken on the proven receiver
+                        # The entry is the authored formula with its calls taken on the proven receiver
                         proven = _Calls(owner, entries, proven=True)
                         functions.append(_entry_function(
                             authored[index], entry, owner, optional_receiver, authored[index].body.visit(proven)))

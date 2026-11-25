@@ -301,7 +301,7 @@ class PXDGenerator:
         decl_stmts = []
         if cls_name in self.module.visitor.dynamic_ref_classes:
             decl_stmts.append("cdef dict __dict__\n")
-        # R-4: what an item holds from shared inputs (holds.HoldTable)
+        # What an item holds from shared inputs (holds.HoldTable)
         decl_stmts.extend(holds.pxd_declarations(cls_info))
         for cells in cls_info.cells.values():
 
@@ -321,7 +321,7 @@ class PXDGenerator:
             if cells.has_args():
                 if cells.has_typeinfo() and cells.is_arrayable():
 
-                    # S1: the value array is declared with the class's last members (value_var_defs)
+                    # The value array is declared with the class's last members (value_var_defs)
                     has_name = HAS_PREF + cells.name
                     has_type = cells.get_readiness_array_decl_expr(c_style=True)
                     decl_stmts.append(f"cdef {has_type} {has_name}\n")
@@ -582,8 +582,8 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
         self.helper_providers = set()
         self.dense_entries = {}
         self.formula_entries = {}
-        self.function_origins = {}      # D139: {private entry of an uncached Cell: (class, Cell)}
-        self.entry_domains = {}         # D139b: {private entry of an uncached Cell: its argument domain}
+        self.function_origins = {}      # {private entry of an uncached Cell: (class, Cell)}
+        self.entry_domains = {}         # {private entry of an uncached Cell: its argument domain}
         self.helper_providers.update(numeric_cache.providers(module))
 
     def _compact_spill(self, cells, cls_name, source):
@@ -620,7 +620,7 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
         from modelx_cython.powers import OperandKind, kind_of_type_expr, formula_local_kinds
         param_kinds = {name: kind_of_type_expr(cells.get_argtype_expr(name, c_style=True, formula=True))
                        for name in cells.params} if cells.has_args() and cells.has_typeinfo() else {}
-        # locals proven of one kind by every assignment (D59): `k = calendar_year(t) - year`
+        # locals proven of one kind by every assignment: `k = calendar_year(t) - year`
         # then `base ** k` is an integer exponent, as the same expression written inline is
         # analysed on the first read: most formulas have no operand the passes below classify
         local_kinds = _FirstRead(lambda: {**formula_local_kinds(
@@ -703,13 +703,13 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
             from modelx_cython.space_results import pin_function
             pins = [pin_function(name, *key) for key, name in self._held_pins.items()]
             module = module.with_changes(body=(*module.body, *pins))
-        # D116: one root construction and release per compiled ItemSpace class (collect and direct)
+        # One root construction and release per compiled ItemSpace class
         from modelx_cython import item_roots
         roots = [fn for name in sorted(self.module.visitor.itemspace_classes) if name in self.module.classes
                  for fn in item_roots.functions(name)]
         if roots:
             module = module.with_changes(body=(*module.body, *roots))
-        # S1: dense cache values left unwritten at allocation, installed when the module is imported
+        # Dense cache values left unwritten at allocation, installed when the module is imported
         values = ''.join(value_storage.functions(cls) for cls in self.module.classes.values())
         if values:
             values += value_storage.install(self.module.classes.values())
@@ -723,13 +723,13 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
         # integer guards: no overflowcheck directive; the checked mode flags the C integer arithmetic of
         # each formula (integer_boundaries.py), and a formula it cannot cover carries the directive itself
         if self.module.spec.policy.infer_types:
-            # M1 (spec key infer_types): C integer inference in generated model modules; providers keep
+            # Spec key infer_types: C integer inference in generated model modules; providers keep
             # their own directives.
             directives.append('infer_types=True')
         if directives:
             module = module.with_changes(header=(
                 cst.EmptyLine(comment=cst.Comment('# cython: ' + ', '.join(directives))), *module.header))
-        # api-tables (D101a): rename the C members of table cells and table References
+        # C functions returning a C number propagate exceptions (exceptval)
         return module.visit(NumericExceptions())
 
     def leave_ClassDef(
@@ -761,7 +761,7 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
 
                 if cells.has_args():
                     if cells.has_typeinfo() and cells.is_arrayable():
-                        # S1: the value array is annotated after every other member (value_storage)
+                        # The value array is annotated after every other member (value_storage)
                         decl_stmts.append(
                             cst.parse_statement(
                                 HAS_PREF
@@ -873,7 +873,7 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
         """Remove ``self._v_*`` and ``self._has_*`` assignments from
         the ``__init__`` body of a space class.
 
-        The dict caches of a locked or collect-shared class are the exception: their
+        The dict caches of a locked class are the exception: their
         ``self._v_<name> = {}`` stays, so that the dict exists before any
         thread calls the cells, instead of being created lazily on first
         use by :meth:`_add_dict_assign`, which several threads could do
@@ -1399,7 +1399,7 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
         """The body of a zero-argument cached cells of a Space shared by threads and not locked.
 
         An instance of a Space that is not an ItemSpace (or that has dynamic References) can be
-        read by several threads at once, e.g. the Data Space by the workers of a collect. The
+        read by several threads at once, e.g. the Data Space by several worker threads. The
         value is published once: a thread that misses runs the formula without a lock, then
         stores the value and the flag inside ``cython.critical_section`` on the instance, only
         if no other thread has stored one, so the field is written once and never cleared under
@@ -1471,12 +1471,12 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
 
 
 def _releasing_delitem(node, cls_name):
-    """D114 item 4: deleting an item also breaks the item's references to itself.
+    """Deleting an item also breaks the item's references to itself.
 
     The exported ``__delitem__`` is ``del self._mx_itemspaces[item]``. An item holds itself in
     ``_space`` and ``_mx_roots``, so without this it is freed only by the cyclic GC. The removed item,
-    when it is a compiled item without child Spaces or items of its own, is cleared as collect clears
-    its reused root (``_mx_cells``, ``_mx_roots``, ``_space``) by ``item_roots.release_item``, which the
+    when it is a compiled item without child Spaces or items of its own, is cleared
+    (``_mx_cells``, ``_mx_roots``, ``_space``) by ``item_roots.release_item``, which the
     whole-model clear shares; it is then freed by its reference count.
     Any other body is left as exported. The KeyError for a missing key is unchanged (``dict.pop``).
     """
@@ -1521,7 +1521,7 @@ def _locked_item_build(statements):
 
 
 def _fast_item_call(node, cls_name):
-    """D114 item 6: a new item of a top-level Space without child Spaces is built without the generic walk.
+    """A new item of a top-level Space without child Spaces is built without the generic walk.
 
     The exported ``__call__`` walks the new root and its base in step (``zip(_mx_walk(), _mx_walk())``),
     copies References, applies the roots' and its own parameters and extends ``_mx_roots``. When the
