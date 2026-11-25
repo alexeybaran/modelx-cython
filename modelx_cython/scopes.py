@@ -5,7 +5,7 @@ from collections import Counter
 from contextlib import contextmanager
 from libcst.metadata import ExpressionContext, ExpressionContextProvider, MetadataWrapper
 
-from .syntax import dotted_name, walk
+from .syntax import children, dotted_name, kept_children, walk
 
 
 OPAQUE_SCOPES = (
@@ -58,7 +58,7 @@ def lexical_nodes(body):
     def current(node):
         yield node
         if not isinstance(node, OPAQUE_SCOPES):
-            for child in node.children:
+            for child in children(node):
                 yield from current(child)
     for statement in body:
         yield from current(statement)
@@ -77,13 +77,15 @@ _SHARED = None     # while shared_facts() is open: {key of the nodes: (the nodes
 @contextmanager
 def shared_facts():
     """Within the block, CstFacts of the same nodes (the same node, or a sequence of the same
-    statements) is computed once: the nodes are immutable, so the facts are the same."""
+    statements) is computed once, and so is each node's ``children``: the nodes are immutable,
+    so both are the same."""
     global _SHARED
     outer = _SHARED
     if outer is None:
         _SHARED = {}
     try:
-        yield
+        with kept_children():
+            yield
     finally:
         _SHARED = outer
 
