@@ -10,6 +10,7 @@ Sums of float vectors use a compensated state equal to CPython's built-in float
 sum bit for bit. It is a private copy of ``_float_sum_state`` (owned by another
 package); the two are to be unified.
 """
+cimport cython
 from cpython.version cimport PY_VERSION_HEX
 from cpython.ref cimport PyObject
 from libc.math cimport fabs, isfinite
@@ -133,6 +134,29 @@ cdef double _vec_get_slow(F64Vec v, long long i) except? -1.0
 cdef int _vec_set_slow(F64Vec v, long long i, double value) except -1
 cdef long long _ivec_get_slow(I64Vec v, long long i) except? -1
 cdef int _ivec_set_slow(I64Vec v, long long i, long long value) except -1
+
+
+# ---------------------------------------------------------------- a value entering a vector
+ctypedef fused item_t:
+    double
+    long long
+    object
+
+
+cdef long long _ivec_item_object(object item) except? -1
+
+
+cdef inline long long ivec_item(item_t item) except? -1:
+    """A value not proven an integer entering an integer vector: an int, or a bool or a float equal to
+    one (live holds a number equal to the stored one), else TypeError; a C conversion would truncate."""
+    if item_t is double:
+        if -9223372036854775808.0 <= item < 9223372036854775808.0 and item == <double>(<long long>item):
+            return <long long>item
+        return _ivec_item_object(item)
+    elif item_t is cython.longlong:
+        return item
+    else:
+        return _ivec_item_object(item)
 
 
 # ---------------------------------------------------------------- element access
