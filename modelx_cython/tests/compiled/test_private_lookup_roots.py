@@ -1,10 +1,10 @@
 """audit-routes P6 (D126): every compiled root takes its lookup contexts over privately.
 
 Items of an exported ItemSpace class are partitioned by the caller (the thread rule that
-``numeric_cache.exclusively_owned`` already relies on), so a direct item keeps the round memo as
-collect's reused root does. A Cython probe reads the context of the compiled class: after a
-``round(x, n)`` the memo is ready on a direct item (before P6 it never was). Values equal live on
-both routes.
+``numeric_cache.exclusively_owned`` already relies on), so a direct item keeps the round memo. A Cython
+probe reads the context of the compiled class: after a ``round(x, n)`` the memo is ready on a direct
+item (before P6 it never was). Values equal live. Direct-route twin of ``test_private_lookup_roots_collect``
+(the same model without ``collect_over``).
 """
 import subprocess
 import sys
@@ -21,8 +21,7 @@ def _build(tmp_path):
     try:
         keys = (1, 2, 3)
         proj = model.new_space(
-            'Projection', formula='lambda key: None', refs={'keys': keys},
-            collect_over={'key': keys}, collect_outputs='lambda: {"sum": {"value": value()}}')
+            'Projection', formula='lambda key: None', refs={'keys': keys})
         proj.new_cells('rounded', '''\
 def rounded(t):
     amount = key * 0.37 + t * 0.011
@@ -40,23 +39,21 @@ def direct():
         total += item.rounded(2) + item.rounded(3)
     return total
 ''')
-        live = {'collect': proj.collect().sum.value, 'direct': port.direct(),
+        live = {'direct': port.direct(),
                 'items': [proj[k].rounded(t) for k in keys for t in range(4)]}
         model.export(tmp_path / 'exported')
     finally:
         model.close()
-    (tmp_path / 'spec.py').write_text(repr({'spaces': {'Projection': {'serial_collect': 'reuse'}}}),
-                                      encoding='utf-8')
     (tmp_path / 'sample.py').write_text(
         'from exported import mx_model as m\n'
-        'm.Projection.collect(); m.Portfolio.direct()\n'
+        'm.Portfolio.direct()\n'
         'for k in (1, 2, 3):\n    [m.Projection[k].rounded(t) for t in range(4)]\n', encoding='utf-8')
     subprocess.run([sys.executable, '-m', 'modelx_cython', 'exported', '--sample', 'sample.py',
-                    '--spec', 'spec.py'], cwd=tmp_path, check=True)
+                    '--no-spec'], cwd=tmp_path, check=True)
     return live
 
 
-def test_direct_items_and_collect_roots_own_their_lookup_contexts(tmp_path):
+def test_direct_items_own_their_lookup_contexts(tmp_path):
     live = _build(tmp_path)
     source = (tmp_path / 'exported_cy/_mx_classes.py').read_text(encoding='utf-8')
     contexts = sorted({line.split(':')[0].strip() for line in source.splitlines()
@@ -85,7 +82,6 @@ def test_direct_items_and_collect_roots_own_their_lookup_contexts(tmp_path):
         item = p[2]
         assert [p[k].rounded(t) for k in (1, 2, 3) for t in range(4)] == expected['items']
         assert memo_ready(item), 'a direct item did not keep its round memo'
-        assert p.collect().sum.value == expected['collect']
         assert m.Portfolio.direct() == expected['direct']
         print('ok')
         ''')

@@ -1,4 +1,5 @@
-"""An independent provider's view type binds through forwarded Cells, behind its ABI guard."""
+"""An independent provider's view type binds through forwarded Cells, behind its ABI guard. The test here is the
+direct-route twin of ``test_native_object_provider_collect`` (the same model without ``collect_over``)."""
 
 from importlib import import_module
 import json
@@ -10,7 +11,6 @@ from textwrap import dedent
 import modelx as mx
 
 from modelx_cython.helpers import module_name
-
 
 
 PROVIDER = 'curve_example.kernel'
@@ -138,9 +138,7 @@ def test_independent_provider_and_forwarding(tmp_path, monkeypatch):
         projection.data = data
         projection.new_cells('rate_from_data', 'lambda: data.again().rate_at(4)')
         keys = (1, 2)
-        pricing = model.new_space('Pricing', formula='lambda key: None', refs={'data': data, 'keys': keys},
-                                  collect_over={'key': keys},
-                                  collect_outputs='lambda: {"sum": {"total": total()}}')
+        pricing = model.new_space('Pricing', formula='lambda key: None', refs={'data': data, 'keys': keys})
         pricing.new_cells('schedule', 'lambda: data.again()')
         pricing.new_cells('quote', 'lambda month: schedule().price(month, "rate", 0.0)')
         pricing.new_cells('total', 'lambda: quote(key) + quote(key + 1)')
@@ -156,15 +154,13 @@ def test_independent_provider_and_forwarding(tmp_path, monkeypatch):
                 'assert data.variable_rate(4) == 6.5\n'
                 'assert data.bound().rate_at(0) == 9.5\n'
                 'assert mx_model.Projection.rate_from_data() == 6.5\n'
-                'assert mx_model.Pricing.collect().sum.total == 18.0\n', encoding='utf-8')
+                'assert sum(mx_model.Pricing[k].total() for k in (1, 2)) == 18.0\n', encoding='utf-8')
     finally:
         model.close()
 
-    (tmp_path / 'spec.py').write_text(
-        repr({'spaces': {'Pricing': {'serial_collect': 'reuse'}}}), encoding='utf-8')
     for name in ('first', 'second'):
         subprocess.run([sys.executable, '-m', 'modelx_cython', name,
-                        '--sample', f'{name}_sample.py', '--spec', 'spec.py'], cwd=tmp_path, check=True)
+                        '--sample', f'{name}_sample.py', '--no-spec'], cwd=tmp_path, check=True)
         implementation.write_text(IMPLEMENTATION + '\n# New build identity.\n', encoding='utf-8')
 
     alias = module_name(PROVIDER)
@@ -185,7 +181,7 @@ def test_independent_provider_and_forwarding(tmp_path, monkeypatch):
         assert first.Projection.rate_from_data() == 6.5
         assert first_provider.preparations == 1
         assert type(first)().Pricing[1].quote(1) == 3.5
-        assert first.Pricing.collect().sum.total == 18.0
+        assert sum(first.Pricing[k].total() for k in (1, 2)) == 18.0
         assert type(f.primary()) is not type(s.primary())
         assert second_provider.preparations == 1
         s.source = f.primary()
@@ -212,27 +208,6 @@ def test_independent_provider_and_forwarding(tmp_path, monkeypatch):
                             capture_output=True, text=True)
     assert result.returncode != 0
     assert f'Native provider {PROVIDER} requires ABI {ABI}' in result.stderr
-
-
-def test_removed_private_lookup_spec_key(tmp_path):
-    """audit-routes P6: the removed spec key is refused with its reason, not silently ignored."""
-    model = mx.new_model('RemovedKey')
-    try:
-        keys = (1, 2)
-        pricing = model.new_space('Pricing', formula='lambda key: None', refs={'keys': keys},
-                                  collect_over={'key': keys}, collect_outputs='lambda: {"sum": {"total": total()}}')
-        pricing.new_cells('total', 'lambda: 1.5 * key')
-        model.export(tmp_path / 'exported')
-    finally:
-        model.close()
-    (tmp_path / 'sample.py').write_text('from exported import mx_model\nmx_model.Pricing.collect()\n',
-                                        encoding='utf-8')
-    (tmp_path / 'spec.py').write_text(
-        repr({'spaces': {'Pricing': {'serial_collect': 'reuse', 'serial_private_lookups': True}}}), encoding='utf-8')
-    run = subprocess.run([sys.executable, '-m', 'modelx_cython', 'exported', '--sample', 'sample.py',
-                          '--spec', 'spec.py', '--translate-only'], cwd=tmp_path, capture_output=True, text=True)
-    assert run.returncode != 0
-    assert 'Pricing: the spec key serial_private_lookups was removed' in run.stdout + run.stderr
 
 
 def _extension_suffix():

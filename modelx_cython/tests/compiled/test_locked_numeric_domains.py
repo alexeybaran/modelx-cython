@@ -1,4 +1,5 @@
-"""Exercise native locked calls and per-item numeric Collect domains."""
+"""Exercise native locked calls from Python threads and from per-item Cells on the direct route.
+Direct-route twin of ``test_locked_numeric_domains_collect`` (the same model without ``collect_over``)."""
 import subprocess
 import sys
 import textwrap
@@ -7,7 +8,7 @@ import modelx as mx
 import numpy as np
 
 
-def test_locked_native_calls_and_dependent_collect_domain(tmp_path):
+def test_locked_native_calls_on_the_direct_route(tmp_path):
     model = mx.new_model("LockedDomains")
     try:
         market = model.new_space("Market", refs={"np": np})
@@ -19,9 +20,7 @@ def test_locked_native_calls_and_dependent_collect_domain(tmp_path):
 """)
         market.new_cells("rate", "def rate(t):\n    return price(t) / price(t + 1)\n")
         book = model.new_space(
-            "Book", formula="lambda close, key: None", refs={"keys": (1, 2, 3, 4), "market": market},
-            collect_over={"key": (1, 2, 3, 4)},
-            collect_outputs='lambda: {"sum": {"pv": pv(), "cash": {t: cash(t) for t in periods(close)}}}')
+            "Book", formula="lambda close, key: None", refs={"keys": (1, 2, 3, 4), "market": market})
         book.new_cells("periods", "lambda month: range(4 - month)")
         book.new_cells("cash", "lambda t: market.price(t) + key")
         book.new_cells("pv", "lambda: key * 2.0")
@@ -34,13 +33,14 @@ def test_locked_native_calls_and_dependent_collect_domain(tmp_path):
     (tmp_path / "sample.py").write_text(
         "from exported import mx_model as m\n"
         "m.Market.rate(1); m.Market.price(2)\n"
-        "m.Book.collect(0); m.Book.collect(1); m.Book.collect(4)\n", encoding="utf-8")
+        "for close in (0, 1, 4):\n"
+        "    for key in (1, 2, 3, 4):\n"
+        "        b = m.Book[close, key]; b.pv(); [b.cash(t) for t in b.periods(close)]\n", encoding="utf-8")
     subprocess.run([sys.executable, "-m", "modelx_cython", "exported", "--sample", "sample.py",
                     "--spec", "spec.py"], cwd=tmp_path, check=True)
     source = (tmp_path / "exported_cy/_mx_classes.py").read_text(encoding="utf-8")
     assert "_mx_held_formula__c_Market_rate" in source
     assert "_mx_held_cache__c_Market_price" in source
-    assert "domain = self.periods(self.close)" in source
     probe = textwrap.dedent("""\
         from concurrent.futures import ThreadPoolExecutor
         from types import SimpleNamespace
@@ -59,13 +59,12 @@ def test_locked_native_calls_and_dependent_collect_domain(tmp_path):
         with ThreadPoolExecutor(max_workers=4) as pool:
             rates = list(pool.map(native.Market.rate, (1, 2, 3, 4) * 10))
         assert rates == [live.Market.rate(t) for t in (1, 2, 3, 4) * 10]
-        for workers in (1, 4):
-            model = type(native)()
-            model.collect_workers = workers
-            for close in (0, 1, 4):
-                expected = live.Book.collect(close).sum
-                result = model.Book.collect(close).sum
-                assert result.pv == expected.pv
-                assert dict(result.cash) == dict(expected.cash)
+        model = type(native)()
+        for close in (0, 1, 4):
+            for key in (1, 2, 3, 4):
+                expected, result = live.Book[close, key], model.Book[close, key]
+                assert result.pv() == expected.pv()
+                assert [result.cash(t) for t in result.periods(close)] == [
+                    expected.cash(t) for t in expected.periods(close)]
         """)
     subprocess.run([sys.executable, "-c", probe], cwd=tmp_path, check=True)
