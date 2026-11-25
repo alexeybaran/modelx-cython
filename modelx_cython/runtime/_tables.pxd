@@ -46,6 +46,7 @@ cdef class PreparedTable:
     cdef Py_ssize_t i64_width
     cdef tuple _arrays                     # the numpy arrays the pointers point into (kept alive, never written)
     cdef tuple objects                     # per object column: tuple of the values pandas returns, by stored row
+    cdef bint row_object                   # a row is not widened to a number dtype: its fields are the stored values
     cdef readonly object max_label, min_label   # index.max(), index.min() as pandas returns them
     cdef long long[8] max_parts, min_parts      # T-5c: their int parts as C integers (0 for another kind)
     cdef const double[::1] asof_keys       # sorted labels of a flat numeric index (for asof)
