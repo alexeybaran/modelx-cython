@@ -2,15 +2,7 @@
 
 import re
 
-from .consts import FORMULA_PREF, MODULE_PREF, SPACE_PREF
 
-
-def _lock_reason(source, kind, resource='table'):
-    _, *parents, _, cls, cell = source.split('.')
-    space = '.'.join([*(name[len(MODULE_PREF):] for name in parents),
-                      cls[len(SPACE_PREF):]])
-    name = cell[len(FORMULA_PREF):]
-    return f'native {kind} {resource} read from {space}.{name} requires {space} in export locked_spaces'
 
 
 def describe(module_infos):
@@ -49,10 +41,6 @@ def describe(module_infos):
                     reasons.append('keyword call retains the Python public boundary')
                 if cell.is_locked:
                     reasons.append('exported shared-Space lock retained')
-                if cell.observed_native_binding is not None and cell.native_provider_binding is None:
-                    reasons.append('native provider result requires a matching return annotation or direct forwarding from a typed Cell')
-                reasons.extend(_lock_reason(source, 'cached', resource)
-                               for source, resource in getattr(cell, 'unlocked_provider_sources', ()))
                 result[cell.fqname] = {
                     'formula': 'python-method' if formula_python else 'cython-cfunction',
                     'public_entry': 'python-method' if public_python else 'cython-cpdef',
