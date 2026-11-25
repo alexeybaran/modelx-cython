@@ -539,7 +539,9 @@ class RuntimeValueInfo:
     def __init__(self, value, mx_class=''):
         """Record the type of ``value`` and an optional class name."""
         self.type_ = (object if isinstance(value, numbers.Integral)
-                      and not -(1 << 63) <= value < (1 << 63) else type(value))
+                      and (not -(1 << 63) <= value < (1 << 63)
+                           or isinstance(value, IntEnum) and not enum_safe(type(value)))   # its own operators
+                      else type(value))
         self.mx_class = mx_class
         from .helper_members import module_helpers
         self.helper_members = module_helpers(value)
