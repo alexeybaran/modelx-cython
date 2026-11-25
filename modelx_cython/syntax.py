@@ -28,10 +28,97 @@ def local_assignment(node):
     return None
 
 
+# The fields each node class visits, in LibCST's own order, learned from LibCST the first
+# time a class is met. ``CSTNode.children`` and ``CSTNode.visit`` rebuild a node (with its
+# validation) to list its children; reading the learned fields lists the same children, in
+# the same order, without building anything. A class whose visiting depends on a value
+# (one field visited by different helpers, or not at all) keeps LibCST's own traversal.
+_FIELDS = {}
+_CONDITIONAL = frozenset(('FormattedStringExpression', 'TemplatedStringExpression',
+                          'ImportFrom', 'LazyImportFrom'))
+
+
+class _FieldRecorder(cst.CSTVisitor):
+    def __init__(self, node):
+        self.node = node
+        self.fields = []
+        self.children = []
+
+    def on_visit_attribute(self, node, attribute):
+        if node is self.node:
+            self.fields.append(attribute)
+
+    def on_leave_attribute(self, original_node, attribute):
+        pass
+
+    def on_visit(self, node):
+        self.children.append(node)
+        return False
+
+    def on_leave(self, original_node):
+        pass
+
+
+def _learn(node):
+    recorder = _FieldRecorder(node)
+    node._visit_and_replace_children(recorder)
+    kind = type(node)
+    if kind.__name__ not in _CONDITIONAL:
+        _FIELDS[kind] = tuple(recorder.fields)
+    return recorder.children
+
+
+def children(node):
+    """``node.children`` (the same nodes in the same order), read from the node's fields."""
+    names = _FIELDS.get(type(node))
+    if names is None:
+        return _learn(node)
+    found = []
+    for name in names:
+        value = getattr(node, name)
+        if isinstance(value, cst.CSTNode):
+            found.append(value)
+        elif value is not None and not isinstance(value, cst.MaybeSentinel):
+            found.extend(value)
+    return found
+
+
+def visit(node, visitor):
+    """``node.visit(visitor)`` for a :class:`libcst.CSTVisitor`, without rebuilding nodes.
+
+    The visitor's callbacks run on the same nodes, attributes and order as LibCST's own
+    traversal; a visitor that transforms (a ``CSTTransformer``) must use ``node.visit``.
+    """
+    if visitor.on_visit(node):
+        names = _FIELDS.get(type(node))
+        if names is None:
+            if type(node).__name__ in _CONDITIONAL:
+                node._visit_and_replace_children(visitor)
+                visitor.on_leave(node)
+                return
+            _learn(node)
+            names = _FIELDS[type(node)]
+        for name in names:
+            visitor.on_visit_attribute(node, name)
+            value = getattr(node, name)
+            if isinstance(value, cst.CSTNode):
+                visit(value, visitor)
+            elif value is not None and not isinstance(value, cst.MaybeSentinel):
+                for item in value:
+                    visit(item, visitor)
+            visitor.on_leave_attribute(node, name)
+    visitor.on_leave(node)
+
+
 def walk(node):
-    yield node
-    for child in node.children:
-        yield from walk(child)
+    """``node`` and every node below it, depth first in source order."""
+    stack = [node]
+    while stack:
+        node = stack.pop()
+        yield node
+        found = children(node)
+        found.reverse()
+        stack.extend(found)
 
 
 def dotted_name(node):

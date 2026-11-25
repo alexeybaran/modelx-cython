@@ -9,7 +9,7 @@ from libcst.metadata import ExpressionContext
 from .cell_entries import checked_dense_guard, dense_condition, exact_receiver
 from .consts import CY_MOD, FORMULA_PREF, MX_SELF
 from .scopes import CstFacts, OPAQUE_SCOPES
-from .syntax import arguments, dotted_name, literal_value, same_expression, walk
+from .syntax import arguments, children, dotted_name, literal_value, same_expression, walk
 from .typedefs import primitive_kind
 
 
@@ -45,7 +45,7 @@ def _exact_calls(node, receiver, exact=False):
     if exact and isinstance(node, cst.Call) and isinstance(node.func, cst.Name):
         yield node
     if not isinstance(node, OPAQUE_SCOPES):
-        for child in node.children:
+        for child in children(node):
             yield from _exact_calls(child, receiver, exact)
 
 

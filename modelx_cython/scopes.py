@@ -4,7 +4,7 @@ import libcst as cst
 from collections import Counter
 from libcst.metadata import ExpressionContext, ExpressionContextProvider, MetadataWrapper
 
-from .syntax import dotted_name, walk
+from .syntax import children, dotted_name, visit, walk
 
 
 OPAQUE_SCOPES = (
@@ -18,7 +18,7 @@ class Names(cst.CSTVisitor):
     def __init__(self, node=None, used=()):
         self.names = set(used)
         if node is not None:
-            node.visit(self)
+            visit(node, self)
 
     def visit_Name(self, node):
         self.names.add(node.value)
@@ -54,13 +54,17 @@ class FormulaTransformer(cst.CSTTransformer):
 
 
 def lexical_nodes(body):
-    def current(node):
-        yield node
-        if not isinstance(node, OPAQUE_SCOPES):
-            for child in node.children:
-                yield from current(child)
+    """Every node of ``body`` (a sequence of statements), depth first in source order, not
+    descending into a nested scope (the scope's own node is included)."""
     for statement in body:
-        yield from current(statement)
+        stack = [statement]
+        while stack:
+            node = stack.pop()
+            yield node
+            if not isinstance(node, OPAQUE_SCOPES):
+                found = children(node)
+                found.reverse()
+                stack.extend(found)
 
 
 def has_scope_effects(body):
