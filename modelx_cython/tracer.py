@@ -284,6 +284,10 @@ def _count_receiver(receiver_calls, trace):
 
 # Returns read by value only (type, magnitude): a repeat of one adds nothing to RuntimeCellsInfo
 _PLAIN_RETURNS = frozenset((int, float, bool, str, type(None), np.float64, np.float32, np.int64, np.int32, np.bool_))
+# Plain returns without a largest value
+_UNORDERED_RETURNS = frozenset((bool, np.bool_, str, type(None)))
+# Exact types whose integer_magnitude is 0: no integer is read from them
+_NO_MAGNITUDE = frozenset((float, bool, str, type(None)))
 
 
 def _add_arg_vals(arg_type_val: Dict[str, Dict[type, Any]], minimums, trace) -> bool:
@@ -297,14 +301,17 @@ def _add_arg_vals(arg_type_val: Dict[str, Dict[type, Any]], minimums, trace) -> 
     changed = False
     for arg, val in itertools.islice(trace.arg_vals.items(), 1, None):
         tp = type(val)
-        types = arg_type_val.setdefault(arg, {})
+        integral = issubclass(tp, numbers.Integral)
+        types = arg_type_val.get(arg)
+        if types is None:
+            types = arg_type_val[arg] = {}
         if tp not in types:
             types[tp] = val
             changed = True
-        elif issubclass(tp, numbers.Integral) and val > types[tp]:
+        elif integral and val > types[tp]:
             types[tp] = val
             changed = True
-        if issubclass(tp, numbers.Integral):
+        if integral:
             value = int(val)
             if arg not in minimums or value < minimums[arg]:
                 minimums[arg] = value
@@ -369,6 +376,7 @@ class _ReturnTypeMerger:
         """
         val = tr.ret_val
         changed = False
+        last_tp = self.ret_type
         if isinstance(val, np.ndarray):
             tp = ReturnTypeInfo(val.dtype.type, is_array=True, ndim=val.ndim)
             # Buffer compatibility depends on byte order and rank as well
@@ -378,17 +386,20 @@ class _ReturnTypeMerger:
                 changed = signature not in self._array_formats
                 self._array_formats.add(signature)
         else:
-            tp = ReturnTypeInfo(object if isinstance(val, numbers.Integral)
-                                and not -(1 << 63) <= val < (1 << 63) else type(val))
-            if self._integral_double_exact and isinstance(val, numbers.Integral):
+            integral = isinstance(val, numbers.Integral)
+            value_type = object if integral and not -(1 << 63) <= val < (1 << 63) else type(val)
+            if self._integral_double_exact and integral:
                 try:
                     integer = operator.index(val)
                     self._integral_double_exact = int(float(integer)) == integer
                 except (TypeError, ValueError, OverflowError):
                     self._integral_double_exact = False
                 changed = not self._integral_double_exact
+            if (last_tp is not None and last_tp.value_type == value_type
+                    and last_tp.is_array == False and last_tp.ndim == 0):     # noqa: E712 (as ==)
+                return changed      # the merged type stays: ``last_tp == tp`` below
+            tp = ReturnTypeInfo(value_type)
 
-        last_tp = self.ret_type
         if last_tp is None:
             self.ret_type = tp
             self._first_args = tr.arg_vals
@@ -885,6 +896,8 @@ class MxCallTraceLogger(CallTraceLogger):
         # ItemSpace parameters, integer columns of input tables) and where it was seen
         self.max_integer = 0
         self.max_integer_at = None
+        self._funcnames = {}    # traced function -> its fully qualified name
+        self._magnitude_free = {}   # type -> whether integer_magnitude is 0 for every value of it
 
     def log(self, trace: CallTrace) -> None:
         """Log a single call trace.
@@ -898,8 +911,30 @@ class MxCallTraceLogger(CallTraceLogger):
         :class:`RuntimeCellsInfo` derives from the kept traces exactly
         what it derives from all of them.
         """
-        name = trace.func.__name__
-        self._integer_magnitudes(trace.funcname, (*trace.arg_vals.values(), getattr(trace, 'ret_val', None)))
+        func = trace.func
+        name = func.__name__
+        funcname = self._funcnames.get(func)
+        if funcname is None:
+            funcname = self._funcnames[func] = trace.funcname
+        for value in (*trace.arg_vals.values(), getattr(trace, 'ret_val', None)):
+            # self._integer_magnitudes(funcname, ...), with the plain scalars read here
+            tp = type(value)
+            if tp is int:
+                magnitude = abs(value)
+            elif tp in _NO_MAGNITUDE:
+                continue
+            else:
+                free = self._magnitude_free.get(tp)
+                if free is None:
+                    # integer_magnitude reads an int, an array or a pandas object; it is 0 for
+                    # any other type (a Space, a dict, a model object)
+                    free = self._magnitude_free[tp] = not (
+                        issubclass(tp, (numbers.Integral, np.ndarray)) or tp.__module__.startswith('pandas.'))
+                if free:
+                    continue
+                magnitude = integer_magnitude(value)
+            if magnitude > self.max_integer:
+                self.max_integer, self.max_integer_at = magnitude, funcname
         if name == "_mx_assign_params":
             values = iter(trace.arg_vals.items())
             _, target = next(values)
@@ -910,7 +945,7 @@ class MxCallTraceLogger(CallTraceLogger):
             params = getattr(sys.modules[cls.__module__], SPACE_PARAMS + "_" + cls.__name__[len(SPACE_PREF):])
             self._record_params(target, ((param, getattr(source, param)) for param in params))
         elif name.startswith(FORMULA_PREF) or name in (MX_ASSIGN_REFS, "__call__"):
-            name = trace.funcname
+            name = funcname
             state = self._cached.get(name)
             if state is None:
                 state = self._cached[name] = {}, {}, _ReturnTypeMerger(name, log=False), {}, set(), [None]
@@ -918,14 +953,15 @@ class MxCallTraceLogger(CallTraceLogger):
             _count_receiver(receivers, trace)
             value, raised = getattr(trace, 'ret_val', None), getattr(trace, 'raised', False)
             keep = _add_arg_vals(types, minimums, trace)
-            if type(value) not in ret_types:
-                ret_types.add(type(value))
+            value_type = type(value)
+            if value_type not in ret_types:
+                ret_types.add(value_type)
                 keep = True
-            if type(value) not in _PLAIN_RETURNS:
+            if value_type not in _PLAIN_RETURNS:
                 keep = True
             elif not raised:
                 keep = merger.add(trace) or keep
-                if type(value) not in (bool, np.bool_, str, type(None)) and value == value:
+                if value_type not in _UNORDERED_RETURNS and value == value:
                     try:
                         value = float(value)
                     except OverflowError:
@@ -935,7 +971,7 @@ class MxCallTraceLogger(CallTraceLogger):
             if keep:
                 self._traces.setdefault(name, []).append(trace)
         else:
-            name = trace.funcname
+            name = funcname
             state = self._kept.get(name)
             if state is None:
                 state = self._kept[name] = {}, {}, _ReturnTypeMerger(name, log=False)
