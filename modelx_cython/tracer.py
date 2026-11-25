@@ -622,6 +622,7 @@ class MxCallTracer(CallTracer):
         """
         super().__init__(logger, max_typed_dict_size, code_filter, sample_rate)
         self.module = module
+        self._in_module = {}    # id(code object) -> (code object, its function is in the module)
 
     def handle_call(self, frame: FrameType) -> None:
         """Start a trace for a call, capturing argument values.
@@ -716,9 +717,14 @@ class MxCallTracer(CallTracer):
             return self
 
         # Filter by module name here.  The function is resolved once per
-        # code object: an uncached cells is traced on every call.
-        func = self._get_func(frame)
-        if not func or not func.__module__.split(".")[0] == self.module:
+        # code object: an uncached cells is traced on every call.  So is
+        # the answer, kept by identity with the code object held.
+        entry = self._in_module.get(id(code))
+        if entry is None or entry[0] is not code:
+            func = self._get_func(frame)
+            entry = self._in_module[id(code)] = code, bool(
+                func and func.__module__.split(".")[0] == self.module)
+        if not entry[1]:
             return self
 
         try:
