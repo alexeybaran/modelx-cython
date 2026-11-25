@@ -190,6 +190,11 @@ cdef inline long long _exact_int(object item) except? -1:
     raise TypeError(f'an integer vector holds integers, not {type(item).__name__}')
 
 
+cdef long long ivec_item(object item) except? -1:
+    """An element entering an integer vector from Python code: an exact int, else TypeError."""
+    return _exact_int(item)
+
+
 cdef I64Vec ivec_of(object value):
     """The value itself if it is an I64Vec, else a copy of a sequence of integers."""
     cdef I64Vec v
