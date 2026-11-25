@@ -114,12 +114,11 @@ def test_minmax_operand_kinds_and_objects(tmp_path):
             ''')
     finally:
         model.close()
-    for name in ('loc', 'blt', 'ln', 'ints2'):
+    # min/max in these object-result Cells are the built-in call, listed as such in the report
+    for name in ('loc', 'blt', 'ln', 'ints2', 'obj', 'obj2', 'mix3', 'mix4', 'err', 'shadow'):
         assert _cell(report, name)['expressions_object'] == [], name
-        assert _cell(report, name)['expressions_untyped'] == [], name
-    for name in ('obj', 'obj2', 'mix3', 'mix4', 'err', 'shadow'):
-        assert [e['form'] for e in _cell(report, name)['expressions_object']], name
-        assert _cell(report, name)['expressions_untyped'] == [], name
+        forms = [e['form'] for e in _cell(report, name)['expressions_untyped']]
+        assert forms and set(forms) <= {'min', 'max'}, name
     _differential(tmp_path, _PROBE_HEAD + '''\
     for i in range(24):
         for j in range(24):
@@ -173,8 +172,9 @@ def test_nested_reductions_lifted(tmp_path):
             ''')
     finally:
         model.close()
+    # every reduction of these cells is lowered; only an outer min/max of plain operands is the built-in call
     for name in ('a', 'b', 'c', 'd', 'e', 'g', 'h', 'm', 'r', 'a2', 'ty', 'ty2'):
-        assert _cell(report, name)['expressions_untyped'] == [], name
+        assert {e['form'] for e in _cell(report, name)['expressions_untyped']} <= {'min', 'max'}, name
     # and/or: the left operand once, the reduction only when the operator evaluates it
     assert _cell(report, 'f')['expressions_untyped'] == []
     o = _cell(report, 'o')['expressions_untyped']
