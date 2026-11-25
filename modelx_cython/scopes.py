@@ -5,7 +5,12 @@ from collections import Counter
 from collections.abc import Sequence
 from types import MappingProxyType
 
-from libcst.metadata import ExpressionContext, ExpressionContextProvider, MetadataWrapper, ParentNodeProvider
+from libcst.metadata import (ExpressionContext, ExpressionContextProvider, MetadataWrapper, ParentNodeProvider,
+                             ScopeProvider)
+try:
+    from libcst.metadata.scope_provider import ScopeVisitor as _ScopeVisitor
+except ImportError:     # pragma: no cover - ScopeProvider then resolves as LibCST does
+    _ScopeVisitor = None
 
 from .syntax import children, dotted_name, visit, walk
 
@@ -214,16 +219,29 @@ def parent_nodes(module):
 
 
 def metadata_wrapper(module, copy=False, parents=False):
-    """``MetadataWrapper(module, unsafe_skip_copy=not copy)`` with its ExpressionContextProvider
-    (on which ScopeProvider depends) and, with ``parents``, its ParentNodeProvider metadata
-    already resolved, from the shared traversal: LibCST resolves the same mappings with two
-    traversals each that rebuild every node. Any other provider resolves as LibCST does."""
+    """``MetadataWrapper(module, unsafe_skip_copy=not copy)`` with its ExpressionContextProvider,
+    ScopeProvider and, with ``parents``, ParentNodeProvider metadata already resolved.
+
+    LibCST resolves ExpressionContextProvider and ParentNodeProvider with two traversals each
+    that rebuild every node; they come from the shared traversal instead. ScopeProvider runs
+    its own ScopeVisitor as LibCST does, without the batched traversal after it that does
+    nothing for it. Every other provider resolves as LibCST does.
+    """
     wrapper = MetadataWrapper(module, unsafe_skip_copy=not copy)
     resolved = getattr(wrapper, '_metadata', None)
     if type(resolved) is dict and not resolved:
         resolved[ExpressionContextProvider] = MappingProxyType(expression_contexts(wrapper.module))
         if parents:
             resolved[ParentNodeProvider] = MappingProxyType(parent_nodes(wrapper.module))
+        if _ScopeVisitor is not None:
+            # what ScopeProvider.visit_Module does when LibCST resolves the provider
+            provider = (ScopeProvider(wrapper._cache.get(ScopeProvider)) if ScopeProvider.gen_cache
+                        else ScopeProvider())
+            with provider.resolve(wrapper):
+                visitor = _ScopeVisitor(provider)
+                wrapper.module.visit(visitor)
+                visitor.infer_accesses()
+            resolved[ScopeProvider] = MappingProxyType(dict(provider._computed))
     return wrapper
 
 
