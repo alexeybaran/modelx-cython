@@ -620,13 +620,6 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
         self._vector_counter = [0]
         code_enums.prepare(module)
 
-    def _reserve_cold_sum(self):
-        while True:
-            name = f'_mx_cold_sum_{self._next_cold_sum}'
-            self._next_cold_sum += 1
-            if name not in self._source:
-                return name
-
     def _compact_spill(self, cells, cls_name, source):
         index = len(self._cold_spills)
         name = f'_mx_compact_spill_{index}'
@@ -692,21 +685,15 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
             local_kinds = formula_local_kinds(node, cells.params, self._resolver, self._cells_kinds,
                                               self._ref_kinds, cls_info.fqname, param_kinds)
             reductions = NativeReductions(
-                cls_info, cells, self.helper_providers, node, self._reserve_cold_sum, builtin_bounds,
+                cls_info, cells, self.helper_providers, node, builtin_bounds,
                 builtin_reductions,
                 formula_kinds={name: {KIND_INT: 'longlong', KIND_FLOAT: 'double'}[kind]
                                for name, kind in local_kinds.items() if kind in (KIND_INT, KIND_FLOAT)})
             node = node.visit(reductions)
-            cells.native_reductions = reductions.count
             cells.native_tuple_int_loops = getattr(reductions, 'tuple_int_loops', 0)   # diag-scale P3
-            cells.exact_reduction_guards = reductions.exact_receiver_guards
         operations = set(rounded_inputs.operations)
         node = self._bind_declared_helpers(node, cls_info, cells, operations)
-        admitted_helpers = set(cells.native_helpers)
-        for fallback in reductions.fallbacks if reductions is not None else ():
-            self._cold_sums.append(self._bind_declared_helpers(fallback, cls_info, cells, rounded_inputs.operations))
-            admitted_helpers.update(cells.native_helpers)
-        cells.native_helpers = sorted(admitted_helpers)
+        cells.native_helpers = sorted(set(cells.native_helpers))
         cells.native_numeric_helpers = sorted(rounded_inputs.operations)
         node = rewrite_powers(
             node, self._resolver, self._cells_kinds, self._ref_kinds,
@@ -984,12 +971,7 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
         node = helpers.rewrite(node)
         cells.native_helpers = sorted(helpers.operations | set(inherited))
         # W1.4 math branch: module math members bound at build time (helpers.module_math).
-        # A cold reduction fallback adds to its formula's counts; a formula sets them.
-        if getattr(node, 'name', None) is not None and node.name.value.startswith('_mx_cold_sum_'):
-            cells.math_native = getattr(cells, 'math_native', 0) + helpers.math_native
-            cells.math_untyped = [*getattr(cells, 'math_untyped', ()), *helpers.math_untyped]
-        else:
-            cells.math_native, cells.math_untyped = helpers.math_native, helpers.math_untyped
+        cells.math_native, cells.math_untyped = helpers.math_native, helpers.math_untyped
         return node
 
     @property   # cannot use cached_property in Transformer
@@ -999,11 +981,9 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
         Each access re-runs the transformation by visiting the
         wrapped module with this transformer.
         """
-        self._cold_sums = []
         self._cold_spills = []
         self._held_arrays = {}
         self._dense_layouts = {}
-        self._next_cold_sum = 0
         self._uses_native_round = False
         from modelx_cython.scopes import Names
         self._held_names = Names(self._module_node)
@@ -1066,8 +1046,8 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
             (module, self.dense_entries, self.formula_entries, self.function_origins,
              self.entry_domains) = add_inline_entries(
                 module, ordinary, self._dense_layouts)
-        if self._cold_sums or self._cold_spills or self._held_arrays:
-            module = module.with_changes(body=(*module.body, *self._cold_sums, *self._cold_spills,
+        if self._cold_spills or self._held_arrays:
+            module = module.with_changes(body=(*module.body, *self._cold_spills,
                                                *(stmt for held in self._held_arrays.values() for stmt in held.body)))
         if self._held_pins:
             from modelx_cython.space_results import pin_function
