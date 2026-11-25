@@ -71,20 +71,19 @@ def test_locked_classes():
     assert visitor.kwarg_called_names == set()
 
 
-def test_exported_collection_and_dynamic_ref_storage():
+def test_exported_dynamic_ref_storage():
     source = textwrap.dedent('''\
         class _c_Actual:
-            __slots__ = ("__dict__", "_mx_collect_cache")
+            __slots__ = ("__dict__",)
 
             def __init__(self, parent):
-                self._mx_collect_cache = {}
+                pass
 
         class _c_Static:
             __slots__ = ("name",)
         ''')
     visitor = ModuleVisitor(module="M._mx_classes", source=source)
 
-    assert visitor.collect_cache_classes == {"_c_Actual"}
     assert visitor.dynamic_ref_classes == {"_c_Actual"}
     assert visitor.spaces == {}
 

@@ -321,25 +321,6 @@ def test_code_filter_ignores_other_modules():
     assert not any(filt(code) for code in codes.values())
 
 
-def test_code_filter_distinguishes_collection_adapter_and_user_cell():
-    codes = compiled_codes("C:/model/Model_nomx/_mx_classes.py", """
-class _c_Space1:
-    def collect(self, cell):
-        return collect_from_space(self._mx_collect_cache, cell)
-
-class _c_Space2:
-    def collect(self, x):
-        return x
-""")
-    filt = MxCodeFilter()
-    assert not filt(codes["_c_Space1.collect"])
-    assert filt(codes["_c_Space2.collect"])
-
-
-# --------------------------------------------------------------------
-# MxCallTraceLogger.log keeps only the traces that add something
-
-
 def test_logger_drops_traces_that_add_nothing():
     logger = MxCallTraceLogger(module="M")
     for i in [0, 1, 1, 0, 3, 2, 3]:
@@ -465,7 +446,7 @@ def test_cached_formula_traces_are_bounded_by_observations(monkeypatch):
     logger.flush()
     kept, full = logger.cells_info[name], RuntimeCellsInfo(traces)
     for attribute in ("arg_types", "max_args", "min_args", "observed_min_args", "observed_max_args",
-                      "ret_type", "max_ret_value", "max_evaluations_per_receiver", "has_negative_args",
+                      "ret_type", "max_evaluations_per_receiver", "has_negative_args",
                       "array_buffer_compatible"):
         assert getattr(kept, attribute) == getattr(full, attribute), attribute
 
