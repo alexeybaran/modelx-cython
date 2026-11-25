@@ -8,7 +8,7 @@ from .checked_arithmetic import (
 )
 from .consts import CY_MOD, FORMULA_PREF, MX_SELF, MX_SYS_MOD
 from .powers import KIND_FLOAT, OperandKind, kind_of_type_expr
-from .scopes import CstFacts, Names, OPAQUE_SCOPES, has_scope_effects, lexical_nodes
+from .scopes import CstFacts, Names, OPAQUE_SCOPES, has_scope_effects, lexical_nodes, maybe_unbound
 from .syntax import arguments, dotted_name, local_assignment, statements, walk
 from .usage import RESOLVED, _extract_self_chain
 
@@ -517,38 +517,26 @@ def _reference_write_gate(cls_info):
                                 f'    {MX_SYS_MOD}._mx_generic_setattr(self, name, value)\n'),)
 
 
-def _loop_targets_read_after(node):
-    """A loop target read outside its loop is a Python object: after a loop that ran no iteration
-    it is unbound, as live raises UnboundLocalError, and a C variable has no unbound state (with
-    type inference, or a declaration of the vector lowering, Cython would read an unset value)."""
+def _unbound_locals(node):
+    """A local that a read can reach before any assignment, on some path, is a Python object: Python
+    raises UnboundLocalError there (a loop that ran no iteration, a branch not taken), and a C local
+    has no unbound state (with type inference, or a declaration of the vector lowering, Cython would
+    read an unset value)."""
     if not isinstance(node.body, cst.IndentedBlock):
         return node
     body = node.body.body
-    inside = {}
-    for part in lexical_nodes(body):
-        if isinstance(part, cst.For) and isinstance(part.target, cst.Name):
-            covered = inside.setdefault(part.target.value, set())
-            covered.add(id(part.target))
-            covered.update(id(item) for item in walk(part.body))
-    if not inside:
-        return node
     facts = CstFacts(body)
-    from libcst.metadata import ExpressionContext
-    names = sorted({part.value for part in lexical_nodes(body)
-                    if isinstance(part, cst.Name) and part.value in inside and id(part) not in inside[part.value]
-                    and facts.contexts.get(part) is ExpressionContext.LOAD})
-    if not names:
-        return node
     parameters = {param.name.value for param in (*node.params.posonly_params, *node.params.params,
                                                  *node.params.kwonly_params)}
-    names = [name for name in names if name not in parameters]
+    names = sorted(name for name, count in facts.stores.items()
+                   if count and name not in parameters and maybe_unbound(body, name, facts))
+    if not names:
+        return node
     declared = {}
     for part in lexical_nodes(body):
         if isinstance(part, cst.AnnAssign) and isinstance(part.target, cst.Name) and part.target.value in names:
             declared.setdefault(part.target.value, []).append(part)
     retyped = {id(item) for name in names for item in declared.get(name, ()) if item.value is None}
-    if any(item.value is not None for name in names for item in declared.get(name, ())):
-        return node         # declared with a value: bound before any loop
 
     class Retype(cst.CSTTransformer):
         def leave_AnnAssign(self, before, after):
@@ -1230,7 +1218,7 @@ def guard_integer_boundaries(state, module_info, resolver, cells_kinds, ref_kind
                 cls = module_info.classes[owner]
                 # D139: the private entry of an uncached Cell has the Cell's own name as its origin
                 cell = cls.cells[name[len(FORMULA_PREF):] if name.startswith(FORMULA_PREF) else name]
-                node = _loop_targets_read_after(node)
+                node = _unbound_locals(node)
                 node = _guard_calls(node, cls, cell, resolver, entries, cells, private_entries, module_info.classes,
                                     safe_builtins)
                 # Physical cache misses and compact spill entries both check
@@ -1255,7 +1243,7 @@ def guard_integer_boundaries(state, module_info, resolver, cells_kinds, ref_kind
                 continue
             name = method.name.value
             if name.startswith(FORMULA_PREF) and (formula := cls.cells.get(name[len(FORMULA_PREF):])):
-                method = _loop_targets_read_after(method)
+                method = _unbound_locals(method)
                 method = _guard_calls(method, cls, formula, resolver, entries, cells, private_entries,
                                       module_info.classes, safe_builtins)
                 method = _guard_result(method, formula, cls, resolver, cells_kinds, ref_kinds, signatures,
@@ -1277,7 +1265,7 @@ def guard_integer_boundaries(state, module_info, resolver, cells_kinds, ref_kind
                 changed = True
                 continue
             if cell is not None and not cell.has_formula_def:
-                method = _loop_targets_read_after(method)
+                method = _unbound_locals(method)
                 method = _guard_calls(method, cls, cell, resolver, entries, cells, private_entries, module_info.classes,
                                       safe_builtins)
                 method = _guard_result(method, cell, cls, resolver, cells_kinds, ref_kinds, signatures,
