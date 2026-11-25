@@ -32,7 +32,8 @@ _HELPER_OPERATIONS = (*_PYTHON_SEMANTICS, cst.Power)
 _INTEGER_CONVERSION = f'{MX_SYS_MOD}._mx_integer_result'
 # the floor division raises Cython's unnamed OverflowError (LLONG_MIN // -1): the handler names it
 _FLOORDIV = f'{MX_SYS_MOD}._mx_signed_floordiv'
-_SIGNED_HELPERS = frozenset((*_SIGNED_OPERATIONS.values(), '_mx_integer_result', '_mx_exact_int64'))
+_SIGNED_HELPERS = frozenset((*_SIGNED_OPERATIONS.values(), '_mx_integer_result', '_mx_exact_int64',
+                             '_mx_flag_add', '_mx_flag_sub', '_mx_flag_mul', '_mx_flag_neg'))
 
 
 _CALL_GATE = """\
@@ -95,39 +96,388 @@ def _checked_integer(value, path):
     return _boundary_call('_mx_integer_result', path, value)
 
 
-def _overflow_handler(body, path, error, leading_lines=()):
-    """``try: <body> except OverflowError: raise <named>``: the error names the Cell; an error a
-    Cell already named (a call to another Cell, a checked conversion) passes unchanged."""
-    handler = cst.parse_statement(
-        f'try:\n    pass\nexcept OverflowError as {error}:\n'
-        f'    raise {MX_SYS_MOD}._mx_named_overflow({error}, {path!r})\n')
-    return handler.with_changes(body=cst.IndentedBlock(body=body), leading_lines=leading_lines)
+# builtins that only convert or compare a value: a wrapped argument does no harm before the test at the return
+_PURE_CONVERSIONS = frozenset(('float', 'int', 'bool', 'abs', 'min', 'max', 'round', 'str', 'repr'))
+_FLAG_CALLS = frozenset(f'{MX_SYS_MOD}._mx_flag_{name}' for name in ('add', 'sub', 'mul', 'neg'))
+_FLAGGED = {cst.Add: '_mx_flag_add', cst.Subtract: '_mx_flag_sub', cst.Multiply: '_mx_flag_mul',
+            cst.AddAssign: '_mx_flag_add', cst.SubtractAssign: '_mx_flag_sub', cst.MultiplyAssign: '_mx_flag_mul'}
+# + - * and unary minus: what Cython computes as plain C when both operands are C integers
+_WRAPPING = (cst.Add, cst.Subtract, cst.Multiply, cst.AddAssign, cst.SubtractAssign, cst.MultiplyAssign)
+_KIND_OF_ANNOTATION = {f'{CY_MOD}.longlong': 'int', f'{CY_MOD}.double': 'float', 'float': 'float',
+                       'object': 'object', 'str': 'object', 'list': 'object', 'tuple': 'object', 'dict': 'object'}
+# calls whose result is never a C integer in Cython (a Python object or a C double)
+_NOT_INTEGER_BUILTINS = frozenset(('float', 'str', 'repr', 'list', 'tuple', 'dict', 'set', 'frozenset', 'sorted',
+                                   'format', 'range', 'zip', 'enumerate', 'map', 'filter', 'reversed', 'getattr'))
 
 
-_ARITHMETIC_NODES = (cst.Add, cst.Subtract, cst.Multiply, cst.FloorDivide, cst.Modulo, cst.Power,
-                     cst.LeftShift, cst.AddAssign, cst.SubtractAssign, cst.MultiplyAssign,
-                     cst.FloorDivideAssign, cst.ModuloAssign, cst.PowerAssign, cst.LeftShiftAssign)
+def _provider_returns():
+    """{function name: 'int' or 'float'} of the bundled provider pxd files (helper modules are
+    cimported under ``_mx_helper_<hash>`` aliases): C integer and C double results."""
+    import pathlib
+    import re
+    kinds = {}
+    pattern = re.compile(r'^\s*cdef\s+(?:inline\s+)?(long long|Py_ssize_t|int|long|double)\s+(\w+)\s*\(', re.M)
+    root = pathlib.Path(__file__).parent
+    for path in (*root.glob('*.pxd'), *(root / 'runtime').glob('*.pxd')):
+        if path.name == '_mx_sys.pxd':
+            continue
+        for ctype, name in pattern.findall(path.read_text(encoding='utf-8')):
+            kind = 'float' if ctype == 'double' else 'int'
+            kinds[name] = kind if kinds.get(name, kind) == kind else None
+    return kinds
+
+
+_PROVIDER_RETURNS = _provider_returns()
+
+
+def _provider_call(value, kind):
+    """A call of a provider function (``_mx_helper_<hash>.name(...)``) whose C result is ``kind``."""
+    return (isinstance(value, cst.Call) and isinstance(value.func, cst.Attribute)
+            and isinstance(value.func.value, cst.Name) and value.func.value.value.startswith('_mx_helper_')
+            and _PROVIDER_RETURNS.get(value.func.attr.value) == kind)
+
+
+# handlers that cannot catch the OverflowError of a flagged formula (the generated reductions catch
+# StopIteration); any other handler leaves the formula to the fallback
+_HARMLESS_HANDLERS = frozenset(('StopIteration', 'KeyError', 'IndexError', 'TypeError', 'ValueError',
+                                'AttributeError', 'LookupError', 'ZeroDivisionError'))
+
+
+def _catches_overflow(node):
+    for part in lexical_nodes(node.body.body):
+        if isinstance(part, cst.ExceptHandler):
+            names = ([dotted_name(e.value) for e in part.type.elements] if isinstance(part.type, cst.Tuple)
+                     else [dotted_name(part.type)] if part.type is not None else [None])
+            if not all(name in _HARMLESS_HANDLERS for name in names):
+                return True
+        elif isinstance(part, getattr(cst, 'ExceptStarHandler', ())):
+            return True
+    return False
+
+
+def _annotation_kind(annotation):
+    """'int', 'float', 'object' or None (another C type, or unknown) for a declared type."""
+    if annotation is None:
+        return 'object'
+    if isinstance(annotation, cst.Subscript):
+        return None
+    return _KIND_OF_ANNOTATION.get(dotted_name(annotation))
+
+
+def _declared_kinds(state):
+    """The declared kinds of module functions, methods and fields, for the overflow fallback."""
+    functions = {name: _annotation_kind(node.returns.annotation if node.returns else None)
+                 for name, node in state.functions.items()}
+    methods = {}
+    for (owner, name), node in state.methods.items():
+        methods.setdefault(owner, {})[name] = _annotation_kind(node.returns.annotation if node.returns else None)
+    fields = {}
+    for owner in state.syntax.body:
+        if isinstance(owner, cst.ClassDef) and isinstance(owner.body, cst.IndentedBlock):
+            declared = fields[owner.name.value] = {}
+            for line in owner.body.body:
+                for item in (line.body if isinstance(line, cst.SimpleStatementLine) else ()):
+                    if isinstance(item, cst.AnnAssign) and isinstance(item.target, cst.Name):
+                        annotation = item.annotation.annotation
+                        element = annotation.value if isinstance(annotation, cst.Subscript) else annotation
+                        declared[item.target.value] = (_KIND_OF_ANNOTATION.get(dotted_name(element)),
+                                                       isinstance(annotation, cst.Subscript))
+    return functions, methods, fields
+
+
+class _NotInteger:
+    """Expressions that Cython never computes as a C integer: a C double or a Python object.
+    Anything else may be one; a + - * on it that the flags do not cover keeps Cython's
+    overflowcheck on the formula (the fallback), so an integer that leaves 64 bits always raises."""
+
+    def __init__(self, node, cls_name, declared, infer_types):
+        functions, methods, fields = declared
+        self.functions = functions
+        self.methods = methods.get(cls_name, {})
+        self.fields = fields.get(cls_name, {})
+        params = (*node.params.posonly_params, *node.params.params, *node.params.kwonly_params)
+        self.names = {param.name.value: _annotation_kind(param.annotation.annotation if param.annotation else None)
+                      for param in params[1:]}
+        stores = {}
+        for part in walk(node.body):
+            if isinstance(part, cst.AnnAssign) and isinstance(part.target, cst.Name):
+                self.names[part.target.value] = _annotation_kind(part.annotation.annotation)
+            elif isinstance(part, cst.Assign) and (target := local_assignment(part)) is not None:
+                stores.setdefault(target.value, []).append(part.value)
+            elif isinstance(part, (cst.Assign, cst.For, cst.AugAssign, cst.WithItem, cst.NamedExpr,
+                                   cst.ExceptHandler, cst.CompFor)):
+                targets = ([target.target for target in part.targets] if isinstance(part, cst.Assign)
+                           else [getattr(part, 'target', None) or getattr(part, 'asname', None)
+                                 or getattr(part, 'name', None)])
+                for item in (name for target in targets if target is not None for name in walk(target)):
+                    if isinstance(item, cst.Name):
+                        stores.setdefault(item.value, []).append(None)
+        # unannotated locals: a C double or object when every store is (Cython infers the spanning
+        # type of the stores); without inference an unannotated local in arithmetic is an object
+        candidates = {name: values for name, values in stores.items() if name not in self.names}
+        if not infer_types:
+            self.names.update({name: 'object' for name in candidates})
+            return
+        assumed = set(candidates)
+        changed = True
+        while changed:
+            changed = False
+            for name in sorted(assumed):
+                self.names[name] = 'object'
+                if not all(value is not None and self(value) for value in candidates[name]):
+                    assumed.discard(name)
+                    del self.names[name]
+                    changed = True
+
+    def __call__(self, value):
+        if isinstance(value, (cst.Float, cst.Imaginary, cst.SimpleString, cst.ConcatenatedString,
+                              cst.FormattedString, cst.List, cst.Tuple, cst.Dict, cst.Set, cst.ListComp,
+                              cst.SetComp, cst.DictComp, cst.GeneratorExp, cst.Lambda)):
+            return True
+        if isinstance(value, cst.Name):
+            return self.names.get(value.value) in ('float', 'object')
+        if isinstance(value, cst.BinaryOperation):
+            if isinstance(value.operator, cst.Divide):
+                return True
+            return self(value.left) or self(value.right)
+        if isinstance(value, cst.UnaryOperation):
+            return not isinstance(value.operator, cst.Not) and self(value.expression)
+        if isinstance(value, cst.IfExp):
+            return self(value.body) and self(value.orelse)
+        if isinstance(value, cst.Call):
+            func = value.func
+            if isinstance(func, cst.Name):
+                if func.value in self.functions:
+                    return self.functions[func.value] in ('float', 'object')
+                if func.value in _NOT_INTEGER_BUILTINS:
+                    return True
+                if func.value in ('min', 'max', 'abs') and value.args and all(arg.star == '' for arg in value.args):
+                    # Cython's min/max/abs of C scalars take their spanning type: a C double or an
+                    # object when one argument is
+                    return any(self(arg.value) for arg in value.args if arg.keyword is None)
+                return False
+            if _provider_call(value, 'float'):
+                return True
+            if dotted_name(func) == f'{CY_MOD}.cast' and value.args:
+                return _KIND_OF_ANNOTATION.get(dotted_name(value.args[0].value)) in ('float', 'object')
+            if (isinstance(func, cst.Attribute) and isinstance(func.value, cst.Name)
+                    and func.value.value == MX_SELF):
+                return self.methods.get(func.attr.value) in ('float', 'object')
+            return False
+        base = value.value if isinstance(value, cst.Subscript) else value
+        if (isinstance(base, cst.Attribute) and isinstance(base.value, cst.Name)
+                and base.value.value == MX_SELF and base.attr.value in self.fields):
+            kind, array = self.fields[base.attr.value]
+            if array == isinstance(value, cst.Subscript):
+                return kind in ('float', 'object')
+        return False
+
+
+def _is_literal(value):
+    """An integer constant expression: Cython folds it with Python's semantics."""
+    return isinstance(value, cst.Integer) or (
+        isinstance(value, cst.UnaryOperation) and isinstance(value.operator, (cst.Minus, cst.Plus))
+        and _is_literal(value.expression)) or (
+        isinstance(value, cst.BinaryOperation) and isinstance(value.operator, _WRAPPING)
+        and _is_literal(value.left) and _is_literal(value.right))
+
+
+def _literal_value(value):
+    """The Python value of an integer constant expression (Cython folds it exactly), else None."""
+    if isinstance(value, cst.Integer):
+        return value.evaluated_value
+    if isinstance(value, cst.UnaryOperation) and isinstance(value.operator, (cst.Minus, cst.Plus)):
+        operand = _literal_value(value.expression)
+        return None if operand is None else (-operand if isinstance(value.operator, cst.Minus) else operand)
+    if isinstance(value, cst.BinaryOperation) and isinstance(value.operator, (cst.Add, cst.Subtract, cst.Multiply)):
+        left, right = _literal_value(value.left), _literal_value(value.right)
+        if left is None or right is None:
+            return None
+        return {cst.Add: left + right, cst.Subtract: left - right, cst.Multiply: left * right}[type(value.operator)]
+    return None
+
+
+def _flag_call(name, flag, *values):
+    return cst.Call(cst.Attribute(cst.Name(MX_SYS_MOD), cst.Name(name)),
+                    tuple(cst.Arg(value) for value in values) + (cst.Arg(cst.parse_expression(
+                        f'{CY_MOD}.address({flag})')),))
+
+
+class _FlagArithmetic(cst.CSTTransformer):
+    """+ - * and unary minus of two C integers (the guard's signed expressions) through the
+    flagged helpers; the operations of nested scopes are left to the fallback."""
+
+    def __init__(self, guard, flag):
+        self.guard = guard
+        self.flag = flag
+        self.count = 0
+
+    def on_visit(self, node):
+        return not isinstance(node, OPAQUE_SCOPES) and super().on_visit(node)
+
+    def _signed(self, value):
+        if _is_literal(value):
+            # a constant beyond 64 bits is a Python int: the operation stays on Python objects
+            constant = _literal_value(value)
+            return constant is not None and -(1 << 63) <= constant < (1 << 63)
+        return self.guard._signed_expression(value, self.guard.path)[1]
+
+    def leave_Call(self, before, after):
+        # an argument computed with flagged operations is tested before the call receives it, so
+        # a wrapped value never reaches another Cell (its range guard, its cache): the OverflowError
+        # names the Cell that computed it
+        target = dotted_name(after.func) or ''
+        if (target.startswith((MX_SYS_MOD + '.', CY_MOD + '.')) or target in _PURE_CONVERSIONS
+                or not self.flag):
+            return after
+        arguments = tuple(
+            arg.with_changes(value=cst.Call(
+                cst.Attribute(cst.Name(MX_SYS_MOD), cst.Name('_mx_flag_checked')),
+                (cst.Arg(arg.value), cst.Arg(cst.parse_expression(f'{CY_MOD}.address({self.flag})')),
+                 cst.Arg(cst.SimpleString(repr(self.guard.path))))))
+            if arg.star == '' and self._signed(arg.value) and any(
+                isinstance(part, cst.Call) and dotted_name(part.func) in _FLAG_CALLS for part in walk(arg.value))
+            else arg
+            for arg in after.args)
+        if all(new is old for new, old in zip(arguments, after.args)):
+            return after
+        self.checked_arguments = getattr(self, 'checked_arguments', 0) + 1
+        return after.with_changes(args=arguments)
+
+    def leave_BinaryOperation(self, before, after):
+        name = _FLAGGED.get(type(after.operator))
+        if (name is None or (_is_literal(after.left) and _is_literal(after.right))
+                or not (self._signed(after.left) and self._signed(after.right))):
+            return after
+        self.count += 1
+        return _flag_call(name, self.flag, after.left, after.right).with_changes(lpar=after.lpar, rpar=after.rpar)
+
+    def leave_UnaryOperation(self, before, after):
+        if (not isinstance(after.operator, cst.Minus) or _is_literal(after.expression)
+                or not self._signed(after.expression)):
+            return after
+        self.count += 1
+        return _flag_call('_mx_flag_neg', self.flag, after.expression).with_changes(
+            lpar=after.lpar, rpar=after.rpar)
+
+    def leave_AugAssign(self, before, after):
+        name = _FLAGGED.get(type(after.operator))
+        if (name is None or not isinstance(after.target, cst.Name)
+                or not (self._signed(after.target) and self._signed(after.value))):
+            return after
+        self.count += 1
+        return cst.Assign((cst.AssignTarget(after.target),), _flag_call(name, self.flag, after.target, after.value))
+
+
+class _CheckFlag(cst.CSTTransformer):
+    """Test the flag once before the formula returns: ``r = value; if flag: raise ...; return r``."""
+
+    def __init__(self, flag, result, path):
+        self.flag = flag
+        self.result = result
+        self.check = cst.parse_statement(f'if {flag}:\n    raise {MX_SYS_MOD}._mx_flagged_overflow({path!r})\n')
+
+    def on_visit(self, node):
+        return not isinstance(node, OPAQUE_SCOPES) and super().on_visit(node)
+
+    def _lines(self, small):
+        if not isinstance(small, cst.Return):
+            return [cst.SimpleStatementLine((small,))]
+        if small.value is None:
+            return [self.check, cst.SimpleStatementLine((small,))]
+        return [cst.SimpleStatementLine((cst.Assign((cst.AssignTarget(cst.Name(self.result)),), small.value),)),
+                self.check, cst.SimpleStatementLine((small.with_changes(value=cst.Name(self.result)),))]
+
+    def leave_SimpleStatementLine(self, before, after):
+        if not any(isinstance(small, cst.Return) for small in after.body):
+            return after
+        lines = [line for small in after.body for line in self._lines(small)]
+        lines[0] = lines[0].with_changes(leading_lines=after.leading_lines)
+        return cst.FlattenSentinel(lines)
+
+    def leave_SimpleStatementSuite(self, before, after):
+        if not any(isinstance(small, cst.Return) for small in after.body):
+            return after
+        return cst.IndentedBlock(body=[line for small in after.body for line in self._lines(small)])
+
+    def leave_For(self, before, after):
+        # a loop whose iterable reads a flagged result tests the flag first: a wrapped bound could
+        # otherwise run a loop of up to 2**63 iterations before the test at the return
+        if not any(isinstance(part, cst.Call) and isinstance(part.func, cst.Attribute)
+                   and part.func.attr.value.startswith('_mx_flag_') for part in walk(after.iter)):
+            return after
+        return cst.FlattenSentinel((self.check.with_changes(leading_lines=after.leading_lines),
+                                    after.with_changes(leading_lines=())))
+
+
+def _wrapping_operations(node):
+    """The + - * and unary minus left in a formula (in nested scopes as well)."""
+    for part in walk(node.body):
+        if isinstance(part, cst.BinaryOperation) and isinstance(part.operator, _WRAPPING):
+            yield part.left, part.right
+        elif isinstance(part, cst.AugAssign) and isinstance(part.operator, _WRAPPING):
+            yield part.target, part.value
+        elif isinstance(part, cst.UnaryOperation) and isinstance(part.operator, cst.Minus):
+            yield part.expression, part.expression
 
 
 def _name_overflows(node, path):
-    """Checked mode: one handler around the body of a formula function that does arithmetic, so
-    an OverflowError from Cython's overflowcheck names the Cell. Declarations stay before it."""
-    if not isinstance(node.body, cst.IndentedBlock) or not any(
-            isinstance(part, _ARITHMETIC_NODES)
-            or isinstance(part, cst.UnaryOperation) and isinstance(part.operator, cst.Minus)
-            or isinstance(part, cst.Call) and dotted_name(part.func) == _FLOORDIV
-            for part in walk(node.body)):
-        return node
+    """The overflowcheck fallback: one handler around the body of the formula, after its declarations,
+    so that an OverflowError of Cython's overflowcheck names the Cell; an error a Cell already named
+    (a flagged formula, a call to another Cell, a checked conversion) passes unchanged."""
     lines = list(node.body.body)
     prefix = 1 if node.get_docstring() is not None else 0
     while prefix < len(lines) and isinstance(lines[prefix], cst.SimpleStatementLine) and all(
-            isinstance(small, cst.AnnAssign) and small.value is None for small in lines[prefix].body):
+            isinstance(small, cst.AnnAssign) and small.value is None
+            or isinstance(small, cst.AnnAssign) and isinstance(small.value, cst.Integer) for small in lines[prefix].body):
         prefix += 1
     if prefix == len(lines):
         return node
     error = Names(node).reserve('_mx_integer_overflow')
-    handler = _overflow_handler(tuple(lines[prefix:]), path, error)
+    handler = cst.parse_statement(
+        f'try:\n    pass\nexcept OverflowError as {error}:\n'
+        f'    raise {MX_SYS_MOD}._mx_named_overflow({error}, {path!r})\n')
+    handler = handler.with_changes(body=cst.IndentedBlock(body=tuple(lines[prefix:])))
     return node.with_changes(body=node.body.with_changes(body=(*lines[:prefix], handler)))
+
+
+def _flag_overflows(node, cell, guard, declared, cls_name, infer_types):
+    """integer guards: the C integer + - * and unary minus of one formula set a flag that the formula
+    tests once before it returns (OverflowError naming the Cell); a formula with an operation the
+    guard cannot show to be on C integers or not (a nested scope, an operand of unknown C type)
+    keeps Cython's overflowcheck on that formula alone."""
+    if not isinstance(node.body, cst.IndentedBlock):
+        return node
+    if _catches_overflow(node) or any(isinstance(part, cst.Yield) for part in lexical_nodes(node.body.body)):
+        flagged = _FlagArithmetic(guard, '')     # a generator, or a handler that could catch the error
+        flagged.count = 0
+    else:
+        names = Names(node)
+        flag = names.reserve('_mx_overflow')
+        flagged = _FlagArithmetic(guard, flag)
+        body = node.body.visit(flagged)
+        if flagged.count:
+            result = names.reserve('_mx_result')
+            returns = node.returns.annotation if node.returns is not None else cst.Name('object')
+            body = body.visit(_CheckFlag(flag, result, cell.model_path))
+            lines = list(body.body)
+            if not lines or not isinstance(lines[-1], cst.SimpleStatementLine) or not any(
+                    isinstance(small, (cst.Return, cst.Raise)) for small in lines[-1].body):
+                lines.append(_CheckFlag(flag, result, cell.model_path).check)
+            doc_end = 1 if node.get_docstring() is not None else 0
+            declarations = (cst.parse_statement(f'{flag}: {CY_MOD}.int = 0\n'),
+                            cst.SimpleStatementLine((cst.AnnAssign(cst.Name(result), cst.Annotation(returns)),)))
+            node = node.with_changes(body=body.with_changes(
+                body=(*lines[:doc_end], *declarations, *lines[doc_end:])))
+    cell.flagged_integer_operations = getattr(cell, 'flagged_integer_operations', 0) + flagged.count
+    not_integer = _NotInteger(node, cls_name, declared, infer_types)
+    if any(not (_is_literal(left) and _is_literal(right)) and not (not_integer(left) or not_integer(right))
+           for left, right in _wrapping_operations(node)):
+        cell.overflowcheck_fallback = True
+        decorator = cst.Decorator(cst.parse_expression(f'{CY_MOD}.overflowcheck(True)'))
+        node = _name_overflows(node.with_changes(decorators=(*node.decorators, decorator)), cell.model_path)
+    return node
+
 
 
 def _python_call_gate(cls, entries, names, call_gate):
@@ -150,6 +500,69 @@ def __getattribute__(self, name):
     return method
 """)
     return (declaration,), (method,)
+
+
+def _reference_write_gate(cls_info):
+    """A Python write of an integer Reference crosses the same exact 64-bit boundary as a generated
+    one (``_mx_exact_int64``): Cython's own setter of a ``cdef public long long`` converts a float
+    through ``__int__`` and would keep 0 for 0.5."""
+    from .transformer import _integer_reference_paths
+    paths = _integer_reference_paths(cls_info)
+    if not paths:
+        return ()
+    tests = ''.join(f"    {'if' if index == 0 else 'elif'} {MX_SYS_MOD}._mx_ref_name_is(name, {name!r}):\n"
+                    f"        value = {MX_SYS_MOD}._mx_exact_int64(value, {path!r})\n"
+                    for index, (name, path) in enumerate(sorted(paths.items())))
+    return (cst.parse_statement(f'def __setattr__(self, name, value):\n{tests}'
+                                f'    {MX_SYS_MOD}._mx_generic_setattr(self, name, value)\n'),)
+
+
+def _loop_targets_read_after(node):
+    """A loop target read outside its loop is a Python object: after a loop that ran no iteration
+    it is unbound, as live raises UnboundLocalError, and a C variable has no unbound state (with
+    type inference, or a declaration of the vector lowering, Cython would read an unset value)."""
+    if not isinstance(node.body, cst.IndentedBlock):
+        return node
+    body = node.body.body
+    inside = {}
+    for part in lexical_nodes(body):
+        if isinstance(part, cst.For) and isinstance(part.target, cst.Name):
+            covered = inside.setdefault(part.target.value, set())
+            covered.add(id(part.target))
+            covered.update(id(item) for item in walk(part.body))
+    if not inside:
+        return node
+    facts = CstFacts(body)
+    from libcst.metadata import ExpressionContext
+    names = sorted({part.value for part in lexical_nodes(body)
+                    if isinstance(part, cst.Name) and part.value in inside and id(part) not in inside[part.value]
+                    and facts.contexts.get(part) is ExpressionContext.LOAD})
+    if not names:
+        return node
+    parameters = {param.name.value for param in (*node.params.posonly_params, *node.params.params,
+                                                 *node.params.kwonly_params)}
+    names = [name for name in names if name not in parameters]
+    declared = {}
+    for part in lexical_nodes(body):
+        if isinstance(part, cst.AnnAssign) and isinstance(part.target, cst.Name) and part.target.value in names:
+            declared.setdefault(part.target.value, []).append(part)
+    retyped = {id(item) for name in names for item in declared.get(name, ()) if item.value is None}
+    if any(item.value is not None for name in names for item in declared.get(name, ())):
+        return node         # declared with a value: bound before any loop
+
+    class Retype(cst.CSTTransformer):
+        def leave_AnnAssign(self, before, after):
+            if id(before) in retyped:
+                return after.with_changes(annotation=cst.Annotation(cst.Name('object')))
+            return after
+
+    body_node = node.body.visit(Retype()) if retyped else node.body
+    added = tuple(cst.SimpleStatementLine((cst.AnnAssign(cst.Name(name), cst.Annotation(cst.Name('object'))),))
+                  for name in names if name not in declared)
+    doc_end = 1 if node.get_docstring() is not None else 0
+    lines = body_node.body
+    return node.with_changes(body=body_node.with_changes(
+        body=(*lines[:doc_end], *added, *lines[doc_end:])))
 
 
 class _GuardCalls(cst.CSTTransformer):
@@ -384,6 +797,8 @@ class _GuardIntegers(cst.CSTTransformer):
         if (isinstance(value, cst.Call) and dotted_name(value.func) == f'{CY_MOD}.cast' and len(value.args) == 2
                 and dotted_name(value.args[0].value) == f'{CY_MOD}.longlong'):
             return True         # the compiler's own C cast to long long (the virtual branch of a dispatch)
+        if _provider_call(value, 'int'):
+            return True
         if isinstance(value, cst.Call):
             target = value.func
             if isinstance(target, cst.Name):
@@ -646,13 +1061,9 @@ class _GuardDivisions(cst.CSTTransformer):
                           _boundary_call(operation, self.guard.path, after.target, after.value))
 
 
-def _guard_divisions(node, cell, cls, signatures, native_helpers=()):
-    """Route the C integer ``//`` and ``%`` of one formula function through the helpers. The
-    operands are recognised as the result lowering recognises them: parameters, declared and
-    assigned locals, fields, casts and calls of C integer type."""
-    if not any(isinstance(part, (cst.BinaryOperation, cst.AugAssign)) and type(part.operator) in _DIVISIONS
-               for part in lexical_nodes(node.body.body)):
-        return node
+def _integer_guard(node, cell, cls, signatures, native_helpers=(), inferred=True):
+    """The signed expressions of one formula function: parameters, declared and (``inferred``:
+    with Cython's type inference) assigned locals, fields, casts and calls of C integer type."""
     fields, functions, methods = signatures
     facts = CstFacts(node.body.body)
     bindings = facts.bindings(lexical_nodes(node.body.body))
@@ -671,6 +1082,8 @@ def _guard_divisions(node, cell, cls, signatures, native_helpers=()):
                            parameters | declared, False, None, False)
     # locals Cython infers as C integers: every store an assignment (plain or augmented) of a
     # C integer expression; any other store (a loop target, a float value) leaves the local out
+    if not inferred:
+        return guard
     values = {}
     for part in lexical_nodes(node.body.body):
         if isinstance(part, cst.AugAssign) and isinstance(part.target, cst.Name):
@@ -688,6 +1101,17 @@ def _guard_divisions(node, cell, cls, signatures, native_helpers=()):
                 candidates.discard(name)
                 guard.signed_names.discard(name)
                 changed = True
+    return guard
+
+
+def _guard_divisions(node, cell, cls, signatures, native_helpers=()):
+    """Route the C integer ``//`` and ``%`` of one formula function through the helpers. The
+    operands are recognised as the result lowering recognises them: parameters, declared and
+    assigned locals, fields, casts and calls of C integer type."""
+    if not any(isinstance(part, (cst.BinaryOperation, cst.AugAssign)) and type(part.operator) in _DIVISIONS
+               for part in lexical_nodes(node.body.body)):
+        return node
+    guard = _integer_guard(node, cell, cls, signatures, native_helpers)
     return node.with_changes(body=node.body.visit(_GuardDivisions(guard)))
 
 
@@ -786,6 +1210,7 @@ def guard_integer_boundaries(state, module_info, resolver, cells_kinds, ref_kind
     gate_class = state.names.reserve('_mx_checked_cell_call')
     changed = False
     signatures = _signed_signatures(state)
+    declared = _declared_kinds(state)
     global_bindings = cst.MetadataWrapper(state.syntax, unsafe_skip_copy=True).resolve(
         cst.metadata.ScopeProvider)[state.syntax]
     safe_builtins = {name for name in ('isinstance', 'int', 'bool')
@@ -805,6 +1230,7 @@ def guard_integer_boundaries(state, module_info, resolver, cells_kinds, ref_kind
                 cls = module_info.classes[owner]
                 # D139: the private entry of an uncached Cell has the Cell's own name as its origin
                 cell = cls.cells[name[len(FORMULA_PREF):] if name.startswith(FORMULA_PREF) else name]
+                node = _loop_targets_read_after(node)
                 node = _guard_calls(node, cls, cell, resolver, entries, cells, private_entries, module_info.classes,
                                     safe_builtins)
                 # Physical cache misses and compact spill entries both check
@@ -813,9 +1239,10 @@ def guard_integer_boundaries(state, module_info, resolver, cells_kinds, ref_kind
                         and cell.is_arrayable() else ())
                 node = _guard_result(node, cell, cls, resolver, cells_kinds, ref_kinds, signatures,
                                      argument_axes=axes, checked=checked)
-                if checked:
-                    node = _name_overflows(node, cell.model_path)
                 node = _guard_divisions(node, cell, cls, signatures)
+                if checked:
+                    node = _flag_overflows(node, cell, _integer_guard(node, cell, cls, signatures, inferred=infer_types),
+                                           declared, cls.name, infer_types)
                 if infer_types:
                     node = _python_locals(node, cell)
                 changed = True
@@ -828,14 +1255,17 @@ def guard_integer_boundaries(state, module_info, resolver, cells_kinds, ref_kind
                 continue
             name = method.name.value
             if name.startswith(FORMULA_PREF) and (formula := cls.cells.get(name[len(FORMULA_PREF):])):
+                method = _loop_targets_read_after(method)
                 method = _guard_calls(method, cls, formula, resolver, entries, cells, private_entries,
                                       module_info.classes, safe_builtins)
                 method = _guard_result(method, formula, cls, resolver, cells_kinds, ref_kinds, signatures,
                                        native_helpers.get((cls.name, name), ()), checked=checked)
-                if checked:
-                    method = _name_overflows(method, formula.model_path)
                 method = _guard_divisions(method, formula, cls, signatures,
                                           native_helpers.get((cls.name, name), ()))
+                if checked:
+                    method = _flag_overflows(method, formula, _integer_guard(
+                        method, formula, cls, signatures, native_helpers.get((cls.name, name), ()),
+                        inferred=infer_types), declared, cls.name, infer_types)
                 if infer_types:
                     method = _python_locals(method, formula)
                 methods.append(method)
@@ -847,19 +1277,25 @@ def guard_integer_boundaries(state, module_info, resolver, cells_kinds, ref_kind
                 changed = True
                 continue
             if cell is not None and not cell.has_formula_def:
+                method = _loop_targets_read_after(method)
                 method = _guard_calls(method, cls, cell, resolver, entries, cells, private_entries, module_info.classes,
                                       safe_builtins)
                 method = _guard_result(method, cell, cls, resolver, cells_kinds, ref_kinds, signatures,
                                        checked=checked)
-                if checked:
-                    method = _name_overflows(method, cell.model_path)
                 method = _guard_divisions(method, cell, cls, signatures)
+                if checked:
+                    method = _flag_overflows(method, cell, _integer_guard(method, cell, cls, signatures,
+                                                                          inferred=infer_types),
+                                             declared, cls.name, infer_types)
                 if infer_types:
                     method = _python_locals(method, cell)
                 changed = True
             methods.append(method)
         added, gates = _python_call_gate(cls, entries, state.names, call_gate)
         declarations.extend(added)
+        writes = () if any(isinstance(item, cst.FunctionDef) and item.name.value == '__setattr__'
+                           for item in methods) else _reference_write_gate(cls)
+        gates = (*gates, *writes)
         changed |= bool(gates)
         classes.append(node.with_changes(body=node.body.with_changes(body=(*methods, *gates))))
     if declarations:

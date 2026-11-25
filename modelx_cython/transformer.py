@@ -712,16 +712,12 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
             # Native memo structs contain only scalars. Use Cython's standard
             # serializer; the module directive also works in pure-Python mode.
             directives.append('auto_pickle=True')
-        # integer guards: overflow checks only in the checked mode (owner's rule), with or without type
-        # inference: a formula's typed C integer arithmetic (Cell results, typed parameters) is C
-        # arithmetic either way
-        checked = self.module.spec.policy.integer_checks != 'unchecked'
+        # integer guards: no overflowcheck directive; the checked mode flags the C integer arithmetic of
+        # each formula (integer_boundaries.py), and a formula it cannot cover carries the directive itself
         if self.module.spec.policy.infer_types:
             # M1 (spec key infer_types): C integer inference in generated model modules; providers keep
             # their own directives.
-            directives.append(f'infer_types=True, overflowcheck={checked}')
-        elif checked:
-            directives.append('overflowcheck=True')
+            directives.append('infer_types=True')
         if directives:
             module = module.with_changes(header=(
                 cst.EmptyLine(comment=cst.Comment('# cython: ' + ', '.join(directives))), *module.header))

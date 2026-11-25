@@ -111,7 +111,9 @@ def test_mx2cy_with_uslib(sample_dir, model):
     assert has_power('1 + self.guar_rate_ann')
     assert has_power('1 - self.mort_rate(t)')
     # Integer-exponent power retains c8's ordinary Cython numeric operation.
-    assert "return (1 + self.inflation_rate) ** (self.policy_year(t) - 1)" in src
+    # (its C integer exponent is computed through the flagged helper of the integer guards)
+    assert ("(1 + self.inflation_rate) ** (_mx_sys._mx_flag_sub(self.policy_year(t), 1, "
+            "_mx_cy.address(_mx_overflow)))") in src
     # nothing is left for Cython to evaluate on double complex
     c_src = (translated / "_mx_classes.c").read_text(encoding="utf-8")
     assert "__Pyx_c_pow_double" not in c_src
