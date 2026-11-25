@@ -2,7 +2,7 @@ from libc.math cimport (
     pow as _mx_c_pow, floor as _mx_c_floor, isfinite as _mx_c_isfinite)
 from libc.limits cimport LLONG_MAX, LLONG_MIN
 from libc.string cimport memcmp
-from cpython.long cimport PyLong_AsLongLong, PyLong_Check, PyLong_CheckExact
+from cpython.long cimport PyLong_AsLongLong, PyLong_AsLongLongAndOverflow, PyLong_Check, PyLong_CheckExact
 from cpython.number cimport PyNumber_Index
 from cpython.object cimport Py_TYPE, PyObject_GenericGetAttr, PyObject_GenericSetAttr
 from cpython.unicode cimport PyUnicode_Check, PyUnicode_Compare
@@ -26,12 +26,7 @@ cdef inline object _mx_named_overflow(object error, str path):
     return named
 
 
-cdef inline long long _mx_exact_int64(object value, str path) except? -1:
-    """Cross a signed 64-bit boundary through the Python index protocol.
-
-    An int or any int subclass (IntEnum, bool) is read directly: PyNumber_Index returns such an
-    object unchanged, so the value and the OverflowError are the same, without taking and
-    releasing a reference on it (diag-scale P3: enum members are shared by every worker)."""
+cdef inline long long _mx_exact_int64_checked(object value, str path) except? -1:
     try:
         if PyLong_Check(value):
             return PyLong_AsLongLong(value)
@@ -44,6 +39,22 @@ cdef inline long long _mx_exact_int64(object value, str path) except? -1:
         raise _mx_named(OverflowError(
             f"{path} requires an exact signed 64-bit integer. Rebuild with a wider sample or spec."
         ), path) from error
+
+
+cdef inline long long _mx_exact_int64(object value, str path) except? -1:
+    """Cross a signed 64-bit boundary through the Python index protocol.
+
+    An int or any int subclass (IntEnum, bool) is read directly: PyNumber_Index returns such an
+    object unchanged, so the value and the OverflowError are the same, without taking and
+    releasing a reference on it (diag-scale P3: enum members are shared by every worker). An exact
+    int that fits is read without the exception handling, which every other value takes."""
+    cdef int overflow = 0
+    cdef long long result
+    if PyLong_CheckExact(value):
+        result = PyLong_AsLongLongAndOverflow(value, &overflow)
+        if not overflow:
+            return result
+    return _mx_exact_int64_checked(value, path)
 
 
 ctypedef unsigned long _mx_native_ulong
