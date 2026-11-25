@@ -527,9 +527,17 @@ class FrameReads:
         owner, found = self, set()
 
         def note(expr):
-            got = owner._receiver(owner._root(expr))
-            if got is not None:
-                found.add(_code(got[0]))
+            root, seen = owner._root(expr), set()
+            while root is not None:
+                got = owner._receiver(root)
+                if got is not None:
+                    found.add(_code(got[0]))
+                    return
+                if not isinstance(root, cst.Name) or root.value in seen:
+                    return
+                seen.add(root.value)        # `w = df`, then an edit through `w`: an edit of df's frame
+                values = owner.facts.formula.values.get(root.value) or ()
+                root = owner._root(values[0]) if len(values) == 1 else None
 
         class Scan(cst.CSTVisitor):
             def visit_Assign(self, n):
