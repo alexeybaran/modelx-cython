@@ -125,6 +125,32 @@ def _index_parts(subscript):
     return parts
 
 
+def _walk_extreme(call):
+    """``max(a for a, s in X)`` / ``min(...)``, no condition, the element one name of the tuple target:
+    (X, the target's names, the element's position), else None."""
+    if not (isinstance(call.func, cst.Name) and call.func.value in ('max', 'min') and len(call.args) == 1
+            and not call.args[0].keyword and not call.args[0].star and isinstance(call.args[0].value, cst.GeneratorExp)):
+        return None
+    gen = call.args[0].value
+    comp, target = gen.for_in, gen.for_in.target
+    if (comp.ifs or comp.inner_for_in is not None or comp.asynchronous is not None or not isinstance(gen.elt, cst.Name)
+            or not isinstance(target, cst.Tuple) or not all(isinstance(e, cst.Element) and isinstance(e.value, cst.Name)
+                                                            for e in target.elements)):
+        return None
+    names = [e.value.value for e in target.elements]
+    return (comp.iter, names, names.index(gen.elt.value)) if names.count(gen.elt.value) == 1 else None
+
+
+def _extreme_part(subscript):
+    """``X.max()[k]`` / ``X.min()[k]``, k an integer literal: (the call, k), else None."""
+    parts = _index_parts(subscript)
+    call = subscript.value
+    if not (parts and len(parts) == 1 and isinstance(parts[0], cst.Integer) and isinstance(call, cst.Call)
+            and not call.args and isinstance(call.func, cst.Attribute) and call.func.attr.value in ('max', 'min')):
+        return None
+    return call, int(parts[0].value, 0)
+
+
 class _Hold:
     """One (receiver, column, kind) a formula reads natively; ``table`` (and ``state`` in items) are the fields of
     the receiver's binding, shared by every read of that receiver."""
@@ -264,31 +290,18 @@ class FrameReads:
     def _extreme_part_int(self, expr):
         """``R.index.max()[k]`` / ``.min()[k]``, R a unique frame of several levels whose level k is int; or
         ``max(a for a, s in R.index)`` with ``a`` naming an int level (``level_walk_extreme``)."""
-        if (isinstance(expr, cst.Call) and isinstance(expr.func, cst.Name) and expr.func.value in ('max', 'min')
-                and len(expr.args) == 1 and isinstance(expr.args[0].value, cst.GeneratorExp)):
-            gen = expr.args[0].value
-            target, it = gen.for_in.target, gen.for_in.iter
-            if (gen.for_in.ifs or gen.for_in.inner_for_in is not None or not isinstance(gen.elt, cst.Name)
-                    or not isinstance(target, cst.Tuple) or not isinstance(it, cst.Attribute) or it.attr.value != 'index'
-                    or not all(isinstance(e.value, cst.Name) for e in target.elements)):
-                return False
-            names = [e.value.value for e in target.elements]
-            found = self._receiver(it.value)
-            if names.count(gen.elt.value) != 1 or found is None or not found[1].get('unique'):
-                return False
-            levels = found[1]['levels']
-            return len(levels) == len(names) and levels[names.index(gen.elt.value)] == 'int'
-        if not (isinstance(expr, cst.Subscript) and len(expr.slice) == 1 and isinstance(expr.slice[0].slice, cst.Index)
-                and isinstance(expr.slice[0].slice.value, cst.Integer) and isinstance(expr.value, cst.Call)
-                and not expr.value.args and isinstance(expr.value.func, cst.Attribute)
-                and expr.value.func.attr.value in ('max', 'min') and isinstance(expr.value.func.value, cst.Attribute)
-                and expr.value.func.value.attr.value == 'index'):
+        walk = _walk_extreme(expr) if isinstance(expr, cst.Call) else None
+        part = _extreme_part(expr) if isinstance(expr, cst.Subscript) else None
+        index = walk[0] if walk else part[0].func.value if part else None
+        if not (isinstance(index, cst.Attribute) and index.attr.value == 'index'):
             return False
-        found = self._receiver(expr.value.func.value.value)
+        found = self._receiver(index.value)
         if found is None or not found[1].get('unique'):
             return False
-        levels, level = found[1]['levels'], int(expr.slice[0].slice.value.value, 0)
-        return 1 < len(levels) <= 8 and 0 <= level < len(levels) and levels[level] == 'int'
+        levels = found[1]['levels']
+        if walk:
+            return len(levels) == len(walk[1]) and levels[walk[2]] == 'int'
+        return 1 < len(levels) <= 8 and 0 <= part[1] < len(levels) and levels[part[1]] == 'int'
 
     def numpy_use(self, node, kind, seen=None):
         """Whether the value of the cell read ``node`` (an original node of this formula) reaches a use where a
@@ -1761,23 +1774,11 @@ class _Rewrite(cst.CSTTransformer):
         ``R.index.get_level_values(i).max()`` (signature kind -6), not a walk of every row per evaluation."""
         o = self.o
         func = original.func
-        if not (isinstance(func, cst.Name) and func.value in ('max', 'min') and len(original.args) == 1
-                and not original.args[0].keyword and not original.args[0].star
-                and isinstance(original.args[0].value, cst.GeneratorExp)):
+        shape = _walk_extreme(original)
+        if shape is None:
             return None
-        gen = original.args[0].value
-        comp = gen.for_in
-        if comp.ifs or comp.inner_for_in is not None or comp.asynchronous is not None or not isinstance(gen.elt, cst.Name):
-            return None
-        target = comp.target
-        if not (isinstance(target, cst.Tuple) and all(isinstance(e, cst.Element) and isinstance(e.value, cst.Name)
-                                                       for e in target.elements)):
-            return None
-        names = [e.value.value for e in target.elements]
-        if names.count(gen.elt.value) != 1:
-            return None
-        level = names.index(gen.elt.value)
-        view = self._index_of(comp.iter)
+        it, names, level = shape
+        view = self._index_of(it)
         if view is None or view.start is not None or not view.schema.get('unique'):
             return None
         levels = view.schema['levels']
@@ -1792,20 +1793,19 @@ class _Rewrite(cst.CSTTransformer):
                 lpar=[], rpar=[]))])
         return self._lowered(self._native_test(hold, []), native, self._fallback(updated, view.call), 'i64')
 
-    def extreme_part(self, original, updated, parts):
+    def extreme_part(self, original, updated):
         """T-5c: ``R.index.max()[k]`` / ``.min()[k]`` on a whole frame of several levels, ``k`` an integer literal
         naming an int level: that part of pandas' extreme as a C integer (signature kind -2: the index is not
         empty), where the label tuple would be one Python object shared by every thread."""
         o = self.o
-        call = original.value
-        if not (len(parts) == 1 and isinstance(parts[0], cst.Integer) and isinstance(call, cst.Call) and not call.args
-                and isinstance(call.func, cst.Attribute) and call.func.attr.value in ('max', 'min')):
+        shape = _extreme_part(original)
+        if shape is None:
             return None
+        call, level = shape
         view = self._index_of(call.func.value)
         if view is None or view.start is not None:
             return None
         levels = view.schema['levels']
-        level = int(parts[0].value, 0)
         if not (1 < len(levels) <= 8 and 0 <= level < len(levels) and levels[level] == 'int'):
             return None
         hold = self._take(view.call, _NO_LABEL, -2)
@@ -2375,7 +2375,7 @@ class _Rewrite(cst.CSTTransformer):
                or self._row_field(original, updated, parts))
         if row is not None:
             return row
-        part = self.extreme_part(original, updated, parts)
+        part = self.extreme_part(original, updated)
         if part is not None:
             return part
         walk = (self.index_item(original, updated) or self.column_keyed(original, updated, parts)
