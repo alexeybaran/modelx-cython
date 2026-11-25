@@ -526,7 +526,7 @@ def test_unchecked_mode_arithmetic_is_plain_c(integer_domain_build_unchecked):
         from exported_cy import mx_model as compiled
 
         report = json.load(open("exported_cy/_mx_integer_checks.json"))
-        assert report["mode"] == "unchecked" and "not traced" in report["limit"]
+        assert report["mode"] == "unchecked" and "wraps beyond 64 bits" in report["limit"]
         maximum, minimum = (1 << 63) - 1, -(1 << 63)
         for cell, overflow, valid in (("increment_amount", maximum, maximum - 1),
                                       ("decrement_amount", minimum, minimum + 1),

@@ -40,13 +40,12 @@ class CompilerPolicy:
     dense_one_axis: bool
     propagate_exact_receiver: bool
     native_cache_hits: str
-    # M1 (W1.1, default on since W1.5): '# cython: infer_types=True, overflowcheck=True'
-    # on generated model modules.
+    # M1 (W1.1, default on since W1.5): '# cython: infer_types=True' on generated model modules.
     infer_types: bool = True
-    # integer guards (owner's rule): 'auto' (default) compiles without overflow checks when no
-    # traced integer reaches UNCHECKED_LIMIT in magnitude, with them otherwise; 'checked' and
-    # 'unchecked' force a mode. The build resolves 'auto' after the trace (resolve_integer_checks).
-    integer_checks: str = 'auto'
+    # integer guards: 'checked' (default) raises OverflowError naming the Cell when C integer
+    # arithmetic of a formula leaves 64 bits (flagged operations, integer_boundaries.py); 'unchecked'
+    # is the documented opt-out: plain C arithmetic, which wraps, as on upstream. Not from the sample.
+    integer_checks: str = 'checked'
     @classmethod
     def resolve(cls, data):
         automatic = data.get('automatic_optimizations', True)
@@ -57,12 +56,12 @@ class CompilerPolicy:
             propagate_exact_receiver=data.get('propagate_exact_receiver', automatic and miss),
             native_cache_hits=data.get('native_cache_hits', 'auto' if automatic and miss else 'none'),
             infer_types=data.get('infer_types', True),
-            integer_checks=data.get('integer_checks', 'auto'))
+            integer_checks=data.get('integer_checks', 'checked'))
         for name, value in values.items():
             if name not in ('native_cache_hits', 'integer_checks') and type(value) is not bool:
                 raise ValueError(f'{name} must be a boolean')
-        if values['integer_checks'] not in ('auto', 'checked', 'unchecked'):
-            raise ValueError('integer_checks must be auto, checked or unchecked')
+        if values['integer_checks'] not in ('checked', 'unchecked'):
+            raise ValueError('integer_checks must be checked or unchecked')
         if type(values['native_cache_hits']) is not str or values['native_cache_hits'] not in (
                 'none', 'scalar', 'dense', 'both', 'auto'):
             raise ValueError('native_cache_hits must be none, scalar, dense, both or auto')
@@ -72,23 +71,6 @@ class CompilerPolicy:
             if values['native_cache_hits'] != 'none':
                 raise ValueError('native_cache_hits requires dense_miss_binding')
         return cls(**values)
-
-
-# integer guards: with every traced integer below 2**31 in magnitude, a product of two stays below
-# 2**62, so the ordinary arithmetic of a formula keeps far from the 64-bit limit
-UNCHECKED_LIMIT = 1 << 31
-UNCHECKED_LIMIT_NOTE = (
-    'Unchecked mode: intermediate values are not traced, so a product of several large terms or an '
-    'integer power could exceed 64 bits and would wrap, as on upstream; set "integer_checks": "checked" '
-    'in the spec to force the checked mode.')
-
-
-def resolve_integer_checks(policy, largest_traced_integer):
-    """The integer-check mode for this build: the spec's, or for 'auto' 'unchecked' when the
-    largest traced integer is below UNCHECKED_LIMIT in magnitude and 'checked' otherwise."""
-    if policy.integer_checks != 'auto':
-        return policy.integer_checks
-    return 'unchecked' if largest_traced_integer < UNCHECKED_LIMIT else 'checked'
 
 
 class TransSpec:
@@ -151,13 +133,12 @@ class TransSpec:
     ``"infer_types"`` (default true): C type inference (``# cython: infer_types=True``) in
     generated model modules; false keeps Cython's default (no inference of C types for untyped
     locals). Overflow checks follow ``"integer_checks"`` either way.
-    ``"integer_checks"`` (default ``"auto"``): ``"unchecked"`` compiles C integer arithmetic
-    without overflow checks (as plain C), ``"checked"`` with them; ``"auto"`` chooses unchecked when
-    no traced integer (Cell arguments and results, References, ItemSpace parameters, integer
-    columns of input tables) reaches 2**31 in magnitude. ``_mx_integer_checks.json`` records the
-    mode used and the largest traced integer. Limit of the unchecked mode: intermediate values are
-    not traced, so a product of several large terms or an integer power could exceed 64 bits and
-    would wrap, as on upstream; set ``"integer_checks": "checked"`` to force the checked mode.
+    ``"integer_checks"`` (default ``"checked"``): C integer ``+ - *`` and unary minus of a
+    formula set an overflow flag that the formula tests once before it returns, raising
+    OverflowError naming the Cell; a formula with an operation whose C type the compiler cannot
+    tell keeps Cython's overflowcheck (listed in ``_mx_integer_checks.json`` under
+    ``overflowcheck_fallback``). ``"unchecked"`` is the opt-out: plain C arithmetic, which wraps
+    beyond 64 bits, as on upstream. The mode never depends on the sample.
     ``"native_cache_hits"`` defaults to ``"auto"`` when automatic optimization
     and dense miss binding are enabled. It selects scalar hits and already-proven
     dense hits; explicit alternatives are ``"none"``, ``"scalar"``, ``"dense"``
