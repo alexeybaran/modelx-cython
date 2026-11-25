@@ -36,8 +36,7 @@ def table_cells(cls_info):
         if (cells.is_special() or cells.has_args() or not cells.has_formula_def
                 or cells.body_has_closure or cells.called_with_kwargs or cells.formula_is_generator):
             continue
-        binder = cells.native_result_binder
-        if binder or frame_cell(cls_info, cells):
+        if frame_cell(cls_info, cells):
             result[name] = cells
     return result
 
@@ -125,7 +124,7 @@ def frame_cell(cls_info, cells):
     """T-3: a zero-argument cell whose traced value is a pandas DataFrame or Series, compiled with prepared
     tables: it is a table cell whose value is the frame itself (assigned as it is, never converted)."""
     policy = getattr(getattr(getattr(cls_info, 'module', None), 'spec', None), 'policy', None)
-    return (bool(getattr(policy, 'prepared_tables', False)) and not cells.native_result_binder
+    return (bool(getattr(policy, 'prepared_tables', False))
             and getattr(getattr(cells, '_rt', None), 'frame_schema', None) is not None)
 
 

@@ -233,8 +233,6 @@ class RuntimeCellsInfo:     # TODO: Create base class RuntimeBaseMemberInfo
         self.max_ret_value = max(values) if values else None   # param_bound_checks margin
         self._init_arg_types(traces)
         self.ret_type = self._init_ret_type(returned)
-        from .provider_manifest import observed_provider_binding
-        self.observed_provider_binding = observed_provider_binding(returned)
         self.frame_schema = frame_schema(returned)
 
     def has_args(self):
