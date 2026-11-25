@@ -25,14 +25,17 @@ def test_narrow_sample_names_cell_and_return_type(tmp_path):
     result = subprocess.run(command + ['--compile-only'], cwd=tmp_path,
                             capture_output=True, text=True)
     assert result.returncode != 0
-    assert "Cython could not compile cell 'Outer.Projection.half'." in result.stderr
-    assert "set a wider 'return_type'" in result.stderr
+    # the cell and the hint, located from the emitted source only now that Cython failed
+    assert ("Cython could not compile cell 'Outer.Projection.half'. If the sampled return type is "
+            "too narrow, set a wider 'return_type' for the cell in the spec, such as 'object'."
+            in result.stderr.splitlines())
     assert "Cannot assign type" in result.stderr
 
     (tmp_path / 'spec.py').write_text(repr({'spaces': {'Outer': {'spaces': {'Projection': {
         'cells': {'half': {'return_type': 'object'}}
     }}}}}), encoding='utf-8')
-    subprocess.run(command, cwd=tmp_path, check=True)
+    built = subprocess.run(command, cwd=tmp_path, check=True, capture_output=True, text=True)
+    assert 'could not compile' not in built.stdout + built.stderr
     subprocess.run([sys.executable, '-c', 'from exported_cy import mx_model; '
                     'assert mx_model.Outer.Projection.half(3) == 1.5'],
                    cwd=tmp_path, check=True)
