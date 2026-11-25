@@ -62,9 +62,8 @@ def test_checked_native_range(tmp_path):
         'v = mx_model.Values\n'
         'v.add(0, 5); v.add_from_one(5); v.weighted(0, 5, 5.5); v.square(0, 5); v.shadowed(0, 5)\n',
         encoding='utf-8')
-    # the checked mode, declared explicitly. The typed
-    # range counters of the removed range proofs are no longer asserted; the values below are.
-    (tmp_path / 'spec.py').write_text(repr({'integer_checks': 'checked'}), encoding='utf-8')
+    # The typed range counters of the removed range proofs are no longer asserted; the values below are.
+    (tmp_path / 'spec.py').write_text(repr({}), encoding='utf-8')
     subprocess.run(
         [sys.executable, '-m', 'modelx_cython', 'exported', '--sample', 'sample.py', '--spec', 'spec.py'],
         cwd=tmp_path, check=True)

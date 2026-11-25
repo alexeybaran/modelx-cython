@@ -99,7 +99,7 @@ def test_flagged_integer_arithmetic_raises_or_equals_live(tmp_path):
     # vector Cells are a bridge layer) and a sum over a generator (a nested scope: reductions are one too)
     assert 'overflowcheck' not in source.splitlines()[0], source.splitlines()[0]
     report = json.loads((tmp_path / 'exported_cy' / '_mx_integer_checks.json').read_text())
-    assert report == {'mode': 'checked', 'overflowcheck_fallback': ['S.element', 'S.reduced']}, report
+    assert report == {'overflowcheck_fallback': ['S.element', 'S.reduced']}, report
     assert len(re.findall(r'_mx_sys\._mx_flag_(add|sub|mul|neg)\(', source)) >= 10
     checked = run('checks.py')
     assert checked.returncode == 0, checked.stdout + checked.stderr

@@ -42,10 +42,6 @@ class CompilerPolicy:
     native_cache_hits: str
     # '# cython: infer_types=True' on generated model modules (spec key infer_types, default on).
     infer_types: bool = True
-    # integer guards: 'checked' (default) raises OverflowError naming the Cell when C integer
-    # arithmetic of a formula leaves 64 bits (flagged operations, integer_boundaries.py); 'unchecked'
-    # is the documented opt-out: plain C arithmetic, which wraps, as on upstream. Not from the sample.
-    integer_checks: str = 'checked'
     @classmethod
     def resolve(cls, data):
         automatic = data.get('automatic_optimizations', True)
@@ -55,13 +51,10 @@ class CompilerPolicy:
             dense_miss_binding=miss, dense_one_axis=data.get('dense_one_axis', automatic),
             propagate_exact_receiver=data.get('propagate_exact_receiver', automatic and miss),
             native_cache_hits=data.get('native_cache_hits', 'auto' if automatic and miss else 'none'),
-            infer_types=data.get('infer_types', True),
-            integer_checks=data.get('integer_checks', 'checked'))
+            infer_types=data.get('infer_types', True))
         for name, value in values.items():
-            if name not in ('native_cache_hits', 'integer_checks') and type(value) is not bool:
+            if name != 'native_cache_hits' and type(value) is not bool:
                 raise ValueError(f'{name} must be a boolean')
-        if values['integer_checks'] not in ('checked', 'unchecked'):
-            raise ValueError('integer_checks must be checked or unchecked')
         if type(values['native_cache_hits']) is not str or values['native_cache_hits'] not in (
                 'none', 'scalar', 'dense', 'both', 'auto'):
             raise ValueError('native_cache_hits must be none, scalar, dense, both or auto')
@@ -130,13 +123,7 @@ class TransSpec:
     entries and private dense formula calls.
     ``"infer_types"`` (default true): C type inference (``# cython: infer_types=True``) in
     generated model modules; false keeps Cython's default (no inference of C types for untyped
-    locals). Overflow checks follow ``"integer_checks"`` either way.
-    ``"integer_checks"`` (default ``"checked"``): C integer ``+ - *`` and unary minus of a
-    formula set an overflow flag that the formula tests once before it returns, raising
-    OverflowError naming the Cell; a formula with an operation whose C type the compiler cannot
-    tell keeps Cython's overflowcheck (listed in ``_mx_integer_checks.json`` under
-    ``overflowcheck_fallback``). ``"unchecked"`` is the opt-out: plain C arithmetic, which wraps
-    beyond 64 bits, as on upstream. The mode never depends on the sample.
+    locals). Integer arithmetic is checked either way (integer_boundaries.py).
     ``"native_cache_hits"`` defaults to ``"auto"`` when automatic optimization
     and dense miss binding are enabled. It selects scalar hits and already-proven
     dense hits; explicit alternatives are ``"none"``, ``"scalar"``, ``"dense"``

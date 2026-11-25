@@ -14,7 +14,7 @@ from .usage import RESOLVED, _extract_self_chain
 _INTEGER_ANNOTATION = cst.Attribute(cst.Name(CY_MOD), cst.Name('longlong'))
 _SIGNED_OPERATIONS = {
     # integer guards: the operators that keep a helper (Python semantics, the checked power);
-    # + - * are plain C operators, checked by Cython's overflowcheck in the checked mode
+    # + - * are flagged C operators (_FlagArithmetic)
     cst.FloorDivide: '_mx_signed_floordiv',
     cst.Modulo: '_mx_signed_remainder',
     cst.LeftShift: '_mx_signed_left_shift',
@@ -721,10 +721,8 @@ def signed_local_assignments(body, name, facts, native_value):
 
 class _GuardIntegers(cst.CSTTransformer):
     def __init__(self, path, kinds, native_helpers, signed_fields,
-                 signed_functions, signed_methods, signed_names, signed_return, error, checked=True):
+                 signed_functions, signed_methods, signed_names, signed_return, error):
         self.path = path
-        # integer guards: False in the unchecked mode, where C integer arithmetic stays plain C
-        self.checked = checked
         self.kinds = kinds
         self.native_helpers = native_helpers
         self.signed_fields = signed_fields
@@ -770,15 +768,15 @@ class _GuardIntegers(cst.CSTTransformer):
         if isinstance(value, cst.BinaryOperation) and isinstance(value.operator, _INTEGER_OPERATIONS):
             left, left_signed = self._signed_expression(value.left, path)
             right, right_signed = self._signed_expression(value.right, path)
-            # Shifts and the remainder keep their helpers in both modes, for Python's semantics:
+            # Shifts and the remainder keep their helpers, for Python's semantics:
             # a right shift rounds a negative value down (C leaves it to the implementation), a
             # left shift of a negative value or by 64 or more is exact in Python (Cython's checked
             # shift raises), LLONG_MIN % -1 is 0 and LLONG_MIN // -1 raises (C traps, and Cython
             # checks the division only where long long is as wide as long). An integer power
-            # stored as a C integer takes the checked power in both modes: Cython's own C integer
+            # stored as a C integer takes the checked power: Cython's own C integer
             # power wraps, and with a variable exponent Cython makes it a double, which a C integer
             # result cannot take (at all, not only beyond 64 bits). Every other
-            # operator is plain C: Cython's overflowcheck checks it in the checked mode.
+            # operator is plain C here; _FlagArithmetic flags + - * afterwards.
             if (isinstance(value.operator, _HELPER_OPERATIONS) and left_signed and right_signed
                     and not (isinstance(value.operator, cst.FloorDivide) and _positive_literal(value.right))):
                 operation = _SIGNED_OPERATIONS[type(value.operator)]
@@ -791,7 +789,7 @@ class _GuardIntegers(cst.CSTTransformer):
             return value.with_changes(body=body, orelse=orelse), body_signed and else_signed
         if isinstance(value, cst.UnaryOperation) and isinstance(value.operator, (cst.Plus, cst.Minus)):
             operand, signed = self._signed_expression(value.expression, path)
-            if signed and isinstance(value.operator, cst.Minus) and self.checked:
+            if signed and isinstance(value.operator, cst.Minus):
                 # Cython's overflowcheck does not check a unary minus (-LLONG_MIN): as 0 - x it does
                 return cst.BinaryOperation(cst.Integer('0'), cst.Subtract(), operand,
                                            lpar=(cst.LeftParen(), *value.lpar),
@@ -941,7 +939,7 @@ def _type_signed_locals(body, guard, facts, parameters):
 
 
 def _guard_result(node, cell, cls, resolver, cells_kinds, ref_kinds, signatures, native_helpers=(),
-                  argument_axes=(), checked=True):
+                  argument_axes=()):
     signed_return = node.returns is not None and node.returns.annotation.deep_equals(_INTEGER_ANNOTATION)
     params = {name: kind_of_type_expr(cell.get_argtype_expr(name, c_style=True, formula=True))
               for name in cell.params}
@@ -967,7 +965,7 @@ def _guard_result(node, cell, cls, resolver, cells_kinds, ref_kinds, signatures,
     error = Names(node).reserve('_mx_integer_overflow')
     guard = _GuardIntegers(cell.model_path, kinds, native_helpers, receiver_fields,
                            functions.difference(bindings), receiver_methods, signed_names, signed_return,
-                           error, checked)
+                           error)
     parameters = tuple(parameter.name.value for parameter in
                        (*node.params.posonly_params, *node.params.params, *node.params.kwonly_params))
     guard.python_locals = set()
@@ -986,8 +984,8 @@ def _positive_literal(value):
 
 
 class _GuardDivisions(cst.CSTTransformer):
-    """Every ``//`` and ``%`` of two C integers takes the checked helper, in both modes and
-    wherever it is (a float formula's ``12 // m`` as well as a C integer result): C traps on
+    """Every ``//`` and ``%`` of two C integers takes the checked helper, wherever
+    it is (a float formula's ``12 // m`` as well as a C integer result): C traps on
     LLONG_MIN // -1 and LLONG_MIN % -1 (see _mx_signed_floordiv). A divisor that is a positive
     literal cannot be -1 and stays a C operator."""
 
@@ -1109,7 +1107,7 @@ def _python_locals(node, cell):
     With ``infer_types`` Cython infers a C type for every untyped local; a local
     compared with ``is``/``is not`` would lose its identity (``x is saved[0]`` on a re-boxed
     int gives a wrong answer), so it is declared ``object``. Integer locals and ``range``
-    targets otherwise stay C integers (their arithmetic: plain C, checked by overflowcheck in the checked mode).
+    targets otherwise stay C integers (their arithmetic is flagged, see _FlagArithmetic).
     Locals with an annotation of their own are left alone. The admission report lists each
     declared local (``object_locals``).
     """
@@ -1148,9 +1146,6 @@ def _python_locals(node, cell):
 
 def guard_integer_boundaries(state, module_info, resolver, cells_kinds, ref_kinds, cells, infer_types=False):
     """Check formula results, arguments and ItemSpace keys after entry lowering."""
-    # integer guards: arguments, keys and results are checked in both modes; arithmetic only in
-    # the checked mode
-    checked = module_info.spec.policy.integer_checks != 'unchecked'
     entries = {name: params for name, cell in cells.items() if (params := integer_parameters(cell))}
     private_entries = {
         name: (cell.model_path, params)
@@ -1193,11 +1188,10 @@ def guard_integer_boundaries(state, module_info, resolver, cells_kinds, ref_kind
                 axes = (cell.dense_logical_axes if cell.has_formula_def and cell.has_args() and cell.has_typeinfo()
                         and cell.is_arrayable() else ())
                 node = _guard_result(node, cell, cls, resolver, cells_kinds, ref_kinds, signatures,
-                                     argument_axes=axes, checked=checked)
+                                     argument_axes=axes)
                 node = _guard_divisions(node, cell, cls, signatures)
-                if checked:
-                    node = _flag_overflows(node, cell, _integer_guard(node, cell, cls, signatures, inferred=infer_types),
-                                           declared, cls.name, infer_types)
+                node = _flag_overflows(node, cell, _integer_guard(node, cell, cls, signatures, inferred=infer_types),
+                                       declared, cls.name, infer_types)
                 if infer_types:
                     node = _python_locals(node, cell)
                 changed = True
@@ -1214,13 +1208,12 @@ def guard_integer_boundaries(state, module_info, resolver, cells_kinds, ref_kind
                 method = _guard_calls(unbound, cls, formula, resolver, entries, cells, private_entries,
                                       module_info.classes, safe_builtins, module_scopes if unbound is method else None)
                 method = _guard_result(method, formula, cls, resolver, cells_kinds, ref_kinds, signatures,
-                                       native_helpers.get((cls.name, name), ()), checked=checked)
+                                       native_helpers.get((cls.name, name), ()))
                 method = _guard_divisions(method, formula, cls, signatures,
                                           native_helpers.get((cls.name, name), ()))
-                if checked:
-                    method = _flag_overflows(method, formula, _integer_guard(
-                        method, formula, cls, signatures, native_helpers.get((cls.name, name), ()),
-                        inferred=infer_types), declared, cls.name, infer_types)
+                method = _flag_overflows(method, formula, _integer_guard(
+                    method, formula, cls, signatures, native_helpers.get((cls.name, name), ()),
+                    inferred=infer_types), declared, cls.name, infer_types)
                 if infer_types:
                     method = _python_locals(method, formula)
                 methods.append(method)
@@ -1235,13 +1228,11 @@ def guard_integer_boundaries(state, module_info, resolver, cells_kinds, ref_kind
                 unbound = _unbound_locals(method)
                 method = _guard_calls(unbound, cls, cell, resolver, entries, cells, private_entries, module_info.classes,
                                       safe_builtins, module_scopes if unbound is method else None)
-                method = _guard_result(method, cell, cls, resolver, cells_kinds, ref_kinds, signatures,
-                                       checked=checked)
+                method = _guard_result(method, cell, cls, resolver, cells_kinds, ref_kinds, signatures)
                 method = _guard_divisions(method, cell, cls, signatures)
-                if checked:
-                    method = _flag_overflows(method, cell, _integer_guard(method, cell, cls, signatures,
-                                                                          inferred=infer_types),
-                                             declared, cls.name, infer_types)
+                method = _flag_overflows(method, cell, _integer_guard(method, cell, cls, signatures,
+                                                                      inferred=infer_types),
+                                         declared, cls.name, infer_types)
                 if infer_types:
                     method = _python_locals(method, cell)
                 changed = True

@@ -3,15 +3,13 @@
 import json
 import subprocess
 
-import pytest
 import sys
 import textwrap
 
 import modelx as mx
 
 
-@pytest.mark.parametrize('mode', ['checked', 'unchecked'])
-def test_native_transfers(tmp_path, mode):
+def test_native_transfers(tmp_path):
     model = mx.new_model('NativeTransfers')
     try:
         space = model.new_space('Policy', formula='lambda key: None')
@@ -57,8 +55,6 @@ def test_native_transfers(tmp_path, mode):
         'dense_one_axis': True,
         'dense_miss_binding': True,
         'propagate_exact_receiver': True,
-        # both integer-check modes; they differ only at the signed range's edges
-        'integer_checks': mode,
         'spaces': {'Policy': {'cells_param_size': {'i': 5}, 'cells': {
             'factor': {'memoize_power': True},
         }}},
@@ -103,18 +99,18 @@ def test_native_transfers(tmp_path, mode):
         for t in (-(1 << 63), -7, 0, 7, (1 << 63) - 1):
             for n in (-(1 << 63), -3, -1, 1, 3):
                 assert s.divisible(t, n) == (t % n == 0)
-                if CHECKED and t == -(1 << 63):     # t - 1 leaves the signed range: raises naming the Cell
+                if t == -(1 << 63):     # t - 1 leaves the signed range: raises naming the Cell
                     try:
                         s.offset(t, n)
                     except OverflowError as error:
                         assert 'Policy.offset' in str(error)
                     else:
                         raise AssertionError('offset: an intermediate beyond the signed range did not raise')
-                elif t != -(1 << 63):
+                else:
                     assert s.offset(t, n) == ((t - 1) % n != 0)
             for n in (-(1 << 63), -3, -1, 1, 3, 12):
                 for advance in (True, False):
-                    if CHECKED and not advance and t == (1 << 63) - 1:   # t + 1 leaves the signed range
+                    if not advance and t == (1 << 63) - 1:   # t + 1 leaves the signed range
                         try:
                             s.periodic(t, n, advance)
                         except OverflowError as error:
@@ -133,24 +129,18 @@ def test_native_transfers(tmp_path, mode):
                 raise AssertionError('zero divisor was accepted')
         for t in (-(1 << 63), -(1 << 25) - 1, -7, -1, 0, 7, 1 << 25, (1 << 63) - 2):
             assert s.fraction(t).hex() == (((t + 1) / 12) * 0.05).hex()
-        if CHECKED:     # m = t + 1 leaves the range: no exact fallback, it raises naming the Cell
-            try:
-                s.fraction((1 << 63) - 1)
-            except OverflowError as error:
-                assert 'Policy.fraction' in str(error)
-            else:
-                raise AssertionError('fraction: an intermediate beyond the signed range did not raise')
-        else:           # unchecked mode: plain C at the edge
+        try:            # m = t + 1 leaves the range: no exact fallback, it raises naming the Cell
             s.fraction((1 << 63) - 1)
-        if CHECKED:     # year - 1 leaves the range: no exact fallback, it raises naming the Cell
-            try:
-                s.piecewise(-(1 << 63))
-            except OverflowError as error:
-                assert 'Policy.piecewise' in str(error)
-            else:
-                raise AssertionError('piecewise: an intermediate beyond the signed range did not raise')
+        except OverflowError as error:
+            assert 'Policy.fraction' in str(error)
         else:
+            raise AssertionError('fraction: an intermediate beyond the signed range did not raise')
+        try:            # year - 1 leaves the range: no exact fallback, it raises naming the Cell
             s.piecewise(-(1 << 63))
+        except OverflowError as error:
+            assert 'Policy.piecewise' in str(error)
+        else:
+            raise AssertionError('piecewise: an intermediate beyond the signed range did not raise')
         for t in (-(1 << 63) + 1, -7, 0, 1, 2, 99, (1 << 63) - 1):
             expected = 0.0 if t >= 99 else (min(t, 9) * 0.25 if t == 1
                                             else max(0.1 - (0.04 / 3.0) * (t - 1), 0.06))
@@ -173,4 +163,4 @@ def test_native_transfers(tmp_path, mode):
                 raise AssertionError('failed power was cached')
         assert s.factor(0, 9.0, 0.5) == 3.0
         ''')
-    subprocess.run([sys.executable, '-c', f'CHECKED = {mode == "checked"}\n' + probe], cwd=tmp_path, check=True)
+    subprocess.run([sys.executable, '-c', probe], cwd=tmp_path, check=True)

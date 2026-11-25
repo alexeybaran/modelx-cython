@@ -614,7 +614,6 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
         node = rewrite_powers(
             node, self._resolver, self._cells_kinds, self._ref_kinds,
             cls_info.fqname, cells, builtin_float=builtin_float,
-            checked_integer_powers=self.module.spec.policy.integer_checks != 'unchecked',
         )
         from modelx_cython.ordered_arguments import preserve_argument_order
         from modelx_cython.powers import OperandKind, kind_of_type_expr, formula_local_kinds
@@ -720,8 +719,8 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
             # Native memo structs contain only scalars. Use Cython's standard
             # serializer; the module directive also works in pure-Python mode.
             directives.append('auto_pickle=True')
-        # integer guards: no overflowcheck directive; the checked mode flags the C integer arithmetic of
-        # each formula (integer_boundaries.py), and a formula it cannot cover carries the directive itself
+        # integer guards: no overflowcheck directive; the C integer arithmetic of each formula is flagged
+        # (integer_boundaries.py), and a formula it cannot cover carries the directive itself
         if self.module.spec.policy.infer_types:
             # Spec key infer_types: C integer inference in generated model modules; providers keep
             # their own directives.

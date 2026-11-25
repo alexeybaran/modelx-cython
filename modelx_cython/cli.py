@@ -297,12 +297,6 @@ def main_handler(args: argparse.Namespace, stdout: IO[str], stderr: IO[str]) -> 
 
         spec = TransSpec(d)
         logger = run_sample(orig_path, args.sample, new_model_name=model_name)
-        # integer guards: the spec's mode, the same for every sample ('checked' unless the spec opts out)
-        integer_report = {'mode': spec.policy.integer_checks}
-        if spec.policy.integer_checks == 'unchecked':
-            integer_report['limit'] = ('Unchecked mode (opt-out): C integer arithmetic is plain C and wraps beyond '
-                                       '64 bits, as on upstream; the default "checked" mode raises OverflowError '
-                                       'naming the Cell.')
         rel_model_path = model_path.relative_to(model_path.parent)
 
         modules = [rel_model_path / (MX_SYS_MOD + ".py")]
@@ -424,9 +418,9 @@ def main_handler(args: argparse.Namespace, stdout: IO[str], stderr: IO[str]) -> 
                      source_modules=(runtime_syntax, *(state.syntax for state in translated_modules.values())),
                      cell_sources=cell_sources, providers=provider_sources)
         report = describe(module_infos)
-        integer_report['overflowcheck_fallback'] = sorted(
+        integer_report = {'overflowcheck_fallback': sorted(
             cell.model_path for info in module_infos.values() for cls in info.classes.values() for cell in cls.cells.values()
-            if getattr(cell, 'overflowcheck_fallback', False))
+            if getattr(cell, 'overflowcheck_fallback', False))}
         (model_path / '_mx_admission.json').write_text(json.dumps(report, indent=2), encoding='utf-8')
         (model_path / '_mx_integer_checks.json').write_text(json.dumps(integer_report, indent=2), encoding='utf-8')
 

@@ -1,7 +1,7 @@
-"""The checked integer mode does not depend on type inference.
+"""Integer checks do not depend on type inference.
 
 With ``"infer_types": false`` a formula's C integer arithmetic is still C arithmetic wherever its operands are
-typed (Cell results, typed parameters); the checked mode must check it as with inference on: an exact value or an
+typed (Cell results, typed parameters); it must be checked as with inference on: an exact value or an
 OverflowError naming the Cell, never a wrapped value.
 """
 import json
@@ -30,7 +30,7 @@ def test_checked_mode_checks_c_arithmetic_with_or_without_inference(tmp_path, in
     finally:
         model.close()
     (tmp_path / "sample.py").write_text("from exported import mx_model\nSp = mx_model.Sp\nSp.c(2); Sp.c(3)\n")
-    (tmp_path / "spec.py").write_text(repr({"integer_checks": "checked", "infer_types": infer_types,
+    (tmp_path / "spec.py").write_text(repr({"infer_types": infer_types,
                                             "spaces": {"Sp": {"cells_param_size": {"t": 2 ** 23}}}}))
     run = subprocess.run([sys.executable, "-B", "-m", "modelx_cython", "exported", "--sample", "sample.py",
                           "--spec", "spec.py"], cwd=tmp_path, capture_output=True, text=True, timeout=900)

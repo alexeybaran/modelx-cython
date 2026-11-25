@@ -216,17 +216,15 @@ use a native hash store and other signatures Python dictionaries.
 
 ## Integer arithmetic
 
-`integer_checks`
-: `"checked"` (default): C integer `+`, `-`, `*` and unary minus in a formula
-  set an overflow flag that the formula tests before it returns, raising
-  {py:exc}`OverflowError` naming the Cell when an exact result would leave
-  64 bits. A formula with an operation whose C type the compiler cannot tell
-  keeps Cython's own overflow checks; such formulas are listed under
-  `overflowcheck_fallback` in `_mx_integer_checks.json` of the generated
-  package. `"unchecked"`: plain C arithmetic, which wraps beyond 64 bits. In
-  both modes `//`, `%`, shifts and integer powers keep Python's results or
-  raise, and a float or an int beyond 64 bits passed where an integer was
-  traced raises naming the Cell. The mode never depends on the sample.
+Integer arithmetic is always checked; no key turns the checks off. C integer
+`+`, `-`, `*` and unary minus in a formula set an overflow flag that the
+formula tests before it returns, raising {py:exc}`OverflowError` naming the
+Cell when an exact result would leave 64 bits. A formula with an operation
+whose C type the compiler cannot tell keeps Cython's own overflow checks; such
+formulas are listed under `overflowcheck_fallback` in `_mx_integer_checks.json`
+of the generated package. `//`, `%`, shifts and integer powers keep Python's
+results or raise, and a float or an int beyond 64 bits passed where an integer
+was traced raises naming the Cell. Nothing here depends on the sample.
 
 `infer_types`
 : `true` (default) compiles generated model modules with Cython's C type

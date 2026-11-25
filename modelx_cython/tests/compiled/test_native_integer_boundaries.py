@@ -18,17 +18,7 @@ def run_python(work, *args):
 
 @pytest.fixture(scope="module")
 def integer_domain_build(tmp_path_factory):
-    # these checks are the checked mode's, declared explicitly
-    return _integer_domain_build(tmp_path_factory, "checked")
-
-
-@pytest.fixture(scope="module")
-def integer_domain_build_unchecked(tmp_path_factory):
-    return _integer_domain_build(tmp_path_factory, "unchecked")
-
-
-def _integer_domain_build(tmp_path_factory, mode):
-    work = tmp_path_factory.mktemp(f"integer-domains-{mode}")
+    work = tmp_path_factory.mktemp("integer-domains")
     model = mx.new_model("IntegerDomains")
     try:
         projection = model.new_space("Outer").new_space(
@@ -168,7 +158,7 @@ def _integer_domain_build(tmp_path_factory, mode):
         projection.inline_operand()
         projection.shift_argument()
         """), encoding="utf-8")
-    (work / "spec.py").write_text(repr({"integer_checks": mode}), encoding="utf-8")
+    (work / "spec.py").write_text(repr({}), encoding="utf-8")
     run_python(work, "-m", "modelx_cython", "exported", "--sample", "sample.py", "--spec", "spec.py")
 
     report = json.loads((work / "exported_cy/_mx_admission.json").read_text(encoding="utf-8"))
@@ -515,55 +505,3 @@ def test_native_signed_shift_and_remainder(integer_domain_build, cell, amount, o
             assert actual == expected, (cell, actual, expected)
         """))
 
-
-def test_unchecked_mode_arithmetic_is_plain_c(integer_domain_build_unchecked):
-    """Unchecked mode: the overflowing arithmetic of the checked-mode tests above is
-    plain C (no check, no exception, as on upstream); values inside the range, the conversions at
-    the Python boundary and the shift and division rules stay as in the checked mode."""
-    run_python(integer_domain_build_unchecked, "-c", textwrap.dedent("""\
-        import json
-        from exported import mx_model as exported
-        from exported_cy import mx_model as compiled
-
-        report = json.load(open("exported_cy/_mx_integer_checks.json"))
-        assert report["mode"] == "unchecked" and "wraps beyond 64 bits" in report["limit"]
-        maximum, minimum = (1 << 63) - 1, -(1 << 63)
-        for cell, overflow, valid in (("increment_amount", maximum, maximum - 1),
-                                      ("decrement_amount", minimum, minimum + 1),
-                                      ("square_amount", 3037000500, 1 << 31),
-                                      ("negate_amount", minimum, minimum + 1),
-                                      ("local_amount", minimum + 1, 5)):
-            reference = type(exported)().Outer.Projection
-            projection = type(compiled)().Outer.Projection
-            reference.amount = projection.amount = valid
-            assert getattr(projection, cell)() == getattr(reference, cell)(), cell
-            projection = type(compiled)().Outer.Projection
-            projection.amount = overflow
-            getattr(projection, cell)()          # plain C: returns, whatever C gives
-        projection = type(compiled)().Outer.Projection
-        projection.amount = 1 << 62
-        projection.inline_operand()              # amount * 4 in plain C, then a checked argument
-        projection = type(compiled)().Outer.Projection
-        projection.amount, projection.divisor = minimum, -1
-        projection.reassigned_local()
-        # boundary conversions stay checked and named
-        projection = type(compiled)().Outer.Projection
-        projection.payload = {"value": 1 << 70}
-        try:
-            projection.object_result()
-        except OverflowError as error:
-            assert "Outer.Projection.object_result" in str(error)
-        else:
-            raise AssertionError("unchecked mode skipped a boundary conversion")
-        # Python's shift and division rules: right shift helper, division check
-        projection = type(compiled)().Outer.Projection
-        projection.amount, projection.shift = -(1 << 63), 1
-        assert projection.right_shift() == -(1 << 62)
-        projection.amount, projection.divisor = 30, 0
-        try:
-            projection.remainder()
-        except ZeroDivisionError:
-            pass
-        else:
-            raise AssertionError("remainder by zero")
-        """))

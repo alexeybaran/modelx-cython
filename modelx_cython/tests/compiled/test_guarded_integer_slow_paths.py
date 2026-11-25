@@ -1,8 +1,7 @@
 """Integer locals whose exact values leave the 64-bit range, compiled.
 
-There is no exact Python fallback for them: in the checked mode each of these formulas raises OverflowError naming the
-Cell where the exported model carries on with a big int; a small value is exact. In the
-unchecked mode a small value is exact and the large ones are plain C arithmetic.
+There is no exact Python fallback for them: each of these formulas raises OverflowError naming the
+Cell where the exported model carries on with a big int; a small value is exact.
 """
 
 import json
@@ -28,20 +27,14 @@ print(json.dumps(out))
 
 
 def test_guarded_slow_paths_are_exact_or_name_the_cell(tmp_path):
-    exported, compiled = _slow_paths(tmp_path, 'checked')
+    exported, compiled = _slow_paths(tmp_path)
     assert compiled[4] == exported[4]                   # a small value: exact
     for (name, value), (_, reference) in zip(compiled[:4], exported[:4]):
         assert not reference.startswith('OverflowError')
         assert value.startswith(f'OverflowError: Values.{name}'), (name, value)
 
 
-def test_slow_paths_unchecked_mode(tmp_path):
-    exported, compiled = _slow_paths(tmp_path, 'unchecked')
-    assert compiled[4] == exported[4]                   # a small value: exact
-    assert all(not value.startswith('OverflowError') for _, value in compiled[:4])   # plain C
-
-
-def _slow_paths(tmp_path, mode):
+def _slow_paths(tmp_path):
     model = mx.new_model('GuardSlowPaths')
     try:
         space = model.new_space('Values', refs={'base': 3})
@@ -57,7 +50,7 @@ def _slow_paths(tmp_path, mode):
     (tmp_path / 'sample.py').write_text(
         'from exported import mx_model as m\nv = m.Values\nfor a in range(5):\n'
         '    v.cmp(a, 2); v.div(a, 2); v.flt(a, 2); v.loc(a, 2)\n', encoding='utf-8')
-    (tmp_path / 'spec.py').write_text(repr({'integer_checks': mode}), encoding='utf-8')
+    (tmp_path / 'spec.py').write_text(repr({}), encoding='utf-8')
     done = subprocess.run([sys.executable, '-m', 'modelx_cython', 'exported', '--sample', 'sample.py',
                            '--spec', 'spec.py'], cwd=tmp_path, capture_output=True, text=True)
     assert done.returncode == 0, done.stdout[-3000:] + done.stderr[-3000:]

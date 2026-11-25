@@ -45,8 +45,7 @@ FORMULAS = {
 }
 
 
-def build(tmp_path, mode='checked'):
-    # the checks below are the checked mode's, declared explicitly
+def build(tmp_path):
     model = mx.new_model('ItemLocals')
     try:
         projection = model.new_space('Projection', formula=lambda point_id: None)
@@ -72,7 +71,7 @@ def build(tmp_path, mode='checked'):
         'p = mx_model.Portfolio\n'
         'p.direct(); p.direct_call(); p.rebound(); p.shifted(1)\n'
         'mx_model.Projection[2].f(3)\n', encoding='utf-8')
-    (tmp_path / 'spec.py').write_text(repr({'integer_checks': mode}), encoding='utf-8')
+    (tmp_path / 'spec.py').write_text(repr({}), encoding='utf-8')
     subprocess.run([sys.executable, '-m', 'modelx_cython', 'exported', '--sample', 'sample.py',
                     '--spec', 'spec.py'], cwd=tmp_path, check=True)
     return live
@@ -140,18 +139,3 @@ def test_item_locals_values_and_checks(tmp_path):
     assert result['same_item'] and result['freed_on_delete'] == 1
     assert result['missing_key'] == ['KeyError', '3']
     assert result['recreated']
-
-
-def test_item_locals_unchecked_mode(tmp_path):
-    """Unchecked mode: the values and the checked argument conversions are as in the checked mode;
-    an argument computed in the Cell beyond 64 bits is plain C arithmetic, and the wrapped value
-    then fails the argument's range guard instead of raising OverflowError."""
-    live = build(tmp_path, 'unchecked')
-    (tmp_path / 'probe.py').write_text(PROBE, encoding='utf-8')
-    result = json.loads(subprocess.run([sys.executable, 'probe.py'], cwd=tmp_path, check=True,
-                                       capture_output=True, text=True).stdout)
-    for name, value in live.items():
-        assert abs(result[name] - value) <= 1e-7 + 1e-10 * abs(value), name
-    message = 'Projection.f requires an exact signed 64-bit integer. Rebuild with a wider sample or spec.'
-    assert result['errors']['big'] == ['OverflowError', message]
-    assert result['errors']['cell_big'] is not None and result['errors']['cell_big'][0] == 'IndexError'

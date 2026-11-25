@@ -35,7 +35,7 @@ class TestConf:
 
 
 @pytest.mark.parametrize('data',[
-    {'automatic_optimizations':1}, {'native_cache_hits':True}, {'integer_checks':'sometimes'},
+    {'automatic_optimizations':1}, {'native_cache_hits':True},
     {'dense_miss_binding':False,'native_cache_hits':'both'},
     {'dense_miss_binding':False,'propagate_exact_receiver':True},
 ])
