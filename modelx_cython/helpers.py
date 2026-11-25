@@ -168,26 +168,7 @@ class HelperCalls(FormulaTransformer):
 
     def leave_Call(self, original, updated):
         math = self.module_math(original, updated)
-        if math is not None:
-            return math
-        from .helper_members import MATH_PROVIDER
-        func = updated.func
-        ref = _declared_reference(func, self.refs)
-        contract = ref.helper if ref is not None else None
-        # A module member that is a math builtin under another name has no ``m_`` form: the
-        # provider operation receives the member itself and checks it.
-        if not contract or contract[0] != MATH_PROVIDER or any(arg.star or arg.keyword for arg in updated.args):
-            return updated
-        provider, operation = contract
-        self.used.add(provider)
-        self.operations.add(provider + '.' + operation)
-        args = tuple(arg.with_changes(value=arg.value.with_changes(
-                     lpar=(cst.LeftParen(),), rpar=(cst.RightParen(),)))
-                     if isinstance(arg.value, cst.GeneratorExp) and not arg.value.lpar else arg
-                     for arg in updated.args)
-        return updated.with_changes(
-            func=cst.Attribute(cst.Name(module_name(provider)), cst.Name(operation)),
-            args=(cst.Arg(func), *args))
+        return updated if math is None else math
 
     def rewrite(self, formula):
         """Bind registered symbols across lexical scopes, without body analysis.
@@ -325,9 +306,6 @@ class _ScopedHelperCalls(HelperCalls):
             return updated
         if not self._owns_receiver(function):
             return updated
-        if _declared_reference(function, self.refs) is None:
-            self.module_math(original, updated)       # lists math members with no native form
-            return updated
         return super().leave_Call(original, updated)
 
 
@@ -383,12 +361,6 @@ def _drop_unused_math_imports(formula, names):
     if not statements:
         statements = [cst.SimpleStatementLine([cst.Pass()])]
     return formula.with_changes(body=formula.body.with_changes(body=statements))
-
-
-def _declared_reference(function, refs):
-    # Kept lazy to avoid the shared registry/resolver import cycle.
-    from .helper_members import helper_reference
-    return helper_reference(function, refs)
 
 
 def install(providers, model_path):
