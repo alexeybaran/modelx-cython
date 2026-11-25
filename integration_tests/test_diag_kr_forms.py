@@ -206,7 +206,8 @@ def test_forms_compile_natively_and_equal_the_interpreter(tmp_path):
     assert '.kcode(' in keyed and 'cast(object, k)' not in keyed, keyed
     assert not any(e['kind'] == 'table-key-object' for e in report[PREFIX + 'keyed']['slow_paths'])
     members = _formula(source, 'members')
-    assert 'for code in (200, 201, 202)' in members and 'code: object' not in members, members
+    # HTTPStatus is no enum family (values not 0..n-1): the loop keeps its members, equal to the interpreter
+    assert 'for code in (self.Status.OK, self.Status.CREATED, self.Status.ACCEPTED)' in members, members
     above = _formula(source, 'above')
     assert 'cast(object' not in above and f'ValueError("{_empty_min_message()}")' in above, above
     assert report[PREFIX + 'capped']['vectors']['lowered'] >= 1, report[PREFIX + 'capped']['vectors']

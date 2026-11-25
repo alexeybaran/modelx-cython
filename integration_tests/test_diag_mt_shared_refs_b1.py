@@ -8,8 +8,9 @@ import modelx as mx
 
 
 def test_enum_member_local_is_a_c_integer_and_results_stay(tmp_path, monkeypatch):
-    """``kind = Kind.A if ... else Kind.B`` is a conditional of integer literals (no member object read per
-    call), and ``kind.name`` its name by value; both give the exported model's values."""
+    """``kind = Kind.A if ... else Kind.B`` is a local, so it holds the members (enums.plan holds members as
+    integers only for Cell parameters, and Kind, values 1 and 2, is no enum family), and ``kind.name`` is the
+    member's name; both give the exported model's values."""
     (tmp_path / 'diag_mt_kinds.py').write_text(
         'import enum\n\nclass Kind(enum.IntEnum):\n    A = 1\n    B = 2\n', encoding='utf-8')
     monkeypatch.syspath_prepend(str(tmp_path))
@@ -56,10 +57,8 @@ def value():
                            '--no-spec'], cwd=tmp_path, capture_output=True, text=True)
     assert done.returncode == 0, done.stdout[-3000:] + done.stderr[-3000:]
     generated = (tmp_path / 'exported_cy/_m_Portfolio/_mx_classes.py').read_text(encoding='utf-8')
-    # members are integer literals (enums.literals); Cython types the local as it types any integer local
-    assert '= 1 if (t + self.key) % 3 == 0 else 2' in generated, generated
-    assert 'kind = 1 if t % 2 == 0 else 2' in generated                     # named: the same integers
-    assert "{1: 'A', 2: 'B'}.get(kind) or getattr(kind, 'name')" in generated   # and its .name by value
+    assert '= self.Kind.A if (t + self.key) % 3 == 0 else self.Kind.B' in generated, generated
+    assert 'kind = self.Kind.A if t % 2 == 0 else self.Kind.B' in generated and 'kind.name' in generated
     probe = textwrap.dedent('''\
         import sys
         from importlib import import_module

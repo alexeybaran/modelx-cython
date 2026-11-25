@@ -12,12 +12,12 @@ import pytest
 import modelx as mx
 
 
-def _build(tmp_path, spec):
+def _build(tmp_path, spec, status=HTTPStatus):
     model = mx.new_model('ParamBounds')
     try:
         keys = (1, 2, 3)
         p = model.new_space('Projection', formula='lambda policy_id: None',
-                            refs={'keys': keys, 'Status': HTTPStatus})
+                            refs={'keys': keys, 'Status': status})
         p.new_cells('proj_len', 'lambda: 4 + 3 * policy_id if policy_id < 9 else 1 // 0')
         p.new_cells('cf', 'lambda t: 1.0 * t + policy_id')
         p.new_cells('pair', 'lambda t, k: cf(t) + k')

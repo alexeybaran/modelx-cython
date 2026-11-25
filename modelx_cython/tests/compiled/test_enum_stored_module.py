@@ -14,7 +14,19 @@ import pytest
 
 import modelx as mx
 
-pytestmark = pytest.mark.skipif(not hasattr(enum, 'StrEnum'), reason='enum.StrEnum is of Python 3.11')
+
+
+def _exports_stored_classes():
+    """Whether modelx exports the classes of a module stored with the model (modelx 0883979, branch
+    r4/modelx-integration): its export runtime reads them back with MiniModuleIO."""
+    import modelx.export._mx_sys as runtime
+    return hasattr(runtime, 'MiniModuleIO')
+
+
+pytestmark = [pytest.mark.skipif(not hasattr(enum, 'StrEnum'), reason='enum.StrEnum is of Python 3.11'),
+              pytest.mark.skipif(not _exports_stored_classes(),
+                                 reason='this modelx cannot export classes of a stored module (needs modelx 0883979, '
+                                        'r4/modelx-integration)')]
 
 ENUMS = textwrap.dedent('''\
     import enum
