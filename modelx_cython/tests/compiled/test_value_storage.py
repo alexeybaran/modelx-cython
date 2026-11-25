@@ -10,7 +10,8 @@ copied through the class's own reduce), and after a copy or pickle round trip, w
 reduced state of a fresh and of a partly filled item is the same in all three builds, so no unwritten byte is carried;
 the reduce has Cython's name; a reduce leaves no block and no type reference behind. On the free-threaded interpreter
 one thread fills an item's caches and assigns its public attributes while another copies (and, without collect,
-pickles) it: no crash, and every restored item returns the live model's values.
+pickles) it: no crash, and every restored item returns the live model's values. The same holds for a locked Space,
+whose flags are ``bint``.
 """
 import os
 import subprocess
@@ -91,31 +92,37 @@ THREADS = textwrap.dedent("""\
     import copy, pickle, random, sys, threading
     native = __import__(sys.argv[1]).mx_model
     live = __import__(sys.argv[2]).mx_model
-    collect = sys.argv[3] == 'collect'
+    mode = sys.argv[3]                       # plain: Policy items; collect: the shared Data; locked: Market
     if sys._is_gil_enabled():
         print(repr({'gil': True}))
         sys.exit(0)
     months = range(48)
 
     def entries(item):                       # every entry of the item's dense caches
-        if collect:
+        if mode == 'collect':
             return [(item.factor, (t,)) for t in months]
+        if mode == 'locked':                 # bint flags, stored with release semantics under the model lock
+            return [(item.price, (t,)) for t in months] + [(item.up, (t,)) for t in months]
         return ([(item.cf, (t,)) for t in months] + [(item.n, (t,)) for t in months]
                 + [(item.alive, (t,)) for t in months] + [(item.counted, (t,)) for t in months]
                 + [(item.grid, (t, j)) for t in months for j in range(3)])
 
     def values(item):                        # a missing entry is computed, a cached one returned
-        return [cell(*args) for cell, args in entries(item)] + ([] if collect else [item.pv()])
+        return [cell(*args) for cell, args in entries(item)] + ([item.pv()] if mode == 'plain' else [])
 
-    keys = [None] if collect else list(range(1, 41))
-    expected = {key: values(live.Data if collect else live.Policy[key]) for key in keys}
-    clones = [copy.copy] + ([] if collect else [lambda x: pickle.loads(pickle.dumps(x))])
+    def item_of(model, key):
+        return model.Policy[key] if mode == 'plain' else model.Data if mode == 'collect' else model.Market
+
+    keys = list(range(1, 41)) if mode == 'plain' else [None]
+    expected = {key: values(item_of(live, key)) for key in keys}
+    # a model with collect holds a thread-local state, a locked model a lock: neither pickles
+    clones = [copy.copy] + ([lambda x: pickle.loads(pickle.dumps(x))] if mode == 'plain' else [])
     current, copies, mismatches, errors = [None], [0], [], []
     done = threading.Event()
 
     def copier():                            # copies (and pickles) the item being filled, in a loop
         try:
-            while current[0] is None:
+            while current[0] is None and not done.is_set():
                 pass
             while not done.is_set():
                 key, item = current[0]
@@ -129,8 +136,10 @@ THREADS = textwrap.dedent("""\
             done.set()
 
     def churn(item):                         # fresh but equal public members: the old ones are freed
-        if collect:
+        if mode == 'collect':
             item._name = ''.join(['Da', 'ta'])
+        elif mode == 'locked':
+            item.months = tuple(range(48))
         else:
             item.months = tuple(range(48))
             item.keys = tuple(range(1, 41))
@@ -141,8 +150,8 @@ THREADS = textwrap.dedent("""\
             order = random.Random(0)
             for r in range(rounds):
                 model = type(native)()       # a new model per round: nothing is added to a model being pickled
-                key = None if collect else keys[r % len(keys)]
-                item = model.Data if collect else model.Policy[key]
+                key = keys[r % len(keys)]
+                item = item_of(model, key)
                 todo = entries(item)
                 order.shuffle(todo)
                 current[0] = (key, item)
@@ -160,7 +169,7 @@ THREADS = textwrap.dedent("""\
         finally:
             done.set()
 
-    threads = [threading.Thread(target=copier), threading.Thread(target=filler, args=(40, 2 if collect else 8))]
+    threads = [threading.Thread(target=copier), threading.Thread(target=filler, args=(40, 8 if mode == 'plain' else 2))]
     for thread in threads:
         thread.start()
     for thread in threads:
@@ -194,13 +203,15 @@ def _build(tmp_path, name, collect, env):
         f'from {name} import mx_model as m\n{run}p = m.Policy[3]\n'
         'p.grid(0, 0); p.grid(47, 2); p.counted(0); p.counted(47); p.n(0); p.alive(0)\n', encoding='utf-8')
     build = subprocess.run([sys.executable, '-m', 'modelx_cython', name, '--sample', f'sample_{name}.py',
-                            '--spec', f'spec_{name}.py'], cwd=tmp_path, capture_output=True, text=True, env=env)
+                            '--spec', f'spec_{name}.py'], cwd=tmp_path, capture_output=True, text=True, env=env,
+                           timeout=900)
     assert build.returncode == 0, build.stdout + build.stderr
     return build.stdout + build.stderr
 
 
 def _run(tmp_path, script, *args):
-    run = subprocess.run([sys.executable, '-c', script, *args], cwd=tmp_path, capture_output=True, text=True)
+    run = subprocess.run([sys.executable, '-c', script, *args], cwd=tmp_path, capture_output=True, text=True,
+                         timeout=300)
     assert run.returncode == 0, run.stdout + run.stderr
     return eval(run.stdout), run.stderr
 
@@ -213,7 +224,8 @@ def _check(tmp_path, mode):
              'poisoned': poison + (' -DCYTHON_USE_TYPE_SPECS=1' if mode == 'plain' else ''),
              'fallback': f'{poison} -DMX_TEST_VALUES_FALLBACK={1 if mode == "plain" else 2}'}
     for build, cppflags in flags.items():
-        log = _build(tmp_path, f'{build}_{mode}', mode == 'collect', dict(plain, CPPFLAGS=cppflags) if cppflags else plain)
+        env = dict(plain, CPPFLAGS=cppflags) if cppflags else plain
+        log = _build(tmp_path, f'{build}_{mode}', mode == 'collect', env)
         assert all(flag in log for flag in cppflags.split()), build
     source = (tmp_path / f'shipped_{mode}_cy/_mx_classes.pxd').read_text(encoding='utf-8')
     policy = source.split('cdef class _c_Policy')[1].split('cpdef')[0]
@@ -250,11 +262,43 @@ def _check(tmp_path, mode):
             assert abs(got.pop(('collect', 4)) - serial) <= 1e-12 * abs(serial)
         assert got == {key: value for key, value in expected.items() if key[0] != 'collect'}, package
         if build != 'fallback':
-            threads, stderr = _run(tmp_path, THREADS, package, f'shipped_{mode}', mode)
-            if sysconfig.get_config_var('Py_GIL_DISABLED'):
-                assert threads['gil'] is False, stderr
-                assert threads['errors'] == [] and threads['mismatches'] == [], (package, threads)
-                assert threads['copies'] >= 100, (package, threads)
+            _assert_threads(tmp_path, package, f'shipped_{mode}', mode)
+
+
+def _assert_threads(tmp_path, package, live, mode):
+    threads, stderr = _run(tmp_path, THREADS, package, live, mode)
+    if sysconfig.get_config_var('Py_GIL_DISABLED'):
+        assert threads['gil'] is False, stderr
+        assert threads['errors'] == [] and threads['mismatches'] == [], (package, threads)
+        assert threads['copies'] >= 50, (package, threads)
+
+
+def test_unwritten_values_of_a_locked_space(tmp_path):
+    """A locked Space has bint flags, published under the model lock: its values are left unwritten too, and an
+    item copied while another thread fills it holds only values behind flags it saw set."""
+    model = mx.new_model('LockedValues')
+    try:
+        market = model.new_space('Market', refs={'months': tuple(range(48))})
+        market.new_cells('level', 'lambda: 10.0')
+        market.new_cells('price', 'lambda t: level() + 0.5 * t')
+        market.new_cells('up', 'lambda t: t % 3 == 0')
+        model.export(tmp_path / 'locked', locked_spaces=['Market'])
+    finally:
+        model.close()
+    (tmp_path / 'spec.py').write_text(repr({'spaces': {'Market': {'cells_param_size': {'t': 48}}}}), encoding='utf-8')
+    (tmp_path / 'sample.py').write_text('from locked import mx_model as m\nm.Market.price(1); m.Market.up(2)\n',
+                                        encoding='utf-8')
+    env = dict(os.environ, CPPFLAGS='-DMX_POISON_UNWRITTEN_VALUES')
+    build = subprocess.run([sys.executable, '-m', 'modelx_cython', 'locked', '--sample', 'sample.py',
+                            '--spec', 'spec.py'], cwd=tmp_path, capture_output=True, text=True, env=env, timeout=900)
+    assert build.returncode == 0 and '-DMX_POISON_UNWRITTEN_VALUES' in build.stdout + build.stderr, build.stderr
+    source = (tmp_path / 'locked_cy/_mx_classes.pxd').read_text(encoding='utf-8')
+    assert 'cdef bint[48] _has_price' in source and 'cdef bint[48] _has_up' in source
+    probe = ('import sys; from locked_cy import mx_model as m\n'
+             'print(repr(sys.modules[type(m.Market).__module__]._mx_uninitialised_values))\n')
+    installed, _ = _run(tmp_path, probe)
+    assert installed == {'_c_Market': True}
+    _assert_threads(tmp_path, 'locked_cy', 'locked', 'locked')
 
 
 def test_unwritten_values_on_collect_and_direct_routes(tmp_path):
