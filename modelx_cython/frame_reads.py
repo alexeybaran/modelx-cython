@@ -119,7 +119,7 @@ class FrameReads:
     (one dict per read) and ``declined`` why a read of a frame receiver was not."""
 
     def __init__(self, resolver, cls_info, cells, providers, policy, row_names=None, prefix_cells=None,
-                 param_cells=None, *, builtin_int, builtin_zip_walk=False, row_inline=None):     # (builtin_zip_walk: unused)
+                 param_cells=None, *, builtin_int, row_inline=None):
         self.param_cells = param_cells or {}    # T-5c: cell with parameters -> (names, its `T.loc[key]` expression)
         self.row_names = row_names or {}       # code of an inlined row expression -> its row cell (assignments)
         self.row_inline = row_inline
@@ -134,7 +134,6 @@ class FrameReads:
         self.lowered_text = set()   # texts of the nodes this formula's rewrite replaced
         self.param_readers = set()  # names of parameterised prefix Cells replaced by a native read
         self.key_count = 0
-        self.held_string_selector = None    # (read by the transformer; nothing sets it any more)
 
     def note_of(self, node):
         return self.notes.get(normal(_code(node)))
