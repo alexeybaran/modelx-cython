@@ -54,10 +54,10 @@ def test_reduction_does_not_type_a_nested_receiver_from_outer_cells():
     cls=SimpleNamespace(name='_c_Values', refs={'sum_f64':SimpleNamespace(
         reduction='f64_sum',helper=('sample.provider','sum_f64'))},
         cells={'term':native_cell(params=('k',)),'count':native_cell('long long')})
-    pass_=NativeReductions(cls,native_cell(),set(),formula,lambda:'_cold',True)
+    pass_=NativeReductions(cls,native_cell(),set(),formula,True)
     result=cst.Module([formula.visit(pass_)]).code
     assert result == source
-    assert pass_.count == 0
+    assert pass_.general_count == 0
 
 
 @pytest.mark.parametrize('source', [
@@ -72,9 +72,9 @@ def test_typed_reduction_preserves_receiver_binding_and_frame_observation(source
     cls = SimpleNamespace(name='_c_Values', refs={'sum_f64': SimpleNamespace(
         reduction='f64_sum', helper=('sample.provider', 'sum_f64'))},
         cells={'term': native_cell(params=('k',)), 'count': native_cell('long long')})
-    lowering = NativeReductions(cls, cell, set(), formula, lambda: '_cold', True)
+    lowering = NativeReductions(cls, cell, set(), formula, True)
     assert cst.Module([formula.visit(lowering)]).code == source
-    assert lowering.count == 0
+    assert lowering.general_count == 0
 
 
 def test_enum_constants_do_not_capture_a_comprehension_receiver():
