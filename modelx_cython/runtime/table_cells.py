@@ -22,9 +22,9 @@ def register_prepared(bind=None, package=None):
 
 
 def bind_frame(space, value):
-    """T-4: prepare ``value`` (a frame cell's computed or assigned frame) in the model's PreparedTable cache and
-    return what an item reading it holds (T-4.2): its PreparedTable, or a table whose every slot is -1 (not a
-    preparable frame); None when the model has no fast reads."""
+    """T-4: prepare ``value`` (a frame cell's computed frame) as it is now, never from a copy prepared earlier for
+    the same object, and return what an item reading it holds (T-4.2): its PreparedTable, or a table whose every
+    slot is -1 (not a preparable frame); None when the model has no fast reads."""
     bind = _binders.get(type(space).__module__.split('.')[0])
     return bind(value) if bind is not None else None
 
