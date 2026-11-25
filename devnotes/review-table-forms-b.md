@@ -117,3 +117,14 @@ D1, `runtime/_tables.pxd` in `PreparedTable` after `ordered`, and `runtime/_tabl
 ```
 D1 costs one pandas row build per prepared table (not per read). An empty frame gets -1 for row reads with an
 `obj` column; its row reads raise KeyError on pandas as before.
+
+## 9. Corrections (after the review)
+- Ordered lookups are not without lean sites: lifelib 04d69db `*_S` text holds 34 `.index.asof(` in 15 models and
+  5 `.index.searchsorted(` in 3 (my count of 0 came from a grep with an unescaped parenthesis). In CI_UK_S
+  `pivot_interp` (a per-step cell) reads a sub-table, `asof`, `searchsorted` and two `.loc` per evaluation: on pandas
+  that is about 170 us per step (§1 costs). Cut C3 would cost far more than 3% on those models: not done.
+- Row-cell inlining (C2): translate-only of KLV_DE_S, Dep_FR_S, VA_US_S with the shipped sample and spec, inlining
+  on and off. Dep_FR_S and VA_US_S: identical generated code (only the report's inlining flags differ). KLV_DE_S:
+  `expenses_pp(t)` and `commissions(t)` differ (`cost = self.cost_row()`, then `cost["..."]`: inlined, a row local
+  with a branch per call; not inlined, the held row read directly), the same 62 native reads otherwise. Not
+  identical, so the cut was not made.
