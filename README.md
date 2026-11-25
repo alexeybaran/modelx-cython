@@ -79,7 +79,7 @@ conda install -c conda-forge modelx-cython
 
 ## Requirements
 
-modelx-cython requires Python 3.10+.
+modelx-cython requires Python 3.9+.
 
 - modelx v0.33.0+
 - Cython v3.2.4+
