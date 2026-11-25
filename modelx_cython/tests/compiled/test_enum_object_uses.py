@@ -5,8 +5,9 @@ A member written in place stays a member object where its class shows (``repr``,
 ``getattr``, ``!r``, ``%``), and a class with its own ``__str__``/``__format__`` is not substituted. ``.name`` of an
 integer that is not a member raises AttributeError, as live. A member stored as a dict key, ``getattr(member,
 "name")`` and ``.name`` of a child Space's Cell result work. A sum over a literal tuple whose loop variable is an
-operand of arithmetic is exact beyond 64 bits. Identity tests, a member of another class given to an enum
-parameter, and an enum value held as an integer where its class would show are build errors.
+operand of arithmetic is exact beyond 64 bits. Identity tests and an enum value held as an integer where its
+class shows give what the model gives; a member of another class given to a parameter whose member the Cell
+reads raises TypeError when the call is reached (these were build errors of the first literal pass).
 """
 import os
 import subprocess
@@ -114,15 +115,30 @@ def test_results_where_the_class_shows_equal_live(tmp_path, monkeypatch):
     assert "p.r_repr() '<Leg.CALL: 0>'" in out['exported_cy'] and 'p.desc2(-1) AttributeError' in out['exported_cy']
 
 
-@pytest.mark.parametrize('cells, sample, message', [
-    ({'nm': 'lambda k: k.name', 'other': 'lambda: nm(Kind.Y)'}, 'm.P.nm(m.P.Leg.CALL)\n',
-     'P.other: `self.nm(self.Kind.Y)` passes a value of one IntEnum class to a parameter traced as another'),
-    ({'is_tuple': 'lambda: tuple(x for x in (Leg.CALL,))[0] is (Leg.CALL, Leg.PUT)[0]'}, 'm.P.is_tuple()\n',
-     'P.is_tuple: `tuple(x for x in (self.Leg.CALL,))[0] is (self.Leg.CALL, self.Leg.PUT)[0]` tests by identity'),
-    ({'pretty_param': 'lambda s: "sex=" + str(s)'}, 'm.P.pretty_param(m.P.Pretty.M)\n',
-     'P.pretty_param: `s` holds an IntEnum value as an integer'),
-    ({'rp': 'lambda k: repr(k)'}, 'm.P.rp(m.P.Leg.CALL)\n', 'P.rp: `k` holds an IntEnum value as an integer'),
-])
-def test_values_that_would_differ_are_build_errors(tmp_path, monkeypatch, cells, sample, message):
-    done, _ = build(tmp_path, monkeypatch, cells, sample)
-    assert done.returncode != 0 and message in done.stdout + done.stderr, done.stdout[-3000:] + done.stderr[-3000:]
+def test_values_that_were_build_errors_equal_live(tmp_path, monkeypatch):
+    """Four formulas that the first literal pass refused. Three now give what the model gives; a member of another
+    class given to a parameter whose member the Cell reads raises TypeError when it is reached."""
+    cells = {'nm': 'lambda k: k.name', 'other': 'lambda: nm(Kind.Y)',
+             'is_tuple': 'lambda: tuple(x for x in (Leg.CALL,))[0] is (Leg.CALL, Leg.PUT)[0]',
+             'pretty_param': 'lambda s: "sex=" + str(s)', 'rp': 'lambda k: repr(k)'}
+    done, env = build(tmp_path, monkeypatch, cells,
+                      'm.P.nm(m.P.Leg.CALL); m.P.is_tuple(); m.P.pretty_param(m.P.Pretty.M); m.P.rp(m.P.Leg.CALL)\n')
+    assert done.returncode == 0, done.stdout[-3000:] + done.stderr[-3000:]
+    probe = textwrap.dedent('''\
+        import sys
+        from importlib import import_module
+        p = import_module(sys.argv[1]).mx_model.P
+        try:                # nm is not called with Leg.PUT: the exported model keeps one cached value for both
+            print(p.other())
+        except TypeError as error:
+            print('TypeError')
+        print(repr((p.is_tuple(), p.pretty_param(p.Pretty.F), p.rp(p.Leg.PUT), p.nm(p.Leg.CALL))))
+        ''')
+    out = {}
+    for package in ('exported', 'exported_cy'):
+        run = subprocess.run([sys.executable, '-c', probe, package], cwd=tmp_path, capture_output=True, text=True,
+                             env=env)
+        assert run.returncode == 0, package + run.stdout + run.stderr
+        out[package] = run.stdout.splitlines()
+    assert out['exported'] == ['Y', "(True, 'sex=F', '<Leg.PUT: 1>', 'CALL')"]
+    assert out['exported_cy'] == ['TypeError', "(True, 'sex=F', '<Leg.PUT: 1>', 'CALL')"]

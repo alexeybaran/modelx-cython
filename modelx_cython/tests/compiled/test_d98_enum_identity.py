@@ -1,8 +1,8 @@
-"""``x is E.M`` / ``x is not E.M`` is a build error.
+"""``x is E.M`` / ``x is not E.M`` gives what the model gives.
 
-Compiled code holds IntEnum members as integers (enums.literals), so an identity test with a member
-would differ from live modelx (``kind(t) is Kind.A`` on a re-boxed int is false). The build stops
-with a message that names the expression and asks for ``==`` / ``!=``.
+An identity test needs the member object: a member written in the test stays a member, and a Cell result or
+parameter that compiled code holds as an integer is converted through its class (enums.plan). This was a build
+error of the first literal pass.
 """
 import subprocess
 import sys
@@ -65,13 +65,16 @@ def caller(t):
         '    p.direct(t); p.reversed_(t); p.local(t); p.caller(t)\n', encoding='utf-8')
 
 
-def test_enum_identity_is_a_build_error(tmp_path, monkeypatch):
+def test_enum_identity_equals_live(tmp_path, monkeypatch):
     _model(tmp_path, monkeypatch)
+    env = {**__import__('os').environ,
+           'PYTHONPATH': str(tmp_path) + ':' + __import__('os').environ.get('PYTHONPATH', '')}
     done = subprocess.run([sys.executable, '-m', 'modelx_cython', 'exported', '--sample', 'sample.py',
-                           '--no-spec'], cwd=tmp_path, capture_output=True, text=True,
-                          env={**__import__('os').environ,
-                               'PYTHONPATH': str(tmp_path) + ':' + __import__('os').environ.get('PYTHONPATH', '')})
-    assert done.returncode != 0
-    assert 'tests by identity' in done.stderr and 'compare with == or !=' in done.stderr, \
-        done.stderr[-3000:]
-    assert not (tmp_path / 'exported_cy' / '_mx_classes.so').exists()
+                           '--no-spec'], cwd=tmp_path, capture_output=True, text=True, env=env)
+    assert done.returncode == 0, done.stdout[-3000:] + done.stderr[-3000:]
+    probe = ('import sys\nfrom importlib import import_module\n'
+             'p = import_module(sys.argv[1]).mx_model.Projection\n'
+             'print([(p.direct(t), p.reversed_(t), p.local(t), p.caller(t)) for t in range(9)])\n')
+    out = [subprocess.run([sys.executable, '-c', probe, package], cwd=tmp_path, capture_output=True, text=True,
+                          env=env).stdout for package in ('exported', 'exported_cy')]
+    assert out[0] == out[1] and out[0].startswith('[(1.0, 10.0, 1000.0, ') and '(2.0, 20.0, 1101.0, ' in out[0], out

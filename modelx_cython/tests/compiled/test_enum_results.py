@@ -62,7 +62,7 @@ def test_enum_cell_results_are_their_integers(tmp_path):
             assert compiled.Projection[i].phases() == live.Projection[i].phases()
             for t in range(12):
                 c, l = compiled.Projection[i].pair(t), live.Projection[i].pair(t)
-                assert c == l and type(c[0]) is int, (c, l)       # a returned tuple holds the integer
+                assert c == l and type(c[0]) is Phase, (c, l)     # a returned tuple holds the member, as live
                 assert compiled.Projection[i].rate(t) == live.Projection[i].rate(t)
         assert compiled.Projection[1].phase(0) == Phase.ACC and compiled.Projection[1].phase(10) == 2
         total = sum(live.Projection[i].pv() for i in IDS)
