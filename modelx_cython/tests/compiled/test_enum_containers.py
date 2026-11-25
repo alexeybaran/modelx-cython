@@ -1,10 +1,9 @@
-"""IntEnum members in a container display stay members (enums.literals); where they meet integer literals they
-give live's results.
+"""IntEnum members in a container display stay members (enums.plan) and give live's results.
 
 A tuple of members returned by a Cell keeps its members, so ``leg.name`` works after the tuple is iterated
-elsewhere (the RILA_US_S ``result`` shape). Such a member compared with a member written in place (an integer
-literal), passed as the label argument of a Cell with a dense cache, or used as a dict key looked up with a literal
-gives the value live gives. Compiled equals the exported model.
+elsewhere (the RILA_US_S ``result`` shape). Such a member compared with a member written in place, passed as the
+label argument of a Cell with a dense cache (converted to its position there), or used as a dict key looked up
+with a member gives the value live gives. Compiled equals the exported model.
 """
 import os
 import subprocess
@@ -31,7 +30,7 @@ CELLS = {
 
 def test_members_in_containers_agree_with_literals(tmp_path, monkeypatch):
     (tmp_path / 'legs_enum.py').write_text(
-        'import enum\n\nclass Leg(enum.IntEnum):\n    CALL = 1\n    PUT = 2\n', encoding='utf-8')
+        'import enum\n\nclass Leg(enum.IntEnum):\n    CALL = 0\n    PUT = 1\n', encoding='utf-8')
     monkeypatch.syspath_prepend(str(tmp_path))
     from legs_enum import Leg
     model = mx.new_model('EnumContainers')
@@ -50,7 +49,7 @@ def test_members_in_containers_agree_with_literals(tmp_path, monkeypatch):
                           cwd=tmp_path, capture_output=True, text=True, env=env)
     assert done.returncode == 0, done.stdout[-3000:] + done.stderr[-3000:]
     generated = (tmp_path / 'exported_cy/_mx_classes.py').read_text(encoding='utf-8')
-    assert 'leg == 2' in generated and '[2]' in generated, generated       # the literal side
+    assert "_mx_enum_code(self.Leg, leg, False, 'Projection.component')" in generated, generated
     probe = textwrap.dedent('''\
         import sys
         from importlib import import_module
@@ -64,4 +63,4 @@ def test_members_in_containers_agree_with_literals(tmp_path, monkeypatch):
         assert run.returncode == 0, package + run.stdout + run.stderr
         out[package] = run.stdout
     assert out['exported_cy'] == out['exported'], out
-    assert "'call': [1.0, 11.0, 21.0]" in out['exported_cy'] and "'Leg', 'Leg'" in out['exported_cy'], out
+    assert "'call': [0.0, 10.0, 20.0]" in out['exported_cy'] and "'Leg', 'Leg'" in out['exported_cy'], out

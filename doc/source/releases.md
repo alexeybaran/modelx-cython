@@ -4,23 +4,27 @@
 
 ### Enum definitions are recognised by type
 
-A Reference in any Space whose value is an `IntEnum` class (one that compares, hashes,
-prints and formats as its integers) is an enum definition without any declaration: it is
-fixed in the compiled model, and each member written in a formula (`Sex.M`) becomes its
-integer literal before compilation. Compiled code holds members and values traced as an
-`IntEnum` as integers, so:
+A Reference in any Space whose value is an enum *family* is an enum definition without any
+declaration: an `IntEnum` class whose values are 0, 1, ..., n-1 or, from Python 3.11, a
+`StrEnum` class, whose members compare and hash as their values. It is fixed in the compiled
+model. A Cell parameter whose traced values are members of one family (or their values) is
+held as the member's position in its class (an `IntEnum` member's value), a C integer with a
+cache of the size of the class, where a Reference of the Cell's Space holds the class and the
+formula neither binds the parameter again nor gives it a default that is no member's value.
 
-- A Cell that returns a member returns its integer; a tuple, list, set or dict display keeps
-  its members. `.name` and `.value` of a member, of a parameter or Cell result traced as one
-  `IntEnum` class, and of a local bound only to its members work; `.name` of an integer that
-  is not a member raises `AttributeError`, as in modelx. Any other attribute is a build error.
-- Where the class shows (`repr`, `type`, `isinstance`, `getattr`, `!r`, `%`), a member written
-  in place stays a member; a parameter, local or Cell result held as an integer there is a
-  build error, as is `str` or `format` of one whose class defines its own.
-- In a model with such members, an identity test (`is`) is a build error unless one side is
-  `None`, a bool, a builtin type or a member of a Reference that is not substituted.
-- Passing a member of one class to a parameter traced as another is a build error. A Python
-  caller can still do it: `.name` then gives the traced class's name for that value.
+- A held parameter is an integer in three uses only: `==`, `!=` and `in` against members,
+  their values or another held parameter of the class; an argument of a Cell parameter held
+  for the class; and a loop over a tuple, list or set of members whose variable has no other
+  use. Members written there become their positions.
+- Every other use sees the member: `.name`, `.value`, arithmetic, ordering, `repr`, `str`,
+  `isinstance`, `is`, a container, a key, a helper function, the result of the Cell. A Cell
+  result, a Reference value or an item Space's argument that is a member stays the member.
+- A caller, in a formula or from Python, gives a member of the class. Where the Cell uses
+  the position only, an object equal to a member's value (its text, its integer, a member
+  of another class with that value) is taken as that member, as modelx compares it. Any
+  other value raises `ValueError` naming the Cell; so does anything but a member where the
+  Cell uses the member itself. An integer or a bool is equal to no `StrEnum` member.
+- Other enum classes (an `IntEnum` with other values or its own `==`) are objects throughout.
 
 Rebinding such a Reference on a compiled model raises `AttributeError`;
 rebuild the model to change it.

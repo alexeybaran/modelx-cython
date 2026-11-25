@@ -1,4 +1,5 @@
-"""``x in (E.A, E.B)`` / ``not in`` over enum members: a membership in a literal tuple of integers."""
+"""``x in (E.A, E.B)`` / ``not in`` over enum members of a value that is not held as a position (an integer, an
+object, members of a class that is no family): the members stay, and the membership gives what live gives."""
 from http import HTTPStatus
 import subprocess
 import sys
@@ -41,11 +42,7 @@ def test_member_tuple_membership(tmp_path):
     subprocess.run([sys.executable, '-m', 'modelx_cython', 'exported',
                     '--sample', 'sample.py', '--no-spec'], cwd=tmp_path, check=True)
     generated = (tmp_path / 'exported_cy/_mx_classes.py').read_text()
-    # members are integer literals: a literal-tuple membership of integers, compiled as Cython compiles it
-    for tuple_ in ('in (200, 201)', 'not in (200, 202, 201)', 'in (200,)', 'not in (200,)', 'in (202, 200)',
-                   'in (200, 204)', 'x in (200, 201)', '201 == '):
-        assert tuple_ in generated, tuple_
-    assert 'Status.' not in generated.split('class _c_Projection', 1)[1].split('def _mx_assign_refs', 1)[0]
+    assert 'x in (self.Status.OK, self.Status.CREATED)' in generated, generated
     probe = textwrap.dedent('''\
         import sys
         from importlib import import_module

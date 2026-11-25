@@ -1,8 +1,9 @@
-"""diag-us: an IntEnum member held in a Reference, compared with a member, is a C comparison.
+"""diag-us: an IntEnum member held in a Reference, compared with a member, gives what live gives.
 
 SPIA_US_S `commuted_value` reads `conv = commute_disc_convention` (a Reference holding a
-`DiscConvention` member, D31) and tests `conv == DiscConvention.compound` in its loop; the
-comparison stayed a Python one (two attribute reads and a boxed integer per iteration).
+`DiscConvention` member, D31) and tests `conv == DiscConvention.compound` in its loop. D31 made it a C
+comparison; enums.plan holds members as integers only as Cell parameters, so the Reference holds the member
+and the comparison is a Python one again, equal to live, also after the Reference is given a new value.
 """
 from http import HTTPStatus
 import subprocess
@@ -37,22 +38,19 @@ def _model(tmp_path):
                                         'for t in range(5): m.Projection.factor(t); m.Projection.direct(t)\n')
 
 
-def test_member_reference_compares_as_c_integer(tmp_path):
+def test_member_reference_compares_as_live(tmp_path):
     _model(tmp_path)
     done = subprocess.run([sys.executable, '-m', 'modelx_cython', 'exported', '--sample', 'sample.py', '--no-spec'],
                           cwd=tmp_path, check=False, capture_output=True, text=True)
     assert done.returncode == 0, done.stdout[-3000:] + done.stderr[-3000:]
-    generated = (tmp_path / 'exported_cy/_mx_classes.py').read_text()
-    assert 'conv == 200' in generated and 'conv == 201' in generated, generated
-    assert 'Conv.OK' not in generated and 'Conv.CREATED' not in generated, generated
     pxd = (tmp_path / 'exported_cy/_mx_classes.pxd').read_text()
-    assert 'long long conv_ref' in pxd, pxd          # the member Reference is a C integer field (D31)
+    assert 'object conv_ref' in pxd, pxd          # the member Reference holds the member
     probe = textwrap.dedent('''\
         import sys
         from importlib import import_module
         p = import_module(sys.argv[1]).mx_model.Projection
         if sys.argv[2] == 'changed':
-            p.conv_ref = p.Conv.OK      # a new value of the Reference: the C field is read
+            p.conv_ref = p.Conv.OK      # a new value of the Reference is read
             assert p.factor(3) == 1.0 / 5.0 + 1.0 / 6.0 and p.direct(0) == 0.5
         else:
             assert [p.factor(t) for t in range(5)] == [2.0 * (5 - t) for t in range(5)]

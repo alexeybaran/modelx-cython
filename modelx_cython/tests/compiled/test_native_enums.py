@@ -1,8 +1,8 @@
 """Enum specialization must read the current exported Reference on a miss.
 
-An IntEnum class bound to a Reference is an enum definition by its traced type: fixed in the compiled
-model, its members integer literals. Another value with the same members (here a namespace) stays an
-ordinary Reference, read on every evaluation and rebindable."""
+An IntEnum class whose values are not 0..n-1 (``HTTPStatus``) is no enum family (enums.plan): like another
+value with the same members (here a namespace) it stays an ordinary Reference, read on every evaluation and
+rebindable, and its members stay members. A family's Reference is fixed: test_enum_by_type."""
 from http import HTTPStatus
 from types import SimpleNamespace
 import subprocess
@@ -37,8 +37,7 @@ def test_enum_reference_replacement(tmp_path, code_owned):
     subprocess.run([sys.executable, '-m', 'modelx_cython', 'exported',
                     '--sample', 'sample.py', '--no-spec'], cwd=tmp_path, check=True)
     generated = (tmp_path/'exported_cy/_mx_classes.py').read_text()
-    # members are integer literals exactly when the Reference holds an IntEnum class
-    assert ('Status.OK' not in generated and '== 200' in generated) == code_owned, generated
+    assert 'Status.OK' in generated, generated
     probe = textwrap.dedent('''\
         import sys
         from types import SimpleNamespace
@@ -55,16 +54,6 @@ def test_enum_reference_replacement(tmp_path, code_owned):
         assert s[11] is not first and s[11].Status is initial
         assert s.matches(0) is True
         assert s.local(0) is False
-        if sys.argv[2] == 'True' and sys.argv[1] == 'exported_cy':
-            try:
-                s.Status = SimpleNamespace(OK=201)
-            except AttributeError:
-                pass
-            else:
-                raise AssertionError('code definition binding was writable')
-            assert s.matches(1) is False
-            assert s.local(1) is True
-            raise SystemExit(0)
         s.Status = SimpleNamespace(OK=201)
         assert s.matches(0) is True
         assert s.matches(1) is True

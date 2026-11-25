@@ -1,8 +1,8 @@
 """diag-scale P2: enum members through conditional expressions.
 
-Members are integer literals before typing (enums.literals), so ``E.A if c else E.B`` (nested, or with
-one branch another integer or an object) is typed as the same conditional of integers. Compiled equals
-the exported model (members compared as their integers).
+A conditional of members (nested, or with one branch another integer or an object) is a Cell result or a
+local, so it stays members (enums.plan); given to a parameter held as a position it is converted there.
+Compiled equals the exported model.
 """
 import os
 import subprocess
@@ -60,7 +60,7 @@ def local_object(t):
 
 def _model(tmp_path, monkeypatch):
     (tmp_path / 'p2_kinds.py').write_text(
-        'import enum\n\nclass Kind(enum.IntEnum):\n    A = 1\n    B = 2\n    C = 3\n', encoding='utf-8')
+        'import enum\n\nclass Kind(enum.IntEnum):\n    A = 0\n    B = 1\n    C = 2\n', encoding='utf-8')
     monkeypatch.syspath_prepend(str(tmp_path))
     from p2_kinds import Kind
     model = mx.new_model('EnumConditionals')
@@ -104,8 +104,9 @@ def test_enum_members_through_conditional_expressions(tmp_path, monkeypatch):
         out[package] = run.stdout
     assert out['exported_cy'] == out['exported'], out
 
-    # every member is an integer literal, whatever the branch beside it: the conditional is typed as
-    # integers are (a C integer where both branches are, the object path otherwise)
+    # a result keeps its members; a conditional given to a held parameter (used in arithmetic) is converted there
     generated = (tmp_path / 'exported_cy/_mx_classes.py').read_text(encoding='utf-8')
-    assert 'Kind.A' not in generated and '1 if t % 2 == 0 else 2' in generated, generated
+    assert 'self.Kind.A if t % 2 == 0 else self.Kind.B' in generated, generated
+    assert ("_mx_enum_code(self.Kind, self.Kind.A if t % 2 else self.Kind.C, False, 'Projection.by_arg')"
+            in generated), generated
     assert 'return [self.Kind.B, self.Kind.C]' in generated, generated     # a list display keeps its members

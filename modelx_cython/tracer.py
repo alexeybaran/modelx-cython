@@ -44,7 +44,6 @@ import numbers
 import operator
 import enum
 import itertools
-from enum import IntEnum
 from dataclasses import dataclass
 from contextlib import contextmanager
 from types import CodeType, FrameType, MemberDescriptorType
@@ -66,6 +65,7 @@ from modelx_cython.monkeytype_tracing import (
     EVENT_RETURN,
 )
 
+from modelx_cython.enums import family, positions
 from modelx_cython.consts import (
     MX_ASSIGN_REFS,
     FORMULA_PREF,
@@ -209,7 +209,9 @@ class RuntimeCellsInfo:     # TODO: Create base class RuntimeBaseMemberInfo
         self.min_args = {}
         self.observed_min_args = {}
         self.observed_max_args = {}
-        self.enum_args = {}         # argument -> (module, qualname, member count) of its IntEnum
+        self.enum_args = {}         # argument -> (module, qualname, member count) of its family
+        self.enum_codes = {}        # argument -> its enum family (enums.family): held as the member's position
+        self.enum_plain = set()     # those arguments that were given a value equal to a member, not the member
         if receiver_calls is None:
             receiver_calls = {}
             for trace in traces:
@@ -252,6 +254,7 @@ class RuntimeCellsInfo:     # TODO: Create base class RuntimeBaseMemberInfo
         # Public Cell formulas are uncached. Preserve an authored object
         # argument there even when the sample supplies only one scalar type.
         annotations = traces[0].func.__annotations__ if is_user_defined(self.name) else {}
+        plain = {}      # argument -> the plain integers and texts it was given
 
         for trace in traces:
 
@@ -269,6 +272,8 @@ class RuntimeCellsInfo:     # TODO: Create base class RuntimeBaseMemberInfo
                     self.min_args[arg] = min(self.min_args.get(arg, 0), val)
                     self.observed_min_args[arg] = min(self.observed_min_args.get(arg, val), val)
                     self.observed_max_args[arg] = max(self.observed_max_args.get(arg, val), val)
+                if tp in (int, str) and len(plain.setdefault(arg, set())) < 256:
+                    plain[arg].add(val)
                 types = arg_type_val.setdefault(arg, {})
                 if tp not in types:
                     types[tp] = val
@@ -282,12 +287,27 @@ class RuntimeCellsInfo:     # TODO: Create base class RuntimeBaseMemberInfo
                 self.arg_types[arg] = object
                 continue
 
+            families = [tp for tp in type_val if family(tp)]
+            if len(families) == 1 and set(type_val) <= {families[0], family(families[0])} and len(
+                    plain.get(arg, ())) < 256 and plain.get(arg, set()) <= set(positions(families[0])[1]):
+                # members of one family, or their values: a C integer, the member's position
+                self.arg_types[arg], self.enum_codes[arg], size = int, families[0], len(families[0])
+                self.max_args[arg], self.min_args[arg] = size - 1, 0
+                self.observed_min_args[arg], self.observed_max_args[arg] = 0, size - 1
+                self.enum_args[arg] = (families[0].__module__, families[0].__qualname__, size)
+                if plain.get(arg):
+                    self.enum_plain.add(arg)
+                continue
+
+            if any(issubclass(tp, enum.Enum) for tp in type_val):     # a member of no family is an object
+                self.arg_types[arg] = object
+                continue
+
             if len(type_val) == 1:
                 for tp, val in type_val.items():
                     self.arg_types[arg] = tp
                     if issubclass(tp, numbers.Integral):
                         self.max_args[arg] = val
-                        self._widen_to_enum(arg, tp)
                     break
             elif all(issubclass(tp, numbers.Integral) for tp in type_val.keys()):
                 self.arg_types[arg] = numbers.Integral
@@ -303,23 +323,6 @@ class RuntimeCellsInfo:     # TODO: Create base class RuntimeBaseMemberInfo
                     _logger.info(f"varying types given to argument '{arg}' in {self.fqname}: {msg}")
 
                 self.arg_types[arg] = object
-
-    def _widen_to_enum(self, arg, tp):
-        """An argument whose every traced value is a member of one IntEnum class can take any
-        member: its domain is the class's member values, not the members the sample used."""
-        if not (issubclass(tp, enum.IntEnum) and '<locals>' not in tp.__qualname__):
-            return
-        values = [int(member) for member in tp]
-        if not values or not all(-(1 << 63) <= v < (1 << 63) for v in values):
-            return
-        low, high = min(values), max(values)
-        self.max_args[arg] = max(self.max_args[arg], high)
-        self.min_args[arg] = min(self.min_args.get(arg, 0), low)
-        self.observed_min_args[arg] = min(self.observed_min_args.get(arg, low), low)
-        self.observed_max_args[arg] = max(self.observed_max_args.get(arg, high), high)
-        if low < 0:
-            self.has_negative_args = True
-        self.enum_args[arg] = (tp.__module__, tp.__qualname__, len(values))
 
     def _init_ret_type(self, traces):
         """Merge observed return types into one ReturnTypeInfo,
@@ -442,7 +445,7 @@ class _ReturnTypeMerger:
                 changed = signature not in self._array_formats
                 self._array_formats.add(signature)
         else:
-            tp = ReturnTypeInfo(object if isinstance(val, numbers.Integral)
+            tp = ReturnTypeInfo(object if isinstance(val, enum.Enum) or isinstance(val, numbers.Integral)
                                 and not -(1 << 63) <= val < (1 << 63) else type(val),
                                 vector_shape=vector_shape(val))
             if self._integral_double_exact and isinstance(val, numbers.Integral):
@@ -531,20 +534,14 @@ class RuntimeValueInfo:
 
     def __init__(self, value, mx_class=''):
         """Record the type of ``value`` and an optional class name."""
-        self.type_ = (object if isinstance(value, numbers.Integral)
+        self.type_ = (object if isinstance(value, enum.Enum) or isinstance(value, numbers.Integral)
                       and not -(1 << 63) <= value < (1 << 63) else type(value))
         self.mx_class = mx_class
         from .helper_members import module_helpers
         self.helper_members = module_helpers(value)
-        self.enum_safe = (isinstance(value, type) and issubclass(value, IntEnum)
-                          and type(value) is type(IntEnum)
-                          and value.__eq__ is int.__eq__ and value.__ne__ is int.__ne__
-                          and all(getattr(value, m) is getattr(IntEnum, m)
-                                  for m in ('__str__', '__format__', '__repr__', '__hash__')))
-        self.enum = ((value.__module__, value.__qualname__,
-                      {name: int.__int__(member) for name, member in value.__members__.items()})
-                     if isinstance(value, type) and issubclass(value, IntEnum)
-                     and '<locals>' not in value.__qualname__ else None)
+        self.enum_class = value if isinstance(value, type) and family(value) else None     # its members in the code
+        self.enum_safe = self.enum_class is not None
+        self.enum = (value.__module__, value.__qualname__, positions(value)[0]) if self.enum_safe else None
 
     @classmethod
     def init_mxobj(cls, value, module):

@@ -1,7 +1,6 @@
-"""A compiled cell holding an IntEnum member gives Python its integer (same numbers as live).
+"""A compiled cell that returns an IntEnum member returns the member, as live.
 
-Members are integer literals in compiled code (enums.literals), so a Cell that returns a member returns
-the equal int: comparisons, keys and sums are as live, and ``.name`` in a formula is the member's name.
+A Cell result is never held as a position (enums.plan): comparisons, keys, sums and ``.name`` are as live.
 
 Direct-route twin of ``test_enum_results_join`` (the same model without ``collect_over``; the total is the sum of the direct items).
 """
@@ -11,7 +10,7 @@ import sys
 import textwrap
 
 
-def test_enum_cell_results_are_their_integers(tmp_path):
+def test_enum_cell_results_are_their_members(tmp_path):
     (tmp_path / "phases.py").write_text(textwrap.dedent("""\
         from enum import IntEnum
         class Phase(IntEnum):
@@ -57,14 +56,14 @@ def test_enum_cell_results_are_their_integers(tmp_path):
         for i in IDS:
             for t in range(12):
                 c, l = compiled.Projection[i].phase(t), live.Projection[i].phase(t)
-                assert c == l and type(c) is int and type(l) is Phase, (i, t, c, l)
-            assert compiled.Projection[i].report().equals(live.Projection[i].report())   # `.name` by value
+                assert c == l and type(c) is Phase and type(l) is Phase, (i, t, c, l)
+            assert compiled.Projection[i].report().equals(live.Projection[i].report())
             assert compiled.Projection[i].phases() == live.Projection[i].phases()
             for t in range(12):
                 c, l = compiled.Projection[i].pair(t), live.Projection[i].pair(t)
-                assert c == l and type(c[0]) is int, (c, l)       # a returned tuple holds the integer
+                assert c == l and type(c[0]) is Phase, (c, l)     # a returned tuple holds the member, as live
                 assert compiled.Projection[i].rate(t) == live.Projection[i].rate(t)
-        assert compiled.Projection[1].phase(0) == Phase.ACC and compiled.Projection[1].phase(10) == 2
+        assert compiled.Projection[1].phase(0) is Phase.ACC and compiled.Projection[1].phase(10) is Phase.DEP
         total = sum(live.Projection[i].pv() for i in IDS)
         m = type(compiled)()
         assert sum(m.Projection[i].pv() for i in IDS) == total
