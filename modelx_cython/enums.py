@@ -6,8 +6,8 @@ integer context: an operand of a comparison or of arithmetic, an argument of a C
 is a number, a subscript that is read, a loop over a display of members whose variable is used only
 in such ways. Every other use keeps the member object. A parameter or Cell result that the tracer
 typed as a C integer because every traced value was a member of one class is converted back through
-its class (``Class(value)``, which raises for an integer that is not a member) wherever the object
-is needed. The definition is read-only in the compiled model (``prepare``, ``bind_properties``),
+its class (the member with that value; an integer that is no member's value stays the integer it
+was in modelx) wherever the object is needed. The definition is read-only in the compiled model (``prepare``, ``bind_properties``),
 because its values are now in the code.
 """
 import numbers
@@ -271,7 +271,8 @@ class _Formula:
             found = self.model.spaces.get((self.owner, name))
             if found is not None:           # the model may have been renamed since the trace
                 return '.'.join((self.module.partition('.')[0], *found.split('.')[1:]))
-            child = f'{self.module.rpartition(".")[0]}._m_{self.cls[3:]}._mx_classes._c_{name}'
+            child = '.'.join(filter(None, (self.module.rpartition('.')[0], f'_m_{self.cls[3:]}', '_mx_classes',
+                                           f'_c_{name}')))
             if name in self.children or any(key.startswith(child + '.') for key in self.model.cells):
                 return child
         return None
@@ -596,9 +597,10 @@ class _Uses(cst.CSTVisitor):
                     self.loops['loop', id(part)] = [element.value for element in part.iter.elements]
                     self.elements.add(id(part.iter))
         self.scopes.append(scope)
+        self.foreign += 'self' in scope
 
     def _leave(self, node):
-        self.scopes.pop()
+        self.foreign -= 'self' in self.scopes.pop()
 
     visit_GeneratorExp = visit_ListComp = visit_SetComp = visit_DictComp = _comprehension
     leave_GeneratorExp = leave_ListComp = leave_SetComp = leave_DictComp = _leave
@@ -661,8 +663,9 @@ class _Rewrite(cst.CSTTransformer):
         updated = super().on_leave(original, updated)
         cls = self.convert.get(id(original))
         if cls is not None:
-            updated = cst.Call(cst.parse_expression(cls), [cst.Arg(updated.with_changes(lpar=(), rpar=()))],
-                               lpar=updated.lpar, rpar=updated.rpar)
+            updated = cst.Call(cst.parse_expression(f'{MX_SYS_MOD}._mx_enum_of'), [
+                cst.Arg(cst.parse_expression(cls)), cst.Arg(updated.with_changes(lpar=(), rpar=()))],
+                lpar=updated.lpar, rpar=updated.rpar)
         cls = self.checks.get(id(original))
         if cls is not None:
             updated = cst.Call(cst.parse_expression(f'{MX_SYS_MOD}._mx_enum_member'),
