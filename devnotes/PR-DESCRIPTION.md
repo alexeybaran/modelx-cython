@@ -6,32 +6,35 @@ values live modelx returns, or it raises at a named Cell. Models need no change.
 (Term_US_SEC, MYGA_US_SEC, SPIA_US_SEC and the others) build from their released `sample_sec.py` and
 `spec_sec.py`.
 
-Non-test source under `modelx_cython` grows from 6,300 to 13,211 lines (`.py`, `.pyx`, `.pxd`).
+Non-test source under `modelx_cython` grows from 6,300 to 13,202 lines (`.py`, `.pyx`, `.pxd`).
 
 ## What the change does, mechanism by mechanism
 
 Line counts are the non-test lines each commit adds or removes.
 
-1. **Shared syntax, scope and build helpers** (+844 / −2). The translation passes used to rebuild
+1. **Shared syntax, scope and build helpers** (+882 / −2). The translation passes used to rebuild
    expression contexts, scopes and definite assignment for every formula. These are now computed once per
    formula tree and shared between passes. The generated `setup.py` turns off floating-point contraction,
    so the C compiler cannot fuse operations into results that differ from Python's. A Cython error is
    reported against the Cell that caused it. The translated source is parsed again before it is built.
-2. **Value arrays without zero fill** (+315 / 0). Cell values live in arrays allocated without
+2. **Value arrays without zero fill** (+864 / −1, including all of `_mx_sys.pxd`). Cell values live in arrays allocated without
    initialisation, plus a separate "written" flag. Building a model point no longer pays for clearing
    memory that is about to be overwritten. Results that a Space holds are kept in arrays released with
-   their owner.
-3. **Dense numeric caches** (+848 / −3). A Cell keyed by integers gets a dense native array over the range
+   their owner. The runtime helpers in `_mx_sys.pxd` arrive whole in this commit, the first that uses
+   them. The later mechanisms use them too: typed entries, powers, the integer checks (about 265 of its
+   lines) and held Space results.
+3. **Dense numeric caches** (+848 / −4). A Cell keyed by integers gets a dense native array over the range
    declared in `cells_param_size`, or the range the sample run reached. Wider keys use an open-addressing
-   table. The two cache modules ship as `.pyx` sources with the package.
+   table. The two cache modules ship as `.pyx` sources with the package. This commit also sets the
+   declared Python floor to 3.10.
 4. **Typed formula entries** (+1,348 / 0). Each Cell gets a typed entry. The entry checks the arguments
    against the cache's domain once, then calls a private formula entry on an exact receiver. Items of
    locked Spaces are read without a dictionary lookup.
-5. **Powers** (+529 / −33). When a power's operands are known to be real, it is computed with C `pow`,
+5. **Powers** (+528 / −33). When a power's operands are known to be real, it is computed with C `pow`,
    with a one-entry memo per Cell. An integer power of C integers goes through an exact helper that
    raises beyond 64 bits. Where Python's semantics depend on the order arguments are evaluated in, that
    order is kept.
-6. **Integer safety by overflow flag** (+1,809 / −1). C integer `+`, `-`, `*` and unary minus return the
+6. **Integer safety by overflow flag** (+1,233 / 0, plus the `_mx_sys.pxd` helpers counted in 2). C integer `+`, `-`, `*` and unary minus return the
    wrapped result and set a flag. GCC and Clang use `__builtin_*_overflow`. MSVC uses unsigned
    arithmetic, `_mul128` on x64 and `__mulh` on ARM64. The formula tests the flag once before it returns,
    and before any loop or call that receives a flagged value. If the flag is set, it raises
@@ -41,18 +44,25 @@ Line counts are the non-test lines each commit adds or removes.
    - `//`, `%`, shifts and integer powers keep Python's results through exact helpers.
    - Arguments, results, ItemSpace keys and References typed as C integers cross a checked conversion.
      Nothing is truncated.
-   - `integer_checks: "unchecked"` in the spec turns the checks off and generates plain C, as before.
+   - The checks are always on. There is no option to turn them off, so the guarantees below hold for
+     every build.
 7. **Held items of shared Spaces** (+195 / 0). A Space result read through a shared Space keeps its items
    held by the compiled model. They are not rebuilt on every read.
-8. **Translation** (+1,319 / −255). The transformer, builder and command line apply mechanisms 1–7. This
+8. **Translation** (+1,299 / −254). The transformer, builder and command line apply mechanisms 1–7. This
    includes fast construction of ItemSpace items, also when the Space has dynamic References. The tracer
-   records the range of each argument and which calls raised. The spec gains `cells_param_size` bounds
-   and `integer_checks`.
-9. **Tests** (+5,841 test lines). Unit tests for each mechanism. Compiled tests build small models and
+   records the range of each argument and which calls raised. The spec gains `cells_param_size` bounds.
+
+   This is one commit, not one per mechanism. Every mechanism is emitted from the same class and entry
+   generators in `transformer.py` (63 hunks interleave caches, entries, integer checks, Space results
+   and value storage). The command line runs the passes as one pipeline. Commits 1–7 add each
+   mechanism's module; only the powers commit changes behaviour on its own, and it carries its tests.
+   This commit is where the other modules start being used, so a reviewer reads each mechanism's
+   module from commits 1–7 together with its part of commit 8.
+9. **Tests** (+5,654 test lines). Unit tests for each mechanism. Compiled tests build small models and
    compare them with live modelx, including one that runs the generated package with `modelx_cython`
    blocked from import.
-10. **CI** (+160 / −126). Unit, compiled, allocation and SEC lanes, described below.
-11. **Documentation** (+959 / −39). The compiled contract, the spec keys and the integer checks.
+10. **CI** (+159 / −126). Unit, compiled, allocation and SEC lanes, described below.
+11. **Documentation** (+185 / −40). The compiled contract, the spec keys and the integer checks.
 
 ## What a model author can rely on
 
@@ -86,6 +96,8 @@ Line counts are the non-test lines each commit adds or removes.
 5. An integer power of C integers goes through a checked helper that raises beyond 64 bits. The current
    compiler used Cython's C power, which wraps. A real power uses C `pow` with a one-entry memo
    (`_mx_memo_pow`), so the generated source text of powers changes.
+6. The declared Python floor is 3.10. The current package declares 3.8 or later. CI covers 3.10 to
+   3.14t, upstream lifelib requires 3.10, and nothing here is written or tested for lower versions.
 
 ### Upstream tests changed, and why
 
@@ -125,13 +137,22 @@ and lifelib come from PyPI.
 | macOS / Clang arm64 | 3.10, 3.12, 3.14 | | | | |
 | macOS / Clang arm64 | 3.13t, 3.14t | | | | |
 
-## Translation time
+## Compilation time
 
-Translation does more analysis than before: ranges, local kinds, admission of typed entries and the
-re-parse check. The shared analysis of mechanism 1 computes contexts and scopes once per tree, and local
-kinds are analysed only when a formula has a classified operand. The second table under Results compares
-translation and build time of this change (candidate) against the current compiler (upstream) on the
-same machine.
+Compilation has two stages. Translation runs `mx2cy` up to the generated sources. The C build is
+Cython plus the C compiler. Translation does more analysis than before: ranges, local kinds, admission
+of typed entries and the re-parse check. The shared analysis of mechanism 1 computes contexts and
+scopes once per tree. Local kinds are analysed only when a formula has a classified operand. A Cell's
+source lines are located only when Cython reports an error. The C build compiles more code per Cell:
+typed entries, the dense caches and the flag tests.
+
+The table compares this change (candidate) with the current compiler (upstream) on the same machine.
+
+| model | translate s, upstream | translate s, candidate | C build s, upstream | C build s, candidate |
+|---|---|---|---|---|
+| Term_US_SEC | | | | |
+| MYGA_US_SEC | | | | |
+| SPIA_US_SEC | | | | |
 
 ## Results
 
@@ -143,9 +164,3 @@ the book-total cell. Peak memory is the maximum resident set during that run.
 | Term_US_SEC | | | | | | |
 | MYGA_US_SEC | | | | | | |
 | SPIA_US_SEC | | | | | | |
-
-| model | translate s, upstream | translate s, candidate | build s, upstream | build s, candidate |
-|---|---|---|---|---|
-| Term_US_SEC | | | | |
-| MYGA_US_SEC | | | | |
-| SPIA_US_SEC | | | | |
