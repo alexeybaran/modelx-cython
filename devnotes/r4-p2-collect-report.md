@@ -75,3 +75,54 @@ No machinery was added back.
 Out, as asked: borrowed references and a persistent thread pool. Thread start costs about 0.2 ms per collect call
 here, under 0.1% of these books; a pool pays only for many small collects. Borrowed references are part of the
 general `r4/integration` compiler and present in both like-for-like builds, so their worth is not separable here.
+
+## Second round: rebase, reused receiver, SEC models
+
+Branch `r4/p2-collect-2` = the three commits above rebased on `r4/p1-fast-sec` 26129ab, plus one commit: collect
+reuses one item per worker thread (non-test +114 / -11; about 74 lines without docstrings).
+
+How the reset is proven complete: it is generated in the class's .pxd from the class's own declaration block and
+the declarations of its bases in the shipped `_mx_sys.pxd`, the list that defines the object's layout. An object or
+memoryview attribute becomes None, as `tp_new` leaves it; a C value, array or struct becomes zero bytes, as the
+allocator leaves it; the dense value arrays stay unwritten behind their flags, as the S1 allocator already leaves a
+new object's. A declaration of any other kind stops the build, naming the attribute and its Cell. The item is then
+built again on the same memory, as `__call__` builds a root (`__init__`, References, roots). An item is kept only
+when nothing else holds it (count 1 after its self-references are released), and never for a Space with dynamic
+References. Tests: consecutive policies differ in every cache kind, one Cell is reached by one policy only and one by
+every other policy (a reset that skips the flag arrays fails it); peak RSS of 3,000 items minus 20 items under 30 MB
+at one and four workers (keeping the items fails it: +57 MB).
+
+Like for like, medians of 5 interleaved rounds (s / peak MB), same set-up as above:
+
+| model | workers | old collect | thin | thin + receiver | direct |
+|---|---|---|---|---|---|
+| KLV_DE_S | 1 | 2.507 / 128.8 | 2.789 / 128.2 | 2.678 / 128.5 | 2.830 / 127.4 |
+| KLV_DE_S | 4 | 0.830 / 132.8 | 1.047 / 159.2 | 0.944 / 132.6 | 0.931 / 168.5 |
+| VA_US_S | 1 | 7.767 / 114.6 | 8.180 / 114.3 | 8.216 / 114.6 | 7.899 / 114.8 |
+| VA_US_S | 4 | 2.107 / 125.1 | 2.603 / 183.2 | 2.344 / 125.2 | 2.629 / 181.5 |
+
+The receiver brings four-worker peak memory to the old one's and halves the four-worker time gap (KLV +14%, VA
++11%); at one worker it stays 6-7% behind on both. What remains is the item's `__init__`, run again for every
+policy, which the old reuse skips.
+
+The old path that kept items: `serial_collect: "reduce"` (fresh receivers, without `parallel_collect_reuse`)
+peaked at 3,846 MB at one worker on KLV_DE_S (20,000 policies) and 131 MB at four; `reuse` with parallel reuse,
+measured above, keeps one receiver.
+
+### SEC models on this branch's own compiler
+
+Term_US_SEC and MYGA_US_SEC take a collect declaration as they are (`lambda idx: None`, domain
+`book = tuple(range(len(data.model_point_table())))`, outputs `{"sum": {"net_cf": net_cf_total()}}`, Book.total
+the book-total cell), in a measurement script (`model_point_table_sec.csv` tiled; nothing in lifelib changed);
+nothing in the models prevents it. Books sized so that the direct route keeping every item fits memory. Medians of
+3 rounds (s / peak MB); collect values equal live bit for bit at both worker counts (Term 4668178.785059491,
+MYGA -162913609.4115729); the four-worker direct sums differ from serial in the last bits.
+
+| model | points | workers | direct, items kept | thin collect | thin + receiver |
+|---|---|---|---|---|---|
+| Term_US_SEC | 12,000 | 1 | 2.433 / 3684 | 0.897 / 96.0 | 0.935 / 95.7 |
+| Term_US_SEC | 12,000 | 4 | 0.860 / 3686 | 0.316 / 113.6 | 0.298 / 102.3 |
+| MYGA_US_SEC | 3,000 | 1 | 2.017 / 3274 | 0.604 / 98.0 | 0.624 / 97.7 |
+| MYGA_US_SEC | 3,000 | 4 | 0.685 / 3276 | 0.288 / 125.8 | 0.223 / 105.2 |
+
+A kept thread pool: not built (another measurement found no gain on DV01 and KLV).
