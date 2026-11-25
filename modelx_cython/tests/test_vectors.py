@@ -138,7 +138,7 @@ def test_for_over_vectors_and_slices():
 ''')
     assert 'x: _mx_cy.double' in code and '.data[_mx_v' in code
     assert f'head = {A}.vec_slice(v, 1, 3)' in code
-    assert any(f.startswith('max() over a vector') for f in report['fallbacks'])
+    assert any(f.startswith('vector used in Python code') for f in report['fallbacks'])    # max(v)
     assert any('step' in f for f in report['fallbacks'])
 
 
