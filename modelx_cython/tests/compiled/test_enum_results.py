@@ -1,11 +1,14 @@
-"""A compiled cell holding an admitted IntEnum gives Python the live member (D103)."""
+"""A compiled cell holding an IntEnum member gives Python its integer (same numbers as live).
+
+Members are integer literals in compiled code (enums.literals), so a Cell that returns a member returns
+the equal int: comparisons, keys and sums are as live, and ``.name`` in a formula is the member's name."""
 
 import subprocess
 import sys
 import textwrap
 
 
-def test_enum_cell_results_are_members_where_they_reach_python(tmp_path):
+def test_enum_cell_results_are_their_integers(tmp_path):
     (tmp_path / "phases.py").write_text(textwrap.dedent("""\
         from enum import IntEnum
         class Phase(IntEnum):
@@ -54,14 +57,14 @@ def test_enum_cell_results_are_members_where_they_reach_python(tmp_path):
         for i in IDS:
             for t in range(12):
                 c, l = compiled.Projection[i].phase(t), live.Projection[i].phase(t)
-                assert c is l and type(c) is Phase, (i, t, c, l)
-            assert compiled.Projection[i].report().equals(live.Projection[i].report())
-            assert all(a is b for a, b in zip(compiled.Projection[i].phases(), live.Projection[i].phases()))
+                assert c == l and type(c) is int and type(l) is Phase, (i, t, c, l)
+            assert compiled.Projection[i].report().equals(live.Projection[i].report())   # `.name` by value
+            assert compiled.Projection[i].phases() == live.Projection[i].phases()
             for t in range(12):
                 c, l = compiled.Projection[i].pair(t), live.Projection[i].pair(t)
-                assert c[0] is l[0] and c[1] == l[1], (c, l)      # a returned tuple holds the member
+                assert c == l and type(c[0]) is int, (c, l)       # a returned tuple holds the integer
                 assert compiled.Projection[i].rate(t) == live.Projection[i].rate(t)
-        assert compiled.Projection[1].phase(0).name == "ACC" and compiled.Projection[1].phase(10).value == 2
+        assert compiled.Projection[1].phase(0) == Phase.ACC and compiled.Projection[1].phase(10) == 2
         total = sum(live.Projection[i].pv() for i in IDS)
         for workers in (1, 4):
             m = type(compiled)()

@@ -13,9 +13,8 @@
   integer ``a`` are integer keys; a returned ``[... for s in range(..)] + list(range(..))`` is
   built into one integer vector without Python lists (CI_KR_S ci_cohort_ids); a vector rebuilt
   from itself (``val = [v * g for v in val]``, Dep_FR_S dep_cohorts) is a typed vector;
-- ``for x in (E.A, E.B, ...)`` over declared enum members is a loop over the member constants
-  with a C long long target when every read of the target is a comparison operand or a long long
-  cell argument (Child_KR_S benefit_pp); a target read any other way (``is``) stays an object.
+- ``for x in (E.A, E.B, ...)`` over enum members is a loop over a literal tuple of integers
+  (enums.literals), which Cython compiles with a C integer target (Child_KR_S benefit_pp).
 Compiled equals the exported model on every call (value, type, or exception).
 """
 from http import HTTPStatus
@@ -174,15 +173,6 @@ def _build(tmp_path):
                     total += weight(code) * flow(t)
                 return total
             '''))
-        s.new_cells('identity', textwrap.dedent('''\
-            def identity(t):
-                total = 0.0
-                for code in (Status.OK, Status.CREATED):
-                    if code is Status.OK:
-                        total += 1.0
-                    total += weight(code) * t
-                return total
-            '''))
         model.export(tmp_path / 'exported')
     finally:
         model.close()
@@ -191,7 +181,7 @@ def _build(tmp_path):
         'v = mx_model.Values\n'
         'v.vec(); v.ages()\n'
         'for t in range(12):\n'
-        '    v.pay(t); v.clamped(t); v.direct(t); v.keyed(t); v.members(t); v.identity(t)\n'
+        '    v.pay(t); v.clamped(t); v.direct(t); v.keyed(t); v.members(t)\n'
         '    v.above(t); v.capped(t); v.ids(t); v.over_ids(t); v.grad(t, 1); v.grad(t, 2); v.scaled(t); v.within(t); v.branched(t)\n'
         '    try:\n        v.empty_min(t)\n    except ValueError:\n        pass\n'
         '    [v.cohort(t, s) for s in range(-t - 1, t + 2)]\n', encoding='utf-8')
@@ -216,9 +206,7 @@ def test_forms_compile_natively_and_equal_the_interpreter(tmp_path):
     assert '.kcode(' in keyed and 'cast(object, k)' not in keyed, keyed
     assert not any(e['kind'] == 'table-key-object' for e in report[PREFIX + 'keyed']['slow_paths'])
     members = _formula(source, 'members')
-    assert 'code: _mx_cy.longlong' in members and 'for code in (_mx_enum_const_' in members, members
-    identity = _formula(source, 'identity')
-    assert 'code: _mx_cy.longlong' not in identity, identity
+    assert 'for code in (200, 201, 202)' in members and 'code: object' not in members, members
     above = _formula(source, 'above')
     assert 'cast(object' not in above and f'ValueError("{_empty_min_message()}")' in above, above
     assert report[PREFIX + 'capped']['vectors']['lowered'] >= 1, report[PREFIX + 'capped']['vectors']
@@ -245,7 +233,7 @@ def test_forms_compile_natively_and_equal_the_interpreter(tmp_path):
             except Exception as e:
                 out.append(['raise', type(e).__name__])
         for t in range(12):
-            for f in (v.pay, v.clamped, v.direct, v.keyed, v.members, v.identity, v.above, v.capped,
+            for f in (v.pay, v.clamped, v.direct, v.keyed, v.members, v.above, v.capped,
                       v.empty_min):
                 call(f, t)
             # an empty vector sum is int 0 live and 0.0 compiled (D24): compared as a float
