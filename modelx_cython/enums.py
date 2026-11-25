@@ -5,6 +5,9 @@ type, no declaration). ``literals`` replaces each ``self.<Ref>.<member>`` by the
 so the compiler sees integers everywhere a member is used; the definition is read-only in the
 compiled model (``prepare``, ``bind_properties``), because its values are now in the code.
 """
+import builtins
+import re
+
 import libcst as cst
 
 from .scopes import CstFacts, lexical_nodes
@@ -77,22 +80,28 @@ def literals(module, source, ref_info, cells_info=None):
         if owner.rpartition('.')[0] == module and enum and getattr(info, 'enum_safe', False):
             members[owner.rpartition('.')[2], ref] = {
                 name: value for name, value in enum[2].items() if -(1 << 63) <= value < (1 << 63)}
-    traced = {key: _traced_names(info) for key, info in (cells_info or {}).items()
-              if key.rpartition('.')[0].rpartition('.')[0] == module}
+    traced = {key: _traced_names(info) for key, info in (cells_info or {}).items()}     # all modules: child Spaces
     if not members and not any(any(names.values()) for names in traced.values()):
         return source
     return cst.parse_module(source).visit(_Literals(module, members, traced)).code
 
 
+class _Table(dict):
+    plain = True            # str() and format() of a member give its integer's
+
+
 def _names(cls):
-    """{value: name} of an enum-safe IntEnum class, else None."""
+    """{value: name} of an IntEnum class that compares as its integers, else None."""
     import enum
     if (isinstance(cls, type) and issubclass(cls, enum.IntEnum) and type(cls) is type(enum.IntEnum)
             and cls.__eq__ is int.__eq__ and cls.__ne__ is int.__ne__):
-        return {int(member): member.name for member in cls}
+        table = _Table((int(member), member.name) for member in cls)
+        table.plain = all(getattr(cls, m) is getattr(enum.IntEnum, m) for m in ('__str__', '__format__'))
+        return table
 
 
 _code = cst.Module([]).code_for_node
+_SHOWN = ('repr', 'ascii', 'type', 'isinstance', 'getattr', 'hasattr', 'id', 'str', 'format')   # the class shows
 
 
 def _traced_names(info):
@@ -100,6 +109,7 @@ def _traced_names(info):
     ret = getattr(info, 'ret_type', None)
     found = {None: _names(getattr(ret, 'value_type', None)) if not getattr(ret, 'is_array', True) else None}
     found.update((name, _names(tp)) for name, tp in (getattr(info, 'arg_types', None) or {}).items())
+    found.update(enumerate(_names(tp) for tp in (getattr(info, 'arg_types', None) or {}).values()))   # by position
     return {key: names for key, names in found.items() if names}
 
 
@@ -109,6 +119,7 @@ class _Literals(cst.CSTTransformer):
         self.module, self.members, self.traced = module, members, traced
         self.cls, self.method, self.scopes = None, None, []     # scopes: (receiver is the method's, {name: names})
         self.in_place = set()       # ids of displays iterated in place or right of `in`
+        self.kept = set()           # ids of members that stay objects: their class shows, or a stored key
 
     def where(self):
         """The Cell as the model names it (``Space.cell``, as ``builder`` ``model_path``)."""
@@ -209,23 +220,64 @@ class _Literals(cst.CSTTransformer):
             for name, value in self.members[self.cls, node.value.attr.value].items():
                 names.setdefault(value, name)       # the first name of a value; later ones are aliases
             return names
-        if (isinstance(node, cst.Call) and isinstance(node.func, cst.Attribute)
-                and isinstance(node.func.value, cst.Name) and node.func.value.value == 'self'):
-            prefix = f'{self.module}.{self.cls}.'
-            traced = self.traced.get(prefix + '_f_' + node.func.attr.value) or self.traced.get(
-                prefix + node.func.attr.value) or {}
-            return traced.get(None)
-        return None
+        return self._traced_call(node).get(None)
+
+    def _traced_call(self, node):
+        """The traced names of ``self.<cell>(...)`` or ``self.<child Space>.<cell>(...)``, else {}."""
+        func = node.func if isinstance(node, cst.Call) and self.scopes and self.scopes[-1][0] else None
+        owner = func.value if isinstance(func, cst.Attribute) else None
+        if isinstance(owner, cst.Attribute) and isinstance(owner.value, cst.Name) and owner.value.value == 'self':
+            owner = f'{self.module.rpartition(".")[0]}._m_{self.cls[3:]}._mx_classes._c_{owner.attr.value}'
+        elif isinstance(owner, cst.Name) and owner.value == 'self':
+            owner = f'{self.module}.{self.cls}'
+        return isinstance(owner, str) and (self.traced.get(f'{owner}._f_{func.attr.value}')
+                                           or self.traced.get(f'{owner}.{func.attr.value}')) or {}
+
+    def _shown(self, node, through_str):
+        """A member where its class shows stays an object; an enum value held as an integer is a build error.
+        ``through_str``: only a class with its own __str__/__format__ shows."""
+        if self.value(node) is not None or self.names(node) is None:
+            return self.kept.update(() if through_str or self.value(node) is None else (id(node),))
+        if not (through_str and getattr(self.names(node), 'plain', True)):
+            raise TypeError(f'{self.where()}: `{_code(node)}` holds an IntEnum value as an integer where its class '
+                            'shows (repr, type, str), so the result would differ from live modelx')
+
+    def visit_Call(self, node):
+        if isinstance(node.func, cst.Name) and node.func.value in _SHOWN and node.args:
+            self._shown(node.args[0].value, node.func.value in ('str', 'format'))
+        traced = self._traced_call(node)
+        for position, arg in enumerate(node.args):
+            expected, given = traced.get(arg.keyword.value if arg.keyword else position), self.names(arg.value)
+            if expected and given is not None and not arg.star and dict(given) != dict(expected):
+                raise TypeError(f'{self.where()}: `{_code(node)}` passes a value of one IntEnum class to a parameter '
+                                'traced as another IntEnum class, so its .name would differ from live modelx')
+
+    def visit_FormattedStringExpression(self, node):
+        self._shown(node.expression, node.conversion not in ('r', 'a'))
+
+    def visit_BinaryOperation(self, node):
+        if isinstance(node.operator, cst.Modulo) and isinstance(node.left, (cst.SimpleString, cst.ConcatenatedString)):
+            through_str = not re.search(r'%[-#0 +\d.*]*[ra]', _code(node.left))
+            right = node.right
+            for operand in ([e.value for e in right.elements] if isinstance(right, cst.Tuple) else [right]):
+                self._shown(operand, through_str)
 
     def leave_Comparison(self, original, updated):
-        left = original.left
-        for item in original.comparisons:
-            if isinstance(item.operator, (cst.Is, cst.IsNot)) and (
-                    self.value(left) is not None or self.value(item.comparator) is not None):
-                raise TypeError(f'{self.where()}: `{_code(original)}` tests an IntEnum member by '
-                                'identity. Compiled code holds members as integers, so the result would differ '
-                                'from live modelx; compare with == or != instead')
-            left = item.comparator
+        # as live: identity with None, a bool, a builtin type, or a member of a Reference that is not substituted
+        fixed = lambda n: isinstance(n, cst.Name) and (n.value in ('None', 'True', 'False')
+                                                       or isinstance(getattr(builtins, n.value, None), type))
+        foreign = lambda n: (isinstance(n, cst.Attribute) and isinstance(n.value, cst.Attribute)
+                             and isinstance(n.value.value, cst.Name) and n.value.value.value == 'self'
+                             and (self.cls, n.value.attr.value) not in self.members)
+        formula, operands = self.method and not self.method.startswith(('_mx_', '__')), [original.left]
+        for left, item in zip(operands, original.comparisons):
+            operands.append(right := item.comparator)
+            if isinstance(item.operator, (cst.Is, cst.IsNot)) and not (fixed(left) or fixed(right)) and (
+                    any(self.value(n) is not None or self.names(n) is not None for n in (left, right))
+                    or self.members and formula and not (foreign(left) or foreign(right))):
+                raise TypeError(f'{self.where()}: `{_code(original)}` tests by identity in a model whose IntEnum '
+                                'members compile to integers, so the result would differ from live modelx; '
+                                'compare with == or != instead')
         return updated
 
     # members held in a container display stay objects (so `.name` works where the container goes), unless the
@@ -234,7 +286,12 @@ class _Literals(cst.CSTTransformer):
         self.in_place.add(id(node.iter))
 
     def visit_Index(self, node):
-        self.in_place.add(id(node.value))
+        if id(node.value) not in self.kept:
+            self.in_place.add(id(node.value))
+
+    def visit_AssignTarget(self, node):         # a stored key stays a member: the container keeps it
+        if isinstance(node.target, cst.Subscript):
+            self.kept.update(id(e.slice.value) for e in node.target.slice if isinstance(e.slice, cst.Index))
 
     visit_CompFor = visit_For
 
@@ -256,15 +313,19 @@ class _Literals(cst.CSTTransformer):
 
     def leave_Attribute(self, original, updated):
         value = self.value(original)
-        if value is not None:
+        if value is not None and id(original) not in self.kept:
             literal = cst.Integer(str(abs(value)))
             if value < 0:
                 literal = cst.UnaryOperation(cst.Minus(), literal, lpar=[cst.LeftParen()], rpar=[cst.RightParen()])
             return literal.with_changes(lpar=(*original.lpar, *literal.lpar), rpar=(*literal.rpar, *original.rpar))
-        names = self.names(original.value)
+        names, attr, inner, receiver = self.names(original.value), original.attr.value, updated.value, original.value
+        if (names is None and attr in ('name', 'value') and isinstance(receiver, cst.Subscript)
+                and isinstance(receiver.value, (cst.List, cst.Tuple)) and any(
+                    self.value(e.value) is None and self.names(e.value) is not None for e in receiver.value.elements)):
+            raise TypeError(f'{self.where()}: `{_code(original)}` holds an IntEnum value as an integer in a container, '
+                            f'so .{attr} would fail where live modelx works')
         if names is None:
             return updated
-        attr, inner = original.attr.value, updated.value
         if attr == 'value':
             return inner.with_changes(lpar=(*original.lpar, cst.LeftParen()), rpar=(cst.RightParen(), *original.rpar))
         if attr != 'name':

@@ -72,6 +72,6 @@ def test_enum_identity_is_a_build_error(tmp_path, monkeypatch):
                           env={**__import__('os').environ,
                                'PYTHONPATH': str(tmp_path) + ':' + __import__('os').environ.get('PYTHONPATH', '')})
     assert done.returncode != 0
-    assert 'tests an IntEnum member by identity' in done.stderr and 'compare with == or !=' in done.stderr, \
+    assert 'tests by identity' in done.stderr and 'compare with == or !=' in done.stderr, \
         done.stderr[-3000:]
     assert not (tmp_path / 'exported_cy' / '_mx_classes.so').exists()
