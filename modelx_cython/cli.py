@@ -54,7 +54,7 @@ from modelx_cython.cell_entries import EntryModule
 from modelx_cython.entry_pipeline import lower_entries
 from modelx_cython.scopes import shared_facts
 from modelx_cython.integer_boundaries import guard_integer_boundaries
-from modelx_cython.build import cell_locations, create_setup
+from modelx_cython.build import cell_functions, create_setup
 from modelx_cython.syntax import read_literal
 from modelx_cython.native_sources import install as install_native_sources
 import libcst as cst
@@ -431,7 +431,7 @@ def main_handler(args: argparse.Namespace, stdout: IO[str], stderr: IO[str]) -> 
             state = lower_locked_entries(state, u.module_info)
             translated_modules[u.fqname] = state
             u.abs_src_path.write_text(emitted_text(state.syntax, u.rel_src_path.as_posix()), encoding='utf-8')
-            cell_sources[u.rel_src_path.as_posix()] = cell_locations(state, u.module_info)
+            cell_sources[u.rel_src_path.as_posix()] = cell_functions(state, u.module_info)
         create_setup(model_name, modules=modules, setup_file=setup_file, source_root=work_dir,
                      source_modules=(runtime_syntax, *(state.syntax for state in translated_modules.values())),
                      cell_sources=cell_sources, providers=provider_sources)
