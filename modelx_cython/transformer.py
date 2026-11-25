@@ -733,9 +733,6 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
         # D110 P1: a local bound once to an item of a typed ItemSpace Reference is declared its class
         from modelx_cython.item_locals import type_item_locals
         node, cells.typed_item_locals = type_item_locals(node, cls_info, self.module)
-        if cells._spec.get('native_vector_ref_reads', False):
-            from modelx_cython.vector_ref_reads import lower
-            node = lower(node, cls_info, cells, scope)
         return node
 
     def _table_reads(self, node, cls_info, cells, builtin_keys, *, row_inline=None):
