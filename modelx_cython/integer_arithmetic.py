@@ -89,7 +89,9 @@ _SCALARS = {
 
 def annotation_type(expr, classes=()):
     """The value type an annotation declares (see the module docstring)."""
-    name = dotted_name(expr)
+    name = dotted_name(expr) or ''
+    if isinstance(expr, cst.SimpleString):
+        return MAYBE            # a string annotation: whatever Cython makes of it
     if name in _SCALARS:
         return _SCALARS[name]
     if name in classes:
