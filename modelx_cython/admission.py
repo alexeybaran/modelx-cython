@@ -93,14 +93,12 @@ def describe(module_infos):
                     'table_reads_keys': getattr(cell, 'table_reads_keys', []),
                     'native_reductions': getattr(cell, 'native_reductions', 0),
                     **({'collect_outputs': cell.collect_leaves} if getattr(cell, 'collect_leaves', None) else {}),
-                    'native_enum_comparisons': getattr(cell, 'native_enum_comparisons', 0),
-                    'native_enum_constants': getattr(cell, 'native_enum_constants', 0),
                     'row_fields_inlined': getattr(cell, 'row_fields_inlined', 0),   # diag-run8 F3
                     'row_cell_inlined': getattr(cell, 'row_cell_inlined', False),
                     'row_cell_kept': getattr(cell, 'row_cell_kept', None),
                     'native_tuple_int_loops': getattr(cell, 'native_tuple_int_loops', 0),
                     'native_expressions': sum(getattr(cell, key, 0) for key in (
-                        'reductions_native', 'enum_memberships', 'minmax_native', 'math_native')),
+                        'reductions_native', 'minmax_native', 'math_native')),
                     'expressions_untyped': expressions_untyped(cell),
                     'powers_in_loops': list(getattr(cell, 'powers_in_loops', ())),
                     'guarded_integer_ops': getattr(cell, 'guarded_integer_ops', 0),
@@ -330,8 +328,8 @@ def slow_paths(cell, cache):
 
 def expressions_untyped(cell):
     """Expression forms (W1.4) left to the interpreter: reductions, n-argument
-    min/max, enum membership and math calls, each with its line and reason."""
-    entries = [entry for key in ('reductions_untyped', 'enum_untyped', 'minmax_untyped', 'math_untyped')
+    min/max and math calls, each with its line and reason."""
+    entries = [entry for key in ('reductions_untyped', 'minmax_untyped', 'math_untyped')
                for entry in getattr(cell, key, ())]
     return sorted(entries, key=lambda entry: (entry['line'], entry['form'], entry['expr']))
 
@@ -340,7 +338,7 @@ def expressions_object(cell):
     """Built-in forms (W1.8) compiled with comparisons or calls on Python objects, because
     an operand's class is not known at build time; each with its line and the operand
     classes. They no longer call the built-in."""
-    entries = [entry for key in ('minmax_object', 'reductions_object', 'enum_object', 'math_object')
+    entries = [entry for key in ('minmax_object', 'reductions_object', 'math_object')
                for entry in getattr(cell, key, ())]
     return sorted(entries, key=lambda entry: (entry['line'], entry['form'], entry['expr']))
 

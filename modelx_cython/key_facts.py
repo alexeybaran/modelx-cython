@@ -1,8 +1,7 @@
 """Key-typing facts of a formula (T-6 step 0): what the table-read lowering knows of a key part's type.
 
-``is_int`` (why an expression is a non-bool integer), ``exact_long_long`` (statically a C ``long long``),
-``enum_constant`` (the module constant of an admitted IntEnum member) and ``_int_index_read`` (an extreme or asof of
-an integer level), on the bindings of one formula (``_Formula``). Moved out of ``table_reads`` unchanged, for the
+``is_int`` (why an expression is a non-bool integer), ``exact_long_long`` (statically a C ``long long``)
+and ``_int_index_read`` (an extreme or asof of an integer level), on the bindings of one formula (``_Formula``). Moved out of ``table_reads`` unchanged, for the
 prepared-table lowering (``frame_reads``) and the old helper-table lowering alike.
 """
 
@@ -314,21 +313,6 @@ class KeyFacts:
             return getattr(self.cls_info, 'refs', {}).get(expr.attr.value)
         return None
 
-    def enum_constant(self, expr):
-        """D79: the module constant of ``self.<Enum>.<member>`` (or its definition field
-        ``self._mx_definition_<Enum>.<member>``) when the enum Reference is admitted at build
-        (``enums.prepare``: an IntEnum definition, enum_safe, value within C int), else None."""
-        if not (isinstance(expr, cst.Attribute) and isinstance(expr.value, cst.Attribute)
-                and isinstance(expr.value.value, cst.Name) and expr.value.value.value == 'self'):
-            return None
-        ref = expr.value.attr.value
-        if ref.startswith('_mx_definition_'):
-            ref = ref[len('_mx_definition_'):]
-        module = getattr(self.cls_info, 'module', None)
-        entry = (getattr(module, 'code_enum_symbols', None) or {}).get(
-            (getattr(self.cls_info, 'name', None), ref, expr.attr.value))
-        return entry[0] if entry else None
-
     def table_cell(self, expr):
         """Schema of a zero-argument Cell call traced as a helper Table, else None."""
         name = self.cell_of(expr)
@@ -385,8 +369,7 @@ class KeyFacts:
         if isinstance(expr, cst.Attribute):
             ref = self.self_ref(expr)
             type_ = getattr(ref, 'type_', None)
-            if isinstance(type_, type) and issubclass(type_, int) and not issubclass(type_, bool) \
-                    and not getattr(ref, 'enum', None):
+            if isinstance(type_, type) and issubclass(type_, int) and not issubclass(type_, bool):
                 return f'reference {expr.attr.value} is int'
             return None
         if isinstance(expr, cst.BinaryOperation) and isinstance(

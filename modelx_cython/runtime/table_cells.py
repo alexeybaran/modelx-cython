@@ -30,25 +30,6 @@ def bind_frame(space, value):
     return bind(value) if bind is not None else None
 
 
-_enums = {}
-
-
-def enum_member(module, qualname, value):
-    """The member of the IntEnum ``module.qualname`` whose value is ``value`` (D103).
-
-    A compiled cell holds an admitted enum as its C integer; this is what a Python caller,
-    an object-valued use or a collected output receives, as in live modelx.
-    """
-    cls = _enums.get((module, qualname))
-    if cls is None:
-        import importlib
-        cls = importlib.import_module(module)
-        for part in qualname.split('.'):
-            cls = getattr(cls, part)
-        _enums[module, qualname] = cls
-    member = cls._value2member_map_.get(value)
-    return member if member is not None else cls(value)
-
 def frame_of(table, path):
     """What a Python caller gets for an internal table, the same object on every request, equal to what
     live modelx returns (D130): the plain DataFrame the table was admitted from (a formula's result or
