@@ -62,10 +62,16 @@ def lexical_nodes(body):
         while stack:
             node = stack.pop()
             yield node
-            if not isinstance(node, OPAQUE_SCOPES):
+            opaque = _OPAQUE.get(type(node))
+            if opaque is None:
+                opaque = _OPAQUE[type(node)] = issubclass(type(node), OPAQUE_SCOPES)
+            if not opaque:
                 found = children(node)
                 found.reverse()
                 stack.extend(found)
+
+
+_OPAQUE = {}    # node class -> whether it is one of OPAQUE_SCOPES
 
 
 class _Contexts(cst.CSTVisitor):
@@ -204,14 +210,20 @@ def binds_none_of(module, names):
     False when one may be bound (ask ScopeProvider)."""
     names = frozenset(names)
     contexts = expression_contexts(module)
+    roles = {}      # node class -> 1 a Name, 2 a named binder, 3 a binder of inner names, 0 none
     for node in walk(module):
-        if isinstance(node, cst.Name):
+        kind = type(node)
+        role = roles.get(kind)
+        if role is None:
+            role = roles[kind] = (1 if issubclass(kind, cst.Name) else 2 if issubclass(kind, _NAMED_BINDERS)
+                                  else 3 if issubclass(kind, _NAME_BINDERS) else 0)
+        if role == 1:
             if node.value in names and contexts.get(node, ExpressionContext.LOAD) is not ExpressionContext.LOAD:
                 return False
-        elif isinstance(node, _NAMED_BINDERS):
+        elif role == 2:
             if node.name.value in names:
                 return False
-        elif isinstance(node, _NAME_BINDERS):
+        elif role == 3:
             if any(isinstance(item, cst.Name) and item.value in names for item in walk(node)):
                 return False
     return True

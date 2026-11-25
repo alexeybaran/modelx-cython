@@ -68,6 +68,22 @@ def _learn(node):
     return recorder.children
 
 
+_NODE, _NONE, _MANY = 0, 1, 2
+_VALUE_KINDS = {type(None): _NONE, cst.MaybeSentinel: _NONE, tuple: _MANY, list: _MANY}
+
+
+def _value_kind(value):
+    """How a visited field's value holds nodes: one node, none, or a sequence of them (the
+    tests LibCST's visit helpers make, by type: ``isinstance`` on its abstract classes is slow)."""
+    kind = _VALUE_KINDS.get(type(value))
+    if kind is None:
+        kind = (_NODE if isinstance(value, cst.CSTNode) else
+                _NONE if value is None or isinstance(value, cst.MaybeSentinel) else _MANY)
+        if type(value).__module__.startswith('libcst'):     # a node class or a sentinel
+            _VALUE_KINDS[type(value)] = kind
+    return kind
+
+
 def children(node):
     """``node.children`` (the same nodes in the same order), read from the node's fields."""
     names = _FIELDS.get(type(node))
@@ -76,10 +92,29 @@ def children(node):
     found = []
     for name in names:
         value = getattr(node, name)
-        if isinstance(value, cst.CSTNode):
+        kind = _value_kind(value)
+        if kind == _NODE:
             found.append(value)
-        elif value is not None and not isinstance(value, cst.MaybeSentinel):
+        elif kind == _MANY:
             found.extend(value)
+    return found
+
+
+_ATTRIBUTE_HOOKS = {}    # visitor class -> whether its attribute callbacks can do anything
+
+
+def _attribute_hooks(kind):
+    """Whether a visitor class reacts to ``on_visit_attribute``/``on_leave_attribute``: it
+    overrides them, or defines a ``visit_<Node>_<field>``/``leave_<Node>_<field>`` method
+    (LibCST's own are no-ops)."""
+    found = _ATTRIBUTE_HOOKS.get(kind)
+    if found is None:
+        base = cst.CSTVisitor
+        found = _ATTRIBUTE_HOOKS[kind] = (
+            kind.on_visit_attribute is not base.on_visit_attribute
+            or kind.on_leave_attribute is not base.on_leave_attribute
+            or any(name.startswith(('visit_', 'leave_')) and name.count('_') > 1
+                   and getattr(kind, name) is not getattr(base, name, None) for name in dir(kind)))
     return found
 
 
@@ -87,8 +122,37 @@ def visit(node, visitor):
     """``node.visit(visitor)`` for a :class:`libcst.CSTVisitor`, without rebuilding nodes.
 
     The visitor's callbacks run on the same nodes, attributes and order as LibCST's own
-    traversal; a visitor that transforms (a ``CSTTransformer``) must use ``node.visit``.
+    traversal (attribute callbacks only for a visitor that has some); a visitor that
+    transforms (a ``CSTTransformer``) must use ``node.visit``.
     """
+    if _attribute_hooks(type(visitor)):
+        _visit_attributes(node, visitor)
+    else:
+        _visit(node, visitor)
+
+
+def _visit(node, visitor):
+    if visitor.on_visit(node):
+        names = _FIELDS.get(type(node))
+        if names is None:
+            if type(node).__name__ in _CONDITIONAL:
+                node._visit_and_replace_children(visitor)
+                visitor.on_leave(node)
+                return
+            _learn(node)
+            names = _FIELDS[type(node)]
+        for name in names:
+            value = getattr(node, name)
+            kind = _value_kind(value)
+            if kind == _NODE:
+                _visit(value, visitor)
+            elif kind == _MANY:
+                for item in value:
+                    _visit(item, visitor)
+    visitor.on_leave(node)
+
+
+def _visit_attributes(node, visitor):
     if visitor.on_visit(node):
         names = _FIELDS.get(type(node))
         if names is None:
@@ -101,11 +165,12 @@ def visit(node, visitor):
         for name in names:
             visitor.on_visit_attribute(node, name)
             value = getattr(node, name)
-            if isinstance(value, cst.CSTNode):
-                visit(value, visitor)
-            elif value is not None and not isinstance(value, cst.MaybeSentinel):
+            kind = _value_kind(value)
+            if kind == _NODE:
+                _visit_attributes(value, visitor)
+            elif kind == _MANY:
                 for item in value:
-                    visit(item, visitor)
+                    _visit_attributes(item, visitor)
             visitor.on_leave_attribute(node, name)
     visitor.on_leave(node)
 

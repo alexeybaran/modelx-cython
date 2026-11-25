@@ -140,3 +140,26 @@ def test_binds_none_of_agrees_with_scope_provider(source, bound):
     assert binds_none_of(module, names) is not bound
     if not bound:
         assert builtin
+
+
+class RecordNodes(cst.CSTVisitor):
+    """No attribute callbacks: the traversal leaves them out."""
+    def __init__(self):
+        self.log = []
+
+    def on_visit(self, node):
+        self.log.append(('visit', id(node)))
+        return not isinstance(node, cst.Lambda)
+
+    def on_leave(self, node):
+        self.log.append(('leave', id(node)))
+
+
+@pytest.mark.parametrize('index', range(len(sources())))
+def test_visit_without_attribute_callbacks_matches_libcst(index):
+    module = cst.parse_module(sources()[index])
+    assert not syntax._attribute_hooks(RecordNodes)
+    expected, actual = RecordNodes(), RecordNodes()
+    module.visit(expected)
+    syntax.visit(module, actual)
+    assert actual.log == expected.log
