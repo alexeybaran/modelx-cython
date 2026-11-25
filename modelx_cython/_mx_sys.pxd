@@ -105,17 +105,16 @@ cdef extern from *:
        platform: Cython 3.3.1 compiles its LLONG_MIN // -1 check only where long long is as wide as
        long, so the C division traps there (STATUS_INTEGER_OVERFLOW on Windows). The error value
        is LLONG_MAX (a quotient only of LLONG_MAX // 1), so a quotient of -1 needs no error check.
-       The path is the Cell's, for the signature of the integer helpers; the checked mode's
-       handler names the OverflowError after it. */
+       The path is the Cell's: the OverflowError names it. */
     static CYTHON_INLINE long long __mx_signed_floordiv(long long a, long long b, PyObject *path) {
         long long q, r;
-        (void)path;
         if (b == 0) {
             PyErr_SetString(PyExc_ZeroDivisionError, "integer division or modulo by zero");
             return LLONG_MAX;
         }
         if (b == -1 && a == LLONG_MIN) {
-            PyErr_SetString(PyExc_OverflowError, "value too large to perform division");
+            /* named here: the formula keeps no handler around its body (integer guards) */
+            PyErr_Format(PyExc_OverflowError, "%U: value too large (integer arithmetic beyond 64 bits)", path);
             return LLONG_MAX;
         }
         q = a / b;
@@ -200,6 +199,93 @@ cdef inline long long _mx_signed_right_shift(long long value, long long count, s
     if value < 0:
         return -1 - ((-1 - value) >> count)
     return value >> count
+
+
+cdef extern from *:
+    """
+    /* Flagged integer arithmetic (integer guards). Each operation returns the wrapped C result and
+       ORs 1 into *flag when the exact result does not fit in 64 bits; the formula tests the flag
+       once, before it returns, and raises OverflowError naming the Cell (_mx_flagged_overflow).
+       There is no error path at the operation, so a formula stays one straight-line function that
+       the C compiler can inline. GCC and Clang have the checked builtins; elsewhere (MSVC) the
+       portable forms compute in unsigned arithmetic, which wraps by definition, and derive the
+       overflow from the signs (+, -) or from the high half of the 128-bit product (*). */
+    #if defined(__GNUC__) || defined(__clang__)
+    #define __MX_ADD_OVERFLOWS(a, b, r) __builtin_add_overflow((a), (b), (r))
+    #define __MX_SUB_OVERFLOWS(a, b, r) __builtin_sub_overflow((a), (b), (r))
+    #define __MX_MUL_OVERFLOWS(a, b, r) __builtin_mul_overflow((a), (b), (r))
+    #else
+    static CYTHON_INLINE int __MX_ADD_OVERFLOWS(long long a, long long b, long long *r) {
+        unsigned long long sum = (unsigned long long)a + (unsigned long long)b;
+        *r = (long long)sum;
+        return ((a ^ *r) & (b ^ *r)) < 0;
+    }
+    static CYTHON_INLINE int __MX_SUB_OVERFLOWS(long long a, long long b, long long *r) {
+        unsigned long long difference = (unsigned long long)a - (unsigned long long)b;
+        *r = (long long)difference;
+        return ((a ^ b) & (a ^ *r)) < 0;
+    }
+    #if defined(_MSC_VER) && defined(_M_X64)
+    #include <intrin.h>
+    static CYTHON_INLINE int __MX_MUL_OVERFLOWS(long long a, long long b, long long *r) {
+        long long high;
+        *r = _mul128(a, b, &high);
+        return high != (*r >> 63);
+    }
+    #elif defined(_MSC_VER) && defined(_M_ARM64)
+    #include <intrin.h>
+    static CYTHON_INLINE int __MX_MUL_OVERFLOWS(long long a, long long b, long long *r) {
+        *r = (long long)((unsigned long long)a * (unsigned long long)b);
+        return __mulh(a, b) != (*r >> 63);
+    }
+    #else
+    static CYTHON_INLINE int __MX_MUL_OVERFLOWS(long long a, long long b, long long *r) {
+        *r = (long long)((unsigned long long)a * (unsigned long long)b);
+        if (a == 0 || b == 0)
+            return 0;
+        if ((a == -1 && b == LLONG_MIN) || (b == -1 && a == LLONG_MIN))
+            return 1;
+        return *r / b != a;
+    }
+    #endif
+    #endif
+    static CYTHON_INLINE long long __mx_flag_add(long long a, long long b, int *flag) {
+        long long r;
+        *flag |= __MX_ADD_OVERFLOWS(a, b, &r);
+        return r;
+    }
+    static CYTHON_INLINE long long __mx_flag_sub(long long a, long long b, int *flag) {
+        long long r;
+        *flag |= __MX_SUB_OVERFLOWS(a, b, &r);
+        return r;
+    }
+    static CYTHON_INLINE long long __mx_flag_mul(long long a, long long b, int *flag) {
+        long long r;
+        *flag |= __MX_MUL_OVERFLOWS(a, b, &r);
+        return r;
+    }
+    static CYTHON_INLINE long long __mx_flag_neg(long long a, int *flag) {
+        *flag |= (a == LLONG_MIN);
+        return (long long)(0ULL - (unsigned long long)a);
+    }
+    """
+    long long _mx_flag_add "__mx_flag_add"(long long left, long long right, int *flag) noexcept nogil
+    long long _mx_flag_sub "__mx_flag_sub"(long long left, long long right, int *flag) noexcept nogil
+    long long _mx_flag_mul "__mx_flag_mul"(long long left, long long right, int *flag) noexcept nogil
+    long long _mx_flag_neg "__mx_flag_neg"(long long value, int *flag) noexcept nogil
+
+
+cdef inline object _mx_flagged_overflow(str path):
+    """The OverflowError of a formula whose flagged integer arithmetic left 64 bits (cold path)."""
+    return _mx_named(OverflowError(f"{path}: value too large (integer arithmetic beyond 64 bits)"), path)
+
+
+cdef inline long long _mx_flag_checked(long long value, int *flag, str path) except? -1:
+    """``value``, computed with flagged operations, once the flag shows it exact: an argument a
+    formula passes on is tested before the call receives it."""
+    if flag[0]:
+        raise _mx_flagged_overflow(path)
+    return value
 
 
 cdef inline bint _mx_ref_name_is(object name, str expected) except? -1:
