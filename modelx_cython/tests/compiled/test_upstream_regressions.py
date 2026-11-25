@@ -28,6 +28,8 @@ CELLS = {
     "zi": "def zi(n):\n    i = -1\n    for i in range(n):\n        pass\n    return i\n",
     # a lambda's and a generator's own parameter named as the formula's typed one
     "lam": "def lam(t):\n    scale = lambda t: t * 2.5\n    return sum(scale(t) for t in range(t)) + t\n",
+    # a formula written on one line (upstream compiles it)
+    "one": "def one(t): return x * t\n",
 }
 SAMPLE = """\
 from exported import mx_model
@@ -35,7 +37,7 @@ S = mx_model.S
 for t in range(10):
     S.f(t); S.g(t, t); S.k(t); S.kk(t); S.h(t); S.half(2 * t); S.rx(t); S.rr(t)
 S.nc(1.5); S.nc(2.5)
-S.z(3); S.w(3); S.zi(3); S.lam(4)
+S.z(3); S.w(3); S.zi(3); S.lam(4); S.one(2)
 mx_model.P[3].v()
 """
 
@@ -59,7 +61,7 @@ def built(tmp_path_factory):
         items.new_cells("v", "lambda: i * 2")
         live = {"z": _outcome(lambda: space.z(0)), "w": _outcome(lambda: space.w(0)),
                 "zi": _outcome(lambda: space.zi(0)), "f": _outcome(lambda: space.f(2.5)),
-                "lam": _outcome(lambda: space.lam(7))}
+                "lam": _outcome(lambda: space.lam(7)), "one": _outcome(lambda: space.one(5))}
         model.export(work / "exported")
     finally:
         model.close()
@@ -163,3 +165,16 @@ def test_a_nested_scope_shadowing_a_typed_parameter_builds_and_equals_live(built
         print(json.dumps(outcome(lambda: S.lam(7))))
     ''')
     assert out == live["lam"] == ["value", "59.5"]
+
+
+def test_a_formula_on_one_line_builds_and_its_arithmetic_is_checked(built):
+    work, live = built
+    out = _probe(work, '''\
+        def big():
+            fresh = type(mx_model)().S          # a new model: the first call's value stays cached
+            fresh.x = 2 ** 62
+            return fresh.one(5)
+        print(json.dumps([outcome(lambda: S.one(5)), outcome(big)]))
+    ''')
+    assert out[0] == live["one"] == ["value", "15"]
+    assert out[1][0] == "OverflowError" and out[1][1].startswith("S.one"), out[1]
