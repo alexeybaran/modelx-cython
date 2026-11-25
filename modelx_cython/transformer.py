@@ -558,7 +558,7 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
         """
         super().__init__()
         self.wrapper = (module.visitor.wrapper if module.visitor.source == source else
-                        cst.metadata.MetadataWrapper(cst.parse_module(source)))
+                        cst.metadata.MetadataWrapper(cst.parse_module(source), unsafe_skip_copy=True))
         self._module_node = self.wrapper.module
         self._source = source
         self.module = module
