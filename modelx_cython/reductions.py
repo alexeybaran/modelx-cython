@@ -568,12 +568,16 @@ class GeneralReductions:
         site, preceding = self.first_site(root)
         if site is None:
             return None
-        if any(not self.effect_free(node) and _compile_time(node) for node in preceding):
+        callees = {id(node.func) for node in _subtree(root) if isinstance(node, cst.Call)}
+        if any(not self.effect_free(node) and (_compile_time(node) or id(node) in callees and _inserted(node))
+               for node in preceding):
             # Cython syntax put in by an earlier lowering (a cast, a C type, a method of a
-            # typed handle) has no run-time value to keep in a temporary: lift nothing
+            # typed handle, a provider function and its typed arguments) has no run-time
+            # value to keep in a temporary: lift nothing
             self.general_declined.setdefault(id(site), (site, (
-                'evaluated after compiler-inserted Cython syntax (a cast, a C type or a typed-handle '
-                'method) in the same statement, which cannot be held in a temporary: built-in call')))
+                'evaluated after compiler-inserted Cython syntax (a cast, a C type, a typed-handle '
+                'method or a provider call) in the same statement, which cannot be held in a temporary: '
+                'built-in call')))
             return None
         names, replacements, lines = self.names, {}, []
         for node in preceding:
@@ -745,6 +749,15 @@ def _compile_time(node):
     syntax resolved at C compile time (casts, C types, typed-handle members), never a
     value of the model's own formula."""
     return any(isinstance(item, cst.Name) and item.value == CY_MOD for item in _subtree(node))
+
+
+def _inserted(node):
+    """A callee an earlier lowering put in (a provider member or a private entry, named
+    ``_mx_...``): a C function whose typed arguments cannot be held in object temporaries."""
+    while isinstance(node, cst.Attribute):
+        node = node.value
+    return (isinstance(node, cst.Name) and node.value.startswith('_mx_')
+            and not node.value.startswith('_mx_hoist'))
 
 
 def _subtree(node):
