@@ -110,9 +110,9 @@ def test_held_table_local_and_builtin_reduction_take_no_shared_reference(tmp_pat
 
 
 def test_enum_member_local_is_a_c_integer_and_results_stay(tmp_path, monkeypatch):
-    """D83: ``kind = Kind.A if ... else Kind.B`` read only as a compiled Cell's integer argument and in
-    comparisons with members is a C integer bound to the module constants (no member object read per
-    call); both branches give the exported model's values; four workers = one worker."""
+    """``kind = Kind.A if ... else Kind.B`` is a conditional of integer literals (no member object read per
+    call), and ``kind.name`` its name by value; both give the exported model's values; four workers =
+    one worker."""
     (tmp_path / 'diag_mt_kinds.py').write_text(
         'import enum\n\nclass Kind(enum.IntEnum):\n    A = 1\n    B = 2\n', encoding='utf-8')
     monkeypatch.syspath_prepend(str(tmp_path))
@@ -164,9 +164,10 @@ def value():
                            '--spec', 'spec.py'], cwd=tmp_path, capture_output=True, text=True)
     assert done.returncode == 0, done.stdout[-3000:] + done.stderr[-3000:]
     generated = (tmp_path / 'exported_cy/_m_Portfolio/_mx_classes.py').read_text(encoding='utf-8')
-    assert generated.count('\n    kind: _mx_cy.longlong\n') == 1, generated   # chosen only; named keeps the member
-    assert 'kind = _mx_enum_const_0 if (t + self.key) % 3 == 0 else _mx_enum_const_1' in generated
-    assert '_mx_definition_Kind.A if' in generated                           # named: an object, as before
+    # members are integer literals (enums.literals); Cython types the local as it types any integer local
+    assert '= 1 if (t + self.key) % 3 == 0 else 2' in generated, generated
+    assert 'kind = 1 if t % 2 == 0 else 2' in generated                     # named: the same integers
+    assert "{1: 'A', 2: 'B'}[kind]" in generated                             # and its .name by value
     probe = textwrap.dedent('''\
         import sys
         from importlib import import_module

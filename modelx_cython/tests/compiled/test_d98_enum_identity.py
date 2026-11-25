@@ -1,16 +1,11 @@
-"""D98: ``x is E.M`` / ``x is not E.M`` where ``x`` is an enum value lowered to a C integer.
+"""``x is E.M`` / ``x is not E.M`` is a build error.
 
-A Cell returning a member of an admitted IntEnum compiles to a C integer, so ``kind(t) is Kind.A``
-compiled to an identity test between an int and the member: always false, the compiled model
-took the else branch while live was right. Where one side is a member of an admitted enum and
-the other is typed as a C integer, ``is`` / ``is not`` now lower exactly as ``==`` / ``!=``
-(members are singletons: identity with a member is equality with its value for a value of that
-enum). Any other identity test keeps the object path. Both operators, both operand orders, a
-local, a cell argument; compiled equals the exported model.
+Compiled code holds IntEnum members as integers (enums.literals), so an identity test with a member
+would differ from live modelx (``kind(t) is Kind.A`` on a re-boxed int is false). The build stops
+with a message that names the expression and asks for ``==`` / ``!=``.
 """
 import subprocess
 import sys
-import textwrap
 
 import modelx as mx
 
@@ -70,25 +65,13 @@ def caller(t):
         '    p.direct(t); p.reversed_(t); p.local(t); p.caller(t)\n', encoding='utf-8')
 
 
-def test_enum_identity_with_a_typed_integer_is_equality(tmp_path, monkeypatch):
+def test_enum_identity_is_a_build_error(tmp_path, monkeypatch):
     _model(tmp_path, monkeypatch)
     done = subprocess.run([sys.executable, '-m', 'modelx_cython', 'exported', '--sample', 'sample.py',
-                           '--no-spec'], cwd=tmp_path, capture_output=True, text=True)
-    assert done.returncode == 0, done.stdout[-3000:] + done.stderr[-3000:]
-    probe = textwrap.dedent('''\
-        import sys
-        from importlib import import_module
-        p = import_module(sys.argv[1]).mx_model.Projection
-        rows = []
-        for t in range(9):
-            rows.append((p.direct(t), p.reversed_(t), p.local(t), p.caller(t),
-                         p.by_arg(t, p.Kind.A), p.by_arg(t, p.Kind.B), p.by_arg(t, p.Kind.C)))
-        print(repr(rows))
-        ''')
-    out = {}
-    for name in ('exported', 'exported_cy'):
-        run = subprocess.run([sys.executable, '-c', probe, name], cwd=tmp_path, capture_output=True, text=True,
-                             env={**__import__('os').environ, 'PYTHONPATH': str(tmp_path) + ':' + __import__('os').environ.get('PYTHONPATH', '')})
-        assert run.returncode == 0, name + run.stdout + run.stderr
-        out[name] = run.stdout
-    assert out['exported_cy'] == out['exported'], out
+                           '--no-spec'], cwd=tmp_path, capture_output=True, text=True,
+                          env={**__import__('os').environ,
+                               'PYTHONPATH': str(tmp_path) + ':' + __import__('os').environ.get('PYTHONPATH', '')})
+    assert done.returncode != 0
+    assert 'tests an IntEnum member by identity' in done.stderr and 'compare with == or !=' in done.stderr, \
+        done.stderr[-3000:]
+    assert not (tmp_path / 'exported_cy' / '_mx_classes.so').exists()

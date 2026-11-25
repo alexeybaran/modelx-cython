@@ -4,7 +4,7 @@ from types import SimpleNamespace
 
 import libcst as cst
 
-from modelx_cython.enums import Constants
+from modelx_cython.enums import literals
 from modelx_cython.helpers import HelperCalls
 from modelx_cython.reductions import NativeReductions
 from modelx_cython.helpers import helper_capability
@@ -19,18 +19,19 @@ def native_cell(result='double', params=()):
         get_argtype_expr=lambda *args, **kw: 'long long')
 
 
+STATUS = {'m._c_Values.Status': SimpleNamespace(enum=('m', 'Status', {'OK': 200}), enum_safe=True)}
+
+
+def in_class(source):
+    return 'class _c_Values:\n' + ''.join('    ' + line + '\n' for line in source.splitlines())
+
+
 def test_enum_constants_do_not_capture_a_nested_receiver():
-    source='''def formula(self):
+    source=in_class('''def formula(self):
     def nested(self):
         return self.Status.OK
-    return nested(self.other)
-'''
-    cls=SimpleNamespace(name='_c_Values', cells={})
-    pass_=Constants(cls,native_cell('long long'),
-                    {('_c_Values','Status','OK'):('_mx_enum_const_0',200)})
-    result=cst.parse_module(source).visit(pass_).code
-    assert 'return self.Status.OK' in result
-    assert pass_.count == 0
+    return nested(self.other)''')
+    assert literals('m', source, STATUS) == source
 
 
 def test_helper_binding_does_not_capture_a_nested_receiver():
@@ -78,38 +79,25 @@ def test_typed_reduction_preserves_receiver_binding_and_frame_observation(source
 
 
 def test_enum_constants_do_not_capture_a_comprehension_receiver():
-    source='''def formula(self, value):
-    return tuple(value == self.Status.OK for self in self.others)
-'''
-    cls=SimpleNamespace(name='_c_Values',cells={})
-    pass_=Constants(cls,native_cell('object',('value',)),
-                    {('_c_Values','Status','OK'):('_mx_enum_const_0',200)})
-    result=cst.parse_module(source).visit(pass_).code
-    assert 'self.Status.OK' in result
-    assert pass_.count == 0
+    source=in_class('''def formula(self, value):
+    return tuple(value == self.Status.OK for self in self.others)''')
+    assert literals('m', source, STATUS) == source
 
 
 def test_declared_code_enum_uses_its_fixed_definition():
-    source='def formula(self, value):\n    return value == self.Status.OK\n'
-    pass_=Constants(SimpleNamespace(name='_c_Values',cells={}),native_cell('bint',('value',)),
-                    {('_c_Values','Status','OK'):('_mx_enum_const_0',200)})
-    namespace={'_mx_enum_const_0':200}
-    transformed=cst.parse_module(source).visit(pass_).code
-    expression=ast.parse(transformed).body[0].body[0].value
+    transformed=literals('m', in_class('def formula(self, value):\n    return value == self.Status.OK'), STATUS)
+    expression=ast.parse(transformed).body[0].body[0].body[0].value
     assert isinstance(expression,ast.Compare)
-    assert isinstance(expression.comparators[0],ast.Name)
+    assert isinstance(expression.comparators[0],ast.Constant) and expression.comparators[0].value == 200
+    namespace={}
     exec(transformed,namespace)
-    assert namespace['formula'](object(),200) is True
-    assert namespace['formula'](object(),201) is False
+    assert namespace['_c_Values'].formula(object(),200) is True
+    assert namespace['_c_Values'].formula(object(),201) is False
 
 
 def test_enum_constants_decline_receiver_rebinding():
-    source='def formula(self, value, other):\n    self = other\n    return value == self.Status.OK\n'
-    pass_=Constants(SimpleNamespace(name='_c_Values',cells={}),
-        native_cell('bint',('value','other')),
-        {('_c_Values','Status','OK'):('_mx_enum_const_0',200)})
-    assert cst.parse_module(source).visit(pass_).code==source
-    assert pass_.count==0
+    source=in_class('def formula(self, value, other):\n    self = other\n    return value == self.Status.OK')
+    assert literals('m', source, STATUS) == source
 
 
 @pytest.mark.parametrize('name,value',[
