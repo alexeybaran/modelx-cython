@@ -21,7 +21,7 @@ on:
 # a wheel, or fails at once.
 # macOS lanes are a job of their own, one at a time: queued macOS jobs were cancelled after
 # 15 minutes without a runner.
-# Python 3.9, the declared floor, has no lane.
+# Python 3.10 is the declared floor (requires-python), as in lifelib.
 jobs:
   lane:
     name: ${{ matrix.os }} / ${{ matrix.python-version }}
