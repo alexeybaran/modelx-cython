@@ -284,7 +284,8 @@ class ModuleVisitor(m.MatcherDecoratableVisitor, ParentScopeAddin):
         self.locked_classes = set()  # classes whose __init__ assigns self._mx_lock
         self.itemspace_classes = set()
         self.dynamic_ref_classes = set()
-        self.wrapper = cst.metadata.MetadataWrapper(cst.parse_module(source))
+        # a module just parsed holds no node twice: the wrapper needs no copy of it
+        self.wrapper = cst.metadata.MetadataWrapper(cst.parse_module(source), unsafe_skip_copy=True)
         self.wrapper.visit(self)
         self.kwarg_called_names = self._collect_kwarg_called_names()
 
