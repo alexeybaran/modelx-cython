@@ -361,6 +361,17 @@ def _names(target):
     return []
 
 
+def _held_names(node):
+    """The names a value holds as they are: the value itself, or the items of a display."""
+    if isinstance(node, cst.Name):
+        return [node.value]
+    if isinstance(node, (cst.Tuple, cst.List, cst.Set)):
+        return [n for e in node.elements for n in _held_names(e.value)]
+    if isinstance(node, cst.Dict):
+        return [n for e in node.elements if isinstance(e, cst.DictElement) for n in _held_names(e.value)]
+    return []
+
+
 def _walk(node):
     found = []
 
@@ -382,10 +393,21 @@ class _Rename(cst.CSTTransformer):
 
 
 # ---------------------------------------------------------------- facts of one formula
+# builtins that only read a list passed to them, and list methods that do not change the list
+READERS = ('sum', 'len', 'zip', 'range', 'min', 'max', 'list', 'tuple', 'sorted', 'enumerate', 'reversed',
+           'any', 'all', 'map', 'filter', 'set', 'frozenset', 'iter', 'isinstance', 'str', 'repr', 'float', 'int')
+_LIST_READS = ('count', 'index', 'copy')
+
+
 class _Facts(cst.CSTVisitor):
     """Bindings, element writes, appends and returns of one formula body."""
 
-    def __init__(self):
+    def __init__(self, readers=frozenset(READERS)):
+        self.readers = readers      # the READERS that resolve to the builtins in this formula
+        self.escapes = set()        # locals a method, a callee or an alias may change in place: lists
+        self.mutated = set()        # locals that are the receiver of a list method other than append
+        self.aliases = []           # (a, b) of ``a = b``: one object under two names
+        self._appending = set()     # ids of the ``v.append`` of the recorded appends
         self.assigns = {}           # name -> [('value', expr) | ('unpack', expr, i, n) | ('aug', op, expr)
                                     #          | ('for', iter, i, n) | ('other',)]
         self.writes = []            # (base expr, value expr) of v[i] = x
@@ -406,6 +428,8 @@ class _Facts(cst.CSTVisitor):
             tgt = t.target
             if isinstance(tgt, cst.Name):
                 self.add(tgt.value, ('value', node.value))
+                if isinstance(node.value, cst.Name):
+                    self.aliases.append((tgt.value, node.value.value))
             elif isinstance(tgt, (cst.Tuple, cst.List)):
                 n = len(tgt.elements)
                 for i, e in enumerate(tgt.elements):
@@ -419,6 +443,8 @@ class _Facts(cst.CSTVisitor):
             elif isinstance(tgt, cst.Subscript):
                 self.store_targets.add(id(tgt))
                 self.writes.append((tgt.value, node.value))
+        if not isinstance(node.value, cst.Name) or not all(isinstance(t.target, cst.Name) for t in node.targets):
+            self.escapes.update(_held_names(node.value))    # a list stored in a container or attribute
 
     def concatenation(self, value):
         """diag-kr: ``A + B + ...`` whose every operand is a list comprehension or
@@ -504,6 +530,10 @@ class _Facts(cst.CSTVisitor):
     def visit_Del(self, node):
         for name in _names(node.target):
             self.add(name, ('other',))
+        targets = [e.value for e in node.target.elements] if isinstance(node.target, cst.Tuple) else [node.target]
+        for target in targets:
+            if isinstance(target, cst.Subscript) and isinstance(target.value, cst.Name):
+                self.mutated.add(target.value.value)
 
     def visit_Import(self, node):
         for alias in node.names:
@@ -519,6 +549,29 @@ class _Facts(cst.CSTVisitor):
         if (isinstance(f, cst.Attribute) and f.attr.value == 'append' and len(node.args) == 1
                 and node.args[0].keyword is None and node.args[0].star == ''):
             self.appends.append((f.value, node.args[0].value, node))
+            self._appending.add(id(f))
+        if not (isinstance(f, cst.Name) and f.value in self.readers):
+            # R1: a callee may change a list passed to it, so the list stays the one it changes
+            self.escapes.update(a.value.value for a in node.args if isinstance(a.value, cst.Name))
+
+    def visit_Attribute(self, node):
+        # R1: v.sort(), v.extend(w), v.pop(), f = v.sort, ...: the list itself changes, so it stays a list
+        if (isinstance(node.value, cst.Name) and id(node) not in self._appending
+                and node.attr.value not in _LIST_READS):
+            self.mutated.add(node.value.value)
+
+    def escaping(self, seed=None):
+        """The locals that stay lists: changed in place or handed to code that may change them, and
+        every name bound to the same object (``a = b``); with ``seed``, the names bound with those."""
+        found = set(self.escapes | self.mutated if seed is None else seed)
+        changed = True
+        while changed:
+            changed = False
+            for a, b in self.aliases:
+                if (a in found) != (b in found):
+                    found.update((a, b))
+                    changed = True
+        return found
 
     def visit_FunctionDef(self, node):
         self.add(node.name.value, ('other',))
@@ -551,6 +604,8 @@ class VectorLowering(cst.CSTTransformer):
         self.ref_scalars = {}
         self.param_scalars = {}         # D87: C-typed parameters, unless the formula rebinds them
         self.strict_locals = False      # D94: module without vector cells: untyped writes keep a list
+        self.readers = frozenset(READERS)   # the READERS that are the builtins in this formula
+        self.escaping = set()
         self.scope_stack = []           # per enclosing comprehension/lambda: expanded here
 
     # ---------------------------------------------------------------- kinds
@@ -751,9 +806,10 @@ class VectorLowering(cst.CSTTransformer):
 
     # ---------------------------------------------------------------- analysis
     def analyse(self, body):
-        facts = _Facts()
+        facts = _Facts(self.readers)
         body.visit(facts)
         self.facts = facts
+        self.escaping = facts.escaping()
         self.statement_comps = facts.statement_comps
         assigns = facts.assigns
         for name, kind in self.param_scalars.items():
@@ -797,6 +853,21 @@ class VectorLowering(cst.CSTTransformer):
         self.owned = {name for name, items in assigns.items() if self.env.get(name) in ('V', 'I')
                       and all(item[0] == 'value' and isinstance(self.kind(item[1]), str)
                               and self.kind(item[1])[0] == 'A' for item in items)}
+        for name in sorted(facts.escaping(facts.mutated)):
+            for item in assigns.get(name, ()):
+                if item[0] in ('value', 'unpack') and self.cached_value(item[1]):
+                    raise VectorWriteError(
+                        f'{self.cells.model_path}: {name!r} holds the cached value of a vector cell and is '
+                        f'changed in place; cached vectors are immutable: change a copy (list(...))')
+
+    def cached_value(self, node):
+        """Whether ``node`` gives the cached value of a vector cell (or a tuple of them) as it is."""
+        if isinstance(node, cst.Subscript) and _index(node) is not None:
+            return self.cached_value(node.value)
+        if isinstance(node, cst.IfExp):
+            return self.cached_value(node.body) or self.cached_value(node.orelse)
+        k = self.kind(node) if isinstance(node, cst.Call) else None
+        return k is not None and not (isinstance(k, str) and k[0] == 'A')
 
     def returned_kinds(self, facts):
         """Kinds that a local takes from the cell's own traced shape when it is returned;
@@ -842,7 +913,7 @@ class VectorLowering(cst.CSTTransformer):
                     self.env[name] = None
                 if all(isinstance(k, str) and k[-1] in (candidate, '?') for k in trial):
                     kinds = trial
-        if not kinds or any(k is None for k in kinds) or returned.get(name) == 'X':
+        if not kinds or any(k is None for k in kinds) or returned.get(name) == 'X' or name in self.escaping:
             return None
         if all(isinstance(k, tuple) for k in kinds):
             return kinds[0] if len(set(kinds)) == 1 else None
@@ -1769,6 +1840,11 @@ class _ObjectUses(cst.CSTTransformer):
         shape = self._shape(original)
         if shape is None or self._native(original, shape):
             return updated
+        parent = self._parent(original)
+        if (isinstance(original, cst.Call) and isinstance(parent, cst.Attribute)
+                and parent.attr.value not in _LIST_READS):
+            raise VectorWriteError(f'{_code(original)}.{parent.attr.value}: the cached value of a vector cell '
+                                   f'is changed in place; cached vectors are immutable: change a copy (list(...))')
         self.converted.append(_code(original)[:80])
         if isinstance(shape, tuple):
             return _expr(f'tuple([_mx_vector.tolist() for _mx_vector in {_code(updated)}])')
@@ -1802,10 +1878,12 @@ def lower(node, cls_info, cells, scope, counter, module, ref_kinds=None):
     if not module_uses_vectors(module) or not isinstance(node.body, cst.IndentedBlock):
         return node
     cells.vector_report = report = {'shape': _shape_json(cells.vector_shape), 'lowered': 0, 'fallbacks': []}
-    builtins = {name for name in ('sum', 'len', 'zip', 'range', 'min', 'max', 'list')
-                if scope[name] and all(isinstance(b, BuiltinAssignment) for b in scope[name])}
+    def is_builtin(name):
+        return scope[name] and all(isinstance(b, BuiltinAssignment) for b in scope[name])
+    builtins = {name for name in ('sum', 'len', 'zip', 'range', 'min', 'max', 'list') if is_builtin(name)}
     loops = [name for name in range_loop_locals(node.body, builtins) if name not in cells.params]
     lowering = VectorLowering(cls_info, cells, builtins, counter)
+    lowering.readers = frozenset(name for name in READERS if is_builtin(name))
     from .powers import KIND_FLOAT, KIND_INT
     lowering.strict_locals = not module_vector_cells(module)
     lowering.ref_scalars = {name: {KIND_FLOAT: FLOAT, KIND_INT: INT}.get(kind)
