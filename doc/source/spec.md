@@ -305,22 +305,3 @@ otherwise manual configuration.
 `native_cache_hits` also accepts `"none"`, `"scalar"`, `"dense"` and `"both"`;
 non-`"none"` modes require `dense_miss_binding`. Checked dense hits can repeat
 domain work, so the automatic mode admits the existing proven-index form.
-
-## Registered helper providers
-
-The shared safety and provider ABI rules are documented in
-[Native specialization contracts](native_contracts.md).
-
-An exported Python function Reference may declare `__modelx_cython_helper__` as a
-`(provider, operation)` tuple. The provider names a Python package resource
-with matching Cython `.pxd` and `.pyx` files. The operation receives the
-current callable first. It must delegate to that callable when its
-identity, argument types, or table layout fall outside the native path.
-
-A provider owns the table representation and the rules for exact keys,
-predecessors, column identifiers, grouped keys, and defaults. The Python
-Reference remains the behavioral oracle for live modelx, Python export,
-and compiled calls. The compiler checks operation names and only selects
-numeric capabilities where the generated call has a justified signature.
-It leaves user-defined key expressions and arbitrary generators on the
-ordinary path when their types or bindings are uncertain.

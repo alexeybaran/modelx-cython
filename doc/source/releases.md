@@ -8,9 +8,7 @@ A Reference in any Space whose value is an `IntEnum` class (one whose members co
 their integer values) is an enum definition without any declaration: it is
 fixed in the compiled model and its members compile to C constants.
 Rebinding such a Reference on a compiled model raises `AttributeError`;
-rebuild the model to change it.  The former declaration Reference
-(`modelx_helpers.typed_inputs.EnumDefinitions`) is no longer needed; a model
-that still holds one builds as before, and the marker is ignored.
+rebuild the model to change it.
 
 ### Uncached cells are typed
 
