@@ -1523,7 +1523,8 @@ def _fast_item_call(node, cls_name):
     copies References, applies the roots' and its own parameters and extends ``_mx_roots``. When the
     receiver is exactly the compiled class and has no child Spaces and no roots, that walk visits the
     root alone with no roots to apply, so the same statements run once, on a typed root. Any other
-    exported shape is left unchanged.
+    exported shape is left unchanged. An export that applies the Space formula's dynamic References
+    (``_mx_root._mx_apply_formula(...)`` after the walk) keeps that call, on the typed root, in the same place.
     """
     if not isinstance(node.body, cst.IndentedBlock):
         return node
@@ -1536,7 +1537,15 @@ def _fast_item_call(node, cls_name):
                 container = stmt.orelse
     if container is None or not isinstance(container.body, cst.IndentedBlock):
         return node
-    block = container.body.body[prefix:]
+    block = list(container.body.body[prefix:])
+    apply = None
+    if len(block) == 6:
+        apply = block.pop(3)
+        call = apply.body[0].value if isinstance(apply, cst.SimpleStatementLine) and len(apply.body) == 1 \
+            and isinstance(apply.body[0], cst.Expr) else None
+        if (not isinstance(call, cst.Call) or not same_expression(call.func, cst.parse_expression('_mx_root._mx_apply_formula'))
+                or any(arg.keyword is not None or arg.star for arg in call.args)):
+            return node
 
     def stmt(code):
         return cst.parse_statement(code + '\n')
@@ -1574,11 +1583,19 @@ def _fast_item_call(node, cls_name):
     assign = cst.Module(body=(loop[2].with_changes(body=(cst.Expr(params.with_changes(
         args=(params.args[0].with_changes(value=cst.Name(root)), *params.args[1:]))),)),)).code.strip()
     store = cst.Module(body=(block[3].with_changes(body=(store.with_changes(value=cst.Name(root)),)),)).code.strip()
+    applied = ''
+    if apply is not None:
+        applied = cst.Module(body=(apply.with_changes(body=(apply.body[0].with_changes(value=apply.body[0].value.with_changes(
+            func=cst.Attribute(cst.Name(root), cst.Name('_mx_apply_formula')))),)),)).code.strip()
+        applied = f"    {applied}\n"
     fast = cst.parse_module(
         f"if type(self) is {cls_name} and not self._mx_spaces and not self._mx_roots:\n"
         f"    {root}: {cls_name} = {item_roots.new_root(cls_name)}(self)\n"
         f"    {assign}\n"
+        f"{applied}"
         f"    {store}\n"
         f"    return {root}\n").body
+    if apply is not None:
+        block.insert(3, apply)
     new_body = container.body.with_changes(body=(*container.body.body[:prefix], *fast, *block))
     return node.with_changes(body=node.body.deep_replace(container, container.with_changes(body=new_body)))
