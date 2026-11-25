@@ -91,12 +91,16 @@ cdef class PreparedTable:
         codes = self.level_codes[level]
         if codes is None:
             if type(key) is int:            # the common case first (no numpy type lookups)
+                if not -0x8000000000000000 <= key <= 0x7fffffffffffffff:
+                    return -1
                 return self.code_ll(level, <long long>key)
             if isinstance(key, (float, np.floating)) and float(key).is_integer():
                 key = int(key)          # pandas finds an integral float key on an int index
-            if not _plain_int(key):
+            if not _plain_int(key) or not -0x8000000000000000 <= key <= 0x7fffffffffffffff:
                 return -1
             return self.code_ll(level, <long long>key)
+        if type(key) is bool or isinstance(key, np.bool_):
+            return -1               # no label of a text or float level, although True == 1.0 (pandas: KeyError)
         code = (<dict>codes).get(key)
         return -1 if code is None else <Py_ssize_t>code
 
