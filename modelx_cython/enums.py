@@ -1,17 +1,19 @@
-"""IntEnum members in model text: integer literals before any other pass, and fixed definitions.
+"""IntEnum members in model text: integers where that makes the speed, members everywhere else.
 
 An enum definition is a Reference whose traced value is an enum-safe IntEnum class (selected by
-type, no declaration). ``literals`` replaces each ``self.<Ref>.<member>`` by the member's value,
-so the compiler sees integers everywhere a member is used; the definition is read-only in the
-compiled model (``prepare``, ``bind_properties``), because its values are now in the code.
+type, no declaration). ``literals`` replaces ``self.<Ref>.<member>`` by the member's value only in an
+integer context: an operand of a comparison or of arithmetic, an argument of a Cell whose parameter
+is a number, a subscript that is read, a loop over a display of members whose variable is used only
+in such ways. Every other use keeps the member object. A parameter or Cell result that the tracer
+typed as a C integer because every traced value was a member of one class is converted back through
+its class (``Class(value)``, which raises for an integer that is not a member) wherever the object
+is needed. The definition is read-only in the compiled model (``prepare``, ``bind_properties``),
+because its values are now in the code.
 """
-import builtins
-import re
+import numbers
 
 import libcst as cst
 
-from .scopes import CstFacts, lexical_nodes
-from .syntax import walk as cst_walk
 from .consts import MX_SYS_MOD
 
 
@@ -62,278 +64,588 @@ def bind_properties(cls, body):
     return tuple(result)
 
 
-# ---------------------------------------------------------------- members as integer literals
-def literals(module, source, ref_info, cells_info=None):
-    """``source`` with every member of an IntEnum class held in a Reference of its Space
-    (``self.<Ref>.<member>``, the Reference's traced value an enum-safe IntEnum class) replaced by
-    the member's integer literal, before any other pass reads the module. Comparisons, call
-    arguments, locals, loops, ``in`` and table keys then take the paths that integers take.
-
-    A value known to be of an IntEnum class (a member, a parameter or Cell result traced as one, a
-    local bound only to members of one class) keeps ``.name`` (its name, looked up by value) and
-    ``.value`` (the integer); any other attribute of it, and an identity test with a member
-    (``x is E.m``), is a build error: compiled code holds such values as integers."""
-    members = {}            # (class, Reference) -> {member: value}, joined as builder._init_refs does
-    for fqname, info in ref_info.items():
-        owner, _, ref = fqname.rpartition('.')
-        enum = getattr(info, 'enum', None)
-        if owner.rpartition('.')[0] == module and enum and getattr(info, 'enum_safe', False):
-            members[owner.rpartition('.')[2], ref] = {
-                name: value for name, value in enum[2].items() if -(1 << 63) <= value < (1 << 63)}
-    traced = {key: _traced_names(info) for key, info in (cells_info or {}).items()}     # all modules: child Spaces
-    if not members and not any(any(names.values()) for names in traced.values()):
-        return source
-    return cst.parse_module(source).visit(_Literals(module, members, traced)).code
-
-
-class _Table(dict):
-    plain = True            # str() and format() of a member give its integer's
-
-
-def _names(cls):
-    """{value: name} of an IntEnum class that compares as its integers, else None."""
-    import enum
-    if (isinstance(cls, type) and issubclass(cls, enum.IntEnum) and type(cls) is type(enum.IntEnum)
-            and cls.__eq__ is int.__eq__ and cls.__ne__ is int.__ne__):
-        table = _Table((int(member), member.name) for member in cls)
-        table.plain = all(getattr(cls, m) is getattr(enum.IntEnum, m) for m in ('__str__', '__format__'))
-        return table
-
-
+# ---------------------------------------------------------------- members as integers, by use
 _code = cst.Module([]).code_for_node
-_SHOWN = ('repr', 'ascii', 'type', 'isinstance', 'getattr', 'hasattr', 'id', 'str', 'format')   # the class shows
+_NUMERIC = ('int', 'float', 'bool', 'abs', 'round', 'range', 'divmod', 'pow', 'hash', 'len')    # give a plain number
+_EXTREMES = ('min', 'max')          # give one of their arguments
+_DISPLAYS = (cst.Tuple, cst.List, cst.Set)
 
 
-def _traced_names(info):
-    """{parameter or None (the result): {value: name}} of a Cell's values traced as one IntEnum class."""
+def enum_safe(cls):
+    """Whether ``cls`` is an IntEnum class whose members behave as their integers in every operation of ``int``
+    and whose ``value`` is that integer: its integer can then stand for a member wherever only the number counts."""
+    import enum
+    return (isinstance(cls, type) and issubclass(cls, enum.IntEnum) and type(cls) is type(enum.IntEnum)
+            and all(getattr(cls, name, None) is getattr(enum.IntEnum, name, None)
+                    for name in {*vars(int), '__str__'} - {'__doc__'} if name.startswith('__'))
+            and all(type(member.value) is int and member.value == int(member) for member in cls))
+
+
+def _kind(tp):
+    """How a traced type is held: (module, qualname) of an enum-safe IntEnum class (a C integer that stands for a
+    member), 'number' for another numeric type, None for an object."""
+    import enum
+    if enum_safe(tp):
+        return tp.__module__, tp.__qualname__
+    if tp in (numbers.Integral, numbers.Real) or (isinstance(tp, type) and issubclass(tp, numbers.Real)
+                                                  and not issubclass(tp, enum.Enum)):
+        return 'number'
+    return None
+
+
+def _signature(info):
+    """(parameter names, {name: kind}, result kind) of a traced Cell."""
+    kinds = {name: _kind(tp) for name, tp in (getattr(info, 'arg_types', None) or {}).items()}
     ret = getattr(info, 'ret_type', None)
-    found = {None: _names(getattr(ret, 'value_type', None)) if not getattr(ret, 'is_array', True) else None}
-    found.update((name, _names(tp)) for name, tp in (getattr(info, 'arg_types', None) or {}).items())
-    found.update(enumerate(_names(tp) for tp in (getattr(info, 'arg_types', None) or {}).values()))   # by position
-    return {key: names for key, names in found.items() if names}
+    result = _kind(getattr(ret, 'value_type', None)) if not getattr(ret, 'is_array', True) else None
+    return tuple(kinds), kinds, result
 
 
-class _Literals(cst.CSTTransformer):
-    def __init__(self, module, members, traced):
-        super().__init__()
-        self.module, self.members, self.traced = module, members, traced
-        self.cls, self.method, self.scopes = None, None, []     # scopes: (receiver is the method's, {name: names})
-        self.in_place = set()       # ids of displays iterated in place or right of `in`
-        self.kept = set()           # ids of members that stay objects: their class shows, or a stored key
+def _target_names(target):
+    """The names a target binds (subscripts and attributes bind none)."""
+    if isinstance(target, cst.Name):
+        return [target.value]
+    if isinstance(target, (cst.Tuple, cst.List)):
+        return [name for element in target.elements for name in _target_names(element.value)]
+    return []
+
+
+class _Model:
+    """What the trace knows of the whole model: enum definitions, Space References and Cell signatures."""
+
+    def __init__(self, ref_info, cells_info):
+        self.members, self.reach, self.spaces = {}, {}, {}
+        for fqname, info in ref_info.items():
+            owner, _, ref = fqname.rpartition('.')
+            enum = getattr(info, 'enum', None)
+            if enum and getattr(info, 'enum_safe', False):
+                self.members[owner, ref] = (enum[:2], {name: value for name, value in enum[2].items()
+                                                       if -(1 << 63) <= value < (1 << 63)})
+                self.reach.setdefault((owner, enum[:2]), ref)
+            if getattr(info, 'mx_class', ''):
+                self.spaces[owner, ref] = info.mx_class
+        self.cells = {key: _signature(info) for key, info in (cells_info or {}).items()}
+        self.typed = any(isinstance(kind, tuple) for _, kinds, result in self.cells.values()
+                         for kind in (*kinds.values(), result))
+
+    def concerns(self, module):
+        return self.typed or any(owner.rpartition('.')[0] == module for owner, _ in self.members)
+
+    def cell(self, owner, name):
+        return self.cells.get(f'{owner}._f_{name}') or self.cells.get(f'{owner}.{name}')
+
+
+class _Bindings(cst.CSTVisitor):
+    """{name: [values of each binding, or None for a binding that is not `name = value` or `for name in display`]}
+    of a method's own scope."""
+
+    def __init__(self):
+        self.found, self.depth = {}, 0
+
+    def other(self, target):
+        for name in _target_names(target):
+            self.found.setdefault(name, []).append(None)
+
+    def visit_Assign(self, node):
+        if self.depth:
+            return
+        if len(node.targets) == 1 and isinstance(node.targets[0].target, cst.Name):
+            self.found.setdefault(node.targets[0].target.value, []).append([node.value])
+        else:
+            for target in node.targets:
+                self.other(target.target)
+
+    def visit_For(self, node):
+        if self.depth:
+            return
+        if (isinstance(node.target, cst.Name) and isinstance(node.iter, _DISPLAYS)
+                and all(isinstance(element, cst.Element) for element in node.iter.elements)):
+            self.found.setdefault(node.target.value, []).append([element.value for element in node.iter.elements])
+        else:
+            self.other(node.target)
+
+    def visit_AugAssign(self, node):
+        if not self.depth:
+            self.other(node.target)
+
+    visit_AnnAssign = visit_Del = visit_AugAssign
+
+    def visit_NamedExpr(self, node):        # binds in the function, also from inside a comprehension
+        self.other(node.target)
+
+    def visit_AsName(self, node):
+        if not self.depth:
+            self.other(node.name)
+
+    def visit_ImportAlias(self, node):
+        if not self.depth and node.asname is None:
+            root = node.name
+            while isinstance(root, cst.Attribute):
+                root = root.value
+            self.other(root)
+
+    def visit_Global(self, node):
+        for item in node.names:
+            self.found.setdefault(item.name.value, []).append(None)
+
+    visit_Nonlocal = visit_Global
+
+    def visit_FunctionDef(self, node):
+        if not self.depth:
+            self.other(node.name)
+        self.depth += 1
+
+    visit_ClassDef = visit_FunctionDef
+
+    def leave_FunctionDef(self, node):
+        self.depth -= 1
+
+    leave_ClassDef = leave_FunctionDef
+
+    def visit_Lambda(self, node):
+        self.depth += 1
+
+    def leave_Lambda(self, node):
+        self.depth -= 1
+
+    def visit_MatchAs(self, node):
+        if not self.depth and node.name is not None:
+            self.other(node.name)
+
+    def visit_MatchStar(self, node):
+        self.visit_MatchAs(node)
+
+    def visit_MatchMapping(self, node):
+        if not self.depth and node.rest is not None:
+            self.other(node.rest)
+
+
+class _Formula:
+    """One method of a Space class: its signature, bindings and, after ``analyse``, its uses."""
+
+    def __init__(self, model, module, cls, node):
+        self.model, self.module, self.cls, self.node = model, module, cls, node
+        self.owner = f'{module}.{cls}'
+        self.key = f'{self.owner}.{node.name.value}'
+        names, kinds, self.result = model.cells.get(self.key) or ((), {}, None)
+        params = node.params
+        self.params = [p.name.value for p in (*params.posonly_params, *params.params, *params.kwonly_params,
+                                              *(p for p in (params.star_arg, params.star_kwarg)
+                                                if isinstance(p, cst.Param)))]
+        finder = _Bindings()
+        node.body.visit(finder)
+        self.bindings = finder.found
+        self.own = self.params[:1] == ['self'] and 'self' not in self.bindings
+        self.kinds = {name: kinds.get(name) for name in self.params[1:]}
 
     def where(self):
         """The Cell as the model names it (``Space.cell``, as ``builder`` ``model_path``)."""
         spaces = [part[3:] for part in self.module.split('.')[1:-1]]
-        return '.'.join((*spaces, (self.cls or '').removeprefix('_c_'), (self.method or '').removeprefix('_f_')))
+        return '.'.join((*spaces, self.cls.removeprefix('_c_'), self.node.name.value.removeprefix('_f_')))
 
-    def visit_ClassDef(self, node):
-        if self.cls is not None or self.scopes:
-            return False            # a nested class keeps its own names
-        self.cls = node.name.value
-
-    def leave_ClassDef(self, original, updated):
-        self.cls = None
-        return updated
-
-    def _enter(self, node, bound):
-        if not self.scopes:         # a method: `self` is its first parameter and is never rebound
-            body = node.body.body if isinstance(node.body, cst.IndentedBlock) else (node.body,)
-            bindings = CstFacts(body).bindings(lexical_nodes(body))
-            own = bound[:1] == ['self'] and 'self' not in bindings and self.cls is not None
-            self.method = node.name.value if isinstance(node, cst.FunctionDef) else None
-            self.scopes.append((own, {}))
-            traced = self.traced.get(f'{self.module}.{self.cls}.{self.method}', {}) if own else {}
-            typed = {name: names for name, names in traced.items() if name in bound and name not in bindings}
-            typed.update(self._member_locals(body, typed) if own else {})
-            self.scopes[-1] = (own, typed)
-        else:                       # a nested scope: the method's `self` and names unless it binds its own
-            own, typed = self.scopes[-1]
-            self.scopes.append((own and 'self' not in bound,
-                                {k: v for k, v in typed.items() if k not in bound}))
-
-    def _member_locals(self, body, typed):
-        """{local: names} of the locals bound (by ``=`` or ``for`` over a literal tuple) only to members of one class."""
-        found, counts, facts = {}, {}, CstFacts(body)
-        for part in lexical_nodes(body):
-            if isinstance(part, cst.Assign) and len(part.targets) == 1 and isinstance(part.targets[0].target, cst.Name):
-                name, values = part.targets[0].target.value, [part.value]
-            elif isinstance(part, cst.For) and isinstance(part.target, cst.Name) and isinstance(part.iter, cst.Tuple):
-                name, values = part.target.value, [e.value for e in part.iter.elements]
-            else:
-                continue
-            names = {self._names_key(value) for value in values}
-            found.setdefault(name, set()).update(names)
-            counts[name] = counts.get(name, 0) + 1
-        return {name: dict(keys.pop()) for name, keys in found.items() if len(keys) == 1 and None not in keys
-                and name not in typed and facts.stores[name] == counts[name]}
-
-    def _names_key(self, node):
-        if isinstance(node, cst.IfExp):
-            body, orelse = self._names_key(node.body), self._names_key(node.orelse)
-            return body if body == orelse else None
-        names = self.names(node)
-        return tuple(sorted(names.items())) if names else None
-
-    def visit_FunctionDef(self, node):
-        params = node.params
-        self._enter(node, [p.name.value for p in (*params.posonly_params, *params.params, *params.kwonly_params,
-                                                  *(p for p in (params.star_arg, params.star_kwarg)
-                                                    if isinstance(p, cst.Param)))])
-
-    def visit_Lambda(self, node):
-        if self.scopes:
-            self.visit_FunctionDef(node)
-        else:
-            self.scopes.append((False, {}))     # a lambda outside a method has no receiver
-
-    def _comprehension(self, node):
-        if self.scopes:
-            self._enter(node, [n.value for part in cst_walk(node) if isinstance(part, cst.CompFor)
-                               for n in cst_walk(part.target) if isinstance(n, cst.Name)])
-        else:
-            self.scopes.append((False, {}))
-
-    def _left(self, original, updated):
-        self.scopes.pop()
-        return updated
-
-    visit_GeneratorExp = visit_ListComp = visit_SetComp = visit_DictComp = _comprehension
-    leave_GeneratorExp = leave_ListComp = leave_SetComp = leave_DictComp = _left
-    leave_FunctionDef = leave_Lambda = _left
-
-    def value(self, node):
-        """The integer of ``self.<Ref>.<member>`` in a method of the class holding the Reference, else None."""
-        if (self.scopes and self.scopes[-1][0] and isinstance(node, cst.Attribute)
-                and isinstance(node.value, cst.Attribute) and isinstance(node.value.value, cst.Name)
-                and node.value.value.value == 'self'):
-            return self.members.get((self.cls, node.value.attr.value), {}).get(node.attr.value)
+    def member(self, node):
+        """(class, integer) of ``self.<Ref>.<member>``, else None."""
+        if (isinstance(node, cst.Attribute) and isinstance(node.value, cst.Attribute)
+                and isinstance(node.value.value, cst.Name) and node.value.value.value == 'self'):
+            cls, members = self.model.members.get((self.owner, node.value.attr.value), (None, {}))
+            if node.attr.value in members:
+                return cls, members[node.attr.value]
         return None
 
-    def names(self, node):
-        """{value: name} of the IntEnum class whose value ``node`` is known to hold (original node), else None."""
-        if not self.scopes or not self.scopes[-1][0]:
+    def space(self, node):
+        """The class path of the Space that ``self.<name>`` holds (a child Space or a Reference to a Space), else None."""
+        if isinstance(node, cst.Attribute) and isinstance(node.value, cst.Name) and node.value.value == 'self':
+            name = node.attr.value
+            found = self.model.spaces.get((self.owner, name))
+            if found is not None:           # the model may have been renamed since the trace
+                return '.'.join((self.module.partition('.')[0], *found.split('.')[1:]))
+            child = f'{self.module.rpartition(".")[0]}._m_{self.cls[3:]}._mx_classes._c_{name}'
+            if name in self.children or any(key.startswith(child + '.') for key in self.model.cells):
+                return child
+        return None
+
+    def callee(self, node):
+        """(Cell key, signature) of ``self.<cell>(...)`` or ``self.<Space>.<cell>(...)``, else None."""
+        func = node.func
+        if not isinstance(func, cst.Attribute):
             return None
+        if isinstance(func.value, cst.Name) and func.value.value == 'self':
+            owner = self.owner
+        else:
+            owner = self.space(func.value)
+        for key in (f'{owner}._f_{func.attr.value}', f'{owner}.{func.attr.value}') if owner else ():
+            if key in self.model.cells:
+                return key, self.model.cells[key]
+        return None
+
+    def reach(self, cls):
+        """The expression that gives the class ``cls`` in this method."""
+        ref = self.model.reach.get((self.owner, cls))
+        if ref is not None:
+            return f'self.{ref}'
+        return f"__import__('importlib').import_module({cls[0]!r}).{cls[1]}"
+
+    def analyse(self):
+        banned = set()
+        while True:
+            uses = _Uses(self, banned)
+            self.node.body.visit(uses)
+            if uses.objects <= banned:
+                self.uses = uses
+                return
+            banned |= uses.objects
+
+
+class _Uses(cst.CSTVisitor):
+    """The contexts of one method. ``literal``: members to write as integers; ``convert``: integer-held values to
+    convert to their member; ``objects``: locals and loop variables that must hold objects (they have a use that
+    needs the member), found under the assumption that those in ``banned`` already do."""
+
+    def __init__(self, formula, banned):
+        self.f, self.banned = formula, banned
+        self.int_ok, self.elements, self.nonload, self.stores = set(), set(), set(), set()
+        self.literal, self.convert, self.objects = {}, {}, set()
+        self.depth = self.foreign = 0
+        # a held name: (class, key, whether it may be turned into an object by banning it)
+        scope = {name: (kind if name not in formula.bindings else None, ('param', name), False)
+                 for name, kind in formula.kinds.items() if isinstance(kind, tuple)}
+        self.scopes = [scope]
+        grown = True
+        while grown:
+            grown = False
+            for name, bindings in formula.bindings.items():
+                if name in scope or name in formula.params or ('local', name) in banned or None in bindings:
+                    continue
+                classes = {self.classify(value) for values in bindings for value in values}
+                if len(classes) == 1 and None not in classes:
+                    scope[name] = (classes.pop(), ('local', name), True)
+                    grown = True
+
+    # ---- names and classes
+    def resolve(self, name):
+        for scope in reversed(self.scopes):
+            if name in scope:
+                return scope[name]
+        return None
+
+    def classify(self, node):
+        """The class of an expression that is an enum value held as an integer (or a member written here)."""
+        if isinstance(node, cst.IfExp):
+            body, orelse = self.classify(node.body), self.classify(node.orelse)
+            return body if body == orelse else None
         if isinstance(node, cst.Name):
-            return self.scopes[-1][1].get(node.value)
-        if self.value(node) is not None:
-            names = {}
-            for name, value in self.members[self.cls, node.value.attr.value].items():
-                names.setdefault(value, name)       # the first name of a value; later ones are aliases
-            return names
-        return self._traced_call(node).get(None)
+            entry = self.resolve(node.value)
+            return entry[0] if entry else None
+        if self.foreign:
+            return None
+        member = self.f.member(node)
+        if member is not None:
+            return member[0]
+        callee = self.f.callee(node) if isinstance(node, cst.Call) else None
+        return callee[1][2] if callee and isinstance(callee[1][2], tuple) else None
 
-    def _traced_call(self, node):
-        """The traced names of ``self.<cell>(...)`` or ``self.<child Space>.<cell>(...)``, else {}."""
-        func = node.func if isinstance(node, cst.Call) and self.scopes and self.scopes[-1][0] else None
-        owner = func.value if isinstance(func, cst.Attribute) else None
-        if isinstance(owner, cst.Attribute) and isinstance(owner.value, cst.Name) and owner.value.value == 'self':
-            owner = f'{self.module.rpartition(".")[0]}._m_{self.cls[3:]}._mx_classes._c_{owner.attr.value}'
-        elif isinstance(owner, cst.Name) and owner.value == 'self':
-            owner = f'{self.module}.{self.cls}'
-        return isinstance(owner, str) and (self.traced.get(f'{owner}._f_{func.attr.value}')
-                                           or self.traced.get(f'{owner}.{func.attr.value}')) or {}
+    def numeric(self, node):
+        """Whether ``node`` is known to be a number (so that ``node % x`` is arithmetic, not formatting)."""
+        if isinstance(node, (cst.Integer, cst.Float)) or self.classify(node) is not None:
+            return True
+        if isinstance(node, cst.Name):
+            return self.resolve(node.value) is None and self.f.kinds.get(node.value) == 'number' \
+                and node.value not in self.f.bindings
+        if isinstance(node, cst.UnaryOperation):
+            return self.numeric(node.expression)
+        if isinstance(node, cst.BinaryOperation):
+            return not isinstance(node.operator, cst.Modulo) or self.numeric(node.left)
+        if isinstance(node, cst.Call):
+            callee = self.f.callee(node) if not self.foreign else None
+            return callee is not None and callee[1][2] is not None or self.builtin(node) in _NUMERIC
+        return False
 
-    def _shown(self, node, through_str):
-        """A member where its class shows stays an object; an enum value held as an integer is a build error.
-        ``through_str``: only a class with its own __str__/__format__ shows."""
-        if self.value(node) is not None or self.names(node) is None:
-            return self.kept.update(() if through_str or self.value(node) is None else (id(node),))
-        if not (through_str and getattr(self.names(node), 'plain', True)):
-            raise TypeError(f'{self.where()}: `{_code(node)}` holds an IntEnum value as an integer where its class '
-                            'shows (repr, type, str), so the result would differ from live modelx')
+    def builtin(self, node):
+        name = node.func.value if isinstance(node.func, cst.Name) else None
+        return name if name not in self.f.bindings and name not in self.f.params and self.resolve(name) is None \
+            else None
+
+    def target(self, node):
+        if isinstance(node, cst.Name):
+            self.nonload.add(id(node))
+        elif isinstance(node, (cst.Tuple, cst.List)):
+            for element in node.elements:
+                self.target(element.value)
+        elif isinstance(node, cst.StarredElement):
+            self.target(node.value)
+        elif isinstance(node, cst.Subscript):
+            self.stores.add(id(node))
+
+    def needs_member(self, node, cls):
+        if cls is None:
+            raise TypeError(f'{self.f.where()}: `{_code(node)}` needs the IntEnum member of a parameter that the '
+                            'formula rebinds; compiled code holds the parameter as an integer. Bind another name')
+        if self.foreign:
+            raise TypeError(f'{self.f.where()}: `{_code(node)}` needs an IntEnum member inside a function that has '
+                            'its own `self`; compiled code holds the value as an integer')
+        self.convert[id(node)] = self.f.reach(cls)
+
+    # ---- uses
+    def visit_Name(self, node):
+        if id(node) in self.nonload or id(node) in self.int_ok:
+            return
+        entry = self.resolve(node.value)
+        if entry is None:
+            return
+        cls, key, bannable = entry
+        if bannable:
+            self.objects.add(key)
+        else:
+            self.needs_member(node, cls)
+
+    def visit_Attribute(self, node):
+        self.nonload.add(id(node.attr))
+        member = None if self.foreign else self.f.member(node)
+        if member is not None:
+            if id(node) in self.int_ok:
+                self.literal[id(node)] = member[1]
+            return False
 
     def visit_Call(self, node):
-        if isinstance(node.func, cst.Name) and node.func.value in _SHOWN and node.args:
-            self._shown(node.args[0].value, node.func.value in ('str', 'format'))
-        traced = self._traced_call(node)
+        callee = None if self.foreign else self.f.callee(node)
+        builtin = self.builtin(node)
+        starred = False
         for position, arg in enumerate(node.args):
-            expected, given = traced.get(arg.keyword.value if arg.keyword else position), self.names(arg.value)
-            if expected and given is not None and not arg.star and dict(given) != dict(expected):
-                raise TypeError(f'{self.where()}: `{_code(node)}` passes a value of one IntEnum class to a parameter '
-                                'traced as another IntEnum class, so its .name would differ from live modelx')
-
-    def visit_FormattedStringExpression(self, node):
-        self._shown(node.expression, node.conversion not in ('r', 'a'))
-
-    def visit_BinaryOperation(self, node):
-        if isinstance(node.operator, cst.Modulo) and isinstance(node.left, (cst.SimpleString, cst.ConcatenatedString)):
-            through_str = not re.search(r'%[-#0 +\d.*]*[ra]', _code(node.left))
-            right = node.right
-            for operand in ([e.value for e in right.elements] if isinstance(right, cst.Tuple) else [right]):
-                self._shown(operand, through_str)
-
-    def leave_Comparison(self, original, updated):
-        # as live: identity with None, a bool, a builtin type, or a member of a Reference that is not substituted
-        fixed = lambda n: isinstance(n, cst.Name) and (n.value in ('None', 'True', 'False')
-                                                       or isinstance(getattr(builtins, n.value, None), type))
-        foreign = lambda n: (isinstance(n, cst.Attribute) and isinstance(n.value, cst.Attribute)
-                             and isinstance(n.value.value, cst.Name) and n.value.value.value == 'self'
-                             and (self.cls, n.value.attr.value) not in self.members)
-        formula, operands = self.method and not self.method.startswith(('_mx_', '__')), [original.left]
-        for left, item in zip(operands, original.comparisons):
-            operands.append(right := item.comparator)
-            if isinstance(item.operator, (cst.Is, cst.IsNot)) and not (fixed(left) or fixed(right)) and (
-                    any(self.value(n) is not None or self.names(n) is not None for n in (left, right))
-                    or self.members and formula and not (foreign(left) or foreign(right))):
-                raise TypeError(f'{self.where()}: `{_code(original)}` tests by identity in a model whose IntEnum '
-                                'members compile to integers, so the result would differ from live modelx; '
-                                'compare with == or != instead')
-        return updated
-
-    # members held in a container display stay objects (so `.name` works where the container goes), unless the
-    # display is iterated in place, is the right side of `in` or is a subscript key
-    def visit_For(self, node):
-        self.in_place.add(id(node.iter))
-
-    def visit_Index(self, node):
-        if id(node.value) not in self.kept:
-            self.in_place.add(id(node.value))
-
-    def visit_AssignTarget(self, node):         # a stored key stays a member: the container keeps it
-        if isinstance(node.target, cst.Subscript):
-            self.kept.update(id(e.slice.value) for e in node.target.slice if isinstance(e.slice, cst.Index))
-
-    visit_CompFor = visit_For
+            starred = starred or bool(arg.star)
+            if arg.keyword is not None:
+                self.nonload.add(id(arg.keyword))
+            if arg.star or starred and arg.keyword is None:
+                continue
+            if callee is not None:
+                names, kinds, _ = callee[1]
+                name = arg.keyword.value if arg.keyword is not None else (names[position:position + 1] or (None,))[0]
+                if kinds.get(name) is not None:
+                    self.int_ok.add(id(arg.value))
+            elif builtin in _NUMERIC or builtin in _EXTREMES and id(node) in self.int_ok:
+                self.int_ok.add(id(arg.value))
+        if callee is not None and isinstance(callee[1][2], tuple) and id(node) not in self.int_ok:
+            self.needs_member(node, callee[1][2])
 
     def visit_Comparison(self, node):
-        self.in_place.update(id(c.comparator) for c in node.comparisons if isinstance(c.operator, (cst.In, cst.NotIn)))
+        operands = [node.left, *(item.comparator for item in node.comparisons)]
+        operators = [item.operator for item in node.comparisons]
+        for position, operand in enumerate(operands):
+            near = operators[max(position - 1, 0):position + 1]
+            if any(isinstance(operator, (cst.Is, cst.IsNot)) for operator in near):
+                continue
+            self.int_ok.add(id(operand))
+            if position and isinstance(operators[position - 1], (cst.In, cst.NotIn)) and isinstance(operand, _DISPLAYS):
+                self.elements.add(id(operand))
 
-    def _display(self, original, updated):
-        if id(original) in self.in_place:
-            return updated
-        keep = lambda o, u: o if self.value(o) is not None else u
-        if isinstance(original, cst.Dict):
-            return updated.with_changes(elements=[u.with_changes(key=keep(o.key, u.key), value=keep(o.value, u.value))
-                                                  if isinstance(o, cst.DictElement) else u
-                                                  for o, u in zip(original.elements, updated.elements)])
-        return updated.with_changes(elements=[u.with_changes(value=keep(o.value, u.value))
-                                              for o, u in zip(original.elements, updated.elements)])
+    def visit_BinaryOperation(self, node):
+        if not isinstance(node.operator, cst.Modulo) or self.numeric(node.left):
+            self.int_ok.update((id(node.left), id(node.right)))
 
-    leave_Tuple = leave_List = leave_Set = leave_Dict = _display
+    def visit_UnaryOperation(self, node):
+        self.int_ok.add(id(node.expression))
+
+    def visit_BooleanOperation(self, node):
+        if id(node) in self.int_ok:
+            self.int_ok.update((id(node.left), id(node.right)))
+
+    def visit_IfExp(self, node):
+        self.int_ok.add(id(node.test))
+        if id(node) in self.int_ok:
+            self.int_ok.update((id(node.body), id(node.orelse)))
+
+    def visit_If(self, node):
+        self.int_ok.add(id(node.test))
+
+    visit_While = visit_Assert = visit_CompIf = visit_If
+
+    def visit_Subscript(self, node):
+        if id(node) in self.stores or not self.foreign and self.f.space(node.value) is not None:
+            return                      # a stored key and the argument of an item Space stay objects
+        for element in node.slice:
+            part = element.slice
+            if isinstance(part, cst.Index):
+                self.int_ok.add(id(part.value))
+                if isinstance(part.value, cst.Tuple):
+                    self.elements.add(id(part.value))
+            else:
+                self.int_ok.update(id(bound) for bound in (part.lower, part.upper, part.step) if bound is not None)
+
+    def visit_Tuple(self, node):
+        if id(node) in self.elements:
+            self.int_ok.update(id(element.value) for element in node.elements if isinstance(element, cst.Element))
+
+    visit_List = visit_Set = visit_Tuple
+
+    def visit_MatchValue(self, node):
+        self.int_ok.add(id(node.value))
+
+    def visit_Return(self, node):
+        if node.value is not None and not self.depth and self.f.result is not None:
+            self.int_ok.add(id(node.value))
+
+    def held_local(self, target):
+        entry = self.resolve(target.value) if isinstance(target, cst.Name) else None
+        return entry is not None and entry[2] and entry[1] == ('local', target.value)
+
+    def visit_Assign(self, node):
+        for target in node.targets:
+            self.target(target.target)
+        if len(node.targets) == 1 and self.held_local(node.targets[0].target):
+            self.int_ok.add(id(node.value))
+
+    def visit_AugAssign(self, node):
+        self.target(node.target)
+        if not isinstance(node.operator, cst.ModuloAssign):
+            self.int_ok.add(id(node.value))
+
+    def visit_AnnAssign(self, node):
+        self.target(node.target)
+
+    visit_Del = visit_AnnAssign
+
+    def visit_NamedExpr(self, node):
+        self.target(node.target)
+
+    def visit_AsName(self, node):
+        self.target(node.name)
+
+    def visit_For(self, node):
+        self.target(node.target)
+        if self.held_local(node.target) and isinstance(node.iter, _DISPLAYS):
+            self.elements.add(id(node.iter))
+
+    # ---- scopes
+    def _comprehension(self, node):
+        parts, part = [], node.for_in
+        while part is not None:
+            parts.append(part)
+            part = part.inner_for_in
+        bound = [name for part in parts for name in _target_names(part.target)]
+        scope = dict.fromkeys(bound)
+        for part in parts:
+            self.target(part.target)
+            if (isinstance(part.target, cst.Name) and isinstance(part.iter, _DISPLAYS) and part.iter.elements
+                    and bound.count(part.target.value) == 1 and ('loop', id(part)) not in self.banned
+                    and all(isinstance(element, cst.Element) for element in part.iter.elements)):
+                classes = {self.classify(element.value) for element in part.iter.elements}
+                if len(classes) == 1 and None not in classes:
+                    scope[part.target.value] = (classes.pop(), ('loop', id(part)), True)
+                    self.elements.add(id(part.iter))
+        self.scopes.append(scope)
+
+    def _leave(self, node):
+        self.scopes.pop()
+
+    visit_GeneratorExp = visit_ListComp = visit_SetComp = visit_DictComp = _comprehension
+    leave_GeneratorExp = leave_ListComp = leave_SetComp = leave_DictComp = _leave
+
+    def _function(self, node, bound):
+        finder = _Bindings()
+        node.body.visit(finder)
+        bound = {*bound, *finder.found}
+        self.scopes.append(dict.fromkeys(bound))
+        self.depth += 1
+        self.foreign += 'self' in bound
+
+    def visit_FunctionDef(self, node):
+        self.nonload.add(id(node.name))
+        params = node.params
+        self._function(node, [p.name.value for p in (*params.posonly_params, *params.params, *params.kwonly_params,
+                                                     *(p for p in (params.star_arg, params.star_kwarg)
+                                                       if isinstance(p, cst.Param)))])
+
+    def visit_Lambda(self, node):
+        params = node.params
+        self._function(node, [p.name.value for p in (*params.posonly_params, *params.params, *params.kwonly_params,
+                                                     *(p for p in (params.star_arg, params.star_kwarg)
+                                                       if isinstance(p, cst.Param)))])
+
+    def leave_FunctionDef(self, node):
+        self.foreign -= 'self' in self.scopes.pop()
+        self.depth -= 1
+
+    leave_Lambda = leave_FunctionDef
+
+    def visit_Param(self, node):
+        self.nonload.add(id(node.name))
+
+    def visit_Annotation(self, node):
+        return False
+
+    visit_ClassDef = visit_Import = visit_ImportFrom = visit_Global = visit_Nonlocal = visit_Annotation
+
+    def visit_MatchAs(self, node):
+        if node.name is not None:
+            self.nonload.add(id(node.name))
+
+    visit_MatchStar = visit_MatchAs
+
+    def visit_MatchMapping(self, node):
+        if node.rest is not None:
+            self.nonload.add(id(node.rest))
+
+    def visit_MatchKeywordElement(self, node):
+        self.nonload.add(id(node.key))
+
+
+class _Rewrite(cst.CSTTransformer):
+    def __init__(self, literal, convert):
+        super().__init__()
+        self.literal, self.convert = literal, convert
 
     def leave_Attribute(self, original, updated):
-        value = self.value(original)
-        if value is not None and id(original) not in self.kept:
-            literal = cst.Integer(str(abs(value)))
-            if value < 0:
-                literal = cst.UnaryOperation(cst.Minus(), literal, lpar=[cst.LeftParen()], rpar=[cst.RightParen()])
-            return literal.with_changes(lpar=(*original.lpar, *literal.lpar), rpar=(*literal.rpar, *original.rpar))
-        names, attr, inner, receiver = self.names(original.value), original.attr.value, updated.value, original.value
-        if (names is None and attr in ('name', 'value') and isinstance(receiver, cst.Subscript)
-                and isinstance(receiver.value, (cst.List, cst.Tuple)) and any(
-                    self.value(e.value) is None and self.names(e.value) is not None for e in receiver.value.elements)):
-            raise TypeError(f'{self.where()}: `{_code(original)}` holds an IntEnum value as an integer in a container, '
-                            f'so .{attr} would fail where live modelx works')
-        if names is None:
+        value = self.literal.get(id(original))
+        if value is None:
             return updated
-        if attr == 'value':
-            return inner.with_changes(lpar=(*original.lpar, cst.LeftParen()), rpar=(cst.RightParen(), *original.rpar))
-        if attr != 'name':
-            raise TypeError(f'{self.where()}: `{_code(original)}` reads .{attr} of an IntEnum value. '
-                            'Compiled code holds such values as integers and supports only .name and .value')
-        if self.value(original.value) is not None:
-            return cst.SimpleString(repr(names[self.value(original.value)]), lpar=original.lpar, rpar=original.rpar)
-        table = '{' + ', '.join(f'{v}: {n!r}' for v, n in sorted(names.items())) + '}'
-        index = _code(inner.with_changes(lpar=(), rpar=()) if hasattr(inner, 'lpar') else inner)
-        return cst.parse_expression(f"{table}.get({index}) or getattr({index}, 'name')").with_changes(   # live's error
-            lpar=(*original.lpar, cst.LeftParen()), rpar=(cst.RightParen(), *original.rpar))
+        literal = cst.Integer(str(abs(value)))
+        if value < 0:
+            literal = cst.UnaryOperation(cst.Minus(), literal, lpar=[cst.LeftParen()], rpar=[cst.RightParen()])
+        return literal.with_changes(lpar=(*original.lpar, *literal.lpar), rpar=(*literal.rpar, *original.rpar))
+
+    def leave_Name(self, original, updated):
+        cls = self.convert.get(id(original))
+        if cls is None:
+            return updated
+        return cst.Call(cst.parse_expression(cls), [cst.Arg(updated.with_changes(lpar=(), rpar=()))],
+                        lpar=updated.lpar, rpar=updated.rpar)
+
+    leave_Call = leave_Name
+
+
+def plan(sources, ref_info, cells_info=None):
+    """{module: source} with IntEnum members and values written for their uses (see the module docstring), for all
+    modules of a model at once: a Cell's parameters and result are known wherever it is called."""
+    model = _Model(ref_info, cells_info)
+    result = dict(sources)
+    for module, source in sources.items():
+        if not model.concerns(module):
+            continue
+        tree = cst.parse_module(source)
+        literal, convert = {}, {}
+        for cls in tree.body:
+            if not isinstance(cls, cst.ClassDef):
+                continue
+            methods = [node for node in cls.body.body if isinstance(node, cst.FunctionDef)]
+            children = {name for node in methods if node.name.value == '__init__'
+                        for line in node.body.body if isinstance(line, cst.SimpleStatementLine)
+                        for small in line.body if isinstance(small, cst.Assign) and isinstance(small.value, cst.Call)
+                        and _code(small.value.func).rpartition('.')[2].startswith('_c_')
+                        for target in small.targets if isinstance(target.target, cst.Attribute)
+                        for name in [target.target.attr.value]}
+            for node in methods:
+                if node.name.value.startswith(('_mx_', '__')):
+                    continue
+                formula = _Formula(model, module, cls.name.value, node)
+                formula.children = children
+                if formula.own:
+                    formula.analyse()
+                    literal.update(formula.uses.literal)
+                    convert.update(formula.uses.convert)
+        if literal or convert:
+            result[module] = tree.visit(_Rewrite(literal, convert)).code
+    return result
+
+
+def literals(module, source, ref_info, cells_info=None):
+    """``plan`` for one module."""
+    return plan({module: source}, ref_info, cells_info)[module]
