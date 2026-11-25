@@ -68,9 +68,20 @@ Probe = one cell of an item Space; frames in cells of a locked `Data` Space; `T1
 | R10 | raises | an `int` key of 2**63 or more on an int level | KeyError / False | OverflowError (`_tables.pyx:92-93`) | not fixed; 2 lines |
 Checks of the fixes: probes 1 and 2 go from 15 + 10 differing cells to 4 + 3 (R7b, R7c, the local of R7a); 76 unit tests pass
 before and after (the first version of the R1 fix broke 3 by refusing a float index; corrected).
-INTEGRATION_PLACEHOLDER
+Nine table integration files against the patched copy: first run 11 passed, 4 failed (the R5 guard named a view whose
+setup had been dropped: build stopped); with the guard limited to used views (`view.used`) the two failing files pass
+(7 of 7), so all 15 selected tests pass. The R5 fix is therefore 8 lines plus that condition. None of these fixes was
+timed; R6 adds a `try` only inside `if state == 0`, and one per call outside item classes.
 
-PROBE3_PLACEHOLDER
+Probe 3 (19 cells, unpatched tree; `_mx_table_reads.json` lists what was lowered):
+| Cell text | Lowered | Note |
+|---|---|---|
+| `data.T1().loc[policy_id, "sa"]` (frame in a Cell) | yes | |
+| `data.tbl.loc[policy_id, "sa"]`, `data.tbl.loc[policy_id]["sa"]` (the same frame in a Reference) | no | absent from the report |
+| `T["sa"].loc[k]`, `T["sa"].at[k]`, `T.loc[k].sa`, `len(T)`, `T.iloc[-1]["sa"]`, `T["sa"].get(k, 0.0)` | no | values equal live |
+| `own().loc[policy_id, "sa"]`, `own()` a frame the item computes: in a cell of `t` / in a cell without parameters | yes / no | call frequency in the sample (`:317-320`) |
+| `float(T.loc[k, c])` / `T.loc[k, c] * 1.0`, `c` computed, columns float64 and int64 | yes / no | spelling |
+| R8, **raises**: `k = data.names if policy_id > 0 else "a"; return float(np.sum(data.TS().loc[k, "sa"]))`, `TS` on a text index, `names` a list; the same text in two cells, one called by the sample, one not | sampled: no ("a key part selects several rows"), equals live 3.0. Not sampled: yes, and the run raises `TypeError` (unhashable list in `ocode`) | the result depends on what the sample reached. Fix (not compiled): the `is_label` guard of `:1341-1349` also on object levels for a part not known to be one label, then drop the veto at `:2388-2395` |
 
 ## 5. The split into four commits
 - Order is right in outline, with three changes. (1) Complete-key membership (`leave_Comparison` 2832, 45 lines) and the
