@@ -4,32 +4,27 @@
 
 ### Enum definitions are recognised by type
 
-A Reference in any Space whose value is an `IntEnum` class (one whose members behave as
-their integers in every operation of `int`) or, from Python 3.11, a `StrEnum` class (one
-whose members behave as their texts) is an enum definition without any declaration: it is
-fixed in the compiled model. Compiled code holds a member as an integer only where that
-makes the speed, and as the member everywhere else:
+A Reference in any Space whose value is an enum *family* is an enum definition without any
+declaration: an `IntEnum` class whose values are 0, 1, ..., n-1 or, from Python 3.11, a
+`StrEnum` class, whose members compare and hash as their values. It is fixed in the compiled
+model. A Cell parameter whose traced values are members of one family (or their values) is
+held as the member's position in its class (an `IntEnum` member's value), a C integer with a
+cache of the size of the class, where a Reference of the Cell's Space holds the class and the
+formula neither binds the parameter again nor gives it a default that is no member's value.
 
-- An `IntEnum` member written in a formula (`Sex.M`) becomes its integer as an operand of a
-  comparison or of arithmetic, as an argument of a Cell whose parameter is a number, as a
-  subscript that is read, and in a tuple, list or set that a loop iterates when the loop
-  variable is used only in such ways. A parameter or Cell result whose traced values are
-  members of one such class is a C integer with a cache of the size of the class.
-- A `StrEnum` member is held as its position in the class, and only where members are told
-  apart: `==`, `!=` and `in` against members or their texts, an argument of a parameter
-  traced as members of the class or their texts, a loop over members. A caller, in a formula
-  or from Python, gives the member or its text; a text that is no member's value raises
-  `ValueError` at the Cell. A Cell result that is a member or a text stays an object.
-- Every other use sees the member: `.name`, `.value` and any other attribute, `repr`, `str`,
-  `format`, `isinstance`, `type`, `is`, a container, a stored key, an item Space's argument,
-  a helper function. A value held as an integer is converted through its class there; an
-  integer that is no member's value stays that integer, as in modelx.
-- A Cell that returns an `IntEnum` member returns its integer, as before.
-- A parameter or result that some formula converts back must be of its traced class: a
-  member of another class, or a plain integer equal to a member, given to it by a formula
-  or from Python raises `TypeError`. A parameter that is only compared takes any integer.
-- A text given from Python to a Cell that reads the member (`kind.name`) is taken as the
-  member, where modelx raises `AttributeError`.
+- A held parameter is an integer in three uses only: `==`, `!=` and `in` against members,
+  their values or another held parameter of the class; an argument of a Cell parameter held
+  for the class; and a loop over a tuple, list or set of members whose variable has no other
+  use. Members written there become their positions.
+- Every other use sees the member: `.name`, `.value`, arithmetic, ordering, `repr`, `str`,
+  `isinstance`, `is`, a container, a key, a helper function, the result of the Cell. A Cell
+  result, a Reference value or an item Space's argument that is a member stays the member.
+- A caller, in a formula or from Python, gives a member of the class. Where the Cell uses
+  the position only, an object equal to a member's value (its text, its integer, a member
+  of another class with that value) is taken as that member, as modelx compares it. Any
+  other value raises `ValueError` naming the Cell; so does anything but a member where the
+  Cell uses the member itself. An exact integer from Python is taken as the position.
+- Other enum classes (an `IntEnum` with other values or its own `==`) are objects throughout.
 
 Rebinding such a Reference on a compiled model raises `AttributeError`;
 rebuild the model to change it.
