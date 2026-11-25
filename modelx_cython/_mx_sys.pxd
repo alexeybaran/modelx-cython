@@ -2,7 +2,8 @@ from libc.math cimport (
     pow as _mx_c_pow, floor as _mx_c_floor, isfinite as _mx_c_isfinite)
 from libc.limits cimport LLONG_MAX, LLONG_MIN
 from libc.string cimport memcmp
-from cpython.long cimport PyLong_AsLongLong, PyLong_AsLongLongAndOverflow, PyLong_Check, PyLong_CheckExact
+from cpython.long cimport (
+    PyLong_AsDouble, PyLong_AsLongLong, PyLong_AsLongLongAndOverflow, PyLong_Check, PyLong_CheckExact)
 from cpython.number cimport PyNumber_Index
 from cpython.object cimport Py_TYPE, PyObject_GenericGetAttr, PyObject_GenericSetAttr
 from cpython.unicode cimport PyUnicode_Check, PyUnicode_Compare
@@ -45,6 +46,14 @@ cdef inline long long _mx_exact_int64(object value, str path) except? -1:
         if not overflow:
             return result
     return _mx_exact_int64_checked(value, path)
+
+
+cdef inline double _mx_int_as_double(object value) except? -1.0:
+    """A Python int beside a double, converted as Python's mixed arithmetic converts it (correctly
+    rounded, OverflowError beyond a double), without a float object in between."""
+    if PyLong_CheckExact(value):
+        return PyLong_AsDouble(value)
+    return value
 
 
 ctypedef unsigned long _mx_native_ulong

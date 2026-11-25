@@ -193,6 +193,11 @@ def _unsafe_negation(kind):
     return isinstance(kind, CInt) and kind.lo <= -(1 << (kind.width - 1))
 
 
+def _double(expr):
+    return cst.Call(cst.Attribute(cst.Name(MX_SYS_MOD), cst.Name('_mx_int_as_double')),
+                    (cst.Arg(expr.with_changes(lpar=(), rpar=())),))
+
+
 def _span(kinds):
     """Cython's spanning type of the branches of a conditional, ``min``/``max`` or ``and``/``or``."""
     if any(kind == OBJECT or not _numeric(kind) for kind in kinds):
@@ -242,6 +247,7 @@ class _Lower(cst.CSTTransformer):
         self.env = env          # name -> type of every declared name of the function
         self.path = path
         self.nested = []        # names bound by enclosing lambdas and comprehensions
+        self.lowered_ints = {}  # id -> integer operation lowered to Python ints (kept alive)
         self.lowered = 0
         self.kinds = {}
 
@@ -433,6 +439,14 @@ class _Lower(cst.CSTTransformer):
 
     def leave_BinaryOperation(self, before, after):
         left, right = self.kind(after.left), self.kind(after.right)
+        if FLOAT in (left, right) and not isinstance(after.operator, (cst.Power, cst.MatrixMultiply)):
+            # a Python int beside a double: Python converts it (correctly rounded, OverflowError
+            # beyond a double) before the float operation, and so does the cast
+            for side in ('left', 'right'):
+                operand = getattr(after, side)
+                if id(operand) in self.lowered_ints:
+                    after = after.with_changes(**{side: _double(operand)})
+            return after
         if not self._integer_pair(left, right) or self._safe(after.operator, left, right):
             return after
         if _exact_remainder(after.operator, left, right):
@@ -447,6 +461,8 @@ class _Lower(cst.CSTTransformer):
         self.lowered += 1
         lowered = after.with_changes(left=_object(after.left))
         self.kinds[id(lowered)] = (lowered, OBJECT)
+        if isinstance(after.operator, (cst.Add, cst.Subtract, cst.Multiply, cst.FloorDivide, cst.Modulo)):
+            self.lowered_ints[id(lowered)] = lowered
         return lowered
 
     def leave_UnaryOperation(self, before, after):
@@ -568,11 +584,13 @@ def _range_arguments(iterable):
 
 
 def _counter(lower, args):
-    """The range of a ``range`` counter, or None unless its step is 1 or -1 (literal) and its bounds are
-    C integers."""
-    kinds = [lower.kind(arg) for arg in args]
-    if not all(isinstance(kind, CInt) for kind in kinds):
+    """The range of a ``range`` counter, or None unless its step is 1 or -1 (literal) and its bounds
+    are integers: C integers, or Python ones, which Cython converts to the counter's type once, as the
+    loop starts (raising where one does not fit, where Python's range would run). The counter only
+    takes values between its bounds, so the loop's own step never overflows."""
+    if not all(_integer_valued(lower, arg) for arg in args):
         return None
+    kinds = [kind if isinstance(kind := lower.kind(arg), CInt) else INT64 for arg in args]
     if len(args) == 1:
         return CInt(0, max(kinds[0].hi - 1, 0))
     start, stop = kinds[:2]
@@ -585,6 +603,17 @@ def _counter(lower, args):
     if sign > 0:
         return CInt(start.lo, max(stop.hi - 1, start.lo))
     return CInt(min(stop.lo + 1, start.hi), start.hi)
+
+
+_INTEGER_RESULTS = (cst.Add, cst.Subtract, cst.Multiply, cst.FloorDivide, cst.Modulo, cst.LeftShift, cst.RightShift)
+
+
+def _integer_valued(lower, expr):
+    """A C integer, or an integer operation of C integers (a Python int once lowered)."""
+    if isinstance(lower.kind(expr), CInt):
+        return True
+    return (isinstance(expr, cst.BinaryOperation) and isinstance(expr.operator, _INTEGER_RESULTS)
+            and _integer_valued(lower, expr.left) and _integer_valued(lower, expr.right))
 
 
 def signed_local_assignments(body, name, facts, native_value):
@@ -715,24 +744,24 @@ def lower_integer_arithmetic(node, types, owner, path, bounds=None):
     declarations = {}
     returns = node.returns and annotation_type(node.returns.annotation, types.classes)
     lower = _Lower(types, owner, env, path, isinstance(returns, CInt) and returns.width == 64)
-    for loop in _loops(body):
-        name = loop.target.value
-        if name in env or name in declarations:
-            continue
-        if _reads_outside(body, loop, name, facts):
+    loops = [loop for loop in _loops(body) if loop.target.value not in env]
+    for loop in loops:
+        if _reads_outside(body, loop, loop.target.value, facts):
             # a loop that never ran leaves it unbound: Python raises, and so does an object local
-            declarations[name] = 'object'
-            continue
-        args = _range_arguments(loop.iter)
-        if args is None or facts.stores[name] != 1 or name in facts.deleted:
+            declarations[loop.target.value] = 'object'
+    for name, kind in _integer_locals(body, facts, lower, set(env) | set(declarations)).items():
+        declarations[name] = f'{CY_MOD}.longlong'
+        env[name] = kind
+    lower.kinds.clear()
+    for loop in loops:
+        name, args = loop.target.value, _range_arguments(loop.iter)
+        if name in declarations or args is None or facts.stores[name] != 1 or name in facts.deleted:
             continue
         counter = _counter(lower, args)
         if counter is not None:
             declarations[name] = f'{CY_MOD}.longlong'
             env[name] = counter
-    for name, kind in _integer_locals(body, facts, lower, set(env) | set(declarations)).items():
-        declarations[name] = f'{CY_MOD}.longlong'
-        env[name] = kind
+            lower.kinds.clear()
     lower.kinds.clear()
     body = _divisibility(body, lower)
     lowered = node.body.with_changes(body=body).visit(lower)
