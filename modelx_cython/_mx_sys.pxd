@@ -599,6 +599,96 @@ cdef extern from *:
                                            void *flags, Py_ssize_t flag_bytes, Py_ssize_t flag_size) noexcept
     int _mx_values_finish "__mx_values_finish" (void *layout) except -1
 
+# Native math-module calls (native_math.py). _mx_stdlib_math is the standard math module, set when a
+# model module that lowers such a call is imported. A C function runs only while the Reference is that
+# module and only where the C library gives CPython's result (CPython's math calls the same functions
+# there); otherwise the Reference's own member runs, so its errors, NaN handling and results are live's.
+cdef extern from *:
+    """
+    static void *_mx_stdlib_math = NULL;
+    """
+    void *_mx_stdlib_math
+from libc.math cimport erf as _mx_c_erf, exp as _mx_c_exp, log as _mx_c_log, sqrt as _mx_c_sqrt
+from libc.math cimport isinf as _mx_c_isinf
+from cpython.float cimport PyFloat_CheckExact, PyFloat_AS_DOUBLE
+from cpython.ref cimport Py_INCREF
+
+
+cdef inline int _mx_math_init() except -1:
+    global _mx_stdlib_math
+    import math
+    Py_INCREF(math)             # held for the process, as sys.modules holds it
+    _mx_stdlib_math = <void*>math
+    return 0
+
+
+cdef inline double _mx_math_value(object value, str name, str path) except? -1.0:
+    """The float a rebound Reference's member returned; anything else raises naming the Cell."""
+    if PyFloat_CheckExact(value):
+        return PyFloat_AS_DOUBLE(value)
+    raise _mx_named(TypeError(f"{path}: {name}() of the Reference returned {type(value).__name__}, "
+                              f"not float; the compiled Cell computes a float"), path)
+
+
+ctypedef fused _mx_math_arg:
+    double
+    long long
+    object
+
+
+cdef inline bint _mx_math_real(_mx_math_arg x, double* out) noexcept:
+    """The double math computes with: a C number, or an exact float (any other object: math's own call)."""
+    if _mx_math_arg is object:
+        if PyFloat_CheckExact(x):
+            out[0] = PyFloat_AS_DOUBLE(x)
+            return True
+        return False
+    else:
+        out[0] = <double>x      # as PyLong_AsDouble rounds an int of this range
+        return True
+
+
+cdef inline double _mx_math_log(object module, _mx_math_arg x, str path) except? -1.0:
+    cdef double v
+    if <void*>module == _mx_stdlib_math and _mx_math_real(x, &v) and v > 0.0:
+        return _mx_c_log(v)     # v <= 0 raises and NaN returns NaN in math's own call
+    return _mx_math_value(module.log(x), 'log', path)
+
+
+cdef inline double _mx_math_exp(object module, _mx_math_arg x, str path) except? -1.0:
+    cdef double v, result
+    if <void*>module == _mx_stdlib_math and _mx_math_real(x, &v):
+        result = _mx_c_exp(v)
+        if _mx_c_isfinite(result):  # overflow raises, inf and NaN: math's own call
+            return result
+    return _mx_math_value(module.exp(x), 'exp', path)
+
+
+cdef inline double _mx_math_sqrt(object module, _mx_math_arg x, str path) except? -1.0:
+    cdef double v
+    if <void*>module == _mx_stdlib_math and _mx_math_real(x, &v) and v >= 0.0:
+        return _mx_c_sqrt(v)    # v < 0 raises and NaN returns NaN in math's own call
+    return _mx_math_value(module.sqrt(x), 'sqrt', path)
+
+
+cdef inline double _mx_math_erf(object module, _mx_math_arg x, str path) except? -1.0:
+    cdef double v
+    if <void*>module == _mx_stdlib_math and _mx_math_real(x, &v):
+        return _mx_c_erf(v)     # math.erf is the C library's erf
+    return _mx_math_value(module.erf(x), 'erf', path)
+
+
+cdef inline bint _mx_math_isinf(object module, _mx_math_arg x, str path) except -1:
+    cdef double v
+    if <void*>module == _mx_stdlib_math and _mx_math_real(x, &v):
+        return _mx_c_isinf(v) != 0
+    value = module.isinf(x)
+    if value is True or value is False:
+        return value
+    raise _mx_named(TypeError(f"{path}: isinf() of the Reference returned {type(value).__name__}, "
+                              f"not bool; the compiled Cell computes a bool"), path)
+
+
 cdef class BaseMxObject:
     pass
 

@@ -794,6 +794,7 @@ class CombinedRefInfo:
     mx_class: str = ''
     decl_type_expr: str = ''
     is_relative: bool = False
+    is_math: bool = False           # the sampled value was the standard math module
 
     def __init__(self, module,
                  cls,
@@ -824,6 +825,7 @@ class CombinedRefInfo:
             self.name = name
             self.type_ = rt_info.type_
             self.mx_class = rt_info.mx_class
+            self.is_math = getattr(rt_info, 'is_math', False)
             self.decl_type_expr = decl_type_expr
             self.is_relative = is_relative
         else:

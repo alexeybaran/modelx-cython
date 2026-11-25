@@ -38,6 +38,7 @@ them into :class:`RuntimeCellsInfo`, :class:`RuntimeRefInfo` and
 
 import sys
 import inspect
+import math
 import pathlib
 import random
 import numbers
@@ -452,6 +453,7 @@ class RuntimeValueInfo:
         self.type_ = (object if isinstance(value, numbers.Integral)
                       and not -(1 << 63) <= value < (1 << 63) else type(value))
         self.mx_class = mx_class
+        self.is_math = value is math        # the standard math module (native_math.py)
 
     @classmethod
     def init_mxobj(cls, value, module):
