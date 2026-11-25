@@ -46,6 +46,8 @@ class CompilerPolicy:
     # arithmetic of a formula leaves 64 bits (flagged operations, integer_boundaries.py); 'unchecked'
     # is the documented opt-out: plain C arithmetic, which wraps, as on upstream. Not from the sample.
     integer_checks: str = 'checked'
+    # the default number of worker threads of a compiled collect() (collect.py)
+    collect_workers: int = 1
     @classmethod
     def resolve(cls, data):
         automatic = data.get('automatic_optimizations', True)
@@ -56,10 +58,13 @@ class CompilerPolicy:
             propagate_exact_receiver=data.get('propagate_exact_receiver', automatic and miss),
             native_cache_hits=data.get('native_cache_hits', 'auto' if automatic and miss else 'none'),
             infer_types=data.get('infer_types', True),
-            integer_checks=data.get('integer_checks', 'checked'))
+            integer_checks=data.get('integer_checks', 'checked'),
+            collect_workers=data.get('collect_workers', 1))
         for name, value in values.items():
-            if name not in ('native_cache_hits', 'integer_checks') and type(value) is not bool:
+            if name not in ('native_cache_hits', 'integer_checks', 'collect_workers') and type(value) is not bool:
                 raise ValueError(f'{name} must be a boolean')
+        if type(values['collect_workers']) is not int or values['collect_workers'] < 1:
+            raise ValueError('collect_workers must be a positive integer')
         if values['integer_checks'] not in ('checked', 'unchecked'):
             raise ValueError('integer_checks must be checked or unchecked')
         if type(values['native_cache_hits']) is not str or values['native_cache_hits'] not in (
@@ -92,6 +97,9 @@ class TransSpec:
       tuple; a single-name key bounds that parameter's axis of every
       cached Cell in scope whose parameter tuple has no tuple entry.
     * ``"cells"``: dict mapping cells names to per-cells dicts.
+    * ``"collect_workers"`` (model level, default 1): the worker threads of a
+      compiled ``collect()``; ``_mx_collect_workers`` set on the compiled model
+      object overrides it. See :mod:`modelx_cython.collect`.
     * ``"cells_params"`` (deprecated): older form of
       ``"cells_param_size"``; maps a parameter name (or tuple) to a
       dict with a ``"size"`` key.  Consulted only when
