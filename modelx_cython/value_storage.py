@@ -8,7 +8,8 @@ last members of the class, widest elements first, so that they form one adjacent
 probe instance gives their offsets to ``_mx_sys.pxd`` (``__mx_values_finish``), which checks that the
 region holds those arrays and nothing else and then installs an allocator that zeroes every other byte.
 The flags, every object field and the header are initialised exactly as before. Where the check fails or
-the CPython C API is not available, nothing is installed and every byte is zeroed as before.
+the mechanism is not available, nothing is installed and every byte is zeroed as before; a failed check
+issues a RuntimeWarning at import that names the class.
 """
 from .consts import CY_MOD, HAS_PREF, MX_SYS_MOD, VAR_PREF
 
@@ -72,7 +73,8 @@ def functions(cls_info):
 
 def install(classes):
     """The module statement that installs the allocators: ``_mx_uninitialised_values`` names each class
-    with dense values and whether its values are left unwritten at allocation."""
+    with dense values and whether its values are left unwritten at allocation (a ``False`` from a failed
+    layout check has been reported by a RuntimeWarning)."""
     names = [cls.name for cls in classes if value_cells(cls)]
     if not names:
         return ''
