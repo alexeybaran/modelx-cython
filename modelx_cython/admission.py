@@ -86,7 +86,6 @@ def describe(module_infos):
                     'exact_spill': cache == 'dense' and bool(cell.has_dense_spill),
                     'nogil_qualified': False,
                     'native_helpers': getattr(cell, 'native_helpers', []),
-                    'native_numeric_helpers': getattr(cell, 'native_numeric_helpers', []),
                     'table_reads_typed': getattr(cell, 'table_reads_typed', 0),
                     'table_reads_untyped': getattr(cell, 'table_reads_untyped', []),
                     'record_reads_untyped': getattr(cell, 'record_reads_untyped', []),
