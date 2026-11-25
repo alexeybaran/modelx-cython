@@ -26,6 +26,8 @@ CELLS = {
     "z": "def z(n):\n    for i in range(n):\n        pass\n    return i\n",
     "w": "def w(n):\n    for i in range(n):\n        y = i * 1.5\n    return y\n",
     "zi": "def zi(n):\n    i = -1\n    for i in range(n):\n        pass\n    return i\n",
+    # a lambda's and a generator's own parameter named as the formula's typed one
+    "lam": "def lam(t):\n    scale = lambda t: t * 2.5\n    return sum(scale(t) for t in range(t)) + t\n",
 }
 SAMPLE = """\
 from exported import mx_model
@@ -33,7 +35,7 @@ S = mx_model.S
 for t in range(10):
     S.f(t); S.g(t, t); S.k(t); S.kk(t); S.h(t); S.half(2 * t); S.rx(t); S.rr(t)
 S.nc(1.5); S.nc(2.5)
-S.z(3); S.w(3); S.zi(3)
+S.z(3); S.w(3); S.zi(3); S.lam(4)
 mx_model.P[3].v()
 """
 
@@ -56,7 +58,8 @@ def built(tmp_path_factory):
         items = model.new_space("P", formula=lambda i: None)
         items.new_cells("v", "lambda: i * 2")
         live = {"z": _outcome(lambda: space.z(0)), "w": _outcome(lambda: space.w(0)),
-                "zi": _outcome(lambda: space.zi(0)), "f": _outcome(lambda: space.f(2.5))}
+                "zi": _outcome(lambda: space.zi(0)), "f": _outcome(lambda: space.f(2.5)),
+                "lam": _outcome(lambda: space.lam(7))}
         model.export(work / "exported")
     finally:
         model.close()
@@ -152,3 +155,11 @@ def test_a_float_where_an_integer_was_traced_never_truncates(built):
         assert out[label][0] == "TypeError" and out[label][1].startswith(cell), (label, out[label])
     assert out["numpy int"] == ["value", "6"]
     assert out["reference kept"] == ["value", "(3, 4)"]
+
+
+def test_a_nested_scope_shadowing_a_typed_parameter_builds_and_equals_live(built):
+    work, live = built
+    out = _probe(work, '''\
+        print(json.dumps(outcome(lambda: S.lam(7))))
+    ''')
+    assert out == live["lam"] == ["value", "59.5"]
