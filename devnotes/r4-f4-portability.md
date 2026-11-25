@@ -4,7 +4,7 @@ Branch `verify/r4-layer1-trial` = `r4/s2-layer1-trial` (56e01f9) + workflow comm
 No compiler source changed. Upstream modelx 0.33.0 and lifelib 0.17.4 from PyPI (0.33.0 is modelx main's version).
 
 ## What each lane runs (`.github/workflows/python-package.yml`, one job per lane)
-- unit: all of `modelx_cython/tests` except `compiled/` (lifelib installed, so the lifelib sample tests run).
+- unit: all of `modelx_cython/tests` except `compiled/` (with lifelib, so its sample tests run).
 - compiled: `modelx_cython/tests/compiled` + `integration_tests`, 116 tests: the 129 of the report less the 11
   below and the 2 allocation tests run separately.
 - allocation: `test_value_storage.py::test_unwritten_values_after_pickle_and_copy` (shipped, poisoned with
@@ -23,12 +23,11 @@ No compiler source changed. Upstream modelx 0.33.0 and lifelib 0.17.4 from PyPI 
 | ubuntu 3.14t / 3.13t | pass | pass | pass | pass |
 | windows (MSVC 14.52) 3.10 / 3.12 / 3.14 | pass | pass | pass | pass |
 | windows 3.14t / 3.13t | pass | pass | pass | pass |
-| macos (clang, arm64) 3.10 | pass (run 2) | pass | pass | pass |
-| macos 3.14t | pass (run 3) | pass | pass | pass |
-| macos 3.12 / 3.14 / 3.13t | pending (run 4) | | | |
+| macos (clang, arm64) 3.10 (run 2), 3.12 | pass | pass | pass | pass |
+| macos 3.14t (run 3) | pass | pass | pass | pass |
+| macos 3.14 / 3.13t | pending (run 4) | | | |
 
 Free-threaded lanes assert `Py_GIL_DISABLED` and `sys._is_gil_enabled() is False` before testing.
-
 ## Real failures (compiler defects)
 None. No lane failed a test for a reason in the compiler. In particular the allocation change installs its
 custom `tp_alloc` (layout check passes) on gcc/x86-64, MSVC/x64 and clang/arm64, on 3.10 to 3.14t; the
@@ -75,8 +74,5 @@ fallback build warns and zero-fills on all three; the numeric caches build as pa
 - lifelib's own `pytest -m cython` suite: it needs `tools/build_sec_cy.py`, absent from both the wheel and
   lifelib main, so the C4 check is driven by `sec_compare.py` instead.
 
-## Runs
-1 https://github.com/alexeybaran/modelx-cython/actions/runs/45621453975 (first; found the 3.10/MSVC test issues)
-2 https://github.com/alexeybaran/modelx-cython/actions/runs/45624825505
-3 https://github.com/alexeybaran/modelx-cython/actions/runs/45628540754
-4 https://github.com/alexeybaran/modelx-cython/actions/runs/45633805590 (final)
+## Runs (https://github.com/alexeybaran/modelx-cython/actions/runs/ + id)
+1: 45621453975 (found the 3.10/MSVC test issues); 2: 45624825505; 3: 45628540754; 4: 45633805590 (final).
