@@ -90,12 +90,15 @@ def named(body):
 @pytest.mark.parametrize('body, expected', [
     ('return self.Kind.A.name', "return 'A'"),                          # a member
     ('return self.Kind.B.value', 'return (2)'),
-    ('return k.name', "return ({-3: 'LOW', 1: 'A', 2: 'B'}[k])"),      # a parameter traced as Kind
+    ('return k.name', "return ({-3: 'LOW', 1: 'A', 2: 'B'}.get(k) or getattr(k, 'name'))"),   # a parameter
     ('return k.value + 1', 'return (k) + 1'),
-    ('x = self.Kind.A if k else self.Kind.B\nreturn x.name', "return ({-3: 'LOW', 1: 'A', 2: 'B'}[x])"),   # a local
-    ('for x in (self.Kind.A, self.Kind.B):\n    y = x.name', "y = ({-3: 'LOW', 1: 'A', 2: 'B'}[x])"),
-    ('return self.kind(t).name', "{-3: 'LOW', 1: 'A', 2: 'B'}[self.kind(t)]"),   # a Cell result
-    ('return T.loc[(k.name, 3), "q"]', "T.loc[(({-3: 'LOW', 1: 'A', 2: 'B'}[k]), 3), \"q\"]"),  # a table key
+    ('x = self.Kind.A if k else self.Kind.B\nreturn x.name',                                       # a local
+     "return ({-3: 'LOW', 1: 'A', 2: 'B'}.get(x) or getattr(x, 'name'))"),
+    ('for x in (self.Kind.A, self.Kind.B):\n    y = x.name',
+     "y = ({-3: 'LOW', 1: 'A', 2: 'B'}.get(x) or getattr(x, 'name'))"),
+    ('return self.kind(t).name', "{-3: 'LOW', 1: 'A', 2: 'B'}.get(self.kind(t))"),   # a Cell result
+    ('return T.loc[(k.name, 3), "q"]',                                                              # a table key
+     "T.loc[(({-3: 'LOW', 1: 'A', 2: 'B'}.get(k) or getattr(k, 'name')), 3), \"q\"]"),
 ])
 def test_name_and_value_of_enum_values(body, expected):
     assert expected in named(body)
@@ -112,7 +115,7 @@ def test_other_names_stay(body):
 
 @pytest.mark.parametrize('body', ['return k.bit_length()', 'return self.Kind.A.real', 'return self.kind(t).label'])
 def test_other_attributes_of_enum_values_are_build_errors(body):
-    with pytest.raises(TypeError, match=r'm\._c_P\.f: .* reads \.\w+ of an IntEnum value'):
+    with pytest.raises(TypeError, match=r'^P\.f: .* reads \.\w+ of an IntEnum value'):
         named(body)
 
 

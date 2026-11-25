@@ -167,7 +167,7 @@ def value():
     # members are integer literals (enums.literals); Cython types the local as it types any integer local
     assert '= 1 if (t + self.key) % 3 == 0 else 2' in generated, generated
     assert 'kind = 1 if t % 2 == 0 else 2' in generated                     # named: the same integers
-    assert "{1: 'A', 2: 'B'}[kind]" in generated                             # and its .name by value
+    assert "{1: 'A', 2: 'B'}.get(kind) or getattr(kind, 'name')" in generated   # and its .name by value
     probe = textwrap.dedent('''\
         import sys
         from importlib import import_module

@@ -92,6 +92,9 @@ def _names(cls):
         return {int(member): member.name for member in cls}
 
 
+_code = cst.Module([]).code_for_node
+
+
 def _traced_names(info):
     """{parameter or None (the result): {value: name}} of a Cell's values traced as one IntEnum class."""
     ret = getattr(info, 'ret_type', None)
@@ -106,6 +109,11 @@ class _Literals(cst.CSTTransformer):
         self.module, self.members, self.traced = module, members, traced
         self.cls, self.method, self.scopes = None, None, []     # scopes: (receiver is the method's, {name: names})
         self.in_place = set()       # ids of displays iterated in place or right of `in`
+
+    def where(self):
+        """The Cell as the model names it (``Space.cell``, as ``builder`` ``model_path``)."""
+        spaces = [part[3:] for part in self.module.split('.')[1:-1]]
+        return '.'.join((*spaces, (self.cls or '').removeprefix('_c_'), (self.method or '').removeprefix('_f_')))
 
     def visit_ClassDef(self, node):
         if self.cls is not None or self.scopes:
@@ -214,8 +222,7 @@ class _Literals(cst.CSTTransformer):
         for item in original.comparisons:
             if isinstance(item.operator, (cst.Is, cst.IsNot)) and (
                     self.value(left) is not None or self.value(item.comparator) is not None):
-                code = cst.Module([]).code_for_node(original)
-                raise TypeError(f'{self.module}.{self.cls}.{self.method}: `{code}` tests an IntEnum member by '
+                raise TypeError(f'{self.where()}: `{_code(original)}` tests an IntEnum member by '
                                 'identity. Compiled code holds members as integers, so the result would differ '
                                 'from live modelx; compare with == or != instead')
             left = item.comparator
@@ -261,15 +268,11 @@ class _Literals(cst.CSTTransformer):
         if attr == 'value':
             return inner.with_changes(lpar=(*original.lpar, cst.LeftParen()), rpar=(cst.RightParen(), *original.rpar))
         if attr != 'name':
-            code = cst.Module([]).code_for_node(original)
-            raise TypeError(f'{self.module}.{self.cls}.{self.method}: `{code}` reads .{attr} of an IntEnum value. '
+            raise TypeError(f'{self.where()}: `{_code(original)}` reads .{attr} of an IntEnum value. '
                             'Compiled code holds such values as integers and supports only .name and .value')
         if self.value(original.value) is not None:
             return cst.SimpleString(repr(names[self.value(original.value)]), lpar=original.lpar, rpar=original.rpar)
-        if sorted(names) == list(range(len(names))):
-            table = '(' + ''.join(f'{names[v]!r}, ' for v in range(len(names))) + ')'
-        else:
-            table = '{' + ', '.join(f'{v}: {n!r}' for v, n in sorted(names.items())) + '}'
-        index = cst.Module([]).code_for_node(inner.with_changes(lpar=(), rpar=()) if hasattr(inner, 'lpar') else inner)
-        return cst.parse_expression(f'{table}[{index}]').with_changes(
+        table = '{' + ', '.join(f'{v}: {n!r}' for v, n in sorted(names.items())) + '}'
+        index = _code(inner.with_changes(lpar=(), rpar=()) if hasattr(inner, 'lpar') else inner)
+        return cst.parse_expression(f"{table}.get({index}) or getattr({index}, 'name')").with_changes(   # live's error
             lpar=(*original.lpar, cst.LeftParen()), rpar=(cst.RightParen(), *original.rpar))
