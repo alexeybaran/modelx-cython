@@ -5,15 +5,11 @@ SPIA_US_S `commuted_value` reads `conv = commute_disc_convention` (a Reference h
 comparison stayed a Python one (two attribute reads and a boxed integer per iteration).
 """
 from http import HTTPStatus
-import json
 import subprocess
 import sys
 import textwrap
 
 import modelx as mx
-
-
-PREFIX = 'exported_cy._mx_classes._c_Projection._f_'
 
 
 def _model(tmp_path):
@@ -46,9 +42,11 @@ def test_member_reference_compares_as_c_integer(tmp_path):
     done = subprocess.run([sys.executable, '-m', 'modelx_cython', 'exported', '--sample', 'sample.py', '--no-spec'],
                           cwd=tmp_path, check=False, capture_output=True, text=True)
     assert done.returncode == 0, done.stdout[-3000:] + done.stderr[-3000:]
-    report = json.loads((tmp_path / 'exported_cy/_mx_admission.json').read_text())
-    assert report[PREFIX + 'factor']['native_enum_comparisons'] == 2
-    assert report[PREFIX + 'direct']['native_enum_comparisons'] == 1
+    generated = (tmp_path / 'exported_cy/_mx_classes.py').read_text()
+    assert 'conv == 200' in generated and 'conv == 201' in generated, generated
+    assert 'Conv.OK' not in generated and 'Conv.CREATED' not in generated, generated
+    pxd = (tmp_path / 'exported_cy/_mx_classes.pxd').read_text()
+    assert 'long long conv_ref' in pxd, pxd          # the member Reference is a C integer field (D31)
     probe = textwrap.dedent('''\
         import sys
         from importlib import import_module
