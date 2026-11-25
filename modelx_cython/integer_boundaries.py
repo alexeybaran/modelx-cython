@@ -551,6 +551,10 @@ def _unbound_locals(node):
         body=(*lines[:doc_end], *added, *lines[doc_end:])))
 
 
+# The builtins the call guard folds when the module leaves them unbound
+_FOLDED_BUILTINS = ('isinstance', 'int', 'bool')
+
+
 class _GuardCalls(cst.CSTTransformer):
     METADATA_DEPENDENCIES = (cst.metadata.ScopeProvider,)
 
@@ -635,15 +639,27 @@ class _GuardCalls(cst.CSTTransformer):
         return after.with_changes(args=arguments)
 
 
-def _guard_calls(node, cls, cell, resolver, entries, cells, private_entries, classes=None, safe_builtins=()):
+def _guard_calls(node, cls, cell, resolver, entries, cells, private_entries, classes=None, safe_builtins=(),
+                 module=None):
+    """``module``: a MetadataWrapper whose module holds ``node`` itself, its scopes resolved.
+
+    The pass asks scopes about the formula's parameters (``self`` among them) and about the
+    builtins it folds, which the module binds nowhere (``safe_builtins``). For those names the
+    formula's scopes in its module answer as in a module holding the formula alone, unless the
+    formula is itself named as one of the builtins.
+    """
     params = (*node.params.posonly_params, *node.params.params, *node.params.kwonly_params)
     if not params or params[0].name.value != MX_SELF:
         return node
     integer_params = {param.name.value: param for param in params if param.annotation is not None
                       and param.annotation.annotation.deep_equals(_INTEGER_ANNOTATION)}
+    visitor = _GuardCalls(params[0], integer_params, cls.fqname, resolver, entries, cells,
+                          private_entries, safe_builtins)
+    if module is not None and node.name.value not in _FOLDED_BUILTINS:
+        with visitor.resolve(module):
+            return node.visit(visitor)
     wrapper = cst.MetadataWrapper(cst.Module(body=(node,)), unsafe_skip_copy=True)
-    return wrapper.visit(_GuardCalls(params[0], integer_params, cls.fqname, resolver, entries, cells,
-                                    private_entries, safe_builtins)).body[0]
+    return wrapper.visit(visitor).body[0]
 
 
 def _object_parameters(params, checked):
@@ -1150,9 +1166,9 @@ def guard_integer_boundaries(state, module_info, resolver, cells_kinds, ref_kind
     changed = False
     signatures = _signed_signatures(state)
     declared = _declared_kinds(state)
-    global_bindings = cst.MetadataWrapper(state.syntax, unsafe_skip_copy=True).resolve(
-        cst.metadata.ScopeProvider)[state.syntax]
-    safe_builtins = {name for name in ('isinstance', 'int', 'bool')
+    module_scopes = cst.MetadataWrapper(state.syntax, unsafe_skip_copy=True)
+    global_bindings = module_scopes.resolve(cst.metadata.ScopeProvider)[state.syntax]
+    safe_builtins = {name for name in _FOLDED_BUILTINS
                      if all(isinstance(binding, BuiltinAssignment) for binding in global_bindings[name])}
     native_helpers = {}
     for node in state.syntax.body:
@@ -1169,9 +1185,9 @@ def guard_integer_boundaries(state, module_info, resolver, cells_kinds, ref_kind
                 cls = module_info.classes[owner]
                 # D139: the private entry of an uncached Cell has the Cell's own name as its origin
                 cell = cls.cells[name[len(FORMULA_PREF):] if name.startswith(FORMULA_PREF) else name]
-                node = _unbound_locals(node)
-                node = _guard_calls(node, cls, cell, resolver, entries, cells, private_entries, module_info.classes,
-                                    safe_builtins)
+                unbound = _unbound_locals(node)
+                node = _guard_calls(unbound, cls, cell, resolver, entries, cells, private_entries, module_info.classes,
+                                    safe_builtins, module_scopes if unbound is node else None)
                 # Physical cache misses and compact spill entries both check
                 # the logical domain before reaching the private formula.
                 axes = (cell.dense_logical_axes if cell.has_formula_def and cell.has_args() and cell.has_typeinfo()
@@ -1194,9 +1210,9 @@ def guard_integer_boundaries(state, module_info, resolver, cells_kinds, ref_kind
                 continue
             name = method.name.value
             if name.startswith(FORMULA_PREF) and (formula := cls.cells.get(name[len(FORMULA_PREF):])):
-                method = _unbound_locals(method)
-                method = _guard_calls(method, cls, formula, resolver, entries, cells, private_entries,
-                                      module_info.classes, safe_builtins)
+                unbound = _unbound_locals(method)
+                method = _guard_calls(unbound, cls, formula, resolver, entries, cells, private_entries,
+                                      module_info.classes, safe_builtins, module_scopes if unbound is method else None)
                 method = _guard_result(method, formula, cls, resolver, cells_kinds, ref_kinds, signatures,
                                        native_helpers.get((cls.name, name), ()), checked=checked)
                 method = _guard_divisions(method, formula, cls, signatures,
@@ -1216,9 +1232,9 @@ def guard_integer_boundaries(state, module_info, resolver, cells_kinds, ref_kind
                 changed = True
                 continue
             if cell is not None and not cell.has_formula_def:
-                method = _unbound_locals(method)
-                method = _guard_calls(method, cls, cell, resolver, entries, cells, private_entries, module_info.classes,
-                                      safe_builtins)
+                unbound = _unbound_locals(method)
+                method = _guard_calls(unbound, cls, cell, resolver, entries, cells, private_entries, module_info.classes,
+                                      safe_builtins, module_scopes if unbound is method else None)
                 method = _guard_result(method, cell, cls, resolver, cells_kinds, ref_kinds, signatures,
                                        checked=checked)
                 method = _guard_divisions(method, cell, cls, signatures)
