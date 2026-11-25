@@ -60,8 +60,18 @@ def _int64_literals(node):
 def _literal_loop(node):
     """The iterable a C integer loop takes over a literal tuple of integers: a range when consecutive."""
     values = _int64_literals(node)
-    consecutive = values == list(range(values[0], values[0] + len(values)))
+    consecutive = values == list(range(values[0], values[0] + len(values))) and values[-1] < (1 << 63) - 1
     return f'range({values[0]}, {values[0] + len(values)})' if consecutive else code(node)
+
+
+def _in_arithmetic(name, tree):
+    """Whether ``name`` is an operand of arithmetic, ``abs`` or ``pow`` in ``tree``: as a C integer it could overflow
+    where live's Python integer does not."""
+    operand = lambda node: isinstance(node, cst.Name) and node.value == name
+    return any(isinstance(n, cst.BinaryOperation) and (operand(n.left) or operand(n.right))
+               or isinstance(n, cst.UnaryOperation) and operand(n.expression)
+               or isinstance(n, cst.Call) and isinstance(n.func, cst.Name) and n.func.value in ('abs', 'pow')
+               and any(operand(arg.value) for arg in n.args) for n in walk(tree))
 
 
 def _one_iterable(call):
@@ -1167,7 +1177,7 @@ return {fallback}
                         return after
                     if not all(type(value) in (int, float, bool, str, type(None)) for value in values):
                         return after
-                    kind = 'longlong' if _int64_literals(iterator) else 'object'
+                    kind = 'longlong' if _int64_literals(iterator) and not _in_arithmetic(name, tree) else 'object'
                 local_types[name] = kind
             else:
                 return after
