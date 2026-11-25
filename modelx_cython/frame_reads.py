@@ -705,7 +705,10 @@ class FrameReads:
             out = kept
 
     def _hold_statements(self, hold):
-        """The statements that resolve one hold, placed before the top-level statement of its first read."""
+        """The statements that resolve one hold, placed before the top-level statement of its first read. That
+        statement may not reach the read (a branch not taken): a hold whose evaluation raises is left unresolved (a
+        table: one whose every read stays pandas), so that the error is raised by the read's own pandas branch, where
+        live raises it, or not at all."""
         m = self.module
         if isinstance(hold, tuple):         # T-4: a held code or row, after the hold of its table
             what, field, table, level_or_key, extra = hold
@@ -718,7 +721,8 @@ class FrameReads:
                 value = f'{level_or_key} + 2'
             else:
                 value = f'{m}.hold_row(self.{table}, {_code(level_or_key)}, False)'
-            return [cst.parse_statement(f'if self.{field} == 0:\n    self.{field} = {value}\n')]
+            return [cst.parse_statement(f'if self.{field} == 0:\n    try:\n        self.{field} = {value}\n'
+                                        f'    except Exception:\n        pass\n')]
         # T-4.2: one binding per receiver and item (or per call outside items): the frame's PreparedTable, or a
         # table whose every slot is -1; each read then takes its slot from the table by its signature id
         function = 'bind_ref_checked' if getattr(self.policy, 'verify_inputs', False) else 'bind_ref'
@@ -730,9 +734,13 @@ class FrameReads:
             value = held if held is not None and function == 'bind_ref' else f'{m}.{function}({receiver})'
             return [cst.parse_statement(
                 f'if self.{hold.state} == 0:\n'
-                f'    self.{hold.table} = {value}\n'
-                f'    self.{hold.state} = 1\n')]
-        return [cst.parse_statement(f'{hold.table}: object = {m}.{function}({receiver})')]
+                f'    try:\n'
+                f'        self.{hold.table} = {value}\n'
+                f'        self.{hold.state} = 1\n'
+                f'    except Exception:\n'
+                f'        self.{hold.table} = {m}.bind_own(None)\n')]
+        return [cst.parse_statement(f'try:\n    {hold.table} = {m}.{function}({receiver})\n'
+                                    f'except Exception:\n    {hold.table} = {m}.bind_own(None)\n')]
 
     # ------------------------------------------------------------------ T-5: views of a prefix
     def view_assignment(self, statement):
