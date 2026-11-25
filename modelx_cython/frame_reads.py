@@ -2327,17 +2327,25 @@ class _Rewrite(cst.CSTTransformer):
         self._record(node, 'pandas', receiver, ONLY_RAISED_WHY)
         return True
 
+    def _pandas_value(self, lowered):
+        """The pandas expression of a read lowered to a C scalar (its own value, not cast to the C type), in
+        parentheses; None for any other node."""
+        if not (self.native.get(id(lowered)) in CTYPE and isinstance(lowered, cst.IfExp)):
+            return None
+        pandas = lowered.orelse
+        if (isinstance(pandas, cst.Call) and _code(pandas.func) == '_mx_cy.cast' and len(pandas.args) == 2
+                and _code(pandas.args[0].value) in CTYPE.values()):
+            pandas = pandas.args[1].value
+        return pandas.with_changes(lpar=[cst.LeftParen()], rpar=[cst.RightParen()])
+
     def leave_Subscript(self, original, updated):
         o = self.o
         value = original.value
-        if self.native.get(id(updated.value)) in CTYPE and isinstance(updated.value, cst.IfExp):
+        pandas = self._pandas_value(updated.value)
+        if pandas is not None:
             # T-5c: a subscript of a read lowered to a C scalar (``T.index.max()[0]`` on one level): the pandas
             # value, which pandas subscripts (or raises on) as live does
-            pandas = updated.value.orelse
-            if (isinstance(pandas, cst.Call) and _code(pandas.func) == '_mx_cy.cast' and len(pandas.args) == 2
-                    and _code(pandas.args[0].value) in CTYPE.values()):
-                pandas = pandas.args[1].value       # the read's own value, not cast to the C type
-            return updated.with_changes(value=pandas.with_changes(lpar=[cst.LeftParen()], rpar=[cst.RightParen()]))
+            return updated.with_changes(value=pandas)
         parts = _index_parts(original)
         if parts is None:
             return updated
@@ -2507,6 +2515,11 @@ class _Rewrite(cst.CSTTransformer):
         hoisted = self._hoist_walk(updated)
         if hoisted is not None:
             return hoisted
+        if isinstance(updated.func, cst.Name) and updated.func.value in ('isinstance', 'type') and updated.args:
+            # the type of a read is the type pandas gives it (a numpy scalar), not that of the C number
+            pandas = self._pandas_value(updated.args[0].value)
+            if pandas is not None:
+                return updated.with_changes(args=[updated.args[0].with_changes(value=pandas), *updated.args[1:]])
         if (isinstance(updated.func, cst.Name) and len(updated.args) == 1 and not updated.args[0].keyword
                 and not updated.args[0].star):
             kind = self.native.get(id(updated.args[0].value))
