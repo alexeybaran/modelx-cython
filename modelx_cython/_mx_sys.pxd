@@ -229,6 +229,14 @@ cdef inline int _mx_check_enum_schema(object receiver, object owner, tuple bindi
     return 0
 
 
+cdef inline object _mx_enum_member(object cls, object value):
+    """``value`` if it is a member of the IntEnum class ``cls``: a parameter or result that compiled code holds as
+    an integer and converts back through ``cls`` must not be given a member of another class or a plain integer."""
+    if type(value) is cls:
+        return value
+    raise TypeError(f"{value!r} is not a member of {cls.__name__}: this Cell is compiled for {cls.__name__} members")
+
+
 cdef inline double _mx_pow(double b, double e) except? -1.0:
     """``**`` between operands mx2cy has typed as C numbers.
 
