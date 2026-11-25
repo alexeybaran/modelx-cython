@@ -3,7 +3,6 @@ from modelx_cython._float_sum_state cimport F64Sum, f64_init, f64_add, f64_resul
 from modelx_cython._float_sum_state cimport (
     PySum, sum_init, sum_add_f64, sum_add_ll,
     sum_add_bint, sum_add_object, sum_result, sum_result_f64, sum_clear)
-cdef bint f64_accepts(object function)
 
 
 # diag-scale P3: an integer item of an exact tuple read borrowed (no reference count change on the
