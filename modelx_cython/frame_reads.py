@@ -1027,6 +1027,8 @@ class FrameReads:
 
 
 _NO_LABEL = object()
+# in a read's test: a key part tested at run time for one label on a level that is not an integer level
+OBJECT_LABEL_TEST = ' := _mx_cy.cast(object, '
 
 # T-5c: in an item class, a frame the item computes itself is prepared (about 0.3-2M instructions, once per item)
 # only for a formula evaluated at least this many times per item; a pandas read costs about 20-100k instructions
@@ -1493,6 +1495,8 @@ class _Rewrite(cst.CSTTransformer):
     def _lowered(self, test, read, fallback, kind=None):
         """``read if test else fallback``: the pandas read cast to the read's C type when the read is typed (both
         branches native), and the lowered read marked as of that kind (``float()``/``int()`` around it dropped)."""
+        if kind in CTYPE and OBJECT_LABEL_TEST in _code(test):
+            kind = None         # the key may select several rows: the pandas branch is then a Series, not a number
         if kind in CTYPE:
             fallback = _cast(CTYPE[kind], fallback)
         lowered = cst.IfExp(test=test, body=read, orelse=fallback, lpar=[cst.LeftParen()], rpar=[cst.RightParen()])
