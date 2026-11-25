@@ -81,6 +81,25 @@ def enum_safe(cls):
             and all(type(member.value) is int and member.value == int(member) for member in cls))
 
 
+def text_safe(cls):
+    """Whether ``cls`` is a StrEnum class whose members behave as their text in every operation of ``str`` and
+    whose ``value`` is that text: its position in the class can then stand for a member where members are only
+    told apart."""
+    import enum
+    base = getattr(enum, 'StrEnum', None)
+    return (base is not None and isinstance(cls, type) and issubclass(cls, base) and type(cls) is type(base)
+            and all(getattr(cls, name, None) is getattr(base, name, None)
+                    for name in vars(str) if name.startswith('__') and name != '__doc__')
+            and all(type(member.value) is str and member.value == str.__str__(member) for member in cls))
+
+
+def positions(cls):
+    """({member name: position}, {member text: position}) of a text-safe class, by declaration order."""
+    order = {member: position for position, member in enumerate(cls)}
+    return ({name: order[member] for name, member in cls.__members__.items()},
+            {member.value: position for member, position in order.items()})
+
+
 def _kind(tp):
     """How a traced type is held: (module, qualname) of an enum-safe IntEnum class (a C integer that stands for a
     member), 'number' for another numeric type, None for an object."""
@@ -94,8 +113,11 @@ def _kind(tp):
 
 
 def _signature(info):
-    """(parameter names, {name: kind}, result kind) of a traced Cell."""
-    kinds = {name: _kind(tp) for name, tp in (getattr(info, 'arg_types', None) or {}).items()}
+    """(parameter names, {name: kind}, result kind) of a traced Cell. A parameter traced as members of a text-safe
+    class (``enum_codes``) is a C integer too: the member's position."""
+    held = getattr(info, 'enum_codes', None) or {}
+    kinds = {name: (held[name].__module__, held[name].__qualname__) if name in held else _kind(tp)
+             for name, tp in (getattr(info, 'arg_types', None) or {}).items()}
     ret = getattr(info, 'ret_type', None)
     result = _kind(getattr(ret, 'value_type', None)) if not getattr(ret, 'is_array', True) else None
     return tuple(kinds), kinds, result
@@ -114,7 +136,10 @@ class _Model:
     """What the trace knows of the whole model: enum definitions, Space References and Cell signatures."""
 
     def __init__(self, ref_info, cells_info, param_info):
-        self.members, self.reach, self.spaces, self.values = {}, {}, {}, {}
+        self.members, self.reach, self.spaces, self.values, self.texts = {}, {}, {}, {}, {}
+        for info in (cells_info or {}).values():                # text-valued classes: {text: position}
+            for cls in (getattr(info, 'enum_codes', None) or {}).values():
+                self.texts[cls.__module__, cls.__qualname__] = positions(cls)[1]
         for owner, params in (param_info or {}).items():        # the parameters of item Spaces
             for name, info in params.items():
                 if isinstance(_kind(getattr(info, 'type_', None)), tuple):
@@ -128,6 +153,8 @@ class _Model:
                 self.members[owner, ref] = (enum[:2], {name: value for name, value in enum[2].items()
                                                        if -(1 << 63) <= value < (1 << 63)})
                 self.reach.setdefault((owner, enum[:2]), ref)
+                if getattr(info, 'enum_texts', None) is not None:
+                    self.texts[enum[:2]] = info.enum_texts
             if getattr(info, 'mx_class', ''):
                 self.spaces[owner, ref] = info.mx_class
         self.cells = {key: _signature(info) for key, info in (cells_info or {}).items()}
@@ -303,6 +330,11 @@ class _Formula:
         banned = set()
         while True:
             uses = _Uses(self, banned, forced)
+            for param in (*self.node.params.posonly_params, *self.node.params.params, *self.node.params.kwonly_params):
+                kind = self.kinds.get(param.name.value)
+                if param.default is not None and kind in self.model.texts and uses.codeable(param.default, kind):
+                    uses.wants(kind, param.default)         # a text default of a parameter held as a position
+                    param.default.visit(uses)
             self.node.body.visit(uses)
             if uses.objects <= banned:
                 self.uses = uses
@@ -320,6 +352,7 @@ class _Uses(cst.CSTVisitor):
         self.int_ok, self.elements, self.nonload, self.stores = set(), set(), set(), set()
         self.literal, self.convert, self.objects = {}, {}, set()
         self.needs, self.flows, self.loops = set(), [], {}
+        self.code, self.encode, self.texts = {}, {}, formula.model.texts    # code: {id: class whose code is wanted}
         self.depth = self.foreign = 0
         # a held name: (class, key, whether it may be turned into an object by banning it)
         scope = {name: (kind, ('param', formula.key, name), False)
@@ -366,9 +399,23 @@ class _Uses(cst.CSTVisitor):
         callee = self.f.callee(node) if isinstance(node, cst.Call) else None
         return callee[1][2] if callee and isinstance(callee[1][2], tuple) else self.f.value(node)
 
+    def held(self, node, cls):
+        """Whether the use of ``node``, a value of ``cls``, takes the integer that stands for it."""
+        if cls is None or cls not in self.texts:
+            return id(node) in self.int_ok or cls is not None and id(node) in self.code
+        return self.code.get(id(node)) == cls
+
+    def codeable(self, node, cls):
+        """Whether ``node`` can be written or is held as the code of a member of the text-valued ``cls``."""
+        return self.classify(node) == cls or isinstance(node, cst.SimpleString) and node.prefix == ''
+
+    def wants(self, cls, *nodes):
+        for node in nodes:
+            self.code[id(node)] = cls
+
     def numeric(self, node):
         """Whether ``node`` is known to be a number (so that ``node % x`` is arithmetic, not formatting)."""
-        if isinstance(node, (cst.Integer, cst.Float)) or self.classify(node) is not None:
+        if isinstance(node, (cst.Integer, cst.Float)) or self.classify(node) not in (None, *self.texts):
             return True
         if isinstance(node, cst.Name):
             return self.resolve(node.value) is None and self.f.kinds.get(node.value) == 'number' \
@@ -439,14 +486,19 @@ class _Uses(cst.CSTVisitor):
         if self.foreign:
             raise TypeError(f'{self.f.where()}: `{_code(node)}` needs an IntEnum member inside a function that has '
                             'its own `self`; compiled code holds the value as an integer')
-        self.convert[id(node)] = self.f.reach(cls)
+        self.convert[id(node)] = ('_mx_enum_at' if cls in self.texts else '_mx_enum_of', self.f.reach(cls))
 
     # ---- uses
+    def visit_SimpleString(self, node):
+        cls = self.code.get(id(node))
+        if cls in self.texts:           # a text that is no member's value equals no member: a code that none has
+            self.literal[id(node)] = self.texts[cls].get(node.evaluated_value, -2)
+
     def visit_Name(self, node):
-        if id(node) in self.nonload or id(node) in self.int_ok:
+        if id(node) in self.nonload:
             return
         entry = self.resolve(node.value)
-        if entry is None:
+        if entry is None or self.held(node, entry[0]):
             return
         cls, key, bannable = entry
         if bannable:
@@ -458,12 +510,12 @@ class _Uses(cst.CSTVisitor):
         self.nonload.add(id(node.attr))
         member = None if self.foreign else self.f.member(node)
         if member is not None:
-            if id(node) in self.int_ok:
+            if self.held(node, member[0]):
                 self.literal[id(node)] = member[1]
             return False
         held = None if self.foreign else self.f.value(node)
         if held is not None:
-            if id(node) not in self.int_ok and id(node) not in self.nonload:
+            if not self.held(node, held) and id(node) not in self.nonload:
                 self.needs_member(node, held, ('value', self.f.owner, node.attr.value))
             return False
 
@@ -481,11 +533,16 @@ class _Uses(cst.CSTVisitor):
                 names, kinds, _ = callee[1]
                 name = arg.keyword.value if arg.keyword is not None else (names[position:position + 1] or (None,))[0]
                 kind = kinds.get(name)
-                if kind is not None and (kind == 'number' or self.flow(('param', callee[0], name), kind, arg.value)):
+                if kind in self.texts:              # the position of a member, or a conversion when it runs
+                    if self.codeable(arg.value, kind):
+                        self.wants(kind, arg.value)
+                    else:
+                        self.encode[id(arg.value)] = self.f.reach(kind)
+                elif kind is not None and (kind == 'number' or self.flow(('param', callee[0], name), kind, arg.value)):
                     self.int_ok.add(id(arg.value))
             elif builtin in _NUMERIC or builtin in _EXTREMES and id(node) in self.int_ok:
                 self.int_ok.add(id(arg.value))
-        if callee is not None and isinstance(callee[1][2], tuple) and id(node) not in self.int_ok:
+        if callee is not None and isinstance(callee[1][2], tuple) and not self.held(node, callee[1][2]):
             self.needs_member(node, callee[1][2], ('result', callee[0]))
 
     def visit_Comparison(self, node):
@@ -498,6 +555,18 @@ class _Uses(cst.CSTVisitor):
             self.int_ok.add(id(operand))
             if position and isinstance(operators[position - 1], (cst.In, cst.NotIn)) and isinstance(operand, _DISPLAYS):
                 self.elements.add(id(operand))
+        if len(operands) == 2:          # a text-valued class: both sides as codes, or both as objects
+            left, right = operands
+            if isinstance(operators[0], (cst.Equal, cst.NotEqual)):
+                sides = [left, right]
+            elif isinstance(operators[0], (cst.In, cst.NotIn)) and isinstance(right, _DISPLAYS) and all(
+                    isinstance(element, cst.Element) for element in right.elements):
+                sides = [left, *(element.value for element in right.elements)]
+            else:
+                return
+            classes = {self.classify(side) for side in sides} & set(self.texts)
+            if len(classes) == 1 and all(self.codeable(side, cls) for cls in classes for side in sides):
+                self.wants(classes.pop(), *sides)
 
     def visit_BinaryOperation(self, node):
         if not isinstance(node.operator, cst.Modulo) or self.numeric(node.left):
@@ -509,11 +578,15 @@ class _Uses(cst.CSTVisitor):
     def visit_BooleanOperation(self, node):
         if id(node) in self.int_ok:
             self.int_ok.update((id(node.left), id(node.right)))
+        if id(node) in self.code:
+            self.wants(self.code[id(node)], node.left, node.right)
 
     def visit_IfExp(self, node):
         self.int_ok.add(id(node.test))
         if id(node) in self.int_ok:
             self.int_ok.update((id(node.body), id(node.orelse)))
+        if id(node) in self.code:
+            self.wants(self.code[id(node)], node.body, node.orelse)
 
     def visit_If(self, node):
         self.int_ok.add(id(node.test))
@@ -549,13 +622,15 @@ class _Uses(cst.CSTVisitor):
 
     def held_local(self, target):
         entry = self.resolve(target.value) if isinstance(target, cst.Name) else None
-        return entry is not None and entry[0] is not None and not self.depth
+        return entry[0] if entry is not None and entry[0] is not None and not self.depth else None
 
     def visit_Assign(self, node):
         for target in node.targets:
             self.target(target.target)
-        if len(node.targets) == 1 and self.held_local(node.targets[0].target):
+        cls = self.held_local(node.targets[0].target) if len(node.targets) == 1 else None
+        if cls is not None:
             self.int_ok.add(id(node.value))
+            self.wants(cls, node.value)
 
     def visit_AugAssign(self, node):
         self.target(node.target)
@@ -575,8 +650,10 @@ class _Uses(cst.CSTVisitor):
 
     def visit_For(self, node):
         self.target(node.target)
-        if self.held_local(node.target) and isinstance(node.iter, _DISPLAYS):
+        cls = self.held_local(node.target)
+        if cls is not None and isinstance(node.iter, _DISPLAYS):
             self.elements.add(id(node.iter))
+            self.wants(cls, *(element.value for element in node.iter.elements))
 
     # ---- scopes
     def _comprehension(self, node):
@@ -596,6 +673,7 @@ class _Uses(cst.CSTVisitor):
                     scope[part.target.value] = (classes.pop(), ('loop', id(part)), True)
                     self.loops['loop', id(part)] = [element.value for element in part.iter.elements]
                     self.elements.add(id(part.iter))
+                    self.wants(scope[part.target.value][0], *self.loops['loop', id(part)])
         self.scopes.append(scope)
         self.foreign += 'self' in scope
 
@@ -655,27 +733,32 @@ class _Uses(cst.CSTVisitor):
 
 
 class _Rewrite(cst.CSTTransformer):
-    def __init__(self, literal, convert, checks):
+    def __init__(self, literal, convert, checks, encode):
         super().__init__()
-        self.literal, self.convert, self.checks = literal, convert, checks
+        self.literal, self.convert, self.checks, self.encode = literal, convert, checks, encode
 
     def on_leave(self, original, updated):
         updated = super().on_leave(original, updated)
-        cls = self.convert.get(id(original))
+        value = self.literal.get(id(original))
+        if value is not None:
+            updated = self.integer(original, value)
+        function, cls = self.convert.get(id(original), (None, None))
         if cls is not None:
-            updated = cst.Call(cst.parse_expression(f'{MX_SYS_MOD}._mx_enum_of'), [
+            updated = cst.Call(cst.parse_expression(f'{MX_SYS_MOD}.{function}'), [
                 cst.Arg(cst.parse_expression(cls)), cst.Arg(updated.with_changes(lpar=(), rpar=()))],
                 lpar=updated.lpar, rpar=updated.rpar)
+        cls = self.encode.get(id(original))
+        if cls is not None:
+            updated = cst.Call(cst.parse_expression(f'{MX_SYS_MOD}._mx_enum_code'),
+                               [cst.Arg(cst.parse_expression(cls)), cst.Arg(updated)])
         cls = self.checks.get(id(original))
         if cls is not None:
             updated = cst.Call(cst.parse_expression(f'{MX_SYS_MOD}._mx_enum_member'),
                                [cst.Arg(cst.parse_expression(cls)), cst.Arg(updated)])
         return updated
 
-    def leave_Attribute(self, original, updated):
-        value = self.literal.get(id(original))
-        if value is None:
-            return updated
+    @staticmethod
+    def integer(original, value):
         literal = cst.Integer(str(abs(value)))
         if value < 0:
             literal = cst.UnaryOperation(cst.Minus(), literal, lpar=[cst.LeftParen()], rpar=[cst.RightParen()])
@@ -737,14 +820,15 @@ def plan(sources, ref_info, cells_info=None, param_info=None):
             break
     result = dict(sources)
     for module, tree in trees.items():
-        literal, convert, checks = {}, {}, {}
+        literal, convert, checks, encode = {}, {}, {}, {}
         for formula in formulas:
             if formula.module == module:
                 literal.update(formula.uses.literal)
                 convert.update(formula.uses.convert)
+                encode.update(formula.uses.encode)
                 checks.update(getattr(formula, 'checks', {}))
-        if literal or convert or checks:
-            result[module] = tree.visit(_Rewrite(literal, convert, checks)).code
+        if literal or convert or checks or encode:
+            result[module] = tree.visit(_Rewrite(literal, convert, checks, encode)).code
     return result
 
 
