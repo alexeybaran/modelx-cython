@@ -1,16 +1,9 @@
 """diag-scale P2: enum members through conditional expressions.
 
-(a) ``E.A if c else E.B`` (nested, or with one branch a C integer) is a C integer where a member is
-lowered today: a value returned by a Cell typed long long / bint / double, a positional argument of a
-C-integer parameter, an operand of ``==`` / ``!=`` with a typed integer. Each member branch becomes its
-constant; the test is evaluated once, as written. A conditional with a branch that is not a C integer
-is left whole (the object path).
-(b) A local bound only to conditional expressions of C-integer values (typed Cell calls) is a C
-integer local, so its comparisons with members take the member constants. A local with a branch that
-is an object stays an object.
-Compiled equals the exported model.
+Members are integer literals before typing (enums.literals), so ``E.A if c else E.B`` (nested, or with
+one branch another integer or an object) is typed as the same conditional of integers. Compiled equals
+the exported model (members compared as their integers).
 """
-import json
 import os
 import subprocess
 import sys
@@ -111,17 +104,8 @@ def test_enum_members_through_conditional_expressions(tmp_path, monkeypatch):
         out[package] = run.stdout
     assert out['exported_cy'] == out['exported'], out
 
-    report = json.loads((tmp_path / 'exported_cy/_mx_admission.json').read_text(encoding='utf-8'))
-    cells = {key.rsplit('._f_', 1)[-1]: value for key, value in report.items()
-             if isinstance(value, dict) and '._f_' in key}
-    constants = {name: cells[name]['native_enum_constants'] for name in CELLS if name in cells}
-    comparisons = {name: cells[name]['native_enum_comparisons'] for name in CELLS if name in cells}
-    # (a) every member of a C-integer conditional is a constant
-    assert constants['kind_of'] == 2 and constants['nested'] == 3, constants
-    assert constants['int_branch'] == 1 and constants['caller'] == 2, constants
-    assert constants['compare'] >= 2, constants
-    # a conditional with an object branch is left whole
-    assert constants['object_branch'] == 0, constants
-    # (b) a conditional local of typed values compares with the member constant; an object one does not
-    assert comparisons['local'] == 1, comparisons
-    assert comparisons['local_object'] == 0, comparisons
+    # every member is an integer literal, whatever the branch beside it: the conditional is typed as
+    # integers are (a C integer where both branches are, the object path otherwise)
+    generated = (tmp_path / 'exported_cy/_mx_classes.py').read_text(encoding='utf-8')
+    assert 'Kind.A' not in generated and '1 if t % 2 == 0 else 2' in generated, generated
+    assert 'return [self.Kind.B, self.Kind.C]' in generated, generated     # a list display keeps its members

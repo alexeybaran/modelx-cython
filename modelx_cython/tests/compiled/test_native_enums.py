@@ -1,11 +1,10 @@
 """Enum specialization must read the current exported Reference on a miss.
 
 An IntEnum class bound to a Reference is an enum definition by its traced type: fixed in the compiled
-model, its members C constants. Another value with the same members (here a namespace) stays an
+model, its members integer literals. Another value with the same members (here a namespace) stays an
 ordinary Reference, read on every evaluation and rebindable."""
 from http import HTTPStatus
 from types import SimpleNamespace
-import json
 import subprocess
 import sys
 import textwrap
@@ -37,9 +36,9 @@ def test_enum_reference_replacement(tmp_path, code_owned):
         'm.Projection.uncached(200)\n')
     subprocess.run([sys.executable, '-m', 'modelx_cython', 'exported',
                     '--sample', 'sample.py', '--no-spec'], cwd=tmp_path, check=True)
-    report = json.loads((tmp_path/'exported_cy/_mx_admission.json').read_text())
-    # the build report: members are C constants exactly when the Reference holds an IntEnum class
-    assert (sum(entry['native_enum_constants'] for entry in report.values()) > 0) == code_owned, report
+    generated = (tmp_path/'exported_cy/_mx_classes.py').read_text()
+    # members are integer literals exactly when the Reference holds an IntEnum class
+    assert ('Status.OK' not in generated and '== 200' in generated) == code_owned, generated
     probe = textwrap.dedent('''\
         import sys
         from types import SimpleNamespace
