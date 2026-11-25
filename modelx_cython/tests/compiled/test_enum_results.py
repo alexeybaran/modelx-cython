@@ -1,7 +1,10 @@
 """A compiled cell holding an IntEnum member gives Python its integer (same numbers as live).
 
 Members are integer literals in compiled code (enums.literals), so a Cell that returns a member returns
-the equal int: comparisons, keys and sums are as live, and ``.name`` in a formula is the member's name."""
+the equal int: comparisons, keys and sums are as live, and ``.name`` in a formula is the member's name.
+
+Direct-route twin of ``test_enum_results_join`` (the same model without ``collect_over``; the total is the sum of the direct items).
+"""
 
 import subprocess
 import sys
@@ -24,8 +27,7 @@ def test_enum_cell_results_are_their_integers(tmp_path):
             m = mx.new_model("Enums")
             p = m.new_space("Projection", formula="lambda policy_id: None",
                             refs={"Phase": Phase, "pd": pd, "ids": IDS,
-                                  "rates": {(0, 0): 1.0, (1, 0): 2.0, (2, 0): 3.0}}, collect_over={"policy_id": IDS},
-                            collect_outputs='lambda: {"sum": {"pv": pv()}}')
+                                  "rates": {(0, 0): 1.0, (1, 0): 2.0, (2, 0): 3.0}})
             p.new_cells("phase", "def phase(t):\\n    return Phase.ACC if t < 3 * policy_id else "
                                  "(Phase.WDR if t < 9 else Phase.DEP)\\n")
             p.new_cells("cf", "def cf(t):\\n    return 10.0 if phase(t) == Phase.WDR else "
@@ -41,11 +43,9 @@ def test_enum_cell_results_are_their_integers(tmp_path):
         "from enum_model import build\nm = build()\nm.export('enums_nomx')\nm.close()\n", encoding="utf-8")
     (tmp_path / "sample.py").write_text(
         "from enums_nomx import mx_model\nfor k in (1, 2, 3, 4):\n"
-        "    p = mx_model.Projection[k]; p.collect_outputs(); p.report(); p.phases(); p.phase(0)\n"
+        "    p = mx_model.Projection[k]; p.pv(); p.report(); p.phases(); p.phase(0)\n"
         "    [p.rate(t) for t in range(12)]; [p.pair(t) for t in range(12)]\n"
-        "mx_model.Projection.collect()\n", encoding="utf-8")
-    (tmp_path / "spec.py").write_text(
-        repr({"parallel_workers": 1, "spaces": {"Projection": {"serial_collect": "reuse"}}}), encoding="utf-8")
+        "", encoding="utf-8")
     (tmp_path / "checks.py").write_text(textwrap.dedent("""\
         from importlib import import_module
         from importlib.machinery import ExtensionFileLoader
@@ -66,14 +66,12 @@ def test_enum_cell_results_are_their_integers(tmp_path):
                 assert compiled.Projection[i].rate(t) == live.Projection[i].rate(t)
         assert compiled.Projection[1].phase(0) == Phase.ACC and compiled.Projection[1].phase(10) == 2
         total = sum(live.Projection[i].pv() for i in IDS)
-        for workers in (1, 4):
-            m = type(compiled)()
-            m.collect_workers = workers
-            assert m.Projection.collect().sum.pv == total
+        m = type(compiled)()
+        assert sum(m.Projection[i].pv() for i in IDS) == total
         live.close()
         print("ok")
         """), encoding="utf-8")
     run = lambda *a: subprocess.run([sys.executable, *a], cwd=tmp_path, check=True, timeout=600)
     run("build_model.py")
-    run("-m", "modelx_cython", "enums_nomx", "--sample", "sample.py", "--spec", "spec.py")
+    run("-m", "modelx_cython", "enums_nomx", "--sample", "sample.py", "--no-spec")
     run("checks.py")

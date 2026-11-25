@@ -1,7 +1,10 @@
 """diag-run8 F1 on a compiled model: ``T.index.max()[k]`` / ``min()[k]`` read as a C integer keep pandas'
 meaning, the k-th part of the lexicographically largest (smallest) key, not the extreme of level k
 (entries (60, 5), (95, 1), (95, 3), (80, 10): ``max()[1]`` is 3, ``min()[1]`` is 5). A new model whose input holds
-other labels reads them. The exported pure-Python model behaves the same (asserted on both)."""
+other labels reads them. The exported pure-Python model behaves the same (asserted on both).
+
+Direct-route twin of ``test_diag_run8_extreme_part_tables_join`` (the same model without ``collect_over``).
+"""
 
 import subprocess
 import sys
@@ -21,8 +24,7 @@ def build():
     data = model.new_space("Data", refs={"pd": pd, "RAW": RAW})
     data.new_cells("tbl", "def tbl():\\n    return RAW.copy()\\n")
     proj = model.new_space("Projection", formula="lambda policy_id: None",
-                           refs={"data": data, "ids": IDS},
-                           collect_over={"policy_id": IDS}, collect_outputs='lambda: {"sum": {"v": v()}}')
+                           refs={"data": data, "ids": IDS})
     proj.new_cells("top1", "lambda: data.tbl().index.max()[1]")
     proj.new_cells("low1", "lambda: data.tbl().index.min()[1]")
     proj.new_cells("top0", "lambda: data.tbl().index.max()[0]")
@@ -72,14 +74,11 @@ def test_extreme_part_is_lexicographic_and_cleared_with_the_space(tmp_path):
         m.close()
         """), encoding="utf-8")
     (tmp_path / "sample.py").write_text(
-        "from extremes_nomx import mx_model\nfor k in (1, 2):\n    mx_model.Projection[k].collect_outputs()\n"
-        "mx_model.Projection.collect()\n", encoding="utf-8")
-    (tmp_path / "spec.py").write_text(
-        repr({"parallel_workers": 1, "spaces": {"Projection": {"serial_collect": "reuse"}}}), encoding="utf-8")
+        "from extremes_nomx import mx_model\nfor k in (1, 2):\n    mx_model.Projection[k].v()\n", encoding="utf-8")
     (tmp_path / "checks.py").write_text(CHECKS, encoding="utf-8")
     run = lambda *a: subprocess.run([sys.executable, *a], cwd=tmp_path, check=True, timeout=600)
     run("build_model.py")
-    run("-m", "modelx_cython", "extremes_nomx", "--sample", "sample.py", "--spec", "spec.py")
+    run("-m", "modelx_cython", "extremes_nomx", "--sample", "sample.py", "--no-spec")
     generated = (tmp_path / "extremes_nomx_cy/_mx_classes.py").read_text(encoding="utf-8")
     # T-5c (prepared tables): the int parts of the extremes, kept as C integers when the table is prepared
     assert "max_part_ll(" in generated and "min_part_ll(" in generated, generated[-4000:]

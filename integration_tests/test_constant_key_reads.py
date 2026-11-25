@@ -5,6 +5,8 @@ part, not an attribute read of the enum class per call.
 (2) A prepared read holds the codes of constant string labels next to the table handle.
 The first read resolves them, a missing key raises KeyError at the read, and collect resets the holds.
 Results must not change: compiled at one and four workers equals the exported model.
+
+Direct-route twin of ``test_constant_key_reads_join`` (the same model without ``collect_over``; items are evaluated directly).
 """
 from http import HTTPStatus
 import subprocess
@@ -29,8 +31,7 @@ def _model(tmp_path):
         data.new_cells('load_basis', 'lambda: loads')
         data.new_cells('cube', 'lambda: grid')
         projection = portfolio.new_space(
-            'Projection', formula='lambda key: None', refs={'market': data, 'keys': keys, 'P': HTTPStatus},
-            collect_over={'key': keys}, collect_outputs='lambda: {"sum": {"value": value()}}')
+            'Projection', formula='lambda key: None', refs={'market': data, 'keys': keys, 'P': HTTPStatus})
         projection.new_cells('rate', textwrap.dedent('''\
             def rate(t):
                 mix = market.basis().at[P.OK, "value"]
@@ -54,13 +55,9 @@ def _model(tmp_path):
         model.export(tmp_path / 'exported', locked_spaces=[data])
     finally:
         model.close()
-    spec = {'parallel_workers': 4, 'spaces': {'Portfolio': {'spaces': {'Projection': {
-        'serial_collect': 'reuse', 'parallel_collect_reuse': True, 'parallel_collect_order': 'domain'}}}}}
-    (tmp_path / 'spec.py').write_text(repr(spec), encoding='utf-8')
     (tmp_path / 'sample.py').write_text(
         'from exported import mx_model\n'
         'p = mx_model.Portfolio.Projection\n'
-        'p.collect()\n'
         'for key in (1, 2, 3):\n'
         '    [p[key].rate(t) for t in range(24)]; p[key].value(); [p[key].rare(t) for t in range(3)]\n',
         encoding='utf-8')
@@ -69,25 +66,18 @@ def _model(tmp_path):
 def test_constant_key_reads_use_enum_constants_and_held_codes(tmp_path):
     _model(tmp_path)
     done = subprocess.run([sys.executable, '-m', 'modelx_cython', 'exported', '--sample', 'sample.py',
-                           '--spec', 'spec.py'], cwd=tmp_path, capture_output=True, text=True)
+                           '--no-spec'], cwd=tmp_path, capture_output=True, text=True)
     assert done.returncode == 0, done.stdout[-3000:] + done.stderr[-3000:]
     generated = (tmp_path / 'exported_cy/_m_Portfolio/_mx_classes.py').read_text(encoding='utf-8')
     enum_read = next(line for line in generated.splitlines() if line.lstrip().startswith('mix ='))
     assert '.kcode(' in enum_read and ', 0, 200)' in enum_read and 'P.OK' not in enum_read, enum_read
     assert generated.count('.hold_code(') == 3
-    assert all(f'root._mx_tk_{slot} = 0' in generated for slot in range(3))
-    assert 'root._mx_tp_0 = None' in generated
     probe = textwrap.dedent('''\
         import sys
         from importlib import import_module
         m = import_module(sys.argv[1]).mx_model
         p = m.Portfolio.Projection
-        if sys.argv[1] == 'exported_cy':
-            serial = type(m)()
-            serial.collect_workers = 1
-            print(float(serial.Portfolio.Projection.collect().sum.value), float(p.collect().sum.value))
-        else:
-            print(float(p.collect().sum.value), float(p.collect().sum.value))
+        print(float(sum(p[key].value() for key in range(1, 41))))
         item = p[7]
         for attempt in range(2):
             try:
@@ -109,7 +99,4 @@ def test_constant_key_reads_use_enum_constants_and_held_codes(tmp_path):
         run = subprocess.run([sys.executable, '-c', probe, package], cwd=tmp_path, capture_output=True, text=True)
         assert run.returncode == 0, package + run.stdout + run.stderr
         out[package] = run.stdout.splitlines()
-    one, four = out['exported_cy'][0].split()
-    assert one == out['exported'][0].split()[0], out
-    assert float(four) == float(one), out
-    assert out['exported_cy'][1:] == out['exported'][1:], out
+    assert out['exported_cy'] == out['exported'], out

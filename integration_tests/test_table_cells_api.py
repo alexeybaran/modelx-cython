@@ -3,7 +3,10 @@
 A table cell returns the plain DataFrame its formula returned, the same object on every call. References are
 plain attributes, assignable as upstream allows (values cached before an assignment stay; the drivers bind
 inputs on a new model before running it). A compiled model has no clear and no table-cell assignment. The
-exported pure-Python model behaves the same for what both offer (asserted on both)."""
+exported pure-Python model behaves the same for what both offer (asserted on both).
+
+Direct-route twin of ``test_table_cells_api_join`` (the same model without ``collect_over``; items are evaluated directly).
+"""
 
 import subprocess
 import sys
@@ -27,8 +30,7 @@ def build():
     data.new_cells("table", "def table():\\n    return FRAME2.copy()\\n")
     data.FRAME2 = FRAME
     proj = model.new_space("Projection", formula="lambda policy_id: None",
-                           refs={"data": data, "ids": IDS, "factor": 1.0},
-                           collect_over={"policy_id": IDS}, collect_outputs='lambda: {"sum": {"pv": pv()}}')
+                           refs={"data": data, "ids": IDS, "factor": 1.0})
     proj.new_cells("sa", 'lambda: data.points().loc[policy_id, "sa"]')
     proj.new_cells("rate", 'lambda: data.table().loc[policy_id, "rate"]')
     proj.new_cells("pv", "lambda: factor * sum(sa() * (1.0 + rate()) ** t for t in range(12))")
@@ -49,11 +51,6 @@ if compiled:
     assert isinstance(import_module(name + "._mx_classes").__loader__, ExtensionFileLoader)
     runtime = import_module("modelx_cython.runtime.table_cells")
 Model = type(package.mx_model)
-
-
-def total(m, workers):
-    m.collect_workers = workers
-    return m.Projection.collect().sum.pv
 
 
 def direct(m):
@@ -83,16 +80,16 @@ doubled = FRAME.assign(sa=FRAME["sa"] * 2)
 m = Model()
 v = m.Data.points()
 assert type(v) is pd.DataFrame and v is m.Data.points() and v.equals(FRAME), type(v)
-assert close(direct(m), base) and close(total(m, 1), base) and close(total(m, 4), base)
+assert close(direct(m), base)
 
 # (2) References assigned on a new model before it runs: a Reference holding a table, and a scalar one
 m = Model()
 m.Data.raw = doubled
 assert m.Data.raw.equals(doubled)
-assert close(direct(m), live(raw=doubled)) and close(total(m, 4), live(raw=doubled))
+assert close(direct(m), live(raw=doubled))
 m = Model()
 m.Projection.factor = 3.0
-assert close(direct(m), live(factor=3.0)) and close(total(m, 4), live(factor=3.0))
+assert close(direct(m), live(factor=3.0))
 
 # (3) one ItemSpace is deleted and created again on the next access, as before (D114)
 m = Model()
@@ -127,14 +124,12 @@ def test_table_cells_and_references(tmp_path):
         m.close()
         """), encoding="utf-8")
     (tmp_path / "sample.py").write_text(
-        "from tables_nomx import mx_model\nfor k in (1, 2, 3, 4):\n    mx_model.Projection[k].collect_outputs()\n"
-        "mx_model.Projection.collect()\n", encoding="utf-8")
-    (tmp_path / "spec.py").write_text(
-        repr({"parallel_workers": 1, "spaces": {"Projection": {"serial_collect": "reuse"}}}), encoding="utf-8")
+        "from tables_nomx import mx_model\nfor k in (1, 2, 3, 4):\n    mx_model.Projection[k].pv()\n",
+        encoding="utf-8")
     (tmp_path / "checks.py").write_text(CHECKS, encoding="utf-8")
     run = lambda *a: subprocess.run([sys.executable, *a], cwd=tmp_path, check=True, timeout=600)
     run("build_model.py")
-    run("-m", "modelx_cython", "tables_nomx", "--sample", "sample.py", "--spec", "spec.py")
+    run("-m", "modelx_cython", "tables_nomx", "--sample", "sample.py", "--no-spec")
     generated = (tmp_path / "tables_nomx_cy/_mx_classes.py").read_text(encoding="utf-8")
     pxd = (tmp_path / "tables_nomx_cy/_mx_classes.pxd").read_text(encoding="utf-8")
     assert "def _mx_cell_points(self)" in generated and "def _mx_cell_table(self)" in generated

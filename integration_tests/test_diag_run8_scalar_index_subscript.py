@@ -1,7 +1,10 @@
 """diag-run8: a subscript of an index read that is a scalar in pandas (``T.index.max()[0]`` on one integer
 level: numpy int, so ``[0]`` raises IndexError) keeps the read as written, so the compiled model gives live's
 error type (both raise; the type differs, see below); the plain ``T.index.max()`` beside it is still a C integer read. Compiled = exported = pandas.
-The public row of an all-numeric row cell equals live's pandas row (ints upcast to float)."""
+The public row of an all-numeric row cell equals live's pandas row (ints upcast to float).
+
+Direct-route twin of ``test_diag_run8_scalar_index_subscript_join`` (the same model without ``collect_over``).
+"""
 
 import subprocess
 import sys
@@ -23,8 +26,7 @@ def build():
     data = model.new_space("Data", refs={"SINGLE": SINGLE, "POINTS": POINTS})
     data.new_cells("single", "def single():\\n    return SINGLE.copy()\\n")
     data.new_cells("points", "def points():\\n    return POINTS.copy()\\n")
-    proj = model.new_space("Projection", formula="lambda policy_id: None", refs={"data": data, "ids": IDS},
-                           collect_over={"policy_id": IDS}, collect_outputs='lambda: {"sum": {"v": v()}}')
+    proj = model.new_space("Projection", formula="lambda policy_id: None", refs={"data": data, "ids": IDS})
     proj.new_cells("top", "lambda: data.single().index.max()")
     proj.new_cells("top0", "lambda: data.single().index.max()[0]")
     proj.new_cells("model_point", "lambda: data.points().loc[policy_id]")
@@ -63,15 +65,13 @@ def _build(tmp_path):
         """), encoding="utf-8")
     (tmp_path / "sample.py").write_text(
         "from scalar_nomx import mx_model\np = mx_model.Projection\nfor k in (1, 2):\n"
-        "    p[k].collect_outputs()\n    p[k].model_point()\n    try:\n        p[k].top0()\n"
-        "    except (IndexError, TypeError):\n        pass\nmx_model.Projection.collect()\n", encoding="utf-8")
-    (tmp_path / "spec.py").write_text(
-        repr({"parallel_workers": 1, "spaces": {"Projection": {"serial_collect": "reuse"}}}), encoding="utf-8")
+        "    p[k].v()\n    p[k].model_point()\n    try:\n        p[k].top0()\n"
+        "    except (IndexError, TypeError):\n        pass\n", encoding="utf-8")
     (tmp_path / "checks.py").write_text(CHECKS, encoding="utf-8")
     run = lambda *a: subprocess.run([sys.executable, *a], cwd=tmp_path, check=True, timeout=600,
                                     capture_output=True, text=True)
     run("build_model.py")
-    run("-m", "modelx_cython", "scalar_nomx", "--sample", "sample.py", "--spec", "spec.py")
+    run("-m", "modelx_cython", "scalar_nomx", "--sample", "sample.py", "--no-spec")
     generated = (tmp_path / "scalar_nomx_cy/_mx_classes.py").read_text(encoding="utf-8")
     return {pkg: run("checks.py", pkg).stdout.strip().split(" | ") for pkg in ("scalar_nomx_cy", "scalar_nomx")}, generated
 

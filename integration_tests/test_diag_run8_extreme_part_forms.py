@@ -1,6 +1,9 @@
 """diag-run8 F1, more forms, compiled against the exported model and pandas: ``index.max()[k]`` /
 ``min()[k]`` on a complete product of two integer levels (k = 1), on an incomplete one (the other storage
-form), and on a table emptied in place (pandas: NaN, so ``[k]`` raises TypeError). Values and errors equal live."""
+form), and on a table emptied in place (pandas: NaN, so ``[k]`` raises TypeError). Values and errors equal live.
+
+Direct-route twin of ``test_diag_run8_extreme_part_forms_join`` (the same model without ``collect_over``).
+"""
 
 import subprocess
 import sys
@@ -25,8 +28,7 @@ def build():
     data.new_cells("product", "def product():\\n    return PRODUCT.copy()\\n")
     data.new_cells("sparse", "def sparse():\\n    return SPARSE.copy()\\n")
     data.new_cells("single", "def single():\\n    return SINGLE.copy()\\n")
-    proj = model.new_space("Projection", formula="lambda policy_id: None", refs={"data": data, "ids": IDS},
-                           collect_over={"policy_id": IDS}, collect_outputs='lambda: {"sum": {"v": v()}}')
+    proj = model.new_space("Projection", formula="lambda policy_id: None", refs={"data": data, "ids": IDS})
     proj.new_cells("p_top1", "lambda: data.product().index.max()[1]")
     proj.new_cells("p_low1", "lambda: data.product().index.min()[1]")
     proj.new_cells("s_top1", "lambda: data.sparse().index.max()[1]")
@@ -87,15 +89,12 @@ def test_extreme_part_forms_equal_live(tmp_path):
         """), encoding="utf-8")
     (tmp_path / "sample.py").write_text(
         "from forms_nomx import mx_model\np = mx_model.Projection\nfor k in (1, 2):\n"
-        "    p[k].collect_outputs()\n"
-        "mx_model.Projection.collect()\n", encoding="utf-8")
-    (tmp_path / "spec.py").write_text(
-        repr({"parallel_workers": 1, "spaces": {"Projection": {"serial_collect": "reuse"}}}), encoding="utf-8")
+        "    p[k].v()\n", encoding="utf-8")
     (tmp_path / "checks.py").write_text(CHECKS, encoding="utf-8")
     run = lambda *a: subprocess.run([sys.executable, *a], cwd=tmp_path, check=True, timeout=600,
                                     capture_output=True, text=True)
     run("build_model.py")
-    run("-m", "modelx_cython", "forms_nomx", "--sample", "sample.py", "--spec", "spec.py")
+    run("-m", "modelx_cython", "forms_nomx", "--sample", "sample.py", "--no-spec")
     generated = (tmp_path / "forms_nomx_cy/_mx_classes.py").read_text(encoding="utf-8")
     assert generated.count("_part_ll(") >= 4, generated.count("_part_ll(")      # T-5c: prepared-table parts
     outs = {pkg: run("checks.py", pkg).stdout for pkg in ("forms_nomx_cy", "forms_nomx")}

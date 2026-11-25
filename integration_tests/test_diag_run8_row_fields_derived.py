@@ -1,4 +1,6 @@
-"""Match derived row admissions and the public values on both collect ownership routes."""
+"""Match derived row admissions and the public values on the direct route.
+
+Direct-route twin of ``test_diag_run8_row_fields_derived_join`` (the same models without ``collect_over``)."""
 
 import json
 import subprocess
@@ -24,8 +26,7 @@ def build(override):
     base.new_cells("model_point", "lambda: data.points().loc[policy_id]")
     base.new_cells("sa", 'lambda: float(model_point()["sa"])')
     base.new_cells("pv", "lambda: sa() * 2.0")
-    proj = model.new_space("Projection", bases=base, formula="lambda policy_id: None", refs={"ids": IDS},
-                           collect_over={"policy_id": IDS}, collect_outputs='lambda: {"sum": {"pv": pv()}}')
+    proj = model.new_space("Projection", bases=base, formula="lambda policy_id: None", refs={"ids": IDS})
     if override == "row":
         proj.model_point.formula = "lambda: data.other().loc[policy_id]"
     elif override == "reader":
@@ -41,9 +42,7 @@ def build(override):
         proj.data = other
         if override == "shared":
             proj.sa.formula = 'def sa():\\n    row = model_point()\\n    return float(row["sa"])\\n'
-            model.new_space("Shared", formula="lambda policy_id: None", refs={"projection": proj, "ids": IDS},
-                            collect_over={"policy_id": IDS},
-                            collect_outputs='lambda: {"sum": {"pv": projection[policy_id].pv()}}')
+            model.new_space("Shared", formula="lambda policy_id: None", refs={"projection": proj, "ids": IDS})
     return model
 """
 
@@ -53,9 +52,7 @@ import sys
 from importlib import import_module
 m = import_module(sys.argv[1]).mx_model
 p = m.Projection
-if hasattr(m, "Shared"):
-    print(m.Shared.collect().sum.pv)
-print(p.collect().sum.pv)
+print(sum(p[i].pv() for i in (1, 2, 3)))
 print(json.dumps([(p[i].sa(), p[i].pv(), type(p[i].model_point()).__name__,
                    sorted((str(k), float(v)) for k, v in p[i].model_point().items()))
                   for i in (1, 2, 3)]))
@@ -63,7 +60,8 @@ print(json.dumps([(p[i].sa(), p[i].pv(), type(p[i].model_point()).__name__,
 
 
 @pytest.mark.parametrize(("override", "total"), [
-    ("row", 12000), ("reader", 1206), ("none", 1200), ("reference", 12000), ("shared", 12000),
+    # ("shared", 12000) is in the join half only: its Shared ItemSpace reaches the items through collect
+    ("row", 12000), ("reader", 1206), ("none", 1200), ("reference", 12000),
     ("alias_line", 1206), ("early_alias", 1200),
 ])
 def test_derived_space_field_admission_preserves_public_rows(tmp_path, override, total):
@@ -76,16 +74,13 @@ def test_derived_space_field_admission_preserves_public_rows(tmp_path, override,
         m.close()
         """), encoding="utf-8")
     (tmp_path / "sample.py").write_text(
-        f"from {name} import mx_model\nfor k in (1, 2, 3):\n    mx_model.Projection[k].collect_outputs()\n"
-        "    mx_model.Projection[k].model_point()\nmx_model.Projection.collect()\n"
-        "if hasattr(mx_model, 'Shared'):\n    mx_model.Shared.collect()\n", encoding="utf-8")
-    (tmp_path / "spec.py").write_text(
-        repr({"parallel_workers": 1, "spaces": {"Projection": {"serial_collect": "reuse"}}}), encoding="utf-8")
+        f"from {name} import mx_model\nfor k in (1, 2, 3):\n    mx_model.Projection[k].pv()\n"
+        "    mx_model.Projection[k].model_point()\n", encoding="utf-8")
     (tmp_path / "checks.py").write_text(CHECKS, encoding="utf-8")
     run = lambda *a: subprocess.run([sys.executable, *a], cwd=tmp_path, check=True, timeout=600,
                                     capture_output=True, text=True)
     run("build_model.py")
-    run("-m", "modelx_cython", name, "--sample", "sample.py", "--spec", "spec.py")
+    run("-m", "modelx_cython", name, "--sample", "sample.py", "--no-spec")
     outs = {pkg: run("checks.py", pkg).stdout.splitlines() for pkg in (name + "_cy", name)}
     assert outs[name + "_cy"] == outs[name], outs
     assert all(float(value) == total for value in outs[name][:-1])

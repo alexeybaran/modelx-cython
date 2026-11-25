@@ -14,6 +14,8 @@ at 1 and 4 workers.
 Tiers: the default suite runs the fixed cases below. ``-m fuzz_full`` adds formulas that combine a random native
 read with a random pandas read of the frame, on the seed MX_CY_FUZZ_SEED or a random one (printed and named in a
 failure).
+
+Direct-route twin of ``test_table_mixed_reads_join`` (the same model without ``collect_over``; the direct values are compared at each stage).
 """
 import json
 import os
@@ -90,9 +92,7 @@ def build():
     report = model.new_space("Report", refs={{"data": data}})
     for name, body in REPORT.items():
         _cell(report, name, body)
-    outputs = ", ".join(f'"{{n}}": {{n}}()' for n in PROJECTION)
-    proj = model.new_space("Projection", formula="lambda policy_id: None", refs={{"data": data, "report": report, "ids": IDS}},
-                           collect_over={{"policy_id": IDS}}, collect_outputs="lambda: {{'sum': {{" + outputs + "}}}}")
+    proj = model.new_space("Projection", formula="lambda policy_id: None", refs={{"data": data, "report": report, "ids": IDS}})
     for name, body in PROJECTION.items():
         _cell(proj, name, body)
     return model
@@ -133,16 +133,6 @@ def values(m):
     return out
 
 
-def sums(direct):
-    return {{cell: round(sum(direct[f"Projection[{{i}}].{{cell}}"][1] for i in IDS), 6) for cell in PROJECTION}}
-
-
-def collected(m, workers):
-    m._mx_collect_set_workers_v2(workers)
-    result = m.Projection.collect().sum
-    return {{cell: round(float(getattr(result, cell)), 6) for cell in PROJECTION}}
-
-
 fit2 = FRAME.assign(sa=FRAME["sa"] * 2, rate=FRAME["rate"][::-1].values, grp=["b", "a", "a", "a"])
 STAGES = [      # (stage, the input frame, whether the compiled reads of its frame stay native)
     ("the traced frame", FRAME, True),
@@ -167,13 +157,6 @@ for stage, frame, native in STAGES:
     want = values(live)
     got = values(compiled)
     failures += [f"{{stage}}: {{k}}: compiled {{got[k]}}, live {{want[k]}}" for k in want if got[k] != want[k]]
-    if all(v[0] == "ok" for v in want.values()):
-        expected = sums(want)
-        for workers in (1, 4):
-            compiled, _ = fresh()
-            found = collected(compiled, workers)
-            failures += [f"{{stage}}: collect at {{workers}} workers: {{c}}: {{found[c]}}, live {{expected[c]}}"
-                         for c in expected if abs(found[c] - expected[c]) > 1e-6 * max(1.0, abs(expected[c]))]
 print(json.dumps(failures))
 '''
 
@@ -187,9 +170,9 @@ def _build(tmp_path, projection, report):
         m.close()
         '''), encoding='utf-8')
     (tmp_path / 'sample.py').write_text(
-        'from mixed_nomx import mx_model\nfor k in (1, 2, 3, 4):\n    mx_model.Projection[k].collect_outputs()\n'
-        'mx_model.Projection.collect()\n', encoding='utf-8')
-    (tmp_path / 'spec.py').write_text(repr({'parallel_workers': 1, 'strict_lowering': True}), encoding='utf-8')
+        'from mixed_nomx import mx_model\nfrom mixed_model import PROJECTION\nfor k in (1, 2, 3, 4):\n'
+        '    [getattr(mx_model.Projection[k], c)() for c in PROJECTION]\n', encoding='utf-8')
+    (tmp_path / 'spec.py').write_text(repr({'strict_lowering': True}), encoding='utf-8')
     (tmp_path / 'checks.py').write_text(CHECKS.format(), encoding='utf-8')
     def run(*args):
         done = subprocess.run([sys.executable, *args], cwd=tmp_path, timeout=1200, capture_output=True, text=True)

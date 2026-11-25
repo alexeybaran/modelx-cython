@@ -3,7 +3,10 @@ every use is a field read are read from the table row by the readers, without bu
 cell itself, called from Python, still gives its row. A key missing from the table is raised by the
 reader with the type and message live gives. The row position is held per item
 (an integer or a str key, looked up once per item, reset between policies). A model
-where the row escapes (returned by a public Cell) keeps the Record path. Compiled equals the exported model, values and errors."""
+where the row escapes (returned by a public Cell) keeps the Record path. Compiled equals the exported model, values and errors.
+
+Direct-route twin of ``test_diag_run8_row_fields_join`` (the same models without ``collect_over``; the routes checked are the direct ones).
+"""
 
 import json
 import subprocess
@@ -33,8 +36,7 @@ def build(escape=False):
     data.new_cells("points", "def points():\\n    return POINTS.copy()\\n")
     data.new_cells("costs", "def costs():\\n    return COSTS.copy()\\n")
     proj = model.new_space("Projection", formula="lambda policy_id: None",
-                           refs={"data": data, "ids": IDS, "Sex": Sex},
-                           collect_over={"policy_id": IDS}, collect_outputs='lambda: {"sum": {"pv": pv()}}')
+                           refs={"data": data, "ids": IDS, "Sex": Sex})
     proj.new_cells("model_point", "lambda: data.points().loc[policy_id]")
     proj.new_cells("sa", 'lambda: float(model_point()["sa"])')
     proj.new_cells("age", 'lambda: int(model_point()["age"])')
@@ -67,11 +69,8 @@ for call in ("sa", "pv"):
     except Exception as e:
         out.append(("raise", call, type(e).__name__, str(e)))
 m = package.mx_model
-for workers in (1, 4):                   # the held row is reset between policies, on both routes
-    m.collect_workers = workers
-    out.append(("collect", workers, round(float(m.Projection.collect().sum.pv), 9)))
-# a new model whose input has another row value, and one whose input lacks a key: the direct route and a
-# collect at 1 and 4 workers
+out.append(("direct", round(float(sum(p[i].pv() for i in (1, 2, 3))), 9)))
+# a new model whose input has another row value, and one whose input lacks a key: the direct route
 edited = m.Data.points().copy()
 edited.loc[1, "sa"] = 999.0
 m = Model()
@@ -85,13 +84,6 @@ for call in ("sa", "pv"):
         out.append(("value", "direct", call))
     except Exception as e:
         out.append(("raise", "direct", call, type(e).__name__, str(e)))
-for workers in (1, 4):
-    m.collect_workers = workers
-    try:
-        m.Projection.collect()
-        out.append(("value", "collect", workers))
-    except Exception as e:
-        out.append(("raise", "collect", workers, type(e).__name__, str(e)))
 print(repr(out))
 """
 
@@ -108,14 +100,12 @@ def _build(tmp_path, escape):
     calls = "".join(f"    p[k].{c}()\n" for c in ("sa", "age", "sex", "both", "fee", "pv", "model_point"))
     (tmp_path / f"sample_{name}.py").write_text(
         f"from {name}_nomx import mx_model\np = mx_model.Projection\nfor k in (1, 2, 3):\n{calls}"
-        + ("    p[k].whole()\n" if escape else "") + "mx_model.Projection.collect()\n", encoding="utf-8")
-    (tmp_path / "spec.py").write_text(
-        repr({"parallel_workers": 1, "spaces": {"Projection": {"serial_collect": "reuse"}}}), encoding="utf-8")
+        + ("    p[k].whole()\n" if escape else ""), encoding="utf-8")
     (tmp_path / "checks.py").write_text(CHECKS, encoding="utf-8")
     run = lambda *a: subprocess.run([sys.executable, *a], cwd=tmp_path, check=True, timeout=600,
                                     capture_output=True, text=True)
     run(f"build_{name}.py")
-    run("-m", "modelx_cython", f"{name}_nomx", "--sample", f"sample_{name}.py", "--spec", "spec.py")
+    run("-m", "modelx_cython", f"{name}_nomx", "--sample", f"sample_{name}.py", "--no-spec")
     outs = {pkg: run("checks.py", pkg).stdout for pkg in (f"{name}_nomx_cy", f"{name}_nomx")}
     report = json.loads((tmp_path / f"{name}_nomx_cy/_mx_admission.json").read_text(encoding="utf-8"))
     cells = {key.rsplit("._f_", 1)[-1]: value for key, value in report.items()
@@ -128,7 +118,7 @@ def test_row_fields_read_without_the_row(tmp_path):
     outs, cells, generated, name = _build(tmp_path, escape=False)
     assert outs[f"{name}_nomx_cy"] == outs[f"{name}_nomx"], outs
     assert "'raise', 'sa', 'KeyError', '99'" in outs[f"{name}_nomx"], outs       # the missing key, as live
-    for route in ("'direct', 'sa'", "'collect', 1", "'collect', 4"):          # a removed key, as live
+    for route in ("'direct', 'sa'",):                                       # a removed key, as live
         assert f"('raise', {route}, 'KeyError', '2')" in outs[f"{name}_nomx"], (route, outs)
     assert cells["model_point"]["row_cell_inlined"] is True, cells["model_point"]
     expected_fields = {"sa": 1, "age": 1, "sex": 1, "both": 2}

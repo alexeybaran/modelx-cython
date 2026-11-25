@@ -5,6 +5,8 @@ instance into a field, reset with the per-policy caches of the collect loop, and
 uses it borrowed: no Cell call and no reference count on the shared table or handle per step. The
 results must not change: compiled at one and four workers equals the exported model; an evaluated
 item read twice gives the same values.
+
+Direct-route twin of ``test_held_table_handles_join`` (the same model without ``collect_over``; items are evaluated directly).
 """
 import subprocess
 import sys
@@ -23,8 +25,7 @@ def _model(tmp_path):
         data = portfolio.new_space('Inputs', refs={'rates': rates})
         data.new_cells('curve', 'lambda: rates')
         projection = portfolio.new_space(
-            'Projection', formula='lambda key: None', refs={'market': data, 'keys': keys},
-            collect_over={'key': keys}, collect_outputs='lambda: {"sum": {"value": value()}}')
+            'Projection', formula='lambda key: None', refs={'market': data, 'keys': keys})
         projection.new_cells('rate', '''\
 def rate(t):
     k = (t + key) % 3 + 1
@@ -47,13 +48,9 @@ def rare(t):
         model.export(tmp_path / 'exported', locked_spaces=[data])
     finally:
         model.close()
-    spec = {'parallel_workers': 4, 'spaces': {'Portfolio': {'spaces': {'Projection': {
-        'serial_collect': 'reuse', 'parallel_collect_reuse': True, 'parallel_collect_order': 'domain'}}}}}
-    (tmp_path / 'spec.py').write_text(repr(spec), encoding='utf-8')
     (tmp_path / 'sample.py').write_text(
         'from exported import mx_model\n'
         'p = mx_model.Portfolio.Projection\n'
-        'p.collect()\n'
         'for key in (1, 2, 3):\n'
         '    [p[key].rate(t) for t in range(24)]; p[key].value(); [p[key].rare(t) for t in range(3)]\n',
         encoding='utf-8')
@@ -62,27 +59,18 @@ def rare(t):
 def test_shared_table_reads_use_a_held_handle_and_results_stay(tmp_path):
     _model(tmp_path)
     done = subprocess.run([sys.executable, '-m', 'modelx_cython', 'exported', '--sample', 'sample.py',
-                           '--spec', 'spec.py'], cwd=tmp_path, capture_output=True, text=True)
+                           '--no-spec'], cwd=tmp_path, capture_output=True, text=True)
     assert done.returncode == 0, done.stdout[-3000:] + done.stderr[-3000:]
     generated = (tmp_path / 'exported_cy/_m_Portfolio/_mx_classes.py').read_text(encoding='utf-8')
     assert 'if self._mx_tq_0 == 0:' in generated
     assert '.PreparedRef, self._mx_tp_0)' in generated
     assert generated.count('self._mx_tp_0 = self.market._mx_prepared_curve()') == 2
-    assert 'root._mx_tp_0 = None' in generated and 'root._mx_tq_0 = 0' in generated
     probe = textwrap.dedent('''\
         import sys
         from importlib import import_module
         m = import_module(sys.argv[1]).mx_model
         p = m.Portfolio.Projection
-        if sys.argv[1] == 'exported_cy':
-            from exported_cy import _mx_sys
-            serial = type(m)()
-            serial.collect_workers = 1
-            one = serial.Portfolio.Projection.collect().sum.value
-            four = p.collect().sum.value
-            print(float(one), float(four))
-        else:
-            print(float(p.collect().sum.value), float(p.collect().sum.value))
+        print(float(sum(p[key].value() for key in range(1, 41))))
         item = p[7]
         assert [item.rare(t) for t in range(5)] == [p[7].rare(t) for t in range(5)]
         try:
@@ -100,7 +88,4 @@ def test_shared_table_reads_use_a_held_handle_and_results_stay(tmp_path):
         run = subprocess.run([sys.executable, '-c', probe, package], cwd=tmp_path, capture_output=True, text=True)
         assert run.returncode == 0, package + run.stdout + run.stderr
         out[package] = run.stdout.splitlines()
-    one, four = out['exported_cy'][0].split()
-    assert one == out['exported'][0].split()[0], (out, 'one worker equals the exported model')
-    assert float(four) == float(one), out                                     # exact sums of a few terms
-    assert out['exported_cy'][1:] == out['exported'][1:], out           # the missing column raises at the read
+    assert out['exported_cy'] == out['exported'], out                  # the missing column raises at the read
