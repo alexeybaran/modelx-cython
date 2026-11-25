@@ -428,8 +428,6 @@ def _flag_overflows(node, cell, guard, declared, cls_name, infer_types):
     tests once before it returns (OverflowError naming the Cell); a formula with an operation the
     guard cannot show to be on C integers or not (a nested scope, an operand of unknown C type)
     keeps Cython's overflowcheck on that formula alone."""
-    if not isinstance(node.body, cst.IndentedBlock):
-        return node
     if _catches_overflow(node) or any(isinstance(part, cst.Yield) for part in lexical_nodes(node.body.body)):
         flagged = _FlagArithmetic(guard, '')     # a generator, or a handler that could catch the error
         flagged.count = 0
@@ -504,8 +502,6 @@ def _unbound_locals(node):
     raises UnboundLocalError there (a loop that ran no iteration, a branch not taken), and a C local
     has no unbound state (with type inference, or a declaration of the vector lowering, Cython would
     read an unset value)."""
-    if not isinstance(node.body, cst.IndentedBlock):
-        return node
     body = node.body.body
     facts = CstFacts(body)
     parameters = {param.name.value for param in (*node.params.posonly_params, *node.params.params,
@@ -870,7 +866,7 @@ class _SignedLocalValues(cst.CSTTransformer):
 
 def _type_signed_locals(body, guard, facts, parameters):
     """Keep provably signed locals native and preserve existing prefix admission."""
-    if (not isinstance(body, cst.IndentedBlock) or has_scope_effects(body.body)
+    if (has_scope_effects(body.body)
             or facts.reads & {'eval', 'exec', 'locals', 'vars', 'globals', '_getframe', 'currentframe'}):
         return body, ()
     operands = []
@@ -1102,7 +1098,7 @@ def _python_locals(node, cell):
     # other binding construct leaves the formula as it is
     effects = (cst.Global, cst.Nonlocal, cst.Import, cst.ImportFrom, cst.Del, cst.NamedExpr,
                cst.FunctionDef, cst.ClassDef, cst.Lambda)
-    if not isinstance(body, cst.IndentedBlock) or any(
+    if any(
             isinstance(part, effects) or isinstance(part, getattr(cst, 'Match', ()))
             for part in lexical_nodes(body.body)):
         return node
