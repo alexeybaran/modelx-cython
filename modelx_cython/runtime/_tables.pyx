@@ -435,15 +435,36 @@ cdef long long _int_part(object part):
 
 
 # ---- binding (T-3) ----------------------------------------------------------------------------------
-# One PreparedTable per frame object, prepared on first use and dropped when the frame dies: a new frame is
-# prepared afresh, and no prepared copy of an old frame is ever used for it.
+# A frame Cell prepares its frame when it binds it (``bind_new``, every time: a frame edited in place and given
+# to a new model is prepared from what it holds then). A read that has only the frame finds that table by the
+# identity of the frame (``prepared``); the entry is dropped when the frame dies. Each operation on the map is one
+# dict operation (no lock): two threads that miss prepare the same frame twice, and one table stays.
 cdef dict _prepared = {}               # id(frame) -> (weak reference to the frame, PreparedTable or None)
-_lock = threading.RLock()
+cdef PreparedTable _NOT_PREPARED = PreparedTable.__new__(PreparedTable)     # every slot -1: reads stay pandas
 
 
-def _forget(key):
-    with _lock:
+def _forget(key, ref):
+    entry = _prepared.get(key)
+    if entry is not None and entry[0] is ref:       # not the entry of a later frame at the same address
         _prepared.pop(key, None)
+
+
+cdef object _prepare_new(object frame):
+    """Prepare ``frame`` as it is now and make it the table its reads find (None: they stay pandas)."""
+    key = id(frame)
+    signatures = _thread_signatures()
+    axes = _zip_origin(frame, signatures)
+    table = prepare(frame)
+    if table is not None:
+        _decide(table, signatures, axes)
+    _prepared[key] = (weakref.ref(frame, lambda ref, key=key: _forget(key, ref)), table)
+    return table
+
+
+cdef object bind_new(object frame):
+    """What a frame Cell publishes when it binds ``frame``: a table prepared now, never one prepared earlier."""
+    table = _prepare_new(frame)
+    return _NOT_PREPARED if table is None else table
 
 
 try:
@@ -451,28 +472,16 @@ try:
 except ImportError:         # the runtime used on its own (tests)
     pass
 else:
-    _register(lambda value: bind_ref(value), __name__.split('.')[0])
+    _register(lambda value: bind_new(value), __name__.split('.')[0])
 
 
 cdef object prepared(object frame):
-    """The PreparedTable of ``frame`` (None when its reads must stay pandas), prepared once per object."""
-    key = id(frame)
-    with _lock:
-        entry = _prepared.get(key)
+    """The PreparedTable of ``frame`` (None when its reads must stay pandas): the one its Cell bound, else prepared
+    at this first read."""
+    entry = _prepared.get(id(frame))
     if entry is not None and entry[0]() is frame:
         return entry[1]
-    signatures = _thread_signatures()
-    axes = _zip_origin(frame, signatures)
-    table = prepare(frame)
-    if table is not None:
-        _decide(table, signatures, axes)
-    ref = weakref.ref(frame, lambda _, key=key: _forget(key))
-    with _lock:
-        _prepared[key] = (ref, table)
-    return table
-
-
-cdef PreparedTable _NOT_PREPARED = PreparedTable.__new__(PreparedTable)     # every slot -1: reads stay pandas
+    return _prepare_new(frame)
 
 
 cdef object bind_ref(object frame):
