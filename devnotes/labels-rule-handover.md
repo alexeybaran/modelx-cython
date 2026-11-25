@@ -1,7 +1,6 @@
 # Handover: enum members held by use (branch `review/r4-labels-a`)
 
-Base: `r4/integration` 09cbd68 merged at 7cb9a14; 18 commits after it. Stack: CPython 3.14t, Cython 3.3.1, modelx 636877b.
-
+Base: `r4/integration` 09cbd68 merged at 7cb9a14; 17 code and test commits after it. Stack: CPython 3.14t, Cython 3.3.1, modelx 636877b.
 ## Design
 - `enums.plan(...)` runs once for all modules, first (`cli.py`); per formula `_Uses` marks contexts, `_Rewrite` applies them.
 - IntEnum (enum-safe): the integer is the member's value. Integer contexts: operand of a comparison (not `is`) or of
