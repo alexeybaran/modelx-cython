@@ -153,56 +153,6 @@ cdef class PreparedTable:
     cdef object object_at(self, Py_ssize_t row, Py_ssize_t slot):
         return (<tuple>self.objects[slot])[row]
 
-    cpdef Py_ssize_t column(self, object label) except -2:
-        """The position of column ``label`` (None for a Series); KeyError as pandas raises it."""
-        position = self.column_positions.get(label)
-        if position is None:
-            raise KeyError(label)
-        return position
-
-    # ------------------------------------------------------------ Python access (tests, fallbacks)
-    def key_codes(self, key):
-        """Level codes of a full key (a scalar for one level, a tuple otherwise); None when a part is absent."""
-        parts = key if self.nlevels > 1 else (key,)
-        if not isinstance(parts, tuple) or len(parts) != self.nlevels:
-            return None
-        codes = []
-        for level, part in enumerate(parts):
-            code = self.code_obj(level, part)
-            if code < 0:
-                return None
-            codes.append(code)
-        return codes
-
-    def row(self, key):
-        """The stored row of ``key``, or -1."""
-        cdef Py_ssize_t[8] buffer
-        codes = self.key_codes(key)
-        if codes is None:
-            return -1
-        for i, code in enumerate(codes):
-            buffer[i] = code
-        return self.row_codes(buffer, len(codes))
-
-    def value(self, key, column=None):
-        """``source.loc[key, column]`` (``source.loc[key]`` for a Series), as pandas returns it."""
-        cdef Py_ssize_t row = self.row(key)
-        cdef Py_ssize_t position
-        if row < 0:
-            raise KeyError(key)
-        position = self.column(None if self.is_series else column)
-        kind = self.column_kind[position]
-        slot = self.column_slot[position]
-        if kind == COLUMN_F64:
-            return np.float64(self.f64_at(row, slot))
-        if kind == COLUMN_I64:
-            return np.int64(self.i64_at(row, slot))
-        return self.object_at(row, slot)
-
-    def contains(self, key):
-        """``key in source.index``."""
-        return self.row(key) >= 0
-
 
 def unprepared_reason(value):
     """Why ``prepare(value)`` returns None (None when it does not)."""
