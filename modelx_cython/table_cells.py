@@ -234,10 +234,7 @@ def rewrite_class(cls_info, node, config, integer_refs):
     for name, shape in vectors.items():
         params = ', '.join(cls_info.cells[name].params)
         value = f'self.{mapping[name]}({params})'
-        from modelx_cython.vectors import cell_vector_container
-        item = 'tuple(v.tolist())' if cell_vector_container(cls_info.cells[name]) == 'tuple' else 'v.tolist()'
-        result = (f'tuple([{item} for v in {value}])' if isinstance(shape, tuple)
-                  else f'tuple({value}.tolist())' if item != 'v.tolist()' else f'{value}.tolist()')
+        result = (f'tuple([v.totuple() for v in {value}])' if isinstance(shape, tuple) else f'{value}.totuple()')
         declared = params
         cell = cls_info.cells[name]
         if name in signatures and (cell.called_with_kwargs or cell.body_has_closure):
@@ -246,7 +243,7 @@ def rewrite_class(cls_info, node, config, integer_refs):
             declared = cst.Module(body=[]).code_for_node(rest)
         lines.append(
             f'def {name}(self{", " if declared else ""}{declared}):\n'
-            f'    """A new list of the values, as live returns a list (D154); compiled code calls '
+            f'    """A new tuple of the values, equal to the tuple live returns (D154); compiled code calls '
             f'``{mapping[name]}``, which passes the typed vector without a copy."""\n'
             f'    return {result}\n')
     if tables:
@@ -416,14 +413,14 @@ class RenameMembers(cst.CSTTransformer):
     def _vector_native(self, node, shape):
         """Whether compiled code consumes the typed vector that ``node`` (a vector cell call) gives (D154).
 
-        Native uses: a provider operation's argument, ``.n`` / ``.data`` / ``.tolist()``, ``is (not) None``, a
+        Native uses: a provider operation's argument, ``.n`` / ``.data`` / ``.totuple()``, ``is (not) None``, a
         typed vector local assigned from it, the return of a function typed to return it, and the elements of
         a tuple of vectors so used. Everywhere else the call stays on the public method, which returns a new
         list: the value Python code sees there is the list live builds, whatever the receiver."""
         from modelx_cython.vectors import ALIAS
         parent = self._parent(node)
         if isinstance(parent, cst.Attribute) and parent.value is node:
-            return parent.attr.value in ('n', 'data', 'tolist')
+            return parent.attr.value in ('n', 'data', 'tolist', 'totuple')
         if isinstance(parent, cst.Arg):
             call = self._parent(parent)
             return (isinstance(call, cst.Call) and isinstance(call.func, cst.Attribute)
@@ -450,7 +447,7 @@ class RenameMembers(cst.CSTTransformer):
         if isinstance(parent, cst.IfExp) and parent.test is not node:
             return self._vector_native(parent, shape)
         if isinstance(parent, cst.CompFor) and parent.iter is node:
-            # _ObjectUses' own conversion of a tuple of vectors: [_mx_vector.tolist() for _mx_vector in <call>]
+            # _ObjectUses' own conversion of a tuple of vectors: [_mx_vector.totuple() for _mx_vector in <call>]
             return isinstance(parent.target, cst.Name) and parent.target.value == '_mx_vector'
         if isinstance(parent, cst.Assign) and parent.value is node:
             return self._vector_targets([t.target for t in parent.targets])
