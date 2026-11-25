@@ -1,5 +1,11 @@
-"""Mandatory integration contract, separate from upstream's dependency matrix."""
-import inspect
+"""Mandatory integration contract, separate from upstream's dependency matrix, on the direct route.
+
+Direct-route twin of the collect-layer ``test_exported_contract_and_collection`` (the same model
+without ``collect_over``, so it builds on upstream modelx): inherited References, ItemSpaces and their
+identity, no live dependency invalidation, an uncached Cell, exceptions passed through, locked
+Spaces, a read-only vector value; the collect totals are the sums of the direct items, and the
+ItemSpace formula's Reference is computed by its Cell.
+"""
 import json
 import os
 import subprocess
@@ -7,15 +13,11 @@ import sys
 import textwrap
 
 import modelx as mx
-import pytest
 
 
-@pytest.mark.parametrize('workers', [1, 2, 4])
-def test_exported_contract_and_collection(tmp_path, workers):
+def test_exported_contract_on_the_direct_route(tmp_path):
     model = mx.new_model('CompiledContract')
     try:
-        assert 'collect_over' in inspect.signature(model.new_space).parameters, (
-            'integration qualification requires the pinned collection-enabled modelx')
         base = model.new_space('Base', refs={'offset': 10.0})
         base.new_cells('value', 'lambda t=0.5: offset + t')
         derived = model.new_space('Derived', bases=base)
@@ -23,38 +25,33 @@ def test_exported_contract_and_collection(tmp_path, workers):
         rows = {'a': {'value': 7.0}, 'b': {'value': 2.5}}
         keys = tuple(rows)
         policies = model.new_space('Policies', formula='lambda key: None',
-            refs={'rows': rows, 'keys': keys, 'adjust': float},
-            collect_over={'key': keys},
-            collect_outputs='lambda: {"sum": {"value": total()}}')
+                                   refs={'rows': rows, 'keys': keys, 'adjust': float})
         policies.new_cells('row', 'lambda: rows[key]')
         policies.new_cells('total', 'lambda: adjust(row()["value"])')
         policies.new_cells('uncached', 'lambda: adjust(1.0)').is_cached = False
         shared = model.new_space('Shared', refs={'adjust': float})
         shared.new_cells('value', 'lambda: adjust(10.0)')
+        # an ItemSpace formula returning References is development modelx's: the Cell computes it
         nested = model.new_space('Nested', refs={'Shared': shared, 'keys': (7, 3)},
-            formula='lambda date, key: {"refs": {"opening": Shared.value() + date + key}}',
-            collect_over={'key': (7, 3)},
-            collect_outputs='lambda: {"individual": {"state": state()}, "sum": {"value": state()[0]}}')
-        nested.new_cells('state', 'lambda: [opening]')
-        caller = model.new_space('Caller', refs={'Nested': nested})
-        caller.new_cells('total', 'lambda date: Nested.collect(date).sum.value')
+                                 formula='lambda date, key: None')
+        nested.new_cells('state', 'lambda: [Shared.value() + date + key]')
+        caller = model.new_space('Caller', refs={'Nested': nested, 'keys': (7, 3)})
+        caller.new_cells('total', 'lambda date: sum(Nested(date, key).state()[0] for key in keys)')
         model.export(tmp_path / 'exported', locked_spaces=['Shared', 'Caller'])
     finally:
         model.close()
-    (tmp_path / 'spec.py').write_text(repr({'parallel_workers': workers}), encoding='utf-8')
     (tmp_path / 'sample.py').write_text(
         'from exported import mx_model as m\n'
-        'm.Base.value(); m.Derived.value(); m.Policies.collect()\n'
-        'm.Policies["a"].uncached(); m.Nested.collect(2); m.Caller.total(2)\n',
+        'm.Base.value(); m.Derived.value()\n'
+        'for key in m.Policies.keys: m.Policies[key].total()\n'
+        'm.Policies["a"].uncached(); m.Nested(2, 7).state(); m.Nested(2, 3).state(); m.Caller.total(2)\n',
         encoding='utf-8')
-    subprocess.run([sys.executable, '-m', 'modelx_cython', 'exported',
-                    '--sample', 'sample.py', '--spec', 'spec.py'],
+    subprocess.run([sys.executable, '-m', 'modelx_cython', 'exported', '--sample', 'sample.py', '--no-spec'],
                    cwd=tmp_path, env=dict(os.environ), check=True)
     admission = json.loads((tmp_path / 'exported_cy/_mx_admission.json').read_text())
     assert admission['exported_cy._mx_classes._c_Base._f_value']['return_type'] == 'double'
     assert admission['exported_cy._mx_classes._c_Derived._f_value']['return_type'] == 'double'
     assert admission['exported_cy._mx_classes._c_Policies._f_uncached']['cache'] == 'none'
-    assert not any(item['nogil_qualified'] for item in admission.values())
     probe = textwrap.dedent('''\
         import sys
         from importlib import import_module
@@ -96,19 +93,16 @@ def test_exported_contract_and_collection(tmp_path, workers):
             raise AssertionError('missing exception')
         b.adjust = lambda v: v + 2.0
         assert b.total() == 4.5
-        assert m.Policies.collect().sum.value == 27.5
-        assert m.Policies.collect() is m.Policies.collect()
+        # the direct items as they now are (b's own adjust); collect's fresh items summed to 27.5
+        assert sum(m.Policies[key].total() for key in m.Policies.keys) == 25.0 + 4.5
         calls = []
         m.Shared.adjust = lambda v: calls.append(v) or v
-        result = m.Nested.collect(2)
-        assert list(result.individual) == [7, 3]
-        assert result.sum.value == 34.0
+        assert [m.Nested(2, key).state() for key in (7, 3)] == [[19.0], [15.0]]
         # A compiled vector cell value is read-only (W1.6, D50); live modelx lets a caller
         # mutate the cached list. Callers copy first and the cached value stays as it was.
-        state = list(result.individual[7].state)
+        state = list(m.Nested(2, 7).state())
         state[0] = -1.0
-        assert state == [-1.0] and result.individual[7].state == [19.0]
-        assert m.Nested(2, 7).state() == [19.0]
+        assert state == [-1.0] and m.Nested(2, 7).state() == [19.0]
         assert m.Caller.total(2) == 34.0
         assert calls == [10.0]
         assert gil() == before

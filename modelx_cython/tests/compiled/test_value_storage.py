@@ -313,9 +313,5 @@ def test_unwritten_values_of_a_locked_space(tmp_path):
     _assert_threads(tmp_path, 'locked_cy', 'locked', 'locked')
 
 
-def test_unwritten_values_on_collect_and_direct_routes(tmp_path):
-    _check(tmp_path, 'collect')
-
-
 def test_unwritten_values_after_pickle_and_copy(tmp_path):
     _check(tmp_path, 'plain')

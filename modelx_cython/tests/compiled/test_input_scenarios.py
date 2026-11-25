@@ -1,11 +1,13 @@
-"""Verify input replacement in live, exported, and compiled models."""
+"""Verify input replacement in live, exported, and compiled models on the direct route.
+
+Direct-route twin of ``test_input_scenarios_collect`` (the same model without ``collect_over``)."""
 
 import subprocess
 import sys
 import textwrap
 
 
-def test_new_input_scenario_after_collect(tmp_path):
+def test_new_input_scenario_on_the_direct_route(tmp_path):
     def write_script(name, source):
         (tmp_path / name).write_text(textwrap.dedent(source), encoding="utf-8")
 
@@ -37,7 +39,6 @@ def test_new_input_scenario_after_collect(tmp_path):
 
         def check_results(model, expected):
             projection = model.Projection
-            assert projection.collect().sum.benefit == sum(expected)
             assert (projection[1].benefit(), projection[2].benefit()) == expected
         """)
 
@@ -57,8 +58,6 @@ def test_new_input_scenario_after_collect(tmp_path):
             projection = model.new_space(
                 "Projection", formula="lambda policy_id: None",
                 refs={"data": data, "Basis": Basis, "policy_ids": policy_ids},
-                collect_over={"policy_id": policy_ids},
-                collect_outputs='lambda: {"sum": {"benefit": benefit()}}',
             )
             projection.new_cells(
                 "benefit",
