@@ -9,7 +9,7 @@ from modelx_cython.tracer import merge_vector_shapes, vector_shape
 
 @pytest.mark.parametrize('value, shape', [
     ([1.0, 2.0], 'V'), ([], 'E'), ([1, 2], 'I'), ([1, 2.0], None), ([True], None),
-    ([1 << 63], None), ((1.0, 2.0), None), (([1.0], [2.0]), ('T', ('V', 'V'))),
+    ([1 << 63], None), ((1.0, 2.0), 'v'), ((1, 2), 'i'), ((1, 2.0), None), (([1.0], [2.0]), ('T', ('V', 'V'))),
     (([1.0], [2]), ('T', ('V', 'I'))), (([1.0], 2.0), None), ((), None), (1.0, None),
 ])
 def test_vector_shape(value, shape):
