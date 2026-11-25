@@ -36,15 +36,15 @@ since d22426f.
 | upstream | 3 | 51 | 471 |
 | P1 | 88 | 559 | 9136 |
 | collect | 30 | 74 | 2787 |
-| B1 | 13 | 104 | 1146 |
-| B2 | 16 | 21 | 1438 |
+| B1 | 16 | 102 | 1681 |
+| B2 | 16 | 21 | 1436 |
 | B3 | 22 | 93 | 1778 |
-| B4 | 10 | 9 | 582 |
+| B4 | 10 | 9 | 587 |
 | B5 | 4 | 21 | 556 |
-| B6 | 14 | 63 | 2592 |
+| B6 | 14 | 63 | 2593 |
 | B7 | 5 | 10 | 367 |
-| join | 13 | 22 | 1554 |
-| total | 218 | 1027 | 22407 |
+| join | 13 | 22 | 1556 |
+| total | 221 | 1025 | 22948 |
 
 The tests counts are collected cases (parametrized cases counted one by one). Before the sort the suite
 collected 950 cases (942 passed, 8 skipped). After the sort it collected 962: the same 950 under their
@@ -64,9 +64,11 @@ with the same 8 skips. The counts above are the current tree, after the merges l
 | `review/r4-table-forms-b` | 3732197 | `integration_tests/test_prepared_zip_prefix.py`: the zip spelling it tested is removed | `integration_tests/test_table_probe.py`: an asof or searchsorted inside the key of a lowered read is now the formula's own pandas call, so the check that native branches call no pandas skips those two calls only. `integration_tests/test_diag_kr_forms.py`: docstring (asof is no longer an integer key) | `integration_tests/forms_probe.py` (helper) and `test_forms_alias_edit`, `test_forms_hold_branch`, `test_forms_list_key`, `test_forms_own_frame`, `test_forms_scalar_type` (B4), `test_forms_view_keyerror` (B6); a case in `test_read_notes.py` (B7) |
 | `r4/w1-vectors` (after the marker: tuples only) | d89c23e | none | vector tests converted to tuple cells (15 compiled files, `test_vectors.py`, `test_diag_kr_forms.py`); `test_local_vectors_without_vector_cells.py`: D94 removed, it now asserts that no formula is lowered and no `F64Vec` appears, and the checks of lowered local vectors go with D94; `test_collect_direct_isolation.py`: `is` became `==` (Python gets a new equal tuple per call); `test_leading_vector_sum.py`: the fallback text is "vector used in Python code" (as the branch's notes `devnotes/w1-vectors-tuple-experiment.md` state) | `compiled/test_tuple_vectors.py` (B3) |
 | `review/r4-table-base-b` 2961ac2 (runtime only) | 2961ac2 | none | none | none: the zip and ordered-lookup runtime left unreachable by the table forms is removed from `_tables.pyx/.pxd` |
+| `r4/w5-labels-2` (enum rule by use) | 53fd56e | none (in `test_enum_literals.py` 19 tests of the literal pass are replaced by 17 of the rule by use) | as `devnotes/labels-rule-w5.md` lists them: generated-text and result assertions of the literal pass now state the forms of the rule by use (members stay members except Cell parameters of an enum family, values 0..n-1). Applied by me to the split files: the `test_constant_key_reads` and `test_diag_mt_shared_refs` edits to their join halves and twins, the enum-domain test to `test_param_bounds_join` and its twin `test_param_bounds_b1` (with the `status` argument added to the P1 build), and the `test_enum_results` twin redone from the new join half. Coverage lost (listed for the coordinator): `test_audit_runtime_b2` no longer checks that a changed enum definition is refused at load; `test_diag_scale_int_items` reads plain integers where it read IntEnum items | `compiled/test_enum_stored_module.py`, `test_enum_text_values.py`, `test_enum_uses.py` (B1) |
 
-The review documents of these branches (`devnotes/REVIEW-BRIEF.md`, `devnotes/review-reductions-a.md`,
-`devnotes/review-table-base-a.md`) were left out. The edits of the two reduction cases in `test_audit_contracts.py` were applied to `test_audit_contracts_b2.py`,
+The review documents of these branches (`devnotes/REVIEW-BRIEF.md`, `devnotes/review-*.md`, `review-labels-a.patch`)
+were left out. From the labels merge on, the suite runs against modelx `r4/modelx-integration` (df3ced9, a descendant of
+636877b), which exports classes of a module stored with the model. The edits of the two reduction cases in `test_audit_contracts.py` were applied to `test_audit_contracts_b2.py`,
 where the sort had moved them. `runtime/_native_streams.pxd` is now listed as B2; the first version of this
 document wrongly listed it as P1, and it is used only by `reductions.py`. `test_prepared_tables.py` moved from B7 to B6:
 after the table-base branch its probe uses no ordered lookup, only `prefix_range` (B6). After the table-forms branch the table
@@ -272,22 +274,25 @@ table while the first readers bind it on a new model, so collect is the subject.
 | `modelx_cython/tests/test_parser_collect.py` | collect | 1 | 22 |
 | `modelx_cython/tests/test_tracer_collect.py` | collect | 1 | 19 |
 | `modelx_cython/tests/test_tracer_export_contract_collect.py` | collect | 1 | 37 |
-| `integration_tests/test_diag_mt_shared_refs_b1.py` | B1 | 1 | 77 |
-| `modelx_cython/tests/compiled/test_d98_enum_identity.py` | B1 | 1 | 77 |
-| `modelx_cython/tests/compiled/test_diag_scale_enum_conditionals.py` | B1 | 1 | 111 |
-| `modelx_cython/tests/compiled/test_enum_by_type.py` | B1 | 1 | 61 |
-| `modelx_cython/tests/compiled/test_enum_containers.py` | B1 | 1 | 67 |
-| `modelx_cython/tests/compiled/test_enum_object_uses.py` | B1 | 5 | 128 |
-| `modelx_cython/tests/compiled/test_enum_reference_compare.py` | B1 | 1 | 65 |
-| `modelx_cython/tests/compiled/test_enum_results.py` | B1 | 1 | 77 |
-| `modelx_cython/tests/compiled/test_native_enum_membership.py` | B1 | 1 | 67 |
-| `modelx_cython/tests/compiled/test_native_enums.py` | B1 | 2 | 88 |
-| `modelx_cython/tests/compiled/test_param_bounds_b1.py` | B1 | 1 | 29 |
-| `modelx_cython/tests/test_audit_contracts_b1.py` | B1 | 5 | 56 |
-| `modelx_cython/tests/test_enum_literals.py` | B1 | 83 | 243 |
+| `integration_tests/test_diag_mt_shared_refs_b1.py` | B1 | 1 | 76 |
+| `modelx_cython/tests/compiled/test_d98_enum_identity.py` | B1 | 1 | 80 |
+| `modelx_cython/tests/compiled/test_diag_scale_enum_conditionals.py` | B1 | 1 | 112 |
+| `modelx_cython/tests/compiled/test_enum_by_type.py` | B1 | 1 | 64 |
+| `modelx_cython/tests/compiled/test_enum_containers.py` | B1 | 1 | 66 |
+| `modelx_cython/tests/compiled/test_enum_object_uses.py` | B1 | 2 | 144 |
+| `modelx_cython/tests/compiled/test_enum_reference_compare.py` | B1 | 1 | 63 |
+| `modelx_cython/tests/compiled/test_enum_results.py` | B1 | 1 | 76 |
+| `modelx_cython/tests/compiled/test_enum_stored_module.py` | B1 | 1 | 126 |
+| `modelx_cython/tests/compiled/test_enum_text_values.py` | B1 | 1 | 112 |
+| `modelx_cython/tests/compiled/test_enum_uses.py` | B1 | 1 | 169 |
+| `modelx_cython/tests/compiled/test_native_enum_membership.py` | B1 | 1 | 64 |
+| `modelx_cython/tests/compiled/test_native_enums.py` | B1 | 2 | 77 |
+| `modelx_cython/tests/compiled/test_param_bounds_b1.py` | B1 | 1 | 34 |
+| `modelx_cython/tests/test_audit_contracts_b1.py` | B1 | 5 | 64 |
+| `modelx_cython/tests/test_enum_literals.py` | B1 | 81 | 354 |
 | `modelx_cython/tests/compiled/reduction_cases.py` | B2 | 0 | 68 |
-| `modelx_cython/tests/compiled/test_audit_runtime_b2.py` | B2 | 1 | 177 |
-| `modelx_cython/tests/compiled/test_diag_scale_int_items.py` | B2 | 2 | 143 |
+| `modelx_cython/tests/compiled/test_audit_runtime_b2.py` | B2 | 1 | 171 |
+| `modelx_cython/tests/compiled/test_diag_scale_int_items.py` | B2 | 2 | 147 |
 | `modelx_cython/tests/compiled/test_generator_boolean_ranges.py` | B2 | 1 | 252 |
 | `modelx_cython/tests/compiled/test_generic_composition.py` | B2 | 1 | 84 |
 | `modelx_cython/tests/compiled/test_native_builtins_w18_b2.py` | B2 | 1 | 62 |
@@ -332,13 +337,13 @@ table while the first readers bind it on a new model, so collect is the subject.
 | `integration_tests/test_forms_scalar_type.py` | B4 | 1 | 16 |
 | `integration_tests/test_held_table_handles.py` | B4 | 1 | 91 |
 | `integration_tests/test_table_cells_api.py` | B4 | 1 | 139 |
-| `modelx_cython/tests/compiled/test_enum_by_type_b4.py` | B4 | 1 | 54 |
+| `modelx_cython/tests/compiled/test_enum_by_type_b4.py` | B4 | 1 | 59 |
 | `integration_tests/test_diag_run8_row_fields.py` | B5 | 2 | 138 |
 | `integration_tests/test_diag_run8_row_fields_derived.py` | B5 | 6 | 99 |
 | `integration_tests/test_table_numpy_values.py` | B5 | 2 | 128 |
 | `modelx_cython/tests/test_diag_run8_row_cells.py` | B5 | 11 | 191 |
 | `integration_tests/_diag_run8_c.py` | B6 | 0 | 26 |
-| `integration_tests/test_diag_kr_forms.py` | B6 | 1 | 262 |
+| `integration_tests/test_diag_kr_forms.py` | B6 | 1 | 263 |
 | `integration_tests/test_diag_mt_shared_refs.py` | B6 | 1 | 92 |
 | `integration_tests/test_diag_run8_extreme_part_forms.py` | B6 | 1 | 101 |
 | `integration_tests/test_diag_run8_extreme_part_tables.py` | B6 | 1 | 93 |
@@ -357,7 +362,7 @@ table while the first readers bind it on a new model, so collect is the subject.
 | `modelx_cython/tests/test_read_audit_b7.py` | B7 | 2 | 47 |
 | `modelx_cython/tests/test_read_notes.py` | B7 | 3 | 73 |
 | `integration_tests/test_constant_key_reads_join.py` | join | 1 | 115 |
-| `integration_tests/test_diag_mt_shared_refs_join.py` | join | 2 | 194 |
+| `integration_tests/test_diag_mt_shared_refs_join.py` | join | 2 | 192 |
 | `integration_tests/test_diag_run8_extreme_part_forms_join.py` | join | 1 | 102 |
 | `integration_tests/test_diag_run8_extreme_part_tables_join.py` | join | 1 | 94 |
 | `integration_tests/test_diag_run8_row_fields_derived_join.py` | join | 7 | 104 |
@@ -367,8 +372,8 @@ table while the first readers bind it on a new model, so collect is the subject.
 | `integration_tests/test_table_cells_api_join.py` | join | 1 | 144 |
 | `integration_tests/test_table_mixed_reads_join.py` | join | 1 | 251 |
 | `integration_tests/test_table_stress.py` | join | 0 | 87 |
-| `modelx_cython/tests/compiled/test_enum_results_join.py` | join | 1 | 79 |
-| `modelx_cython/tests/compiled/test_param_bounds_join.py` | join | 1 | 29 |
+| `modelx_cython/tests/compiled/test_enum_results_join.py` | join | 1 | 78 |
+| `modelx_cython/tests/compiled/test_param_bounds_join.py` | join | 1 | 34 |
 
 ## Source modules (`modelx_cython`, no tests)
 
@@ -378,10 +383,10 @@ is the shared wiring, and only the integrator resolves conflicts in it.
 
 | module | layer | lines | split |
 |---|---|---|---|
-| `modelx_cython/_mx_sys.pxd` | shared: P1 ≈573, B1 ≈15 | 588 | `_mx_check_enum_schema` (B1) |
+| `modelx_cython/_mx_sys.pxd` | shared: P1 ≈596, B1 ≈15 | 611 | `_mx_check_enum_schema` (B1) |
 | `modelx_cython/admission.py` | shared: P1 ≈262, collect ≈15, B1 ≈3, B2 ≈15, B3 ≈30, B4 ≈200 | 525 | report keys: reductions (B2), vector cache/refusals (B3), `table_read_sites` and read warnings (B4, with form names of B5-B7), collect bound checks (collect) |
 | `modelx_cython/builder.py` | shared: P1 ≈1138, collect ≈4, B1 ≈10, B3 ≈35 | 1187 | vector shape/cache of a Cell (B3); enum Reference info (B1) |
-| `modelx_cython/cli.py` | shared: P1 ≈627, collect ≈16, B1 ≈3, B4 ≈30, B7 ≈40 | 716 | `enums.literals` call (B1); table setup in `run_sample`/`main_handler` (B4); read-note recording and the read audit file (B7); collect runtime check (collect) |
+| `modelx_cython/cli.py` | shared: P1 ≈629, collect ≈16, B1 ≈3, B4 ≈30, B7 ≈40 | 718 | `enums.literals` call (B1); table setup in `run_sample`/`main_handler` (B4); read-note recording and the read audit file (B7); collect runtime check (collect) |
 | `modelx_cython/config.py` | shared: P1 ≈360, collect ≈35, B4 ≈32 | 427 | collect spec keys (collect); table policy keys (B4) |
 | `modelx_cython/frame_reads.py` | shared: B4 ≈1189, B5 ≈307, B6 ≈975, B7 ≈188 | 2659 | by recogniser: L1/L4, the shared machinery and the numpy-scalar boxing of reads (B4); L2 row fields (B5); L3 prefixes, L5 extremes, L7 membership, L8 index walks, comprehensions, iterrows (B6); the read audit (`audit`, `audit_subtables`, `without_fallbacks`) (B7) |
 | `modelx_cython/holds.py` | shared: P1 ≈90, B4 ≈13 | 103 | `hold_table` (B4); the registry is P1 |
@@ -389,7 +394,7 @@ is the shared wiring, and only the integrator resolves conflicts in it.
 | `modelx_cython/runtime/_tables.pxd` | shared: B4 ≈231, B5 ≈15, B6 ≈106 | 352 | declarations of the above |
 | `modelx_cython/runtime/_tables.pyx` | shared: B4 ≈530, B5 ≈40, B6 ≈131 | 701 | preparation, binding and keyed reads (B4); `hold_row` (B5); `prefix_range`, views, extremes and the view walks `view_start`, `view_stop`, `position` (B6) |
 | `modelx_cython/table_cells.py` | shared: B3 ≈250, B4 ≈284 | 534 | `vector_cells` and the vector exits of `RenameMembers` (B3); table cells, frame binding and publication (B4) |
-| `modelx_cython/tracer.py` | shared: P1 ≈1010, collect ≈15, B1 ≈75, B3 ≈100, B4 ≈60 | 1260 | IntEnum value info and enum-argument widening (B1); vector shapes and their merge (B3); frame schema and read notes hooks (B4); collect-adapter filter (collect) |
+| `modelx_cython/tracer.py` | shared: P1 ≈1007, collect ≈15, B1 ≈75, B3 ≈100, B4 ≈60 | 1257 | IntEnum value info and enum-argument widening (B1); vector shapes and their merge (B3); frame schema and read notes hooks (B4); collect-adapter filter (collect) |
 | `modelx_cython/transformer.py` | shared: P1 ≈1538, collect ≈80, B1 ≈10, B2 ≈22, B3 ≈50, B4 ≈97, B5 ≈70, B6 ≈63 | 1930 | shared wiring; table hooks `_table_reads*`, `_lower_frames`, `_pandas_reads` (B4), `_row_cells`, `_table_reads_with_row_fields` (B5), `_prefix_cells`, `_param_prefix_cells` (B6); reduction and vector passes in `_rewrite_powers`/`update_method`; collect hooks in `__init__`, `leave_Module`, `leave_ClassDef`; enum `prepare`/storage |
 | `modelx_cython/usage.py` | shared: P1 ≈630, B4 ≈25 | 655 | pandas receiver resolution (B4); the memoryview usage classifier is P1 |
 | `modelx_cython/__init__.py` | P1 | 35 | |
@@ -411,7 +416,7 @@ is the shared wiring, and only the integrator resolves conflicts in it.
 | `modelx_cython/helper_members.py` | P1 | 99 | |
 | `modelx_cython/helpers.py` | P1 | 385 | |
 | `modelx_cython/inline_entries.py` | P1 | 372 | |
-| `modelx_cython/integer_boundaries.py` | P1 | 869 | |
+| `modelx_cython/integer_boundaries.py` | P1 | 879 | |
 | `modelx_cython/item_locals.py` | P1 | 200 | |
 | `modelx_cython/item_roots.py` | P1 | 49 | |
 | `modelx_cython/locked_entries.py` | P1 | 202 | |
@@ -435,7 +440,7 @@ is the shared wiring, and only the integrator resolves conflicts in it.
 | `modelx_cython/factory_reuse.py` | collect | 271 | |
 | `modelx_cython/runtime/factory_reuse.py` | collect | 22 | |
 | `modelx_cython/serial_collect.py` | collect | 1137 | |
-| `modelx_cython/enums.py` | B1 | 339 | |
+| `modelx_cython/enums.py` | B1 | 438 | |
 | `modelx_cython/_float_sum_state.pxd` | B2 | 233 | |
 | `modelx_cython/reductions.py` | B2 | 942 | |
 | `modelx_cython/runtime/_native_streams.pxd` | B2 | 28 | |
@@ -449,9 +454,9 @@ is the shared wiring, and only the integrator resolves conflicts in it.
 
 | layer | lines (shared modules by the estimated split) |
 |---|---|
-| P1 | 13798 |
+| P1 | 13830 |
 | collect | 1840 |
-| B1 | 455 |
+| B1 | 554 |
 | B2 | 1240 |
 | B3 | 3146 |
 | B4 | 3156 |
@@ -459,4 +464,4 @@ is the shared wiring, and only the integrator resolves conflicts in it.
 | B6 | 1275 |
 | B7 | 705 |
 | unused | 0 |
-| total | 26457 |
+| total | 26588 |
