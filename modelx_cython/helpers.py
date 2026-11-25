@@ -388,7 +388,13 @@ def install(providers, model_path, object_providers=None):
         if not package:
             raise ValueError('helper provider must belong to a package')
         alias = module_name(provider)
-        sources = {suffix: read_resource(package, name + suffix) for suffix in ('.pyx', '.pxd')}
+        sources = {'.pxd': read_resource(package, name + '.pxd')}
+        try:
+            sources['.pyx'] = read_resource(package, name + '.pyx')
+        except FileNotFoundError:
+            # a header: inline functions only, compiled into the modules that cimport it
+            (model_path / (alias + '.pxd')).write_bytes(sources['.pxd'])
+            continue
         manifest = object_providers.get(provider)
         if manifest:
             digest = hashlib.sha256()
