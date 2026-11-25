@@ -111,7 +111,19 @@ class _OrderedArguments(cst.CSTTransformer):
         values = cst.Tuple(tuple(cst.Element(argument.value) for argument in positional))
         return after.with_changes(args=(cst.Arg(values, star='*'), *keywords))
 
+def _rewrites(node):
+    """Whether :class:`_OrderedArguments` can change ``node``: it rewrites only a ``**`` and a
+    call of the name ``int``, ``min`` or ``max``."""
+    from .syntax import walk
+    return any(isinstance(part, cst.BinaryOperation) and isinstance(part.operator, cst.Power)
+               or isinstance(part, cst.Call) and isinstance(part.func, cst.Name)
+               and part.func.value in ('int', 'min', 'max')
+               for part in walk(node))
+
+
 def preserve_argument_order(formula, native_result=False, operand_kind=None):
     """Keep unproved powers on Cython's ordinary Python-object operator."""
+    if not _rewrites(formula):
+        return formula      # the pass would return an equal copy
     wrapper = cst.MetadataWrapper(cst.Module(body=(formula,)))
     return wrapper.visit(_OrderedArguments(native_result, operand_kind)).body[0]
