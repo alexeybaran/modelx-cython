@@ -54,27 +54,31 @@ def helper_reference(function, refs):
 _KINDS = {'double': 'double', 'long long': 'longlong', 'bint': 'bint'}
 
 
-def argument_kind(node, current, cells, refs):
+def argument_kind(node, current, cells, refs, own=None):
     """C kind of a math argument from declared types only: 'double', 'longlong', 'bint' or None.
 
     ``current`` is the formula's cells (parameter types), ``cells`` the class cells by name,
-    ``refs`` the class References. Unknown or object operands give None.
+    ``refs`` the class References. Unknown or object operands give None. ``own(name)`` tells
+    whether a name node is the formula's parameter (not a lambda's or comprehension's own name
+    that shadows it); without it every parameter name is taken as the formula's.
     """
     if isinstance(node, cst.Float):
         return 'double'
     if isinstance(node, cst.Integer):
         return 'longlong' if node.evaluated_value < (1 << 63) else None
     if isinstance(node, cst.Name):
+        if own is not None and not own(node):
+            return None
         if current is not None and node.value in getattr(current, 'params', ()) and current.has_typeinfo():
             return _KINDS.get(current.get_argtype_expr(node.value, c_style=True, formula=True))
         return None
     if isinstance(node, cst.UnaryOperation) and isinstance(node.operator, (cst.Minus, cst.Plus)):
-        kind = argument_kind(node.expression, current, cells, refs)
+        kind = argument_kind(node.expression, current, cells, refs, own)
         return 'longlong' if kind == 'bint' else kind
     if isinstance(node, cst.BinaryOperation) and isinstance(
             node.operator, (cst.Add, cst.Subtract, cst.Multiply, cst.Divide)):
-        left = argument_kind(node.left, current, cells, refs)
-        right = argument_kind(node.right, current, cells, refs)
+        left = argument_kind(node.left, current, cells, refs, own)
+        right = argument_kind(node.right, current, cells, refs, own)
         if left is None or right is None:
             return None
         if isinstance(node.operator, cst.Divide) or 'double' in (left, right):
