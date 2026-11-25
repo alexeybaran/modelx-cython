@@ -53,18 +53,28 @@ def _operands(node, operator):
     return [node]
 
 
-_MEANING = {}    # node class -> its fields that carry meaning
+_MEANING = {}    # node class -> its fields that carry meaning (None: a boolean operation)
+_ROLES = {}      # class -> (a node, a FunctionDef, an expression)
+
+
+def _role(kind):
+    role = _ROLES.get(kind)
+    if role is None:
+        role = _ROLES[kind] = (issubclass(kind, cst.CSTNode), issubclass(kind, cst.FunctionDef),
+                               issubclass(kind, cst.BaseExpression))
+    return role
 
 
 def _children(node):
     """(field name, value) pairs of ``node`` that carry meaning, a boolean chain flattened."""
-    if isinstance(node, cst.BooleanOperation):
+    kind = type(node)
+    if kind not in _MEANING:
+        _MEANING[kind] = None if issubclass(kind, cst.BooleanOperation) else tuple(
+            field.name for field in dataclasses.fields(node) if not _layout(field.name))
+    names = _MEANING[kind]
+    if names is None:
         return [('operator', type(node.operator).__name__),
                 ('operands', _operands(node, type(node.operator)))]
-    names = _MEANING.get(type(node))
-    if names is None:
-        names = _MEANING[type(node)] = tuple(field.name for field in dataclasses.fields(node)
-                                             if not _layout(field.name))
     return [(name, getattr(node, name)) for name in names]
 
 
@@ -82,13 +92,15 @@ def _first_difference(a, b, function=None, expression=None, built=False):
             if found:
                 return found
         return None
-    if type(a) is not type(b):
-        return function, b if isinstance(b, cst.BaseExpression) else expression
-    if not isinstance(a, cst.CSTNode):
+    kind = type(b)
+    if type(a) is not kind:
+        return function, b if _role(kind)[2] else expression
+    node, defines, expresses = _role(kind)
+    if not node:
         return None if a == b else (function, expression)
-    if isinstance(b, cst.FunctionDef):
+    if defines:
         function = b.name.value
-    if isinstance(b, cst.BaseExpression):
+    if expresses:
         expression = b
     for (field, x), (_, y) in zip(_children(a), _children(b)):
         if (built and field == 'star' and isinstance(a, cst.Param) and isinstance(x, cst.MaybeSentinel)
