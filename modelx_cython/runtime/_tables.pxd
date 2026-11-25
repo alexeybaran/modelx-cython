@@ -107,7 +107,6 @@ cdef class PreparedTable:
     cdef Py_ssize_t row_key(self, object key) except -2
     cdef bint prefix_range(self, const Py_ssize_t* codes, int count, Py_ssize_t* start, Py_ssize_t* stop) noexcept nogil
     cdef object object_at(self, Py_ssize_t row, Py_ssize_t slot)
-    cpdef Py_ssize_t column(self, object label) except -2
 
 
 # ---- reads of compiled code (T-3) ---------------------------------------------------------------------
