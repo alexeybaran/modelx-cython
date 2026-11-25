@@ -7,6 +7,10 @@ argument of compiled Cells reads the items of an exact tuple borrowed, as C inte
 is not an int fitting in 64 bits takes the object path (its error is the one raised today), any
 other iterable (a list) the loop as written. A loop variable used as an object keeps the object loop.
 Compiled equals the exported model; the compiled errors are the ones of the integer boundary.
+
+The items are plain integers: a parameter given members of an IntEnum that is no enum family (here values
+1..3), or members mixed with other integers, is an object (enums.plan), so neither the C-integer loop nor the
+64-bit boundary applies to it; compiled then equals live (``1.5 * 2 ** 70`` is a value in both).
 """
 import json
 import os
@@ -20,11 +24,11 @@ import modelx as mx
 CELLS = {
     'legs': '''\
 def legs():
-    return (Leg.A, Leg.B, Leg.C)
+    return (1, 2, 3)
 ''',
     'as_list': '''\
 def as_list():
-    return [Leg.C, Leg.A]
+    return [3, 1]
 ''',
     'comp': '''\
 def comp(t, leg):
@@ -119,7 +123,7 @@ def test_integer_items_of_a_tuple(tmp_path, monkeypatch):
     done = subprocess.run([sys.executable, '-m', 'modelx_cython', 'exported', '--sample', 'sample.py',
                            '--no-spec'], cwd=tmp_path, capture_output=True, text=True)
     assert done.returncode == 0, done.stdout[-3000:] + done.stderr[-3000:]
-    # values: an IntEnum tuple (borrowed loop), a list (object loop), an escaping variable, an int
+    # values: an integer tuple (borrowed loop), a list (object loop), an escaping variable, an int
     # subclass whose __index__ differs (read as its int value, as PyNumber_Index does) and bool
     assert _run(tmp_path, calls, 'exported_cy', '-') == _run(tmp_path, calls, 'exported', '-')
 
