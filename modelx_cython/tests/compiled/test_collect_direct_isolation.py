@@ -91,7 +91,8 @@ PROBE = textwrap.dedent('''\
         assert p[k].value() == held[k][0] == direct[k]
         assert p[k].pair() is held[k][1], "a direct item's cached object was recomputed"
         assert parts(m, k) == n, "a direct item re-evaluated after collect"
-    assert m.Data.table() is shared and tables(m) == 1, "collect cleared a shared Data cell"
+    # table() is a vector cell: Python gets an equal new tuple per call (D154), not the cached object
+    assert m.Data.table() == shared and tables(m) == 1, "collect cleared a shared Data cell"
 
     # (b) collect, then direct calls
     m = fresh()
