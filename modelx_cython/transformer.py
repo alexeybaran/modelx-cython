@@ -868,7 +868,6 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
             frames.param_readers.clear()
             if frames.row_inline is not None:
                 frames.row_inline.lowered_sites.clear()
-            frames.held_string_selector = None
             frames.declined = [{'expression': cells.name, 'receiver': '', 'form': 'pandas',
                                 'reason': f'declined after internal error: {type(error).__name__}: {error}'}]
             import logging
@@ -890,10 +889,8 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
             frames = FrameReads(self._resolver, cls_info, cells, self.helper_providers, self.module.spec.policy,
                                 row_names, self._prefix_cells(cls_info),
                                 self._param_prefix_cells(cls_info), builtin_int='int' in builtin_keys,
-                                builtin_zip_walk={'zip', 'int', 'float', 'str', 'type'} <= builtin_keys,
                                 row_inline=row_inline)
             node = self._lower_frames(frames, node, cls_info, cells)
-            cells.held_string_selector = frames.held_string_selector
             cells.frame_reads = frames.lowered + frames.declined
             # T-5: the pandas fallback of a lowered read runs only when the table cannot answer: not a pandas read
             from modelx_cython.frame_reads import without_fallbacks
