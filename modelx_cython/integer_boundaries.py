@@ -1,11 +1,9 @@
 """Check integer Cell results and ItemSpace keys at their native boundaries."""
 
 import libcst as cst
+from libcst.metadata import ExpressionContext
 from libcst.metadata.scope_provider import BuiltinAssignment
 
-from .checked_arithmetic import (
-    CheckedArithmetic, divisibility_enabled, divisibility_operands, signed_local_assignments,
-)
 from .consts import CY_MOD, FORMULA_PREF, MX_SELF, MX_SYS_MOD
 from .powers import KIND_FLOAT, OperandKind, kind_of_type_expr
 from .scopes import CstFacts, Names, OPAQUE_SCOPES, has_scope_effects, lexical_nodes, maybe_unbound
@@ -556,13 +554,11 @@ def _unbound_locals(node):
 class _GuardCalls(cst.CSTTransformer):
     METADATA_DEPENDENCIES = (cst.metadata.ScopeProvider,)
 
-    def __init__(self, receiver, integer_params, counters, owner, resolver, entries, cells, private_entries,
+    def __init__(self, receiver, integer_params, owner, resolver, entries, cells, private_entries,
                  item_cells=None, safe_builtins=()):
         self.item_cells = item_cells or {}     # D110 P1: {typed item local: {cell name: cell}}
         self.receiver = receiver
         self.integer_params = integer_params
-        self.counters = counters
-        self.loop_targets = []
         self.owner = owner
         self.resolver = resolver
         self.entries = entries
@@ -570,22 +566,10 @@ class _GuardCalls(cst.CSTTransformer):
         self.private_entries = private_entries
         self.safe_builtins = safe_builtins
 
-    def visit_For_body(self, node):
-        self.loop_targets.append(node.target.value if isinstance(node.target, cst.Name) else None)
-
-    def leave_For_body(self, node):
-        self.loop_targets.pop()
-
     def _native_argument(self, value):
         if not isinstance(value, cst.Name):
             return False
         scope = self.get_metadata(cst.metadata.ScopeProvider, value, None)
-        # Range analysis already proved the only store and that its reads
-        # stay in the loop body. Check the receiver scope after entry lowering.
-        if value.value in self.counters and value.value in self.loop_targets:
-            receiver_scope = self.get_metadata(cst.metadata.ScopeProvider, self.receiver, None)
-            if scope is receiver_scope:
-                return True
         if value.value not in self.integer_params:
             return False
         bindings = tuple(scope[value.value]) if scope is not None else ()
@@ -666,11 +650,10 @@ def _guard_calls(node, cls, cell, resolver, entries, cells, private_entries, cla
         return node
     integer_params = {param.name.value: param for param in params if param.annotation is not None
                       and param.annotation.annotation.deep_equals(_INTEGER_ANNOTATION)}
-    counters = getattr(cell, 'signed_range_counters', ())
     wrapper = cst.MetadataWrapper(cst.Module(body=(node,)), unsafe_skip_copy=True)
     item_cells = {local: classes[owner].cells for local, owner in getattr(cell, 'typed_item_locals', {}).items()
                   if classes and owner in classes}
-    return wrapper.visit(_GuardCalls(params[0], integer_params, counters, cls.fqname, resolver, entries, cells,
+    return wrapper.visit(_GuardCalls(params[0], integer_params, cls.fqname, resolver, entries, cells,
                                     private_entries, item_cells, safe_builtins)).body[0]
 
 
@@ -695,22 +678,56 @@ def _guard_space_parameters(node, cell):
                                  body=(*statements[:doc_end], *assignments, *statements[doc_end:])))
 
 
+def signed_local_assignments(body, name, facts, native_value):
+    """Find all signed definitions and the reads they definitely initialize."""
+    reads = {node for node, context in facts.contexts.items()
+             if isinstance(node, cst.Name) and node.value == name and context is ExpressionContext.LOAD}
+    assignments = {}
+
+    def flow(lines, assigned):
+        for line in lines:
+            evaluated = line.test if isinstance(line, cst.If) else line
+            if not assigned and any(part in reads for part in walk(evaluated)):
+                return None
+            if isinstance(line, cst.If):
+                taken = flow(statements(line.body), assigned)
+                other = line.orelse
+                if isinstance(other, cst.If):
+                    skipped = flow((other,), assigned)
+                elif other is not None:
+                    skipped = flow(statements(other.body), assigned)
+                else:
+                    skipped = assigned
+                if taken is None or skipped is None:
+                    return None
+                assigned = taken and skipped
+            elif (target := local_assignment(line)) is not None and target.value == name:
+                value = native_value(line.value)
+                if value is None:
+                    return None
+                assignments[line] = value
+                assigned = True
+        return assigned
+
+    if flow(statements(body), False) is None or len(assignments) != facts.stores[name]:
+        return {}, reads
+    return assignments, reads
+
+
 class _GuardIntegers(cst.CSTTransformer):
-    def __init__(self, path, kinds, native_helpers, arithmetic, signed_fields,
+    def __init__(self, path, kinds, native_helpers, signed_fields,
                  signed_functions, signed_methods, signed_names, signed_return, error, checked=True):
         self.path = path
         # integer guards: False in the unchecked mode, where C integer arithmetic stays plain C
         self.checked = checked
         self.kinds = kinds
         self.native_helpers = native_helpers
-        self.arithmetic = arithmetic
         self.signed_fields = signed_fields
         self.signed_functions = signed_functions
         self.signed_methods = signed_methods
         self.signed_names = signed_names
         self.signed_return = signed_return
         self.error = error
-        self.arithmetic.signed_atom = self._signed_atom
 
     def on_visit(self, node):
         return not isinstance(node, OPAQUE_SCOPES) and super().on_visit(node)
@@ -862,52 +879,6 @@ class _SignedLocalValues(cst.CSTTransformer):
         return after if value is None else after.with_changes(value=value)
 
 
-def _signed_divisibility(body, facts, guard, parameters):
-    """Admit locals whose only uses are signed zero-remainder comparisons."""
-    if (has_scope_effects(body.body)
-            or facts.reads & {'eval', 'exec', 'locals', 'vars', 'globals', '_getframe', 'currentframe'}):
-        return body, ()
-    probes = {node: operands for node in lexical_nodes(body.body)
-              if (operands := divisibility_operands(node)) is not None
-              and all(isinstance(value, cst.Name) for value in operands[:2])}
-    uses = {value for operands in probes.values() for value in operands[:2]}
-    native = guard.signed_names - {name for name in parameters if facts.stores[name]}
-    declarations = []
-    for name in sorted({value.value for value in uses} - set(parameters) - native):
-        if not facts.stores[name]:
-            continue
-        assignments, reads = signed_local_assignments(
-            body, name, facts,
-            lambda value: value if guard._signed_expression(value, guard.path)[1] else None,
-        )
-        if not assignments or not reads <= uses:
-            continue
-        # Each comparison must be able to preserve the local's signed value.
-        if not all(operand.value in native or operand.value == name
-                   for operands in probes.values() if any(value in reads for value in operands[:2])
-                   for operand in operands[:2]):
-            continue
-        native.add(name)
-        declarations.append(cst.SimpleStatementLine((
-            cst.AnnAssign(cst.Name(name), cst.Annotation(_INTEGER_ANNOTATION)),)))
-
-    replacements = {}
-    for probe, (dividend, divisor, operation, negate) in probes.items():
-        if not {dividend.value, divisor.value} <= native:
-            continue
-        call = cst.Call(cst.Attribute(cst.Name(MX_SYS_MOD), cst.Name(operation)),
-                        (cst.Arg(dividend), cst.Arg(divisor)))
-        if negate:
-            call = cst.UnaryOperation(cst.Not(), call)
-        replacements[probe] = call.with_changes(lpar=probe.lpar, rpar=probe.rpar)
-
-    class LowerDivisibility(cst.CSTTransformer):
-        def leave_Comparison(self, before, after):
-            return replacements.get(before, after)
-
-    return body.visit(LowerDivisibility()) if replacements else body, tuple(declarations)
-
-
 def _type_signed_locals(body, guard, facts, parameters):
     """Keep provably signed locals native and preserve existing prefix admission."""
     if (not isinstance(body, cst.IndentedBlock) or has_scope_effects(body.body)
@@ -967,25 +938,21 @@ def _type_signed_locals(body, guard, facts, parameters):
 def _guard_result(node, cell, cls, resolver, cells_kinds, ref_kinds, signatures, native_helpers=(),
                   argument_axes=(), checked=True):
     signed_return = node.returns is not None and node.returns.annotation.deep_equals(_INTEGER_ANNOTATION)
-    divisibility = (node.returns is not None and dotted_name(node.returns.annotation) == f'{CY_MOD}.bint'
-                    and not cell.is_locked and not cell.body_has_closure and divisibility_enabled(cell)
-                    and any(divisibility_operands(part) is not None for part in lexical_nodes(node.body.body)))
     params = {name: kind_of_type_expr(cell.get_argtype_expr(name, c_style=True, formula=True))
               for name in cell.params}
     kinds = OperandKind(resolver, cells_kinds, ref_kinds, cls.fqname, params)
-    arithmetic = CheckedArithmetic(cls, cell)
-    arithmetic.parameters = {
+    integer_parameters = {
         param.name.value for param in node.params.params
         if param.annotation is not None and param.annotation.annotation.deep_equals(_INTEGER_ANNOTATION)
     }
     facts = CstFacts(node.body.body)
     bindings = facts.bindings(lexical_nodes(node.body.body))
-    if not signed_return and not divisibility and not any(
+    if not signed_return and not any(
             isinstance(part, cst.Call) and dotted_name(part.func) == _INTEGER_CONVERSION
             for part in lexical_nodes(node.body.body)):
         return node
     fields, functions, methods = signatures
-    signed_names = arithmetic.parameters | {
+    signed_names = integer_parameters | {
         statement.target.value for statement in lexical_nodes(node.body.body)
         if isinstance(statement, cst.AnnAssign) and isinstance(statement.target, cst.Name)
         and statement.annotation.annotation.deep_equals(_INTEGER_ANNOTATION)
@@ -993,16 +960,13 @@ def _guard_result(node, cell, cls, resolver, cells_kinds, ref_kinds, signatures,
     receiver_fields = fields.get(cls.name, {}) if MX_SELF not in bindings else {}
     receiver_methods = methods.get(cls.name, set()) if MX_SELF not in bindings else set()
     error = Names(node).reserve('_mx_integer_overflow')
-    guard = _GuardIntegers(cell.model_path, kinds, native_helpers, arithmetic, receiver_fields,
+    guard = _GuardIntegers(cell.model_path, kinds, native_helpers, receiver_fields,
                            functions.difference(bindings), receiver_methods, signed_names, signed_return,
                            error, checked)
     parameters = tuple(parameter.name.value for parameter in
                        (*node.params.posonly_params, *node.params.params, *node.params.kwonly_params))
     guard.python_locals = set()
-    if divisibility:
-        body, declarations = _signed_divisibility(node.body, facts, guard, parameters)
-    else:
-        body, declarations = _type_signed_locals(node.body, guard, facts, parameters)
+    body, declarations = _type_signed_locals(node.body, guard, facts, parameters)
     cell.python_int_locals = set(getattr(cell, 'python_int_locals', ())) | guard.python_locals
     body = body.visit(guard)
     if declarations:
@@ -1061,9 +1025,7 @@ def _integer_guard(node, cell, cls, signatures, native_helpers=(), inferred=True
     declared = {statement.target.value for statement in lexical_nodes(node.body.body)
                 if isinstance(statement, cst.AnnAssign) and isinstance(statement.target, cst.Name)
                 and statement.annotation.annotation.deep_equals(_INTEGER_ANNOTATION)}
-    arithmetic = CheckedArithmetic(cls, cell)
-    arithmetic.parameters = parameters
-    guard = _GuardIntegers(cell.model_path, None, native_helpers, arithmetic,
+    guard = _GuardIntegers(cell.model_path, None, native_helpers,
                            fields.get(cls.name, {}) if MX_SELF not in bindings else {},
                            functions.difference(bindings),
                            methods.get(cls.name, set()) if MX_SELF not in bindings else set(),

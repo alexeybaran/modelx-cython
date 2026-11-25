@@ -108,8 +108,6 @@ class TransSpec:
       fit inside the existing logical bounds. A declared window overrides
       the automatic dense storage size ceiling for an eligible cached Cell.
       Exact spill keeps the original logical domain available.
-    * ``"native_divisibility"``: enable the checked Cython zero-remainder
-      comparison for proven signed-integer operands.
     * ``"memoize_power"``: enable a one-entry exact-operand memo for the
       existing typed power helper on a privately owned policy Space.
     * ``"return_type"``: either a type name accepted by

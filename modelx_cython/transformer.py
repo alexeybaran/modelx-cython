@@ -592,19 +592,15 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
         See :mod:`modelx_cython.powers`; the node is returned unchanged
         when no operand pair can be typed.
         """
-        from modelx_cython.checked_arithmetic import CheckedArithmetic
         from modelx_cython import held_arrays
-        builtin_keys = {name for name in ("all", "any", "sum", "min", "max", "float", "int", "round", "range",
-                                         "zip", "str", "type")
-                        if scope[name] and all(isinstance(binding, BuiltinAssignment)
-                                               for binding in scope[name])}
+        builtin_float = bool(scope['float']) and all(isinstance(binding, BuiltinAssignment)
+                                                     for binding in scope['float'])
         # a typed-memoryview Cell read by subscript is held per item (no slice copy per evaluation)
         node = held_arrays.lower(node, cls_info, cells, self._held_arrays)
         cells.formula_allows_exact_receiver = allows_exact_receiver(node, cls_info.name)
-        node = CheckedArithmetic(cls_info, cells, builtin_keys).rewrite(node)
         node = rewrite_powers(
             node, self._resolver, self._cells_kinds, self._ref_kinds,
-            cls_info.fqname, cells, builtin_float='float' in builtin_keys,
+            cls_info.fqname, cells, builtin_float=builtin_float,
             checked_integer_powers=self.module.spec.policy.integer_checks != 'unchecked',
         )
         from modelx_cython.ordered_arguments import preserve_argument_order
