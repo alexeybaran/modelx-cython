@@ -91,3 +91,38 @@ The local lists stay typed buffers and the returned tuples are those buffers, wi
 change, since `v[z - 1]`, `len`, `sum`, `zip` and loops read tuples as they read lists. Two things would make
 a reader stop working: changing a returned value in place (live raises on a tuple) and comparing it with a
 list (a tuple is never equal to a list).
+
+### Results
+
+Lines outside tests:
+- The tuples-only commits change +239 / −390, net −151, against my estimate of about 310 list-only lines.
+- They removed the R1 escape analysis, `VectorWriteError`, list copies at Python exits, D94, the list `'X'`
+  returns and the duplicate fallback notes.
+- They added the untype round, `_copy_reads`, `totuple`, and `tuple(v)` pass-through and copy.
+- Against the marker 8725799 the tree is still **+105** (+412 / −307). The experiment's tuple forms
+  (sequence check, `(x,) + tuple(...)`, `vec_cat`) cost more than the list code they replace.
+
+Cuts that would reach the target, none made (unmeasured, or in other files):
+- diag-kr min/max of a generator over vectors (`expand_extreme`, about 45 lines). `reductions.py` would read
+  a tuple copy; affects Annuity_JP_S and Cancer_KR_S.
+- The D93 leading sum (about 35 lines; VUL_US_S, VA_KR_S).
+- The powers arbitration (`scalar_only_power` with `leave_BinaryOperation`, about 56 lines), moved into
+  `powers.py` through its `operand_kind` hook.
+
+Micro timing, best of 7 processes, the projection driver of the experiment:
+
+| Form | live | compiled |
+|---|---|---|
+| tuple, `(x,) + tuple(...)` (IP_UK_S as written) | 0.052 s | 0.0019 s (0.0018 s at the experiment head) |
+| list built, `return tuple(out)` (the advised rewrite) | 0.050 s | **0.0016 s** |
+| list returned (now a Python object) | 0.052 s | 0.0156 s (0.0017 s before tuples only) |
+
+The concatenation form is about 10% slower than a list built in place, because it builds both parts and then
+copies them (`vec_cat`). Writing the parts into one allocation would close the gap, for about 20 lines.
+
+Python code no longer gets the cached object of a vector cell. It gets an equal new tuple per call, where
+live returns the cached tuple itself, so `cell() is cell()` is now False
+(`test_collect_direct_isolation` compares by value).
+
+Tests: 700 unit tests pass and 207 compiled tests plus `test_diag_kr_forms` pass. The 6 lifelib-package tests
+were not run.
