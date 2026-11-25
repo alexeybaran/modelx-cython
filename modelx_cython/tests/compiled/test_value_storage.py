@@ -93,7 +93,7 @@ THREADS = textwrap.dedent("""\
     native = __import__(sys.argv[1]).mx_model
     live = __import__(sys.argv[2]).mx_model
     mode = sys.argv[3]                       # plain: Policy items; collect: the shared Data; locked: Market
-    if sys._is_gil_enabled():
+    if getattr(sys, '_is_gil_enabled', lambda: True)():   # before 3.13 there is always a GIL
         print(repr({'gil': True}))
         sys.exit(0)
     months = range(48)
@@ -216,17 +216,28 @@ def _run(tmp_path, script, *args):
     return eval(run.stdout), run.stderr
 
 
+# setuptools passes CPPFLAGS to unix-style compilers only; MSVC reads extra options from CL instead (it takes
+# -D as /D), and does not echo them in the build log. The macros' effect is asserted below either way: the
+# fallback build's warning and installed flags, the poisoned plain build's heap types.
+MSVC = os.name == 'nt'
+
+
+def _with_macros(env, flags):
+    return dict(env, CPPFLAGS=flags, **({'CL': flags} if MSVC else {}))
+
+
 def _check(tmp_path, mode):
     plain = dict(os.environ)
     plain.pop('CPPFLAGS', None)
+    plain.pop('CL', None)
     poison = '-DMX_POISON_UNWRITTEN_VALUES'
     flags = {'shipped': '',
              'poisoned': poison + (' -DCYTHON_USE_TYPE_SPECS=1' if mode == 'plain' else ''),
              'fallback': f'{poison} -DMX_TEST_VALUES_FALLBACK={1 if mode == "plain" else 2}'}
     for build, cppflags in flags.items():
-        env = dict(plain, CPPFLAGS=cppflags) if cppflags else plain
+        env = _with_macros(plain, cppflags) if cppflags else plain
         log = _build(tmp_path, f'{build}_{mode}', mode == 'collect', env)
-        assert all(flag in log for flag in cppflags.split()), build
+        assert MSVC or all(flag in log for flag in cppflags.split()), build
     source = (tmp_path / f'shipped_{mode}_cy/_mx_classes.pxd').read_text(encoding='utf-8')
     policy = source.split('cdef class _c_Policy')[1].split('cpdef')[0]
     members = [line.strip() for line in policy.splitlines() if line.strip().startswith('cdef ')]
@@ -288,10 +299,11 @@ def test_unwritten_values_of_a_locked_space(tmp_path):
     (tmp_path / 'spec.py').write_text(repr({'spaces': {'Market': {'cells_param_size': {'t': 48}}}}), encoding='utf-8')
     (tmp_path / 'sample.py').write_text('from locked import mx_model as m\nm.Market.price(1); m.Market.up(2)\n',
                                         encoding='utf-8')
-    env = dict(os.environ, CPPFLAGS='-DMX_POISON_UNWRITTEN_VALUES')
+    env = _with_macros(dict(os.environ), '-DMX_POISON_UNWRITTEN_VALUES')
     build = subprocess.run([sys.executable, '-m', 'modelx_cython', 'locked', '--sample', 'sample.py',
                             '--spec', 'spec.py'], cwd=tmp_path, capture_output=True, text=True, env=env, timeout=900)
-    assert build.returncode == 0 and '-DMX_POISON_UNWRITTEN_VALUES' in build.stdout + build.stderr, build.stderr
+    assert build.returncode == 0 and (MSVC or '-DMX_POISON_UNWRITTEN_VALUES' in build.stdout + build.stderr), \
+        build.stdout + build.stderr
     source = (tmp_path / 'locked_cy/_mx_classes.pxd').read_text(encoding='utf-8')
     assert 'cdef bint[48] _has_price' in source and 'cdef bint[48] _has_up' in source
     probe = ('import sys; from locked_cy import mx_model as m\n'
