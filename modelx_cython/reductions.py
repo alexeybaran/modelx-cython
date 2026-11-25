@@ -549,7 +549,10 @@ class GeneralReductions:
             return [f'if {test}:', f'    return {hit}']
         if state['flag_exit']:
             return [f'if {test}:', f'    {p}_result = {hit}', f'    {p}_done = True', '    break']
-        return [f'if {test}:', f'    {p}_result = {hit}']
+        # over a list comprehension every element is evaluated, then the built-in tests them
+        # in order and stops at the deciding one: no truth is asked of a later element
+        decided = f'{p}_result and not {p}_element' if name == 'all' else f'not {p}_result and {p}_element'
+        return [f'{p}_element = ({value})', f'if {decided}:', f'    {p}_result = {hit}']
 
 
     # ---------------------------------------------------------------- W1.8: nested sites
