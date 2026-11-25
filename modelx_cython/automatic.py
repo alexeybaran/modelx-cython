@@ -78,32 +78,9 @@ def max_dense_entries(cell):
     return value
 
 
-# R-3b: above the default ceiling, storage is chosen by use. A rectangle stays dense while it is at most
-# DENSE_USE_FACTOR times the entries one receiver (policy root) fills in the sample: the formula evaluations
-# per receiver the tracer counts (max_evaluations_per_receiver). A hash entry costs about 550 instructions
-# to fill and 119 per hit against a few for a dense slot, while a dense slot costs about 2 (collect reset)
-# to 10 (loop zero-fill) instructions per policy whether used or not: dense is cheaper up to a ratio of
-# about 80 on the loop route and 400 on collect.
-DENSE_USE_FACTOR = 16
-
-
-def filled_per_receiver(cell):
-    """The most entries of the Cell one receiver filled in the sample (its formula evaluations)."""
-    return getattr(getattr(cell, '_rt', None), 'max_evaluations_per_receiver', 0) or 0
-
-
-def dense_by_use(cell, count):
-    """R-3b: whether a rectangle of ``count`` entries above the ceiling stays dense by use. An explicit
-    max_dense_entries (Cell or Space) is a hard limit and is not overridden."""
-    if max_dense_entries_set(cell):
-        return False
-    filled = filled_per_receiver(cell)
-    return filled > 0 and count <= DENSE_USE_FACTOR * filled
-
-
 def dense_allowed(cell, count):
-    """Dense when the rectangle is within the ceiling, or (R-3b) within DENSE_USE_FACTOR x its use."""
-    return count > 0 and (count <= max_dense_entries(cell) or dense_by_use(cell, count))
+    """Dense when the rectangle of the declared or sampled range is within the ceiling."""
+    return 0 < count <= max_dense_entries(cell)
 
 
 def dense_count(cell):
@@ -118,9 +95,13 @@ def dense_fits(cell):
 
 
 def primary_capacity(cell):
-    # Formula evaluations are cache misses, counted per receiver rather than
-    # summed across traced policies. Keep the table's existing <=50% load rule.
-    evaluations = getattr(getattr(cell, '_rt', None), 'max_evaluations_per_receiver', 0)
-    if evaluations <= 0:
-        return 0
-    return min(MAX_PRIMARY_ENTRIES, 1 << (2 * evaluations - 1).bit_length())
+    """The initial capacity of a privately owned numeric cache, from the declared or sampled range of its
+    parameters: twice the entries of that range (the table's <= 50% load), a power of two, at most
+    MAX_PRIMARY_ENTRIES; 8 where a parameter has no countable range (a float). The table grows past it."""
+    axes = cell.associative_logical_axes if cell.has_typeinfo() and cell.params else ()
+    if len(axes) != len(cell.params):
+        return 8
+    entries = 1
+    for axis in axes:
+        entries *= max(axis.stop - axis.lower, 1)
+    return min(MAX_PRIMARY_ENTRIES, max(8, 1 << (2 * entries - 1).bit_length()))
