@@ -986,11 +986,13 @@ class VectorLowering(cst.CSTTransformer):
         return cst.Call(_expr(fn(op, elem)), [cst.Arg(a) for a in args])
 
     def item(self, e, value_o, value_u):
-        """value_u entering a vector of kind e: checked (an exact int, else TypeError) where the
-        vector holds integers and the value is not proven one; a C conversion would truncate."""
-        if e != 'I' or self.scalar(value_o) == INT:
+        """value_u entering a vector of kind e, checked where it is not proven of the vector's kind
+        (vec_item, ivec_item: a number equal to the value live holds, else TypeError); a C conversion
+        would truncate a float into an integer vector or round a large int into a float vector."""
+        if self.scalar(value_o) == (FLOAT if e == 'V' else INT):
             return value_u
-        return cst.Call(_expr(f'{ALIAS}.ivec_item'), [cst.Arg(value_u.with_changes(lpar=(), rpar=()))])
+        check = 'vec_item' if e == 'V' else 'ivec_item'
+        return cst.Call(_expr(f'{ALIAS}.{check}'), [cst.Arg(value_u.with_changes(lpar=(), rpar=()))])
 
     # ---------------------------------------------------------------- expressions
     def leave_Subscript(self, original, updated):
@@ -1430,8 +1432,8 @@ class VectorLowering(cst.CSTTransformer):
         r = self.temp('r')
         self.declare(r, TYPES[e])
         elt = _code(comp_u.elt.visit(_Rename(renames)))
-        if e == 'I' and self.comp_elem(comp_o) != INT:
-            elt = f'{ALIAS}.ivec_item({elt}\n)'
+        if self.comp_elem(comp_o) != (FLOAT if e == 'V' else INT):
+            elt = f'{ALIAS}.{"vec_item" if e == "V" else "ivec_item"}({elt}\n)'
         pre.append(_stmt(f'{r} = {fn("new", e)}({n})\n'))
         # the element may span lines (as written in the formula): parenthesised, closed on its own line
         loop = '\n'.join([head] + ['    ' + line for line in body] + [f'    {r}.data[{i}] = ({elt}\n)']) + '\n'
