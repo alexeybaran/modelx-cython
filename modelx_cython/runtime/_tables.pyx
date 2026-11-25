@@ -409,6 +409,8 @@ cdef PreparedTable _build(object value):
     table.f64_width, table.i64_width = f64.shape[1], i64.shape[1]
     _point(table, sorted_array, combined, grid, f64, i64, pos_row)
     table.objects = tuple(objects)
+    # the dtype pandas gives a row (it widens number columns to one dtype: int32 beside float64 reads as float64)
+    table.row_object = table.is_series or n == 0 or getattr(frame.iloc[0].dtype, 'kind', 'O') not in 'iufc'
     # index extremes and asof keys, as pandas gives them
     table.max_label = index.max() if n else None
     table.min_label = index.min() if n else None
@@ -614,6 +616,8 @@ cdef void _decide(PreparedTable table, object signatures, object zip_axes):
         if result and columns is not None:
             if len(columns) != len(table.column_positions):
                 result = False
+            elif not table.row_object and any(expected == COLUMN_OBJECT for _, expected in columns):
+                result = False      # a field kept as an object, but pandas widens this row: not the stored value
             else:
                 for name, expected in columns:
                     position = table.column_positions.get(name, -1)
