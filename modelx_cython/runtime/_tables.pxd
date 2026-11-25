@@ -19,7 +19,6 @@ cdef enum:
 cdef class PreparedTable:
     cdef object _source                    # weak reference to the user's frame or Series (``source``): a prepared
                                            # copy never keeps a replaced frame alive
-    cdef object _zip_axes                   # exact index and columns seen before bound preparation
     cdef readonly bint is_series
     cdef readonly Py_ssize_t nrows, nlevels
     cdef readonly tuple level_labels       # per level: its labels in code order (a list)
@@ -120,8 +119,6 @@ cdef object bind_ref(object frame)
 cdef object bind_own(object frame)
 cdef object bind_ref_checked(object frame)
 cdef Py_ssize_t hold_code(object table, int level, object value) except -2
-cdef Py_ssize_t asof_row(PreparedRef ref, int count, Py_ssize_t c0, Py_ssize_t c1, Py_ssize_t c2,
-                         Py_ssize_t c3, Py_ssize_t c4, double x) noexcept
 cdef Py_ssize_t hold_row(object table, object key, bint assigned) except -2
 cdef object object_field(PreparedRef ref, Py_ssize_t slot, Py_ssize_t row)
 cdef object f64_box(double value)
@@ -325,7 +322,6 @@ cdef inline Py_ssize_t nrows(PreparedRef ref) noexcept nogil:
 cdef object label_obj(PreparedRef ref, Py_ssize_t row, int level)
 cdef long long view_range(PreparedRef ref, int count, Py_ssize_t c0, Py_ssize_t c1, Py_ssize_t c2, Py_ssize_t c3,
                           Py_ssize_t c4) noexcept
-cdef object zip_prepared_prefix(object prepared, object frame, object accessor, object key, Py_ssize_t signature)
 
 
 cdef inline Py_ssize_t range_start(long long packed) noexcept nogil:
@@ -341,8 +337,6 @@ cdef Py_ssize_t view_start(PreparedRef ref, int count, Py_ssize_t c0, Py_ssize_t
 cdef Py_ssize_t view_stop(PreparedRef ref, int count, Py_ssize_t c0, Py_ssize_t c1, Py_ssize_t c2, Py_ssize_t c3,
                           Py_ssize_t c4) noexcept
 cdef Py_ssize_t position(Py_ssize_t start, Py_ssize_t stop, Py_ssize_t i) except -2
-cdef Py_ssize_t search(PreparedRef ref, Py_ssize_t start, Py_ssize_t stop, int level, double x, bint right) noexcept
-cdef Py_ssize_t asof_at(PreparedRef ref, Py_ssize_t start, Py_ssize_t stop, int level, double x, int error) except -2
 cdef Py_ssize_t named_slot(PreparedRef ref, object label) except -2
 cdef double field_f64(PreparedRef ref, Py_ssize_t row, object label) except? -1.0
 cdef object max_obj(PreparedRef ref)

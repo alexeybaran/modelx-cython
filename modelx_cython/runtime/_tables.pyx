@@ -13,7 +13,6 @@ A lookup equals ``value.loc[key, column]`` on the tables ``prepare`` accepts: th
 keys, misses included (``tests/test_prepared_tables.py``). The key lookups and value reads compiled code uses are
 inline methods of the .pxd.
 """
-from types import MethodType
 import weakref
 
 import numpy as np
@@ -22,14 +21,6 @@ import pandas as pd
 cdef Py_ssize_t _GRID_LIMIT = 65536
 cdef long long _COMBINED_LIMIT = 1LL << 62
 cdef int _MAX_LEVELS = 8
-cdef object _zip_attrs = pd.DataFrame.attrs
-cdef object _zip_loc = pd.DataFrame.loc
-cdef object _zip_accessor_type = type(pd.DataFrame().loc)
-cdef object _zip_accessor_getitem = _zip_accessor_type.__getitem__
-cdef object _zip_frame_getitem = pd.DataFrame.__getitem__
-cdef object _zip_xs = pd.DataFrame.xs
-cdef object _zip_levels = pd.MultiIndex.levels
-cdef object _zip_level_get_loc = pd.Index.get_loc
 
 
 cdef extern from "Python.h":
@@ -391,10 +382,9 @@ cdef object _prepare_new(object frame):
     """Prepare ``frame`` as it is now and make it the table its reads find (None: they stay pandas)."""
     key = id(frame)
     signatures = model_signatures()
-    axes = _zip_origin(frame, signatures)
     table = prepare(frame)
     if table is not None:
-        _decide(table, signatures, axes)
+        _decide(table, signatures)
     _prepared[key] = (weakref.ref(frame, lambda ref, key=key: _forget(key, ref)), table, _generation)
     return table
 
@@ -453,50 +443,7 @@ cdef object bind_own(object frame):
     return bind_ref(frame)
 
 
-cdef object _zip_origin(object frame, object signatures):
-    """Capture axes before pandas can copy metadata during preparation."""
-    if (type(frame) is not pd.DataFrame or pd.DataFrame.attrs is not _zip_attrs
-            or not any(kind == -7 for _, _, _, kind in signatures)):
-        return None
-    attrs = frame.attrs
-    if type(attrs) is not dict or attrs:
-        return None
-    index, columns = frame.index, frame.columns
-    if type(index) is pd.MultiIndex and type(columns) is pd.Index:
-        return index, columns
-    return None
-
-
-cdef Py_ssize_t _zip_slot(PreparedTable table, object label, object axes):
-    """Admit the narrow ordered ZIP shape at the original Data Cell's bind."""
-    if axes is None:
-        return -1
-    frame = table._source()
-    if (type(frame) is not pd.DataFrame or table.nlevels != 2 or not table.ordered_within[1]
-            or pd.DataFrame.loc is not _zip_loc or pd.DataFrame.__getitem__ is not _zip_frame_getitem
-            or pd.DataFrame.xs is not _zip_xs or pd.MultiIndex.levels is not _zip_levels):
-        return -1
-    index, columns = axes
-    prefix = index.levels[0]
-    if (frame.index is not index or frame.columns is not columns
-            or type(prefix) is not pd.Index or type(index.levels[1]) is not pd.Index
-            or not _zip_method(prefix.get_loc, prefix, _zip_level_get_loc)
-            or index.levels[1].dtype != np.dtype('int64')
-            or any(type(key) is not str for key in table.level_labels[0])
-            or any(type(name) is not str for name in columns)):
-        return -1
-    cdef Py_ssize_t position = table.column_positions.get(label, -1)
-    if position < 0 or table.column_kind[position] != COLUMN_F64:
-        return -1
-    table._zip_axes = axes
-    return table.column_slot[position] + 1
-
-
-cdef inline bint _zip_method(object method, object owner, object implementation):
-    return type(method) is MethodType and method.__self__ is owner and method.__func__ is implementation
-
-
-cdef void _decide(PreparedTable table, object signatures, object zip_axes):
+cdef void _decide(PreparedTable table, object signatures):
     """T-4.2: decide, once per prepared table, the slot of every read signature of the model:
     (levels, columns, label, kind) ->
     - ``levels``: one letter per index level, ``i`` for a level a read takes integer keys on (it must still be an
@@ -507,7 +454,7 @@ cdef void _decide(PreparedTable table, object signatures, object zip_axes):
       index; -3: a walk of the index in pandas order: the table ordered within every prefix of ``label`` levels
       (0 or None: the whole table); -4: a row read by field, ``columns`` given;
       -5: ``T.loc[a, b]`` read as a row prefix, no label of level ``label`` (b's) being a column label;
-      -7: a ZIP over an ordered string/int64 prefix and a float64 column).
+      -6: the extremes of an int level, ``label`` its (name, position)).
     The slot is one plus the column's slot in its block (1 for a read of the index), or -1."""
     cdef int level
     cdef Py_ssize_t position
@@ -532,9 +479,7 @@ cdef void _decide(PreparedTable table, object signatures, object zip_axes):
                         break
         value = -1
         if result:
-            if kind == -7:
-                value = _zip_slot(table, label, zip_axes)
-            elif kind == -6:      # T-5: level label[1] is named label[0] and is an int level (get_level_values)
+            if kind == -6:      # T-5: level label[1] is named label[0] and is an int level (get_level_values)
                 value = 1 if (label[1] < table.nlevels and (label[0] is None or table.level_names[label[1]] == label[0])
                               and table.level_kind[label[1]] != LEVEL_OBJECT and table.nrows > 0) else -1
             elif kind == -5:      # T-5: `T.loc[a, b]` is a row prefix: no label of level `label` is a column label
@@ -609,39 +554,6 @@ cdef Py_ssize_t hold_code(object table, int level, object value) except -2:
     return code + 1 if code >= 0 else -1
 
 
-cdef Py_ssize_t asof_row(PreparedRef ref, int count, Py_ssize_t c0, Py_ssize_t c1, Py_ssize_t c2,
-                         Py_ssize_t c3, Py_ssize_t c4, double x) noexcept:
-    """T-4: ``P.index.asof(x)`` on the sub-frame P = ``T.loc[prefix]`` (``count`` prefix codes) whose one remaining
-    level is an int level, as the stored row of that label in T: the row of the largest label <= x among the
-    prefix's rows; -1 when there is none or x is NaN (pandas returns NaN; the read then runs on pandas).
-    Read through the borrowed pointer only (T-4.2: no reference on the shared table per step)."""
-    cdef Py_ssize_t[6] codes
-    cdef Py_ssize_t start, stop, lo, hi, mid
-    cdef int last = (<PreparedTable>ref).nlevels - 1
-    codes[0] = c0; codes[1] = c1; codes[2] = c2; codes[3] = c3; codes[4] = c4
-    if count != last or x != x or (<PreparedTable>ref).level_kind[last] == LEVEL_OBJECT:
-        return -1
-    if not (<PreparedTable>ref).prefix_range(codes, count, &start, &stop):
-        return -1
-    lo, hi = start, stop        # rows of the prefix, ascending by the last level's label
-    while lo < hi:
-        mid = (lo + hi) >> 1
-        if _last_label(ref, mid) <= x:
-            lo = mid + 1
-        else:
-            hi = mid
-    return lo - 1 if lo > start else -1
-
-
-cdef inline long long _last_label(PreparedRef ref, Py_ssize_t row) noexcept:
-    cdef int last = (<PreparedTable>ref).nlevels - 1
-    cdef long long combined = (<PreparedTable>ref).combined[row]
-    cdef Py_ssize_t code = <Py_ssize_t>(combined % (<PreparedTable>ref).radix[last - 1]) if last > 0 else <Py_ssize_t>combined
-    if (<PreparedTable>ref).level_kind[last] == LEVEL_DENSE:
-        return (<PreparedTable>ref).level_first[last] + code
-    return (<PreparedTable>ref).sorted_labels[(<PreparedTable>ref).level_offset[last] + code]
-
-
 cdef Py_ssize_t hold_row(object table, object key, bint assigned) except -2:
     """T-4: one plus the stored row of ``key`` in a held table, for the fields of a row cell (``T.loc[key]``);
     -1 when the table is not prepared, the key is absent, or the row cell holds a value the user assigned
@@ -711,44 +623,6 @@ cdef long long view_range(PreparedRef ref, int count, Py_ssize_t c0, Py_ssize_t 
     return (<long long>start << 32) | <long long>stop
 
 
-cdef object zip_prepared_prefix(object prepared, object frame, object accessor, object key, Py_ssize_t signature):
-    """Read a freshly boxed list from the already published ordered snapshot, or decline."""
-    cdef PreparedTable table
-    cdef PreparedRef ref
-    cdef Py_ssize_t column, row, start, stop
-    cdef long long bounds
-    if type(prepared) is not PreparedTable or type(frame) is not pd.DataFrame or type(key) is not str:
-        return None
-    table = <PreparedTable>prepared
-    ref = <PreparedRef>table
-    column = slot(ref, signature)
-    if column <= 0 or table._source() is not frame:
-        return None
-    index, columns = table._zip_axes
-    if (frame.index is not index or frame.columns is not columns or type(accessor) is not _zip_accessor_type
-            or _zip_accessor_type.__getitem__ is not _zip_accessor_getitem or pd.DataFrame.loc is not _zip_loc
-            or pd.DataFrame.__getitem__ is not _zip_frame_getitem or pd.DataFrame.xs is not _zip_xs
-            or pd.MultiIndex.levels is not _zip_levels):
-        return None
-    prefix = index.levels[0]
-    if (type(prefix) is not pd.Index or not _zip_method(prefix.get_loc, prefix, _zip_level_get_loc)
-            or not _zip_method(frame.xs, frame, _zip_xs)):
-        return None
-    if pd.DataFrame.attrs is not _zip_attrs:
-        return None
-    attrs = frame.attrs
-    if type(attrs) is not dict or attrs:
-        return None
-    bounds = view_range(ref, 1, ocode(ref, 0, key), 0, 0, 0, 0)
-    if bounds < 0:
-        return None
-    start, stop = range_start(bounds), range_stop(bounds)
-    cdef list pairs = []
-    for row in range(start, stop):
-        pairs.append((label_ll(ref, row, 1), f64_row(ref, column, row + 1)))
-    return pairs
-
-
 cdef Py_ssize_t view_start(PreparedRef ref, int count, Py_ssize_t c0, Py_ssize_t c1, Py_ssize_t c2, Py_ssize_t c3,
                            Py_ssize_t c4) noexcept:
     """The first stored row of the prefix given as ``count`` level codes, or -1 when it has no row."""
@@ -778,35 +652,6 @@ cdef Py_ssize_t position(Py_ssize_t start, Py_ssize_t stop, Py_ssize_t i) except
     if i < 0 or i >= n:
         raise IndexError(f'index {i if i >= 0 else i - n} is out of bounds for axis 0 with size {n}')
     return start + i
-
-
-cdef Py_ssize_t search(PreparedRef ref, Py_ssize_t start, Py_ssize_t stop, int level, double x, bint right) noexcept:
-    """``index.searchsorted(x, side)`` of an ordered view on an int level: the position (from ``start``) of the first
-    label > x (right) or >= x (left)."""
-    cdef Py_ssize_t lo = start, hi = stop, mid
-    cdef double label
-    while lo < hi:
-        mid = (lo + hi) >> 1
-        label = <double>label_ll(ref, mid, level)
-        if label < x or (right and label == x):
-            lo = mid + 1
-        else:
-            hi = mid
-    return lo - start
-
-
-cdef Py_ssize_t asof_at(PreparedRef ref, Py_ssize_t start, Py_ssize_t stop, int level, double x, int error) except -2:
-    """``index.asof(x)`` of an ordered view on an int level as the stored row of the label; when there is none (x
-    below the first label, or NaN) the error pandas then raises: ValueError for ``int(...)`` of it (``error`` 0),
-    KeyError for a key read with it (1)."""
-    cdef Py_ssize_t row
-    if x == x:
-        row = start + search(ref, start, stop, level, x, True) - 1
-        if row >= start:
-            return row
-    if error == 0:
-        raise ValueError('cannot convert float NaN to integer')
-    raise KeyError(float('nan'))
 
 
 cdef object max_obj(PreparedRef ref):
