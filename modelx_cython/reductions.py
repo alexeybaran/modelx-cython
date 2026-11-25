@@ -152,6 +152,10 @@ class _Substitute(cst.CSTTransformer):
             value = value.with_changes(lpar=(cst.LeftParen(),), rpar=(cst.RightParen(),))
         return value
 
+    def leave_Arg(self, before, after):
+        # a keyword is a parameter name of the callee, never the generator variable
+        return after if after.keyword is before.keyword else after.with_changes(keyword=before.keyword)
+
 
 def _names(target):
     if isinstance(target, cst.Name):
