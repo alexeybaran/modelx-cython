@@ -1,9 +1,10 @@
 """An integer power of C integers is exact or raises naming the Cell; it never wraps.
 
-Cython computes a C integer raised to a non-negative integer literal (and any C integer power
-stored in a C integer) with its own unchecked integer power, which wraps where Python gives a
-big integer. The sample here keeps every value within 64 bits, as a real book does, so the
-Cells are typed as C integers; the run then calls them past that range.
+Cython computes a C integer raised to a non-negative integer literal with its own unchecked integer
+power, which wraps where Python gives a big integer, and a variable exponent as a double. The sample
+here keeps every value within 64 bits, as a real book does, so the Cells are typed as C integers;
+the run then calls them past that range. A power of two C integers is Python's: its value is live's,
+and only a Cell whose C integer result cannot hold it raises, naming the Cell.
 """
 import json
 import subprocess
@@ -32,23 +33,18 @@ OUTSIDE = {"const_exponent": 9, "local_base": 9, "float_context": 9, "variable_e
 
 @pytest.fixture(scope="module")
 def power_build(tmp_path_factory):
-    # the checked mode (owner's rule): the small sample would resolve the unchecked mode
-    return _power_build(tmp_path_factory, "checked")
+    return _power_build(tmp_path_factory)
 
 
-@pytest.fixture(scope="module")
-def power_build_unchecked(tmp_path_factory):
-    return _power_build(tmp_path_factory, "unchecked")
-
-
-def _power_build(tmp_path_factory, mode):
-    work = tmp_path_factory.mktemp(f"integer-power-{mode}")
+def _power_build(tmp_path_factory):
+    work = tmp_path_factory.mktemp("integer-power")
     model = mx.new_model("IntegerPower")
     try:
         space = model.new_space("Sp")
         for name, formula in CELLS.items():
             space.new_cells(name, formula)
         live = {name: {str(t): repr(getattr(space, name)(t)) for t in ts} for name, ts in INSIDE.items()}
+        live["outside"] = {name: repr(getattr(space, name)(t)) for name, t in OUTSIDE.items()}
         model.export(work / "exported")
     finally:
         model.close()
@@ -56,7 +52,7 @@ def _power_build(tmp_path_factory, mode):
     (work / "sample.py").write_text(
         "from exported import mx_model\nSp = mx_model.Sp\n"
         + "".join(f"Sp.{name}(2); Sp.{name}(3)\n" for name in INSIDE) + "Sp.h(0)\n")
-    (work / "spec.py").write_text(repr({"integer_checks": mode, "spaces": {"Sp": {"cells_param_size": {"t": 20}}}}))
+    (work / "spec.py").write_text(repr({"spaces": {"Sp": {"cells_param_size": {"t": 20}}}}))
     run = subprocess.run([sys.executable, "-B", "-m", "modelx_cython", "exported", "--sample", "sample.py",
                           "--spec", "spec.py"], cwd=work, capture_output=True, text=True, timeout=600)
     assert run.returncode == 0, run.stdout + run.stderr
@@ -70,9 +66,8 @@ def _probe(work, code):
     return json.loads(run.stdout.strip().splitlines()[-1])
 
 
-@pytest.mark.parametrize("mode", ["checked", "unchecked"])
-def test_power_inside_the_range_equals_live(power_build, power_build_unchecked, mode):
-    work = power_build if mode == "checked" else power_build_unchecked
+def test_power_inside_the_range_equals_live(power_build):
+    work = power_build
     live = json.loads((work / "live.json").read_text())
     compiled = _probe(work, f'''
         import json
@@ -82,13 +77,14 @@ def test_power_inside_the_range_equals_live(power_build, power_build_unchecked, 
     ''')
     for name in INSIDE:
         if name == "negative_exponent":
-            # Cython types ``2 ** -t`` as a double (unchanged here): equal values, 1.0 for live 1 at t = 0
+            # traced a float (t > 0): equal values, 1.0 for live 1 at t = 0
             assert {t: float(v) for t, v in compiled[name].items()} == {t: float(v) for t, v in live[name].items()}
         else:
             assert compiled[name] == live[name], name
 
 
-def test_power_beyond_64_bits_raises_naming_the_cell(power_build):
+def test_power_beyond_64_bits_is_live_or_raises_naming_the_cell(power_build):
+    live = json.loads((power_build / "live.json").read_text())["outside"]
     outcome = _probe(power_build, f'''
         import json
         from exported_cy import mx_model
@@ -100,30 +96,11 @@ def test_power_beyond_64_bits_raises_naming_the_cell(power_build):
                 out[name] = [type(error).__name__, str(error)]
         print(json.dumps(out))
     ''')
-    for name in OUTSIDE:
-        kind, text = outcome[name]
-        assert kind == "OverflowError", (name, outcome[name])
-        assert text.startswith(f"Sp.{name}:"), (name, text)
-
-
-
-
-def test_unchecked_mode_power(power_build_unchecked):
-    """Unchecked mode: a power stored as a C integer still takes the checked power (Cython's own
-    wraps, and gives a double for a variable exponent, which a C integer cannot take); in a float
-    or comparison context it is Cython's C power and wraps beyond 64 bits, as on upstream."""
-    outcome = _probe(power_build_unchecked, f'''
-        import json
-        from exported_cy import mx_model
-        out = {{}}
-        for name, t in {OUTSIDE!r}.items():
-            try:
-                out[name] = ["value", repr(getattr(mx_model.Sp, name)(t))]
-            except (OverflowError, TypeError) as error:
-                out[name] = [type(error).__name__, str(error)]
-        print(json.dumps(out))
-    ''')
-    for name in ("const_exponent", "local_base", "variable_exponent"):
-        assert outcome[name][0] == "OverflowError" and outcome[name][1].startswith(f"Sp.{name}:"), outcome[name]
+    # a float or a comparison of the power: live's value
     for name in ("float_context", "comparison"):
-        assert outcome[name][0] == "value", outcome[name]          # plain C power
+        assert outcome[name] == ["value", live[name]], (name, outcome[name])
+    # a C integer result that cannot hold live's: OverflowError naming the Cell
+    for name in ("const_exponent", "local_base", "variable_exponent"):
+        assert int(live[name]) >= 2 ** 63
+        kind, text = outcome[name]
+        assert kind == "OverflowError" and text.startswith(f"Sp.{name} "), (name, outcome[name])

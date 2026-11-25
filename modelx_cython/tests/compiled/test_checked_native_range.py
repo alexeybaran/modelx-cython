@@ -62,11 +62,8 @@ def test_checked_native_range(tmp_path):
         'v = mx_model.Values\n'
         'v.add(0, 5); v.add_from_one(5); v.weighted(0, 5, 5.5); v.square(0, 5); v.shadowed(0, 5)\n',
         encoding='utf-8')
-    # the checked mode (owner's rule): the small sample would resolve the unchecked mode. The typed
-    # range counters of the removed range proofs are no longer asserted; the values below are.
-    (tmp_path / 'spec.py').write_text(repr({'integer_checks': 'checked'}), encoding='utf-8')
     subprocess.run(
-        [sys.executable, '-m', 'modelx_cython', 'exported', '--sample', 'sample.py', '--spec', 'spec.py'],
+        [sys.executable, '-m', 'modelx_cython', 'exported', '--sample', 'sample.py', '--no-spec'],
         cwd=tmp_path, check=True)
     probe = textwrap.dedent('''\
         from exported_cy import mx_model
@@ -77,15 +74,16 @@ def test_checked_native_range(tmp_path):
             for index in range(origin + 1, stop):
                 expected += float(index) * ((index - origin) / 12.0)
             assert v.add(origin, stop) == expected
-        # an intermediate beyond the signed range (origin + 1, index * index): the exact fallback of
-        # the removed range proofs is gone, it raises naming the Cell
-        for name, call in (('add', lambda: v.add(bound, bound)), ('square', lambda: v.square(bound - 2, bound))):
-            try:
-                call()
-            except OverflowError as error:
-                assert str(error).startswith('Values.' + name), error
-            else:
-                raise AssertionError(name + ': an intermediate beyond the signed range did not raise')
+        # a product beyond the signed range is a Python int, as live
+        assert v.square(bound - 2, bound) == float((bound - 1) * (bound - 1))
+        # a range bound beyond it (origin + 1) cannot be a C counter's: it raises naming the Cell, where
+        # live's loop is empty
+        try:
+            v.add(bound, bound)
+        except OverflowError as error:
+            assert str(error).startswith('Values.add'), error
+        else:
+            raise AssertionError('a range bound beyond the signed range did not raise')
         assert v.add_from_one(-bound) == 0.0 and v.add_from_one(5) == 10.0
         for origin in (0, -(1 << 63), (1 << 63) - 16):
             expected = sum(float(origin + (k - 1) * 3) * ((k - 1) * 3 / 12.0)
