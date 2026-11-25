@@ -216,9 +216,6 @@ class PXDGenerator:
                         if c.native_provider_binding is not None)
         for provider in sorted(contexts):
             stmts.append(f'from {self.package} cimport {module_name(provider)}')
-        enum_declarations = code_enums.declarations(self.module)
-        if enum_declarations:
-            stmts.append(enum_declarations)
         return "\n".join(stmts)
 
     @cached_property
@@ -696,17 +693,13 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
                                               self._ref_kinds, cls_info.fqname, param_kinds)
             reductions = NativeReductions(
                 cls_info, cells, self.helper_providers, node, self._reserve_cold_sum, builtin_bounds,
-                builtin_reductions, self.module.code_enum_symbols,
+                builtin_reductions,
                 formula_kinds={name: {KIND_INT: 'longlong', KIND_FLOAT: 'double'}[kind]
                                for name, kind in local_kinds.items() if kind in (KIND_INT, KIND_FLOAT)})
             node = node.visit(reductions)
             cells.native_reductions = reductions.count
             cells.native_tuple_int_loops = getattr(reductions, 'tuple_int_loops', 0)   # diag-scale P3
             cells.exact_reduction_guards = reductions.exact_receiver_guards
-        enum_comparisons = code_enums.Constants(cls_info, cells, self.module.code_enum_symbols)
-        node = node.visit(enum_comparisons)
-        cells.native_enum_comparisons = enum_comparisons.comparisons
-        cells.native_enum_constants = enum_comparisons.count
         operations = set(rounded_inputs.operations)
         node = self._bind_declared_helpers(node, cls_info, cells, operations)
         admitted_helpers = set(cells.native_helpers)

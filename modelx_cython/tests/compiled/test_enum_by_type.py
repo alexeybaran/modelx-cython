@@ -1,7 +1,7 @@
 """Enum definitions are selected by traced type.
 
 A Reference whose value is an enum-safe IntEnum class is an enum definition: fixed in the compiled
-model and its members are C constants. No declaration is needed.
+model and its members are integer literals. No declaration is needed.
 """
 from http import HTTPStatus
 import json
@@ -51,10 +51,10 @@ def test_enum_selected_by_type(tmp_path):
         encoding='utf-8')
     subprocess.run([sys.executable, '-m', 'modelx_cython', 'exported', '--sample', 'sample.py', '--no-spec'],
                    cwd=tmp_path, check=True)
-    report = json.loads((tmp_path / 'exported_cy' / '_mx_admission.json').read_text(encoding='utf-8'))
-    constants = {key.rsplit('._f_', 1)[-1]: entry['native_enum_constants'] for key, entry in report.items()
-                 if isinstance(entry, dict) and 'native_enum_constants' in entry}
-    assert constants['matches'] >= 1 and constants['code'] >= 1, constants
+    generated = (tmp_path / 'exported_cy' / '_mx_classes.py').read_text(encoding='utf-8')
+    # members are integer literals in the formulas
+    assert '== 200' in generated and '== 404' in generated, generated
+    assert 'Status.OK' not in generated and 'Status.NOT_FOUND' not in generated, generated
     (tmp_path / 'check.py').write_text(CHECK, encoding='utf-8')
     result = subprocess.run([sys.executable, 'check.py'], cwd=tmp_path, capture_output=True, text=True)
     assert result.returncode == 0, result.stdout + result.stderr
