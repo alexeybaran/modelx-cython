@@ -1,8 +1,5 @@
-"""D94 (diag-vec2): a module with no vector cell whose formulas allocate local vectors is lowered too.
-
-Only the formulas with a typed local vector change (the module's other formulas are generated as before);
-a local list that is not a typed vector (written with an int, a mixed min/max or an untyped object, or
-appended with one) stays a Python list with exact list semantics. Compiled = exported, bit by bit and by type.
+"""D94 removed (tuples only): a module with no vector cell is not lowered, whatever lists its formulas build;
+its local lists are Python lists with exact list semantics. Compiled = exported, bit by bit and by type.
 """
 import json
 import subprocess
@@ -103,14 +100,8 @@ def test_local_vectors_in_a_module_without_vector_cells(tmp_path):
     (tmp_path / "sample.py").write_text(SAMPLE.format(names=NAMES), encoding="utf-8")
     subprocess.run([sys.executable, "-m", "modelx_cython", "exported", "--no-spec"], cwd=tmp_path, check=True)
     reports = _reports(json.loads((tmp_path / "exported_cy" / "_mx_admission.json").read_text(encoding="utf-8")))
-    assert all(not r.get("vectors", {}).get("shape") for r in reports.values())      # no vector cell
-    solve = reports["solve"]["vectors"]
-    assert solve["vector_locals"] == {"dens": "V", "disc": "V", "paid": "I"}, solve
-    assert solve["lowered"] >= 5 and not solve["fallbacks"], solve
-    for name in ("int_write", "obj_write", "mixed_append"):
-        vectors = reports[name].get("vectors")
-        assert vectors is None or not vectors.get("vector_locals"), (name, vectors)
-    assert "vectors" not in reports["plain"], reports["plain"]           # not lowered: generated as before
+    assert all("vectors" not in r for r in reports.values()), reports      # no formula is lowered
+    assert "F64Vec" not in (tmp_path / "exported_cy" / "_mx_classes.py").read_text(encoding="utf-8")
     (tmp_path / "check.py").write_text(CHECK.format(names=NAMES), encoding="utf-8")
     result = subprocess.run([sys.executable, "check.py"], cwd=tmp_path, capture_output=True, text=True)
     assert result.returncode == 0, result.stdout + result.stderr
