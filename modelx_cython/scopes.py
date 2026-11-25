@@ -6,7 +6,7 @@ from collections.abc import Sequence
 from types import MappingProxyType
 
 from libcst.metadata import (ExpressionContext, ExpressionContextProvider, MetadataWrapper, ParentNodeProvider,
-                             ScopeProvider)
+                             PositionProvider, ScopeProvider)
 try:
     from libcst.metadata.scope_provider import ScopeVisitor as _ScopeVisitor
 except ImportError:     # pragma: no cover - ScopeProvider then resolves as LibCST does
@@ -254,6 +254,22 @@ def metadata_wrapper(module, copy=False, parents=False):
                 visitor.infer_accesses()
             resolved[ScopeProvider] = MappingProxyType(dict(provider._computed))
     return wrapper
+
+
+def code_positions(module):
+    """What ``MetadataWrapper(module, unsafe_skip_copy=True).resolve(PositionProvider)`` holds.
+
+    PositionProvider is not batchable: LibCST generates it, then runs the batched traversal of
+    the batchable providers left, none, over every node. The provider is generated as LibCST
+    generates it, without that traversal.
+    """
+    wrapper = MetadataWrapper(module, unsafe_skip_copy=True)
+    resolved = getattr(wrapper, '_metadata', None)
+    if type(resolved) is dict and not resolved and not PositionProvider.METADATA_DEPENDENCIES:
+        provider = (PositionProvider(wrapper._cache.get(PositionProvider)) if PositionProvider.gen_cache
+                    else PositionProvider())
+        resolved[PositionProvider] = provider._gen(wrapper)
+    return wrapper.resolve(PositionProvider)
 
 
 # Nodes that bind a name of their own (``name`` field) without an expression context

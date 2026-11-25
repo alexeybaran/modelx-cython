@@ -229,3 +229,14 @@ def test_parent_nodes_keep_the_last_parent_left():
     actual = parent_nodes(module)
     assert list((id(node), id(parent)) for node, parent in actual.items()) == \
         list((id(node), id(parent)) for node, parent in expected.items())
+
+
+@pytest.mark.parametrize('index', [0, 1])
+def test_code_positions_match_libcst(index):
+    from libcst.metadata import MetadataWrapper, PositionProvider
+    from modelx_cython.scopes import code_positions
+    module = cst.parse_module(sources()[index])
+    expected = MetadataWrapper(module, unsafe_skip_copy=True).resolve(PositionProvider)
+    actual = code_positions(module)
+    assert [(id(node), position) for node, position in actual.items()] == \
+        [(id(node), position) for node, position in expected.items()]

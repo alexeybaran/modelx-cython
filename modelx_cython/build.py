@@ -10,16 +10,15 @@ from collections import defaultdict
 from typing import Sequence
 
 import libcst as cst
-from libcst.metadata import MetadataWrapper, PositionProvider
 
 from .consts import FORMULA_PREF, MODULE_PREF, SPACE_PREF
-from .scopes import lexical_nodes
+from .scopes import code_positions, lexical_nodes
 from .syntax import statements, walk
 
 
 def cell_locations(state, module_info):
     """Map Cython source locations back to the model's cell paths."""
-    positions = MetadataWrapper(state.syntax, unsafe_skip_copy=True).resolve(PositionProvider)
+    positions = code_positions(state.syntax)
     space_path = tuple(part[len(MODULE_PREF):] for part in module_info.fqname.split('.')[1:-1])
     methods = state.methods
     moved = defaultdict(list)
