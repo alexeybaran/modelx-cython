@@ -33,7 +33,7 @@ from libcst.metadata import ExpressionContext
 
 from .consts import CY_MOD, MX_SYS_MOD
 from .scopes import CstFacts, has_scope_effects, lexical_nodes
-from .syntax import dotted_name, local_assignment, statements, walk
+from .syntax import dotted_name, local_assignment, walk
 
 
 class CInt:
@@ -561,21 +561,6 @@ def _declared(node, types, owner):
     return env
 
 
-def _loops(body):
-    """Each ``for`` loop of the function (not of a nested scope) whose target is a plain name."""
-    for part in lexical_nodes(body):
-        if isinstance(part, cst.For) and isinstance(part.target, cst.Name):
-            yield part
-
-
-def _reads_outside(body, loop, name, facts):
-    """Whether ``name`` is read anywhere but inside the body of ``loop``."""
-    inside = {id(node) for node in walk(loop.body)}
-    return any(isinstance(node, cst.Name) and node.value == name and id(node) not in inside
-               and facts.contexts.get(node) is ExpressionContext.LOAD
-               for node in walk(cst.Module(list(body))))
-
-
 def _range_arguments(iterable):
     if (isinstance(iterable, cst.Call) and dotted_name(iterable.func) == 'range'
             and 1 <= len(iterable.args) <= 3 and not any(arg.star or arg.keyword for arg in iterable.args)):
@@ -616,41 +601,154 @@ def _integer_valued(lower, expr):
             and _integer_valued(lower, expr.left) and _integer_valued(lower, expr.right))
 
 
-def signed_local_assignments(body, name, facts, native_value):
-    """({assignment: value}, reads) of the local ``name`` when every store is a plain assignment
-    whose ``native_value`` is not None and every read follows a definite assignment; else ({}, reads)."""
+class _Unknown(Exception):
+    """A binding construct the definite-assignment analysis does not follow."""
+
+
+_UNREACHABLE = 'unreachable'
+
+
+def _join(*states):
+    reachable = [state for state in states if state != _UNREACHABLE]
+    return all(reachable) if reachable else _UNREACHABLE
+
+
+def _binds(target, name):
+    """Whether an assignment target binds ``name`` (a name, or one inside a tuple or list target)."""
+    if isinstance(target, cst.Name):
+        return target.value == name
+    if isinstance(target, (cst.Tuple, cst.List)):
+        return any(_binds(element.value, name) for element in target.elements)
+    return False
+
+
+def maybe_unbound(body, name, facts):
+    """Whether a read of the local ``name`` can come before any assignment to it, on some path of the
+    function ``body`` (or the body binds it in a way not followed here). Python raises then; a C local
+    has no unbound state, so such a local must stay a Python object."""
     reads = {node for node, context in facts.contexts.items()
              if isinstance(node, cst.Name) and node.value == name and context is ExpressionContext.LOAD}
-    assignments = {}
+    for part in walk(cst.Module(list(body))):
+        if isinstance(part, (cst.ListComp, cst.SetComp, cst.DictComp, cst.GeneratorExp)):
+            comprehension = part.for_in
+            while comprehension is not None:
+                if _binds(comprehension.target, name):
+                    reads.difference_update(walk(part))     # the comprehension's own variable
+                comprehension = comprehension.inner_for_in
 
-    def flow(lines, assigned):
+    class Found(Exception):
+        pass
+
+    def read(node, state):
+        if state is False and any(part in reads for part in walk(node)):
+            raise Found
+        if any(isinstance(part, cst.NamedExpr) and _binds(part.target, name) for part in walk(node)):
+            raise _Unknown
+
+    def block(lines, state):
         for line in lines:
-            evaluated = line.test if isinstance(line, cst.If) else line
-            if not assigned and any(part in reads for part in walk(evaluated)):
-                return None
-            if isinstance(line, cst.If):
-                taken = flow(statements(line.body), assigned)
-                other = line.orelse
-                if isinstance(other, cst.If):
-                    skipped = flow((other,), assigned)
-                elif other is not None:
-                    skipped = flow(statements(other.body), assigned)
-                else:
-                    skipped = assigned
-                if taken is None or skipped is None:
-                    return None
-                assigned = taken and skipped
-            elif (target := local_assignment(line)) is not None and target.value == name:
-                value = native_value(line.value)
-                if value is None:
-                    return None
-                assignments[line] = value
-                assigned = True
-        return assigned
+            if state == _UNREACHABLE:
+                break
+            state = statement(line, state)
+        return state
 
-    if flow(statements(body), False) is None or len(assignments) != facts.stores[name]:
-        return {}, reads
-    return assignments, reads
+    def suite(node, state):
+        if isinstance(node, cst.SimpleStatementSuite):
+            for small in node.body:
+                if state == _UNREACHABLE:
+                    break
+                state = small_statement(small, state)
+            return state
+        return block(node.body, state)
+
+    def statement(line, state):
+        if isinstance(line, cst.SimpleStatementLine):
+            for small in line.body:
+                state = small_statement(small, state)
+            return state
+        if isinstance(line, cst.If):
+            read(line.test, state)
+            taken = suite(line.body, state)
+            if isinstance(line.orelse, cst.If):
+                other = statement(line.orelse, state)
+            elif line.orelse is not None:
+                other = suite(line.orelse.body, state)
+            else:
+                other = state
+            return _join(taken, other)
+        if isinstance(line, (cst.For, cst.While)):
+            if isinstance(line, cst.For):
+                read(line.iter, state)
+                inside = True if _binds(line.target, name) else state
+                if not _binds(line.target, name):
+                    read(line.target, state)
+            else:
+                read(line.test, state)
+                inside = state
+            suite(line.body, inside)
+            # the body may run no time; the else clause follows it
+            return _join(state, suite(line.orelse.body, state)) if line.orelse is not None else state
+        if isinstance(line, cst.Try):
+            body_end = suite(line.body, state)
+            ends = [suite(line.orelse.body, body_end) if line.orelse is not None else body_end]
+            for handler in line.handlers:
+                if handler.name is not None and _binds(handler.name.name, name):
+                    raise _Unknown
+                if handler.type is not None:
+                    read(handler.type, state)
+                ends.append(suite(handler.body, state))
+            end = _join(*ends)
+            if line.finalbody is not None:
+                suite(line.finalbody.body, state)
+                end = suite(line.finalbody.body, end) if end != _UNREACHABLE else end
+            return end
+        if isinstance(line, cst.With):
+            for item in line.items:
+                read(item.item, state)
+                if item.asname is not None and _binds(item.asname.name, name):
+                    state = True if state != _UNREACHABLE else state
+            return suite(line.body, state)
+        if isinstance(line, (cst.FunctionDef, cst.ClassDef)):
+            read(line, state)
+            return True if line.name.value == name else state
+        raise _Unknown
+
+    def small_statement(small, state):
+        if isinstance(small, cst.Assign):
+            read(small.value, state)
+            for target in small.targets:
+                if _binds(target.target, name):
+                    state = True
+                else:
+                    read(target.target, state)
+            return state
+        if isinstance(small, cst.AnnAssign):
+            if small.value is None:
+                return state
+            read(small.value, state)
+            return True if _binds(small.target, name) else (read(small.target, state) or state)
+        if isinstance(small, cst.AugAssign):
+            read(small.target, state)
+            read(small.value, state)
+            return state
+        if isinstance(small, (cst.Return, cst.Raise)):
+            read(small, state)
+            return _UNREACHABLE
+        if isinstance(small, (cst.Break, cst.Continue)):
+            return _UNREACHABLE
+        if isinstance(small, (cst.Expr, cst.Assert, cst.Pass)):
+            read(small, state)
+            return state
+        if isinstance(small, cst.Del) and not any(isinstance(part, cst.Name) and part.value == name
+                                                  for part in walk(small)):
+            return state
+        raise _Unknown          # del, global, nonlocal, import: not followed
+
+    try:
+        block(body, False)
+    except (Found, _Unknown):
+        return True
+    return False
 
 
 _DYNAMIC = frozenset(('eval', 'exec', 'locals', 'vars', 'globals', '_getframe', 'currentframe'))
@@ -658,8 +756,8 @@ _DYNAMIC = frozenset(('eval', 'exec', 'locals', 'vars', 'globals', '_getframe', 
 
 def _integer_locals(body, facts, lower, taken):
     """{local: its range} of the locals that can be C integers: every store a plain assignment of a
-    C integer value (as lowered), every read after a definite assignment (a C local is never unbound),
-    and none compared by identity (a C integer is boxed anew for ``is``)."""
+    C integer value (as lowered), and none compared by identity (a C integer is boxed anew for ``is``).
+    ``taken`` holds the declared names, among them every local that may be read unbound."""
     if has_scope_effects(body) or facts.reads & _DYNAMIC:
         return {}
     identity = set()
@@ -667,13 +765,13 @@ def _integer_locals(body, facts, lower, taken):
         if isinstance(part, cst.Comparison) and any(
                 isinstance(item.operator, (cst.Is, cst.IsNot)) for item in part.comparisons):
             identity.update(item.value for item in walk(part) if isinstance(item, cst.Name))
-    pending = {}
-    for name, count in facts.stores.items():
-        if not count or name in taken or name in identity or name in facts.deleted:
-            continue
-        assignments, _ = signed_local_assignments(body, name, facts, lambda value: value)
-        if assignments:
-            pending[name] = tuple(assignments.values())
+    values = {}
+    for part in lexical_nodes(body):
+        if (target := local_assignment(part)) is not None:
+            values.setdefault(target.value, []).append(part.value)
+    pending = {name: tuple(values[name]) for name, count in facts.stores.items()
+               if count and len(values.get(name, ())) == count and name not in taken and name not in identity
+               and name not in facts.deleted}
     # greatest fixpoint: assume every candidate a C integer of any value, drop those an assignment refutes
     changed = True
     while changed and pending:
@@ -707,18 +805,18 @@ def lower_integer_arithmetic(node, types, owner, path, bounds=None):
     declarations = {}
     returns = node.returns and annotation_type(node.returns.annotation, types.classes)
     lower = _Lower(types, owner, env, path, isinstance(returns, CInt) and returns.width == 64)
-    loops = [loop for loop in _loops(body) if loop.target.value not in env]
-    for loop in loops:
-        if _reads_outside(body, loop, loop.target.value, facts):
-            # a loop that never ran leaves it unbound: Python raises, and so does an object local
-            declarations[loop.target.value] = 'object'
+    for name, count in facts.stores.items():
+        if count and name not in env and maybe_unbound(body, name, facts):
+            # read before any assignment on some path: Python raises there, and so does an object local
+            declarations[name] = 'object'
     for name, kind in _integer_locals(body, facts, lower, set(env) | set(declarations)).items():
         declarations[name] = f'{CY_MOD}.longlong'
         env[name] = kind
     lower.kinds.clear()
+    loops = [part for part in lexical_nodes(body) if isinstance(part, cst.For) and isinstance(part.target, cst.Name)]
     for loop in loops:
         name, args = loop.target.value, _range_arguments(loop.iter)
-        if name in declarations or args is None or facts.stores[name] != 1 or name in facts.deleted:
+        if name in env or name in declarations or args is None or facts.stores[name] != 1 or name in facts.deleted:
             continue
         counter = _counter(lower, args)
         if counter is not None:
