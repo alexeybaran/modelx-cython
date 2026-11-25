@@ -818,6 +818,11 @@ def plan(sources, ref_info, cells_info=None, param_info=None):
                 again = True
         if not again:
             break
+    for kind, *key in needy:        # for the gate of calls from Python: the class such a parameter must be given
+        info = (cells_info or {}).get(key[0]) if kind == 'param' else None
+        cls = (getattr(info, 'arg_types', None) or {}).get(key[1]) if info is not None else None
+        if enum_safe(cls):
+            vars(info).setdefault('enum_members', {})[key[1]] = cls
     result = dict(sources)
     for module, tree in trees.items():
         literal, convert, checks, encode = {}, {}, {}, {}

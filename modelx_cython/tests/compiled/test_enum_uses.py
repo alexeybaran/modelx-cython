@@ -4,7 +4,7 @@ The cases of two reviews of the enum pass and two shapes of real models, in one 
 enum-typed value where its class shows (``repr``, ``str``, ``format``, ``isinstance``, a container), read by
 ``.name``, tested by identity, passed to a helper function, appended to a list, used as the key of an item Space
 or of a table by its name, in a comprehension, from an untraced Cell, across Spaces, and of a class with its own
-operators. Two probes raise ``TypeError`` where the model gives a value, because a member of another class
+operators. Three probes raise ``TypeError`` where the model gives a value, because a member of another class
 reaches a parameter or result that is compiled as an integer of its traced class and converted back.
 """
 import os
@@ -117,7 +117,7 @@ PROBES = [f'p.{name}()' for name in (
     'p.C.ident()', 'p.C.idents()', 'p.basis_param(p.Leg.PUT)']
 # a member of another class given to a converted parameter or result; probed in a process of their own: the
 # exported model keeps one cached value for members of two classes that are equal as integers
-RAISES = ['p.cross()', 'p.pick_nm(0)']
+RAISES = ['p.cross()', 'p.pick_nm(0)', 'p.nm(p.Kind.Y)']       # the last: given from Python
 
 
 def test_every_use_equals_live(tmp_path, monkeypatch):
@@ -164,5 +164,5 @@ def test_every_use_equals_live(tmp_path, monkeypatch):
     assert compiled == live, '\n'.join(f'{a}  |  {b}' for a, b in zip(live, compiled) if a != b)
     assert "p.shown(p.Leg.PUT) ('<Leg.PUT: 1>'," in ''.join(compiled)
     assert "p.fund_at(2, p.Timing.END) ValueError invalid timing: 2 <Timing.END: 2>" in compiled
-    assert out['exported'][:len(RAISES)] == ["p.cross() ['X', 'Y']", "p.pick_nm(0) 'X'"]
-    assert [line.split()[1] for line in out['exported_cy'][:len(RAISES)]] == ['TypeError', 'TypeError'], out['exported_cy']
+    assert out['exported'][:len(RAISES)] == ["p.cross() ['X', 'Y']", "p.pick_nm(0) 'X'", "p.nm(p.Kind.Y) 'Y'"]
+    assert [line.split()[1] for line in out['exported_cy'][:len(RAISES)]] == ['TypeError'] * 3, out['exported_cy']
