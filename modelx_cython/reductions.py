@@ -231,7 +231,10 @@ class GeneralReductions:
 
     def substituted(self, node, mapping):
         state = self.general_state
-        if state['facts'] is None or not mapping:
+        if state['facts'] is None:
+            # a direct iterable: the element is the loop variable itself
+            return mapping.get(node.value, node) if isinstance(node, cst.Name) else node
+        if not mapping:
             return node
         return node.visit(_Substitute(mapping, state['facts'].contexts))
 
