@@ -260,6 +260,12 @@ class _LocalAllocations(cst.CSTVisitor):
             self._stack[-1][1].add(f.value.value)
 
 
+def _not_a_number(node):
+    """None, a string or a display: a value no vector holds."""
+    return (_is_name(node, 'None') or isinstance(node, (cst.SimpleString, cst.ConcatenatedString, cst.FormattedString,
+                                                         cst.List, cst.Tuple, cst.Dict, cst.Set)))
+
+
 def _numeric_literal(node):
     if isinstance(node, cst.UnaryOperation) and isinstance(node.operator, cst.Minus):
         node = node.expression
@@ -644,6 +650,8 @@ class VectorLowering(cst.CSTTransformer):
                         and isinstance(one.elements[0], cst.Element)
                         and not isinstance(other, (cst.List, cst.ListComp))):
                     elem = self.scalar(one.elements[0].value)
+                    if elem is None and _not_a_number(one.elements[0].value):
+                        return None     # [None] * n: a list, converted where it is stored into a vector
                     return {FLOAT: 'AV', INT: 'AI'}.get(elem, 'A?')
             return None
         if isinstance(node, cst.List) and not node.elements:
