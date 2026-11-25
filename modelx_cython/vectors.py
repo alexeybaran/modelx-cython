@@ -1400,10 +1400,10 @@ class VectorLowering(cst.CSTTransformer):
     def expand_sum(self, gen_o, gen_u):
         pre, head, body, renames, n, i = self.loop_head(gen_o.for_in, gen_u.for_in, 's')
         s = self.temp('sum')
-        self.declare(s, f'{ALIAS}.VecSum')
+        self.declare(s, f'{ALIAS}.F64Sum')
         elt = _code(gen_u.elt.visit(_Rename(renames)))
-        pre.append(_stmt(f'{ALIAS}.sum_init({CY_MOD}.address({s}))\n'))
-        add = f'{ALIAS}.sum_add({CY_MOD}.address({s}), {elt})'
+        pre.append(_stmt(f'{ALIAS}.f64_init({CY_MOD}.address({s}))\n'))
+        add = f'{ALIAS}.f64_add({CY_MOD}.address({s}), {elt})'
         if gen_u.for_in.ifs:
             cond = ' and '.join(f'({_code(c.test.visit(_Rename(renames)))})' for c in gen_u.for_in.ifs)
             lines = body + [f'if {cond}:', f'    {add}']
@@ -1411,7 +1411,7 @@ class VectorLowering(cst.CSTTransformer):
             lines = body + [add]
         pre.append(_stmt('\n'.join([head] + ['    ' + line for line in lines]) + '\n'))
         self.lowered += 1
-        return pre, _expr(f'{ALIAS}.sum_result({CY_MOD}.address({s}))')
+        return pre, _expr(f'{ALIAS}.f64_result({CY_MOD}.address({s}))')
 
     def expand_extreme(self, gen_o, gen_u, name, elem):
         """diag-kr: ``min``/``max`` of a generator over vectors, as Python computes it: the first

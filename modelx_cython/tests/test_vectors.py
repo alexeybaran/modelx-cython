@@ -107,7 +107,7 @@ def test_comprehensions_sums_and_powers():
     w = [1.0 - (1.0 - q * f) ** (1.0 / 12.0) for f in v]
     return [z * 0.5 + s + sum(w) + sum(w[1:]) for z in range(len(v))]
 ''', 'V')
-    assert f'{A}.sum_add(' in code and f'{A}.sum_result(' in code
+    assert f'{A}.f64_add(' in code and f'{A}.f64_result(' in code
     assert '_mx_sys._mx_pow((1.0 - q * _mx_v' in code
     assert f'{A}.vec_sum(w)' in code and f'{A}.vec_sum_range(w, 1, ' in code
     assert report['powers'] == 1 and report['fallbacks'] == []
