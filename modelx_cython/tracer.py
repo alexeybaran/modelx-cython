@@ -103,6 +103,44 @@ class ReturnTypeInfo:
     value_type: type
     is_array: bool = False
     ndim: int = 0
+    vector_shape: object = None     # vector cells: see vector_shape()
+
+
+def vector_shape(val):
+    """The vector shape of a traced value (vector cells, ``vectors.py``).
+
+    'V' for a list of exact floats, 'I' for a list of exact ints within int64,
+    'E' for an empty list (either), ('T', kinds) for a non-empty tuple of such
+    lists, else None. Keyed on the value only.
+    """
+    if type(val) is list:
+        if not val:
+            return 'E'
+        if all(type(x) is float for x in val):
+            return 'V'
+        if all(type(x) is int and -(1 << 63) <= x < (1 << 63) for x in val):
+            return 'I'
+        return None
+    if type(val) is tuple and val:
+        kinds = tuple(vector_shape(x) if type(x) is list else None for x in val)
+        return ('T', kinds) if None not in kinds else None
+    return None
+
+
+def merge_vector_shapes(a, b):
+    """The shape both traced shapes fit, else None ('E' fits 'V' and 'I')."""
+    if a == b:
+        return a
+    if isinstance(a, tuple) and isinstance(b, tuple):
+        if len(a[1]) != len(b[1]):
+            return None
+        kinds = tuple(merge_vector_shapes(x, y) for x, y in zip(a[1], b[1]))
+        return ('T', kinds) if None not in kinds else None
+    if a == 'E' and b in ('V', 'I'):
+        return b
+    if b == 'E' and a in ('V', 'I'):
+        return a
+    return None
 
 
 class RuntimeCellsInfo:     # TODO: Create base class RuntimeBaseMemberInfo
@@ -375,10 +413,12 @@ class _ReturnTypeMerger:
                 except (TypeError, ValueError, OverflowError):
                     self._integral_double_exact = False
                 changed = not self._integral_double_exact
+            shape = vector_shape(val) if value_type is list or value_type is tuple else None
             if (last_tp is not None and last_tp.value_type == value_type
-                    and last_tp.is_array == False and last_tp.ndim == 0):     # noqa: E712 (as ==)
+                    and last_tp.is_array == False and last_tp.ndim == 0     # noqa: E712 (as ==)
+                    and last_tp.vector_shape == shape):
                 return changed      # the merged type stays: ``last_tp == tp`` below
-            tp = ReturnTypeInfo(value_type)
+            tp = ReturnTypeInfo(value_type, vector_shape=shape)
 
         if last_tp is None:
             self.ret_type = tp
@@ -386,6 +426,13 @@ class _ReturnTypeMerger:
             return True
         if last_tp == tp:
             return changed
+        if (last_tp.value_type is tp.value_type and not tp.is_array and not last_tp.is_array
+                and last_tp.vector_shape != tp.vector_shape):
+            shape = merge_vector_shapes(last_tp.vector_shape, tp.vector_shape)
+            if shape == last_tp.vector_shape:
+                return changed
+            last_tp.vector_shape = shape
+            return True
 
         before = (last_tp.value_type, last_tp.is_array, last_tp.ndim)
         logged = False

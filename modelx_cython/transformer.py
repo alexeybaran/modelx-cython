@@ -69,6 +69,8 @@ from modelx_cython.powers import rewrite_powers
 from modelx_cython.inline_entries import add_inline_entries, allows_exact_receiver
 from modelx_cython.cell_entries import CacheHit, DenseEntry, dense_condition
 from modelx_cython import numeric_cache
+from modelx_cython import vectors
+from modelx_cython import vector_entries
 from modelx_cython import holds
 from modelx_cython import value_storage
 from modelx_cython import collect
@@ -200,7 +202,7 @@ class PXDGenerator:
         """
         stmts = []
         from modelx_cython.native_sources import module_name
-        for provider in sorted(numeric_cache.providers(self.module)):
+        for provider in sorted(numeric_cache.providers(self.module) | vectors.providers(self.module)):
             stmts.append(f'from {self.package} cimport {module_name(provider)}')
         for ci in self.module.cimports:
             stmts.append(f"cimport {ci}")
@@ -336,6 +338,8 @@ class PXDGenerator:
 
                 elif cells.uses_native_numeric_cache:
                     decl_stmts.append(f'cdef {numeric_cache.storage(cells)} {VAR_PREF + cells.name}\n')
+                elif cells.uses_vector_cache:
+                    decl_stmts.append(f'cdef {vectors.CACHE_TYPE} {VAR_PREF + cells.name}\n')
                 else:
                     decl_stmts.append(f"cdef dict {VAR_PREF + cells.name}\n")
             else:
@@ -503,8 +507,10 @@ class PXDGenerator:
                 parameters = self._add_param_type_hints(
                     cls_name=cls_name, cells_name=cells.name
                 )
+                # a vector cell's C entry is renamed; its public method is declared after every other
+                entry = vector_entries.pxd_entry(self.module.classes[cls_name], cells)
                 decl_stmts.append(
-                    f"cpdef {rettype} {cells.name}({parameters})\n"
+                    f"cpdef {rettype} {entry}({parameters})\n"
                 )
             else:
                 parameters = self._add_param_type_hints(
@@ -514,6 +520,8 @@ class PXDGenerator:
                     f"cpdef object {cells.name}({parameters})\n"
                 )
 
+        decl_stmts.extend(vector_entries.pxd_publics(self.module.classes[cls_name], lambda cells: (
+            self._add_param_type_hints(cls_name=cls_name, cells_name=cells.name))))
         return "".join(decl_stmts)
 
 
@@ -591,6 +599,8 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
         self.function_origins = {}      # {private entry of an uncached Cell: (class, Cell)}
         self.entry_domains = {}         # {private entry of an uncached Cell: its argument domain}
         self.helper_providers.update(numeric_cache.providers(module))
+        self.helper_providers.update(vectors.providers(module))
+        self._vector_counter = [0]
 
     def _compact_spill(self, cells, cls_name, source):
         index = len(self._cold_spills)
@@ -616,6 +626,9 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
                                                      for binding in scope['float'])
         # a typed-memoryview Cell read by subscript is held per item (no slice copy per evaluation)
         node = held_arrays.lower(node, cls_info, cells, self._held_arrays)
+        node = vectors.lower(node, cls_info, cells, scope, self._vector_counter, self.module,
+                             self._ref_kinds.get(cls_info.fqname, {}))
+        self.helper_providers.update(vectors.providers(self.module))
         authored = node
         node = self._table_reads(node, cls_info, cells, scope)
         node = self._reductions(node, authored, cls_info, cells, scope)
@@ -642,6 +655,9 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
         from modelx_cython import space_results
         if self._resolver is not None:
             node, _ = space_results.lower(node, cls_info, cells, scope, operand_kind, self._pin_held_item)
+        if cells._spec.get('native_vector_ref_reads', False):
+            from modelx_cython.vector_ref_reads import lower
+            node = lower(node, cls_info, cells, scope)
         return node
 
     def _reductions(self, node, authored, cls_info, cells, scope):
@@ -849,6 +865,8 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
                     elif cells.uses_native_numeric_cache:
                         decl_stmts.append(cst.parse_statement(
                             f'{VAR_PREF + cells.name}: {numeric_cache.storage(cells)}\n'))
+                    elif cells.uses_vector_cache:
+                        decl_stmts.append(cst.parse_statement(f'{VAR_PREF + cells.name}: {vectors.CACHE_TYPE}\n'))
                     else:
                         decl_stmts.append(
                             cst.parse_statement(
@@ -1149,6 +1167,9 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
                         initializers.append(cst.parse_statement(
                             f'self._v_{cell.name} = {numeric_cache.constructor(cell)}\n'
                         ))
+                    elif cell.uses_vector_cache:
+                        initializers.append(cst.parse_statement(
+                            f'self._v_{cell.name} = {vectors.cache_constructor(cell)}\n'))
                 return updated_node.with_changes(body=updated_node.body.with_changes(
                     body=(*updated_node.body.body, *initializers)))
 
@@ -1391,6 +1412,8 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
                             _logger.warning(warning)
                         if (warning := use_warning(cells)) is not None:
                             _logger.warning(warning)
+                    elif cells.uses_vector_cache:
+                        body = vectors.cache_body(cells)
                     else:
                         if cells.is_locked:
                             # __init__ installs the dict before any worker can read it.

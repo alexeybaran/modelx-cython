@@ -333,6 +333,10 @@ class KeyFacts:
             func = expr.func
             if self._int_index_read(expr):
                 return 'key of an integer index'     # an extreme of a single integer level (min/max)
+            from .vectors import ALIAS as _VECTORS
+            if (isinstance(func, cst.Attribute) and isinstance(func.value, cst.Name)
+                    and func.value.value == _VECTORS and func.attr.value == 'ivec_get'):
+                return 'element of an integer vector'      # the vector pass's typed read
             if isinstance(func, cst.Name) and func.value in ('min', 'max', 'abs') and expr.args:
                 return ('integer min/max' if all(self.is_int(arg.value, depth + 1) for arg in expr.args)
                         else None)
