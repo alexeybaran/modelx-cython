@@ -50,6 +50,7 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           python -m pip install --only-binary scipy,libcst,numpy,pandas . pytest pytest-xdist "pandas>=2.2.2" lifelib openpyxl psutil
+          python -m pip install "git+https://github.com/alexeybaran/modelx@pr/collect"
           python -m pip list
       - name: Interpreter
         shell: bash
