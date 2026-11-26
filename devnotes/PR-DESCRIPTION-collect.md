@@ -8,9 +8,11 @@ totalled in compiled code, on several threads on free-threaded Python, without t
 
 ## Depends on
 
-The modelx change that exports collect with the hook call (https://github.com/alexeybaran/modelx, branch
-`r4/p2-modelx-collect`, commits 7956ad4..4f21476) must be merged first. Without it a model exports no collect, the
-compiled class gains nothing and the tests of this change are skipped.
+The modelx change that exports collect with the hook call must be merged first: https://github.com/alexeybaran/modelx,
+branch `pr/collect` (1aa21f4), seven commits on upstream main: two for dynamic References, five for collect. Without it
+a model exports no collect and the compiled class gains nothing. CI here installs upstream modelx, so it skips
+`tests/compiled/test_collect.py` as a whole (its four tests: values, workers key, reused items, reset rule); the
+borrowed-read tests run.
 
 This change goes on top of the fast SEC change (`pr/fast-sec`, including its native math-module calls).
 
@@ -20,14 +22,15 @@ In order, on `pr/fast-sec` (bf9c28f):
 
 | # | commit | non-test lines | test lines |
 |---|---|---|---|
-| 1 | Compile a Space declared with collect: the cache slot and the collect hook | +244 / -2 | +148 |
+| 1 | Compile a Space declared with collect: the cache slot and the collect hook | +249 / -4 | +149 |
 | 2 | Reuse one item per worker thread in collect | +114 / -11 | +82 |
 | 3 | Borrow the held item of an exclusively owned item at a read | +17 / -5 | +146 / -3 |
 
-Total: 10 files, +740 / -10. Commit 1 adds `collect.py`, its wiring in `config.py` (spec key `collect_workers`), `parser.py` and
+Total: 10 files, +746 / -12. Commit 1 adds `collect.py`, its wiring in `config.py` (spec key `collect_workers`), `parser.py` and
 `transformer.py`, and its documentation (`spec.md`: `collect_workers`; `freethreading.md`: the run-time setting
-`_mx_collect_workers` and the refusal over unlocked Spaces); its test also checks that collect on an ItemSpace raises
-TypeError as the export does; commit 2 changes `collect.py` and `transformer.py`; commit 3 changes
+`_mx_collect_workers` and the refusal over unlocked Spaces). It keeps the export's `collect` property, which a
+decorated method of the export is, as a property and not a Cell, so an ItemSpace has no `collect`, as in live modelx;
+its test checks this; commit 2 changes `collect.py` and `transformer.py`; commit 3 changes
 `space_results.py` and, as its message states, also changes the direct route.
 
 **Declaration and evaluator.** The compiled class declares the collect cache and defines the hook from the exported
@@ -54,6 +57,8 @@ held item: the direct route (items built by `Projection[k]`) as well as collect.
 
 - Values are the export's own, added in domain order: equal to live modelx bit for bit at any number of workers.
 - An error raises the exception of the first failing coordinate in domain order, at any number of workers.
+- An ItemSpace has no `collect`, as in live modelx: reading it raises `AttributeError` and `hasattr` is False, in
+  live modelx, the export and the compiled model.
 - Items collect creates are released: peak memory does not grow with the number of items, at one worker or four.
 - A reused item holds nothing from the previous coordinate (tested on every cache kind, on a Cell reached by one
   coordinate only and on one reached by every other coordinate; a reset that skips the flag arrays fails the test).
