@@ -626,7 +626,6 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
         See :mod:`modelx_cython.powers`; the node is returned unchanged
         when no operand pair can be typed.
         """
-        from modelx_cython.checked_arithmetic import CheckedArithmetic
         from modelx_cython import vectors, held_arrays
         builtin_keys = {name for name in ("all", "any", "sum", "min", "max", "float", "int", "round", "range",
                                          "zip", "str", "type")
@@ -638,7 +637,6 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
                              self._ref_kinds.get(cls_info.fqname, {}))
         node = self._table_reads_with_row_fields(node, cls_info, cells, builtin_keys)
         cells.formula_allows_exact_receiver = allows_exact_receiver(node, cls_info.name)
-        node = CheckedArithmetic(cls_info, cells, builtin_keys).rewrite(node)
         if not self.module.spec.policy.native_math:
             builtin_keys.discard('round')
         self._table_reads_report(cells)

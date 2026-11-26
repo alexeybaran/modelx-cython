@@ -166,25 +166,3 @@ def test_a_provider_with_only_a_pxd_is_installed_as_a_header(monkeypatch, tmp_pa
     assert helpers.install({'sample.header'}, model) == []
     assert (model/(alias+'.pxd')).read_bytes() == b'header.pxd'
     assert not (model/(alias+'.pyx')).exists()
-
-
-def test_arithmetic_rewrite_preserves_global_assignment_effects():
-    import cython
-    from modelx_cython.checked_arithmetic import CheckedArithmetic
-    cell=native_cell('double',('t',))
-    cell.is_locked=False;cell.cls='_c_Values';cell._spec={}
-    cls=SimpleNamespace(cells={},visitor=SimpleNamespace(dynamic_ref_classes=()))
-    source='''def formula(self, t):
-    global a, b
-    a = t * t
-    b = t + t
-    return a / 12.0 + b
-'''
-    function=cst.parse_module(source).body[0]
-    result=CheckedArithmetic(cls,cell).rewrite(function)
-    namespace={'a':0,'b':0,'_mx_cy':cython}
-    exec(cst.Module([result]).code,namespace)
-    assert namespace['formula'](None,2)==4/12.0+4
-    assert (namespace['a'],namespace['b'])==(4,4)
-
-

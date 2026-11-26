@@ -1,6 +1,5 @@
 from libc.math cimport (
     pow as _mx_c_pow, floor as _mx_c_floor, isfinite as _mx_c_isfinite)
-from libc.limits cimport LLONG_MAX, LLONG_MIN
 from libc.string cimport memcmp
 from cpython.long cimport PyLong_CheckExact
 from cpython.number cimport PyNumber_Index
@@ -8,7 +7,6 @@ from cpython.object cimport Py_TYPE, PyObject_GenericSetAttr
 from cpython.unicode cimport PyUnicode_Check, PyUnicode_Compare
 from modelx_cython._rounding cimport _mx_round_one, _mx_round_digits, _nearest_even
 from libc.math cimport fabs, copysign
-cimport cython
 
 
 cdef inline object _mx_named(object error, str path):
@@ -139,25 +137,6 @@ cdef inline double _mx_memo_pow(PowerMemo* memo, double base, double exponent) e
         memo.value = value
         memo.ready = True
     return value
-
-
-@cython.cdivision(True)
-cdef inline bint _mx_divisible(long long dividend, long long divisor) except? -1:
-    if divisor == 0:
-        raise ZeroDivisionError("integer division or modulo by zero")
-    return divisor == -1 or dividend % divisor == 0
-
-
-cdef inline bint _mx_divisible_after_decrement(long long dividend, long long divisor) except? -1:
-    if dividend == LLONG_MIN:
-        return ((<object>dividend) - 1) % divisor == 0
-    return _mx_divisible(dividend - 1, divisor)
-
-
-cdef inline bint _mx_divisible_after_increment(long long dividend, long long divisor) except? -1:
-    if dividend == LLONG_MAX:
-        return ((<object>dividend) + 1) % divisor == 0
-    return _mx_divisible(dividend + 1, divisor)
 
 
 cdef extern from *:
