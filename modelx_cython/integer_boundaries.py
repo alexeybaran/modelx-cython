@@ -35,49 +35,6 @@ _FLOORDIV = f'{MX_SYS_MOD}._mx_signed_floordiv'
 _SIGNED_HELPERS = frozenset((*_SIGNED_OPERATIONS.values(), '_mx_integer_result', '_mx_exact_int64'))
 
 
-_CALL_GATE = """\
-@{cy}.cclass
-class {gate}:
-    # D110 P0: a Python-bound Cell with integer arguments, checked as before, then the compiled method;
-    # built without functools.wraps (its attributes are read from the method on demand)
-    method: object
-    params: tuple
-    path: str
-
-    def __call__(self, *args, **kwargs):
-        values = list(args)
-        for position, name in self.params:
-            if position < len(values):
-                values[position] = {runtime}._mx_exact_int64(values[position], self.path)
-            if name in kwargs:
-                kwargs[name] = {runtime}._mx_exact_int64(kwargs[name], self.path)
-        return self.method(*values, **kwargs)
-
-    @property
-    def __wrapped__(self):
-        return self.method
-
-    def __getattribute__(self, name):
-        # introspection reads the method's own attributes (``__doc__`` included), as functools.wraps copied them
-        if name == '__doc__':
-            return self.method.__doc__
-        try:
-            return {runtime}._mx_generic_getattr(self, name)
-        except AttributeError:
-            return getattr(self.method, name)
-
-    def __repr__(self):
-        return repr(self.method)
-
-
-@{cy}.cfunc
-def {name}(method: object, params: tuple, path: str) -> object:
-    gate: {gate} = {gate}.__new__({gate})
-    gate.method, gate.params, gate.path = method, params, path
-    return gate
-"""
-
-
 def integer_parameters(cell):
     if cell.is_special() or cell.body_has_closure or not cell.has_typeinfo():
         return ()
@@ -130,26 +87,56 @@ def _name_overflows(node, path):
     return node.with_changes(body=node.body.with_changes(body=(*lines[:prefix], handler)))
 
 
-def _python_call_gate(cls, entries, names, call_gate):
-    """Check Python-bound Cells while preserving their Cython vtable types."""
+def _python_call_gate(cls, entries, names, methods):
+    """Check the integer arguments of a Cell called from Python, keeping its Cython vtable type.
+
+    Each such Cell gets a Python entry with the Cell's own parameters and defaults: it checks every
+    integer argument with ``_mx_exact_int64`` (an exact 64-bit integer, or the call raises naming the
+    Cell) and calls the compiled method at C level. ``__getattribute__`` returns the entry for the
+    Cell's name, unless a subclass overrides the method; the entry carries the Cell's ``__name__``,
+    ``__qualname__``, ``__doc__`` and the method as ``__wrapped__``."""
+    nodes = {item.name.value: item for item in methods if isinstance(item, cst.FunctionDef)}
     routes = {cell.name: (entries[cell.fqname], cell.model_path)
-              for cell in cls.cells.values() if cell.fqname in entries}
+              for cell in cls.cells.values() if cell.fqname in entries and cell.name in nodes}
     if not routes:
         return (), ()
     field = names.reserve(f'_mx_integer_arguments_{cls.name}')
-    declaration = cst.parse_statement(f'{field} = {routes!r}\n')
-    method = cst.parse_statement(f"""\
+    gate = {name: names.reserve(f'_mx_python_entry_{name}') for name in routes}
+    added, defs = [cst.parse_statement(f'{field} = {CY_MOD}.declare(dict, {gate!r})\n')], []   # a C global
+    for name, (params, path) in routes.items():
+        signature = nodes[name].params
+        plain = signature.with_changes(params=tuple(p.with_changes(annotation=None) for p in signature.params))
+        checked = dict(params)
+        names_ = [p.name.value for p in signature.params[1:]]
+        args = ', '.join(f'{MX_SYS_MOD}._mx_exact_int64({arg}, {path!r})' if index in checked else arg
+                         for index, arg in enumerate(names_))
+        header = cst.Module(body=()).code_for_node(plain)
+        # The C method without Cython's override dispatch (``Class.method(self, ...)``), which would read the
+        # attribute back through __getattribute__ (a class with a __dict__, a Python subclass), called from a
+        # module function whose parameters no Cell parameter can shadow
+        call = names.reserve(f'_mx_python_call_{cls.name}_{name}')
+        slots = ', '.join(f'_mx_a{index}: {CY_MOD}.longlong' if index in checked else f'_mx_a{index}'
+                          for index in range(len(names_)))
+        added.append(cst.parse_statement(
+            f'@{CY_MOD}.cfunc\n@{CY_MOD}.inline\ndef {call}(self: {cls.name}, {slots}) -> object:\n'
+            f'    return {cls.name}.{name}(self, {", ".join(f"_mx_a{i}" for i in range(len(names_)))})\n'))
+        defs.append(cst.parse_statement(f'def {gate[name]}({header}):\n    return {call}(self, {args})\n'))
+        owner = f'{CY_MOD}.cast(object, {cls.name})'      # the Python type, not the C methods
+        entry = f'{owner}.{gate[name]}'
+        added.extend(cst.parse_module(
+            f'{entry}.__name__ = {name!r}\n{entry}.__qualname__ = {cls.name + "." + name!r}\n'
+            f'{entry}.__doc__ = {owner}.{name}.__doc__\n{entry}.__wrapped__ = {owner}.{name}\n').body)
+    defs.append(cst.parse_statement(f"""\
 def __getattribute__(self, name):
-    method = {MX_SYS_MOD}._mx_generic_getattr(self, name)
     entry = {field}.get(name)
     if entry is not None and (
         type(self) is {cls.name}
         or getattr(type(self), name) is getattr({CY_MOD}.cast(object, {cls.name}), name)
     ):
-        return {call_gate}(method, entry[0], entry[1])
-    return method
-""")
-    return (declaration,), (method,)
+        name = entry
+    return {MX_SYS_MOD}._mx_generic_getattr(self, name)
+"""))
+    return tuple(added), tuple(defs)
 
 
 class _GuardCalls(cst.CSTTransformer):
@@ -782,8 +769,6 @@ def guard_integer_boundaries(state, module_info, resolver, cells_kinds, ref_kind
                             if checked in private_entries})
     classes = []
     declarations = []
-    call_gate = state.names.reserve('_mx_checked_cell_callable')
-    gate_class = state.names.reserve('_mx_checked_cell_call')
     changed = False
     signatures = _signed_signatures(state)
     global_bindings = cst.MetadataWrapper(state.syntax, unsafe_skip_copy=True).resolve(
@@ -858,12 +843,9 @@ def guard_integer_boundaries(state, module_info, resolver, cells_kinds, ref_kind
                     method = _python_locals(method, cell)
                 changed = True
             methods.append(method)
-        added, gates = _python_call_gate(cls, entries, state.names, call_gate)
+        added, gates = _python_call_gate(cls, entries, state.names, methods)
         declarations.extend(added)
         changed |= bool(gates)
         classes.append(node.with_changes(body=node.body.with_changes(body=(*methods, *gates))))
-    if declarations:
-        classes.extend(declarations)
-        classes.extend(cst.parse_module(_CALL_GATE.format(
-            cy=CY_MOD, name=call_gate, gate=gate_class, runtime=MX_SYS_MOD)).body)
+    classes.extend(declarations)
     return state.replace(state.syntax.with_changes(body=classes)) if changed else state
