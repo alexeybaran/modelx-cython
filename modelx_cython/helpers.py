@@ -127,11 +127,6 @@ class HelperCalls(FormulaTransformer):
         if not name:
             self.decline(original, f'math.{func.attr.value} has no native form; runs as a Python call')
             return updated
-        from .native_math import NAMES
-        if (name in NAMES and not self.local_math(original.func.value)
-                and getattr(self.refs.get(func.value.attr.value), 'is_math', False)
-                and len(updated.args) == 1 and updated.args[0].keyword is None and updated.args[0].star == ''):
-            return updated      # lowered by native_math.py, after the formula passes
         if name == 'isclose':
             return self.module_isclose(original, updated, func)
         if len(updated.args) != 1 or updated.args[0].keyword or updated.args[0].star:
