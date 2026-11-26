@@ -40,6 +40,11 @@ PROBE = textwrap.dedent('''\
     out.append(["big", outcome(lambda: type(m)().S.big())])
     out.append(["user module named math", outcome(lambda: type(m)().U.lg(2.0))])
     import usermath, oddmath
+    import math
+    back = type(m)()
+    back.S.math = usermath
+    back.S.math = math                 # rebound to another module and back: the C path again
+    out.append(["back to math", outcome(lambda: back.S.lg(2.0))])
     for module in (usermath, oddmath):
         rebound = type(m)()
         rebound.S.math = module
@@ -84,8 +89,9 @@ def test_calls_are_lowered_only_for_the_standard_math_module(built):
     work, _ = built
     source = (work / "exported_cy" / "_mx_classes.py").read_text(encoding="utf-8")
     for name in ("log", "exp", "sqrt", "erf", "isinf"):
-        assert f"_mx_sys._mx_math_{name}(self.math, x, 'S." in source, name
-    assert "_mx_sys._mx_math_log(self.math, self.huge, 'S.big')" in source
+        # the Reference passes as a borrowed pointer (no reference count of the shared module per call)
+        assert f"_mx_sys._mx_math_{name}(_mx_cy.cast(_mx_cy.p_void, self.math), self, 'math', x, 'S." in source, name
+    assert "_mx_sys._mx_math_log(_mx_cy.cast(_mx_cy.p_void, self.math), self, 'math', self.huge, 'S.big')" in source
     assert "return self.math.log(x)" in source       # U: a user module held by a Reference named math
 
 
@@ -101,7 +107,8 @@ def test_values_and_errors_equal_live(built):
         ["lg", "0.0", ["ValueError", wording]]]
     assert ["ex", "710.0", ["OverflowError", "math range error"]] in compiled
     assert ["big", ["value", repr(math.log(10 ** 400))]] in compiled
-    assert compiled[-3:-1] == [["user module named math", ["value", "42.0"]], ["usermath", ["value", "42.0"]]]
+    assert compiled[-4:-1] == [["user module named math", ["value", "42.0"]], ["back to math", ["value", "0.6931471805599453"]],
+                               ["usermath", ["value", "42.0"]]]
 
 
 def test_a_rebound_module_returning_another_type_raises_naming_the_cell(built):
