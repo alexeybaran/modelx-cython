@@ -537,6 +537,33 @@ def _assigned_local_kinds(body, parameters, resolver, cells_kinds, ref_kinds, cl
                     for operator, value in augmented.get(name, ())):
                 kinds[name] = kind
                 changed = True
+    # Locals bound from each other (``lo = k``, ``lo = hi``, ``hi = min(lo + 60, end)``): guess each
+    # remaining candidate's kind from the values known with the guesses so far, then drop every guess
+    # that one of its values contradicts, until all remaining guesses hold together. Each value then
+    # has its local's kind whenever the others have theirs, so no assignment can break any of them.
+    guesses: Dict[str, str] = {}
+    changed = True
+    while changed:
+        changed = False
+        classify = _LocalKind(resolver, cells_kinds, ref_kinds, cls_fqname, {**param_kinds, **kinds, **guesses})
+        for name in sorted(candidates - set(kinds) - set(guesses)):
+            found = {_range_kind(classify, value) if _is_range(value) else classify.kind(value)
+                     for value in plain[name]} - {KIND_UNKNOWN}
+            if len(found) == 1:
+                guesses[name] = found.pop()
+                changed = True
+    while guesses:
+        trial = _LocalKind(resolver, cells_kinds, ref_kinds, cls_fqname, {**param_kinds, **kinds, **guesses})
+        wrong = {name for name, kind in guesses.items()
+                 if any((_range_kind(trial, value) if _is_range(value) else trial.kind(value)) != kind
+                        for value in plain[name])
+                 or any(trial.kind(cst.BinaryOperation(cst.Name(name), operator, value)) != kind
+                        for operator, value in augmented.get(name, ()))}
+        if not wrong:
+            break
+        for name in wrong:
+            del guesses[name]
+    kinds.update(guesses)
     return kinds
 
 
