@@ -29,7 +29,7 @@ import re
 import libcst as cst
 
 from . import item_roots
-from .syntax import dotted_name
+from .syntax import dotted_name, walk
 
 HOOK_VERSION = 1
 
@@ -199,6 +199,34 @@ def kept_refs(class_node):
     return tuple(pairs)
 
 
+def reached_cells(class_node, cells):
+    """The Cells (of ``cells``) that ``collect_outputs`` reaches, read from the exported class: the formula of a
+    Cell (``_f_<name>``, or the method of an uncached Cell) calls another as ``self.<name>``, transitively. None,
+    so that every Cell is reset, when a formula reached uses ``self`` in any other way: bare (passed on), or
+    through an attribute starting with ``_`` (``_space``, ``_model``, ``_parent``), by which a Cell of the item
+    can be reached dynamically; or when a reached Cell has no formula in the class."""
+    methods = {item.name.value: item for item in class_node.body.body if isinstance(item, cst.FunctionDef)}
+    seen, todo = set(), ['collect_outputs']
+    while todo:
+        name = todo.pop()
+        if name in seen:
+            continue
+        seen.add(name)
+        formula = methods.get(f'_f_{name}', methods.get(name))
+        if formula is None:
+            return None
+        bare, owned = 0, []
+        for node in walk(formula.body):
+            if isinstance(node, cst.Name) and node.value == 'self':
+                bare += 1
+            elif isinstance(node, cst.Attribute) and isinstance(node.value, cst.Name) and node.value.value == 'self':
+                owned.append(node.attr.value)
+        if bare != len(owned) or any(attr.startswith('_') for attr in owned):
+            return None
+        todo.extend(attr for attr in owned if attr in cells)
+    return seen
+
+
 def class_node(module, cls_name):
     return next(node for node in module.body if isinstance(node, cst.ClassDef) and node.name.value == cls_name)
 
@@ -235,13 +263,16 @@ def _base_fields():
     return [field for base in ('BaseMxObject', 'BaseParent', 'BaseSpace') for field in _fields(blocks.get(base, ''))]
 
 
-def reset_function(cls_name, block, classes, values, kept=None):
+def reset_function(cls_name, block, classes, values, kept=None, reached=None):
     """The ``cdef inline`` function, for the class's .pxd, that returns an item to the state of a new object.
 
     Every attribute that the class block and its bases declare (the object's layout) is listed: an object
     or a memoryview to None, as ``tp_new`` leaves it; any C value, array or struct to zero bytes, as the allocator leaves
     it. The dense value arrays (``values``) are left unwritten behind their flags, as the class's allocator
     leaves them in a new object (``value_storage``: it zeroes every byte but those arrays). A declaration of another kind stops the build naming the attribute and its Cell.
+
+    For a Cell that ``collect_outputs`` cannot reach (``reached``, from ``reached_cells``; None: every Cell may
+    be reached) the item's caches are left as they are: never filled on a reused item, they stay as new.
 
     The References of ``kept`` (``kept_refs``) keep their values, and ``refs_held`` tells whether each is still the
     one the Space holds (identity, or a C value's equality); when one is not, the hook copies them all again."""
@@ -258,6 +289,9 @@ def reset_function(cls_name, block, classes, values, kept=None):
     for line, ctype, name in fields:
         base = ctype.split('[')[0].split('.')[-1].strip()
         if line in values or known and name in dict(kept):
+            continue
+        cell = name.removeprefix('_v_').removeprefix('_has_').removeprefix('_spill_')
+        if reached is not None and cell != name and cell in classes[cls_name].cells and cell not in reached:
             continue
         if ('[' not in ctype and (base in objects or base.startswith('_c_'))
                 or re.fullmatch(r'(const )?[\w ]+\[:(, *:)*\]', ctype)):     # an object or a memoryview

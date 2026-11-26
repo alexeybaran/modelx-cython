@@ -286,3 +286,49 @@ def test_a_reference_rebound_during_collect_reaches_the_later_items(tmp_path):
                                     capture_output=True, text=True).stdout)
     assert out['compiled'] == out['export'] == live
     assert out['compiled3'] == out['export3'] and out['compiled3']['4'] == 24.0
+
+
+REACH_PROBE = textwrap.dedent('''\
+    import json
+    from exported import mx_model as export
+    from exported_cy import mx_model as compiled
+
+    def run(m, name):
+        return {str(c): r._fields for c, r in getattr(m, name).collect().individual.items()}
+
+    print(json.dumps({name: [run(export, name), run(compiled, name)] for name in ('Static', 'Dynamic')}))
+''')
+
+
+def test_the_reset_skips_only_cells_collect_outputs_cannot_reach(tmp_path):
+    """The reset of a reused item leaves the caches of a Cell that collect_outputs cannot reach; a Cell reached
+    through ``_space`` (dynamically) makes the reset clear every Cell, so its value never comes from an earlier
+    coordinate."""
+    model = mx.new_model('ReachCollect')
+    try:
+        for name, outputs in (('Static', '{"o": odd(2), "s": stat()}'), ('Dynamic', '{"d": dyn(), "s": stat()}')):
+            space = model.new_space(name, formula='lambda key: None')
+            space.new_cells('keys', 'lambda: tuple(range(1, 9))')
+            space.new_cells('odd', 'lambda t: key * 0.25 + t')
+            space.new_cells('unused', 'lambda t: key * 3.0 + t')
+            space.new_cells('stat', 'lambda: key * 2.0 + unused(1) * 0.0 if key < 0 else key * 2.0')
+            space.new_cells('dyn', 'lambda: _space.odd(2)')
+            space.set_collect(over={'key': space.keys}, outputs=f'lambda: {{"individual": {outputs}}}')
+        model.export(tmp_path / 'exported')
+    finally:
+        model.close()
+    (tmp_path / 'sample.py').write_text(
+        'from exported import mx_model as m\nm.Static.collect(); m.Dynamic.collect()\n'
+        'for k in (1, 2):\n    m.Static[k].unused(1); m.Dynamic[k].unused(1)\n', encoding='utf-8')
+    subprocess.run([sys.executable, '-m', 'modelx_cython', 'exported', '--sample', 'sample.py', '--no-spec'],
+                   cwd=tmp_path, check=True, capture_output=True)
+    pxd = (tmp_path / 'exported_cy' / '_mx_classes.pxd').read_text()
+    resets = {name: pxd.split(f'_mx_reset_root__c_{name}(')[1].split('\ncdef ')[0] for name in ('Static', 'Dynamic')}
+    assert 'root._has_odd' in resets['Static'] and 'root._has_stat' in resets['Static']
+    assert 'root._has_dyn' not in resets['Static']                  # reached by no output of Static
+    assert 'root._has_dyn' in resets['Dynamic'] and 'root._has_unused' in resets['Dynamic']   # every Cell
+    out = json.loads(subprocess.run([sys.executable, '-c', REACH_PROBE], cwd=tmp_path, check=True,
+                                    capture_output=True, text=True).stdout)
+    for name in ('Static', 'Dynamic'):
+        assert out[name][1] == out[name][0], name
+    assert out['Dynamic'][0]['3']['d'] == 2.75
