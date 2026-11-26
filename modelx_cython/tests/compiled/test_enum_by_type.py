@@ -31,6 +31,15 @@ for t in range(0, 300, 7):
     for name in ('matches', 'code'):
         assert getattr(o, name)(t) == getattr(c, name)(t), (name, t)
 assert c.Status is HTTPStatus
+# the members are in the code: a class whose definition changed after compilation is refused at load
+for parent in (type(c), type('Middle', (type(c),), {})):
+    invalid = type('ChangedSchema', (parent,), {'Status': object()})
+    try:
+        invalid(compiled)
+    except TypeError as actual:
+        assert 'Status' in str(actual) and 'rebuild' in str(actual), actual
+    else:
+        raise AssertionError('changed compiled definition was accepted')
 try:
     c.Status = SimpleNamespace(OK=201)
 except AttributeError:
