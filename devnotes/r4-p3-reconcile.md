@@ -101,6 +101,8 @@ vector cells".
 15, L8 walk 83, column by expression 28. A row field left on pandas costs a row build (13.5 us) plus 1.2 us per
 field per item and reader. With L1/L4 only I expect no model to reach line-B speed (not measured).
 
+*Superseded by the measured census in section 7: the first slice must also take B6's index extremes (L5/L7).*
+
 **Recommended first slice (B0-lite + B4 + B5 without the inliner):** header install and `runtime` package (~10),
 B4 (~3,500, recorder core included), the L2 held-row reads (~360), no row-cell inliner, no audit, no sub-tables.
 About 3,900 lines plus the B4 and B5 tests (1,143). Expected to reach line-B speed on models that have no vector
@@ -174,3 +176,74 @@ line B's P1/collect code that line A already replaced.
   `_tables.*`.
 - Porters 1 and 3 can start the same day; porter 2 starts once `reductions.py` exists. The first measurable state
   (section 4) is porter 3's B4 + B5-lite plus porter 1's header-install lines.
+
+## 7. E1: census of the 57 regional models on line B (measured, translate only)
+
+Line B 8c03194 (`python -m modelx_cython <export> --translate-only`), development modelx `r4/modelx-integration`
+df3ced9, pandas 2.3.3, CPython 3.13 (GIL build). Texts: lifelib `r4/l1-lean-b` c98ff5c9 (the bridge's text,
+generated from upstream 20d4dae) and upstream lifelib main 20d4dae (original text). Each model is exported with
+`mx.read_model(...).export(...)`. The sample is its product `run.py` with `model` bound to the export. Seven run.py
+files (Sofort_DE_S, IncomeTerm_JP_S, Cancer_KR_S, Immediate_KR_S, Medical_KR_S, Term_KR_S, VA_KR_S) list
+`model.Projection.cells`, which an export lacks; there the public attributes were listed instead. The spec is the
+lean product's `spec.py` for both texts (upstream ships none). All 114 translations exit 0, at 28-121 s each. A layer
+is needed when line B's output for the model uses it: B4 any lowered read; B5 an L2 site; B6 L5/L7 or L3/L8;
+B1 `_mx_enum_at`, `_mx_definition_*`, enum domains or members rewritten to integers; B3 `_native_vectors` calls or
+vector cells; B2 `native_reductions`; B0 native `round`; math `_native_math` calls (p1-math, assumed in line A).
+This counts mechanisms; speed and values were not measured.
+
+**The row inliner is not needed.** All 57 lean models were translated again with `typed_table_reads: false`. Each
+of the 57 leaves exactly the same reads on pandas, per step and per policy, as with the inliner. B5 can come
+without `row_cells.py`'s inliner, about 450 lines.
+
+Lowered sites (both texts nearly equal): L1 350 (274 per step), L2 1,386 (308 per step), L3 41, L5 114 (106 per
+step), L7 14, L8 51 (39 per step); no L4. **Extremes are per-step reads**, so L5/L7 belong in the first slice.
+
+**Models in line-B form**, that is, every layer line B uses for the model is present. In brackets: of these, how
+many also leave no per-step pandas read on line B itself. Math is assumed present. Each value is without B0 /
+with B0.
+
+| set of layers | lean text | original text |
+|---|---|---|
+| (a) B4+B5 (no inliner) | 0 [0] / 0 [0] | 5 [4] / 7 [6] |
+| (b) + B1 | 5 [3] / 7 [5] | 5 [4] / 7 [6] |
+| (c) + B3 | 5 [3] / 7 [5] | 5 [4] / 7 [6] |
+| (d) + B2 | 9 [6] / 11 [8] | 9 [8] / 11 [10] |
+| (e) + B6 | 50 [21] / 57 [24] | 50 [27] / 57 [30] |
+| order by need: B4+B5+L5/L7 | 0 / 0 | 17 [14] / 20 [17] |
+| ... + L3/L8 (rest of B6) | 1 / 1 | 34 [20] / 38 [23] |
+| ... + B1 | 33 [15] / 36 [18] | 34 / 38 |
+| ... + B2 | 42 [20] / 47 [23] | 45 [26] / 52 [29] |
+| ... + B3 | 50 [21] / 57 [24] | 50 [27] / 57 [30] |
+
+| layer | B0 | B1 | B2 | B3 | B4 | B5 | L5/L7 | L3/L8 | math |
+|---|---|---|---|---|---|---|---|---|---|
+| models (lean / original) | 7 / 7 | 56 / 0 | 12 / 14 | 10 / 5 | 57 / 57 | 57 / 57 | 39 / 39 | 28 / 28 | 18 / 18 |
+
+The original text has no enum members, so it never needs B1. B1 is needed by every lean model except Term_US_S.
+Medical_KR_S and VUL_US_S take B2 on the original text where they take B3 on the lean text. Even on line B, 33 lean
+and 27 original models keep at least one per-step pandas read. These are listed in brackets as lean/original:
+Cancer_KR_S 14/10, Child_KR_S 12/9, Cancer_JP_S 11/11 and VA_KR_S 11/10 have the most.
+
+Per model (26 groups by identical needs, both texts, per-step pandas reads left on line B): `devnotes/r4-p3-census.md`.
+
+**Revised order** (it replaces section 4's first slice):
+1. B4, then B5 without the inliner, then B6's L5/L7 (about 310 lines of `frame_reads` plus the extremes of
+   `_tables`). On the original text this brings 17 models to line-B form, 20 with B0.
+2. The rest of B6: 34 (38).
+3. B1. It is needed only for the lean text, where it lifts the count from 1 to 33 (36).
+4. B2: 45 (52) original, 42 (47) lean.
+5. B3 last: all 57 with B0. B0 rounding (~150 lines, 7 models on either text) comes with step 1.
+
+**Smallest B4 that keeps the recorder's two decisions** (by reading, not compiled): about **3,150 lines**, not 3,500.
+- **Kept from `read_notes.py` (about 220 of 477):** the import hook (`_Loader`, `_Finder`, `instrument`, `_walk`,
+  `recording`), the subscript and method-call branches of `_Wrap`, `r_sub`, `r_call`, `_note`, `_shape`, a plain
+  `kind`, `normal`, `_balanced`, `by_text` without table counts, `only_raised`, and `selects_rows`. `raised_veto`
+  is called on subscripts and calls (`frame_reads.py` 2228, 2365, 2625), and `selects_rows` on subscripts (2215).
+- **Left for B7 from `read_notes.py`:** `r_in`, `r_iter`, `r_it`, `r_v` and their wrapping, the provenance
+  `_follow`, `as_json`, `table_read`, and `scalar_table_read`.
+- **Also left for B7:** `admission.py`'s table-read sites and warnings (about 200); the transformer's
+  `_pandas_reads`, `_table_reads_kept` and `_table_reads_report` (about 35); cli's `_mx_table_reads.json`,
+  `_mx_read_notes.json` and `_mx_read_audit.json` (about 25); and `strict_tables` and `verify_inputs` (about 10).
+- **Kept in B4:** `_mx_table_signatures.py`, because the runtime reads it (`_tables.pyx` 426-433).
+- **Risk:** without provenance, a key that was a traced table column reads as `series`. That is still a selector,
+  so the decision should be unchanged. Check it by running the B4-B6 tests with the reduced recorder.
