@@ -23,3 +23,6 @@ Done so far:
 - Suites (this environment: upstream modelx 0.33.0, no modelx_helpers): c342db9 782 failed / 819 passed / 29 errors;
   11ef208 782 failed / 825 passed / 29 errors, the same failing tests (720 of them for want of modelx_helpers,
   others for collect_over). The six new passes are the new tests.
+- 69612fd: the parameter conversion only where the class shows (ef067e7 cost KLV_DE_S +1.43%: it converted at every
+  object use); a test model's generated classes equal c342db9's again.
+- Classes: 37aef20 F, ef067e7 + 69612fd F, 6a2bc02 T: reverted (tests only, no fix needs it).
