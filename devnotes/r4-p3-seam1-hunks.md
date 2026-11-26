@@ -55,3 +55,33 @@ Files on one side only are not counted. They are:
 Collect after c342db9: the proposal's `test_collect.py` gives values equal to the export and to live, bit for bit, at
 one and four workers. Its bound on the items left after a four-worker collect fails, 7 against at most 6, on this
 tree's `item_roots`. Direct mode is the subject of seam 1.
+
+## Checks after each commit (direct mode, fork text 04d69db, its spec)
+
+The gate could not be used: attaching the benchmark toolkit was refused by a permission check. The figures below
+come from a substitute measurement, so they are not the gate's numbers and are not comparable to the handover
+references 833,521 and 23,171,472.
+
+Setup:
+- **Run:** one process per build, `PYTHONHASHSEED=0`.
+- **What is counted:** callgrind collects only inside the compiled `Projection.net_cf` entry and the item
+  construction (`--toggle-collect`).
+- **Workload:** over the book, each policy is built and `net_cf(t)` is read for t in `range(proj_len())`.
+- **Figure:** collected instructions ÷ policies. This includes the first read's table preparation, once per run.
+- **Sample:** the shipped `sample.py` calls `collect_outputs`, which the 04d69db text does not define. Every build
+  used one generic sample instead: every policy, every public zero-argument cell, `collect_outputs` where defined.
+- **Live:** every `net_cf(t)` value of every policy is compared with live modelx `pr/collect` 1aa21f4, at rel 1e-10
+  and abs 1e-7.
+
+| tree | modelx | Term_UK_S (8 policies) | Dep_FR_S (11 policies) | values against live |
+|---|---|---|---|---|
+| 0b77986 (baseline) | handover 636877b | 3,696,426 | 24,293,844 | 0 mismatches (2,340 and 5,340 values) |
+| 5b4b4a3 | pr/collect 1aa21f4 | 3,707,505 (+0.30%) | 24,295,905 (+0.01%) | 0 mismatches |
+| 5b4b4a3 | handover 636877b | 3,693,965 (-0.07%) | - | 0 mismatches |
+| c342db9 | pr/collect 1aa21f4 | 3,690,576 (-0.16%) | 24,291,555 (-0.01%) | 0 mismatches |
+
+**A first method was discarded:** the whole process, four passes minus one, with `del Projection[k]` between
+passes.
+- On the handover export, a deleted item comes back with its caches filled. `_f_net_cf` ran 2,340 times in four
+  passes, against 9,360 on the pr/collect export.
+- That method showed +33%, an artefact of the export rather than of the compiler.
