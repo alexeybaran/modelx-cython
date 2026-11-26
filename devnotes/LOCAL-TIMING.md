@@ -19,3 +19,5 @@ The Term probe overestimated the candidate's safe book. The selected 41,470-poli
 | SEC Term, identical candidate builds | 8,000 | 2.435 [2.263–5.741] | 2.350 [2.283–2.939] | 0.967 [0.512–1.070] | 1.009 | Unresolved |
 
 Term's paired ratio and its identical-build control were still outside the repeatability gate on retry. The timings are diagnostic and are excluded from the headline performance claim. The other eleven SEC products have no published same-book paired timings in this evidence set. The twelve-model instruction table is independent of wall-time variability.
+
+[Gate results, including both sizing passes and timing controls](https://github.com/alexeybaran/modelx-benchmark-toolkit/tree/bc911037b36d2d293c831615847e5a118642ede6/parallel/20261113/round4/gate/results/p1-local-pilot-term-ltc)

@@ -220,33 +220,32 @@ On the eight-core Ryzen 7 5800H under WSL2, DIA_US_SEC scaled 1.73× from one to
 
 ### Broad census of released lifelib models
 
-The census catalog contains 95 driven models and 10 entries without a modelx driver. Published results cover **87 of 95 driven models** across 11 of 12 shards. Each published pair uses the measured compiler `503b07c6f13d646ca4a15b020a18aea7c677a205` against upstream `d22426fbac8637f84510902c2fa33b6466e5acb4`, with modelx `fec516d7e9b5813e7d40819a72731bd35fc2972f` and lifelib `20d4daef3281d538b3fbda6d0fb951fcceb3a6f4` on both sides. Both sides of a shard used the same machine. The final head adds only two test files.
+The census records outcomes for **all 95 driven models**. The catalog has another 10 entries without a modelx driver. Each comparison uses the measured compiler `503b07c6f13d646ca4a15b020a18aea7c677a205` against upstream `d22426fbac8637f84510902c2fa33b6466e5acb4`, with modelx `fec516d7e9b5813e7d40819a72731bd35fc2972f` and lifelib `20d4daef3281d538b3fbda6d0fb951fcceb3a6f4` on both sides. Eleven shards used the same machine for each pair. The remaining shard uses an earlier upstream run on a matching CPU type. The final head adds two test files.
 
 | Published outcome | Models |
 |---|---:|
-| Both compilers pass the live comparison | 66 |
-| Candidate passes, baseline fails | 8 |
+| Both compilers pass the live comparison | 73 |
+| Candidate passes, baseline fails | 9 |
 | Matching failure class on both | 13 |
 | Baseline passes, candidate fails | 0 |
-| Pending results on both compilers | 8 |
 
-The eight candidate-only passes are BU_DE_S, Dep_FR_S, Euro_FR_S, IncomeTerm_JP_S and VA_US_S, where baseline raises `IndexError: array index out of range`, and Term_JP_S, CI_KR_S and Term_KR_S, where baseline Cython rejects complex powers as unordered. The shared failures are four ExcelWorkbook translation errors, one ModuleIO translation error, five value-comparison failures involving missing data files, the WholeLife_JP_S report dtype mismatch, the BasicBonds live import of missing QuantLib, and the fastlife modelx export error. The cause of the missing-file failures remains unverified. Candidate shard 5 passes KLV_DE_S, PER_FR_S, Cancer_KR_S, PA_UK_S, ULSG_US_SEC, VA_US_SEC, BasicTerm_ME and CashValue_ME_EX1. Their upstream shard is missing, so these models are outside the paired totals.
+The nine candidate-only passes are BU_DE_S, Dep_FR_S, Euro_FR_S, IncomeTerm_JP_S, KLV_DE_S and VA_US_S, where baseline raises `IndexError: array index out of range`, and Term_JP_S, CI_KR_S and Term_KR_S, where baseline Cython rejects complex powers as unordered. The shared failures are four ExcelWorkbook translation errors, one ModuleIO translation error, five value-comparison failures involving missing data files, the WholeLife_JP_S report dtype mismatch, the BasicBonds live import of missing QuantLib, and the fastlife modelx export error. The cause of the missing-file failures remains unverified.
 
 | Candidate ÷ baseline | Comparable models | Range | Median |
 |---|---:|---:|---:|
-| SEC instructions per policy | 10 | 0.2024–0.4542× | 0.2655× |
-| Regional instructions per policy | 44 | 0.9201–1.0476× | 0.9898× |
+| SEC instructions per policy | 12 | 0.2024–0.4542× | 0.2664× |
+| Regional instructions per policy | 46 | 0.9201–1.0476× | 0.9898× |
 | Legacy sweep instructions per evaluated value | 7 | 0.8072–1.0022× | 0.9639× |
 | Translation time | 66 | 0.8098–1.9078× | 1.3804× |
 | C build time | 66 | 1.0475–1.4052× | 1.2367× |
 | Incremental memory per policy | 52 | 0.2125–0.9939× | 0.8428× |
 | Peak RSS at equal book size | 26 | 0.2336–0.9902× | 0.8608× |
 
-Ratios use models that passed on both sides and had the corresponding measurements. Instruction counts compare the same number of projections for a model and require successful live comparisons. Peak RSS ratios require equal book sizes. The census SEC range covers 10 of the 12 SEC models. The separate twelve-model SEC table above uses its own measurement runs and sample sizes.
+The 65 instruction ratios require matching CPU types, counted books and successful live comparisons. Cancer_KR_S passed live on both compilers and has no matched instruction ratio in the census because the counted books differed. Wall, memory and build-time ratios exclude the cross-host shard. Peak RSS ratios also require equal book sizes. The separate SEC table above uses its own measurement runs and sample sizes.
 
 **LTC_JP_S** used 514,431,746.9 candidate instructions per policy versus 491,080,255.2 baseline, a **4.755% increase** on the same 20-policy book in shard 2. Both values matched live exactly. This is the only published comparable instruction count more than 3% above baseline. A local exact-pin reproduction measured a 5.03% increase. The candidate stores `Projection.care_surv(s, t)` in a native hash cache, replacing a 948-by-948 dense value array and its flags per item. The two hash helper functions accounted for roughly the net increase in the callgrind profile. The published census estimated about 22% less incremental memory per policy. [LTC cache attribution](LTC-JP-S.md)
 
-[Full provisional census and shard evidence](PROPOSAL-1-CENSUS.md)
+[Full census and shard evidence](PROPOSAL-1-CENSUS.md)
 
 ### Calls from Python (at 503b07c)
 
