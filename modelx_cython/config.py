@@ -92,7 +92,8 @@ class TransSpec:
     * ``"cells"``: dict mapping cells names to per-cells dicts.
     * ``"collect_workers"`` (model level, default 1): the worker threads of a
       compiled ``collect()``; ``_mx_collect_workers`` set on the compiled model
-      object overrides it. See :mod:`modelx_cython.collect`.
+      object overrides it at run time (the *Collect* section of the
+      free-threading page).
     * ``"cells_params"`` (deprecated): older form of
       ``"cells_param_size"``; maps a parameter name (or tuple) to a
       dict with a ``"size"`` key.  Consulted only when
