@@ -3,7 +3,7 @@
 
 ``prepare(value)`` turns the user's DataFrame or Series into a ``PreparedTable`` the compiled reads use: the rows
 stored sorted by their level codes, one ascending array of combined codes (and a dense grid when small) for keyed
-lookups, typed column blocks copied from the frame, and the index extremes and asof keys. The user's object is
+lookups, typed column blocks copied from the frame, and the index extremes. The user's object is
 never changed or replaced: it stays what every formula sees (``source``). ``prepare`` returns None, and
 ``unprepared_reason`` says why, for a table whose reads must stay pandas (a non-unique index, NaN labels, labels
 that compare equal although pandas keeps them apart, duplicate column labels, too many key combinations, an index
@@ -13,9 +13,6 @@ A lookup equals ``value.loc[key, column]`` on the tables ``prepare`` accepts: th
 keys, misses included (``tests/test_prepared_tables.py``). The key lookups and value reads compiled code uses are
 inline methods of the .pxd.
 """
-from libc.math cimport isnan
-
-import threading
 from types import MethodType
 import weakref
 
@@ -165,77 +162,8 @@ cdef class PreparedTable:
         stop[0] = lo
         return stop[0] > start[0]
 
-    cdef Py_ssize_t asof_position(self, double x) noexcept nogil:
-        """Position in asof_labels of the last label <= x, or -1 (x below the first label, or NaN)."""
-        cdef Py_ssize_t lo = 0, hi = self.asof_keys.shape[0], mid
-        if isnan(x):
-            return -1
-        while lo < hi:
-            mid = (lo + hi) >> 1
-            if self.asof_keys[mid] <= x:
-                lo = mid + 1
-            else:
-                hi = mid
-        return lo - 1
-
     cdef object object_at(self, Py_ssize_t row, Py_ssize_t slot):
         return (<tuple>self.objects[slot])[row]
-
-    cpdef Py_ssize_t column(self, object label) except -2:
-        """The position of column ``label`` (None for a Series); KeyError as pandas raises it."""
-        position = self.column_positions.get(label)
-        if position is None:
-            raise KeyError(label)
-        return position
-
-    # ------------------------------------------------------------ Python access (tests, fallbacks)
-    def key_codes(self, key):
-        """Level codes of a full key (a scalar for one level, a tuple otherwise); None when a part is absent."""
-        parts = key if self.nlevels > 1 else (key,)
-        if not isinstance(parts, tuple) or len(parts) != self.nlevels:
-            return None
-        codes = []
-        for level, part in enumerate(parts):
-            code = self.code_obj(level, part)
-            if code < 0:
-                return None
-            codes.append(code)
-        return codes
-
-    def row(self, key):
-        """The stored row of ``key``, or -1."""
-        cdef Py_ssize_t[8] buffer
-        codes = self.key_codes(key)
-        if codes is None:
-            return -1
-        for i, code in enumerate(codes):
-            buffer[i] = code
-        return self.row_codes(buffer, len(codes))
-
-    def value(self, key, column=None):
-        """``source.loc[key, column]`` (``source.loc[key]`` for a Series), as pandas returns it."""
-        cdef Py_ssize_t row = self.row(key)
-        cdef Py_ssize_t position
-        if row < 0:
-            raise KeyError(key)
-        position = self.column(None if self.is_series else column)
-        kind = self.column_kind[position]
-        slot = self.column_slot[position]
-        if kind == COLUMN_F64:
-            return np.float64(self.f64_at(row, slot))
-        if kind == COLUMN_I64:
-            return np.int64(self.i64_at(row, slot))
-        return self.object_at(row, slot)
-
-    def contains(self, key):
-        """``key in source.index``."""
-        return self.row(key) >= 0
-
-    def asof(self, x):
-        """``source.index.asof(x)`` for a flat numeric index and a number x (pandas' asof of NaN differs by version:
-        the compiled reads read NaN on pandas, and this returns NaN for it)."""
-        position = self.asof_position(float(x))
-        return self.asof_labels[position] if position >= 0 else np.nan
 
 
 def unprepared_reason(value):
@@ -444,20 +372,13 @@ cdef PreparedTable _build(object value):
     row = 'O' if table.is_series or n == 0 else _row_kind(dtypes, frame)
     table.row_object = row not in 'iufc'
     table.row_float = row == 'f'        # a row of float64 fields
-    # index extremes and asof keys, as pandas gives them
+    # index extremes, as pandas gives them
     table.max_label = index.max() if n else None
     table.min_label = index.min() if n else None
     if n and table.nlevels > 1:
         for level in range(min(table.nlevels, 8)):
             table.max_parts[level] = _int_part(table.max_label[level])
             table.min_parts[level] = _int_part(table.min_label[level])
-    if table.nlevels == 1 and n and index.dtype.kind in 'iuf':
-        sorted_index = index.sort_values()
-        table.asof_keys = np.ascontiguousarray(sorted_index.to_numpy(dtype=np.float64))
-        table.asof_labels = [sorted_index[i] for i in range(n)]
-    else:
-        table.asof_keys = np.zeros(0)
-        table.asof_labels = []
     return table
 
 
@@ -497,7 +418,7 @@ def _forget(key, ref):
 cdef object _prepare_new(object frame):
     """Prepare ``frame`` as it is now and make it the table its reads find (None: they stay pandas)."""
     key = id(frame)
-    signatures = _thread_signatures()
+    signatures = model_signatures()
     axes = _zip_origin(frame, signatures)
     table = prepare(frame)
     if table is not None:
@@ -537,7 +458,6 @@ cdef object bind_ref(object frame):
 
 
 cdef object _signatures = None
-_own = threading.local()        # T-5c: each worker thread's copy of the signatures (see _thread_signatures)
 
 
 cdef object model_signatures():
@@ -555,39 +475,10 @@ cdef object model_signatures():
     return _signatures
 
 
-cdef object _fresh(object value):
-    """A copy of a signature element that shares no object with the original (texts and tuples rebuilt; small ints
-    and None are immortal)."""
-    if type(value) is str:
-        return ''.join([c for c in value])
-    if type(value) is tuple:
-        return tuple([_fresh(v) for v in value])
-    return value
-
-
-cdef object _thread_signatures():
-    """T-5c: the model's read signatures as this thread's own objects: a per-item preparation (a frame each item
-    computes itself) under several worker threads then touches no Python object another thread reads (no shared
-    reference counts)."""
-    found = getattr(_own, 'signatures', None)
-    if found is None:
-        found = _own.signatures = _fresh(tuple(model_signatures()))
-    return found
-
-
 cdef object bind_own(object frame):
-    """T-5c: an item's binding of a frame it computes itself (a receiver no Data space publishes): its prepared
-    table, prepared for this item only. The shared prepared-table map is only looked up (without the lock: a frame
-    another item already prepared is reused); a new preparation is not registered (no lock, no weak reference),
-    and its verdicts are decided on this thread's own signatures. The item holds it until its Space is cleared."""
-    entry = _prepared.get(id(frame))
-    if entry is not None and entry[0]() is frame:
-        return _NOT_PREPARED if entry[1] is None else entry[1]
-    table = prepare(frame)
-    if table is None:
-        return _NOT_PREPARED
-    _decide(table, _thread_signatures(), None)
-    return table
+    """An item's binding of a frame it computes itself (a receiver no Data space publishes): as ``bind_ref``.
+    Kept as the entry the compiler emits for such a receiver."""
+    return bind_ref(frame)
 
 
 cdef object _zip_origin(object frame, object signatures):

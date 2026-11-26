@@ -50,8 +50,6 @@ cdef class PreparedTable:
     cdef bint row_float                    # a row is widened to float64: an int64 field reads as numpy.float64
     cdef readonly object max_label, min_label   # index.max(), index.min() as pandas returns them
     cdef long long[8] max_parts, min_parts      # T-5c: their int parts as C integers (0 for another kind)
-    cdef const double[::1] asof_keys       # sorted labels of a flat numeric index (for asof)
-    cdef readonly object asof_labels       # the labels themselves, by position, as pandas returns them
     cdef object _name_arrays               # T-5: column name map: open addressing, `name_mask + 1` entries of
     cdef const Py_ssize_t* name_obj        # (borrowed pointer to the label, its hash, its position or -1); the
     cdef const Py_hash_t* name_hash        # labels stay alive as the keys of column_positions
@@ -109,9 +107,7 @@ cdef class PreparedTable:
     cdef Py_ssize_t code_obj(self, int level, object key) except -2
     cdef Py_ssize_t row_key(self, object key) except -2
     cdef bint prefix_range(self, const Py_ssize_t* codes, int count, Py_ssize_t* start, Py_ssize_t* stop) noexcept nogil
-    cdef Py_ssize_t asof_position(self, double x) noexcept nogil
     cdef object object_at(self, Py_ssize_t row, Py_ssize_t slot)
-    cpdef Py_ssize_t column(self, object label) except -2
 
 
 # ---- reads of compiled code (T-3) ---------------------------------------------------------------------
