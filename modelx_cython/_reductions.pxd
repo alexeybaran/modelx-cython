@@ -253,3 +253,51 @@ cdef extern from *:
     Py_ssize_t tuple_size "PyTuple_GET_SIZE" (object t) noexcept
     bint exact_tuple "PyTuple_CheckExact" (object o) noexcept
 
+
+# Exact tuples and lists of numbers read as C values (``reductions.py``, a source checked once per evaluation):
+# ``seq_f64`` is true when ``s`` is an exact tuple or list whose every item is an exact float, ``seq_i64`` when every
+# item is an exact int that fits in a signed 64-bit integer (bool and int subclasses excluded: their items keep
+# their own class). The reads take no reference; the caller reads a checked sequence only while no code can run.
+cdef extern from *:
+    """
+    static CYTHON_INLINE Py_ssize_t __pyx_mx_seq_size(PyObject *s) {
+        return PyTuple_CheckExact(s) ? PyTuple_GET_SIZE(s) : PyList_GET_SIZE(s);
+    }
+    static CYTHON_INLINE PyObject *__pyx_mx_seq_item(PyObject *s, Py_ssize_t i) {
+        return PyTuple_CheckExact(s) ? PyTuple_GET_ITEM(s, i) : PyList_GET_ITEM(s, i);
+    }
+    static CYTHON_INLINE int __pyx_mx_seq_f64(PyObject *s) {
+        Py_ssize_t i, n;
+        if (!PyTuple_CheckExact(s) && !PyList_CheckExact(s)) return 0;
+        n = __pyx_mx_seq_size(s);
+        for (i = 0; i < n; i++)
+            if (!PyFloat_CheckExact(__pyx_mx_seq_item(s, i))) return 0;
+        return 1;
+    }
+    static CYTHON_INLINE int __pyx_mx_seq_i64(PyObject *s) {
+        Py_ssize_t i, n;
+        int overflow;
+        PyObject *item;
+        if (!PyTuple_CheckExact(s) && !PyList_CheckExact(s)) return 0;
+        n = __pyx_mx_seq_size(s);
+        for (i = 0; i < n; i++) {
+            item = __pyx_mx_seq_item(s, i);
+            if (!PyLong_CheckExact(item)) return 0;
+            overflow = 0;
+            (void)PyLong_AsLongLongAndOverflow(item, &overflow);
+            if (overflow) return 0;
+        }
+        return 1;
+    }
+    static CYTHON_INLINE double __pyx_mx_seq_f64_at(PyObject *s, Py_ssize_t i) {
+        return PyFloat_AS_DOUBLE(__pyx_mx_seq_item(s, i));
+    }
+    static CYTHON_INLINE long long __pyx_mx_seq_i64_at(PyObject *s, Py_ssize_t i) {
+        return PyLong_AsLongLong(__pyx_mx_seq_item(s, i));
+    }
+    """
+    bint seq_f64 "__pyx_mx_seq_f64" (object s) noexcept
+    bint seq_i64 "__pyx_mx_seq_i64" (object s) noexcept
+    Py_ssize_t seq_size "__pyx_mx_seq_size" (object s) noexcept
+    double seq_f64_at "__pyx_mx_seq_f64_at" (object s, Py_ssize_t i) noexcept
+    long long seq_i64_at "__pyx_mx_seq_i64_at" (object s, Py_ssize_t i) noexcept

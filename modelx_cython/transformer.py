@@ -667,7 +667,8 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
         lowering = NativeReductions(
             cls_info, cells, self.helper_providers, node, bounds, reductions,
             formula_kinds={name: {KIND_INT: 'longlong', KIND_FLOAT: 'double'}[kind]
-                           for name, kind in local_kinds.items() if kind in (KIND_INT, KIND_FLOAT)})
+                           for name, kind in local_kinds.items() if kind in (KIND_INT, KIND_FLOAT)},
+            builtin_calls={name for name in ('zip', 'abs', 'float') if builtin(name)})
         node = node.visit(lowering)
         cells.native_tuple_int_loops = getattr(lowering, 'tuple_int_loops', 0)
         return node

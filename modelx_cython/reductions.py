@@ -56,6 +56,21 @@ def _one_iterable(call):
 
 _C_DECLARED = {'longlong': 'longlong', 'Py_ssize_t': 'longlong', 'long': 'longlong', 'int': 'longlong',
                'double': 'double', 'bint': 'bint'}
+_NOT_SEQUENCES = frozenset(('range', 'enumerate', 'zip', 'map', 'filter', 'reversed', 'iter', 'dict', 'set'))
+
+
+def _maybe_sequence(node):
+    """A source that can be a tuple or list at run time: not a range, a mapping or set view, an index, a display
+    of another kind or an iterator built in place."""
+    if isinstance(node, cst.Call):
+        if isinstance(node.func, cst.Name):
+            return node.func.value not in _NOT_SEQUENCES
+        return not (isinstance(node.func, cst.Attribute) and node.func.attr.value in ('items', 'keys', 'values'))
+    if isinstance(node, cst.Attribute):
+        return node.attr.value not in ('index', 'columns', 'values')
+    return isinstance(node, (cst.Name, cst.Subscript))
+
+
 def _parts(generator):
     part = generator.for_in
     while part is not None:
@@ -190,10 +205,14 @@ class GeneralReductions:
                     + 'else:\n' + textwrap.indent(branches[1], '    '))
         return self.lower_general(statement, call, mode, target)
 
-    def lower_general(self, statement, call, mode, target):
+    def lower_general(self, statement, call, mode, target, outer=None):
         name = call.func.value
         source = call.args[0].value
         start = call.args[1].value if len(call.args) == 2 else None
+        if outer is None and start is None and isinstance(source, (cst.GeneratorExp, cst.ListComp)):
+            sequences = self.sequence_sources(source)
+            if sequences is not None:
+                return self.lower_sequences(statement, call, mode, target, source, sequences)
         prefix = self.reserve_prefix()
         if isinstance(source, (cst.GeneratorExp, cst.ListComp)):
             generator = isinstance(source, cst.GeneratorExp)
@@ -238,7 +257,122 @@ class GeneralReductions:
         self.general_state = dict(prefix=prefix, name=name, generator=generator, facts=facts,
                                   renamed=renamed, mode=mode, target=target,
                                   local_types={}, kinds=set(), alias=module_name(STREAMS_PROVIDER))
-        return self.emit_general(statement, call, parts, element)
+        return self.emit_general(statement, call, parts, element, outer)
+
+    # ---------------------------------------------------------------- tuples and lists of numbers
+    def sequence_sources(self, source):
+        """``(e for x in S if c)`` or ``(e for a, b in zip(S1, S2) if c)`` whose element and conditions cannot run
+        code (``pure``): the sources S, to be read as C values when each is at run time an exact tuple or list of
+        exact floats (or of ints within 64 bits); else None."""
+        part = source.for_in
+        if part.inner_for_in is not None or part.asynchronous is not None:
+            return None
+        if self.classify(0, (part.target, part.iter, ()))[0] != 'iter':
+            return None
+        iterator = part.iter
+        if (isinstance(iterator, cst.Call) and isinstance(iterator.func, cst.Name) and iterator.func.value == 'zip'
+                and self.builtin_zip and len(iterator.args) >= 2
+                and all(arg.keyword is None and not arg.star for arg in iterator.args)):
+            sources = [arg.value for arg in iterator.args]
+            if not (isinstance(part.target, cst.Tuple) and len(part.target.elements) == len(sources)):
+                return None
+        elif isinstance(part.target, cst.Name):
+            sources = [iterator]
+        else:
+            return None
+        try:
+            names = _names(part.target)
+        except _Unsupported:
+            return None
+        if len(set(names)) != len(names) or not all(_maybe_sequence(item) for item in sources):
+            return None
+        for self._class_names in ('float', 'int'):
+            if all(self.pure(node, set(names)) for node in (source.elt, *(test.test for test in part.ifs))):
+                return sources
+        return None
+
+    def pure(self, node, names):
+        """``node`` evaluates without running any code but C arithmetic and comparisons: the loop variables (C
+        numbers on this path), names and ``self`` members of a C number kind, numeric literals, ``+ - *``, unary
+        ``- + not``, comparisons of two operands of one numeric class (an int and a float compare exactly in Python,
+        not as C does), ``and``/``or``, a conditional expression, and ``abs``/``float`` of such operands."""
+        if isinstance(node, (cst.Integer, cst.Float)):
+            return True
+        if isinstance(node, cst.Name):
+            return node.value in names or node.value in ('True', 'False') or self.kind(node, {}) is not None
+        if isinstance(node, cst.Attribute):
+            return self.kind(node, {}) is not None
+        if isinstance(node, cst.BinaryOperation):
+            return (isinstance(node.operator, (cst.Add, cst.Subtract, cst.Multiply))
+                    and self.pure(node.left, names) and self.pure(node.right, names))
+        if isinstance(node, cst.UnaryOperation):
+            return isinstance(node.operator, (cst.Minus, cst.Plus, cst.Not)) and self.pure(node.expression, names)
+        if isinstance(node, cst.BooleanOperation):
+            return self.pure(node.left, names) and self.pure(node.right, names)
+        if isinstance(node, cst.IfExp):
+            return all(self.pure(item, names) for item in (node.test, node.body, node.orelse))
+        if isinstance(node, cst.Comparison):
+            operands = [node.left, *(part.comparator for part in node.comparisons)]
+            return (all(isinstance(part.operator, (cst.LessThan, cst.LessThanEqual, cst.GreaterThan,
+                                                   cst.GreaterThanEqual, cst.Equal, cst.NotEqual))
+                        for part in node.comparisons)
+                    and all(self.pure(item, names) for item in operands)
+                    and len(classes := {self._numeric_class(item, names) for item in operands}) == 1
+                    and None not in classes)
+        if (isinstance(node, cst.Call) and isinstance(node.func, cst.Name) and node.func.value in ('abs', 'float')
+                and node.func.value in self.builtin_calls and len(node.args) == 1
+                and node.args[0].keyword is None and not node.args[0].star):
+            return self.pure(node.args[0].value, names)
+        return False
+
+    def _numeric_class(self, node, names):
+        """'float' or 'int' for a pure operand, the loop variables taken as the variant's class: the test is
+        made per variant (``_class_names``)."""
+        if isinstance(node, cst.Name) and node.value in names:
+            return self._class_names
+        if isinstance(node, (cst.Integer, cst.Float)):
+            return 'int' if isinstance(node, cst.Integer) else 'float'
+        if isinstance(node, cst.BinaryOperation):
+            classes = {self._numeric_class(node.left, names), self._numeric_class(node.right, names)}
+            return None if None in classes else 'float' if 'float' in classes else 'int'
+        if isinstance(node, cst.UnaryOperation) and isinstance(node.operator, (cst.Minus, cst.Plus)):
+            return self._numeric_class(node.expression, names)
+        if isinstance(node, cst.Call) and isinstance(node.func, cst.Name) and node.func.value in ('abs', 'float'):
+            return 'float' if node.func.value == 'float' else self._numeric_class(node.args[0].value, names)
+        if isinstance(node, (cst.Name, cst.Attribute)):
+            return {'double': 'float', 'longlong': 'int', 'bint': 'int'}.get(self.kind(node, {}))
+        return None
+
+    def lower_sequences(self, statement, call, mode, target, source, sources):
+        """The sources evaluated once, in order, as the generator's creation evaluates its first iterable; then
+        the reduction over C floats when every source is an exact tuple or list of exact floats, over C integers
+        when the one source holds only ints within 64 bits, else the loop as written over the objects."""
+        p = self.reserve_prefix()
+        alias = module_name(STREAMS_PROVIDER)
+        temps = [f'{p}_s{index}' for index in range(len(sources))]
+        lines = [f'{temp} = ({code(item)})' for temp, item in zip(temps, sources)]
+        names = set(_names(source.for_in.target))
+        branches = []
+        for variant, numeric in (('f64', 'float'), ('i64', 'int'))[:1 if len(sources) > 1 else 2]:
+            self._class_names = numeric
+            if not all(self.pure(node, names) for node in (source.elt, *(t.test for t in source.for_in.ifs))):
+                continue
+            try:
+                text = self.lower_general(statement, call, mode, target, outer=('seq', (variant, temps)))
+            except _Unsupported:
+                continue
+            branches.append((' and '.join(f'{alias}.seq_{variant}({temp})' for temp in temps), text))
+        iterator = (cst.parse_expression(f'zip({", ".join(temps)})') if len(temps) > 1 else cst.Name(temps[0]))
+        plain = source.with_changes(for_in=source.for_in.with_changes(iter=iterator))
+        fallback = self.lower_general(statement, call.with_changes(args=[call.args[0].with_changes(value=plain)]),
+                                      mode, target, outer=('iter', iterator))
+        if not branches:
+            return '\n'.join(lines) + '\n' + fallback
+        for index, (test, text) in enumerate(branches):
+            lines.append(f'{"if" if index == 0 else "elif"} {test}:')
+            lines.append(textwrap.indent(text, '    ').rstrip('\n'))
+        lines += ['else:', textwrap.indent(fallback, '    ').rstrip('\n')]
+        return '\n'.join(lines) + '\n'
 
     def substituted(self, node, mapping):
         state = self.general_state
@@ -254,7 +388,7 @@ class GeneralReductions:
         return kind if kind in ('double', 'longlong', 'bint') else None
 
     # ---------------------------------------------------------------- emission
-    def emit_general(self, statement, call, parts, element):
+    def emit_general(self, statement, call, parts, element, outer_class=None):
         state = self.general_state
         p, name, alias = state['prefix'], state['name'], state['alias']
         # all/any stop at the deciding item, except over a list comprehension, which
@@ -265,6 +399,8 @@ class GeneralReductions:
         prologue, declarations = [], []
         # The outermost iterable is evaluated where the generator is created.
         classes = [self.classify(index, part) for index, part in enumerate(parts)]
+        if outer_class is not None:
+            classes[0] = outer_class
         instances = 1
         for kind_, data in classes:
             if kind_ == 'tuple':
@@ -274,7 +410,11 @@ class GeneralReductions:
                        for (kind_, data), part in zip(classes, parts)]
         outer_kind, outer = classes[0]
         mapping0 = {}
-        if outer_kind == 'range':
+        if outer_kind == 'seq':
+            pass                                # the sources are held in temporaries (lower_sequences)
+        elif outer_kind == 'iter' and outer_class is not None:
+            classes[0] = ('iter', outer)        # a held source: nothing more to evaluate
+        elif outer_kind == 'range':
             names = [f'{p}_bound_{i}' for i in range(len(outer))]
             prologue += [f'{n}: _mx_cy.longlong = {code(value)}' for n, value in zip(names, outer)]
             classes[0] = ('range', [cst.Name(n) for n in names])
@@ -323,6 +463,12 @@ class GeneralReductions:
             prologue.append(init)
         elif name in ('min', 'max'):
             typed = next(iter(kinds)) if len(kinds) == 1 and None not in kinds else None
+            returned = {'double': 'double', 'long long': 'longlong', 'bint': 'bint'}.get(
+                self.cells.get_rettype_expr(c_style=True)) if state['mode'] == 'return' else None
+            if outer_class is not None and outer_class[0] == 'seq' and returned not in (None, typed):
+                # the variant's C extreme is not the Cell's C result (a bool Cell over a tuple of bools): the
+                # variant cannot hold the sampled items, and the loop over the objects serves them
+                raise _Unsupported('a typed extreme of another C type than the result')
             declarations.append(f'{p}_seen: _mx_cy.bint = False')
             if typed:
                 declarations += [f'{p}_best: _mx_cy.{typed} = 0', f'{p}_value: _mx_cy.{typed}']
@@ -425,6 +571,24 @@ class GeneralReductions:
             bounds = ', '.join(code(self.substituted(bound, mapping)) for bound in data)
             lines.append(f'{indent}for {variable} in range({bounds}):')
             inner = dict(mapping, **{names[0]: cst.Name(variable)})
+            lines += self.emit_body(level, parts, classes, element, inner, indent + '    ', tests)
+        elif kind_ == 'seq':
+            variant, temps = data
+            ctype = {'f64': 'double', 'i64': 'longlong'}[variant]
+            alias = state['alias']
+            variables = [f'{p}_{variant[0]}_{n}' for n in names]
+            typed = state.setdefault('typed_vars', [])
+            for declaration in (f'{p}_n: _mx_cy.Py_ssize_t', f'{p}_i: _mx_cy.Py_ssize_t',
+                                *(f'{v}: _mx_cy.{ctype}' for v in variables)):
+                if declaration not in typed:
+                    typed.append(declaration)
+            state['local_types'].update({v: ctype for v in variables})
+            lines.append(f'{indent}{p}_n = {alias}.seq_size({temps[0]})')
+            for temp in temps[1:]:          # zip stops at the shortest
+                lines += [f'{indent}if {alias}.seq_size({temp}) < {p}_n:', f'{indent}    {p}_n = {alias}.seq_size({temp})']
+            lines.append(f'{indent}for {p}_i in range({p}_n):')
+            lines += [f'{indent}    {v} = {alias}.seq_{variant}_at({temp}, {p}_i)' for v, temp in zip(variables, temps)]
+            inner = dict(mapping, **{n: cst.Name(v) for n, v in zip(names, variables)})
             lines += self.emit_body(level, parts, classes, element, inner, indent + '    ', tests)
         elif kind_ == 'iter':
             iterator = data if level == 0 else self.substituted(data, mapping)
@@ -817,8 +981,11 @@ def _evaluation_order(node):
 
 class NativeReductions(GeneralReductions, FormulaTransformer):
     def __init__(self, cls_info, cells, providers, formula, builtin_bounds,
-                 builtin_reductions=frozenset(), formula_kinds=None):
+                 builtin_reductions=frozenset(), formula_kinds=None, builtin_calls=frozenset()):
         super().__init__()
+        # the builtins of this formula's scope (no module name or local shadows them): zip, abs, float
+        self.builtin_zip = 'zip' in builtin_calls
+        self.builtin_calls = frozenset(builtin_calls)
         # kinds of the formula's own locals (powers.formula_local_kinds), for names no
         # comprehension in the formula binds; a term `pols_lapse(s) * (1.0 - rho) ** k` with
         # `rho` a double local is then a double and its sum keeps a double state

@@ -128,13 +128,14 @@ _TABLE_RETURNS = {
 # unsigned 64-bit words of the numeric caches: keys and hashes, never an operand of formula arithmetic
 _WORD_RETURNS = frozenset(('int_word', 'value_word', 'double_word', 'key_word', 'mix', 'hash_step'))
 # C results of the reduction state (_reductions.pxd): the sum steps' error returns (int), the float results, the
-# size and integer items of exact tuples (tests/test_reduction_returns.py checks this header as
+# sizes and items of checked tuples and lists (tests/test_reduction_returns.py checks this header as
 # test_provider_returns checks the others)
 _REDUCTION_RETURNS = {
     'f64_result': 'float', 'sum_result_f64': 'float', '_cs_value': 'float',
     '_sum_generic': 'int', '_sum_whole': 'int', 'sum_add_f64': 'int', 'sum_add_ll': 'int', 'sum_add_bint': 'int',
     'sum_add_object': 'int',
     'tuple_int64': 'int', 'tuple_size': 'int', 'exact_tuple': 'int',
+    'seq_f64': 'int', 'seq_i64': 'int', 'seq_size': 'int', 'seq_f64_at': 'float', 'seq_i64_at': 'int',
 }
 
 

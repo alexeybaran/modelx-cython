@@ -34,8 +34,8 @@ def test_reductions_over_walks(tmp_path):
     lowered = {name for name in CELLS if '_mx_reduce_' in _formula(source, name)}
     assert lowered >= {'view_max', 'view_sum', 'view_any', 'whole_text_sum', 'interpolated', 'missing',
                        'nothing_left'}, lowered
-    # the generator over the index is a loop over positions
-    assert 'range(' in _formula(source, 'view_max')
+    # the generator over the index is a loop over positions; the list of the walk is read as C integers
+    assert 'range(' in _formula(source, 'view_max') and '.seq_i64(' in _formula(source, 'interpolated')
     assert not re.search(r'\bmax\(a for a in', _formula(source, 'view_max').split('else:')[0])
 
 
