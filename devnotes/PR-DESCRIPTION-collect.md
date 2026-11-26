@@ -75,7 +75,7 @@ Collect declared in a measurement script, `Data` locked, books tiled to the size
 every item fits 4 GB. On the shipped book collect equals live modelx bit for bit on all twelve, at 1 and 4 workers,
 with and without the borrowed read.
 
-| model | points | direct kept 1w | direct kept 4w | collect 1w | collect 4w | scaling direct / collect | collect without borrowed read 1w / 4w (scaling) |
+| model | points | (a) direct kept 1w | (a) direct kept 4w | (c) collect 1w | (c) collect 4w | scaling direct / collect | collect without borrowed read 1w / 4w (scaling) |
 |---|---|---|---|---|---|---|---|
 | DIA_US_SEC | 2229 | 1.67/1747 | 0.79/1750 | 0.87/100 | 0.51/108 | 2.13 / 1.73 | 0.87 / 0.53 (1.65x) |
 | FIA_US_SEC | 1156 | 1.05/1802 | 0.40/1804 | 0.28/99 | 0.12/108 | 2.64 / 2.30 | 0.29 / 0.13 (2.33x) |
@@ -90,22 +90,33 @@ with and without the borrowed read.
 | VUL_US_SEC | 817 | 2.33/2322 | 2.49/2339 | 1.53/101 | 0.49/116 | 0.94 / 3.10 | 1.58 / 0.50 (3.14x) |
 | WholeLife_US_SEC | 3178 | 1.56/2363 | 0.59/2364 | 0.54/95 | 0.22/102 | 2.62 / 2.39 | 0.53 / 0.24 (2.25x) |
 
+(b) a per-policy loop that deletes each item, on three models (1 worker, 4 workers, scaling): MYGA_US_SEC 0.34 / 98
+and 0.15 / 122 (2.24x), Term_US_SEC 0.57 / 96 and 0.24 / 148 (2.38x), VA_US_SEC 0.46 / 105 and 0.21 / 163 (2.20x);
+at one worker it equals collect.
+
 Direct without the borrowed read at four workers: MYGA 0.40 s, Term 0.60 s, VA 0.97 s. Collect uses about 100 MB
-where the direct route keeping its items uses 1.4-2.5 GB. Four-worker runs take 0.1-0.5 s, so their scaling includes
+where the direct route keeping its items uses 1.4-2.5 GB; a loop deleting each item uses 100-160 MB. Four-worker runs take 0.1-0.5 s, so their scaling includes
 thread start. RILA_US_SEC is slower on four workers than on one on both routes, for a reason outside collect.
 
-### The DV01 example on MYGA_US_SEC, 1,050 policies (medians of 5, wall s / CPU s / peak MB)
+### The DV01 example on MYGA_US_SEC (medians of 5, the report Cells of 3; wall s / CPU s / peak MB)
 
-| route | 1 worker | 4 workers | scaling |
-|---|---|---|---|
-| hand-written pooled driver | 9.97 / 9.9 / 252 | 3.80 / 13.4 / 352 | 2.62x |
-| collect | 9.81 / 9.7 / 1120 | 3.75 / 12.5 / 1099 | 2.62x |
-| collect without the borrowed read | 10.31 / 10.2 / 1120 | 7.79 / 28.6 / 1099 | 1.32x |
+| route | policies | 1 worker | 4 workers | per policy, 1 worker | scaling |
+|---|---|---|---|---|---|
+| (a) the report Cells, every item kept | 140 | 3.79 / 3.8 / 5631 | - | 27 ms, 40.2 MB | - |
+| (b) pooled driver, deletes each policy's items | 1,050 | 9.97 / 9.9 / 252 | 3.80 / 13.4 / 352 | 9.5 ms, 0.24 MB | 2.62x |
+| (c) collect | 1,050 | 9.81 / 9.7 / 1120 | 3.75 / 12.5 / 1099 | 9.3 ms, 1.07 MB | 2.62x |
+| (c) collect without the borrowed read | 1,050 | 10.31 / 10.2 / 1120 | 7.79 / 28.6 / 1099 | | 1.32x |
+
+On the same 140-policy book (medians of 3): (b) 1.48 s / 177 MB and 0.88 s / 237 MB, (c) 1.46 s / 325 MB and
+0.98 s / 299 MB. (a) runs on one thread (the Cells sum policy by policy) and keeps all 40,950 Valuation
+ItemSpaces with the book's `Actual` ItemSpaces, so its book is sized to this 16 GB machine. (c) sits between (a) and
+(b): it releases each Valuation ItemSpace once its outputs are added, but the `Actual` ItemSpaces belong to another
+Space, every close reads them, and they stay alive across the 39 collects; (b) deletes each policy's as soon as that
+policy is done. Totals equal in every run (1,050: DV01 129960.61614055187; 140: 17328.0821516274); on 70 policies
+every route equals live modelx bit for bit.
 
 The declaration adds five lines to the model, and the report through collect is 21 lines instead of a per-policy
-task, a thread pool and its own sums. Collect holds the policies' `Actual` ItemSpaces across the 39 collects of the
-report, which every close reads; the pooled driver deletes each policy's when it is done. DV01 129960.61614055187 in
-every run.
+task, a thread pool and its own sums.
 
 ### Against the previous collect implementation, on the same item code (medians of 5, wall s / peak MB)
 

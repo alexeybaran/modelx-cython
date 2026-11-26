@@ -1,15 +1,15 @@
-From 307eab7890292824a3cd79bf81e9861a87bda3de Mon Sep 17 00:00:00 2001
+From 1332857a2ef5c5ee907b66d65ec56bf401851582 Mon Sep 17 00:00:00 2001
 From: collect proposal <collect-proposal@users.noreply.github.com>
 Date: Thu, 26 Nov 2026 00:54:36 +0000
-Subject: [PATCH 5/5] DV01 page: both routes, the locked Spaces, time and
- memory at 1,050 policies
+Subject: [PATCH 5/5] DV01 page: three routes, the locked Spaces, time and
+ memory per policy
 
 ---
- .../fixed_deferred_annuity/dv01-sec.md        | 40 ++++++++++++++-----
- 1 file changed, 30 insertions(+), 10 deletions(-)
+ .../fixed_deferred_annuity/dv01-sec.md        | 54 +++++++++++++------
+ 1 file changed, 39 insertions(+), 15 deletions(-)
 
 diff --git a/lifelib/libraries/uslib/products/fixed_deferred_annuity/dv01-sec.md b/lifelib/libraries/uslib/products/fixed_deferred_annuity/dv01-sec.md
-index ba22efcb..42d924a8 100644
+index ba22efcb..a52f99be 100644
 --- a/lifelib/libraries/uslib/products/fixed_deferred_annuity/dv01-sec.md
 +++ b/lifelib/libraries/uslib/products/fixed_deferred_annuity/dv01-sec.md
 @@ -21,6 +21,7 @@ python products/fixed_deferred_annuity/run_dv01_sec.py                    # live
@@ -56,7 +56,7 @@ index ba22efcb..42d924a8 100644
  **The driver.** With more than one worker the main thread submits every task and then waits
  once for all of them with `concurrent.futures.wait`, instead of waiting on each result in
  turn as `list(pool.map(...))` does. On free-threaded CPython 3.14 a thread waiting on a lock
-@@ -114,7 +126,8 @@ free, so with `pool.map` the four workers ran on fresh pages and scaled 1.3x whe
+@@ -114,25 +126,37 @@ free, so with `pool.map` the four workers ran on fresh pages and scaled 1.3x whe
  wait scales 2.5x or more.
  
  Requirements: free-threaded CPython 3.14 (`python3.14t`) for the parallel run, Cython 3.3,
@@ -66,29 +66,39 @@ index ba22efcb..42d924a8 100644
  GIL build the workers take turns and the reports are the same.
  
  ## Speed
-@@ -123,16 +136,23 @@ Compiled, book of 1,050 policies (the seven new-business points 150 times), ESG
- years 0 to 2, so 1,050 × 3 × 13 = 40,950 valuations; median of three rounds, each run in a
- fresh process, on a 4-core cloud VM, Python 3.14.6 free-threaded, gcc 13:
  
+-Compiled, book of 1,050 policies (the seven new-business points 150 times), ESG path 1,
+-years 0 to 2, so 1,050 × 3 × 13 = 40,950 valuations; median of three rounds, each run in a
+-fresh process, on a 4-core cloud VM, Python 3.14.6 free-threaded, gcc 13:
+-
 -| Workers | Seconds | Speed-up |
 -| ---: | ---: | ---: |
 -| 1 | 8.71 | 1.00 |
 -| 4 | 3.26 | 2.67 |
 -
 -The three rounds ranged 8.37–8.95 s and 3.02–3.36 s. Totals: DV01 129,960.616141 and
-+| Route | Workers | Seconds | CPU seconds | Peak memory | Speed-up |
-+| --- | ---: | ---: | ---: | ---: | ---: |
-+| pooled driver | 1 | 9.97 | 9.9 | 0.25 GB | 1.00 |
-+| pooled driver | 4 | 3.80 | 13.4 | 0.35 GB | 2.62 |
-+| collect | 1 | 9.81 | 9.7 | 1.1 GB | 1.00 |
-+| collect | 4 | 3.75 | 12.5 | 1.1 GB | 2.62 |
+-CS01 157,856.970872 in every run. Live modelx runs the 14-point book in about 300 s.
++Compiled, books of the seven new-business points repeated, ESG path 1, years 0 to 2, so 3 × 13
++valuations per policy (40,950 on 1,050 policies); each run in a fresh process, on a 4-core cloud
++VM, Python 3.14.6 free-threaded, gcc 13:
 +
-+Median of five rounds, routes interleaved, with `Data` and `Actual` locked. Collect takes the
-+same time as the pooled driver and about 1.1 GB against 0.25 GB, because the 1,050 `Actual`
-+ItemSpaces stay alive across the 39 collects, where the pooled driver deletes each policy's
-+once that policy is done. What collect gains is less model code: the report reads each close's
-+total from one call instead of a per-policy task, a thread pool and its own sums. Totals: DV01 129,960.616141 and
- CS01 157,856.970872 in every run. Live modelx runs the 14-point book in about 300 s.
++| Route | Policies | Workers | Seconds | CPU seconds | Peak memory | Per policy | Speed-up |
++| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
++| `Outer` Cells, every item kept | 140 | 1 | 3.79 | 3.8 | 5.6 GB | 27 ms, 40 MB | |
++| pooled driver | 1,050 | 1 | 9.97 | 9.9 | 0.25 GB | 9.5 ms, 0.24 MB | 1.00 |
++| pooled driver | 1,050 | 4 | 3.80 | 13.4 | 0.35 GB | | 2.62 |
++| collect | 1,050 | 1 | 9.81 | 9.7 | 1.1 GB | 9.3 ms, 1.07 MB | 1.00 |
++| collect | 1,050 | 4 | 3.75 | 12.5 | 1.1 GB | | 2.62 |
++
++Median of five rounds (three for the `Outer` row), routes interleaved, with `Data` and `Actual` locked; the
++`Outer` Cells keep all 40,950 Valuation ItemSpaces and the book's `Actual` ItemSpaces, so their book is sized to
++this machine's 16 GB (on 140 policies the pooled driver takes 1.48 s and 0.18 GB, collect 1.46 s and 0.32 GB).
++Collect sits between the two in memory: it releases each Valuation ItemSpace once its outputs are added, but the
++`Actual` ItemSpaces belong to another Space and stay alive across the 39 collects, where the pooled driver deletes
++each policy's once that policy is done. It takes the same time as the pooled driver; what it gains is less model
++code: the report reads each close's total from one call instead of a per-policy task, a thread pool and its own
++sums. Totals: DV01 129,960.616141 and CS01 157,856.970872 in every 1,050-policy run. Live modelx runs the 14-point
++book in about 300 s.
  
  ## Tests
  

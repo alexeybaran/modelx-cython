@@ -12,17 +12,22 @@
 
 Requires modelx with `Space.set_collect` and the compiled collect of this repository.
 
-## DV01, 1,050 policies (medians of 5, wall s / CPU s / peak MB)
+## DV01 (medians of 5, the report Cells of 3; wall s / CPU s / peak MB)
 
-| route | 1 worker | 4 workers | scaling |
-|---|---|---|---|
-| pooled driver | 9.97 / 9.9 / 252 | 3.80 / 13.4 / 352 | 2.62x |
-| collect | 9.81 / 9.7 / 1120 | 3.75 / 12.5 / 1099 | 2.62x |
-| collect without the borrowed read | 10.31 / 10.2 / 1120 | 7.79 / 28.6 / 1099 | 1.32x |
+| route | policies | 1 worker | 4 workers | per policy, 1 worker | scaling |
+|---|---|---|---|---|---|
+| (a) report Cells (`Outer`), every item kept | 140 | 3.79 / 3.8 / 5631 | - | 27 ms, 40.2 MB | - |
+| (b) pooled driver, deletes each policy's items | 1,050 | 9.97 / 9.9 / 252 | 3.80 / 13.4 / 352 | 9.5 ms, 0.24 MB | 2.62x |
+| (c) collect | 1,050 | 9.81 / 9.7 / 1120 | 3.75 / 12.5 / 1099 | 9.3 ms, 1.07 MB | 2.62x |
+| (c) collect without the borrowed read | 1,050 | 10.31 / 10.2 / 1120 | 7.79 / 28.6 / 1099 | | 1.32x |
 
-DV01 129960.61614055187 in every run; on 70 policies every route equals live modelx bit for bit. Collect holds the
-1,050 `Actual` ItemSpaces across the 39 collects (each close reads them); the pooled driver deletes each policy's
-when it is done. Collect's gain is less model code, not speed.
+On the same 140-policy book (medians of 3): (b) 1.48 s / 177 MB and 0.88 s / 237 MB, (c) 1.46 s / 325 MB and
+0.98 s / 299 MB. (a) runs on one thread (the `Outer` Cells sum policy by policy) and keeps all 40,950 Valuation
+ItemSpaces with the book's `Actual` ItemSpaces, so its book is sized to this 16 GB machine. (c) sits between (a) and
+(b): it releases each Valuation ItemSpace once its outputs are added, but the `Actual` ItemSpaces belong to another
+Space, every close reads them, and they stay alive across the 39 collects; (b) deletes each policy's as soon as that
+policy is done. Totals equal in every run (1,050: DV01 129960.61614055187; 140: 17328.0821516274); on 70 policies
+every route equals live modelx bit for bit.
 
 ## The twelve `*_US_SEC` models (medians of 3, wall s / peak MB)
 
@@ -33,7 +38,7 @@ direct route, keeping every item, fits 4 GB. Values: on the shipped book collect
 the borrowed read) equals live modelx bit for bit on all twelve; on the tiled book collect and the direct route at one
 worker give one value. Direct at four workers adds four partial sums and differs in the last bits.
 
-| model | points | direct kept 1w | direct kept 4w | collect 1w | collect 4w | scaling direct / collect | collect without borrowed read 1w / 4w (scaling) | direct without, 4w (scaling) |
+| model | points | (a) direct kept 1w | (a) direct kept 4w | (c) collect 1w | (c) collect 4w | scaling direct / collect | collect without borrowed read 1w / 4w (scaling) | direct without, 4w (scaling) |
 |---|---|---|---|---|---|---|---|---|
 | DIA_US_SEC | 2229 | 1.67/1747 | 0.79/1750 | 0.87/100 | 0.51/108 | 2.13 / 1.73 | 0.87 / 0.53 (1.65x) | |
 | FIA_US_SEC | 1156 | 1.05/1802 | 0.40/1804 | 0.28/99 | 0.12/108 | 2.64 / 2.30 | 0.29 / 0.13 (2.33x) | |
@@ -47,6 +52,10 @@ worker give one value. Direct at four workers adds four partial sums and differs
 | VA_US_SEC | 954 | 1.39/2020 | 0.95/2022 | 0.49/104 | 0.16/117 | 1.46 / 3.01 | 0.43 / 0.17 (2.57x) | 0.97 (1.47x) |
 | VUL_US_SEC | 817 | 2.33/2322 | 2.49/2339 | 1.53/101 | 0.49/116 | 0.94 / 3.10 | 1.58 / 0.50 (3.14x) | |
 | WholeLife_US_SEC | 3178 | 1.56/2363 | 0.59/2364 | 0.54/95 | 0.22/102 | 2.62 / 2.39 | 0.53 / 0.24 (2.25x) | |
+
+(b) a per-policy loop that deletes each item (`Projection[k]`, `del`), with the borrowed read: MYGA_US_SEC 0.34 / 98
+and 0.15 / 122 (2.24x), Term_US_SEC 0.57 / 96 and 0.24 / 148 (2.38x), VA_US_SEC 0.46 / 105 and 0.21 / 163 (2.20x);
+at one worker it equals collect.
 
 The books are small (memory bounds the direct route), so four-worker runs take 0.1-0.5 s and their scaling
 includes thread start and noise. RILA_US_SEC runs slower on four workers than on one on both routes; the cause is
