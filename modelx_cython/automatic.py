@@ -118,9 +118,13 @@ def dense_fits(cell):
 
 
 def primary_capacity(cell):
-    # Formula evaluations are cache misses, counted per receiver rather than
-    # summed across traced policies. Keep the table's existing <=50% load rule.
-    evaluations = getattr(getattr(cell, '_rt', None), 'max_evaluations_per_receiver', 0)
-    if evaluations <= 0:
-        return 0
-    return min(MAX_PRIMARY_ENTRIES, 1 << (2 * evaluations - 1).bit_length())
+    """The initial capacity of a privately owned numeric cache, from the declared or sampled range of its
+    parameters: twice the entries of that range (the table's <= 50% load), a power of two, at most
+    MAX_PRIMARY_ENTRIES; 8 where a parameter has no countable range (a float). The table grows past it."""
+    axes = cell.associative_logical_axes if cell.has_typeinfo() and cell.params else ()
+    if len(axes) != len(cell.params):
+        return 8
+    entries = 1
+    for axis in axes:
+        entries *= max(axis.stop - axis.lower, 1)
+    return min(MAX_PRIMARY_ENTRIES, max(8, 1 << (2 * entries - 1).bit_length()))
