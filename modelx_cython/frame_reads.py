@@ -646,8 +646,8 @@ class FrameReads:
                 found.add(_code(got[0]))
             if not isinstance(root, cst.Name) or root.value in seen:
                 return
-            if root.value == 'self' or root.value in f.other:
-                unknown.append(root.value)
+            if root.value == 'self' or (root.value in f.other and not root.value.startswith('_mx_')):
+                unknown.append(root.value)      # (a generated local, a vector result the compiler fills, is no frame)
             for value in f.values.get(root.value, ()):
                 note(value, (*seen, root.value))
 
