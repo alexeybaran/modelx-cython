@@ -28,19 +28,27 @@ modelx on every point.
    Cells use these entries directly.
    - Items of locked Spaces are read without a dictionary lookup.
 5. **Powers.** Upstream's `powers.py` rewrites a power to C `pow` when its operands are provably real
-   Cells, References or parameters. This change adds the following, each a separate proof or rewrite:
+   Cells, References or parameters. This change adds the following, each a separate proof or rewrite.
+     Figures in this list come from one developer session and are unverified by a second
+     measurement: callgrind instructions per policy on the SEC model's result Cell, single-threaded
+     BLAS, gc off, two runs, noise about 2%.
    - **One-entry memo per Cell.** A real power of a Cell that owns its result goes through
      `_mx_memo_pow`, which keeps the last operands and result, so a repeated power costs a comparison.
-     This saves 2.9% of instructions on Term_US_SEC and 2.7% on MYGA_US_SEC.
+     With the memo on rather than off, instructions fall 2.9% on Term_US_SEC, 2.7% on
+     MYGA_US_SEC and 0.5% on RILA_US_SEC.
    - **Kinds of locals.** A local assigned only real values is real, so a power of it is rewritten too.
    - **Running totals in loops.** A local accumulated with real terms inside a loop keeps its real kind,
-     so powers of the total are rewritten. This saves 5.5% of instructions on DIA.
+     so powers of the total are rewritten. With this on rather than off, DIA uses 5.5% fewer
+     instructions, and boxed floats per policy fall from 19,021 to 14,620.
    - **Conditional expressions and negative exponents.** `a if c else b` is real when both branches
      are. An integral base raised to a negative integer is treated as fractional, so it takes the real
      path, not an integer power.
    - **Indexed typed arrays and mutually dependent locals.** One index per dimension of a Cell's
      typed-memoryview result gives an element of its C type. Locals that depend on each other are
-     proved real together. Together these save 11.6% of instructions on DIA.
+     proved real together. Together, measured as 6c04fe4 against e67f27a (6c04fe4 has the same tree as
+     503b07c), DIA falls from 9.909M to 8.755M instructions per policy (−11.6%), and boxed floats per
+     policy fall from 14,620 to 4,953. The other models change by +0.1% (Term), +0.6% (MYGA) and −0.2%
+     (RILA).
    - **Argument order.** Where Python's semantics depend on the order in which arguments are evaluated,
      that order is kept. Term_JP_S, Term_KR_S and CI_KR_S compile only with this: on upstream, a float
      power inside `min` or `max` is typed complex by Cython 3 and the build stops.
@@ -51,7 +59,10 @@ modelx on every point.
    by pointer. A rebound Reference, and every case outside those domains, takes the fallback: the
    Reference's own function runs. Domain errors, overflows, infinities, NaNs and ints beyond 64 bits
    therefore behave exactly as in live modelx. A user module that happens to be called `math` is not
-   affected. On RILA_US_SEC with four workers, a run fell from 0.151 s to 0.063 s.
+   affected. On RILA_US_SEC with four workers, a run fell from 0.151 s to 0.063 s. That was measured
+   as 1c3f228 against 6c04fe4 on free-threaded CPython 3.14 with four virtual cores, each worker running
+   its own model, best of five. It comes from one developer session; a second session's five
+   alternating rounds are pending.
 7. **Held items of shared Spaces.** A Space result read through a shared Space keeps its items held by
    the compiled model. They are not rebuilt on every read.
 8. **Translation.** The transformer, builder and command line apply mechanisms 1–7. This includes fast
@@ -94,7 +105,8 @@ $ python -c "from Wrap_nomx_cy import Wrap; Wrap.S.x = 2**62; print(Wrap.S.f())"
 -9223372036854775808
 ```
 
-Live modelx returns 9223372036854775808 for the same call.
+Live modelx returns 9223372036854775808 for the same call. This was run at 503b07c, where writing
+0.5 to `x` raises `TypeError: S.x requires an integer, got 0.5`.
 
 The one addition to upstream: a fractional float or a non-number written from Python to an integer
 Reference raises `TypeError` naming the Reference. Upstream truncates it, so a Reference set to 0.5
@@ -163,9 +175,10 @@ and lifelib come from PyPI.
 
 Every value below equals live modelx in every run.
 
-Three sets of figures were taken at 53104d2: the independent benchmark (per-policy times, peak memory
-and compile times), the DV01 parallel book and the census. 53104d2 is a development commit, not part of this series. It still had integer overflow checks and a
-per-Cell Python entry; this series has neither. The other tables were measured on code without them,
+The independent benchmark (per-policy times, peak memory and compile times) and the DV01 parallel book
+were taken at 53104d2, a development commit that is not part of this series. The census was taken at
+5982ebe, an earlier commit of this series. Both commits still had integer overflow checks, and
+53104d2 also had a per-Cell Python entry; the final series has neither. The other tables were measured on code without them,
 at the commit each one names.
 
 ### Values
@@ -188,10 +201,17 @@ the book-total cell. Peak memory is the process's maximum resident set.
 | MYGA_US_SEC | 1,871.8 | 300.6 | 6.23x | 256.0 | 104.0 |
 | RILA_US_SEC | 1,993.3 | 444.9 | 4.48x | 493.9 | 103.9 |
 
-### Instructions per policy against the settled code
+### The borrowed math pointer: 7edf07b against 1c3f228
 
-Ratio of instructions per policy at 7edf07b: Term_US_SEC 1.000, MYGA_US_SEC 1.000, RILA_US_SEC
-0.962.
+Method: the `sec` gate tier. Per policy, a fresh item is built, evaluated cold and released, and
+callgrind counts the instructions. Numeric libraries are single-threaded. Upstream modelx and lifelib
+20d4dae. Compiler 7edf07b against 1c3f228, which is the same code without the borrowed math pointer.
+
+| model | 1c3f228 | 7edf07b | ratio |
+|---|---|---|---|
+| Term_US_SEC | 998,446 | 998,424 | 1.000 |
+| MYGA_US_SEC | 2,337,714 | 2,337,714 | 1.000 |
+| RILA_US_SEC | 3,616,637 | 3,480,441 | 0.962 |
 
 ### Twelve SEC models against upstream (at 503b07c)
 
@@ -204,13 +224,17 @@ progress.
 
 ### Scaling with workers
 
-On a quiet four-virtual-core machine with 32 policies per worker, going from one to four workers
-speeds DIA up 2.95x and RILA up 3.08x. On the same machine, a share-nothing Python loop loses 11% at
-four workers. An independent run on an eight-core machine is pending.
+This uses the same harness as the RILA math figure above, on an idle machine (load under 0.3) with
+four virtual cores and 32 policies per worker. From one to four workers:
+- DIA went from 0.711 s to 0.241 s (2.95x) at e67f27a, and reached 3.24x at 6c04fe4.
+- RILA_US_SEC reached 3.08x.
+
+On the same machine, a share-nothing Python loop loses 11% per thread at four threads. These figures
+come from one developer session. An independent run on an eight-core machine is pending.
 
 | model | 1 worker | 4 workers | 8 workers (eight-core machine) |
 |---|---|---|---|
-| DIA | 1.00x | 2.95x | (pending) |
+| DIA (6c04fe4) | 1.00x | 3.24x | (pending) |
 | RILA_US_SEC | 1.00x | 3.08x | (pending) |
 
 ### Parallel book: SEC DV01 example (at 53104d2)
@@ -224,10 +248,11 @@ rounds. Each figure is the median wall time of the whole book at the given numbe
 | 4 | 4.54 | 2.68x (2.31–2.87 across rounds) | 344 |
 | 8 | 4.10 | 2.97x | 386 |
 
-### Breadth: every lifelib model (at 53104d2)
+### Breadth: every lifelib model (at 5982ebe)
 
-Method: each of the 95 models in upstream lifelib main was built and driven with both compilers on
-one cloud VM per model. Its values were compared with live modelx, instructions per policy were
+Method: the candidate compiler at 5982ebe, an earlier commit of this series, against the upstream
+compiler at d22426f, both with modelx fec516d. Each of the 95 models in lifelib 20d4dae (upstream main
+at the time) was built and driven with both compilers on one cloud VM per model. Its values were compared with live modelx, instructions per policy were
 counted with callgrind, and memory per policy was measured.
 
 - **No regressions.** No model that the current compiler runs fails on this one. 73 models build and
@@ -245,18 +270,18 @@ counted with callgrind, and memory per policy was measured.
   compiler: workbook inputs, old model formats, a missing optional package, and one report column
   returned as integers.
 
-### Calls from Python (at 1c3f228)
+### Calls from Python (at 503b07c)
 
 Method: a one-Space model with a Reference `x = 1` and a Cell `rate(t) = 0.01 * t + x`, sampled at
 t = 0 to 9 and built with `mx2cy --no-spec` by each compiler. The script then runs `p.rate(5)` (a
 cached call) or `p.x = 1` (a write to the integer Reference) in a Python loop. Each figure is callgrind's
 total instructions for 200,000 iterations minus those for none, divided by 200,000, so loop overhead is
-included. Run on Linux x86-64 with free-threaded CPython 3.14 and Cython 3.3.1.
+included. Repeat runs differ by about 2%. Run on Linux x86-64 with free-threaded CPython 3.14 and Cython 3.3.1.
 
 | operation | upstream | this change |
 |---|---|---|
-| `p.rate(5)` | 885 | 819 |
-| `p.x = 1` | 820 | 908 |
+| `p.rate(5)` | 906 | 821 |
+| `p.x = 1` | 818 | 907 |
 
 The write costs more because of the type check described under Integers.
 
@@ -274,7 +299,7 @@ Same machine as the per-policy table, one build of each model with each compiler
 | MYGA_US_SEC | 40.9 | 88.1 | 130.3 | 154.0 | 1.41x |
 | RILA_US_SEC | 60.9 | 127.9 | 160.9 | 190.8 | 1.44x |
 
-Across the census, translation took a median 1.55x the current compiler's time for regional models
+Across the census (at 5982ebe), translation took a median 1.55x the current compiler's time for regional models
 and 1.70x for SEC models. The C build took 1.29x–1.30x.
 
 ## Commits and line counts (upstream d22426f to 503b07c, 14 commits)
