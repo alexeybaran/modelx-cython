@@ -2477,6 +2477,9 @@ class _Rewrite(cst.CSTTransformer):
         kind (float64 or int64; checked for the whole table once, signature kind -4): a typed read whose slot is looked
         up by name (KeyError as pandas). ``prefix``: the codes of a view's prefix, before the key's."""
         o = self.o
+        if isinstance(name, SEVERAL_ROWS):      # ``R.loc[k, ['q']]``: a selection of columns, pandas' own
+            self._record(original, 'pandas', call, 'the column part is a display of several columns')
+            return None
         kinds = {kind for _, kind in schema['columns']}
         up = o.facts.formula.parents.get(id(original))
         consumer = o.facts.formula.parents.get(id(up)) if isinstance(up, cst.Arg) else None
@@ -2498,6 +2501,11 @@ class _Rewrite(cst.CSTTransformer):
         else:
             (suffix, args), conditions = self._read_args(hold, own, levels)
         label = _cast('object', self.updated_of.get(id(name), name))
+        if _literal_str(name) is None:          # a name computed at run time: native only while it is one label
+            o.key_count += 1
+            held = f'_mx_okey_{o.key_count}'
+            conditions = [*conditions, cst.parse_expression(f'{o.module}.is_label(({held} := {_code(label)}))')]
+            label = cst.Name(held)
         if kind is None:            # float(R.loc[key, name]) on columns of several kinds: float of the stored value
             row = self._next(self._m('row' + suffix, o.ref(hold), *args))
             read, kind = self._m('field_f64', o.ref(hold), row, label), 'f64'
@@ -2643,8 +2651,8 @@ class _Rewrite(cst.CSTTransformer):
             label = _literal_str(label)
             if label is None:
                 named = self.named_read(original, updated, call, schema, key, parts[1], [])
-                if named is not None:
-                    return named
+                if named is not None or isinstance(parts[1], SEVERAL_ROWS):
+                    return named or updated
                 self._record(original, 'pandas', call, 'the column is not a literal name, and the columns are '
                              'not all of one kind (float64 or int64)')
                 return updated
