@@ -38,6 +38,7 @@ except ImportError:  # Python -3.9
 from functools import cached_property
 import libcst as cst
 import libcst.matchers as m
+from modelx_cython.syntax import parse_source
 from libcst.metadata import ParentNodeProvider, ScopeProvider, GlobalScope, ClassScope
 
 from modelx_cython.consts import (
@@ -285,7 +286,8 @@ class ModuleVisitor(m.MatcherDecoratableVisitor, ParentScopeAddin):
         self.itemspace_classes = set()
         self.collect_spaces = set()  # classes whose __init__ assigns self._mx_collect_cache
         self.dynamic_ref_classes = set()
-        self.wrapper = cst.metadata.MetadataWrapper(cst.parse_module(source))
+        # a module just parsed holds no node twice: the wrapper needs no copy of it
+        self.wrapper = cst.metadata.MetadataWrapper(parse_source(source), unsafe_skip_copy=True)
         self.wrapper.visit(self)
         self.kwarg_called_names = self._collect_kwarg_called_names()
 

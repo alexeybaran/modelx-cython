@@ -1,8 +1,26 @@
 """Small operations on the compiler's existing LibCST representation."""
 from contextlib import contextmanager
 from dataclasses import fields
+import re
 
 import libcst as cst
+
+# a ``def`` whose body follows its colon on the same line (the passes expect an indented body)
+_ONE_LINE_DEF = re.compile(r'^[ \t]*(?:async[ \t]+)?def\b[^\n]*:[ \t]*[^\s#]', re.M)
+
+
+class _IndentedBodies(cst.CSTTransformer):
+    def leave_FunctionDef(self, before, after):
+        if isinstance(after.body, cst.SimpleStatementSuite):
+            return after.with_changes(body=cst.IndentedBlock(body=(cst.SimpleStatementLine(after.body.body),)))
+        return after
+
+
+def parse_source(source):
+    """Parse a model module; a function written on one line (``def f(t): return t``) gets the
+    indented body of the same statements, as every pass expects."""
+    module = cst.parse_module(source)
+    return module.visit(_IndentedBodies()) if _ONE_LINE_DEF.search(source) else module
 
 
 def code(node):

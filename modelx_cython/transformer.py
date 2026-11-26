@@ -93,7 +93,7 @@ from modelx_cython.consts import (
     is_user_defined,
 )
 
-from modelx_cython.syntax import dotted_name, literal_value, same_expression
+from modelx_cython.syntax import dotted_name, literal_value, parse_source, same_expression
 from modelx_cython.typedefs import CY_BOOL_T, CY_INT_T, primitive_kind
 
 
@@ -599,7 +599,7 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
         """
         super().__init__()
         self.wrapper = (module.visitor.wrapper if module.visitor.source == source else
-                        cst.metadata.MetadataWrapper(cst.parse_module(source)))
+                        cst.metadata.MetadataWrapper(parse_source(source), unsafe_skip_copy=True))
         self._module_node = self.wrapper.module
         self._source = source
         self.module = module
