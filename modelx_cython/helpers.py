@@ -135,7 +135,7 @@ class HelperCalls(FormulaTransformer):
             return updated
         operation = 'm_' + name
         if name in ('floor', 'ceil'):
-            kind = argument_kind(updated.args[0].value, self.current, self.cells, self.refs)
+            kind = argument_kind(original.args[0].value, self.current, self.cells, self.refs, self.formula_name)
             if kind in ('double', 'longlong'):
                 operation += '_ll'
         self.used.add(MATH_PROVIDER)
@@ -173,7 +173,9 @@ class HelperCalls(FormulaTransformer):
                      or isinstance(value, cst.Name)
                      or isinstance(value, cst.Attribute) and isinstance(value.value, cst.Name)
                      and value.value.value == 'self')
-            if not plain or argument_kind(value, self.current, self.cells, self.refs) not in ('double', 'longlong'):
+            written = next(arg.value for arg in original.args if arg.keyword is not None and arg.keyword.value == name)
+            if not plain or argument_kind(written, self.current, self.cells, self.refs,
+                                          self.formula_name) not in ('double', 'longlong'):
                 self.decline(original, f'math.isclose {name} is not a float or integer literal, '
                              'typed Reference or parameter; runs as a Python call')
                 return updated
@@ -211,6 +213,10 @@ class HelperCalls(FormulaTransformer):
         """diag-scale P1: ``node`` is a name bound by the formula's own ``import math`` (see
         _ScopedHelperCalls); the base binder knows no lexical scopes and finds none."""
         return False
+
+    def formula_name(self, node):
+        """``node`` (a Name) is the formula's own parameter; the base binder knows no scopes."""
+        return True
 
     def namespace(self, value):
         """The borrowed namespace argument of a math provider call: the module Reference itself, or
@@ -279,6 +285,7 @@ class _ScopedHelperCalls(HelperCalls):
         self.math_imports = {}          # diag-scale P1: top-level ``import math [as n]`` node -> name
         self.math_aliases = set()
         self.math_lowered = set()       # alias names with at least one lowered member
+        self.formula_params = frozenset()   # ids of the formula's parameter nodes
 
     def local_math(self, node):
         """``node`` is a load of a name whose only binding in the formula is a top-level
@@ -304,6 +311,15 @@ class _ScopedHelperCalls(HelperCalls):
         self.math_aliases.add(node.value)
         return True
 
+    def formula_name(self, node):
+        """``node`` is read where its only binding is a parameter of the formula itself: a lambda or
+        comprehension name that shadows a typed parameter has another type."""
+        scope = self.get_metadata(cst.metadata.ScopeProvider, node, None)
+        if scope is None:
+            return False
+        assignments = tuple(scope[node.value])
+        return bool(assignments) and all(id(a.node) in self.formula_params for a in assignments)
+
     def line_of(self, node):
         position = self.get_metadata(cst.metadata.PositionProvider, node, None)
         if position is None or self.first_line is None:
@@ -315,6 +331,7 @@ class _ScopedHelperCalls(HelperCalls):
             parameters = (*node.params.posonly_params, *node.params.params)
             if parameters and parameters[0].name.value == 'self':
                 self.receiver = parameters[0]
+            self.formula_params = frozenset(id(p) for p in (*parameters, *node.params.kwonly_params))
             position = self.get_metadata(cst.metadata.PositionProvider, node.name, None)
             self.first_line = position.start.line if position is not None else None
         return cst.CSTTransformer.on_visit(self, node)
