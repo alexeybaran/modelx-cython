@@ -159,7 +159,7 @@ class FrameReads:
         self.held_string_selector = None
 
     def note_of(self, node):
-        return self.notes.get(normal(_code(node)))
+        return None     # table reads take no decision from the sample's notes (the audit still reports them)
 
     def audit(self, native_node):
         """The table reads the sample saw in this formula that were not lowered: (expression, reason, ...)."""
