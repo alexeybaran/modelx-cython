@@ -186,6 +186,8 @@ cdef bint selects_rows(object key)
 
 cdef inline bint is_label(_key_t key) noexcept:
     if _key_t is object:
+        if type(key) is str or type(key) is int or type(key) is float:     # the common labels: no call
+            return True
         return not selects_rows(key)
     else:
         return True
