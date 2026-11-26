@@ -50,6 +50,7 @@ try:
 except ImportError: # Python -3.9
     NoneType = type(None)
 
+import logging
 import textwrap
 from functools import cached_property
 import libcst as cst
@@ -59,10 +60,17 @@ from libcst._nodes.statement import BaseStatement, ClassDef
 from libcst._removal_sentinel import RemovalSentinel
 import libcst.matchers as m
 from libcst.metadata import ParentNodeProvider, ScopeProvider, GlobalScope, ClassScope
+from libcst.metadata.scope_provider import BuiltinAssignment
 
 from modelx_cython.parser import ParentScopeAddin
 from modelx_cython.builder import ModuleInfo, CombinedCellsInfo
+from modelx_cython.config import TransSpec
 from modelx_cython.powers import rewrite_powers
+from modelx_cython.inline_entries import add_inline_entries, allows_exact_receiver
+from modelx_cython.cell_entries import CacheHit, DenseEntry, dense_condition
+from modelx_cython import numeric_cache
+from modelx_cython import holds
+from modelx_cython import value_storage
 
 from modelx_cython.consts import (
     FORMULA_PREF,
@@ -81,7 +89,30 @@ from modelx_cython.consts import (
     is_user_defined,
 )
 
+from modelx_cython.syntax import dotted_name, parse_source, same_expression
 from modelx_cython.typedefs import CY_BOOL_T
+
+
+def _outside_logical_domain(cell, axes):
+    bounds = ', '.join(f'{axis.key} in [{axis.lower}, {axis.stop})' for axis in axes)
+    message = (f'{cell.model_path}: argument index out of range. Expected {bounds}. '
+               f'Sample the required indices or set {TransSpec.CELLS_PARAM_SIZE!r} in the spec.')
+    return f'raise IndexError({message!r})\n'
+
+
+def _guard_associative_cache(cell, body):
+    axes = cell.associative_logical_axes if cell.has_typeinfo() else ()
+    condition = dense_condition(axes)
+    if not condition or condition == "True":
+        return body
+    outside = textwrap.indent(_outside_logical_domain(cell, axes), '    ')
+    guard = cst.parse_statement(f'if not ({condition}):\n{outside}')
+    return body.with_changes(body=(guard, *body.body))
+
+
+
+_logger = logging.getLogger(__name__)
+
 
 class PXDGenerator:
     """Generate a Cython ``.pxd`` declaration file for a model module.
@@ -124,6 +155,7 @@ class PXDGenerator:
 
     {private_var_defs}
     {public_var_defs}
+    {value_var_defs}
 
         cpdef {MX_COPY_REFS}({class_name} self, object base, object base_root)
 
@@ -153,6 +185,9 @@ class PXDGenerator:
         with newlines.
         """
         stmts = []
+        from modelx_cython.native_sources import module_name
+        for provider in sorted(numeric_cache.providers(self.module)):
+            stmts.append(f'from {self.package} cimport {module_name(provider)}')
         for ci in self.module.cimports:
             stmts.append(f"cimport {ci}")
         return "\n".join(stmts)
@@ -198,15 +233,19 @@ class PXDGenerator:
             ``cls_template`` filled with the class's variable and
             method declarations, indented for the class body.
         """
-        return self.cls_template.format(
+        block = self.cls_template.format(
             class_name=name,
             MX_SYS_MOD=MX_SYS_MOD,
             private_var_defs=textwrap.indent(self.private_var_defs(name), ' ' * 4),
             public_var_defs=textwrap.indent(self.public_var_defs(name), ' ' * 4),
+            value_var_defs=textwrap.indent(
+                ''.join(value_storage.pxd_declarations(self.module.classes[name])), ' ' * 4),
             MX_COPY_REFS=MX_COPY_REFS,
             private_meth_defs=textwrap.indent(self.private_meth_defs(name), ' ' * 4),
             public_meth_defs=textwrap.indent(self.public_meth_defs(name), ' ' * 4)
         )
+        value_storage.check_last(block, self.module.classes[name])
+        return block
 
     @cached_property
     def child_cimports(self):
@@ -228,7 +267,7 @@ class PXDGenerator:
 
         For each non-special cells with a ``_f_`` formula method: a
         cells with parameters gets a C-array value cache ``_v_<name>``
-        and a ``bint`` flag array ``_has_<name>`` when typed and
+        and a flag array ``_has_<name>`` when typed and
         arrayable, or a single ``cdef dict _v_<name>`` otherwise; a
         cells without parameters gets a scalar ``_v_<name>`` of its
         return type plus a ``bint`` flag ``_has_<name>``.  Uncached
@@ -247,6 +286,10 @@ class PXDGenerator:
 
         cls_info = self.module.classes[cls_name]
         decl_stmts = []
+        if cls_name in self.module.visitor.dynamic_ref_classes:
+            decl_stmts.append("cdef dict __dict__\n")
+        # What an item holds from shared inputs (holds.HoldTable)
+        decl_stmts.extend(holds.pxd_declarations(cls_info))
         for cells in cls_info.cells.values():
 
             assert cells.module == self.module.fqname
@@ -254,6 +297,8 @@ class PXDGenerator:
 
             if cells.is_special():
                 continue
+            if memo := getattr(cells, 'power_memo', None):
+                decl_stmts.append(f"cdef {MX_SYS_MOD}.PowerMemo {memo}\n")
 
             if not cells.has_formula_def:
                 # uncached cells: the public method is the formula itself
@@ -263,15 +308,15 @@ class PXDGenerator:
             if cells.has_args():
                 if cells.has_typeinfo() and cells.is_arrayable():
 
-                    var_name = VAR_PREF + cells.name
-                    var_type = cells.get_array_decl_expr(c_style=True)
-                    decl_stmts.append(f"cdef {var_type} {var_name}\n")
-
+                    # The value array is declared with the class's last members (value_var_defs)
                     has_name = HAS_PREF + cells.name
-                    has_type = cells.get_array_decl_expr(
-                                rettype_expr=CY_BOOL_T, c_style=True)
+                    has_type = cells.get_readiness_array_decl_expr(c_style=True)
                     decl_stmts.append(f"cdef {has_type} {has_name}\n")
+                    if cells.has_dense_spill:
+                        decl_stmts.append(f"cdef dict _spill_{cells.name}\n")
 
+                elif cells.uses_native_numeric_cache:
+                    decl_stmts.append(f'cdef {numeric_cache.storage(cells)} {VAR_PREF + cells.name}\n')
                 else:
                     decl_stmts.append(f"cdef dict {VAR_PREF + cells.name}\n")
             else:
@@ -282,11 +327,11 @@ class PXDGenerator:
         return "".join(decl_stmts)
 
     def public_var_defs(self, cls_name):
-        """``cdef public`` declarations for refs and child spaces.
+        """Externally readable declarations for refs and child spaces.
 
-        Emits one typed ``cdef public`` line per ref (skipping refs
-        that name a child space, which are declared below), followed
-        by one line per child space typed as
+        A signed integer Reference uses a readonly descriptor so that
+        Python writes use the checked attribute setter. Child spaces
+        are declared as
         ``<module>._mx_classes._c_<space>``, where ``<module>`` is the
         class's own submodule (``_m_`` plus the class name suffix).
 
@@ -301,12 +346,13 @@ class PXDGenerator:
             Concatenated declaration lines.
         """
 
+        cls_info = self.module.classes[cls_name]
         decl_stmts = []
-        for ref in self.module.classes[cls_name].refs.values():
+        for ref in cls_info.refs.values():
 
             assert ref.module == self.module.fqname and ref.cls == cls_name
 
-            if ref.name in self.module.classes[cls_name].spaces:
+            if ref.name in cls_info.spaces:
                 # declared below as a child space
                 continue
 
@@ -380,7 +426,8 @@ class PXDGenerator:
             if cells.is_special():
                 continue
 
-            if not cells.has_formula_def or cells.formula_is_generator:
+            if (not cells.has_formula_def or cells.formula_is_generator
+                    or cells.formula_has_captured_default):
                 # no _f_ method exists, or it stays a plain Python method
                 continue
 
@@ -451,6 +498,19 @@ class PXDGenerator:
         return "".join(decl_stmts)
 
 
+class _FirstRead:
+    """A mapping read through ``get`` only, computed on the first read."""
+
+    def __init__(self, compute):
+        self._compute = compute
+        self._mapping = None
+
+    def get(self, key, default=None):
+        if self._mapping is None:
+            self._mapping = self._compute()
+        return self._mapping.get(key, default)
+
+
 class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
     """Rewrite a model module into Cython pure-Python mode.
 
@@ -497,24 +557,70 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
         modelx exported it.
         """
         super().__init__()
-        self.wrapper = cst.metadata.MetadataWrapper(cst.parse_module(source))
+        self.wrapper = (module.visitor.wrapper if module.visitor.source == source else
+                        cst.metadata.MetadataWrapper(parse_source(source), unsafe_skip_copy=True))
         self._module_node = self.wrapper.module
+        self._source = source
         self.module = module
         self.package = module.fqname.split(".")[0]
         self._resolver = resolver
         self._cells_kinds = cells_kinds or {}
         self._ref_kinds = ref_kinds or {}
+        self.helper_providers = set()
+        self.dense_entries = {}
+        self.formula_entries = {}
+        self.function_origins = {}      # {private entry of an uncached Cell: (class, Cell)}
+        self.entry_domains = {}         # {private entry of an uncached Cell: its argument domain}
+        self.helper_providers.update(numeric_cache.providers(module))
 
-    def _rewrite_powers(self, node, cls_info, cells):
+    def _compact_spill(self, cells, cls_name, source):
+        index = len(self._cold_spills)
+        name = f'_mx_compact_spill_{index}'
+        while name in self._source:
+            name += '_'
+        params = ', '.join(f'{p}: {cells.get_argtype_expr(p)}' for p in cells.params)
+        result = cells.get_rettype_expr()
+        self._cold_spills.append(cst.parse_statement(
+            f'\n\n@{CY_MOD}.cfunc\n@{CY_MOD}.exceptval(-1, check=True)\n'
+            f'def {name}(self: {cls_name}, {params}) -> {result}:\n'
+            + textwrap.indent(source, '    ')))
+        return name, f'{name}(self, {", ".join(cells.params)})'
+
+    def _rewrite_powers(self, node, cls_info, cells, scope):
         """Rewrite the provably real ``**`` of one formula body.
 
         See :mod:`modelx_cython.powers`; the node is returned unchanged
         when no operand pair can be typed.
         """
-        return rewrite_powers(
+        from modelx_cython import held_arrays
+        builtin_float = bool(scope['float']) and all(isinstance(binding, BuiltinAssignment)
+                                                     for binding in scope['float'])
+        # a typed-memoryview Cell read by subscript is held per item (no slice copy per evaluation)
+        node = held_arrays.lower(node, cls_info, cells, self._held_arrays)
+        cells.formula_allows_exact_receiver = allows_exact_receiver(node, cls_info.name)
+        node = rewrite_powers(
             node, self._resolver, self._cells_kinds, self._ref_kinds,
-            cls_info.fqname, cells,
+            cls_info.fqname, cells, builtin_float=builtin_float,
         )
+        from modelx_cython.ordered_arguments import preserve_argument_order
+        from modelx_cython.powers import OperandKind, kind_of_type_expr, formula_local_kinds
+        param_kinds = {name: kind_of_type_expr(cells.get_argtype_expr(name, c_style=True, formula=True))
+                       for name in cells.params} if cells.has_args() and cells.has_typeinfo() else {}
+        # locals proven of one kind by every assignment: `k = calendar_year(t) - year`
+        # then `base ** k` is an integer exponent, as the same expression written inline is
+        # analysed on the first read: most formulas have no operand the passes below classify
+        local_kinds = _FirstRead(lambda: {**formula_local_kinds(
+            node, cells.params, self._resolver, self._cells_kinds, self._ref_kinds, cls_info.fqname,
+            param_kinds), **param_kinds})
+        operand_kind = OperandKind(self._resolver, self._cells_kinds, self._ref_kinds,
+                                   cls_info.fqname, local_kinds)
+        node = preserve_argument_order(node,
+            native_result=cells.get_rettype_expr(c_style=True) in ('double', 'long long', 'bint'),
+            operand_kind=operand_kind)
+        from modelx_cython import space_results
+        if self._resolver is not None:
+            node, _ = space_results.lower(node, cls_info, cells, scope, operand_kind, self._pin_held_item)
+        return node
 
     @property   # cannot use cached_property in Transformer
     def transformed(self):
@@ -523,7 +629,19 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
         Each access re-runs the transformation by visiting the
         wrapped module with this transformer.
         """
+        self._cold_spills = []
+        self._held_arrays = {}
+        self._dense_layouts = {}
+        from modelx_cython.scopes import Names
+        self._held_names = Names(self._module_node)
+        self._held_pins = {}
         return self.wrapper.visit(self)
+
+    def _pin_held_item(self, owner, producer):
+        key = owner, producer
+        if key not in self._held_pins:
+            self._held_pins[key] = self._held_names.reserve(f'_mx_pin_held_item_{len(self._held_pins)}')
+        return self._held_pins[key]
 
     def leave_Module(self, original_node: Module, updated_node: Module) -> Module:
         """Prepend cimports of ``_mx_sys`` and each child-space module,
@@ -532,13 +650,18 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
         # cimports for child spaces
         parent = ".".join(self.module.fqname.split(".")[:-1])
         stmts = []
+        from modelx_cython.native_sources import module_name
+        from modelx_cython.exceptions import NumericExceptions
+        for provider in sorted(self.helper_providers):
+            stmts.append(cst.parse_statement(
+                f'from cython.cimports.{self.package} import {module_name(provider)}'))
         for child in self.module.sub_modules:
             stmts.append(cst.parse_statement(
                 f"from cython.cimports.{parent} import {child}",
                 config=updated_node.config_for_parsing,
             ))
 
-        return updated_node.with_changes(
+        module = updated_node.with_changes(
             body=(
                 cst.parse_statement(
                     f"from cython.cimports.{self.package} import {MX_SYS_MOD}",
@@ -551,6 +674,47 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
                 *updated_node.body,
             )
         )
+        scope = self.get_metadata(ScopeProvider, original_node)
+        if not any(assignment.name == "type" for assignment in scope.assignments):
+            # Exact type alone cannot rule out overrides on a receiver with a dict.
+            ordinary = {name: cls for name, cls in self.module.classes.items()
+                        if name not in self.module.visitor.dynamic_ref_classes}
+            (module, self.dense_entries, self.formula_entries, self.function_origins,
+             self.entry_domains) = add_inline_entries(
+                module, ordinary, self._dense_layouts)
+        if self._cold_spills or self._held_arrays:
+            module = module.with_changes(body=(*module.body, *self._cold_spills,
+                                               *(stmt for held in self._held_arrays.values() for stmt in held.body)))
+        if self._held_pins:
+            from modelx_cython.space_results import pin_function
+            pins = [pin_function(name, *key) for key, name in self._held_pins.items()]
+            module = module.with_changes(body=(*module.body, *pins))
+        # One root construction and release per compiled ItemSpace class
+        from modelx_cython import item_roots
+        roots = [fn for name in sorted(self.module.visitor.itemspace_classes) if name in self.module.classes
+                 for fn in item_roots.functions(name)]
+        if roots:
+            module = module.with_changes(body=(*module.body, *roots))
+        # Dense cache values left unwritten at allocation, installed when the module is imported
+        values = ''.join(value_storage.functions(cls) for cls in self.module.classes.values())
+        if values:
+            values += value_storage.install(self.module.classes.values())
+            module = module.with_changes(body=(*module.body, *cst.parse_module(values).body))
+        directives = []
+        if any(getattr(cell, 'power_memo', None) for cls in self.module.classes.values()
+               for cell in cls.cells.values()):
+            # Native memo structs contain only scalars. Use Cython's standard
+            # serializer; the module directive also works in pure-Python mode.
+            directives.append('auto_pickle=True')
+        if self.module.spec.policy.infer_types:
+            # Spec key infer_types: C integer inference in generated model modules; providers keep
+            # their own directives.
+            directives.append('infer_types=True')
+        if directives:
+            module = module.with_changes(header=(
+                cst.EmptyLine(comment=cst.Comment('# cython: ' + ', '.join(directives))), *module.header))
+        # C functions returning a C number propagate exceptions (exceptval)
+        return module.visit(NumericExceptions())
 
     def leave_ClassDef(
         self, original_node: ClassDef, updated_node: ClassDef
@@ -581,26 +745,21 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
 
                 if cells.has_args():
                     if cells.has_typeinfo() and cells.is_arrayable():
-                        decl_stmts.append(
-                            cst.parse_statement(
-                                VAR_PREF
-                                + cells.name
-                                + ": "
-                                + cells.get_array_decl_expr(),
-                                config=self._module_node.config_for_parsing,
-                            )
-                        )
+                        # The value array is annotated after every other member (value_storage)
                         decl_stmts.append(
                             cst.parse_statement(
                                 HAS_PREF
                                 + cells.name
                                 + ": "
-                                + cells.get_array_decl_expr(
-                                    rettype_expr=f"{CY_MOD}.{CY_BOOL_T}",
-                                ),
+                                + cells.get_readiness_array_decl_expr(),
                                 config=self._module_node.config_for_parsing,
                             )
                         )
+                        if cells.has_dense_spill:
+                            decl_stmts.append(cst.parse_statement(f'_spill_{cells.name}: dict\n'))
+                    elif cells.uses_native_numeric_cache:
+                        decl_stmts.append(cst.parse_statement(
+                            f'{VAR_PREF + cells.name}: {numeric_cache.storage(cells)}\n'))
                     else:
                         decl_stmts.append(
                             cst.parse_statement(
@@ -664,6 +823,13 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
 
                 decl_stmts.append(stmt)
 
+            for cell in self.module.classes[cls_name].cells.values():
+                if memo := getattr(cell, 'power_memo', None):
+                    decl_stmts.append(cst.parse_statement(f'{memo}: {MX_SYS_MOD}.PowerMemo\n'))
+            decl_stmts.extend(cst.parse_statement(line)
+                              for line in holds.py_declarations(self.module.classes[cls_name]))
+            decl_stmts.extend(cst.parse_statement(line)
+                              for line in value_storage.py_declarations(self.module.classes[cls_name]))
             decorator = cst.Decorator(
                 decorator=cst.Attribute(value=cst.Name(CY_MOD), attr=cst.Name("cclass"))
             )
@@ -780,6 +946,10 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
         for param in param_list:
             param_name = param.name.value
             type_expr = cells.get_argtype_expr(param_name, formula=formula)
+            if type_expr == 'str':
+                # a Python object parameter accepts None as Python does; the bare annotation
+                # makes Cython reject None (at the Python entry, and at a direct C call)
+                type_expr = 'str | None'
             if type_expr:
                 updated_params.append(
                     param.with_changes(
@@ -841,6 +1011,16 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
             meth_name = original_node.name.value
             cls_info = self.module.classes[cls_name]
 
+            if meth_name == '__init__':
+                initializers = []
+                for cell in cls_info.cells.values():
+                    if cell.uses_native_numeric_cache:
+                        initializers.append(cst.parse_statement(
+                            f'self._v_{cell.name} = {numeric_cache.constructor(cell)}\n'
+                        ))
+                return updated_node.with_changes(body=updated_node.body.with_changes(
+                    body=(*updated_node.body.body, *initializers)))
+
             if meth_name[: len(FORMULA_PREF)] == FORMULA_PREF:
                 # _f_ methods
                 cells = cls_info.cells.get(meth_name[len(FORMULA_PREF):])
@@ -850,8 +1030,18 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
                     # leave as a plain Python method
                     return updated_node
 
+                scope = self.get_metadata(ScopeProvider, original_node.body)
+                if any(isinstance(binding.node, cst.Param)
+                       and binding.node.default is not None
+                       and any(access.scope is not scope for access in binding.references)
+                       for binding in scope.assignments):
+                    # Cython's pxd-declared optional C arguments are not
+                    # initialized in the closure. A compiled def binds them
+                    # through its normal Python argument handling.
+                    cells.formula_has_captured_default = True
+                    return updated_node
                 updated_node = self._rewrite_powers(
-                    updated_node, cls_info, cells)
+                    updated_node, cls_info, cells, scope)
 
                 decorators = [
                     cst.Decorator(
@@ -906,12 +1096,17 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
             elif meth_name == "__call__":
                 # Special methods
                 cells = cls_info.cells[meth_name]
+                if cls_name in self.module.visitor.itemspace_classes:
+                    updated_node = _fast_item_call(updated_node, cls_name)
 
                 if cells and cells.has_typeinfo() and cells.has_args():
                     parameters = self._add_param_type_hints(
                         updated_node, cls_name=cls_name
                     )
                     return updated_node.with_changes(params=parameters)
+
+            elif meth_name == "__delitem__" and cls_name in self.module.visitor.itemspace_classes:
+                updated_node = _releasing_delitem(updated_node, cls_name)
 
             elif meth_name[:2] == "__":
                 # Special methods
@@ -929,7 +1124,7 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
                 if not cells.has_formula_def:
                     # uncached cells: the body is the formula itself
                     updated_node = self._rewrite_powers(
-                        updated_node, cls_info, cells)
+                        updated_node, cls_info, cells, self.get_metadata(ScopeProvider, original_node.body))
 
                 if cells.called_with_kwargs:
                     # C-level calls are positional-only, so a cells called
@@ -967,7 +1162,8 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
                     if cells.has_typeinfo() and cells.is_arrayable():
 
                         # Construct indented_block to replace the original one
-                        c_idx_expr = ''.join([f"[{p}]" for p in cells.params])
+                        axes = cells.dense_axes
+                        c_idx_expr = ''.join(f'[{axis.index_expr}]' for axis in axes)
                         param_expr = f"{', '.join([p for p in cells.params])}"
 
                         has_expr = f"{MX_SELF}.{HAS_PREF}{meth_name}{c_idx_expr}"
@@ -975,31 +1171,74 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
                         f_expr = f"{MX_SELF}.{FORMULA_PREF}{meth_name}({param_expr})"
 
                         args = tuple(cells.params)
-                        size = cls_info.cells_arg_sizes[args]
+                        idx_range = dense_condition(axes)
 
-                        idx_range = " and ".join(
-                            [f"(0 <= {p} < {i})" for p, i in zip(args, size)])
-
+                        # A shared Space's dense cache is filled by concurrent workers: its flag is
+                        # published after the value (release) and read before it (acquire).
+                        published = not cells.is_locked and not numeric_cache.exclusively_owned(cells)
+                        ready_expr = (f"{MX_SYS_MOD}._mx_load_dense_flag({CY_MOD}.address({has_expr}))"
+                                      if published else has_expr)
+                        ready_store = (f"{MX_SYS_MOD}._mx_store_dense_flag({CY_MOD}.address({has_expr}), True)"
+                                       if published else f"{has_expr} = True")
                         if cells.is_locked:
                             cache_body = self._locked_body(
                                 has_expr, v_expr, f_expr, indent=4)
                         else:
                             cache_body = textwrap.dedent(f"""\
-                                if {has_expr}:
+                                if {ready_expr}:
                                     return {v_expr}
                                 else:
                                     val = {f_expr}
                                     {v_expr} = val
-                                    {has_expr} = True
+                                    {ready_store}
                                     return val
                                 """)
+                        logical_axes = cells.dense_logical_axes
+                        logical_guard = dense_condition(logical_axes)
+                        outside = _outside_logical_domain(cells, logical_axes)
+                        spill_branch = ''
+                        spill_entry = None
+                        if cells.has_dense_spill:
+                            key = '(' + ', '.join(args) + (',' if len(args)==1 else '') + ')'
+                            cache = f'self._spill_{meth_name}'
+                            value = 'val'
+                            while value in args:
+                                value += '_'
+                            spill = (f'if {cache} is None:\n    {cache} = {{}}\n'
+                                     f'try:\n    return {cache}[{key}]\n'
+                                     f'except KeyError:\n    pass\n'
+                                     f'{value} = {f_expr}\n{cache}[{key}] = {value}\nreturn {value}\n')
+                            if cells.is_locked:
+                                spill = f'with self.{MX_LOCK}:\n' + textwrap.indent(spill, '    ')
+                            if cells.has_inferred_dense_domain or cells.has_shifted_cache:
+                                spill = (f'if not ({logical_guard}):\n'
+                                         + textwrap.indent(outside, '    ') + spill)
+                            if cells.has_inferred_dense_domain:
+                                spill_entry, helper = self._compact_spill(cells, cls_name, spill)
+                                outside = f'return {helper}\n'
+                            elif cells.has_shifted_cache:
+                                outside = spill
+                            else:
+                                spill_entry, helper = self._compact_spill(cells, cls_name, spill)
+                                spill_branch = f'elif {logical_guard}:\n    return {helper}\n'
                         if_stmt = (
                             f"if {idx_range}:\n"
                             + textwrap.indent(cache_body, " " * 4)
+                            + spill_branch
                             + "else:\n"
-                            + '    raise IndexError("array index out of range")\n')
+                            + textwrap.indent(outside, '    '))
                         if_node = cst.parse_statement(
                             if_stmt, config=self._module_node.config_for_parsing
+                        )
+                        hit = None
+                        if not cells.is_locked and len(axes) == 1 and axes[0].c_type == 'long long':
+                            hit = CacheHit(cst.parse_expression(ready_expr),
+                                           cst.parse_expression(v_expr), if_node.test)
+                        self._dense_layouts[cls_name, meth_name] = DenseEntry(
+                            cls_name, FORMULA_PREF + meth_name, axes, cells.has_dense_spill,
+                            logical_axes if spill_entry else (), spill_entry,
+                            spill_entry is not None and cells.has_inferred_dense_domain,
+                            if_node.test, hit,
                         )
                         indented_block = cst.ensure_type(
                             updated_node.body, cst.IndentedBlock
@@ -1011,26 +1250,48 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
                             returns=returns,
                             body=indented_block,
                         )
+                    elif cells.uses_native_numeric_cache:
+                        body = numeric_cache.body(cells)
+                        from modelx_cython.admission import over_limit_warning, use_warning
+                        if (warning := over_limit_warning(cells)) is not None:
+                            _logger.warning(warning)
+                        if (warning := use_warning(cells)) is not None:
+                            _logger.warning(warning)
                     else:
                         if cells.is_locked:
-                            # the exported body is already double-checked
-                            # and the dict is created in __init__
+                            # __init__ installs the dict before any worker can read it.
                             body = updated_node.body
                         else:
                             body = self._add_dict_assign(meth_name, updated_node)
-                        return updated_node.with_changes(
-                            decorators=decorators,
-                            params=parameters,
-                            returns=returns,
-                            body=body
-                        )
+                        key_types = {"bint", "long long", "double"}
+                        if not cells.is_locked:
+                            key_types.add("str")
+                        if (cells.has_typeinfo() and not cells.is_array_returned
+                                and cells.get_rettype_expr(c_style=True)
+                                in {"bint", "long long", "double"}
+                                and all(cells.get_argtype_expr(p, c_style=True)
+                                        in key_types
+                                        for p in cells.params)):
+                            body = self._single_lookup_body(meth_name, body, cells.params)
+                    return updated_node.with_changes(
+                        decorators=decorators,
+                        params=parameters,
+                        returns=returns,
+                        body=_guard_associative_cache(cells, body)
+                    )
                 else:   # No type info, no arg
-                    if cells.is_locked:
+                    flag = f"{MX_SELF}.{HAS_PREF}{meth_name}"
+                    cache = f"{MX_SELF}.{VAR_PREF}{meth_name}"
+                    formula = f"{MX_SELF}.{FORMULA_PREF}{meth_name}()"
+                    shared = (cells.has_formula_def and not cells.is_locked
+                              and not numeric_cache.exclusively_owned(cells))
+                    if cells.is_locked or shared:
+                        if cells.is_locked:
+                            body = self._locked_body(flag, cache, formula)
+                        else:
+                            body = self._shared_body(flag, cache, formula, cells.get_rettype_expr())
                         stmts = cst.parse_module(
-                            self._locked_body(
-                                f"{MX_SELF}.{HAS_PREF}{meth_name}",
-                                f"{MX_SELF}.{VAR_PREF}{meth_name}",
-                                f"{MX_SELF}.{FORMULA_PREF}{meth_name}()"),
+                            body,
                             config=self._module_node.config_for_parsing
                         ).body
                         return updated_node.with_changes(
@@ -1047,6 +1308,65 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
 
 
         return updated_node
+
+    @staticmethod
+    def _single_lookup_body(meth_name, body, params=()):
+        cache = f"{MX_SELF}.{VAR_PREF}{meth_name}"
+        module = cst.Module([])
+        value_name = '_mx_cache_value'
+        while value_name in params:
+            value_name += '_'
+
+        def is_cache(node):     # the exporter's dict cache of this Cell: ``self._v_<cell>``
+            return (isinstance(node, cst.Attribute) and isinstance(node.value, cst.Name) and node.value.value == MX_SELF
+                    and node.attr.value == VAR_PREF + meth_name)
+
+        class Lookup(cst.CSTTransformer):
+            def leave_If(self, original_node, updated_node):
+                test = updated_node.test
+                if (not isinstance(test, cst.Comparison)
+                        or len(test.comparisons) != 1
+                        or not isinstance(test.comparisons[0].operator, cst.In)
+                        or not is_cache(test.comparisons[0].comparator)):
+                    return updated_node
+                key = module.code_for_node(test.left)
+                assignment = cst.parse_statement(
+                    f"{value_name} = {cache}.get({key})\n")
+                hit = cst.parse_statement(f"if {value_name} is not None:\n    return {value_name}\n")
+                return cst.FlattenSentinel((assignment, hit.with_changes(orelse=updated_node.orelse)))
+
+        # A numeric C return cannot contain None, so None is an unambiguous miss.
+        declaration = cst.parse_statement(f"{value_name}: object\n")
+        body = body.visit(Lookup())
+        return body.with_changes(body=(declaration,) + body.body)
+
+    @staticmethod
+    def _shared_body(has_expr: str, v_expr: str, f_expr: str, rettype: str) -> str:
+        """The body of a zero-argument cached cells of a Space shared by threads and not locked.
+
+        An instance of a Space that is not an ItemSpace (or that has dynamic References) can be
+        read by several threads at once, e.g. the Data Space by several worker threads. The
+        value is published once: a thread that misses runs the formula without a lock, then
+        stores the value and the flag inside ``cython.critical_section`` on the instance, only
+        if no other thread has stored one, so the field is written once and never cleared under
+        a reader; the flag is written through ``_mx_store_flag`` (a release store) after the
+        value and read through ``_mx_load_flag`` (an acquire load), so a reader that sees the
+        flag sees the whole value. Racing threads may each run the formula; all return the one
+        stored value. On a build with the GIL the critical section is a no-op and the stores do
+        not release the GIL.
+        """
+        load = f"{MX_SYS_MOD}._mx_load_flag({CY_MOD}.address({has_expr}))"
+        store = f"{MX_SYS_MOD}._mx_store_flag({CY_MOD}.address({has_expr}), True)"
+        return textwrap.dedent(f"""\
+            if {load}:
+                return {v_expr}
+            val: {rettype} = {f_expr}
+            with {CY_MOD}.critical_section({MX_SELF}):
+                if not {has_expr}:
+                    {v_expr} = val
+                    {store}
+            return {v_expr}
+            """)
 
     @staticmethod
     def _locked_body(has_expr: str, v_expr: str, f_expr: str, indent=0) -> str:
@@ -1094,3 +1414,138 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
             updated_node.body, cst.IndentedBlock
         ).with_changes(body=(init_stmt,) + updated_node.body.body)
 
+
+
+def _releasing_delitem(node, cls_name):
+    """Deleting an item also breaks the item's references to itself.
+
+    The exported ``__delitem__`` is ``del self._mx_itemspaces[item]``. An item holds itself in
+    ``_space`` and ``_mx_roots``, so without this it is freed only by the cyclic GC. The removed item,
+    when it is a compiled item without child Spaces or items of its own, is cleared
+    (``_mx_cells``, ``_mx_roots``, ``_space``) by ``item_roots.release_item``, which the
+    whole-model clear shares; it is then freed by its reference count.
+    Any other body is left as exported. The KeyError for a missing key is unchanged (``dict.pop``).
+    """
+    body = node.body.body
+    params = node.params.params
+    if len(body) != 1 or len(params) != 2 or not isinstance(body[0], cst.SimpleStatementLine):
+        return node
+    stmt = body[0].body[0] if len(body[0].body) == 1 else None
+    key = params[1].name.value
+    expected = cst.parse_statement(f"del {MX_SELF}._mx_itemspaces[{key}]\n").body[0]
+    if stmt is None or not stmt.deep_equals(expected):
+        return node
+    source = f"{item_roots.release_item(cls_name)}({MX_SELF}._mx_itemspaces.pop({key}))\n"
+    return node.with_changes(body=node.body.with_changes(body=cst.parse_module(source).body))
+
+
+from modelx_cython import item_roots
+
+
+def _locked_item_build(statements):
+    """Recognize the model-level cold-miss lock added to unlocked Spaces."""
+    if len(statements) != 4:
+        return None
+    key, lookup, hit, locked = statements
+    if (not isinstance(key, cst.SimpleStatementLine) or len(key.body) != 1
+            or not isinstance(key.body[0], cst.Assign) or len(key.body[0].targets) != 1
+            or not same_expression(key.body[0].targets[0].target, cst.Name('_mx_key'))
+            or not isinstance(locked, cst.With) or locked.asynchronous is not None
+            or not isinstance(locked.body, cst.IndentedBlock) or len(locked.items) != 1):
+        return None
+    model_lock = cst.WithItem(cst.parse_expression('self._model._mx_lock'))
+    if not same_expression(locked.items[0], model_lock):
+        return None
+    read = cst.parse_module(
+        '_mx_root = self._mx_itemspaces.get(_mx_key)\n'
+        'if _mx_root is not None:\n'
+        '    return _mx_root\n'
+    ).body
+    if same_expression((lookup, hit), read) and same_expression(locked.body.body[:2], read):
+        return locked
+    return None
+
+
+def _fast_item_call(node, cls_name):
+    """A new item of a top-level Space without child Spaces is built without the generic walk.
+
+    The exported ``__call__`` walks the new root and its base in step (``zip(_mx_walk(), _mx_walk())``),
+    copies References, applies the roots' and its own parameters and extends ``_mx_roots``. When the
+    receiver is exactly the compiled class and has no child Spaces and no roots, that walk visits the
+    root alone with no roots to apply, so the same statements run once, on a typed root. Any other
+    exported shape is left unchanged. An export that applies the Space formula's dynamic References
+    (``_mx_root._mx_apply_formula(...)`` after the walk) keeps that call, on the typed root, in the same place.
+    """
+    if not isinstance(node.body, cst.IndentedBlock):
+        return node
+    container = _locked_item_build(node.body.body)
+    prefix = 2 if container is not None else 0
+    if container is None:
+        for stmt in node.body.body:
+            if (isinstance(stmt, cst.If) and isinstance(stmt.orelse, cst.Else)
+                    and isinstance(stmt.test, cst.Comparison)):
+                container = stmt.orelse
+    if container is None or not isinstance(container.body, cst.IndentedBlock):
+        return node
+    block = list(container.body.body[prefix:])
+    apply = None
+    if len(block) == 6:
+        apply = block.pop(3)
+        call = apply.body[0].value if isinstance(apply, cst.SimpleStatementLine) and len(apply.body) == 1 \
+            and isinstance(apply.body[0], cst.Expr) else None
+        if (not isinstance(call, cst.Call) or not same_expression(call.func, cst.parse_expression('_mx_root._mx_apply_formula'))
+                or any(arg.keyword is not None or arg.star for arg in call.args)):
+            return node
+
+    def stmt(code):
+        return cst.parse_statement(code + '\n')
+
+    def same(node, code):
+        return same_expression(node, stmt(code))
+
+    def single(node, kind):     # the one small statement of a line, of the given type, or None
+        if isinstance(node, cst.SimpleStatementLine) and len(node.body) == 1 and isinstance(node.body[0], kind):
+            return node.body[0]
+        return None
+
+    store = single(block[3], cst.Assign) if len(block) == 5 else None
+    if (len(block) != 5 or not same(block[0], '_mx_base = self') or not same(block[1], '_mx_root = _mx_base.__class__(self)')
+            or not isinstance(block[2], cst.For) or block[2].asynchronous is not None or block[2].orelse is not None
+            or not isinstance(block[2].body, cst.IndentedBlock)
+            or not same_expression(block[2].target, cst.parse_expression('(_mx_s, _mx_b)'))
+            or not same_expression(block[2].iter, cst.parse_expression('zip(_mx_root._mx_walk(), _mx_base._mx_walk())'))
+            or store is None or not same(block[3], 'self._mx_itemspaces[_mx_key] = _mx_root')
+            or not same(block[4], 'return _mx_root')):
+        return node
+    loop = block[2].body.body
+    params = single(loop[2], cst.Expr) if len(loop) == 5 else None
+    params = params.value if params is not None else None
+    if (len(loop) != 5 or not same(loop[0], '_mx_s._mx_copy_refs(_mx_b, _mx_base)')
+            or not same(loop[1], 'for _mx_r in self._mx_roots:\n    _mx_r._mx_copy_params(_mx_s)')
+            or not isinstance(params, cst.Call) or not params.args
+            or not same_expression(params.func, cst.parse_expression('self._mx_assign_params'))
+            or params.args[0].keyword is not None or params.args[0].star
+            or not same_expression(params.args[0].value, cst.Name('_mx_s'))
+            or not same(loop[3], '_mx_s._mx_roots.extend(self._mx_roots)')
+            or not same(loop[4], '_mx_s._mx_roots.append(_mx_root)')):
+        return node
+    root = '_mx_fast_root'
+    assign = cst.Module(body=(loop[2].with_changes(body=(cst.Expr(params.with_changes(
+        args=(params.args[0].with_changes(value=cst.Name(root)), *params.args[1:]))),)),)).code.strip()
+    store = cst.Module(body=(block[3].with_changes(body=(store.with_changes(value=cst.Name(root)),)),)).code.strip()
+    applied = ''
+    if apply is not None:
+        applied = cst.Module(body=(apply.with_changes(body=(apply.body[0].with_changes(value=apply.body[0].value.with_changes(
+            func=cst.Attribute(cst.Name(root), cst.Name('_mx_apply_formula')))),)),)).code.strip()
+        applied = f"    {applied}\n"
+    fast = cst.parse_module(
+        f"if type(self) is {cls_name} and not self._mx_spaces and not self._mx_roots:\n"
+        f"    {root}: {cls_name} = {item_roots.new_root(cls_name)}(self)\n"
+        f"    {assign}\n"
+        f"{applied}"
+        f"    {store}\n"
+        f"    return {root}\n").body
+    if apply is not None:
+        block.insert(3, apply)
+    new_body = container.body.with_changes(body=(*container.body.body[:prefix], *fast, *block))
+    return node.with_changes(body=node.body.deep_replace(container, container.with_changes(body=new_body)))
