@@ -1,26 +1,7 @@
 """Small operations on the compiler's existing LibCST representation."""
-from contextlib import contextmanager
 from dataclasses import fields
-import re
 
 import libcst as cst
-
-# a ``def`` whose body follows its colon on the same line (the passes expect an indented body)
-_ONE_LINE_DEF = re.compile(r'^[ \t]*(?:async[ \t]+)?def\b[^\n]*:[ \t]*[^\s#]', re.M)
-
-
-class _IndentedBodies(cst.CSTTransformer):
-    def leave_FunctionDef(self, before, after):
-        if isinstance(after.body, cst.SimpleStatementSuite):
-            return after.with_changes(body=cst.IndentedBlock(body=(cst.SimpleStatementLine(after.body.body),)))
-        return after
-
-
-def parse_source(source):
-    """Parse a model module; a function written on one line (``def f(t): return t``) gets the
-    indented body of the same statements, as every pass expects."""
-    module = cst.parse_module(source)
-    return module.visit(_IndentedBodies()) if _ONE_LINE_DEF.search(source) else module
 
 
 def code(node):
@@ -47,40 +28,9 @@ def local_assignment(node):
     return None
 
 
-_CHILDREN = None    # while kept_children() is open: {id(node): (node, node.children)}
-
-
-@contextmanager
-def kept_children():
-    """Within the block, ``children(node)`` reads ``node.children`` once per node: LibCST
-    builds the list on every read, and a node's children never change. The nodes read are
-    held while the block is open."""
-    global _CHILDREN
-    outer = _CHILDREN
-    if outer is None:
-        _CHILDREN = {}
-    try:
-        yield
-    finally:
-        _CHILDREN = outer
-
-
-def children(node):
-    """``node.children``, kept within :func:`kept_children`."""
-    kept = _CHILDREN
-    if kept is None:
-        return node.children
-    found = kept.get(id(node))
-    if found is not None and found[0] is node:
-        return found[1]
-    found = node.children
-    kept[id(node)] = node, found
-    return found
-
-
 def walk(node):
     yield node
-    for child in children(node):
+    for child in node.children:
         yield from walk(child)
 
 

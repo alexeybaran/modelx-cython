@@ -19,15 +19,16 @@ def allows_exact_receiver(node, owner):
 
 
 def _eligible(cell, params):
-    # An uncached Cell (no ``_f_`` method: its public method is the formula) takes the same
+    # D139: an uncached Cell (no ``_f_`` method: its public method is the formula) takes the same
     # private entry, the formula itself with no cache lookup, storage or readiness flag
     return (
-        not cell.is_locked
+        (cell.has_formula_def or cell.native_provider_binding is None)
+        and not cell.is_locked
         and not cell.formula_is_generator
         and not cell.formula_has_captured_default
         and not cell.body_has_closure
         and not cell.called_with_kwargs
-        and (cell.get_rettype_expr(c_style=True) in _NUMERIC_TYPES
+        and (cell.get_rettype_expr(c_style=True) in _NUMERIC_TYPES or cell.native_provider_binding is not None
              or not cell.has_args() and cell.get_rettype_expr(c_style=True) in ('object', 'str'))
         and not params.posonly_params
         and not params.kwonly_params
@@ -97,15 +98,24 @@ def _entry_function(method, entry, owner, optional_receiver, body=None):
 
 
 class _Calls(cst.CSTTransformer):
-    def __init__(self, owner, entries, proven=False):
+    def __init__(self, owner, entries, exact_guards=(), provider_receivers=None, item_entries=None,
+                 proven=False):
         self.entries = entries
+        # D114 item 5: {typed item local: (its class, that class's entries)}
+        self.item_entries = item_entries or {}
+        self.provider_receivers = provider_receivers or {}
+        self.unlocked_provider_sources = set()
         self.exact_receiver = cst.parse_expression(exact_receiver(owner))
-        # The body of an uncached Cell's private entry runs on a proven exact receiver
+        self.exact_guards = exact_guards
+        # D139: the body of an uncached Cell's private entry runs on a proven exact receiver
         self.exact_depth = 1 if proven else 0
+
+    def has_exact_guard(self, node):
+        return isinstance(node.test, cst.Name) and node.test.value in self.exact_guards
 
     def proves_exact_receiver(self, node):
         test = node.test
-        return (test.deep_equals(self.exact_receiver)
+        return (self.has_exact_guard(node) or test.deep_equals(self.exact_receiver)
                 or (isinstance(test, cst.BooleanOperation) and isinstance(test.operator, cst.And)
                     and test.left.deep_equals(self.exact_receiver)))
 
@@ -116,6 +126,12 @@ class _Calls(cst.CSTTransformer):
     def leave_If_body(self, node):
         if self.proves_exact_receiver(node):
             self.exact_depth -= 1
+
+    def leave_If(self, original, updated):
+        if self.has_exact_guard(original):
+            return updated.with_changes(test=cst.BooleanOperation(
+                self.exact_receiver, cst.And(), updated.test))
+        return updated
 
     # These scopes may bind a different receiver or evaluate later.
     def visit_FunctionDef(self, node):
@@ -135,6 +151,27 @@ class _Calls(cst.CSTTransformer):
 
     def leave_Call(self, original, updated):
         func = updated.func
+        if (not updated.args and isinstance(func, cst.Attribute)
+                and isinstance(func.value, cst.Attribute) and isinstance(func.value.value, cst.Name)
+                and func.value.value.value == MX_SELF):
+            source = self.provider_receivers.get((func.value.attr.value, func.attr.value))
+            if source is not None and not source.is_locked:
+                kind = 'table' if source.native_table_result else 'provider'
+                self.unlocked_provider_sources.add((source.fqname, kind))
+            elif source is not None:
+                receiver = cst.Module([]).code_for_node(func.value)
+                return cst.IfExp(
+                    test=cst.parse_expression(
+                        f'type({receiver}) is {source.parent.name} and '
+                        f'{MX_SYS_MOD}._mx_load_flag({CY_MOD}.address({receiver}._has_{func.attr.value}))'),
+                    body=cst.Attribute(func.value, cst.Name(f'_v_{func.attr.value}')),
+                    orelse=updated, lpar=(cst.LeftParen(),), rpar=(cst.RightParen(),))
+        if (isinstance(func, cst.Attribute) and isinstance(func.value, cst.Name)
+                and (item := self.item_entries.get(func.value.value)) is not None
+                and func.attr.value in item[1]):
+            # a call on a typed item local takes the item class's entry behind its own exact-type test
+            return self._entry_call(updated, item[1][func.attr.value],
+                                    cst.parse_expression(f'type({func.value.value}) is {item[0]}'), False)
         if not (isinstance(func, cst.Attribute) and isinstance(func.value, cst.Name)
                 and func.value.value == MX_SELF and func.attr.value in self.entries):
             return updated
@@ -151,7 +188,7 @@ class _Calls(cst.CSTTransformer):
             func=cst.Name(entry), args=(cst.Arg(func.value), *updated.args, *supplied))
         if proven:
             return direct
-        # The virtual branch converts to the Cell's C return type, as the typed entry
+        # D59: the virtual branch converts to the Cell's C return type, as the typed entry
         # returns it, so the whole expression has that type and a local assigned from it
         # is inferred as a C number (infer_types) rather than an object.
         virtual = updated
@@ -200,7 +237,7 @@ class _Calls(cst.CSTTransformer):
 def _referenced_entries(body, functions, uncached, classes, origins, domains):
     """``functions`` without the private entry of an uncached Cell that no emitted code calls.
 
-    An uncached Cell's private entry exists for its callers on a proven receiver. With none it is
+    An uncached Cell's entry (D139) exists for its callers on a proven receiver. With none it is
     an unreachable module-level C function and is not emitted; an entry called only by such an
     entry is unreachable too."""
     candidates = {entry: key for key, entry in uncached.items()}
@@ -232,9 +269,9 @@ def add_inline_entries(module, classes, dense_layouts):
     next_entry = 0
     body = []
     all_entries, pending = {}, []
-    uncached = {}          # {(owner, cell name): entry} of uncached Cells
+    uncached = {}          # D139: {(owner, cell name): entry} of uncached Cells
     origins = {}
-    domains = {}           # {entry of an uncached Cell: its traced argument domain}
+    domains = {}           # D139b: {entry of an uncached Cell: its traced argument domain}
     for statement in module.body:
         if not isinstance(statement, cst.ClassDef) or statement.name.value not in classes:
             body.append(statement)
@@ -261,7 +298,7 @@ def add_inline_entries(module, classes, dense_layouts):
             cell.inline_entry = entry
             entries[cell.name] = entry, len(cell.params), defaults, cell.get_rettype_expr(c_style=True)
             if not cell.has_formula_def:
-                # Emitted below from the formula, once every class's entries are known
+                # D139: emitted below from the formula, once every class's entries are known
                 uncached[owner, cell.name] = entry
                 origins[entry] = owner, cell.name
                 if domain := _entry_domain(cell):
@@ -287,15 +324,15 @@ def add_inline_entries(module, classes, dense_layouts):
         all_entries[owner] = entries
         pending.append((statement, owner, cells, entries, methods))
         body.append(None)
-    # Formulas are rewritten after every class's entries are known, so a call can take the entry
-    # of its receiver's class
+    # D114 item 5: formulas are rewritten after every class's entries are known, so a call on a
+    # typed item local can take the entry of the item's class
     pending_iter = iter(pending)
     for position, placed in enumerate(body):
         if placed is not None:
             continue
         statement, owner, cells, entries, methods = next(pending_iter)
         authored = list(methods)
-        if entries:
+        if entries or any(getattr(cell, 'typed_item_locals', None) for cell in cells.values()):
             for index, method in enumerate(methods):
                 if not isinstance(method, cst.FunctionDef):
                     continue
@@ -315,11 +352,29 @@ def add_inline_entries(module, classes, dense_layouts):
                 if guard_allowed is None:
                     guard_allowed = allows_exact_receiver(method, owner)
                 if guard_allowed:
-                    calls = _Calls(owner, entries)
+                    names_in_formula = Names(method).names
+                    provider_receivers = {
+                        (ref_name, name): other
+                        for ref_name, ref in classes[owner].refs.items()
+                        if (target := getattr(ref, 'decl_type_expr', None)) in classes
+                        and target not in names_in_formula
+                        for name, other in classes[target].cells.items()
+                        if (other.native_provider_binding is not None and not other.has_args()
+                            and other.has_formula_def)
+                    }
+                    item_entries = {
+                        local: (target, all_entries[target])
+                        for local, target in getattr(cell, 'typed_item_locals', {}).items()
+                        # the class name is in the formula only as P1's own annotation of the local
+                        if all_entries.get(target)}
+                    calls = _Calls(owner, entries, getattr(cell, 'exact_reduction_guards', ()), provider_receivers,
+                                   item_entries)
                     methods[index] = method.with_changes(body=method.body.visit(calls))
+                    cell.unlocked_provider_sources = sorted(calls.unlocked_provider_sources)
                     if (entry := uncached.get((owner, cell.name))) is not None and not name.startswith(FORMULA_PREF):
-                        # The entry is the authored formula with its calls taken on the proven receiver
-                        proven = _Calls(owner, entries, proven=True)
+                        # D139: the entry is the authored formula with its calls taken on the proven receiver
+                        proven = _Calls(owner, entries, getattr(cell, 'exact_reduction_guards', ()),
+                                        provider_receivers, item_entries, proven=True)
                         functions.append(_entry_function(
                             authored[index], entry, owner, optional_receiver, authored[index].body.visit(proven)))
                         continue

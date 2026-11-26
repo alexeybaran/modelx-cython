@@ -2,10 +2,11 @@ from libc.math cimport (
     pow as _mx_c_pow, floor as _mx_c_floor, isfinite as _mx_c_isfinite)
 from libc.limits cimport LLONG_MAX, LLONG_MIN
 from libc.string cimport memcmp
-from cpython.long cimport PyLong_AsLongLong, PyLong_AsLongLongAndOverflow, PyLong_Check, PyLong_CheckExact
+from cpython.long cimport PyLong_AsLongLong, PyLong_Check, PyLong_CheckExact
 from cpython.number cimport PyNumber_Index
 from cpython.object cimport Py_TYPE, PyObject_GenericGetAttr, PyObject_GenericSetAttr
 from cpython.unicode cimport PyUnicode_Check, PyUnicode_Compare
+from modelx_cython._rounding cimport _mx_round_one, _mx_round_digits, _nearest_even
 from libc.math cimport fabs, copysign
 cimport cython
 
@@ -26,7 +27,12 @@ cdef inline object _mx_named_overflow(object error, str path):
     return named
 
 
-cdef inline long long _mx_exact_int64_checked(object value, str path) except? -1:
+cdef inline long long _mx_exact_int64(object value, str path) except? -1:
+    """Cross a signed 64-bit boundary through the Python index protocol.
+
+    An int or any int subclass (IntEnum, bool) is read directly: PyNumber_Index returns such an
+    object unchanged, so the value and the OverflowError are the same, without taking and
+    releasing a reference on it (diag-scale P3: enum members are shared by every worker)."""
     try:
         if PyLong_Check(value):
             return PyLong_AsLongLong(value)
@@ -39,22 +45,6 @@ cdef inline long long _mx_exact_int64_checked(object value, str path) except? -1
         raise _mx_named(OverflowError(
             f"{path} requires an exact signed 64-bit integer. Rebuild with a wider sample or spec."
         ), path) from error
-
-
-cdef inline long long _mx_exact_int64(object value, str path) except? -1:
-    """Cross a signed 64-bit boundary through the Python index protocol.
-
-    An int or any int subclass (IntEnum, bool) is read directly: PyNumber_Index returns such an
-    object unchanged, so the value and the OverflowError are the same, without taking and
-    releasing a reference on it (enum members are shared by every worker thread). An exact
-    int that fits is read without the exception handling, which every other value takes."""
-    cdef int overflow = 0
-    cdef long long result
-    if PyLong_CheckExact(value):
-        result = PyLong_AsLongLongAndOverflow(value, &overflow)
-        if not overflow:
-            return result
-    return _mx_exact_int64_checked(value, path)
 
 
 ctypedef unsigned long _mx_native_ulong
@@ -86,22 +76,46 @@ cdef inline long long _mx_integer_result(_mx_integer_source value, str path) exc
         return value
 
 
+cdef inline long long _mx_round_as_index(object constructor, bint convert, object function,
+                                         _mx_integer_source value, object canonical,
+                                         str path) except? -1:
+    cdef double magnitude
+    if _mx_integer_source is double:
+        magnitude = fabs(value)
+        if (not convert or constructor is int) and canonical is not None and function is canonical and magnitude < 4503599627370496.0:
+            return <long long>copysign(_nearest_even(magnitude, 0.0), value)
+    rounded = _mx_round_one(function, value, canonical)
+    return _mx_exact_int64(constructor(rounded) if convert else rounded, path)
+
+
+cdef inline long long _mx_rounded_index(object constructor, object function,
+                                        _mx_integer_source value, object canonical,
+                                        str path) except? -1:
+    return _mx_round_as_index(constructor, True, function, value, canonical, path)
+
+
+cdef inline long long _mx_bare_round_index(object function, _mx_integer_source value,
+                                           object canonical, str path) except? -1:
+    return _mx_round_as_index(None, False, function, value, canonical, path)
+
+
 cdef extern from *:
     """
     /* Python's a // b on C integers with the branches Cython emits on LP64 platforms, on every
        platform: Cython 3.3.1 compiles its LLONG_MIN // -1 check only where long long is as wide as
        long, so the C division traps there (STATUS_INTEGER_OVERFLOW on Windows). The error value
        is LLONG_MAX (a quotient only of LLONG_MAX // 1), so a quotient of -1 needs no error check.
-       The path is the Cell's: the OverflowError names it. */
+       The path is the Cell's, for the signature of the integer helpers; the checked mode's
+       handler names the OverflowError after it. */
     static CYTHON_INLINE long long __mx_signed_floordiv(long long a, long long b, PyObject *path) {
         long long q, r;
+        (void)path;
         if (b == 0) {
             PyErr_SetString(PyExc_ZeroDivisionError, "integer division or modulo by zero");
             return LLONG_MAX;
         }
         if (b == -1 && a == LLONG_MIN) {
-            /* named here: the formula keeps no handler around its body (integer guards) */
-            PyErr_Format(PyExc_OverflowError, "%U: value too large (integer arithmetic beyond 64 bits)", path);
+            PyErr_SetString(PyExc_OverflowError, "value too large to perform division");
             return LLONG_MAX;
         }
         q = a / b;
@@ -188,93 +202,6 @@ cdef inline long long _mx_signed_right_shift(long long value, long long count, s
     return value >> count
 
 
-cdef extern from *:
-    """
-    /* Flagged integer arithmetic (integer guards). Each operation returns the wrapped C result and
-       ORs 1 into *flag when the exact result does not fit in 64 bits; the formula tests the flag
-       once, before it returns, and raises OverflowError naming the Cell (_mx_flagged_overflow).
-       There is no error path at the operation, so a formula stays one straight-line function that
-       the C compiler can inline. GCC and Clang have the checked builtins; elsewhere (MSVC) the
-       portable forms compute in unsigned arithmetic, which wraps by definition, and derive the
-       overflow from the signs (+, -) or from the high half of the 128-bit product (*). */
-    #if defined(__GNUC__) || defined(__clang__)
-    #define __MX_ADD_OVERFLOWS(a, b, r) __builtin_add_overflow((a), (b), (r))
-    #define __MX_SUB_OVERFLOWS(a, b, r) __builtin_sub_overflow((a), (b), (r))
-    #define __MX_MUL_OVERFLOWS(a, b, r) __builtin_mul_overflow((a), (b), (r))
-    #else
-    static CYTHON_INLINE int __MX_ADD_OVERFLOWS(long long a, long long b, long long *r) {
-        unsigned long long sum = (unsigned long long)a + (unsigned long long)b;
-        *r = (long long)sum;
-        return ((a ^ *r) & (b ^ *r)) < 0;
-    }
-    static CYTHON_INLINE int __MX_SUB_OVERFLOWS(long long a, long long b, long long *r) {
-        unsigned long long difference = (unsigned long long)a - (unsigned long long)b;
-        *r = (long long)difference;
-        return ((a ^ b) & (a ^ *r)) < 0;
-    }
-    #if defined(_MSC_VER) && defined(_M_X64)
-    #include <intrin.h>
-    static CYTHON_INLINE int __MX_MUL_OVERFLOWS(long long a, long long b, long long *r) {
-        long long high;
-        *r = _mul128(a, b, &high);
-        return high != (*r >> 63);
-    }
-    #elif defined(_MSC_VER) && defined(_M_ARM64)
-    #include <intrin.h>
-    static CYTHON_INLINE int __MX_MUL_OVERFLOWS(long long a, long long b, long long *r) {
-        *r = (long long)((unsigned long long)a * (unsigned long long)b);
-        return __mulh(a, b) != (*r >> 63);
-    }
-    #else
-    static CYTHON_INLINE int __MX_MUL_OVERFLOWS(long long a, long long b, long long *r) {
-        *r = (long long)((unsigned long long)a * (unsigned long long)b);
-        if (a == 0 || b == 0)
-            return 0;
-        if ((a == -1 && b == LLONG_MIN) || (b == -1 && a == LLONG_MIN))
-            return 1;
-        return *r / b != a;
-    }
-    #endif
-    #endif
-    static CYTHON_INLINE long long __mx_flag_add(long long a, long long b, int *flag) {
-        long long r;
-        *flag |= __MX_ADD_OVERFLOWS(a, b, &r);
-        return r;
-    }
-    static CYTHON_INLINE long long __mx_flag_sub(long long a, long long b, int *flag) {
-        long long r;
-        *flag |= __MX_SUB_OVERFLOWS(a, b, &r);
-        return r;
-    }
-    static CYTHON_INLINE long long __mx_flag_mul(long long a, long long b, int *flag) {
-        long long r;
-        *flag |= __MX_MUL_OVERFLOWS(a, b, &r);
-        return r;
-    }
-    static CYTHON_INLINE long long __mx_flag_neg(long long a, int *flag) {
-        *flag |= (a == LLONG_MIN);
-        return (long long)(0ULL - (unsigned long long)a);
-    }
-    """
-    long long _mx_flag_add "__mx_flag_add"(long long left, long long right, int *flag) noexcept nogil
-    long long _mx_flag_sub "__mx_flag_sub"(long long left, long long right, int *flag) noexcept nogil
-    long long _mx_flag_mul "__mx_flag_mul"(long long left, long long right, int *flag) noexcept nogil
-    long long _mx_flag_neg "__mx_flag_neg"(long long value, int *flag) noexcept nogil
-
-
-cdef inline object _mx_flagged_overflow(str path):
-    """The OverflowError of a formula whose flagged integer arithmetic left 64 bits (cold path)."""
-    return _mx_named(OverflowError(f"{path}: value too large (integer arithmetic beyond 64 bits)"), path)
-
-
-cdef inline long long _mx_flag_checked(long long value, int *flag, str path) except? -1:
-    """``value``, computed with flagged operations, once the flag shows it exact: an argument a
-    formula passes on is tested before the call receives it."""
-    if flag[0]:
-        raise _mx_flagged_overflow(path)
-    return value
-
-
 cdef inline bint _mx_ref_name_is(object name, str expected) except? -1:
     return PyUnicode_Check(name) and PyUnicode_Compare(name, expected) == 0
 
@@ -285,6 +212,21 @@ cdef inline int _mx_generic_setattr(object receiver, object name, object value) 
 
 cdef inline object _mx_generic_getattr(object receiver, object name):
     return PyObject_GenericGetAttr(receiver, name)
+
+
+cdef inline int _mx_check_enum_schema(object receiver, object owner, tuple bindings) except -1:
+    """Declared model-code bindings are fixed until the model is rebuilt."""
+    cdef object actual = <object>Py_TYPE(receiver)
+    cdef object base, name
+    if actual is owner:
+        return 0
+    for base in actual.__mro__:
+        if base is owner:
+            break
+        for name in bindings:
+            if name in base.__dict__:
+                raise TypeError(f"enum definition {name!r} is fixed in this compiled model; rebuild the model to change it")
+    return 0
 
 
 cdef inline double _mx_pow(double b, double e) except? -1.0:
@@ -337,6 +279,25 @@ cdef inline double _mx_memo_pow(PowerMemo* memo, double base, double exponent) e
     return value
 
 
+@cython.cdivision(True)
+cdef inline bint _mx_divisible(long long dividend, long long divisor) except? -1:
+    if divisor == 0:
+        raise ZeroDivisionError("integer division or modulo by zero")
+    return divisor == -1 or dividend % divisor == 0
+
+
+cdef inline bint _mx_divisible_after_decrement(long long dividend, long long divisor) except? -1:
+    if dividend == LLONG_MIN:
+        return ((<object>dividend) - 1) % divisor == 0
+    return _mx_divisible(dividend - 1, divisor)
+
+
+cdef inline bint _mx_divisible_after_increment(long long dividend, long long divisor) except? -1:
+    if dividend == LLONG_MAX:
+        return ((<object>dividend) + 1) % divisor == 0
+    return _mx_divisible(dividend + 1, divisor)
+
+
 cdef extern from *:
     """
     /* Acquire/release accessors for the _has_ flags of locked Spaces.
@@ -386,309 +347,6 @@ cdef extern from *:
     short _mx_load_dense_flag "__mx_load_dense_flag" (short *p) noexcept nogil
     void _mx_store_dense_flag "__mx_store_dense_flag" (short *p, short v) noexcept nogil
 
-
-cdef extern from *:
-    """
-    /* Unwritten values (value_storage.py): the value arrays of dense Cell caches are not zero-filled when an
-       object is allocated. A value is read only after its flag is set, and a flag is set only after
-       its value is stored. A class registers its value arrays from a probe instance; finish()
-       requires them to be adjacent members and installs an allocator that zeroes every other byte,
-       as PyType_GenericAlloc zeroes all of them. Pickling and copying reduce a copy of the object
-       in which a value is copied only behind a flag read from the live object, so no unwritten byte
-       leaves the process. Where the mechanism is unavailable (another interpreter, Python before
-       3.10, a debug build) nothing is installed; where the layout check fails, nothing is installed
-       and a RuntimeWarning names the class. Test-only macros: MX_POISON_UNWRITTEN_VALUES fills the
-       values with 0xA5; MX_TEST_VALUES_FALLBACK=1 fails the layout check, =2 makes it unavailable. */
-    typedef struct { Py_ssize_t value, bytes, value_size, flag, flag_size; } __mx_value_array;
-    typedef struct __mx_values_layout {
-        PyTypeObject *type; char *probe; PyObject *reduce;
-        Py_ssize_t lo, hi, count, capacity, failed;
-        __mx_value_array *arrays; struct __mx_values_layout *next;
-    } __mx_values_layout;
-
-    #if PY_VERSION_HEX >= 0x030D0000
-    #define __MX_VALUES_LOCK(op)  Py_BEGIN_CRITICAL_SECTION(op)
-    #define __MX_VALUES_UNLOCK()  Py_END_CRITICAL_SECTION()
-    #else
-    #define __MX_VALUES_LOCK(op)  {
-    #define __MX_VALUES_UNLOCK()  }
-    #endif
-
-    static inline __mx_values_layout **__mx_values_head(void) {
-        static __mx_values_layout *head = NULL;
-        return &head;
-    }
-
-    static inline __mx_values_layout *__mx_values_find(PyTypeObject *t) {
-        for (; t != NULL; t = t->tp_base)
-            for (__mx_values_layout *l = *__mx_values_head(); l != NULL; l = l->next)
-                if (l->type == t) return l;
-        return NULL;
-    }
-
-    static inline PyObject *__mx_values_alloc(PyTypeObject *t, Py_ssize_t nitems) {
-        /* The registered class only: a static subtype inherits tp_alloc and is zero-filled. */
-        __mx_values_layout *l = nitems == 0 ? __mx_values_find(t) : NULL;
-        if (l == NULL || l->type != t || t->tp_itemsize != 0 || !PyType_IS_GC(t)) return PyType_GenericAlloc(t, nitems);
-        PyObject *obj = PyObject_GC_New(PyObject, t);     /* header initialised, body not zeroed */
-        if (obj == NULL) return NULL;
-        memset((char *)obj + sizeof(PyObject), 0, (size_t)(l->lo - (Py_ssize_t)sizeof(PyObject)));
-    #ifdef MX_POISON_UNWRITTEN_VALUES
-        memset((char *)obj + l->lo, 0xA5, (size_t)(l->hi - l->lo));
-    #endif
-        memset((char *)obj + l->hi, 0, (size_t)(t->tp_basicsize - l->hi));
-        PyObject_GC_Track(obj);
-        return obj;
-    }
-
-    /* One flag of the live object, loaded with acquire semantics as the generated readers load it
-       (short: shared dense caches; int: bint flags of locked Spaces), and stored into the copy. */
-    static inline int __mx_values_flag(const char *live, char *copy, Py_ssize_t size) {
-        if (size == (Py_ssize_t)sizeof(short)) {
-            short flag = __mx_load_dense_flag((short *)live);
-            memcpy(copy, &flag, sizeof flag);
-            return flag != 0;
-        }
-        int flag = __MX_LOAD_FLAG((int *)live);
-        memcpy(copy, &flag, sizeof flag);
-        return flag != 0;
-    }
-
-    static inline PyObject *__mx_values_reduce(PyObject *self, PyObject *unused) {
-        PyTypeObject *t = Py_TYPE(self);
-        __mx_values_layout *l = __mx_values_find(t);
-        (void)unused;
-        if (l == NULL) { PyErr_SetString(PyExc_SystemError, "no dense value layout"); return NULL; }
-        if (l->type != t || t->tp_alloc != __mx_values_alloc)
-            return PyObject_CallOneArg(l->reduce, self);  /* a zero-filled subtype */
-        PyObject *copy = PyObject_GC_New(PyObject, t);    /* untracked; its members are borrowed from self */
-        if (copy == NULL) return NULL;
-        char *dst = (char *)copy, *src = (char *)self;
-        PyObject *result;
-    #ifndef Py_GIL_DISABLED
-        int gc = PyGC_Disable();   /* no collection, so no finalizer or thread switch, while members are borrowed */
-    #endif
-        /* Free-threaded: self's critical section, which Cython's reduce and the setters of public members
-           take, is held from the copy to the end of the reduce, so no member is replaced meanwhile. */
-        __MX_VALUES_LOCK(self);
-        memcpy(dst + sizeof(PyObject), src + sizeof(PyObject), (size_t)(l->lo - (Py_ssize_t)sizeof(PyObject)));
-        memcpy(dst + l->hi, src + l->hi, (size_t)(t->tp_basicsize - l->hi));
-        for (Py_ssize_t a = 0; a < l->count; a++) {   /* a value is copied only behind a flag seen set */
-            const __mx_value_array *v = &l->arrays[a];
-            for (Py_ssize_t i = 0, n = v->bytes / v->value_size; i < n; i++) {
-                Py_ssize_t value = v->value + i * v->value_size, flag = v->flag + i * v->flag_size;
-                if (__mx_values_flag(src + flag, dst + flag, v->flag_size))
-                    memcpy(dst + value, src + value, (size_t)v->value_size);
-                else
-                    memset(dst + value, 0, (size_t)v->value_size);
-            }
-        }
-        result = PyObject_CallOneArg(l->reduce, copy);
-        __MX_VALUES_UNLOCK();
-    #ifndef Py_GIL_DISABLED
-        if (gc) PyGC_Enable();
-    #endif
-        if (Py_REFCNT(copy) != 1) {
-            /* The reduce kept the copy (Cython's does not). This function's reference is never released,
-               so the copy is never deallocated; it is not returned, because its members are borrowed. */
-            Py_XDECREF(result);
-            PyErr_SetString(PyExc_SystemError, "the reduce of a dense value copy kept the copy");
-            return NULL;
-        }
-    #if PY_VERSION_HEX >= 0x030D0000
-        {   /* PyObject_GC_New reported the copy to a reference tracer; PyObject_GC_Del does not */
-            void *data = NULL;
-            PyRefTracer tracer = PyRefTracer_GetTracer(&data);
-            if (tracer != NULL) tracer(copy, PyRefTracer_DESTROY, data);
-        }
-    #endif
-        if (PyType_HasFeature(t, Py_TPFLAGS_HEAPTYPE)) Py_DECREF(t);   /* taken by PyObject_GC_New */
-        PyObject_GC_Del(copy);
-        return result;
-    }
-
-    static inline void *__mx_values_begin(PyObject *type, PyObject *probe) {
-        __mx_values_layout *l = (__mx_values_layout *)PyMem_RawCalloc(1, sizeof(__mx_values_layout));
-        if (l != NULL) { l->type = (PyTypeObject *)type; l->probe = (char *)probe; }
-        return l;
-    }
-
-    static inline void __mx_values_add(void *layout, void *values, Py_ssize_t bytes, Py_ssize_t value_size,
-                                       void *flags, Py_ssize_t flag_bytes, Py_ssize_t flag_size) {
-        __mx_values_layout *l = (__mx_values_layout *)layout;
-        if (l == NULL || l->failed) return;
-        if (l->count == l->capacity) {
-            Py_ssize_t capacity = 2 * l->capacity + 8;
-            void *arrays = PyMem_RawRealloc(l->arrays, (size_t)capacity * sizeof(__mx_value_array));
-            if (arrays == NULL) { l->failed = 1; return; }
-            l->arrays = (__mx_value_array *)arrays; l->capacity = capacity;
-        }
-        __mx_value_array v = {(char *)values - l->probe, bytes, value_size, (char *)flags - l->probe, flag_size};
-        if (value_size <= 0 || bytes % value_size || flag_bytes != bytes / value_size * flag_size
-                || (flag_size != (Py_ssize_t)sizeof(short) && flag_size != (Py_ssize_t)sizeof(int)))
-            l->failed = 1;
-        l->arrays[l->count++] = v;
-    }
-
-    /* 1: installed. 0: not installed, every byte is zeroed as before; a failed check warns. -1: the
-       warning was raised as an error. */
-    static inline int __mx_values_finish(void *layout) {
-        __mx_values_layout *l = (__mx_values_layout *)layout;
-        if (l == NULL) return 0;
-        PyTypeObject *t = l->type;
-        int ok = 0, checked = 0;
-    #if !CYTHON_COMPILING_IN_CPYTHON || CYTHON_COMPILING_IN_LIMITED_API || PY_VERSION_HEX < 0x030A0000 \
-        || defined(Py_REF_DEBUG) || defined(Py_TRACE_REFS) \
-        || (defined(MX_TEST_VALUES_FALLBACK) && MX_TEST_VALUES_FALLBACK == 2)
-        /* Unavailable. Py_REF_DEBUG and Py_TRACE_REFS: the scrubbed copy cannot be unregistered from the
-           reference total or the list of all objects through the public API. */
-        (void)t;
-    #else
-        checked = 1;
-        ok = !l->failed && l->count > 0;
-        if (ok) {   /* adjacent value arrays only: no other member lies in [lo, hi) */
-            l->lo = l->arrays[0].value;
-            for (Py_ssize_t a = 0; a < l->count; a++) if (l->arrays[a].value < l->lo) l->lo = l->arrays[a].value;
-            l->hi = l->lo;
-            for (Py_ssize_t a = 0; a < l->count && ok; a++) {
-                Py_ssize_t b = 0;
-                while (b < l->count && l->arrays[b].value != l->hi) b++;
-                ok = b < l->count;
-                if (ok) l->hi += l->arrays[b].bytes;
-            }
-            ok = ok && l->lo >= (Py_ssize_t)sizeof(PyObject) && l->hi <= t->tp_basicsize && PyType_IS_GC(t)
-                 && t->tp_itemsize == 0 && t->tp_alloc == PyType_GenericAlloc && __mx_values_find(t) == NULL;
-        #ifdef Py_TPFLAGS_INLINE_VALUES
-            ok = ok && !(t->tp_flags & Py_TPFLAGS_INLINE_VALUES);
-        #endif
-        #if defined(MX_TEST_VALUES_FALLBACK) && MX_TEST_VALUES_FALLBACK == 1
-            ok = 0;
-        #endif
-        }
-        /* Named as Cython names its reduce: the same __name__ as before, and a compiled subtype's
-           __Pyx_setup_reduce replaces it with the subtype's own. */
-        static PyMethodDef reduce_def = {"__reduce_cython__", (PyCFunction)__mx_values_reduce, METH_NOARGS, NULL};
-        PyObject *descr = NULL;
-        if (ok) {   /* the class's own __reduce__ (Cython's auto-pickle) is reduced from a scrubbed copy */
-            l->reduce = PyDict_GetItemString(t->tp_dict, "__reduce__");
-            descr = l->reduce != NULL ? PyDescr_NewMethod(t, &reduce_def) : NULL;
-            ok = descr != NULL;
-            if (ok) Py_INCREF(l->reduce);
-        }
-        if (ok && PyDict_SetItemString(t->tp_dict, "__reduce__", descr) < 0) { Py_DECREF(l->reduce); ok = 0; }
-        Py_XDECREF(descr);
-        if (ok) {
-            PyType_Modified(t);
-            l->probe = NULL;
-            l->next = *__mx_values_head();
-            *__mx_values_head() = l;
-            t->tp_alloc = __mx_values_alloc;
-        }
-    #endif
-        if (!ok) {
-            PyMem_RawFree(l->arrays); PyMem_RawFree(l); PyErr_Clear();
-            if (checked && PyErr_WarnFormat(PyExc_RuntimeWarning, 1, "dense cache values of %s are zero-filled "
-                                            "at allocation: the value layout check failed", t->tp_name) < 0)
-                return -1;
-        }
-        return ok;
-    }
-    """
-    void *_mx_values_begin "__mx_values_begin" (object type, object probe)
-    void _mx_values_add "__mx_values_add" (void *layout, void *values, Py_ssize_t value_bytes, Py_ssize_t value_size,
-                                           void *flags, Py_ssize_t flag_bytes, Py_ssize_t flag_size) noexcept
-    int _mx_values_finish "__mx_values_finish" (void *layout) except -1
-
-# Native math-module calls (native_math.py). _mx_stdlib_math is the standard math module, set when a
-# model module that lowers such a call is imported. A C function runs only while the Reference is that
-# module and only where the C library gives CPython's result (CPython's math calls the same functions
-# there); otherwise the Reference's own member runs, so its errors, NaN handling and results are live's.
-cdef extern from *:
-    """
-    static void *_mx_stdlib_math = NULL;
-    """
-    void *_mx_stdlib_math
-from libc.math cimport erf as _mx_c_erf, exp as _mx_c_exp, log as _mx_c_log, sqrt as _mx_c_sqrt
-from libc.math cimport isinf as _mx_c_isinf
-from cpython.float cimport PyFloat_CheckExact, PyFloat_AS_DOUBLE
-from cpython.ref cimport Py_INCREF
-
-
-cdef inline int _mx_math_init() except -1:
-    global _mx_stdlib_math
-    import math
-    Py_INCREF(math)             # held for the process, as sys.modules holds it
-    _mx_stdlib_math = <void*>math
-    return 0
-
-
-cdef inline double _mx_math_value(object value, str name, str path) except? -1.0:
-    """The float a rebound Reference's member returned; anything else raises naming the Cell."""
-    if PyFloat_CheckExact(value):
-        return PyFloat_AS_DOUBLE(value)
-    raise _mx_named(TypeError(f"{path}: {name}() of the Reference returned {type(value).__name__}, "
-                              f"not float; the compiled Cell computes a float"), path)
-
-
-ctypedef fused _mx_math_arg:
-    double
-    long long
-    object
-
-
-cdef inline bint _mx_math_real(_mx_math_arg x, double* out) noexcept:
-    """The double math computes with: a C number, or an exact float (any other object: math's own call)."""
-    if _mx_math_arg is object:
-        if PyFloat_CheckExact(x):
-            out[0] = PyFloat_AS_DOUBLE(x)
-            return True
-        return False
-    else:
-        out[0] = <double>x      # as PyLong_AsDouble rounds an int of this range
-        return True
-
-
-cdef inline double _mx_math_log(object module, _mx_math_arg x, str path) except? -1.0:
-    cdef double v
-    if <void*>module == _mx_stdlib_math and _mx_math_real(x, &v) and v > 0.0:
-        return _mx_c_log(v)     # v <= 0 raises and NaN returns NaN in math's own call
-    return _mx_math_value(module.log(x), 'log', path)
-
-
-cdef inline double _mx_math_exp(object module, _mx_math_arg x, str path) except? -1.0:
-    cdef double v, result
-    if <void*>module == _mx_stdlib_math and _mx_math_real(x, &v):
-        result = _mx_c_exp(v)
-        if _mx_c_isfinite(result):  # overflow raises, inf and NaN: math's own call
-            return result
-    return _mx_math_value(module.exp(x), 'exp', path)
-
-
-cdef inline double _mx_math_sqrt(object module, _mx_math_arg x, str path) except? -1.0:
-    cdef double v
-    if <void*>module == _mx_stdlib_math and _mx_math_real(x, &v) and v >= 0.0:
-        return _mx_c_sqrt(v)    # v < 0 raises and NaN returns NaN in math's own call
-    return _mx_math_value(module.sqrt(x), 'sqrt', path)
-
-
-cdef inline double _mx_math_erf(object module, _mx_math_arg x, str path) except? -1.0:
-    cdef double v
-    if <void*>module == _mx_stdlib_math and _mx_math_real(x, &v):
-        return _mx_c_erf(v)     # math.erf is the C library's erf
-    return _mx_math_value(module.erf(x), 'erf', path)
-
-
-cdef inline bint _mx_math_isinf(object module, _mx_math_arg x, str path) except -1:
-    cdef double v
-    if <void*>module == _mx_stdlib_math and _mx_math_real(x, &v):
-        return _mx_c_isinf(v) != 0
-    value = module.isinf(x)
-    if value is True or value is False:
-        return value
-    raise _mx_named(TypeError(f"{path}: isinf() of the Reference returned {type(value).__name__}, "
-                              f"not bool; the compiled Cell computes a bool"), path)
-
-
 cdef class BaseMxObject:
     pass
 
@@ -704,7 +362,8 @@ cdef class BaseParent(BaseMxObject):
     cdef public object _mx_lock
 
 cdef class BaseModel(BaseParent):
-    pass
+    cdef public object _mx_collect_workers_override
+    cdef public object _mx_collect_dispatch_state
 
 cdef class BaseSpace(BaseParent):
 

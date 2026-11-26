@@ -1,4 +1,4 @@
-"""Locals read from typed Cells are C numbers.
+"""Locals read from typed Cells are C numbers (D59).
 
 A same-Space call to an admitted Cell compiles to ``(entry(self, ...) if exact else
 self.cell(...))``. The virtual branch converts to the Cell's C return type, so the whole

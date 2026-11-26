@@ -1,7 +1,8 @@
-"""One construction and one release of a top-level item.
+"""D116: one construction and one release of a top-level item, shared by collect and the direct route.
 
-A directly created item is ``C(base)`` with the base's References and itself as its only root, built
-once per key. ``__delitem__`` releases the item it drops through one shared function. Releasing breaks the item's references to itself (``_space``,
+Collect's reused root and a directly created item are the same thing: ``C(base)`` with the base's
+References and itself as its only root. Collect builds one per call and resets it per policy; the
+direct route builds one per key. ``__delitem__`` releases the item it drops through one shared function. Releasing breaks the item's references to itself (``_space``,
 ``_mx_roots``) and its Cell objects, so it is freed by its reference count.
 """
 import libcst as cst
@@ -21,14 +22,25 @@ def release_item(cls_name):
     return f'_mx_release_item_{cls_name}'
 
 
-def functions(cls_name):
-    """Module-level C functions for one compiled ItemSpace class."""
+def functions(cls_name, contexts=()):
+    """Module-level C functions for one compiled ItemSpace class.
+
+    ``contexts`` are the class's per-instance lookup contexts (``native_contexts``). Every root takes
+    them over privately (``_mx_enable_private_lookup``: warm lookups without the critical section, the
+    round memo): items of an exported ItemSpace class are partitioned by the caller, the one documented
+    thread rule for items that ``numeric_cache.exclusively_owned`` already relies on (audit-routes P6,
+    D126). A context whose provider has no such method is left shared."""
+    enable = "".join(
+        f"    _mx_enable = getattr(root.{name}, '_mx_enable_private_lookup', None)\n"
+        f"    if _mx_enable is not None:\n"
+        f"        _mx_enable()\n" for name in sorted(contexts))
     return cst.parse_module(
         f"@{CY_MOD}.cfunc\n"
         f"def {new_root(cls_name)}(base: {cls_name}) -> {cls_name}:\n"
         f"    root: {cls_name} = {cls_name}(base)\n"
         f"    root._mx_copy_refs(base, base)\n"
         f"    root._mx_roots.append(root)\n"
+        f"{enable}"
         f"    return root\n"
         f"\n\n"
         f"@{CY_MOD}.cfunc\n"

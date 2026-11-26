@@ -21,7 +21,7 @@ def test_space_level_only_is_upstream_form():
 
 
 def test_declared_lower_bound_pairs():
-    """A declaration is a size or a (lower, stop) pair; the stop keeps its place in the sizes."""
+    """R-3-lower: a declaration is a size or a (lower, stop) pair; the stop keeps its place in the sizes."""
     import pytest
     spec = TransSpec({'cells_param_size': {'gen': (1940, 1981), 't': 10, ('x', 'y'): ((5, 20), 3)},
                       'spaces': {'Inner': {'cells_param_size': {'gen': 1981}}}})

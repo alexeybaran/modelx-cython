@@ -1,4 +1,4 @@
-"""A sampled call that raised contributes its argument ranges but no return type.
+"""D111: a sampled call that raised contributes its argument ranges but no return type.
 
 A Cell that raises for some sampled items (its own guard) keeps the type of the calls that
 returned; a Cell whose every sampled call raised keeps the previous behaviour (its result is
@@ -19,7 +19,9 @@ def _build(tmp_path):
     model = mx.new_model('RaisedSample')
     try:
         p = model.new_space('Projection', formula='lambda policy_id: None',
-                            refs={'keys': KEYS})
+                            refs={'keys': KEYS},
+                            collect_over={'policy_id': KEYS},
+                            collect_outputs='lambda: {"sum": {"total": total()}}')
         p.new_cells('life', 'lambda: policy_id % 2 == 0')
         p.new_cells('rate', 'lambda: 0.01 * policy_id')
         p.new_cells('proj_len', 'lambda: 5 + policy_id')
@@ -39,7 +41,7 @@ def _build(tmp_path):
         model.export(tmp_path / 'exported')
     finally:
         model.close()
-    # The SEC samples' pattern: project, then call every zero-argument Cell, recording raises.
+    # The shipped-sample pattern (D102): project, then call every zero-argument Cell, recording raises.
     (tmp_path / 'sample.py').write_text(textwrap.dedent('''\
         from exported import mx_model as m
         for key in (1, 2, 3, 4):
@@ -51,8 +53,10 @@ def _build(tmp_path):
                 except (ValueError, LookupError):
                     pass
         '''))
+    (tmp_path / 'spec.py').write_text(repr({'parallel_workers': 1,
+                                            'spaces': {'Projection': {'serial_collect': 'reuse'}}}))
     build = subprocess.run([sys.executable, '-B', '-m', 'modelx_cython', 'exported',
-                            '--sample', 'sample.py', '--no-spec'],
+                            '--sample', 'sample.py', '--spec', 'spec.py'],
                            cwd=tmp_path, env=dict(os.environ), capture_output=True, text=True)
     (tmp_path / 'build.log').write_text(build.stdout + build.stderr)
     assert build.returncode == 0, build.stdout + build.stderr

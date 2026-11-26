@@ -428,7 +428,7 @@ def test_demote_rebound_params_uncached_cells_everywhere():
 
 
 def test_assigned_local_kinds_from_every_assignment():
-    """A local takes a kind only when every binding of it has that kind."""
+    """D59: a local takes a kind only when every binding of it has that kind."""
     import libcst as cst
     from modelx_cython.powers import _assigned_local_kinds, KIND_FLOAT, KIND_INT
 
@@ -470,7 +470,7 @@ def test_assigned_local_kinds_from_every_assignment():
      "    return total", 1),
 ])
 def test_power_into_a_double_accumulator_is_native(body, count):
-    """The power's value flows into a local that is a double without it."""
+    """D62: the power's value flows into a local that is a double without it."""
     out = _rewrite(body)
     assert out.count("_mx_sys._mx_pow(") == count, out
     assert "**" not in out
@@ -510,7 +510,7 @@ def test_range_loop_bound_from_int_of_a_number():
     assert out.count("_mx_sys._mx_pow(") == 1 and "**" not in out, out
     assert "**" in _rewrite("int = self.arr\n    " + body)
 def test_local_kinds_through_declarations_and_compiler_casts():
-    """As in a SEC commuted_value: a loop variable declared before its loop
+    """diag-us (SPIA_US_S commuted_value): a loop variable declared before its loop
     (``s: _mx_cy.longlong``) and a value guarded by the overflow cast keep their kinds,
     so the power in one branch of the accumulator's operand is native."""
     body = ("n = 12\n    j = self.rate(t)\n    total = 0.0\n    s: _mx_cy.longlong\n"

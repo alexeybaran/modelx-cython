@@ -189,7 +189,7 @@ class OperandKind:
         elif isinstance(expr, cst.BinaryOperation):
             return self._binop_kind(expr)
         elif isinstance(expr, cst.IfExp):
-            # both branches of one kind give that kind; mixed or unknown stay unknown
+            # both branches of one kind give that kind (D59); mixed or unknown stay unknown
             body, orelse = self.kind(expr.body), self.kind(expr.orelse)
             return body if body == orelse else KIND_UNKNOWN
         elif isinstance(expr, cst.Name):
@@ -342,8 +342,8 @@ class _PowerRewriter(cst.CSTTransformer):
             )
         # Only a floating exponent puts a power on Cython's complex
         # path, so an integer one is left alone without comment; an exponent
-        # that the formula's local kinds prove an integer is one too (the
-        # argument-order pass, which knows those kinds, keeps its C power)
+        # that the formula's local kinds prove an integer is one too (diag-jp:
+        # argument ordering, which knows those kinds, keeps its C power)
         if exponent in (KIND_FLOAT, KIND_UNKNOWN) and not (
                 self._local_kind is not None and self._local_kind.kind(original_node.right) == KIND_INT):
             self._decline(original_node)
@@ -414,6 +414,7 @@ def rewrite_powers(
     cells,
     *,
     builtin_float=False,
+    checked_integer_powers=True,
 ) -> cst.FunctionDef:
     """Rewrite the provably real powers in one method body.
 
@@ -471,11 +472,6 @@ def rewrite_powers(
             param_kinds.update((name, KIND_FLOAT) for name in declarations
                                if facts.stores[name] == 1 and name not in cells.params
                                and name not in facts.deleted)
-    if not any(isinstance(part, cst.BinaryOperation) and isinstance(part.operator, cst.Power)
-               for part in walk(node.body)):
-        # the rewriter changes only a '**': none to rewrite, decline or report
-        cells.powers_in_loops = []
-        return node
     kind = OperandKind(resolver, cells_kinds, ref_kinds, cls_fqname, param_kinds)
     return_operands = None
     if native_return:
@@ -491,9 +487,9 @@ def rewrite_powers(
     local_kinds = formula_local_kinds(node, cells.params, resolver, cells_kinds, ref_kinds, cls_fqname, param_kinds)
     rewriter = _PowerRewriter(kind, memo, return_operands, OperandKind(
         resolver, cells_kinds, ref_kinds, cls_fqname, {**local_kinds, **param_kinds}) if local_kinds else None,
-        path=getattr(cells, 'model_path', None))
+        path=getattr(cells, 'model_path', None) if checked_integer_powers else None)
     updated = node.body.visit(rewriter)
-    # Powers left on Python's semantics inside a loop, for the admission report
+    # D62: powers left on Python's semantics inside a loop, for the admission report
     cells.powers_in_loops = list(rewriter.declined_in_loops)
     if rewriter.declined:
         _logger.info(
@@ -509,7 +505,7 @@ def rewrite_powers(
 
 
 class _LocalKind(OperandKind):
-    """OperandKind for the local and sink analysis: also ``min``/``max``/``abs``
+    """OperandKind for the local and sink analysis (D59, D62): also ``min``/``max``/``abs``
     of operands of one known kind and ``int()`` of a known number (the builtins; exported formulas read References through
     ``self``, so a bare ``min`` is the builtin unless the formula binds it, which disqualifies
     the formula through its scope facts)."""
@@ -552,7 +548,7 @@ _C_KINDS = {'longlong': KIND_INT, 'double': KIND_FLOAT}
 def _declared_c_kinds(body, parameters):
     """Locals declared with one C scalar type (``x: _mx_cy.longlong``, with or without a value)
     and no other annotation: a C-typed local can only hold that type, whatever else the formula
-    does (for example the loop of a lowered reduction, whose ``except ... as`` is a scope effect)."""
+    does (diag-jp: the loop of a lowered reduction, whose ``except ... as`` is a scope effect)."""
     found = {}
     for node in lexical_nodes(body):
         if isinstance(node, cst.AnnAssign) and isinstance(node.target, cst.Name):
@@ -566,7 +562,7 @@ def _declared_c_kinds(body, parameters):
 
 
 def _assigned_local_kinds(body, parameters, resolver, cells_kinds, ref_kinds, cls_fqname, param_kinds):
-    """Kinds of locals proven from every assignment to them.
+    """Kinds of locals proven from every assignment to them (D59).
 
     A local qualifies when each of its bindings in the formula is a plain or annotated
     assignment, or an augmented ``+= -= *= /= //= %=``, at the formula's own level or in
@@ -587,7 +583,7 @@ def _assigned_local_kinds(body, parameters, resolver, cells_kinds, ref_kinds, cl
     c_typed = {}
     for node in lexical_nodes(body):
         if isinstance(node, cst.AnnAssign) and isinstance(node.target, cst.Name):
-            # A local declared with a C scalar type (``s: _mx_cy.longlong``,
+            # diag-jp: a local declared with a C scalar type (``s: _mx_cy.longlong``,
             # ``b: _mx_cy.longlong = ...``, emitted by earlier passes) can only hold that type
             annotation = node.annotation.annotation
             ctype = (annotation.attr.value if isinstance(annotation, cst.Attribute)
@@ -645,7 +641,7 @@ def _assigned_local_kinds(body, parameters, resolver, cells_kinds, ref_kinds, cl
 
 
 def formula_local_kinds(node, parameters, resolver, cells_kinds, ref_kinds, cls_fqname, param_kinds):
-    """Kinds of the locals of a formula FunctionDef that every assignment proves,
+    """Kinds of the locals of a formula FunctionDef that every assignment proves (D59),
     for later passes that classify operands (argument order, typed min/max)."""
     if resolver is None or not isinstance(getattr(node, 'body', None), cst.IndentedBlock):
         return {}
@@ -663,7 +659,7 @@ def _range_kind(classify, call):
 
 
 def _double_accumulator_powers(body, parameters, resolver, cells_kinds, ref_kinds, cls_fqname, param_kinds):
-    """Powers whose value flows into a C double local.
+    """Powers whose value flows into a C double local (D59, D62).
 
     A sink is a local whose every assignment is a double expression (``_assigned_local_kinds``)
     and which has at least one assignment that is a double without any power in it

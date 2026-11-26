@@ -1,9 +1,14 @@
-"""The integer overflow model.
+"""The integer overflow model in both integer-check modes (owner's rule).
 
 Each Cell computes a C integer value whose exact (Python) result leaves 64 bits, or depends on
-Python's integer semantics. The sample keeps every value small, as a real book does, so the
-Cells are typed as C integers; the run then calls them with the values below. Every case is
-exact or raises an error naming the Cell; none is silently wrong, whatever the sample traced.
+Python's integer semantics. The sample keeps every value small, as a real book does, so the Cells
+are typed as C integers; the run then calls them with the values below.
+
+Checked mode: every case is exact or raises an error naming the Cell; none is silently wrong.
+Unchecked mode: C integer arithmetic is plain C, as on upstream. The cases marked "plain" are
+outside its guarantee (their value is whatever C gives); the others are exact or raise as in the
+checked mode: the conversions at the Python boundary stay checked and named, and a power stored as
+a C integer takes the checked power in both modes.
 """
 import json
 import re
@@ -48,7 +53,12 @@ CELLS = {
 RUNS = {"neg": 0, "pw": 9, "sh": 9, "rs": 3, "fd": 3, "md": 3, "fm": 0, "il": 100000, "ie": 100000,
         "ls": 2097151, "sm": 2097148, "di": 100, "mx": 2097151, "pl": 9, "pf": 9, "pv": 16, "pc": 9,
         "dl": 100, "lf": 1, "lg": 1, "ff": 0, "mf": 0, "fn": 0, "fa": 0, "ma": 0}
-EXACT = {"rs", "fd", "md", "dl", "lf", "lg", "mf", "ma"}       # every other case raises naming the Cell
+EXACT = {"rs", "fd", "md", "dl", "lf", "lg", "mf", "ma"}
+# checked mode: everything else raises naming the Cell
+UNCHECKED_PLAIN = {"neg", "il", "ie", "ls", "mx", "pf", "pc"}
+# division check, named boundary conversions, the checked power of a power stored as a C integer,
+# the left-shift helper (Python's shift rules, checked in both modes)
+UNCHECKED_RAISES = {"fm", "sm", "di", "pw", "pl", "pv", "sh", "ff", "fn", "fa"}
 
 
 @pytest.fixture(scope="module")
@@ -66,14 +76,16 @@ def exported(tmp_path_factory):
     return work, live
 
 
-def _build(exported, tmp_path):
+def _build(exported, tmp_path, mode):
     work, live = exported
-    build = tmp_path / "build"
+    build = tmp_path / mode
     build.mkdir()
     subprocess.run(["cp", "-r", str(work / "exported"), str(build / "exported")], check=True)
     (build / "sample.py").write_text("from exported import mx_model\nSp = mx_model.Sp\n"
                                      + "".join(f"Sp.{n}(2); Sp.{n}(3)\n" for n in CELLS) + "Sp.h(0)\n")
     spec = {"spaces": {"Sp": {"cells_param_size": {"t": 2097156}}}}
+    if mode != "auto":
+        spec["integer_checks"] = mode
     (build / "spec.py").write_text(repr(spec))
     run = subprocess.run([sys.executable, "-B", "-m", "modelx_cython", "exported", "--sample", "sample.py",
                           "--spec", "spec.py"], cwd=build, capture_output=True, text=True, timeout=900)
@@ -112,14 +124,32 @@ def _unchecked_divisions(c_file):
     return found
 
 
-def test_every_case_is_exact_or_names_the_cell(exported, tmp_path):
-    """No spec key: the Reference BIG = 2**62 is traced here, and a model whose integers are all small
-    is built the same way; nothing in the build follows the magnitude of a traced integer."""
-    outcome, live, report = _build(exported, tmp_path)
-    assert set(report) == {"overflowcheck_fallback"}
+def test_checked_mode_is_exact_or_names_the_cell(exported, tmp_path):
+    outcome, live, report = _build(exported, tmp_path, "checked")
+    assert report["mode"] == "checked" and report["requested"] == "checked"
     for name in RUNS:
         kind, text = outcome[name]
         if name in EXACT:
             assert outcome[name] == ["value", live[name]], name
         else:
             assert kind == "OverflowError" and text.startswith(f"Sp.{name}"), (name, outcome[name])
+
+
+def test_unchecked_mode_is_plain_c_outside_the_boundary(exported, tmp_path):
+    outcome, live, report = _build(exported, tmp_path, "unchecked")
+    assert report["mode"] == "unchecked" and "intermediate values are not traced" in report["limit"]
+    for name in EXACT:
+        assert outcome[name] == ["value", live[name]], name
+    for name in UNCHECKED_RAISES:
+        assert outcome[name][0] == "OverflowError", (name, outcome[name])
+    for name in ("sm", "di", "pw", "pl", "pv", "sh"):
+        assert outcome[name][1].startswith(f"Sp.{name}"), (name, outcome[name])
+    for name in UNCHECKED_PLAIN:         # plain C arithmetic: no check, no exception
+        assert outcome[name][0] == "value", (name, outcome[name])
+
+
+def test_auto_mode_follows_the_largest_traced_integer(exported, tmp_path):
+    _, _, report = _build(exported, tmp_path, "auto")
+    # the Reference BIG = 2**62 is traced: beyond 2**31, so the checked mode
+    assert report["mode"] == "checked" and report["requested"] == "auto"
+    assert report["largest_traced_integer"] >= 2 ** 62

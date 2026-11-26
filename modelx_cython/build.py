@@ -17,51 +17,34 @@ from .scopes import lexical_nodes
 from .syntax import statements, walk
 
 
-def cell_functions(state, module_info):
-    """The functions that compile each cell, for its Cython errors: ``(class name, or None for a
-    module function; function name; cell path; whether the cell is typed)``."""
+def cell_locations(state, module_info):
+    """Map Cython source locations back to the model's cell paths."""
+    positions = MetadataWrapper(state.syntax, unsafe_skip_copy=True).resolve(PositionProvider)
     space_path = tuple(part[len(MODULE_PREF):] for part in module_info.fqname.split('.')[1:-1])
+    methods = state.methods
     moved = defaultdict(list)
     for name, origin in state.function_origins.items():
-        moved[origin].append(name)
-    functions = []
+        moved[origin].append(state.functions[name])
+    locations = []
     for cls_name, cls in module_info.classes.items():
         space_name = cls_name[len(SPACE_PREF):]
         for cell in cls.cells.values():
             if cell.is_special():
                 continue
             identity = cls_name, FORMULA_PREF + cell.name
+            nodes = (methods.get(identity), methods.get((cls_name, cell.name)), *moved[identity],
+                     *moved[cls_name, cell.name])
             name = '.'.join((*space_path, space_name, cell.name))
             typed = cell.get_rettype_expr() != 'object'
-            owned = [(cls_name, method) for method in (FORMULA_PREF + cell.name, cell.name)
-                     if (cls_name, method) in state.methods]
-            for owner, function in (*owned, *((None, f) for f in (*moved[identity], *moved[cls_name, cell.name]))):
-                functions.append((owner, function, name, typed))
-    return functions
-
-
-def cell_locations(source, functions):
-    """``(first line, last line, cell path, lines of its returns)`` of each of ``functions``
-    (see :func:`cell_functions`) in the module text ``source``; read only for a Cython error."""
-    module = cst.parse_module(source)
-    positions = MetadataWrapper(module, unsafe_skip_copy=True).resolve(PositionProvider)
-    nodes = {}
-    for item in module.body:
-        if isinstance(item, cst.FunctionDef):
-            nodes[None, item.name.value] = item
-        elif isinstance(item, cst.ClassDef):
-            nodes.update(((item.name.value, method.name.value), method) for method in item.body.body
-                         if isinstance(method, cst.FunctionDef))
-    locations = []
-    for owner, function, name, typed in functions:
-        node = nodes[owner, function]
-        start = positions[node.decorators[0] if node.decorators else node].start.line
-        end = positions[node].end.line
-        returns = ()
-        if typed:
-            returns = tuple((positions[item].start.line, positions[item].end.line)
-                            for item in lexical_nodes(node.body.body) if isinstance(item, cst.Return))
-        locations.append((start, end, name, returns))
+            for node in filter(None, nodes):
+                start = positions[node.decorators[0] if node.decorators else node].start.line
+                end = positions[node].end.line
+                returns = ()
+                if typed:
+                    returns = tuple((positions[item].start.line, positions[item].end.line)
+                                    for item in lexical_nodes(node.body.body)
+                                    if isinstance(item, cst.Return))
+                locations.append((start, end, name, returns))
     return locations
 
 
@@ -95,10 +78,8 @@ def cythonize_model(modules, *, cell_sources=None, **kwargs):
         finally:
             sys.stderr.write(diagnostics.getvalue())
     except CompileError:
-        sources = {}
-        for path, functions in cell_sources.items():
-            with open(path, encoding='utf-8') as source:
-                sources[os.path.normcase(os.path.abspath(path))] = cell_locations(source.read(), functions)
+        sources = {os.path.normcase(os.path.abspath(path)): locations
+                   for path, locations in cell_sources.items()}
         errors = defaultdict(set)
         # cythonize raises one summary exception without a position. Its
         # diagnostics contain the locations of the individual errors.
@@ -172,8 +153,7 @@ def create_setup(model_name: str, modules: Sequence[str], setup_file: pathlib.Pa
     setup_file : pathlib.Path
         Path of the ``setup.py`` file to write.
     cell_sources : dict, optional
-        Paths relative to the working directory and their cell functions (see
-        :func:`cell_functions`), located in the source only on a Cython error.
+        Paths relative to the working directory and their cell source ranges.
     """
 
     # Cython's generated pickle state builds a recursive boolean chain over
@@ -200,6 +180,7 @@ def create_setup(model_name: str, modules: Sequence[str], setup_file: pathlib.Pa
     from setuptools import setup
     from Cython.Compiler.PyrexTypes import CArrayType, c_int_type
     from modelx_cython.build import cythonize_model, fp_contract_off, package_include_path
+    from modelx_cython.provider_build_cache import provider_build_cache
     import sys
     sys.setrecursionlimit(max(sys.getrecursionlimit(), {recursion_budget}))
 
@@ -226,7 +207,7 @@ def create_setup(model_name: str, modules: Sequence[str], setup_file: pathlib.Pa
             include_path=[package_include_path()],
             compiler_directives={{"freethreading_compatible": True}}
         ),
-        cmdclass=fp_contract_off({{}}, {provider_names!r})
+        cmdclass=fp_contract_off(provider_build_cache({provider_sources!r}), {provider_names!r})
     )
     """)
 
@@ -235,6 +216,7 @@ def create_setup(model_name: str, modules: Sequence[str], setup_file: pathlib.Pa
             model_name=model_name,
             modules_str=modules_str, recursion_budget=recursion_budget,
             cell_sources=cell_sources,
+            provider_sources={f'{model_name}.{path.stem}': path.as_posix() for path in providers},
             provider_names=sorted(f'{model_name}.{path.stem}' for path in providers)),
         encoding="utf-8")
 

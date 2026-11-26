@@ -201,6 +201,7 @@ class CombinedCellsInfo(LexicalCellsInfo):
     # C-level (cpdef) calls do not support; set in cli.main_handler
     called_with_kwargs: bool = False
     formula_has_captured_default: bool = False
+    forwarded_native_result: bool = False
 
     def __init__(self, cls_info, lx_info, rt_info, spec) -> None:
         """Merge lexical, runtime and spec info, validating the spec's
@@ -384,6 +385,21 @@ class CombinedCellsInfo(LexicalCellsInfo):
             return object
 
     @cached_property
+    def vector_shape(self):
+        """'V' (list of floats), 'I' (list of int64) or ('T', kinds) (tuple of such
+        lists) when every traced return value had that shape (``tracer.vector_shape``),
+        else None. Cells with a spec return type, special methods and formulas kept
+        as Python methods are never vector cells (``vectors.py``)."""
+        from modelx_cython.vectors import cell_vector_shape
+        return cell_vector_shape(self)
+
+    @property
+    def uses_vector_cache(self):
+        """Whether a vector cell caches its values in a dense VecCache (``vectors.py``)."""
+        from modelx_cython.vectors import uses_vector_cache
+        return uses_vector_cache(self)
+
+    @cached_property
     def is_real_value(self):
         """Whether the normalized return type is numeric.
 
@@ -441,6 +457,7 @@ class CombinedCellsInfo(LexicalCellsInfo):
         information.  Its ``_v_`` attribute is a ``cdef dict``.
         """
         return (self.has_formula_def and self.has_args() and not self.uses_native_numeric_cache
+                and not self.uses_vector_cache
                 and not (self.has_typeinfo() and self.is_arrayable()))
 
     @property
@@ -546,6 +563,13 @@ class CombinedCellsInfo(LexicalCellsInfo):
             If True, emit C-style types for .pxd files.
         """
 
+        binding = self.native_provider_binding
+        if binding:
+            from modelx_cython.helpers import module_name
+            return f'{module_name(binding.manifest.provider)}.{binding.declaration.view_type}'
+        if self.vector_shape in ('V', 'I'):
+            from modelx_cython.vectors import vector_type
+            return vector_type(self.vector_shape)
         if self.has_typeinfo():
             typ = get_type_expr(self.norm_type, c_style=c_style)
             if self.is_real_value and self.is_array_returned:
@@ -562,6 +586,78 @@ class CombinedCellsInfo(LexicalCellsInfo):
                 return typ
         else:
             return "object"
+
+    @property
+    def _can_bind_native_result(self):
+        return (self.has_formula_def and not self.is_special()
+                and not self.body_has_closure and not self.formula_is_generator
+                and not self.formula_has_captured_default
+                and not self.called_with_kwargs and not self.has_spec_rettype)
+
+    @property
+    def observed_native_binding(self):
+        binding = self.observed_provider_type
+        if self._can_bind_native_result and binding and binding.declaration.view_type is not None:
+            return binding
+        return None
+
+    @property
+    def observed_provider_type(self):
+        return getattr(self._rt, 'observed_provider_binding', None)
+
+    @property
+    def admitted_table(self):
+        """auto-tables (D104): the sampled value was a plain pandas frame admitted as a table."""
+        return getattr(self._rt, 'admitted_table', False)
+
+    @property
+    def admission_record(self):
+        """auto-tables: the admission record of a zero-argument formula that returned a DataFrame."""
+        return getattr(self._rt, 'admission_record', None)
+
+    @property
+    def frame_row_result(self):
+        """auto-tables (D119): every sampled value is a row (Record) of a table admitted from a frame."""
+        return getattr(self._rt, 'frame_row_result', False)
+
+    @property
+    def pandas_fallbacks(self):
+        """auto-tables: pandas fallbacks on admitted tables in the sample, ``{line: {operation: calls}}``."""
+        return getattr(self._rt, 'pandas_fallbacks', None) or {}
+
+    @property
+    def table_schema(self):
+        """M1: key and column kinds of a traced helper Table result (tracer.table_schema)."""
+        return getattr(self._rt, 'table_schema', None)
+
+    @property
+    def table_result(self):
+        """M1: the provider type id when every sampled result is that provider type's
+        exact owner (a helper Table or Record), whether or not it is bound natively."""
+        binding = self.observed_provider_type
+        return binding.type_id if binding is not None else None
+
+    @property
+    def native_table_result(self):
+        binding = self.native_provider_binding
+        handle = binding.declaration.handle if binding is not None else None
+        return handle is not None and handle.type == 'TableHandle'
+
+    @property
+    def native_provider_binding(self):
+        binding = self.observed_native_binding
+        if binding and (binding.declaration.admission == 'observed'
+                        or binding.declared or self.forwarded_native_result):
+            return binding
+        return None
+
+    @property
+    def native_result_binder(self):
+        binding = self.native_provider_binding
+        if binding:
+            from modelx_cython.helpers import module_name
+            return f'{module_name(binding.manifest.provider)}.{binding.declaration.bind}'
+        return None
 
     def is_arg_int(self, arg: str):
         """Return True if the type of parameter ``arg`` (see
@@ -593,6 +689,8 @@ class CombinedCellsInfo(LexicalCellsInfo):
         size policy and can use signed offsets. This selects storage only.
         """
         assert self.has_args() and self.has_typeinfo()
+        if getattr(self.parent, 'collect_shared_item', False) and not self.is_locked:
+            return False
         if not (self.has_formula_def and self.is_int_args and self.is_real_value and not self.is_array_returned):
             return False
         if TransSpec.DENSE_WINDOW in self._spec:
@@ -635,7 +733,7 @@ class CombinedCellsInfo(LexicalCellsInfo):
         return tuple(axis.lower for axis in self.dense_axes)
 
     def _axis_lower(self, key):
-        """Lower bound of a logical axis: a declared (lower, stop) pair gives lower (a sampled
+        """Lower bound of a logical axis: a declared (lower, stop) pair gives lower (R-3-lower; a sampled
         argument below it replaces it, as a sampled one above a declared stop replaces the stop);
         otherwise min(0, sampled minimum), as before."""
         minimums = getattr(self._rt, 'min_args', {})
@@ -721,7 +819,7 @@ class CombinedCellsInfo(LexicalCellsInfo):
 
     def get_readiness_array_decl_expr(self, c_style=False):
         # Cython pickles unsigned-char arrays as NUL-terminated strings, which
-        # loses zero flags (and can read beyond the array). 2-byte short
+        # loses zero flags (and can read beyond the array). D110 P2a: 2-byte short
         # flags halve the flag bytes of every item and keep their full shape through
         # the standard compiled-class serializer, as bint arrays did. A locked Cell's
         # flags are read and written atomically (_mx_load_flag / _mx_store_flag on
@@ -794,7 +892,9 @@ class CombinedRefInfo:
     mx_class: str = ''
     decl_type_expr: str = ''
     is_relative: bool = False
-    is_math: bool = False           # the sampled value was the standard math module
+    helper = None
+    enum = None
+    enum_safe = False
 
     def __init__(self, module,
                  cls,
@@ -805,7 +905,17 @@ class CombinedRefInfo:
         When ``rt_info`` is falsy, only ``module``, ``cls`` and
         ``name`` are set; the class-level defaults remain in effect.
         """
+        from .helpers import CAPABILITIES
+        self.helper_members = getattr(rt_info, 'helper_members', {})
+        self.helper_parameters = getattr(rt_info, 'helper_parameters', None)
+        self.helper_result_type = getattr(rt_info, 'helper_result_type', None)
+        for field_name, _ in CAPABILITIES.values():
+            setattr(self, field_name, getattr(rt_info, field_name, None))
         if rt_info:
+            self.helper = getattr(rt_info, 'helper', None)
+            self.enum = getattr(rt_info, 'enum', None)
+            self.enum_safe = getattr(rt_info, 'enum_safe', False)
+
             if rt_info.mx_class:
                 if rt_info.mx_class.startswith(module + "."):
                     # Defined in the module itself; a bare prefix match
@@ -825,7 +935,6 @@ class CombinedRefInfo:
             self.name = name
             self.type_ = rt_info.type_
             self.mx_class = rt_info.mx_class
-            self.is_math = getattr(rt_info, 'is_math', False)
             self.decl_type_expr = decl_type_expr
             self.is_relative = is_relative
         else:
@@ -898,6 +1007,7 @@ class ClassInfo:
     refs:   dict  # name -> CombinedRefInfo
     spaces: list
     params: dict  # name -> CombinedRefInfo
+    collect_shared_item = False
 
     def __init__(self, name, module):
         """Build the cells, space, ref and parameter tables for the
@@ -911,7 +1021,7 @@ class ClassInfo:
         self._cells_max_args = {}
         self._associative_max_args = {}
         self.declared_axes = {}     # parameter tuple -> {parameter: where its size is declared}
-        self.declared_lowers = {}   # parameter tuple -> {parameter: declared lower bound} of (lower, stop) declarations
+        self.declared_lowers = {}   # parameter tuple -> {parameter: declared lower bound} (R-3-lower pairs)
         self.refs = {}
         self.spaces = []
         self._init_cells()
@@ -1073,7 +1183,7 @@ class ClassInfo:
         return sizes
 
 
-# A sampled argument outside a declared range widens it (as upstream does for a declared size);
+# R-3-lower: a sampled argument outside a declared range widens it (as upstream does for a declared size);
 # the build says so, one line per cell and parameter. For the stop, the cell named is the one whose sample
 # widened it; the widened range applies to every Cell with the same parameter tuple in that Space.
 RANGE_WIDENED = ('{cell} ({params}): parameter {key} declared range [{lower}, {stop}), sampled {sampled} '

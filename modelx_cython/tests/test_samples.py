@@ -401,7 +401,7 @@ def test_fractional_power(sample_dir, model):
     assert "cdef double[11] _v_mth_q\n" in pxd
     import re
     # The ordinary numeric Cell ABI widens integer/float observations without
-    # changing their values, as upstream does. Object ABI is separately tested.
+    # changing their values, as in upstream/c8. Object ABI is separately tested.
     assert re.search(r'cdef double _f_int_pow\(_c_Space1 self, long long t\)(?: except\? -1)?\n',pxd)
 
     # only the two floating-exponent powers are rewritten
@@ -409,8 +409,7 @@ def test_fractional_power(sample_dir, model):
         encoding="utf-8")
     assert "_mx_sys._mx_pow((1 + self.ann_rate(t)), (1 / 12))" in src
     assert "_mx_sys._mx_pow((1 - self.ann_q(t)), (1 / 12))" in src
-    # the C integer exponent is negated through the flagged helper (integer guards); the power stays
-    assert "2 ** _mx_sys._mx_flag_neg(t, _mx_cy.address(_mx_overflow))" in src
+    assert "return 2 ** -t" in src
     # uncached_rate has no _f_ method, so its public method carries the
     # formula and goes through the transformer's other rewrite site
     assert "def uncached_rate(" in src
