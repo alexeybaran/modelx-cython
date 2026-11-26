@@ -389,6 +389,30 @@ def _walk(node):
     return found
 
 
+def _call_shape(func, shapes, ref_shapes):
+    """The vector shape of a call of ``self.<cell>`` or ``self.<Reference>.<cell>``, else None."""
+    if not isinstance(func, cst.Attribute):
+        return None
+    if _is_name(func.value, 'self'):
+        return shapes.get(func.attr.value)
+    if isinstance(func.value, cst.Attribute) and _is_name(func.value.value, 'self'):
+        return ref_shapes.get(func.value.attr.value, {}).get(func.attr.value)
+    return None
+
+
+def reference_shapes(cls_info, module):
+    """{Reference: {cell: shape}} of the vector cells of the Spaces that References of ``cls_info`` are
+    declared with (a class of ``module``, as table_cells.RenameMembers resolves a receiver)."""
+    found = {}
+    for name, ref in getattr(cls_info, 'refs', {}).items():
+        decl = getattr(ref, 'decl_type_expr', '')
+        target = getattr(module, 'classes', {}).get(decl.rsplit('.', 1)[-1]) if decl else None
+        shapes = {c: cell.vector_shape for c, cell in target.cells.items() if cell.vector_shape} if target else {}
+        if shapes:
+            found[name] = shapes
+    return found
+
+
 class _Rename(cst.CSTTransformer):
     """Rename variables; an attribute name or a keyword argument's name is not a variable."""
 
@@ -606,6 +630,7 @@ class VectorLowering(cst.CSTTransformer):
         self.cls_info = cls_info
         self.cells = cells
         self.shapes = {name: c.vector_shape for name, c in cls_info.cells.items() if c.vector_shape}
+        self.ref_shapes = {}            # cross-Space reads: {Reference: {cell: shape}} (reference_shapes)
         self.builtins = builtins
         self.counter = counter          # shared per module: unique temporaries
         self.temps = set()              # the temporaries temp() made
@@ -638,10 +663,7 @@ class VectorLowering(cst.CSTTransformer):
     def kind(self, node):
         """'V', 'I', 'AV', 'AI' (fresh allocations), ('T', kinds) or None for an original node."""
         if isinstance(node, cst.Call):
-            f = node.func
-            if isinstance(f, cst.Attribute) and _is_name(f.value, 'self') and f.attr.value in self.shapes:
-                return self.shapes[f.attr.value]
-            return None
+            return _call_shape(node.func, self.shapes, self.ref_shapes)
         if isinstance(node, cst.Name):
             return self.env.get(node.value)
         if isinstance(node, cst.Subscript):
@@ -1813,9 +1835,10 @@ class _ObjectUses(cst.CSTTransformer):
     A tuple of vectors in such a position becomes a tuple of lists."""
     METADATA_DEPENDENCIES = (__import__('libcst.metadata', fromlist=['ParentNodeProvider']).ParentNodeProvider,)
 
-    def __init__(self, names, shapes, own=None):
+    def __init__(self, names, shapes, own=None, ref_shapes=None):
         super().__init__()
         self.names, self.shapes = names, shapes     # {name: shape}, {vector cell: shape}
+        self.ref_shapes = ref_shapes or {}          # {Reference: {vector cell: shape}}
         self.own = own                              # the shape this formula returns, if it is a vector cell
         self.converted = []
 
@@ -1829,9 +1852,8 @@ class _ObjectUses(cst.CSTTransformer):
     def _shape(self, node):
         if isinstance(node, cst.Name):
             return self.names.get(node.value)
-        if (isinstance(node, cst.Call) and isinstance(node.func, cst.Attribute)
-                and _is_name(node.func.value, 'self')):
-            return self.shapes.get(node.func.attr.value)
+        if isinstance(node, cst.Call):
+            return _call_shape(node.func, self.shapes, self.ref_shapes)
         if isinstance(node, cst.Subscript):
             base = self._shape(node.value)
             if isinstance(base, tuple) and _index(node) is not None and _int_literal(_index(node)) is not None:
@@ -1902,11 +1924,11 @@ class _ObjectUses(cst.CSTTransformer):
         return self._leave(original, updated)
 
 
-def _object_uses(body, names, shapes, own=None):
+def _object_uses(body, names, shapes, own=None, ref_shapes=None):
     """``body`` (an IndentedBlock) with every Python use of a vector made a list (``_ObjectUses``)."""
     from libcst.metadata import MetadataWrapper
     wrapper = MetadataWrapper(cst.Module(body=body.body), unsafe_skip_copy=True)
-    uses = _ObjectUses(names, shapes, own)
+    uses = _ObjectUses(names, shapes, own, ref_shapes)
     module = wrapper.visit(uses)
     return body.with_changes(body=module.body), uses.converted
 
@@ -1926,6 +1948,7 @@ def lower(node, cls_info, cells, scope, counter, module, ref_kinds=None):
     loops = [name for name in range_loop_locals(node.body, builtins) if name not in cells.params]
     lowering = VectorLowering(cls_info, cells, builtins, counter)
     lowering.readers = frozenset(name for name in READERS if is_builtin(name))
+    lowering.ref_shapes = reference_shapes(cls_info, module)
     from .powers import KIND_FLOAT, KIND_INT
     lowering.strict_locals = not module_vector_cells(module)
     lowering.ref_scalars = {name: {KIND_FLOAT: FLOAT, KIND_INT: INT}.get(kind)
@@ -1952,6 +1975,7 @@ def lower(node, cls_info, cells, scope, counter, module, ref_kinds=None):
     decls = [_stmt(f'{name}: {CY_MOD}.longlong\n') for name in loops + derived]
     touches = (any(lowering.env.values()) or cells.vector_shape or any(
         isinstance(n, cst.Attribute) and n.attr.value in lowering.shapes for n in _walk(node.body))
+        or any(isinstance(n, cst.Call) and _call_shape(n.func, {}, lowering.ref_shapes) for n in _walk(node.body))
         or any(isinstance(n, cst.Power) for n in _walk(node.body)))
     report['range_loop_locals'] = loops
     if derived:
@@ -1969,7 +1993,8 @@ def lower(node, cls_info, cells, scope, counter, module, ref_kinds=None):
                 typed[small.target.value] = next(k for k, t in TYPES.items() if t == _code(small.annotation.annotation))
     body, converted = _object_uses(body, typed, {n: s for n, s in lowering.shapes.items()
                                                  if s in ('V', 'I') or isinstance(s, tuple)},
-                                   cells.vector_shape if cells.vector_shape in ("V", "I") or isinstance(cells.vector_shape, tuple) else None)
+                                   cells.vector_shape if cells.vector_shape in ("V", "I") or isinstance(cells.vector_shape, tuple) else None,
+                                   lowering.ref_shapes)
     if derived:
         body = body.visit(_CheckedFloatReads(typed, set(derived)))
     for name, items in lowering.facts.assigns.items():
