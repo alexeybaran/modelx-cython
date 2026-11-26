@@ -16,10 +16,10 @@ for bit, at any number of workers.
 Workers: the spec key ``collect_workers`` (default 1), or ``_mx_collect_workers`` set on the compiled
 model object. With more than one, items run on that many threads; their outputs are added in domain
 order as they complete, and an error raises the exception of the first failing coordinate, as one
-worker does. Threads run model code at the same time only on free-threaded Python; with the GIL,
-one worker runs. Before starting threads, a Reference of the Space that is a Space without a lock
-(not exported in ``locked_spaces``) raises ValueError naming it, as does a formula of the Space that
+worker does. With more than one worker, on every build, a Reference of the Space that is a Space without
+a lock (not exported in ``locked_spaces``) raises ValueError naming it, as does a formula of the Space that
 reads ``_model``, ``_parent`` or ``_space``: what those reach cannot be filled by two threads at once.
+Threads run model code at the same time only on free-threaded Python; with the GIL, one worker runs.
 """
 import pathlib
 import re
@@ -223,19 +223,21 @@ def _mx_collect_evaluate(space, coords, outputs_at, refs, reads_parents):
     if type(workers) is not int or workers < 1:
         raise ValueError('_mx_collect_workers must be a positive int, not %r' % (workers,))
     accumulator = Accumulator()
+    if workers > 1 and len(coords) > 1:
+        # refused on every build, whether or not the threads would run model code at once
+        name = type(space).__name__[len('_c_'):]
+        if reads_parents:
+            raise ValueError(f'collect of {{name}} with {{workers}} workers: a formula of {{name}} reads _model, '
+                             '_parent or _space, which the workers could fill at once; use one worker')
+        for ref in refs:
+            value = getattr(space, ref, None)
+            if isinstance(value, _mx_sys.BaseSpace) and value is not space and value._mx_lock is None:
+                raise ValueError(f'collect of {{name}} with {{workers}} workers: the Reference {{ref}} is a Space '
+                                 'without a lock; export it in locked_spaces or use one worker')
     if workers == 1 or len(coords) == 1 or getattr(sys, '_is_gil_enabled', lambda: True)():
         for c in coords:
             accumulator.add(c, prepare_output(outputs_at(c), live))
         return accumulator.result()
-    name = type(space).__name__[len('_c_'):]
-    if reads_parents:
-        raise ValueError(f'collect of {{name}} with {{workers}} workers: a formula of {{name}} reads _model, '
-                         '_parent or _space, which the workers could fill at once; use one worker')
-    for ref in refs:
-        value = getattr(space, ref, None)
-        if isinstance(value, _mx_sys.BaseSpace) and value is not space and value._mx_lock is None:
-            raise ValueError(f'collect of {{name}} with {{workers}} workers: the Reference {{ref}} is a Space '
-                             'without a lock; export it in locked_spaces or use one worker')
     import threading
     lock = threading.Lock()
     pending = {{}}
