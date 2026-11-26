@@ -408,6 +408,8 @@ def main_handler(args: argparse.Namespace, stdout: IO[str], stderr: IO[str]) -> 
                 )
             from modelx_cython.locked_entries import lower_locked_entries
             state = lower_locked_entries(state, u.module_info)
+            from modelx_cython import enum_results
+            state = state.replace(enum_results.finish(state.syntax, u.module_info))     # members where they reach Python
             translated_modules[u.fqname] = state
             # the printed text must mean the tree the passes built (no dropped parentheses)
             from modelx_cython import reparse_check
