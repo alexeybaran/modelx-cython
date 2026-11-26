@@ -7,6 +7,7 @@ import sys
 import textwrap
 
 import modelx as mx
+from modelx.export import exporter
 
 PROBE = textwrap.dedent('''\
     import enum, json
@@ -60,7 +61,10 @@ def test_python_calls_check_integer_arguments(tmp_path):
         d.new_cells('c', 'lambda t: t * scale + 0.5')
         live = {'exact': s.f(3), 'two': s.g(3, 4), 'default': s.g(3), 'bool': s.f(True), 'numpy': s.f(5),
                 'subclass': s.f(6), 'enum': s.g(2, 2), 'keyword': s.g(3, 4), 'keyword_numpy': s.g(3, 7),
-                'mixed': s.h(2, 0.5), 'dynamic': d[2].c(3)}
+                'mixed': s.h(2, 0.5),
+                # a modelx that does not export dynamic References exports D[2] with the Space's
+                # own scale: the compiled model equals the export
+                'dynamic': d[2].c(3) if hasattr(exporter, 'dynamic_ref_formula') else d.c(3)}
         model.export(tmp_path / 'exported')
     finally:
         model.close()
