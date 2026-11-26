@@ -1,0 +1,102 @@
+From 307eab7890292824a3cd79bf81e9861a87bda3de Mon Sep 17 00:00:00 2001
+From: collect proposal <collect-proposal@users.noreply.github.com>
+Date: Thu, 26 Nov 2026 00:54:36 +0000
+Subject: [PATCH 5/5] DV01 page: both routes, the locked Spaces, time and
+ memory at 1,050 policies
+
+---
+ .../fixed_deferred_annuity/dv01-sec.md        | 40 ++++++++++++++-----
+ 1 file changed, 30 insertions(+), 10 deletions(-)
+
+diff --git a/lifelib/libraries/uslib/products/fixed_deferred_annuity/dv01-sec.md b/lifelib/libraries/uslib/products/fixed_deferred_annuity/dv01-sec.md
+index ba22efcb..42d924a8 100644
+--- a/lifelib/libraries/uslib/products/fixed_deferred_annuity/dv01-sec.md
++++ b/lifelib/libraries/uslib/products/fixed_deferred_annuity/dv01-sec.md
+@@ -21,6 +21,7 @@ python products/fixed_deferred_annuity/run_dv01_sec.py                    # live
+ python products/fixed_deferred_annuity/run_dv01_sec.py --compiled         # compiled, 1 and 4 workers
+ python products/fixed_deferred_annuity/run_dv01_sec.py --compiled --build DIR --workers 8
+ python products/fixed_deferred_annuity/run_dv01_sec.py --compiled --policies 1050
++python products/fixed_deferred_annuity/run_dv01_sec.py --compiled --collect     # through collect
+ ```
+ 
+ The first builds the model and prints the two reports of the shipped book, MYGA_US_SEC's
+@@ -31,7 +32,8 @@ minutes; a build already in `DIR` is reused. It then runs the report twice, each
+ fresh process: on one worker thread, and on `--workers` threads. It prints each run's totals
+ and seconds and checks that the two reports are equal. `--policies N` replaces the shipped
+ book by N policies, MYGA_US_SEC's seven new-business points repeated; the timings below are
+-on that book. `--paths` and `--years` widen the report, and `--json FILE` writes it out.
++on that book. `--collect` computes the compiled report through `Valuation.collect` instead of
++the pooled driver. `--paths` and `--years` widen the report, and `--json FILE` writes it out.
+ 
+ In Python:
+ 
+@@ -98,7 +100,7 @@ is a dynamic Space Reference, and compiling it needs a modelx that exports such
+ 
+ ## The compiled model
+ 
+-`dv01_sec/compiled.py` exports the model with `ESG` and `Market` locked, writes a spec of
++`dv01_sec/compiled.py` exports the model with `ESG`, `Market`, `Data` and `Actual` locked, writes a spec of
+ cache sizes (MYGA_US_SEC's own, from `spec_sec.py`, for both projections),
+ and compiles it with `dv01_sec/sample.py` as the trace, which runs the report of the shipped
+ book. Nothing is written into the library tree. The compiled report is computed by
+@@ -106,6 +108,16 @@ book. Nothing is written into the library tree. The compiled report is computed
+ releasing each item once read, and the results are summed in policy order as `Outer` sums
+ them, so the totals do not depend on the number of workers.
+ 
++**Through collect.** `Valuation` declares collect over the book (`model.py`, five lines):
++`Valuation.collect(month, scen_id, key)` evaluates every policy at one close and curve on the
++compiled collect's worker threads, adds its liability PV and, on the base curve, its cash
++flows in policy order, and releases each policy's ItemSpace. `report.collect_report` (21 lines)
++makes one such call per close and curve, 39 for the report below, and assembles the frames as
++the pooled driver does; the two reports are equal bit for bit. Collect runs its items on
++several threads only when every Space they read is locked, which is why `Data` and `Actual`
++are locked here. `Actual`'s ItemSpaces stay alive from one close to the next, since every close
++reads them; the report deletes them once the path is done.
++
+ **The driver.** With more than one worker the main thread submits every task and then waits
+ once for all of them with `concurrent.futures.wait`, instead of waiting on each result in
+ turn as `list(pool.map(...))` does. On free-threaded CPython 3.14 a thread waiting on a lock
+@@ -114,7 +126,8 @@ free, so with `pool.map` the four workers ran on fresh pages and scaled 1.3x whe
+ wait scales 2.5x or more.
+ 
+ Requirements: free-threaded CPython 3.14 (`python3.14t`) for the parallel run, Cython 3.3,
+-a C compiler, modelx with the export of dynamic Space References, and modelx-cython. Under a
++a C compiler, modelx with the export of dynamic Space References and with `Space.set_collect`,
++and modelx-cython with the compiled collect. Under a
+ GIL build the workers take turns and the reports are the same.
+ 
+ ## Speed
+@@ -123,16 +136,23 @@ Compiled, book of 1,050 policies (the seven new-business points 150 times), ESG
+ years 0 to 2, so 1,050 × 3 × 13 = 40,950 valuations; median of three rounds, each run in a
+ fresh process, on a 4-core cloud VM, Python 3.14.6 free-threaded, gcc 13:
+ 
+-| Workers | Seconds | Speed-up |
+-| ---: | ---: | ---: |
+-| 1 | 8.71 | 1.00 |
+-| 4 | 3.26 | 2.67 |
+-
+-The three rounds ranged 8.37–8.95 s and 3.02–3.36 s. Totals: DV01 129,960.616141 and
++| Route | Workers | Seconds | CPU seconds | Peak memory | Speed-up |
++| --- | ---: | ---: | ---: | ---: | ---: |
++| pooled driver | 1 | 9.97 | 9.9 | 0.25 GB | 1.00 |
++| pooled driver | 4 | 3.80 | 13.4 | 0.35 GB | 2.62 |
++| collect | 1 | 9.81 | 9.7 | 1.1 GB | 1.00 |
++| collect | 4 | 3.75 | 12.5 | 1.1 GB | 2.62 |
++
++Median of five rounds, routes interleaved, with `Data` and `Actual` locked. Collect takes the
++same time as the pooled driver and about 1.1 GB against 0.25 GB, because the 1,050 `Actual`
++ItemSpaces stay alive across the 39 collects, where the pooled driver deletes each policy's
++once that policy is done. What collect gains is less model code: the report reads each close's
++total from one call instead of a per-policy task, a thread pool and its own sums. Totals: DV01 129,960.616141 and
+ CS01 157,856.970872 in every run. Live modelx runs the 14-point book in about 300 s.
+ 
+ ## Tests
+ 
+ `tests/test_fixed_deferred_annuity_us_sec_dv01.py` holds the model's shape, the live report
+ of the shipped book against stored values (rel 1e-10, abs 1e-7), and, where modelx-cython and
+-a C compiler are installed, the compiled report at 1 and 4 workers against the live one.
++a C compiler are installed, the compiled report at 1 and 4 workers against the live one, and
++the report through collect equal to the pooled driver's and to the live one.
+-- 
+2.43.0
+

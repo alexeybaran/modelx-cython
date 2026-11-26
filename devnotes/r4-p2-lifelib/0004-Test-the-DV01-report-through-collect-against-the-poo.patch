@@ -1,0 +1,48 @@
+From 0a300e7043464fc25ed3074caf5e6bfd06260ba2 Mon Sep 17 00:00:00 2001
+From: collect proposal <collect-proposal@users.noreply.github.com>
+Date: Thu, 26 Nov 2026 00:54:36 +0000
+Subject: [PATCH 4/5] Test the DV01 report through collect against the pooled
+ driver and live modelx
+
+---
+ ...test_fixed_deferred_annuity_us_sec_dv01.py | 20 +++++++++++++++++++
+ 1 file changed, 20 insertions(+)
+
+diff --git a/lifelib/libraries/uslib/tests/test_fixed_deferred_annuity_us_sec_dv01.py b/lifelib/libraries/uslib/tests/test_fixed_deferred_annuity_us_sec_dv01.py
+index b307858d..66c8b5ca 100644
+--- a/lifelib/libraries/uslib/tests/test_fixed_deferred_annuity_us_sec_dv01.py
++++ b/lifelib/libraries/uslib/tests/test_fixed_deferred_annuity_us_sec_dv01.py
+@@ -12,6 +12,8 @@ curves, and reports DV01 and CS01 by tenor.  These tests hold:
+ * the compiled report: the model compiled with modelx-cython (``compiled.build``) and run by
+   the pooled driver (``report.pooled_report``) with 1 and with 4 worker threads, each run in a
+   fresh process, equal to the live report under the same rule.
++* the report through collect (``report.collect_report``): at 1 and 4 workers, equal to the
++  pooled driver's bit for bit and to the live report.
+ 
+ The live report takes about five minutes, and the build about ten more.  The compile test
+ carries the ``cython`` marker and skips where modelx-cython or a C compiler is missing, or
+@@ -163,3 +165,21 @@ def test_compiled_report_equals_live(dv01_build, live, workers):
+     dv01, cs01 = live
+     assert _close(result["dv01"], dv01.to_numpy()).all()
+     assert _close(result["cs01"], cs01.to_numpy()).all()
++
++
++@pytest.mark.cython
++@pytest.mark.parametrize("workers", [1, 4])
++def test_compiled_collect_equals_direct_and_live(dv01_build, live, workers):
++    """The report through Valuation.collect equals the pooled driver's, bit for bit, and live modelx."""
++    results = {}
++    for route in ("direct", "collect"):
++        command = [sys.executable, str(RUNNER), "--run", str(dv01_build), "--workers", str(workers)]
++        done = subprocess.run(command + (["--collect"] if route == "collect" else []),
++                              capture_output=True, text=True)
++        assert done.returncode == 0, done.stderr[-3000:]
++        results[route] = json.loads(done.stdout.strip().splitlines()[-1])
++    assert results["collect"]["dv01"] == results["direct"]["dv01"]
++    assert results["collect"]["cs01"] == results["direct"]["cs01"]
++    dv01, cs01 = live
++    assert _close(results["collect"]["dv01"], dv01.to_numpy()).all()
++    assert _close(results["collect"]["cs01"], cs01.to_numpy()).all()
+-- 
+2.43.0
+

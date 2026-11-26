@@ -1,0 +1,125 @@
+# Compiled collect
+
+modelx declares collect on a Space (`Space.set_collect(over={param: domain}, outputs=...)`): `collect()` evaluates
+the Space at every coordinate of a domain, reads each ItemSpace's `collect_outputs`, adds the `sum` outputs and keeps
+the `individual` ones. An exported model calls one hook of the compiled Space class, `_mx_collect_hook` (version 1),
+with the checked domain. This change makes the compiled class define that hook, so that a book is projected and
+totalled in compiled code, on several threads on free-threaded Python, without the model's author writing a driver.
+
+## Commits
+
+| commit | non-test lines | test lines |
+|---|---|---|
+| Compile a Space declared with collect: the cache slot and the collect hook, version 1 | +203 / -2 | +141 |
+| Collect reuses one item per worker thread, reset to a new object's state between coordinates | +114 / -11 | +82 |
+| Borrow the held item of an exclusively owned item at a read | +17 / -5 | +146 / -3 |
+
+**Declaration and evaluator.** The compiled class declares the collect cache and defines the hook from the exported
+`collect` and `_mx_collect_item` methods. For each coordinate the hook builds the item as `__call__` builds a new
+root, reads `collect_outputs()`, checks and detaches it with the export's own `prepare_output`, and releases the item
+when collect created it; an existing ItemSpace is used and kept. The export's `Accumulator` adds the outputs in domain
+order. Workers: the spec key `collect_workers` (default 1) or `_mx_collect_workers` on the compiled model object.
+With more than one, items run on that many threads from a shared index; outputs are added in domain order as they
+complete. With the GIL one worker runs.
+
+**Reused receiver.** A new item that nothing else holds is kept by its worker thread and returned to the state of a
+new object before the next coordinate, then built again on the same memory. The reset is generated in the class's
+`.pxd` from the class's own attribute declarations and those of its bases (the object's layout): an object or
+memoryview attribute becomes None, as `tp_new` leaves it; a C value, array or struct becomes zero bytes, as the
+allocator leaves it; dense value arrays stay unwritten behind their flags, as the allocator already leaves them. A
+declaration of any other kind stops the build, naming the attribute and its Cell. Spaces with dynamic References
+keep fresh items.
+
+**Borrowed read.** The pinned read of a held item returns the pointer without a new reference, so an item of a shared
+Space held by every worker's items is read without writing its reference count. It changes every compiled read of a
+held item: the direct route (items built by `Projection[k]`) as well as collect.
+
+## Guarantees
+
+- Values are the export's own, added in domain order: equal to live modelx bit for bit at any number of workers.
+- An error raises the exception of the first failing coordinate in domain order, at any number of workers.
+- Items collect creates are released: peak memory does not grow with the number of items, at one worker or four.
+- A reused item holds nothing from the previous coordinate (tested on every cache kind, on a Cell reached by one
+  coordinate only and on one reached by every other coordinate; a reset that skips the flag arrays fails the test).
+- Python 3.10 and later, with and without the GIL; the full upstream suite passes unchanged.
+
+## Limits
+
+- More than one worker requires every Space the items read to be locked. A Reference of the collect Space to a Space
+  without a lock, or a formula of it reading `_model`, `_parent` or `_space`, raises `ValueError` naming it before
+  any thread starts. A model satisfies it by exporting those Spaces in `locked_spaces`; one worker always runs.
+  Locked Cells read their computed values without the lock; a miss takes the model lock, so concurrent first fills
+  of a locked Space run one at a time.
+- Collect releases only the items of the collect Space. ItemSpaces of other Spaces that its items create stay in
+  those Spaces until the model deletes them.
+- Sums are added in domain order on one thread; collect does not add in C or merge partial sums.
+- Threads are started per call and joined before it returns.
+
+## Considered and declined
+
+| design | why declined |
+|---|---|
+| allow an unlocked Space reached only through its items, keyed by the collected parameter | safe within one call, but two collects started by user threads at once can share an item; not provable without serialising them, and locking the Space costs nothing measurable on the models below |
+| skip re-running `__init__` on a reused item (reset only the caches) | measured: 0-3% on both models, within noise |
+| native C sums of scalar outputs | the Python path costs 1.35 us per item: at most 3% of the fastest model, 0.3% of the others |
+| contiguous chunks with partial sums | under 1%, and four-worker sums would differ from one worker's in the last bits |
+| a thread pool kept per model | no measurable change on the DV01 example and KLV_DE_S |
+
+## Evidence
+
+All measurements: free-threaded CPython 3.14.6, Cython 3.3.1, 4 vCPU, fresh process per run, runs interleaved.
+
+### The twelve `*_US_SEC` lifelib models (medians of 3, wall s / peak MB)
+
+Collect declared in a measurement script, `Data` locked, books tiled to the size at which the direct route keeping
+every item fits 4 GB. On the shipped book collect equals live modelx bit for bit on all twelve, at 1 and 4 workers,
+with and without the borrowed read.
+
+| model | points | direct kept 1w | direct kept 4w | collect 1w | collect 4w | scaling direct / collect | collect without borrowed read 1w / 4w (scaling) |
+|---|---|---|---|---|---|---|---|
+| DIA_US_SEC | 2229 | 1.67/1747 | 0.79/1750 | 0.87/100 | 0.51/108 | 2.13 / 1.73 | 0.87 / 0.53 (1.65x) |
+| FIA_US_SEC | 1156 | 1.05/1802 | 0.40/1804 | 0.28/99 | 0.12/108 | 2.64 / 2.30 | 0.29 / 0.13 (2.33x) |
+| IUL_US_SEC | 792 | 1.45/1946 | 0.54/1949 | 0.70/101 | 0.27/114 | 2.71 / 2.65 | 0.74 / 0.26 (2.88x) |
+| MYGA_US_SEC | 1552 | 1.18/1740 | 0.40/1742 | 0.33/97 | 0.14/104 | 2.95 / 2.27 | 0.34 / 0.14 (2.44x) |
+| RILA_US_SEC | 863 | 1.34/1396 | 2.13/1398 | 0.72/101 | 2.05/111 | 0.63 / 0.35 | 0.73 / 2.01 (0.37x) |
+| SPIA_US_SEC | 3299 | 1.52/1824 | 0.46/1826 | 0.65/96 | 0.23/103 | 3.32 / 2.81 | 0.77 / 0.23 (3.35x) |
+| Term_US_SEC | 8117 | 1.70/2522 | 0.62/2523 | 0.65/94 | 0.23/100 | 2.76 / 2.79 | 0.61 / 0.22 (2.75x) |
+| ULSG_US_SEC | 1449 | 1.20/1815 | 0.40/1818 | 0.42/95 | 0.17/104 | 3.00 / 2.47 | 0.50 / 0.18 (2.75x) |
+| UL_US_SEC | 2046 | 1.37/2083 | 0.47/2085 | 0.48/95 | 0.19/103 | 2.90 / 2.53 | 0.45 / 0.19 (2.43x) |
+| VA_US_SEC | 954 | 1.39/2020 | 0.95/2022 | 0.49/104 | 0.16/117 | 1.46 / 3.01 | 0.43 / 0.17 (2.57x) |
+| VUL_US_SEC | 817 | 2.33/2322 | 2.49/2339 | 1.53/101 | 0.49/116 | 0.94 / 3.10 | 1.58 / 0.50 (3.14x) |
+| WholeLife_US_SEC | 3178 | 1.56/2363 | 0.59/2364 | 0.54/95 | 0.22/102 | 2.62 / 2.39 | 0.53 / 0.24 (2.25x) |
+
+Direct without the borrowed read at four workers: MYGA 0.40 s, Term 0.60 s, VA 0.97 s. Collect uses about 100 MB
+where the direct route keeping its items uses 1.4-2.5 GB. Four-worker runs take 0.1-0.5 s, so their scaling includes
+thread start. RILA_US_SEC is slower on four workers than on one on both routes, for a reason outside collect.
+
+### The DV01 example on MYGA_US_SEC, 1,050 policies (medians of 5, wall s / CPU s / peak MB)
+
+| route | 1 worker | 4 workers | scaling |
+|---|---|---|---|
+| hand-written pooled driver | 9.97 / 9.9 / 252 | 3.80 / 13.4 / 352 | 2.62x |
+| collect | 9.81 / 9.7 / 1120 | 3.75 / 12.5 / 1099 | 2.62x |
+| collect without the borrowed read | 10.31 / 10.2 / 1120 | 7.79 / 28.6 / 1099 | 1.32x |
+
+The declaration adds five lines to the model, and the report through collect is 21 lines instead of a per-policy
+task, a thread pool and its own sums. Collect holds the policies' `Actual` ItemSpaces across the 39 collects of the
+report, which every close reads; the pooled driver deletes each policy's when it is done. DV01 129960.61614055187 in
+every run.
+
+### Against the previous collect implementation, on the same item code (medians of 5, wall s / peak MB)
+
+The previous implementation (a reused receiver per worker, native sums, contiguous chunks with partial sums) and this
+one were built by the same compiler on lifelib's KLV_DE_S (60,000 policies) and VA_US_S (20,000 policies), collect
+output the book's net cash flow. Direct: the same items through `Projection[k]` and `del`, four interleaved slices.
+
+| model | workers | previous | this, without the reused receiver | this | direct |
+|---|---|---|---|---|---|
+| KLV_DE_S | 1 | 2.507 / 128.8 | 2.789 / 128.2 | 2.678 / 128.5 | 2.830 / 127.4 |
+| KLV_DE_S | 4 | 0.830 / 132.8 | 1.047 / 159.2 | 0.944 / 132.6 | 0.931 / 168.5 |
+| VA_US_S | 1 | 7.767 / 114.6 | 8.180 / 114.3 | 8.216 / 114.6 | 7.899 / 114.8 |
+| VA_US_S | 4 | 2.107 / 125.1 | 2.603 / 183.2 | 2.344 / 125.2 | 2.629 / 181.5 |
+
+The previous implementation is 6-7% faster at one worker and 11-14% at four, by running its per-item path natively;
+this one has the previous one's peak memory, a fraction of its code, and four-worker sums equal to one worker's bit
+for bit (the previous one's differ in the last bits).

@@ -1,0 +1,38 @@
+From 1b40d45f22f70f2cead8aef59a47c6addf85f9ae Mon Sep 17 00:00:00 2001
+From: collect proposal <collect-proposal@users.noreply.github.com>
+Date: Thu, 26 Nov 2026 00:54:36 +0000
+Subject: [PATCH 1/5] DV01 example: declare collect on Valuation over the book
+
+Valuation.collect(month, scen_id, key) evaluates every policy of the book at
+one close and curve and adds its liability PV and, on the base curve, its
+cash flows. Needs a modelx with Space.set_collect.
+---
+ .../uslib/products/fixed_deferred_annuity/dv01_sec/model.py  | 5 +++++
+ 1 file changed, 5 insertions(+)
+
+diff --git a/lifelib/libraries/uslib/products/fixed_deferred_annuity/dv01_sec/model.py b/lifelib/libraries/uslib/products/fixed_deferred_annuity/dv01_sec/model.py
+index 93f141b9..15330b32 100644
+--- a/lifelib/libraries/uslib/products/fixed_deferred_annuity/dv01_sec/model.py
++++ b/lifelib/libraries/uslib/products/fixed_deferred_annuity/dv01_sec/model.py
+@@ -29,6 +29,10 @@ import lifelib
+ 
+ from . import actual, contract, market, outer, valuation
+ 
++# What a close's collect over the book adds: the liability PV, and on the base curve the cash flows.
++COLLECT_OUTPUTS = '''lambda: {'sum': {'pv': liability_pv(), 'cf': {
++    k: cashflow_at_offset(k) for k in projection_months(valuation_month)} if shock == -1 else {}}}'''
++
+ # Months of Actual's cash flows that Outer.actual_cashflows reports.
+ OUTER_MONTHS = 36
+ 
+@@ -184,6 +188,7 @@ def build_model(*, model_name='MYGASECDV01', input_dir=None, outer_months=OUTER_
+     valuation_space.new_cells('point_indices', actual_space.cells['point_indices'].formula.source)
+     _install(actual_space, sec_formulas)
+     _install(valuation_space, sec_formulas)
++    valuation_space.set_collect(over={'idx': valuation_space.point_indices}, outputs=COLLECT_OUTPUTS)
+ 
+     outer_space = model.new_space_from_module(outer, name='Outer', refs={
+         'Actual': actual_space, 'Valuation': valuation_space, 'ESG': esg,
+-- 
+2.43.0
+

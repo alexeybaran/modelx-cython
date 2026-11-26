@@ -1,0 +1,108 @@
+From 6c02727590c8a012cec7a7fed493a1146aa02c3f Mon Sep 17 00:00:00 2001
+From: collect proposal <collect-proposal@users.noreply.github.com>
+Date: Thu, 26 Nov 2026 00:54:36 +0000
+Subject: [PATCH 3/5] DV01 example: the report through collect, beside the
+ direct driver
+
+report.collect_report reads each close's totals from Valuation.collect; the
+pooled driver stays the default and --collect selects collect for the
+compiled runs of run_dv01_sec.py.
+---
+ .../fixed_deferred_annuity/dv01_sec/report.py | 26 +++++++++++++++++++
+ .../fixed_deferred_annuity/run_dv01_sec.py    | 11 ++++++--
+ 2 files changed, 35 insertions(+), 2 deletions(-)
+
+diff --git a/lifelib/libraries/uslib/products/fixed_deferred_annuity/dv01_sec/report.py b/lifelib/libraries/uslib/products/fixed_deferred_annuity/dv01_sec/report.py
+index 01f5584e..94c7c158 100644
+--- a/lifelib/libraries/uslib/products/fixed_deferred_annuity/dv01_sec/report.py
++++ b/lifelib/libraries/uslib/products/fixed_deferred_annuity/dv01_sec/report.py
+@@ -12,6 +12,10 @@ then waits once for all of them with ``concurrent.futures.wait``; it does not wa
+ result in turn, as ``list(pool.map(...))`` does, because on free-threaded CPython 3.14 a
+ thread waiting on a lock spins while attached to the interpreter, and that holds back the
+ reuse of the memory the workers free (``dv01-sec.md``, *The driver*).
++
++:func:`collect_report` gives the same numbers through ``Valuation.collect``: one collect per close
++and curve over the book, each policy's ItemSpace evaluated, added and released by the compiled
++collect, on ``workers`` threads.
+ """
+ from concurrent.futures import ThreadPoolExecutor, wait
+ 
+@@ -116,3 +120,25 @@ def pooled_report(model, num_scenarios, annual_steps, workers=1):
+             dv01_rows.append(dv)
+             cs01_rows.append(cs)
+     return _frames(model, num_scenarios, annual_steps, dv01_rows, cs01_rows)
++
++
++def collect_report(model, num_scenarios, annual_steps, workers=1):
++    """The annual risk report from one collect per close and curve, over the book."""
++    model._mx_collect_workers = workers
++    valuation = model.Valuation
++    keys = range(len(model.Data.shock_key_months()))
++    dv01_rows, cs01_rows = [], []
++    for s in range(1, num_scenarios + 1):
++        for m in closes(annual_steps):
++            base = valuation.collect(m, s, -1).sum
++            dv, cs = [], []
++            for key in keys:
++                dv.append(base.pv - valuation.collect(m, s, key).sum.pv)
++                market = model.Market(m + 1, s, key)
++                discounts = [market.price(m + k + 2) for k in base.cf]
++                cs.append(base.pv - float(-np.dot(tuple(base.cf.values()), discounts)))
++            dv01_rows.append(dv)
++            cs01_rows.append(cs)
++        for i in valuation.point_indices():
++            del model.Actual[i, s]
++    return _frames(model, num_scenarios, annual_steps, dv01_rows, cs01_rows)
+diff --git a/lifelib/libraries/uslib/products/fixed_deferred_annuity/run_dv01_sec.py b/lifelib/libraries/uslib/products/fixed_deferred_annuity/run_dv01_sec.py
+index 81313c6a..2372b839 100644
+--- a/lifelib/libraries/uslib/products/fixed_deferred_annuity/run_dv01_sec.py
++++ b/lifelib/libraries/uslib/products/fixed_deferred_annuity/run_dv01_sec.py
+@@ -4,6 +4,7 @@
+     python products/fixed_deferred_annuity/run_dv01_sec.py --compiled       # compiled, 1 and 4 workers
+     python products/fixed_deferred_annuity/run_dv01_sec.py --compiled --workers 8 --build DIR
+     python products/fixed_deferred_annuity/run_dv01_sec.py --compiled --policies 1050
++    python products/fixed_deferred_annuity/run_dv01_sec.py --compiled --collect     # through collect
+ 
+ The report is ``dv01_sec/``'s ``Outer.annual_risk_report``: for each ESG path and each year,
+ the key-rate DV01 and CS01 of the book at the close before the year starts, one column per
+@@ -18,7 +19,8 @@ Live modelx computes the report from the model's ``Outer`` Cells, releasing each
+ ItemSpaces as it goes.  ``--compiled`` builds the model with modelx-cython into ``--build
+ DIR`` (a temporary directory by default; an existing build there is reused) and runs the
+ report there twice, in a fresh process each time: with one worker thread, and with
+-``--workers`` threads (default 4), one task per policy.  Each run prints its totals and
++``--workers`` threads (default 4), one task per policy; with ``--collect``, through
++``Valuation.collect`` instead, one collect per close and curve, its items on the workers.  Each run prints its totals and
+ seconds, and the runner checks that the two reports are equal.  On free-threaded CPython
+ (``python3.14t``) the workers run in parallel; on a build with the GIL they take turns.
+ """
+@@ -48,6 +50,8 @@ def parse(argv):
+     parser.add_argument('--build', help='directory of the compiled build (made if absent)')
+     parser.add_argument('--workers', type=int, default=4, help='threads of the parallel run')
+     parser.add_argument('--policies', type=int, help='a book of N copies of the seven twins')
++    parser.add_argument('--collect', action='store_true',
++                        help='compiled runs read the totals through Valuation.collect')
+     parser.add_argument('--paths', type=int, default=1, help='ESG paths 1..N')
+     parser.add_argument('--years', type=int, default=2, help='years 0..N')
+     parser.add_argument('--json', help='also write the reports and totals to this JSON file')
+@@ -82,7 +86,8 @@ def child(args):
+     sys.setrecursionlimit(20_000)
+     model = compiled.load(args.run, args.input)
+     start = time.perf_counter()
+-    dv01, cs01 = report.pooled_report(model, args.paths, args.years, args.workers)
++    run = report.collect_report if args.collect else report.pooled_report
++    dv01, cs01 = run(model, args.paths, args.years, args.workers)
+     seconds = time.perf_counter() - start
+     result = summary(dv01, cs01, seconds, workers=args.workers,
+                      gil=getattr(sys, '_is_gil_enabled', lambda: True)())
+@@ -103,6 +108,8 @@ def compiled_runs(args, input_dir, folder):
+                    '--paths', str(args.paths), '--years', str(args.years)]
+         if input_dir is not None:
+             command += ['--input', str(input_dir)]
++        if args.collect:
++            command.append('--collect')
+         done = subprocess.run(command, capture_output=True, text=True)
+         if done.returncode:
+             sys.exit(f'the compiled run with {workers} worker(s) failed:\n{done.stderr[-3000:]}')
+-- 
+2.43.0
+
