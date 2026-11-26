@@ -199,7 +199,7 @@ rounds. Each figure is the median wall time of the whole book at the given numbe
 
 Method: each of the 95 models in upstream lifelib main was built and driven with both compilers on
 one cloud VM per model. Its values were compared with live modelx, instructions per policy were
-and memory per policy.
+counted with callgrind, and memory per policy was measured.
 
 - **No regressions.** No model that the current compiler runs fails on this one. 73 models build and
   equal live modelx on both.
