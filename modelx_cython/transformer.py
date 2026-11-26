@@ -196,10 +196,6 @@ class PXDGenerator:
             stmts.append(f'from {self.package} cimport {module_name(provider)}')
         for ci in self.module.cimports:
             stmts.append(f"cimport {ci}")
-        contexts = {provider for cls in self.module.classes.values()
-                    for provider in getattr(cls, 'native_contexts', {}).values()}
-        for provider in sorted(contexts):
-            stmts.append(f'from {self.package} cimport {module_name(provider)}')
         enum_declarations = code_enums.declarations(self.module)
         if enum_declarations:
             stmts.append(enum_declarations)
@@ -308,9 +304,6 @@ class PXDGenerator:
             decl_stmts.append("cdef public dict _mx_collect_cache\n")
         for name in getattr(cls_info, 'readonly_refs', ()):
             decl_stmts.append(f'cdef object {code_enums.storage(name)}\n')
-        from modelx_cython.helpers import module_name
-        for name, provider in getattr(cls_info, 'native_contexts', {}).items():
-            decl_stmts.append(f'cdef {module_name(provider)}.LookupContext {name}\n')
         # R-4: what an item holds from shared inputs (holds.HoldTable)
         decl_stmts.extend(holds.pxd_declarations(cls_info))
         if getattr(self.module.spec.policy, 'prepared_tables', False):
@@ -634,7 +627,6 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
         when no operand pair can be typed.
         """
         from modelx_cython.checked_arithmetic import CheckedArithmetic
-        from modelx_cython.rounding import RoundedInputs
         from modelx_cython import vectors, held_arrays
         builtin_keys = {name for name in ("all", "any", "sum", "min", "max", "float", "int", "round", "range",
                                          "zip", "str", "type")
@@ -649,18 +641,12 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
         node = CheckedArithmetic(cls_info, cells, builtin_keys).rewrite(node)
         if not self.module.spec.policy.native_math:
             builtin_keys.discard('round')
-        rounded_inputs = RoundedInputs(cls_info, cells, self.helper_providers, builtin_keys,
-                                        self._resolver)
-        node = node.visit(rounded_inputs)
         self._table_reads_report(cells)
         if 'round' in builtin_keys and '_mx_canonical_round' not in self._source:
             from modelx_cython.rounding import NativeRounding
             rounding = NativeRounding()
             node = node.with_changes(body=node.body.visit(rounding))
             self._uses_native_round |= rounding.used
-        if not hasattr(cls_info, 'native_contexts'):
-            cls_info.native_contexts = {}
-        cls_info.native_contexts.update(rounded_inputs.contexts)
         # Keep the qualified typed kernels behind the common helper contracts.
         # The same CST/type facts select their native domain; unsupported source
         # and values keep ordinary object-capable Cython and current callables.
@@ -689,10 +675,8 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
         node = node.visit(enum_comparisons)
         cells.native_enum_comparisons = enum_comparisons.comparisons
         cells.native_enum_constants = enum_comparisons.count
-        operations = set(rounded_inputs.operations)
-        node = self._bind_declared_helpers(node, cls_info, cells, operations)
+        node = self._bind_declared_helpers(node, cls_info, cells)
         cells.native_helpers = sorted(set(cells.native_helpers))
-        cells.native_numeric_helpers = sorted(rounded_inputs.operations)
         node = rewrite_powers(
             node, self._resolver, self._cells_kinds, self._ref_kinds,
             cls_info.fqname, cells, builtin_float='float' in builtin_keys,
@@ -1070,9 +1054,7 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
         # D116: one root construction and release per compiled ItemSpace class (collect and direct)
         from modelx_cython import item_roots
         roots = [fn for name in sorted(self.module.visitor.itemspace_classes) if name in self.module.classes
-                 for fn in item_roots.functions(
-                     name, {} if self.module.classes[name].collect_shared_item
-                     else getattr(self.module.classes[name], 'native_contexts', {}))]
+                 for fn in item_roots.functions(name)]
         if roots:
             module = module.with_changes(body=(*module.body, *roots))
         if self._math_calls:        # native math-module calls compare against the math module
@@ -1210,27 +1192,13 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
 
                 decl_stmts.append(stmt)
 
-            from modelx_cython.helpers import module_name
             for cell in self.module.classes[cls_name].cells.values():
                 if memo := getattr(cell, 'power_memo', None):
                     decl_stmts.append(cst.parse_statement(f'{memo}: {MX_SYS_MOD}.PowerMemo\n'))
-            contexts = getattr(self.module.classes[cls_name], 'native_contexts', {})
-            for name, provider in contexts.items():
-                decl_stmts.append(cst.parse_statement(f'{name}: {module_name(provider)}.LookupContext\n'))
             decl_stmts.extend(cst.parse_statement(line)
                               for line in holds.py_declarations(self.module.classes[cls_name]))
             decl_stmts.extend(cst.parse_statement(line)
                               for line in value_storage.py_declarations(self.module.classes[cls_name]))
-            if contexts:
-                body = []
-                for statement in updated_node.body.body:
-                    if isinstance(statement, cst.FunctionDef) and statement.name.value == '__init__':
-                        assignments = [cst.parse_statement(f'self.{name} = {module_name(provider)}.LookupContext()\n')
-                                       for name,provider in contexts.items()]
-                        statement = statement.with_changes(body=statement.body.with_changes(
-                            body=(*statement.body.body, *assignments)))
-                    body.append(statement)
-                updated_node = updated_node.with_changes(body=updated_node.body.with_changes(body=tuple(body)))
             updated_node = updated_node.with_changes(body=updated_node.body.with_changes(
                 body=code_enums.bind_properties(self.module.classes[cls_name], updated_node.body.body)))
             if cls_name in self.module.visitor.collect_spaces:

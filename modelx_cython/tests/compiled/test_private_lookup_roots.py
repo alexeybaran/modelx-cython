@@ -1,19 +1,11 @@
-"""audit-routes P6 (D126): every compiled root takes its lookup contexts over privately.
-
-Items of an exported ItemSpace class are partitioned by the caller (the thread rule that
-``numeric_cache.exclusively_owned`` already relies on), so a direct item keeps the round memo as
-collect's reused root does. A Cython probe reads the context of the compiled class: after a
-``round(x, n)`` the memo is ready on a direct item (before P6 it never was). Values equal live on
-both routes.
-"""
+"""The direct and collect routes of an ItemSpace with a ``round(x, n)`` return give the values live
+gives (audit-routes P6, D126). The roots once took a per-item round memo over; the memo is gone (two
+threads on one item could read each other's result), the values are unchanged."""
 import subprocess
 import sys
 import textwrap
-from pathlib import Path
 
 import modelx as mx
-
-from modelx_cython import runtime
 
 
 def _build(tmp_path):
@@ -56,35 +48,15 @@ def direct():
     return live
 
 
-def test_direct_items_and_collect_roots_own_their_lookup_contexts(tmp_path):
+def test_direct_items_and_collect_roots_equal_live(tmp_path):
     live = _build(tmp_path)
     source = (tmp_path / 'exported_cy/_mx_classes.py').read_text(encoding='utf-8')
-    contexts = sorted({line.split(':')[0].strip() for line in source.splitlines()
-                       if line.strip().startswith('_v_mx_context_') and 'LookupContext' in line})
-    assert contexts, 'the model has no rounding context: the test shape no longer applies'
-    field = contexts[0]
-    (tmp_path / 'context_probe.pyx').write_text(textwrap.dedent(f'''\
-        from exported_cy._mx_classes cimport _c_Projection
-
-        def memo_ready(_c_Projection space):
-            return bool(space.{field}.round_ready)
-        '''), encoding='utf-8')
-    include = Path(runtime.__file__).resolve().parents[2]
-    (tmp_path / 'probe_setup.py').write_text(textwrap.dedent(f'''\
-        from setuptools import setup
-        from Cython.Build import cythonize
-        setup(ext_modules=cythonize(['context_probe.pyx'], include_path=['.', {str(include)!r}],
-              compiler_directives={{'language_level': 3, 'freethreading_compatible': True}}))
-        '''), encoding='utf-8')
-    subprocess.run([sys.executable, 'probe_setup.py', 'build_ext', '--inplace'], cwd=tmp_path, check=True)
+    assert 'LookupContext' not in source and '_mx_round_digits' in source
     probe = textwrap.dedent(f'''\
-        from context_probe import memo_ready
         from exported_cy import mx_model as m
         expected = {live!r}
         p = m.Projection
-        item = p[2]
         assert [p[k].rounded(t) for k in (1, 2, 3) for t in range(4)] == expected['items']
-        assert memo_ready(item), 'a direct item did not keep its round memo'
         assert p.collect().sum.value == expected['collect']
         assert m.Portfolio.direct() == expected['direct']
         print('ok')
