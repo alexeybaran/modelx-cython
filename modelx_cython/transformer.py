@@ -616,8 +616,9 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
                                                      for binding in scope['float'])
         # a typed-memoryview Cell read by subscript is held per item (no slice copy per evaluation)
         node = held_arrays.lower(node, cls_info, cells, self._held_arrays)
+        authored = node
         node = self._table_reads(node, cls_info, cells, scope)
-        node = self._reductions(node, cls_info, cells, scope)
+        node = self._reductions(node, authored, cls_info, cells, scope)
         cells.formula_allows_exact_receiver = allows_exact_receiver(node, cls_info.name)
         node = rewrite_powers(
             node, self._resolver, self._cells_kinds, self._ref_kinds,
@@ -643,9 +644,11 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
             node, _ = space_results.lower(node, cls_info, cells, scope, operand_kind, self._pin_held_item)
         return node
 
-    def _reductions(self, node, cls_info, cells, scope):
+    def _reductions(self, node, authored, cls_info, cells, scope):
         """Built-in ``sum``/``min``/``max``/``any``/``all`` of one iterable as native loops (reductions.py), after the
-        table reads."""
+        table reads, so that a generator over a table index walked by the prepared table is a loop over positions.
+        The kinds of the formula's locals are read from the formula as written (``authored``): a lowered read gives
+        the value of the read it replaces, and its handlers and assignment expressions bind no local of the formula."""
         from modelx_cython.reductions import BUILTIN_REDUCTIONS, NativeReductions, has_reduction_contract
 
         def builtin(name):
@@ -659,7 +662,7 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
                      for binding in scope[name])
         param_kinds = ({name: kind_of_type_expr(cells.get_argtype_expr(name, c_style=True, formula=True))
                         for name in cells.params} if cells.has_args() and cells.has_typeinfo() else {})
-        local_kinds = formula_local_kinds(node, cells.params, self._resolver, self._cells_kinds,
+        local_kinds = formula_local_kinds(authored, cells.params, self._resolver, self._cells_kinds,
                                           self._ref_kinds, cls_info.fqname, param_kinds)
         lowering = NativeReductions(
             cls_info, cells, self.helper_providers, node, bounds, reductions,

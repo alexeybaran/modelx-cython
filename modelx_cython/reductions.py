@@ -1,6 +1,8 @@
 """Lower typed reductions using existing CST nodes and binding metadata."""
 from functools import cached_property
 
+import textwrap
+
 import libcst as cst
 from libcst.metadata import ExpressionContext
 
@@ -52,6 +54,8 @@ def _one_iterable(call):
             and (call.args[1].keyword is None or call.args[1].keyword.value == 'start'))
 
 
+_C_DECLARED = {'longlong': 'longlong', 'Py_ssize_t': 'longlong', 'long': 'longlong', 'int': 'longlong',
+               'double': 'double', 'bint': 'bint'}
 def _parts(generator):
     part = generator.for_in
     while part is not None:
@@ -163,7 +167,7 @@ class GeneralReductions:
         if not self.builtin_site(call) or id(call) in self.general_done:
             return after
         try:
-            text = self.lower_general(statement, call, mode, target)
+            text = self.lower_site(statement, call, mode, target)
         except _Unsupported as reason:
             self.general_declined[id(call)] = (call, f'{reason}: built-in call')
             return after
@@ -173,6 +177,19 @@ class GeneralReductions:
         return cst.FlattenSentinel(cst.parse_module(text).body)
 
     # ---------------------------------------------------------------- analysis
+    def lower_site(self, statement, call, mode, target):
+        """The lowered text of one site. A generator over a table index walked by the prepared table is
+        ``(native) if test else (pandas)`` (frame_reads): each branch is its own reduction under an ``if``, the
+        test evaluated first as the conditional expression evaluates it."""
+        source = call.args[0].value
+        if (len(call.args) == 1 and isinstance(source, cst.IfExp)
+                and all(isinstance(branch, (cst.GeneratorExp, cst.ListComp)) for branch in (source.body, source.orelse))):
+            branches = [self.lower_general(statement, call.with_changes(args=[call.args[0].with_changes(
+                value=branch)]), mode, target) for branch in (source.body, source.orelse)]
+            return (f'if ({code(source.test)}):\n' + textwrap.indent(branches[0], '    ')
+                    + 'else:\n' + textwrap.indent(branches[1], '    '))
+        return self.lower_general(statement, call, mode, target)
+
     def lower_general(self, statement, call, mode, target):
         name = call.func.value
         source = call.args[0].value
@@ -706,6 +723,23 @@ class GeneralReductions:
             body=[statement.with_changes(value=root)])])
 
 
+def _authored_scope_effects(body):
+    """``has_scope_effects`` of the formula as written: a handler or an assignment expression an earlier lowering
+    put in (``except Exception:``, ``(_mx_key := part)`` of a table read) binds no name of the formula's own."""
+    def inserted(node):
+        if isinstance(node, cst.ExceptHandler):
+            return node.name is None or (isinstance(node.name.name, cst.Name)
+                                         and node.name.name.value.startswith('_mx_'))
+        return (isinstance(node, cst.NamedExpr) and isinstance(node.target, cst.Name)
+                and node.target.value.startswith('_mx_'))
+    if not has_scope_effects(body):
+        return False
+    effects = (cst.Global, cst.Nonlocal, cst.Import, cst.ImportFrom, cst.ExceptHandler,
+               cst.Del, cst.NamedExpr, cst.FunctionDef, cst.ClassDef, cst.Lambda)
+    return any((isinstance(node, effects) and not inserted(node)) or isinstance(node, getattr(cst, 'Match', ()))
+               for node in lexical_nodes(body))
+
+
 def _replaced(node, mapping):
     """``node`` with the subtrees whose id is in ``mapping`` replaced; every other subtree
     is kept as the same object (``deep_replace`` copies them), so site ids stay valid."""
@@ -791,6 +825,15 @@ class NativeReductions(GeneralReductions, FormulaTransformer):
         bound = {name.value for part in walk(formula) if isinstance(part, cst.CompFor)
                  for name in walk(part.target) if isinstance(name, cst.Name)}
         self.formula_kinds = {name: kind for name, kind in (formula_kinds or {}).items() if name not in bound}
+        # locals an earlier lowering declared with a C number type (a view's first and last positions)
+        declared = {}
+        for part in lexical_nodes(formula.body.body):
+            if (isinstance(part, cst.AnnAssign) and isinstance(part.target, cst.Name)
+                    and isinstance(part.annotation.annotation, cst.Attribute)
+                    and code(part.annotation.annotation.value) == CY_MOD):
+                declared.setdefault(part.target.value, set()).add(_C_DECLARED.get(part.annotation.annotation.attr.value))
+        self.formula_kinds.update({name: kinds.pop() for name, kinds in declared.items()
+                                   if len(kinds) == 1 and None not in kinds and name not in bound})
         self.object_loops = []
         self.cls_info, self.cells, self.providers = cls_info, cells, providers
         self.formula = formula
@@ -802,7 +845,7 @@ class NativeReductions(GeneralReductions, FormulaTransformer):
         self.builtin_names = {name for name in ('bool', 'int', 'float', 'abs', 'len', 'min', 'max',
                                                 'sum', 'all', 'any', 'round')
                               if name in builtin_reductions or name not in self.body_facts.stores}
-        self.scope_safe = (not has_scope_effects(formula.body.body)
+        self.scope_safe = (not _authored_scope_effects(formula.body.body)
                            and 'self' not in self.body_facts.stores
                            and not {'locals', 'vars', 'eval', 'exec'} & self.body_facts.reads
                            and not {'StopIteration', 'RuntimeError'} & (
