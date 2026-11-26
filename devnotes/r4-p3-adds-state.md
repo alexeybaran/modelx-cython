@@ -19,6 +19,10 @@ taken from 58ff45d).
 | f2632fa | rewrite_powers returns at once without a power |
 | ea74809 | re-parse check compares the built tree first |
 | eaeca92 | Reference-write check (`_mx_integral`, `__setattr__`), with test_python_integer_boundary |
+| 9241355, reverted by e8c14e3 | native_math.py as the lowering path (held: it takes a reference per call; the helper path passes the Reference borrowed) |
+| f9cd640 | helpers takes module_name and read_resource from native_sources |
+| c168271 | `_ReturnTypeMerger` keeps a scalar type without rebuilding it (list and tuple keep the vector-shape merge) |
+| 7e75eb8 | `_FirstRead` local kinds; expression_kinds reads them through get |
 
 ## Checks
 
@@ -41,9 +45,9 @@ taken from 58ff45d).
   integer removal.
 - Power inside min/max typed complex: already present; the proposal's test_powers and test_ordered_arguments
   pass on this tree.
-- `_FirstRead` local kinds: needs the proposal's OperandKind change in powers.py (class iii).
-- `_ReturnTypeMerger` shortcut: conflicts with this tree's vector_shape merge (class iii).
-- native_sources.install: duplicates helpers.install_helpers (class iii).
+- native_sources.install in place of helpers.install: helpers.install also writes the build guard of object
+  providers (provider manifests), which native_sources.install lacks; kept.
+- Native math as the path in use: held until the proposal's path passes the Reference borrowed.
 - maybe_unbound / `_unbound_locals`, isinstance folding: part of formula_passes.py, which replaces
   guard_integer_boundaries on the proposal line.
 - shared_facts around the integer guard: left with the guard.
