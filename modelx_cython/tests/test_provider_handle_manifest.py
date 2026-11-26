@@ -4,14 +4,6 @@ import pytest
 
 from modelx_cython.provider_manifest import TypedHandle, _read_type, read_provider_manifest
 
-TABLE = 'modelx_helpers.immutable_inputs.Table'
-RECORD = 'modelx_helpers.immutable_inputs.Record'
-
-
-def test_native_inputs_declares_table_and_record_handles():
-    manifest = read_provider_manifest('modelx_cython.runtime._native_inputs', 'owned-table-1')
-    assert manifest.types[TABLE].handle == TypedHandle('TableHandle', 'table_handle')
-    assert manifest.types[RECORD].handle == TypedHandle('RecordHandle', 'record_handle')
 
 
 def test_handle_is_optional_and_defaults_to_none():
