@@ -275,6 +275,19 @@ cdef PreparedTable _build(object value):
         level_codes = np.fromiter((table.code_obj(i, label) for label in labels), dtype=np.int64, count=n)
         codes += level_codes * table.radix[i]
     order = np.argsort(codes, kind='stable')
+    # per prefix depth d (0: the whole table), whether the stored rows of every prefix of d levels are in pandas'
+    # order, and the labels of level d exact as doubles: an ordered lookup then searches the stored rows
+    within = []
+    for d in range(table.nlevels):
+        if d == 0:
+            same = np.ones(max(n - 1, 0), dtype=bool)
+        else:
+            prefix = codes[order] // table.radix[d - 1]
+            same = prefix[1:] == prefix[:-1]
+        exact = all(_plain_int(label) and -9007199254740992 <= label <= 9007199254740992
+                    for label in table.level_labels[d])
+        within.append(bool(exact and (n < 2 or (order[1:][same] > order[:-1][same]).all())))
+    table.ordered_within = tuple(within)
     combined = np.ascontiguousarray(codes[order] if n else np.zeros(1, dtype=np.int64), dtype=np.int64)
     if product <= _GRID_LIMIT:
         grid = np.full(max(1, product), -1, dtype=np.intp)
@@ -399,7 +412,7 @@ cdef void _decide(PreparedTable table, object signatures):
       of them); else None;
     - ``label``, ``kind``: the column read and its block kind (0 float64, 1 int64, 2 object; -1: the index; -4:
       a field chosen at run time, ``columns`` given; -2: the extremes of a non-empty index; -6: the extremes of an
-      int level, ``label`` its (name or None, position)).
+      int level, ``label`` its (name or None, position); -3: an ordered lookup within prefixes of ``label`` levels).
     The slot is one plus the column's slot in its block (1 for a read of the index), or -1."""
     cdef int level
     cdef Py_ssize_t position
@@ -444,6 +457,8 @@ cdef Py_ssize_t _index_slot(PreparedTable table, object label, int kind):
     if kind == -6:      # the extremes of level label[1], named label[0] (None: any name), an int level, not empty
         return 1 if (label[1] < table.nlevels and (label[0] is None or table.level_names[label[1]] == label[0])
                      and table.level_kind[label[1]] != LEVEL_OBJECT and table.nrows > 0) else -1
+    if kind == -3:      # an ordered lookup within prefixes of ``label`` levels (None: the whole table)
+        return 1 if table.ordered_within[label or 0] else -1
     return 1 if kind in (-1, -4) else -1
 
 
@@ -540,6 +555,15 @@ cdef double field_f64(PreparedRef ref, Py_ssize_t row, object label) except? -1.
     if kind == COLUMN_I64:
         return <double>(<PreparedTable>ref).i64_at(row - 1, slot)
     return float((<PreparedTable>ref).object_at(row - 1, slot))
+
+
+cdef bint _is_number(object x):
+    """An int or float (numpy's too) that is not a bool, not NaN, and that a double holds exactly."""
+    if type(x) is float or isinstance(x, np.floating):
+        return x == x
+    if (type(x) is int or isinstance(x, np.integer)) and not isinstance(x, (bool, np.bool_)):
+        return -9007199254740992 <= x <= 9007199254740992
+    return False
 
 
 cdef object max_obj(PreparedRef ref):

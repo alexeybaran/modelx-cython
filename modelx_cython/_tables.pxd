@@ -32,6 +32,8 @@ cdef class PreparedTable:
     cdef const Py_ssize_t* grid            # combined code -> stored row, or -1 (when the product is small)
     cdef bint has_grid
     cdef readonly tuple level_names        # index.names
+    cdef readonly tuple ordered_within     # per prefix depth: the stored rows of every prefix are in pandas order
+                                           # and the labels of the next level are exact as doubles (asof)
     cdef readonly object max_label, min_label   # index.max(), index.min() as pandas returns them
     cdef readonly dict column_positions    # column label -> position
     cdef const int[::1] column_kind        # COLUMN_*
@@ -297,6 +299,39 @@ cdef inline long long label_ll(PreparedRef ref, Py_ssize_t row, int level) noexc
     if (<PreparedTable>ref).level_kind[level] == LEVEL_DENSE:
         return (<PreparedTable>ref).level_first[level] + code
     return (<PreparedTable>ref).sorted_labels[(<PreparedTable>ref).level_offset[level] + code]
+
+
+cdef inline Py_ssize_t nrows(PreparedRef ref) noexcept nogil:
+    return (<PreparedTable>ref).nrows
+
+
+cdef inline Py_ssize_t asof_row(PreparedRef ref, Py_ssize_t start, Py_ssize_t stop, int level, double x) noexcept nogil:
+    """``index.asof(x)`` of the stored rows [start, stop) of an int level in pandas' order: the last row whose label is
+    <= x, or -1 when there is none (pandas: NaN)."""
+    cdef Py_ssize_t lo = start, hi = stop, mid
+    while lo < hi:
+        mid = (lo + hi) >> 1
+        if <double>label_ll(ref, mid, level) <= x:
+            lo = mid + 1
+        else:
+            hi = mid
+    return lo - 1 if lo > start else -1
+
+
+# Whether ``x`` is one number pandas compares by value (asof): a C number, decided when the model is compiled, or at
+# run time an int or float that is not a bool and that a double holds exactly; NaN is not.
+cdef bint _is_number(object x)
+
+
+cdef inline bint is_number(_key_t x) noexcept:
+    if _key_t is object:
+        return _is_number(x)
+    elif _key_t is bint or _key_t is Py_UCS4:
+        return False
+    elif _key_t is double:
+        return x == x
+    else:
+        return -9007199254740992 <= x <= 9007199254740992
 
 
 cdef object max_obj(PreparedRef ref)

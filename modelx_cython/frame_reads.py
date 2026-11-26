@@ -17,6 +17,9 @@ pandas DataFrame or Series with a unique index (``tracer.frame_schema``), or a l
   other index gives pandas' own extreme label), ``max(R.index)`` / ``min(R.index)``, the extreme of the remaining
   level of a prefix ``R.loc[prefix].index.max()``, ``R.index.get_level_values(L).max()`` (L a level number or a
   name traced on every frame, also through a local) and ``max(a for a, s in R.index)``;
+- the ordered lookup ``R.index.asof(x)`` and ``R.loc[prefix].index.asof(x)`` on an int level stored in pandas'
+  order (``int(...)`` of it a C integer, any other use the numpy integer pandas returns); x NaN, not one number
+  at run time, below the first label, or an index in another order runs pandas' own asof;
 - membership ``key in R.index`` / ``not in`` with a complete key. A key part that is not one label at run time
   (a list, a mask, an index, an unhashable value) runs pandas' own membership, which answers or raises as live.
 
@@ -1333,6 +1336,81 @@ class _Rewrite(cst.CSTTransformer):
         read = self._m('label_ll', o.ref(hold), row, cst.Integer(str(len(parts))))
         return self._lowered(test, read, self._fallback(updated, call), 'i64')
 
+    def _asof_parts(self, call):
+        """(receiver call, schema, prefix parts) of ``R.index.asof(x)`` / ``R.loc[prefix].index.asof(x)`` whose one
+        remaining level is an int level, x one positional argument that is not a text or a display, else None."""
+        o = self.o
+        func = call.func
+        if not (isinstance(func, cst.Attribute) and func.attr.value == 'asof' and isinstance(func.value, cst.Attribute)
+                and func.value.attr.value == 'index' and len(call.args) == 1 and not call.args[0].keyword
+                and not call.args[0].star and not isinstance(call.args[0].value, (
+                    cst.SimpleString, cst.ConcatenatedString, cst.FormattedString, *SEVERAL_ROWS))):
+            return None
+        receiver = func.value.value
+        whole = o._receiver(receiver)
+        if whole is not None:
+            found, parts = (whole if self._plain(*whole) else None), []
+        else:
+            prefix = o.prefix_of(receiver)
+            found, parts = prefix if prefix is not None else (None, None)
+        if found is None:
+            return None
+        levels = found[1]['levels']
+        if len(levels) - len(parts) != 1 or levels[len(parts)] != 'int':
+            return None
+        return found[0], found[1], parts
+
+    def _asof(self, original, updated):
+        """``int(X.index.asof(x))``: the label as a C integer; any other ``X.index.asof(x)``: the numpy integer pandas
+        returns. Native while the table's stored order within the prefix is pandas' (kind -3), the prefix has rows, x
+        is one number and not NaN (tested at run time), and a label <= x exists; else pandas' own asof, which answers
+        or raises as live does (NaN for no label, by pandas' version, is pandas')."""
+        o = self.o
+        func = original.func
+        whole_int = (isinstance(func, cst.Name) and func.value == 'int' and o.facts.int_argument(original) is not None
+                     and isinstance(original.args[0].value, cst.Call))
+        call = original.args[0].value if whole_int else original
+        found = self._asof_parts(call)
+        if found is None:
+            return None
+        if not whole_int:
+            up = o.facts.formula.parents.get(id(original))
+            outer = o.facts.formula.parents.get(id(up)) if isinstance(up, cst.Arg) else None
+            if isinstance(outer, cst.Call) and o.facts.int_argument(outer) is original:
+                return None     # int(...) of it: lowered with the call around it
+        receiver, schema, parts = found
+        depth = len(parts)
+        hold = self._take(receiver, depth if parts else None, -3)
+        root = call.func.value.value
+        root = root.value.value if parts else root
+        if isinstance(root, cst.Name):
+            self.replaced_names.add(root.value)
+        conditions = []
+        if parts:
+            codes = [self._held(hold, level, part, conditions) if o.item_fixed(part, schema['levels'][level])
+                     else self.code_of(hold, level, part, schema['levels'][level], conditions)
+                     for level, part in enumerate(parts)]
+            args = [o.ref(hold), cst.Integer(str(depth)), *codes, *[cst.Integer('0')] * (5 - len(codes))]
+        o.key_count += 1
+        n = o.key_count
+        x, start, found_at = f'_mx_x_{n}', f'_mx_vs_{n}', f'_mx_at_{n}'
+        emit = self.updated_of.get(id(call.args[0].value), call.args[0].value)
+        tests = [self._native_test(hold, conditions),
+                 cst.parse_expression(f'{o.module}.is_number(({x} := {_code(emit)}))')]
+        if parts:
+            tests.append(cst.parse_expression(f'({start} := {_code(self._m("view_start", *args))}) >= 0'))
+            stop = self._m('view_stop', *args)
+        else:
+            start, stop = '0', self._m('nrows', o.ref(hold))
+        tests.append(cst.parse_expression(
+            f'({found_at} := {o.module}.asof_row({_code(o.ref(hold))}, {start}, {_code(stop)}, {depth}, '
+            f'_mx_cy.cast(_mx_cy.double, {x}))) >= 0'))
+        label = self._m('label_ll', o.ref(hold), cst.Name(found_at), cst.Integer(str(depth)))
+        if whole_int:
+            return self._lowered(self._conjunction(tests), label, self._fallback(updated, receiver), 'i64')
+        boxed = self._m('i64_box', o.ref(hold), label, cst.Name('False'))
+        return self._lowered(self._conjunction(tests), boxed, self._fallback(updated, receiver))
+
     def level_extreme(self, original, updated, found):
         """``R.index.get_level_values(L).max()`` / ``.min()`` of an int level: its largest / smallest label, a C
         integer; native while the level still has that name, is an int level and the table is not empty (kind -6)."""
@@ -1411,7 +1489,7 @@ class _Rewrite(cst.CSTTransformer):
             return updated.with_changes(args=[updated.args[0].with_changes(
                 value=self._pandas_value(updated.args[0].value)), *updated.args[1:]])
         inner = self.o.facts.int_argument(original)
-        lowered = self._extreme(original, updated)
+        lowered = self._asof(original, updated) or self._extreme(original, updated)
         if lowered is not None:
             return lowered
         if (isinstance(updated.func, cst.Name) and len(updated.args) == 1 and not updated.args[0].keyword
