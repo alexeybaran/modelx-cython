@@ -733,10 +733,12 @@ class FrameReads:
         """The statements that resolve one hold, placed before the top-level statement of its first read. That
         statement may not reach the read (a branch not taken): a hold whose evaluation raises is left unresolved (a
         table: one whose every read stays pandas), so that the error is raised by the read's own pandas branch, where
-        live raises it, or not at all."""
+        live raises it, or not at all. Such a hold is remembered as tried (the value of a miss: its reads run on
+        pandas), so it is not evaluated again on every call."""
         m = self.module
         if isinstance(hold, tuple):         # T-4: a held code or row, after the hold of its table
             what, field, table, level_or_key, extra = hold
+            missed = '1' if what == 'range' else '-1'      # a range packs -1 (no rows) plus 2
             if what == 'code':
                 value = f'{m}.hold_code(self.{table}, {level_or_key}, {_code(extra)})'
                 if _code(extra) in self.tuple_guards:      # T-5c: -1 (the reads run on pandas) when not a tuple
@@ -747,7 +749,7 @@ class FrameReads:
             else:
                 value = f'{m}.hold_row(self.{table}, {_code(level_or_key)}, False)'
             return [cst.parse_statement(f'if self.{field} == 0:\n    try:\n        self.{field} = {value}\n'
-                                        f'    except Exception:\n        pass\n')]
+                                        f'    except Exception:\n        self.{field} = {missed}\n')]
         # T-4.2: one binding per receiver and item (or per call outside items): the frame's PreparedTable, or a
         # table whose every slot is -1; each read then takes its slot from the table by its signature id
         function = 'bind_ref_checked' if getattr(self.policy, 'verify_inputs', False) else 'bind_ref'
@@ -763,7 +765,8 @@ class FrameReads:
                 f'        self.{hold.table} = {value}\n'
                 f'        self.{hold.state} = 1\n'
                 f'    except Exception:\n'
-                f'        self.{hold.table} = {m}.bind_own(None)\n')]
+                f'        self.{hold.table} = {m}.bind_own(None)\n'
+                f'        self.{hold.state} = 1\n')]
         return [cst.parse_statement(f'try:\n    {hold.table} = {m}.{function}({receiver})\n'
                                     f'except Exception:\n    {hold.table} = {m}.bind_own(None)\n')]
 
