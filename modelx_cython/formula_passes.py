@@ -5,7 +5,8 @@ parameters."""
 import libcst as cst
 from libcst.metadata.scope_provider import BuiltinAssignment
 
-from .consts import CY_MOD, FORMULA_PREF, MX_SELF, MX_SYS_MOD
+from .consts import CY_MOD, FORMULA_PREF, MODULE_PREF, MX_SELF, MX_SYS_MOD, SPACE_PREF
+from .typedefs import CY_INT_T
 from .scopes import CstFacts, lexical_nodes, maybe_unbound
 from .syntax import arguments, walk
 
@@ -26,24 +27,26 @@ def integer_parameters(cell):
 def _python_call_gate(cls, entries, names, methods):
     """The Python entry of a Cell with integer parameters, keeping its Cython vtable type.
 
-    Each such Cell gets a Python entry with the Cell's own parameters and defaults: it calls the
-    compiled method at C level, Cython converting each integer argument to its C parameter type. ``__getattribute__`` returns the entry for the
+    Each such Cell gets a Python entry with the Cell's own parameters and defaults: it passes each
+    integer argument through ``_mx_integral`` (a fractional float or a non-integer raises TypeError
+    naming the Cell) and calls the compiled method at C level. ``__getattribute__`` returns the entry for the
     Cell's name, unless a subclass overrides the method; the entry carries the Cell's ``__name__``,
     ``__qualname__``, ``__doc__`` and the method as ``__wrapped__``."""
     nodes = {item.name.value: item for item in methods if isinstance(item, cst.FunctionDef)}
-    routes = {cell.name: entries[cell.fqname]
+    routes = {cell.name: (entries[cell.fqname], cell.model_path)
               for cell in cls.cells.values() if cell.fqname in entries and cell.name in nodes}
     if not routes:
         return (), ()
     field = names.reserve(f'_mx_integer_arguments_{cls.name}')
     gate = {name: names.reserve(f'_mx_python_entry_{name}') for name in routes}
     added, defs = [cst.parse_statement(f'{field} = {CY_MOD}.declare(dict, {gate!r})\n')], []   # a C global
-    for name, params in routes.items():
+    for name, (params, path) in routes.items():
         signature = nodes[name].params
         plain = signature.with_changes(params=tuple(p.with_changes(annotation=None) for p in signature.params))
         checked = dict(params)
         names_ = [p.name.value for p in signature.params[1:]]
-        args = ', '.join(names_)
+        args = ', '.join(f'{MX_SYS_MOD}._mx_integral({arg}, {path!r})' if index in checked else arg
+                         for index, arg in enumerate(names_))
         header = cst.Module(body=()).code_for_node(plain)
         # The C method without Cython's override dispatch (``Class.method(self, ...)``), which would read the
         # attribute back through __getattribute__ (a class with a __dict__, a Python subclass), called from a
@@ -72,6 +75,22 @@ def __getattribute__(self, name):
 """))
     return tuple(added), tuple(defs)
 
+
+
+def _reference_write_gate(cls_info):
+    """A Python write of an integer Reference passes the value through ``_mx_integral``: Cython's own
+    setter of a ``cdef public long long`` converts a float through ``__int__`` and would keep 0 for 0.5."""
+    owners = [part[len(MODULE_PREF):] for part in cls_info.module.fqname.split('.')[1:-1]]
+    owners.append(cls_info.name[len(SPACE_PREF):])
+    paths = {name: '.'.join((*owners, name)) for name in cls_info.visitor.ref_info.get(cls_info.name, {})
+             if name not in cls_info.spaces and cls_info.refs[name].get_type_expr(c_style=True) == CY_INT_T}
+    if not paths:
+        return ()
+    tests = ''.join(f"    {'if' if index == 0 else 'elif'} {MX_SYS_MOD}._mx_ref_name_is(name, {name!r}):\n"
+                    f"        value = {MX_SYS_MOD}._mx_integral(value, {path!r})\n"
+                    for index, (name, path) in enumerate(sorted(paths.items())))
+    return (cst.parse_statement(f'def __setattr__(self, name, value):\n{tests}'
+                                f'    {MX_SYS_MOD}._mx_generic_setattr(self, name, value)\n'),)
 
 
 def _unbound_locals(node):
@@ -262,6 +281,8 @@ def lower_formula_semantics(state, module_info, cells, infer_types=False):
                     changed = True
             methods.append(method)
         added, gates = _python_call_gate(cls, entries, state.names, methods)
+        if not any(isinstance(item, cst.FunctionDef) and item.name.value == '__setattr__' for item in methods):
+            gates = (*gates, *_reference_write_gate(cls))
         declarations.extend(added)
         changed |= bool(gates)
         classes.append(node.with_changes(body=node.body.with_changes(body=(*methods, *gates))))
