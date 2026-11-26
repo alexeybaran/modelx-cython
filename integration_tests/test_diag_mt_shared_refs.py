@@ -76,7 +76,7 @@ def test_held_table_local_and_builtin_reduction_take_no_shared_reference(tmp_pat
     assert generated.count('self._mx_tp_0 = self.market._mx_prepared_curve()') == 1
     assert 'root._mx_tp_0 = None' in generated and 'root._mx_tq_0 = 0' in generated
     # the builtin reduction: no object local bound to the builtin
-    assert '.f64_accepts(sum)' in generated, generated
+    assert '.f64_add(' in generated and '_accepts(' not in generated, generated
     assert '_function = sum' not in generated and '_function: object' not in generated
     probe = textwrap.dedent('''\
         import sys
