@@ -32,3 +32,7 @@ Task (from the coordinator):
 - **To do:** the text-key and bounds repair of r4/p3-reads applies to `runtime/_tables.*`. The case is being measured
   on Term_UK_S, upstream text, before and after.
 - **Baseline (c342db9).** Full suite under modelx 0.33.0. 20 test modules fail to import (`modelx_helpers` absent).
+- **Text-key repair (44902c6).** Term_UK_S on upstream text: 6.82M→6.36M instructions per policy. Values equal to
+  live.
+- **STOP (reported).** BasicTerm_SE per policy at head: 3.840M→3.903M (+1.64%). Values equal. c342db9 already
+  prepares the item's own row. A bisect over the commits is running (/home/user/work/bis/results.txt).
