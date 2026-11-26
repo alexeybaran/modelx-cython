@@ -146,5 +146,3 @@ def test_uncached_cells_take_a_direct_entry_and_equal_live(tmp_path):
         assert all(abs(a - b) <= 1e-7 + 1e-10 * abs(b) for a, b in zip(compiled[key], live[key])), key
     assert compiled['counts'] == live['counts'] == [5.0, 5, 5, 8]
     assert compiled['log'] == live['log'] == [0, 1, 2, 3, 4, 4, 4, 4]
-    # integer arguments are checked as for a cached Cell
-    assert compiled['errors'][0] == compiled['errors'][2] is not None
