@@ -73,6 +73,8 @@ from modelx_cython import numeric_cache
 from modelx_cython import enums as code_enums
 from modelx_cython import table_cells
 from modelx_cython import holds
+from modelx_cython import value_storage
+from modelx_cython import collect
 
 from modelx_cython.consts import (
     FORMULA_PREF,
@@ -261,7 +263,7 @@ class PXDGenerator:
             ``cls_template`` filled with the class's variable and
             method declarations, indented for the class body.
         """
-        return self.cls_template.format(
+        block = self.cls_template.format(
             class_name=name,
             MX_SYS_MOD=MX_SYS_MOD,
             private_var_defs=textwrap.indent(self.private_var_defs(name), ' ' * 4),
@@ -270,6 +272,10 @@ class PXDGenerator:
             private_meth_defs=textwrap.indent(self.private_meth_defs(name), ' ' * 4),
             public_meth_defs=textwrap.indent(self.public_meth_defs(name), ' ' * 4)
         )
+        if collect.reuses_items(self.module.visitor, name):
+            values = {line.strip() for line in value_storage.pxd_declarations(self.module.classes[name])}
+            block += '\n\n' + collect.reset_function(name, block, self.module.classes, values)
+        return block
 
     @cached_property
     def child_cimports(self):
@@ -312,6 +318,8 @@ class PXDGenerator:
         decl_stmts = []
         if cls_name in self.module.visitor.dynamic_ref_classes:
             decl_stmts.append("cdef dict __dict__\n")
+        if cls_name in self.module.visitor.collect_spaces:
+            decl_stmts.append("cdef public dict _mx_collect_cache\n")
         for name in getattr(cls_info, 'readonly_refs', ()):
             decl_stmts.append(f'cdef object {code_enums.storage(name)}\n')
         from modelx_cython.helpers import module_name
@@ -1091,6 +1099,9 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
                      else getattr(self.module.classes[name], 'native_contexts', {}))]
         if roots:
             module = module.with_changes(body=(*module.body, *roots))
+        if getattr(self, '_collect_hooks', False):
+            module = module.with_changes(body=(*module.body, *collect.evaluator(
+                self.module.spec.policy.collect_workers)))
         directives = []
         if any(getattr(cell, 'power_memo', None) for cls in self.module.classes.values()
                for cell in cls.cells.values()):
@@ -1251,6 +1262,13 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
                 updated_node = updated_node.with_changes(body=updated_node.body.with_changes(body=tuple(body)))
             updated_node = updated_node.with_changes(body=updated_node.body.with_changes(
                 body=code_enums.bind_properties(self.module.classes[cls_name], updated_node.body.body)))
+            if cls_name in self.module.visitor.collect_spaces:
+                hook = collect.hook(original_node, cls_name, sorted(self.module.classes[cls_name].refs),
+                                    reuse=collect.reuses_items(self.module.visitor, cls_name))
+                if hook:
+                    self._collect_hooks = True
+                    updated_node = updated_node.with_changes(
+                        body=updated_node.body.with_changes(body=(*updated_node.body.body, *hook)))
             decorator = cst.Decorator(
                 decorator=cst.Attribute(value=cst.Name(CY_MOD), attr=cst.Name("cclass"))
             )
@@ -1572,8 +1590,8 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
             elif meth_name == "__delitem__" and cls_name in self.module.visitor.itemspace_classes:
                 updated_node = _releasing_delitem(updated_node, cls_name)
 
-            elif meth_name[:2] == "__":
-                # Special methods
+            elif meth_name[:2] == "__" or original_node.decorators:
+                # Special methods; a decorated method of the export (collect's property) is no Cell
                 pass
 
             else:

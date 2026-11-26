@@ -45,6 +45,8 @@ class CompilerPolicy:
     # M1 (W1.1, default on since W1.5): '# cython: infer_types=True, overflowcheck=True'
     # on generated model modules.
     infer_types: bool = True
+    # the default number of worker threads of a compiled collect() (collect.py)
+    collect_workers: int = 1
     # M1 (W1.3): lower pandas-spelled table reads to typed handle reads (table_reads.py).
     # On by default since the runtime handles (W1.2) landed (D45).
     typed_table_reads: bool = True
@@ -86,12 +88,15 @@ class CompilerPolicy:
             integer_checks=data.get('integer_checks', 'auto'),
             prepared_tables=data.get('prepared_tables', True),
             verify_inputs=data.get('verify_inputs', False),
-            strict_lowering=data.get('strict_lowering', os.environ.get('MX_CY_STRICT_LOWERING') == '1'))
+            strict_lowering=data.get('strict_lowering', os.environ.get('MX_CY_STRICT_LOWERING') == '1'),
+            collect_workers=data.get('collect_workers', 1))
         for name, value in values.items():
-            if name not in ('native_cache_hits', 'integer_checks') and type(value) is not bool:
+            if name not in ('native_cache_hits', 'integer_checks', 'collect_workers') and type(value) is not bool:
                 raise ValueError(f'{name} must be a boolean')
         if values['integer_checks'] not in ('auto', 'checked', 'unchecked'):
             raise ValueError('integer_checks must be auto, checked or unchecked')
+        if type(values['collect_workers']) is not int or values['collect_workers'] < 1:
+            raise ValueError('collect_workers must be a positive integer')
         if type(values['native_cache_hits']) is not str or values['native_cache_hits'] not in (
                 'none', 'scalar', 'dense', 'both', 'auto'):
             raise ValueError('native_cache_hits must be none, scalar, dense, both or auto')
@@ -139,6 +144,10 @@ class TransSpec:
       tuple; a single-name key bounds that parameter's axis of every
       cached Cell in scope whose parameter tuple has no tuple entry.
     * ``"cells"``: dict mapping cells names to per-cells dicts.
+    * ``"collect_workers"`` (model level, default 1): the worker threads of a
+      compiled ``collect()``; ``_mx_collect_workers`` set on the compiled model
+      object overrides it at run time (the *Collect* section of the
+      free-threading page).
     * ``"cells_params"`` (deprecated): older form of
       ``"cells_param_size"``; maps a parameter name (or tuple) to a
       dict with a ``"size"`` key.  Consulted only when
