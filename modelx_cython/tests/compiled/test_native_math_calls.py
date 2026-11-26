@@ -93,8 +93,12 @@ def test_values_and_errors_equal_live(built):
     _, results = built
     live, compiled = results["exported"], results["exported_cy"]
     assert compiled[:-1] == live[:-1]
+    try:
+        math.log(0.0)
+    except ValueError as error:
+        wording = str(error)     # the interpreter's own text, which changed between Python versions
     assert [case for case in compiled if case[0] == "lg" and case[1] == "0.0"] == [
-        ["lg", "0.0", ["ValueError", "expected a positive input, got 0.0"]]]
+        ["lg", "0.0", ["ValueError", wording]]]
     assert ["ex", "710.0", ["OverflowError", "math range error"]] in compiled
     assert ["big", ["value", repr(math.log(10 ** 400))]] in compiled
     assert compiled[-3:-1] == [["user module named math", ["value", "42.0"]], ["usermath", ["value", "42.0"]]]
