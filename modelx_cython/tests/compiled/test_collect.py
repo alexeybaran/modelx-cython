@@ -58,11 +58,12 @@ PROBE = textwrap.dedent('''\
         out[workers]['error'] = error(compiled.Projection.collect)
         compiled.Loose._mx_collect_cache.clear()
         out[workers]['loose'] = error(compiled.Loose.collect)
-        out[workers]['item'] = error(compiled.Projection[2].collect)
+        out[workers]['item'] = error(lambda: compiled.Projection[2].collect)
+        out[workers]['item_has'] = hasattr(compiled.Projection[3], 'collect')
     export.Projection.fail_keys = (7, 4)
     export.Projection._mx_collect_cache.clear()
     out['export_error'] = error(export.Projection.collect)
-    out['export_item'] = error(export.Projection[2].collect)
+    out['export_item'] = error(lambda: export.Projection[2].collect)
     print(json.dumps(out))
 ''')
 
@@ -132,9 +133,9 @@ def test_compiled_collect(tmp_path):
         # base, the kept item and at most an item per worker whose free a thread defers: the rest released
         assert got['items'] <= 2 + int(workers), got['items']
         assert got['error'] == out['export_error'] == ['LookupError', 'no rate for 4']
-        # collect belongs to the declared Space: on an ItemSpace the export and the compiled class raise
-        # TypeError (live modelx, which defines collect on the declared Space only, raises AttributeError)
-        assert got['item'][0] == out['export_item'][0] == 'TypeError' and got['item'] == out['export_item']
+        # collect belongs to the declared Space: an ItemSpace has no collect, as in live modelx
+        assert got['item'] == out['export_item'] and got['item'][0] == 'AttributeError'
+        assert got['item_has'] is False
         assert got['loose'] == (None if workers == '1' else [
             'ValueError', 'collect of Loose with 4 workers: the Reference data is a Space without a lock; '
             'export it in locked_spaces or use one worker'])

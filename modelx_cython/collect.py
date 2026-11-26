@@ -1,8 +1,9 @@
 """Compiled ``collect()``: the hook of modelx's exported collect, version 1.
 
 A Space that declares collect is exported with ``_mx_collect_item`` (the ItemSpace at one coordinate:
-an existing one, or a new root that is not stored) and a ``collect`` method that calls
-``_mx_sys.collect_from_space``. The compiled class adds ``_mx_collect_hook``, which modelx calls
+an existing one, or a new root that is not stored) and a method that calls
+``_mx_sys.collect_from_space`` (``_mx_collect_run``, which the Space's ``collect`` property returns;
+an ItemSpace has no ``collect``, as in live modelx). The compiled class adds ``_mx_collect_hook``, which modelx calls
 with the checked domain: each item is built (as ``__call__`` builds a new root, by ``item_roots``, for
 a Space without child Spaces; else by ``_mx_collect_item``), its ``collect_outputs()`` read and checked
 by the export's ``prepare_output``, and the item released when collect created it. A new item of a

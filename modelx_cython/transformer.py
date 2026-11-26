@@ -1177,8 +1177,8 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
             elif meth_name == "__delitem__" and cls_name in self.module.visitor.itemspace_classes:
                 updated_node = _releasing_delitem(updated_node, cls_name)
 
-            elif meth_name[:2] == "__":
-                # Special methods
+            elif meth_name[:2] == "__" or original_node.decorators:
+                # Special methods; a decorated method of the export (collect's property) is no Cell
                 pass
 
             else:

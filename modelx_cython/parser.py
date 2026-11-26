@@ -446,6 +446,9 @@ class ModuleVisitor(m.MatcherDecoratableVisitor, ParentScopeAddin):
             ):
                 # Special methods
                 pass
+            elif original_node.decorators:
+                # a decorated method of the export (collect's property) is no Cell
+                pass
             else:
                 # cells
                 name = original_node.name.value

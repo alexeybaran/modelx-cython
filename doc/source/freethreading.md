@@ -107,9 +107,8 @@ that reads `_model`, `_parent` or `_space`, raises `ValueError` naming it before
 starts. A model satisfies it by exporting those Spaces in `locked_spaces`, as above. One worker
 always runs.
 
-`collect()` belongs to the declared Space. Called on one of its ItemSpaces, the exported and the
-compiled model raise `TypeError`, where live modelx, which defines `collect` only on the
-declared Space, raises `AttributeError`.
+`collect()` belongs to the declared Space. Its ItemSpaces have no `collect`, in live modelx, in
+the export and in the compiled model alike: reading it raises `AttributeError`.
 
 ## What the compiled model guarantees
 
