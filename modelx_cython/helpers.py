@@ -4,12 +4,13 @@ Providers supply a .pyx/.pxd pair. Their Cython functions receive the current
 Python callable first and must preserve its behavior when it is replaced.
 """
 import hashlib
-from importlib import resources
+from importlib import resources     # read through native_sources.read_resource
 import keyword
 import inspect
 
 import libcst as cst
 
+from .native_sources import module_name, read_resource
 from .scopes import FormulaTransformer
 from .consts import CY_MOD
 
@@ -22,17 +23,8 @@ CAPABILITIES = {
 SCALAR_RESULTS = frozenset(('float64', 'int64', 'bool', 'unicode', 'object'))
 
 
-def module_name(provider):
-    return '_mx_helper_' + hashlib.sha256(provider.encode()).hexdigest()[:12]
-
-
 def valid_identifier(name):
     return isinstance(name, str) and name.isidentifier() and not keyword.iskeyword(name)
-
-
-def read_resource(package, name):
-    return (resources.files(package).joinpath(name).read_bytes()
-            if hasattr(resources, 'files') else resources.read_binary(package, name))
 
 
 def registered_helper(value):

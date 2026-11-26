@@ -2,7 +2,7 @@
 import libcst as cst
 
 from .consts import MODULE_PREF, MX_SPACE_MOD, SPACE_PREF
-from .helpers import module_name
+from .native_sources import module_name
 
 PROVIDER = 'modelx_cython._numeric_cache'
 ALIAS = module_name(PROVIDER)
