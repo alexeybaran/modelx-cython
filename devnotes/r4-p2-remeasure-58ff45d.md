@@ -88,3 +88,42 @@ max(cert, lf)`). Each policy makes 8,500 boxed floats and 1,200 `PyNumber_Power`
 power semantics where the sample could not exclude a negative base. These are allocations local to each thread.
 Whether they limit scaling (through allocator or cache pressure) is not shown. The next experiment would be the same
 loop with C `pow` behind a sign check.
+
+## Collect's fixed cost per policy against the earlier tree's own collect
+
+Index_DE_S and UC_FR_S at lifelib 04d69db. Collect is declared over `point_id` with `{"sum": {"net_cf": net_cf_total()}}`,
+`Data` is locked, and the build uses the shipped book. The run is at one worker on the book tiled to 20 and 1,020
+policies. Instructions per policy are the callgrind difference divided by 1,000; runs vary by about ±5k, mostly
+OpenBLAS thread spin. Proposal (A): compiler c342db9 with modelx 1aa21f4. Earlier tree (B): 0b77986 with modelx
+636877b and spec `serial_collect: reuse`. Values are equal between A and B on both books.
+
+| model | A | B | A - B |
+|---|---|---|---|
+| Index_DE_S | 556,703 | 514,066 | +42.6k |
+| UC_FR_S | 565,939 | 519,068 | +46.9k |
+
+The item's own computation is the same (Index 437.9k against 438.6k, UC 360.5k against 360.0k). The difference is
+the per-coordinate overhead, measured as the inclusive cost of the collect loop minus the item's outputs Cell:
+
+| per coordinate | Index A | Index B | UC A | UC B |
+|---|---|---|---|---|
+| export's `prepare_output` + `Accumulator.add`, interpreted (B sums in C) | 17.9k | - | 17.9k | - |
+| reset of the reused item: memset of flag arrays | 4.7k | 4.0k | 37.8k | 17.6k |
+| `_mx_copy_refs`: every Reference re-assigned (B captures them at entry) | 7.3k | - | 8.1k | - |
+| `_mx_itemspaces.get`, `_mx_roots.append`, `threading.local` get/set, `__init__`, release | 8.6k | 0.7k | 9.2k | 13.7k |
+| total overhead | 38.5k | 4.7k | 73.0k | 31.3k |
+
+UC's reset clears the `short[1226]` flags of every Cell, 211 KB per item. B clears only the Cells that
+`collect_outputs` reaches (`serial_collect._reset_lines(only=...)`). A Cython-compiled `_mx_collect.py` lowers the
+evaluator row from 17.9k to 13.2k (Index), because the rest is dict, set and tuple building.
+
+Changes inside the proposal, not made:
+1. A per-worker slot passed to the item function instead of `threading.local`: about 10 lines, -1 to 3k, clearly
+   right.
+2. Keep References across reuse: leave them out of the reset and drop `_mx_copy_refs` on a reused item. About 8
+   lines, -7 to 8k. The contract becomes "References as at collect entry", as in B.
+3. Reset only the Cells reachable from `collect_outputs`, with a full reset when the reach is not static. About 15
+   lines, -20k on UC. It needs the compiler's call graph.
+4. A compiled fast path for `sum` outputs that are exact floats: added in domain order as `total = total + value`,
+   so bit-identical to the Accumulator. About 30 lines, -15 to 18k. This is the native sum declined earlier at 1.35 us
+   per item.
