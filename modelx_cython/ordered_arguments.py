@@ -1,0 +1,129 @@
+"""Preserve object power semantics outside the proved native domain.
+
+Numeric Cells keep the native power and extrema mechanics unchanged. Object-result
+Cells and child scopes use ordinary object operators when Cython's native
+promotion would change their scalar-class contract.
+"""
+import libcst as cst
+from libcst.metadata import ScopeProvider, ParentNodeProvider
+from libcst.metadata.scope_provider import BuiltinAssignment
+
+
+class _OrderedArguments(cst.CSTTransformer):
+    METADATA_DEPENDENCIES = (ScopeProvider, ParentNodeProvider)
+
+    def __init__(self, native_result=False, operand_kind=None):
+        super().__init__()
+        self.opaque_depth = 0
+        self.native_result = native_result
+        self.operand_kind = operand_kind
+
+    def on_visit(self, node):
+        from .scopes import OPAQUE_SCOPES
+        if isinstance(node, OPAQUE_SCOPES):
+            self.opaque_depth += 1
+        return super().on_visit(node)
+
+    def on_leave(self, before, after):
+        result = super().on_leave(before, after)
+        from .scopes import OPAQUE_SCOPES
+        if isinstance(before, OPAQUE_SCOPES):
+            self.opaque_depth -= 1
+        return result
+
+    def leave_BinaryOperation(self, before, after):
+        if not isinstance(before.operator, cst.Power):
+            return after
+        if self.native_result and self.opaque_depth == 1:
+            # Proven floating powers were lowered earlier. An integral exponent
+            # keeps the native arithmetic; other unproved powers need the existing
+            # object operator so Cython cannot infer an unordered complex value.
+            from .powers import KIND_INT
+            if self.operand_kind is None or self.operand_kind.kind(before.right) == KIND_INT:
+                return after
+            # A native return already supplies Cython's scalar conversion.
+            # Keep that existing arithmetic path; intermediate values and
+            # comparisons lack this conversion boundary and must stay objects.
+            parent = self.get_metadata(ParentNodeProvider, before)
+            while isinstance(parent, (cst.BinaryOperation, cst.UnaryOperation)):
+                parent = self.get_metadata(ParentNodeProvider, parent)
+            if isinstance(parent, cst.Return):
+                return after
+        # The qualified real-power pass has already handled its proved C
+        # domain. Preserve Python's remaining integer/mixed/complex power
+        # result and error semantics through Cython's ordinary object operator.
+        scope = self.get_metadata(ScopeProvider, before)
+        bindings = tuple(scope['object'])
+        if not bindings or not all(isinstance(binding, BuiltinAssignment) for binding in bindings):
+            return after
+        if tuple(scope['_mx_cy']):
+            return after
+        def boxed(value):
+            return cst.Call(cst.Attribute(cst.Name('_mx_cy'), cst.Name('cast')),
+                            (cst.Arg(cst.Name('object')), cst.Arg(value)))
+        return after.with_changes(left=boxed(after.left), right=boxed(after.right))
+
+    def integer_identity(self, before, after):
+        """``int(x)`` of a proven C integer is ``x``.
+
+        Builtin ``int`` of an int returns that int, but Cython types the call as a Python
+        object, so ``n = int((last - start) // step)`` made ``n`` an object and with it every
+        local derived from it (``for k in range(1, n + 1)``: boxed ``k``, ``k * step``, ...),
+        although the local-kind analysis proves ``n`` an integer. Only the
+        builtin, one positional argument, at the formula's own level (not in a comprehension,
+        lambda or nested def, where names may be bound otherwise)."""
+        from .powers import KIND_INT
+        if (self.operand_kind is None or self.opaque_depth != 1 or not isinstance(before.func, cst.Name)
+                or before.func.value != 'int' or len(before.args) != 1 or before.args[0].keyword is not None
+                or before.args[0].star):
+            return None
+        scope = self.get_metadata(ScopeProvider, before.func)
+        bindings = tuple(scope['int'])
+        if not bindings or not all(isinstance(binding, BuiltinAssignment) for binding in bindings):
+            return None
+        if self.operand_kind.kind(before.args[0].value) != KIND_INT:
+            return None
+        value = after.args[0].value
+        return value.with_changes(lpar=(cst.LeftParen(),), rpar=(cst.RightParen(),)) if not value.lpar else value
+
+    def leave_Call(self, before, after):
+        integer = self.integer_identity(before, after)
+        if integer is not None:
+            return integer
+        # A numeric Cell already normalizes its result through its native ABI.
+        # Object results/child scopes must keep the selected operand's Python
+        # scalar class: Cython promotes mixed native min/max inputs to double.
+        # This fallback is about the result contract, not first-error order.
+        if self.native_result and self.opaque_depth == 1:
+            return after
+        if not isinstance(before.func, cst.Name) or before.func.value not in ('min', 'max'):
+            return after
+        if any(argument.star for argument in after.args):
+            return after
+        positional = tuple(argument for argument in after.args if argument.keyword is None)
+        if len(positional) < 2:
+            return after
+        scope = self.get_metadata(ScopeProvider, before.func)
+        bindings = tuple(scope[before.func.value])
+        if not bindings or not all(isinstance(binding, BuiltinAssignment) for binding in bindings):
+            return after
+        keywords = tuple(argument for argument in after.args if argument.keyword is not None)
+        values = cst.Tuple(tuple(cst.Element(argument.value) for argument in positional))
+        return after.with_changes(args=(cst.Arg(values, star='*'), *keywords))
+
+def _rewrites(node):
+    """Whether :class:`_OrderedArguments` can change ``node``: it rewrites only a ``**`` and a
+    call of the name ``int``, ``min`` or ``max``."""
+    from .syntax import walk
+    return any(isinstance(part, cst.BinaryOperation) and isinstance(part.operator, cst.Power)
+               or isinstance(part, cst.Call) and isinstance(part.func, cst.Name)
+               and part.func.value in ('int', 'min', 'max')
+               for part in walk(node))
+
+
+def preserve_argument_order(formula, native_result=False, operand_kind=None):
+    """Keep unproved powers on Cython's ordinary Python-object operator."""
+    if not _rewrites(formula):
+        return formula      # the pass would return an equal copy
+    wrapper = cst.MetadataWrapper(cst.Module(body=(formula,)))
+    return wrapper.visit(_OrderedArguments(native_result, operand_kind)).body[0]
