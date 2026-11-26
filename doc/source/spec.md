@@ -216,15 +216,42 @@ use a native hash store and other signatures Python dictionaries.
 
 ## Integer arithmetic
 
-Integer arithmetic is always checked; no key turns the checks off. C integer
-`+`, `-`, `*` and unary minus in a formula set an overflow flag that the
-formula tests before it returns, raising {py:exc}`OverflowError` naming the
-Cell when an exact result would leave 64 bits. A formula with an operation
-whose C type the compiler cannot tell keeps Cython's own overflow checks; such
-formulas are listed under `overflowcheck_fallback` in `_mx_integer_checks.json`
-of the generated package. `//`, `%`, shifts and integer powers keep Python's
-results or raise, and a float or an int beyond 64 bits passed where an integer
-was traced raises naming the Cell. Nothing here depends on the sample.
+`integer_checks`
+: Top-level setting: `"auto"` (default), `"checked"` or `"unchecked"`; any
+  other value stops the build.
+
+`"checked"`: each formula whose C integer `+`, `-`, `*` or unary minus the
+compiler cannot show to be on a float or a Python object is compiled with
+Cython's `overflowcheck`, nested scopes (generators, comprehensions)
+included, and raises {py:exc}`OverflowError` naming the Cell when an exact
+result would leave 64 bits (a unary minus is checked in the formula itself,
+not in a nested scope). These formulas are listed under `overflowcheck`
+in `_mx_integer_checks.json` of the generated package. The checked mode is
+markedly slower than the unchecked mode.
+
+`"unchecked"`: those operators are plain C operators, as on upstream.
+
+`"auto"` resolves after the sample run: to `"unchecked"` when the largest
+integer the sample traced is below 2**31 in magnitude, and to `"checked"`
+otherwise. The sample's integers are the arguments and results of Cells and
+Space calls, ItemSpace parameters and Reference values; of a NumPy array or
+a pandas DataFrame, Series or Index among these (an input table), its
+integer elements, columns and index. `_mx_integer_checks.json` records the
+mode requested, the mode used, the largest traced integer and where it was
+seen.
+
+An unchecked model can wrap: the sample sees only the values passed in and
+returned, not intermediate results, so when an intermediate result exceeds
+64 bits on inputs larger than the sample suggested (a product of several
+large terms, for example), the formula wraps silently, as on upstream. Set
+`"integer_checks": "checked"` in the spec to force the checks whatever the
+sample, at the cost of the checked mode's speed.
+
+In both modes, an integer passed from Python where an integer was traced,
+or written to an integer Reference, must be an exact 64-bit integer (a
+float or an int beyond 64 bits raises naming the Cell); integer results are
+converted exactly; and `//`, `%`, shifts and integer powers keep Python's
+results or raise.
 
 `infer_types`
 : `true` (default) compiles generated model modules with Cython's C type

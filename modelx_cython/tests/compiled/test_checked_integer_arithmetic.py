@@ -1,9 +1,9 @@
-"""Integer guards without a run-time mode: C integer ``+ - *`` and unary minus of a formula set an
-overflow flag that the formula tests once before it returns, raising OverflowError naming the Cell.
-Nothing depends on the sample: the reproductions below wrapped silently (or flipped with an unrelated
-traced value) when a model-wide mode followed the largest traced integer. Each must raise or equal
-live; small numbers equal live; a float that reaches an integer Reference raises, and a loop target
-read after a loop that ran no iteration raises as live."""
+"""The checked mode (spec key ``integer_checks``: ``"checked"``, forced here): C integer ``+ - *`` and
+unary minus of a formula are compiled with Cython's overflowcheck, nested scopes (a generator, a
+comprehension) included, and an exact result that leaves 64 bits raises OverflowError naming the
+Cell. Each reproduction below must raise or equal live; small numbers equal live; a float that
+reaches an integer Reference raises, and a loop target read after a loop that ran no iteration
+raises as live."""
 import json
 import re
 import subprocess
@@ -31,6 +31,11 @@ def build():
     s.new_cells('scaled', 'lambda: iref * 3')
     s.new_cells('squared', 'def squared():\\n    t = kref + 1\\n    return t * t - 1\\n')
     s.new_cells('small', 'lambda t: (t * 7 + 3) * (t - 2) - (t // 3)')
+    s.new_cells('highest', 'lambda: 9223372036854775807')
+    s.new_cells('added', 'lambda: highest() + base()')
+    s.new_cells('subtracted', 'lambda: lowest() - base()')
+    s.new_cells('negated_local', 'def negated_local():\\n    x = -lowest()\\n    return float(x)\\n')
+    s.new_cells('comprehension', 'lambda: len([t * t * t for t in range(top() - 1, top())])')
     s.iref = 2
     s.kref = 5
     return m
@@ -41,6 +46,7 @@ from exported import mx_model
 S = mx_model.S
 S.local_typed(); S.inferred(2); S.augmented(2); S.il(3); S.vec(3); S.element(3); S.reduced(); S.lowest()
 S.negated(); S.after_loop(3); S.scaled(); S.squared()
+S.added(); S.subtracted(); S.negated_local(); S.comprehension()
 [S.small(t) for t in range(50)]
 '''
 
@@ -63,7 +69,8 @@ def outcome(model, call):
         return [type(error).__name__, text]
 
 calls = ['local_typed()', 'inferred(2)', 'inferred(10)', 'augmented(2)', 'augmented(10)', 'float_argument()',
-         'element(1)', 'reduced()', 'negated()', 'after_loop(3)', 'after_loop(0)', 'squared()']
+         'element(1)', 'reduced()', 'negated()', 'after_loop(3)', 'after_loop(0)', 'squared()',
+         'added()', 'subtracted()', 'negated_local()', 'comprehension()']
 calls += [f'small({t})' for t in range(50)]
 result = {call: [outcome(comp, call), outcome(live, call)] for call in calls}
 live.S.iref = 0.5
@@ -79,13 +86,15 @@ print(json.dumps(result))
 '''
 
 RAISES_OVERFLOW = {'local_typed()': 'S.local_typed', 'inferred(10)': 'S.inferred', 'augmented(10)': 'S.augmented',
-                   'reduced()': 'S.reduced', 'negated()': 'S.negated', 'kref': 'S.squared'}
+                   'reduced()': 'S.reduced', 'negated()': 'S.negated', 'kref': 'S.squared', 'added()': 'S.added',
+                   'subtracted()': 'S.subtracted', 'negated_local()': 'S.negated_local',
+                   'comprehension()': 'S.comprehension'}
 
 
-def test_flagged_integer_arithmetic_raises_or_equals_live(tmp_path):
+def test_checked_integer_arithmetic_raises_or_equals_live(tmp_path):
     (tmp_path / 'model.py').write_text(MODEL, encoding='utf-8')
     (tmp_path / 'sample.py').write_text(SAMPLE, encoding='utf-8')
-    (tmp_path / 'spec.py').write_text(repr({'cells_param_size': {'n': 30, 'k': 4}}), encoding='utf-8')
+    (tmp_path / 'spec.py').write_text(repr({'cells_param_size': {'n': 30, 'k': 4}, 'integer_checks': 'checked'}), encoding='utf-8')
     (tmp_path / 'checks.py').write_text(CHECKS, encoding='utf-8')
     run = lambda *args: subprocess.run([sys.executable, '-B', *args], cwd=tmp_path, capture_output=True,
                                        text=True, timeout=900)
@@ -94,13 +103,13 @@ def test_flagged_integer_arithmetic_raises_or_equals_live(tmp_path):
     built = run('-m', 'modelx_cython', 'exported', '--sample', 'sample.py', '--spec', 'spec.py')
     assert built.returncode == 0, built.stdout + built.stderr
     source = (tmp_path / 'exported_cy' / '_mx_classes.py').read_text(encoding='utf-8')
-    # no model-wide directive; every C integer + - * of these formulas is flagged, except two left to
-    # the per-formula fallback in this compiler: an element of a vector Cell's value (a Python object:
-    # vector Cells are a bridge layer) and a sum over a generator (a nested scope: reductions are one too)
+    # no model-wide directive: Cython's overflowcheck on each formula with C integer + - * or unary
+    # minus, nested scopes included, among them every formula below that raises
     assert 'overflowcheck' not in source.splitlines()[0], source.splitlines()[0]
     report = json.loads((tmp_path / 'exported_cy' / '_mx_integer_checks.json').read_text())
-    assert report == {'overflowcheck_fallback': ['S.element', 'S.reduced']}, report
-    assert len(re.findall(r'_mx_sys\._mx_flag_(add|sub|mul|neg)\(', source)) >= 10
+    assert report['requested'] == report['mode'] == 'checked', report
+    assert set(RAISES_OVERFLOW.values()) <= set(report['overflowcheck']), report
+    assert len(re.findall(r'@_mx_cy\.overflowcheck\(True\)', source)) == len(report['overflowcheck'])
     checked = run('checks.py')
     assert checked.returncode == 0, checked.stdout + checked.stderr
     result = json.loads(checked.stdout.strip().splitlines()[-1])

@@ -50,7 +50,10 @@ def test_native_transfers(tmp_path):
         's.fraction(1); s.fraction(3); s.piecewise(1); s.piecewise(2); s.periodic(1, 4, False)\n'
         's.factor(4, 4.0, 0.5)\n',
         encoding='utf-8')
+    # the sample's integers are small, so 'auto' would build unchecked: the overflow checks below need the
+    # checked mode (spec key integer_checks)
     (tmp_path / 'spec.py').write_text(repr({
+        'integer_checks': 'checked',
         'dense_bounds_proofs': True,
         'dense_one_axis': True,
         'dense_miss_binding': True,

@@ -55,3 +55,30 @@ def test_disabling_automatic_selection_disables_implicit_dense_entries():
     assert not policy.dense_miss_binding
     assert not policy.propagate_exact_receiver
     assert policy.native_cache_hits == 'none'
+
+
+def test_integer_checks_defaults_to_auto_and_accepts_the_three_modes():
+    from modelx_cython.config import CompilerPolicy
+    assert CompilerPolicy.resolve({}).integer_checks == 'auto'
+    for mode in ('auto', 'checked', 'unchecked'):
+        assert CompilerPolicy.resolve({'integer_checks': mode}).integer_checks == mode
+
+
+@pytest.mark.parametrize('value', ['Checked', 'on', True, None, 1])
+def test_integer_checks_rejects_any_other_value(value):
+    from modelx_cython.config import CompilerPolicy
+    with pytest.raises(ValueError, match='integer_checks must be auto, checked or unchecked'):
+        CompilerPolicy.resolve({'integer_checks': value})
+
+
+def test_auto_resolves_from_the_largest_traced_integer():
+    from modelx_cython.config import CompilerPolicy, UNCHECKED_LIMIT, resolve_integer_checks
+    assert UNCHECKED_LIMIT == 2 ** 31
+    auto = CompilerPolicy.resolve({})
+    assert resolve_integer_checks(auto, 0) == 'unchecked'
+    assert resolve_integer_checks(auto, 2 ** 31 - 1) == 'unchecked'
+    assert resolve_integer_checks(auto, 2 ** 31) == 'checked'
+    assert resolve_integer_checks(auto, 2 ** 70) == 'checked'
+    for mode in ('checked', 'unchecked'):
+        forced = CompilerPolicy.resolve({'integer_checks': mode})
+        assert resolve_integer_checks(forced, 0) == resolve_integer_checks(forced, 2 ** 70) == mode

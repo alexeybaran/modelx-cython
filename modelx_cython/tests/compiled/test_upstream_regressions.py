@@ -66,7 +66,9 @@ def built(tmp_path_factory):
     finally:
         model.close()
     (work / "sample.py").write_text(SAMPLE)
-    (work / "spec.py").write_text(repr({"spaces": {"S": {"cells_param_size": {"t": 20}}}}))
+    # the sample's integers are small, so 'auto' would build unchecked: the overflow checks below need the
+    # checked mode (spec key integer_checks)
+    (work / "spec.py").write_text(repr({"integer_checks": "checked", "spaces": {"S": {"cells_param_size": {"t": 20}}}}))
     run = subprocess.run([sys.executable, "-B", "-m", "modelx_cython", "exported", "--sample", "sample.py",
                           "--spec", "spec.py"], cwd=work, capture_output=True, text=True, timeout=900)
     assert run.returncode == 0, run.stdout + run.stderr

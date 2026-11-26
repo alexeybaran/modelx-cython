@@ -2,8 +2,9 @@
 
 Each Cell computes a C integer value whose exact (Python) result leaves 64 bits, or depends on
 Python's integer semantics. The sample keeps every value small, as a real book does, so the
-Cells are typed as C integers; the run then calls them with the values below. Every case is
-exact or raises an error naming the Cell; none is silently wrong, whatever the sample traced.
+Cells are typed as C integers; the run then calls them with the values below. The Reference
+BIG = 2**62 is traced, so the spec key ``integer_checks`` (``"auto"``, not set here) resolves to the
+checked mode: every case is exact or raises an error naming the Cell; none is silently wrong.
 """
 import json
 import re
@@ -113,10 +114,11 @@ def _unchecked_divisions(c_file):
 
 
 def test_every_case_is_exact_or_names_the_cell(exported, tmp_path):
-    """No spec key: the Reference BIG = 2**62 is traced here, and a model whose integers are all small
-    is built the same way; nothing in the build follows the magnitude of a traced integer."""
+    """No spec key: the Reference BIG = 2**62 is traced here, (and Sp.lf returns more than 2**64), so 'auto' resolves
+    to the checked mode."""
     outcome, live, report = _build(exported, tmp_path)
-    assert set(report) == {"overflowcheck_fallback"}
+    assert report["requested"] == "auto" and report["mode"] == "checked", report
+    assert report["largest_traced_integer"] >= 2 ** 62, report
     for name in RUNS:
         kind, text = outcome[name]
         if name in EXACT:

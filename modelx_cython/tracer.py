@@ -75,7 +75,9 @@ from modelx_cython.consts import (
     MX_SYS_MOD,
     BASE_MODEL,
     SPACE_PREF,
-    SPACE_PARAMS
+    SPACE_PARAMS,
+    FILE_PREF,
+    MODULE_PREF,
 )
 
 if (3, 12) <= sys.version_info < (3, 14):
@@ -813,6 +815,54 @@ class MxCodeFilter:
         return False
 
 
+def integer_magnitude(value) -> int:
+    """The largest |integer| in ``value`` for the integer-check mode (spec key ``integer_checks``):
+    an int or a NumPy integer (not a bool), or the integer elements of a NumPy array, the integer
+    columns and integer index of a pandas DataFrame, Series or Index (an input table); 0 otherwise."""
+    kind = type(value)
+    if kind is int:
+        return abs(value)
+    if kind in _NOT_INTEGRAL:
+        return 0
+    if isinstance(value, numbers.Integral) and not isinstance(value, (bool, np.bool_)):
+        return abs(int(value))
+    arrays = ()
+    if isinstance(value, np.ndarray):
+        arrays = (value,)
+    elif kind.__module__.split('.')[0] == 'pandas':
+        arrays = []
+        if hasattr(value, 'dtypes') and hasattr(value, 'columns'):          # DataFrame
+            arrays = [value[c].to_numpy() for c, t in zip(value.columns, value.dtypes)
+                      if getattr(t, 'kind', '') in 'iu']
+        elif hasattr(value, 'dtype') and hasattr(value, 'to_numpy'):         # Series or Index
+            arrays.append(value.to_numpy())
+        index = getattr(value, 'index', None)
+        if index is not None and getattr(index.dtype, 'kind', '') in 'iu':
+            arrays.append(index.to_numpy())
+    largest = 0
+    for array in arrays:
+        if getattr(array.dtype, 'kind', '') in 'iu' and array.size:
+            largest = max(largest, abs(int(array.max())), abs(int(array.min())))
+    return largest
+
+
+_NOT_INTEGRAL = frozenset((float, bool, str, type(None), tuple, list, dict))
+
+
+def _model_path(name):
+    """A traced name as a dotted path of the model: ``Pkg._m_A._mx_classes._c_B._f_c`` as ``A.B.c``."""
+    parts = []
+    for part in name.split('.')[1:]:
+        if part.startswith(FILE_PREF):
+            continue
+        for prefix in (MODULE_PREF, SPACE_PREF, FORMULA_PREF):
+            if part.startswith(prefix):
+                part = part[len(prefix):]
+                break
+        parts.append(part)
+    return '.'.join(parts)
+
+
 class MxCallTraceLogger(CallTraceLogger):
     """Log and store/print records collected by a CallTracer.
 
@@ -866,6 +916,11 @@ class MxCallTraceLogger(CallTraceLogger):
         self.param_info = {}  # class name -> {param: RuntimeParamInfo}
         self._assigned_params = {}
         self._funcnames = {}    # traced function -> its fully qualified name
+        # integer guards (spec key integer_checks): the largest |integer| traced (Cell and Space
+        # arguments and results, ItemSpace parameters, References, integer columns of input
+        # tables: integer_magnitude) and where it was first seen
+        self.max_integer = 0
+        self.max_integer_at = None
 
     def log(self, trace: CallTrace) -> None:
         """Log a single call trace.
@@ -883,6 +938,9 @@ class MxCallTraceLogger(CallTraceLogger):
         funcname = self._funcnames.get(func)
         if funcname is None:
             funcname = self._funcnames[func] = trace.funcname
+        self._integer_magnitudes(funcname, trace.arg_vals.values())
+        if hasattr(trace, 'ret_val'):
+            self._integer_magnitudes(funcname, (trace.ret_val,))
         if name == "_mx_assign_params":
             values = iter(trace.arg_vals.items())
             _, target = next(values)
@@ -928,10 +986,17 @@ class MxCallTraceLogger(CallTraceLogger):
             if args_changed or ret_changed:
                 self._traces.setdefault(name, []).append(trace)
 
+    def _integer_magnitudes(self, where, values):
+        for value in values:
+            magnitude = integer_magnitude(value)
+            if magnitude > self.max_integer:
+                self.max_integer, self.max_integer_at = magnitude, _model_path(where)
+
     def _record_params(self, target, values):
         cls = type(target)
         params = self._assigned_params.setdefault(cls.__module__ + "." + cls.__name__, {})
         for name, value in values:
+            self._integer_magnitudes(cls.__module__ + "." + cls.__name__ + "." + name, (value,))
             if name not in params:
                 params[name] = RuntimeParamInfo.init_mxobj(value, self.module)
 
@@ -961,6 +1026,7 @@ class MxCallTraceLogger(CallTraceLogger):
                 for name, val in instance_attrs(tr0.arg_vals[MX_SELF]):
                     if is_user_defined(name):
                         fqname = ".".join(name_split[:-1] + [name])
+                        self._integer_magnitudes(fqname, (val,))
                         self.ref_info[fqname] = RuntimeRefInfo.init_mxobj(val, self.module)
             else:
                 if is_user_defined(name_split[-1]):

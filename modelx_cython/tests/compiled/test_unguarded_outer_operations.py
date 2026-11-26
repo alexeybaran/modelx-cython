@@ -39,7 +39,9 @@ def test_unguarded_outer_operations_are_exact_or_raise(tmp_path):
     calls = ''.join(f'v.{name}(7, 3)\n' for name in OPERATIONS)
     (tmp_path / 'sample.py').write_text(
         'from exported import mx_model\nv = mx_model.Values\nv.flag(); v.width()\n' + calls, encoding='utf-8')
-    (tmp_path / 'spec.py').write_text(repr({}), encoding='utf-8')
+    # the sample's integers are small, so 'auto' would build unchecked: the overflow checks below need the
+    # checked mode (spec key integer_checks)
+    (tmp_path / 'spec.py').write_text(repr({'integer_checks': 'checked'}), encoding='utf-8')
     subprocess.run(
         [sys.executable, '-m', 'modelx_cython', 'exported', '--sample', 'sample.py', '--spec', 'spec.py'],
         cwd=tmp_path, check=True)

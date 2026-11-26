@@ -434,3 +434,19 @@ def test_cached_formula_traces_are_bounded_by_observations(monkeypatch):
                       "ret_type", "has_negative_args",
                       "array_buffer_compatible"):
         assert getattr(kept, attribute) == getattr(full, attribute), attribute
+
+
+def test_integer_magnitude_of_traced_values():
+    import pandas as pd
+    from modelx_cython.tracer import integer_magnitude
+    assert integer_magnitude(-2 ** 40) == 2 ** 40
+    assert integer_magnitude(np.int32(-7)) == 7
+    assert integer_magnitude(True) == integer_magnitude(np.bool_(True)) == 0
+    assert integer_magnitude(2.5e30) == integer_magnitude('9' * 20) == integer_magnitude(None) == 0
+    assert integer_magnitude(np.array([3, -2 ** 33])) == 2 ** 33
+    assert integer_magnitude(np.array([1e40])) == 0
+    # an input table: its integer columns and integer index, not its float columns
+    frame = pd.DataFrame({'n': [1, -2 ** 32], 'x': [1e40, 0.0]}, index=[10, 20])
+    assert integer_magnitude(frame) == 2 ** 32
+    assert integer_magnitude(pd.Series([0.5], index=[2 ** 35])) == 2 ** 35
+    assert integer_magnitude(pd.Index([4, -50])) == 50

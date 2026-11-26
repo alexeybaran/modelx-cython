@@ -1,3 +1,4 @@
+import json
 import logging
 import re
 import sys
@@ -409,8 +410,11 @@ def test_fractional_power(sample_dir, model):
         encoding="utf-8")
     assert "_mx_sys._mx_pow((1 + self.ann_rate(t)), (1 / 12))" in src
     assert "_mx_sys._mx_pow((1 - self.ann_q(t)), (1 / 12))" in src
-    # the C integer exponent is negated through the flagged helper (integer guards); the power stays
-    assert "2 ** _mx_sys._mx_flag_neg(t, _mx_cy.address(_mx_overflow))" in src
+    # every traced integer is small: integer checks resolve unchecked, and the C integer exponent is
+    # negated by the plain C operator (integer guards); the power stays
+    report = json.loads((work_dir / (model + "_nomx_cy") / "_mx_integer_checks.json").read_text())
+    assert report["mode"] == "unchecked", report
+    assert "2 ** -t" in src
     # uncached_rate has no _f_ method, so its public method carries the
     # formula and goes through the transformer's other rewrite site
     assert "def uncached_rate(" in src

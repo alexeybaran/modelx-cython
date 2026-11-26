@@ -158,7 +158,9 @@ def integer_domain_build(tmp_path_factory):
         projection.inline_operand()
         projection.shift_argument()
         """), encoding="utf-8")
-    (work / "spec.py").write_text(repr({}), encoding="utf-8")
+    # the sample's integers are small, so 'auto' would build unchecked: the overflow checks below need the
+    # checked mode (spec key integer_checks)
+    (work / "spec.py").write_text(repr({"integer_checks": "checked"}), encoding="utf-8")
     run_python(work, "-m", "modelx_cython", "exported", "--sample", "sample.py", "--spec", "spec.py")
 
     report = json.loads((work / "exported_cy/_mx_admission.json").read_text(encoding="utf-8"))

@@ -71,7 +71,9 @@ def build(tmp_path):
         'p = mx_model.Portfolio\n'
         'p.direct(); p.direct_call(); p.rebound(); p.shifted(1)\n'
         'mx_model.Projection[2].f(3)\n', encoding='utf-8')
-    (tmp_path / 'spec.py').write_text(repr({}), encoding='utf-8')
+    # the sample's integers are small, so 'auto' would build unchecked: the overflow checks below need the
+    # checked mode (spec key integer_checks)
+    (tmp_path / 'spec.py').write_text(repr({'integer_checks': 'checked'}), encoding='utf-8')
     subprocess.run([sys.executable, '-m', 'modelx_cython', 'exported', '--sample', 'sample.py',
                     '--spec', 'spec.py'], cwd=tmp_path, check=True)
     return live

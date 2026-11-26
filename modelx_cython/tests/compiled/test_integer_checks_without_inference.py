@@ -30,7 +30,9 @@ def test_checked_mode_checks_c_arithmetic_with_or_without_inference(tmp_path, in
     finally:
         model.close()
     (tmp_path / "sample.py").write_text("from exported import mx_model\nSp = mx_model.Sp\nSp.c(2); Sp.c(3)\n")
-    (tmp_path / "spec.py").write_text(repr({"infer_types": infer_types,
+    # the sample's integers are small, so 'auto' would build unchecked: the overflow checks below need the
+    # checked mode (spec key integer_checks)
+    (tmp_path / "spec.py").write_text(repr({"infer_types": infer_types, "integer_checks": "checked",
                                             "spaces": {"Sp": {"cells_param_size": {"t": 2 ** 23}}}}))
     run = subprocess.run([sys.executable, "-B", "-m", "modelx_cython", "exported", "--sample", "sample.py",
                           "--spec", "spec.py"], cwd=tmp_path, capture_output=True, text=True, timeout=900)

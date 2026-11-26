@@ -41,7 +41,7 @@ import subprocess
 from typing import IO, TYPE_CHECKING, Sequence, Optional, Tuple
 
 from modelx_cython.consts import MX_MODEL_MOD, MX_SPACE_MOD, MX_SYS_MOD
-from modelx_cython.config import TransSpec
+from modelx_cython.config import TransSpec, UNCHECKED_LIMIT, UNCHECKED_LIMIT_NOTE, resolve_integer_checks
 from modelx_cython.tracer import trace_calls, MxCallTraceLogger, MxCodeFilter
 from modelx_cython.builder import ModuleInfo
 from modelx_cython.parser import ModuleVisitor
@@ -297,6 +297,16 @@ def main_handler(args: argparse.Namespace, stdout: IO[str], stderr: IO[str]) -> 
 
         spec = TransSpec(d)
         logger = run_sample(orig_path, args.sample, new_model_name=model_name)
+        # integer guards (spec key integer_checks): 'auto' follows the largest traced integer
+        mode = resolve_integer_checks(spec.policy, logger.max_integer)
+        integer_report = {'mode': mode, 'requested': spec.policy.integer_checks,
+                          'largest_traced_integer': logger.max_integer, 'seen_at': logger.max_integer_at,
+                          'unchecked_below': UNCHECKED_LIMIT}
+        if mode == 'unchecked':
+            integer_report['limit'] = UNCHECKED_LIMIT_NOTE
+        spec.policy = dataclasses.replace(spec.policy, integer_checks=mode)
+        _logger.info('integer checks: %s (largest traced integer %d at %s)',
+                     mode, logger.max_integer, logger.max_integer_at)
         rel_model_path = model_path.relative_to(model_path.parent)
 
         modules = [rel_model_path / (MX_SYS_MOD + ".py")]
@@ -405,6 +415,7 @@ def main_handler(args: argparse.Namespace, stdout: IO[str], stderr: IO[str]) -> 
                 state = guard_integer_boundaries(
                     translated_modules[u.fqname], u.module_info, resolver, cells_kinds, ref_kinds,
                     cells_by_name, infer_types=policy.infer_types,
+                    checked=policy.integer_checks == 'checked',
                 )
             from modelx_cython.locked_entries import lower_locked_entries
             state = lower_locked_entries(state, u.module_info)
@@ -418,9 +429,10 @@ def main_handler(args: argparse.Namespace, stdout: IO[str], stderr: IO[str]) -> 
                      source_modules=(runtime_syntax, *(state.syntax for state in translated_modules.values())),
                      cell_sources=cell_sources, providers=provider_sources)
         report = describe(module_infos)
-        integer_report = {'overflowcheck_fallback': sorted(
+        # the formulas compiled with Cython's overflowcheck (checked mode)
+        integer_report['overflowcheck'] = sorted(
             cell.model_path for info in module_infos.values() for cls in info.classes.values() for cell in cls.cells.values()
-            if getattr(cell, 'overflowcheck_fallback', False))}
+            if getattr(cell, 'overflowcheck', False))
         (model_path / '_mx_admission.json').write_text(json.dumps(report, indent=2), encoding='utf-8')
         (model_path / '_mx_integer_checks.json').write_text(json.dumps(integer_report, indent=2), encoding='utf-8')
 

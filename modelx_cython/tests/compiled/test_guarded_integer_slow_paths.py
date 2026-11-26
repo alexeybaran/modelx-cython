@@ -50,7 +50,9 @@ def _slow_paths(tmp_path):
     (tmp_path / 'sample.py').write_text(
         'from exported import mx_model as m\nv = m.Values\nfor a in range(5):\n'
         '    v.cmp(a, 2); v.div(a, 2); v.flt(a, 2); v.loc(a, 2)\n', encoding='utf-8')
-    (tmp_path / 'spec.py').write_text(repr({}), encoding='utf-8')
+    # the sample's integers are small, so 'auto' would build unchecked: the overflow checks below need the
+    # checked mode (spec key integer_checks)
+    (tmp_path / 'spec.py').write_text(repr({'integer_checks': 'checked'}), encoding='utf-8')
     done = subprocess.run([sys.executable, '-m', 'modelx_cython', 'exported', '--sample', 'sample.py',
                            '--spec', 'spec.py'], cwd=tmp_path, capture_output=True, text=True)
     assert done.returncode == 0, done.stdout[-3000:] + done.stderr[-3000:]
