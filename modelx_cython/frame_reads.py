@@ -852,9 +852,14 @@ class FrameReads:
 
     def int_label(self, expr):
         """T-5: ``X.index[i]``, ``X.index.asof(x)``, ``.max()``, ``.min()`` or ``.searchsorted(x)`` of a view or frame
-        whose one remaining level is an int level: an integer (key facts)."""
+        whose one remaining level is an int level: an integer (key facts). ``X.index[i]`` is one only for a position
+        ``i`` known to be an integer: a mask, a list or a slice selects an index, never a label."""
         if isinstance(expr, cst.Subscript):
             index = expr.value
+            parts = _index_parts(expr)
+            if (parts is None or len(parts) != 1 or isinstance(parts[0], SEVERAL_ROWS)
+                    or not self.facts.is_int(parts[0])):
+                return False
         elif isinstance(expr, cst.Call) and isinstance(expr.func, cst.Attribute) and expr.func.attr.value in (
                 'asof', 'max', 'min', 'searchsorted'):
             index = expr.func.value
@@ -1067,6 +1072,8 @@ class FrameReads:
         from .row_cells import item_constant
         if count < 2 or count > MAX_PARTS:
             return None
+        if self.facts.is_int(key):
+            return None         # a C integer is never a tuple (and cannot be subscripted): the read is pandas'
         if isinstance(key, cst.Name):
             value = self._value_of(key.value)
             if (isinstance(value, cst.Tuple) and len(value.elements) == count
@@ -1365,6 +1372,7 @@ class _Rewrite(cst.CSTTransformer):
         self.asof_rows = {}     # asof local -> (membership hold, prefix cell call, asof expression)
         self.native = {}        # id(lowered read) -> column kind, for float()/int() around it
         self.float_only = set()     # ids of float64 reads kept as objects for a text key part (_lowered)
+        self.selections = {}        # id of such a read (float64 or int64) -> its column kind, for numpy's type (on_leave)
         self.taken = []         # T-5c: kinds of the holds taken since the last recorded read (its run-time fallbacks)
         self.emitted_inline_assignments = set()
         self.generator_walks = set()    # T-5c: ids of lowered generator walks (``gen if test else pandas gen``)
@@ -1373,12 +1381,12 @@ class _Rewrite(cst.CSTTransformer):
 
     def on_leave(self, original, updated):
         result = super().on_leave(original, updated)
-        kind = self.native.get(id(result))
+        kind = self.native.get(id(result)) or self.selections.get(id(result))
         if (kind in CTYPE and result is not updated and isinstance(original, cst.Subscript)
                 and isinstance(result, cst.IfExp) and _value_read(result.body) is not None
                 and self.o.numpy_use(original, kind)):
-            del self.native[id(result)]
-            result = self._boxed(result, kind)
+            self.native.pop(id(result), None)
+            result = self._boxed(result, kind)     # (a read checked per call for one label: its native branch too)
         self.updated_of[id(original)] = result
         if result is not updated and isinstance(original, (cst.Subscript, cst.Call, cst.Comparison, cst.For,
                                                              cst.GeneratorExp, cst.ListComp)):
@@ -1694,8 +1702,10 @@ class _Rewrite(cst.CSTTransformer):
         lowered = cst.IfExp(test=test, body=read, orelse=fallback, lpar=[cst.LeftParen()], rpar=[cst.RightParen()])
         if kind in CTYPE and not selection:
             self.native[id(lowered)] = kind
-        elif kind == 'f64':     # under float() it is a C double again: float() converts the pandas branch only
-            self.float_only.add(id(lowered))
+        elif kind in CTYPE:
+            self.selections[id(lowered)] = kind
+            if kind == 'f64':   # under float() it is a C double again: float() converts the pandas branch only
+                self.float_only.add(id(lowered))
         return lowered
 
     def _index_of(self, expr):
@@ -2484,6 +2494,9 @@ class _Rewrite(cst.CSTTransformer):
         kind (float64 or int64; checked for the whole table once, signature kind -4): a typed read whose slot is looked
         up by name (KeyError as pandas). ``prefix``: the codes of a view's prefix, before the key's."""
         o = self.o
+        if isinstance(name, SEVERAL_ROWS):      # ``R.loc[k, ['q']]``: a selection of columns, pandas' own
+            self._record(original, 'pandas', call, 'the column part is a display of several columns')
+            return None
         kinds = {kind for _, kind in schema['columns']}
         up = o.facts.formula.parents.get(id(original))
         consumer = o.facts.formula.parents.get(id(up)) if isinstance(up, cst.Arg) else None
@@ -2505,6 +2518,11 @@ class _Rewrite(cst.CSTTransformer):
         else:
             (suffix, args), conditions = self._read_args(hold, own, levels)
         label = _cast('object', self.updated_of.get(id(name), name))
+        if _literal_str(name) is None:          # a name computed at run time: native only while it is one label
+            o.key_count += 1
+            held = f'_mx_okey_{o.key_count}'
+            conditions = [*conditions, cst.parse_expression(f'{o.module}.is_label(({held} := {_code(label)}))')]
+            label = cst.Name(held)
         if kind is None:            # float(R.loc[key, name]) on columns of several kinds: float of the stored value
             row = self._next(self._m('row' + suffix, o.ref(hold), *args))
             read, kind = self._m('field_f64', o.ref(hold), row, label), 'f64'
@@ -2650,8 +2668,8 @@ class _Rewrite(cst.CSTTransformer):
             label = _literal_str(label)
             if label is None:
                 named = self.named_read(original, updated, call, schema, key, parts[1], [])
-                if named is not None:
-                    return named
+                if named is not None or isinstance(parts[1], SEVERAL_ROWS):
+                    return named or updated
                 self._record(original, 'pandas', call, 'the column is not a literal name, and the columns are '
                              'not all of one kind (float64 or int64)')
                 return updated
