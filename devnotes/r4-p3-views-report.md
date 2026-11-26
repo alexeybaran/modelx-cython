@@ -36,8 +36,8 @@ The SEC models use their own `sample_sec.py` and `spec_sec.py`. Because the samp
 slice-1 column below is re-measured, not copied from its report.
 
 - **Per policy.** Each policy is a new item, then the Python sum of `net_cf(t)` over `proj_len()`, then `del
-  Projection[pid]`. A round is one fresh process that walks the book several times. The time of a round is the mean
-  per policy after the first pass, which is a warm-up. The figure is the median of 5 interleaved rounds (11 rounds
+  Projection[pid]`. A run is one fresh process that walks the book several times. The time of a run is the mean
+  per policy after the first pass, which is a warm-up. The figure is the median of 5 interleaved runs (11 runs
   for KLV_DE_S and UC_FR_S on slice 1 and this branch, whose spread is wide).
 - **Build time.** The median of 3 interleaved builds, two at a time, as slice 1 measured.
 - **Values.** On every policy, `net_cf(t)` at every t and every value of each zero-argument `result*` frame are
