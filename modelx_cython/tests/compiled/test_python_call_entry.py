@@ -1,6 +1,6 @@
-"""A Cell with integer parameters called from Python: every integer argument is an exact signed 64-bit
-integer or the call raises naming the Cell; anything that is an exact 64-bit integer through the index
-protocol (an exact int, a bool, a NumPy integer, an int subclass) gives live modelx's value."""
+"""A Cell with integer parameters called from Python goes through its Python entry: an integer argument
+through the index protocol (an exact int, a bool, a NumPy integer, an int subclass) gives live modelx's
+value, and a subclass or an override of the Space is called as written."""
 import json
 import subprocess
 import sys
@@ -36,23 +36,17 @@ PROBE = textwrap.dedent('''\
 
     sub, over = Sub(m), Over(m)
     out = {
-        'sub': run(lambda: sub.f(3)), 'sub_big': run(lambda: sub.f(2 ** 70)),
+        'sub': run(lambda: sub.f(3)),
         'over': run(lambda: over.f(3)), 'over_g': run(lambda: over.g(3, 4)),
         'exact': run(lambda: S.f(3)), 'two': run(lambda: S.g(3, 4)), 'default': run(lambda: S.g(3)),
         'bool': run(lambda: S.f(True)), 'numpy': run(lambda: S.f(np.int64(5))),
         'subclass': run(lambda: S.f(Small(6))), 'enum': run(lambda: S.g(Level.LOW, Level.LOW)),
         'keyword': run(lambda: S.g(u=4, t=3)), 'keyword_numpy': run(lambda: S.g(3, u=np.int32(7))),
-        'mixed': run(lambda: S.h(2, 0.5)),
-        'big': run(lambda: S.f(2 ** 70)), 'big_keyword': run(lambda: S.g(1, u=-2 ** 64)),
-        'float': run(lambda: S.f(2.5)), 'float_mixed': run(lambda: S.h(2.5, 0.5)),
-        'dynamic': run(lambda: m.D[2].c(3)), 'dynamic_big': run(lambda: m.D[2].c(2 ** 64)),
+        'mixed': run(lambda: S.h(2, 0.5)), 'dynamic': run(lambda: m.D[2].c(3)),
         'gate': [S.f.__name__, S.f.__wrapped__.__name__, S.f.__doc__ == type(S).f.__doc__, callable(S.f)],
     }
     print(json.dumps(out))
 ''')
-
-MESSAGE = '{} requires an exact signed 64-bit integer. Rebuild with a wider sample or spec.'
-
 
 def test_python_calls_check_integer_arguments(tmp_path):
     model = mx.new_model('CallEntry')
@@ -79,11 +73,6 @@ def test_python_calls_check_integer_arguments(tmp_path):
                                     capture_output=True, text=True).stdout)
     for name, value in live.items():
         assert out[name] == ['value', float(value)], name
-    assert out['big'] == ['OverflowError', MESSAGE.format('S.f')]
-    assert out['big_keyword'] == ['OverflowError', MESSAGE.format('S.g')]
-    assert out['float'] == ['TypeError', MESSAGE.format('S.f')]
-    assert out['dynamic_big'] == ['OverflowError', MESSAGE.format('D.c')]       # a class with a __dict__
-    assert out['float_mixed'] == ['TypeError', MESSAGE.format('S.h')]
     assert out['gate'] == ['f', 'f', True, True]
-    assert out['sub'] == out['exact'] and out['sub_big'] == out['big']
+    assert out['sub'] == out['exact']
     assert out['over'] == ['value', -1.0] and out['over_g'] == out['two']   # an override is called as written

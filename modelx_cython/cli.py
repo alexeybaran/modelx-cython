@@ -53,7 +53,7 @@ from modelx_cython.admission import describe
 from modelx_cython.cell_entries import EntryModule
 from modelx_cython.entry_pipeline import lower_entries
 from modelx_cython.scopes import shared_facts
-from modelx_cython.integer_boundaries import guard_integer_boundaries
+from modelx_cython.formula_passes import lower_formula_semantics
 from modelx_cython.build import cell_functions, create_setup
 from modelx_cython.syntax import read_literal
 from modelx_cython.native_sources import install as install_native_sources
@@ -402,10 +402,8 @@ def main_handler(args: argparse.Namespace, stdout: IO[str], stderr: IO[str]) -> 
         cell_sources = {}
         for u in units:
             with shared_facts():
-                state = guard_integer_boundaries(
-                    translated_modules[u.fqname], u.module_info, resolver, cells_kinds, ref_kinds,
-                    cells_by_name, infer_types=policy.infer_types,
-                )
+                state = lower_formula_semantics(translated_modules[u.fqname], u.module_info, cells_by_name,
+                                                infer_types=policy.infer_types)
             from modelx_cython.locked_entries import lower_locked_entries
             state = lower_locked_entries(state, u.module_info)
             translated_modules[u.fqname] = state
@@ -418,11 +416,7 @@ def main_handler(args: argparse.Namespace, stdout: IO[str], stderr: IO[str]) -> 
                      source_modules=(runtime_syntax, *(state.syntax for state in translated_modules.values())),
                      cell_sources=cell_sources, providers=provider_sources)
         report = describe(module_infos)
-        integer_report = {'overflowcheck_fallback': sorted(
-            cell.model_path for info in module_infos.values() for cls in info.classes.values() for cell in cls.cells.values()
-            if getattr(cell, 'overflowcheck_fallback', False))}
         (model_path / '_mx_admission.json').write_text(json.dumps(report, indent=2), encoding='utf-8')
-        (model_path / '_mx_integer_checks.json').write_text(json.dumps(integer_report, indent=2), encoding='utf-8')
 
     if args.translate_only:
         return 0

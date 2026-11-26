@@ -119,12 +119,7 @@ class _HeldCalls(cst.CSTTransformer):
                 continue
             if checked or ctype != 'long long' or MX_SYS_MOD in self.names:
                 return updated
-            checked = True
-            value = args[i].value
-            path = cst.Arg(cst.SimpleString(repr(method.model_path)))
-            conversion = cst.Call(cst.parse_expression(f'{MX_SYS_MOD}._mx_integer_result'),
-                                  (cst.Arg(value), path))
-            args[i] = args[i].with_changes(value=conversion)
+            checked = True      # converted to the C parameter type by Cython at the call
 
         if parameterized or producer_cell.is_locked:
             # Evaluate the real producer once, preserving overrides and its cache.

@@ -87,7 +87,6 @@ def test_native_held_item_uses_exact_type_and_preserves_fallback(tmp_path, monke
     assert 'type(self._v_explicit) is _c_Market' not in source
     assert 'type(self._v_shadowed_market) is _c_Market' not in source
     assert 'type(self._v_overridable) is _c_Market' in source
-    assert ".price(_mx_sys._mx_integer_result(" in source
     report = json.loads((tmp_path / 'exported_cy/_mx_admission.json').read_text(encoding='utf-8'))
     assert report['exported_cy._mx_classes._c_Policy._f_market']['return_type'] == 'object'
     c_source = (tmp_path / 'exported_cy/_mx_classes.c').read_text(encoding='utf-8')
@@ -112,16 +111,6 @@ def test_native_held_item_uses_exact_type_and_preserves_fallback(tmp_path, monke
             expected = 1.0 / (1 + round(0.5 + index))
             assert computed.rounded(index) == computed.wrapped(index) == expected
         assert computed.computed(0) == 0.5
-        if sys.argv[1] == 'exported_cy':
-            for t, value, error in [(1, 1.5, TypeError), (2, 2**70, OverflowError)]:
-                hook.raw = value
-                try:
-                    computed.computed(t)
-                except error as exc:
-                    assert 'Market.price' in str(exc), exc
-                else:
-                    raise AssertionError('computed Cell argument escaped its integer check')
-            hook.raw = 1
         values = [m.Policy[key].project(t) for key in (1, 3) for t in (0, 1, 2)]
         assert values == [m.Policy[key].selected_rate(t) for key in (1, 3) for t in (0, 1, 2)]
         values += [m.Policy[key].mixed_rate(t) for key in (1, 2) for t in (0, 1, 2)]

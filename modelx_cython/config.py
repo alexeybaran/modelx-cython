@@ -123,7 +123,7 @@ class TransSpec:
     entries and private dense formula calls.
     ``"infer_types"`` (default true): C type inference (``# cython: infer_types=True``) in
     generated model modules; false keeps Cython's default (no inference of C types for untyped
-    locals). Integer arithmetic is checked either way (integer_boundaries.py).
+    locals).
     ``"native_cache_hits"`` defaults to ``"auto"`` when automatic optimization
     and dense miss binding are enabled. It selects scalar hits and already-proven
     dense hits; explicit alternatives are ``"none"``, ``"scalar"``, ``"dense"``
