@@ -168,6 +168,7 @@ class RuntimeCellsInfo:     # TODO: Create base class RuntimeBaseMemberInfo
         self.min_args = {}
         self.observed_min_args = {}
         self.observed_max_args = {}
+        self.enum_args = {}         # argument -> (module, qualname, member count) of its IntEnum
         # A call that raised gives its arguments but no return value; a Cell whose every
         # traced call raised keeps them all (its result is then traced as None, as before).
         returned = [trace for trace in traces if not getattr(trace, 'raised', False)] or list(traces)
@@ -235,6 +236,7 @@ class RuntimeCellsInfo:     # TODO: Create base class RuntimeBaseMemberInfo
                     self.arg_types[arg] = tp
                     if issubclass(tp, numbers.Integral):
                         self.max_args[arg] = val
+                        self._widen_to_enum(arg, tp)
                     break
             elif all(issubclass(tp, numbers.Integral) for tp in type_val.keys()):
                 self.arg_types[arg] = numbers.Integral
@@ -250,6 +252,23 @@ class RuntimeCellsInfo:     # TODO: Create base class RuntimeBaseMemberInfo
                     _logger.info(f"varying types given to argument '{arg}' in {self.fqname}: {msg}")
 
                 self.arg_types[arg] = object
+
+    def _widen_to_enum(self, arg, tp):
+        """An argument whose every traced value is a member of one IntEnum class can take any
+        member: its domain is the class's member values, not the members the sample used."""
+        if not (issubclass(tp, IntEnum) and '<locals>' not in tp.__qualname__):
+            return
+        values = [int(member) for member in tp]
+        if not values or not all(-(1 << 63) <= v < (1 << 63) for v in values):
+            return
+        low, high = min(values), max(values)
+        self.max_args[arg] = max(self.max_args[arg], high)
+        self.min_args[arg] = min(self.min_args.get(arg, 0), low)
+        self.observed_min_args[arg] = min(self.observed_min_args.get(arg, low), low)
+        self.observed_max_args[arg] = max(self.observed_max_args.get(arg, high), high)
+        if low < 0:
+            self.has_negative_args = True
+        self.enum_args[arg] = (tp.__module__, tp.__qualname__, len(values))
 
     def _init_ret_type(self, traces):
         """Merge observed return types into one ReturnTypeInfo,

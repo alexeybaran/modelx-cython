@@ -54,6 +54,8 @@ def describe(module_infos):
                         axis.key: [int(axis.lower), int(axis.stop)] for axis in cell.associative_logical_axes
                     } if cache in ('native-numeric-keys', 'dictionary') else {},
                     'declared_sizes': _declared_sizes(cls, cell) if cache != 'none' else {},
+                    **({'enum_domains': {name: f'{e[0]}.{e[1]} ({e[2]} members)' for name, e in enum_args.items()}}
+                       if (enum_args := getattr(getattr(cell, '_rt', None), 'enum_args', None)) else {}),
                     'numeric_primary_capacity': primary_capacity(cell)
                     if cache == 'native-numeric-keys' else 0,
                     'power_memo': bool(getattr(cell, 'power_memo', None)),
