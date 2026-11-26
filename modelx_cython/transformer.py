@@ -1129,6 +1129,16 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
         if values:
             values += value_storage.install(self.module.classes.values())
             module = module.with_changes(body=(*module.body, *cst.parse_module(values).body))
+        # The table runtime is imported only by a module that reads it: a compiled model without
+        # table Cells runs without modelx_cython installed
+        from modelx_cython.syntax import walk
+        imports = [stmt for stmt in module.body if isinstance(stmt, cst.SimpleStatementLine)
+                   and len(stmt.body) == 1 and isinstance(stmt.body[0], cst.ImportFrom)
+                   and any(alias.asname is not None and alias.asname.name.value == table_cells.RUNTIME
+                           for alias in stmt.body[0].names)]
+        if imports and not any(isinstance(part, cst.Name) and part.value == table_cells.RUNTIME
+                               for stmt in module.body if stmt not in imports for part in walk(stmt)):
+            module = module.with_changes(body=tuple(stmt for stmt in module.body if stmt not in imports))
         directives = []
         if any(getattr(cell, 'power_memo', None) for cls in self.module.classes.values()
                for cell in cls.cells.values()):
