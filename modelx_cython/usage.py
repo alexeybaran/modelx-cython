@@ -601,9 +601,6 @@ def build_resolver(module_infos) -> CellsResolver:
                 observed = getattr(cells, 'observed_provider_type', None)
                 if observed is not None:
                     observed_provider_results[cells.fqname] = observed
-                schema = getattr(cells, 'table_schema', None)
-                if schema is not None:
-                    table_schemas[cells.fqname] = schema
                 result = getattr(cells, 'table_result', None)
                 if result is not None:
                     table_results[cells.fqname] = result
@@ -642,7 +639,6 @@ def build_resolver(module_infos) -> CellsResolver:
                              scalar_refs_by_class, locked_scalar_results, unlocked_scalar_results)
     resolver.provider_results = provider_results
     resolver.observed_provider_results = observed_provider_results
-    resolver.table_schemas = table_schemas
     resolver.table_results = table_results
     resolver.pandas_results = pandas_results
     resolver.frame_schemas = frame_schemas

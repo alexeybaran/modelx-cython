@@ -346,10 +346,8 @@ def expressions_object(cell):
 
 
 # ---------------------------------------------------------------- M1 table reads (W1.1)
-TABLE_TYPE = 'modelx_helpers.immutable_inputs.Table'
 TABLE_READ_ATTRS = ('loc', 'at', 'index', 'iterrows')
 NOT_LOWERED = 'not lowered to a typed handle read; runs as a Python call'
-KEPT_PYTHON = 'formula kept as a Python method ({why}): runs as a Python call'
 PANDAS_RECEIVER = ('receiver is a pandas DataFrame, Series or Index, not a helper Table: never lowered; '
                    'pandas runs on every evaluation')
 TABLE_READ_WARNING = '{cell}: per-step table read is not typed: {read} (formula line {line}): {reason}'
@@ -410,11 +408,6 @@ def table_read_sites(node, resolver, cls_info, pandas=False, receivers=None):
         tables = set(getattr(resolver, 'pandas_results', {}))
         refs = {name for name, ref in getattr(cls_info, 'refs', {}).items()
                 if getattr(ref, 'type_', None) is not None and pandas_type_id(ref.type_)}
-    else:
-        tables = {name for name, kind in resolver.table_results.items() if kind == TABLE_TYPE}
-        refs = {name for name, ref in getattr(cls_info, 'refs', {}).items()
-                if getattr(ref, 'type_', None) is not None
-                and f'{ref.type_.__module__}.{ref.type_.__qualname__}' == TABLE_TYPE}
     if not tables and not refs:
         return []
 

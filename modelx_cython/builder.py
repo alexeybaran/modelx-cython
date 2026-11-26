@@ -626,11 +626,6 @@ class CombinedCellsInfo(LexicalCellsInfo):
         return getattr(self._rt, 'pandas_fallbacks', None) or {}
 
     @property
-    def table_schema(self):
-        """M1: key and column kinds of a traced helper Table result (tracer.table_schema)."""
-        return getattr(self._rt, 'table_schema', None)
-
-    @property
     def table_result(self):
         """M1: the provider type id when every sampled result is that provider type's
         exact owner (a helper Table or Record), whether or not it is bound natively."""
