@@ -176,9 +176,8 @@ and lifelib come from PyPI.
 Every value below equals live modelx in every run.
 
 The independent benchmark (per-policy times, peak memory and compile times) and the DV01 parallel book
-were taken at 53104d2, a development commit that is not part of this series. The census was taken at
-5982ebe, an earlier commit of this series. Both commits still had integer overflow checks, and
-53104d2 also had a per-Cell Python entry; the final series has neither. The other tables were measured on code without them,
+were taken at 53104d2, a development commit that is not part of this series. It still had integer
+overflow checks and a per-Cell Python entry; the final series has neither. The other tables were measured on code without them,
 at the commit each one names.
 
 ### Values
@@ -248,27 +247,25 @@ rounds. Each figure is the median wall time of the whole book at the given numbe
 | 4 | 4.54 | 2.68x (2.31–2.87 across rounds) | 344 |
 | 8 | 4.10 | 2.97x | 386 |
 
-### Breadth: every lifelib model (at 5982ebe)
+### Breadth: every lifelib model (at 503b07c)
 
-Method: the candidate compiler at 5982ebe, an earlier commit of this series, against the upstream
-compiler at d22426f, both with modelx fec516d. Each of the 95 models in lifelib 20d4dae (upstream main
-at the time) was built and driven with both compilers on one cloud VM per model. Its values were compared with live modelx, instructions per policy were
-counted with callgrind, and memory per policy was measured.
+A complete census on the final code is running. It covers all 95 driven models of upstream lifelib
+20d4dae, compiling each with this branch's compiler at 503b07c and with upstream's at d22426f, both
+on modelx fec516d. Both compilers run on the same machine for each shard, spread over twelve machines.
 
-- **No regressions.** No model that the current compiler runs fails on this one. 73 models build and
-  equal live modelx on both.
-- **SEC models.** The 12 SEC models run at a median 0.30 of the current compiler's instructions per
-  policy, with a range of 0.22–0.52.
-- **Regional models.** 47 regional models run at a median 0.99 of the current compiler's instructions
-  per policy (0.92–1.05), with a median 0.87 of its memory per policy.
-- **Models only this compiler runs.** Nine regional models hit two defects in the current compiler:
-  - A float power inside `min` or `max` is typed complex by Cython 3, so the build stops: Term_JP_S,
-    Term_KR_S and CI_KR_S.
-  - A dense cache that starts at 0 raises `IndexError` for a negative argument before the formula runs:
-    BU_DE_S, KLV_DE_S, Dep_FR_S, Euro_FR_S, IncomeTerm_JP_S and VA_US_S.
-- **Models neither compiler runs.** Thirteen models fail identically on both, for reasons outside the
-  compiler: workbook inputs, old model formats, a missing optional package, and one report column
-  returned as integers.
+| | count / median |
+|---|---|
+| models that build and equal live modelx on both | (census in progress) |
+| models that run only on this compiler | (census in progress) |
+| models that fail identically on both | (census in progress) |
+| SEC models, instructions per policy, this / upstream | (census in progress) |
+| regional models, instructions per policy, this / upstream | (census in progress) |
+| memory per policy, this / upstream | (census in progress) |
+| translation time, this / upstream | (census in progress) |
+| C build time, this / upstream | (census in progress) |
+
+An earlier census, at 5982ebe (an earlier commit of this series, which still had integer overflow
+checks), found no model that the current compiler runs failing on this one.
 
 ### Calls from Python (at 503b07c)
 
@@ -299,8 +296,7 @@ Same machine as the per-policy table, one build of each model with each compiler
 | MYGA_US_SEC | 40.9 | 88.1 | 130.3 | 154.0 | 1.41x |
 | RILA_US_SEC | 60.9 | 127.9 | 160.9 | 190.8 | 1.44x |
 
-Across the census (at 5982ebe), translation took a median 1.55x the current compiler's time for regional models
-and 1.70x for SEC models. The C build took 1.29x–1.30x.
+Translation and C build times across all models are reported with the census above.
 
 ## Commits and line counts (upstream d22426f to 503b07c, 14 commits)
 
@@ -330,5 +326,14 @@ All files: 117 changed, +11,347 / −491.
 
 ## CI
 
-Every executed lane passed on four consecutive runs. Four macOS lanes were not assigned a runner, so
-no result is claimed for them. In particular, no result is claimed for macOS 3.10 or 3.14t.
+Runs of `.github/workflows/python-package.yml`. Each lane runs the unit, compiled, allocation and sec
+suites.
+
+- **Run 45833870838 (1c3f228, attempt 2).** 14 of 15 lanes ran, and all four suites passed in each:
+  - Linux: 3.10, 3.12, 3.14, 3.13t, 3.14t
+  - Windows: 3.10, 3.12, 3.14, 3.13t, 3.14t
+  - macOS: 3.10, 3.12, 3.14, 3.13t
+
+  The macOS / free-threaded 3.14 lane was not assigned a runner and was cancelled after 35 minutes,
+  so macOS / 3.14t is untested.
+- **Run 45869162145 (503b07c, the final commit).** Queued.
