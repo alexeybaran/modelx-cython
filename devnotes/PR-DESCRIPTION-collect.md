@@ -93,14 +93,7 @@ held item: the direct route (items built by `Projection[k]`) as well as collect.
   Locked Cells read their computed values without the lock; a miss takes the model lock, so concurrent first fills
   of a locked Space run one at a time.
 - Collect releases only the items of the collect Space. ItemSpaces of other Spaces that its items create stay in
-  those Spaces until the model deletes them, as in live modelx. On the DV01 model each Valuation item reads
-  `Actual[idx, scen_id]`, one ItemSpace per policy of about 0.9 MB, which every close reads: collect evaluates close by
-  close, so the whole book's `Actual` items are alive together, while the direct route goes policy by policy and
-  deletes each policy's `Actual` once its closes are done. At 1,050 policies, one worker, peak RSS (`ru_maxrss` of a
-  fresh process; 48e1231, commit 7's change, on 58ff45d): the report through collect 1,082 MB; the same close-by-close
-  order through direct items deleted one by one, 1,081 MB; that order with each `Actual[i, s]` deleted after its item,
-  164 MB with the same total and 28% more time (10.85 s against 13.91 s), as `Actual` is then computed again at every
-  close. The memory belongs to the model's evaluation order, not to collect.
+  those Spaces until the model deletes them.
 - Sums are added in domain order on one thread; collect does not add in C or merge partial sums.
 - Threads are started per call and joined before it returns.
 
@@ -122,13 +115,12 @@ and the removal of the per-Cell Python entry.
 90da50b (`r4/p2-collect-3`) is the collect head when the SEC and DV01 evidence was recorded (b84801d, 518d946). 88cb421
 (`r4/p2-collect-2`, report b5266df) is the head of the comparison with the previous implementation. 82020d8
 (`r4/p2-collect`, report a945517) is the head of the cost of the Python sums. The DV01 figures of 58ff45d come from
-the eight-core machine; the memory figures of 48e1231 on 58ff45d from the 4 vCPU machine below. 58ff45d is the
+the eight-core machine. 58ff45d is the
 head before commits 6 and 7 (commit 6 changes documentation only).
 
 | measured at | model | figures |
 |---|---|---|
 | 58ff45d | DV01 example, 1,050 policies, eight-core machine | below |
-| 48e1231 on 58ff45d (commit 7's change) | DV01 example, 1,050 policies, peak memory | in Limits |
 
 ### The DV01 example at 58ff45d (eight-core machine; five alternating fresh-process rounds, medians)
 
@@ -138,7 +130,7 @@ head before commits 6 and 7 (commit 6 changes documentation only).
 | collect, peak RSS MiB | 1,082-1,122 at 1, 4 and 8 workers | | |
 | direct (pooled driver), same build, peak RSS MiB | 253 | 340 | 394 |
 
-The collect peak is the book's `Actual` items held together (see Limits). Commit 7 is not in these runs.
+Commit 7 is not in these runs. Why collect holds more memory than the direct route on this model is under study.
 
 All measurements: free-threaded CPython 3.14.6, Cython 3.3.1, 4 vCPU, fresh process per run, runs interleaved.
 
