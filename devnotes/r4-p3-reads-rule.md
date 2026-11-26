@@ -30,3 +30,26 @@ Under this rule:
 
 A first version that never prepared an item's own frames changed 15 models. It made four US models slower:
 `coi_rate_guar(t)` reads `coi_rate_scale()[y]` with a per-step key. So that version was not kept.
+
+## Two repairs on forms already ported
+
+Both are their own commits. Generated code is otherwise unchanged, and the suite passes (583 passed, 15 skipped).
+The six models measured below equal live on every policy.
+
+- **Exact `str` and `int` key parts take a fast path.**
+  - In `code_obj`, an exact `str` key is one dict lookup. An exact `int` key is one C conversion with an overflow
+    flag, instead of two Python comparisons.
+  - The numpy types other values are tested against are held in module fields.
+  - `is_label` answers for an exact `str`, `int` or `float` without a call.
+- **The hold's handler no longer forces the overflowcheck fallback.** It is now named `_mx_unbound`, and the integer
+  guard passes it. That removes one fallback in KLV_DE_S (17 to 16). The other fallbacks there come from operands
+  of unknown C type, not from the holds.
+
+Instructions per policy, from callgrind collecting only inside `net_cf`, one pass over the book, generic sample
+(this method's totals are higher than the census's):
+
+| model | before (r4/p3-views) | after | change |
+|---|---|---|---|
+| Term_UK_S | 7.02M | 6.59M | -6.1% |
+| KLV_DE_S | 5.25M | 5.22M | -0.5% |
+| VA_US_S | 42.32M | 42.44M | +0.3% (noise) |
