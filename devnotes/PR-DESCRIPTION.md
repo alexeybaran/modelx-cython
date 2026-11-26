@@ -1,11 +1,6 @@
 # Faster compiled models
 
-This change makes the compiled package of an unmodified modelx model run faster than the current
-compiler's output, with the values live modelx returns. On the SEC models, a policy took 4.4 to 6.2
-times less time than on the current compiler, with up to 4.8 times less peak memory (measured at
-53104d2; see Results). Models need no change. The lifelib SEC models build from their released
-`sample_sec.py` and `spec_sec.py`, and CI compares Term_US_SEC, MYGA_US_SEC and SPIA_US_SEC with live
-modelx on every point.
+This change reduces the cost of running compiled modelx models. On the twelve released lifelib SEC models, the current compiler used 2.20× to 4.94× as many instructions per projection as this change, with a median of 3.75×. The measured values matched live modelx across all 24 runs. The released `sample_sec.py` and `spec_sec.py` files build those models without edits, and the CI SEC suite compares Term_US_SEC, MYGA_US_SEC and SPIA_US_SEC with live modelx on every point.
 
 ## What the change does, mechanism by mechanism
 
@@ -57,12 +52,8 @@ modelx on every point.
    result: `log` for x > 0, `sqrt` for x ≥ 0, `exp` for a finite result, and `erf` and `isinf` always.
    The Reference is passed to the native call as a borrowed pointer and compared with the `math` module
    by pointer. A rebound Reference, and every case outside those domains, takes the fallback: the
-   Reference's own function runs. Domain errors, overflows, infinities, NaNs and ints beyond 64 bits
-   therefore behave exactly as in live modelx. A user module that happens to be called `math` is not
-   affected. On RILA_US_SEC with four workers, a run fell from 0.151 s to 0.063 s. That was measured
-   as 1c3f228 against 6c04fe4 on free-threaded CPython 3.14 with four virtual cores, each worker running
-   its own model, best of five. It comes from one developer session; a second session's five
-   alternating rounds are pending.
+   Reference's own function runs. This preserves the module's handling of domain errors, infinities
+   and NaNs. A user module that happens to be called `math` continues to use its own functions.
 7. **Held items of shared Spaces.** A Space result read through a shared Space keeps its items held by
    the compiled model. They are not rebuilt on every read.
 8. **Translation.** The transformer, builder and command line apply mechanisms 1–7. This includes fast
@@ -115,9 +106,8 @@ stores 0. There is no range check.
 ## What a model author can rely on
 
 - **Values.** The compiled package equals live modelx within a relative tolerance of 1e-10 and an
-  absolute tolerance of 1e-7. A raise must match the same raise. Where the compiler cannot prove an
-  operation safe, the build stops or the call raises at a named Cell. Integer arithmetic is the
-  exception: as on upstream, it wraps past 64 bits (see Integers).
+  absolute tolerance of 1e-7. A different error type is accepted where both the live and compiled
+  calls raise. Arithmetic past 64 bits follows upstream's integer behavior (see Integers).
 - **Ranges.** A call outside a Cell's declared or sampled range raises `IndexError`. The message names
   the Cell, each argument's range, and the spec key `cells_param_size`, which widens the range.
 - **No run-time dependency.** The generated package imports nothing from `modelx_cython` at run time.
@@ -138,7 +128,7 @@ stores 0. There is no range check.
    powers changes.
 4. A fractional float or a non-number written from Python to an integer Reference raises `TypeError`
    naming the Reference; the current compiler truncates it.
-5. The declared Python floor is 3.10. The current package declares 3.8 or later. CI covers 3.10 to
+5. The declared Python floor is 3.10. The current package declares 3.8 or later. The CI matrix targets 3.10 to
    3.14t, upstream lifelib requires 3.10, and nothing here is written or tested for lower versions.
 
 ### Upstream tests changed, and why
@@ -157,7 +147,7 @@ No upstream test was deleted.
 
 ## Supported Pythons and compilers
 
-CI (`.github/workflows/python-package.yml`) runs CPython 3.10, 3.12 and 3.14, plus free-threaded 3.13t
+The CI matrix (`.github/workflows/python-package.yml`) targets CPython 3.10, 3.12 and 3.14, plus free-threaded 3.13t
 and 3.14t, on the `ubuntu-latest`, `windows-latest` and `macos-latest` runners, with each runner's
 default C compiler (GCC, MSVC and Clang). Cython is not pinned: pip installs the newest release that
 satisfies the package's `Cython>=3.2.4`. Each lane runs four suites:
@@ -173,12 +163,7 @@ and lifelib come from PyPI.
 
 ## Results
 
-Every value below equals live modelx in every run.
-
-The independent benchmark (per-policy times, peak memory and compile times) and the DV01 parallel book
-were taken at 53104d2, a development commit that is not part of this series. It still had integer
-overflow checks and a per-Cell Python entry; the final series has neither. The other tables were measured on code without them,
-at the commit each one names.
+The dedicated SEC instruction runs matched live modelx. The census reports all observed outcomes and inherited failures below.
 
 ### Values
 
@@ -186,19 +171,6 @@ at the commit each one names.
 model with `mx2cy`. It then runs lifelib's own check against live modelx: every point swept, and every
 cached value and raise compared, at lifelib's relative tolerance of 1e-12. The CI `sec` lane runs it
 for Term_US_SEC, MYGA_US_SEC and SPIA_US_SEC.
-
-### SEC models, per policy (at 53104d2)
-
-Machine: an 8-core AMD Ryzen 7 5800H under WSL2, free-threaded CPython 3.14.8. Method: both compilers
-built the same models and ran identical books of policies. Rounds alternated between the two
-compilers, and the figures are medians of five rounds. Time is wall-clock microseconds per policy on
-the book-total cell. Peak memory is the process's maximum resident set.
-
-| model | µs per policy, upstream | µs per policy, candidate | speed-up | peak memory MiB, upstream | peak memory MiB, candidate |
-|---|---|---|---|---|---|
-| Term_US_SEC | 653.1 | 149.2 | 4.38x | 126.7 | 97.8 |
-| MYGA_US_SEC | 1,871.8 | 300.6 | 6.23x | 256.0 | 104.0 |
-| RILA_US_SEC | 1,993.3 | 444.9 | 4.48x | 493.9 | 103.9 |
 
 ### The borrowed math pointer: 7edf07b against 1c3f228
 
@@ -238,69 +210,43 @@ peak resident memory of the measured run of that many projections.
 Across the twelve models, upstream uses 2.20x to 4.94x the instructions of this change
 (median 3.75x).
 
-### Wall time, paired pass
+### Paired wall time
 
-Method: the same book on both compilers, five alternating rounds. The table gives the median ratio,
-its range and the noise floor of the same build run against itself.
+No paired SEC wall-time comparison met the repeatability threshold. On a fixed 8,000-policy Term book, the candidate and upstream medians were 2.451 s and 6.736 s. The paired ratio ranged from 0.303 to 0.560 and the identical-build ratio ranged from 0.512 to 1.070, including the retry. These timings are diagnostic. The other eleven SEC products have no published same-book paired timing. [Local pilot and timing method](LOCAL-TIMING.md)
 
-| scope | median ratio, this / upstream | range | same-build noise floor |
-|---|---|---|---|
-| twelve SEC models | (pass in progress) | | |
-| census models | (pass in progress) | | |
+### DIA first-use preparation
 
-### Scaling with workers
+On the eight-core Ryzen 7 5800H under WSL2, DIA_US_SEC scaled 1.73× from one to four workers on a 5,000-policy book at `503b07c`. The direct route includes the first projection's premium-schedule preparation. The model's Data Cells `premium_array`, `premium_rows` and `premium_last` prepare those tables serially in pandas. All runs matched live modelx.
 
-This uses the same harness as the RILA math figure above, on an idle machine (load under 0.3) with
-four virtual cores and 32 policies per worker. From one to four workers:
-- DIA went from 0.711 s to 0.241 s (2.95x) at e67f27a, and reached 3.24x at 6c04fe4.
-- RILA_US_SEC reached 3.08x.
+### Broad census of released lifelib models
 
-On the same machine, a share-nothing Python loop loses 11% per thread at four threads. These figures
-come from one developer session. An independent run on an eight-core machine is pending.
+The census catalog contains 95 driven models and 10 entries without a modelx driver. Published results cover **87 of 95 driven models** across 11 of 12 shards. Each published pair uses the measured compiler `503b07c6f13d646ca4a15b020a18aea7c677a205` against upstream `d22426fbac8637f84510902c2fa33b6466e5acb4`, with modelx `fec516d7e9b5813e7d40819a72731bd35fc2972f` and lifelib `20d4daef3281d538b3fbda6d0fb951fcceb3a6f4` on both sides. Both sides of a shard used the same machine. The final head adds only two test files.
 
-A larger book shows where the remaining serial time goes. DIA_US_SEC with 5,000 policies at four
-workers speeds up 1.18x when the model's table preparation is inside the clock, and 3.33x when the
-preparation is done before the clock starts. That preparation is one serial pass in the model's own
-text, not in compiled code: the Data Cells `premium_array`, `premium_rows` and `premium_last` group the
-premium schedule point by point in pandas, taking 0.53 s per model. Method: a 4-vCPU cloud VM (Xeon
-2.1 GHz), free-threaded CPython 3.14t, `OPENBLAS_NUM_THREADS=1`. Each worker has its own model, the
-policies are split across threads, 512 policies are timed, and the figure is the best of 3 to 5 runs.
+| Published outcome | Models |
+|---|---:|
+| Both compilers pass the live comparison | 66 |
+| Candidate passes, baseline fails | 8 |
+| Matching failure class on both | 13 |
+| Baseline passes, candidate fails | 0 |
+| Pending results on both compilers | 8 |
 
-| model | 1 worker | 4 workers | 8 workers (eight-core machine) |
-|---|---|---|---|
-| DIA (6c04fe4) | 1.00x | 3.24x | (pending) |
-| RILA_US_SEC | 1.00x | 3.08x | (pending) |
+The eight candidate-only passes are BU_DE_S, Dep_FR_S, Euro_FR_S, IncomeTerm_JP_S and VA_US_S, where baseline raises `IndexError: array index out of range`, and Term_JP_S, CI_KR_S and Term_KR_S, where baseline Cython rejects complex powers as unordered. The shared failures are four ExcelWorkbook translation errors, one ModuleIO translation error, five value-comparison failures involving missing data files, the WholeLife_JP_S report dtype mismatch, the BasicBonds live import of missing QuantLib, and the fastlife modelx export error. The cause of the missing-file failures remains unverified. Candidate shard 5 passes KLV_DE_S, PER_FR_S, Cancer_KR_S, PA_UK_S, ULSG_US_SEC, VA_US_SEC, BasicTerm_ME and CashValue_ME_EX1. Their upstream shard is missing, so these models are outside the paired totals.
 
-### Parallel book: SEC DV01 example (at 53104d2)
+| Candidate ÷ baseline | Comparable models | Range | Median |
+|---|---:|---:|---:|
+| SEC instructions per policy | 10 | 0.2024–0.4542× | 0.2655× |
+| Regional instructions per policy | 44 | 0.9201–1.0476× | 0.9898× |
+| Legacy sweep instructions per evaluated value | 7 | 0.8072–1.0022× | 0.9639× |
+| Translation time | 66 | 0.8098–1.9078× | 1.3804× |
+| C build time | 66 | 1.0475–1.4052× | 1.2367× |
+| Incremental memory per policy | 52 | 0.2125–0.9939× | 0.8428× |
+| Peak RSS at equal book size | 26 | 0.2336–0.9902× | 0.8608× |
 
-Same machine as the per-policy table. 1,050 policies from the lifelib DV01 example, six alternating
-rounds. Each figure is the median wall time of the whole book at the given number of workers.
+Ratios use models that passed on both sides and had the corresponding measurements. Instruction counts compare the same number of projections for a model and require successful live comparisons. Peak RSS ratios require equal book sizes. The census SEC range covers 10 of the 12 SEC models. The separate twelve-model SEC table above uses its own measurement runs and sample sizes.
 
-| workers | seconds | speed-up over one worker | peak memory MiB |
-|---|---|---|---|
-| 1 | 12.17 | 1.00x | 252 |
-| 4 | 4.54 | 2.68x (2.31–2.87 across rounds) | 344 |
-| 8 | 4.10 | 2.97x | 386 |
+**LTC_JP_S** used 514,431,746.9 candidate instructions per policy versus 491,080,255.2 baseline, a **4.755% increase** on the same 20-policy book in shard 2. Both values matched live exactly. This is the only published comparable instruction count more than 3% above baseline. A local exact-pin reproduction measured a 5.03% increase. The candidate stores `Projection.care_surv(s, t)` in a native hash cache, replacing a 948-by-948 dense value array and its flags per item. The two hash helper functions accounted for roughly the net increase in the callgrind profile. The published census estimated about 22% less incremental memory per policy. [LTC cache attribution](LTC-JP-S.md)
 
-### Breadth: every lifelib model (at 503b07c)
-
-A complete census on the final code is running. It covers all 95 driven models of upstream lifelib
-20d4dae, compiling each with this branch's compiler at 503b07c and with upstream's at d22426f, both
-on modelx fec516d. Both compilers run on the same machine for each shard, spread over twelve machines.
-
-| | count / median |
-|---|---|
-| models that build and equal live modelx on both | (census in progress) |
-| models that run only on this compiler | (census in progress) |
-| models that fail identically on both | (census in progress) |
-| SEC models, instructions per policy, this / upstream | (census in progress) |
-| regional models, instructions per policy, this / upstream | (census in progress) |
-| memory per policy, this / upstream | (census in progress) |
-| translation time, this / upstream | (census in progress) |
-| C build time, this / upstream | (census in progress) |
-
-An earlier census, at 5982ebe (an earlier commit of this series, which still had integer overflow
-checks), found no model that the current compiler runs failing on this one.
+[Full provisional census and shard evidence](PROPOSAL-1-CENSUS.md)
 
 ### Calls from Python (at 503b07c)
 
@@ -317,28 +263,9 @@ included. Repeat runs differ by about 2%. Run on Linux x86-64 with free-threaded
 
 The write costs more because of the type check described under Integers.
 
-### Compilation time (at 53104d2)
+## Commits and line counts (15 linear commits)
 
-Translation runs `mx2cy` up to the generated sources. The C build is Cython plus the C compiler.
-Translation does more analysis than before: ranges, local kinds, admission of typed entries and the
-re-parse check. The C build compiles more code per Cell: typed entries and dense caches.
-
-Same machine as the per-policy table, one build of each model with each compiler:
-
-| model | translate s, upstream | translate s, candidate | C build s, upstream | C build s, candidate | total, candidate / upstream |
-|---|---|---|---|---|---|
-| Term_US_SEC | 12.3 | 28.6 | 57.7 | 73.1 | 1.45x |
-| MYGA_US_SEC | 40.9 | 88.1 | 130.3 | 154.0 | 1.41x |
-| RILA_US_SEC | 60.9 | 127.9 | 160.9 | 190.8 | 1.44x |
-
-Translation and C build times across all models are reported with the census above.
-
-## Commits and line counts (upstream d22426f to 7957dc3, 15 commits)
-
-The branch is `pr/fast-sec-3`, with head 7957dc3. That is 503b07c plus one commit that adds two test
-files and nothing else. Every measurement and CI run in this description was taken on 503b07c; the code
-under test is the same at the head. At the head, the unit suite gives 409 passed and 8 skipped. Six more
-unit tests need lifelib installed and were not run there.
+The head `7957dc3beb9237c779872bb479c2c9978b0ed296` is 15 single-parent commits ahead of upstream `d22426fbac8637f84510902c2fa33b6466e5acb4`. The published census, the twelve-model SEC instruction table, and the standalone CI run use `503b07c6f13d646ca4a15b020a18aea7c677a205`. The final commit adds `test_power_accumulator_shapes.py` and `test_python_call_no_entry.py`, totaling 99 lines. Historical development measurements retain the commits identified in their sections. The head's recorded unit suite had 409 passes and 8 skips, with six further unit tests requiring lifelib in that environment. [Commit series](https://github.com/alexeybaran/modelx-cython/compare/d22426fbac8637f84510902c2fa33b6466e5acb4...7957dc3beb9237c779872bb479c2c9978b0ed296), [final test-only change](https://github.com/alexeybaran/modelx-cython/compare/503b07c6f13d646ca4a15b020a18aea7c677a205...7957dc3beb9237c779872bb479c2c9978b0ed296)
 
 "Compiler" is non-test code under `modelx_cython/`. "Other" is CI, documentation and packaging.
 "Tests" is everything under `modelx_cython/tests/` and `integration_tests/`. Counts are from
@@ -367,24 +294,22 @@ All files: 119 changed, +11,446 / −491.
 
 ## CI
 
-These are runs of `.github/workflows/python-package.yml`, read from each run's job list. Each lane runs
-the unit, compiled, allocation and sec suites, and every lane that executed passed all four. "No
-runner" means the job was never assigned a runner and was cancelled after waiting. Between these
-commits the code changed only as the commit table shows, so a lane that passed on an earlier commit is
-evidence for that commit, not for the final one.
+The standalone run on measured commit `503b07c` passed all four suites in 12 of 15 jobs. Three macOS jobs were cancelled before running any steps. The later Collect verification run on `813c04f`, which includes the measured Fast SEC commit, passed 13 of 15 jobs. The two macOS free-threaded jobs ran and passed there. The regular macOS 3.14 job never received a runner in either of these runs. [Standalone workflow](https://github.com/alexeybaran/modelx-cython/actions/runs/45869162145), [Collect verification workflow](https://github.com/alexeybaran/modelx-cython/actions/runs/45869161273)
 
-| run | commit | executed and passed | no runner |
+| OS | CPython | Fast SEC on 503b07c | Fast SEC plus Collect on 813c04f |
 |---|---|---|---|
-| 45831453108 | f86f38d | Linux 3.10, 3.12, 3.14, 3.13t, 3.14t; Windows 3.10, 3.12, 3.14, 3.13t, 3.14t; macOS 3.13t | macOS 3.10, 3.12, 3.14, 3.14t |
-| 45833870838 (two attempts) | 1c3f228 | Linux and Windows, all five versions; macOS 3.10, 3.12, 3.14, 3.13t | macOS 3.14t |
-| 45851243863 | 7edf07b | Linux and Windows, all five versions; macOS 3.10 | macOS 3.12, 3.14, 3.13t, 3.14t |
-| 45869162145 | 503b07c (final) | Linux and Windows, all five versions; macOS 3.10, 3.12 | macOS 3.13t, 3.14, 3.14t |
-
-On the final code (run 45869162145), 12 of 15 lanes ran and all 12 passed; no test failed anywhere.
-Three macOS lanes (3.13t, 3.14 and 3.14t) were cancelled without ever being given a runner.
-
-The same code is also the base of the collect verification branch (run 45869161273 on 813c04f, which
-is this series plus collect). There, the macOS 3.13t and 3.14t lanes did get runners and both passed,
-and the macOS 3.12 and 3.14 lanes were the ones without a runner. Across the two runs, every lane has
-passed on this code except macOS 3.14 (not free-threaded), which has not run. The owner has accepted
-the missing macOS lanes.
+| Linux | 3.10 | [Pass](https://github.com/alexeybaran/modelx-cython/actions/runs/45869162145/job/140079742997) | [Pass](https://github.com/alexeybaran/modelx-cython/actions/runs/45869161273/job/140079738706) |
+| Linux | 3.12 | [Pass](https://github.com/alexeybaran/modelx-cython/actions/runs/45869162145/job/140079743049) | [Pass](https://github.com/alexeybaran/modelx-cython/actions/runs/45869161273/job/140079738839) |
+| Linux | 3.14 | [Pass](https://github.com/alexeybaran/modelx-cython/actions/runs/45869162145/job/140079742969) | [Pass](https://github.com/alexeybaran/modelx-cython/actions/runs/45869161273/job/140079738733) |
+| Linux | 3.13t | [Pass](https://github.com/alexeybaran/modelx-cython/actions/runs/45869162145/job/140079742703) | [Pass](https://github.com/alexeybaran/modelx-cython/actions/runs/45869161273/job/140079738910) |
+| Linux | 3.14t | [Pass](https://github.com/alexeybaran/modelx-cython/actions/runs/45869162145/job/140079743060) | [Pass](https://github.com/alexeybaran/modelx-cython/actions/runs/45869161273/job/140079738775) |
+| Windows | 3.10 | [Pass](https://github.com/alexeybaran/modelx-cython/actions/runs/45869162145/job/140079742878) | [Pass](https://github.com/alexeybaran/modelx-cython/actions/runs/45869161273/job/140079738880) |
+| Windows | 3.12 | [Pass](https://github.com/alexeybaran/modelx-cython/actions/runs/45869162145/job/140079743097) | [Pass](https://github.com/alexeybaran/modelx-cython/actions/runs/45869161273/job/140079738974) |
+| Windows | 3.14 | [Pass](https://github.com/alexeybaran/modelx-cython/actions/runs/45869162145/job/140079742882) | [Pass](https://github.com/alexeybaran/modelx-cython/actions/runs/45869161273/job/140079738815) |
+| Windows | 3.13t | [Pass](https://github.com/alexeybaran/modelx-cython/actions/runs/45869162145/job/140079742971) | [Pass](https://github.com/alexeybaran/modelx-cython/actions/runs/45869161273/job/140079739018) |
+| Windows | 3.14t | [Pass](https://github.com/alexeybaran/modelx-cython/actions/runs/45869162145/job/140079743084) | [Pass](https://github.com/alexeybaran/modelx-cython/actions/runs/45869161273/job/140079738708) |
+| macOS | 3.10 | [Pass](https://github.com/alexeybaran/modelx-cython/actions/runs/45869162145/job/140079742299) | [Pass](https://github.com/alexeybaran/modelx-cython/actions/runs/45869161273/job/140079738902) |
+| macOS | 3.12 | [Pass](https://github.com/alexeybaran/modelx-cython/actions/runs/45869162145/job/140079742739) | [No runner](https://github.com/alexeybaran/modelx-cython/actions/runs/45869161273/job/140079738920) |
+| macOS | 3.14 | [No runner](https://github.com/alexeybaran/modelx-cython/actions/runs/45869162145/job/140079742798) | [No runner](https://github.com/alexeybaran/modelx-cython/actions/runs/45869161273/job/140079738344) |
+| macOS | 3.13t | [No runner](https://github.com/alexeybaran/modelx-cython/actions/runs/45869162145/job/140079742802) | [Pass](https://github.com/alexeybaran/modelx-cython/actions/runs/45869161273/job/140079738782) |
+| macOS | 3.14t | [No runner](https://github.com/alexeybaran/modelx-cython/actions/runs/45869162145/job/140079742824) | [Pass](https://github.com/alexeybaran/modelx-cython/actions/runs/45869161273/job/140079738755) |
