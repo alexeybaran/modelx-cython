@@ -202,6 +202,23 @@ cdef inline long long _mx_signed_right_shift(long long value, long long count, s
     return value >> count
 
 
+cdef inline object _mx_integral(object value, str path):
+    """``value`` from Python for a C integer: an int, a float that is a whole number, or anything
+    else through the index protocol. A fractional float or a value that is not an integer raises
+    TypeError naming ``path``; a value beyond 64 bits is left to Cython's own conversion."""
+    if PyLong_CheckExact(value):
+        return value
+    if isinstance(value, float):
+        if value.is_integer():
+            return value
+    else:
+        try:
+            return PyNumber_Index(value)
+        except TypeError:
+            pass
+    raise _mx_named(TypeError(f"{path} requires an integer, got {value!r}"), path)
+
+
 cdef inline bint _mx_ref_name_is(object name, str expected) except? -1:
     return PyUnicode_Check(name) and PyUnicode_Compare(name, expected) == 0
 

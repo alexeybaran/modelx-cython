@@ -6,7 +6,8 @@ from libcst.metadata.scope_provider import BuiltinAssignment
 from .checked_arithmetic import (
     CheckedArithmetic, divisibility_enabled, divisibility_operands, signed_local_assignments,
 )
-from .consts import CY_MOD, FORMULA_PREF, MX_SELF, MX_SYS_MOD
+from .consts import CY_MOD, FORMULA_PREF, MODULE_PREF, MX_SELF, MX_SYS_MOD, SPACE_PREF
+from .typedefs import CY_INT_T
 from .powers import KIND_FLOAT, OperandKind, kind_of_type_expr
 from .scopes import CstFacts, Names, OPAQUE_SCOPES, has_scope_effects, lexical_nodes
 from .syntax import arguments, dotted_name, local_assignment, statements, walk
@@ -150,6 +151,22 @@ def __getattribute__(self, name):
     return method
 """)
     return (declaration,), (method,)
+
+
+def _reference_write_gate(cls_info):
+    """A Python write of an integer Reference passes the value through ``_mx_integral``: Cython's own
+    setter of a ``cdef public long long`` converts a float through ``__int__`` and would keep 0 for 0.5."""
+    owners = [part[len(MODULE_PREF):] for part in cls_info.module.fqname.split('.')[1:-1]]
+    owners.append(cls_info.name[len(SPACE_PREF):])
+    paths = {name: '.'.join((*owners, name)) for name in cls_info.visitor.ref_info.get(cls_info.name, {})
+             if name not in cls_info.spaces and cls_info.refs[name].get_type_expr(c_style=True) == CY_INT_T}
+    if not paths:
+        return ()
+    tests = ''.join(f"    {'if' if index == 0 else 'elif'} {MX_SYS_MOD}._mx_ref_name_is(name, {name!r}):\n"
+                    f"        value = {MX_SYS_MOD}._mx_integral(value, {path!r})\n"
+                    for index, (name, path) in enumerate(sorted(paths.items())))
+    return (cst.parse_statement(f'def __setattr__(self, name, value):\n{tests}'
+                                f'    {MX_SYS_MOD}._mx_generic_setattr(self, name, value)\n'),)
 
 
 class _GuardCalls(cst.CSTTransformer):
@@ -860,6 +877,9 @@ def guard_integer_boundaries(state, module_info, resolver, cells_kinds, ref_kind
             methods.append(method)
         added, gates = _python_call_gate(cls, entries, state.names, call_gate)
         declarations.extend(added)
+        writes = () if any(isinstance(item, cst.FunctionDef) and item.name.value == '__setattr__'
+                           for item in methods) else _reference_write_gate(cls)
+        gates = (*gates, *writes)
         changed |= bool(gates)
         classes.append(node.with_changes(body=node.body.with_changes(body=(*methods, *gates))))
     if declarations:
