@@ -2,7 +2,8 @@
 
 One model, built once: a compiled package imports and runs without modelx_cython; a Cell called
 outside its declared or sampled range raises an error naming the Cell, the argument and the spec
-key to declare; a variable a loop that never ran leaves unbound raises as in Python.
+key to declare; a variable a loop that never ran leaves unbound raises as in Python; a float or
+other object arriving where an integer was traced raises or keeps its value, never truncates.
 """
 import json
 import subprocess
@@ -18,7 +19,9 @@ CELLS = {
     "k": "lambda t: f(t + 5)",
     "kk": "lambda t: g(t, t + 5)",
     "h": "lambda t: str(t)",
+    "half": "lambda t: f(t / 2)",
     "rx": "lambda t: t + x",
+    "rr": "lambda t: t if t < 10 else rx(t) / 2",
     "nc": "lambda a: a * 2.0",
     "z": "def z(n):\n    for i in range(n):\n        pass\n    return i\n",
     "w": "def w(n):\n    for i in range(n):\n        y = i * 1.5\n    return y\n",
@@ -32,7 +35,7 @@ SAMPLE = """\
 from exported import mx_model
 S = mx_model.S
 for t in range(10):
-    S.f(t); S.g(t, t); S.k(t); S.kk(t); S.h(t); S.rx(t)
+    S.f(t); S.g(t, t); S.k(t); S.kk(t); S.h(t); S.half(2 * t); S.rx(t); S.rr(t)
 S.nc(1.5); S.nc(2.5)
 S.z(3); S.w(3); S.zi(3); S.lam(4); S.one(2)
 mx_model.P[3].v()
@@ -130,6 +133,32 @@ def test_a_variable_a_loop_left_unbound_raises_as_live(built):
     assert out["z3"] == ["value", "2"]
 
 
+def test_a_float_where_an_integer_was_traced_never_truncates(built):
+    work, live = built
+    out = _probe(work, '''\
+        import numpy as np
+        results = {
+            "argument": outcome(lambda: S.f(2.5)),
+            "numpy float": outcome(lambda: S.f(np.float64(3))),
+            "numpy int": outcome(lambda: S.f(np.int64(3))),
+            "from a cell": outcome(lambda: S.half(3)),
+            "item key": outcome(lambda: mx_model.P[2.5].v()),
+            "result": outcome(lambda: S.rr(12)),
+        }
+        def assign():
+            S.x = 2.5
+        results["reference"] = outcome(assign)
+        results["reference kept"] = outcome(lambda: (S.x, S.rx(1)))
+        print(json.dumps(results))
+    ''')
+    assert live["f"] == ["value", "5.0"]
+    for label, cell in (("argument", "S.f"), ("numpy float", "S.f"), ("from a cell", "S.f"),
+                        ("item key", "P.__call__"), ("result", "S.rr"), ("reference", "S.x")):
+        assert out[label][0] == "TypeError" and out[label][1].startswith(cell), (label, out[label])
+    assert out["numpy int"] == ["value", "6"]
+    assert out["reference kept"] == ["value", "(3, 4)"]
+
+
 def test_a_nested_scope_shadowing_a_typed_parameter_builds_and_equals_live(built):
     work, live = built
     out = _probe(work, '''\
@@ -138,9 +167,14 @@ def test_a_nested_scope_shadowing_a_typed_parameter_builds_and_equals_live(built
     assert out == live["lam"] == ["value", "59.5"]
 
 
-def test_a_formula_on_one_line_builds_and_equals_live(built):
+def test_a_formula_on_one_line_builds_and_its_arithmetic_is_checked(built):
     work, live = built
     out = _probe(work, '''\
-        print(json.dumps(outcome(lambda: S.one(5))))
+        def big():
+            fresh = type(mx_model)().S          # a new model: the first call's value stays cached
+            fresh.x = 2 ** 62
+            return fresh.one(5)
+        print(json.dumps([outcome(lambda: S.one(5)), outcome(big)]))
     ''')
-    assert out == live["one"] == ["value", "15"]
+    assert out[0] == live["one"] == ["value", "15"]
+    assert out[1][0] == "OverflowError" and out[1][1].startswith("S.one"), out[1]
