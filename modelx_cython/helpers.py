@@ -344,13 +344,21 @@ def _drop_unused_math_imports(formula, names):
 
 
 def install(providers, model_path):
+    """Copy each provider's .pyx/.pxd pair into the model package; returns the .pyx paths to compile.
+    A provider with only a .pxd is a header: the .pxd is copied and nothing is compiled for it."""
     modules = []
     for provider in sorted(providers):
         package, _, name = provider.rpartition('.')
         if not package:
             raise ValueError('helper provider must belong to a package')
         alias = module_name(provider)
-        sources = {suffix: read_resource(package, name + suffix) for suffix in ('.pyx', '.pxd')}
+        try:
+            sources = {'.pyx': read_resource(package, name + '.pyx')}
+        except FileNotFoundError:
+            # a header: inline functions only, compiled into the modules that cimport it
+            (model_path / (alias + '.pxd')).write_bytes(read_resource(package, name + '.pxd'))
+            continue
+        sources['.pxd'] = read_resource(package, name + '.pxd')
         for suffix, payload in sources.items():
             (model_path / (alias + suffix)).write_bytes(payload)
         modules.append(model_path.relative_to(model_path.parent)
