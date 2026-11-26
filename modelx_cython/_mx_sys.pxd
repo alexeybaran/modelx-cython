@@ -581,6 +581,9 @@ cdef extern from *:
 # model module that lowers such a call is imported. A C function runs only while the Reference is that
 # module and only where the C library gives CPython's result (CPython's math calls the same functions
 # there); otherwise the Reference's own member runs, so its errors, NaN handling and results are live's.
+# The Reference arrives as a borrowed pointer, compared with _mx_stdlib_math and never dereferenced:
+# no reference count of the module, which every worker shares, moves per call. The fallback reads the
+# Reference again from the item by name, with an owned reference.
 cdef extern from *:
     """
     static void *_mx_stdlib_math = NULL;
@@ -626,41 +629,41 @@ cdef inline bint _mx_math_real(_mx_math_arg x, double* out) noexcept:
         return True
 
 
-cdef inline double _mx_math_log(object module, _mx_math_arg x, str path) except? -1.0:
+cdef inline double _mx_math_log(void *module, object space, str ref, _mx_math_arg x, str path) except? -1.0:
     cdef double v
-    if <void*>module == _mx_stdlib_math and _mx_math_real(x, &v) and v > 0.0:
+    if module == _mx_stdlib_math and _mx_math_real(x, &v) and v > 0.0:
         return _mx_c_log(v)     # v <= 0 raises and NaN returns NaN in math's own call
-    return _mx_math_value(module.log(x), 'log', path)
+    return _mx_math_value(getattr(space, ref).log(x), 'log', path)
 
 
-cdef inline double _mx_math_exp(object module, _mx_math_arg x, str path) except? -1.0:
+cdef inline double _mx_math_exp(void *module, object space, str ref, _mx_math_arg x, str path) except? -1.0:
     cdef double v, result
-    if <void*>module == _mx_stdlib_math and _mx_math_real(x, &v):
+    if module == _mx_stdlib_math and _mx_math_real(x, &v):
         result = _mx_c_exp(v)
         if _mx_c_isfinite(result):  # overflow raises, inf and NaN: math's own call
             return result
-    return _mx_math_value(module.exp(x), 'exp', path)
+    return _mx_math_value(getattr(space, ref).exp(x), 'exp', path)
 
 
-cdef inline double _mx_math_sqrt(object module, _mx_math_arg x, str path) except? -1.0:
+cdef inline double _mx_math_sqrt(void *module, object space, str ref, _mx_math_arg x, str path) except? -1.0:
     cdef double v
-    if <void*>module == _mx_stdlib_math and _mx_math_real(x, &v) and v >= 0.0:
+    if module == _mx_stdlib_math and _mx_math_real(x, &v) and v >= 0.0:
         return _mx_c_sqrt(v)    # v < 0 raises and NaN returns NaN in math's own call
-    return _mx_math_value(module.sqrt(x), 'sqrt', path)
+    return _mx_math_value(getattr(space, ref).sqrt(x), 'sqrt', path)
 
 
-cdef inline double _mx_math_erf(object module, _mx_math_arg x, str path) except? -1.0:
+cdef inline double _mx_math_erf(void *module, object space, str ref, _mx_math_arg x, str path) except? -1.0:
     cdef double v
-    if <void*>module == _mx_stdlib_math and _mx_math_real(x, &v):
+    if module == _mx_stdlib_math and _mx_math_real(x, &v):
         return _mx_c_erf(v)     # math.erf is the C library's erf
-    return _mx_math_value(module.erf(x), 'erf', path)
+    return _mx_math_value(getattr(space, ref).erf(x), 'erf', path)
 
 
-cdef inline bint _mx_math_isinf(object module, _mx_math_arg x, str path) except -1:
+cdef inline bint _mx_math_isinf(void *module, object space, str ref, _mx_math_arg x, str path) except -1:
     cdef double v
-    if <void*>module == _mx_stdlib_math and _mx_math_real(x, &v):
+    if module == _mx_stdlib_math and _mx_math_real(x, &v):
         return _mx_c_isinf(v) != 0
-    value = module.isinf(x)
+    value = getattr(space, ref).isinf(x)
     if value is True or value is False:
         return value
     raise _mx_named(TypeError(f"{path}: isinf() of the Reference returned {type(value).__name__}, "
