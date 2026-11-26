@@ -15,11 +15,23 @@ _NATIVE_RESULTS = {'double', 'long long', 'bint'}
 
 
 def pin_function(name, owner, producer):
-    # Cython can defer a bare cast of an object field until after computing
-    # the arguments. A C function returning the object forces an owned
-    # temporary at receiver evaluation, just as the ordinary call does.
-    return cst.parse_statement(f'@{CY_MOD}.cfunc\n@{CY_MOD}.inline\n'
-                               f'def {name}(root: {owner}) -> object:\n    return root.{VAR_PREF}{producer}\n')
+    """The held item, borrowed: read once, at receiver evaluation, as Python orders it.
+
+    Cython can defer a bare cast of an object field until after computing the arguments; a C function
+    returning the field forces the read at receiver evaluation. It returns the pointer without a new
+    reference, so a read of an item shared by several threads (an item of a shared Space held by each
+    worker's own items) writes nothing to that item's reference count. The holder keeps it alive: the
+    call site reads it only when ``root`` is exactly the compiled class and its flag is set; ``root`` is
+    alive for the whole call (it is the running formula's ``self``); and the cached field of a
+    zero-argument Cell of an exclusively owned item is written once, before its flag, and never again
+    while the item lives (an exported model has no cache clearing; releasing the item from its Space
+    clears its Cells, roots and Space only). Deleting the held item from its own Space or closing the
+    model leaves the holder's reference in place. Only an unlocked (exclusively owned) producer is pinned.
+    """
+    pointer = f'{CY_MOD}.pointer({CY_MOD}.void)'
+    return cst.parse_statement(f'@{CY_MOD}.cfunc\n@{CY_MOD}.inline\n@{CY_MOD}.exceptval(check=False)\n'
+                               f'def {name}(root: {owner}) -> {pointer}:\n'
+                               f'    return {CY_MOD}.cast({pointer}, root.{VAR_PREF}{producer})\n')
 
 
 def _traced_target(cell, allow_locked=False):
