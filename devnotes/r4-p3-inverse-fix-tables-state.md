@@ -62,3 +62,5 @@ Task (from the coordinator):
   - Term_UK_S +0.46% on the 8-policy book; +0.70% on a 10x book (3.770M vs 3.744M).
   - UC_FR_S +0.74% (11 policies). VA_US_S +0.18% (9 policies).
   - All equal to live.
+- **Accepted by the ratchet.** Fork text, 9e65ea2 vs c342db9, allocation-inclusive: VA_US_S +0.09%, Term_UK_S
+  +0.26%, UC_FR_S −0.47%. Equal to live. Translate times unchanged.
