@@ -1,7 +1,7 @@
 """Table reads whose key parts are fixed per item.
 
-(1) An IntEnum member used as a table key part stays the member; the read is still a prepared one, its key the
-member read per call and tested to be one label.
+(1) An IntEnum member admitted at build (enum definition) used as a table key part is its module
+constant (``_mx_enum_const_N``), not an attribute read of the enum class per call.
 (2) A prepared read holds the codes of constant string labels next to the table it holds.
 The first read resolves them, a missing key raises KeyError at the read.
 Results must not change: compiled equals the exported model.
@@ -68,7 +68,7 @@ def test_constant_key_reads_use_enum_constants_and_held_codes(tmp_path):
     assert done.returncode == 0, done.stdout[-3000:] + done.stderr[-3000:]
     generated = (tmp_path / 'exported_cy/_m_Portfolio/_mx_classes.py').read_text(encoding='utf-8')
     enum_read = next(line for line in generated.splitlines() if line.lstrip().startswith('mix ='))
-    assert '.kcode(' in enum_read and ':= self.P.OK)' in enum_read, enum_read
+    assert '.lcode(' in enum_read and ', 0, _mx_enum_const_' in enum_read, enum_read
     assert generated.count('.hold_code(') == 3
     probe = textwrap.dedent('''\
         import sys

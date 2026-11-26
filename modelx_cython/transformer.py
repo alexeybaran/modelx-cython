@@ -72,6 +72,7 @@ from modelx_cython import numeric_cache
 from modelx_cython import holds
 from modelx_cython import value_storage
 from modelx_cython import collect
+from modelx_cython import enums as code_enums
 
 from modelx_cython.consts import (
     FORMULA_PREF,
@@ -97,12 +98,14 @@ from modelx_cython.typedefs import CY_BOOL_T, CY_INT_T, primitive_kind
 def _integer_reference_paths(cls_info):
     """Return qualified names of writable References stored as C integers."""
     lexical_refs = cls_info.visitor.ref_info.get(cls_info.name, {})
+    fixed_refs = getattr(cls_info, 'readonly_refs', ())
     owners = [part[len(MODULE_PREF):] for part in cls_info.module.fqname.split('.')[1:-1]]
     owners.append(cls_info.name[len(SPACE_PREF):])
     return {
         name: '.'.join((*owners, name))
         for name in lexical_refs
         if name not in cls_info.spaces
+        and name not in fixed_refs
         and cls_info.refs[name].get_type_expr(c_style=True) == CY_INT_T
     }
 
@@ -204,6 +207,9 @@ class PXDGenerator:
             stmts.append(f'from {self.package} cimport {module_name(provider)}')
         for ci in self.module.cimports:
             stmts.append(f"cimport {ci}")
+        enum_declarations = code_enums.declarations(self.module)
+        if enum_declarations:
+            stmts.append(enum_declarations)
         return "\n".join(stmts)
 
     @cached_property
@@ -307,6 +313,8 @@ class PXDGenerator:
             decl_stmts.append("cdef dict __dict__\n")
         if cls_name in self.module.visitor.collect_spaces:
             decl_stmts.append("cdef public dict _mx_collect_cache\n")
+        for name in getattr(cls_info, 'readonly_refs', ()):
+            decl_stmts.append(f'cdef object {code_enums.storage(name)}\n')
         # What an item holds from shared inputs (holds.HoldTable)
         decl_stmts.extend(holds.pxd_declarations(cls_info))
         for cells in cls_info.cells.values():
@@ -374,6 +382,8 @@ class PXDGenerator:
             if ref.name in cls_info.spaces:
                 # declared below as a child space
                 continue
+            if ref.name in getattr(cls_info, 'readonly_refs', ()):
+                continue        # an enum definition: stored privately, a read-only property serves Python
 
             stmt = f"cdef public {ref.get_type_expr(c_style=True)} {ref.name}\n"
             decl_stmts.append(stmt)
@@ -591,6 +601,7 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
         self.function_origins = {}      # {private entry of an uncached Cell: (class, Cell)}
         self.entry_domains = {}         # {private entry of an uncached Cell: its argument domain}
         self.helper_providers.update(numeric_cache.providers(module))
+        code_enums.prepare(module)
 
     def _compact_spill(self, cells, cls_name, source):
         index = len(self._cold_spills)
@@ -617,6 +628,11 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
         # a typed-memoryview Cell read by subscript is held per item (no slice copy per evaluation)
         node = held_arrays.lower(node, cls_info, cells, self._held_arrays)
         node = self._table_reads(node, cls_info, cells, scope)
+        if self.module.code_enum_symbols:      # a module without enum definitions is left as it was
+            enum_comparisons = code_enums.Constants(cls_info, cells, self.module.code_enum_symbols)
+            node = node.visit(enum_comparisons)
+            cells.native_enum_comparisons = enum_comparisons.comparisons
+            cells.native_enum_constants = enum_comparisons.count
         cells.formula_allows_exact_receiver = allows_exact_receiver(node, cls_info.name)
         node = rewrite_powers(
             node, self._resolver, self._cells_kinds, self._ref_kinds,
@@ -738,6 +754,8 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
         if self._cold_spills or self._held_arrays:
             module = module.with_changes(body=(*module.body, *self._cold_spills,
                                                *(stmt for held in self._held_arrays.values() for stmt in held.body)))
+        if any(getattr(cls, 'readonly_refs', ()) for cls in self.module.classes.values()):
+            module = module.with_changes(body=(*module.body, *code_enums.check_function()))
         if self._held_pins:
             from modelx_cython.space_results import pin_function
             pins = [pin_function(name, *key) for key, name in self._held_pins.items()]
@@ -850,8 +868,9 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
                     # declared below as a child space
                     continue
 
+                fixed = ref.name in getattr(self.module.classes[cls_name], 'readonly_refs', ())
                 stmt = cst.parse_statement(
-                    f"{ref.name}: {ref.get_type_expr()}",
+                    f"{code_enums.storage(ref.name) if fixed else ref.name}: {ref.get_type_expr()}",
                     config=self._module_node.config_for_parsing,
                 )
                 if is_first:
@@ -888,6 +907,8 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
                               for line in holds.py_declarations(self.module.classes[cls_name]))
             decl_stmts.extend(cst.parse_statement(line)
                               for line in value_storage.py_declarations(self.module.classes[cls_name]))
+            updated_node = updated_node.with_changes(body=updated_node.body.with_changes(
+                body=code_enums.bind_properties(self.module.classes[cls_name], updated_node.body.body)))
             if cls_name in self.module.visitor.collect_spaces:
                 hook = collect.hook(original_node, cls_name, sorted(self.module.classes[cls_name].refs),
                                     reuse=collect.reuses_items(self.module.visitor, cls_name))

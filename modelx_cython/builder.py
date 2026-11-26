@@ -794,6 +794,8 @@ class CombinedRefInfo:
     mx_class: str = ''
     decl_type_expr: str = ''
     is_relative: bool = False
+    enum = None             # an IntEnum class held: (module, qualname, {member: value}) (enums.py)
+    enum_safe = False
 
     def __init__(self, module,
                  cls,
@@ -805,6 +807,8 @@ class CombinedRefInfo:
         ``name`` are set; the class-level defaults remain in effect.
         """
         if rt_info:
+            self.enum = getattr(rt_info, 'enum', None)
+            self.enum_safe = getattr(rt_info, 'enum_safe', False)
             if rt_info.mx_class:
                 if rt_info.mx_class.startswith(module + "."):
                     # Defined in the module itself; a bare prefix match

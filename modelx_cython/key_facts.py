@@ -272,6 +272,21 @@ class KeyFacts:
             return getattr(self.cls_info, 'refs', {}).get(expr.attr.value)
         return None
 
+    def enum_constant(self, expr):
+        """The module constant of ``self.<Enum>.<member>`` (or its definition field
+        ``self._mx_definition_<Enum>.<member>``) when the enum Reference is admitted at build
+        (``enums.prepare``: an IntEnum definition, enum_safe, value within C int), else None."""
+        if not (isinstance(expr, cst.Attribute) and isinstance(expr.value, cst.Attribute)
+                and isinstance(expr.value.value, cst.Name) and expr.value.value.value == 'self'):
+            return None
+        ref = expr.value.attr.value
+        if ref.startswith('_mx_definition_'):
+            ref = ref[len('_mx_definition_'):]
+        module = getattr(self.cls_info, 'module', None)
+        entry = (getattr(module, 'code_enum_symbols', None) or {}).get(
+            (getattr(self.cls_info, 'name', None), ref, expr.attr.value))
+        return entry[0] if entry else None
+
     def int_argument(self, expr):
         """Argument of a one-argument builtin ``int`` call in this formula, or None."""
         if (self.builtin_int and isinstance(expr, cst.Call) and isinstance(expr.func, cst.Name)

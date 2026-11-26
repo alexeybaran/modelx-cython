@@ -57,6 +57,7 @@ def describe(module_infos):
                     'numeric_primary_capacity': primary_capacity(cell)
                     if cache == 'native-numeric-keys' else 0,
                     'power_memo': bool(getattr(cell, 'power_memo', None)),
+                    **(_enum_report(cell) if hasattr(cell, 'native_enum_constants') else {}),
                     'dense_offsets': [int(offset) for offset in cell.cache_offsets]
                     if cache == 'dense' else [],
                     'exact_spill': cache == 'dense' and bool(cell.has_dense_spill),
@@ -226,3 +227,26 @@ def slow_paths(cell, cache):
         entries.append({'kind': 'object-return', 'detail': 'returns a Python object on every call '
                         '(boxed at the cell boundary)', 'per_step': per_step})
     return entries
+
+
+def _enum_report(cell):
+    """The enum constants of a Cell of a module with enum definitions (``enums.Constants``); other reports
+    are unchanged."""
+    return {'native_enum_comparisons': getattr(cell, 'native_enum_comparisons', 0),
+            'native_enum_constants': getattr(cell, 'native_enum_constants', 0),
+            'native_expressions': getattr(cell, 'enum_memberships', 0),
+            'expressions_untyped': expressions_untyped(cell),
+            'expressions_object': expressions_object(cell)}
+
+
+def expressions_untyped(cell):
+    """Expression forms left to the interpreter (enum membership), each with its line and reason."""
+    entries = [entry for key in ('enum_untyped',) for entry in getattr(cell, key, ())]
+    return sorted(entries, key=lambda entry: (entry['line'], entry['form'], entry['expr']))
+
+
+def expressions_object(cell):
+    """Built-in forms compiled with comparisons on Python objects, because an operand's class is not
+    known at build time; each with its line and the operand classes."""
+    entries = [entry for key in ('enum_object',) for entry in getattr(cell, key, ())]
+    return sorted(entries, key=lambda entry: (entry['line'], entry['form'], entry['expr']))

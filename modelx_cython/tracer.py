@@ -42,6 +42,7 @@ import pathlib
 import random
 import numbers
 import operator
+from enum import IntEnum
 import itertools
 from dataclasses import dataclass
 from contextlib import contextmanager
@@ -453,6 +454,17 @@ class RuntimeValueInfo:
         self.type_ = (object if isinstance(value, numbers.Integral)
                       and not -(1 << 63) <= value < (1 << 63) else type(value))
         self.mx_class = mx_class
+        # An IntEnum class held in a Reference: its members become integer literals (enums.literals)
+        # when it compares, hashes and shows as IntEnum does; ``enum`` is (module, qualname, {member: value}).
+        self.enum_safe = (isinstance(value, type) and issubclass(value, IntEnum)
+                          and type(value) is type(IntEnum)
+                          and value.__eq__ is int.__eq__ and value.__ne__ is int.__ne__
+                          and all(getattr(value, m) is getattr(IntEnum, m)
+                                  for m in ('__str__', '__format__', '__repr__', '__hash__')))
+        self.enum = ((value.__module__, value.__qualname__,
+                      {name: int.__int__(member) for name, member in value.__members__.items()})
+                     if isinstance(value, type) and issubclass(value, IntEnum)
+                     and '<locals>' not in value.__qualname__ else None)
 
     @classmethod
     def init_mxobj(cls, value, module):

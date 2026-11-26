@@ -613,6 +613,7 @@ class FrameReads:
         self.code_fields, self.row_fields, self.range_fields = {}, {}, {}
         self.mutated = self._mutated(node)
         self.row_locals = self._row_locals(node)
+        self.enum_key_locals = self._enum_key_locals()
         self.views = {}         # view local -> _View
         self.declarations = []  # C locals of the formula
         rewriter = _Rewrite(self)
@@ -900,7 +901,8 @@ class FrameReads:
         # a text literal and a field of a cached row cell are fixed too, unless the read takes the part as a
         # C integer (key_part): their code is held per item instead of looked up at every read
         return item_constant(part, self.cached_call) or (
-            self._fixed_value(part) and not (level_kind == 'int' and self.facts.is_int(part)))
+            self._fixed_value(part) and not (level_kind == 'int' and (
+                self.facts.is_int(part) or self.facts.enum_constant(part) is not None)))
 
     def fixed_part(self, part):
         """A key part fixed per item: ``item_constant``, or one of ``_fixed_value``."""
@@ -915,13 +917,22 @@ class FrameReads:
         return self.row_fields[key]
 
     def _fixed_value(self, part):
-        """A text literal, or ``self.R()["f"]`` with R a cached zero-argument cell (a field of a row cell): values
-        that do not change while the item's caches hold."""
-        if isinstance(part, cst.SimpleString):
+        """A text literal, an enum member ``self.<Enum>.<member>``, or ``self.R()["f"]`` with R a cached
+        zero-argument cell (a field of a row cell): values that do not change while the item's caches hold."""
+        if isinstance(part, cst.SimpleString) or self._enum_attribute(part):
             return True
         parts = _index_parts(part) if isinstance(part, cst.Subscript) else None
         return (parts is not None and len(parts) == 1 and _literal_str(parts[0]) is not None
                 and isinstance(part.value, cst.Call) and item_constant(part.value, self.cached_call))
+
+    def _enum_attribute(self, part):
+        """``self.<Enum>.<member>`` (or ``self._mx_definition_<Enum>.<member>``) on an enum Reference."""
+        if not (isinstance(part, cst.Attribute) and isinstance(part.value, cst.Attribute)
+                and isinstance(part.value.value, cst.Name) and part.value.value.value == 'self'):
+            return False
+        ref = part.value.attr.value
+        ref = ref[len('_mx_definition_'):] if ref.startswith('_mx_definition_') else ref
+        return bool(getattr(getattr(self.cls_info, 'refs', {}).get(ref), 'enum', None))
 
     def code_field(self, hold, level, part, emit=None):
         """The item field holding the code of ``part`` (``emit``, the part with its own reads lowered, is what the hold
@@ -961,12 +972,52 @@ class FrameReads:
         return cst.Call(func=cst.Attribute(cst.Name(self.module), cst.Name('slot')),
                         args=[cst.Arg(self.ref(hold)), cst.Arg(cst.Integer(str(self.read_signature(hold))))])
 
+    def _enum_constants(self, value):
+        """{code of each enum member: its C constant} when ``value`` is an admitted IntEnum member (``self.E.m``) or a
+        conditional between such values, else None."""
+        if isinstance(value, cst.IfExp):
+            body, orelse = self._enum_constants(value.body), self._enum_constants(value.orelse)
+            return {**body, **orelse} if body is not None and orelse is not None else None
+        constant = self.facts.enum_constant(value)
+        return {_code(value): constant} if constant is not None else None
+
+    def _enum_key_locals(self):
+        """{local: its enum constants} for each local bound once to an IntEnum member, or to a choice between
+        members (``item = E.a if paid_up(k) else E.b``), whose every read is a key part of a ``.loc``/``.at`` read:
+        it is bound to the members' C constants, and a key part it gives is a C integer, not the member
+        object (shared by every thread) looked up at every read."""
+        found = {}
+        f = self.facts.formula
+        for name, values in f.values.items():
+            value = self._value_of(name)
+            constants = self._enum_constants(value) if value is not None else None
+            loads = f.loads.get(name) or ()
+            if constants and loads and all(not nested and self._key_part_position(load) for load, nested in loads):
+                found[name] = constants
+        return found
+
+    def _key_part_position(self, node):
+        """``node`` is the key, or a part of a tuple key, of a ``.loc[...]`` / ``.at[...]`` read."""
+        parents = self.facts.formula.parents
+        up = parents.get(id(node))
+        if isinstance(up, cst.Element):
+            up = parents.get(id(parents.get(id(up))))
+        element = parents.get(id(up)) if isinstance(up, cst.Index) else None
+        subscript = parents.get(id(element)) if isinstance(element, cst.SubscriptElement) else None
+        return (isinstance(subscript, cst.Subscript) and isinstance(subscript.value, cst.Attribute)
+                and subscript.value.attr.value in ('loc', 'at'))
+
     def key_part(self, part, level_kind, emit=None):
         """Emit a key part for typed dispatch on integer levels and object lookup elsewhere.
 
         The facts apply to the original ``part``. ``emit`` is the same part with its own reads lowered.
         """
         emit = part if emit is None else emit
+        if level_kind == 'int' and isinstance(part, cst.Name) and part.value in self.enum_key_locals:
+            return _cast('_mx_cy.longlong', emit), 'int'     # bound to the members' C constants
+        constant = self.facts.enum_constant(part) if level_kind == 'int' else None
+        if constant is not None:        # an IntEnum member: its C constant (enums.py)
+            return cst.Name(constant), 'int'
         if level_kind == 'int':
             # Cython types int() as an object. Give it a C type only when the input fits:
             # casting int() of a C double directly to long long can skip Python's conversion checks.
@@ -1091,7 +1142,7 @@ class _Rewrite(cst.CSTTransformer):
             name = f'_mx_{"key" if how == "typed" else "okey"}_{o.key_count}'
             conditions.append(cst.parse_expression(f'{o.module}.is_label(({name} := {_code(arg)}))'))
             arg = cst.Name(name)
-        return self._m({'typed': 'kcode'}.get(how, 'ocode'), o.ref(hold), cst.Integer(str(level)), arg)
+        return self._m({'int': 'lcode', 'typed': 'kcode'}.get(how, 'ocode'), o.ref(hold), cst.Integer(str(level)), arg)
 
     def _native_test(self, hold, conditions):
         test = self._positive(self.o.slot(hold))
@@ -1208,6 +1259,15 @@ class _Rewrite(cst.CSTTransformer):
         if not (len(original.body) == 1 and isinstance(original.body[0], cst.Assign)):
             return updated
         name = original.body[0].targets[0].target
+        constants = o.enum_key_locals.get(name.value) if isinstance(name, cst.Name) else None
+        if constants:       # ``item = E.a if c else E.b`` used only as key parts: bound to C constants
+
+            class Constants(cst.CSTTransformer):
+                def leave_Attribute(self, o_, new):
+                    constant = constants.get(_code(o_))
+                    return cst.Name(constant) if constant is not None else new
+            return updated.with_changes(body=[updated.body[0].with_changes(
+                value=updated.body[0].value.visit(Constants()))])
         found = o.row_locals.get(name.value) if isinstance(name, cst.Name) else None
         if found is None or found[2] is not original.body[0]:
             return updated
