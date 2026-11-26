@@ -89,21 +89,8 @@ from modelx_cython.consts import (
     is_user_defined,
 )
 
-from modelx_cython.syntax import dotted_name, literal_value, parse_source, same_expression
-from modelx_cython.typedefs import CY_BOOL_T, CY_INT_T, primitive_kind
-
-
-def _integer_reference_paths(cls_info):
-    """Return qualified names of writable References stored as C integers."""
-    lexical_refs = cls_info.visitor.ref_info.get(cls_info.name, {})
-    owners = [part[len(MODULE_PREF):] for part in cls_info.module.fqname.split('.')[1:-1]]
-    owners.append(cls_info.name[len(SPACE_PREF):])
-    return {
-        name: '.'.join((*owners, name))
-        for name in lexical_refs
-        if name not in cls_info.spaces
-        and cls_info.refs[name].get_type_expr(c_style=True) == CY_INT_T
-    }
+from modelx_cython.syntax import dotted_name, parse_source, same_expression
+from modelx_cython.typedefs import CY_BOOL_T
 
 
 def _outside_logical_domain(cell, axes):
@@ -725,8 +712,6 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
             # Native memo structs contain only scalars. Use Cython's standard
             # serializer; the module directive also works in pure-Python mode.
             directives.append('auto_pickle=True')
-        # integer guards: no overflowcheck directive; the C integer arithmetic of each formula is flagged
-        # (integer_boundaries.py), and a formula it cannot cover carries the directive itself
         if self.module.spec.policy.infer_types:
             # Spec key infer_types: C integer inference in generated model modules; providers keep
             # their own directives.
@@ -998,41 +983,6 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
         ``_mx_copy_refs`` method bodies."""
         return updated_node.with_changes(value="base_")
 
-    def _guard_reference_assignments(self, cls_info, method):
-        """Check generated integer Reference writes with an object source."""
-        integer_refs = _integer_reference_paths(cls_info)
-        if not integer_refs:
-            return method
-        guard = cst.parse_expression(f'{MX_SYS_MOD}._mx_exact_int64')
-        single_assignment = m.SimpleStatementLine(body=(m.Assign(targets=(m.AssignTarget(),)),))
-        body = []
-        for line in method.body.body:
-            if not m.matches(line, single_assignment):
-                body.append(line)
-                continue
-            assignment = line.body[0]
-            target = dotted_name(assignment.targets[0].target) or ''
-            receiver, _, name = target.rpartition('.')
-            if receiver != MX_SELF or name not in integer_refs:
-                body.append(line)
-                continue
-
-            value = assignment.value
-            if method.name.value == MX_COPY_REFS and dotted_name(value) == f'base_.{name}':
-                body.append(line)
-                continue
-            try:
-                literal = literal_value(value)
-            except ValueError:
-                literal = None
-            if primitive_kind(literal) == 'longlong':
-                body.append(line)
-                continue
-            path = cst.SimpleString(repr(integer_refs[name]))
-            checked = cst.Call(guard, (cst.Arg(value), cst.Arg(path)))
-            body.append(line.with_changes(body=(assignment.with_changes(value=checked),)))
-        return method.with_changes(body=method.body.with_changes(body=tuple(body)))
-
     @m.call_if_inside(m.ClassDef())
     @m.leave(m.FunctionDef())
     def update_method(self, original_node, updated_node):
@@ -1076,9 +1026,6 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
                         ))
                 return updated_node.with_changes(body=updated_node.body.with_changes(
                     body=(*updated_node.body.body, *initializers)))
-
-            if meth_name in (MX_ASSIGN_REFS, MX_COPY_REFS):
-                updated_node = self._guard_reference_assignments(cls_info, updated_node)
 
             if meth_name[: len(FORMULA_PREF)] == FORMULA_PREF:
                 # _f_ methods
