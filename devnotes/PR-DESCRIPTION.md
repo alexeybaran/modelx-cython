@@ -27,15 +27,31 @@ modelx on every point.
    cache's domain once, then calls a private formula entry on an exact receiver. Calls between compiled
    Cells use these entries directly.
    - Items of locked Spaces are read without a dictionary lookup.
-5. **Powers.** When a power's operands are known to be real, it is computed with C `pow`, with a
-   one-entry memo per Cell. Where Python's semantics depend on the order arguments are evaluated in,
-   that order is kept.
+5. **Powers.** Upstream's `powers.py` rewrites a power to C `pow` when its operands are provably real
+   Cells, References or parameters. This change adds the following, each a separate proof or rewrite:
+   - **One-entry memo per Cell.** A real power of a Cell that owns its result goes through
+     `_mx_memo_pow`, which keeps the last operands and result, so a repeated power costs a comparison.
+     This saves 2.9% of instructions on Term_US_SEC and 2.7% on MYGA_US_SEC.
+   - **Kinds of locals.** A local assigned only real values is real, so a power of it is rewritten too.
+   - **Running totals in loops.** A local accumulated with real terms inside a loop keeps its real kind,
+     so powers of the total are rewritten. This saves 5.5% of instructions on DIA.
+   - **Conditional expressions and negative exponents.** `a if c else b` is real when both branches
+     are. An integral base raised to a negative integer is treated as fractional, so it takes the real
+     path, not an integer power.
+   - **Indexed typed arrays and mutually dependent locals.** One index per dimension of a Cell's
+     typed-memoryview result gives an element of its C type. Locals that depend on each other are
+     proved real together. Together these save 11.6% of instructions on DIA.
+   - **Argument order.** Where Python's semantics depend on the order in which arguments are evaluated,
+     that order is kept. Term_JP_S, Term_KR_S and CI_KR_S compile only with this: on upstream, a float
+     power inside `min` or `max` is typed complex by Cython 3 and the build stops.
 6. **Math-module calls.** A Reference can hold the standard `math` module. A call through it to `log`,
    `exp`, `sqrt`, `erf` or `isinf` then runs the C library's function wherever that gives CPython's own
    result: `log` for x > 0, `sqrt` for x ≥ 0, `exp` for a finite result, and `erf` and `isinf` always.
-   Everywhere else the Reference's own function runs. Domain errors, overflows, infinities, NaNs, ints
-   beyond 64 bits and a rebound Reference therefore behave exactly as in live modelx. A user module that
-   happens to be called `math` is not affected.
+   The Reference is passed to the native call as a borrowed pointer and compared with the `math` module
+   by pointer. A rebound Reference, and every case outside those domains, takes the fallback: the
+   Reference's own function runs. Domain errors, overflows, infinities, NaNs and ints beyond 64 bits
+   therefore behave exactly as in live modelx. A user module that happens to be called `math` is not
+   affected. On RILA_US_SEC with four workers, a run fell from 0.151 s to 0.063 s.
 7. **Held items of shared Spaces.** A Space result read through a shared Space keeps its items held by
    the compiled model. They are not rebuilt on every read.
 8. **Translation.** The transformer, builder and command line apply mechanisms 1–7. This includes fast
@@ -148,9 +164,9 @@ and lifelib come from PyPI.
 Every value below equals live modelx in every run.
 
 Three sets of figures were taken at 53104d2: the independent benchmark (per-policy times, peak memory
-and compile times), the DV01 parallel book and the census. That was before the integer overflow checks
-(removed in aa7853d) and the per-Cell Python entry (removed in 1c3f228) left the code. The
-instructions-per-policy table and the Python-call table show the code after those removals.
+and compile times), the DV01 parallel book and the census. 53104d2 is a development commit, not part of this series. It still had integer overflow checks and a
+per-Cell Python entry; this series has neither. The other tables were measured on code without them,
+at the commit each one names.
 
 ### Values
 
@@ -172,17 +188,30 @@ the book-total cell. Peak memory is the process's maximum resident set.
 | MYGA_US_SEC | 1,871.8 | 300.6 | 6.23x | 256.0 | 104.0 |
 | RILA_US_SEC | 1,993.3 | 444.9 | 4.48x | 493.9 | 103.9 |
 
-### Instructions per policy, after the integer and entry removals
+### Instructions per policy against the settled code
 
-Method: callgrind instructions per policy, single-threaded, policies driven directly in a loop over
-the book, on upstream lifelib 20d4dae.
+Ratio of instructions per policy at 7edf07b: Term_US_SEC 1.000, MYGA_US_SEC 1.000, RILA_US_SEC
+0.962.
 
-| model | 53104d2 | abfe35d | 1c3f228 |
+### Twelve SEC models against upstream (at 503b07c)
+
+A run of all twelve SEC models on 503b07c against upstream d22426f, on CI runner machines, is in
+progress.
+
+| model | upstream Ir/policy | proposal Ir/policy | ratio | peak MB | translate s | build s |
+|---|---|---|---|---|---|---|
+| (run in progress) | | | | | | |
+
+### Scaling with workers
+
+On a quiet four-virtual-core machine with 32 policies per worker, going from one to four workers
+speeds DIA up 2.95x and RILA up 3.08x. On the same machine, a share-nothing Python loop loses 11% at
+four workers. An independent run on an eight-core machine is pending.
+
+| model | 1 worker | 4 workers | 8 workers (eight-core machine) |
 |---|---|---|---|
-| Term_US_SEC | 1,029,124 | 999,041 | (re-run in progress) |
-| MYGA_US_SEC | 2,409,450 | 2,337,087 | (re-run in progress) |
-| RILA_US_SEC | 3,731,814 | 3,618,867 | (re-run in progress) |
-| ten regional models | | | (check in progress) |
+| DIA | 1.00x | 2.95x | (pending) |
+| RILA_US_SEC | 1.00x | 3.08x | (pending) |
 
 ### Parallel book: SEC DV01 example (at 53104d2)
 
@@ -248,10 +277,33 @@ Same machine as the per-policy table, one build of each model with each compiler
 Across the census, translation took a median 1.55x the current compiler's time for regional models
 and 1.70x for SEC models. The C build took 1.29x–1.30x.
 
-## Commits and line counts
+## Commits and line counts (upstream d22426f to 503b07c, 14 commits)
 
-To be updated at freeze.
+"Compiler" is non-test code under `modelx_cython/`. "Other" is CI, documentation and packaging.
+"Tests" is everything under `modelx_cython/tests/` and `integration_tests/`. Counts are from
+`git show --numstat` per commit.
+
+| commit | title | compiler + / − | other + / − | tests + / − |
+|---|---|---|---|---|
+| 19a063d | Add shared syntax, scope and build helpers | +882 / −2 | +0 / −0 | +0 / −0 |
+| d2ff936 | Add value arrays without zero fill and held arrays | +589 / −1 | +0 / −0 | +0 / −0 |
+| c8a519d | Add dense numeric caches sized from the declared or sampled range | +842 / −0 | +6 / −4 | +0 / −0 |
+| 056cc5f | Add typed formula entries checked once per call | +1,345 / −0 | +0 / −0 | +0 / −0 |
+| 534ee00 | Prove powers real from locals, memoise C pow, keep argument order | +444 / −26 | +0 / −0 | +192 / −3 |
+| 0e1315a | Keep Python's semantics of locals under C typing and check integer Reference writes | +253 / −1 | +0 / −0 | +0 / −0 |
+| 412eb13 | Add held item results of shared Spaces | +190 / −0 | +0 / −0 | +0 / −0 |
+| 58f1eb0 | Translate Cells through typed entries and dense caches | +1,233 / −252 | +0 / −0 | +279 / −37 |
+| d1fbd12 | Add tests for entries, caches and powers | +0 / −0 | +0 / −0 | +4,474 / −0 |
+| e33041d | Run unit, compiled and SEC model comparisons in CI | +0 / −0 | +159 / −126 | +0 / −0 |
+| e6049d2 | Document the compiled contract, spec keys and integer arithmetic | +1 / −1 | +187 / −39 | +0 / −0 |
+| 065a6c1 | Compile calls of the math module through a Reference to the C library | +146 / −0 | +0 / −0 | +107 / −0 |
+| 5eef6ff | Compare the math domain error's text with the running interpreter's | +0 / −0 | +0 / −0 | +5 / −1 |
+| 503b07c | Pass the math Reference to native math calls as a borrowed pointer | +26 / −18 | +0 / −0 | +10 / −3 |
+| total | 37 compiler files, 10 other, 70 test files | +5,932 / −282 | +352 / −169 | +5,063 / −40 |
+
+All files: 117 changed, +11,347 / −491.
 
 ## CI
 
-To be updated at freeze.
+Every executed lane passed on four consecutive runs. Four macOS lanes were not assigned a runner, so
+no result is claimed for them. In particular, no result is claimed for macOS 3.10 or 3.14t.
