@@ -1787,11 +1787,11 @@ class _Rewrite(cst.CSTTransformer):
                 return None
             hold = self._take(view.call, view.depth, -3)
             start, stop, test = self._view_parts(view, hold)
-            x = _cast('_mx_cy.double', self.updated_of.get(id(plain[0].value), plain[0].value))
+            x, number = self._one_number(plain[0].value)
             native = self._m('search', o.ref(hold), start, stop, cst.Integer(str(view.depth)), x,
                              cst.Name('True' if right else 'False'))
             # T-5c: NaN (pandas sorts it last) is pandas' own
-            test = self._conjunction([test, cst.Comparison(x, [cst.ComparisonTarget(cst.Equal(), x)])])
+            test = self._conjunction([test, *number, cst.Comparison(x, [cst.ComparisonTarget(cst.Equal(), x)])])
             self._record(original, 'L8', view.call, view=view)
             return self._guarded(original, updated, view, test, native, 'i64')
         if func.attr.value in ('max', 'min') and not original.args and view.start is not None:
@@ -1809,11 +1809,11 @@ class _Rewrite(cst.CSTTransformer):
                 return None
             hold = self._take(view.call, view.depth, -3)
             start, stop, test = self._view_parts(view, hold)
-            x = _cast('_mx_cy.double', self.updated_of.get(id(original.args[0].value), original.args[0].value))
+            x, number = self._one_number(original.args[0].value)
             found = self._m('search', o.ref(hold), start, stop, cst.Integer(str(view.depth)), x, cst.Name('True'))
             row = cst.BinaryOperation(cst.BinaryOperation(start, cst.Add(), found), cst.Subtract(), cst.Integer('1'))
-            test = self._conjunction([test, cst.Comparison(found, [cst.ComparisonTarget(cst.GreaterThan(),
-                                                                                       cst.Integer('0'))])])
+            test = self._conjunction([test, *number, cst.Comparison(found, [cst.ComparisonTarget(cst.GreaterThan(),
+                                                                                                cst.Integer('0'))])])
             self._record(original, 'L6', view.call, view=view)
             return self._guarded(original, updated, view, test, self._label(view, hold, row))
         return None
@@ -1946,6 +1946,19 @@ class _Rewrite(cst.CSTTransformer):
             self._record(call, 'pandas', view.call, why)
         return why is not None
 
+    def _one_number(self, arg):
+        """``(x, tests)`` for the argument of an ordered lookup (asof, searchsorted): the C double the native lookup
+        takes, and the run-time tests before it. An argument Cython types as a C integer needs none; any other is
+        evaluated once and looked up natively only while it is one label (``is_label``): an array, a list or a
+        Series is pandas' own lookup, which returns an array as live does."""
+        value = self.updated_of.get(id(arg), arg)
+        if self.o.facts.is_int(arg) or isinstance(arg, (cst.Integer, cst.Float)):
+            return _cast('_mx_cy.double', value), []
+        self.o.key_count += 1
+        held = f'_mx_okey_{self.o.key_count}'
+        test = cst.parse_expression(f'{self.o.module}.is_label(({held} := {_code(value)}))')
+        return _cast('_mx_cy.double', cst.Name(held)), [test]
+
     def _asof(self, call, updated, error, whole_call=None):
         """``X.index.asof(x)`` on an int level of an ordered view, as the label (C long long); no label: the error
         of its consumer (``int()``: ValueError; a key: KeyError)."""
@@ -1961,11 +1974,10 @@ class _Rewrite(cst.CSTTransformer):
             return None
         hold = self._take(view.call, view.depth, -3)
         start, stop, test = self._view_parts(view, hold)
-        x = call.args[0].value
-        x = _cast('_mx_cy.double', self.updated_of.get(id(x), x))
+        x, number = self._one_number(call.args[0].value)
         # T-5c: pandas' asof of NaN differs by version (NaN on pandas 3, the last label on pandas 2.2): NaN is read
         # on pandas, so the result is live's on every supported version
-        test = self._conjunction([test, cst.Comparison(x, [cst.ComparisonTarget(cst.Equal(), x)])])
+        test = self._conjunction([test, *number, cst.Comparison(x, [cst.ComparisonTarget(cst.Equal(), x)])])
         row = self._m('asof_at', o.ref(hold), start, stop, cst.Integer(str(view.depth)), x, cst.Integer(str(error)))
         self._record(call, 'L6', view.call, view=view)
         return self._guarded(whole_call or call, updated, view, test, self._label(view, hold, row), 'i64')
