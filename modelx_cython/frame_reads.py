@@ -830,7 +830,7 @@ class FrameReads:
             what, field, table, level_or_key, extra = hold
             value = self._held_value(what, table, level_or_key, extra)
             return [cst.parse_statement(f'if self.{field} == 0:\n    try:\n        self.{field} = {value}\n'
-                                        f'    except Exception:\n        pass\n')]
+                                        f'    except Exception as _mx_unbound:\n        pass\n')]
         # one binding per receiver and item (or per call outside items): the frame's PreparedTable, or a table whose
         # every slot is -1; each read then takes its slot from the table by its signature id
         receiver = _code(hold.receiver)
@@ -840,10 +840,10 @@ class FrameReads:
                 f'    try:\n'
                 f'        self.{hold.table} = {m}.bind_ref({receiver})\n'
                 f'        self.{hold.state} = 1\n'
-                f'    except Exception:\n'
+                f'    except Exception as _mx_unbound:\n'
                 f'        self.{hold.table} = {m}.bind_ref(None)\n')]
         return [cst.parse_statement(f'try:\n    {hold.table} = {m}.bind_ref({receiver})\n'
-                                    f'except Exception:\n    {hold.table} = {m}.bind_ref(None)\n')]
+                                    f'except Exception as _mx_unbound:\n    {hold.table} = {m}.bind_ref(None)\n')]
 
     def _held_value(self, what, table, level_or_key, extra):
         """The value a held field takes: one plus a level code, or one plus the stored row of a key."""

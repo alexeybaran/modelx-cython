@@ -144,6 +144,9 @@ _HARMLESS_HANDLERS = frozenset(('StopIteration', 'KeyError', 'IndexError', 'Type
 
 def _catches_overflow(node):
     for part in lexical_nodes(node.body.body):
+        if (isinstance(part, cst.ExceptHandler) and part.name is not None
+                and dotted_name(part.name.name) == '_mx_unbound'):
+            continue    # a prepared-table hold: its try evaluates a receiver call or a per-item key, no C arithmetic
         if isinstance(part, cst.ExceptHandler):
             names = ([dotted_name(e.value) for e in part.type.elements] if isinstance(part.type, cst.Tuple)
                      else [dotted_name(part.type)] if part.type is not None else [None])
