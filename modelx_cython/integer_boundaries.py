@@ -118,7 +118,7 @@ _PROVIDER_RETURNS = {'word_int': 'int', 'word_double': 'float'}
 _TABLE_RETURNS = {
     'lcode': 'int', 'ocode': 'int', 'kcode': 'int', 'is_label': 'int', 'selects_rows': 'int',
     'missing_codes': 'int', 'hold_code': 'int', 'row_c': 'int', 'row_1': 'int', '_row_c': 'int', '_row_1': 'int',
-    'slot': 'int',
+    'slot': 'int', 'hold_row': 'int', 'i64_row': 'int', 'f64_row': 'float',
     'i64_c': 'int', 'i64_1': 'int', 'f64_c': 'float', 'f64_1': 'float', 'field_f64': 'float',
 }
 # unsigned 64-bit words of the numeric caches: keys and hashes, never an operand of formula arithmetic

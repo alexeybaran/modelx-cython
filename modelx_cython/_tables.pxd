@@ -97,6 +97,7 @@ cdef class PreparedTable:
     cdef Py_ssize_t row_search(self, long long combined) noexcept nogil
     cdef Py_ssize_t name_position(self, object label) except -2
     cdef Py_ssize_t code_obj(self, int level, object key) except -2
+    cdef Py_ssize_t row_key(self, object key) except -2
     cdef object object_at(self, Py_ssize_t row, Py_ssize_t slot)
 
 
@@ -108,6 +109,7 @@ ctypedef PyObject* PreparedRef
 cdef object bind_ref(object frame)
 cdef void renew() noexcept
 cdef Py_ssize_t hold_code(object table, int level, object value) except -2
+cdef Py_ssize_t hold_row(object table, object key) except -2
 cdef object object_field(PreparedRef ref, Py_ssize_t slot, Py_ssize_t row)
 cdef double field_f64(PreparedRef ref, Py_ssize_t row, object label) except? -1.0
 cdef object f64_box(double value)
@@ -234,6 +236,15 @@ cdef inline Py_ssize_t row_1(PreparedRef ref, Py_ssize_t c0) except -2:
     if row < 0:
         missing_codes(ref, &c0, 1)
     return row
+
+
+# a field of a row held per item or found per read (one plus the stored row)
+cdef inline double f64_row(PreparedRef ref, Py_ssize_t slot, Py_ssize_t row) noexcept nogil:
+    return (<PreparedTable>ref).f64_at(row - 1, slot - 1)
+
+
+cdef inline long long i64_row(PreparedRef ref, Py_ssize_t slot, Py_ssize_t row) noexcept nogil:
+    return (<PreparedTable>ref).i64_at(row - 1, slot - 1)
 
 
 # the slot of a read, through the table its item holds: one C load (a read stays pandas when it is <= 0)

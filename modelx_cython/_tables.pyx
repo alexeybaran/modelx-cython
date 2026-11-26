@@ -89,6 +89,22 @@ cdef class PreparedTable:
         code = (<dict>codes).get(key)
         return -1 if code is None else <Py_ssize_t>code
 
+    cdef Py_ssize_t row_key(self, object key) except -2:
+        """The stored row of a full key given as Python objects (a scalar, or a tuple), or -1."""
+        cdef Py_ssize_t[8] buffer
+        cdef Py_ssize_t code
+        cdef int level
+        if self.nlevels == 1:
+            return -1 if isinstance(key, tuple) else self.code_obj(0, key)
+        if not isinstance(key, tuple) or len(<tuple>key) != self.nlevels:
+            return -1
+        for level in range(self.nlevels):
+            code = self.code_obj(level, (<tuple>key)[level])
+            if code < 0:
+                return -1
+            buffer[level] = code
+        return self.row_codes(buffer, self.nlevels)
+
     cdef object object_at(self, Py_ssize_t row, Py_ssize_t slot):
         return (<tuple>self.objects[slot])[row]
 
@@ -411,6 +427,19 @@ cdef Py_ssize_t hold_code(object table, int level, object value) except -2:
         return -1
     code = (<PreparedTable>table).code_obj(level, value)
     return code + 1 if code >= 0 else -1
+
+
+cdef Py_ssize_t hold_row(object table, object key) except -2:
+    """One plus the stored row of ``key`` in a held table, for the fields of a row whose key is fixed per item; -1
+    when the table is not prepared or has no such row; -2 when a part of the key is not one label. A read takes
+    it only when it is positive, so pandas answers or raises otherwise."""
+    cdef Py_ssize_t row
+    if selects_rows(key) and not (type(key) is tuple and not any(selects_rows(part) for part in key)):
+        return -2
+    if table is None or table is _NOT_PREPARED:
+        return -1
+    row = (<PreparedTable>table).row_key(key)
+    return row + 1 if row >= 0 else -1
 
 
 cdef bint selects_rows(object key):

@@ -121,7 +121,8 @@ def compare(tmp_path, frames, cells, ids, sample_ids=None, spec=None):
 
 def native_reads(source, cell):
     """The prepared-table reads compiled into the formula of ``cell`` (its own function and the module functions it
-    calls), one runtime function name per read: each lowered read is ``(native if <slot test> else pandas)``."""
+    calls), one runtime function name per read: each lowered read is ``(native if <slot test> else pandas)``, a
+    field of a row local ``(native if <the row is stored> else pandas)``."""
     module = cst.parse_module(source)
     functions = {}
     for node in module.body:
@@ -141,7 +142,8 @@ def native_reads(source, cell):
 
     class Reads(cst.CSTVisitor):
         def visit_IfExp(self, node):
-            if re.match(r'\(*_mx_helper_\w+\.slot\(', module.code_for_node(node.test)):
+            # the native branch is taken on a slot of the prepared table (or on the stored row of a row local)
+            if re.match(r'\(*(_mx_helper_\w+\.slot\(|_mx_rw_\w+ >= 0)', module.code_for_node(node.test)):
                 # the read itself (a value kept as the numpy scalar pandas returns is boxed around it)
                 names = [n for n in re.findall(r'_mx_helper_\w+\.(\w+)\(', module.code_for_node(node.body))
                          if not n.endswith('_box')]

@@ -10,7 +10,8 @@ A class's ``HoldTable`` has one entry per held value, by kind:
   (``_mx_ta_<n>`` of the Cell's memoryview type, valid while ``_mx_ta_<n>_ready``), keyed by (receiver, Cell);
   see ``held_arrays``;
 - ``prepared`` and ``prepared_slot``: the PreparedTable of a pandas frame and whether it is bound, keyed by the
-  receiver; ``prepared_code``: one plus the level code of a key part fixed per item; see ``frame_reads``.
+  receiver; ``prepared_code``: one plus the level code of a key part fixed per item; ``prepared_row``: one
+  plus the stored row of a key fixed per item; see ``frame_reads``.
 
 Every field of a kind other than ``array`` is unbound at zero (None for the table), the state of a new item and
 of an item reset between policies. This module only names the fields and gives their declarations.
@@ -23,6 +24,9 @@ _KINDS = {
     'prepared_slot': ('_mx_tq_', 'Py_ssize_t', '_mx_cy.Py_ssize_t', '0'),
     # one plus the level code (-1 absent, -2 not one label), keyed by (table field, level, part)
     'prepared_code': ('_mx_tk_', 'Py_ssize_t', '_mx_cy.Py_ssize_t', '0'),
+    # one plus the stored row of a key (-1 absent or not prepared, -2 a key part not one label), keyed by
+    # (table field, key)
+    'prepared_row': ('_mx_tw_', 'Py_ssize_t', '_mx_cy.Py_ssize_t', '0'),
 }
 
 

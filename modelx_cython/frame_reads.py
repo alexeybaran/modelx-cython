@@ -6,8 +6,13 @@ operation runs on the frame itself.
 
 Recognised here, the receiver ``R`` a self-rooted zero-argument call of a cached Cell whose every traced value is a
 pandas DataFrame or Series with a unique index (``tracer.frame_schema``), or a local assigned once from such a call:
-``R.loc[key, "c"]`` / ``R.at[key, "c"]`` of a float64, int64 or object column, the key complete (one part per
-level); a Series ``R.loc[k]``, ``R.at[k]``, ``R[k]``.
+
+- ``R.loc[key, "c"]`` / ``R.at[key, "c"]`` of a float64, int64 or object column, the key complete (one part per
+  level); a Series ``R.loc[k]``, ``R.at[k]``, ``R[k]``;
+- fields of a row read without building the row: ``R.loc[key]["c"]``; ``row = R.loc[key]`` then ``row["c"]``; and
+  ``self.P()["c"]`` where P is a row cell, a cached zero-argument Cell whose formula is ``return R.loc[key]``. A
+  key fixed per item has its row held per item (``_mx_tw_<n>``); a field reads as pandas gives it in the row (an
+  int64 field of a row pandas widens to float64 is a float).
 
 Where a read is lowered:
 
@@ -44,7 +49,7 @@ MAX_PARTS = 6
 SEVERAL_ROWS = (cst.List, cst.ListComp, cst.Set, cst.Slice, cst.Tuple, cst.Lambda)
 MUTATORS = frozenset(('__setitem__', '__delitem__', 'update', 'insert', 'pop'))
 # the native reads of a cell value (pandas returns numpy.float64 / numpy.int64 for them)
-VALUE_READS = frozenset(('f64_1', 'f64_c', 'i64_1', 'i64_c'))
+VALUE_READS = frozenset(('f64_1', 'f64_c', 'i64_1', 'i64_c', 'f64_row', 'i64_row'))
 # calls whose result does not depend on whether the argument is a numpy scalar or a Python number
 NUMPY_NEUTRAL_CALLS = frozenset(('float', 'int', 'bool'))
 # calls that return one of their numeric arguments (its type goes on)
@@ -108,6 +113,92 @@ def item_constant(node, cached_call):
             and cached_call(node))
 
 
+def row_cells(module_node, cls_info):
+    """{cell: its ``R.loc[key]``} for the row cells of an item class: cached zero-argument Cells whose formula is
+    ``return R.loc[key]``, ``R`` a self-rooted zero-argument call and ``self`` the key's only free name, that no
+    other class of the module defines (or defines with the same formula, both plain Space classes), so that no
+    derived class can give the Cell another value."""
+    if cls_info.name not in cls_info.visitor.itemspace_classes:
+        return {}
+    classes = [n for n in getattr(module_node, 'body', ()) if isinstance(n, cst.ClassDef)]
+    own = next((c for c in classes if c.name.value == cls_info.name), None)
+    found = {}
+    for func in (own.body.body if own is not None else ()):
+        if not (isinstance(func, cst.FunctionDef) and func.name.value.startswith('_f_')):
+            continue
+        expr, name = _row_expression(func), func.name.value[3:]
+        if expr is not None and name in cls_info.cells and all(
+                _same_row_cell(own, other, name, expr) for other in classes if other is not own and any(
+                    isinstance(f, cst.FunctionDef) and f.name.value in ('_f_' + name, name) for f in other.body.body)):
+            found[name] = expr
+    return found
+
+
+def _body(func):
+    """The statements of a function without its docstring."""
+    body = list(func.body.body) if isinstance(func.body, cst.IndentedBlock) else [func.body]
+    if (body and isinstance(body[0], cst.SimpleStatementLine) and len(body[0].body) == 1
+            and isinstance(body[0].body[0], cst.Expr)
+            and isinstance(body[0].body[0].value, (cst.SimpleString, cst.ConcatenatedString))):
+        body = body[1:]
+    return body
+
+
+def _row_expression(func):
+    """The ``R.loc[key]`` of a formula ``return R.loc[key]`` (``self`` the key's only free name), else None."""
+    params = func.params
+    if (len(params.params) != 1 or params.params[0].name.value != 'self' or params.star_arg
+            not in (None, cst.MaybeSentinel.DEFAULT) or params.kwonly_params or params.star_kwarg
+            or params.posonly_params):
+        return None
+    body = _body(func)
+    if len(body) != 1 or not isinstance(body[0], cst.SimpleStatementLine) or len(body[0].body) != 1:
+        return None
+    ret = body[0].body[0]
+    expr = ret.value if isinstance(ret, cst.Return) else None
+    if not (isinstance(expr, cst.Subscript) and len(expr.slice) == 1 and isinstance(expr.slice[0].slice, cst.Index)
+            and expr.slice[0].slice.star is None and isinstance(expr.value, cst.Attribute)
+            and expr.value.attr.value == 'loc' and isinstance(expr.value.value, cst.Call) and not expr.value.value.args):
+        return None
+    root = expr.value.value.func
+    while isinstance(root, cst.Attribute):
+        root = root.value
+    if not (isinstance(root, cst.Name) and root.value == 'self'):
+        return None
+    names, plain = set(), [True]
+
+    class Names(cst.CSTVisitor):
+        def visit_Attribute(self, node):
+            node.value.visit(self)
+            return False
+
+        def visit_Name(self, node):
+            names.add(node.value)
+
+        def visit_Lambda(self, node):
+            plain[0] = False
+            return False
+        visit_GeneratorExp = visit_ListComp = visit_SetComp = visit_DictComp = visit_NamedExpr = visit_Lambda
+    expr.slice[0].slice.value.visit(Names())
+    if not plain[0] or names - {'self'}:
+        return None
+    return expr.with_changes(lpar=(), rpar=())
+
+
+def _same_row_cell(owner, other, name, expr):
+    """Two independent Space classes of the module define the same row cell with the same formula."""
+    base = cst.parse_expression('_mx_sys.BaseSpace')
+    for cls in (owner, other):
+        if (not cls.name.value.startswith('_c_') or len(cls.bases) != 1
+                or not cls.bases[0].value.deep_equals(base) or cls.decorators or cls.keywords):
+            return False
+    formulas = [f for f in other.body.body if isinstance(f, cst.FunctionDef) and f.name.value == '_f_' + name]
+    if len(formulas) != 1:
+        return False
+    found = _row_expression(formulas[0])
+    return found is not None and found.deep_equals(expr)
+
+
 class _Hold:
     """One (receiver, column, kind) a formula reads natively; ``table`` (and ``state`` in items) are the fields of
     the receiver's binding, shared by every read of that receiver."""
@@ -129,7 +220,8 @@ _NO_LABEL = object()
 class FrameReads:
     """``lower(node)`` returns the formula with recognised reads lowered (the node itself when none is)."""
 
-    def __init__(self, resolver, cls_info, cells, providers, *, builtin_int, builtin_float):
+    def __init__(self, resolver, cls_info, cells, providers, *, builtin_int, builtin_float, row_cells=None):
+        self.row_cells = row_cells or {}    # row cell of the class -> its ``R.loc[key]`` expression
         self.resolver, self.cls_info, self.cells = resolver, cls_info, cells
         self.providers = providers
         self.builtin_int, self.builtin_float = builtin_int, builtin_float
@@ -301,8 +393,9 @@ class FrameReads:
         self.module = module_name(PROVIDER)
         self.holds = {}         # (receiver code, label, kind) -> _Hold
         self.bindings = {}      # receiver code -> its binding (_Hold of the table field)
-        self.code_fields = {}
+        self.code_fields, self.row_fields = {}, {}
         self.mutated = self._mutated(node)
+        self.row_locals = self._row_locals(node)
         self.declarations = []  # C locals of the formula
         rewriter = _Rewrite(self)
         body = []
@@ -314,7 +407,7 @@ class FrameReads:
             body.append(new)
         if not self.holds:      # every lowered read takes a hold: nothing was lowered
             return node
-        body = self._drop_unused_locals(body, rewriter.replaced_names | set(rewriter.key_locals))
+        body = self._drop_unused_locals(body, rewriter.replaced_names | set(rewriter.key_locals) | set(rewriter.swaps))
         if self.declarations:
             from .key_facts import _is_docstring
             head = 1 if body and _is_docstring(body[0]) else 0
@@ -433,8 +526,60 @@ class FrameReads:
                                     f'except Exception:\n    {hold.table} = {m}.bind_ref(None)\n')]
 
     def _held_value(self, what, table, level_or_key, extra):
-        """The value a held field takes: one plus a level code."""
+        """The value a held field takes: one plus a level code, or one plus the stored row of a key."""
+        if what == 'row':
+            return f'{self.module}.hold_row(self.{table}, {_code(level_or_key)})'
         return f'{self.module}.hold_code(self.{table}, {level_or_key}, {_code(extra)})'
+
+    def _row_locals(self, node):
+        """``row = R.loc[key]`` (at any depth of the formula's own scope, ``row`` bound once), R a frame receiver of a
+        unique index and the key complete, every load of ``row`` a read of a literal column ``row["c"]`` or of a
+        computed one under ``float()``: {name: (R call, schema, the assignment)}."""
+        f, found = self.facts.formula, {}
+        owner = self
+
+        def field_reads(name, schema):
+            columns = dict(schema['columns'])
+            for use, nested in f.loads.get(name, ()):
+                sub = f.parents.get(id(use))
+                parts = _index_parts(sub) if isinstance(sub, cst.Subscript) else None
+                if nested or parts is None or sub.value is not use or len(parts) != 1:
+                    return False
+                if _literal_str(parts[0]) in columns:
+                    continue
+                up = f.parents.get(id(sub))
+                call = f.parents.get(id(up)) if isinstance(up, cst.Arg) else None
+                if not (isinstance(call, cst.Call) and isinstance(call.func, cst.Name) and call.func.value == 'float'
+                        and len(call.args) == 1 and _literal_str(parts[0]) is None and owner.builtin_float):
+                    return False
+            return True
+
+        class Scan(cst.CSTVisitor):
+            def visit_FunctionDef(inner, n):
+                return n is node
+
+            def visit_Lambda(inner, n):
+                return False
+
+            def visit_Assign(inner, n):
+                if not (len(n.targets) == 1 and isinstance(n.targets[0].target, cst.Name)
+                        and isinstance(n.value, cst.Subscript) and isinstance(n.value.value, cst.Attribute)
+                        and n.value.value.attr.value == 'loc'):
+                    return
+                name = n.targets[0].target.value
+                parts = _index_parts(n.value)
+                got = owner._receiver(n.value.value.value)
+                if (got is None or parts is None or len(parts) != 1 or got[1]['kind'] != 'frame'
+                        or not got[1].get('unique') or _code(got[0]) in owner.mutated or not owner._once(name)):
+                    return
+                levels, key = got[1]['levels'], parts[0]
+                if (len(levels) == 1) == isinstance(key, cst.Tuple) or (
+                        isinstance(key, cst.Tuple) and len(key.elements) != len(levels)):
+                    return
+                if field_reads(name, got[1]):
+                    found[name] = (got[0], got[1], n)
+        node.visit(Scan())
+        return found
 
     def read_signature(self, hold):
         """The id of the kinds a read is compiled for (index levels; every column for a row read by field; the
@@ -466,6 +611,18 @@ class FrameReads:
         # C integer (key_part): their code is held per item instead of looked up at every read
         return item_constant(part, self.cached_call) or (
             self._fixed_value(part) and not (level_kind == 'int' and self.facts.is_int(part)))
+
+    def fixed_part(self, part):
+        """A key part fixed per item: ``item_constant``, or one of ``_fixed_value``."""
+        return item_constant(part, self.cached_call) or self._fixed_value(part)
+
+    def row_field(self, hold, key_expr, emit=None):
+        """The item field holding one plus the stored row of ``key_expr`` (a key fixed per item)."""
+        key = (hold.table, _code(key_expr))
+        if key not in self.row_fields:
+            self.row_fields[key] = hold_table(self.cls_info).field('prepared_row', key)
+            self.new_items.append(('row', self.row_fields[key], hold.table, key_expr if emit is None else emit, None))
+        return self.row_fields[key]
 
     def _fixed_value(self, part):
         """A text literal, or ``self.R()["f"]`` with R a cached zero-argument cell (a field of a row cell): values
@@ -542,6 +699,7 @@ class _Rewrite(cst.CSTTransformer):
         self.o = owner
         self.replaced_names = set()
         self.key_locals = {}    # name of a key local -> its tuple display (the fallback evaluates the display)
+        self.swaps = {}         # row local -> the row cell call it stands for (fallbacks, dropped locals)
         self.native = {}        # id(lowered read) -> column kind, for float()/int() around it
         self.updated_of = {}    # id(original node) -> its rewritten node (key parts are emitted with their reads lowered)
 
@@ -707,16 +865,18 @@ class _Rewrite(cst.CSTTransformer):
     def _fallback(self, updated, call):
         """The original pandas read on the frame itself: a frame local replaced by its Cell call, a key local by
         its tuple display (so neither local is evaluated on the native path)."""
-        frames, keys = self.replaced_names, self.key_locals
+        frames, keys, swaps = self.replaced_names, self.key_locals, self.swaps
 
         class Swap(cst.CSTTransformer):
             def leave_Name(self, original, new):
+                if original.value in swaps:
+                    return swaps[original.value]
                 if original.value in frames:
                     return call
                 if original.value in keys:
                     return keys[original.value]
                 return new
-        return updated.visit(Swap()) if (frames or keys) else updated
+        return updated.visit(Swap()) if (frames or keys or swaps) else updated
 
     def _plain(self, call, schema):
         """The frame ``call`` is read as stored: not edited by the formula, of a unique index."""
@@ -733,7 +893,170 @@ class _Rewrite(cst.CSTTransformer):
         parts = _index_parts(original)
         if parts is None:
             return updated
-        return self.keyed_read(original, updated, value, parts) or updated
+        return (self.row_local_read(original, updated, parts) or self.row_cell_field(original, updated, parts)
+                or self._row_field(original, updated, parts) or self.keyed_read(original, updated, value, parts)
+                or updated)
+
+    # ------------------------------------------------------------------ fields of a row
+    @staticmethod
+    def _branch(test, native, fallback):
+        """``if test: native else: fallback`` (statements)."""
+        return cst.If(test=test, body=cst.IndentedBlock(body=native),
+                      orelse=cst.Else(body=cst.IndentedBlock(body=fallback)))
+
+    @staticmethod
+    def _assign(name, value):
+        return cst.SimpleStatementLine([cst.Assign([cst.AssignTarget(cst.Name(name))], value)])
+
+    def leave_SimpleStatementLine(self, original, updated):
+        """``row = R.loc[key]``: the stored row in a C local (KeyError as pandas); the pandas row only when the
+        table is not of the kinds the build traced (every column checked: kind -4) or a key part is not one label."""
+        o = self.o
+        if not (len(original.body) == 1 and isinstance(original.body[0], cst.Assign)):
+            return updated
+        name = original.body[0].targets[0].target
+        found = o.row_locals.get(name.value) if isinstance(name, cst.Name) else None
+        if found is None or found[2] is not original.body[0]:
+            return updated
+        call, schema, assign = found
+        hold = self._take(call, _NO_LABEL, -4)
+        hold.row_columns = True
+        key = _index_parts(assign.value)[0]
+        var = f'_mx_rw_{name.value}'
+        if var not in o.declarations:
+            o.declarations.append(var)
+        fallback = [cst.parse_statement(f'{var} = -1'),
+                    original.with_changes(body=[assign.with_changes(value=self._fallback(assign.value, call))])]
+        parts = _parts(key)
+        if o.per_item and o.cells.has_args() and all(o.fixed_part(p) for p in parts):
+            # a key fixed per item (``row = T.loc[cost_id()]`` in a per-step cell): the row held per item, looked
+            # up once, not at every step
+            field = o.row_field(hold, key, self._detached(key))
+            native = self._assign(var, cst.parse_expression(f'self.{field} - 1'))
+            return self._branch(self._native_test(hold, [cst.parse_expression(f'self.{field} > 0')]), [native],
+                                fallback)
+        (suffix, args), conditions = self._read_args(hold, parts, schema['levels'])
+        native = self._assign(var, self._m('row' + suffix, o.ref(hold), *args))
+        return self._branch(self._native_test(hold, conditions), [native], fallback)
+
+    def row_local_read(self, original, updated, parts):
+        """``row["c"]`` of a row local: the field from the prepared blocks, of the kind pandas gives it."""
+        o = self.o
+        value = original.value
+        found = o.row_locals.get(value.value) if isinstance(value, cst.Name) else None
+        if found is None or len(parts) != 1:
+            return None
+        call, schema, _ = found
+        valid = cst.parse_expression(f'_mx_rw_{value.value} >= 0')
+        label = _literal_str(parts[0])
+        if label is None:           # float(row[name]): the field chosen at run time
+            hold = self._take(call, _NO_LABEL, -4)
+            hold.row_columns = True
+            read = self._m('field_f64', o.ref(hold), cst.parse_expression(f'_mx_rw_{value.value} + 1'),
+                           _cast('object', self.updated_of.get(id(parts[0]), parts[0])))
+            return self._lowered(valid, read, updated, 'f64')
+        read, kind, _ = self._field_read(call, schema, label, lambda hold: (
+            cst.parse_expression(f'_mx_rw_{value.value} + 1'), []))
+        return self._lowered(valid, read, updated, kind)
+
+    def _field_read(self, call, schema, label, position):
+        """Field ``label`` of a stored row, of the kind pandas gives it: the column's own on a row with an object
+        column, else the row's common kind (an int column of a float row reads as a float). ``position(hold)``:
+        (the row + 1, its conditions). (read, kind, test)."""
+        o = self.o
+        kinds = dict(schema['columns'])
+        mixed = any(k == 'obj' for k in kinds.values())
+        kind = kinds[label] if mixed else ('f64' if any(k == 'f64' for k in kinds.values()) else 'i64')
+        stored = kinds[label]           # the block the column is stored in
+        hold = self._take(call, label, {'f64': 0, 'i64': 1, 'obj': 2}[stored])
+        hold.row_columns = True         # the row's dtype depends on every column: all of them are checked
+        row, conditions = position(hold)
+        read = self._m({'f64': 'f64_row', 'i64': 'i64_row', 'obj': 'object_field'}[stored], o.ref(hold), o.slot(hold),
+                       row)
+        if kind == 'f64' and stored == 'i64':
+            read = _cast('_mx_cy.double', read)
+        return read, (kind if kind in READ else None), self._native_test(hold, conditions)
+
+    def row_cell_field(self, original, updated, parts):
+        """``self.P()["f"]`` with P a row cell (``return T.loc[key]``, the key complete and fixed per item): the row
+        held per item, as ``T.loc[key]["f"]``; a computed field under ``float()`` reads the stored value as a float.
+        Compiled zero-argument Cells cannot be assigned, so P's value is always its formula's."""
+        o = self.o
+        call = original.value
+        local = call.value if isinstance(call, cst.Name) else None
+        if local is not None:                   # ``row = self.P()`` then ``row["f"]``
+            call = o._value_of(local) or call
+        if not (o.per_item and isinstance(call, cst.Call) and not call.args and isinstance(call.func, cst.Attribute)
+                and isinstance(call.func.value, cst.Name) and call.func.value.value == 'self'):
+            return None
+        row = o.row_cells.get(call.func.attr.value)
+        if row is None or not o.cached_call(call) or len(parts) != 1:
+            return None
+        if _literal_str(parts[0]) is not None:
+            if local is not None:       # the local is P() for the pandas branch, and is dropped once unread
+                self.swaps.setdefault(local, call)
+            return self._row_field(original.with_changes(value=row), updated, parts, held=True)
+        up = o.facts.formula.parents.get(id(original))
+        consumer = o.facts.formula.parents.get(id(up)) if isinstance(up, cst.Arg) else None
+        if not (isinstance(consumer, cst.Call) and isinstance(consumer.func, cst.Name) and consumer.func.value == 'float'
+                and len(consumer.args) == 1 and o.builtin_float):
+            return None
+        found = o._receiver(row.value.value)
+        key = _index_parts(row)[0]
+        if found is None or found[1]['kind'] != 'frame' or not self._plain(*found):
+            return None
+        levels = found[1]['levels']
+        fixed = _parts(key)
+        if len(fixed) != len(levels) or (len(levels) == 1 and isinstance(key, cst.Tuple)) or not all(
+                o.fixed_part(part) for part in fixed):
+            return None
+        hold = self._take(found[0], _NO_LABEL, -4)
+        hold.row_columns = True
+        field = o.row_field(hold, key, self._detached(key))
+        o.key_count += 1
+        local_name = f'_mx_name_{o.key_count}'
+        label = _cast('object', self.updated_of.get(id(parts[0]), parts[0]))
+        test = self._native_test(hold, [cst.parse_expression(f'self.{field} > 0'), cst.parse_expression(
+            f'{o.module}.is_label(({local_name} := {_code(label)}))')])
+        read = self._m('field_f64', o.ref(hold), cst.parse_expression(f'self.{field}'), cst.Name(local_name))
+        return self._lowered(test, read, updated, 'f64')
+
+    def _row_field(self, original, updated, parts, held=False):
+        """``R.loc[key]["f"]``, a field of a row of a frame: a key fixed per item has its row held per item (also the
+        key of a row cell, ``held``), any other key finds its row per read (KeyError as pandas when it has none); the
+        field is read from the prepared table, of the kind pandas gives it. None when not this form."""
+        o = self.o
+        row = original.value
+        if not (len(parts) == 1 and isinstance(row, cst.Subscript)
+                and isinstance(row.value, cst.Attribute) and row.value.attr.value == 'loc'):
+            return None
+        label = _literal_str(parts[0])
+        key_parts = _index_parts(row)
+        found = o._receiver(row.value.value)
+        if label is None or key_parts is None or len(key_parts) != 1 or found is None:
+            return None
+        call, schema = found
+        if schema['kind'] != 'frame' or not self._plain(call, schema) or label not in dict(schema['columns']):
+            return None
+        key = key_parts[0]
+        levels = schema['levels']
+        if (isinstance(key, cst.Tuple) and len(key.elements) != len(levels)) or (
+                not isinstance(key, cst.Tuple) and len(levels) != 1):
+            return None
+        per_read = not (o.per_item and all(o.fixed_part(part) for part in _parts(key)))
+        if per_read and held:
+            return None
+        if isinstance(row.value.value, cst.Name):
+            self.replaced_names.add(row.value.value.value)
+
+        def position(hold):
+            if per_read:
+                (suffix, cargs), labels = self._read_args(hold, _parts(key), levels)
+                return self._next(self._m('row' + suffix, o.ref(hold), *cargs)), labels
+            field = o.row_field(hold, key, self._detached(key))
+            return cst.parse_expression(f'self.{field}'), [cst.parse_expression(f'self.{field} > 0')]
+        read, kind, test = self._field_read(call, schema, label, position)
+        return self._lowered(test, read, self._fallback(updated, call), kind)
 
     def keyed_read(self, original, updated, value, parts):
         """``R.loc[key, "c"]`` / ``R.at[key, "c"]`` on a frame; ``R.loc[k]`` / ``R.at[k]`` / ``R[k]`` on a Series."""
