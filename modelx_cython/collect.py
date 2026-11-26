@@ -7,7 +7,7 @@ an ItemSpace has no ``collect``, as in live modelx). The compiled class adds ``_
 with the checked domain: each item is built (as ``__call__`` builds a new root, by ``item_roots``, for
 a Space without child Spaces; else by ``_mx_collect_item``), its ``collect_outputs()`` read and checked
 by the export's ``prepare_output``, and the item released when collect created it. A new item of a
-Space without child Spaces or dynamic References is kept by its worker thread when nothing else holds
+Space without child Spaces or dynamic References is kept in its worker's slot when nothing else holds
 it, returned to the state of a new object (``reset_function``: every declared attribute, from the
 class's own .pxd block) and built again on the same memory for the next coordinate. The outputs are added
 by the export's ``Accumulator`` in domain order, so the result is the one live modelx computes, bit
@@ -88,19 +88,23 @@ def hook(class_node, cls_name, refs, fast=True, reuse=False):
     params = ', '.join(p.name.value for p in item.params.params[1:])
     others = call.args[3].value
     lam = call.args[2].value
-    outputs_at = lam.with_changes(body=lam.body.with_changes(func=cst.Name('_mx_outputs')))
+    # the worker's slot first: the item it keeps between coordinates
+    outputs_at = lam.with_changes(
+        params=lam.params.with_changes(params=(cst.Param(cst.Name('_mx_spare')), *lam.params.params)),
+        body=lam.body.with_changes(func=cst.Name('_mx_outputs'),
+                                   args=(cst.Arg(cst.Name('_mx_spare')), *lam.body.args)))
     unpack = f'    {_code(others)} = args\n' if others.elements else ''
     apply = ('            _mx_fast._mx_apply_formula(%s)\n' % params
              if '_mx_apply_formula' in _code(item) else '')
     if reuse:
-        # one cleared item per worker thread: built again as __call__ builds a root, on the same object
+        # one cleared item per worker, in the worker's slot: built again as __call__ builds a root, on the same object
         built = (
             f'        if type(self) is {cls_name} and not self._mx_spaces and not self._mx_roots:\n'
-            f'            _mx_fast: {cls_name} = getattr(_mx_spare, "root", None)\n'
+            f'            _mx_fast: {cls_name} = _mx_spare[0]\n'
             f'            if _mx_fast is None:\n'
             f'                _mx_fast = {item_roots.new_root(cls_name)}(self)\n'
             f'            else:\n'
-            f'                _mx_spare.root = None\n'
+            f'                _mx_spare[0] = None\n'
             f'                _mx_fast.__init__(self)\n'
             f'                _mx_fast._mx_copy_refs(self, self)\n'
             f'                _mx_fast._mx_roots.append(_mx_fast)\n'
@@ -111,9 +115,8 @@ def hook(class_node, cls_name, refs, fast=True, reuse=False):
             f'            {item_roots.release_root(cls_name)}(_mx_fast)\n'
             f'            if _mx_owned and _mx_refcount(_mx_fast) == 1:     # held by nothing else\n'
             f'                {reset_root(cls_name)}(_mx_fast)\n'
-            f'                _mx_spare.root = _mx_fast\n'
+            f'                _mx_spare[0] = _mx_fast\n'
             f'            return _mx_out\n')
-        unpack += '    import threading\n    _mx_spare = threading.local()\n'
     elif fast:
         built = (
             f'        if type(self) is {cls_name} and not self._mx_spaces and not self._mx_roots:\n'
@@ -130,7 +133,7 @@ def hook(class_node, cls_name, refs, fast=True, reuse=False):
         f'\n'
         f'def _mx_collect_hook(self, coords, args):\n'
         f'{unpack}'
-        f'    def _mx_outputs({params}):\n'
+        f'    def _mx_outputs(_mx_spare, {params}):\n'
         f'        _mx_root = self._mx_itemspaces.get({_code(lookup.args[0].value)})\n'
         f'        if _mx_root is not None:\n'
         f'            return _mx_root.collect_outputs()\n'
@@ -235,8 +238,9 @@ def _mx_collect_evaluate(space, coords, outputs_at, refs, reads_parents):
                 raise ValueError(f'collect of {{name}} with {{workers}} workers: the Reference {{ref}} is a Space '
                                  'without a lock; export it in locked_spaces or use one worker')
     if workers == 1 or len(coords) == 1 or getattr(sys, '_is_gil_enabled', lambda: True)():
+        spare = [None]      # the worker's slot
         for c in coords:
-            accumulator.add(c, prepare_output(outputs_at(c), live))
+            accumulator.add(c, prepare_output(outputs_at(spare, c), live))
         return accumulator.result()
     import threading
     lock = threading.Lock()
@@ -244,6 +248,7 @@ def _mx_collect_evaluate(space, coords, outputs_at, refs, reads_parents):
     state = [0, 0, len(coords), None]       # next to take, next to add, stop, the first error
 
     def work():
+        spare = [None]
         while True:
             with lock:
                 i = state[0]
@@ -251,7 +256,7 @@ def _mx_collect_evaluate(space, coords, outputs_at, refs, reads_parents):
                     return
                 state[0] = i + 1
             try:
-                out = prepare_output(outputs_at(coords[i]), live)
+                out = prepare_output(outputs_at(spare, coords[i]), live)
             except BaseException as error:
                 with lock:
                     if i < state[2]:
