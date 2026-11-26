@@ -3025,9 +3025,11 @@ class _Rewrite(cst.CSTTransformer):
         view.used = True
         hold = self._take(view.call, _NO_LABEL, -1)
 
-        def membership(parts):
+        labels = []     # a part that is not one label at run time (a list, a mask, a Series) is pandas' own
+
+        def membership(parts, conditions=None):
             codes = list(view.codes) + [self._held(hold, level, part, []) if o.item_fixed(part, levels[level])
-                                        else self.code_of(hold, level, part, levels[level])
+                                        else self.code_of(hold, level, part, levels[level], conditions)
                                         for level, part in enumerate(parts, start=view.depth)]
             if view.depth + len(parts) == len(levels):
                 suffix, args = self.code_args(codes)
@@ -3037,14 +3039,14 @@ class _Rewrite(cst.CSTTransformer):
                                               *self._padded(codes)),
                                       [cst.ComparisonTarget(cst.GreaterThanEqual(), cst.Integer('0'))])
             return cst.UnaryOperation(cst.Not(), test) if isinstance(target.operator, cst.NotIn) else test
-        test = membership(own)
+        test = membership(own, labels)
         shape = []
         if runtime is not None:     # a tuple of another length: pandas (the native test fails)
             k, n = o.tuple_guards[_code(runtime[0])]
             test = self._lowered(cst.parse_expression(f'type({k}) is tuple'), membership(runtime), test)
             shape = [cst.parse_expression(f'(type({k}) is not tuple or len({k}) == {n})')]
         start, stop, native = self._view_parts(view, hold)
-        native = self._conjunction([native, *shape])
+        native = self._conjunction([native, *shape, *labels])
         if name is None and isinstance(index.value, cst.Name):
             self.replaced_names.add(index.value.value)
         self._record(original, 'L7', view.call, view=view)
