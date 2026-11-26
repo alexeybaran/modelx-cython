@@ -463,12 +463,33 @@ class RenameMembers(cst.CSTTransformer):
         enum = self._params[-1].get(original.value) if self._params else None
         if enum is None:
             return updated
-        parent = self._parent(original)
-        if (isinstance(parent, (cst.AssignTarget, cst.Param)) or not self._object_use(original)
-                or (isinstance(parent, cst.Attribute) and parent.attr is original)):
+        if not self._shows_class(original):
             return updated
         self.shown.add((*self._owners[-1], original.value))
         return self._member_of(enum, updated)
+
+    _SHOWING_BUILTINS = frozenset(('str', 'repr', 'format', 'ascii', 'type', 'isinstance', 'getattr', 'hasattr', 'id'))
+
+    def _shows_class(self, node):
+        """A site where the member's class shows: an attribute of it (``.name``), the first argument of
+        ``str``/``repr``/``format``/``type``/``isinstance``/``getattr``/..., an f-string field or a ``%`` operand.
+        Elsewhere the parameter stays the C integer, as in a formula that never shows its class."""
+        parent = self._parent(node)
+        if isinstance(parent, cst.Attribute):
+            return parent.value is node
+        if isinstance(parent, cst.FormattedStringExpression):
+            return True
+        if isinstance(parent, cst.BinaryOperation) and isinstance(parent.operator, cst.Modulo):
+            return parent.right is node and isinstance(parent.left, (cst.SimpleString, cst.ConcatenatedString))
+        if isinstance(parent, cst.Element) and isinstance(self._parent(parent), cst.Tuple):
+            outer = self._parent(self._parent(parent))
+            return (isinstance(outer, cst.BinaryOperation) and isinstance(outer.operator, cst.Modulo)
+                    and isinstance(outer.left, (cst.SimpleString, cst.ConcatenatedString)))
+        if isinstance(parent, cst.Arg):
+            call = self._parent(parent)
+            return (isinstance(call, cst.Call) and isinstance(call.func, cst.Name)
+                    and call.func.value in self._SHOWING_BUILTINS and call.args and call.args[0] is parent)
+        return False
 
     def _foreign_members(self, original):
         """Record a member constant of one class passed to a compiled Cell's parameter traced as another."""
