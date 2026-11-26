@@ -127,13 +127,30 @@ _TABLE_RETURNS = {
 }
 # unsigned 64-bit words of the numeric caches: keys and hashes, never an operand of formula arithmetic
 _WORD_RETURNS = frozenset(('int_word', 'value_word', 'double_word', 'key_word', 'mix', 'hash_step'))
+# C results of the reduction state (_reductions.pxd): the sum steps' error returns (int), the float results, the
+# size and integer items of exact tuples (tests/test_reduction_returns.py checks this header as
+# test_provider_returns checks the others)
+_REDUCTION_RETURNS = {
+    'f64_result': 'float', 'sum_result_f64': 'float', '_cs_value': 'float',
+    '_sum_generic': 'int', '_sum_whole': 'int', 'sum_add_f64': 'int', 'sum_add_ll': 'int', 'sum_add_bint': 'int',
+    'sum_add_object': 'int',
+    'tuple_int64': 'int', 'tuple_size': 'int', 'exact_tuple': 'int',
+}
+
+
+def native_return_kind(name):
+    """'int' or 'float' for a function of a native support header that returns a signed C integer or a C double,
+    'word' for an unsigned word of the numeric caches, else None."""
+    if name in _WORD_RETURNS:
+        return 'word'
+    return _PROVIDER_RETURNS.get(name) or _TABLE_RETURNS.get(name) or _REDUCTION_RETURNS.get(name)
 
 
 def _provider_call(value, kind):
     """A call of a native support helper (``_mx_helper_<hash>.name(...)``) whose C result is ``kind``."""
     return (isinstance(value, cst.Call) and isinstance(value.func, cst.Attribute)
             and isinstance(value.func.value, cst.Name) and value.func.value.value.startswith('_mx_helper_')
-            and (_PROVIDER_RETURNS.get(value.func.attr.value) or _TABLE_RETURNS.get(value.func.attr.value)) == kind)
+            and value.func.attr.value not in _WORD_RETURNS and native_return_kind(value.func.attr.value) == kind)
 
 
 # handlers that cannot catch the OverflowError of a flagged formula (the generated reductions catch
@@ -525,6 +542,13 @@ def _unbound_locals(node):
                                                  *node.params.kwonly_params)}
     names = sorted(name for name, count in facts.stores.items()
                    if count and name not in parameters and maybe_unbound(body, name, facts))
+    if names:
+        # C storage the code fills through its address (a reduction's state, an item read into a C integer): a
+        # Python object has no address, so such a local is a C variable whatever else reads it
+        addressed = {part.args[0].value.value for part in lexical_nodes(body)
+                     if isinstance(part, cst.Call) and dotted_name(part.func) == f'{CY_MOD}.address'
+                     and len(part.args) == 1 and isinstance(part.args[0].value, cst.Name)}
+        names = [name for name in names if name not in addressed]
     if not names:
         return node
     declared = {}

@@ -64,11 +64,24 @@ def describe(module_infos):
                     'guarded_integer_ops': getattr(cell, 'guarded_integer_ops', 0),
                     'object_locals': [{'local': name, 'reason': 'compared by identity (is / is not)'}
                                       for name in getattr(cell, 'python_object_locals', ())],
+                    **reductions(cell),
                     'cache_detail': cache_detail(cell, cache),
                     'slow_paths': slow_paths(cell, cache),
                     'reasons': reasons or ['original Cython representation'],
                 }
     return result
+
+
+def reductions(cell):
+    """The built-in reductions of a formula that has any: how many are native loops, those left to the built-in
+    (with the line and the reason) and those whose loop runs on Python objects. Nothing for other formulas."""
+    native, untyped = getattr(cell, 'reductions_native', 0), getattr(cell, 'reductions_untyped', ())
+    if not native and not untyped:
+        return {}
+    order = lambda entry: (entry['line'], entry['form'], entry['expr'])     # noqa: E731
+    return {'native_reductions': native,
+            'reductions_untyped': sorted(untyped, key=order),
+            'reductions_object': sorted(getattr(cell, 'reductions_object', ()), key=order)}
 
 
 def _declared_sizes(cls, cell):

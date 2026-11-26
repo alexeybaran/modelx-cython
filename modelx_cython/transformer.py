@@ -617,6 +617,7 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
         # a typed-memoryview Cell read by subscript is held per item (no slice copy per evaluation)
         node = held_arrays.lower(node, cls_info, cells, self._held_arrays)
         node = self._table_reads(node, cls_info, cells, scope)
+        node = self._reductions(node, cls_info, cells, scope)
         cells.formula_allows_exact_receiver = allows_exact_receiver(node, cls_info.name)
         node = rewrite_powers(
             node, self._resolver, self._cells_kinds, self._ref_kinds,
@@ -640,6 +641,32 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
         from modelx_cython import space_results
         if self._resolver is not None:
             node, _ = space_results.lower(node, cls_info, cells, scope, operand_kind, self._pin_held_item)
+        return node
+
+    def _reductions(self, node, cls_info, cells, scope):
+        """Built-in ``sum``/``min``/``max``/``any``/``all`` of one iterable as native loops (reductions.py), after the
+        table reads."""
+        from modelx_cython.reductions import BUILTIN_REDUCTIONS, NativeReductions, has_reduction_contract
+
+        def builtin(name):
+            return bool(scope[name]) and all(isinstance(binding, BuiltinAssignment) for binding in scope[name])
+        reductions = {name for name in BUILTIN_REDUCTIONS if builtin(name)}
+        if not has_reduction_contract(node, cls_info.refs, reductions):
+            return node
+        from modelx_cython.powers import formula_local_kinds, kind_of_type_expr, KIND_INT, KIND_FLOAT
+        bounds = all(isinstance(binding, BuiltinAssignment)
+                     for name in ('range', 'min', 'max', 'abs', 'StopIteration', 'RuntimeError')
+                     for binding in scope[name])
+        param_kinds = ({name: kind_of_type_expr(cells.get_argtype_expr(name, c_style=True, formula=True))
+                        for name in cells.params} if cells.has_args() and cells.has_typeinfo() else {})
+        local_kinds = formula_local_kinds(node, cells.params, self._resolver, self._cells_kinds,
+                                          self._ref_kinds, cls_info.fqname, param_kinds)
+        lowering = NativeReductions(
+            cls_info, cells, self.helper_providers, node, bounds, reductions,
+            formula_kinds={name: {KIND_INT: 'longlong', KIND_FLOAT: 'double'}[kind]
+                           for name, kind in local_kinds.items() if kind in (KIND_INT, KIND_FLOAT)})
+        node = node.visit(lowering)
+        cells.native_tuple_int_loops = getattr(lowering, 'tuple_int_loops', 0)
         return node
 
     def _table_reads(self, node, cls_info, cells, scope):

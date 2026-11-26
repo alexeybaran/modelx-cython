@@ -1,7 +1,8 @@
 """Native support sources (a .pyx/.pxd pair of this package) copied into a compiled model package.
 
 The numeric caches are such a pair: a Space class whose Cells use one cimports it under a private
-alias, and the build compiles the copy beside the model's modules.
+alias, and the build compiles the copy beside the model's modules. A provider without a .pyx is a header of
+inline code only (the reduction state): its .pxd is copied and nothing is compiled or imported at run time.
 """
 import hashlib
 from importlib import resources
@@ -25,7 +26,9 @@ def install(providers, model_path):
         if not package:
             raise ValueError('a native source must belong to a package')
         alias = module_name(provider)
-        for suffix in ('.pyx', '.pxd'):
+        header_only = not resources.files(package).joinpath(name + '.pyx').is_file()
+        for suffix in ('.pxd',) if header_only else ('.pyx', '.pxd'):
             (model_path / (alias + suffix)).write_bytes(read_resource(package, name + suffix))
-        modules.append(model_path.relative_to(model_path.parent) / (alias + '.pyx'))
+        if not header_only:
+            modules.append(model_path.relative_to(model_path.parent) / (alias + '.pyx'))
     return modules
