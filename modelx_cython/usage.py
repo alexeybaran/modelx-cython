@@ -109,15 +109,29 @@ class CellsResolver:
         refs_by_class: Mapping[str, Mapping[str, str]],
         spaces_by_class: Mapping[str, Mapping[str, str]],
         scalar_refs_by_class: Optional[Mapping[str, Set[str]]] = None,
+        locked_scalar_results: Optional[Mapping[str, str]] = None,
+        unlocked_scalar_results: Optional[Mapping[str, str]] = None,
     ) -> None:
         self._cells = cells_by_class
         self._refs = refs_by_class
         self._spaces = spaces_by_class
         self._scalar_refs = scalar_refs_by_class or {}
+        self.locked_scalar_results = locked_scalar_results or {}
+        self.unlocked_scalar_results = unlocked_scalar_results or {}
+        # cells with a cached formula; cell_rettype() reads the final C return type.
+        self.cached_cells = set()
+        self._cell_infos = {}
         self._name_index: Dict[str, List[str]] = {}
         for cells in cells_by_class.values():
             for name, fqname in cells.items():
                 self._name_index.setdefault(name, []).append(fqname)
+
+    def cell_rettype(self, fqname: str) -> Optional[str]:
+        """C return type of a typed, non-special cell, read when asked; None otherwise."""
+        cells = self._cell_infos.get(fqname)
+        if cells is None or cells.is_special() or not cells.has_typeinfo():
+            return None
+        return cells.get_rettype_expr(c_style=True)
 
     def resolve_chain(
         self, cls_fqname: str, chain: Sequence[str]
@@ -262,7 +276,7 @@ class UsageClassifier:
         Runs a :class:`UsageVisitor` over the module's CST; verdicts
         accumulate in ``self.verdicts`` across successive calls.
         """
-        wrapper.visit(UsageVisitor(module_fqname, self))
+        wrapper.visit(UsageVisitor(module_fqname, self, wrapper))
 
     def result(self) -> Dict[str, UsageVerdict]:
         """The accumulated verdicts, keyed by candidate cells fqname."""
@@ -321,7 +335,7 @@ class UsageClassifier:
         """Clear ``verdict.only_element_access`` and record the site as
         ``"<module>:<line> <reason>"``."""
         verdict.only_element_access = False
-        line = visitor.get_metadata(PositionProvider, node).start.line
+        line = visitor.position(node).start.line
         verdict.unsafe_sites.append(f"{visitor.module}:{line} {reason}")
 
     def _classify_use(
@@ -449,13 +463,19 @@ class UsageVisitor(cst.CSTVisitor, ParentScopeAddin):
     :meth:`UsageClassifier.handle_call`.
     """
 
-    METADATA_DEPENDENCIES = (ScopeProvider, ParentNodeProvider, PositionProvider)
+    METADATA_DEPENDENCIES = (ScopeProvider, ParentNodeProvider)
 
-    def __init__(self, module: str, classifier: UsageClassifier) -> None:
+    def __init__(self, module: str, classifier: UsageClassifier, wrapper=None) -> None:
         super().__init__()
         self.module = module
         self._classifier = classifier
         self._cls_stack: List[str] = []
+        self._wrapper = wrapper
+
+    def position(self, node):
+        """The PositionProvider range of ``node``, resolved on the wrapper visited (a codegen
+        of the whole module) only when an unsafe site asks for its line."""
+        return self._wrapper.resolve(PositionProvider)[node]
 
     def visit_ClassDef(self, node: cst.ClassDef) -> bool:
         """Push the class fqname for module-level space classes, or an
@@ -522,6 +542,9 @@ def build_resolver(module_infos) -> CellsResolver:
     refs_by_class: Dict[str, Dict[str, str]] = {}
     spaces_by_class: Dict[str, Dict[str, str]] = {}
     scalar_refs_by_class: Dict[str, Set[str]] = {}
+    locked_scalar_results: Dict[str, str] = {}
+    unlocked_scalar_results: Dict[str, str] = {}
+    cached_cells, cell_infos = set(), {}
 
     for fqname, info in module_infos.items():
         pkg, basename = fqname.rsplit(".", 1)
@@ -529,6 +552,14 @@ def build_resolver(module_infos) -> CellsResolver:
             cells_by_class[cls_info.fqname] = {
                 name: cells.fqname for name, cells in cls_info.cells.items()
             }
+            for cells in cls_info.cells.values():
+                if cells.has_formula_def:
+                    cached_cells.add(cells.fqname)
+                    cell_infos[cells.fqname] = cells
+                if (cells.has_formula_def and not cells.is_special() and not cells.has_args()
+                        and not cells.body_has_closure and not cells.called_with_kwargs):
+                    results = locked_scalar_results if cells.is_locked else unlocked_scalar_results
+                    results[cells.fqname] = cells.get_rettype_expr(c_style=True)
             refs_by_class[cls_info.fqname] = {
                 name: (ref.mx_class or "")
                 for name, ref in cls_info.refs.items()
@@ -547,8 +578,11 @@ def build_resolver(module_infos) -> CellsResolver:
                 attr: child_mod + "." + SPACE_PREF + attr
                 for attr in cls_info.spaces
             }
-    return CellsResolver(cells_by_class, refs_by_class, spaces_by_class,
-                         scalar_refs_by_class)
+    resolver = CellsResolver(cells_by_class, refs_by_class, spaces_by_class,
+                             scalar_refs_by_class, locked_scalar_results, unlocked_scalar_results)
+    resolver.cached_cells = cached_cells
+    resolver._cell_infos = cell_infos
+    return resolver
 
 
 def analyze_usage(units) -> Dict[str, UsageVerdict]:
