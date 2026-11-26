@@ -12,26 +12,35 @@ The modelx change that exports collect with the hook call must be merged first: 
 branch `pr/collect` (1aa21f4), seven commits on upstream main: two for dynamic References, five for collect. Without it
 a model exports no collect and the compiled class gains nothing. CI here installs upstream modelx, so it skips
 `tests/compiled/test_collect.py` as a whole (its four tests: values, workers key, reused items, reset rule); the
-borrowed-read tests run.
+borrowed-read tests run. The collect tests run in CI only on a branch that installs the modelx change; run
+45831454650 on c802f9b is pending.
 
 This change goes on top of the fast SEC change (`pr/fast-sec`, including its native math-module calls).
 
 ## Commits
 
-In order, on `pr/fast-sec` (bf9c28f):
+In order, on `pr/fast-sec` (f86f38d):
 
-| # | commit | non-test lines | test lines |
-|---|---|---|---|
-| 1 | Compile a Space declared with collect: the cache slot and the collect hook | +249 / -4 | +149 |
-| 2 | Reuse one item per worker thread in collect | +114 / -11 | +82 |
-| 3 | Borrow the held item of an exclusively owned item at a read | +17 / -5 | +146 / -3 |
+| # | commit | subject | non-test lines | test lines |
+|---|---|---|---|---|
+| 1 | 757eb98 | Compile a Space declared with collect: the cache slot and the collect hook | +249 / -4 | +149 |
+| 2 | 71a87ed | Reuse one item per worker thread in collect | +114 / -11 | +82 |
+| 3 | bc216a4 | Borrow the held item of an exclusively owned item at a read | +17 / -5 | +146 / -3 |
+| 4 | beda0ee | Refuse an unlocked Space Reference or a parent read at several workers on every build | +14 / -12 | |
+| 5 | c802f9b | Count the live items and objects after collect instead of resident memory | | +21 / -10 |
 
-Total: 10 files, +746 / -12. Commit 1 adds `collect.py`, its wiring in `config.py` (spec key `collect_workers`), `parser.py` and
+Total (f86f38d..c802f9b): 10 files, +759 / -12; net non-test +371 / -9, test +388 / -3.
+
+Commit 1 adds `collect.py`, its wiring in `config.py` (spec key `collect_workers`), `parser.py` and
 `transformer.py`, and its documentation (`spec.md`: `collect_workers`; `freethreading.md`: the run-time setting
 `_mx_collect_workers` and the refusal over unlocked Spaces). It keeps the export's `collect` property, which a
 decorated method of the export is, as a property and not a Cell, so an ItemSpace has no `collect`, as in live modelx;
 its test checks this; commit 2 changes `collect.py` and `transformer.py`; commit 3 changes
-`space_results.py` and, as its message states, also changes the direct route.
+`space_results.py` and, as its message states, also changes the direct route. Commit 4 moves the refusals of
+`collect.py` ahead of its one-thread path, so that an unlocked Space Reference or a parent read at several workers
+raises on every interpreter build, with or without the GIL. Commit 5 replaces the resident-memory bound of the
+reused-items test, whose unit differs by platform and whose `resource` module Windows lacks, by a direct count of the
+live items and of the objects the garbage collector tracks after collect of 20 and of 3,000 coordinates.
 
 **Declaration and evaluator.** The compiled class declares the collect cache and defines the hook from the exported
 `collect` and `_mx_collect_item` methods. For each coordinate the hook builds the item as `__call__` builds a new
@@ -39,7 +48,7 @@ root, reads `collect_outputs()`, checks and detaches it with the export's own `p
 when collect created it; an existing ItemSpace is used and kept. The export's `Accumulator` adds the outputs in domain
 order. Workers: the spec key `collect_workers` (default 1) or `_mx_collect_workers` on the compiled model object.
 With more than one, items run on that many threads from a shared index; outputs are added in domain order as they
-complete. With the GIL one worker runs.
+complete. With the GIL, several workers compute serially on one thread, with the same values and errors.
 
 **Reused receiver.** A new item that nothing else holds is kept by its worker thread and returned to the state of a
 new object before the next coordinate, then built again on the same memory. The reset is generated in the class's
@@ -59,7 +68,8 @@ held item: the direct route (items built by `Projection[k]`) as well as collect.
 - An error raises the exception of the first failing coordinate in domain order, at any number of workers.
 - An ItemSpace has no `collect`, as in live modelx: reading it raises `AttributeError` and `hasattr` is False, in
   live modelx, the export and the compiled model.
-- Items collect creates are released: peak memory does not grow with the number of items, at one worker or four.
+- Items collect creates are released: the live items and tracked objects after collect do not grow with the number
+  of items, at one worker or four.
 - A reused item holds nothing from the previous coordinate (tested on every cache kind, on a Cell reached by one
   coordinate only and on one reached by every other coordinate; a reset that skips the flag arrays fails the test).
 - Python 3.10 and later, with and without the GIL; the full upstream suite passes unchanged.
@@ -68,7 +78,7 @@ held item: the direct route (items built by `Projection[k]`) as well as collect.
 
 - More than one worker requires every Space the items read to be locked. A Reference of the collect Space to a Space
   without a lock, or a formula of it reading `_model`, `_parent` or `_space`, raises `ValueError` naming it before
-  any thread starts. A model satisfies it by exporting those Spaces in `locked_spaces`; one worker always runs.
+  any thread starts, on every interpreter build. A model satisfies it by exporting those Spaces in `locked_spaces`; one worker always runs.
   Locked Cells read their computed values without the lock; a miss takes the model lock, so concurrent first fills
   of a locked Space run one at a time.
 - Collect releases only the items of the collect Space. ItemSpaces of other Spaces that its items create stay in
