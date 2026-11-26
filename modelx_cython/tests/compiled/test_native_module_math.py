@@ -64,12 +64,16 @@ def test_module_math_bound_at_build_time(tmp_path):
     def helpers(name):
         return {h.rsplit('.', 1)[-1] for h in entry(name)['native_helpers']}
 
+    # erf, exp, log, sqrt and isinf on the math module are lowered by native_math.py (the Reference borrowed), not
+    # by the provider
+    source = (tmp_path / 'exported_cy/_mx_classes.py').read_text(encoding='utf-8')
     for name in ('erf', 'exp', 'log', 'sqrt', 'isinf'):
-        assert f'm_{name}' in helpers(name), (name, helpers(name))
+        assert f'_mx_sys._mx_math_{name}(' in source and f'm_{name}' not in helpers(name), (name, helpers(name))
     assert 'm_floor_ll' in helpers('down') and 'm_ceil_ll' in helpers('up'), (helpers('down'), helpers('up'))
     used = set().union(*(helpers(name.rsplit('._f_', 1)[-1]) for name in report))
     assert {'m_floor_ll', 'm_constant', 'm_floor'} <= used, used   # m_floor: the unsampled (object) argument
-    assert entry('down')['return_type'] == 'long long' and entry('loglin')['native_expressions'] == 4
+    assert entry('down')['return_type'] == 'long long'
+    assert source.count("'Values.loglin')") == 4      # its exp and three logs, each a native_math.py call
     # W1.8: math.isclose compiles (m_isclose); test_native_builtins_w18 compares it
     assert entry('close')['expressions_untyped'] == [] and 'm_isclose' in helpers('close')
     assert '2 arguments' in entry('base_two')['expressions_untyped'][0]['reason']
