@@ -27,6 +27,15 @@ o, c = original.Projection, compiled.Projection
 for t in range(0, 300, 7):
     assert o.matches(t) == c.matches(t) and o.code(t, Status(t % 2)) == c.code(t, Status(t % 2)), t
 assert c.Status is Status
+# a family's members are in the code: a class whose definition changed after compilation is refused at load
+for parent in (type(c), type('Middle', (type(c),), {})):
+    invalid = type('ChangedSchema', (parent,), {'Status': object()})
+    try:
+        invalid(compiled)
+    except TypeError as actual:
+        assert 'Status' in str(actual) and 'rebuild' in str(actual), actual
+    else:
+        raise AssertionError('changed compiled definition was accepted')
 try:
     c.Status = SimpleNamespace(OK=201)
 except AttributeError:

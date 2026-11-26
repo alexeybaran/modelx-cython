@@ -106,6 +106,12 @@ s.Status=SimpleNamespace(OK=201)
 assert s.matches(201) is True and s.matches(200) is False
 s.Status=HTTPStatus
 assert s.matches(200) is True
+# nor is a class whose definition changed after compilation refused (a family's is: test_enum_by_type). It is
+# accepted, as any class over a Space with ordinary References; given its References, its formulas read them
+# as modelx does (a Reference the instance is never given is not read from the class in compiled code)
+changed=type('ChangedSchema',(type(s),),{'Status':SimpleNamespace(OK=201)})(mx_model)
+changed._mx_copy_refs(s,s)
+assert changed.matches(200) is True and changed.matches(201) is False
 v=mx_model.VirtualValues
 v.Status=SimpleNamespace(OK=201)
 assert v.matches(200) is False and v.matches(201) is True
