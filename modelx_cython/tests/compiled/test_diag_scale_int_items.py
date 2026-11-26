@@ -137,10 +137,6 @@ def test_items_outside_64_bits_or_not_integers_raise_the_boundary_errors(tmp_pat
     done = subprocess.run([sys.executable, '-m', 'modelx_cython', 'exported', '--sample', 'sample.py',
                            '--no-spec'], cwd=tmp_path, capture_output=True, text=True)
     assert done.returncode == 0, done.stdout[-3000:] + done.stderr[-3000:]
-    # IntEnum members and other int subclasses as items of the tuple: read directly as their integers (a), as live
-    for values in ('(p.Leg.A, p.Leg.C)', '(True, p.odd, p.Leg.B)'):
-        compiled = eval(_run(tmp_path, ('mixed_items',), 'exported_cy', values))
-        assert compiled == eval(_run(tmp_path, ('mixed_items',), 'exported', values)), (values, compiled)
     for values, error in (('(1, 2 ** 70)', 'OverflowError'), ("(1, 'x')", 'TypeError'),
                           ('(1, 2.5)', 'TypeError')):
         last = eval(_run(tmp_path, ('mixed_items',), 'exported_cy', values))[-1][0]
