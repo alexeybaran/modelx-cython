@@ -50,10 +50,26 @@ ONLY_RAISED_WHY = 'every evaluation of this place raised in the sample (no evide
 # kinds of a call's result in the sample (read_notes.kind) that are a single number
 ONE_NUMBER = frozenset(('int', 'float', 'bool'))
 MUTATORS = frozenset(('__setitem__', '__delitem__', 'update', 'insert', 'pop'))
+# the native reads of a cell value (pandas returns numpy.float64 / numpy.int64 for them)
+VALUE_READS = frozenset(('f64_1', 'f64_c', 'i64_1', 'i64_c', 'f64_row', 'i64_row'))
+# calls whose result does not depend on whether the argument is a numpy scalar or a Python number
+NUMPY_NEUTRAL_CALLS = frozenset(('float', 'int', 'bool'))
+# calls that return one of their numeric arguments (its type goes on)
+NUMPY_PASSING_CALLS = frozenset(('abs', 'min', 'max', 'sum'))
 
 
 def _code(node):
     return cst.Module(body=()).code_for_node(node)
+
+
+def _value_read(read):
+    """The native read of a cell value in ``read`` (possibly cast to a C type), else None."""
+    if (isinstance(read, cst.Call) and _code(read.func) == '_mx_cy.cast' and len(read.args) == 2
+            and _code(read.args[0].value) in CTYPE.values()):
+        read = read.args[1].value
+    if isinstance(read, cst.Call) and isinstance(read.func, cst.Attribute) and read.func.attr.value in VALUE_READS:
+        return read
+    return None
 
 
 class _ReadSources(cst.CSTVisitor):
@@ -110,6 +126,13 @@ class _Hold:
 
     def __init__(self, table, state, receiver, label, kind):
         self.table, self.state, self.receiver, self.label, self.kind = table, state, receiver, label, kind
+
+
+class _EveryReceiver(frozenset):
+    """The receivers a formula edits when an edit goes through a name that may be any of them: all."""
+
+    def __contains__(self, item):
+        return True
 
 
 class FrameReads:
@@ -264,6 +287,93 @@ class FrameReads:
         levels, level = found[1]['levels'], int(expr.slice[0].slice.value.value, 0)
         return 1 < len(levels) <= 8 and 0 <= level < len(levels) and levels[level] == 'int'
 
+    def numpy_use(self, node, kind, seen=None):
+        """Whether the value of the cell read ``node`` (an original node of this formula) reaches a use where a
+        numpy scalar and a C number give different values without raising: ``round`` or a method of it, an
+        integer power, a container, an argument of a call other than ``float``/``int``/``bool``, ``math.*`` or a Cell
+        of the model, a return of a Cell that is not of a C type. Through ``+ - * / // %`` (equal values; a
+        division by zero raises where numpy gives inf or nan), unary minus, ``abs``/``min``/``max``/``sum``,
+        conditionals and locals the value keeps its type (live: numpy's); a comparison, a truth test, a key part,
+        ``float()``/``int()`` and a C result end it."""
+        parents = self.facts.formula.parents
+        seen = set() if seen is None else seen
+        current = node
+        while True:
+            parent = parents.get(id(current))
+            if isinstance(parent, cst.BinaryOperation):
+                op = parent.operator
+                if isinstance(op, cst.Power):
+                    if kind != 'f64' and not (current is parent.left and isinstance(parent.right, cst.Integer)):
+                        return True
+                elif not isinstance(op, (cst.Add, cst.Subtract, cst.Multiply, cst.Divide, cst.FloorDivide,
+                                         cst.Modulo)):
+                    return True     # (a division by zero raises where numpy gives inf or nan: compiled raises)
+            elif isinstance(parent, cst.UnaryOperation):
+                if isinstance(parent.operator, cst.Not):
+                    return False
+                if not isinstance(parent.operator, (cst.Minus, cst.Plus)):
+                    return True
+            elif isinstance(parent, (cst.ComparisonTarget, cst.Comparison)):
+                return False
+            elif isinstance(parent, (cst.If, cst.While)):
+                return False
+            elif isinstance(parent, cst.IfExp):
+                if current is parent.test:
+                    return False
+            elif isinstance(parent, cst.BooleanOperation):
+                pass
+            elif isinstance(parent, (cst.Index, cst.SubscriptElement)):
+                return False        # a key part: looked up by its value
+            elif isinstance(parent, cst.Arg):
+                call = parents.get(id(parent))
+                if not isinstance(call, cst.Call) or parent.keyword is not None or parent.star:
+                    return True
+                func = call.func
+                if isinstance(func, cst.Name) and func.value in NUMPY_NEUTRAL_CALLS:
+                    return False
+                if isinstance(func, cst.Name) and func.value in NUMPY_PASSING_CALLS:
+                    parent = call
+                elif (isinstance(func, cst.Attribute) and isinstance(func.value, cst.Name)
+                      and func.value.value == 'math'):
+                    return False
+                elif (isinstance(func, cst.Attribute) and isinstance(func.value, cst.Name)
+                      and func.value.value == 'self' and self.cached_call(cst.Call(func=func))):
+                    return False    # a Cell of the model: its C parameter, as upstream
+                else:
+                    return True
+            elif isinstance(parent, cst.GeneratorExp) and current is parent.elt:
+                arg = parents.get(id(parent))
+                call = parents.get(id(arg))
+                if not (isinstance(arg, cst.Arg) and isinstance(call, cst.Call) and isinstance(call.func, cst.Name)
+                        and call.func.value in NUMPY_PASSING_CALLS):
+                    return True
+                parent = call
+            elif isinstance(parent, cst.Return):
+                try:
+                    result = '' if self.cells.native_result_binder else self.cells.get_rettype_expr()
+                except Exception:
+                    result = ''
+                return not (result.startswith('_mx_cy.') and result != '_mx_cy.object')
+            elif isinstance(parent, cst.Expr):
+                return False
+            elif isinstance(parent, (cst.Assign, cst.AnnAssign, cst.AugAssign)) and current is parent.value:
+                if isinstance(parent, cst.AugAssign) and not isinstance(
+                        parent.operator, (cst.AddAssign, cst.SubtractAssign, cst.MultiplyAssign, cst.DivideAssign,
+                                          cst.FloorDivideAssign, cst.ModuloAssign)):
+                    return True
+                targets = ([t.target for t in parent.targets] if isinstance(parent, cst.Assign) else [parent.target])
+                if len(targets) != 1 or not isinstance(targets[0], cst.Name):
+                    return True
+                name = targets[0].value
+                if name in seen:
+                    return False
+                seen.add(name)
+                loads = self.facts.formula.loads.get(name) or ()
+                return any(nested or self.numpy_use(load, kind, seen) for load, nested in loads)
+            else:
+                return True
+            current = parent
+
     def _once(self, name):
         """``name`` is bound once by an assignment of the formula (not a parameter, a loop target or another binding)."""
         f = self.facts.formula
@@ -305,19 +415,19 @@ class FrameReads:
 
     def _receiver(self, expr):
         """(cell call, schema) when ``expr`` is a frame receiver, else None. In an item class a frame or row the item
-        computes itself is prepared per item: it is one only when the reading formula is evaluated at least
-        ``PREPARE_MIN_EVALUATIONS`` times per item in the sample (T-5c), so that the preparation pays for itself;
-        a formula evaluated fewer times reads it on pandas."""
+        computes itself is prepared per item (about 0.3-2M instructions; a pandas read costs 20-100k): it is one only
+        for a formula with parameters, evaluated once per step, so that the preparation pays for itself; a formula
+        without parameters, evaluated once per item, reads it on pandas. Decided from the text, not from how often
+        the sample evaluated the formula."""
         schema = self._schema_of_call(expr)
         found = (expr, schema) if schema is not None else None
         if found is None:
             value = self._value_of(expr.value) if isinstance(expr, cst.Name) else None
             schema = self._schema_of_call(value) if value is not None else None
             found = (value, schema) if schema is not None else None
-        if found is not None and getattr(self, 'per_item', False) and self.published(found[0]) is None:
-            evaluations = getattr(getattr(self.cells, '_rt', None), 'max_evaluations_per_receiver', 0) or 0
-            if evaluations < PREPARE_MIN_EVALUATIONS:
-                return None
+        if (found is not None and getattr(self, 'per_item', False) and not self.cells.has_args()
+                and self.published(found[0]) is None):
+            return None
         return found
 
     def param_prefix(self, expr):
@@ -523,13 +633,23 @@ class FrameReads:
     def _mutated(self, node):
         """Codes of the receivers the formula itself edits in place (an assignment or ``del`` through them,
         ``__setitem__``/``__delitem__``/``update``/``insert``/``pop``, or any call with ``inplace``): their
-        reads stay pandas, so an edit is read as it is made, as live."""
-        owner, found = self, set()
+        reads stay pandas, so an edit is read as it is made, as live. An edit through a local bound to a receiver
+        (``w = df``) edits the receiver; one through a name bound in a way not followed (a loop target, unpacking,
+        ``self``) may edit any of them: every read of the formula then stays pandas."""
+        owner, found, f = self, set(), self.facts.formula
+        unknown = []
 
-        def note(expr):
-            got = owner._receiver(owner._root(expr))
+        def note(expr, seen=()):
+            root = owner._root(expr)
+            got = owner._receiver(root)
             if got is not None:
                 found.add(_code(got[0]))
+            if not isinstance(root, cst.Name) or root.value in seen:
+                return
+            if root.value == 'self' or root.value in f.other:
+                unknown.append(root.value)
+            for value in f.values.get(root.value, ()):
+                note(value, (*seen, root.value))
 
         class Scan(cst.CSTVisitor):
             def visit_Assign(self, n):
@@ -554,7 +674,7 @@ class FrameReads:
                         or any(a.keyword is not None and a.keyword.value == 'inplace' for a in n.args)):
                     note(n.func.value)
         node.visit(Scan())
-        return found
+        return _EveryReceiver() if unknown else found
 
     @staticmethod
     def _flatten(body):
@@ -567,12 +687,36 @@ class FrameReads:
         """A frame local whose every use was lowered is no longer evaluated (no Cell call, no reference). Repeated
         until nothing more is dropped: dropping a view's assignment can leave its frame local unused (T-5c)."""
         out = self._flatten(body)
+        guards = {view.start.value: view.name for view in self.views.values() if view.start is not None}
+
+        def guarded_value(node):
+            """The value of `if <start> < 0: <view> = value`, the copy of a view's assignment that runs only where
+            its rows are not found: its target is no use of the view, so the assignment itself can still go."""
+            test, block = node.test, node.body.body
+            if (node.orelse is None and isinstance(test, cst.Comparison) and isinstance(test.left, cst.Name)
+                    and len(test.comparisons) == 1 and isinstance(test.comparisons[0].operator, cst.LessThan)
+                    and isinstance(zero := test.comparisons[0].comparator, cst.Integer) and zero.value == '0'
+                    and len(block) == 1 and isinstance(block[0], cst.SimpleStatementLine)
+                    and len(block[0].body) == 1 and isinstance(assign := block[0].body[0], cst.Assign)
+                    and len(assign.targets) == 1 and isinstance(assign.targets[0].target, cst.Name)
+                    and guards.get(test.left.value) == assign.targets[0].target.value):
+                return assign.value
+            return None
+
         while True:
             loads = {}
 
             class Loads(cst.CSTVisitor):
                 def visit_Name(self, name):
                     loads[name.value] = loads.get(name.value, 0) + 1
+
+                def visit_If(self, node):
+                    value = guarded_value(node)
+                    if value is None:
+                        return True
+                    loads[node.test.left.value] = loads.get(node.test.left.value, 0) + 1
+                    value.visit(self)
+                    return False
             cst.Module(body=out).visit(Loads())
             kept = []
             for statement in out:
@@ -586,7 +730,10 @@ class FrameReads:
             out = kept
 
     def _hold_statements(self, hold):
-        """The statements that resolve one hold, placed before the top-level statement of its first read."""
+        """The statements that resolve one hold, placed before the top-level statement of its first read. That
+        statement may not reach the read (a branch not taken): a hold whose evaluation raises is left unresolved (a
+        table: one whose every read stays pandas), so that the error is raised by the read's own pandas branch, where
+        live raises it, or not at all."""
         m = self.module
         if isinstance(hold, tuple):         # T-4: a held code or row, after the hold of its table
             what, field, table, level_or_key, extra = hold
@@ -599,7 +746,8 @@ class FrameReads:
                 value = f'{level_or_key} + 2'
             else:
                 value = f'{m}.hold_row(self.{table}, {_code(level_or_key)}, False)'
-            return [cst.parse_statement(f'if self.{field} == 0:\n    self.{field} = {value}\n')]
+            return [cst.parse_statement(f'if self.{field} == 0:\n    try:\n        self.{field} = {value}\n'
+                                        f'    except Exception:\n        pass\n')]
         # T-4.2: one binding per receiver and item (or per call outside items): the frame's PreparedTable, or a
         # table whose every slot is -1; each read then takes its slot from the table by its signature id
         function = 'bind_ref_checked' if getattr(self.policy, 'verify_inputs', False) else 'bind_ref'
@@ -611,9 +759,13 @@ class FrameReads:
             value = held if held is not None and function == 'bind_ref' else f'{m}.{function}({receiver})'
             return [cst.parse_statement(
                 f'if self.{hold.state} == 0:\n'
-                f'    self.{hold.table} = {value}\n'
-                f'    self.{hold.state} = 1\n')]
-        return [cst.parse_statement(f'{hold.table}: object = {m}.{function}({receiver})')]
+                f'    try:\n'
+                f'        self.{hold.table} = {value}\n'
+                f'        self.{hold.state} = 1\n'
+                f'    except Exception:\n'
+                f'        self.{hold.table} = {m}.bind_own(None)\n')]
+        return [cst.parse_statement(f'try:\n    {hold.table} = {m}.{function}({receiver})\n'
+                                    f'except Exception:\n    {hold.table} = {m}.bind_own(None)\n')]
 
     # ------------------------------------------------------------------ T-5: views of a prefix
     def view_assignment(self, statement):
@@ -1047,10 +1199,6 @@ class FrameReads:
 
 _NO_LABEL = object()
 
-# T-5c: in an item class, a frame the item computes itself is prepared (about 0.3-2M instructions, once per item)
-# only for a formula evaluated at least this many times per item; a pandas read costs about 20-100k instructions
-PREPARE_MIN_EVALUATIONS = 8
-
 
 # T-5c: attributes of a pandas object whose subscript is a pandas selection (a bool key is passed as the Python bool)
 PANDAS_INDEXERS = frozenset(('index', 'iloc', 'loc', 'at', 'iat', 'columns'))
@@ -1209,6 +1357,7 @@ class _Rewrite(cst.CSTTransformer):
         self.key_locals = {}    # name of a key local -> its tuple display (the fallback evaluates the display)
         self.asof_rows = {}     # asof local -> (membership hold, prefix cell call, asof expression)
         self.native = {}        # id(lowered read) -> column kind, for float()/int() around it
+        self.float_only = set()     # ids of float64 reads kept as objects for a text key part (_lowered)
         self.taken = []         # T-5c: kinds of the holds taken since the last recorded read (its run-time fallbacks)
         self.emitted_inline_assignments = set()
         self.generator_walks = set()    # T-5c: ids of lowered generator walks (``gen if test else pandas gen``)
@@ -1217,6 +1366,12 @@ class _Rewrite(cst.CSTTransformer):
 
     def on_leave(self, original, updated):
         result = super().on_leave(original, updated)
+        kind = self.native.get(id(result))
+        if (kind in CTYPE and result is not updated and isinstance(original, cst.Subscript)
+                and isinstance(result, cst.IfExp) and _value_read(result.body) is not None
+                and self.o.numpy_use(original, kind)):
+            del self.native[id(result)]
+            result = self._boxed(result, kind)
         self.updated_of[id(original)] = result
         if result is not updated and isinstance(original, (cst.Subscript, cst.Call, cst.Comparison, cst.For,
                                                              cst.GeneratorExp, cst.ListComp)):
@@ -1338,13 +1493,15 @@ class _Rewrite(cst.CSTTransformer):
         of the Python value (looked up as pandas does)."""
         o = self.o
         arg, how = o.key_part(part, kind, self.updated_of.get(id(part)))
-        if (how == 'typed' and conditions is not None and not o.facts.is_int(part)
-                and o.facts.int_argument(part) is None):
-            # not known to be a C integer from the text: the read is native only while the part names one label.
+        if conditions is not None and (
+                (how == 'typed' and not o.facts.is_int(part) and o.facts.int_argument(part) is None)
+                or (how == 'object' and _literal_str(part) is None)):
+            # not known to be one label from the text (a C integer, a text literal): the read is native only while the
+            # part names one label (a list or a mask selects rows, as pandas does whether or not the sample saw one).
             # The test is decided at compile time when Cython gives the part a C type, else it looks at the value;
             # the part is evaluated once, into a local the read then uses
             o.key_count += 1
-            name = f'_mx_key_{o.key_count}'
+            name = f'_mx_{"key" if how == "typed" else "okey"}_{o.key_count}'
             conditions.append(cst.parse_expression(f'{o.module}.is_label(({name} := {_code(arg)}))'))
             arg = cst.Name(name)
         return self._m({'int': 'lcode', 'typed': 'kcode'}.get(how, 'ocode'), o.ref(hold), cst.Integer(str(level)), arg)
@@ -1397,6 +1554,9 @@ class _Rewrite(cst.CSTTransformer):
                   if cell is None and isinstance(value, cst.Subscript) else value)      # (T-5c: or P(a) itself)
         view = o.views[name] = _View(name, call, schema, len(parts), codes, cst.Name(start), cst.Name(stop),
                                      cell if held is None else None)
+        # an absent prefix (or a table that is not prepared) evaluates the assignment as written: pandas raises its
+        # KeyError there, as live, even when no read of the view runs afterwards
+        statements.append(cst.If(test=cst.parse_expression(f'{start} < 0'), body=cst.IndentedBlock(body=[statement])))
         view.setup = [*statements, statement]     # the setup statements are kept only if a use needs them
         self.swaps[name] = source
         return view.setup
@@ -1501,14 +1661,34 @@ class _Rewrite(cst.CSTTransformer):
     def _guarded(self, original, updated, view, test, native, kind=None):
         return self._lowered(test, native, self._fallback(updated, view.call), kind)
 
+    def _boxed(self, lowered, kind):
+        """A lowered cell value whose use meets numpy's rules: the native branch boxed as the numpy scalar pandas
+        returns, the pandas branch as pandas returns it (not cast); no longer a C value."""
+        read, fallback = lowered.body, lowered.orelse
+        if (isinstance(fallback, cst.Call) and _code(fallback.func) == '_mx_cy.cast' and len(fallback.args) == 2
+                and _code(fallback.args[0].value) in CTYPE.values()):
+            fallback = fallback.args[1].value
+        if kind == 'f64':
+            boxed = self._m('f64_box', read)        # (an int64 field of a row pandas widens is read as a double)
+        else:
+            field = _value_read(read).func.attr.value == 'i64_row'
+            boxed = self._m('i64_box', _value_read(read).args[0].value, read, cst.Name('True' if field else 'False'))
+        return lowered.with_changes(body=boxed, orelse=fallback)
+
     def _lowered(self, test, read, fallback, kind=None):
         """``read if test else fallback``: the pandas read cast to the read's C type when the read is typed (both
-        branches native), and the lowered read marked as of that kind (``float()``/``int()`` around it dropped)."""
-        if kind in CTYPE:
+        branches native), and the lowered read marked as of that kind (``float()``/``int()`` around it dropped). A
+        read whose test checks that a text-level key part names one label (``_mx_okey_``) stays a Python object: its
+        pandas branch may be a selection (a list key gives a Series). Under ``float()`` such a float64 read is a C
+        double again, with ``float()`` around its pandas branch only (leave_Call)."""
+        selection = '_mx_okey_' in _code(test)
+        if kind in CTYPE and not selection:
             fallback = _cast(CTYPE[kind], fallback)
         lowered = cst.IfExp(test=test, body=read, orelse=fallback, lpar=[cst.LeftParen()], rpar=[cst.RightParen()])
-        if kind in CTYPE:
+        if kind in CTYPE and not selection:
             self.native[id(lowered)] = kind
+        elif kind == 'f64':     # under float() it is a C double again: float() converts the pandas branch only
+            self.float_only.add(id(lowered))
         return lowered
 
     def _index_of(self, expr):
@@ -2371,17 +2551,22 @@ class _Rewrite(cst.CSTTransformer):
         self._record(node, 'pandas', receiver, ONLY_RAISED_WHY)
         return True
 
+    @staticmethod
+    def _pandas_value(lowered):
+        """The pandas branch of a read lowered to a C scalar, not cast to the C type: the numpy scalar live has."""
+        pandas = lowered.orelse
+        if (isinstance(pandas, cst.Call) and _code(pandas.func) == '_mx_cy.cast' and len(pandas.args) == 2
+                and _code(pandas.args[0].value) in CTYPE.values()):
+            pandas = pandas.args[1].value
+        return pandas.with_changes(lpar=[cst.LeftParen()], rpar=[cst.RightParen()])
+
     def leave_Subscript(self, original, updated):
         o = self.o
         value = original.value
         if self.native.get(id(updated.value)) in CTYPE and isinstance(updated.value, cst.IfExp):
             # T-5c: a subscript of a read lowered to a C scalar (``T.index.max()[0]`` on one level): the pandas
             # value, which pandas subscripts (or raises on) as live does
-            pandas = updated.value.orelse
-            if (isinstance(pandas, cst.Call) and _code(pandas.func) == '_mx_cy.cast' and len(pandas.args) == 2
-                    and _code(pandas.args[0].value) in CTYPE.values()):
-                pandas = pandas.args[1].value       # the read's own value, not cast to the C type
-            return updated.with_changes(value=pandas.with_changes(lpar=[cst.LeftParen()], rpar=[cst.RightParen()]))
+            return updated.with_changes(value=self._pandas_value(updated.value))
         parts = _index_parts(original)
         if parts is None:
             return updated
@@ -2528,6 +2713,11 @@ class _Rewrite(cst.CSTTransformer):
         """``float(...)`` around a float64 read and ``int(...)`` around an int64 read are dropped: the read is
         already that C value, and the builtin would box it into a Python object and back. L5: the extremes of a
         one-level int index are read as C integers."""
+        if (isinstance(updated.func, cst.Name) and updated.func.value in ('isinstance', 'type') and updated.args
+                and isinstance(updated.args[0].value, cst.IfExp) and self.native.get(id(updated.args[0].value)) in CTYPE):
+            # the type of a read is the numpy scalar's pandas returns, not the C number's
+            return updated.with_changes(args=[updated.args[0].with_changes(
+                value=self._pandas_value(updated.args[0].value)), *updated.args[1:]])
         target = original
         inner = self.o.facts.int_argument(original)
         if isinstance(inner, cst.Call):
@@ -2554,6 +2744,10 @@ class _Rewrite(cst.CSTTransformer):
         if (isinstance(updated.func, cst.Name) and len(updated.args) == 1 and not updated.args[0].keyword
                 and not updated.args[0].star):
             kind = self.native.get(id(updated.args[0].value))
+            if updated.func.value == 'float' and id(read := updated.args[0].value) in self.float_only:
+                typed = read.with_changes(orelse=updated.with_changes(args=[cst.Arg(read.orelse)]))
+                self.native[id(typed)] = 'f64'
+                return typed
             if (kind == 'f64' and updated.func.value == 'float') or (kind == 'i64' and inner is not None):
                 return updated.args[0].value.with_changes(lpar=[cst.LeftParen()], rpar=[cst.RightParen()])
         return updated

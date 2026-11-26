@@ -46,6 +46,8 @@ cdef class PreparedTable:
     cdef Py_ssize_t i64_width
     cdef tuple _arrays                     # the numpy arrays the pointers point into (kept alive, never written)
     cdef tuple objects                     # per object column: tuple of the values pandas returns, by stored row
+    cdef bint row_object                   # a row is not widened to a number dtype: its fields are the stored values
+    cdef bint row_float                    # a row is widened to float64: an int64 field reads as numpy.float64
     cdef readonly object max_label, min_label   # index.max(), index.min() as pandas returns them
     cdef long long[8] max_parts, min_parts      # T-5c: their int parts as C integers (0 for another kind)
     cdef const double[::1] asof_keys       # sorted labels of a flat numeric index (for asof)
@@ -126,6 +128,8 @@ cdef Py_ssize_t asof_row(PreparedRef ref, int count, Py_ssize_t c0, Py_ssize_t c
                          Py_ssize_t c3, Py_ssize_t c4, double x) noexcept
 cdef Py_ssize_t hold_row(object table, object key, bint assigned) except -2
 cdef object object_field(PreparedRef ref, Py_ssize_t slot, Py_ssize_t row)
+cdef object f64_box(double value)
+cdef object i64_box(PreparedRef ref, long long value, bint field)
 
 
 # ---- reads by level codes (T-4; T-5: the one read path for every key) and held rows ----------------------------
@@ -182,6 +186,8 @@ cdef bint selects_rows(object key)
 
 cdef inline bint is_label(_key_t key) noexcept:
     if _key_t is object:
+        if type(key) is str or type(key) is int or type(key) is float:     # the common labels: no call
+            return True
         return not selects_rows(key)
     else:
         return True

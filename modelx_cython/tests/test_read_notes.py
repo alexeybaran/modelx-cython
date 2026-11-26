@@ -60,3 +60,14 @@ def test_cached_cell_call_still_follows_pandas_result_and_records_exceptions():
             ('_c_Data', 'values', 'list'), ('_c_Data', 'values', 'col:Data.values'),
             ('_c_Data', 'values', read_notes.RAISES),
         }
+
+
+def test_a_one_part_tuple_key_is_recorded_as_a_tuple():
+    """``x[k,]`` reads the key ``(k,)``: the recorder evaluates the same key as the formula."""
+    source = ('class _c_P:\n'
+              '    def _f_get(self, d):\n'
+              '        return d[1,]\n')
+    namespace = {}
+    exec(read_notes.instrument(source, '<probe>'), namespace)
+    with read_notes.recording('unused'):
+        assert namespace['_c_P']()._f_get({(1,): 'tuple', 1: 'scalar'}) == 'tuple'

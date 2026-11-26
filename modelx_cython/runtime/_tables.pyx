@@ -6,7 +6,8 @@ stored sorted by their level codes, one ascending array of combined codes (and a
 lookups, typed column blocks copied from the frame, and the index extremes and asof keys. The user's object is
 never changed or replaced: it stays what every formula sees (``source``). ``prepare`` returns None, and
 ``unprepared_reason`` says why, for a table whose reads must stay pandas (a non-unique index, NaN labels, labels
-that compare equal although pandas keeps them apart, duplicate column labels, too many key combinations).
+that compare equal although pandas keeps them apart, duplicate column labels, too many key combinations, an index
+level pandas looks up by rules of its own: dates, periods, intervals, categories, bools, labels of mixed types).
 
 A lookup equals ``value.loc[key, column]`` on the tables ``prepare`` accepts: the tests compare them on random
 keys, misses included (``tests/test_prepared_tables.py``). The key lookups and value reads compiled code uses are
@@ -40,9 +41,16 @@ cdef extern from "Python.h":
     int _Py_EQ "Py_EQ"
 
 
+from cpython.long cimport PyLong_AsLongLongAndOverflow
+
+cdef object _np_bool = np.bool_
+cdef object _np_floating = np.floating
+cdef object _np_integer = np.integer
+
+
 cdef inline bint _plain_int(object label):
     # an int label (including IntEnum members and numpy integers), not a bool
-    return isinstance(label, (int, np.integer)) and not isinstance(label, (bool, np.bool_))
+    return isinstance(label, (int, _np_integer)) and not isinstance(label, (bool, _np_bool))
 
 
 cdef class PreparedTable:
@@ -85,17 +93,26 @@ cdef class PreparedTable:
             i = (i + 1) & self.name_mask
 
     cdef Py_ssize_t code_obj(self, int level, object key) except -2:
-        """The code of any key part at ``level``, or -1 when absent."""
+        """The code of any key part at ``level``, or -1 when absent. An exact ``int`` on an int level and an exact
+        ``str`` on any other level are looked up first, without the checks other values need."""
         cdef object code
+        cdef long long whole
+        cdef int overflow
         codes = self.level_codes[level]
         if codes is None:
-            if type(key) is int:            # the common case first (no numpy type lookups)
-                return self.code_ll(level, <long long>key)
-            if isinstance(key, (float, np.floating)) and float(key).is_integer():
+            if type(key) is int:            # the common case first: one C conversion, no Python comparisons
+                whole = PyLong_AsLongLongAndOverflow(key, &overflow)
+                return -1 if overflow else self.code_ll(level, whole)
+            if isinstance(key, (float, _np_floating)) and float(key).is_integer():
                 key = int(key)          # pandas finds an integral float key on an int index
-            if not _plain_int(key):
+            if not _plain_int(key) or not -0x8000000000000000 <= key <= 0x7fffffffffffffff:
                 return -1
             return self.code_ll(level, <long long>key)
+        if type(key) is str:                # the common text label: a dict lookup, nothing else
+            code = (<dict>codes).get(key)
+            return -1 if code is None else <Py_ssize_t>code
+        if type(key) is bool or isinstance(key, _np_bool):
+            return -1               # no label of a text or float level, although True == 1.0 (pandas: KeyError)
         code = (<dict>codes).get(key)
         return -1 if code is None else <Py_ssize_t>code
 
@@ -225,8 +242,8 @@ def unprepared_reason(value):
     """Why ``prepare(value)`` returns None (None when it does not)."""
     try:
         _build(value)
-    except ValueError as error:
-        return str(error)
+    except Exception as error:
+        return str(error) or type(error).__name__
     return None
 
 
@@ -234,7 +251,7 @@ def prepare(value):
     """The PreparedTable of a DataFrame or Series, or None when its reads must stay pandas."""
     try:
         return _build(value)
-    except ValueError:
+    except Exception:       # also whatever pandas raises on labels it cannot order or convert: the reads stay pandas
         return None
 
 
@@ -301,6 +318,24 @@ cdef void _name_map(PreparedTable table):
     table.name_mask = size - 1
 
 
+cdef str _row_kind(list dtypes, object frame):
+    """The kind of the dtype pandas gives a row of columns of ``dtypes`` (find_common_type), without building one for
+    numpy dtypes and text: text or bool beside a number is object, numbers (or bools) give their common type. Other
+    dtypes (datetimes, other extension dtypes) are read off the first row."""
+    cdef bint text = False
+    for dtype in dtypes:
+        if isinstance(dtype, pd.StringDtype):
+            text = True
+        elif not (isinstance(dtype, np.dtype) and dtype.kind in 'biufcO'):
+            return getattr(frame.iloc[0].dtype, 'kind', 'O')
+    if text:
+        return 'O'      # a text row, or text beside other columns: object
+    found = {dtype.kind for dtype in dtypes}
+    if 'O' in found or ('b' in found and found & set('iufc')):
+        return 'O'
+    return np.result_type(*dtypes).kind
+
+
 cdef PreparedTable _build(object value):
     cdef PreparedTable table = PreparedTable.__new__(PreparedTable)
     cdef Py_ssize_t i, n
@@ -320,6 +355,13 @@ cdef PreparedTable _build(object value):
         raise ValueError('duplicate column labels')
     if index.nlevels > _MAX_LEVELS:
         raise ValueError(f'more than {_MAX_LEVELS} index levels')
+    for level_index in (index.levels if index.nlevels > 1 else (index,)):
+        # a level is prepared only when pandas finds a label by its equality: not a date found by a text, a number
+        # found inside an interval, a category, a bool
+        if type(level_index) not in (pd.Index, pd.RangeIndex) or level_index.inferred_type not in (
+                'integer', 'string', 'floating', 'mixed-integer-float', 'empty'):
+            raise ValueError(f'an index level pandas looks up by rules of its own ({type(level_index).__name__} of '
+                             f'{level_index.inferred_type} labels)')
     table._source = weakref.ref(value)
     table.nrows = n = len(index)
     table.nlevels = index.nlevels
@@ -372,9 +414,10 @@ cdef PreparedTable _build(object value):
         grid = np.zeros(1, dtype=np.intp)
     # columns: copies, stored in the sorted row order
     labels = [None] if table.is_series else list(frame.columns)
-    kinds, slots, f64_cols, i64_cols, objects = [], [], [], [], []
+    kinds, slots, f64_cols, i64_cols, objects, dtypes = [], [], [], [], [], []
     for position, label in enumerate(labels):
         column = frame.iloc[:, position]
+        dtypes.append(column.dtype)
         if column.dtype == np.float64:
             kinds.append(COLUMN_F64)
             slots.append(len(f64_cols))
@@ -397,6 +440,10 @@ cdef PreparedTable _build(object value):
     table.f64_width, table.i64_width = f64.shape[1], i64.shape[1]
     _point(table, sorted_array, combined, grid, f64, i64, pos_row)
     table.objects = tuple(objects)
+    # the dtype pandas gives a row (it widens number columns to one dtype: int32 beside float64 reads as float64)
+    row = 'O' if table.is_series or n == 0 else _row_kind(dtypes, frame)
+    table.row_object = row not in 'iufc'
+    table.row_float = row == 'f'        # a row of float64 fields
     # index extremes and asof keys, as pandas gives them
     table.max_label = index.max() if n else None
     table.min_label = index.min() if n else None
@@ -423,15 +470,46 @@ cdef long long _int_part(object part):
 
 
 # ---- binding (T-3) ----------------------------------------------------------------------------------
-# One PreparedTable per frame object, prepared on first use and dropped when the frame dies: a new frame is
-# prepared afresh, and no prepared copy of an old frame is ever used for it.
-cdef dict _prepared = {}               # id(frame) -> (weak reference to the frame, PreparedTable or None)
-_lock = threading.RLock()
+# A frame Cell prepares its frame when it binds it (``bind_new``, every time: a frame edited in place and given
+# to a new model is prepared from what it holds then). A read that has only the frame finds that table by the
+# identity of the frame (``prepared``) within the generation it was prepared in: each new model of this package
+# starts a generation (``renew``, called by its top-level Spaces), so a frame any Cell returns, a Reference's frame
+# returned as it is included, is prepared again for a new model and never read from a copy an earlier model made.
+# The entry is dropped when the frame dies. Each operation on the map is one dict operation (no lock): two
+# threads that miss prepare the same frame twice, and one table stays.
+cdef dict _prepared = {}               # id(frame) -> (weak reference to the frame, PreparedTable or None, generation)
+cdef Py_ssize_t _generation = 0
 
 
-def _forget(key):
-    with _lock:
+def renew():
+    """A new model of this package: every frame is prepared again at its first read in it."""
+    global _generation
+    _generation += 1
+cdef PreparedTable _NOT_PREPARED = PreparedTable.__new__(PreparedTable)     # every slot -1: reads stay pandas
+
+
+def _forget(key, ref):
+    entry = _prepared.get(key)
+    if entry is not None and entry[0] is ref:       # not the entry of a later frame at the same address
         _prepared.pop(key, None)
+
+
+cdef object _prepare_new(object frame):
+    """Prepare ``frame`` as it is now and make it the table its reads find (None: they stay pandas)."""
+    key = id(frame)
+    signatures = _thread_signatures()
+    axes = _zip_origin(frame, signatures)
+    table = prepare(frame)
+    if table is not None:
+        _decide(table, signatures, axes)
+    _prepared[key] = (weakref.ref(frame, lambda ref, key=key: _forget(key, ref)), table, _generation)
+    return table
+
+
+cdef object bind_new(object frame):
+    """What a frame Cell publishes when it binds ``frame``: a table prepared now, never one prepared earlier."""
+    table = _prepare_new(frame)
+    return _NOT_PREPARED if table is None else table
 
 
 try:
@@ -439,28 +517,16 @@ try:
 except ImportError:         # the runtime used on its own (tests)
     pass
 else:
-    _register(lambda value: bind_ref(value), __name__.split('.')[0])
+    _register(lambda value: bind_new(value), __name__.split('.')[0], renew)
 
 
 cdef object prepared(object frame):
-    """The PreparedTable of ``frame`` (None when its reads must stay pandas), prepared once per object."""
-    key = id(frame)
-    with _lock:
-        entry = _prepared.get(key)
-    if entry is not None and entry[0]() is frame:
+    """The PreparedTable of ``frame`` (None when its reads must stay pandas): the one its Cell bound, or prepared
+    at an earlier read, in this model's generation; else prepared at this first read."""
+    entry = _prepared.get(id(frame))
+    if entry is not None and <Py_ssize_t>entry[2] == _generation and entry[0]() is frame:
         return entry[1]
-    signatures = _thread_signatures()
-    axes = _zip_origin(frame, signatures)
-    table = prepare(frame)
-    if table is not None:
-        _decide(table, signatures, axes)
-    ref = weakref.ref(frame, lambda _, key=key: _forget(key))
-    with _lock:
-        _prepared[key] = (ref, table)
-    return table
-
-
-cdef PreparedTable _NOT_PREPARED = PreparedTable.__new__(PreparedTable)     # every slot -1: reads stay pandas
+    return _prepare_new(frame)
 
 
 cdef object bind_ref(object frame):
@@ -593,6 +659,8 @@ cdef void _decide(PreparedTable table, object signatures, object zip_axes):
         if result and columns is not None:
             if len(columns) != len(table.column_positions):
                 result = False
+            elif not table.row_object and any(expected == COLUMN_OBJECT for _, expected in columns):
+                result = False      # a field kept as an object, but pandas widens this row: not the stored value
             else:
                 for name, expected in columns:
                     position = table.column_positions.get(name, -1)
@@ -741,6 +809,25 @@ cdef int missing_codes(PreparedRef ref, const Py_ssize_t* codes, int count) exce
 
 cdef object object_field(PreparedRef ref, Py_ssize_t slot, Py_ssize_t row):
     return (<PreparedTable>ref).object_at(row - 1, slot - 1)
+
+
+# The numpy scalar pandas returns for a cell value, for a read whose value meets numpy's own rules (``round`` of it,
+# a method of it, a division by zero, an integer power): such a read is boxed, the others stay C numbers.
+cdef object _float64 = np.float64
+cdef object _int64 = np.int64
+
+
+cdef object f64_box(double value):
+    """``numpy.float64``, as pandas returns a value of a float64 column."""
+    return _float64(value)
+
+
+cdef object i64_box(PreparedRef ref, long long value, bint field):
+    """``numpy.int64`` as pandas returns a value of an int64 column; a field of a row pandas widens to float64
+    (``field``, the table's rows of number columns) is ``numpy.float64``."""
+    if field and (<PreparedTable>ref).row_float:
+        return _float64(value)
+    return _int64(value)
 
 
 # ---- T-5: index walks ------------------------------------------------------------------------------------
