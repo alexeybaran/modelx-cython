@@ -13,14 +13,15 @@ without such Cells is returned unchanged.
 import libcst as cst
 from libcst.metadata import ParentNodeProvider
 
-from .consts import CY_MOD, MX_SYS_MOD
+from .consts import CY_MOD, MODULE_PREF, MX_SPACE_MOD, MX_SYS_MOD, SPACE_PREF
 
 MEMBER = '_mx_enum_member'
 ENTRY = '_mx_enum_entry'
 CALL = '_mx_enum_call'
 
 # The member of the IntEnum ``module.qualname`` whose value is ``value``: what a Python caller, an
-# object-valued use or a collected output receives, as in live modelx.
+# object-valued use or a collected output receives, as in live modelx. A value that is no member's is an
+# integer the formula computed (``E.A - 1``), which live gives as the integer.
 FUNCTIONS = f'''\
 _mx_enums = {{}}
 
@@ -34,7 +35,7 @@ def {MEMBER}(module, qualname, value):
             cls = getattr(cls, part)
         _mx_enums[module, qualname] = cls
     member = cls._value2member_map_.get(value)
-    return member if member is not None else cls(value)
+    return member if member is not None else value
 
 
 @{CY_MOD}.cclass
@@ -92,13 +93,23 @@ class EnumResults(cst.CSTTransformer):
 
     METADATA_DEPENDENCIES = (ParentNodeProvider,)
 
-    def __init__(self, module):
+    def __init__(self, module, others=None, origins=None):
         super().__init__()
         self.module = module
         self.cells = {cls_name: enum_cells(cls_info) for cls_name, cls_info in module.classes.items()}
-        self.enums = {}
-        for cells in self.cells.values():
-            self.enums.update(cells)
+        self.cells.update(others or {})     # (module, class) of other modules' Spaces (child Spaces)
+        self.origins = origins or {}        # module function -> (class, Cell) it is the entry of
+        self.parent = module.fqname.rpartition('.')[0]
+        self._values = []                   # per function: {parameter or local: enum} of enum values held as C integers
+        self._owners = []                   # per function: (class, Cell) whose formula or entry it is, or None
+        self.shown = set()                  # (class, Cell, parameter) whose value is used as an object
+        self.foreign = []                   # (class, Cell, parameter, caller): a member of another class passed
+        constants = {}
+        for (cls_name, ref, member), (symbol, value) in getattr(module, 'code_enum_symbols', {}).items():
+            enum = getattr(module.classes[cls_name].refs.get(ref), 'enum', None)
+            if enum:
+                constants[symbol] = tuple(enum[:2])
+        self.constants = constants          # enum constant -> (module, qualname) of its class
         self.wrapped = 0
         self.gated = []
         self._classes = []
@@ -124,7 +135,10 @@ class EnumResults(cst.CSTTransformer):
         return name if name in self.module.classes else None
 
     def _ref_class(self, cls_name, attr):
-        cls_info = self.module.classes.get(cls_name)
+        cls_info = self.module.classes.get(cls_name) if isinstance(cls_name, str) else None
+        if cls_info is not None and attr in getattr(cls_info, 'spaces', ()):
+            child = (f'{self.parent}.{MODULE_PREF}{cls_name[len(SPACE_PREF):]}.{MX_SPACE_MOD}', SPACE_PREF + attr)
+            return child if child in self.cells else None
         ref = cls_info.refs.get(attr) if cls_info is not None else None
         decl = getattr(ref, 'decl_type_expr', None)
         return self._known(decl.rsplit('.', 1)[-1]) if decl else None
@@ -185,32 +199,101 @@ class EnumResults(cst.CSTTransformer):
                         types_[small.targets[0].target.value] = cls
         self._locals.append(types_)
         self._functions.append(node)
+        self._values.append(self._enum_values(node))
 
     def leave_FunctionDef(self, original, updated):
         self._locals.pop()
         self._functions.pop()
+        self._values.pop()
+        self._owners.pop()
         return updated
+
+    def _where(self):
+        owner = next((o for o in reversed(self._owners) if o), None)
+        return '.'.join((*[p[len(MODULE_PREF):] for p in self.module.fqname.split('.')[1:-1]],
+                         owner[0][len(SPACE_PREF):], owner[1])) if owner else self.module.fqname
+
+    def _enum_values(self, node):
+        """{name: enum} of the C-integer parameters traced as one IntEnum class, and of the locals every binding of
+        which is an assignment of an enum cell's C result (of one class): where their value is used as an object,
+        it is the member, as live holds it."""
+        from .enums import _traced_enum
+        from .scopes import CstFacts, lexical_nodes
+        found = {}
+        owner = self.origins.get(node.name.value)
+        if owner is None and self._classes and self._classes[-1]:
+            name = node.name.value
+            owner = (self._classes[-1], name[3:] if name.startswith('_f_') else name)
+        cls_info = self.module.classes.get(owner[0]) if owner else None
+        name = owner[1][3:] if owner and owner[1].startswith('_f_') else owner and owner[1]
+        cell = cls_info.cells.get(name) if cls_info is not None else None
+        self._owners.append((owner[0], name) if cell is not None else None)
+        for param in node.params.params:
+            annotation = param.annotation and cst.Module([]).code_for_node(param.annotation.annotation)
+            if cell is not None and annotation == f'{CY_MOD}.longlong' and param.name.value in cell.params:
+                enum = _traced_enum(cell, param.name.value)
+                if enum is not None:
+                    found[param.name.value] = enum
+        body = node.body.body if isinstance(node.body, cst.IndentedBlock) else ()
+        facts = CstFacts(body)
+        assigned = {}
+        for part in lexical_nodes(body):
+            if isinstance(part, cst.Assign) and len(part.targets) == 1 and isinstance(part.targets[0].target, cst.Name):
+                assigned.setdefault(part.targets[0].target.value, []).append(self._enum_of(part.value))
+        for name, enums in assigned.items():
+            kinds = {e[1] if e else None for e in enums}
+            if None not in kinds and len(kinds) == 1 and facts.stores[name] == len(enums) and name not in found:
+                found[name] = kinds.pop()
+        return found
+
+    def leave_Name(self, original, updated):
+        enum = self._values[-1].get(original.value) if self._values else None
+        if enum is None:
+            return updated
+        parent = self._parent(original)
+        if isinstance(parent, (cst.AssignTarget, cst.Param)) or (isinstance(parent, cst.Attribute)
+                                                                  and parent.attr is original):
+            return updated
+        if not self._object_use(original):
+            return updated
+        owner = self._owners[-1] if self._owners else None
+        if owner is not None and original.value in self.module.classes[owner[0]].cells[owner[1]].params:
+            self.shown.add((*owner, original.value))
+        return self._member(enum, updated)
 
     # ---------------------------------------------------------------- object uses
     def leave_Call(self, original, updated):
         func = original.func
+        callee = self._receiver(func.value) if isinstance(func, cst.Attribute) else None
+        cell = self.module.classes[callee].cells.get(func.attr.value) if isinstance(callee, str) else None
+        if cell is not None and not any(a.keyword or a.star for a in original.args):
+            from .enums import _traced_enum
+            for arg, param in zip(original.args, cell.params):
+                value = arg.value
+                while (isinstance(value, cst.Call) and isinstance(value.func, cst.Attribute) and value.args
+                       and value.func.attr.value == '_mx_integer_result'):
+                    value = value.args[0].value         # the integer guard's checked argument
+                given = self.constants.get(value.value) if isinstance(value, cst.Name) else None
+                expected = _traced_enum(cell, param) if given else None
+                if expected is not None and given != expected:
+                    self.foreign.append((callee, cell.name, param, self._where()))
         if (isinstance(func, cst.Attribute) and func.attr.value in self.cells.get(self._receiver(func.value), {})
                 and self._object_use(original) and not isinstance(self._parent(original), cst.IfExp)):
-            return self._member(func.attr.value, updated)
+            return self._member(self.cells[self._receiver(func.value)][func.attr.value], updated)
         return updated
 
     def leave_IfExp(self, original, updated):
         # an inline entry: `(entry(self, t) if exact else cast(T, self.cell(t)))`
-        name = self._enum_of(original.orelse)
-        if name is not None and self._object_use(original):
-            return self._member(name, updated)
+        found = self._enum_of(original.orelse)
+        if found is not None and self._object_use(original):
+            return self._member(found[1], updated)
         return updated
 
     def _parent(self, node):
         return self.get_metadata(ParentNodeProvider, node, None)
 
     def _enum_of(self, expr):
-        """The enum cell whose C value ``expr`` is (a call of it, possibly cast), else None."""
+        """(name, enum) of the enum cell whose C value ``expr`` is (a call of it, possibly cast), else None."""
         if isinstance(expr, cst.Call):
             func = expr.func
             if (isinstance(func, cst.Attribute) and func.attr.value == 'cast'
@@ -218,13 +301,13 @@ class EnumResults(cst.CSTTransformer):
                 return self._enum_of(expr.args[1].value)
             if (isinstance(func, cst.Attribute)
                     and func.attr.value in self.cells.get(self._receiver(func.value), {})):
-                return func.attr.value
+                return func.attr.value, self.cells[self._receiver(func.value)][func.attr.value]
         if isinstance(expr, cst.IfExp):
             return self._enum_of(expr.orelse)
         return None
 
-    def _member(self, name, expr):
-        module, qualname = self.enums[name]
+    def _member(self, enum, expr):
+        module, qualname = enum
         self.wrapped += 1
         return cst.Call(cst.Name(MEMBER), args=(
             cst.Arg(cst.SimpleString(repr(module))), cst.Arg(cst.SimpleString(repr(qualname))),
@@ -308,12 +391,24 @@ class EnumResults(cst.CSTTransformer):
         return node.with_changes(body=node.body.with_changes(body=tuple(body)))
 
 
-def finish(syntax, module):
-    """The generated module with enum results as members where they reach Python; unchanged without enum cells."""
-    if not any(enum_cells(cls_info) for cls_info in module.classes.values()):
+def finish(syntax, module, others=None, origins=None):
+    """The generated module with enum results as members where they reach Python; unchanged without enum cells.
+    ``others``: ``{(module, class): enum cells}`` of the model's other modules; ``origins``: the Cell of each module
+    function that is a Cell's entry."""
+    from .enums import _traced_enum
+    if not others and not any(enum_cells(cls_info) or any(
+            _traced_enum(cell, param) for cell in cls_info.cells.values() if cell.has_typeinfo()
+            for param in cell.params) for cls_info in module.classes.values()):
         return syntax
-    results = EnumResults(module)
+    results = EnumResults(module, others, origins)
     syntax = cst.MetadataWrapper(syntax, unsafe_skip_copy=True).visit(results)
+    for cls_name, cell, param, where in results.foreign:
+        if (cls_name, cell, param) in results.shown:
+            raise TypeError(f'{where}: passes a member of one IntEnum class to the parameter {param!r} of '
+                            f'{cell}, traced as another IntEnum class and used there as an object, so its value '
+                            'would differ from live modelx')
+    if not (results.wrapped or results.gated):
+        return syntax
     added = cst.parse_module(FUNCTIONS).body
     added += tuple(cst.parse_statement(f'{field} = {cells!r}\n') for field, cells in results.gated)
     return syntax.with_changes(body=(*syntax.body, *added))
