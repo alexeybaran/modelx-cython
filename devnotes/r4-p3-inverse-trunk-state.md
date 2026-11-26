@@ -26,3 +26,16 @@ most 200 words.
 ## Progress
 
 - 5e67b27: metric 221.
+- **f67859b, merge of fix-reductions 612f2e1.** No conflicts, no removed helper used. Metric 221.
+- **e4cdfc9, merge of fix-tables 9e65ea2.** Metric 221.
+  - Hand conflict in table_cells.py: the trunk's rewrite_class and RenameMembers no longer take integer Reference
+    paths.
+  - The table fixes' `_renew_on_new_model` and `_drop_unused_import` are kept.
+- **09f66ec, merge of fix-labels 00f501c** (released as step 4; kept as its own merge so it can be backed out).
+  Metric 221.
+  - Hand conflict in table_cells.finish: the label fix's foreign-IntEnum check, with no integer paths, and the
+    dropped import kept.
+  - Removed helper: `_foreign_members` unwrapped `_mx_integer_result`. The unwrapping is dropped, since nothing
+    wraps arguments now.
+- **Running:** suites of 5e67b27 and f67859b; models for f67859b and e4cdfc9. Next: suites of e4cdfc9 and 09f66ec,
+  models for 09f66ec.
