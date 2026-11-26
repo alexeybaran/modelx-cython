@@ -41,7 +41,8 @@ Where a read is lowered:
 
 - in a class whose instances are items (an ItemSpace): in a formula with parameters (evaluated per step), and in
   a formula without parameters (once per item) when the frame is a Cell of a Space without items (prepared once
-  per model, not per item);
+  per model, not per item). A frame or Series the item computes itself is prepared per item only for a formula
+  with parameters that reads it by a computed key or walks it; reads by literal keys stay on pandas;
 - in any other class, only in a formula with parameters: a formula without parameters runs once per model.
 
 Binding: in an item class the receiver is evaluated and its PreparedTable found by identity of the frame object
@@ -583,19 +584,71 @@ class FrameReads:
         return name is not None and name in getattr(self.resolver, 'shared_frames', ())
 
     def _receiver(self, expr):
-        """(cell call, schema) when ``expr`` is a frame receiver, else None. In an item class a frame the item
-        computes itself is prepared per item (about 0.3-2M instructions; a pandas read costs 20-100k): it is a
-        receiver only for a formula with parameters, evaluated once per step, so that the preparation pays for
-        itself. Decided from the text, not from how often the sample evaluated the formula."""
+        """(cell call, schema) when ``expr`` is a frame receiver, else None. In an item class a frame or Series the
+        item computes itself (its own result frames, a row or column it selects) is prepared per item, at about
+        0.1-2M instructions, so it is a receiver only in a formula with parameters that reads it by a computed key
+        (a key part that is not a literal or a choice between literals) or walks it: literal keys name a few values
+        per item, which pandas reads for less than the preparation. Decided from the text, not from call counts."""
+        found = self._receiver_of(expr)
+        if found is not None and self.per_item and not self.shared(found[0]) and (
+                not self.cells.has_args() or _code(found[0]) in self._literal_reads()):
+            return None
+        return found
+
+    def _receiver_of(self, expr):
         schema = self._schema_of_call(expr)
         found = (expr, schema) if schema is not None else None
         if found is None:
             value = self._value_of(expr.value) if isinstance(expr, cst.Name) else None
             schema = self._schema_of_call(value) if value is not None else None
             found = (value, schema) if schema is not None else None
-        if found is not None and self.per_item and not self.cells.has_args() and not self.shared(found[0]):
-            return None
         return found
+
+    def _literal_reads(self):
+        """Codes of the frames the item computes itself that this formula only reads by literal keys: ``R["c"]``,
+        ``R.loc["a", "c"]``, ``R.at[k]`` whose every key part is a literal or a conditional between literals."""
+        found = getattr(self, '_literal_codes', None)
+        if found is not None:
+            return found
+        owner, uses = self, {}
+
+        def literal(node):
+            if isinstance(node, (cst.SimpleString, cst.Integer, cst.Float)):
+                return True
+            if isinstance(node, cst.IfExp):
+                return literal(node.body) and literal(node.orelse)
+            return isinstance(node, cst.Tuple) and all(isinstance(e, cst.Element) and literal(e.value)
+                                                       for e in node.elements)
+
+        class Scan(cst.CSTVisitor):
+            def visit_FunctionDef(inner, node):
+                return node is owner._node
+
+            def visit_Lambda(inner, node):
+                return False
+
+            def visit_Call(inner, node):
+                inner._use(node)
+
+            def visit_Name(inner, node):
+                inner._use(node)
+
+            def _use(inner, node):
+                got = owner._receiver_of(node) if isinstance(node, (cst.Call, cst.Name)) else None
+                if got is None or owner.shared(got[0]):
+                    return
+                parents = owner.facts.formula.parents
+                up = parents.get(id(node))
+                if isinstance(node, cst.Call) and isinstance(up, cst.Assign) and up.value is node:
+                    return      # ``r = R()``: the uses of the local are its reads
+                if isinstance(up, cst.Attribute) and up.attr.value in ('loc', 'at') and up.value is node:
+                    up = parents.get(id(up))
+                parts = _index_parts(up) if isinstance(up, cst.Subscript) else None
+                code = _code(got[0])
+                uses[code] = uses.get(code, True) and parts is not None and all(map(literal, parts))
+        self._node.visit(Scan())
+        self._literal_codes = {code for code, only in uses.items() if only}
+        return self._literal_codes
 
     # ------------------------------------------------------------------ driver
     def lower(self, node):
@@ -603,6 +656,7 @@ class FrameReads:
         if not params or params[0].name.value != 'self' or not getattr(self.resolver, 'frame_schemas', None):
             return node
         self.per_item = self.cls_info.name in self.cls_info.visitor.itemspace_classes
+        self._node = node
         if not self.per_item and not self.cells.has_args():
             return node         # evaluated once per model: its reads stay on pandas
         self.facts = self._facts(node)
@@ -1744,6 +1798,9 @@ class _Rewrite(cst.CSTTransformer):
         row = o.row_cells.get(call.func.attr.value)
         if row is None or not o.cached_call(call) or len(parts) != 1:
             return None
+        source = o._receiver_of(row.value.value)
+        if source is None or not o.shared(source[0]):
+            return None     # a row of a frame the item computes: its fields name a few values per item (pandas)
         if _literal_str(parts[0]) is not None:
             if local is not None:       # the local is P() for the pandas branch, and is dropped once unread
                 self.swaps.setdefault(local, call)
