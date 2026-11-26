@@ -38,6 +38,7 @@ them into :class:`RuntimeCellsInfo`, :class:`RuntimeRefInfo` and
 
 import sys
 import inspect
+import math
 import pathlib
 import random
 import numbers
@@ -544,6 +545,7 @@ class RuntimeValueInfo:
         self.type_ = (object if isinstance(value, numbers.Integral)
                       and not -(1 << 63) <= value < (1 << 63) else type(value))
         self.mx_class = mx_class
+        self.is_math = value is math        # the standard math module (native_math.py)
         self.helper = registered_helper(value) if type(value) is FunctionType else None
         from .helper_members import module_helpers
         self.helper_members = module_helpers(value)

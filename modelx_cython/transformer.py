@@ -737,6 +737,9 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
         from modelx_cython import space_results
         if self._resolver is not None:
             node, _ = space_results.lower(node, cls_info, cells, scope, operand_kind, self._pin_held_item)
+        from modelx_cython import native_math
+        node, lowered = native_math.lower(node, cls_info, cells)
+        self._math_calls += lowered
         # D110 P1: a local bound once to an item of a typed ItemSpace Reference is declared its class
         from modelx_cython.item_locals import type_item_locals
         node, cells.typed_item_locals = type_item_locals(node, cls_info, self.module)
@@ -1033,6 +1036,7 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
         from modelx_cython.scopes import Names
         self._held_names = Names(self._module_node)
         self._held_pins = {}
+        self._math_calls = 0
         return self.wrapper.visit(self)
 
     def _pin_held_item(self, owner, producer):
@@ -1099,6 +1103,8 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
                      else getattr(self.module.classes[name], 'native_contexts', {}))]
         if roots:
             module = module.with_changes(body=(*module.body, *roots))
+        if self._math_calls:        # native math-module calls compare against the math module
+            module = module.with_changes(body=(*module.body, cst.parse_statement(f'{MX_SYS_MOD}._mx_math_init()\n')))
         if getattr(self, '_collect_hooks', False):
             module = module.with_changes(body=(*module.body, *collect.evaluator(
                 self.module.spec.policy.collect_workers)))
