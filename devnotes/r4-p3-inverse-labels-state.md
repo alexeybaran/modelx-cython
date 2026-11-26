@@ -20,3 +20,6 @@ Done so far:
 - 6a2bc02 4b96b21 cherry-picked (conflict in test_enum_by_type resolved; the test_audit_runtime_b2 case dropped).
 - Environment: test_enum_results (collect_over) and test_enum_by_type[True] (modelx_helpers) fail here on c342db9
   too. Suites: compare failure sets of c342db9 and the head (runs/inv-*.fail in the scratch area).
+- Suites (this environment: upstream modelx 0.33.0, no modelx_helpers): c342db9 782 failed / 819 passed / 29 errors;
+  11ef208 782 failed / 825 passed / 29 errors, the same failing tests (720 of them for want of modelx_helpers,
+  others for collect_over). The six new passes are the new tests.
