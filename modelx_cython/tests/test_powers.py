@@ -568,3 +568,44 @@ def test_formula_local_kinds_reads_the_formula_body():
     kinds = formula_local_kinds(node, ('t',), _NoResolve(), {}, {}, 'm.C', {'t': KIND_INT})
     assert kinds == {'k': KIND_INT, 's': KIND_INT, 'q': KIND_FLOAT}, kinds
     assert formula_local_kinds(node, ('t',), None, {}, {}, 'm.C', {'t': KIND_INT}) == {}
+
+
+def _local_kinds(source, params, param_kinds):
+    from modelx_cython.powers import _assigned_local_kinds
+
+    class _NoResolve:
+        def resolve_chain(self, *args):
+            return None, None
+
+    body = cst.parse_module(source).body[0].body.body
+    return _assigned_local_kinds(body, params, _NoResolve(), {}, {}, 'm.C', param_kinds)
+
+
+def test_locals_bound_from_each_other_take_their_kind_together():
+    """DIA_US_SEC rop_factor_calc: ``lo = k``, ``lo = hi``, ``hi = min(lo + 60, end)``; a cycle whose
+    values contradict a guess (``hi = lo + 0.5`` while ``lo = hi``) proves neither local."""
+    kinds = _local_kinds(
+        'def f(self, k, end):\n'
+        '    lo = k\n'
+        '    while lo < end:\n'
+        '        hi = min(lo + 60, end)\n'
+        '        mid = (lo - k + (hi - k)) / 24.0\n'
+        '        lo = hi\n'
+        '    return 0.0\n', ('k', 'end'), {'k': KIND_INT, 'end': KIND_INT})
+    assert kinds == {'lo': KIND_INT, 'hi': KIND_INT, 'mid': KIND_FLOAT}, kinds
+    kinds = _local_kinds(
+        'def f(self, k, end):\n'
+        '    lo = k\n'
+        '    while lo < end:\n'
+        '        hi = lo + 0.5\n'
+        '        lo = hi\n'
+        '    return 0.0\n', ('k', 'end'), {'k': KIND_INT, 'end': KIND_INT})
+    assert kinds == {}, kinds
+
+
+def test_power_over_locals_bound_from_each_other_is_native():
+    body = ("total = 0.0\n    lo = t\n    while lo < 40:\n        hi = min(lo + 6, 40)\n"
+            "        mid = (lo - t + (hi - t)) / 24.0\n        total += (hi - lo) * (1.0 + self.rate(t)) ** (-mid)\n"
+            "        lo = hi\n    return total")
+    out = _rewrite(body)
+    assert out.count("_mx_sys._mx_pow(") == 1 and "**" not in out, out
