@@ -277,17 +277,21 @@ def reset_function(cls_name, block, classes, values, kept=None, reached=None):
     be reached) the item's caches are left as they are: never filled on a reused item, they stay as new.
 
     The References of ``kept`` (``kept_refs``) keep their values, and ``refs_held`` tells whether each is still the
-    one the Space holds (identity, or a C value's equality); when one is not, the hook copies them all again."""
+    one the Space holds (identity, or a C value's bytes); when one is not, the hook copies them all again."""
     structs = _declared(r'^cdef struct (\w+)')
     objects = _OBJECTS | set(classes) | _declared(r'^cdef class (\w+)')
     lines = []
     fields = [*_base_fields(), *_fields(block)]
     types = {name: ctype for _, ctype, name in fields}
+    # an enum Reference is held as _mx_definition_<name>, which its property <name> returns
+    held_as = lambda name: name if name in types or f'_mx_definition_{name}' not in types else f'_mx_definition_{name}'
+    kept = None if kept is None else tuple((held_as(t), held_as(a)) for t, a in kept)
     known = kept is not None and all(t in types and a in types and '[' not in types[t] for t, a in kept)
     held = [] if known else ['False']     # an undeclared or array attribute: copied again at every coordinate
     for target, source in kept if known else ():
         is_object = types[target].split('[')[0].split('.')[-1].strip() in objects or types[target].startswith('_c_')
-        held.append(f'root.{target} is base.{source}' if is_object else f'root.{target} == base.{source}')
+        held.append(f'root.{target} is base.{source}' if is_object else      # a C value: its bytes (-0.0 is not 0.0)
+                    f'memcmp(&root.{target}, &base.{source}, sizeof(root.{target})) == 0')
     for line, ctype, name in fields:
         base = ctype.split('[')[0].split('.')[-1].strip()
         if line in values or known and name in dict(kept):
@@ -303,9 +307,9 @@ def reset_function(cls_name, block, classes, values, kept=None, reached=None):
         else:
             cell = name.removeprefix('_v_').removeprefix('_has_').removeprefix('_spill_')
             raise ValueError(f'{cls_name[3:]}: collect cannot reset {line!r} (Cell {cell}) between items')
-    source = ('from libc.string cimport memset\nfrom cpython.ref cimport Py_REFCNT as _mx_refcount\n\n'
+    source = ('from libc.string cimport memcmp, memset\nfrom cpython.ref cimport Py_REFCNT as _mx_refcount\n\n'
               f'cdef inline void {reset_root(cls_name)}({cls_name} root) noexcept:\n' + ''.join(lines))
-    if kept is not None:      # whether the kept References are still the Space's: identity, or a C value's equality
+    if kept is not None:      # whether the kept References are still the Space's: identity, or a C value's bytes
         source += (f'\n\ncdef inline bint {refs_held(cls_name)}({cls_name} root, {cls_name} base) noexcept:\n'
                    f'    return {" and ".join(held) or "True"}\n')
     return source

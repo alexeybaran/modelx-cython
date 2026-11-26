@@ -252,15 +252,21 @@ REBIND_PROBE = textwrap.dedent('''\
         m.Projection._mx_collect_cache.clear()
         return {str(c): r.v for c, r in m.Projection.collect().individual.items()}
 
+    def signed(m):
+        m.Signed.zero = 0.0
+        return {str(c): repr(r.s) for c, r in m.Signed.collect().individual.items()}
+
     print(json.dumps({'export': run(export, 1.0), 'compiled': run(compiled, 1.0),
-                      'export3': run(export, 3.0), 'compiled3': run(compiled, 3.0)}))
+                      'export3': run(export, 3.0), 'compiled3': run(compiled, 3.0),
+                      'signed': [signed(export), signed(compiled)]}))
 ''')
 
 
 def test_a_reference_rebound_during_collect_reaches_the_later_items(tmp_path):
     """A reused item keeps the References it copied and copies them again when one is no longer the Space's: a
     formula that rebinds a Reference of the Space at coordinate 3 changes the items after it, as in live modelx,
-    and the caller's rebinding between two collects reaches the next one."""
+    and the caller's rebinding between two collects reaches the next one. A C value is compared by its bytes, so
+    a rebinding of 0.0 to -0.0 reaches the later items too."""
     model = mx.new_model('RebindCollect')
     try:
         proj = model.new_space('Projection', formula='lambda key: None', refs={'scale': 1.0})
@@ -273,19 +279,31 @@ def test_a_reference_rebound_during_collect_reaches_the_later_items(tmp_path):
         proj.new_cells('v', 'lambda: poke() + key * scale')
         proj.set_collect(over={'key': proj.keys}, outputs='lambda: {"individual": {"v": v()}}')
         live = {str(c): r.v for c, r in proj.collect().individual.items()}
+        signed = model.new_space('Signed', formula='lambda key: None', refs={'zero': 0.0})
+        signed.new_cells('keys', 'lambda: tuple(range(1, 7))')
+        signed.new_cells('poke', '''def poke():
+    if key == 3:
+        _model.Signed.zero = -0.0
+    return 0.0
+''')
+        signed.set_collect(over={'key': signed.keys}, outputs='lambda: {"individual": {"p": poke(), "s": zero}}')
+        live_signed = {str(c): repr(r.s) for c, r in signed.collect().individual.items()}
         model.export(tmp_path / 'exported')
     finally:
         model.close()
     assert live == {'1': 1.0, '2': 2.0, '3': 3.0, '4': 8.0, '5': 10.0, '6': 12.0}
+    assert live_signed['3'] == '0.0' and live_signed['4'] == '-0.0'
     (tmp_path / 'sample.py').write_text(
-        'from exported import mx_model as m\nm.Projection.collect()\n', encoding='utf-8')
+        'from exported import mx_model as m\nm.Projection.collect(); m.Signed.collect()\n', encoding='utf-8')
     subprocess.run([sys.executable, '-m', 'modelx_cython', 'exported', '--sample', 'sample.py', '--no-spec'],
                    cwd=tmp_path, check=True, capture_output=True)
-    assert '_mx_refs_held__c_Projection' in (tmp_path / 'exported_cy' / '_mx_classes.pxd').read_text()
+    pxd = (tmp_path / 'exported_cy' / '_mx_classes.pxd').read_text()
+    assert 'memcmp(&root.scale, &base.scale' in pxd.split('_mx_refs_held__c_Projection(')[1].split('\ncdef ')[0]
     out = json.loads(subprocess.run([sys.executable, '-c', REBIND_PROBE], cwd=tmp_path, check=True,
                                     capture_output=True, text=True).stdout)
     assert out['compiled'] == out['export'] == live
     assert out['compiled3'] == out['export3'] and out['compiled3']['4'] == 24.0
+    assert out['signed'][1] == out['signed'][0] == live_signed      # -0.0 is a rebinding of 0.0
 
 
 REACH_PROBE = textwrap.dedent('''\
