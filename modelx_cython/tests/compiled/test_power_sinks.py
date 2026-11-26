@@ -75,10 +75,6 @@ def test_powers_into_double_accumulators_are_native(tmp_path):
     done = subprocess.run([sys.executable, '-m', 'modelx_cython', 'exported', '--sample', 'sample.py',
                            '--no-spec'], cwd=tmp_path, capture_output=True, text=True)
     assert done.returncode == 0, done.stdout[-3000:] + done.stderr[-3000:]
-    report = json.loads((tmp_path / 'exported_cy/_mx_admission.json').read_text(encoding='utf-8'))
-    cells = {key.rsplit('._f_', 1)[-1]: row for key, row in report.items()}
-    assert cells['kept']['powers_in_loops'] == ['v ** (j / 2.0)'], cells['kept']
-    assert cells['accumulated']['powers_in_loops'] == [], cells['accumulated']
     out = subprocess.run([sys.executable, '-c', RUN.format(package='exported_cy')], cwd=tmp_path,
                          capture_output=True, text=True)
     assert out.returncode == 0, out.stdout[-3000:] + out.stderr[-3000:]

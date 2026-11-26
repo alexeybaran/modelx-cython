@@ -239,37 +239,24 @@ class OperandKind:
 class _PowerRewriter(cst.CSTTransformer):
     """Replace provably real ``**`` operations with ``_mx_sys._mx_pow``."""
 
-    def __init__(self, operand_kind: OperandKind, memo=None, operands=None, local_kind=None) -> None:
+    def __init__(self, operand_kind: OperandKind, memo=None, operands=None) -> None:
         super().__init__()
         self._kind = operand_kind
-        self._local_kind = local_kind     # report only: which declined powers are integer powers
         self._operands = operands or {}   # operand kinds proven for a power by its context
         self._opaque_depth = 0
         self.rewritten = 0
         self.declined: List[str] = []
-        self.declined_in_loops: List[str] = []
-        self._loop_depth = 0
         self.memo = memo
 
     def on_visit(self, node: cst.CSTNode) -> bool:
         if isinstance(node, _OPAQUE_SCOPES):
             self._opaque_depth += 1
-        if isinstance(node, (cst.For, cst.While, cst.CompFor)):
-            self._loop_depth += 1
         return super().on_visit(node)
 
     def on_leave(self, original_node, updated_node):
         if isinstance(original_node, _OPAQUE_SCOPES):
             self._opaque_depth -= 1
-        if isinstance(original_node, (cst.For, cst.While, cst.CompFor)):
-            self._loop_depth -= 1
         return super().on_leave(original_node, updated_node)
-
-    def _decline(self, node):
-        text = cst.Module([]).code_for_node(node).strip()
-        self.declined.append(text)
-        if self._loop_depth:
-            self.declined_in_loops.append(text)
 
     def leave_BinaryOperation(self, original_node, updated_node):
         if not isinstance(original_node.operator, cst.Power):
@@ -278,7 +265,9 @@ class _PowerRewriter(cst.CSTTransformer):
             # a name here may be bound by the enclosing comprehension,
             # lambda or nested def rather than by the cells, so nothing
             # can be typed from the parameters
-            self._decline(original_node)
+            self.declined.append(
+                cst.Module([]).code_for_node(original_node).strip()
+            )
             return updated_node
         # classify the original operands: a nested power has already
         # been rewritten into a call in ``updated_node``
@@ -306,12 +295,11 @@ class _PowerRewriter(cst.CSTTransformer):
                 rpar=updated_node.rpar,
             )
         # Only a floating exponent puts a power on Cython's complex
-        # path, so an integer one is left alone without comment; an exponent
-        # that the formula's local kinds prove an integer is one too (the
-        # argument-order pass, which knows those kinds, keeps its C power)
-        if exponent in (KIND_FLOAT, KIND_UNKNOWN) and not (
-                self._local_kind is not None and self._local_kind.kind(original_node.right) == KIND_INT):
-            self._decline(original_node)
+        # path, so an integer one is left alone without comment.
+        if exponent in (KIND_FLOAT, KIND_UNKNOWN):
+            self.declined.append(
+                cst.Module([]).code_for_node(original_node).strip()
+            )
         return updated_node
 
     @staticmethod
@@ -377,20 +365,15 @@ def rewrite_powers(
     param_kinds = _param_kinds(cells)
     if not any(isinstance(part, cst.BinaryOperation) and isinstance(part.operator, cst.Power)
                for part in walk(node.body)):
-        # the rewriter changes only a '**': none to rewrite, decline or report
-        cells.powers_in_loops = []
+        # the rewriter changes only a '**': none to rewrite or decline
         return node
     kind = OperandKind(resolver, cells_kinds, ref_kinds, cls_fqname, param_kinds)
     operands = None
     if isinstance(node.body, cst.IndentedBlock):
         operands = _double_accumulator_powers(
             node.body.body, cells.params, resolver, cells_kinds, ref_kinds, cls_fqname, param_kinds)
-    local_kinds = formula_local_kinds(node, cells.params, resolver, cells_kinds, ref_kinds, cls_fqname, param_kinds)
-    rewriter = _PowerRewriter(kind, memo, operands, OperandKind(
-        resolver, cells_kinds, ref_kinds, cls_fqname, {**local_kinds, **param_kinds}) if local_kinds else None)
+    rewriter = _PowerRewriter(kind, memo, operands)
     updated = node.body.visit(rewriter)
-    # Powers left on Python's semantics inside a loop, for the admission report
-    cells.powers_in_loops = list(rewriter.declined_in_loops)
     if rewriter.declined:
         _logger.info(
             f"'**' left as exported in {cells.formula_fqname}, so a "

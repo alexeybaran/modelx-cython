@@ -60,7 +60,6 @@ def describe(module_infos):
                     'dense_offsets': [int(offset) for offset in cell.cache_offsets]
                     if cache == 'dense' else [],
                     'exact_spill': cache == 'dense' and bool(cell.has_dense_spill),
-                    'powers_in_loops': list(getattr(cell, 'powers_in_loops', ())),
                     'guarded_integer_ops': getattr(cell, 'guarded_integer_ops', 0),
                     'object_locals': [{'local': name, 'reason': 'compared by identity (is / is not)'}
                                       for name in getattr(cell, 'python_object_locals', ())],
@@ -220,8 +219,6 @@ def slow_paths(cell, cache):
         except Exception:       # an axis without bounds: the cache kind alone
             pass
         entries.append({'kind': 'hash-cache', 'detail': detail, 'per_step': per_step})
-    for power in getattr(cell, 'powers_in_loops', ()) or ():
-        entries.append({'kind': 'power-on-objects-in-loop', 'detail': power, 'per_step': per_step})
     if per_step and cache != 'none' and cell.get_rettype_expr(c_style=True) == 'object':
         entries.append({'kind': 'object-return', 'detail': 'returns a Python object on every call '
                         '(boxed at the cell boundary)', 'per_step': per_step})
