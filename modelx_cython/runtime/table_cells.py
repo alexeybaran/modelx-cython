@@ -58,7 +58,7 @@ def enum_member(module, qualname, value):
             cls = getattr(cls, part)
         _enums[module, qualname] = cls
     member = cls._value2member_map_.get(value)
-    return member if member is not None else cls(value)
+    return member if member is not None else value      # no member's value: the integer the formula computed
 
 def frame_of(table, path):
     """What a Python caller gets for an internal table, the same object on every request, equal to what

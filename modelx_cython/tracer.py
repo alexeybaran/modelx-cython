@@ -566,7 +566,9 @@ class RuntimeValueInfo:
                     if self.helper is not None else None)
         self.enum_safe = (isinstance(value, type) and issubclass(value, IntEnum)
                           and type(value) is type(IntEnum)
-                          and value.__eq__ is int.__eq__ and value.__ne__ is int.__ne__)
+                          and value.__eq__ is int.__eq__ and value.__ne__ is int.__ne__
+                          and all(getattr(value, m) is getattr(IntEnum, m)
+                                  for m in ('__str__', '__format__', '__repr__', '__hash__')))
         self.enum = ((value.__module__, value.__qualname__,
                       {name: int.__int__(member) for name, member in value.__members__.items()})
                      if isinstance(value, type) and issubclass(value, IntEnum)
