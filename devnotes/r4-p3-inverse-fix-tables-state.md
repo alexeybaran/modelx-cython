@@ -54,3 +54,11 @@ Task (from the coordinator):
     8-policy book); the is_label checks, about 0.4%.
 - **Suites.** The failing set at the head equals c342db9's: 797 test headers, all from the environment
   (modelx_helpers absent, modelx 0.33 without collect_over, libcst).
+- **f6871d5 and 9e65ea2: 5c5540a's row widening decided from the column dtypes** (pandas' find_common_type rule),
+  with no row built.
+  - Under pandas 3, text columns have the `str` dtype; they are now covered too.
+  - The test checks the decision against `frame.iloc[0].dtype` for each case.
+- **Head 9e65ea2 vs c342db9, upstream text:**
+  - Term_UK_S +0.46% on the 8-policy book; +0.70% on a 10x book (3.770M vs 3.744M).
+  - UC_FR_S +0.74% (11 policies). VA_US_S +0.18% (9 policies).
+  - All equal to live.
