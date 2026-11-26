@@ -447,6 +447,7 @@ class _ReturnTypeMerger:
         """
         val = tr.ret_val
         changed = False
+        last_tp = self.ret_type
         if isinstance(val, np.ndarray):
             tp = ReturnTypeInfo(val.dtype.type, is_array=True, ndim=val.ndim)
             # Buffer compatibility depends on byte order and rank as well
@@ -456,18 +457,22 @@ class _ReturnTypeMerger:
                 changed = signature not in self._array_formats
                 self._array_formats.add(signature)
         else:
-            tp = ReturnTypeInfo(object if isinstance(val, numbers.Integral)
-                                and not -(1 << 63) <= val < (1 << 63) else type(val),
-                                vector_shape=vector_shape(val))
-            if self._integral_double_exact and isinstance(val, numbers.Integral):
+            integral = isinstance(val, numbers.Integral)
+            value_type = object if integral and not -(1 << 63) <= val < (1 << 63) else type(val)
+            if self._integral_double_exact and integral:
                 try:
                     integer = operator.index(val)
                     self._integral_double_exact = int(float(integer)) == integer
                 except (TypeError, ValueError, OverflowError):
                     self._integral_double_exact = False
                 changed = not self._integral_double_exact
+            # a list or tuple carries a vector shape (vector_shape) the merge below compares
+            if (last_tp is not None and last_tp.value_type == value_type and value_type is not list
+                    and value_type is not tuple
+                    and last_tp.is_array == False and last_tp.ndim == 0):     # noqa: E712 (as ==)
+                return changed      # the merged type stays: ``last_tp == tp`` below
+            tp = ReturnTypeInfo(value_type, vector_shape=vector_shape(val))
 
-        last_tp = self.ret_type
         if last_tp is None:
             self.ret_type = tp
             self._first_args = tr.arg_vals
