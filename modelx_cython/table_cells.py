@@ -325,6 +325,15 @@ class RenameMembers(cst.CSTTransformer):
                 if name in self.mapping.get(cls_name, {}):
                     self.enums[name] = enum
         self.wrapped = 0
+        self._params = []           # per function: {parameter: enum} of C-integer parameters traced as one IntEnum
+        self._owners = []           # per function: (class, Cell) whose formula it is, or None
+        self.shown = set()          # (class, Cell, parameter) whose value is used as an object
+        self.foreign = []           # (class, Cell, parameter, caller): a member of another class passed to it
+        self.constants = {}         # enum constant -> (module, qualname) of its class
+        for (owner, ref, _), (symbol, _) in getattr(module, 'code_enum_symbols', {}).items():
+            enum = getattr(module.classes[owner].refs.get(ref), 'enum', None)
+            if enum:
+                self.constants[symbol] = tuple(enum[:2])
         self.vectors = {cls_name: vector_cells(cls_info) for cls_name, cls_info in module.classes.items()}
         self.vector_publics = 0     # D154: vector cell calls left on the public method (a new list)
         self._classes = []          # enclosing generated class names
@@ -420,12 +429,67 @@ class RenameMembers(cst.CSTTransformer):
             if isinstance(small, cst.AnnAssign) and isinstance(small.target, cst.Name)
             and cst.Module(body=[]).code_for_node(small.annotation.annotation) in vector_types})
         self._functions.append(node)
+        self._params.append(self._enum_params(node))
 
     def leave_FunctionDef(self, original, updated):
         self._locals.pop()
         self._vector_locals.pop()
         self._functions.pop()
+        self._params.pop()
+        self._owners.pop()
         return updated
+
+    # ---------------------------------------------------------------- enum parameters used as objects
+    def _enum_params(self, node):
+        """{parameter: enum} of a Cell formula's C-integer parameters traced as one IntEnum class: where one is
+        used as an object, it is the member, as live holds it (its ``.name``, ``str``, ``repr``)."""
+        from modelx_cython.enums import _traced_enum
+        cls_info = self.module.classes.get(self._classes[-1]) if self._classes and self._classes[-1] else None
+        name = node.name.value
+        cell = cls_info.cells.get(name[3:] if name.startswith('_f_') else name) if cls_info is not None else None
+        self._owners.append((cls_info.name, cell.name) if cell is not None else None)
+        if cell is None or not cell.has_typeinfo():
+            return {}
+        found = {}
+        for param in node.params.params:
+            annotation = param.annotation and cst.Module([]).code_for_node(param.annotation.annotation)
+            if annotation == f'{CY_MOD}.longlong' and param.name.value in cell.params:
+                enum = _traced_enum(cell, param.name.value)
+                if enum is not None:
+                    found[param.name.value] = enum
+        return found
+
+    def leave_Name(self, original, updated):
+        enum = self._params[-1].get(original.value) if self._params else None
+        if enum is None:
+            return updated
+        parent = self._parent(original)
+        if (isinstance(parent, (cst.AssignTarget, cst.Param)) or not self._object_use(original)
+                or (isinstance(parent, cst.Attribute) and parent.attr is original)):
+            return updated
+        self.shown.add((*self._owners[-1], original.value))
+        return self._member_of(enum, updated)
+
+    def _foreign_members(self, original):
+        """Record a member constant of one class passed to a compiled Cell's parameter traced as another."""
+        from modelx_cython.enums import _traced_enum
+        func = original.func
+        owner = self._receiver(func.value) if isinstance(func, cst.Attribute) else None
+        cls_info = self.module.classes.get(owner) if owner else None
+        cell = cls_info.cells.get(func.attr.value) if cls_info is not None else None
+        if cell is None or not cell.has_typeinfo() or any(a.keyword or a.star for a in original.args):
+            return
+        for arg, param in zip(original.args, cell.params):
+            value = arg.value
+            while (isinstance(value, cst.Call) and isinstance(value.func, cst.Attribute) and value.args
+                   and value.func.attr.value == '_mx_integer_result'):
+                value = value.args[0].value         # the integer guard's checked argument
+            given = self.constants.get(value.value) if isinstance(value, cst.Name) else None
+            expected = _traced_enum(cell, param) if given else None
+            if expected is not None and given != expected:
+                owners = [o for o in self._owners if o]
+                where = f'{owners[-1][0][len("_c_"):]}.{owners[-1][1]}' if owners else self.module.fqname
+                self.foreign.append((owner, cell.name, param, where))
 
     # ---------------------------------------------------------------- D154: vector results
     def _vector_return(self, shape):
@@ -509,6 +573,7 @@ class RenameMembers(cst.CSTTransformer):
 
     def leave_Call(self, original, updated):
         func = original.func
+        self._foreign_members(original)
         if isinstance(func, cst.Attribute):
             new = self._new(func.value, func.attr.value, CELL_PREF)
             shape = self.vectors.get(self._receiver(func.value), {}).get(func.attr.value) if new else None
@@ -547,7 +612,10 @@ class RenameMembers(cst.CSTTransformer):
         return None
 
     def _member(self, name, expr):
-        module, qualname = self.enums[name]
+        return self._member_of(self.enums[name], expr)
+
+    def _member_of(self, enum, expr):
+        module, qualname = enum
         self.wrapped += 1
         return cst.parse_expression(f'{RUNTIME}.enum_member({module!r}, {qualname!r}, _x)').with_changes(
             args=(cst.Arg(cst.SimpleString(repr(module))), cst.Arg(cst.SimpleString(repr(qualname))),
@@ -623,6 +691,11 @@ def finish(syntax, module):
     """The last pass over a generated module (after entry lowering and integer guards):
     rename the members of table and enum cells and table References, add the Python members."""
     from modelx_cython.transformer import _integer_reference_paths
-    result = cst.MetadataWrapper(syntax, unsafe_skip_copy=True).visit(
-        RenameMembers(module, syntax.config_for_parsing, _integer_reference_paths))
+    rename = RenameMembers(module, syntax.config_for_parsing, _integer_reference_paths)
+    result = cst.MetadataWrapper(syntax, unsafe_skip_copy=True).visit(rename)
+    for owner, cell, param, where in rename.foreign:
+        if (owner, cell, param) in rename.shown:
+            raise TypeError(f'{where}: passes a member of one IntEnum class to the parameter {param!r} of '
+                            f'{cell}, traced as another IntEnum class and used there as an object, so its value '
+                            'would differ from live modelx')
     return result
