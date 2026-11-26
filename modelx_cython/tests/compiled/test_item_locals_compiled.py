@@ -1,6 +1,5 @@
 """A compiled Cell that loops over the items of an ItemSpace Reference computes the live values,
-whether its item local is bound once or rebound; a call from Python goes through the Cell's Python
-entry."""
+whether its item local is bound once or rebound."""
 
 import json
 import subprocess
@@ -92,9 +91,7 @@ for label, call in (('text', lambda: item.f('a')), ('arity', lambda: item.f(1, 2
         errors[label] = None
     except Exception as error:
         errors[label] = [type(error).__name__, str(error)]
-gate = item.f
 out['errors'] = errors
-out['doc'] = [gate.__doc__ == type(item).f.__doc__, type(gate).__name__]
 # items are cached and stay the same object; deleting one frees it without the cyclic GC
 import gc
 out['same_item'] = P[3] is P[3] and P(3) is P[3]
@@ -111,7 +108,6 @@ except KeyError as error:
     out['missing_key'] = ['KeyError', str(error)]
 out['recreated'] = P[3].f(2) == p.direct() * 0 + P[3].f(2)
 gc.enable()
-out['gate'] = [gate.__name__, gate.__wrapped__.__name__, callable(gate)]
 print(json.dumps(out))
 '''
 
@@ -126,8 +122,6 @@ def test_item_locals_values_and_checks(tmp_path):
     errors = result['errors']
     assert errors['text'][0] == 'TypeError'
     assert errors['arity'][0] == 'TypeError'
-    assert result['gate'] == ['f', 'f', True]
-    assert result['doc'][0]
     assert result['same_item'] and result['freed_on_delete'] == 1
     assert result['missing_key'] == ['KeyError', '3']
     assert result['recreated']

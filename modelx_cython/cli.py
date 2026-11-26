@@ -361,8 +361,6 @@ def main_handler(args: argparse.Namespace, stdout: IO[str], stderr: IO[str]) -> 
         module_infos = {u.module_info.fqname: u.module_info for u in units}
         resolver = build_resolver(module_infos)
         cells_kinds, ref_kinds = build_kind_maps(module_infos)
-        cells_by_name = {cell.fqname: cell for module in module_infos.values()
-                         for cls in module.classes.values() for cell in cls.cells.values()}
         demote_rebound_params(module_infos, resolver, cells_kinds, ref_kinds)
 
         policy = spec.policy
@@ -402,7 +400,7 @@ def main_handler(args: argparse.Namespace, stdout: IO[str], stderr: IO[str]) -> 
         cell_sources = {}
         for u in units:
             with shared_facts():
-                state = lower_formula_semantics(translated_modules[u.fqname], u.module_info, cells_by_name,
+                state = lower_formula_semantics(translated_modules[u.fqname], u.module_info,
                                                 infer_types=policy.infer_types)
             from modelx_cython.locked_entries import lower_locked_entries
             state = lower_locked_entries(state, u.module_info)
