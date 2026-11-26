@@ -214,12 +214,34 @@ callgrind counts the instructions. Numeric libraries are single-threaded. Upstre
 
 ### Twelve SEC models against upstream (at 503b07c)
 
-A run of all twelve SEC models on 503b07c against upstream d22426f, on CI runner machines, is in
-progress.
+Method: this branch's compiler at 503b07c against upstream's at d22426f, both on modelx fec516d and
+lifelib 20d4dae, loop route. The figure is callgrind instructions per projection. Every value equals
+live modelx. Peak memory is the figure the result files record for the 200-projection counted run.
 
-| model | upstream Ir/policy | proposal Ir/policy | ratio | peak MB | translate s | build s |
-|---|---|---|---|---|---|---|
-| (run in progress) | | | | | | |
+| model | upstream Ir/projection | this change Ir/projection | ratio | peak MB, upstream | peak MB, this change |
+|---|---|---|---|---|---|
+| Term_US_SEC | (to be filled from the result files) | | | | |
+| SPIA_US_SEC | (to be filled from the result files) | | | | |
+| WholeLife_US_SEC | (to be filled from the result files) | | | | |
+| VUL_US_SEC | (to be filled from the result files) | | | | |
+| FIA_US_SEC | (to be filled from the result files) | | | | |
+| VA_US_SEC | (to be filled from the result files) | | | | |
+| UL_US_SEC | (to be filled from the result files) | | | | |
+| IUL_US_SEC | (to be filled from the result files) | | | | |
+| ULSG_US_SEC | (to be filled from the result files) | | | | |
+| MYGA_US_SEC | (to be filled from the result files) | | | | |
+| RILA_US_SEC | (to be filled from the result files) | | | | |
+| DIA_US_SEC | (to be filled from the result files) | | | | |
+
+### Wall time, paired pass
+
+Method: the same book on both compilers, five alternating rounds. The table gives the median ratio,
+its range and the noise floor of the same build run against itself.
+
+| scope | median ratio, this / upstream | range | same-build noise floor |
+|---|---|---|---|
+| twelve SEC models | (pass in progress) | | |
+| census models | (pass in progress) | | |
 
 ### Scaling with workers
 
@@ -339,4 +361,5 @@ evidence for that commit, not for the final one.
 | 45851243863 | 7edf07b | Linux and Windows, all five versions; macOS 3.10 | macOS 3.12, 3.14, 3.13t, 3.14t |
 | 45869162145 | 503b07c (final) | (queued) | (queued) |
 
-macOS / free-threaded 3.14 was not assigned a runner on any of these runs, so it is untested.
+The macOS / free-threaded 3.14 lane has not run, because no runner was allocated to it on any of
+these runs. It is therefore untested, and the owner has accepted that.
