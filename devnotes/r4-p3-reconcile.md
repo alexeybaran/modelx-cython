@@ -225,7 +225,6 @@ and 27 original models keep at least one per-step pandas read. These are listed 
 Cancer_KR_S 14/10, Child_KR_S 12/9, Cancer_JP_S 11/11 and VA_KR_S 11/10 have the most.
 
 Per model (26 groups by identical needs, both texts, per-step pandas reads left on line B): `devnotes/r4-p3-census.md`.
-
 **Revised order** (it replaces section 4's first slice):
 1. B4, then B5 without the inliner, then B6's L5/L7 (about 310 lines of `frame_reads` plus the extremes of
    `_tables`). On the original text this brings 17 models to line-B form, 20 with B0.
@@ -247,3 +246,5 @@ Per model (26 groups by identical needs, both texts, per-step pandas reads left 
 - **Kept in B4:** `_mx_table_signatures.py`, because the runtime reads it (`_tables.pyx` 426-433).
 - **Risk:** without provenance, a key that was a traced table column reads as `series`. That is still a selector,
   so the decision should be unchanged. Check it by running the B4-B6 tests with the reduced recorder.
+
+## 8. Original text against the fork text (UC_FR_S, Dep_FR_S, Child_KR_S at 856b984): `devnotes/r4-p3-original-text.md`
