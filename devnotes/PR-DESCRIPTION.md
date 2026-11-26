@@ -198,7 +198,7 @@ rounds. Each figure is the median wall time of the whole book at the given numbe
 ### Breadth: every lifelib model (at 53104d2)
 
 Method: each of the 95 models in upstream lifelib main was built and driven with both compilers on
-one cloud VM per model. Its values were compared with live modelx, and callgrind counted instructions
+one cloud VM per model. Its values were compared with live modelx, instructions per policy were
 and memory per policy.
 
 - **No regressions.** No model that the current compiler runs fails on this one. 73 models build and
