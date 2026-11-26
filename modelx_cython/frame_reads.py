@@ -849,9 +849,14 @@ class FrameReads:
 
     def int_label(self, expr):
         """T-5: ``X.index[i]``, ``X.index.asof(x)``, ``.max()``, ``.min()`` or ``.searchsorted(x)`` of a view or frame
-        whose one remaining level is an int level: an integer (key facts)."""
+        whose one remaining level is an int level: an integer (key facts). ``X.index[i]`` is one only for a position
+        ``i`` known to be an integer: a mask, a list or a slice selects an index, never a label."""
         if isinstance(expr, cst.Subscript):
             index = expr.value
+            parts = _index_parts(expr)
+            if (parts is None or len(parts) != 1 or isinstance(parts[0], SEVERAL_ROWS)
+                    or not self.facts.is_int(parts[0])):
+                return False
         elif isinstance(expr, cst.Call) and isinstance(expr.func, cst.Attribute) and expr.func.attr.value in (
                 'asof', 'max', 'min', 'searchsorted'):
             index = expr.func.value
