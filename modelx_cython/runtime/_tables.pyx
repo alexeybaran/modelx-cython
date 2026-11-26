@@ -320,13 +320,17 @@ cdef void _name_map(PreparedTable table):
 
 cdef str _row_kind(list dtypes, object frame):
     """The kind of the dtype pandas gives a row of columns of ``dtypes`` (find_common_type), without building one for
-    numpy dtypes: one dtype is itself, bool beside a number is object, numbers give their common type. Other dtypes
-    (datetimes, extension dtypes) are read off the first row."""
-    if not all(isinstance(dtype, np.dtype) and dtype.kind in 'biufcO' for dtype in dtypes):
-        return getattr(frame.iloc[0].dtype, 'kind', 'O')
+    numpy dtypes and text: text or bool beside a number is object, numbers (or bools) give their common type. Other
+    dtypes (datetimes, other extension dtypes) are read off the first row."""
+    cdef bint text = False
+    for dtype in dtypes:
+        if isinstance(dtype, pd.StringDtype):
+            text = True
+        elif not (isinstance(dtype, np.dtype) and dtype.kind in 'biufcO'):
+            return getattr(frame.iloc[0].dtype, 'kind', 'O')
+    if text:
+        return 'O'      # a text row, or text beside other columns: object
     found = {dtype.kind for dtype in dtypes}
-    if len(set(dtypes)) == 1:
-        return dtypes[0].kind
     if 'O' in found or ('b' in found and found & set('iufc')):
         return 'O'
     return np.result_type(*dtypes).kind

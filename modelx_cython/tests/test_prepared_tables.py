@@ -311,6 +311,8 @@ ROW_DTYPES = [
     {'a': 'bool', 'b': 'bool'}, {'q': 'float64', 'c': 'complex128'}, {'q': 'float64', 'o': 'object'},
     {'q': 'float64', 'd': 'datetime64[ns]'}, {'q': 'float64', 'e': 'Int64'}, {'q': 'float64', 'k': 'category'},
     {'q': 'float64', 'n': 'int64', 'b': 'bool'}, {'n': 'int64'}, {'q': 'float64'}, {'q': 'float32', 'r': 'float32'},
+    {'q': 'float64', 's': 'str'}, {'s': 'str', 't': 'str'}, {'s': 'str'}, {'n': 'int64', 's': 'str', 'b': 'bool'},
+    {'q': 'float64', 's': 'string'}, {'s': 'string', 't': 'str'},
 ]
 
 
@@ -319,7 +321,8 @@ def test_row_dtype_is_the_one_pandas_gives(tables, dtypes):
     """Whether a row is widened to a number dtype (and to float64) is decided from the column dtypes, as pandas
     decides it for ``frame.iloc[0]``: bool beside a number gives object, numbers give their common type."""
     _tables, probe = tables
-    columns = {name: pd.Series([1, 0, 1], dtype=dtype) if dtype in ('bool', 'Int64', 'category')
+    columns = {name: pd.Series(['x', 'y', 'z'], dtype=dtype) if dtype in ('str', 'string')
+               else pd.Series([1, 0, 1], dtype=dtype) if dtype in ('bool', 'Int64', 'category')
                else pd.Series(np.array([1, 0, 1]).astype(dtype)) for name, dtype in dtypes.items()}
     frame = pd.DataFrame(columns).set_axis(pd.Index([10, 11, 12]))
     table = _tables.prepare(frame)
