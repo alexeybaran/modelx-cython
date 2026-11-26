@@ -214,24 +214,29 @@ callgrind counts the instructions. Numeric libraries are single-threaded. Upstre
 
 ### Twelve SEC models against upstream (at 503b07c)
 
-Method: this branch's compiler at 503b07c against upstream's at d22426f, both on modelx fec516d and
-lifelib 20d4dae, loop route. The figure is callgrind instructions per projection. Every value equals
-live modelx. Peak memory is the figure the result files record for the 200-projection counted run.
+Method: this branch's compiler at 503b07c against upstream's at d22426f, on a cloud VM with an Intel
+Xeon at 2.10 GHz and free-threaded Python 3.14.6. Both use modelx fec516d and lifelib 20d4dae. Each
+model runs the given number of projections by the loop route, and callgrind counts the instructions per
+projection. In all 24 runs the values equal live modelx (maximum absolute difference 0). Peak MB is the
+peak resident memory of the measured run of that many projections.
 
-| model | upstream Ir/projection | this change Ir/projection | ratio | peak MB, upstream | peak MB, this change |
-|---|---|---|---|---|---|
-| Term | (to be filled from the result files) | | | | |
-| SPIA | (to be filled from the result files) | | | | |
-| WholeLife | (to be filled from the result files) | | | | |
-| VUL | (to be filled from the result files) | | | | |
-| FIA | (to be filled from the result files) | | | | |
-| VA | (to be filled from the result files) | | | | |
-| UL | (to be filled from the result files) | | | | |
-| IUL | (to be filled from the result files) | | | | |
-| ULSG | (to be filled from the result files) | | | | |
-| MYGA | (to be filled from the result files) | | | | |
-| RILA | (to be filled from the result files) | | | | |
-| DIA | (to be filled from the result files) | | | | |
+| model | projections | upstream Ir/projection | this change Ir/projection | upstream / this | peak MB, upstream | peak MB, this change |
+|---|---|---|---|---|---|---|
+| Term | 204 | 4,051,402 | 998,454 | 4.06x | 193 | 119 |
+| SPIA | 220 | 6,555,090 | 2,433,060 | 2.69x | 358 | 122 |
+| WholeLife | 220 | 7,521,839 | 2,028,906 | 3.71x | 368 | 122 |
+| VUL | 207 | 21,776,962 | 9,890,900 | 2.20x | 1,671 | 127 |
+| FIA | 216 | 11,126,173 | 2,906,594 | 3.83x | 824 | 124 |
+| VA | 207 | 17,745,439 | 4,674,314 | 3.80x | 1,207 | 130 |
+| UL | 207 | 11,289,671 | 2,655,970 | 4.25x | 487 | 122 |
+| IUL | 204 | 33,126,381 | 9,321,880 | 3.55x | 1,090 | 125 |
+| ULSG | 207 | 11,725,569 | 3,451,453 | 3.40x | 650 | 123 |
+| MYGA | 210 | 10,270,358 | 2,357,352 | 4.36x | 622 | 124 |
+| RILA | 216 | 17,187,850 | 3,479,318 | 4.94x | 1,436 | 128 |
+| DIA | 208 | 7,283,855 | 2,359,605 | 3.09x | 464 | 125 |
+
+Across the twelve models, upstream uses 2.20x to 4.94x the instructions of this change
+(median 3.75x).
 
 ### Wall time, paired pass
 
