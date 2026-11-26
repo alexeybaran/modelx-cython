@@ -58,9 +58,11 @@ PROBE = textwrap.dedent('''\
         out[workers]['error'] = error(compiled.Projection.collect)
         compiled.Loose._mx_collect_cache.clear()
         out[workers]['loose'] = error(compiled.Loose.collect)
+        out[workers]['item'] = error(compiled.Projection[2].collect)
     export.Projection.fail_keys = (7, 4)
     export.Projection._mx_collect_cache.clear()
     out['export_error'] = error(export.Projection.collect)
+    out['export_item'] = error(export.Projection[2].collect)
     print(json.dumps(out))
 ''')
 
@@ -96,7 +98,8 @@ def _model(tmp_path):
         book = model.new_space('Book', refs={'proj': proj})
         book.new_cells('total', 'lambda: proj.collect().sum.pv')
         live = {'pv': proj.collect().sum.pv, 'pv2': proj.collect(scen=2).sum.pv,
-                'cfs': dict(proj.collect().sum.cfs), 'ind': proj.collect().individual[5].pv}
+                'cfs': dict(proj.collect().sum.cfs), 'ind': proj.collect().individual[5].pv,
+                'item': not hasattr(proj[2], 'collect')}
         model.export(tmp_path / 'exported', locked_spaces=['Data'])
     finally:
         model.close()
@@ -119,6 +122,7 @@ def test_compiled_collect(tmp_path):
     assert export['sum']['pv'] == live['pv'] and out['export2']['sum']['pv'] == live['pv2']
     assert export['sum']['cfs'] == {str(k): v for k, v in live['cfs'].items()}
     assert export['individual']['5']['pv'] == live['ind']
+    assert live['item']             # live modelx: collect is not an attribute of an ItemSpace
     for workers in ('1', '4'):
         got = out[workers]
         assert got['value'] == export, workers                   # bit for bit, domain order
@@ -128,6 +132,9 @@ def test_compiled_collect(tmp_path):
         # base, the kept item and at most an item per worker whose free a thread defers: the rest released
         assert got['items'] <= 2 + int(workers), got['items']
         assert got['error'] == out['export_error'] == ['LookupError', 'no rate for 4']
+        # collect belongs to the declared Space: on an ItemSpace the export and the compiled class raise
+        # TypeError (live modelx, which defines collect on the declared Space only, raises AttributeError)
+        assert got['item'][0] == out['export_item'][0] == 'TypeError' and got['item'] == out['export_item']
         assert got['loose'] == (None if workers == '1' else [
             'ValueError', 'collect of Loose with 4 workers: the Reference data is a Space without a lock; '
             'export it in locked_spaces or use one worker'])

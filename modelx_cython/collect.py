@@ -190,8 +190,8 @@ def reset_function(cls_name, block, classes, values):
 
     Every attribute that the class block and its bases declare (the object's layout) is listed: an object
     or a memoryview to None, as ``tp_new`` leaves it; any C value, array or struct to zero bytes, as the allocator leaves
-    it. The dense value arrays (``values``) are left as the S1 allocator leaves them, unwritten, behind
-    their flags. A declaration of another kind stops the build naming the attribute and its Cell."""
+    it. The dense value arrays (``values``) are left unwritten behind their flags, as the class's allocator
+    leaves them in a new object (``value_storage``: it zeroes every byte but those arrays). A declaration of another kind stops the build naming the attribute and its Cell."""
     structs = _declared(r'^cdef struct (\w+)')
     objects = _OBJECTS | set(classes) | _declared(r'^cdef class (\w+)')
     lines = []
