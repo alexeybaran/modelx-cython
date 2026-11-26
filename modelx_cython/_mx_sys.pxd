@@ -1,7 +1,10 @@
 from libc.math cimport (
     pow as _mx_c_pow, floor as _mx_c_floor, isfinite as _mx_c_isfinite)
 from libc.string cimport memcmp
-from cpython.object cimport Py_TYPE, PyObject_GenericGetAttr
+from cpython.long cimport PyLong_CheckExact
+from cpython.number cimport PyNumber_Index
+from cpython.object cimport Py_TYPE, PyObject_GenericGetAttr, PyObject_GenericSetAttr
+from cpython.unicode cimport PyUnicode_Check, PyUnicode_Compare
 from libc.math cimport fabs, copysign
 cimport cython
 
@@ -10,6 +13,31 @@ cdef inline object _mx_named(object error, str path):
     """``error`` marked as naming the Cell ``path``."""
     error._mx_cell = path
     return error
+
+
+cdef inline object _mx_integral(object value, str path):
+    """``value`` from Python for a C integer: an int, a float that is a whole number, or anything
+    else through the index protocol. A fractional float or a value that is not an integer raises
+    TypeError naming ``path``; a value beyond 64 bits is left to Cython's own conversion."""
+    if PyLong_CheckExact(value):
+        return value
+    if isinstance(value, float):
+        if value.is_integer():
+            return value
+    else:
+        try:
+            return PyNumber_Index(value)
+        except TypeError:
+            pass
+    raise _mx_named(TypeError(f"{path} requires an integer, got {value!r}"), path)
+
+
+cdef inline bint _mx_ref_name_is(object name, str expected) except? -1:
+    return PyUnicode_Check(name) and PyUnicode_Compare(name, expected) == 0
+
+
+cdef inline int _mx_generic_setattr(object receiver, object name, object value) except -1:
+    return PyObject_GenericSetAttr(receiver, name, value)
 
 
 cdef inline object _mx_generic_getattr(object receiver, object name):
