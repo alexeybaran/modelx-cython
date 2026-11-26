@@ -337,35 +337,32 @@ def _mx_collect_evaluate(space, coords, outputs_at, refs, reads_parents):
     pending = {{}}
     state = [0, 0, len(coords), None]       # next to take, next to add, stop, the first error
 
-    def work_items(spare):
-        while True:
-            with lock:
-                i = state[0]
-                if i >= state[2]:
-                    return
-                state[0] = i + 1
-            try:
-                out = outputs_at(spare, coords[i])
-            except BaseException as error:
-                with lock:
-                    if i < state[2]:
-                        state[2], state[3] = i, error
-                continue
-            with lock:
-                pending[i] = out
-                while state[1] < state[2] and state[1] in pending:
-                    k = state[1]
-                    try:
-                        accumulator.add(coords[k], pending.pop(k))
-                    except BaseException as error:
-                        state[2], state[3] = k, error
-                        break
-                    state[1] = k + 1
-
     def work():
         spare = [None, None]
         try:
-            work_items(spare)
+            while True:
+                with lock:
+                    i = state[0]
+                    if i >= state[2]:
+                        return
+                    state[0] = i + 1
+                try:
+                    out = outputs_at(spare, coords[i])
+                except BaseException as error:
+                    with lock:
+                        if i < state[2]:
+                            state[2], state[3] = i, error
+                    continue
+                with lock:
+                    pending[i] = out
+                    while state[1] < state[2] and state[1] in pending:
+                        k = state[1]
+                        try:
+                            accumulator.add(coords[k], pending.pop(k))
+                        except BaseException as error:
+                            state[2], state[3] = k, error
+                            break
+                        state[1] = k + 1
         finally:
             spare.clear()
 
