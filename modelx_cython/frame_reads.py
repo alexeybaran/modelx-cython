@@ -1072,6 +1072,8 @@ class FrameReads:
         from .row_cells import item_constant
         if count < 2 or count > MAX_PARTS:
             return None
+        if self.facts.is_int(key):
+            return None         # a C integer is never a tuple (and cannot be subscripted): the read is pandas'
         if isinstance(key, cst.Name):
             value = self._value_of(key.value)
             if (isinstance(value, cst.Tuple) and len(value.elements) == count
