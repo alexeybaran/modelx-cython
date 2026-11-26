@@ -48,3 +48,16 @@ most 200 words.
     scope effects, so every formula with a table hold lost the reduction, rounding and row passes.
   - Fix: an unnamed handler and a walrus of an `_mx_` name no longer count.
   - IP_UK_S −0.10%.
+- **Six regional models (fork text).** The step was in the fix-tables merge. Closed at d342f58, all within 3% of the
+  reference.
+  - Revert of 75cc21a (838d0a0; an allowed sample-count rule was restored). That reverts c9db767 too.
+  - 21f0a0e: a raising hold is remembered as tried.
+  - d342f58: a vector the compiler fills is no frame edit (Child_KR_S, LTC_KR_S, BU_DE_S).
+- **Coordinator's order after that.**
+  - (1) 53dcea2: text guards from the recorder experiment, plus f988be7 (numpy type of a label-checked read).
+  - (2) 3b48dad: merge of fix-other 28aad6f.
+  - (3) ac1ad83: merge of adds up to dbc7132. Hand conflicts: table_cells.finish uses `without_unused_runtime`;
+    test_space_item_results keeps both assertions.
+- **Suites per step:** no new failure at steps 1 and 2. Step 3 has one new failure,
+  test_native_module_math::test_module_math_bound_at_build_time. It fails on the adds branch alone: the report no
+  longer lists m_erf in native_helpers. Reported; stopped there.
