@@ -77,7 +77,7 @@ class ExpressionKind:
         """``node`` is a Name bound to the built-in of that name (no local rebinding)."""
         if not isinstance(node, cst.Name):
             return False
-        if node.value in self.locals or node.value in getattr(self.base, '_param_kinds', {}):
+        if node.value in self.locals or getattr(self.base, '_param_kinds', {}).get(node.value) is not None:
             return False
         if self.scope_of is None:
             return False
@@ -92,7 +92,7 @@ class ExpressionKind:
         if isinstance(expr, cst.Name):
             if expr.value in self.locals:
                 return self.locals[expr.value] if self._own(expr, expr.value) else KIND_UNKNOWN
-            if expr.value in getattr(self.base, '_param_kinds', {}) and not self._own(expr, expr.value):
+            if getattr(self.base, '_param_kinds', {}).get(expr.value) is not None and not self._own(expr, expr.value):
                 return KIND_UNKNOWN
             return self.base.kind(expr)
         if isinstance(expr, cst.UnaryOperation):

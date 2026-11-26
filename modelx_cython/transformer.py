@@ -552,6 +552,19 @@ class PXDGenerator:
         return "".join(decl_stmts)
 
 
+class _FirstRead:
+    """A mapping read through ``get`` only, computed on the first read."""
+
+    def __init__(self, compute):
+        self._compute = compute
+        self._mapping = None
+
+    def get(self, key, default=None):
+        if self._mapping is None:
+            self._mapping = self._compute()
+        return self._mapping.get(key, default)
+
+
 class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
     """Rewrite a model module into Cython pure-Python mode.
 
@@ -727,10 +740,12 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
                        for name in cells.params} if cells.has_args() and cells.has_typeinfo() else {}
         # locals proven of one kind by every assignment (D59): `k = calendar_year(t) - year`
         # then `base ** k` is an integer exponent, as the same expression written inline is
-        local_kinds = formula_local_kinds(node, cells.params, self._resolver, self._cells_kinds,
-                                          self._ref_kinds, cls_info.fqname, param_kinds)
+        # analysed on the first read: most formulas have no operand the passes below classify
+        local_kinds = _FirstRead(lambda: {**formula_local_kinds(
+            node, cells.params, self._resolver, self._cells_kinds, self._ref_kinds, cls_info.fqname,
+            param_kinds), **param_kinds})
         operand_kind = OperandKind(self._resolver, self._cells_kinds, self._ref_kinds,
-                                   cls_info.fqname, {**local_kinds, **param_kinds})
+                                   cls_info.fqname, local_kinds)
         node = preserve_argument_order(node,
             native_result=cells.get_rettype_expr(c_style=True) in ('double', 'long long', 'bint'),
             operand_kind=operand_kind,
