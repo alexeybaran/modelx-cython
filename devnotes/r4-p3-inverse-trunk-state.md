@@ -39,3 +39,12 @@ most 200 words.
     wraps arguments now.
 - **Running:** suites of 5e67b27 and f67859b; models for f67859b and e4cdfc9. Next: suites of e4cdfc9 and 09f66ec,
   models for 09f66ec.
+- **Figures vs c342db9** (upstream text, all equal to live):
+  - f67859b: Term +0.49%, UC −0.08%, VA +0.09%, IP +0.10%, KLV −0.14%.
+  - e4cdfc9: Term +0.55%, UC +0.31%, VA +0.13%, IP +1.02%, KLV +0.19%.
+  - The IP step is already in fix-tables alone (9e65ea2: +1.05%).
+- **7af873a: repair for the IP_UK_S step.**
+  - Cause: `scopes.has_scope_effects` counted the holds' unnamed `except Exception:` and the `_mx_okey_` walrus as
+    scope effects, so every formula with a table hold lost the reduction, rounding and row passes.
+  - Fix: an unnamed handler and a walrus of an `_mx_` name no longer count.
+  - IP_UK_S −0.10%.
