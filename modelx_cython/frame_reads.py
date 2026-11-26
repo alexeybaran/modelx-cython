@@ -1357,6 +1357,7 @@ class _Rewrite(cst.CSTTransformer):
         self.key_locals = {}    # name of a key local -> its tuple display (the fallback evaluates the display)
         self.asof_rows = {}     # asof local -> (membership hold, prefix cell call, asof expression)
         self.native = {}        # id(lowered read) -> column kind, for float()/int() around it
+        self.float_only = set()     # ids of float64 reads kept as objects for a text key part (_lowered)
         self.taken = []         # T-5c: kinds of the holds taken since the last recorded read (its run-time fallbacks)
         self.emitted_inline_assignments = set()
         self.generator_walks = set()    # T-5c: ids of lowered generator walks (``gen if test else pandas gen``)
@@ -1678,14 +1679,16 @@ class _Rewrite(cst.CSTTransformer):
         """``read if test else fallback``: the pandas read cast to the read's C type when the read is typed (both
         branches native), and the lowered read marked as of that kind (``float()``/``int()`` around it dropped). A
         read whose test checks that a text-level key part names one label (``_mx_okey_``) stays a Python object: its
-        pandas branch may be a selection (a list key gives a Series)."""
-        if '_mx_okey_' in _code(test):
-            kind = None
-        if kind in CTYPE:
+        pandas branch may be a selection (a list key gives a Series). Under ``float()`` such a float64 read is a C
+        double again, with ``float()`` around its pandas branch only (leave_Call)."""
+        selection = '_mx_okey_' in _code(test)
+        if kind in CTYPE and not selection:
             fallback = _cast(CTYPE[kind], fallback)
         lowered = cst.IfExp(test=test, body=read, orelse=fallback, lpar=[cst.LeftParen()], rpar=[cst.RightParen()])
-        if kind in CTYPE:
+        if kind in CTYPE and not selection:
             self.native[id(lowered)] = kind
+        elif kind == 'f64':     # under float() it is a C double again: float() converts the pandas branch only
+            self.float_only.add(id(lowered))
         return lowered
 
     def _index_of(self, expr):
@@ -2741,6 +2744,10 @@ class _Rewrite(cst.CSTTransformer):
         if (isinstance(updated.func, cst.Name) and len(updated.args) == 1 and not updated.args[0].keyword
                 and not updated.args[0].star):
             kind = self.native.get(id(updated.args[0].value))
+            if updated.func.value == 'float' and id(read := updated.args[0].value) in self.float_only:
+                typed = read.with_changes(orelse=updated.with_changes(args=[cst.Arg(read.orelse)]))
+                self.native[id(typed)] = 'f64'
+                return typed
             if (kind == 'f64' and updated.func.value == 'float') or (kind == 'i64' and inner is not None):
                 return updated.args[0].value.with_changes(lpar=[cst.LeftParen()], rpar=[cst.RightParen()])
         return updated
