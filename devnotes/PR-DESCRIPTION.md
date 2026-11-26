@@ -326,14 +326,17 @@ All files: 117 changed, +11,347 / −491.
 
 ## CI
 
-Runs of `.github/workflows/python-package.yml`. Each lane runs the unit, compiled, allocation and sec
-suites.
+These are runs of `.github/workflows/python-package.yml`, read from each run's job list. Each lane runs
+the unit, compiled, allocation and sec suites, and every lane that executed passed all four. "No
+runner" means the job was never assigned a runner and was cancelled after waiting. Between these
+commits the code changed only as the commit table shows, so a lane that passed on an earlier commit is
+evidence for that commit, not for the final one.
 
-- **Run 45833870838 (1c3f228, attempt 2).** 14 of 15 lanes ran, and all four suites passed in each:
-  - Linux: 3.10, 3.12, 3.14, 3.13t, 3.14t
-  - Windows: 3.10, 3.12, 3.14, 3.13t, 3.14t
-  - macOS: 3.10, 3.12, 3.14, 3.13t
+| run | commit | executed and passed | no runner |
+|---|---|---|---|
+| 45831453108 | f86f38d | Linux 3.10, 3.12, 3.14, 3.13t, 3.14t; Windows 3.10, 3.12, 3.14, 3.13t, 3.14t; macOS 3.13t | macOS 3.10, 3.12, 3.14, 3.14t |
+| 45833870838 (two attempts) | 1c3f228 | Linux and Windows, all five versions; macOS 3.10, 3.12, 3.14, 3.13t | macOS 3.14t |
+| 45851243863 | 7edf07b | Linux and Windows, all five versions; macOS 3.10 | macOS 3.12, 3.14, 3.13t, 3.14t |
+| 45869162145 | 503b07c (final) | (queued) | (queued) |
 
-  The macOS / free-threaded 3.14 lane was not assigned a runner and was cancelled after 35 minutes,
-  so macOS / 3.14t is untested.
-- **Run 45869162145 (503b07c, the final commit).** Queued.
+macOS / free-threaded 3.14 was not assigned a runner on any of these runs, so it is untested.
