@@ -1,6 +1,7 @@
 # Table reads on the fast line: report
 
-Branch `r4/p3-tables` = `r4/p2-collect-3` (90da50b) + five commits. The port is from `r4/integration` 8c03194, and it was
+Branch `r4/p3-tables` = `r4/p2-collect-3` (90da50b) + eight commits (the second round, below: ordered lookups and a
+runtime without memoryviews). The port is from `r4/integration` 8c03194, and it was
 also compared with 856b984. Expectation written before the first measurement: `r4-p3-tables-expectation.md`.
 Stack: CPython 3.13.18, Cython 3.3.2, pandas 3.0.5, numpy 2.5.3, modelx 0.33.0 (upstream), lifelib main 20d4dae
 (upstream text). The machine has 4 vCPUs.
@@ -149,3 +150,109 @@ asserts is in its generated code.
 
 Python 3.10 was not available here. 3.11 to 3.13 are installed, and the suite ran on 3.13. No construct newer than 3.8 is
 used.
+
+
+## Second round: ordered lookups, five models, compile time
+
+Two commits were added after the first report.
+
+- **Ordered lookups** (+140 non-test lines, `test_forms_asof`). `R.index.asof(x)` and `R.loc[prefix].index.asof(x)` read
+  an int level stored in pandas' order. Under `int()` the result is a C integer; any other use gets pandas' numpy
+  integer. pandas' own asof runs when x is NaN, x is not one number at run time, x is below the first label, the prefix
+  has no rows, or the order is not increasing.
+  - Only whole frames and inline prefixes are covered. A view local (`sub = T.loc[p]`, then `sub.index.asof(x)`) and the
+    prefix-cell `lo = P.index.asof(x)` need the sub-table layer and were not ported.
+  - `searchsorted` was not ported.
+  - The upstream lifelib text has no `asof` at all. UC_FR_S's `asof` is in the fork text, which could not be attached
+    here (add_repo for alexeybaran/lifelib was refused). So no model in this report exercises it.
+- **Runtime without memoryviews** (+28 / -25). The header's column kinds and slots were typed memoryviews. That made every
+  model module compile Cython's memoryview support (Term_US_S `_mx_classes.c`: 0 memoryview references on line A, 1,010
+  with the slice). They are now raw pointers taken from each array's address. The column-name hashes are stored at the
+  width of Py_hash_t on every platform. No read changed.
+- **Not ported, the zip/vector entry points** that 856b984 had and 8c03194 removed: `zip_prepared_prefix`, `_zip_axes`,
+  and the held string selector of the zip walk. The vector layer needs them for IP_UK_S's `sum(... zip(v, rec))`.
+
+### Per policy (upstream text, shipped book, medians of 5 interleaved rounds)
+
+Each policy is a new item, then `result_cf()` or the Python sum of `net_cf(t)`, then the item is deleted. Every build
+equals live on every policy.
+
+| model | line A: result_cf / net_cf | this branch | line B 856b984 |
+|---|---|---|---|
+| KLV_DE_S | 88.5 ms / 111.5 ms | 0.99 ms / 0.42 ms | 0.77 ms / 0.47 ms |
+| Term_US_S | 94.9 / 108.4 | 0.78 / 0.39 | 0.88 / 0.30 |
+| UC_FR_S | 57.4 / 61.3 | 27.3 / 27.0 | 30.3 / 27.7 |
+| VA_US_S | 338 / 356 | 223 / 223 | 5.4 / 5.6 |
+| IP_UK_S | 158 / 169 | 76.0 / 85.2 | 7.0 / 6.4 |
+
+What still runs on pandas, per step (cell: form):
+
+- KLV_DE_S: nothing.
+- Term_US_S: nothing. Per item, `shock_lapse_rate` (`iterrows()` walk plus `iloc[-1]`) runs once per policy.
+- UC_FR_S: `uc_return_mth` (`T.loc[[list]]`, a several-rows selection). It stays on pandas on 856b984 too, so UC_FR_S is
+  27 ms on both.
+- VA_US_S:
+  - `gawa_pct_at_age`, `inv_return_mth`, `scenario_rate`: `sub = T.loc[prefix]`, a comprehension over `sub.index`, then
+    `sub.loc[max(...), c]` (forms L3 and L8);
+  - `surr_charge_rate` (`grid = T.loc[p]`, then `grid.loc[years, c]`, L3).
+- IP_UK_S: `inception_rate` (`sub = T.loc[...]`, `sorted(... for a in sub.index)`, `sub.loc[lo, c]`: L3 and L8); the
+  vector reductions are B3.
+
+The next layer by measured need is the view locals and index walks of the sub-table layer (VA_US_S 40x, IP_UK_S 12x
+behind 856b984), then vectors for IP_UK_S.
+
+### Compile time (median of 3; seconds translate / C build; two builds ran at a time throughout)
+
+| model | upstream d22426f | line A | table base | held rows | extremes | ordered lookups | no memoryviews |
+|---|---|---|---|---|---|---|---|
+| KLV_DE_S | 11.8 / 44.0 | 22.1 / 52.8 | 23.7 / 76.3 | 25.3 / 77.1 | 25.0 / 78.2 | 25.5 / 79.4 | 24.9 / 70.3 |
+| Term_US_S | 3.7 / 20.1 | 8.1 / 24.7 | 8.3 / 41.9 | 8.7 / 45.7 | 8.6 / 45.3 | 9.1 / 45.4 | 8.8 / 37.2 |
+| UC_FR_S | 7.7 / 35.1 | 15.4 / 43.3 | 17.3 / 64.9 | 18.6 / 64.0 | 18.8 / 66.5 | 19.1 / 67.6 | 18.9 / 60.2 |
+| VA_US_S | 25.6 / 72.3 | 39.9 / 91.9 | 42.4 / 114.3 | 44.1 / 121.0 | 43.3 / 118.8 | 42.9 / 124.7 | 45.6 / 110.3 |
+| IP_UK_S | 9.4 / 27.0 | 12.5 / 33.7 | 12.8 / 52.1 | 13.3 / 52.6 | 13.1 / 52.6 | 13.4 / 54.5 | 14.0 / 47.0 |
+
+Translate time over line A is +9% to +23% (UC_FR_S the most), under the 30% limit. C build time over line A is
++12.5 to +18.4 s per model (+20% VA_US_S to +51% Term_US_S). The C build is the larger cost:
+
+- the copied runtime is compiled once per model;
+- the model's own classes grow (Term_US_S `_mx_classes.c` 76k to 101k lines before the memoryview change).
+
+Term_US_SEC and MYGA_US_SEC translate times are unchanged (Term 12.7 s / 13.1 s, MYGA 38.6 s / 38.1 s, line A / branch,
+median of 3), and their generated files are byte-identical.
+
+The three largest additions to translate time, from cProfile of KLV_DE_S, line A against the branch (profiled seconds):
+
+1. The integer guard: +7.4 s. It runs over larger formulas: each lowered read adds a conditional, four to six runtime
+   calls and casts.
+2. The transformer: +5.1 s. Of this, 2.2 s is the lowering itself and the rest is the later passes on the larger
+   formulas.
+3. Entry lowering (+2.2 s) and building the shared scope facts (+1.8 s) on the larger trees.
+
+On whether these can use line A's shared facts:
+
+- The lowering builds its own bindings-and-loads visitor (`key_facts._Formula`, about 0.2 s). That could be built on
+  line A's shared `CstFacts` instead, but the gain is small.
+- The larger cost is the size of what is emitted. One reference to the held table per formula, instead of a cast of the
+  item field in every read, would shrink every later pass's input.
+
+### Fork text and the table-forms merge
+
+The fork text (alexeybaran/lifelib 04d69db) could not be attached here, so KLV_DE_S was not measured on it. From reading
+the diff 856b984..19c3147, the candidates that slow or un-lower KLV are:
+
+1. **Text-level key parts.** A key part on a text level that is not known to be one label is now tested at run time,
+   and its read stays a Python object instead of a C double. In 856b984 those parts had no test and the read was typed.
+   On the lean (fork) text, text levels whose keys are member-derived values or locals would take this path. On the
+   original text KLV has none per step.
+2. **Frames an item computes itself.** These are now prepared per item in every formula with parameters, decided by the
+   text; 856b984 required at least 8 evaluations per item in the sample. For example `check_net_cf_resid(t)` reads
+   `self.result_cf().loc[t]`, so a collect route that runs the checks prepares `result_cf` per policy (0.3 to 2M
+   instructions).
+
+Neither form is left out of this branch: both are line B 8c03194 behaviour, kept for correctness (1) and for not depending
+on call counts (2).
+
+### Tests skipped here for want of a modelx with collect
+
+`integration_tests/test_table_reads_collect.py::test_table_reads_through_collect`, together with line A's own
+`modelx_cython/tests/compiled/test_collect.py`. Both skip on `not hasattr(UserSpace, "set_collect")`.
