@@ -1,6 +1,6 @@
 """Formula passes after entry lowering: Python's semantics where Cython's C typing would change them
-(an unbound local, a local compared by identity), and the Python entry of Cells with integer
-parameters."""
+(an unbound local, a local compared by identity, a fractional float written to an integer
+Reference)."""
 
 import libcst as cst
 from libcst.metadata.scope_provider import BuiltinAssignment
@@ -14,67 +14,6 @@ from .syntax import arguments, walk
 _INTEGER_ANNOTATION = cst.Attribute(cst.Name(CY_MOD), cst.Name('longlong'))
 # The builtins the isinstance folding reads when the module leaves them unbound
 _FOLDED_BUILTINS = ('isinstance', 'int', 'bool')
-
-
-def integer_parameters(cell):
-    if cell.is_special() or cell.body_has_closure or not cell.has_typeinfo():
-        return ()
-    return tuple((index, name) for index, name in enumerate(cell.params)
-                 if cell.get_argtype_expr(name, c_style=True) == 'long long')
-
-
-
-def _python_call_gate(cls, entries, names, methods):
-    """The Python entry of a Cell with integer parameters, keeping its Cython vtable type.
-
-    Each such Cell gets a Python entry with the Cell's own parameters and defaults: it passes each
-    integer argument through ``_mx_integral`` (a fractional float or a non-integer raises TypeError
-    naming the Cell) and calls the compiled method at C level. ``__getattribute__`` returns the entry for the
-    Cell's name, unless a subclass overrides the method; the entry carries the Cell's ``__name__``,
-    ``__qualname__``, ``__doc__`` and the method as ``__wrapped__``."""
-    nodes = {item.name.value: item for item in methods if isinstance(item, cst.FunctionDef)}
-    routes = {cell.name: (entries[cell.fqname], cell.model_path)
-              for cell in cls.cells.values() if cell.fqname in entries and cell.name in nodes}
-    if not routes:
-        return (), ()
-    field = names.reserve(f'_mx_integer_arguments_{cls.name}')
-    gate = {name: names.reserve(f'_mx_python_entry_{name}') for name in routes}
-    added, defs = [cst.parse_statement(f'{field} = {CY_MOD}.declare(dict, {gate!r})\n')], []   # a C global
-    for name, (params, path) in routes.items():
-        signature = nodes[name].params
-        plain = signature.with_changes(params=tuple(p.with_changes(annotation=None) for p in signature.params))
-        checked = dict(params)
-        names_ = [p.name.value for p in signature.params[1:]]
-        args = ', '.join(f'{MX_SYS_MOD}._mx_integral({arg}, {path!r})' if index in checked else arg
-                         for index, arg in enumerate(names_))
-        header = cst.Module(body=()).code_for_node(plain)
-        # The C method without Cython's override dispatch (``Class.method(self, ...)``), which would read the
-        # attribute back through __getattribute__ (a class with a __dict__, a Python subclass), called from a
-        # module function whose parameters no Cell parameter can shadow
-        call = names.reserve(f'_mx_python_call_{cls.name}_{name}')
-        slots = ', '.join(f'_mx_a{index}: {CY_MOD}.longlong' if index in checked else f'_mx_a{index}'
-                          for index in range(len(names_)))
-        added.append(cst.parse_statement(
-            f'@{CY_MOD}.cfunc\n@{CY_MOD}.inline\ndef {call}(self: {cls.name}, {slots}) -> object:\n'
-            f'    return {cls.name}.{name}(self, {", ".join(f"_mx_a{i}" for i in range(len(names_)))})\n'))
-        defs.append(cst.parse_statement(f'def {gate[name]}({header}):\n    return {call}(self, {args})\n'))
-        owner = f'{CY_MOD}.cast(object, {cls.name})'      # the Python type, not the C methods
-        entry = f'{owner}.{gate[name]}'
-        added.extend(cst.parse_module(
-            f'{entry}.__name__ = {name!r}\n{entry}.__qualname__ = {cls.name + "." + name!r}\n'
-            f'{entry}.__doc__ = {owner}.{name}.__doc__\n{entry}.__wrapped__ = {owner}.{name}\n').body)
-    defs.append(cst.parse_statement(f"""\
-def __getattribute__(self, name):
-    entry = {field}.get(name)
-    if entry is not None and (
-        type(self) is {cls.name}
-        or getattr(type(self), name) is getattr({CY_MOD}.cast(object, {cls.name}), name)
-    ):
-        name = entry
-    return {MX_SYS_MOD}._mx_generic_getattr(self, name)
-"""))
-    return tuple(added), tuple(defs)
-
 
 
 def _reference_write_gate(cls_info):
@@ -240,13 +179,11 @@ def _python_locals(node, cell):
 
 
 
-def lower_formula_semantics(state, module_info, cells, infer_types=False):
+def lower_formula_semantics(state, module_info, infer_types=False):
     """After entry lowering: unbound locals and (``infer_types``) locals compared by identity stay
-    Python objects, ``isinstance`` of a C integer parameter is folded, and each Cell with integer
-    parameters gets its Python entry."""
-    entries = {name: params for name, cell in cells.items() if (params := integer_parameters(cell))}
+    Python objects, ``isinstance`` of a C integer parameter is folded, and a Python write of an
+    integer Reference takes ``_mx_integral``."""
     classes = []
-    declarations = []
     changed = False
     module_scopes = cst.MetadataWrapper(state.syntax, unsafe_skip_copy=True)
     global_bindings = module_scopes.resolve(cst.metadata.ScopeProvider)[state.syntax]
@@ -280,11 +217,8 @@ def lower_formula_semantics(state, module_info, cells, infer_types=False):
                     method = lower(method, cell)
                     changed = True
             methods.append(method)
-        added, gates = _python_call_gate(cls, entries, state.names, methods)
-        if not any(isinstance(item, cst.FunctionDef) and item.name.value == '__setattr__' for item in methods):
-            gates = (*gates, *_reference_write_gate(cls))
-        declarations.extend(added)
+        gates = () if any(isinstance(item, cst.FunctionDef) and item.name.value == '__setattr__'
+                          for item in methods) else _reference_write_gate(cls)
         changed |= bool(gates)
         classes.append(node.with_changes(body=node.body.with_changes(body=(*methods, *gates))))
-    classes.extend(declarations)
     return state.replace(state.syntax.with_changes(body=classes)) if changed else state

@@ -221,12 +221,13 @@ Cython's, as on upstream: `+`, `-`, `*`, unary minus, `<<` and an integer
 `**` wrap silently when the exact result leaves 64 bits; `//` and `%` keep
 Python's rounding, `LLONG_MIN // -1` raises {py:exc}`OverflowError` and
 `LLONG_MIN % -1` stops the process (a C division trap). An `int` beyond 64
-bits passed from Python raises {py:exc}`OverflowError`. From Python, a Cell
-argument where an integer was traced and a value written to an integer
-Reference must be an integer or a `float` that is a whole number: a
-fractional `float` or a non-number raises {py:exc}`TypeError` naming the
-Cell or the Reference. Keep integer values well inside 64 bits, or let the
-sample pass values that make the Cell an object.
+bits passed from Python raises {py:exc}`OverflowError`, and a `float`
+passed from Python where an integer was traced is truncated, as on
+upstream. A value written from Python to an integer Reference must be an
+integer or a `float` that is a whole number: a fractional `float` or a
+non-number raises {py:exc}`TypeError` naming the Reference. Keep integer
+values well inside 64 bits, or let the sample pass values that make the
+Cell an object.
 
 `infer_types`
 : `true` (default) compiles generated model modules with Cython's C type
