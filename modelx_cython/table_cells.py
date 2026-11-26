@@ -625,4 +625,19 @@ def finish(syntax, module):
     from modelx_cython.transformer import _integer_reference_paths
     result = cst.MetadataWrapper(syntax, unsafe_skip_copy=True).visit(
         RenameMembers(module, syntax.config_for_parsing, _integer_reference_paths))
-    return result
+    return without_unused_runtime(result)
+
+
+def without_unused_runtime(syntax):
+    """``syntax`` without the table runtime import when no statement reads the runtime: a compiled model
+    without table Cells runs without modelx_cython installed. Run after every pass that can add a use
+    (the frame-cell binds of this pass included)."""
+    from modelx_cython.syntax import walk
+    imports = [stmt for stmt in syntax.body if isinstance(stmt, cst.SimpleStatementLine)
+               and len(stmt.body) == 1 and isinstance(stmt.body[0], cst.ImportFrom)
+               and any(alias.asname is not None and alias.asname.name.value == RUNTIME
+                       for alias in stmt.body[0].names)]
+    if not imports or any(isinstance(part, cst.Name) and part.value == RUNTIME
+                          for stmt in syntax.body if stmt not in imports for part in walk(stmt)):
+        return syntax
+    return syntax.with_changes(body=tuple(stmt for stmt in syntax.body if stmt not in imports))
