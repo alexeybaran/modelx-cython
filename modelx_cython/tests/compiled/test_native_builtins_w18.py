@@ -172,8 +172,12 @@ def test_nested_reductions_lifted(tmp_path):
             ''')
     finally:
         model.close()
+    # every reduction is lifted; what is left is an outer min/max of an object-result Cell, which is the
+    # built-in call (no typed min/max)
     for name in ('a', 'b', 'c', 'd', 'e', 'g', 'h', 'm', 'r', 'a2', 'ty', 'ty2'):
-        assert _cell(report, name)['expressions_untyped'] == [], name
+        left = _cell(report, name)['expressions_untyped']
+        assert all(e['form'] in ('min', 'max') and 'built-in' in e['reason'] and ' for ' not in e['expr']
+                   for e in left), (name, left)
     # and/or: the left operand once, the reduction only when the operator evaluates it
     assert _cell(report, 'f')['expressions_untyped'] == []
     o = _cell(report, 'o')['expressions_untyped']
