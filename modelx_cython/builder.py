@@ -616,11 +616,6 @@ class CombinedCellsInfo(LexicalCellsInfo):
         return getattr(self._rt, 'admission_record', None)
 
     @property
-    def frame_row_result(self):
-        """auto-tables (D119): every sampled value is a row (Record) of a table admitted from a frame."""
-        return getattr(self._rt, 'frame_row_result', False)
-
-    @property
     def pandas_fallbacks(self):
         """auto-tables: pandas fallbacks on admitted tables in the sample, ``{line: {operation: calls}}``."""
         return getattr(self._rt, 'pandas_fallbacks', None) or {}

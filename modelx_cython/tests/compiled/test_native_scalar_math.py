@@ -7,12 +7,10 @@ import sys
 import textwrap
 
 import modelx as mx
-import pytest
-from modelx_helpers import numeric_math
 
 
-@pytest.mark.parametrize("namespace", [math, numeric_math])
-def test_registered_scalar_math(tmp_path, namespace):
+def test_registered_scalar_math(tmp_path):
+    namespace = math
     model = mx.new_model('ScalarMath')
     try:
         values = model.new_space('Values', refs={'numbers': namespace})

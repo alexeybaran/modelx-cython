@@ -164,7 +164,6 @@ def path_of(cls_info, name):
 
 
 CELL_PREF, REF_PREF = '_mx_cell_', '_mx_ref_'
-_TABLE_TYPES = {('pandas', 'DataFrame'), ('pandas', 'Series'), ('modelx_helpers', 'Table')}
 
 
 
