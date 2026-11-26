@@ -36,3 +36,15 @@ Task (from the coordinator):
   live.
 - **STOP (reported).** BasicTerm_SE per policy at head: 3.840M→3.903M (+1.64%). Values equal. c342db9 already
   prepares the item's own row. A bisect over the commits is running (/home/user/work/bis/results.txt).
+- **BasicTerm_SE move: noise.** The stable method (seed 0, no ASLR, gc off) puts every commit within 0.5% of
+  c342db9 (3.870M per policy).
+- **VA_US_S ×27 (upstream text).**
+  - Cause: 848b665's guarded copy kept the unconditional view assignment.
+  - Repaired at the head (4a36a3d; inserting it right after 848b665 would need a force-push).
+  - Now +0.48%. UC_FR_S +0.34%.
+- **Term_UK_S +2.1% at the head.**
+  - Steps: c365b4d +6.8% (recovered by 44902c6), 5c5540a +0.9%, cc35429 +0.3%, 4ead200 about +1%.
+  - Per cell: mort_rate_base +333 instructions per call, a read 4ead200 keeps as a Python object (boxed double).
+- **Values.** VA_US_S, Term_UK_S and UC_FR_S at 4a36a3d are equal to live.
+- **Classes.** Every pick is an F row of the ledger. 44902c6 is a speed repair of c365b4d/4ead200. 4a36a3d repairs
+  848b665.
