@@ -416,72 +416,19 @@ class FrameReads:
     def _receiver(self, expr):
         """(cell call, schema) when ``expr`` is a frame receiver, else None. In an item class a frame or row the item
         computes itself is prepared per item (about 0.3-2M instructions; a pandas read costs 20-100k): it is one only
-        for a formula with parameters that reads it by a computed key or walks it, so that the preparation pays for
-        itself. A formula without parameters (once per item), and reads by literal keys or a choice between literals
-        (a few values per item), read it on pandas. Decided from the text, not from how often the sample evaluated
-        the formula."""
-        found = self._receiver_of(expr)
-        if (found is not None and getattr(self, 'per_item', False) and self.published(found[0]) is None
-                and (not self.cells.has_args() or _code(found[0]) in self._literal_reads())):
-            return None
-        return found
-
-    def _receiver_of(self, expr):
+        for a formula with parameters, evaluated once per step, so that the preparation pays for itself; a formula
+        without parameters, evaluated once per item, reads it on pandas. Decided from the text, not from how often
+        the sample evaluated the formula."""
         schema = self._schema_of_call(expr)
         found = (expr, schema) if schema is not None else None
         if found is None:
             value = self._value_of(expr.value) if isinstance(expr, cst.Name) else None
             schema = self._schema_of_call(value) if value is not None else None
             found = (value, schema) if schema is not None else None
+        if (found is not None and getattr(self, 'per_item', False) and not self.cells.has_args()
+                and self.published(found[0]) is None):
+            return None
         return found
-
-    def _literal_reads(self):
-        """Codes of the frames the item computes itself that this formula only reads by literal keys: ``R["c"]``,
-        ``R.loc["a", "c"]``, ``R.at[k]`` whose every key part is a literal or a conditional between literals."""
-        found = getattr(self, '_literal_codes', None)
-        if found is not None:
-            return found
-        if getattr(self, '_node', None) is None:
-            return frozenset()      # outside a formula's lowering
-        owner, uses = self, {}
-
-        def literal(node):
-            if isinstance(node, (cst.SimpleString, cst.Integer, cst.Float)):
-                return True
-            if isinstance(node, cst.IfExp):
-                return literal(node.body) and literal(node.orelse)
-            return isinstance(node, cst.Tuple) and all(isinstance(e, cst.Element) and literal(e.value)
-                                                       for e in node.elements)
-
-        class Scan(cst.CSTVisitor):
-            def visit_FunctionDef(inner, node):
-                return node is owner._node
-
-            def visit_Lambda(inner, node):
-                return False
-
-            def visit_Call(inner, node):
-                inner._use(node)
-
-            def visit_Name(inner, node):
-                inner._use(node)
-
-            def _use(inner, node):
-                got = owner._receiver_of(node) if isinstance(node, (cst.Call, cst.Name)) else None
-                if got is None or owner.published(got[0]) is not None:
-                    return
-                parents = owner.facts.formula.parents
-                up = parents.get(id(node))
-                if isinstance(node, cst.Call) and isinstance(up, cst.Assign) and up.value is node:
-                    return      # ``r = R()``: the uses of the local are its reads
-                if isinstance(up, cst.Attribute) and up.attr.value in ('loc', 'at') and up.value is node:
-                    up = parents.get(id(up))
-                parts = _index_parts(up) if isinstance(up, cst.Subscript) else None
-                code = _code(got[0])
-                uses[code] = uses.get(code, True) and parts is not None and all(map(literal, parts))
-        self._node.visit(Scan())
-        self._literal_codes = {code for code, only in uses.items() if only}
-        return self._literal_codes
 
     def param_prefix(self, expr):
         """T-5c (shape G): ``self.P(a, ...)`` with P a cell of parameters whose formula is ``return T.loc[key]`` (T a
@@ -550,7 +497,6 @@ class FrameReads:
         if not params or params[0].name.value != 'self' or not getattr(self.resolver, 'frame_schemas', None):
             return node
         self.facts = self._facts(node)
-        self._node, self._literal_codes = node, None
         plain = self.facts._int_index_read
 
         def int_index_read(expr):       # T-4 (L5): extremes of a one-level int frame index are C integers
