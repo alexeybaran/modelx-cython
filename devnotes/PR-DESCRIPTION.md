@@ -333,7 +333,12 @@ Same machine as the per-policy table, one build of each model with each compiler
 
 Translation and C build times across all models are reported with the census above.
 
-## Commits and line counts (upstream d22426f to 503b07c, 14 commits)
+## Commits and line counts (upstream d22426f to 7957dc3, 15 commits)
+
+The branch is `pr/fast-sec-3`, with head 7957dc3. That is 503b07c plus one commit that adds two test
+files and nothing else. Every measurement and CI run in this description was taken on 503b07c; the code
+under test is the same at the head. At the head, the unit suite gives 409 passed and 8 skipped. Six more
+unit tests need lifelib installed and were not run there.
 
 "Compiler" is non-test code under `modelx_cython/`. "Other" is CI, documentation and packaging.
 "Tests" is everything under `modelx_cython/tests/` and `integration_tests/`. Counts are from
@@ -355,9 +360,10 @@ Translation and C build times across all models are reported with the census abo
 | 065a6c1 | Compile calls of the math module through a Reference to the C library | +146 / −0 | +0 / −0 | +107 / −0 |
 | 5eef6ff | Compare the math domain error's text with the running interpreter's | +0 / −0 | +0 / −0 | +5 / −1 |
 | 503b07c | Pass the math Reference to native math calls as a borrowed pointer | +26 / −18 | +0 / −0 | +10 / −3 |
-| total | 37 compiler files, 10 other, 70 test files | +5,932 / −282 | +352 / −169 | +5,063 / −40 |
+| 7957dc3 | Test power shapes over an accumulator and Python calls of integer Cells | +0 / −0 | +0 / −0 | +99 / −0 |
+| total | 37 compiler files, 10 other, 72 test files | +5,932 / −282 | +352 / −169 | +5,162 / −40 |
 
-All files: 117 changed, +11,347 / −491.
+All files: 119 changed, +11,446 / −491.
 
 ## CI
 
