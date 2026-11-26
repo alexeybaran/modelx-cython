@@ -248,7 +248,8 @@ class PXDGenerator:
         value_storage.check_last(block, self.module.classes[name])
         if collect.reuses_items(self.module.visitor, name):
             values = {line.strip() for line in value_storage.pxd_declarations(self.module.classes[name])}
-            block += '\n\n' + collect.reset_function(name, block, self.module.classes, values)
+            kept = collect.kept_refs(collect.class_node(self.module.visitor.wrapper.module, name))
+            block += '\n\n' + collect.reset_function(name, block, self.module.classes, values, kept)
         return block
 
     @cached_property

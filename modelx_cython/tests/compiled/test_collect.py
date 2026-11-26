@@ -240,3 +240,49 @@ def test_a_declaration_without_reset_rule_stops_the_build():
     block = 'cdef class _c_P(_mx_sys.BaseSpace):\n    cdef RateTable _v_rate\n'
     with pytest.raises(ValueError, match=r"P: collect cannot reset .*_v_rate.* \(Cell rate\)"):
         collect.reset_function('_c_P', block, {'_c_P': None}, set())
+
+
+REBIND_PROBE = textwrap.dedent('''\
+    import json
+    from exported import mx_model as export
+    from exported_cy import mx_model as compiled
+
+    def run(m, scale):
+        m.Projection.scale = scale
+        m.Projection._mx_collect_cache.clear()
+        return {str(c): r.v for c, r in m.Projection.collect().individual.items()}
+
+    print(json.dumps({'export': run(export, 1.0), 'compiled': run(compiled, 1.0),
+                      'export3': run(export, 3.0), 'compiled3': run(compiled, 3.0)}))
+''')
+
+
+def test_a_reference_rebound_during_collect_reaches_the_later_items(tmp_path):
+    """A reused item keeps the References it copied and copies them again when one is no longer the Space's: a
+    formula that rebinds a Reference of the Space at coordinate 3 changes the items after it, as in live modelx,
+    and the caller's rebinding between two collects reaches the next one."""
+    model = mx.new_model('RebindCollect')
+    try:
+        proj = model.new_space('Projection', formula='lambda key: None', refs={'scale': 1.0})
+        proj.new_cells('keys', 'lambda: tuple(range(1, 7))')
+        proj.new_cells('poke', '''def poke():
+    if key == 3:
+        _model.Projection.scale = scale * 2.0
+    return 0.0
+''')
+        proj.new_cells('v', 'lambda: poke() + key * scale')
+        proj.set_collect(over={'key': proj.keys}, outputs='lambda: {"individual": {"v": v()}}')
+        live = {str(c): r.v for c, r in proj.collect().individual.items()}
+        model.export(tmp_path / 'exported')
+    finally:
+        model.close()
+    assert live == {'1': 1.0, '2': 2.0, '3': 3.0, '4': 8.0, '5': 10.0, '6': 12.0}
+    (tmp_path / 'sample.py').write_text(
+        'from exported import mx_model as m\nm.Projection.collect()\n', encoding='utf-8')
+    subprocess.run([sys.executable, '-m', 'modelx_cython', 'exported', '--sample', 'sample.py', '--no-spec'],
+                   cwd=tmp_path, check=True, capture_output=True)
+    assert '_mx_refs_held__c_Projection' in (tmp_path / 'exported_cy' / '_mx_classes.pxd').read_text()
+    out = json.loads(subprocess.run([sys.executable, '-c', REBIND_PROBE], cwd=tmp_path, check=True,
+                                    capture_output=True, text=True).stdout)
+    assert out['compiled'] == out['export'] == live
+    assert out['compiled3'] == out['export3'] and out['compiled3']['4'] == 24.0

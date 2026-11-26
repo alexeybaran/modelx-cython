@@ -9,7 +9,9 @@ a Space without child Spaces; else by ``_mx_collect_item``), its ``collect_outpu
 by the export's ``prepare_output``, and the item released when collect created it. A new item of a
 Space without child Spaces or dynamic References is kept in its worker's slot when nothing else holds
 it, returned to the state of a new object (``reset_function``: every declared attribute, from the
-class's own .pxd block) and built again on the same memory for the next coordinate. The outputs are added
+class's own .pxd block) and built again on the same memory for the next coordinate. Its References stay as copied, and are copied
+again before a coordinate when one is no longer the one the Space holds (rebound during collect), so every
+item reads the Space's References at its coordinate, as live modelx gives. The outputs are added
 by the export's ``Accumulator`` in domain order, so the result is the one live modelx computes, bit
 for bit, at any number of workers.
 
@@ -97,6 +99,10 @@ def hook(class_node, cls_name, refs, fast=True, reuse=False):
     apply = ('            _mx_fast._mx_apply_formula(%s)\n' % params
              if '_mx_apply_formula' in _code(item) else '')
     if reuse:
+        # the References the reset keeps are copied again only when one is no longer the Space's
+        copy_refs = ('                _mx_fast._mx_copy_refs(self, self)\n' if kept_refs(class_node) is None else
+                     f'                if not {refs_held(cls_name)}(_mx_fast, self):\n'
+                     f'                    _mx_fast._mx_copy_refs(self, self)\n')
         # one cleared item per worker, in the worker's slot: built again as __call__ builds a root, on the same object
         built = (
             f'        if type(self) is {cls_name} and not self._mx_spaces and not self._mx_roots:\n'
@@ -106,7 +112,7 @@ def hook(class_node, cls_name, refs, fast=True, reuse=False):
             f'            else:\n'
             f'                _mx_spare[0] = None\n'
             f'                _mx_fast.__init__(self)\n'
-            f'                _mx_fast._mx_copy_refs(self, self)\n'
+            f'{copy_refs}'
             f'                _mx_fast._mx_roots.append(_mx_fast)\n'
             f'            self._mx_assign_params(_mx_fast, {params})\n'
             f'{apply}'
@@ -157,6 +163,46 @@ def reset_root(cls_name):
     return f'_mx_reset_root_{cls_name}'
 
 
+def refs_held(cls_name):
+    return f'_mx_refs_held_{cls_name}'
+
+
+def kept_refs(class_node):
+    """(attribute, base attribute) of each Reference the exported ``_mx_copy_refs`` copies from the base, but the
+    Space's parameters, which every coordinate assigns; None when a line has another form. A line that rebases
+    a Reference (``self._parent.X if base.A._mx_is_in(base_root) else base.A``) is kept while it holds
+    ``base.A``."""
+    methods = {item.name.value: item for item in class_node.body.body if isinstance(item, cst.FunctionDef)}
+    copy, item = methods.get('_mx_copy_refs'), methods.get('_mx_collect_item')
+    if copy is None or item is None:
+        return None
+    params = {p.name.value for p in item.params.params[1:]}
+    pairs = []
+    for stmt in copy.body.body:
+        assign = stmt.body[0] if isinstance(stmt, cst.SimpleStatementLine) and len(stmt.body) == 1 else None
+        if isinstance(assign, cst.Pass):
+            continue
+        if not isinstance(assign, cst.Assign) or len(assign.targets) != 1:
+            return None
+        target, value = dotted_name(assign.targets[0].target) or '', assign.value
+        if isinstance(value, cst.IfExp):
+            test = value.test
+            if not (isinstance(test, cst.Call) and dotted_name(test.func) == f'{dotted_name(value.orelse)}._mx_is_in'):
+                return None
+            value = value.orelse
+        source = dotted_name(value) or ''
+        if not (target.count('.') == 1 and target.startswith('self.') and source.count('.') == 1
+                and source.startswith('base.')):
+            return None
+        if target[5:] not in params:
+            pairs.append((target[5:], source[5:]))
+    return tuple(pairs)
+
+
+def class_node(module, cls_name):
+    return next(node for node in module.body if isinstance(node, cst.ClassDef) and node.name.value == cls_name)
+
+
 _SCALARS = {'bint', 'char', 'signed char', 'short', 'int', 'long', 'long long', 'unsigned char',
             'unsigned short', 'unsigned int', 'unsigned long', 'unsigned long long', 'float', 'double',
             'Py_ssize_t', 'size_t'}
@@ -189,19 +235,29 @@ def _base_fields():
     return [field for base in ('BaseMxObject', 'BaseParent', 'BaseSpace') for field in _fields(blocks.get(base, ''))]
 
 
-def reset_function(cls_name, block, classes, values):
+def reset_function(cls_name, block, classes, values, kept=None):
     """The ``cdef inline`` function, for the class's .pxd, that returns an item to the state of a new object.
 
     Every attribute that the class block and its bases declare (the object's layout) is listed: an object
     or a memoryview to None, as ``tp_new`` leaves it; any C value, array or struct to zero bytes, as the allocator leaves
     it. The dense value arrays (``values``) are left unwritten behind their flags, as the class's allocator
-    leaves them in a new object (``value_storage``: it zeroes every byte but those arrays). A declaration of another kind stops the build naming the attribute and its Cell."""
+    leaves them in a new object (``value_storage``: it zeroes every byte but those arrays). A declaration of another kind stops the build naming the attribute and its Cell.
+
+    The References of ``kept`` (``kept_refs``) keep their values, and ``refs_held`` tells whether each is still the
+    one the Space holds (identity, or a C value's equality); when one is not, the hook copies them all again."""
     structs = _declared(r'^cdef struct (\w+)')
     objects = _OBJECTS | set(classes) | _declared(r'^cdef class (\w+)')
     lines = []
-    for line, ctype, name in [*_base_fields(), *_fields(block)]:
+    fields = [*_base_fields(), *_fields(block)]
+    types = {name: ctype for _, ctype, name in fields}
+    known = kept is not None and all(t in types and a in types and '[' not in types[t] for t, a in kept)
+    held = [] if known else ['False']     # an undeclared or array attribute: copied again at every coordinate
+    for target, source in kept if known else ():
+        is_object = types[target].split('[')[0].split('.')[-1].strip() in objects or types[target].startswith('_c_')
+        held.append(f'root.{target} is base.{source}' if is_object else f'root.{target} == base.{source}')
+    for line, ctype, name in fields:
         base = ctype.split('[')[0].split('.')[-1].strip()
-        if line in values:
+        if line in values or known and name in dict(kept):
             continue
         if ('[' not in ctype and (base in objects or base.startswith('_c_'))
                 or re.fullmatch(r'(const )?[\w ]+\[:(, *:)*\]', ctype)):     # an object or a memoryview
@@ -211,8 +267,12 @@ def reset_function(cls_name, block, classes, values):
         else:
             cell = name.removeprefix('_v_').removeprefix('_has_').removeprefix('_spill_')
             raise ValueError(f'{cls_name[3:]}: collect cannot reset {line!r} (Cell {cell}) between items')
-    return ('from libc.string cimport memset\nfrom cpython.ref cimport Py_REFCNT as _mx_refcount\n\n'
-            f'cdef inline void {reset_root(cls_name)}({cls_name} root) noexcept:\n' + ''.join(lines))
+    source = ('from libc.string cimport memset\nfrom cpython.ref cimport Py_REFCNT as _mx_refcount\n\n'
+              f'cdef inline void {reset_root(cls_name)}({cls_name} root) noexcept:\n' + ''.join(lines))
+    if kept is not None:      # whether the kept References are still the Space's: identity, or a C value's equality
+        source += (f'\n\ncdef inline bint {refs_held(cls_name)}({cls_name} root, {cls_name} base) noexcept:\n'
+                   f'    return {" and ".join(held) or "True"}\n')
+    return source
 
 
 def evaluator(workers):
