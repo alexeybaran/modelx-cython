@@ -48,3 +48,9 @@ Task (from the coordinator):
 - **Values.** VA_US_S, Term_UK_S and UC_FR_S at 4a36a3d are equal to live.
 - **Classes.** Every pick is an F row of the ledger. 44902c6 is a speed repair of c365b4d/4ead200. 4a36a3d repairs
   848b665.
+- **c1bb280: float() of a text-key read is a C double again.** Term_UK_S 6.395M→6.367M per policy (+1.7% vs
+  c342db9), equal to live.
+  - What is left: `_build`'s `frame.iloc[0].dtype` from 5c5540a, about 1.0% (once per table per model, over an
+    8-policy book); the is_label checks, about 0.4%.
+- **Suites.** The failing set at the head equals c342db9's: 797 test headers, all from the environment
+  (modelx_helpers absent, modelx 0.33 without collect_over, libcst).
