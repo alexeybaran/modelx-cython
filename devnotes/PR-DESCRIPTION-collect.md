@@ -75,9 +75,7 @@ held item: the direct route (items built by `Projection[k]`) as well as collect.
   coordinate only and on one reached by every other coordinate; a reset that skips the flag arrays fails the test).
 - Python 3.10 and later, with and without the GIL. CI on `verify/pr-collect-7-with-collect-modelx` (58ff45d with
   modelx `pr/collect`) is pending. A local run of the whole suite on 58ff45d with modelx 1aa21f4, CPython 3.13 with the
-  GIL on Linux: 520 passed, 8 skipped, 2 failed. The two failures are in `test_native_math_calls.py` (the math-module
-  calls are not lowered). They fail the same way on the fast SEC change alone (1c3f228, f86f38d, 53104d2) in that
-  environment, so they are not caused by collect; CI has no 3.13 lane with the GIL.
+  GIL on Linux: 522 passed, 8 skipped (Linux only; no free-threaded build, macOS or Windows here).
 
 ## Limits
 
