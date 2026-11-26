@@ -1,17 +1,11 @@
 """Compiled ``collect()``: the hook of modelx's exported collect, version 1.
 
-A Space that declares collect is exported with ``_mx_collect_item`` (the ItemSpace at one coordinate:
-an existing one, or a new root that is not stored) and a method that calls
-``_mx_sys.collect_from_space`` (``_mx_collect_run``, which the Space's ``collect`` property returns;
-an ItemSpace has no ``collect``, as in live modelx). The compiled class adds ``_mx_collect_hook``, which modelx calls
-with the checked domain: each item is built (as ``__call__`` builds a new root, by ``item_roots``, for
-a Space without child Spaces; else by ``_mx_collect_item``), its ``collect_outputs()`` read and checked
-by the export's ``prepare_output``, and the item released when collect created it. A new item of a
-Space without child Spaces or dynamic References is kept in its worker's slot when nothing else holds
-it, returned to the state of a new object (``reset_function``: every declared attribute, from the
-class's own .pxd block) and built again on the same memory for the next coordinate. The outputs are added
-by the export's ``Accumulator`` in domain order, so the result is the one live modelx computes, bit
-for bit, at any number of workers.
+A Space that declares collect exports a constructor for one coordinate and a method that calls
+``_mx_sys.collect_from_space``. The compiled hook builds a private ItemSpace for each coordinate.
+Locked Spaces in that tree get their own reentrant lock. The export's ``prepare_output`` detaches
+and validates the outputs before the private item is released. A worker can reset and reuse an
+unescaped item of a Space without child Spaces or dynamic References. The export's ``Accumulator``
+adds the outputs in domain order at any number of workers.
 
 Workers: the spec key ``collect_workers`` (default 1), or ``_mx_collect_workers`` set on the compiled
 model object. With more than one, items run on that many threads; their outputs are added in domain
@@ -23,11 +17,12 @@ Threads run model code at the same time only on free-threaded Python; with the G
 """
 import pathlib
 import re
+import textwrap
 
 import libcst as cst
 
 from . import item_roots
-from .syntax import dotted_name
+from .syntax import arguments, code, dotted_name, same_expression, single_statement
 
 HOOK_VERSION = 1
 
@@ -49,10 +44,6 @@ def _collect_call(method):
     return None
 
 
-def _code(node):
-    return cst.Module(body=()).code_for_node(node)
-
-
 def _reads_parents(class_node):
     """Whether a formula of the class reads ``self._model``, ``self._parent`` or ``self._space``."""
     found = []
@@ -68,83 +59,158 @@ def _reads_parents(class_node):
     return bool(found)
 
 
-def hook(class_node, cls_name, refs, fast=True, reuse=False):
-    """Statements to add to the body of a compiled Space class that declares collect, or ().
+def _item_constructor(item):
+    """Recognize the detached constructor, including the old export's leading Direct lookup."""
+    if not isinstance(item.body, cst.IndentedBlock) or not item.params.params:
+        return None
+    args = ', '.join(param.name.value for param in item.params.params[1:])
+    body = item.body.body
+    lookup = single_statement(body[0]) if body else None
+    if isinstance(lookup, cst.Assign) and arguments(lookup.value, 'self._mx_itemspaces.get', 1):
+        legacy = cst.parse_module(
+            f'_mx_root = {code(lookup.value)}\n'
+            'if _mx_root is not None:\n'
+            '    return _mx_root\n').body
+        if same_expression(body[:2], legacy):
+            body = body[2:]
+    constructor = cst.parse_module(
+        '_mx_base = self\n'
+        '_mx_root = _mx_base.__class__(self)\n'
+        'for _mx_s, _mx_b in zip(_mx_root._mx_walk(), _mx_base._mx_walk()):\n'
+        '    _mx_s._mx_copy_refs(_mx_b, _mx_base)\n'
+        '    for _mx_r in self._mx_roots:\n'
+        '        _mx_r._mx_copy_params(_mx_s)\n'
+        f'    self._mx_assign_params(_mx_s, {args})\n'
+        '    _mx_s._mx_roots.extend(self._mx_roots)\n'
+        '    _mx_s._mx_roots.append(_mx_root)\n').body
+    if not (same_expression(body[:3], constructor) and body[3:]):
+        return None
+    suffix = body[3:]
+    returned = cst.parse_statement('return _mx_root\n')
+    if same_expression(suffix, (returned,)):
+        return args, constructor, False
+    apply = cst.parse_statement(f'_mx_root._mx_apply_formula({args})\n')
+    if same_expression(suffix, (apply, returned)):
+        return args, constructor, True
+    return None
+
+
+def _private_constructor(item, constructor, params, apply_formula):
+    """Give the generic constructor a lock for its private tree before running its formula."""
+    base, root, walk = constructor
+    lock = cst.parse_module(
+        'if _mx_s._mx_lock is not None:\n'
+        '    if _mx_private_lock is None:\n'
+        '        _mx_private_lock = _mx_collect_rlock()\n'
+        '    _mx_s._mx_lock = _mx_private_lock\n').body
+    walk = walk.with_changes(body=walk.body.with_changes(body=(*lock, *walk.body.body)))
+    initialize = code(walk)
+    if apply_formula:
+        initialize += f'_mx_root._mx_apply_formula({params})\n'
+    body = cst.parse_module(
+        f'{code(base)}{code(root)}'
+        '_mx_private_lock = None\n'
+        'try:\n'
+        f'{textwrap.indent(initialize, "    ")}'
+        'except BaseException:\n'
+        '    _mx_release_collect_tree(_mx_root)\n'
+        '    _mx_root = _mx_s = None\n'
+        '    raise\n'
+        'return _mx_root\n').body
+    return item.body.with_changes(body=body)
+
+
+def hook(class_node, cls_name, refs, dots='.', fast=True, reuse=False):
+    """The compiled detached constructor and hook for a supported exported Space, or None.
 
     ``refs`` are the names of its References. With ``fast``, a new item of a Space without child
-    Spaces or roots is built and released by the functions of ``item_roots``, as ``__call__`` builds
-    it (``transformer._fast_item_call``); any other item through the exported ``_mx_collect_item``."""
+    Spaces or roots is built on the typed class. Other items use the export's constructor."""
     methods = {item.name.value: item for item in class_node.body.body if isinstance(item, cst.FunctionDef)}
     item = methods.get('_mx_collect_item')
     calls = [call for call in map(_collect_call, methods.values()) if call is not None]
     if item is None or len(calls) != 1:
-        return ()
-    first = item.body.body[0]
-    lookup = first.body[0].value if isinstance(first, cst.SimpleStatementLine) else None
-    if (not isinstance(lookup, cst.Call) or dotted_name(lookup.func) != 'self._mx_itemspaces.get'
-            or len(lookup.args) != 1):
-        return ()
+        return None
+    constructor = _item_constructor(item)
+    if constructor is None:
+        raise ValueError(f'{cls_name[3:]}: unsupported exported Collect item constructor')
+    params, build, apply_formula = constructor
     call = calls[0]
-    params = ', '.join(p.name.value for p in item.params.params[1:])
     others = call.args[3].value
     lam = call.args[2].value
+    if arguments(lam.body, 'self._mx_collect_item', len(item.params.params) - 1) is None:
+        raise ValueError(f'{cls_name[3:]}: unsupported exported Collect item call')
     # the worker's slot first: the item it keeps between coordinates
     outputs_at = lam.with_changes(
         params=lam.params.with_changes(params=(cst.Param(cst.Name('_mx_spare')), *lam.params.params)),
         body=lam.body.with_changes(func=cst.Name('_mx_outputs'),
                                    args=(cst.Arg(cst.Name('_mx_spare')), *lam.body.args)))
-    unpack = f'    {_code(others)} = args\n' if others.elements else ''
-    apply = ('            _mx_fast._mx_apply_formula(%s)\n' % params
-             if '_mx_apply_formula' in _code(item) else '')
+    unpack = f'    {code(others)} = _mx_args\n' if others.elements else ''
+    apply = f'                _mx_fast._mx_apply_formula({params})\n' if apply_formula else ''
+    initialize = ''
+    mark_prepared = ''
+    retain = ''
     if reuse:
-        # one cleared item per worker, in the worker's slot: built again as __call__ builds a root, on the same object
-        built = (
-            f'        if type(self) is {cls_name} and not self._mx_spaces and not self._mx_roots:\n'
+        initialize = (
             f'            _mx_fast: {cls_name} = _mx_spare[0]\n'
             f'            if _mx_fast is None:\n'
-            f'                _mx_fast = {item_roots.new_root(cls_name)}(self)\n'
+            f'                _mx_fast = {cls_name}(self)\n'
+            f'                _mx_private_lock = _mx_collect_rlock() if _mx_fast._mx_lock is not None else None\n'
             f'            else:\n'
             f'                _mx_spare[0] = None\n'
+            f'                _mx_private_lock = _mx_spare[1]\n'
+            f'                _mx_spare[1] = None\n'
             f'                _mx_fast.__init__(self)\n'
-            f'                _mx_fast._mx_copy_refs(self, self)\n'
-            f'                _mx_fast._mx_roots.append(_mx_fast)\n'
-            f'            self._mx_assign_params(_mx_fast, {params})\n'
-            f'{apply}'
-            f'            _mx_out = _mx_fast.collect_outputs()\n'
-            f'            _mx_owned = not _mx_fast._mx_itemspaces\n'
-            f'            {item_roots.release_root(cls_name)}(_mx_fast)\n'
-            f'            if _mx_owned and _mx_refcount(_mx_fast) == 1:     # held by nothing else\n'
-            f'                {reset_root(cls_name)}(_mx_fast)\n'
-            f'                _mx_spare[0] = _mx_fast\n'
-            f'            return _mx_out\n')
+            f'            _mx_prepared = False\n')
+        mark_prepared = '                _mx_prepared = True\n'
+        retain = (
+            f'                    if _mx_prepared and _mx_refcount(_mx_fast) == 1:\n'
+            f'                        {reset_root(cls_name)}(_mx_fast)\n'
+            f'                        _mx_spare[0] = _mx_fast\n'
+            f'                        _mx_spare[1] = _mx_private_lock\n')
     elif fast:
+        initialize = (
+            f'            _mx_fast: {cls_name} = {cls_name}(self)\n'
+            f'            _mx_private_lock = _mx_collect_rlock() if _mx_fast._mx_lock is not None else None\n')
+    if initialize:
         built = (
             f'        if type(self) is {cls_name} and not self._mx_spaces and not self._mx_roots:\n'
-            f'            _mx_fast: {cls_name} = {item_roots.new_root(cls_name)}(self)\n'
-            f'            self._mx_assign_params(_mx_fast, {params})\n'
+            f'{initialize}'
+            f'            try:\n'
+            f'                _mx_fast._mx_lock = _mx_private_lock\n'
+            f'                _mx_fast._mx_copy_refs(self, self)\n'
+            f'                _mx_fast._mx_roots.append(_mx_fast)\n'
+            f'                self._mx_assign_params(_mx_fast, {params})\n'
             f'{apply}'
-            f'            _mx_out = _mx_fast.collect_outputs()\n'
-            f'            {item_roots.release_root(cls_name)}(_mx_fast)\n'
-            f'            return _mx_out\n')
+            f'                _mx_out = _mx_prepare_output(_mx_fast.collect_outputs(), _mx_live_types)\n'
+            f'{mark_prepared}'
+            f'                return _mx_out\n'
+            f'            finally:\n'
+            f'                if _mx_fast._mx_itemspaces:\n'
+            f'                    _mx_release_collect_tree(_mx_fast)\n'
+            f'                else:\n'
+            f'                    {item_roots.release_root(cls_name)}(_mx_fast)\n'
+            f'{retain}'
+            f'                _mx_fast = None\n')
     else:
         built = ''
     source = (
         f'_mx_collect_hook_version = {HOOK_VERSION}\n'
         f'\n'
-        f'def _mx_collect_hook(self, coords, args):\n'
+        f'def _mx_collect_hook(self, _mx_coords, _mx_args):\n'
+        f'    from {dots}_mx_collect import prepare_output as _mx_prepare_output\n'
+        f'    _mx_live_types = (_mx_sys.BaseMxObject,)\n'
         f'{unpack}'
         f'    def _mx_outputs(_mx_spare, {params}):\n'
-        f'        _mx_root = self._mx_itemspaces.get({_code(lookup.args[0].value)})\n'
-        f'        if _mx_root is not None:\n'
-        f'            return _mx_root.collect_outputs()\n'
         f'{built}'
         f'        _mx_root = self._mx_collect_item({params})\n'
-        f'        _mx_out = _mx_root.collect_outputs()\n'
-        f'        {item_roots.release_item(cls_name)}(_mx_root)\n'
-        f'        return _mx_out\n'
-        f'    return _mx_collect_evaluate(self, coords, {_code(outputs_at)},\n'
+        f'        try:\n'
+        f'            return _mx_prepare_output(_mx_root.collect_outputs(), _mx_live_types)\n'
+        f'        finally:\n'
+        f'            _mx_release_collect_tree(_mx_root)\n'
+        f'            _mx_root = None\n'
+        f'    return _mx_collect_evaluate(self, _mx_coords, {code(outputs_at)},\n'
         f'                                {tuple(refs)!r}, {_reads_parents(class_node)!r})\n')
-    return cst.parse_module(source).body
+    return _private_constructor(item, build, params, apply_formula), cst.parse_module(source).body
 
 
 def reuses_items(visitor, cls_name):
@@ -215,13 +281,31 @@ def reset_function(cls_name, block, classes, values):
             f'cdef inline void {reset_root(cls_name)}({cls_name} root) noexcept:\n' + ''.join(lines))
 
 
-def evaluator(workers):
-    """The module-level function that every collect hook of a module calls."""
+def evaluator(workers, dots='.'):
+    """The module-level functions shared by the collect hooks of a module."""
     return cst.parse_module(f'''
+from threading import RLock as _mx_collect_rlock
+
+
+def _mx_release_collect_tree(root: _mx_sys.BaseSpace):
+    # Walk only owned child Spaces and their locally retained items, never References.
+    items = [root]
+    member: _mx_sys.BaseSpace
+    while items:
+        member = items.pop()
+        items.extend(member._mx_spaces.values())
+        if member._mx_itemspaces:
+            items.extend(member._mx_itemspaces.values())
+            member._mx_itemspaces.clear()
+        member._mx_cells.clear()
+        member._mx_roots.clear()
+        member._space = None
+        member._parent = None
+
+
 def _mx_collect_evaluate(space, coords, outputs_at, refs, reads_parents):
-    from ._mx_collect import Accumulator, prepare_output
+    from {dots}_mx_collect import Accumulator
     import sys
-    live = (_mx_sys.BaseMxObject,)
     workers = getattr(space._model, '_mx_collect_workers', {workers!r})
     if type(workers) is not int or workers < 1:
         raise ValueError('_mx_collect_workers must be a positive int, not %r' % (workers,))
@@ -237,18 +321,23 @@ def _mx_collect_evaluate(space, coords, outputs_at, refs, reads_parents):
             if isinstance(value, _mx_sys.BaseSpace) and value is not space and value._mx_lock is None:
                 raise ValueError(f'collect of {{name}} with {{workers}} workers: the Reference {{ref}} is a Space '
                                  'without a lock; export it in locked_spaces or use one worker')
-    if workers == 1 or len(coords) == 1 or getattr(sys, '_is_gil_enabled', lambda: True)():
-        spare = [None]      # the worker's slot
-        for c in coords:
-            accumulator.add(c, prepare_output(outputs_at(spare, c), live))
+    model_lock = getattr(space._model, '_mx_lock', None)
+    if (workers == 1 or len(coords) == 1 or getattr(sys, '_is_gil_enabled', lambda: True)()
+            or model_lock is not None and getattr(model_lock, '_is_owned', lambda: True)()):
+        # A locked caller cannot wait for workers that may need its shared lock.
+        spare = [None, None]       # reusable item and its private lock
+        try:
+            for c in coords:
+                accumulator.add(c, outputs_at(spare, c))
+        finally:
+            spare.clear()
         return accumulator.result()
     import threading
     lock = threading.Lock()
     pending = {{}}
     state = [0, 0, len(coords), None]       # next to take, next to add, stop, the first error
 
-    def work():
-        spare = [None]
+    def work_items(spare):
         while True:
             with lock:
                 i = state[0]
@@ -256,7 +345,7 @@ def _mx_collect_evaluate(space, coords, outputs_at, refs, reads_parents):
                     return
                 state[0] = i + 1
             try:
-                out = prepare_output(outputs_at(spare, coords[i]), live)
+                out = outputs_at(spare, coords[i])
             except BaseException as error:
                 with lock:
                     if i < state[2]:
@@ -273,12 +362,19 @@ def _mx_collect_evaluate(space, coords, outputs_at, refs, reads_parents):
                         break
                     state[1] = k + 1
 
+    def work():
+        spare = [None, None]
+        try:
+            work_items(spare)
+        finally:
+            spare.clear()
+
     threads = [threading.Thread(target=work) for _ in range(min(workers, len(coords)))]
     for thread in threads:
         thread.start()
     for thread in threads:
         thread.join()
     if state[3] is not None:
-        raise state[3]
+        raise state.pop()
     return accumulator.result()
 ''').body

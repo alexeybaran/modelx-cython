@@ -706,7 +706,7 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
             module = module.with_changes(body=(*module.body, cst.parse_statement(f'{MX_SYS_MOD}._mx_math_init()\n')))
         if getattr(self, '_collect_hooks', False):
             module = module.with_changes(body=(*module.body, *collect.evaluator(
-                self.module.spec.policy.collect_workers)))
+                self.module.spec.policy.collect_workers, self._collect_dots)))
         # Dense cache values left unwritten at allocation, installed when the module is imported
         values = ''.join(value_storage.functions(cls) for cls in self.module.classes.values())
         if values:
@@ -843,12 +843,19 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
             decl_stmts.extend(cst.parse_statement(line)
                               for line in value_storage.py_declarations(self.module.classes[cls_name]))
             if cls_name in self.module.visitor.collect_spaces:
-                hook = collect.hook(original_node, cls_name, sorted(self.module.classes[cls_name].refs),
-                                    reuse=collect.reuses_items(self.module.visitor, cls_name))
-                if hook:
+                self._collect_dots = '.' * self.module.fqname.count('.')
+                generated = collect.hook(original_node, cls_name, sorted(self.module.classes[cls_name].refs),
+                                         dots=self._collect_dots,
+                                         reuse=collect.reuses_items(self.module.visitor, cls_name))
+                if generated is not None:
                     self._collect_hooks = True
+                    constructor, hook = generated
+                    body = tuple(
+                        stmt.with_changes(body=constructor)
+                        if isinstance(stmt, cst.FunctionDef) and stmt.name.value == '_mx_collect_item'
+                        else stmt for stmt in updated_node.body.body)
                     updated_node = updated_node.with_changes(
-                        body=updated_node.body.with_changes(body=(*updated_node.body.body, *hook)))
+                        body=updated_node.body.with_changes(body=(*body, *hook)))
             decorator = cst.Decorator(
                 decorator=cst.Attribute(value=cst.Name(CY_MOD), attr=cst.Name("cclass"))
             )
