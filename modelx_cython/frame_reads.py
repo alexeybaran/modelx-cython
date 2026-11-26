@@ -34,6 +34,8 @@ pandas DataFrame or Series with a unique index (``tracer.frame_schema``), or a l
 - a float64 or int64 column C of a view or prefix (``v["c"]``, ``R.loc[prefix]["c"]``, ``R.loc[prefix, "c"]``, or a
   local of one): its values and ``C.items()`` walked, ``C.tolist()``, ``list(C)``, a walk of ``C.index``, and
   ``C.iloc[i]`` / ``C.loc[k]``;
+- ``for k, row in R.iterrows():`` over a one-level frame, ``row["c"]`` read from the stored row of the kind pandas
+  gives it (the Python numbers iteration gives on a row with an object column), every load of ``row`` in the loop;
 
 Where a read is lowered:
 
@@ -798,7 +800,9 @@ class FrameReads:
     def _row_locals(self, node):
         """``row = R.loc[key]`` (at any depth of the formula's own scope, ``row`` bound once), R a frame receiver of a
         unique index and the key complete, every load of ``row`` a read of a literal column ``row["c"]`` or of a
-        computed one under ``float()``: {name: (R call, schema, the assignment)}."""
+        computed one under ``float()``: {name: (R call, schema, the assignment)}. Also the row of ``for k, row in
+        R.iterrows():`` (R of one level, ``row`` bound by that loop only, read only in its body): {name: (R call,
+        schema, the loop)}."""
         f, found = self.facts.formula, {}
         owner = self
 
@@ -843,6 +847,27 @@ class FrameReads:
                 if field_reads(name, got[1]):
                     found[name] = (got[0], got[1], n)
 
+            def visit_For(inner, n):     # ``for k, row in R.iterrows():`` over a one-level frame
+                it, target = n.iter, n.target
+                if not (isinstance(it, cst.Call) and not it.args and isinstance(it.func, cst.Attribute)
+                        and it.func.attr.value == 'iterrows' and n.asynchronous is None
+                        and isinstance(target, cst.Tuple) and len(target.elements) == 2
+                        and all(isinstance(e, cst.Element) and isinstance(e.value, cst.Name) for e in target.elements)):
+                    return
+                got = owner._receiver(it.func.value)
+                key, name = (e.value.value for e in target.elements)
+                if (got is None or got[1]['kind'] != 'frame' or not got[1].get('unique') or len(got[1]['levels']) != 1
+                        or _code(got[0]) in owner.mutated or key == name or f.binds.get(name, 0) != 1
+                        or name in owner.facts._params or name in found):
+                    return
+                if field_reads(name, got[1]) and all(within(use, n.body) for use, _ in f.loads.get(name, ())):
+                    found[name] = (got[0], got[1], n)
+
+        def within(node, block):
+            """``node`` is inside ``block`` (a load of a loop's row in its body, never after the loop)."""
+            while node is not None and node is not block:
+                node = f.parents.get(id(node))
+            return node is block
         node.visit(Scan())
         return found
 
@@ -967,11 +992,13 @@ class _Rewrite(cst.CSTTransformer):
         self.swaps = {}         # row local -> the row cell call it stands for (fallbacks, dropped locals)
         self.native = {}        # id(lowered read) -> column kind, for float()/int() around it
         self.updated_of = {}    # id(original node) -> its rewritten node (key parts are emitted with their reads lowered)
+        self.unboxed = set()    # ids of lowered reads whose live value is a Python number (never a numpy scalar)
 
     def on_leave(self, original, updated):
         result = super().on_leave(original, updated)
         kind = self.native.get(id(result))
         if (kind in CTYPE and result is not updated and isinstance(original, cst.Subscript)
+                and id(result) not in self.unboxed
                 and isinstance(result, cst.IfExp) and _value_read(result.body) is not None
                 and self.o.numpy_use(original, kind)):
             del self.native[id(result)]
@@ -1543,12 +1570,50 @@ class _Rewrite(cst.CSTTransformer):
     def leave_GeneratorExp(self, original, updated):
         return self.comprehension(original, updated) or updated
 
+    def iterrows_loop(self, original, updated):
+        """``for k, row in R.iterrows():``: positions in pandas order, ``k`` the label and ``row`` the stored row
+        (``_mx_rw_row``), its fields read as a row local's; the pandas loop (``_mx_rw_row`` -1) when the table is
+        not of the traced kinds (every column checked)."""
+        o = self.o
+        target = original.target
+        if not (isinstance(target, cst.Tuple) and len(target.elements) == 2
+                and all(isinstance(e, cst.Element) and isinstance(e.value, cst.Name) for e in target.elements)):
+            return None
+        key, name = (e.value.value for e in target.elements)
+        found = o.row_locals.get(name)
+        if found is None or found[2] is not original:
+            return None
+        call, schema, _ = found
+        hold = self._take(call, _NO_LABEL, -4)
+        hold.row_columns = True
+        var = f'_mx_rw_{name}'
+        position = self._position()
+        o.declarations += [var, position.value]
+        walk = _Walk(call, schema, 0, hold, cst.Integer('0'), self._m('nrows', o.ref(hold)), None, True)
+        row = self._m('whole_row', o.ref(hold), position)
+        first = [self._assign(var, row), *[self._assign(n, e) for n, e in self._labels(
+            walk, cst.Name(key), position).items()]]
+        body = updated.body
+        body = (body.with_changes(body=[*first, *body.body]) if isinstance(body, cst.IndentedBlock)
+                else cst.IndentedBlock(body=[*first, cst.SimpleStatementLine(body=body.body)]))
+        native = updated.with_changes(body=body, target=position, iter=cst.Call(
+            func=cst.Name('range'), args=[cst.Arg(walk.stop)]))
+        if isinstance(original.iter.func.value, cst.Name):
+            walk.swaps[original.iter.func.value.value] = call
+            self.replaced_names.add(original.iter.func.value.value)
+        unbound = cst.parse_statement(f'{name} = None')    # read only by the pandas branches of its fields
+        return self._branch(self._native_test(hold, []), [unbound, native],
+                            [cst.parse_statement(f'{var} = -1'), self._walk_fallback(updated, walk)])
+
     def leave_For(self, original, updated):
         """``for k in X.index:`` (``_walk``): a loop over positions in pandas order, the target names bound to the
         labels of each position first in the body; the pandas loop when the table cannot answer."""
         o = self.o
         if original.asynchronous is not None:
             return updated
+        rows = self.iterrows_loop(original, updated)
+        if rows is not None:
+            return rows
         walk = self._walk(original.iter)
         if walk is None:
             return updated
@@ -1641,7 +1706,10 @@ class _Rewrite(cst.CSTTransformer):
             return self._lowered(valid, read, updated, 'f64')
         read, kind, _ = self._field_read(call, schema, label, lambda hold: (
             cst.parse_expression(f'_mx_rw_{value.value} + 1'), []))
-        return self._lowered(valid, read, updated, kind)
+        lowered = self._lowered(valid, read, updated, kind)
+        if isinstance(found[2], cst.For) and any(k == 'obj' for _, k in schema['columns']):
+            self.unboxed.add(id(lowered))   # iterrows builds such a row from Python scalars, not numpy's
+        return lowered
 
     def _field_read(self, call, schema, label, position):
         """Field ``label`` of a stored row, of the kind pandas gives it: the column's own on a row with an object
@@ -2058,7 +2126,8 @@ class _Rewrite(cst.CSTTransformer):
         """``float(...)`` around a float64 read and ``int(...)`` around an int64 read are dropped: the read is
         already that C value, and the builtin would box it into a Python object and back."""
         if (isinstance(updated.func, cst.Name) and updated.func.value in ('isinstance', 'type') and updated.args
-                and isinstance(updated.args[0].value, cst.IfExp) and self.native.get(id(updated.args[0].value)) in CTYPE):
+                and isinstance(updated.args[0].value, cst.IfExp) and self.native.get(id(updated.args[0].value)) in CTYPE
+                and id(updated.args[0].value) not in self.unboxed):
             # the type of a read is the numpy scalar's pandas returns, not the C number's
             return updated.with_changes(args=[updated.args[0].with_changes(
                 value=self._pandas_value(updated.args[0].value)), *updated.args[1:]])
