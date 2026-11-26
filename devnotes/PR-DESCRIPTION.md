@@ -220,18 +220,18 @@ live modelx. Peak memory is the figure the result files record for the 200-proje
 
 | model | upstream Ir/projection | this change Ir/projection | ratio | peak MB, upstream | peak MB, this change |
 |---|---|---|---|---|---|
-| Term_US_SEC | (to be filled from the result files) | | | | |
-| SPIA_US_SEC | (to be filled from the result files) | | | | |
-| WholeLife_US_SEC | (to be filled from the result files) | | | | |
-| VUL_US_SEC | (to be filled from the result files) | | | | |
-| FIA_US_SEC | (to be filled from the result files) | | | | |
-| VA_US_SEC | (to be filled from the result files) | | | | |
-| UL_US_SEC | (to be filled from the result files) | | | | |
-| IUL_US_SEC | (to be filled from the result files) | | | | |
-| ULSG_US_SEC | (to be filled from the result files) | | | | |
-| MYGA_US_SEC | (to be filled from the result files) | | | | |
-| RILA_US_SEC | (to be filled from the result files) | | | | |
-| DIA_US_SEC | (to be filled from the result files) | | | | |
+| Term | (to be filled from the result files) | | | | |
+| SPIA | (to be filled from the result files) | | | | |
+| WholeLife | (to be filled from the result files) | | | | |
+| VUL | (to be filled from the result files) | | | | |
+| FIA | (to be filled from the result files) | | | | |
+| VA | (to be filled from the result files) | | | | |
+| UL | (to be filled from the result files) | | | | |
+| IUL | (to be filled from the result files) | | | | |
+| ULSG | (to be filled from the result files) | | | | |
+| MYGA | (to be filled from the result files) | | | | |
+| RILA | (to be filled from the result files) | | | | |
+| DIA | (to be filled from the result files) | | | | |
 
 ### Wall time, paired pass
 
