@@ -372,14 +372,17 @@ def _add_arg_vals(arg_type_val: Dict[str, Dict[type, Any]], minimums, trace) -> 
     changed = False
     for arg, val in itertools.islice(trace.arg_vals.items(), 1, None):
         tp = type(val)
-        types = arg_type_val.setdefault(arg, {})
+        integral = issubclass(tp, numbers.Integral)
+        types = arg_type_val.get(arg)
+        if types is None:
+            types = arg_type_val[arg] = {}
         if tp not in types:
             types[tp] = val
             changed = True
-        elif issubclass(tp, numbers.Integral) and val > types[tp]:
+        elif integral and val > types[tp]:
             types[tp] = val
             changed = True
-        if issubclass(tp, numbers.Integral):
+        if integral:
             value = int(val)
             if arg not in minimums or value < minimums[arg]:
                 minimums[arg] = value
@@ -807,6 +810,7 @@ class MxCallTracer(CallTracer):
         """
         super().__init__(logger, max_typed_dict_size, code_filter, sample_rate)
         self.module = module
+        self._in_module = {}    # id(code object) -> (code object, its function is in the module)
 
     def handle_call(self, frame: FrameType) -> None:
         """Start a trace for a call, capturing argument values.
@@ -830,9 +834,10 @@ class MxCallTracer(CallTracer):
             return
         arg_names = code.co_varnames[0: code.co_argcount]
         arg_vals = {}
+        local_vals = frame.f_locals     # one view of the frame's locals (a new proxy per read)
         for name in arg_names:
-            if name in frame.f_locals:
-                arg_vals[name] = frame.f_locals[name]
+            if name in local_vals:
+                arg_vals[name] = local_vals[name]
 
         self.traces[frame] = CallTrace(func, arg_vals)
 
@@ -901,9 +906,14 @@ class MxCallTracer(CallTracer):
             return self
 
         # Filter by module name here.  The function is resolved once per
-        # code object: an uncached cells is traced on every call.
-        func = self._get_func(frame)
-        if not func or not func.__module__.split(".")[0] == self.module:
+        # code object: an uncached cells is traced on every call.  So is
+        # the answer, kept by identity with the code object held.
+        entry = self._in_module.get(id(code))
+        if entry is None or entry[0] is not code:
+            func = self._get_func(frame)
+            entry = self._in_module[id(code)] = code, bool(
+                func and func.__module__.split(".")[0] == self.module)
+        if not entry[1]:
             return self
 
         try:
@@ -975,10 +985,22 @@ class MxCodeFilter:
     def __init__(self):
         # code object -> is_uncached_cells_code(code), as computed once
         self._public = {}
+        # id(code object) -> (code object, whether it is traced)
+        self._decisions = {}
 
     def __call__(self, code):
         """Return ``True`` if the code object should be traced."""
-        # Since called many times, check module name and function name only
+        # Called on every call and return event: the answer is kept per code object
+        # (by identity, the object held with it, so that its id is not reused)
+        entry = self._decisions.get(id(code))
+        if entry is not None and entry[0] is code:
+            return entry[1]
+        decision = self._decide(code)
+        self._decisions[id(code)] = code, decision
+        return decision
+
+    def _decide(self, code):
+        # check module name and function name only
         if (
             code.co_filename[-len(MX_MODEL_MOD) - 3: -3] == MX_MODEL_MOD
             or code.co_filename[-len(MX_SPACE_MOD) - 3: -3] == MX_SPACE_MOD
