@@ -14,23 +14,24 @@ dynamic Space References; a Space formula that names the Space itself as its bas
 a model exports no collect and the compiled class gains nothing. CI here installs upstream modelx, so it skips
 `tests/compiled/test_collect.py` as a whole (its four tests: values, workers key, reused items, reset rule); the
 borrowed-read tests run. The collect tests run in CI only on a branch that installs the modelx change:
-`verify/pr-collect-7-with-collect-modelx`, on 58ff45d; its run is pending.
+`verify/pr-collect-9-with-collect-modelx` (db26d17: d30757b and that one CI change), run 45877087591, queued.
 
-This change goes on top of the fast SEC change (`pr/fast-sec`, including its native math-module calls).
+This change goes on top of the fast SEC change at 503b07c, which includes its native math-module calls with the math
+Reference passed as a borrowed pointer.
 
 ## Commits
 
-In order, on `pr/fast-sec` (1c3f228); head `r4/p2-collect-7` (58ff45d):
+In order, on 503b07c; head `pr/collect-7` (d30757b):
 
 | # | commit | subject | non-test lines | test lines |
 |---|---|---|---|---|
-| 1 | 0a46365 | Compile a Space declared with collect: the cache slot and the collect hook | | |
-| 2 | e843412 | Reuse one item per worker thread in collect | | |
-| 3 | e2210de | Borrow the held item of an exclusively owned item at a read | | |
-| 4 | 133d10c | Refuse an unlocked Space Reference or a parent read at several workers on every build | | |
-| 5 | 58ff45d | Count the live items and objects after collect instead of resident memory | | |
-
-The history is being recut to an identical tree; the ids and line counts are filled in once it is final.
+| 1 | 7541606 | Compile a Space declared with collect: the cache slot and the collect hook | +249 / -4 | +149 |
+| 2 | 4b0630c | Reuse one item per worker thread in collect | +114 / -11 | +82 |
+| 3 | 6ad0c74 | Borrow the held item of an exclusively owned item at a read | +17 / -5 | +146 / -3 |
+| 4 | 2fc21e4 | Refuse an unlocked Space Reference or a parent read at several workers on every build | +14 / -12 | |
+| 5 | e7595ea | Count the live items and objects after collect instead of resident memory | | +21 / -10 |
+| 6 | 7e64414 | Describe collect workers under the GIL and the refusal on every build | +5 / -4 | |
+| 7 | d30757b | Collect keeps each worker's reused item in a slot the evaluator passes, not in threading.local | +15 / -10 | +3 |
 
 Commit 1 adds `collect.py`, its wiring in `config.py` (spec key `collect_workers`), `parser.py` and
 `transformer.py`, and its documentation (`spec.md`: `collect_workers`; `freethreading.md`: the run-time setting
@@ -41,7 +42,13 @@ its test checks this; commit 2 changes `collect.py` and `transformer.py`; commit
 `collect.py` ahead of its one-thread path, so that an unlocked Space Reference or a parent read at several workers
 raises on every interpreter build, with or without the GIL. Commit 5 replaces the resident-memory bound of the
 reused-items test, whose unit differs by platform and whose `resource` module Windows lacks, by a direct count of the
-live items and of the objects the garbage collector tracks after collect of 20 and of 3,000 coordinates.
+live items and of the objects the garbage collector tracks after collect of 20 and of 3,000 coordinates. Commit 6
+documents the workers under the GIL and the refusal. Commit 7 keeps each worker's reused item in a one-element list
+that the evaluator gives each worker and passes to the item function with the coordinate, in place of a
+`threading.local` kept by the hook: a getattr and two setattr less per coordinate, and no reused item outlives its
+collect (the `threading.local` sat in a reference cycle with the hook's closure, so on the DV01 model one reused item
+per collect stayed alive until the garbage collector ran: 39 at the end of the report; peak 1,121 MB against 1,082 MB
+with the change, 1,050 policies, one worker, 4 vCPU). It needs no modelx change.
 
 **Declaration and evaluator.** The compiled class declares the collect cache and defines the hook from the exported
 `collect` and `_mx_collect_item` methods. For each coordinate the hook builds the item as `__call__` builds a new
@@ -51,7 +58,7 @@ order. Workers: the spec key `collect_workers` (default 1) or `_mx_collect_worke
 With more than one, items run on that many threads from a shared index; outputs are added in domain order as they
 complete. With the GIL, several workers compute serially on one thread, with the same values and errors.
 
-**Reused receiver.** A new item that nothing else holds is kept by its worker thread and returned to the state of a
+**Reused receiver.** A new item that nothing else holds is kept in its worker's slot and returned to the state of a
 new object before the next coordinate, then built again on the same memory. The reset is generated in the class's
 `.pxd` from the class's own attribute declarations and those of its bases (the object's layout): an object or
 memoryview attribute becomes None, as `tp_new` leaves it; a C value, array or struct becomes zero bytes, as the
@@ -73,9 +80,10 @@ held item: the direct route (items built by `Projection[k]`) as well as collect.
   of items, at one worker or four.
 - A reused item holds nothing from the previous coordinate (tested on every cache kind, on a Cell reached by one
   coordinate only and on one reached by every other coordinate; a reset that skips the flag arrays fails the test).
-- Python 3.10 and later, with and without the GIL. CI on `verify/pr-collect-7-with-collect-modelx` (58ff45d with
-  modelx `pr/collect`) is pending. A local run of the whole suite on 58ff45d with modelx 1aa21f4, CPython 3.13 with the
-  GIL on Linux: 522 passed, 8 skipped (Linux only; no free-threaded build, macOS or Windows here).
+- Python 3.10 and later, with and without the GIL. CI on `verify/pr-collect-9-with-collect-modelx` (d30757b with
+  modelx `pr/collect`): run 45877087591, queued. Locally on the head's tree (6179f37, the same tree as d30757b) with
+  modelx 1aa21f4, free-threaded CPython 3.14.6 on Linux: `tests/compiled/test_collect.py` 4 passed. The last local run
+  of the whole suite is the one on 58ff45d, CPython 3.13 with the GIL: 522 passed, 8 skipped (Linux only).
 
 ## Limits
 
@@ -85,7 +93,14 @@ held item: the direct route (items built by `Projection[k]`) as well as collect.
   Locked Cells read their computed values without the lock; a miss takes the model lock, so concurrent first fills
   of a locked Space run one at a time.
 - Collect releases only the items of the collect Space. ItemSpaces of other Spaces that its items create stay in
-  those Spaces until the model deletes them.
+  those Spaces until the model deletes them, as in live modelx. On the DV01 model each Valuation item reads
+  `Actual[idx, scen_id]`, one ItemSpace per policy of about 0.9 MB, which every close reads: collect evaluates close by
+  close, so the whole book's `Actual` items are alive together, while the direct route goes policy by policy and
+  deletes each policy's `Actual` once its closes are done. At 1,050 policies, one worker, peak RSS (`ru_maxrss` of a
+  fresh process; 48e1231, commit 7's change, on 58ff45d): the report through collect 1,082 MB; the same close-by-close
+  order through direct items deleted one by one, 1,081 MB; that order with each `Actual[i, s]` deleted after its item,
+  164 MB with the same total and 28% more time (10.85 s against 13.91 s), as `Actual` is then computed again at every
+  close. The memory belongs to the model's evaluation order, not to collect.
 - Sums are added in domain order on one thread; collect does not add in C or merge partial sums.
 - Threads are started per call and joined before it returns.
 
@@ -101,16 +116,29 @@ held item: the direct route (items built by `Projection[k]`) as well as collect.
 
 ## Evidence
 
-Each figure below is marked with the commit it was measured at. None was measured on the current head: they predate
-the recut onto `pr/fast-sec`, the removal of the integer checks and the removal of the per-Cell Python entry.
+Each figure below is marked with the commit it was measured at. None was measured on the current head d30757b. The
+figures at 90da50b, 88cb421 and 82020d8 predate the recut onto the fast SEC change, the removal of the integer checks
+and the removal of the per-Cell Python entry.
 90da50b (`r4/p2-collect-3`) is the collect head when the SEC and DV01 evidence was recorded (b84801d, 518d946). 88cb421
 (`r4/p2-collect-2`, report b5266df) is the head of the comparison with the previous implementation. 82020d8
-(`r4/p2-collect`, report a945517) is the head of the cost of the Python sums. A re-measurement on 58ff45d is in
-progress.
+(`r4/p2-collect`, report a945517) is the head of the cost of the Python sums. The DV01 figures of 58ff45d come from
+the eight-core machine; the memory figures of 48e1231 on 58ff45d from the 4 vCPU machine below. 58ff45d is the
+head before commits 6 and 7 (commit 6 changes documentation only).
 
 | measured at | model | figures |
 |---|---|---|
-| 58ff45d | (pending) | (pending) |
+| 58ff45d | DV01 example, 1,050 policies, eight-core machine | below |
+| 48e1231 on 58ff45d (commit 7's change) | DV01 example, 1,050 policies, peak memory | in Limits |
+
+### The DV01 example at 58ff45d (eight-core machine; five alternating fresh-process rounds, medians)
+
+| route | 1 worker | 4 workers | 8 workers |
+|---|---|---|---|
+| collect, wall s | 10.916 | 3.837 | 3.092 |
+| collect, peak RSS MiB | 1,082-1,122 at 1, 4 and 8 workers | | |
+| direct (pooled driver), same build, peak RSS MiB | 253 | 340 | 394 |
+
+The collect peak is the book's `Actual` items held together (see Limits). Commit 7 is not in these runs.
 
 All measurements: free-threaded CPython 3.14.6, Cython 3.3.1, 4 vCPU, fresh process per run, runs interleaved.
 
