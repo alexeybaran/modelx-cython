@@ -29,9 +29,16 @@ cdef extern from "Python.h":
     int _Py_EQ "Py_EQ"
 
 
+from cpython.long cimport PyLong_AsLongLongAndOverflow
+
+cdef object _np_bool = np.bool_
+cdef object _np_floating = np.floating
+cdef object _np_integer = np.integer
+
+
 cdef inline bint _plain_int(object label):
     # an int label (including IntEnum members and numpy integers), not a bool
-    return isinstance(label, (int, np.integer)) and not isinstance(label, (bool, np.bool_))
+    return isinstance(label, (int, _np_integer)) and not isinstance(label, (bool, _np_bool))
 
 
 cdef class PreparedTable:
@@ -71,20 +78,25 @@ cdef class PreparedTable:
             i = (i + 1) & self.name_mask
 
     cdef Py_ssize_t code_obj(self, int level, object key) except -2:
-        """The code of any key part at ``level``, or -1 when absent."""
+        """The code of any key part at ``level``, or -1 when absent. An exact ``int`` on an int level and an exact
+        ``str`` on any other level are looked up first, without the checks other values need."""
         cdef object code
+        cdef long long whole
+        cdef int overflow
         codes = self.level_codes[level]
         if codes is None:
-            if type(key) is int:            # the common case first (no numpy type lookups)
-                if not -0x8000000000000000 <= key <= 0x7fffffffffffffff:
-                    return -1
-                return self.code_ll(level, <long long>key)
-            if isinstance(key, (float, np.floating)) and float(key).is_integer():
+            if type(key) is int:            # the common case first: one C conversion, no Python comparisons
+                whole = PyLong_AsLongLongAndOverflow(key, &overflow)
+                return -1 if overflow else self.code_ll(level, whole)
+            if isinstance(key, (float, _np_floating)) and float(key).is_integer():
                 key = int(key)          # pandas finds an integral float key on an int index
             if not _plain_int(key) or not -0x8000000000000000 <= key <= 0x7fffffffffffffff:
                 return -1
             return self.code_ll(level, <long long>key)
-        if type(key) is bool or isinstance(key, np.bool_):
+        if type(key) is str:                # the common text label: a dict lookup, nothing else
+            code = (<dict>codes).get(key)
+            return -1 if code is None else <Py_ssize_t>code
+        if type(key) is bool or isinstance(key, _np_bool):
             return -1               # no label of a text or float level, although True == 1.0 (pandas: KeyError)
         code = (<dict>codes).get(key)
         return -1 if code is None else <Py_ssize_t>code
