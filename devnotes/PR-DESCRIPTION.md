@@ -372,7 +372,13 @@ evidence for that commit, not for the final one.
 | 45831453108 | f86f38d | Linux 3.10, 3.12, 3.14, 3.13t, 3.14t; Windows 3.10, 3.12, 3.14, 3.13t, 3.14t; macOS 3.13t | macOS 3.10, 3.12, 3.14, 3.14t |
 | 45833870838 (two attempts) | 1c3f228 | Linux and Windows, all five versions; macOS 3.10, 3.12, 3.14, 3.13t | macOS 3.14t |
 | 45851243863 | 7edf07b | Linux and Windows, all five versions; macOS 3.10 | macOS 3.12, 3.14, 3.13t, 3.14t |
-| 45869162145 | 503b07c (final) | (queued) | (queued) |
+| 45869162145 | 503b07c (final) | Linux and Windows, all five versions; macOS 3.10, 3.12 | macOS 3.13t, 3.14, 3.14t |
 
-The macOS / free-threaded 3.14 lane has not run, because no runner was allocated to it on any of
-these runs. It is therefore untested, and the owner has accepted that.
+On the final code (run 45869162145), 12 of 15 lanes ran and all 12 passed; no test failed anywhere.
+Three macOS lanes (3.13t, 3.14 and 3.14t) were cancelled without ever being given a runner.
+
+The same code is also the base of the collect verification branch (run 45869161273 on 813c04f, which
+is this series plus collect). There, the macOS 3.13t and 3.14t lanes did get runners and both passed,
+and the macOS 3.12 and 3.14 lanes were the ones without a runner. Across the two runs, every lane has
+passed on this code except macOS 3.14 (not free-threaded), which has not run. The owner has accepted
+the missing macOS lanes.
