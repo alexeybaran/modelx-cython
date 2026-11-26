@@ -22,6 +22,15 @@ pandas DataFrame or Series with a unique index (``tracer.frame_schema``), or a l
   at run time, below the first label, or an index in another order runs pandas' own asof;
 - membership ``key in R.index`` / ``not in`` with a complete key. A key part that is not one label at run time
   (a list, a mask, an index, an unhashable value) runs pandas' own membership, which answers or raises as live.
+- a view of a prefix held in a local, ``v = R.loc[prefix]`` at the top of the formula: its prefix codes and stored
+  rows in C locals (held per item when every part is fixed per item), ``v.loc[k, "c"]``, ``float(v.loc[k, name])``,
+  ``v.index.max()`` / ``.min()`` and ``max(v.index)`` / ``min(v.index)`` of one remaining int level. When the view is
+  not native the assignment runs on pandas where it stands, so a missing prefix raises where live raises it;
+- walks of an index in pandas order: comprehensions and ``for`` loops over ``X.index`` (a view local, a whole frame,
+  ``R.loc[prefix]``, a local holding an index), ``list`` / ``tuple`` / ``set`` of it; a label of an int level is a C
+  integer, any other the label object pandas iteration gives. A whole frame is walked by pandas position; a prefix
+  natively only while its stored rows are in pandas order (decided per table). A generator is walked natively only
+  as the argument of a builtin that consumes it at once;
 
 Where a read is lowered:
 
@@ -243,6 +252,59 @@ class _View:
         self.name, self.call, self.schema, self.depth, self.codes = name, call, schema, depth, codes
         self.start, self.stop, self.source, self.untyped = start, stop, source, untyped
         self.setup, self.used = None, False
+
+
+class _Walk:
+    """The rows an index walk visits in pandas order: positions [start, stop) of a whole table (``whole``: each
+    mapped to its stored row) or the stored rows of a prefix of ``depth`` levels; native while ``test`` holds.
+    ``swaps``: the locals the pandas walk replaces by what they stand for."""
+
+    def __init__(self, call, schema, depth, hold, start, stop, test, whole):
+        self.call, self.schema, self.depth, self.hold = call, schema, depth, hold
+        self.start, self.stop, self.test, self.whole = start, stop, test, whole
+        self.swaps = {}
+
+
+# builtins that consume a generator argument at once: a generator over an index is walked natively only there
+WALK_BUILTINS = frozenset(('sorted', 'list', 'tuple', 'set', 'frozenset', 'sum', 'min', 'max', 'any', 'all'))
+
+
+def _rebinds(comp, names):
+    """An inner ``for``, comprehension, lambda or walrus of ``comp`` binds one of ``names``."""
+    from .key_facts import _bound_names
+    found = []
+
+    class Scan(cst.CSTVisitor):
+        def visit_CompFor(self, node):
+            if node is not comp.for_in:
+                found.extend(n for n in _bound_names(node.target) if n in names)
+
+        def visit_Lambda(self, node):
+            found.extend(p.name.value for p in node.params.params if p.name.value in names)
+            found.append('lambda')      # a lambda is a scope of its own: not entered by the substitution
+
+        def visit_NamedExpr(self, node):
+            found.extend(n for n in _bound_names(node.target) if n in names)
+    comp.visit(Scan())
+    return bool(found)
+
+
+class _Substitute(cst.CSTTransformer):
+    """Each load of a walked name replaced by its label expression (attribute names and keywords kept)."""
+
+    def __init__(self, labels):
+        super().__init__()
+        self.labels = labels
+
+    def leave_Name(self, original, updated):
+        found = self.labels.get(original.value)
+        return found.deep_clone() if found is not None else updated
+
+    def leave_Attribute(self, original, updated):
+        return updated.with_changes(attr=original.attr)
+
+    def leave_Arg(self, original, updated):
+        return updated.with_changes(keyword=original.keyword)
 
 
 class _EveryReceiver(frozenset):
@@ -765,6 +827,7 @@ class FrameReads:
                     return
                 if field_reads(name, got[1]):
                     found[name] = (got[0], got[1], n)
+
         node.visit(Scan())
         return found
 
@@ -1251,6 +1314,202 @@ class _Rewrite(cst.CSTTransformer):
         read = self._m('label_ll', o.ref(hold), row, cst.Integer(str(view.depth)))
         return self._lowered(test, read, self._fallback(updated, view.call), None if view.untyped else 'i64')
 
+    # ------------------------------------------------------------------ walks of an index
+    def _walk(self, it):
+        """``X.index`` walked in pandas order (X a view local, a whole frame receiver, or ``R.loc[prefix]``; also
+        through a local assigned once to ``X.index``), else None."""
+        o = self.o
+        swaps = {}
+        if isinstance(it, cst.Name):
+            value = o._value_of(it.value) if o._once(it.value) else None
+            if not (isinstance(value, cst.Attribute) and value.attr.value == 'index'):
+                return None
+            swaps[it.value] = value
+            self.swaps.setdefault(it.value, value)      # the local is dropped once unread
+            it = value
+        if not (isinstance(it, cst.Attribute) and it.attr.value == 'index'):
+            return None
+        target = it.value
+        view = self._view_of(target)
+        whole = o._receiver(target) if view is None else None
+        if view is not None:
+            hold = self._take(view.call, view.depth, -7)
+            view.used = True
+            walk = _Walk(view.call, view.schema, view.depth, hold, cst.Name(view.start), cst.Name(view.stop),
+                         self._native_test(hold, [cst.parse_expression(f'{view.start} >= 0')]), False)
+            swaps[view.name] = view.source
+        elif whole is not None:
+            if not self._plain(*whole):
+                return None
+            hold = self._take(whole[0], _NO_LABEL, -1)
+            walk = _Walk(whole[0], whole[1], 0, hold, cst.Integer('0'), self._m('nrows', o.ref(hold)),
+                         self._native_test(hold, []), True)
+            if isinstance(target, cst.Name):
+                swaps[target.value] = whole[0]
+                self.replaced_names.add(target.value)
+        else:
+            prefix = o.prefix_of(target)
+            if prefix is None or len(prefix[0][1]['levels']) > MAX_PARTS:
+                return None
+            (call, schema), parts = prefix
+            levels = schema['levels']
+            hold = self._take(call, len(parts), -7)
+            conditions, codes = [], []
+            for level, part in enumerate(parts):    # the prefix codes once, into C locals of the test
+                if o.item_fixed(part, levels[level]):
+                    codes.append(self._held(hold, level, part, conditions))
+                    continue
+                code = self.code_of(hold, level, part, levels[level], conditions)
+                o.key_count += 1
+                conditions.append(cst.parse_expression(f'(_mx_vc_{o.key_count} := {_code(code)}) >= 0'))
+                codes.append(cst.Name(f'_mx_vc_{o.key_count}'))
+            args = [cst.Integer(str(len(parts))), *codes, *[cst.Integer('0')] * (MAX_PARTS - 1 - len(codes))]
+            o.key_count += 1
+            start = f'_mx_vs_{o.key_count}'
+            conditions.append(cst.parse_expression(
+                f'({start} := {_code(self._m("view_start", o.ref(hold), *args))}) >= 0'))
+            walk = _Walk(call, schema, len(parts), hold, cst.Name(start), self._m('view_stop', o.ref(hold), *args),
+                         self._native_test(hold, conditions), False)
+            if isinstance(target.value.value, cst.Name):
+                swaps[target.value.value.value] = call
+                self.replaced_names.add(target.value.value.value)
+        walk.swaps = swaps
+        return walk
+
+    def _labels(self, walk, target, position):
+        """{name: its expression at the walked position} for a loop target over ``walk``: one name (the label, or
+        the tuple of the labels of several remaining levels), or a tuple of distinct names, one per remaining
+        level; None for any other target."""
+        levels = walk.schema['levels']
+        row = self._m('whole_row', self.o.ref(walk.hold), position) if walk.whole else position
+
+        def label(level):
+            return self._m('label_ll' if levels[level] == 'int' else 'label_obj', self.o.ref(walk.hold),
+                           row.deep_clone(), cst.Integer(str(level)))
+        remaining = range(walk.depth, len(levels))
+        if isinstance(target, cst.Name):
+            if len(remaining) == 1:
+                return {target.value: label(walk.depth)}
+            return {target.value: cst.Tuple([cst.Element(label(level)) for level in remaining])}
+        if not (isinstance(target, cst.Tuple) and len(target.elements) == len(remaining)
+                and all(isinstance(e, cst.Element) and isinstance(e.value, cst.Name) for e in target.elements)):
+            return None
+        names = [e.value.value for e in target.elements]
+        if len(set(names)) != len(names):
+            return None
+        return {name: label(level) for name, level in zip(names, remaining)}
+
+    def _walk_fallback(self, updated, walk):
+        """The pandas walk: the view, index and frame locals of the walk replaced by what they stand for (so that
+        none of them needs evaluating on the native path); every other name as written."""
+        swaps = walk.swaps
+
+        class Swap(cst.CSTTransformer):
+            def leave_Name(self, original, new):
+                return swaps[original.value] if original.value in swaps else new
+        return updated.visit(Swap()) if swaps else updated
+
+    def _position(self):
+        self.o.key_count += 1
+        return cst.Name(f'_mx_p{self.o.key_count}')
+
+    def comprehension(self, original, updated):
+        """A comprehension whose first ``for`` walks an index (``_walk``): positions in pandas order, the target names
+        replaced by their labels. A generator is walked natively only as the argument of a builtin that consumes it
+        at once (its table is read through a borrowed reference)."""
+        o = self.o
+        comp = original.for_in
+        if comp.asynchronous is not None or (isinstance(original, cst.GeneratorExp) and not self._consumed(original)):
+            return None
+        walk = self._walk(comp.iter)
+        if walk is None:
+            return None
+        position = self._position()
+        labels = self._labels(walk, comp.target, position)
+        if labels is None or _rebinds(original, set(labels)):
+            return None
+        sub = _Substitute(labels)
+        for_in = updated.for_in
+        native = updated.with_changes(for_in=for_in.with_changes(
+            target=position, iter=cst.Call(func=cst.Name('range'), args=[cst.Arg(walk.start), cst.Arg(walk.stop)]),
+            ifs=[i.visit(sub) for i in for_in.ifs],
+            inner_for_in=for_in.inner_for_in.visit(sub) if for_in.inner_for_in is not None else None))
+        if isinstance(native, cst.DictComp):
+            native = native.with_changes(key=native.key.visit(sub), value=native.value.visit(sub))
+        else:
+            native = native.with_changes(elt=native.elt.visit(sub))
+        fallback = self._walk_fallback(updated, walk)
+        if isinstance(original, cst.GeneratorExp):
+            parens = {'lpar': [cst.LeftParen()], 'rpar': [cst.RightParen()]}
+            native, fallback = native.with_changes(**parens), fallback.with_changes(**parens)
+        return self._lowered(walk.test, native, fallback)
+
+    def _consumed(self, gen):
+        """A generator that is the one argument of a builtin consuming it at once (``sorted``, ``max``, ...)."""
+        o = self.o
+        arg = o.facts.formula.parents.get(id(gen))
+        call = o.facts.formula.parents.get(id(arg)) if isinstance(arg, cst.Arg) else None
+        if isinstance(call, cst.Call) and o.builtin_minmax and o._walk_extreme_int(call):
+            return False        # ``max(a for a, s in R.index)``: read as the level's extreme, no walk
+        return (isinstance(call, cst.Call) and isinstance(call.func, cst.Name) and call.func.value in WALK_BUILTINS
+                and len(call.args) == 1 and call.args[0] is arg and arg.keyword is None and not arg.star
+                and call.func.value not in o.facts.formula.binds and call.func.value not in o.facts.formula.other)
+
+    def leave_ListComp(self, original, updated):
+        return self.comprehension(original, updated) or updated
+
+    def leave_SetComp(self, original, updated):
+        return self.comprehension(original, updated) or updated
+
+    def leave_DictComp(self, original, updated):
+        return self.comprehension(original, updated) or updated
+
+    def leave_GeneratorExp(self, original, updated):
+        return self.comprehension(original, updated) or updated
+
+    def leave_For(self, original, updated):
+        """``for k in X.index:`` (``_walk``): a loop over positions in pandas order, the target names bound to the
+        labels of each position first in the body; the pandas loop when the table cannot answer."""
+        o = self.o
+        if original.asynchronous is not None:
+            return updated
+        walk = self._walk(original.iter)
+        if walk is None:
+            return updated
+        position = self._position()
+        labels = self._labels(walk, original.target, position)
+        if labels is None:
+            return updated
+        o.declarations.append(position.value)
+        first = [self._assign(name, expr) for name, expr in labels.items()]
+        body = updated.body
+        body = (body.with_changes(body=[*first, *body.body]) if isinstance(body, cst.IndentedBlock)
+                else cst.IndentedBlock(body=[*first, cst.SimpleStatementLine(body=body.body)]))
+        native = updated.with_changes(target=position, body=body, iter=cst.Call(
+            func=cst.Name('range'), args=[cst.Arg(walk.start), cst.Arg(walk.stop)]))
+        return self._branch(walk.test, [native], [self._walk_fallback(updated, walk)])
+
+    def index_builtin(self, original, updated):
+        """``list(X.index)``, ``tuple(X.index)``, ``set(X.index)``: the labels in pandas order."""
+        o = self.o
+        func = original.func
+        if not (isinstance(func, cst.Name) and func.value in ('list', 'tuple', 'set') and len(original.args) == 1
+                and original.args[0].keyword is None and not original.args[0].star
+                and func.value not in o.facts.formula.binds and func.value not in o.facts.formula.other):
+            return None
+        walk = self._walk(original.args[0].value)
+        if walk is None:
+            return None
+        position = self._position()
+        name = f'_mx_k{o.key_count}'
+        labels = self._labels(walk, cst.Name(name), position)
+        for_in = cst.CompFor(target=position, iter=cst.Call(
+            func=cst.Name('range'), args=[cst.Arg(walk.start), cst.Arg(walk.stop)]))
+        native = (cst.SetComp if func.value == 'set' else cst.ListComp)(elt=labels[name], for_in=for_in)
+        if func.value == 'tuple':
+            native = cst.Call(func=cst.Name('tuple'), args=[cst.Arg(native)])
+        return self._lowered(walk.test, native, self._walk_fallback(updated, walk))
+
     def row_local_read(self, original, updated, parts):
         """``row["c"]`` of a row local: the field from the prepared blocks, of the kind pandas gives it."""
         o = self.o
@@ -1691,7 +1950,8 @@ class _Rewrite(cst.CSTTransformer):
             return updated.with_changes(args=[updated.args[0].with_changes(
                 value=self._pandas_value(updated.args[0].value)), *updated.args[1:]])
         inner = self.o.facts.int_argument(original)
-        lowered = self._asof(original, updated) or self._extreme(original, updated)
+        lowered = (self._asof(original, updated) or self._extreme(original, updated)
+                   or self.index_builtin(original, updated))
         if lowered is not None:
             return lowered
         if (isinstance(updated.func, cst.Name) and len(updated.args) == 1 and not updated.args[0].keyword

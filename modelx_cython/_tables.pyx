@@ -184,9 +184,9 @@ cdef size_t _address(array):
     return <size_t>array.ctypes.data
 
 
-cdef void _point(PreparedTable table, sorted_array, combined, grid, f64, i64, kinds, slots):
+cdef void _point(PreparedTable table, sorted_array, combined, grid, f64, i64, kinds, slots, pos_row):
     """Point the table's raw pointers into its arrays and keep the arrays alive with it."""
-    table._arrays = (sorted_array, combined, grid, f64, i64, kinds, slots)
+    table._arrays = (sorted_array, combined, grid, f64, i64, kinds, slots, pos_row)
     for array in table._arrays:
         array.flags.writeable = False
     table.sorted_labels = <const long long*>_address(sorted_array)
@@ -196,6 +196,7 @@ cdef void _point(PreparedTable table, sorted_array, combined, grid, f64, i64, ki
     table.i64 = <const long long*>_address(i64)
     table.column_kind = <const int*>_address(kinds)
     table.column_slot = <const Py_ssize_t*>_address(slots)
+    table.pos_row = <const Py_ssize_t*>_address(pos_row)
 
 
 cdef void _name_map(PreparedTable table):
@@ -278,7 +279,7 @@ cdef PreparedTable _build(object value):
     order = np.argsort(codes, kind='stable')
     # per prefix depth d (0: the whole table), whether the stored rows of every prefix of d levels are in pandas'
     # order, and the labels of level d exact as doubles: an ordered lookup then searches the stored rows
-    within = []
+    within, walks = [], []
     for d in range(table.nlevels):
         if d == 0:
             same = np.ones(max(n - 1, 0), dtype=bool)
@@ -287,8 +288,12 @@ cdef PreparedTable _build(object value):
             same = prefix[1:] == prefix[:-1]
         exact = all(_plain_int(label) and -9007199254740992 <= label <= 9007199254740992
                     for label in table.level_labels[d])
-        within.append(bool(exact and (n < 2 or (order[1:][same] > order[:-1][same]).all())))
+        walks.append(bool(n < 2 or (order[1:][same] > order[:-1][same]).all()))
+        within.append(exact and walks[d])
     table.ordered_within = tuple(within)
+    table.walk_within = tuple(walks)
+    pos_row = np.zeros(max(1, n), dtype=np.intp)       # pandas position -> stored row
+    pos_row[order] = np.arange(n, dtype=np.intp)
     combined = np.ascontiguousarray(codes[order] if n else np.zeros(1, dtype=np.int64), dtype=np.int64)
     if product <= _GRID_LIMIT:
         grid = np.full(max(1, product), -1, dtype=np.intp)
@@ -326,7 +331,7 @@ cdef PreparedTable _build(object value):
     i64 = np.ascontiguousarray(np.column_stack(i64_cols) if i64_cols else np.zeros((max(1, n), 1), dtype=np.int64),
                                dtype=np.int64)
     table.f64_width, table.i64_width = f64.shape[1], i64.shape[1]
-    _point(table, sorted_array, combined, grid, f64, i64, kinds, slots)
+    _point(table, sorted_array, combined, grid, f64, i64, kinds, slots, pos_row)
     table.objects = tuple(objects)
     # the dtype pandas gives a row (it widens number columns to one dtype: int32 beside float64 reads as float64)
     table.row_object = table.is_series or n == 0 or getattr(frame.iloc[0].dtype, 'kind', 'O') not in 'iufc'
@@ -413,7 +418,8 @@ cdef void _decide(PreparedTable table, object signatures):
       of them); else None;
     - ``label``, ``kind``: the column read and its block kind (0 float64, 1 int64, 2 object; -1: the index; -4:
       a field chosen at run time, ``columns`` given; -2: the extremes of a non-empty index; -6: the extremes of an
-      int level, ``label`` its (name or None, position); -3: an ordered lookup within prefixes of ``label`` levels).
+      int level, ``label`` its (name or None, position); -3: an ordered lookup within prefixes of ``label`` levels;
+      -7: a walk of the rows of each prefix of ``label`` levels in pandas order).
     The slot is one plus the column's slot in its block (1 for a read of the index), or -1."""
     cdef int level
     cdef Py_ssize_t position
@@ -460,6 +466,8 @@ cdef Py_ssize_t _index_slot(PreparedTable table, object label, int kind):
                      and table.level_kind[label[1]] != LEVEL_OBJECT and table.nrows > 0) else -1
     if kind == -3:      # an ordered lookup within prefixes of ``label`` levels (None: the whole table)
         return 1 if table.ordered_within[label or 0] else -1
+    if kind == -7:      # a walk of the rows of every prefix of ``label`` levels, in pandas order
+        return 1 if label < table.nlevels and table.walk_within[label] else -1
     return 1 if kind in (-1, -4) else -1
 
 
@@ -565,6 +573,11 @@ cdef bint _is_number(object x):
     if (type(x) is int or isinstance(x, np.integer)) and not isinstance(x, (bool, np.bool_)):
         return -9007199254740992 <= x <= 9007199254740992
     return False
+
+
+cdef object label_obj(PreparedRef ref, Py_ssize_t row, int level):
+    """The label of any level at a stored row: the object pandas iteration gives."""
+    return (<PreparedTable>ref).level_labels[level][level_code_at(ref, row, level)]
 
 
 cdef object max_obj(PreparedRef ref):

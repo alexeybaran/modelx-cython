@@ -34,6 +34,8 @@ cdef class PreparedTable:
     cdef readonly tuple level_names        # index.names
     cdef readonly tuple ordered_within     # per prefix depth: the stored rows of every prefix are in pandas order
                                            # and the labels of the next level are exact as doubles (asof)
+    cdef readonly tuple walk_within        # per prefix depth: the stored rows of every prefix are in pandas order
+    cdef const Py_ssize_t* pos_row         # pandas position -> stored row
     cdef readonly object max_label, min_label   # index.max(), index.min() as pandas returns them
     cdef readonly dict column_positions    # column label -> position
     cdef const int* column_kind            # COLUMN_*, per column position
@@ -290,17 +292,31 @@ cdef inline long long level_min_ll(PreparedRef ref, int level) noexcept nogil:
 
 
 @cython.cdivision(True)
-cdef inline long long label_ll(PreparedRef ref, Py_ssize_t row, int level) noexcept nogil:
-    """The label of an int level at a stored row (combined codes are not negative: C division)."""
-    cdef Py_ssize_t code
+cdef inline Py_ssize_t level_code_at(PreparedRef ref, Py_ssize_t row, int level) noexcept nogil:
+    """The code of ``level`` at a stored row (combined codes are not negative: C division)."""
     if level == (<PreparedTable>ref).nlevels - 1:
-        code = <Py_ssize_t>((<PreparedTable>ref).combined[row] % (<PreparedTable>ref).level_size[level])
-    else:
-        code = <Py_ssize_t>(((<PreparedTable>ref).combined[row] // (<PreparedTable>ref).radix[level])
-                            % (<PreparedTable>ref).level_size[level])
+        return <Py_ssize_t>((<PreparedTable>ref).combined[row] % (<PreparedTable>ref).level_size[level])
+    return <Py_ssize_t>(((<PreparedTable>ref).combined[row] // (<PreparedTable>ref).radix[level])
+                        % (<PreparedTable>ref).level_size[level])
+
+
+cdef inline long long label_ll(PreparedRef ref, Py_ssize_t row, int level) noexcept nogil:
+    """The label of an int level at a stored row."""
+    cdef Py_ssize_t code = level_code_at(ref, row, level)
     if (<PreparedTable>ref).level_kind[level] == LEVEL_DENSE:
         return (<PreparedTable>ref).level_first[level] + code
     return (<PreparedTable>ref).sorted_labels[(<PreparedTable>ref).level_offset[level] + code]
+
+
+# ---- walks of an index in pandas order -----------------------------------------------------------------------
+# A whole table is walked by pandas position, each mapped to its stored row; a prefix is walked over its stored rows
+# [start, stop), which are in pandas order where its read signature says so (``walk_within``). A label of an int
+# level is read as a C integer, any other as the label object pandas iteration gives.
+cdef inline Py_ssize_t whole_row(PreparedRef ref, Py_ssize_t position) noexcept nogil:
+    return (<PreparedTable>ref).pos_row[position]
+
+
+cdef object label_obj(PreparedRef ref, Py_ssize_t row, int level)
 
 
 cdef inline Py_ssize_t nrows(PreparedRef ref) noexcept nogil:
