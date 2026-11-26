@@ -9,27 +9,28 @@ totalled in compiled code, on several threads on free-threaded Python, without t
 ## Depends on
 
 The modelx change that exports collect with the hook call must be merged first: https://github.com/alexeybaran/modelx,
-branch `pr/collect` (1aa21f4), seven commits on upstream main: two for dynamic References, five for collect. Without it
+branch `pr/collect` (1aa21f4), seven commits on upstream modelx main (fec516d): two for the export (statically named
+dynamic Space References; a Space formula that names the Space itself as its base) and five for collect. Without it
 a model exports no collect and the compiled class gains nothing. CI here installs upstream modelx, so it skips
 `tests/compiled/test_collect.py` as a whole (its four tests: values, workers key, reused items, reset rule); the
-borrowed-read tests run. The collect tests run in CI only on a branch that installs the modelx change; run
-45831454650 on c802f9b is pending.
+borrowed-read tests run. The collect tests run in CI only on a branch that installs the modelx change:
+`verify/pr-collect-7-with-collect-modelx`, on 58ff45d; its run is pending.
 
 This change goes on top of the fast SEC change (`pr/fast-sec`, including its native math-module calls).
 
 ## Commits
 
-In order, on `pr/fast-sec` (f86f38d):
+In order, on `pr/fast-sec` (1c3f228); head `r4/p2-collect-7` (58ff45d):
 
 | # | commit | subject | non-test lines | test lines |
 |---|---|---|---|---|
-| 1 | 757eb98 | Compile a Space declared with collect: the cache slot and the collect hook | +249 / -4 | +149 |
-| 2 | 71a87ed | Reuse one item per worker thread in collect | +114 / -11 | +82 |
-| 3 | bc216a4 | Borrow the held item of an exclusively owned item at a read | +17 / -5 | +146 / -3 |
-| 4 | beda0ee | Refuse an unlocked Space Reference or a parent read at several workers on every build | +14 / -12 | |
-| 5 | c802f9b | Count the live items and objects after collect instead of resident memory | | +21 / -10 |
+| 1 | 0a46365 | Compile a Space declared with collect: the cache slot and the collect hook | | |
+| 2 | e843412 | Reuse one item per worker thread in collect | | |
+| 3 | e2210de | Borrow the held item of an exclusively owned item at a read | | |
+| 4 | 133d10c | Refuse an unlocked Space Reference or a parent read at several workers on every build | | |
+| 5 | 58ff45d | Count the live items and objects after collect instead of resident memory | | |
 
-Total (f86f38d..c802f9b): 10 files, +759 / -12; net non-test +371 / -9, test +388 / -3.
+The history is being recut to an identical tree; the ids and line counts are filled in once it is final.
 
 Commit 1 adds `collect.py`, its wiring in `config.py` (spec key `collect_workers`), `parser.py` and
 `transformer.py`, and its documentation (`spec.md`: `collect_workers`; `freethreading.md`: the run-time setting
@@ -72,7 +73,11 @@ held item: the direct route (items built by `Projection[k]`) as well as collect.
   of items, at one worker or four.
 - A reused item holds nothing from the previous coordinate (tested on every cache kind, on a Cell reached by one
   coordinate only and on one reached by every other coordinate; a reset that skips the flag arrays fails the test).
-- Python 3.10 and later, with and without the GIL; the full upstream suite passes unchanged.
+- Python 3.10 and later, with and without the GIL. CI on `verify/pr-collect-7-with-collect-modelx` (58ff45d with
+  modelx `pr/collect`) is pending. A local run of the whole suite on 58ff45d with modelx 1aa21f4, CPython 3.13 with the
+  GIL on Linux: 520 passed, 8 skipped, 2 failed. The two failures are in `test_native_math_calls.py` (the math-module
+  calls are not lowered). They fail the same way on the fast SEC change alone (1c3f228, f86f38d, 53104d2) in that
+  environment, so they are not caused by collect; CI has no 3.13 lane with the GIL.
 
 ## Limits
 
@@ -91,16 +96,27 @@ held item: the direct route (items built by `Projection[k]`) as well as collect.
 | design | why declined |
 |---|---|
 | allow an unlocked Space reached only through its items, keyed by the collected parameter | safe within one call, but two collects started by user threads at once can share an item; not provable without serialising them, and locking the Space costs nothing measurable on the models below |
-| skip re-running `__init__` on a reused item (reset only the caches) | measured: 0-3% on both models, within noise |
-| native C sums of scalar outputs | the Python path costs 1.35 us per item: at most 3% of the fastest model, 0.3% of the others |
-| contiguous chunks with partial sums | under 1%, and four-worker sums would differ from one worker's in the last bits |
-| a thread pool kept per model | no measurable change on the DV01 example and KLV_DE_S |
+| skip re-running `__init__` on a reused item (reset only the caches) | measured: 0-3% on both models, within noise (first recorded in b84801d; the commit of the run is not recorded) |
+| native C sums of scalar outputs | measured at 82020d8: the Python path costs 1.35 us per item: at most 3% of the fastest model, 0.3% of the others |
+| contiguous chunks with partial sums | estimated at 82020d8: under 1%, and four-worker sums would differ from one worker's in the last bits |
+| a thread pool kept per model | no measurable change on the DV01 example and KLV_DE_S (the run is not recorded) |
 
 ## Evidence
 
+Each figure below is marked with the commit it was measured at. None was measured on the current head: they predate
+the recut onto `pr/fast-sec`, the removal of the integer checks and the removal of the per-Cell Python entry.
+90da50b (`r4/p2-collect-3`) is the collect head when the SEC and DV01 evidence was recorded (b84801d, 518d946). 88cb421
+(`r4/p2-collect-2`, report b5266df) is the head of the comparison with the previous implementation. 82020d8
+(`r4/p2-collect`, report a945517) is the head of the cost of the Python sums. A re-measurement on 58ff45d is in
+progress.
+
+| measured at | model | figures |
+|---|---|---|
+| 58ff45d | (pending) | (pending) |
+
 All measurements: free-threaded CPython 3.14.6, Cython 3.3.1, 4 vCPU, fresh process per run, runs interleaved.
 
-### The twelve `*_US_SEC` lifelib models (medians of 3, wall s / peak MB)
+### The twelve `*_US_SEC` lifelib models (at 90da50b; medians of 3, wall s / peak MB)
 
 Collect declared in a measurement script, `Data` locked, books tiled to the size at which the direct route keeping
 every item fits 4 GB. On the shipped book collect equals live modelx bit for bit on all twelve, at 1 and 4 workers,
@@ -129,7 +145,7 @@ Direct without the borrowed read at four workers: MYGA 0.40 s, Term 0.60 s, VA 0
 where the direct route keeping its items uses 1.4-2.5 GB; a loop deleting each item uses 100-160 MB. Four-worker runs take 0.1-0.5 s, so their scaling includes
 thread start. RILA_US_SEC is slower on four workers than on one on both routes, for a reason outside collect.
 
-### The DV01 example on MYGA_US_SEC (medians of 5, the report Cells of 3; wall s / CPU s / peak MB)
+### The DV01 example on MYGA_US_SEC (at 90da50b; medians of 5, the report Cells of 3; wall s / CPU s / peak MB)
 
 | route | policies | 1 worker | 4 workers | per policy, 1 worker | scaling |
 |---|---|---|---|---|---|
@@ -149,7 +165,7 @@ every route equals live modelx bit for bit.
 The declaration adds five lines to the model, and the report through collect is 21 lines instead of a per-policy
 task, a thread pool and its own sums.
 
-### Against the previous collect implementation, on the same item code (medians of 5, wall s / peak MB)
+### Against the previous collect implementation, on the same item code (at 88cb421; medians of 5, wall s / peak MB)
 
 The previous implementation (a reused receiver per worker, native sums, contiguous chunks with partial sums) and this
 one were built by the same compiler on lifelib's KLV_DE_S (60,000 policies) and VA_US_S (20,000 policies), collect
