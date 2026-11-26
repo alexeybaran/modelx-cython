@@ -1372,6 +1372,7 @@ class _Rewrite(cst.CSTTransformer):
         self.asof_rows = {}     # asof local -> (membership hold, prefix cell call, asof expression)
         self.native = {}        # id(lowered read) -> column kind, for float()/int() around it
         self.float_only = set()     # ids of float64 reads kept as objects for a text key part (_lowered)
+        self.selections = {}        # id of such a read (float64 or int64) -> its column kind, for numpy's type (on_leave)
         self.taken = []         # T-5c: kinds of the holds taken since the last recorded read (its run-time fallbacks)
         self.emitted_inline_assignments = set()
         self.generator_walks = set()    # T-5c: ids of lowered generator walks (``gen if test else pandas gen``)
@@ -1380,12 +1381,12 @@ class _Rewrite(cst.CSTTransformer):
 
     def on_leave(self, original, updated):
         result = super().on_leave(original, updated)
-        kind = self.native.get(id(result))
+        kind = self.native.get(id(result)) or self.selections.get(id(result))
         if (kind in CTYPE and result is not updated and isinstance(original, cst.Subscript)
                 and isinstance(result, cst.IfExp) and _value_read(result.body) is not None
                 and self.o.numpy_use(original, kind)):
-            del self.native[id(result)]
-            result = self._boxed(result, kind)
+            self.native.pop(id(result), None)
+            result = self._boxed(result, kind)     # (a read checked per call for one label: its native branch too)
         self.updated_of[id(original)] = result
         if result is not updated and isinstance(original, (cst.Subscript, cst.Call, cst.Comparison, cst.For,
                                                              cst.GeneratorExp, cst.ListComp)):
@@ -1701,8 +1702,10 @@ class _Rewrite(cst.CSTTransformer):
         lowered = cst.IfExp(test=test, body=read, orelse=fallback, lpar=[cst.LeftParen()], rpar=[cst.RightParen()])
         if kind in CTYPE and not selection:
             self.native[id(lowered)] = kind
-        elif kind == 'f64':     # under float() it is a C double again: float() converts the pandas branch only
-            self.float_only.add(id(lowered))
+        elif kind in CTYPE:
+            self.selections[id(lowered)] = kind
+            if kind == 'f64':   # under float() it is a C double again: float() converts the pandas branch only
+                self.float_only.add(id(lowered))
         return lowered
 
     def _index_of(self, expr):
