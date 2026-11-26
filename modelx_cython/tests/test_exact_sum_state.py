@@ -2,8 +2,8 @@
 
 A small extension cimports the header-only state and feeds it items the way the
 lowered generators do: typed doubles, C integers and bools, or objects. Every
-case compares the result type, the exception type and text exactly, and the value
-within 1e-10 x sum(|items|) + 1e-7 (nan only equals nan).
+case compares the result type, the exception type and text and the value exactly
+(every bit; nan equals nan).
 """
 import math
 import random
@@ -71,22 +71,6 @@ def probe(tmp_path_factory):
         sys.path.remove(str(folder))
 
 
-REL_TOL, ABS_TOL = 1e-10, 1e-7     # the project tolerance; the last digit is not a goal
-
-
-def magnitude(items, *start):
-    """sum(|x|) over the numeric items and start: the scale of the relative tolerance, so a result that
-    differs only by cancellation among the items is equal within the tolerance of what was summed."""
-    total = 0.0
-    for x in (*items, *start):
-        if isinstance(x, (int, float, complex, Fraction)):
-            try:
-                total += float(abs(x))
-            except OverflowError:
-                return math.inf
-    return total
-
-
 def outcome(function, *args):
     try:
         value = function(*args)
@@ -95,30 +79,20 @@ def outcome(function, *args):
     return (type(value), value)
 
 
-def _close(a, b, scale):
-    if math.isnan(a) or math.isnan(b):
-        return math.isnan(a) and math.isnan(b)
-    return a == b or abs(a - b) <= REL_TOL * scale + ABS_TOL
-
-
-def same(actual, expected, scale):
-    """Equal error (type and text) or equal result type, with float and complex values within
-    REL_TOL x scale + ABS_TOL and every other value exactly equal."""
-    if actual[0] == 'raise' or expected[0] == 'raise' or actual[0] is not expected[0]:
+def same(actual, expected):
+    """Equal error (type and text) or equal result: the type and every bit (the repr, so that nan
+    equals nan and the sign of zero counts). The built-in is the one of the running interpreter:
+    3.12 and 3.13 add an int item to a float total without compensation and have no complex loop."""
+    if actual[0] == 'raise' or expected[0] == 'raise':
         return actual == expected
-    if expected[0] is float:
-        return _close(actual[1], expected[1], scale)
-    if expected[0] is complex:
-        return (_close(actual[1].real, expected[1].real, scale)
-                and _close(actual[1].imag, expected[1].imag, scale))
-    return actual == expected
+    return actual[0] is expected[0] and repr(actual[1]) == repr(expected[1])
 
 
 def check(probe, items):
     expected = outcome(sum, items)
     for typed in (True, False):
         actual = outcome(lambda: probe.exact_sum(items, typed=typed))
-        assert same(actual, expected, magnitude(items)), (items, typed, actual, expected)
+        assert same(actual, expected), (items, typed, actual, expected)
 
 
 EDGES = [0.0, -0.0, 1.0, -1.0, 0.1, 1e16, -1e16, 1e308, -1e308, 5e-324, -5e-324,
@@ -127,7 +101,10 @@ EDGES = [0.0, -0.0, 1.0, -1.0, 0.1, 1e16, -1e16, 1e308, -1e308, 5e-324, -5e-324,
 
 
 def test_documented_edges(probe):
-    check(probe, [1e16, 1, 1, -1e16])            # integer items are compensated (3.12+)
+    check(probe, [1e16, 1, 1, -1e16])            # integer items are compensated from 3.14, not before
+    check(probe, [0.1, 1e16, 1, -1e16])
+    check(probe, [0.1, 1e16, 2 ** 70, 0.1, -1e16, -2.0 ** 70])   # an int beyond C long in the float loop
+    check(probe, [0.1, 1j, 1e16, 1.0, -1e16])    # complex after floats
     check(probe, ())                              # int 0
     check(probe, [-0.0])                          # 0.0: int start 0 + -0.0
     check(probe, [1e308, 1e308, -1e308])          # inf, not nan
@@ -146,7 +123,7 @@ def test_documented_edges(probe):
 
 
 def test_result_at_a_double_boundary(probe):
-    for items in ([], [1, 2], [1e16, 1, -1e16], [2 ** 63 - 1, 2], [1j], [0.5, Fraction(1, 4)]):
+    for items in ([], [1, 2], [1e16, 1, -1e16], [1e16, 1, 1, -1e16], [2 ** 63 - 1, 2], [1j], [0.5, Fraction(1, 4)]):
         try:
             expected = ('value', float(sum(items)) if not isinstance(sum(items), complex) else None)
         except Exception as error:
@@ -160,8 +137,7 @@ def test_result_at_a_double_boundary(probe):
         elif expected[0] == 'raise':
             assert actual == expected, items
         else:
-            assert (actual[0] == 'value' and type(actual[1]) is type(expected[1])
-                    and _close(actual[1], expected[1], magnitude(items))), items
+            assert same((type(actual[1]), actual[1]), (type(expected[1]), expected[1])) and actual[0] == 'value', items
 
 
 def test_random_property(probe):

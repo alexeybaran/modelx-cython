@@ -92,7 +92,7 @@ class _Unsupported(Exception):
     """A form the general reduction lowering leaves to the interpreter (the reason)."""
 
 
-_ATOMIC = (cst.Name, cst.Attribute, cst.Integer, cst.Float, cst.SimpleString)
+_ATOMIC = (cst.Name, cst.Attribute, cst.Float, cst.SimpleString)   # an integer before .attr needs parentheses
 _UNROLL_LIMIT = 32            # literal-tuple instances unrolled per reduction
 def _empty_message():
     """The running interpreter's own message for min() of an empty iterable, with the function
@@ -122,6 +122,10 @@ class _Substitute(cst.CSTTransformer):
         if after.lpar or not isinstance(value, _ATOMIC):
             value = value.with_changes(lpar=(cst.LeftParen(),), rpar=(cst.RightParen(),))
         return value
+
+    def leave_Arg(self, before, after):
+        # a keyword is a parameter name of the callee, never the generator variable
+        return after if after.keyword is before.keyword else after.with_changes(keyword=before.keyword)
 
 
 def _names(target):
@@ -227,7 +231,10 @@ class GeneralReductions:
 
     def substituted(self, node, mapping):
         state = self.general_state
-        if state['facts'] is None or not mapping:
+        if state['facts'] is None:
+            # a direct iterable: the element is the loop variable itself
+            return mapping.get(node.value, node) if isinstance(node, cst.Name) else node
+        if not mapping:
             return node
         return node.visit(_Substitute(mapping, state['facts'].contexts))
 
@@ -520,7 +527,10 @@ class GeneralReductions:
             return [f'if {test}:', f'    return {hit}']
         if state['flag_exit']:
             return [f'if {test}:', f'    {p}_result = {hit}', f'    {p}_done = True', '    break']
-        return [f'if {test}:', f'    {p}_result = {hit}']
+        # over a list comprehension every element is evaluated, then the built-in tests them
+        # in order and stops at the deciding one: no truth is asked of a later element
+        decided = f'{p}_result and not {p}_element' if name == 'all' else f'not {p}_result and {p}_element'
+        return [f'{p}_element = ({value})', f'if {decided}:', f'    {p}_result = {hit}']
 
 
     # ---------------------------------------------------------------- W1.8: nested sites
@@ -539,12 +549,16 @@ class GeneralReductions:
         site, preceding = self.first_site(root)
         if site is None:
             return None
-        if any(not self.effect_free(node) and _compile_time(node) for node in preceding):
+        callees = {id(node.func) for node in _subtree(root) if isinstance(node, cst.Call)}
+        if any(not self.effect_free(node) and (_compile_time(node) or id(node) in callees and _inserted(node))
+               for node in preceding):
             # Cython syntax put in by an earlier lowering (a cast, a C type, a method of a
-            # typed handle) has no run-time value to keep in a temporary: lift nothing
+            # typed handle, a provider function and its typed arguments) has no run-time
+            # value to keep in a temporary: lift nothing
             self.general_declined.setdefault(id(site), (site, (
-                'evaluated after compiler-inserted Cython syntax (a cast, a C type or a typed-handle '
-                'method) in the same statement, which cannot be held in a temporary: built-in call')))
+                'evaluated after compiler-inserted Cython syntax (a cast, a C type, a typed-handle '
+                'method or a provider call) in the same statement, which cannot be held in a temporary: '
+                'built-in call')))
             return None
         names, replacements, lines = self.names, {}, []
         for node in preceding:
@@ -716,6 +730,15 @@ def _compile_time(node):
     syntax resolved at C compile time (casts, C types, typed-handle members), never a
     value of the model's own formula."""
     return any(isinstance(item, cst.Name) and item.value == CY_MOD for item in _subtree(node))
+
+
+def _inserted(node):
+    """A callee an earlier lowering put in (a provider member or a private entry, named
+    ``_mx_...``): a C function whose typed arguments cannot be held in object temporaries."""
+    while isinstance(node, cst.Attribute):
+        node = node.value
+    return (isinstance(node, cst.Name) and node.value.startswith('_mx_')
+            and not node.value.startswith('_mx_hoist'))
 
 
 def _subtree(node):
