@@ -105,6 +105,36 @@ cdef class PreparedTable:
             buffer[level] = code
         return self.row_codes(buffer, self.nlevels)
 
+    cdef bint prefix_range(self, const Py_ssize_t* codes, int count, Py_ssize_t* start, Py_ssize_t* stop) noexcept nogil:
+        """The stored rows [start, stop) whose first ``count`` level codes are ``codes``; False when none."""
+        cdef long long low = 0, high
+        cdef int i
+        cdef Py_ssize_t lo, hi, mid
+        if count < 1 or count > self.nlevels:
+            return False
+        for i in range(count):
+            if codes[i] < 0 or codes[i] >= self.level_size[i]:
+                return False
+            low += codes[i] * self.radix[i]
+        high = low + self.radix[count - 1]
+        lo, hi = 0, self.nrows
+        while lo < hi:
+            mid = (lo + hi) >> 1
+            if self.combined[mid] < low:
+                lo = mid + 1
+            else:
+                hi = mid
+        start[0] = lo
+        hi = self.nrows
+        while lo < hi:
+            mid = (lo + hi) >> 1
+            if self.combined[mid] < high:
+                lo = mid + 1
+            else:
+                hi = mid
+        stop[0] = lo
+        return stop[0] > start[0]
+
     cdef object object_at(self, Py_ssize_t row, Py_ssize_t slot):
         return (<tuple>self.objects[slot])[row]
 
@@ -229,6 +259,7 @@ cdef PreparedTable _build(object value):
             offset += len(labels)
     table.level_labels = tuple(level[1] for level in levels)
     table.level_codes = tuple(level[3] for level in levels)
+    table.level_names = tuple(index.names)
     sorted_array = np.ascontiguousarray(sorted_labels if sorted_labels else [0], dtype=np.int64)
     cdef const long long[::1] sorted_view = sorted_array
     table._arrays = (sorted_array,)              # alive before code_ll reads it below
@@ -286,6 +317,8 @@ cdef PreparedTable _build(object value):
     # the dtype pandas gives a row (it widens number columns to one dtype: int32 beside float64 reads as float64)
     table.row_object = table.is_series or n == 0 or getattr(frame.iloc[0].dtype, 'kind', 'O') not in 'iufc'
     table.row_float = not table.row_object and frame.iloc[0].dtype.kind == 'f'     # a row of float64 fields
+    table.max_label = index.max() if n else None        # index extremes, as pandas gives them
+    table.min_label = index.min() if n else None
     return table
 
 
@@ -365,7 +398,8 @@ cdef void _decide(PreparedTable table, object signatures):
     - ``columns``: for a row read by field, every (label, kind) of the traced frame (the row's dtype depends on all
       of them); else None;
     - ``label``, ``kind``: the column read and its block kind (0 float64, 1 int64, 2 object; -1: the index; -4:
-      a field chosen at run time, ``columns`` given).
+      a field chosen at run time, ``columns`` given; -2: the extremes of a non-empty index; -6: the extremes of an
+      int level, ``label`` its (name or None, position)).
     The slot is one plus the column's slot in its block (1 for a read of the index), or -1."""
     cdef int level
     cdef Py_ssize_t position
@@ -405,6 +439,11 @@ cdef void _decide(PreparedTable table, object signatures):
 
 cdef Py_ssize_t _index_slot(PreparedTable table, object label, int kind):
     """The slot of a read of the index itself (kind < 0): 1 when this table answers it, else -1."""
+    if kind == -2:      # the extremes of a non-empty index
+        return 1 if table.nrows > 0 else -1
+    if kind == -6:      # the extremes of level label[1], named label[0] (None: any name), an int level, not empty
+        return 1 if (label[1] < table.nlevels and (label[0] is None or table.level_names[label[1]] == label[0])
+                     and table.level_kind[label[1]] != LEVEL_OBJECT and table.nrows > 0) else -1
     return 1 if kind in (-1, -4) else -1
 
 
@@ -501,3 +540,33 @@ cdef double field_f64(PreparedRef ref, Py_ssize_t row, object label) except? -1.
     if kind == COLUMN_I64:
         return <double>(<PreparedTable>ref).i64_at(row - 1, slot)
     return float((<PreparedTable>ref).object_at(row - 1, slot))
+
+
+cdef object max_obj(PreparedRef ref):
+    return (<PreparedTable>ref).max_label
+
+
+cdef object min_obj(PreparedRef ref):
+    return (<PreparedTable>ref).min_label
+
+
+cdef Py_ssize_t view_start(PreparedRef ref, int count, Py_ssize_t c0, Py_ssize_t c1, Py_ssize_t c2, Py_ssize_t c3,
+                           Py_ssize_t c4) noexcept:
+    """The first stored row of the prefix given as ``count`` level codes, or -1 when it has no row."""
+    cdef Py_ssize_t[5] codes
+    cdef Py_ssize_t start, stop
+    codes[0] = c0; codes[1] = c1; codes[2] = c2; codes[3] = c3; codes[4] = c4
+    if not (<PreparedTable>ref).prefix_range(codes, count, &start, &stop):
+        return -1
+    return start
+
+
+cdef Py_ssize_t view_stop(PreparedRef ref, int count, Py_ssize_t c0, Py_ssize_t c1, Py_ssize_t c2, Py_ssize_t c3,
+                          Py_ssize_t c4) noexcept:
+    """One past the last stored row of the prefix, or -1 when it has no row."""
+    cdef Py_ssize_t[5] codes
+    cdef Py_ssize_t start, stop
+    codes[0] = c0; codes[1] = c1; codes[2] = c2; codes[3] = c3; codes[4] = c4
+    if not (<PreparedTable>ref).prefix_range(codes, count, &start, &stop):
+        return -1
+    return stop

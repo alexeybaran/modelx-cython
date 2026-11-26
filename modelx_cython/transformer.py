@@ -651,13 +651,14 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
         import copy
         from modelx_cython.frame_reads import FrameReads
         builtin = {name: bool(scope[name]) and all(isinstance(b, BuiltinAssignment) for b in scope[name])
-                   for name in ('int', 'float')}
+                   for name in ('int', 'float', 'max', 'min')}
         rows = self.__dict__.setdefault('_row_cell_cache', {})
         if cls_info.name not in rows:
             from modelx_cython.frame_reads import row_cells
             rows[cls_info.name] = row_cells(self._module_node, cls_info)
         frames = FrameReads(self._resolver, cls_info, cells, self.helper_providers,
                             builtin_int=builtin['int'], builtin_float=builtin['float'],
+                            builtin_minmax=builtin['max'] and builtin['min'],
                             row_cells={n: e for n, e in rows[cls_info.name].items() if n != cells.name})
         holds_before = copy.deepcopy(getattr(cls_info, 'holds', None))
         signatures = dict(getattr(self._resolver, 'table_signatures', {}))

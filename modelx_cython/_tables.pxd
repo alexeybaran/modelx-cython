@@ -31,6 +31,8 @@ cdef class PreparedTable:
     cdef const long long* combined         # combined code of every stored row, ascending (rows are stored sorted)
     cdef const Py_ssize_t* grid            # combined code -> stored row, or -1 (when the product is small)
     cdef bint has_grid
+    cdef readonly tuple level_names        # index.names
+    cdef readonly object max_label, min_label   # index.max(), index.min() as pandas returns them
     cdef readonly dict column_positions    # column label -> position
     cdef const int[::1] column_kind        # COLUMN_*
     cdef const Py_ssize_t[::1] column_slot # position within its block
@@ -98,6 +100,7 @@ cdef class PreparedTable:
     cdef Py_ssize_t name_position(self, object label) except -2
     cdef Py_ssize_t code_obj(self, int level, object key) except -2
     cdef Py_ssize_t row_key(self, object key) except -2
+    cdef bint prefix_range(self, const Py_ssize_t* codes, int count, Py_ssize_t* start, Py_ssize_t* stop) noexcept nogil
     cdef object object_at(self, Py_ssize_t row, Py_ssize_t slot)
 
 
@@ -245,6 +248,63 @@ cdef inline double f64_row(PreparedRef ref, Py_ssize_t slot, Py_ssize_t row) noe
 
 cdef inline long long i64_row(PreparedRef ref, Py_ssize_t slot, Py_ssize_t row) noexcept nogil:
     return (<PreparedTable>ref).i64_at(row - 1, slot - 1)
+
+
+# ---- index extremes and membership -------------------------------------------------------------------------
+cdef inline bint contains_c(PreparedRef ref, int count, Py_ssize_t c0, Py_ssize_t c1, Py_ssize_t c2,
+                            Py_ssize_t c3, Py_ssize_t c4, Py_ssize_t c5) noexcept nogil:
+    cdef Py_ssize_t[6] codes
+    codes[0] = c0; codes[1] = c1; codes[2] = c2; codes[3] = c3; codes[4] = c4; codes[5] = c5
+    return (<PreparedTable>ref).row_codes(codes, count) >= 0
+
+
+cdef inline bint contains_1(PreparedRef ref, Py_ssize_t c0) noexcept nogil:
+    return _row_1(ref, c0) >= 0
+
+
+# extremes of a one-level int index (``T.index.max()`` / ``.min()``), as C integers (the table is not empty)
+cdef inline long long max_ll(PreparedRef ref) noexcept nogil:
+    return level_max_ll(ref, 0)
+
+
+cdef inline long long min_ll(PreparedRef ref) noexcept nogil:
+    return level_min_ll(ref, 0)
+
+
+# ``T.index.get_level_values(level).max()`` / ``.min()`` of an int level of a non-empty table
+cdef inline long long level_max_ll(PreparedRef ref, int level) noexcept nogil:
+    if (<PreparedTable>ref).level_kind[level] == LEVEL_DENSE:
+        return (<PreparedTable>ref).level_first[level] + (<PreparedTable>ref).level_size[level] - 1
+    return (<PreparedTable>ref).sorted_labels[(<PreparedTable>ref).level_offset[level]
+                                              + (<PreparedTable>ref).level_size[level] - 1]
+
+
+cdef inline long long level_min_ll(PreparedRef ref, int level) noexcept nogil:
+    if (<PreparedTable>ref).level_kind[level] == LEVEL_DENSE:
+        return (<PreparedTable>ref).level_first[level]
+    return (<PreparedTable>ref).sorted_labels[(<PreparedTable>ref).level_offset[level]]
+
+
+@cython.cdivision(True)
+cdef inline long long label_ll(PreparedRef ref, Py_ssize_t row, int level) noexcept nogil:
+    """The label of an int level at a stored row (combined codes are not negative: C division)."""
+    cdef Py_ssize_t code
+    if level == (<PreparedTable>ref).nlevels - 1:
+        code = <Py_ssize_t>((<PreparedTable>ref).combined[row] % (<PreparedTable>ref).level_size[level])
+    else:
+        code = <Py_ssize_t>(((<PreparedTable>ref).combined[row] // (<PreparedTable>ref).radix[level])
+                            % (<PreparedTable>ref).level_size[level])
+    if (<PreparedTable>ref).level_kind[level] == LEVEL_DENSE:
+        return (<PreparedTable>ref).level_first[level] + code
+    return (<PreparedTable>ref).sorted_labels[(<PreparedTable>ref).level_offset[level] + code]
+
+
+cdef object max_obj(PreparedRef ref)
+cdef object min_obj(PreparedRef ref)
+cdef Py_ssize_t view_start(PreparedRef ref, int count, Py_ssize_t c0, Py_ssize_t c1, Py_ssize_t c2, Py_ssize_t c3,
+                           Py_ssize_t c4) noexcept
+cdef Py_ssize_t view_stop(PreparedRef ref, int count, Py_ssize_t c0, Py_ssize_t c1, Py_ssize_t c2, Py_ssize_t c3,
+                          Py_ssize_t c4) noexcept
 
 
 # the slot of a read, through the table its item holds: one C load (a read stays pandas when it is <= 0)

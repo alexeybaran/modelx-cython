@@ -12,7 +12,13 @@ pandas DataFrame or Series with a unique index (``tracer.frame_schema``), or a l
 - fields of a row read without building the row: ``R.loc[key]["c"]``; ``row = R.loc[key]`` then ``row["c"]``; and
   ``self.P()["c"]`` where P is a row cell, a cached zero-argument Cell whose formula is ``return R.loc[key]``. A
   key fixed per item has its row held per item (``_mx_tw_<n>``); a field reads as pandas gives it in the row (an
-  int64 field of a row pandas widens to float64 is a float).
+  int64 field of a row pandas widens to float64 is a float);
+- index extremes, as C integers where the level is an int level: ``R.index.max()`` / ``.min()`` (one level; any
+  other index gives pandas' own extreme label), ``max(R.index)`` / ``min(R.index)``, the extreme of the remaining
+  level of a prefix ``R.loc[prefix].index.max()``, ``R.index.get_level_values(L).max()`` (L a level number or a
+  name traced on every frame, also through a local) and ``max(a for a, s in R.index)``;
+- membership ``key in R.index`` / ``not in`` with a complete key. A key part that is not one label at run time
+  (a list, a mask, an index, an unhashable value) runs pandas' own membership, which answers or raises as live.
 
 Where a read is lowered:
 
@@ -199,6 +205,22 @@ def _same_row_cell(owner, other, name, expr):
     return found is not None and found.deep_equals(expr)
 
 
+def _walk_extreme(call):
+    """``max(a for a, s in X)`` / ``min(...)``, no condition, the element one name of the tuple target:
+    (X, the target's names, the element's position), else None."""
+    if not (isinstance(call.func, cst.Name) and call.func.value in ('max', 'min') and len(call.args) == 1
+            and not call.args[0].keyword and not call.args[0].star and isinstance(call.args[0].value, cst.GeneratorExp)):
+        return None
+    gen = call.args[0].value
+    comp, target = gen.for_in, gen.for_in.target
+    if (comp.ifs or comp.inner_for_in is not None or comp.asynchronous is not None or not isinstance(gen.elt, cst.Name)
+            or not isinstance(target, cst.Tuple) or not all(isinstance(e, cst.Element) and isinstance(e.value, cst.Name)
+                                                            for e in target.elements)):
+        return None
+    names = [e.value.value for e in target.elements]
+    return (comp.iter, names, names.index(gen.elt.value)) if names.count(gen.elt.value) == 1 else None
+
+
 class _Hold:
     """One (receiver, column, kind) a formula reads natively; ``table`` (and ``state`` in items) are the fields of
     the receiver's binding, shared by every read of that receiver."""
@@ -220,11 +242,13 @@ _NO_LABEL = object()
 class FrameReads:
     """``lower(node)`` returns the formula with recognised reads lowered (the node itself when none is)."""
 
-    def __init__(self, resolver, cls_info, cells, providers, *, builtin_int, builtin_float, row_cells=None):
+    def __init__(self, resolver, cls_info, cells, providers, *, builtin_int, builtin_float, builtin_minmax=False,
+                 row_cells=None):
         self.row_cells = row_cells or {}    # row cell of the class -> its ``R.loc[key]`` expression
         self.resolver, self.cls_info, self.cells = resolver, cls_info, cells
         self.providers = providers
         self.builtin_int, self.builtin_float = builtin_int, builtin_float
+        self.builtin_minmax = builtin_minmax
         self.key_count = 0
         self.local_count = 0
 
@@ -236,7 +260,98 @@ class FrameReads:
         facts.formula = _Formula(node)
         node.visit(facts.formula)
         facts._params = set(getattr(self.cells, 'params', ()) or ())
+        plain_int = facts.is_int
+
+        def is_int(expr, depth=0):      # ``max(a for a, s in T.index)`` of an int level
+            return plain_int(expr, depth) or (
+                'extreme of an integer level' if isinstance(expr, cst.Call) and self._walk_extreme_int(expr) else None)
+        facts.is_int = is_int
+        facts._int_index_read = lambda expr: (self.extreme(expr) is not None or self.int_label(expr)
+                                              or self.level_values(expr) is not None)
         return facts
+
+    def _walk_extreme_int(self, expr):
+        """``max(a for a, s in R.index)`` / ``min(...)`` with ``a`` naming an int level of a unique frame."""
+        walk = _walk_extreme(expr)
+        index = walk[0] if walk else None
+        if not (isinstance(index, cst.Attribute) and index.attr.value == 'index'):
+            return False
+        found = self._receiver(index.value)
+        if found is None or not found[1].get('unique'):
+            return False
+        levels = found[1]['levels']
+        return len(levels) == len(walk[1]) and levels[walk[2]] == 'int'
+
+    def extreme(self, expr):
+        """``R.index.max()`` / ``R.index.min()`` on a frame receiver with one unique int level: (R call, 'max'|'min')."""
+        if not (isinstance(expr, cst.Call) and not expr.args and isinstance(expr.func, cst.Attribute)
+                and expr.func.attr.value in ('max', 'min') and isinstance(expr.func.value, cst.Attribute)
+                and expr.func.value.attr.value == 'index'):
+            return None
+        found = self._receiver(expr.func.value.value)
+        if (found is None or found[1]['levels'] != ('int',) or not found[1].get('unique')
+                or _code(found[0]) in self.mutated):
+            return None
+        return found[0], expr.func.attr.value
+
+    def int_label(self, expr):
+        """``R.loc[prefix].index.max()`` / ``.min()`` whose one remaining level is an int level: an integer."""
+        if not (isinstance(expr, cst.Call) and isinstance(expr.func, cst.Attribute) and expr.func.attr.value in (
+                'max', 'min') and isinstance(expr.func.value, cst.Attribute) and expr.func.value.attr.value == 'index'):
+            return False
+        prefix = self.prefix_of(expr.func.value.value)
+        if prefix is None:
+            return False
+        (_, schema), parts = prefix
+        return len(schema['levels']) - len(parts) == 1 and schema['levels'][len(parts)] == 'int'
+
+    def prefix_of(self, value):
+        """``R.loc[prefix]`` with R a frame receiver (unique index, not edited) of more levels than the prefix, the
+        prefix one part or a tuple display of parts: ((R call, schema), prefix parts), else None."""
+        if not (isinstance(value, cst.Subscript) and isinstance(value.value, cst.Attribute)
+                and value.value.attr.value == 'loc'):
+            return None
+        parts = _index_parts(value)
+        found = self._receiver(value.value.value)
+        if (parts is None or len(parts) != 1 or found is None or not found[1].get('unique')
+                or _code(found[0]) in self.mutated):
+            return None
+        parts = _parts(parts[0])
+        if not 0 < len(parts) < len(found[1]['levels']) or any(map(_several, parts)):
+            return None
+        return found, parts
+
+    def level_values(self, expr):
+        """``R.index.get_level_values(L).max()`` / ``.min()`` (also through a local assigned once to the level
+        values) of an int level, L a level number or a name traced on every frame: (R call, schema, level, name,
+        'max'|'min', the local or None), else None."""
+        func = expr.func if isinstance(expr, cst.Call) else None
+        if not (isinstance(func, cst.Attribute) and func.attr.value in ('max', 'min') and not expr.args):
+            return None
+        inner, local = func.value, None
+        if isinstance(inner, cst.Name):
+            local, inner = inner.value, self._value_of(inner.value)
+        if not (isinstance(inner, cst.Call) and isinstance(inner.func, cst.Attribute)
+                and inner.func.attr.value == 'get_level_values' and len(inner.args) == 1 and not inner.args[0].keyword
+                and not inner.args[0].star and isinstance(inner.func.value, cst.Attribute)
+                and inner.func.value.attr.value == 'index'):
+            return None
+        found = self._receiver(inner.func.value.value)
+        if found is None or not found[1].get('unique') or _code(found[0]) in self.mutated:
+            return None
+        call, schema = found
+        arg = inner.args[0].value
+        names = list(schema.get('names') or ())
+        if isinstance(arg, cst.Integer):
+            index, name = int(arg.value, 0), None
+        elif _literal_str(arg) is not None and names.count(_literal_str(arg)) == 1:
+            name = _literal_str(arg)
+            index = names.index(name)
+        else:
+            return None
+        if not 0 <= index < len(schema['levels']) or schema['levels'][index] != 'int':
+            return None
+        return call, schema, index, name, func.attr.value, local
 
     def numpy_use(self, node, kind, seen=None):
         """Whether the value of the cell read ``node`` (an original node of this formula) reaches a use where a
@@ -275,6 +390,9 @@ class FrameReads:
                 pass
             elif isinstance(parent, (cst.Index, cst.SubscriptElement)):
                 return False        # a key part: looked up by its value
+            elif isinstance(parent, cst.Element) and isinstance(parents.get(id(parent)), cst.Tuple) and isinstance(
+                    parents.get(id(parents.get(id(parent)))), (cst.Index, cst.SubscriptElement)):
+                return False        # a part of a tuple key
             elif isinstance(parent, cst.Arg):
                 call = parents.get(id(parent))
                 if not isinstance(call, cst.Call) or parent.keyword is not None or parent.star:
@@ -1145,6 +1263,145 @@ class _Rewrite(cst.CSTTransformer):
         read = self._m('field_f64', o.ref(hold), row, cst.Name(local))
         return self._lowered(self._native_test(hold, conditions), read, self._fallback(updated, call), 'f64')
 
+    # ------------------------------------------------------------------ index extremes and membership
+    def _extreme(self, original, updated):
+        """The index extremes of the module docstring, else None. An extreme read as a C integer is lowered only
+        where its value meets no use in which numpy's integer and a C integer differ (``numpy_use``)."""
+        o = self.o
+        func = original.func
+        found = o.extreme(original)
+        if found is not None:               # R.index.max() of one int level: the C integer
+            call, which = found
+            if o.numpy_use(original, 'i64'):
+                return None
+            hold = self._take(call, _NO_LABEL, -2)
+            if isinstance(original.func.value.value, cst.Name):
+                self.replaced_names.add(original.func.value.value.value)
+            return self._lowered(self._native_test(hold, []), self._m(which + '_ll', o.ref(hold)),
+                                 self._fallback(updated, call), 'i64')
+        if (isinstance(func, cst.Name) and func.value in ('max', 'min') and len(original.args) == 1
+                and not original.args[0].keyword and not original.args[0].star):
+            arg = original.args[0].value        # max(R.index) of one int level: the same C integer
+            index = arg.value if isinstance(arg, cst.Attribute) and arg.attr.value == 'index' else None
+            got = o._receiver(index) if index is not None else None
+            if (got is not None and got[1]['levels'] == ('int',) and self._plain(*got)
+                    and o.builtin_minmax and not o.numpy_use(original, 'i64')):
+                hold = self._take(got[0], _NO_LABEL, -2)
+                if isinstance(index, cst.Name):
+                    self.replaced_names.add(index.value)
+                return self._lowered(self._native_test(hold, []), self._m(func.value + '_ll', o.ref(hold)),
+                                     self._fallback(updated, got[0]), 'i64')
+            return self.level_walk_extreme(original, updated)
+        if not (isinstance(func, cst.Attribute) and func.attr.value in ('max', 'min') and not original.args):
+            return None
+        level = o.level_values(original)
+        if level is not None:
+            return self.level_extreme(original, updated, level)
+        index = func.value
+        if not (isinstance(index, cst.Attribute) and index.attr.value == 'index'):
+            return None
+        whole = o._receiver(index.value)
+        if whole is not None:               # any other index: pandas' own extreme label, prepared once
+            if not self._plain(*whole):
+                return None
+            hold = self._take(whole[0], _NO_LABEL, -2)
+            if isinstance(index.value, cst.Name):
+                self.replaced_names.add(index.value.value)
+            return self._lowered(self._native_test(hold, []), self._m(func.attr.value + '_obj', o.ref(hold)),
+                                 self._fallback(updated, whole[0]))
+        prefix = o.prefix_of(index.value)
+        if prefix is None or not o.int_label(original) or o.numpy_use(original, 'i64'):
+            return None
+        # R.loc[prefix].index.max(): the label of the remaining int level at the first or last stored row of the
+        # prefix (rows are stored in code order, and the codes of an int level are in label order)
+        (call, schema), parts = prefix
+        hold = self._take(call, _NO_LABEL, -1)
+        if isinstance(index.value.value.value, cst.Name):
+            self.replaced_names.add(index.value.value.value.value)
+        conditions = []
+        codes = [self._held(hold, level, part, conditions) if o.item_fixed(part, schema['levels'][level])
+                 else self.code_of(hold, level, part, schema['levels'][level], conditions)
+                 for level, part in enumerate(parts)]
+        args = [o.ref(hold), cst.Integer(str(len(parts))), *codes, *[cst.Integer('0')] * (5 - len(codes))]
+        o.key_count += 1
+        start = f'_mx_vs_{o.key_count}'
+        test = self._conjunction([self._native_test(hold, conditions), cst.parse_expression(
+            f'({start} := {_code(self._m("view_" + ("start" if func.attr.value == "min" else "stop"), *args))}) > 0'
+            if func.attr.value == 'max' else
+            f'({start} := {_code(self._m("view_start", *args))}) >= 0')])
+        row = cst.parse_expression(f'{start} - 1' if func.attr.value == 'max' else start)
+        read = self._m('label_ll', o.ref(hold), row, cst.Integer(str(len(parts))))
+        return self._lowered(test, read, self._fallback(updated, call), 'i64')
+
+    def level_extreme(self, original, updated, found):
+        """``R.index.get_level_values(L).max()`` / ``.min()`` of an int level: its largest / smallest label, a C
+        integer; native while the level still has that name, is an int level and the table is not empty (kind -6)."""
+        o = self.o
+        call, schema, index, name, which, local = found
+        if o.numpy_use(original, 'i64'):
+            return None
+        hold = self._take(call, (name, index), -6)
+        if local is not None:           # the pandas branch reads the level values; the local goes once unread
+            self.swaps.setdefault(local, o._value_of(local))
+        inner = o._value_of(local) if local is not None else original.func.value
+        if isinstance(inner.func.value.value, cst.Name):
+            self.replaced_names.add(inner.func.value.value.value)
+        native = self._m(f'level_{which}_ll', o.ref(hold), cst.Integer(str(index)))
+        return self._lowered(self._native_test(hold, []), native, self._fallback(updated, call), 'i64')
+
+    def level_walk_extreme(self, original, updated):
+        """``max(a for a, s in R.index)`` / ``min(...)``: the element is the part of the tuple target naming an int
+        level, with no condition, over a whole frame of unique keys: that level's extreme as a C integer, as
+        ``R.index.get_level_values(i).max()`` (kind -6), not a walk of every row per evaluation."""
+        o = self.o
+        shape = _walk_extreme(original)
+        if shape is None or not o.builtin_minmax:
+            return None
+        it, names, level = shape
+        found = o._receiver(it.value) if isinstance(it, cst.Attribute) and it.attr.value == 'index' else None
+        if found is None or not self._plain(*found) or o.numpy_use(original, 'i64'):
+            return None
+        levels = found[1]['levels']
+        if len(levels) != len(names) or levels[level] != 'int':
+            return None
+        hold = self._take(found[0], (None, level), -6)
+        if isinstance(it.value, cst.Name):
+            self.replaced_names.add(it.value.value)
+        native = self._m(f'level_{original.func.value}_ll', o.ref(hold), cst.Integer(str(level)))
+        return self._lowered(self._native_test(hold, []), native, self._fallback(updated, found[0]), 'i64')
+
+    def leave_Comparison(self, original, updated):
+        """``key in R.index`` / ``not in`` with a complete key: the native test while every key part is one label
+        (a part fixed per item and absent from its level gives False without a lookup); pandas' own membership
+        for a part that is not one label at run time, so its answer or its error is live's."""
+        o = self.o
+        if len(original.comparisons) != 1:
+            return updated
+        target = original.comparisons[0]
+        index = target.comparator
+        if not (isinstance(target.operator, (cst.In, cst.NotIn)) and isinstance(index, cst.Attribute)
+                and index.attr.value == 'index'):
+            return updated
+        found = o._receiver(index.value)
+        if found is None or not self._plain(*found):
+            return updated
+        call, schema = found
+        key_parts = self._key(original.left, schema)
+        if key_parts is None:
+            return updated
+        hold = self._take(call, _NO_LABEL, -1)
+        if isinstance(index.value, cst.Name):
+            self.replaced_names.add(index.value.value)
+        (suffix, args), conditions = self._read_args(hold, key_parts, schema['levels'])
+        # a held code is -1 for an absent label (the lookup of code -2 is False), -2 for a part that is not one
+        # label and 0 while unresolved (its evaluation raised): those two run pandas
+        conditions = [cst.parse_expression(f'({_code(c.left)} > 0 or {_code(c.left)} == -1)')
+                      if isinstance(c, cst.Comparison) else c for c in conditions]
+        test = self._m('contains' + suffix, o.ref(hold), *args)
+        if isinstance(target.operator, cst.NotIn):
+            test = cst.UnaryOperation(cst.Not(), test)
+        return self._lowered(self._native_test(hold, conditions), test, self._fallback(updated, call))
+
     def leave_Call(self, original, updated):
         """``float(...)`` around a float64 read and ``int(...)`` around an int64 read are dropped: the read is
         already that C value, and the builtin would box it into a Python object and back."""
@@ -1154,6 +1411,9 @@ class _Rewrite(cst.CSTTransformer):
             return updated.with_changes(args=[updated.args[0].with_changes(
                 value=self._pandas_value(updated.args[0].value)), *updated.args[1:]])
         inner = self.o.facts.int_argument(original)
+        lowered = self._extreme(original, updated)
+        if lowered is not None:
+            return lowered
         if (isinstance(updated.func, cst.Name) and len(updated.args) == 1 and not updated.args[0].keyword
                 and not updated.args[0].star):
             kind = self.native.get(id(updated.args[0].value))
