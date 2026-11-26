@@ -216,6 +216,9 @@ def test_reused_items_hold_nothing_from_the_previous_policy(tmp_path):
     subprocess.run([sys.executable, '-m', 'modelx_cython', 'exported', '--sample', 'sample.py', '--no-spec'],
                    cwd=tmp_path, check=True, capture_output=True)
     assert '_mx_reset_root__c_Projection' in (tmp_path / 'exported_cy' / '_mx_classes.pxd').read_text()
+    # the reused item is kept in the slot the evaluator passes to each worker, not in a threading.local
+    hook = (tmp_path / 'exported_cy' / '_mx_classes.py').read_text().split('def _mx_collect_hook(')[1]
+    assert 'def _mx_outputs(_mx_spare, ' in hook and '_mx_spare[0] = _mx_fast' in hook and 'threading.local' not in hook
     run = subprocess.run([sys.executable, '-c', STALE_PROBE], cwd=tmp_path, check=True,
                          capture_output=True, text=True)
     out = json.loads(run.stdout)
