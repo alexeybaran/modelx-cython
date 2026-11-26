@@ -390,21 +390,40 @@ def _mx_collect_evaluate(space, coords, outputs_at, refs, reads_parents):
 
 def _mx_collect_plain(out):
     # an output that is only a 'sum' of exact floats, added by _mx_collect_add without being prepared
-    sums = out.get('sum') if type(out) is dict and len(out) == 1 else None
-    return type(sums) is dict and bool(sums) and all(type(v) is float for v in sums.values())
+    if type(out) is not dict or len(out) != 1:
+        return False
+    sums = out.get('sum')
+    if type(sums) is not dict or not sums:
+        return False
+    values: dict = sums
+    for v in values.values():
+        if type(v) is not float:
+            return False
+    return True
 
 
 def _mx_collect_add(accumulator, total, c, out, raw, live, prepare_output):
     # out raw (plain, not prepared) or prepared. Raw, with the keys the Accumulator's total holds and floats
-    # there: total = total + value, in domain order, as its _add adds; anything else through the Accumulator
-    sums, held = out['sum'] if raw else None, total[0]
-    if raw and held is not None and len(sums) == len(held) and all(type(held.get(k)) is float for k in sums):
-        for k, v in sums.items():
-            held[k] = held[k] + v
-        return
+    # there: total = total + value in C doubles (the addition of Python's float), in domain order, as its _add
+    # adds; anything else through the Accumulator
+    if raw and total[0] is not None:
+        held: dict = total[0]
+        sums: dict = out['sum']
+        if len(sums) == len(held):
+            for k in sums:
+                if type(held.get(k)) is not float:
+                    break
+            else:
+                for k, v in sums.items():
+                    a: _mx_cy.double = held[k]
+                    held[k] = a + _mx_cy.cast(_mx_cy.double, v)
+                return
     accumulator.add(c, prepare_output(out, live) if raw else out)
-    held = getattr(accumulator, '_sum', None)
-    if (total[0] is None and getattr(accumulator, '_modes', None) == ('sum',) and type(held) is dict
-            and all(type(v) is float for v in held.values())):
-        total[0] = held
+    held_sum = getattr(accumulator, '_sum', None)
+    if total[0] is None and getattr(accumulator, '_modes', None) == ('sum',) and type(held_sum) is dict:
+        first: dict = held_sum
+        for v in first.values():
+            if type(v) is not float:
+                return
+        total[0] = held_sum
 ''').body
