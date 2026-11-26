@@ -1,4 +1,5 @@
 """Small operations on the compiler's existing LibCST representation."""
+from contextlib import contextmanager
 from dataclasses import fields
 
 import libcst as cst
@@ -28,9 +29,40 @@ def local_assignment(node):
     return None
 
 
+_CHILDREN = None    # while kept_children() is open: {id(node): (node, node.children)}
+
+
+@contextmanager
+def kept_children():
+    """Within the block, ``children(node)`` reads ``node.children`` once per node: LibCST
+    builds the list on every read, and a node's children never change. The nodes read are
+    held while the block is open."""
+    global _CHILDREN
+    outer = _CHILDREN
+    if outer is None:
+        _CHILDREN = {}
+    try:
+        yield
+    finally:
+        _CHILDREN = outer
+
+
+def children(node):
+    """``node.children``, kept within :func:`kept_children`."""
+    kept = _CHILDREN
+    if kept is None:
+        return node.children
+    found = kept.get(id(node))
+    if found is not None and found[0] is node:
+        return found[1]
+    found = node.children
+    kept[id(node)] = node, found
+    return found
+
+
 def walk(node):
     yield node
-    for child in node.children:
+    for child in children(node):
         yield from walk(child)
 
 
