@@ -22,6 +22,7 @@ cells return type or declaring maximum cells parameter sizes.
 """
 
 from typing import Union, Sequence, Mapping
+import os
 from dataclasses import dataclass
 from modelx_cython.consts import (
     FILE_PREF,
@@ -44,6 +45,13 @@ class CompilerPolicy:
     infer_types: bool = True
     # the default number of worker threads of a compiled collect() (collect.py)
     collect_workers: int = 1
+    # reads of a traced pandas DataFrame or Series lowered onto a table prepared from the same frame
+    # (frame_reads.py); False leaves every table read on pandas
+    prepared_tables: bool = True
+    # a formula whose table-read lowering raises an internal error stops the build instead of being compiled as
+    # written, its reads on pandas (on in test suites, also through MX_CY_STRICT_LOWERING=1)
+    strict_lowering: bool = False
+
     @classmethod
     def resolve(cls, data):
         automatic = data.get('automatic_optimizations', True)
@@ -54,7 +62,9 @@ class CompilerPolicy:
             propagate_exact_receiver=data.get('propagate_exact_receiver', automatic and miss),
             native_cache_hits=data.get('native_cache_hits', 'auto' if automatic and miss else 'none'),
             infer_types=data.get('infer_types', True),
-            collect_workers=data.get('collect_workers', 1))
+            collect_workers=data.get('collect_workers', 1),
+            prepared_tables=data.get('prepared_tables', True),
+            strict_lowering=data.get('strict_lowering', os.environ.get('MX_CY_STRICT_LOWERING') == '1'))
         for name, value in values.items():
             if name not in ('native_cache_hits', 'collect_workers') and type(value) is not bool:
                 raise ValueError(f'{name} must be a boolean')
@@ -132,6 +142,11 @@ class TransSpec:
     ``"infer_types"`` (default true): C type inference (``# cython: infer_types=True``) in
     generated model modules; false keeps Cython's default (no inference of C types for untyped
     locals). Integer arithmetic is checked either way (integer_boundaries.py).
+    ``"prepared_tables"`` (default true): reads of a traced pandas DataFrame or Series are answered from a
+    table prepared from the frame the formula reads (``frame_reads.py``); false leaves them on pandas.
+    ``"strict_lowering"`` (default false, or true when the environment sets ``MX_CY_STRICT_LOWERING=1``): an
+    internal error of the table-read lowering stops the build; otherwise that formula's reads stay on pandas
+    and a warning names it.
     ``"native_cache_hits"`` defaults to ``"auto"`` when automatic optimization
     and dense miss binding are enabled. It selects scalar hits and already-proven
     dense hits; explicit alternatives are ``"none"``, ``"scalar"``, ``"dense"``

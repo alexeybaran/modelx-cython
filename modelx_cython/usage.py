@@ -545,6 +545,7 @@ def build_resolver(module_infos) -> CellsResolver:
     locked_scalar_results: Dict[str, str] = {}
     unlocked_scalar_results: Dict[str, str] = {}
     cached_cells, cell_infos = set(), {}
+    frame_schemas, shared_frames = {}, set()
 
     for fqname, info in module_infos.items():
         pkg, basename = fqname.rsplit(".", 1)
@@ -556,6 +557,11 @@ def build_resolver(module_infos) -> CellsResolver:
                 if cells.has_formula_def:
                     cached_cells.add(cells.fqname)
                     cell_infos[cells.fqname] = cells
+                schema = _frame_schema(info, cls_info, cells)
+                if schema is not None:
+                    frame_schemas[cells.fqname] = schema
+                    if cls_name not in info.visitor.itemspace_classes:
+                        shared_frames.add(cells.fqname)     # prepared once per model, not per item
                 if (cells.has_formula_def and not cells.is_special() and not cells.has_args()
                         and not cells.body_has_closure and not cells.called_with_kwargs):
                     results = locked_scalar_results if cells.is_locked else unlocked_scalar_results
@@ -582,7 +588,20 @@ def build_resolver(module_infos) -> CellsResolver:
                              scalar_refs_by_class, locked_scalar_results, unlocked_scalar_results)
     resolver.cached_cells = cached_cells
     resolver._cell_infos = cell_infos
+    resolver.frame_schemas = frame_schemas
+    resolver.shared_frames = shared_frames
     return resolver
+
+
+def _frame_schema(info, cls_info, cells):
+    """The traced frame schema of a zero-argument formula Cell whose every sampled result is a pandas DataFrame
+    or Series (``tracer.frame_schema``), when the spec lets table reads be lowered (``prepared_tables``)."""
+    rt = getattr(cells, '_rt', None)
+    policy = getattr(getattr(info, 'spec', None), 'policy', None)
+    if (rt is None or not cells.has_formula_def or cells.has_args() or cells.is_special()
+            or not getattr(policy, 'prepared_tables', False)):
+        return None
+    return getattr(rt, 'frame_schema', None)
 
 
 def analyze_usage(units) -> Dict[str, UsageVerdict]:

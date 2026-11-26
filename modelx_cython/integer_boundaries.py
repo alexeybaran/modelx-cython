@@ -110,13 +110,26 @@ _NOT_INTEGER_BUILTINS = frozenset(('float', 'str', 'repr', 'list', 'tuple', 'dic
 
 # C results of the numeric cache helper (_numeric_cache.pxd, cimported as ``_mx_helper_<hash>``)
 _PROVIDER_RETURNS = {'word_int': 'int', 'word_double': 'float'}
+# C results of the prepared-table runtime (_tables.pxd): level codes, rows and slots (Py_ssize_t) and tests (bint)
+# are signed C integers ('int': their + - * are flagged like a Cell's), values 'int' or 'float'. Every function of
+# a native header that returns a C number is listed here, in _PROVIDER_RETURNS or in _WORD_RETURNS
+# (tests/test_provider_returns.py): an unlisted one would be an unknown operand, whose arithmetic with a literal
+# Cython computes in plain C.
+_TABLE_RETURNS = {
+    'lcode': 'int', 'ocode': 'int', 'kcode': 'int', 'is_label': 'int', 'selects_rows': 'int',
+    'missing_codes': 'int', 'hold_code': 'int', 'row_c': 'int', 'row_1': 'int', '_row_c': 'int', '_row_1': 'int',
+    'slot': 'int',
+    'i64_c': 'int', 'i64_1': 'int', 'f64_c': 'float', 'f64_1': 'float', 'field_f64': 'float',
+}
+# unsigned 64-bit words of the numeric caches: keys and hashes, never an operand of formula arithmetic
+_WORD_RETURNS = frozenset(('int_word', 'value_word', 'double_word', 'key_word', 'mix', 'hash_step'))
 
 
 def _provider_call(value, kind):
-    """A call of a numeric cache helper (``_mx_helper_<hash>.name(...)``) whose C result is ``kind``."""
+    """A call of a native support helper (``_mx_helper_<hash>.name(...)``) whose C result is ``kind``."""
     return (isinstance(value, cst.Call) and isinstance(value.func, cst.Attribute)
             and isinstance(value.func.value, cst.Name) and value.func.value.value.startswith('_mx_helper_')
-            and _PROVIDER_RETURNS.get(value.func.attr.value) == kind)
+            and (_PROVIDER_RETURNS.get(value.func.attr.value) or _TABLE_RETURNS.get(value.func.attr.value)) == kind)
 
 
 # handlers that cannot catch the OverflowError of a flagged formula (the generated reductions catch

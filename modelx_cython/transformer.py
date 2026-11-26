@@ -616,6 +616,7 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
                                                      for binding in scope['float'])
         # a typed-memoryview Cell read by subscript is held per item (no slice copy per evaluation)
         node = held_arrays.lower(node, cls_info, cells, self._held_arrays)
+        node = self._table_reads(node, cls_info, cells, scope)
         cells.formula_allows_exact_receiver = allows_exact_receiver(node, cls_info.name)
         node = rewrite_powers(
             node, self._resolver, self._cells_kinds, self._ref_kinds,
@@ -640,6 +641,33 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
         if self._resolver is not None:
             node, _ = space_results.lower(node, cls_info, cells, scope, operand_kind, self._pin_held_item)
         return node
+
+    def _table_reads(self, node, cls_info, cells, scope):
+        """Reads of a traced pandas frame lowered onto its prepared table (frame_reads.py). An internal error of
+        the lowering leaves the formula as written, every read on pandas, with a warning (``strict_lowering``
+        raises it): the class's held fields and the read signatures are restored, so nothing of it is emitted."""
+        if self._resolver is None or not getattr(self._resolver, 'frame_schemas', None):
+            return node
+        import copy
+        from modelx_cython.frame_reads import FrameReads
+        builtin = {name: bool(scope[name]) and all(isinstance(b, BuiltinAssignment) for b in scope[name])
+                   for name in ('int', 'float')}
+        frames = FrameReads(self._resolver, cls_info, cells, self.helper_providers,
+                            builtin_int=builtin['int'], builtin_float=builtin['float'])
+        holds_before = copy.deepcopy(getattr(cls_info, 'holds', None))
+        signatures = dict(getattr(self._resolver, 'table_signatures', {}))
+        try:
+            return frames.lower(node)
+        except Exception as error:
+            if self.module.spec.policy.strict_lowering:
+                raise
+            cls_info.holds = holds_before
+            if hasattr(self._resolver, 'table_signatures'):
+                self._resolver.table_signatures.clear()
+                self._resolver.table_signatures.update(signatures)
+            _logger.warning('table reads of %s left on pandas after an internal error: %s: %s',
+                            cells.fqname, type(error).__name__, error)
+            return node
 
     @property   # cannot use cached_property in Transformer
     def transformed(self):

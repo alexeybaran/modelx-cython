@@ -179,6 +179,7 @@ class RuntimeCellsInfo:     # TODO: Create base class RuntimeBaseMemberInfo
         self.has_negative_args = False
         self._init_arg_types(traces)
         self.ret_type = self._init_ret_type(returned)
+        self.frame_schema = frame_schema(returned)
 
     def has_args(self):
         """Return whether the cells method takes arguments.
@@ -564,6 +565,55 @@ def instance_attrs(obj: Any) -> Iterator[tuple]:
                 yield name, getattr(obj, name)
             except AttributeError:  # slot never assigned
                 pass
+
+
+def _frame_schema(value):
+    """The schema of one pandas DataFrame or Series (see ``frame_schema``), or None."""
+    if 'pandas' not in {klass.__module__.split('.')[0] for klass in type(value).__mro__}:
+        return None
+    names = {klass.__name__ for klass in type(value).__mro__}
+    if 'DataFrame' in names:
+        kind, columns = 'frame', tuple((label, _column_kind(value[label].dtype) if
+                                         list(value.columns).count(label) == 1 else 'obj')
+                                        for label in value.columns)
+    elif 'Series' in names:
+        kind, columns = 'series', ((None, _column_kind(value.dtype)),)
+    else:
+        return None
+    index = value.index
+    levels = tuple('int' if getattr(level, 'dtype', None) is not None and level.dtype.kind in 'iu' else 'obj'
+                   for level in (index.levels if index.nlevels > 1 else (index,)))
+    return {'kind': kind, 'levels': levels, 'unique': bool(index.is_unique), 'columns': columns}
+
+
+def _column_kind(dtype):
+    return {'float64': 'f64', 'int64': 'i64'}.get(str(dtype), 'obj')
+
+
+def frame_schema(traces):
+    """The schema of a traced pandas DataFrame or Series result, or None.
+
+    ``{'kind': 'frame'|'series', 'levels': ('int'|'obj', ...), 'unique': bool, 'columns': ((label,
+    'f64'|'i64'|'obj'), ...)}`` (a Series has one column, labelled None). The compiler lowers reads onto a
+    PreparedTable from it (frame_reads.py); the frame itself is never replaced. None when a traced value is not
+    a pandas frame or Series, or when the traced values disagree (a level kind differs); a column of another kind
+    or present in one value only is dropped, so its reads stay pandas. The compiled reads check the same kinds on
+    the frame they read at run time.
+    """
+    schema = None
+    for trace in traces or ():
+        found = _frame_schema(trace.ret_val)
+        if found is None:
+            return None
+        if schema is None:
+            schema = found
+            continue
+        if found['kind'] != schema['kind'] or found['levels'] != schema['levels']:
+            return None
+        mine = dict(found['columns'])
+        schema = dict(schema, unique=schema['unique'] and found['unique'],
+                      columns=tuple((label, kind) for label, kind in schema['columns'] if mine.get(label) == kind))
+    return schema
 
 
 class MxCallTracer(CallTracer):

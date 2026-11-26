@@ -1,0 +1,146 @@
+"""Python access to table cells and References of a compiled model whose reads are prepared, as upstream.
+
+A table cell returns the plain DataFrame its formula returned, the same object on every call. References are
+plain attributes, assignable as upstream allows (values cached before an assignment stay; the drivers bind
+inputs on a new model before running it). A compiled model has no clear and no table-cell assignment. The
+exported pure-Python model behaves the same for what both offer (asserted on both). The compiled model imports
+nothing from modelx_cython: its table runtime is a copy in its own package.
+"""
+
+import subprocess
+import sys
+import textwrap
+
+
+MODEL = """\
+import modelx as mx
+import pandas as pd
+
+FRAME = pd.DataFrame({"sa": [100.0, 200.0, 300.0, 400.0], "rate": [0.01, 0.02, 0.03, 0.04]},
+                     index=pd.Index([1, 2, 3, 4], name="policy_id"))
+IDS = (1, 2, 3, 4)
+
+
+def build():
+    model = mx.new_model("Tables")
+    data = model.new_space("Data", refs={"pd": pd})
+    data.raw = FRAME
+    data.new_cells("points", "def points():\\n    return raw.copy()\\n")
+    data.new_cells("table", "def table():\\n    return FRAME2.copy()\\n")
+    data.FRAME2 = FRAME
+    proj = model.new_space("Projection", formula="lambda policy_id: None",
+                           refs={"data": data, "ids": IDS, "factor": 1.0})
+    proj.new_cells("sa", 'lambda: data.points().loc[policy_id, "sa"]')
+    proj.new_cells("rate", 'lambda: data.table().loc[policy_id, "rate"]')
+    proj.new_cells("pv", "lambda: factor * sum(sa() * (1.0 + rate()) ** t for t in range(12))")
+    return model
+"""
+
+CHECKS = """\
+import importlib.abc, sys, threading
+
+
+class Blocked(importlib.abc.MetaPathFinder):     # the compiled model runs without modelx_cython installed
+    def find_spec(self, name, path=None, target=None):
+        if name == "modelx_cython" or name.startswith("modelx_cython."):
+            raise ImportError("modelx_cython is not installed here")
+
+
+sys.meta_path.insert(0, Blocked())
+from importlib import import_module
+from importlib.machinery import ExtensionFileLoader
+import pandas as pd
+from tables_model import FRAME, build
+
+name = sys.argv[1]
+compiled = name.endswith("_cy")
+package = import_module(name)
+if compiled:
+    assert isinstance(import_module(name + "._mx_classes").__loader__, ExtensionFileLoader)
+Model = type(package.mx_model)
+
+
+def direct(m):
+    return sum(m.Projection[i].pv() for i in (1, 2, 3, 4))
+
+
+def live(raw=None, factor=None):
+    m = build()
+    try:
+        if raw is not None:
+            m.Data.raw = raw
+        if factor is not None:
+            m.Projection.factor = factor
+        return sum(m.Projection[i].pv() for i in (1, 2, 3, 4))
+    finally:
+        m.close()
+
+
+def close(a, b):
+    return abs(a - b) <= 1e-9 * max(1.0, abs(b))
+
+
+base = live()
+doubled = FRAME.assign(sa=FRAME["sa"] * 2)
+
+# (1) a table cell returns a plain DataFrame, the same object every time; both routes equal live
+m = Model()
+v = m.Data.points()
+assert type(v) is pd.DataFrame and v is m.Data.points() and v.equals(FRAME), type(v)
+assert close(direct(m), base)
+
+# (2) References assigned on a new model before it runs: a Reference holding a table, and a scalar one
+m = Model()
+m.Data.raw = doubled
+assert m.Data.raw.equals(doubled)
+assert close(direct(m), live(raw=doubled))
+m = Model()
+m.Projection.factor = 3.0
+assert close(direct(m), live(factor=3.0))
+
+# (3) one ItemSpace is deleted and created again on the next access, as before
+m = Model()
+item = m.Projection[3]
+del m.Projection[3]
+assert m.Projection[3] is not item and close(direct(m), base)
+
+if compiled:
+    # (4) as upstream: no clear of a Space and no table-cell assignment on a compiled model
+    for space in (m.Data, m.Projection):
+        for method in ("clear_all", "clear_cells", "clear_items", "clear_at"):
+            assert method not in vars(type(space)), (type(space).__name__, method)
+    import operator
+    for attempt, error in ((lambda: operator.setitem(m.Data.points, (), doubled), TypeError),
+                           (lambda: setattr(m.Data, "points", doubled), AttributeError)):
+        try:
+            attempt()
+        except error:
+            pass
+        else:
+            raise AssertionError("a table cell was assigned")
+assert not [m for m in sys.modules if m.startswith("modelx_cython")]
+print("ok", name)
+"""
+
+
+def test_table_cells_and_references(tmp_path):
+    (tmp_path / "tables_model.py").write_text(MODEL, encoding="utf-8")
+    (tmp_path / "build_model.py").write_text(textwrap.dedent("""\
+        from tables_model import build
+        m = build()
+        m.export("tables_nomx", locked_spaces=["Data"])
+        m.close()
+        """), encoding="utf-8")
+    (tmp_path / "sample.py").write_text(
+        "from tables_nomx import mx_model\nfor k in (1, 2, 3, 4):\n    mx_model.Projection[k].pv()\n",
+        encoding="utf-8")
+    (tmp_path / "checks.py").write_text(CHECKS, encoding="utf-8")
+    run = lambda *a: subprocess.run([sys.executable, *a], cwd=tmp_path, check=True, timeout=600)
+    run("build_model.py")
+    run("-m", "modelx_cython", "tables_nomx", "--sample", "sample.py", "--no-spec")
+    generated = (tmp_path / "tables_nomx_cy/_mx_classes.py").read_text(encoding="utf-8")
+    pxd = (tmp_path / "tables_nomx_cy/_mx_classes.pxd").read_text(encoding="utf-8")
+    assert generated.count(".bind_ref(self.data.points())") == 1 and generated.count(".f64_1(") == 2
+    assert "cdef public object raw" in pxd and "cdef public object ids" in pxd      # References: plain attributes
+    run("checks.py", "tables_nomx_cy")
+    run("checks.py", "tables_nomx")         # the exported pure-Python model behaves the same

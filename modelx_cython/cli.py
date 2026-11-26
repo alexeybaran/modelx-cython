@@ -423,6 +423,13 @@ def main_handler(args: argparse.Namespace, stdout: IO[str], stderr: IO[str]) -> 
             if getattr(cell, 'overflowcheck_fallback', False))}
         (model_path / '_mx_admission.json').write_text(json.dumps(report, indent=2), encoding='utf-8')
         (model_path / '_mx_integer_checks.json').write_text(json.dumps(integer_report, indent=2), encoding='utf-8')
+        signatures = getattr(resolver, 'table_signatures', None)
+        if signatures:      # the kinds each fast table read is compiled for, by id; decided per table when prepared
+            ordered = [key for key, _ in sorted(signatures.items(), key=lambda item: item[1])]
+            (model_path / '_mx_table_signatures.py').write_text(
+                '# Generated: the index and column kinds each fast table read is compiled for, by id.\n'
+                'SIGNATURES = (\n' + ''.join(f'    {signature!r},\n' for signature in ordered) + ')\n',
+                encoding='utf-8')
 
     if args.translate_only:
         return 0
