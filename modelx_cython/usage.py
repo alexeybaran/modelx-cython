@@ -292,7 +292,7 @@ class UsageClassifier:
         Runs a :class:`UsageVisitor` over the module's CST; verdicts
         accumulate in ``self.verdicts`` across successive calls.
         """
-        wrapper.visit(UsageVisitor(module_fqname, self))
+        wrapper.visit(UsageVisitor(module_fqname, self, wrapper))
 
     def result(self) -> Dict[str, UsageVerdict]:
         """The accumulated verdicts, keyed by candidate cells fqname."""
@@ -351,7 +351,7 @@ class UsageClassifier:
         """Clear ``verdict.only_element_access`` and record the site as
         ``"<module>:<line> <reason>"``."""
         verdict.only_element_access = False
-        line = visitor.get_metadata(PositionProvider, node).start.line
+        line = visitor.position(node).start.line
         verdict.unsafe_sites.append(f"{visitor.module}:{line} {reason}")
 
     def _classify_use(
@@ -479,13 +479,19 @@ class UsageVisitor(cst.CSTVisitor, ParentScopeAddin):
     :meth:`UsageClassifier.handle_call`.
     """
 
-    METADATA_DEPENDENCIES = (ScopeProvider, ParentNodeProvider, PositionProvider)
+    METADATA_DEPENDENCIES = (ScopeProvider, ParentNodeProvider)
 
-    def __init__(self, module: str, classifier: UsageClassifier) -> None:
+    def __init__(self, module: str, classifier: UsageClassifier, wrapper=None) -> None:
         super().__init__()
         self.module = module
         self._classifier = classifier
         self._cls_stack: List[str] = []
+        self._wrapper = wrapper
+
+    def position(self, node):
+        """The PositionProvider range of ``node``, resolved on the wrapper visited (a codegen
+        of the whole module) only when an unsafe site asks for its line."""
+        return self._wrapper.resolve(PositionProvider)[node]
 
     def visit_ClassDef(self, node: cst.ClassDef) -> bool:
         """Push the class fqname for module-level space classes, or an

@@ -57,7 +57,7 @@ from modelx_cython.entry_pipeline import lower_entries
 from modelx_cython.scopes import shared_facts
 from modelx_cython.integer_boundaries import guard_integer_boundaries
 from modelx_cython.helpers import install as install_helpers
-from modelx_cython.build import cell_locations, create_setup
+from modelx_cython.build import cell_functions, create_setup
 from modelx_cython.syntax import read_literal
 
 _logger = logging.getLogger(__name__)
@@ -446,7 +446,7 @@ def main_handler(args: argparse.Namespace, stdout: IO[str], stderr: IO[str]) -> 
             from modelx_cython import reparse_check
             u.abs_src_path.write_text(reparse_check.check(state.syntax, name=u.rel_src_path.as_posix()),
                                       encoding='utf-8')
-            cell_sources[u.rel_src_path.as_posix()] = cell_locations(state, u.module_info)
+            cell_sources[u.rel_src_path.as_posix()] = cell_functions(state, u.module_info)
         create_setup(model_name, modules=modules, setup_file=setup_file, source_root=work_dir,
                      source_modules=(runtime_syntax, *(state.syntax for state in translated_modules.values())),
                      cell_sources=cell_sources, providers=provider_sources)
