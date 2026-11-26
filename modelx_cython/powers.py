@@ -34,8 +34,7 @@ removes the failure without touching integer arithmetic at all.
 The proof is the conservative classifier below.  Every operand is
 :data:`KIND_FLOAT`, :data:`KIND_INT` or :data:`KIND_UNKNOWN`, and only
 numeric literals, the declaring cells' own parameters, calls to cells
-the resolver reaches, scalar references, single-assignment locals
-annotated with the builtin ``float``, and arithmetic over those are
+the resolver reaches, scalar references and arithmetic over those are
 ever known. Everything else -- other locals, subscripts, module
 attributes, and anything inside a construct that binds names of its own,
 where a name can shadow a parameter of the cells -- is unknown. This pass
@@ -342,8 +341,6 @@ def rewrite_powers(
     ref_kinds: Mapping[str, Mapping[str, str]],
     cls_fqname: str,
     cells,
-    *,
-    builtin_float=False,
 ) -> cst.FunctionDef:
     """Rewrite the provably real powers in one method body.
 
@@ -360,8 +357,6 @@ def rewrite_powers(
         Fqname of the class the method belongs to.
     cells : CombinedCellsInfo
         The cells the method implements, for its parameter types.
-    builtin_float : bool
-        Whether the formula's lexical float binding is the builtin.
 
     Returns
     -------
@@ -380,19 +375,6 @@ def rewrite_powers(
         from modelx_cython.numeric_cache import exclusively_owned
         memo = f'_mx_power_{cells.name}' if exclusively_owned(cells) else None
     param_kinds = _param_kinds(cells)
-    if builtin_float and isinstance(node.body, cst.IndentedBlock):
-        declarations = [
-            decl.target.value for decl in lexical_nodes(node.body.body)
-            if isinstance(decl, cst.AnnAssign) and isinstance(decl.target, cst.Name)
-            and isinstance(decl.annotation.annotation, cst.Name)
-            and decl.annotation.annotation.value == 'float' and decl.value is not None
-        ]
-        if declarations:
-            facts = CstFacts(node.body.body)
-            # Cython gives an unshadowed float local a double declaration.
-            param_kinds.update((name, KIND_FLOAT) for name in declarations
-                               if facts.stores[name] == 1 and name not in cells.params
-                               and name not in facts.deleted)
     if not any(isinstance(part, cst.BinaryOperation) and isinstance(part.operator, cst.Power)
                for part in walk(node.body)):
         # the rewriter changes only a '**': none to rewrite, decline or report

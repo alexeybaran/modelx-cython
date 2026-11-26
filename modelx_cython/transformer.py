@@ -60,7 +60,6 @@ from libcst._nodes.statement import BaseStatement, ClassDef
 from libcst._removal_sentinel import RemovalSentinel
 import libcst.matchers as m
 from libcst.metadata import ParentNodeProvider, ScopeProvider, GlobalScope, ClassScope
-from libcst.metadata.scope_provider import BuiltinAssignment
 
 from modelx_cython.parser import ParentScopeAddin
 from modelx_cython.builder import ModuleInfo, CombinedCellsInfo
@@ -593,14 +592,12 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
         when no operand pair can be typed.
         """
         from modelx_cython import held_arrays
-        builtin_float = bool(scope['float']) and all(isinstance(binding, BuiltinAssignment)
-                                                     for binding in scope['float'])
         # a typed-memoryview Cell read by subscript is held per item (no slice copy per evaluation)
         node = held_arrays.lower(node, cls_info, cells, self._held_arrays)
         cells.formula_allows_exact_receiver = allows_exact_receiver(node, cls_info.name)
         node = rewrite_powers(
             node, self._resolver, self._cells_kinds, self._ref_kinds,
-            cls_info.fqname, cells, builtin_float=builtin_float,
+            cls_info.fqname, cells,
         )
         from modelx_cython.ordered_arguments import preserve_argument_order
         from modelx_cython.powers import OperandKind, kind_of_type_expr, formula_local_kinds
