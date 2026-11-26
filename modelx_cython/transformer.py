@@ -620,6 +620,9 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
         from modelx_cython import space_results
         if self._resolver is not None:
             node, _ = space_results.lower(node, cls_info, cells, scope, operand_kind, self._pin_held_item)
+        from modelx_cython import native_math
+        node, lowered = native_math.lower(node, cls_info, cells)
+        self._math_calls += lowered
         return node
 
     @property   # cannot use cached_property in Transformer
@@ -635,6 +638,7 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
         from modelx_cython.scopes import Names
         self._held_names = Names(self._module_node)
         self._held_pins = {}
+        self._math_calls = 0
         return self.wrapper.visit(self)
 
     def _pin_held_item(self, owner, producer):
@@ -695,6 +699,8 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
                  for fn in item_roots.functions(name)]
         if roots:
             module = module.with_changes(body=(*module.body, *roots))
+        if self._math_calls:        # native math-module calls compare against the math module
+            module = module.with_changes(body=(*module.body, cst.parse_statement(f'{MX_SYS_MOD}._mx_math_init()\n')))
         # Dense cache values left unwritten at allocation, installed when the module is imported
         values = ''.join(value_storage.functions(cls) for cls in self.module.classes.values())
         if values:
