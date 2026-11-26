@@ -687,12 +687,36 @@ class FrameReads:
         """A frame local whose every use was lowered is no longer evaluated (no Cell call, no reference). Repeated
         until nothing more is dropped: dropping a view's assignment can leave its frame local unused (T-5c)."""
         out = self._flatten(body)
+        guards = {view.start.value: view.name for view in self.views.values() if view.start is not None}
+
+        def guarded_value(node):
+            """The value of `if <start> < 0: <view> = value`, the copy of a view's assignment that runs only where
+            its rows are not found: its target is no use of the view, so the assignment itself can still go."""
+            test, block = node.test, node.body.body
+            if (node.orelse is None and isinstance(test, cst.Comparison) and isinstance(test.left, cst.Name)
+                    and len(test.comparisons) == 1 and isinstance(test.comparisons[0].operator, cst.LessThan)
+                    and isinstance(zero := test.comparisons[0].comparator, cst.Integer) and zero.value == '0'
+                    and len(block) == 1 and isinstance(block[0], cst.SimpleStatementLine)
+                    and len(block[0].body) == 1 and isinstance(assign := block[0].body[0], cst.Assign)
+                    and len(assign.targets) == 1 and isinstance(assign.targets[0].target, cst.Name)
+                    and guards.get(test.left.value) == assign.targets[0].target.value):
+                return assign.value
+            return None
+
         while True:
             loads = {}
 
             class Loads(cst.CSTVisitor):
                 def visit_Name(self, name):
                     loads[name.value] = loads.get(name.value, 0) + 1
+
+                def visit_If(self, node):
+                    value = guarded_value(node)
+                    if value is None:
+                        return True
+                    loads[node.test.left.value] = loads.get(node.test.left.value, 0) + 1
+                    value.visit(self)
+                    return False
             cst.Module(body=out).visit(Loads())
             kept = []
             for statement in out:
