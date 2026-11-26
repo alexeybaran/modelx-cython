@@ -40,3 +40,51 @@ Values equal between builds (RILA -38020248.73820954, DIA -652661961.9109885). R
 with native math, but four workers are still slower than one; the direct route behaves the same way, so the cause is
 outside collect and is not explained here. DIA's four-worker time is unchanged, so its scaling falls as its one-worker
 time falls.
+
+## Why RILA_US_SEC does not scale, and DIA_US_SEC stops at 1.6x
+
+Same builds, books and machine as above (RILA 863 points, DIA 2229); wall s, fresh process per run, interleaved.
+
+**RILA: one shared reference count, written by every native math call.** The native-math lowering compiles
+`self.math.exp(x)` to `_mx_sys._mx_math_exp(self.math, x, path)`, the helper taking the module as `object`. Cython
+takes a new reference to `self.math` around every call. On free-threaded Python the `math` module belongs to the main
+thread, so each worker's increment and decrement is an atomic write to the same word of the module object, shared by
+every item and every thread. RILA's option formula calls exp, log, sqrt and erf about 6,800 times per policy. The model
+text decides how often this happens; the compiler output is what writes the count. modelx is not involved.
+
+The evidence that singles it out:
+
+| observation | 1 worker | 4 workers |
+|---|---|---|
+| instructions (callgrind) | 4.62 G | 4.75 G (+3%) |
+| user CPU s for the whole process | 1.37-1.53 | 2.68-2.82 |
+| `_Py_DecRefShared` calls (callgrind) | negligible | 5.88 M = 6,800 per policy, all from inlined `Py_DECREF` of `self->math` in `_mx_dense_formula_86` |
+| four separate 1-worker processes at once | 0.38-0.50 each | (they scale) |
+
+So the work is the same, CPU per instruction doubles, and the stall happens only between threads of one process. A
+copy of the model per thread does not help (1w 0.493 / 4w 0.488), because the module is shared all the same. Ruled out:
+book size (8,630 points: 1w 3.78 / 4w 5.04), locks (lock functions 148 K instructions in total, futex 171 calls),
+OpenBLAS threads (OPENBLAS_NUM_THREADS=1: 0.465 / 0.529), allocator trimming and mmap (glibc tunables: 1w faster,
+4w unchanged), mimalloc purging, the GC, page faults (fewer at 4w), memory bandwidth (separate processes scale).
+
+Confirmation: the same generated code rebuilt with the helpers taking a borrowed pointer (`void* module`, compared
+with the standard module; `(<object>module).exp(x)` only on the fallback; call sites
+`_mx_math_exp(_mx_cy.cast(_mx_cy.p_void, self.math), x, path)`), three interleaved runs each:
+
+| build | 1 worker | 4 workers | scaling |
+|---|---|---|---|
+| 58ff45d | 0.405-0.414 | 0.527-0.535 | 0.77x |
+| borrowed module pointer | 0.389-0.540 | 0.131-0.154 | 2.8x |
+
+The values are identical (-38020248.73820954). The fix is in the compiler: about 12 lines, in `_mx_sys.pxd` (five
+helpers) and one argument in `native_math.py`. It is not committed. It needs the suite run, and a decision that a
+Reference rebound during a computation is out of scope, as it already is for the borrowed read.
+
+**DIA: not the same mechanism, and not singled out.** DIA makes no native math calls, and `_Py_DecRefShared` is
+0.1% of its instructions at four workers. Its profile is dominated by object arithmetic in the formula behind
+`_mx_dense_formula_73` (`a += (1.0 / m) * _mx_cy.cast(object, v) ** _mx_cy.cast(object, (s - tk) / 12.0) *
+max(cert, lf)`). Each policy makes 8,500 boxed floats and 1,200 `PyNumber_Power` calls, and the dealloc path
+(`_Py_MergeZeroLocalRefcount`) takes 12% of instructions. The casts come from the compiler, which keeps Python's
+power semantics where the sample could not exclude a negative base. These are allocations local to each thread.
+Whether they limit scaling (through allocator or cache pressure) is not shown. The next experiment would be the same
+loop with C `pow` behind a sign check.
