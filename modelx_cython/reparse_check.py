@@ -53,35 +53,60 @@ def _operands(node, operator):
     return [node]
 
 
+_MEANING = {}    # node class -> its fields that carry meaning (None: a boolean operation)
+_ROLES = {}      # class -> (a node, a FunctionDef, an expression)
+
+
+def _role(kind):
+    role = _ROLES.get(kind)
+    if role is None:
+        role = _ROLES[kind] = (issubclass(kind, cst.CSTNode), issubclass(kind, cst.FunctionDef),
+                               issubclass(kind, cst.BaseExpression))
+    return role
+
+
 def _children(node):
     """(field name, value) pairs of ``node`` that carry meaning, a boolean chain flattened."""
-    if isinstance(node, cst.BooleanOperation):
+    kind = type(node)
+    if kind not in _MEANING:
+        _MEANING[kind] = None if issubclass(kind, cst.BooleanOperation) else tuple(
+            field.name for field in dataclasses.fields(node) if not _layout(field.name))
+    names = _MEANING[kind]
+    if names is None:
         return [('operator', type(node.operator).__name__),
                 ('operands', _operands(node, type(node.operator)))]
-    return [(field.name, getattr(node, field.name)) for field in dataclasses.fields(node)
-            if not _layout(field.name)]
+    return [(name, getattr(node, name)) for name in names]
 
 
-def _first_difference(a, b, function=None, expression=None):
-    """(function name, emitted expression node) where the shapes first differ, or None."""
+def _first_difference(a, b, function=None, expression=None, built=False):
+    """(function name, emitted expression node) where the shapes first differ, or None.
+
+    ``built``: ``a`` is the tree the passes built, not a parsed one; a parameter's star left
+    to its default there is the one the parser reads from the text (its position's).
+    """
     if isinstance(a, (list, tuple)) and isinstance(b, (list, tuple)):
         if len(a) != len(b):
             return function, expression
         for x, y in zip(a, b):
-            found = _first_difference(x, y, function, expression)
+            found = _first_difference(x, y, function, expression, built)
             if found:
                 return found
         return None
-    if type(a) is not type(b):
-        return function, b if isinstance(b, cst.BaseExpression) else expression
-    if not isinstance(a, cst.CSTNode):
+    kind = type(b)
+    if type(a) is not kind:
+        return function, b if _role(kind)[2] else expression
+    node, defines, expresses = _role(kind)
+    if not node:
         return None if a == b else (function, expression)
-    if isinstance(b, cst.FunctionDef):
+    if defines:
         function = b.name.value
-    if isinstance(b, cst.BaseExpression):
+    if expresses:
         expression = b
-    for (_, x), (_, y) in zip(_children(a), _children(b)):
-        found = _first_difference(x, y, function, expression)
+    for (field, x), (_, y) in zip(_children(a), _children(b)):
+        if (built and field == 'star' and isinstance(a, cst.Param) and isinstance(x, cst.MaybeSentinel)
+                and isinstance(y, str)):
+            continue
+        found = _first_difference(x, y, function, expression, built)
         if found:
             return found
     return None
@@ -93,6 +118,11 @@ def check(module, text=None, name='<module>'):
     if text is None:
         text = module.code
     emitted = cst.parse_module(text)
+    # The text reads as the tree when the tree itself has its shape: no parenthesized copy needed.
+    # Otherwise (a node the passes built in another form than the parser's) compare the shapes
+    # of both texts.
+    if _first_difference(module, emitted, built=True) is None:
+        return text
     built = cst.parse_module(module.visit(_Group()).code)
     found = _first_difference(built, emitted)
     if found is None:
