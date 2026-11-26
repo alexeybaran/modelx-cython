@@ -178,21 +178,24 @@ def _level(values):
     return LEVEL_OBJECT, ordered, 0, codes
 
 
-cdef void _point(PreparedTable table, sorted_array, combined, grid, f64, i64):
+cdef size_t _address(array):
+    """The address of the first element of a C-contiguous numpy array (kept alive by its table)."""
+    assert array.flags.c_contiguous and array.size > 0
+    return <size_t>array.ctypes.data
+
+
+cdef void _point(PreparedTable table, sorted_array, combined, grid, f64, i64, kinds, slots):
     """Point the table's raw pointers into its arrays and keep the arrays alive with it."""
-    cdef const long long[::1] s = sorted_array
-    cdef const long long[::1] c = combined
-    cdef const Py_ssize_t[::1] g = grid
-    cdef const double[:, ::1] f = f64
-    cdef const long long[:, ::1] i = i64
-    table._arrays = (sorted_array, combined, grid, f64, i64)
+    table._arrays = (sorted_array, combined, grid, f64, i64, kinds, slots)
     for array in table._arrays:
         array.flags.writeable = False
-    table.sorted_labels = &s[0]
-    table.combined = &c[0]
-    table.grid = &g[0]
-    table.f64 = &f[0, 0]
-    table.i64 = &i[0, 0]
+    table.sorted_labels = <const long long*>_address(sorted_array)
+    table.combined = <const long long*>_address(combined)
+    table.grid = <const Py_ssize_t*>_address(grid)
+    table.f64 = <const double*>_address(f64)
+    table.i64 = <const long long*>_address(i64)
+    table.column_kind = <const int*>_address(kinds)
+    table.column_slot = <const Py_ssize_t*>_address(slots)
 
 
 cdef void _name_map(PreparedTable table):
@@ -201,7 +204,7 @@ cdef void _name_map(PreparedTable table):
     while size < 2 * len(table.column_positions):
         size *= 2
     objs = np.zeros(size, dtype=np.intp)
-    hashes = np.zeros(size, dtype=np.int64)
+    hashes = np.zeros(size, dtype=np.intp)      # Py_hash_t has the width of Py_ssize_t
     positions = np.full(size, -1, dtype=np.intp)
     for label, position in table.column_positions.items():     # the dict's own key objects (kept alive by it)
         h = hash(label)
@@ -209,11 +212,10 @@ cdef void _name_map(PreparedTable table):
         while positions[i] >= 0:
             i = (i + 1) & (size - 1)
         objs[i], hashes[i], positions[i] = id(label), h, position
-    cdef const Py_ssize_t[::1] o = objs
-    cdef const long long[::1] hh = hashes
-    cdef const Py_ssize_t[::1] p = positions
     table._name_arrays = (objs, hashes, positions)
-    table.name_obj, table.name_hash, table.name_pos = &o[0], <const Py_hash_t*>&hh[0], &p[0]
+    table.name_obj = <const Py_ssize_t*>_address(objs)
+    table.name_hash = <const Py_hash_t*>_address(hashes)
+    table.name_pos = <const Py_ssize_t*>_address(positions)
     table.name_mask = size - 1
 
 
@@ -261,9 +263,8 @@ cdef PreparedTable _build(object value):
     table.level_codes = tuple(level[3] for level in levels)
     table.level_names = tuple(index.names)
     sorted_array = np.ascontiguousarray(sorted_labels if sorted_labels else [0], dtype=np.int64)
-    cdef const long long[::1] sorted_view = sorted_array
     table._arrays = (sorted_array,)              # alive before code_ll reads it below
-    table.sorted_labels = &sorted_view[0]
+    table.sorted_labels = <const long long*>_address(sorted_array)
     for i in range(table.nlevels - 1, -1, -1):
         table.radix[i] = product
         product *= max(1, table.level_size[i])
@@ -319,13 +320,13 @@ cdef PreparedTable _build(object value):
                 objects.append(tuple(column.iat[int(row)] for row in order))
     table.column_positions = {label: position for position, label in enumerate(labels)}
     _name_map(table)
-    table.column_kind = np.asarray(kinds, dtype=np.intc) if kinds else np.zeros(1, dtype=np.intc)
-    table.column_slot = np.asarray(slots, dtype=np.intp) if slots else np.zeros(1, dtype=np.intp)
+    kinds = np.ascontiguousarray(kinds if kinds else [0], dtype=np.intc)
+    slots = np.ascontiguousarray(slots if slots else [0], dtype=np.intp)
     f64 = np.ascontiguousarray(np.column_stack(f64_cols) if f64_cols else np.zeros((max(1, n), 1)), dtype=np.float64)
     i64 = np.ascontiguousarray(np.column_stack(i64_cols) if i64_cols else np.zeros((max(1, n), 1), dtype=np.int64),
                                dtype=np.int64)
     table.f64_width, table.i64_width = f64.shape[1], i64.shape[1]
-    _point(table, sorted_array, combined, grid, f64, i64)
+    _point(table, sorted_array, combined, grid, f64, i64, kinds, slots)
     table.objects = tuple(objects)
     # the dtype pandas gives a row (it widens number columns to one dtype: int32 beside float64 reads as float64)
     table.row_object = table.is_series or n == 0 or getattr(frame.iloc[0].dtype, 'kind', 'O') not in 'iufc'

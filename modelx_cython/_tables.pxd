@@ -36,13 +36,15 @@ cdef class PreparedTable:
                                            # and the labels of the next level are exact as doubles (asof)
     cdef readonly object max_label, min_label   # index.max(), index.min() as pandas returns them
     cdef readonly dict column_positions    # column label -> position
-    cdef const int[::1] column_kind        # COLUMN_*
-    cdef const Py_ssize_t[::1] column_slot # position within its block
+    cdef const int* column_kind            # COLUMN_*, per column position
+    cdef const Py_ssize_t* column_slot     # per column position: its position within its block
     cdef const double* f64                 # stored row x float64 column, row-major
     cdef Py_ssize_t f64_width
     cdef const long long* i64              # stored row x int64 column, row-major
     cdef Py_ssize_t i64_width
-    cdef tuple _arrays                     # the numpy arrays the pointers point into (kept alive, never written)
+    cdef tuple _arrays                     # the numpy arrays the pointers point into (kept alive, never written; raw
+                                           # pointers, not memoryviews, so no module that cimports this one needs
+                                           # Cython's memoryview support)
     cdef tuple objects                     # per object column: tuple of the values pandas returns, by stored row
     cdef bint row_object                   # a row is not widened to a number dtype: its fields are the stored values
     cdef bint row_float                    # a row is widened to float64: an int64 field reads as numpy.float64
