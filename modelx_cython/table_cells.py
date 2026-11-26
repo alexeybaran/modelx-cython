@@ -219,7 +219,7 @@ def _statements(text, config):
     return cst.parse_module(text, config=config).body
 
 
-def rewrite_class(cls_info, node, config, integer_refs):
+def rewrite_class(cls_info, node, config):
     """Add the members described in the module docstring to a generated Space class."""
     mapping = module_renames(cls_info.module)[cls_info.name]
     tables = {n: c for n, c in table_cells(cls_info).items() if n in mapping}
@@ -314,10 +314,9 @@ class RenameMembers(cst.CSTTransformer):
     Class-body annotations of the References are renamed with them.
     """
 
-    def __init__(self, module, config=None, integer_refs=None):
+    def __init__(self, module, config=None):
         self.module = module
         self.config = config
-        self.integer_refs = integer_refs
         self.mapping = module_renames(module)
         self.enums = {}
         for cls_name, cls_info in module.classes.items():
@@ -386,7 +385,7 @@ class RenameMembers(cst.CSTTransformer):
         if name is not None and self.config is not None and not self._classes:
             # the last pass: every earlier pass has seen the cells under their own names
             cls_info = self.module.classes[name]
-            updated = rewrite_class(cls_info, updated, self.config, self.integer_refs(cls_info))
+            updated = rewrite_class(cls_info, updated, self.config)
         return updated
 
     def visit_FunctionDef(self, node):
@@ -620,9 +619,8 @@ class RenameMembers(cst.CSTTransformer):
 
 
 def finish(syntax, module):
-    """The last pass over a generated module (after entry lowering and integer guards):
+    """The last pass over a generated module (after entry lowering and the formula passes):
     rename the members of table and enum cells and table References, add the Python members."""
-    from modelx_cython.transformer import _integer_reference_paths
     result = cst.MetadataWrapper(syntax, unsafe_skip_copy=True).visit(
-        RenameMembers(module, syntax.config_for_parsing, _integer_reference_paths))
+        RenameMembers(module, syntax.config_for_parsing))
     return result

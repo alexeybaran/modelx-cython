@@ -120,20 +120,16 @@ class _HeldCalls(cst.CSTTransformer):
                 continue
             if checked or ctype != 'long long' or MX_SYS_MOD in self.names:
                 return updated
-            checked = True
+            checked = True      # converted to the C parameter type by Cython at the call
             value = args[i].value
-            path = cst.Arg(cst.SimpleString(repr(method.model_path)))
             constructor = arguments(value, 'int', 1)
             rounded = arguments(constructor[0] if constructor else value, f'{MX_SYS_MOD}._mx_round_one', 3)
-            if rounded:
+            if rounded:     # the native rounding of a rounded argument
+                path = cst.Arg(cst.SimpleString(repr(method.model_path)))
                 helper = '_mx_rounded_index' if constructor else '_mx_bare_round_index'
                 prefix = (cst.Arg(value.func),) if constructor else ()
-                conversion = cst.Call(cst.parse_expression(f'{MX_SYS_MOD}.{helper}'),
-                                      (*prefix, *(cst.Arg(v) for v in rounded), path))
-            else:
-                conversion = cst.Call(cst.parse_expression(f'{MX_SYS_MOD}._mx_integer_result'),
-                                      (cst.Arg(value), path))
-            args[i] = args[i].with_changes(value=conversion)
+                args[i] = args[i].with_changes(value=cst.Call(cst.parse_expression(f'{MX_SYS_MOD}.{helper}'),
+                                                              (*prefix, *(cst.Arg(v) for v in rounded), path)))
 
         if parameterized or producer_cell.is_locked:
             # Evaluate the real producer once, preserving overrides and its cache.

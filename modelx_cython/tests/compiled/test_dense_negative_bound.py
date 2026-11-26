@@ -1,10 +1,12 @@
-"""D15: the public one-axis range check stays overflow-free under ``overflowcheck``.
+"""The public one-axis range check is overflow-free.
 
-The round-2 text ``cast(ulonglong, key) - cast(ulonglong, lower) < span`` raises
-OverflowError under Cython's overflow check whenever key < lower, i.e. on every call
-when an axis starts below zero (BU_DE_S: an axis from -9). The emitted check is now
-``cast(ulonglong, key - (lower)) < span`` and ``cast(ulonglong, key) < span`` for lower 0.
+A signed ``key - lower`` overflows for a key far below a positive lower bound (or above a negative
+one), so the offset is taken in unsigned arithmetic, which wraps by definition:
+``cast(ulonglong, key) - cast(ulonglong, lower) < span``, and ``cast(ulonglong, key) < span`` for
+lower 0. The check is compiled and run here at keys around and far from the bounds.
 """
+import re
+
 import pytest
 import libcst as cst
 
@@ -32,18 +34,21 @@ def _check_text(lower, stop):
 
 @pytest.mark.parametrize('lower,stop,expected', [
     (0, 4, '_mx_cy.cast(_mx_cy.ulonglong, t) < 4'),
-    (-9, 6, '_mx_cy.cast(_mx_cy.ulonglong, t - (-9)) < 15'),
-    (3, 8, '_mx_cy.cast(_mx_cy.ulonglong, t - (3)) < 5'),
+    (-9, 6, '_mx_cy.cast(_mx_cy.ulonglong, t) - _mx_cy.cast(_mx_cy.ulonglong, -9) < 15'),
+    (3, 8, '_mx_cy.cast(_mx_cy.ulonglong, t) - _mx_cy.cast(_mx_cy.ulonglong, 3) < 5'),
 ])
-def test_range_check_subtracts_signed_before_the_cast(lower, stop, expected):
+def test_range_check_subtracts_in_unsigned_arithmetic(lower, stop, expected):
     assert _check_text(lower, stop) == expected
 
 
 @pytest.mark.parametrize('lower,stop', [(-9, 6), (0, 4), (3, 8)])
-def test_range_check_compiled_with_overflowcheck(lower, stop):
+def test_range_check_compiled(lower, stop):
     cython = pytest.importorskip('cython')
-    check = _check_text(lower, stop).replace('_mx_cy.', 'cython.')
-    body = ('cdef long long t\nresult = []\nfor t in range(%d, %d):\n'
-            '    result.append(bool(%s))\nreturn result\n') % (lower - 4, stop + 4, check)
-    got = cython.inline(body, cython_compiler_directives={'overflowcheck': True}, quiet=True)
-    assert got == [lower <= t < stop for t in range(lower - 4, stop + 4)]
+    # the emitted casts as Cython's own syntax: an inline module has no ``cython`` import
+    check = re.sub(r'_mx_cy\.cast\(_mx_cy\.ulonglong, ([^)]*)\)', r'(<unsigned long long>(\1))',
+                   _check_text(lower, stop))
+    keys = [*range(lower - 4, stop + 4), -2 ** 63, -2 ** 63 + 1, 2 ** 63 - 1, 2 ** 63 - 2]
+    body = ('cdef long long t\nresult = []\nfor t in keys:\n'
+            '    result.append(bool(%s))\nreturn result\n') % check
+    got = cython.inline(body, locals={'keys': keys}, quiet=True)
+    assert got == [lower <= t < stop for t in keys]

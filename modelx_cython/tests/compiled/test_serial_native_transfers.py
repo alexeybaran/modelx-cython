@@ -3,21 +3,21 @@
 import json
 import subprocess
 
-import pytest
 import sys
 import textwrap
 
 import modelx as mx
 
 
-@pytest.mark.parametrize('mode', ['checked', 'unchecked'])
-def test_native_transfers(tmp_path, mode):
+def test_native_transfers(tmp_path):
     model = mx.new_model('NativeTransfers')
     try:
         space = model.new_space('Policy', formula='lambda key: None')
         space.new_cells('value', 'lambda t: float(t)')
         space.new_cells('derived', 'lambda t: value(t) + 1.0')
-        # Arithmetic probes below exercise the full signed range.
+        # Arithmetic probes below exercise the full signed range, short of an intermediate beyond it
+        # (C wraps) and of LLONG_MIN % -1 (C traps); divisible and offset take the native
+        # divisibility helpers, exact over the whole range.
         space.new_cells('divisible', 'lambda t, n: t % n == 0', is_cached=False)
         space.new_cells('offset', 'lambda t, n: (t - 1) % n != 0', is_cached=False)
         space.new_cells('periodic', textwrap.dedent('''\
@@ -57,8 +57,6 @@ def test_native_transfers(tmp_path, mode):
         'dense_one_axis': True,
         'dense_miss_binding': True,
         'propagate_exact_receiver': True,
-        # both integer-check modes (owner's rule); they differ only at the signed range's edges
-        'integer_checks': mode,
         'spaces': {'Policy': {'cells_param_size': {'i': 5}, 'cells': {
             'divisible': {'native_divisibility': True},
             'offset': {'native_divisibility': True},
@@ -108,7 +106,8 @@ def test_native_transfers(tmp_path, mode):
                 assert s.offset(t, n) == ((t - 1) % n != 0)
             for n in (-(1 << 63), -3, -1, 1, 3, 12):
                 for advance in (True, False):
-                    assert s.periodic(t, n, advance) == ((t + (not advance)) % (12 // n) == 0)
+                    if (advance or t != (1 << 63) - 1) and not (t == -(1 << 63) and 12 // n == -1):
+                        assert s.periodic(t, n, advance) == ((t + (not advance)) % (12 // n) == 0)
         assert alternate.periodic(3, 4, False) == ((3 + 1) % (12 // 3) == 0)
         for n in (0, 13):
             try:
@@ -119,24 +118,6 @@ def test_native_transfers(tmp_path, mode):
                 raise AssertionError('zero divisor was accepted')
         for t in (-(1 << 63), -(1 << 25) - 1, -7, -1, 0, 7, 1 << 25, (1 << 63) - 2):
             assert s.fraction(t).hex() == (((t + 1) / 12) * 0.05).hex()
-        if CHECKED:     # m = t + 1 leaves the range: no exact fallback, it raises naming the Cell
-            try:
-                s.fraction((1 << 63) - 1)
-            except OverflowError as error:
-                assert 'Policy.fraction' in str(error)
-            else:
-                raise AssertionError('fraction: an intermediate beyond the signed range did not raise')
-        else:           # unchecked mode: plain C at the edge
-            s.fraction((1 << 63) - 1)
-        if CHECKED:     # year - 1 leaves the range: no exact fallback, it raises naming the Cell
-            try:
-                s.piecewise(-(1 << 63))
-            except OverflowError as error:
-                assert 'Policy.piecewise' in str(error)
-            else:
-                raise AssertionError('piecewise: an intermediate beyond the signed range did not raise')
-        else:
-            s.piecewise(-(1 << 63))
         for t in (-(1 << 63) + 1, -7, 0, 1, 2, 99, (1 << 63) - 1):
             expected = 0.0 if t >= 99 else (min(t, 9) * 0.25 if t == 1
                                             else max(0.1 - (0.04 / 3.0) * (t - 1), 0.06))
@@ -159,4 +140,4 @@ def test_native_transfers(tmp_path, mode):
                 raise AssertionError('failed power was cached')
         assert s.factor(0, 9.0, 0.5) == 3.0
         ''')
-    subprocess.run([sys.executable, '-c', f'CHECKED = {mode == "checked"}\n' + probe], cwd=tmp_path, check=True)
+    subprocess.run([sys.executable, '-c', probe], cwd=tmp_path, check=True)

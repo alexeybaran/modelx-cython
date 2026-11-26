@@ -12,9 +12,6 @@ class's typed entries instead of Python attribute calls. Conditions, otherwise n
   ``<self or the base>.__class__(self)``: the value is an instance of the class (proven, not
   sampled). Cython's type test at the typed assignment remains, so a value of another type
   raises TypeError and is never cast wrongly.
-
-Integer arguments of calls on such a local keep the checks of calls on ``self``
-(``integer_boundaries._GuardCalls``), so errors are the same as through the Python gate.
 """
 import libcst as cst
 

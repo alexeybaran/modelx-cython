@@ -55,7 +55,7 @@ from modelx_cython.admission import describe
 from modelx_cython.cell_entries import EntryModule
 from modelx_cython.entry_pipeline import lower_entries
 from modelx_cython.scopes import shared_facts
-from modelx_cython.integer_boundaries import guard_integer_boundaries
+from modelx_cython.formula_passes import lower_formula_semantics
 from modelx_cython.helpers import install as install_helpers
 from modelx_cython.build import cell_functions, create_setup
 from modelx_cython.syntax import read_literal
@@ -308,17 +308,6 @@ def main_handler(args: argparse.Namespace, stdout: IO[str], stderr: IO[str]) -> 
         spec = TransSpec(d)
         logger = run_sample(orig_path, args.sample, new_model_name=model_name,
                             record_reads=spec.policy.prepared_tables)
-        # integer guards (owner's rule): the mode follows the largest traced integer
-        from .config import UNCHECKED_LIMIT, UNCHECKED_LIMIT_NOTE, resolve_integer_checks
-        mode = resolve_integer_checks(spec.policy, logger.max_integer)
-        integer_report = {'mode': mode, 'requested': spec.policy.integer_checks,
-                          'largest_traced_integer': logger.max_integer, 'seen_at': logger.max_integer_at,
-                          'unchecked_below': UNCHECKED_LIMIT}
-        if mode == 'unchecked':
-            integer_report['limit'] = UNCHECKED_LIMIT_NOTE
-        spec.policy = dataclasses.replace(spec.policy, integer_checks=mode)
-        _logger.info('integer checks: %s (largest traced integer %d at %s)',
-                     mode, logger.max_integer, logger.max_integer_at)
         rel_model_path = model_path.relative_to(model_path.parent)
 
         modules = [rel_model_path / (MX_SYS_MOD + ".py")]
@@ -386,8 +375,6 @@ def main_handler(args: argparse.Namespace, stdout: IO[str], stderr: IO[str]) -> 
         resolver.read_notes = getattr(logger, 'read_notes_by_text', None) or {}
         admit_forwarded_views(module_infos, resolver)
         cells_kinds, ref_kinds = build_kind_maps(module_infos)
-        cells_by_name = {cell.fqname: cell for module in module_infos.values()
-                         for cls in module.classes.values() for cell in cls.cells.values()}
         demote_rebound_params(module_infos, resolver, cells_kinds, ref_kinds)
 
         policy = spec.policy
@@ -432,10 +419,8 @@ def main_handler(args: argparse.Namespace, stdout: IO[str], stderr: IO[str]) -> 
             translated_modules = lower_entries(translated_modules, dense_entries, formula_entries, policy)
         cell_sources = {}
         for u in units:
-            state = guard_integer_boundaries(
-                translated_modules[u.fqname], u.module_info, resolver, cells_kinds, ref_kinds,
-                cells_by_name, infer_types=policy.infer_types,
-            )
+            state = lower_formula_semantics(translated_modules[u.fqname], u.module_info,
+                                            infer_types=policy.infer_types)
             from modelx_cython.locked_entries import lower_locked_entries
             state = lower_locked_entries(state, u.module_info)
             # api-tables (D101a, D103): the last pass, after every pass that looks cells up by name
@@ -452,7 +437,6 @@ def main_handler(args: argparse.Namespace, stdout: IO[str], stderr: IO[str]) -> 
                      cell_sources=cell_sources, providers=provider_sources)
         report = describe(module_infos)
         (model_path / '_mx_admission.json').write_text(json.dumps(report, indent=2), encoding='utf-8')
-        (model_path / '_mx_integer_checks.json').write_text(json.dumps(integer_report, indent=2), encoding='utf-8')
         if policy.prepared_tables:      # T-4 item 0: the read signatures, decided per table when it is prepared
             signatures = getattr(resolver, 'table_signatures', {})
             ordered = [key for key, _ in sorted(signatures.items(), key=lambda item: item[1])]

@@ -1,12 +1,10 @@
 """diag-scale P3: integer items of a Python tuple without reference traffic.
 
-(a) ``_mx_exact_int64`` reads any int subclass (IntEnum, bool, a user subclass) directly, as
-PyNumber_Index returns such an object unchanged: same value, same OverflowError.
-(b) A lowered reduction over an object iterable whose loop variable is only passed as a C-integer
+A lowered reduction over an object iterable whose loop variable is only passed as a C-integer
 argument of compiled Cells reads the items of an exact tuple borrowed, as C integers. An item that
 is not an int fitting in 64 bits takes the object path (its error is the one raised today), any
 other iterable (a list) the loop as written. A loop variable used as an object keeps the object loop.
-Compiled equals the exported model; the compiled errors are the ones of the integer boundary.
+Compiled equals the exported model.
 """
 import json
 import os
@@ -130,14 +128,3 @@ def test_integer_items_of_a_tuple(tmp_path, monkeypatch):
     assert loops['total'] == 1 and loops['any_big'] == 1 and loops['mixed_items'] == 1, loops
     assert loops['listed'] == 1, loops          # emitted; a list takes the loop as written at run time
     assert loops['escapes'] == 0, loops         # the variable is also used as an object
-
-
-def test_items_outside_64_bits_or_not_integers_raise_the_boundary_errors(tmp_path, monkeypatch):
-    calls = _model(tmp_path, monkeypatch)
-    done = subprocess.run([sys.executable, '-m', 'modelx_cython', 'exported', '--sample', 'sample.py',
-                           '--no-spec'], cwd=tmp_path, capture_output=True, text=True)
-    assert done.returncode == 0, done.stdout[-3000:] + done.stderr[-3000:]
-    for values, error in (('(1, 2 ** 70)', 'OverflowError'), ("(1, 'x')", 'TypeError'),
-                          ('(1, 2.5)', 'TypeError')):
-        last = eval(_run(tmp_path, ('mixed_items',), 'exported_cy', values))[-1][0]
-        assert last.startswith(error + ': Projection.comp requires an exact signed 64-bit integer'), (values, last)

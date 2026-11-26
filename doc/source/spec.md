@@ -225,15 +225,18 @@ use a native hash store and other signatures Python dictionaries.
 
 ## Integer arithmetic
 
-Integer arithmetic is always checked; no key turns the checks off. C integer
-`+`, `-`, `*` and unary minus in a formula set an overflow flag that the
-formula tests before it returns, raising {py:exc}`OverflowError` naming the
-Cell when an exact result would leave 64 bits. A formula with an operation
-whose C type the compiler cannot tell keeps Cython's own overflow checks; such
-formulas are listed under `overflowcheck_fallback` in `_mx_integer_checks.json`
-of the generated package. `//`, `%`, shifts and integer powers keep Python's
-results or raise, and a float or an int beyond 64 bits passed where an integer
-was traced raises naming the Cell. Nothing here depends on the sample.
+Integers traced as `int` are C `long long` values, and their arithmetic is
+Cython's, as on upstream: `+`, `-`, `*`, unary minus, `<<` and an integer
+`**` wrap silently when the exact result leaves 64 bits; `//` and `%` keep
+Python's rounding, `LLONG_MIN // -1` raises {py:exc}`OverflowError` and
+`LLONG_MIN % -1` stops the process (a C division trap). An `int` beyond 64
+bits passed from Python raises {py:exc}`OverflowError`, and a `float`
+passed from Python where an integer was traced is truncated, as on
+upstream. A value written from Python to an integer Reference must be an
+integer or a `float` that is a whole number: a fractional `float` or a
+non-number raises {py:exc}`TypeError` naming the Reference. Keep integer
+values well inside 64 bits, or let the sample pass values that make the
+Cell an object.
 
 `infer_types`
 : `true` (default) compiles generated model modules with Cython's C type

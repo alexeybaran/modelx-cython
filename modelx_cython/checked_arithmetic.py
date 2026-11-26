@@ -169,9 +169,7 @@ class CheckedArithmetic:
         return cst.Module(body).visit(Divisibility()).body
 
     def rewrite(self, function):
-        """Lower zero-remainder comparisons of signed C integers to the native divisibility helpers.
-        (integer guards: the range proofs and exact fallbacks that rewrote other arithmetic are
-        gone; Cython's overflowcheck checks it in the checked mode.)"""
+        """Lower zero-remainder comparisons of signed C integers to the native divisibility helpers."""
         self.cell.signed_range_counters = frozenset()
         if (not divisibility_enabled(self.cell) or self.cell.is_locked or self.cell.body_has_closure
                 or self.cell.cls in self.cls.visitor.dynamic_ref_classes
