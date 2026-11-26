@@ -43,10 +43,6 @@ leaves powers with unknown operands for ordinary Cell lowering. The object
 operator in :mod:`~modelx_cython.ordered_arguments` preserves Python power
 semantics where Cython would otherwise infer a complex intermediate.
 
-A native double return can also use a uniquely assigned local from a
-resolved double Cell or Reference. That local proof applies only to arithmetic directly
-feeding the return, where Cython already requires a real result.
-
 The same classifier decides, in :func:`demote_rebound_params`, whether a
 parameter that a formula binds again keeps its C type there: only if
 every value bound to it is provably of that type.
@@ -66,13 +62,12 @@ from typing import Dict, List, Mapping, Optional
 from collections import Counter
 import libcst as cst
 import libcst.matchers as m
-from libcst.metadata import ExpressionContext
 
-from modelx_cython.consts import CY_MOD, MX_POW, MX_SELF, MX_SYS_MOD
+from modelx_cython.consts import CY_MOD, MX_POW, MX_SYS_MOD
 from modelx_cython.typedefs import CY_FLOAT_T, CY_INT_T
 from modelx_cython.usage import RESOLVED, CellsResolver, _extract_self_chain
 from modelx_cython.scopes import CstFacts, OPAQUE_SCOPES as _OPAQUE_SCOPES, has_scope_effects, lexical_nodes
-from modelx_cython.syntax import local_assignment, single_statement, walk
+from modelx_cython.syntax import walk
 
 _logger = logging.getLogger(__name__)
 
@@ -245,11 +240,11 @@ class OperandKind:
 class _PowerRewriter(cst.CSTTransformer):
     """Replace provably real ``**`` operations with ``_mx_sys._mx_pow``."""
 
-    def __init__(self, operand_kind: OperandKind, memo=None, return_operands=None, local_kind=None) -> None:
+    def __init__(self, operand_kind: OperandKind, memo=None, operands=None, local_kind=None) -> None:
         super().__init__()
         self._kind = operand_kind
         self._local_kind = local_kind     # report only: which declined powers are integer powers
-        self._return_operands = return_operands or {}
+        self._operands = operands or {}   # operand kinds proven for a power by its context
         self._opaque_depth = 0
         self.rewritten = 0
         self.declined: List[str] = []
@@ -288,8 +283,8 @@ class _PowerRewriter(cst.CSTTransformer):
             return updated_node
         # classify the original operands: a nested power has already
         # been rewritten into a call in ``updated_node``
-        if original_node in self._return_operands:
-            base, exponent = self._return_operands[original_node]
+        if original_node in self._operands:
+            base, exponent = self._operands[original_node]
         else:
             base = self._kind.kind(original_node.left)
             exponent = self._kind.kind(original_node.right)
@@ -340,42 +335,6 @@ class _PowerRewriter(cst.CSTTransformer):
         )
 
 
-def _native_return_locals(body, facts, operand_kind, parameters):
-    """Prove a local from one dominating double Cell or Reference read."""
-    if (facts.stores[MX_SELF] or has_scope_effects(body)
-            or facts.reads & {'locals', 'vars', 'eval', 'exec', '_getframe', 'currentframe'}):
-        return {}
-    seen, result = set(parameters), {}
-    for line in body:
-        assignment = single_statement(line)
-        if ((target := local_assignment(assignment)) is not None
-                and target.value not in seen and facts.stores[target.value] == 1
-                and target.value not in facts.deleted
-                and isinstance(assignment.value, (cst.Call, cst.Attribute))
-                and operand_kind.kind(assignment.value) == KIND_FLOAT):
-            result[target.value] = KIND_FLOAT
-        seen.update(part.value for part in walk(line) if isinstance(part, cst.Name)
-                    and facts.contexts.get(part) is ExpressionContext.LOAD)
-    return result
-
-
-def _native_return_arithmetic(body, operand_kind):
-    """Identify typed arithmetic through the native return boundary only."""
-    def arithmetic(expr):
-        if operand_kind.kind(expr) == KIND_UNKNOWN:
-            return
-        if isinstance(expr, cst.BinaryOperation):
-            if isinstance(expr.operator, cst.Power):
-                yield expr, (operand_kind.kind(expr.left), operand_kind.kind(expr.right))
-            yield from arithmetic(expr.left)
-            yield from arithmetic(expr.right)
-        elif isinstance(expr, cst.UnaryOperation):
-            yield from arithmetic(expr.expression)
-
-    return {expr: kinds for stmt in lexical_nodes(body) if isinstance(stmt, cst.Return) and stmt.value is not None
-            for expr, kinds in arithmetic(stmt.value)}
-
-
 def rewrite_powers(
     node: cst.FunctionDef,
     resolver: Optional[CellsResolver],
@@ -421,14 +380,6 @@ def rewrite_powers(
         from modelx_cython.numeric_cache import exclusively_owned
         memo = f'_mx_power_{cells.name}' if exclusively_owned(cells) else None
     param_kinds = _param_kinds(cells)
-    # A cells object that does not report a return type (any object that
-    # implements only the parameter-type interface) has an unknown return
-    # type, so the native-return arithmetic path does not apply to it.
-    rettype = getattr(cells, 'get_rettype_expr', None)
-    native_return = (isinstance(node.body, cst.IndentedBlock) and rettype is not None
-                     and rettype(c_style=True) == CY_FLOAT_T
-                     and any(isinstance(part, cst.Power) for part in lexical_nodes(node.body.body)))
-    facts = CstFacts(node.body.body) if native_return else None
     if builtin_float and isinstance(node.body, cst.IndentedBlock):
         declarations = [
             decl.target.value for decl in lexical_nodes(node.body.body)
@@ -437,7 +388,7 @@ def rewrite_powers(
             and decl.annotation.annotation.value == 'float' and decl.value is not None
         ]
         if declarations:
-            facts = facts if facts is not None else CstFacts(node.body.body)
+            facts = CstFacts(node.body.body)
             # Cython gives an unshadowed float local a double declaration.
             param_kinds.update((name, KIND_FLOAT) for name in declarations
                                if facts.stores[name] == 1 and name not in cells.params
@@ -448,19 +399,12 @@ def rewrite_powers(
         cells.powers_in_loops = []
         return node
     kind = OperandKind(resolver, cells_kinds, ref_kinds, cls_fqname, param_kinds)
-    return_operands = None
-    if native_return:
-        local_kinds = _native_return_locals(node.body.body, facts, kind, cells.params)
-        if local_kinds:
-            return_kind = OperandKind(resolver, cells_kinds, ref_kinds, cls_fqname, {**param_kinds, **local_kinds})
-            return_operands = _native_return_arithmetic(node.body.body, return_kind)
+    operands = None
     if isinstance(node.body, cst.IndentedBlock):
-        accumulated = _double_accumulator_powers(
+        operands = _double_accumulator_powers(
             node.body.body, cells.params, resolver, cells_kinds, ref_kinds, cls_fqname, param_kinds)
-        if accumulated:
-            return_operands = {**(return_operands or {}), **accumulated}
     local_kinds = formula_local_kinds(node, cells.params, resolver, cells_kinds, ref_kinds, cls_fqname, param_kinds)
-    rewriter = _PowerRewriter(kind, memo, return_operands, OperandKind(
+    rewriter = _PowerRewriter(kind, memo, operands, OperandKind(
         resolver, cells_kinds, ref_kinds, cls_fqname, {**local_kinds, **param_kinds}) if local_kinds else None)
     updated = node.body.visit(rewriter)
     # Powers left on Python's semantics inside a loop, for the admission report
