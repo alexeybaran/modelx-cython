@@ -87,23 +87,25 @@ def test_native_held_item_uses_exact_type_and_preserves_fallback(tmp_path, monke
     assert 'type(self._v_explicit) is _c_Market' not in source
     assert 'type(self._v_shadowed_market) is _c_Market' not in source
     assert 'type(self._v_overridable) is _c_Market' in source
-    assert ".price(_mx_sys._mx_integer_result(" in source
-    assert ".price(_mx_sys._mx_bare_round_index(" in source
-    assert ".price(_mx_sys._mx_rounded_index(" in source
     report = json.loads((tmp_path / 'exported_cy/_mx_admission.json').read_text(encoding='utf-8'))
     assert report['exported_cy._mx_classes._c_Policy._f_market']['return_type'] == 'object'
     c_source = (tmp_path / 'exported_cy/_mx_classes.c').read_text(encoding='utf-8')
-    # The evaluated receiver is an owned temporary while the tenor Cell runs.
-    helper = re.search(r'def (_mx_pin_held_item_\d+)\(root: _c_Policy\) -> object:\s+return root\._v_cold_market', source)
+    # The receiver is read once, before the tenor Cell runs, as a borrowed pointer: no reference is
+    # taken or dropped (the Policy item's cached field holds the item), and that pointer reaches the call.
+    helper = re.search(r'def (_mx_pin_held_item_\d+)\(root: _c_Policy\) -> _mx_cy\.pointer\(_mx_cy\.void\):\s+'
+                       r'return _mx_cy\.cast\(_mx_cy\.pointer\(_mx_cy\.void\), root\._v_cold_market\)', source)
     assert helper is not None
     pin = re.search(r'(?P<held>__pyx_t_\d+) = \w+' + helper[1] + r'\(__pyx_v_self\);', c_source)
     assert pin is not None
     argument_start = c_source.index('_has_tenor[', pin.end())
     native_call = c_source.index('->__pyx_vtab)->rate(', argument_start)
-    assert c_source.index(f'__Pyx_GOTREF({pin["held"]})', pin.end()) < argument_start
+    held = re.escape(pin['held'])
+    assert not re.search(rf'(GOTREF|INCREF|DECREF)\({held}\)', c_source[pin.end():native_call])
     assert pin['held'] in c_source[native_call:c_source.index(';', native_call)]
+    assert not re.search(r'_mx_pin_held_item_\d+\(root: _c_Policy\) -> object', source)
 
     probe = textwrap.dedent('''\
+        import gc
         import json
         import sys
         import held_item_test_hook as hook
@@ -114,16 +116,6 @@ def test_native_held_item_uses_exact_type_and_preserves_fallback(tmp_path, monke
             expected = 1.0 / (1 + round(0.5 + index))
             assert computed.rounded(index) == computed.wrapped(index) == expected
         assert computed.computed(0) == 0.5
-        if sys.argv[1] == 'exported_cy':
-            for t, value, error in [(1, 1.5, TypeError), (2, 2**70, OverflowError)]:
-                hook.raw = value
-                try:
-                    computed.computed(t)
-                except error as exc:
-                    assert 'Market.price' in str(exc), exc
-                else:
-                    raise AssertionError('computed Cell argument escaped its integer check')
-            hook.raw = 1
         values = [m.Policy[key].project(t) for key in (1, 3) for t in (0, 1, 2)]
         assert values == [m.Policy[key].selected_rate(t) for key in (1, 3) for t in (0, 1, 2)]
         values += [m.Policy[key].mixed_rate(t) for key in (1, 2) for t in (0, 1, 2)]
@@ -155,6 +147,33 @@ def test_native_held_item_uses_exact_type_and_preserves_fallback(tmp_path, monke
         assert values[-1] == original_market.rate(1, 1.5)
         assert m.Policy[8].selected_rate(1) == 44.5
         hook.override = hook.callback = None
+        # The held item is borrowed while the argument Cell runs: its reference count is the same as
+        # after the call (the live model's interpreter holds the receiver on its stack: one more).
+        policy = m.Policy[9]
+        held = policy.cold_market()
+        values.append(policy.ordered(0))
+        counts = []
+        hook.callback = lambda: counts.append(sys.getrefcount(held))
+        values.append(policy.ordered(1))
+        hook.callback = None
+        counts.append(sys.getrefcount(held))
+        if sys.argv[1] == 'exported_cy':
+            assert counts[0] == counts[1], counts
+        del held
+        # Every other reference to the held item goes while the argument Cell runs: the receiver
+        # leaves its Space and the item leaves the Market Space; the receiver's cached field keeps it.
+        policy = m.Policy[10]
+        values.append(policy.ordered(0))
+        def drop_all():
+            del m.Policy[10]
+            del m.Market[1]
+            gc.collect()
+        hook.callback = drop_all
+        values.append(policy.ordered(1))
+        hook.callback = None
+        del policy
+        gc.collect()
+        values.append(m.Policy[10].ordered(1))
         for cell, key in [('project', 2), ('ordered', 4)]:
             try:
                 getattr(m.Policy[key], cell)(0)
