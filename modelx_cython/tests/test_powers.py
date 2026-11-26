@@ -11,6 +11,7 @@ CLS = "Model_nomx._mx_classes._c_Space1"
 RATE = CLS + "._f_rate"
 COUNT = CLS + "._f_count"
 ARR = CLS + "._f_arr"
+LAST = CLS + "._f_last"
 
 
 @pytest.fixture
@@ -120,14 +121,14 @@ class _FakeCells:
 
 def _rewrite(body: str) -> str:
     resolver = CellsResolver(
-        cells_by_class={CLS: {"rate": RATE, "arr": ARR}},
+        cells_by_class={CLS: {"rate": RATE, "arr": ARR, "last": LAST}},
         refs_by_class={CLS: {}},
         spaces_by_class={CLS: {}},
     )
     func = cst.parse_statement(f"def _f_target(self, t, x):\n    {body}\n")
     out = rewrite_powers(
         func, resolver,
-        cells_kinds={RATE: KIND_FLOAT, ARR: KIND_UNKNOWN},
+        cells_kinds={RATE: KIND_FLOAT, ARR: KIND_UNKNOWN, LAST: KIND_UNKNOWN, LAST + "[1]": KIND_INT},
         ref_kinds={CLS: {}},
         cls_fqname=CLS,
         cells=_FakeCells(),
@@ -252,9 +253,38 @@ def test_build_kind_maps():
     cells_kinds, ref_kinds = build_kind_maps({"Model_nomx._mx_classes": info})
 
     assert cells_kinds == {RATE: KIND_FLOAT, COUNT: KIND_INT,
-                           ARR: KIND_UNKNOWN}
+                           ARR: KIND_UNKNOWN, ARR + "[1]": KIND_FLOAT}
     assert ref_kinds == {CLS: {"rate_ref": KIND_FLOAT, "n_ref": KIND_INT,
                                "table": KIND_UNKNOWN}}
+
+
+def test_element_of_a_typed_memoryview_cell():
+    """One index per dimension of a Cell's typed-memoryview result reads an element of its C type;
+    a partial index or a slice is a view, and the result itself is not a number."""
+    info = _FakeModuleInfo({
+        "_c_Space1": _FakeClassInfo(
+            CLS,
+            cells={"last": _FakeCellsInfo(LAST, "const long long[:]"),
+                   "grid": _FakeCellsInfo(ARR, "const double[:, :]")},
+            refs={},
+        )
+    })
+    cells_kinds, ref_kinds = build_kind_maps({"Model_nomx._mx_classes": info})
+    kind = OperandKind(CellsResolver({CLS: {"last": LAST, "grid": ARR}}, {CLS: {}}, {CLS: {}}),
+                       cells_kinds, ref_kinds, CLS, {"t": KIND_INT})
+    for expr, expected in [("self.last()[t]", KIND_INT), ("self.last()[t] + 1", KIND_INT),
+                           ("self.grid()[t, 0]", KIND_FLOAT), ("self.grid()[t]", KIND_UNKNOWN),
+                           ("self.last()[1:]", KIND_UNKNOWN), ("self.last()", KIND_UNKNOWN),
+                           ("self.other()[t]", KIND_UNKNOWN)]:
+        assert kind.kind(cst.parse_expression(expr)) == expected, expr
+
+
+def test_loop_bound_from_an_array_element_proves_the_power():
+    """DIA_US_SEC guarantee_mths_pricing: ``for tk in range(self.data.premium_last()[self.idx] + 1)``."""
+    body = ("last = self.last()[t]\n    v = 1.0 / (1.0 + self.rate(t))\n    total = 0.0\n"
+            "    for k in range(last + 1):\n        total += v ** ((k - t) / 12.0)\n    return total")
+    out = _rewrite(body)
+    assert out.count("_mx_sys._mx_pow(") == 1 and "**" not in out, out
 
 
 def test_kind_maps_feed_the_classifier():

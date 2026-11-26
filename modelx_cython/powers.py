@@ -34,11 +34,13 @@ removes the failure without touching integer arithmetic at all.
 The proof is the conservative classifier below.  Every operand is
 :data:`KIND_FLOAT`, :data:`KIND_INT` or :data:`KIND_UNKNOWN`, and only
 numeric literals, the declaring cells' own parameters, calls to cells
-the resolver reaches, scalar references and arithmetic over those are
-ever known. Everything else -- other locals, subscripts, module
-attributes, and anything inside a construct that binds names of its own,
-where a name can shadow a parameter of the cells -- is unknown. This pass
-leaves powers with unknown operands for ordinary Cell lowering. The object
+the resolver reaches, an element of such a call's typed-memoryview
+result read with one index per dimension, scalar references and
+arithmetic over those are ever known. Everything else -- other locals,
+other subscripts, module attributes, and anything inside a construct
+that binds names of its own, where a name can shadow a parameter of the
+cells -- is unknown. This pass leaves powers with unknown operands for
+ordinary Cell lowering. The object
 operator in :mod:`~modelx_cython.ordered_arguments` preserves Python power
 semantics where Cython would otherwise infer a complex intermediate.
 
@@ -105,6 +107,14 @@ def kind_of_type_expr(type_expr: str) -> str:
         return KIND_UNKNOWN
 
 
+def _element_kind(type_expr: str):
+    """(kind, dimensions) of the elements of a typed memoryview such as ``const long long[:]``, else None."""
+    base, _, dims = type_expr.removeprefix('const ').partition('[')
+    if not dims or dims.rstrip(']').replace(' ', '').replace(',', '') != ':' * (dims.count(',') + 1):
+        return None
+    return kind_of_type_expr(base), dims.count(',') + 1
+
+
 def build_kind_maps(module_infos: Mapping[str, object]):
     """Collect the kind of every cells return value and every ref.
 
@@ -128,6 +138,9 @@ def build_kind_maps(module_infos: Mapping[str, object]):
                 cells_kinds[cells.fqname] = kind_of_type_expr(
                     cells.get_rettype_expr(c_style=True)
                 )
+                element = _element_kind(cells.get_rettype_expr(c_style=True))
+                if element is not None:     # the kind of one element, keyed by the Cell and its dimensions
+                    cells_kinds[f'{cells.fqname}[{element[1]}]'] = element[0]
             ref_kinds[cls_info.fqname] = {
                 name: kind_of_type_expr(ref.get_type_expr(c_style=True))
                 for name, ref in cls_info.refs.items()
@@ -190,6 +203,10 @@ class OperandKind:
             return self._param_kinds.get(expr.value, KIND_UNKNOWN)
         elif isinstance(expr, cst.Call):
             return self._call_kind(expr)
+        elif (isinstance(expr, cst.Subscript) and isinstance(expr.value, cst.Call)
+              and all(isinstance(e.slice, cst.Index) and e.slice.star is None for e in expr.slice)):
+            # one index per dimension of a Cell's typed-memoryview result is an element of its C type
+            return OperandKind._call_kind(self, expr.value, f'[{len(expr.slice)}]')
         elif isinstance(expr, cst.Attribute):
             return self._ref_kind(expr)
         else:
@@ -216,14 +233,14 @@ class OperandKind:
             return KIND_FLOAT if KIND_FLOAT in (left, right) else KIND_INT
         return KIND_UNKNOWN
 
-    def _call_kind(self, expr: cst.Call) -> str:
+    def _call_kind(self, expr: cst.Call, element: str = '') -> str:
         chain = _extract_self_chain(expr.func)
         if not isinstance(chain, list):
             return KIND_UNKNOWN
         status, fqname = self._resolver.resolve_chain(self._cls_fqname, chain)
         if status != RESOLVED:
             return KIND_UNKNOWN
-        return self._cells_kinds.get(fqname, KIND_UNKNOWN)
+        return self._cells_kinds.get(fqname + element, KIND_UNKNOWN)
 
     def _ref_kind(self, expr: cst.Attribute) -> str:
         chain = _extract_self_chain(expr)
