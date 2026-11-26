@@ -940,9 +940,6 @@ def is_uncached_cells_code(code: CodeType) -> bool:
         A code object defined in an ``_mx_classes.py`` or
         ``_mx_model.py`` module.
     """
-    # The exported collection adapter also has no _f_ method.
-    if "_mx_collect_cache" in code.co_names and "collect_from_space" in code.co_names:
-        return False
     name = code.co_name
     qualname = getattr(code, "co_qualname", None)   # Python 3.11+
     if qualname is not None:

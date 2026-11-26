@@ -132,12 +132,6 @@ def test_cache_hit_optimization_does_not_depend_on_ast_unparse(monkeypatch):
     assert lower_entries({'m': state}, {}, {}, CompilerPolicy.resolve({}))['m'].syntax.code == ''
 
 
-def test_collection_admission_reuses_the_existing_syntax_without_ast(monkeypatch):
-    from modelx_cython.serial_collect import analyze
-    monkeypatch.delattr(ast, 'unparse')
-    module = SimpleNamespace(classes={}, spec=SimpleNamespace(automatic_optimizations=True),
-        visitor=SimpleNamespace(wrapper=SimpleNamespace(module=cst.parse_module('class Values: pass\n'))))
-    assert analyze(module) == {}
 
 
 def test_provider_resources_use_the_legacy_resource_api(monkeypatch, tmp_path):

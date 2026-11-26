@@ -362,8 +362,7 @@ cdef class BaseParent(BaseMxObject):
     cdef public object _mx_lock
 
 cdef class BaseModel(BaseParent):
-    cdef public object _mx_collect_workers_override
-    cdef public object _mx_collect_dispatch_state
+    pass
 
 cdef class BaseSpace(BaseParent):
 

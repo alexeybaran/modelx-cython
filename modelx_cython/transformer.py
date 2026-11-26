@@ -310,8 +310,6 @@ class PXDGenerator:
 
         cls_info = self.module.classes[cls_name]
         decl_stmts = []
-        if cls_name in self.module.visitor.collect_cache_classes:
-            decl_stmts.append("cdef dict _mx_collect_cache\n")
         if cls_name in self.module.visitor.dynamic_ref_classes:
             decl_stmts.append("cdef dict __dict__\n")
         for name in getattr(cls_info, 'readonly_refs', ()):
@@ -582,8 +580,6 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
         resolver=None,
         cells_kinds=None,
         ref_kinds=None,
-        serial_shapes=None,
-        collect_workers=None,
     ) -> None:
         """Parse ``source`` and record the module info and package.
 
@@ -602,8 +598,6 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
         self._resolver = resolver
         self._cells_kinds = cells_kinds or {}
         self._ref_kinds = ref_kinds or {}
-        self._serial_shapes = serial_shapes or {}
-        self._collect_workers = collect_workers
         self._uses_native_round = False
         self.helper_providers = set()
         cells = [cell for cls in module.classes.values() for cell in cls.cells.values()]
@@ -1046,13 +1040,6 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
         # cimports for child spaces
         parent = ".".join(self.module.fqname.split(".")[:-1])
         stmts = []
-        if any(shape.reuse for shape in self._serial_shapes.values()):
-            stmts.append(cst.parse_statement(
-                'from cython.cimports.libc.string import memset as _mx_collect_memset'))
-        if any(leaf.kind == 'dict' for shape in self._serial_shapes.values()
-               for leaf in getattr(shape, 'leaves', ())):
-            stmts.append(cst.parse_statement(
-                'from cython.cimports.libc.stdlib import malloc as _mx_collect_malloc, free as _mx_collect_free'))
         from modelx_cython.helpers import module_name
         from modelx_cython.exceptions import NumericExceptions
         if self._uses_native_round:
@@ -1264,11 +1251,6 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
                 updated_node = updated_node.with_changes(body=updated_node.body.with_changes(body=tuple(body)))
             updated_node = updated_node.with_changes(body=updated_node.body.with_changes(
                 body=code_enums.bind_properties(self.module.classes[cls_name], updated_node.body.body)))
-            if self._collect_workers is not None:
-                from modelx_cython.serial_collect import add_methods
-                updated_node = add_methods(
-                    self.module.classes[cls_name], updated_node, self._serial_shapes.get(cls_name),
-                    workers=self._collect_workers, source=original_node)
             decorator = cst.Decorator(
                 decorator=cst.Attribute(value=cst.Name(CY_MOD), attr=cst.Name("cclass"))
             )

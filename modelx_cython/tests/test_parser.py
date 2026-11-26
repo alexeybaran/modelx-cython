@@ -84,7 +84,6 @@ def test_exported_collection_and_dynamic_ref_storage():
         ''')
     visitor = ModuleVisitor(module="M._mx_classes", source=source)
 
-    assert visitor.collect_cache_classes == {"_c_Actual"}
     assert visitor.dynamic_ref_classes == {"_c_Actual"}
     assert visitor.spaces == {}
 
