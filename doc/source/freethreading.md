@@ -100,12 +100,13 @@ mx_model._mx_collect_workers = 4
 total = mx_model.Book.total()      # a Cells that calls Projection.collect()
 ```
 
-The threads run at the same time only on free-threaded Python; with the GIL one worker runs.
+The threads run at the same time only on free-threaded Python; with the GIL, several workers
+compute the coordinates one after another on one thread, with the same values and errors.
 More than one worker requires every Space the collected ItemSpaces read to be locked: a
 Reference of the collect Space to a Space that is not locked, or a formula of the collect Space
-that reads `_model`, `_parent` or `_space`, raises `ValueError` naming it before any thread
-starts. A model satisfies it by exporting those Spaces in `locked_spaces`, as above. One worker
-always runs.
+that reads `_model`, `_parent` or `_space`, raises `ValueError` naming it before any coordinate
+is computed, on every interpreter build, with or without the GIL. A model satisfies it by
+exporting those Spaces in `locked_spaces`, as above. One worker always runs.
 
 `collect()` belongs to the declared Space. Its ItemSpaces have no `collect`, in live modelx, in
 the export and in the compiled model alike: reading it raises `AttributeError`.
