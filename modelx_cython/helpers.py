@@ -3,7 +3,6 @@
 Providers supply a .pyx/.pxd pair. Their Cython functions receive the current
 module or callable and must preserve its behavior when it is replaced.
 """
-import hashlib
 from importlib import resources     # read through native_sources.read_resource
 import keyword
 
@@ -160,26 +159,7 @@ class HelperCalls(FormulaTransformer):
 
     def leave_Call(self, original, updated):
         math = self.module_math(original, updated)
-        if math is not None:
-            return math
-        from .helper_members import MATH_PROVIDER
-        func = updated.func
-        ref = _declared_reference(func, self.refs)
-        contract = ref.helper if ref is not None else None
-        # A module member that is a math builtin under another name has no ``m_`` form: the
-        # provider operation receives the member itself and checks it.
-        if not contract or contract[0] != MATH_PROVIDER or any(arg.star or arg.keyword for arg in updated.args):
-            return updated
-        provider, operation = contract
-        self.used.add(provider)
-        self.operations.add(provider + '.' + operation)
-        args = tuple(arg.with_changes(value=arg.value.with_changes(
-                     lpar=(cst.LeftParen(),), rpar=(cst.RightParen(),)))
-                     if isinstance(arg.value, cst.GeneratorExp) and not arg.value.lpar else arg
-                     for arg in updated.args)
-        return updated.with_changes(
-            func=cst.Attribute(cst.Name(module_name(provider)), cst.Name(operation)),
-            args=(cst.Arg(func), *args))
+        return updated if math is None else math
 
     def rewrite(self, formula):
         """Bind registered symbols across lexical scopes, without body analysis.
@@ -306,9 +286,6 @@ class _ScopedHelperCalls(HelperCalls):
             return updated
         if not self._owns_receiver(function):
             return updated
-        if _declared_reference(function, self.refs) is None:
-            self.module_math(original, updated)       # lists math members with no native form
-            return updated
         return super().leave_Call(original, updated)
 
 
@@ -366,51 +343,16 @@ def _drop_unused_math_imports(formula, names):
     return formula.with_changes(body=formula.body.with_changes(body=statements))
 
 
-def _declared_reference(function, refs):
-    # Kept lazy to avoid the shared registry/resolver import cycle.
-    from .helper_members import helper_reference
-    return helper_reference(function, refs)
-
-
-def install(providers, model_path, object_providers=None):
+def install(providers, model_path):
     modules = []
-    expected = {}
-    object_providers = object_providers or {}
     for provider in sorted(providers):
         package, _, name = provider.rpartition('.')
         if not package:
             raise ValueError('helper provider must belong to a package')
         alias = module_name(provider)
         sources = {suffix: read_resource(package, name + suffix) for suffix in ('.pyx', '.pxd')}
-        manifest = object_providers.get(provider)
-        if manifest:
-            digest = hashlib.sha256()
-            for payload in (read_resource(package, name + '.provider.json'), *sources.values()):
-                digest.update(len(payload).to_bytes(8, 'little'))
-                digest.update(payload)
-            fingerprint = digest.hexdigest()
-            expected[alias] = ((manifest.protocol, manifest.provider, manifest.abi), fingerprint)
-            sources['.pyx'] += f'\n\n__modelx_cython_provider_build__ = {fingerprint!r}\n'.encode()
         for suffix, payload in sources.items():
             (model_path / (alias + suffix)).write_bytes(payload)
         modules.append(model_path.relative_to(model_path.parent)
                        / (alias + '.pyx'))
-    if expected:
-        guard = model_path / '_mx_provider_guard.py'
-        guard.write_text(f'''from importlib import import_module
-
-for _alias, (_contract, _fingerprint) in {expected!r}.items():
-    _message = (f'Native provider {{_contract[1]}} requires ABI {{_contract[2]}} '
-                f'and build fingerprint {{_fingerprint}}')
-    try:
-        _provider = import_module('.' + _alias, __package__)
-    except ImportError as _error:
-        raise ImportError(_message) from _error
-    if (getattr(_provider, '__modelx_cython_provider__', None) != _contract
-            or getattr(_provider, '__modelx_cython_provider_build__', None) != _fingerprint):
-        raise ImportError(_message)
-''', encoding='utf-8')
-        init = model_path / '__init__.py'
-        init.write_text('from . import _mx_provider_guard\n' + init.read_text(encoding='utf-8'),
-                        encoding='utf-8')
     return modules

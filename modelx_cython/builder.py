@@ -201,7 +201,6 @@ class CombinedCellsInfo(LexicalCellsInfo):
     # C-level (cpdef) calls do not support; set in cli.main_handler
     called_with_kwargs: bool = False
     formula_has_captured_default: bool = False
-    forwarded_native_result: bool = False
 
     def __init__(self, cls_info, lx_info, rt_info, spec) -> None:
         """Merge lexical, runtime and spec info, validating the spec's
@@ -563,10 +562,6 @@ class CombinedCellsInfo(LexicalCellsInfo):
             If True, emit C-style types for .pxd files.
         """
 
-        binding = self.native_provider_binding
-        if binding:
-            from modelx_cython.helpers import module_name
-            return f'{module_name(binding.manifest.provider)}.{binding.declaration.view_type}'
         if self.vector_shape in ('V', 'I'):
             from modelx_cython.vectors import vector_type
             return vector_type(self.vector_shape)
@@ -595,17 +590,6 @@ class CombinedCellsInfo(LexicalCellsInfo):
                 and not self.called_with_kwargs and not self.has_spec_rettype)
 
     @property
-    def observed_native_binding(self):
-        binding = self.observed_provider_type
-        if self._can_bind_native_result and binding and binding.declaration.view_type is not None:
-            return binding
-        return None
-
-    @property
-    def observed_provider_type(self):
-        return getattr(self._rt, 'observed_provider_binding', None)
-
-    @property
     def frame_row_result(self):
         """auto-tables (D119): every sampled value is a row (Record) of a table admitted from a frame."""
         return getattr(self._rt, 'frame_row_result', False)
@@ -614,35 +598,6 @@ class CombinedCellsInfo(LexicalCellsInfo):
     def table_schema(self):
         """M1: key and column kinds of a traced helper Table result (tracer.table_schema)."""
         return getattr(self._rt, 'table_schema', None)
-
-    @property
-    def table_result(self):
-        """M1: the provider type id when every sampled result is that provider type's
-        exact owner (a helper Table or Record), whether or not it is bound natively."""
-        binding = self.observed_provider_type
-        return binding.type_id if binding is not None else None
-
-    @property
-    def native_table_result(self):
-        binding = self.native_provider_binding
-        handle = binding.declaration.handle if binding is not None else None
-        return handle is not None and handle.type == 'TableHandle'
-
-    @property
-    def native_provider_binding(self):
-        binding = self.observed_native_binding
-        if binding and (binding.declaration.admission == 'observed'
-                        or binding.declared or self.forwarded_native_result):
-            return binding
-        return None
-
-    @property
-    def native_result_binder(self):
-        binding = self.native_provider_binding
-        if binding:
-            from modelx_cython.helpers import module_name
-            return f'{module_name(binding.manifest.provider)}.{binding.declaration.bind}'
-        return None
 
     def is_arg_int(self, arg: str):
         """Return True if the type of parameter ``arg`` (see

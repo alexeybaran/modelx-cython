@@ -3,44 +3,6 @@
 from libc.math cimport erf as c_erf, exp as c_exp, isinf as c_isinf, log as c_log, sqrt as c_sqrt, isfinite
 from math import erf as builtin_erf, exp as builtin_exp, isinf as builtin_isinf, log as builtin_log, sqrt as builtin_sqrt
 
-cdef double erf(object function, MathArgument value) except? -1.0:
-    if MathArgument is double:
-        if function is builtin_erf and isfinite(value):
-            return c_erf(value)
-    return function(value)
-
-
-cdef double exp(object function, MathArgument value) except? -1.0:
-    cdef double result
-    if MathArgument is double:
-        if function is builtin_exp:
-            result = c_exp(value)
-            if isfinite(result):
-                return result
-    return function(value)
-
-
-cdef bint isinf(object function, MathArgument value) except -1:
-    if MathArgument is double:
-        if function is builtin_isinf:
-            return c_isinf(value) != 0
-    return function(value)
-
-
-cdef double log(object function, MathArgument value) except? -1.0:
-    if MathArgument is double:
-        if function is builtin_log and value > 0.0:
-            return c_log(value)
-    return function(value)
-
-
-cdef double sqrt(object function, MathArgument value) except? -1.0:
-    if MathArgument is double:
-        if function is builtin_sqrt and value >= 0.0:
-            return c_sqrt(value)
-    return function(value)
-
-
 # ---------------------------------------------------------------- build-time resolution (W1.4)
 # ``math.<fn>(x)`` on a module Reference is bound at build time: the call passes the
 # Reference (a C field of the Space), never ``self.math.<fn>``, so no Python attribute

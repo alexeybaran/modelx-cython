@@ -198,9 +198,6 @@ class PXDGenerator:
             stmts.append(f"cimport {ci}")
         contexts = {provider for cls in self.module.classes.values()
                     for provider in getattr(cls, 'native_contexts', {}).values()}
-        contexts.update(c.native_provider_binding.manifest.provider
-                        for cls in self.module.classes.values() for c in cls.cells.values()
-                        if c.native_provider_binding is not None)
         for provider in sorted(contexts):
             stmts.append(f'from {self.package} cimport {module_name(provider)}')
         enum_declarations = code_enums.declarations(self.module)
@@ -469,7 +466,7 @@ class PXDGenerator:
                 continue
 
             if cells and cells.has_typeinfo():
-                rettype = 'object' if cells.native_result_binder else cells.get_rettype_expr(c_style=True)
+                rettype = cells.get_rettype_expr(c_style=True)
                 parameters = self._add_param_type_hints(
                     cls_name=cls_name, cells_name=cells.name, formula=True
                 )
@@ -607,11 +604,6 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
         self._ref_kinds = ref_kinds or {}
         self._uses_native_round = False
         self.helper_providers = set()
-        cells = [cell for cls in module.classes.values() for cell in cls.cells.values()]
-        self.object_providers = {binding.manifest.provider: binding.manifest
-                                 for cell in cells if (binding := cell.observed_provider_type)}
-        self.helper_providers.update(binding.manifest.provider for cell in cells
-                                     if (binding := cell.native_provider_binding))
         self.dense_entries = {}
         self.formula_entries = {}
         self.function_origins = {}      # D139: {private entry of an uncached Cell: (class, Cell)}
@@ -1495,7 +1487,7 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
                 ]
                 returns = cst.Annotation(
                     annotation=cst.parse_expression(
-                        'object' if cells.native_result_binder else cells.get_rettype_expr(),
+                        cells.get_rettype_expr(),
                         config=self._module_node.config_for_parsing,
                     )
                 )
@@ -1590,10 +1582,6 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
                         config=self._module_node.config_for_parsing,
                     )
                 )
-                binder = cells.native_result_binder
-                binding = cells.native_provider_binding
-                binding_args = ((cst.Arg(cst.SimpleString(repr(cells.method_fqname))),)
-                                if binding is not None and binding.declaration.bind_cell else ())
                 if cells.has_args():
                     # Add parameter type hints
                     parameters = self._add_param_type_hints(
@@ -1713,12 +1701,6 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
                             body = updated_node.body
                         else:
                             body = self._add_dict_assign(meth_name, updated_node)
-                        if binder:
-                            constructor = cst.parse_expression(binder)
-                            formula = m.Call(func=m.Attribute(
-                                value=m.Name(MX_SELF), attr=m.Name(FORMULA_PREF + meth_name)))
-                            body = m.replace(body, formula, lambda call, _: cst.Call(
-                                constructor, (cst.Arg(call), *binding_args)))
                         key_types = {"bint", "long long", "double"}
                         if not cells.is_locked:
                             key_types.add("str")
@@ -1739,23 +1721,13 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
                     flag = f"{MX_SELF}.{HAS_PREF}{meth_name}"
                     cache = f"{MX_SELF}.{VAR_PREF}{meth_name}"
                     formula = f"{MX_SELF}.{FORMULA_PREF}{meth_name}()"
-                    if binder:
-                        path = f', {cells.method_fqname!r}' if binding_args else ''
-                        formula = f'{binder}({formula}{path})'
                     shared = (cells.has_formula_def and not cells.is_locked
                               and not numeric_cache.exclusively_owned(cells))
-                    if cells.is_locked or binder or shared:
+                    if cells.is_locked or shared:
                         if cells.is_locked:
                             body = self._locked_body(flag, cache, formula)
-                        elif shared:
-                            body = self._shared_body(flag, cache, formula, cells.get_rettype_expr())
                         else:
-                            body = (f'if {flag}:\n'
-                                    f'    return {cache}\n'
-                                    'else:\n'
-                                    f'    {cache} = {formula}\n'
-                                    f'    {flag} = True\n'
-                                    f'    return {cache}\n')
+                            body = self._shared_body(flag, cache, formula, cells.get_rettype_expr())
                         stmts = cst.parse_module(
                             body,
                             config=self._module_node.config_for_parsing

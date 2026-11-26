@@ -350,7 +350,7 @@ class FrameReads:
                 parent = call
             elif isinstance(parent, cst.Return):
                 try:
-                    result = '' if self.cells.native_result_binder else self.cells.get_rettype_expr()
+                    result = self.cells.get_rettype_expr()
                 except Exception:
                     result = ''
                 return not (result.startswith('_mx_cy.') and result != '_mx_cy.object')
