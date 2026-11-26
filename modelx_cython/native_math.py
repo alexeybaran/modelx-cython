@@ -1,7 +1,9 @@
 """Calls of the math module through a Reference, compiled to the C library behind an identity check.
 
 ``self.<ref>.<name>(x)`` with ``<ref>`` a Reference that held the standard ``math`` module in the
-sample and ``<name>`` one of NAMES becomes ``_mx_sys._mx_math_<name>(self.<ref>, x, path)``. While
+sample and ``<name>`` one of NAMES becomes
+``_mx_sys._mx_math_<name>(_mx_cy.cast(_mx_cy.p_void, self.<ref>), self, '<ref>', x, path)``: the
+Reference as a borrowed pointer, compared only, so no reference count moves on the shared module. While
 the Reference is the math module and ``x`` is a C number or an exact float where the C library and
 CPython's math module give the same result, the C function runs; otherwise the Reference's own
 member is called, so a domain error, an overflow, a NaN, another argument type or a rebound
@@ -10,7 +12,7 @@ for isinf) whatever they are given, so the call's C result type holds.
 """
 import libcst as cst
 
-from .consts import MX_SELF, MX_SYS_MOD
+from .consts import CY_MOD, MX_SELF, MX_SYS_MOD
 from .scopes import OPAQUE_SCOPES
 
 NAMES = ('erf', 'exp', 'isinf', 'log', 'sqrt')
@@ -31,8 +33,11 @@ class _MathCalls(cst.CSTTransformer):
                 and len(before.args) == 1 and before.args[0].keyword is None and before.args[0].star == ''):
             return after
         self.count += 1
+        ref = func.value.attr.value
+        borrowed = cst.parse_expression(f'{CY_MOD}.cast({CY_MOD}.p_void, {MX_SELF}.{ref})')
         return cst.Call(cst.Attribute(cst.Name(MX_SYS_MOD), cst.Name(f'_mx_math_{func.attr.value}')),
-                        args=(cst.Arg(after.func.value), after.args[0].with_changes(comma=cst.MaybeSentinel.DEFAULT),
+                        args=(cst.Arg(borrowed), cst.Arg(cst.Name(MX_SELF)), cst.Arg(cst.SimpleString(repr(ref))),
+                              after.args[0].with_changes(comma=cst.MaybeSentinel.DEFAULT),
                               cst.Arg(cst.SimpleString(repr(self.path)))),
                         lpar=after.lpar, rpar=after.rpar)
 
