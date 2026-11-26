@@ -72,16 +72,6 @@ def frame_of(table, path):
     frame = getattr(table, '_mx_python_frame', _NO_FRAME)
     if frame is _NO_FRAME:
         return table
-    if frame is None:
-        with _lock:
-            frame = table._mx_python_frame
-            if frame is None:
-                from modelx_helpers.immutable_inputs import table_frame
-                owner = table.__modelx_table_owner__()
-                frame = table_frame(owner)          # a table admitted from a frame
-                if frame is None:
-                    frame = owner                   # a helper Table: what the formula returned, as live
-                table._mx_python_frame = frame
     return frame
 
 
@@ -108,20 +98,3 @@ class TableCell:
         return f'<compiled table cell {self._path}>'
 
 
-def row_series(record, path):
-    """What a Python caller gets for a cell whose value is a row of a table admitted from a frame: the
-    plain pandas row (``frame.loc[key]``, as live gives it), the same object on every call of the
-    cached cell (D130, superseding D119's read-only Series). Any other value is returned as it is.
-    Compiled code keeps reading the Record."""
-    from modelx_helpers.immutable_inputs import record_row
-    found = record_row(record)
-    if found is None:
-        return record
-    row, cached = found
-    if cached is None:
-        with _lock:
-            cached = record_row(record)[1]
-            if cached is None:
-                cached = row()
-                object.__setattr__(record, '_frame_row', (row, cached))
-    return cached
