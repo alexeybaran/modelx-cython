@@ -422,3 +422,46 @@ def test_float_sums_equal_live_bit_for_bit(tmp_path):
     for workers in ('1', '4'):
         assert out[workers][0] == out['export'], workers
         assert out[workers][1] == out['export_bad'], workers
+
+
+def test_a_second_coordinate_does_not_copy_unchanged_references(tmp_path, monkeypatch):
+    """The reused item copies the Space's References only when one changed: the hook guards _mx_copy_refs with
+    the generated check, and the check compares every kept Reference (a Space, an enum class, a tuple, a double,
+    an int and a str), so an unchanged Reference is never copied again; a check that cannot compare one returns
+    False and copies every Reference at every coordinate, which the values cannot show."""
+    (tmp_path / 'kinds.py').write_text('import enum\n\n\nclass Kind(enum.IntEnum):\n    LOW = 1\n    HIGH = 2\n',
+                                       encoding='utf-8')
+    monkeypatch.syspath_prepend(str(tmp_path))
+    from kinds import Kind
+    model = mx.new_model('KeptRefs')
+    try:
+        data = model.new_space('Data')
+        data.new_cells('rate', 'lambda: 0.5')
+        proj = model.new_space('Projection', formula='lambda key: None',
+                               refs={'data': data, 'Kind': Kind, 'names': ('a', 'b'), 'scale': 1.5, 'count': 3,
+                                     'label': 'x'})
+        proj.new_cells('keys', 'lambda: tuple(range(1, 5))')
+        proj.new_cells('v', 'lambda: key * scale * Kind.HIGH * data.rate() + count + len(names) + len(label)')
+        proj.set_collect(over={'key': proj.keys}, outputs='lambda: {"sum": {"v": v()}}')
+        live = proj.collect().sum.v
+        model.export(tmp_path / 'exported', locked_spaces=['Data'])
+    finally:
+        model.close()
+    (tmp_path / 'sample.py').write_text('from exported import mx_model as m\nm.Projection.collect()\n',
+                                        encoding='utf-8')
+    subprocess.run([sys.executable, '-m', 'modelx_cython', 'exported', '--sample', 'sample.py', '--no-spec'],
+                   cwd=tmp_path, check=True, capture_output=True)
+    pxd = (tmp_path / 'exported_cy' / '_mx_classes.pxd').read_text()
+    held = pxd.split('_mx_refs_held__c_Projection(')[1].split('\ncdef ')[0]
+    assert 'False' not in held
+    for name in ('data', 'Kind', 'names', 'label'):
+        assert f'root.{name} is base.{name}' in held, name
+    for name in ('scale', 'count'):
+        assert f'memcmp(&root.{name}, &base.{name}, sizeof(root.{name}))' in held, name
+    reset = pxd.split('_mx_reset_root__c_Projection(')[1].split('\ncdef ')[0]
+    assert not any(f'root.{name} ' in reset for name in ('data', 'Kind', 'names', 'scale', 'count', 'label'))
+    hook = (tmp_path / 'exported_cy' / '_mx_classes.py').read_text().split('def _mx_collect_hook(')[1]
+    assert hook.index('if not _mx_refs_held__c_Projection(_mx_fast, self):') < hook.index('_mx_fast._mx_copy_refs(self, self)')
+    out = subprocess.run([sys.executable, '-c', 'from exported_cy import mx_model as m; print(repr(m.Projection.collect().sum.v))'],
+                         cwd=tmp_path, check=True, capture_output=True, text=True).stdout
+    assert float(out) == live
