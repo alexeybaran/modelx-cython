@@ -258,6 +258,14 @@ four virtual cores and 32 policies per worker. From one to four workers:
 On the same machine, a share-nothing Python loop loses 11% per thread at four threads. These figures
 come from one developer session. An independent run on an eight-core machine is pending.
 
+A larger book shows where the remaining serial time goes. DIA_US_SEC with 5,000 policies at four
+workers speeds up 1.18x when the model's table preparation is inside the clock, and 3.33x when the
+preparation is done before the clock starts. That preparation is one serial pass in the model's own
+text, not in compiled code: the Data Cells `premium_array`, `premium_rows` and `premium_last` group the
+premium schedule point by point in pandas, taking 0.53 s per model. Method: a 4-vCPU cloud VM (Xeon
+2.1 GHz), free-threaded CPython 3.14t, `OPENBLAS_NUM_THREADS=1`. Each worker has its own model, the
+policies are split across threads, 512 policies are timed, and the figure is the best of 3 to 5 runs.
+
 | model | 1 worker | 4 workers | 8 workers (eight-core machine) |
 |---|---|---|---|
 | DIA (6c04fe4) | 1.00x | 3.24x | (pending) |
