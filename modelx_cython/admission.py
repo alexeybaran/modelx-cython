@@ -132,8 +132,8 @@ def _window(axes):
 
 
 OVER_LIMIT_WARNING = ('{cell}: window {window} (traced {ranges}) = {count:,} entries exceeds max_dense_entries '
-                      '{limit:,}; its values are kept in the hash store on every route (D135). If the cell is '
-                      'read only on a regular grid, key it on the grid index (conversion rule R9, grid key).')
+                      '{limit:,}; its values are kept in the hash store. If the cell is '
+                      'read only on a regular grid, give it one parameter for the grid position.')
 
 
 def over_limit_warning(cell):
