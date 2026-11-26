@@ -51,3 +51,20 @@ taken from 58ff45d).
 - maybe_unbound / `_unbound_locals`, isinstance folding: part of formula_passes.py, which replaces
   guard_integer_boundaries on the proposal line.
 - shared_facts around the integer guard: left with the guard.
+
+## After 4c1bf9a (test modules of the proposal, cache choices, native math)
+
+| commit | change | ratchet (with allocation, step) |
+|---|---|---|
+| 449991e, reverted by e01b140 | table runtime import dropped in the transformer | every fork-text build failed (frame-cell binds come later) |
+| 24a3a6d | table runtime import dropped at the end of table_cells.finish; test_frame_cell_table_import | accepted (batch) |
+| ec0c6df | over-limit warning wording (test_over_limit_hash_store) | in the batch |
+| d090dc9 | the proposal's test_collect | test only |
+| 43d7a1b | borrowed held-item pin (test_space_item_results; test_shared_item_reads passes) | in the batch |
+| 47518ad, reverted by 5f24e6d | primary_capacity from the range | VA_US_S +1.38%, MYGA SEC +17%: the tree's sizing stays |
+| dbb652b | dense-by-use removed (test_dense_by_range) | no effect on any model: kept |
+| 0a4f2ab | native math from the proposal's 7edf07b (borrowed Reference), helper math hands over log/exp/sqrt/erf/isinf | within 0.2% on every model: accepted |
+
+Kept in the tree's form, listed: primary_capacity (figures above; the tree's test_automatic_cache_policy);
+the provider build cache in setup.py (test_fp_contract), with the object providers; the helper math path for the
+other math members, constants, isclose and a local import of math (borrowed, no counterpart in native_math.py).

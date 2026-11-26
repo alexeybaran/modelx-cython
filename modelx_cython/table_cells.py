@@ -728,21 +728,19 @@ def finish(syntax, module):
             raise TypeError(f'{where}: passes a member of one IntEnum class to the parameter {param!r} of '
                             f'{cell}, traced as another IntEnum class and used there as an object, so its value '
                             'would differ from live modelx')
-    return _drop_unused_import(result)
+    return without_unused_runtime(result)
 
 
-def _drop_unused_import(syntax):
-    """The module without the runtime import when nothing reads ``_mx_table_cells``: a compiled model
-    without table cells imports without modelx_cython installed, as upstream's does."""
-    from .syntax import walk
-    imports = [statement for statement in syntax.body
-               if isinstance(statement, cst.SimpleStatementLine) and len(statement.body) == 1
-               and isinstance(statement.body[0], cst.ImportFrom)
-               and any(isinstance(alias.asname, cst.AsName) and alias.asname.name.value == RUNTIME
-                       for alias in (statement.body[0].names if isinstance(statement.body[0].names, tuple) else ()))]
-    if len(imports) != 1:
+def without_unused_runtime(syntax):
+    """``syntax`` without the table runtime import when no statement reads the runtime: a compiled model
+    without table Cells runs without modelx_cython installed. Run after every pass that can add a use
+    (the frame-cell binds of this pass included)."""
+    from modelx_cython.syntax import walk
+    imports = [stmt for stmt in syntax.body if isinstance(stmt, cst.SimpleStatementLine)
+               and len(stmt.body) == 1 and isinstance(stmt.body[0], cst.ImportFrom)
+               and any(alias.asname is not None and alias.asname.name.value == RUNTIME
+                       for alias in stmt.body[0].names)]
+    if not imports or any(isinstance(part, cst.Name) and part.value == RUNTIME
+                          for stmt in syntax.body if stmt not in imports for part in walk(stmt)):
         return syntax
-    used = any(isinstance(node, cst.Name) and node.value == RUNTIME
-               for statement in syntax.body if statement is not imports[0] for node in walk(statement))
-    return syntax if used else syntax.with_changes(
-        body=tuple(statement for statement in syntax.body if statement is not imports[0]))
+    return syntax.with_changes(body=tuple(stmt for stmt in syntax.body if stmt not in imports))
