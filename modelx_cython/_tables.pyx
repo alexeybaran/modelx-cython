@@ -580,6 +580,15 @@ cdef object label_obj(PreparedRef ref, Py_ssize_t row, int level):
     return (<PreparedTable>ref).level_labels[level][level_code_at(ref, row, level)]
 
 
+cdef Py_ssize_t position(Py_ssize_t start, Py_ssize_t stop, Py_ssize_t i) except -2:
+    cdef Py_ssize_t n = stop - start
+    if i < 0:
+        i += n
+    if i < 0 or i >= n:
+        raise IndexError('single positional indexer is out-of-bounds')
+    return start + i
+
+
 cdef object max_obj(PreparedRef ref):
     return (<PreparedTable>ref).max_label
 

@@ -122,7 +122,7 @@ _TABLE_RETURNS = {
     'contains_c': 'int', 'contains_1': 'int', 'max_ll': 'int', 'min_ll': 'int', 'level_max_ll': 'int',
     'level_min_ll': 'int', 'label_ll': 'int', 'view_start': 'int', 'view_stop': 'int',
     'nrows': 'int', 'asof_row': 'int', 'is_number': 'int', '_is_number': 'int', 'level_code_at': 'int',
-    'whole_row': 'int',
+    'whole_row': 'int', 'position': 'int',
     'i64_c': 'int', 'i64_1': 'int', 'f64_c': 'float', 'f64_1': 'float', 'field_f64': 'float',
 }
 # unsigned 64-bit words of the numeric caches: keys and hashes, never an operand of formula arithmetic

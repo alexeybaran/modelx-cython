@@ -31,6 +31,9 @@ pandas DataFrame or Series with a unique index (``tracer.frame_schema``), or a l
   integer, any other the label object pandas iteration gives. A whole frame is walked by pandas position; a prefix
   natively only while its stored rows are in pandas order (decided per table). A generator is walked natively only
   as the argument of a builtin that consumes it at once;
+- a float64 or int64 column C of a view or prefix (``v["c"]``, ``R.loc[prefix]["c"]``, ``R.loc[prefix, "c"]``, or a
+  local of one): its values and ``C.items()`` walked, ``C.tolist()``, ``list(C)``, a walk of ``C.index``, and
+  ``C.iloc[i]`` / ``C.loc[k]``;
 
 Where a read is lowered:
 
@@ -263,6 +266,18 @@ class _Walk:
         self.call, self.schema, self.depth, self.hold = call, schema, depth, hold
         self.start, self.stop, self.test, self.whole = start, stop, test, whole
         self.swaps = {}
+        self.column = None      # (hold, kind) of a column walked by its values
+        self.codes = []         # the level codes of a prefix
+        self.mode = 'index'     # 'index': the labels; 'values': a column's values; 'items': (label, value)
+
+    def swapped(self, expr):
+        """``expr`` with the locals of this walk replaced by what they stand for."""
+        swaps = self.swaps
+
+        class Swap(cst.CSTTransformer):
+            def leave_Name(self, original, new):
+                return swaps[original.value] if original.value in swaps else new
+        return expr.visit(Swap()) if swaps else expr
 
 
 # builtins that consume a generator argument at once: a generator over an index is walked natively only there
@@ -1145,6 +1160,7 @@ class _Rewrite(cst.CSTTransformer):
             return updated
         return (self.row_local_read(original, updated, parts) or self.row_cell_field(original, updated, parts)
                 or self._row_field(original, updated, parts) or self.view_read(original, updated, parts)
+                or self.column_item(original, updated, parts)
                 or self.keyed_read(original, updated, value, parts) or updated)
 
     # ------------------------------------------------------------------ fields of a row
@@ -1316,20 +1332,33 @@ class _Rewrite(cst.CSTTransformer):
 
     # ------------------------------------------------------------------ walks of an index
     def _walk(self, it):
-        """``X.index`` walked in pandas order (X a view local, a whole frame receiver, or ``R.loc[prefix]``; also
-        through a local assigned once to ``X.index``), else None."""
+        """What a walk of ``it`` visits in pandas order, else None: the labels of ``X.index`` (X a view local, a whole
+        frame receiver, ``R.loc[prefix]`` or a column of one of them; also through a local assigned once to
+        ``X.index``); the values of a column C of a view or prefix (``_column``), or its (label, value) pairs
+        ``C.items()``."""
         o = self.o
         swaps = {}
         if isinstance(it, cst.Name):
             value = o._value_of(it.value) if o._once(it.value) else None
-            if not (isinstance(value, cst.Attribute) and value.attr.value == 'index'):
-                return None
-            swaps[it.value] = value
-            self.swaps.setdefault(it.value, value)      # the local is dropped once unread
-            it = value
-        if not (isinstance(it, cst.Attribute) and it.attr.value == 'index'):
-            return None
-        target = it.value
+            if isinstance(value, cst.Attribute) and value.attr.value == 'index':
+                swaps[it.value] = value
+                self.swaps.setdefault(it.value, value)      # the local is dropped once unread
+                it = value
+        if isinstance(it, cst.Attribute) and it.attr.value == 'index':
+            walk = self._rows(it.value, swaps) or self._column(it.value, swaps)
+            if walk is not None:
+                walk.mode = 'index'
+            return walk
+        items = (isinstance(it, cst.Call) and not it.args and isinstance(it.func, cst.Attribute)
+                 and it.func.attr.value == 'items')
+        walk = self._column(it.func.value if items else it, swaps)
+        if walk is not None:
+            walk.mode = 'items' if items else 'values'
+        return walk
+
+    def _rows(self, target, swaps):
+        """The rows of X in pandas order: a view local, a whole frame receiver, or ``R.loc[prefix]``; else None."""
+        o = self.o
         view = self._view_of(target)
         whole = o._receiver(target) if view is None else None
         if view is not None:
@@ -1337,6 +1366,7 @@ class _Rewrite(cst.CSTTransformer):
             view.used = True
             walk = _Walk(view.call, view.schema, view.depth, hold, cst.Name(view.start), cst.Name(view.stop),
                          self._native_test(hold, [cst.parse_expression(f'{view.start} >= 0')]), False)
+            walk.codes = list(view.codes)
             swaps[view.name] = view.source
         elif whole is not None:
             if not self._plain(*whole):
@@ -1370,10 +1400,46 @@ class _Rewrite(cst.CSTTransformer):
                 f'({start} := {_code(self._m("view_start", o.ref(hold), *args))}) >= 0'))
             walk = _Walk(call, schema, len(parts), hold, cst.Name(start), self._m('view_stop', o.ref(hold), *args),
                          self._native_test(hold, conditions), False)
+            walk.codes = codes
             if isinstance(target.value.value, cst.Name):
                 swaps[target.value.value.value] = call
                 self.replaced_names.add(target.value.value.value)
         walk.swaps = swaps
+        return walk
+
+    def _column(self, expr, swaps):
+        """The rows of a float64 or int64 column C of a view or prefix: ``V["c"]``, ``R.loc[prefix]["c"]``,
+        ``R.loc[prefix, "c"]``, or a local assigned once to one of them; the walk of those rows with the column's
+        hold (``column``), else None."""
+        o = self.o
+        if isinstance(expr, cst.Name):
+            value = o._value_of(expr.value) if o._once(expr.value) else None
+            if value is None or any(nested for _, nested in o.facts.formula.loads.get(expr.value, ())):
+                return None
+            found = self._column(value, swaps)
+            if found is not None:
+                swaps[expr.value] = found.swapped(value)
+                self.swaps.setdefault(expr.value, swaps[expr.value])      # dropped once unread
+            return found
+        parts = _index_parts(expr) if isinstance(expr, cst.Subscript) else None
+        if not parts or _literal_str(parts[-1]) is None:
+            return None
+        label = _literal_str(parts[-1])
+        if len(parts) == 1:
+            source = expr.value
+        elif isinstance(expr.value, cst.Attribute) and expr.value.attr.value == 'loc':
+            source = expr.with_changes(slice=[e.with_changes(comma=cst.MaybeSentinel.DEFAULT) for e in expr.slice[:-1]])
+        else:
+            return None
+        walk = self._rows(source, swaps)
+        if walk is None or walk.whole or walk.schema['kind'] != 'frame':
+            return None
+        kind = dict(walk.schema['columns']).get(label)
+        if kind not in READ or len(walk.schema['levels']) - walk.depth != 1:
+            return None
+        chold = self._take(walk.call, label, COLUMN_KIND[kind])
+        walk.column = (chold, kind)
+        walk.test = self._conjunction([walk.test, self._positive(o.slot(chold))])
         return walk
 
     def _labels(self, walk, target, position):
@@ -1387,6 +1453,16 @@ class _Rewrite(cst.CSTTransformer):
             return self._m('label_ll' if levels[level] == 'int' else 'label_obj', self.o.ref(walk.hold),
                            row.deep_clone(), cst.Integer(str(level)))
         remaining = range(walk.depth, len(levels))
+        if walk.mode != 'index':        # a column: its value, or (label, value)
+            chold, kind = walk.column
+            value = self._m(kind + '_row', self.o.ref(chold), self.o.slot(chold), self._next(row.deep_clone()))
+            if walk.mode == 'values':
+                return {target.value: value} if isinstance(target, cst.Name) else None
+            if not (isinstance(target, cst.Tuple) and len(target.elements) == 2 and all(
+                    isinstance(e, cst.Element) and isinstance(e.value, cst.Name) for e in target.elements)):
+                return None
+            key, name = (e.value.value for e in target.elements)
+            return {key: label(walk.depth), name: value} if key != name else None
         if isinstance(target, cst.Name):
             if len(remaining) == 1:
                 return {target.value: label(walk.depth)}
@@ -1490,15 +1566,22 @@ class _Rewrite(cst.CSTTransformer):
         return self._branch(walk.test, [native], [self._walk_fallback(updated, walk)])
 
     def index_builtin(self, original, updated):
-        """``list(X.index)``, ``tuple(X.index)``, ``set(X.index)``: the labels in pandas order."""
+        """``list(X.index)``, ``tuple(X.index)``, ``set(X.index)``: the labels in pandas order; ``list(C)`` and
+        ``C.tolist()`` of a column: its values (the Python numbers both give)."""
         o = self.o
         func = original.func
-        if not (isinstance(func, cst.Name) and func.value in ('list', 'tuple', 'set') and len(original.args) == 1
+        if isinstance(func, cst.Attribute) and func.attr.value == 'tolist' and not original.args:
+            walk = self._walk(func.value)
+            if walk is None or walk.mode != 'values':
+                return None
+            func = cst.Name('list')
+        elif (isinstance(func, cst.Name) and func.value in ('list', 'tuple', 'set') and len(original.args) == 1
                 and original.args[0].keyword is None and not original.args[0].star
                 and func.value not in o.facts.formula.binds and func.value not in o.facts.formula.other):
-            return None
-        walk = self._walk(original.args[0].value)
-        if walk is None:
+            walk = self._walk(original.args[0].value)
+            if walk is None or walk.mode == 'items' or (walk.mode == 'values' and func.value != 'list'):
+                return None
+        else:
             return None
         position = self._position()
         name = f'_mx_k{o.key_count}'
@@ -1509,6 +1592,36 @@ class _Rewrite(cst.CSTTransformer):
         if func.value == 'tuple':
             native = cst.Call(func=cst.Name('tuple'), args=[cst.Arg(native)])
         return self._lowered(walk.test, native, self._walk_fallback(updated, walk))
+
+    def column_item(self, original, updated, parts):
+        """``C.iloc[i]`` (i an integer, from the end when negative) and ``C.loc[k]`` of a column of a view or prefix
+        (``_column``): the value at that position of the prefix's rows, or at label k of its remaining level."""
+        o = self.o
+        value = original.value
+        if not (isinstance(value, cst.Attribute) and value.attr.value in ('iloc', 'loc') and len(parts) == 1
+                and not _several(parts[0])):
+            return None
+        part = parts[0]
+        if value.attr.value == 'iloc' and (not o.facts.is_int(part) or isinstance(part, cst.Name)):
+            return None         # a position known from the text to be an integer (a name may be a bool)
+        swaps = {}
+        walk = self._column(value.value, swaps)
+        if walk is None:
+            return None
+        walk.swaps = swaps
+        chold, kind = walk.column
+        emit = self.updated_of.get(id(part), part)
+        if value.attr.value == 'iloc':
+            row = self._m('position', walk.start, walk.stop, _cast('_mx_cy.Py_ssize_t', emit))
+            read, test = self._m(kind + '_row', o.ref(chold), o.slot(chold), self._next(row)), walk.test
+        else:
+            levels = walk.schema['levels']
+            conditions = [walk.test]
+            own = (self._held(chold, walk.depth, part, conditions) if o.item_fixed(part, levels[walk.depth])
+                   else self.code_of(chold, walk.depth, part, levels[walk.depth], conditions))
+            suffix, args = self.code_args([*walk.codes, own])
+            read, test = self._m(kind + suffix, o.ref(chold), o.slot(chold), *args), self._conjunction(conditions)
+        return self._lowered(test, read, self._walk_fallback(updated, walk), kind)
 
     def row_local_read(self, original, updated, parts):
         """``row["c"]`` of a row local: the field from the prepared blocks, of the kind pandas gives it."""

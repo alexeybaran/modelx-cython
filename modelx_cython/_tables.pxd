@@ -319,6 +319,11 @@ cdef inline Py_ssize_t whole_row(PreparedRef ref, Py_ssize_t position) noexcept 
 cdef object label_obj(PreparedRef ref, Py_ssize_t row, int level)
 
 
+# ``C.iloc[i]`` of a column of a prefix's rows [start, stop): the stored row (i from the end when negative);
+# IndexError as pandas when i is out of bounds
+cdef Py_ssize_t position(Py_ssize_t start, Py_ssize_t stop, Py_ssize_t i) except -2
+
+
 cdef inline Py_ssize_t nrows(PreparedRef ref) noexcept nogil:
     return (<PreparedTable>ref).nrows
 
