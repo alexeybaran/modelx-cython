@@ -25,7 +25,6 @@ ctypedef fused MathValue2:
     object
 
 cdef object math_module
-cdef object numeric_math_module
 # diag-mt2: ``namespace`` is the module Reference as a BORROWED pointer: the generated call
 # passes ``cast(p_void, self.<ref>)`` (the Space keeps the Reference alive), so a per-step
 # call takes no reference on the module every worker shares (an atomic increment and decrement

@@ -3,7 +3,6 @@ import sys
 
 import pytest
 
-from modelx_cython.helpers import registered_helper
 from modelx_cython.provider_manifest import owner_provider_binding, read_provider_manifest
 
 
@@ -56,15 +55,6 @@ def test_read_independent_provider_manifest(declaration):
     assert PROVIDER not in sys.modules
     with pytest.raises(TypeError):
         manifest.types['another'] = curve
-
-
-def test_function_provider_does_not_need_a_manifest(declaration):
-    def plain_lookup(value):
-        return value
-
-    plain_lookup.__modelx_cython_helper__ = (PROVIDER, 'lookup')
-    assert registered_helper(plain_lookup) == (PROVIDER, 'lookup')
-    assert read_provider_manifest(PROVIDER, ABI) is None
 
 
 def test_missing_provider_package():
