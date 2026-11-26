@@ -12,20 +12,22 @@ The modelx change that exports collect with the hook call (https://github.com/al
 `r4/p2-modelx-collect`, commits 7956ad4..4f21476) must be merged first. Without it a model exports no collect, the
 compiled class gains nothing and the tests of this change are skipped.
 
-This change goes on top of the fast SEC change (`pr/fast-sec`).
+This change goes on top of the fast SEC change (`pr/fast-sec`, including its native math-module calls).
 
 ## Commits
 
-In order, on `pr/fast-sec`:
+In order, on `pr/fast-sec` (bf9c28f):
 
 | # | commit | non-test lines | test lines |
 |---|---|---|---|
-| 1 | Compile a Space declared with collect: the cache slot and the collect hook | +203 / -2 | +141 |
+| 1 | Compile a Space declared with collect: the cache slot and the collect hook | +244 / -2 | +148 |
 | 2 | Reuse one item per worker thread in collect | +114 / -11 | +82 |
 | 3 | Borrow the held item of an exclusively owned item at a read | +17 / -5 | +146 / -3 |
 
-Total: 8 files, +692 / -10. Commit 1 adds `collect.py` and its wiring in `config.py` (spec key `collect_workers`),
-`parser.py` and `transformer.py`; commit 2 changes `collect.py` and `transformer.py`; commit 3 changes
+Total: 10 files, +740 / -10. Commit 1 adds `collect.py`, its wiring in `config.py` (spec key `collect_workers`), `parser.py` and
+`transformer.py`, and its documentation (`spec.md`: `collect_workers`; `freethreading.md`: the run-time setting
+`_mx_collect_workers` and the refusal over unlocked Spaces); its test also checks that collect on an ItemSpace raises
+TypeError as the export does; commit 2 changes `collect.py` and `transformer.py`; commit 3 changes
 `space_results.py` and, as its message states, also changes the direct route.
 
 **Declaration and evaluator.** The compiled class declares the collect cache and defines the hook from the exported
