@@ -71,6 +71,23 @@ def test_locked_classes():
     assert visitor.kwarg_called_names == set()
 
 
+def test_exported_dynamic_ref_storage():
+    source = textwrap.dedent('''\
+        class _c_Actual:
+            __slots__ = ("__dict__",)
+
+            def __init__(self, parent):
+                pass
+
+        class _c_Static:
+            __slots__ = ("name",)
+        ''')
+    visitor = ModuleVisitor(module="M._mx_classes", source=source)
+
+    assert visitor.dynamic_ref_classes == {"_c_Actual"}
+    assert visitor.spaces == {}
+
+
 # --------------------------------------------------------------------
 # Parameters a formula binds again
 

@@ -41,6 +41,7 @@ import inspect
 import pathlib
 import random
 import numbers
+import operator
 import itertools
 from dataclasses import dataclass
 from contextlib import contextmanager
@@ -125,6 +126,8 @@ class RuntimeCellsInfo:     # TODO: Create base class RuntimeBaseMemberInfo
     returns, collapse to a plain ``object`` return type.  Each kind of
     fallback is logged once, with the arguments of the conflicting
     calls.
+    Scalar integral/nonintegral real mixtures may widen to double when values
+    are exactly preserved. Explicit object Cell declarations retain scalar types.
 
     Attributes
     ----------
@@ -161,8 +164,21 @@ class RuntimeCellsInfo:     # TODO: Create base class RuntimeBaseMemberInfo
         self.module = traces[0].func.__module__
         self.arg_types = {}
         self.max_args = {}
+        self.min_args = {}
+        self.observed_min_args = {}
+        self.observed_max_args = {}
+        # A call that raised gives its arguments but no return value; a Cell whose every
+        # traced call raised keeps them all (its result is then traced as None, as before).
+        returned = [trace for trace in traces if not getattr(trace, 'raised', False)] or list(traces)
+        arrays = [trace.ret_val for trace in returned if isinstance(trace.ret_val, np.ndarray)]
+        formats = {array.dtype.str for array in arrays}
+        self.array_buffer_compatible = (len(formats) == 1 and all(
+            array.ndim > 0 and array.dtype.isnative
+            and array.dtype in (np.dtype('float64'), np.dtype('int64'))
+            for array in arrays)) if arrays else True
+        self.has_negative_args = False
         self._init_arg_types(traces)
-        self.ret_type = self._init_ret_type(traces)
+        self.ret_type = self._init_ret_type(returned)
 
     def has_args(self):
         """Return whether the cells method takes arguments.
@@ -178,11 +194,39 @@ class RuntimeCellsInfo:     # TODO: Create base class RuntimeBaseMemberInfo
     def _init_arg_types(self, traces):
         """Merge observed argument types into arg_types and max_args."""
         arg_type_val: Dict[str, dict[type, Any]] = {}
+        wide_arguments = set()
+        # Public Cell formulas are uncached. Preserve an authored object
+        # argument there even when the sample supplies only one scalar type.
+        annotations = traces[0].func.__annotations__ if is_user_defined(self.name) else {}
 
         for trace in traces:
-            _add_arg_vals(arg_type_val, trace)
+
+            for arg, val in itertools.islice(
+                trace.arg_vals.items(), 1, None
+            ):  # remove self
+                tp = type(val)
+                integral = issubclass(tp, numbers.Integral)
+                if integral:
+                    val = operator.index(val)
+                    if val < 0:
+                        self.has_negative_args = True
+                    if not -(1 << 63) <= val < (1 << 63):
+                        wide_arguments.add(arg)
+                    self.min_args[arg] = min(self.min_args.get(arg, 0), val)
+                    self.observed_min_args[arg] = min(self.observed_min_args.get(arg, val), val)
+                    self.observed_max_args[arg] = max(self.observed_max_args.get(arg, val), val)
+                types = arg_type_val.setdefault(arg, {})
+                if tp not in types:
+                    types[tp] = val
+                elif integral:
+                    if val > types[tp]:
+                        types[tp] = val
 
         for arg, type_val in arg_type_val.items():
+
+            if annotations.get(arg) is object or arg in wide_arguments:
+                self.arg_types[arg] = object
+                continue
 
             if len(type_val) == 1:
                 for tp, val in type_val.items():
@@ -209,30 +253,47 @@ class RuntimeCellsInfo:     # TODO: Create base class RuntimeBaseMemberInfo
         """Merge observed return types into one ReturnTypeInfo,
         widening or falling back to ``object`` as described in the
         class docstring (see :class:`_ReturnTypeMerger`)."""
+        # A concrete object annotation declares the result ABI. A spec
+        # can override this later, and string annotations are unevaluated.
+        if any(trace.func.__annotations__.get('return') is object for trace in traces):
+            return ReturnTypeInfo(object)
         merger = _ReturnTypeMerger(self.fqname)
         for tr in traces:
             merger.add(tr)
         return merger.ret_type
 
 
-def _add_arg_vals(arg_type_val: Dict[str, Dict[type, Any]], trace) -> bool:
+# Returns read by value only (type, magnitude): a repeat of one adds nothing to RuntimeCellsInfo
+_PLAIN_RETURNS = frozenset((int, float, bool, str, type(None), np.float64, np.float32, np.int64, np.int32, np.bool_))
+# Plain returns without a largest value
+_UNORDERED_RETURNS = frozenset((bool, np.bool_, str, type(None)))
+
+
+def _add_arg_vals(arg_type_val: Dict[str, Dict[type, Any]], minimums, trace) -> bool:
     """Record the argument values of ``trace`` in ``arg_type_val``.
 
     ``arg_type_val`` maps each argument, ``self`` excluded, to its
     observed types, each mapped to the value quoted for it: the first
-    value seen, or for an integral type the largest.  Returns whether
-    ``arg_type_val`` changed: a new type, or a larger integral value.
+    value seen, or for an integral type the largest. Preserve a new
+    lower integral value too, so deduplication cannot hide a wide argument.
     """
     changed = False
     for arg, val in itertools.islice(trace.arg_vals.items(), 1, None):
         tp = type(val)
-        types = arg_type_val.setdefault(arg, {})
+        integral = issubclass(tp, numbers.Integral)
+        types = arg_type_val.get(arg)
+        if types is None:
+            types = arg_type_val[arg] = {}
         if tp not in types:
             types[tp] = val
             changed = True
-        elif issubclass(tp, numbers.Integral):
-            if val > types[tp]:
-                types[tp] = val
+        elif integral and val > types[tp]:
+            types[tp] = val
+            changed = True
+        if integral:
+            value = int(val)
+            if arg not in minimums or value < minimums[arg]:
+                minimums[arg] = value
                 changed = True
     return changed
 
@@ -260,6 +321,8 @@ class _ReturnTypeMerger:
         self.ret_type: Optional[ReturnTypeInfo] = None
         self._first_args = None
         self._logged = set()
+        self._array_formats = set()
+        self._integral_double_exact = True
 
     @staticmethod
     def _arg_expr(args):
@@ -291,18 +354,37 @@ class _ReturnTypeMerger:
             messages logged.
         """
         val = tr.ret_val
+        changed = False
+        last_tp = self.ret_type
         if isinstance(val, np.ndarray):
             tp = ReturnTypeInfo(val.dtype.type, is_array=True, ndim=val.ndim)
+            # Buffer compatibility depends on byte order and rank as well
+            # as the NumPy scalar type used to merge return types.
+            if not self.log:
+                signature = (val.dtype.str, val.ndim > 0)
+                changed = signature not in self._array_formats
+                self._array_formats.add(signature)
         else:
-            tp = ReturnTypeInfo(type(val))
+            integral = isinstance(val, numbers.Integral)
+            value_type = object if integral and not -(1 << 63) <= val < (1 << 63) else type(val)
+            if self._integral_double_exact and integral:
+                try:
+                    integer = operator.index(val)
+                    self._integral_double_exact = int(float(integer)) == integer
+                except (TypeError, ValueError, OverflowError):
+                    self._integral_double_exact = False
+                changed = not self._integral_double_exact
+            if (last_tp is not None and last_tp.value_type == value_type
+                    and last_tp.is_array == False and last_tp.ndim == 0):     # noqa: E712 (as ==)
+                return changed      # the merged type stays: ``last_tp == tp`` below
+            tp = ReturnTypeInfo(value_type)
 
-        last_tp = self.ret_type
         if last_tp is None:
             self.ret_type = tp
             self._first_args = tr.arg_vals
             return True
         if last_tp == tp:
-            return False
+            return changed
 
         before = (last_tp.value_type, last_tp.is_array, last_tp.ndim)
         logged = False
@@ -331,7 +413,7 @@ class _ReturnTypeMerger:
                 last_tp.value_type = numbers.Integral
             elif (issubclass(last_tp.value_type, numbers.Real)
                   and issubclass(tp.value_type, numbers.Real)):
-                last_tp.value_type = numbers.Real
+                last_tp.value_type = numbers.Real if self._integral_double_exact else object
             else:
                 logged = self._fallback(
                     "types", tr, last_tp.value_type.__name__,
@@ -349,7 +431,7 @@ class _ReturnTypeMerger:
 
         after = (self.ret_type.value_type, self.ret_type.is_array,
                  self.ret_type.ndim)
-        return logged or after != before
+        return changed or logged or after != before
 
 
 class RuntimeValueInfo:
@@ -367,7 +449,8 @@ class RuntimeValueInfo:
 
     def __init__(self, value, mx_class=''):
         """Record the type of ``value`` and an optional class name."""
-        self.type_ = type(value)
+        self.type_ = (object if isinstance(value, numbers.Integral)
+                      and not -(1 << 63) <= value < (1 << 63) else type(value))
         self.mx_class = mx_class
 
     @classmethod
@@ -518,6 +601,7 @@ class MxCallTracer(CallTracer):
         """
         super().__init__(logger, max_typed_dict_size, code_filter, sample_rate)
         self.module = module
+        self._in_module = {}    # id(code object) -> (code object, its function is in the module)
 
     def handle_call(self, frame: FrameType) -> None:
         """Start a trace for a call, capturing argument values.
@@ -541,9 +625,10 @@ class MxCallTracer(CallTracer):
             return
         arg_names = code.co_varnames[0: code.co_argcount]
         arg_vals = {}
+        local_vals = frame.f_locals     # one view of the frame's locals (a new proxy per read)
         for name in arg_names:
-            if name in frame.f_locals:
-                arg_vals[name] = frame.f_locals[name]
+            if name in local_vals:
+                arg_vals[name] = local_vals[name]
 
         self.traces[frame] = CallTrace(func, arg_vals)
 
@@ -578,6 +663,8 @@ class MxCallTracer(CallTracer):
                 ret_opcodes = (RETURN_VALUE_OPCODE,)
             if last_opcode in ret_opcodes:
                 trace.ret_val = arg
+            else:
+                trace.raised = True     # unwound by an exception: no return value
 
             # Extract and store local variables
             # code = frame.f_code
@@ -610,9 +697,14 @@ class MxCallTracer(CallTracer):
             return self
 
         # Filter by module name here.  The function is resolved once per
-        # code object: an uncached cells is traced on every call.
-        func = self._get_func(frame)
-        if not func or not func.__module__.split(".")[0] == self.module:
+        # code object: an uncached cells is traced on every call.  So is
+        # the answer, kept by identity with the code object held.
+        entry = self._in_module.get(id(code))
+        if entry is None or entry[0] is not code:
+            func = self._get_func(frame)
+            entry = self._in_module[id(code)] = code, bool(
+                func and func.__module__.split(".")[0] == self.module)
+        if not entry[1]:
             return self
 
         try:
@@ -684,10 +776,22 @@ class MxCodeFilter:
     def __init__(self):
         # code object -> is_uncached_cells_code(code), as computed once
         self._public = {}
+        # id(code object) -> (code object, whether it is traced)
+        self._decisions = {}
 
     def __call__(self, code):
         """Return ``True`` if the code object should be traced."""
-        # Since called many times, check module name and function name only
+        # Called on every call and return event: the answer is kept per code object
+        # (by identity, the object held with it, so that its id is not reused)
+        entry = self._decisions.get(id(code))
+        if entry is not None and entry[0] is code:
+            return entry[1]
+        decision = self._decide(code)
+        self._decisions[id(code)] = code, decision
+        return decision
+
+    def _decide(self, code):
+        # check module name and function name only
         if (
             code.co_filename[-len(MX_MODEL_MOD) - 3: -3] == MX_MODEL_MOD
             or code.co_filename[-len(MX_SPACE_MOD) - 3: -3] == MX_SPACE_MOD
@@ -696,7 +800,7 @@ class MxCodeFilter:
                 return True
             elif code.co_name == MX_ASSIGN_REFS:
                 return True
-            elif code.co_name == "__call__":
+            elif code.co_name in ("__call__", "_mx_assign_params", "_mx_copy_params"):
                 return True
             else:
                 result = self._public.get(code)
@@ -748,43 +852,86 @@ class MxCallTraceLogger(CallTraceLogger):
         self.module = module
         self.new_name = new_model_name
         self._traces = {}  # funcname -> [trace]
-        # funcname -> (argument types and values, return type merger) of
-        # the traces kept: see log
+        # funcname -> (argument types and values, integral minima, return
+        # type merger) for uncached traces: see log
         self._kept = {}
+        # funcname -> the same state for cached traces, with calls per receiver, the result
+        # types seen and the largest scalar result: see log
+        self._cached = {}
         self.cells_info = {}  # funcname -> MethodTypeInfo
         self.ref_info = {}
         self.modules = []
         self.param_info = {}  # class name -> {param: RuntimeParamInfo}
+        self._assigned_params = {}
+        self._funcnames = {}    # traced function -> its fully qualified name
 
     def log(self, trace: CallTrace) -> None:
         """Log a single call trace.
 
-        The trace is appended to an internal list keyed by its fully
-        qualified function name, for aggregation in :meth:`flush`,
-        unless it changes nothing that :class:`RuntimeCellsInfo` derives
-        from the traces: the logger keeps, per function, the state that
-        :class:`RuntimeCellsInfo` builds from the traces kept so far --
-        each argument's observed types with the value quoted for each
-        (see :func:`_add_arg_vals`), and the merged return type with the
-        fallbacks logged (see :class:`_ReturnTypeMerger`) -- and drops a
-        trace that leaves both unchanged.  The first trace is always
-        kept.  Since a dropped trace changes nothing, what
-        :class:`RuntimeCellsInfo` derives from the kept traces is exactly
-        what it derives from all of them, including its log messages and
-        the values they quote, while a function called many times with
-        the same types -- an uncached cells is called on every use --
-        keeps only a few traces alive.
+        Retain only the traces that contribute an argument or return
+        observation. A cached trace is kept as well when
+        its result is not a plain scalar (arrays, frames, tables and
+        other objects are read trace by trace), when its result type is
+        new, or when it raises the largest scalar result, so that
+        :class:`RuntimeCellsInfo` derives from the kept traces exactly
+        what it derives from all of them.
         """
-        name = trace.funcname
-        state = self._kept.get(name)
-        if state is None:
-            state = self._kept[name] = (
-                {}, _ReturnTypeMerger(name, log=False))
-        arg_type_val, merger = state
-        args_changed = _add_arg_vals(arg_type_val, trace)
-        ret_changed = merger.add(trace)
-        if args_changed or ret_changed:
-            self._traces.setdefault(name, []).append(trace)
+        func = trace.func
+        name = func.__name__
+        funcname = self._funcnames.get(func)
+        if funcname is None:
+            funcname = self._funcnames[func] = trace.funcname
+        if name == "_mx_assign_params":
+            values = iter(trace.arg_vals.items())
+            _, target = next(values)
+            self._record_params(target, values)
+        elif name == "_mx_copy_params":
+            source, target = trace.arg_vals.values()
+            cls = type(source)
+            params = getattr(sys.modules[cls.__module__], SPACE_PARAMS + "_" + cls.__name__[len(SPACE_PREF):])
+            self._record_params(target, ((param, getattr(source, param)) for param in params))
+        elif name.startswith(FORMULA_PREF) or name in (MX_ASSIGN_REFS, "__call__"):
+            name = funcname
+            state = self._cached.get(name)
+            if state is None:
+                state = self._cached[name] = {}, {}, _ReturnTypeMerger(name, log=False), set(), [None]
+            types, minimums, merger, ret_types, largest = state
+            value, raised = getattr(trace, 'ret_val', None), getattr(trace, 'raised', False)
+            keep = _add_arg_vals(types, minimums, trace)
+            value_type = type(value)
+            if value_type not in ret_types:
+                ret_types.add(value_type)
+                keep = True
+            if value_type not in _PLAIN_RETURNS:
+                keep = True
+            elif not raised:
+                keep = merger.add(trace) or keep
+                if value_type not in _UNORDERED_RETURNS and value == value:
+                    try:
+                        value = float(value)
+                    except OverflowError:
+                        value, keep = None, True
+                    if value is not None and (largest[0] is None or value > largest[0]):
+                        largest[0], keep = value, True
+            if keep:
+                self._traces.setdefault(name, []).append(trace)
+        else:
+            name = funcname
+            state = self._kept.get(name)
+            if state is None:
+                state = self._kept[name] = {}, {}, _ReturnTypeMerger(name, log=False)
+            types, minimums, merger = state
+            args_changed = _add_arg_vals(types, minimums, trace)
+            ret_changed = False if getattr(trace, 'raised', False) else merger.add(trace)
+            if args_changed or ret_changed:
+                self._traces.setdefault(name, []).append(trace)
+
+    def _record_params(self, target, values):
+        cls = type(target)
+        params = self._assigned_params.setdefault(cls.__module__ + "." + cls.__name__, {})
+        for name, value in values:
+            if name not in params:
+                params[name] = RuntimeParamInfo.init_mxobj(value, self.module)
 
     def flush(self) -> None:
         """Aggregate the accumulated traces into runtime info objects.
@@ -827,7 +974,14 @@ class MxCallTraceLogger(CallTraceLogger):
 
         self._traces.clear()
         self._kept.clear()
+        self._cached.clear()
         self._get_params()
+        # Collection receivers are absent from the retained ItemSpace tree.
+        for cls, assigned in self._assigned_params.items():
+            params = self.param_info.setdefault(cls, {})
+            for name, info in assigned.items():
+                params.setdefault(name, info)
+        self._assigned_params.clear()
 
         if self.new_name:
             self._update_model_name()
@@ -911,8 +1065,8 @@ def trace_calls(
 
     A context manager that installs an :class:`MxCallTracer` as the
     profile function via :func:`sys.setprofile` for the duration of
-    the ``with`` block.  On exit, the previous profile function is
-    restored and ``logger.flush()`` is called.
+    the ``with`` block. The previous profile function is restored on exit.
+    A successful trace is then flushed to the logger.
 
     Parameters
     ----------
@@ -940,4 +1094,4 @@ def trace_calls(
         yield
     finally:
         sys.setprofile(old_trace)
-        logger.flush()
+    logger.flush()

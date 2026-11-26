@@ -38,6 +38,7 @@ except ImportError:  # Python -3.9
 from functools import cached_property
 import libcst as cst
 import libcst.matchers as m
+from modelx_cython.syntax import parse_source
 from libcst.metadata import ParentNodeProvider, ScopeProvider, GlobalScope, ClassScope
 
 from modelx_cython.consts import (
@@ -235,8 +236,8 @@ class ModuleVisitor(m.MatcherDecoratableVisitor, ParentScopeAddin):
     cimports : list
         Always left empty by this visitor.
     formula_defs : dict
-        Maps each space class name to the set of cells names for
-        which a ``_f_<name>`` formula method exists in the source.
+        Maps each space class name to its Cells' ``_f_<name>`` formula nodes,
+        keyed by Cell name.
         Cells that modelx exports as uncached have no ``_f_`` method.
     closure_funcs : dict
         Maps each space class name to the set of cells method names
@@ -277,12 +278,15 @@ class ModuleVisitor(m.MatcherDecoratableVisitor, ParentScopeAddin):
         self.classes = []
         self.spaces = {}  # Parent class name to list of child space names
         self.cimports = []
-        self.formula_defs = {}  # {class_name: set of cells names with _f_ defs}
+        self.formula_defs = {}
         self.closure_funcs = {}  # {class_name: set of method names containing closures}
         self.generator_funcs = {}  # {class_name: set of method names containing yield}
         self.param_rebinds = {}  # {class_name: {method name: {param: [binding]}}}
         self.locked_classes = set()  # classes whose __init__ assigns self._mx_lock
-        self.wrapper = cst.metadata.MetadataWrapper(cst.parse_module(source))
+        self.itemspace_classes = set()
+        self.dynamic_ref_classes = set()
+        # a module just parsed holds no node twice: the wrapper needs no copy of it
+        self.wrapper = cst.metadata.MetadataWrapper(parse_source(source), unsafe_skip_copy=True)
         self.wrapper.visit(self)
         self.kwarg_called_names = self._collect_kwarg_called_names()
 
@@ -324,6 +328,16 @@ class ModuleVisitor(m.MatcherDecoratableVisitor, ParentScopeAddin):
         name = original_node.name.value
         if name[:len(SPACE_PREF)] == SPACE_PREF:
             self.classes.append(name)
+            for line in original_node.body.body:
+                if not isinstance(line, cst.SimpleStatementLine):
+                    continue
+                for stmt in line.body:
+                    if m.matches(stmt, m.Assign(
+                            targets=(m.AssignTarget(target=m.Name("__slots__")),))) and any(
+                            isinstance(item.value, cst.SimpleString)
+                            and item.value.evaluated_value == "__dict__"
+                            for item in getattr(stmt.value, "elements", ())):
+                        self.dynamic_ref_classes.add(name)
 
     @m.call_if_inside(m.ClassDef())
     @m.call_if_inside(m.FunctionDef(name=cst.Name("__init__")))
@@ -350,6 +364,9 @@ class ModuleVisitor(m.MatcherDecoratableVisitor, ParentScopeAddin):
 
             if target.value.value == MX_SELF and target.attr.value == MX_LOCK:
                 self.locked_classes.add(cls_name)
+                return
+            if target.value.value == MX_SELF and target.attr.value == "_mx_itemspaces":
+                self.itemspace_classes.add(cls_name)
                 return
 
             # Assuming all member assignments in __init__ to names without prefix "_" are child spaces
@@ -412,8 +429,7 @@ class ModuleVisitor(m.MatcherDecoratableVisitor, ParentScopeAddin):
             if original_node.name.value[: len(FORMULA_PREF)] == FORMULA_PREF:
                 # _f_ methods
                 name = original_node.name.value
-                self.formula_defs.setdefault(cls_name, set()).add(
-                    name[len(FORMULA_PREF):])
+                self.formula_defs.setdefault(cls_name, {})[name[len(FORMULA_PREF):]] = original_node
                 if self._is_generator(original_node):
                     self.generator_funcs.setdefault(cls_name, set()).add(name)
                 self._collect_rebinds(cls_name, original_node)
