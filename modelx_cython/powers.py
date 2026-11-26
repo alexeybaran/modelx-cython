@@ -472,6 +472,11 @@ def rewrite_powers(
             param_kinds.update((name, KIND_FLOAT) for name in declarations
                                if facts.stores[name] == 1 and name not in cells.params
                                and name not in facts.deleted)
+    if not any(isinstance(part, cst.BinaryOperation) and isinstance(part.operator, cst.Power)
+               for part in walk(node.body)):
+        # the rewriter changes only a '**': none to rewrite, decline or report
+        cells.powers_in_loops = []
+        return node
     kind = OperandKind(resolver, cells_kinds, ref_kinds, cls_fqname, param_kinds)
     return_operands = None
     if native_return:
