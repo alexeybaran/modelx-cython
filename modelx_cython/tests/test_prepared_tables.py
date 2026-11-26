@@ -49,6 +49,9 @@ PROBE = textwrap.dedent('''\
         if row < 0:
             raise KeyError(key)
         return table.i64_at(row, slot)
+
+    def row_dtype(PreparedTable table):
+        return table.row_object, table.row_float
 ''')
 
 
@@ -300,6 +303,29 @@ def test_row_of_a_narrow_number_column_is_pandas(model_tables, dtype, native):
         assert type(row['n']) is not type(frame['n'].iat[2])        # widened: not the stored value
     # the two row signatures are native only for the object row; the scalar read of q always is
     assert model_tables.native_slots(frame) == native
+
+
+ROW_DTYPES = [
+    {'q': 'float64', 'n': 'int32'}, {'q': 'float64', 'n': 'int64'}, {'q': 'float32', 'n': 'int64'},
+    {'q': 'int64', 'n': 'uint64'}, {'q': 'int8', 'n': 'uint8'}, {'q': 'float64', 'b': 'bool'}, {'q': 'int64', 'b': 'bool'},
+    {'a': 'bool', 'b': 'bool'}, {'q': 'float64', 'c': 'complex128'}, {'q': 'float64', 'o': 'object'},
+    {'q': 'float64', 'd': 'datetime64[ns]'}, {'q': 'float64', 'e': 'Int64'}, {'q': 'float64', 'k': 'category'},
+    {'q': 'float64', 'n': 'int64', 'b': 'bool'}, {'n': 'int64'}, {'q': 'float64'}, {'q': 'float32', 'r': 'float32'},
+]
+
+
+@pytest.mark.parametrize('dtypes', ROW_DTYPES, ids=lambda d: '-'.join(d.values()))
+def test_row_dtype_is_the_one_pandas_gives(tables, dtypes):
+    """Whether a row is widened to a number dtype (and to float64) is decided from the column dtypes, as pandas
+    decides it for ``frame.iloc[0]``: bool beside a number gives object, numbers give their common type."""
+    _tables, probe = tables
+    columns = {name: pd.Series([1, 0, 1], dtype=dtype) if dtype in ('bool', 'Int64', 'category')
+               else pd.Series(np.array([1, 0, 1]).astype(dtype)) for name, dtype in dtypes.items()}
+    frame = pd.DataFrame(columns).set_axis(pd.Index([10, 11, 12]))
+    table = _tables.prepare(frame)
+    assert table is not None
+    kind = getattr(frame.iloc[0].dtype, 'kind', 'O')
+    assert probe.row_dtype(table) == (kind not in 'iufc', kind == 'f'), (frame.dtypes.to_dict(), frame.iloc[0].dtype)
 
 
 def test_copy_at_bind(tables):

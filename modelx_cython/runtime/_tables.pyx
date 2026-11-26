@@ -318,6 +318,20 @@ cdef void _name_map(PreparedTable table):
     table.name_mask = size - 1
 
 
+cdef str _row_kind(list dtypes, object frame):
+    """The kind of the dtype pandas gives a row of columns of ``dtypes`` (find_common_type), without building one for
+    numpy dtypes: one dtype is itself, bool beside a number is object, numbers give their common type. Other dtypes
+    (datetimes, extension dtypes) are read off the first row."""
+    if not all(isinstance(dtype, np.dtype) and dtype.kind in 'biufcO' for dtype in dtypes):
+        return getattr(frame.iloc[0].dtype, 'kind', 'O')
+    found = {dtype.kind for dtype in dtypes}
+    if len(set(dtypes)) == 1:
+        return dtypes[0].kind
+    if 'O' in found or ('b' in found and found & set('iufc')):
+        return 'O'
+    return np.result_type(*dtypes).kind
+
+
 cdef PreparedTable _build(object value):
     cdef PreparedTable table = PreparedTable.__new__(PreparedTable)
     cdef Py_ssize_t i, n
@@ -396,9 +410,10 @@ cdef PreparedTable _build(object value):
         grid = np.zeros(1, dtype=np.intp)
     # columns: copies, stored in the sorted row order
     labels = [None] if table.is_series else list(frame.columns)
-    kinds, slots, f64_cols, i64_cols, objects = [], [], [], [], []
+    kinds, slots, f64_cols, i64_cols, objects, dtypes = [], [], [], [], [], []
     for position, label in enumerate(labels):
         column = frame.iloc[:, position]
+        dtypes.append(column.dtype)
         if column.dtype == np.float64:
             kinds.append(COLUMN_F64)
             slots.append(len(f64_cols))
@@ -422,8 +437,9 @@ cdef PreparedTable _build(object value):
     _point(table, sorted_array, combined, grid, f64, i64, pos_row)
     table.objects = tuple(objects)
     # the dtype pandas gives a row (it widens number columns to one dtype: int32 beside float64 reads as float64)
-    table.row_object = table.is_series or n == 0 or getattr(frame.iloc[0].dtype, 'kind', 'O') not in 'iufc'
-    table.row_float = not table.row_object and frame.iloc[0].dtype.kind == 'f'     # a row of float64 fields
+    row = 'O' if table.is_series or n == 0 else _row_kind(dtypes, frame)
+    table.row_object = row not in 'iufc'
+    table.row_float = row == 'f'        # a row of float64 fields
     # index extremes and asof keys, as pandas gives them
     table.max_label = index.max() if n else None
     table.min_label = index.min() if n else None
