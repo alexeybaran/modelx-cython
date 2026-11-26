@@ -1,9 +1,11 @@
 # Faster compiled models
 
 This change makes the compiled package of an unmodified modelx model run faster than the current
-compiler's output, with the values live modelx returns. Models need no change. The lifelib SEC models
-build from their released `sample_sec.py` and `spec_sec.py`, and CI compares Term_US_SEC, MYGA_US_SEC
-and SPIA_US_SEC with live modelx on every point (see Results).
+compiler's output, with the values live modelx returns. On the SEC models, a policy took 4.4 to 6.2
+times less time than on the current compiler, with up to 4.8 times less peak memory (measured at
+53104d2; see Results). Models need no change. The lifelib SEC models build from their released
+`sample_sec.py` and `spec_sec.py`, and CI compares Term_US_SEC, MYGA_US_SEC and SPIA_US_SEC with live
+modelx on every point.
 
 ## What the change does, mechanism by mechanism
 
@@ -71,7 +73,7 @@ open('sample.py', 'w').write('from Wrap_nomx import Wrap\nWrap.S.f()\n')
 ```
 
 ```console
-$ python make.py && mx2cy Wrap_nomx
+$ python make.py && mx2cy Wrap_nomx --no-spec
 $ python -c "from Wrap_nomx_cy import Wrap; Wrap.S.x = 2**62; print(Wrap.S.f())"
 -9223372036854775808
 ```
@@ -143,24 +145,108 @@ and lifelib come from PyPI.
 
 ## Results
 
-**Values.** `python .github/scripts/sec_compare.py <work dir> <model> <product>` builds a released
-lifelib SEC model with `mx2cy` and runs lifelib's own check against live modelx: every point swept,
-every cached value and raise compared, at lifelib's relative tolerance of 1e-12. The CI `sec` lane runs
-it for Term_US_SEC, MYGA_US_SEC and SPIA_US_SEC.
+Every value below equals live modelx in every run.
 
-**Calls from Python.** At 1c3f228, measured as instructions per operation with loop overhead
-included, upstream against this change:
+Three sets of figures were taken at 53104d2: the independent benchmark (per-policy times, peak memory
+and compile times), the DV01 parallel book and the census. That was before the integer overflow checks
+(removed in aa7853d) and the per-Cell Python entry (removed in 1c3f228) left the code. The
+instructions-per-policy table and the Python-call table show the code after those removals.
+
+### Values
+
+`python .github/scripts/sec_compare.py <work dir> <model> <product>` builds a released lifelib SEC
+model with `mx2cy`. It then runs lifelib's own check against live modelx: every point swept, and every
+cached value and raise compared, at lifelib's relative tolerance of 1e-12. The CI `sec` lane runs it
+for Term_US_SEC, MYGA_US_SEC and SPIA_US_SEC.
+
+### SEC models, per policy (at 53104d2)
+
+Machine: an 8-core AMD Ryzen 7 5800H under WSL2, free-threaded CPython 3.14.8. Method: both compilers
+built the same models and ran identical books of policies. Rounds alternated between the two
+compilers, and the figures are medians of five rounds. Time is wall-clock microseconds per policy on
+the book-total cell. Peak memory is the process's maximum resident set.
+
+| model | µs per policy, upstream | µs per policy, candidate | speed-up | peak memory MiB, upstream | peak memory MiB, candidate |
+|---|---|---|---|---|---|
+| Term_US_SEC | 653.1 | 149.2 | 4.38x | 126.7 | 97.8 |
+| MYGA_US_SEC | 1,871.8 | 300.6 | 6.23x | 256.0 | 104.0 |
+| RILA_US_SEC | 1,993.3 | 444.9 | 4.48x | 493.9 | 103.9 |
+
+### Instructions per policy, after the integer and entry removals
+
+Method: callgrind instructions per policy, single-threaded, policies driven directly in a loop over
+the book, on upstream lifelib 20d4dae.
+
+| model | 53104d2 | abfe35d | 1c3f228 |
+|---|---|---|---|
+| Term_US_SEC | 1,029,124 | 999,041 | (re-run in progress) |
+| MYGA_US_SEC | 2,409,450 | 2,337,087 | (re-run in progress) |
+| RILA_US_SEC | 3,731,814 | 3,618,867 | (re-run in progress) |
+| ten regional models | | | (check in progress) |
+
+### Parallel book: SEC DV01 example (at 53104d2)
+
+Same machine as the per-policy table. 1,050 policies from the lifelib DV01 example, six alternating
+rounds. Each figure is the median wall time of the whole book at the given number of workers.
+
+| workers | seconds | speed-up over one worker | peak memory MiB |
+|---|---|---|---|
+| 1 | 12.17 | 1.00x | 252 |
+| 4 | 4.54 | 2.68x (2.31–2.87 across rounds) | 344 |
+| 8 | 4.10 | 2.97x | 386 |
+
+### Breadth: every lifelib model (at 53104d2)
+
+Method: each of the 95 models in upstream lifelib main was built and driven with both compilers on
+one cloud VM per model. Its values were compared with live modelx, and callgrind counted instructions
+and memory per policy.
+
+- **No regressions.** No model that the current compiler runs fails on this one. 73 models build and
+  equal live modelx on both.
+- **SEC models.** The 12 SEC models run at a median 0.30 of the current compiler's instructions per
+  policy, with a range of 0.22–0.52.
+- **Regional models.** 47 regional models run at a median 0.99 of the current compiler's instructions
+  per policy (0.92–1.05), with a median 0.87 of its memory per policy.
+- **Models only this compiler runs.** Nine regional models hit two defects in the current compiler:
+  - A float power inside `min` or `max` is typed complex by Cython 3, so the build stops: Term_JP_S,
+    Term_KR_S and CI_KR_S.
+  - A dense cache that starts at 0 raises `IndexError` for a negative argument before the formula runs:
+    BU_DE_S, KLV_DE_S, Dep_FR_S, Euro_FR_S, IncomeTerm_JP_S and VA_US_S.
+- **Models neither compiler runs.** Thirteen models fail identically on both, for reasons outside the
+  compiler: workbook inputs, old model formats, a missing optional package, and one report column
+  returned as integers.
+
+### Calls from Python (at 1c3f228)
+
+Method: a one-Space model with a Reference `x = 1` and a Cell `rate(t) = 0.01 * t + x`, sampled at
+t = 0 to 9 and built with `mx2cy --no-spec` by each compiler. The script then runs `p.rate(5)` (a
+cached call) or `p.x = 1` (a write to the integer Reference) in a Python loop. Each figure is callgrind's
+total instructions for 200,000 iterations minus those for none, divided by 200,000, so loop overhead is
+included. Run on Linux x86-64 with free-threaded CPython 3.14 and Cython 3.3.1.
 
 | operation | upstream | this change |
 |---|---|---|
-| `p.rate(5)`, a cached call to a Cell with one integer parameter | 789 | 724 |
-| a write from Python to an integer Reference | 731 | 798 |
+| `p.rate(5)` | 885 | 819 |
+| `p.x = 1` | 820 | 908 |
 
 The write costs more because of the type check described under Integers.
 
-**Compilation time.** Translation does more analysis than before: ranges, local kinds, admission of
-typed entries and the re-parse check. The C build compiles more code per Cell: typed entries and dense
-caches. Both stages take longer than on the current compiler.
+### Compilation time (at 53104d2)
+
+Translation runs `mx2cy` up to the generated sources. The C build is Cython plus the C compiler.
+Translation does more analysis than before: ranges, local kinds, admission of typed entries and the
+re-parse check. The C build compiles more code per Cell: typed entries and dense caches.
+
+Same machine as the per-policy table, one build of each model with each compiler:
+
+| model | translate s, upstream | translate s, candidate | C build s, upstream | C build s, candidate | total, candidate / upstream |
+|---|---|---|---|---|---|
+| Term_US_SEC | 12.3 | 28.6 | 57.7 | 73.1 | 1.45x |
+| MYGA_US_SEC | 40.9 | 88.1 | 130.3 | 154.0 | 1.41x |
+| RILA_US_SEC | 60.9 | 127.9 | 160.9 | 190.8 | 1.44x |
+
+Across the census, translation took a median 1.55x the current compiler's time for regional models
+and 1.70x for SEC models. The C build took 1.29x–1.30x.
 
 ## Commits and line counts
 
