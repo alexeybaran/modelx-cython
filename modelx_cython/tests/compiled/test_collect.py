@@ -149,13 +149,19 @@ def test_collect_workers_key():
             CompilerPolicy.resolve({'collect_workers': bad})
 
 
-PEAK_PROBE = textwrap.dedent('''\
-    import resource, sys
+LIVE_PROBE = textwrap.dedent('''\
+    import gc, json, sys
     from exported_cy import mx_model as compiled
     compiled.Projection.n = int(sys.argv[1])
     compiled._mx_collect_workers = int(sys.argv[2])
+    gc.collect()
+    gc.disable()
+    before = len(gc.get_objects())
     compiled.Projection.collect()
-    print(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss // 1024)
+    compiled.Projection._mx_collect_cache.clear()     # the result itself, held as live modelx holds it
+    objects = gc.get_objects()
+    items = sum(type(o) is type(compiled.Projection) for o in objects)
+    print(json.dumps({'items': items, 'objects': len(objects) - before}))
 ''')
 
 STALE_PROBE = textwrap.dedent('''\
@@ -179,7 +185,7 @@ STALE_PROBE = textwrap.dedent('''\
 def test_reused_items_hold_nothing_from_the_previous_policy(tmp_path):
     """Each worker reuses one item: values of every kind of cache differ from one policy to the next, one
     Cell is reached by one policy only and one by every other policy, so a value left from an earlier
-    policy on the same item would show. Peak memory does not grow with the number of items."""
+    policy on the same item would show. The live items and objects do not grow with the number of items."""
     model = mx.new_model('StaleCollect')
     try:
         proj = model.new_space('Projection', formula='lambda key: None', refs={'n': 24})
@@ -215,13 +221,18 @@ def test_reused_items_hold_nothing_from_the_previous_policy(tmp_path):
     out = json.loads(run.stdout)
     assert out['1'] == out['export'] and out['4'] == out['export']
     assert out['export']['5']['only'] == 500.0 and out['export']['3']['odd'] == 2.75
-    # items are released at one worker as at four: kept, 3,000 items of 40 kB would add 120 MB
-    def peak(n, workers):
-        return int(subprocess.run([sys.executable, '-c', PEAK_PROBE, str(n), workers], cwd=tmp_path,
-                                  check=True, capture_output=True, text=True).stdout)
+    # items are released at one worker as at four, counted directly (not by resident memory, whose unit and
+    # allocator differ by platform): the live items and the objects the garbage collector tracks after collect
+    # of 20 and of 3,000 coordinates, with the collector off, so a kept item or cached value would count
+    def live(n, workers):
+        return json.loads(subprocess.run([sys.executable, '-c', LIVE_PROBE, str(n), workers], cwd=tmp_path,
+                                         check=True, capture_output=True, text=True).stdout)
     for workers in ('1', '4'):
-        small, large = peak(20, workers), peak(3000, workers)
-        assert large - small < 30, (workers, small, large)
+        small, large = live(20, workers), live(3000, workers)
+        # base, the item per worker and at most an item per worker whose free a thread defers
+        assert large['items'] <= 2 + int(workers), (workers, small, large)
+        # 3,000 coordinates: one object more per kept coordinate would add 3,000
+        assert large['objects'] - small['objects'] < 300, (workers, small, large)
 
 
 def test_a_declaration_without_reset_rule_stops_the_build():
