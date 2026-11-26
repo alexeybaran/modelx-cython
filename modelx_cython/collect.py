@@ -13,7 +13,9 @@ class's own .pxd block) and built again on the same memory for the next coordina
 again before a coordinate when one is no longer the one the Space holds (rebound during collect), so every
 item reads the Space's References at its coordinate, as live modelx gives. The outputs are added
 by the export's ``Accumulator`` in domain order, so the result is the one live modelx computes, bit
-for bit, at any number of workers.
+for bit, at any number of workers. An output that is only a ``sum`` of exact floats, with the keys the
+Accumulator's total holds and floats there, is added into that total directly (``total + value``, as the
+Accumulator adds, in domain order) without ``prepare_output``; any other output goes through both.
 
 Workers: the spec key ``collect_workers`` (default 1), or ``_mx_collect_workers`` set on the compiled
 model object. With more than one, items run on that many threads; their outputs are added in domain
@@ -331,10 +333,13 @@ def _mx_collect_evaluate(space, coords, outputs_at, refs, reads_parents):
             if isinstance(value, _mx_sys.BaseSpace) and value is not space and value._mx_lock is None:
                 raise ValueError(f'collect of {{name}} with {{workers}} workers: the Reference {{ref}} is a Space '
                                  'without a lock; export it in locked_spaces or use one worker')
+    total = [None]      # the Accumulator's own sum dict, once its first output holds only floats in 'sum'
     if workers == 1 or len(coords) == 1 or getattr(sys, '_is_gil_enabled', lambda: True)():
         spare = [None]      # the worker's slot
         for c in coords:
-            accumulator.add(c, prepare_output(outputs_at(spare, c), live))
+            out = outputs_at(spare, c)
+            raw = _mx_collect_plain(out)
+            _mx_collect_add(accumulator, total, c, out if raw else prepare_output(out, live), raw, live, prepare_output)
         return accumulator.result()
     import threading
     lock = threading.Lock()
@@ -350,7 +355,9 @@ def _mx_collect_evaluate(space, coords, outputs_at, refs, reads_parents):
                     return
                 state[0] = i + 1
             try:
-                out = prepare_output(outputs_at(spare, coords[i]), live)
+                out = outputs_at(spare, coords[i])
+                raw = _mx_collect_plain(out)
+                out = (out, True) if raw else (prepare_output(out, live), False)
             except BaseException as error:
                 with lock:
                     if i < state[2]:
@@ -361,7 +368,7 @@ def _mx_collect_evaluate(space, coords, outputs_at, refs, reads_parents):
                 while state[1] < state[2] and state[1] in pending:
                     k = state[1]
                     try:
-                        accumulator.add(coords[k], pending.pop(k))
+                        _mx_collect_add(accumulator, total, coords[k], *pending.pop(k), live, prepare_output)
                     except BaseException as error:
                         state[2], state[3] = k, error
                         break
@@ -375,4 +382,25 @@ def _mx_collect_evaluate(space, coords, outputs_at, refs, reads_parents):
     if state[3] is not None:
         raise state[3]
     return accumulator.result()
+
+
+def _mx_collect_plain(out):
+    # an output that is only a 'sum' of exact floats, added by _mx_collect_add without being prepared
+    sums = out.get('sum') if type(out) is dict and len(out) == 1 else None
+    return type(sums) is dict and bool(sums) and all(type(v) is float for v in sums.values())
+
+
+def _mx_collect_add(accumulator, total, c, out, raw, live, prepare_output):
+    # out raw (plain, not prepared) or prepared. Raw, with the keys the Accumulator's total holds and floats
+    # there: total = total + value, in domain order, as its _add adds; anything else through the Accumulator
+    sums, held = out['sum'] if raw else None, total[0]
+    if raw and held is not None and len(sums) == len(held) and all(type(held.get(k)) is float for k in sums):
+        for k, v in sums.items():
+            held[k] = held[k] + v
+        return
+    accumulator.add(c, prepare_output(out, live) if raw else out)
+    held = getattr(accumulator, '_sum', None)
+    if (total[0] is None and getattr(accumulator, '_modes', None) == ('sum',) and type(held) is dict
+            and all(type(v) is float for v in held.values())):
+        total[0] = held
 ''').body

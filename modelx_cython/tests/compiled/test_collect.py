@@ -332,3 +332,75 @@ def test_the_reset_skips_only_cells_collect_outputs_cannot_reach(tmp_path):
     for name in ('Static', 'Dynamic'):
         assert out[name][1] == out[name][0], name
     assert out['Dynamic'][0]['3']['d'] == 2.75
+
+
+SUM_PROBE = textwrap.dedent('''\
+    import json, struct
+    from exported import mx_model as export
+    from exported_cy import mx_model as compiled
+
+    def bits(result):
+        return {k: (struct.pack('<d', v).hex() if type(v) is float else repr(v)) for k, v in result.sum._fields.items()}
+
+    def error(call):
+        try:
+            call()
+        except Exception as exc:
+            return [type(exc).__name__, str(exc)]
+
+    out = {'export': bits(export.Projection.collect()), 'export_bad': error(export.Bad.collect)}
+    for workers in (1, 4):
+        compiled._mx_collect_workers = workers
+        compiled.Projection._mx_collect_cache.clear()
+        compiled.Bad._mx_collect_cache.clear()
+        out[workers] = [bits(compiled.Projection.collect()), error(compiled.Bad.collect)]
+    print(json.dumps(out))
+''')
+
+
+def test_float_sums_equal_live_bit_for_bit(tmp_path):
+    """Sums of floats added without the Accumulator equal live modelx bit for bit, with NaN, infinities, values
+    far apart in size and a sum that mixes int and float outputs; an output of another structure raises live's
+    error at its coordinate, at one worker and at four."""
+    model = mx.new_model('SumCollect')
+    try:
+        proj = model.new_space('Projection', formula='lambda key: None')
+        proj.new_cells('keys', 'lambda: tuple(range(1, 41))')
+        proj.new_cells('a', '''def a():
+    if key == 7:
+        return float('nan')
+    return key * 0.1 + 1e-17 * key
+''')
+        proj.new_cells('b', '''def b():
+    if key == 5:
+        return float('inf')
+    if key == 9:
+        return float('-inf')
+    return 1e300 * key
+''')
+        proj.new_cells('c', 'lambda: (1e-310 if key % 2 else 3.0) / 7.0')
+        proj.new_cells('n', 'lambda: key if key % 3 == 0 else key * 0.5')
+        proj.set_collect(over={'key': proj.keys},
+                         outputs='lambda: {"sum": {"a": a(), "b": b(), "c": c(), "n": n()}}')
+        bad = model.new_space('Bad', formula='lambda key: None')
+        bad.new_cells('keys', 'lambda: tuple(range(1, 9))')
+        bad.new_cells('x', 'lambda: key * 0.5')
+        bad.set_collect(over={'key': bad.keys},
+                        outputs='lambda: {"sum": {"x": x(), "y": x()}} if key == 5 else {"sum": {"x": x()}}')
+        live = {k: v for k, v in proj.collect().sum._fields.items()}
+        model.export(tmp_path / 'exported')
+    finally:
+        model.close()
+    (tmp_path / 'sample.py').write_text(
+        'from exported import mx_model as m\nm.Projection.collect()\n'
+        'for k in range(1, 9):\n    m.Bad[k].collect_outputs()\n', encoding='utf-8')
+    subprocess.run([sys.executable, '-m', 'modelx_cython', 'exported', '--sample', 'sample.py', '--no-spec'],
+                   cwd=tmp_path, check=True, capture_output=True)
+    out = json.loads(subprocess.run([sys.executable, '-c', SUM_PROBE], cwd=tmp_path, check=True,
+                                    capture_output=True, text=True).stdout)
+    import struct
+    assert out['export'] == {k: struct.pack('<d', v).hex() for k, v in live.items()}
+    assert out['export_bad'][0] == 'ValueError'
+    for workers in ('1', '4'):
+        assert out[workers][0] == out['export'], workers
+        assert out[workers][1] == out['export_bad'], workers
