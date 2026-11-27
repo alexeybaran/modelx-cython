@@ -74,6 +74,7 @@ def test_native_records_and_reductions(tmp_path):
         m.Book.wide_arithmetic()
         m.Book.read_series(2)
         m.Book.format_series(2)
+        m.Book.format_series(6)
         m.Book.read_row(8, 6)
         m.Book.python_row(7)
         m.Varying.collect()
@@ -91,7 +92,10 @@ def test_native_records_and_reductions(tmp_path):
         import pickle
         import math
         from exported_cy import mx_model
+        from exported_cy._mx_collect import CollectResult
         Model = type(mx_model)
+        collision = CollectResult({'_data': 42, '_mx_native': 7})
+        assert collision._data == 42 and collision._mx_native == 7
         def storage(result):
             return result._CollectResult__storage
         for workers in (1, 4):

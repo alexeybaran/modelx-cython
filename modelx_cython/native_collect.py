@@ -351,7 +351,10 @@ class _FieldReads(cst.CSTTransformer):
         for index, field in enumerate(fields):
             if field.kind == PYTHON or field.name != name or (field.domain is not None) != (key is not None):
                 continue
-            if field.kind != FLOAT:
+            if field.kind == FLOAT:
+                if self.result_type != 'double':
+                    return None
+            else:
                 if self.result_type != 'long long':
                     return None
                 read += '_int'
