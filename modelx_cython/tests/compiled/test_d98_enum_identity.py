@@ -8,6 +8,7 @@ the other is typed as a C integer, ``is`` / ``is not`` now lower exactly as ``==
 enum). Any other identity test keeps the object path. Both operators, both operand orders, a
 local, a cell argument; compiled equals the exported model.
 """
+import os
 import subprocess
 import sys
 import textwrap
@@ -66,6 +67,7 @@ def caller(t):
     (tmp_path / 'sample.py').write_text(
         'from exported import mx_model as m\n'
         'p = m.Projection\n'
+        'p[1].direct(0)\n'
         'for t in range(9):\n'
         '    p.direct(t); p.reversed_(t); p.local(t); p.caller(t)\n', encoding='utf-8')
 
@@ -108,7 +110,8 @@ def test_enum_identity_with_a_typed_integer_is_equality(tmp_path, monkeypatch):
     out = {}
     for name in ('exported', 'exported_cy'):
         run = subprocess.run([sys.executable, '-c', probe, name], cwd=tmp_path, capture_output=True, text=True,
-                             env={**__import__('os').environ, 'PYTHONPATH': str(tmp_path) + ':' + __import__('os').environ.get('PYTHONPATH', '')})
+                             env={**os.environ, 'PYTHONPATH': str(tmp_path) + os.pathsep
+                                  + os.environ.get('PYTHONPATH', '')})
         assert run.returncode == 0, name + run.stdout + run.stderr
         out[name] = run.stdout
     assert out['exported_cy'] == out['exported'], out
