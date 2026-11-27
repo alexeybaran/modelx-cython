@@ -2,7 +2,7 @@ name: Python package
 
 on:
   push:
-    branches: [main, "verify/**"]
+    branches: [main, "verify/**", "!verify/regional-shared-row-1"]
   pull_request:
     branches: [main]
 
