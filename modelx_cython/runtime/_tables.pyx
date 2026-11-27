@@ -540,7 +540,8 @@ cdef void _decide(PreparedTable table, object signatures, object zip_axes):
       index; -3: a walk of the index in pandas order: the table ordered within every prefix of ``label`` levels
       (0 or None: the whole table); -4: a row read by field, ``columns`` given;
       -5: ``T.loc[a, b]`` read as a row prefix, no label of level ``label`` (b's) being a column label;
-      -7: a ZIP over an ordered string/int64 prefix and a float64 column).
+      -7: a ZIP over an ordered string/int64 prefix and a float64 column;
+      -8: an ascending index of an exact pandas DataFrame).
     The slot is one plus the column's slot in its block (1 for a read of the index), or -1."""
     cdef int level
     cdef Py_ssize_t position
@@ -565,7 +566,9 @@ cdef void _decide(PreparedTable table, object signatures, object zip_axes):
                         break
         value = -1
         if result:
-            if kind == -7:
+            if kind == -8:
+                value = 1 if table.ordered and type(table._source()) is pd.DataFrame else -1
+            elif kind == -7:
                 value = _zip_slot(table, label, zip_axes)
             elif kind == -6:      # T-5: level label[1] is named label[0] and is an int level (get_level_values)
                 value = 1 if (label[1] < table.nlevels and (label[0] is None or table.level_names[label[1]] == label[0])

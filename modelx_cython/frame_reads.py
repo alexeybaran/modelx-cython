@@ -1305,6 +1305,7 @@ RUN_TIME = {
     -3: "the stored order of the index within the prefix differs from pandas' order",
     -5: '`T.loc[a, b]` is not a row prefix of the table at run time (pandas reads it as row and column)',
     -6: 'the level has no longer that name, is not an int level, or the table is empty',
+    -8: 'the bound receiver is not an exact pandas DataFrame with an ascending index',
 }
 
 
@@ -2429,12 +2430,19 @@ class _Rewrite(cst.CSTTransformer):
         return self._guarded(updated, view, test, native, None if o.guards(own) else kind)
 
     def ordered_view_read(self, original, updated, value, parts):
-        """Read a column at an integer Cell's asof row, with an optional literal clamp."""
+        """Read a prepared column at a signed integer Cell's asof row."""
         o = self.o
         if not o.builtin_type or not isinstance(value.value, cst.Name) or len(parts) != 2:
             return None
-        view = o.views.get(value.value.value)
-        if view is None or not view.schema.get('unique') or view.schema['levels'][view.depth:] != ('int',):
+        receiver = value.value
+        view = o.views.get(receiver.value)
+        flat = view is None
+        if flat:
+            found = o._receiver(receiver)
+            if found is None or found[1]['kind'] != 'frame' or _code(found[0]) in o.mutated or not o.published(found[0]):
+                return None
+            view = _View(None, *found)
+        if not view.schema.get('unique') or view.schema['levels'][view.depth:] != ('int',):
             return None
         label = _literal_str(parts[1])
         kind = dict(view.schema['columns']).get(label)
@@ -2445,7 +2453,7 @@ class _Rewrite(cst.CSTTransformer):
             return None
         argument = arg = key.args[0].value
         bound = None
-        if (isinstance(argument, cst.Call) and isinstance(argument.func, cst.Name)
+        if (not flat and isinstance(argument, cst.Call) and isinstance(argument.func, cst.Name)
                 and argument.func.value in o.builtin_extrema):
             operands = arguments(argument, count=2)
             if operands is None:
@@ -2475,12 +2483,15 @@ class _Rewrite(cst.CSTTransformer):
                 or cls.name in cls.visitor.dynamic_ref_classes
                 or not allows_exact_receiver(o.facts.formula.root, cls.name)):
             return None
-        ordered = self._take(view.call, view.depth, -3)
+        ordered = self._take(view.call, view.depth, -8 if flat else -3)
         # Both slots refer to the same prepared table and its sorted rows.
         hold = self._take(view.call, label, COLUMN_KIND[kind])
         start, stop, ready = self._view_parts(view, ordered)
-        test = self._conjunction([cst.parse_expression(exact_receiver(cls.name)), ready,
-                                  self._native_test(hold, [])])
+        conditions = [cst.parse_expression(exact_receiver(cls.name)), ready, self._native_test(hold, [])]
+        if flat:
+            binding = f'self.{ordered.table}' if o.per_item else ordered.table
+            conditions.append(cst.parse_expression(f'{binding}.source is {receiver.value}'))
+        test = self._conjunction(conditions)
         native_key = self.updated_of.get(id(arg), arg)
         if bound is not None:
             # Express the minimum without an out-of-range positive C literal.
@@ -2492,7 +2503,11 @@ class _Rewrite(cst.CSTTransformer):
         view.used = o.ordered_view_type_guard = True
         self._record(key, 'L6', view.call)
         self._record(original, 'L3', view.call)
-        return self._guarded(updated, view, test, self._column_value(hold, kind, row), kind)
+        native = self._column_value(hold, kind, row)
+        # Retain the authored frame local on both arms. A failed guard must read that
+        # frame and evaluate the key Cell once, without recomputing the receiver.
+        return (self._lowered(test, native, updated, kind) if flat
+                else self._guarded(updated, view, test, native, kind))
 
     # ------------------------------------------------------------------ T-5: row locals
     def leave_SimpleStatementLine(self, original, updated):
