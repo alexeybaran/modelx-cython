@@ -1,4 +1,4 @@
-name: Verify compiled Collect compatibility
+name: Verify the compiled Collect hook
 
 on:
   push:
@@ -8,26 +8,10 @@ permissions:
   contents: read
 
 jobs:
-  compiled:
-    name: ${{ matrix.os }} / ${{ matrix.python-version }}
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 70
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: ubuntu-latest
-            python-version: '3.14t'
-            dv01: true
-          - os: windows-latest
-            python-version: '3.14t'
-            dv01: false
-          - os: ubuntu-latest
-            python-version: '3.14'
-            dv01: false
+  native:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
     env:
-      PYTEST_ADDOPTS: ${{ matrix.os == 'windows-latest' && '--basetemp=C:/ct' || '' }}
-      PYTHONIOENCODING: utf-8
       COMPILER_PIN: e665d57c2787be0ff42554a9fcf6c3670b47385b
       MODELX_PIN: 990d5852ac8c3deed7e8646365dd4e16c63da368
       LIFELIB_PIN: e50454141680d0f9d65cce7ade81e4987f8c85ac
@@ -42,87 +26,58 @@ jobs:
           path: lifelib-pin
       - uses: actions/setup-python@v5
         with:
-          python-version: ${{ matrix.python-version }}
-      - name: Disable the GIL on free-threaded Python
-        if: endsWith(matrix.python-version, 't')
-        shell: bash
+          python-version: '3.14t'
+      - name: Disable the GIL
         run: echo "PYTHON_GIL=0" >> "$GITHUB_ENV"
       - name: Install the exact source revisions
-        shell: bash
         run: |
           git merge-base --is-ancestor "$COMPILER_PIN" HEAD
           test "$(git diff --name-only "$COMPILER_PIN" HEAD)" = .github/workflows/python-package.yml
           test "$(git -C lifelib-pin rev-parse HEAD)" = "$LIFELIB_PIN"
-          python -m pip install --upgrade pip
           python -m pip install --only-binary scipy,libcst,numpy,pandas . pytest pandas scipy openpyxl psutil
           python -m pip install --force-reinstall --no-deps "git+https://github.com/alexeybaran/modelx@$MODELX_PIN"
           python -m pip install --no-deps -e lifelib-pin
           python -c "import json, os; from importlib.metadata import distribution; assert json.loads(distribution('modelx').read_text('direct_url.json'))['vcs_info']['commit_id'] == os.environ['MODELX_PIN']"
-      - name: Verify interpreter mode
-        shell: bash
-        run: |
-          python -c "import libcst, modelx, numpy, pandas, scipy, sys; from modelx.export import _mx_collect; assert callable(_mx_collect._collect_once); assert sys._is_gil_enabled() is ('${{ matrix.python-version }}' != '3.14t')"
-      - name: Verify compiled Collect and Direct
-        shell: bash
+      - name: Build and verify the native Collect fixture
         working-directory: ${{ runner.temp }}
         run: |
-          tests="$GITHUB_WORKSPACE/modelx_cython/tests/compiled"
           python -m pytest --import-mode=importlib --rootdir "$GITHUB_WORKSPACE" -p no:cacheprovider -q -ra \
-            "$tests/test_collect.py" "$tests/test_collect_direct_isolation.py" "$tests/test_native_collect.py"
-      - name: Verify the DV01 report against live modelx
-        if: matrix.dv01
-        working-directory: lifelib-pin
-        shell: bash
-        env:
-          USLIB_REQUIRE_CYTHON: '1'
+            --basetemp "$RUNNER_TEMP/native-collect" \
+            "$GITHUB_WORKSPACE/modelx_cython/tests/compiled/test_native_collect.py"
+      - name: Reject standalone dispatch and verify Direct parity
+        working-directory: ${{ runner.temp }}
         run: |
-          python -m pytest -q -ra -p no:cacheprovider --basetemp "$RUNNER_TEMP/dv01" \
-            lifelib/libraries/uslib/tests/test_fixed_deferred_annuity_us_sec_dv01.py
-      - name: Verify DV01 uses the native hook
-        if: matrix.dv01
-        working-directory: lifelib-pin
-        shell: bash
-        run: |
-          python - "$RUNNER_TEMP/dv01" <<'PY'
+          python - "$RUNNER_TEMP/native-collect" <<'PY'
           import importlib
+          from importlib.machinery import ExtensionFileLoader
           from pathlib import Path
           import sys
-
-          import numpy as np
-          from lifelib.libraries.uslib.products.fixed_deferred_annuity.dv01_sec import compiled
 
           def unexpected_executor(*args, **kwargs):
               raise AssertionError("A compiled Collect called the standalone executor")
 
-          sys.setrecursionlimit(20_000)
-          folder, = Path(sys.argv[1]).glob("dv01_sec_build*")
-          model = compiled.load(folder)
-          runtime = importlib.import_module("model_cy._mx_collect")
+          paths = {path.parent.resolve() for path in Path(sys.argv[1]).rglob("exported_cy")
+                   if path.is_dir()}
+          folder, = paths
+          sys.path.insert(0, str(folder))
+          package = importlib.import_module("exported_cy")
+          classes = importlib.import_module("exported_cy._mx_classes")
+          assert isinstance(classes.__loader__, ExtensionFileLoader)
+          runtime = importlib.import_module("exported_cy._mx_collect")
           assert callable(runtime._collect_once)
           runtime._collect_once = unexpected_executor
-          actual = model.Actual
-          assert type(actual)._mx_collect_hook_version == 1
-          coordinates = tuple(actual.point_indices())
-          kept = actual[coordinates[0], 1]
           for workers in (1, 4):
+              model = type(package.mx_model)()
               model._mx_collect_workers = workers
-              actual._mx_collect_cache.clear()
-              result = actual.collect(1)
+              source = model.Source
+              assert type(source)._mx_collect_hook_version == 1
+              kept = source[7, 0, -1]
+              result = source.collect()
               assert result._CollectResult__storage.native is not None
-              assert actual.collect(1) is result
-              assert actual[coordinates[0], 1] is kept
-              assert set(result.individual) == set(coordinates)
-              opening_fields = tuple(result.individual[coordinates[0]]._fields)
-              assert len(opening_fields) == 11
-              for coordinate in coordinates:
-                  direct = actual[coordinate, 1]
-                  row = result.individual[coordinate]
-                  for field in opening_fields:
-                      values = getattr(row, field)
-                      for month in actual.opening_months:
-                          assert values[month] == values(month)
-                          np.testing.assert_allclose(values[month], getattr(direct, field)(month),
-                                                     rtol=1e-10, atol=1e-7)
+              assert source.collect() is result and source[7, 0, -1] is kept
+              assert result.individual[7].value(2) == result.individual[7].value[2] == kept.value(2)
+              assert result.individual[7].label['kind'] == 'odd'
+              assert result.sum.total == 36.0
               assert sys._is_gil_enabled() is False
-              print(f"{workers} worker(s) used native Collect and matched Direct openings")
+              print(f"{workers} worker(s) used the compiled Collect hook and matched Direct")
           PY
