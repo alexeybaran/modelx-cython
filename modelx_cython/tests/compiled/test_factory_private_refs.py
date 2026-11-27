@@ -49,9 +49,9 @@ def test_factory_private_refs(tmp_path, dependency):
 """)
         else:
             run.new_cells("total", "lambda: value(case)")
-        run.new_cells("steps", "lambda case: range(case)")
+        # The uniform series axis must also accept the case rejected by the factory.
         run.set_collect(over={"point": "points"},
-                        outputs=lambda: {"sum": {"total": total(), "series": {t: value(t) for t in steps(case)}}})
+                        outputs=lambda: {"sum": {"total": total(), "series": {t: value(t) for t in range(case)}}})
         model.export(tmp_path / "exported", locked_spaces=['Data'])
     finally:
         model.close()
