@@ -90,14 +90,13 @@ cpdef object integer_keys(object value):
 
 cdef class NativeCollect:
     def __init__(self, tuple coordinates, tuple individual, tuple sums,
-                 Py_ssize_t workers, result_type):
+                 Py_ssize_t workers, native_result):
         self.coordinates = coordinates
         self.sections = tuple(name for name, schema in (('individual', individual), ('sum', sums)) if schema)
         self.schemas = individual, sums
         self.individual_count, self.sum_count = len(individual), len(sums)
         self.worker_count = workers
-        self.result_type = result_type
-        self.python_rows = {}
+        self.native_result = native_result
         self.large_sums = {}
         if individual:
             first = coordinates[0]
@@ -111,6 +110,10 @@ cdef class NativeCollect:
         self.sum_fields = make_fields(sums, &self.sum_width, &self.object_width)
         self.rows = allocate(self.row_width, len(coordinates), False)
         self.sums = allocate(self.sum_width, workers, True)
+        if self.sum_width:
+            self.active = <unsigned char*>calloc(workers, 1)
+            if self.active == NULL:
+                raise MemoryError()
         if self.sum_width and any(kind in (INTEGER, BOOL) for _, _, kind in sums):
             self.wide = <unsigned char*>calloc(workers * self.sum_width, 1)
             if self.wide == NULL:
@@ -126,13 +129,19 @@ cdef class NativeCollect:
         free(self.rows)
         free(self.sums)
         free(self.wide)
+        free(self.active)
 
     cdef void write(self, bint individual, Py_ssize_t row, Py_ssize_t worker,
                     Py_ssize_t field, Py_ssize_t index, double value) noexcept nogil:
+        cdef Py_ssize_t offset
         if individual:
             self.rows[row * self.row_width + self.individual_fields[field].offset + index].floating = value
         else:
-            self.sums[worker * self.sum_width + self.sum_fields[field].offset + index].floating += value
+            offset = worker * self.sum_width + self.sum_fields[field].offset + index
+            if self.active[worker]:
+                self.sums[offset].floating += value
+            else:
+                self.sums[offset].floating = value
 
     cdef void write_int(self, bint individual, Py_ssize_t row, Py_ssize_t worker,
                         Py_ssize_t field, Py_ssize_t index, long long value) except *:
@@ -154,10 +163,25 @@ cdef class NativeCollect:
     cdef void write_object(self, Py_ssize_t row, Py_ssize_t field, object value) except *:
         self.object_rows[row * self.object_width + self.individual_fields[field].offset] = value
 
+    cdef void finish_row(self, Py_ssize_t worker) noexcept nogil:
+        if self.active != NULL:
+            self.active[worker] = 1
+
     def finish(self):
         cdef Py_ssize_t worker, field, i, partial
         cdef Field column
         for worker in range(1, self.worker_count):
+            if self.active == NULL or not self.active[worker]:
+                continue
+            if not self.active[0]:
+                for i in range(self.sum_width):
+                    partial = worker * self.sum_width + i
+                    self.sums[i] = self.sums[partial]
+                    if self.wide != NULL and self.wide[partial]:
+                        self.large_sums[i] = self.large_sums[partial]
+                        self.wide[i] = 1
+                self.active[0] = 1
+                continue
             for field in range(self.sum_count):
                 column = self.sum_fields[field]
                 for i in range(column.offset, column.offset + column.width):
@@ -169,9 +193,7 @@ cdef class NativeCollect:
                         self.wide[i] = 1
                     else:
                         self.add_int(i, self.sums[partial].integer)
-        result = self.result_type._from_native(self)
-        self.python_data = result._data
-        return result
+        return self.native_result(self, bool(self.individual_count))
 
     @property
     def fields(self):
@@ -180,25 +202,23 @@ cdef class NativeCollect:
     cpdef object keys(self, bint individual, Py_ssize_t field):
         return self.schemas[0 if individual else 1][field][1]
 
-    def materialize(self, str section):
+    def materialize(self, str section, views):
         cdef Py_ssize_t row
+        cdef NativeRow totals
         if section == 'individual':
-            return {key: self.row_as_python(row) for row, key in enumerate(self.coordinates)}
-        return self.result_type(self._as_fields(False, 0))
+            return {key: self.record(views, row) for row, key in enumerate(self.coordinates)}
+        totals = NativeRow.__new__(NativeRow)
+        totals.owner = self
+        return self.native_result(totals)
 
-    def _as_fields(self, bint individual, Py_ssize_t row):
-        cdef Py_ssize_t field, index, offset
+    cdef object field_as_python(self, bint individual, Py_ssize_t row, Py_ssize_t field):
+        cdef Py_ssize_t index, offset
         cdef Field* layout = self.individual_fields if individual else self.sum_fields
-        schema = self.schemas[0 if individual else 1]
-        result = {}
-        for field, (name, domain, kind) in enumerate(schema):
-            offset = layout[field].offset
-            if domain is None:
-                result[name] = self.box(individual, row, kind, offset)
-            else:
-                result[name] = {key: self.box(individual, row, kind, offset + index)
-                                for index, key in enumerate(domain)}
-        return result
+        _, domain, kind = self.schemas[0 if individual else 1][field]
+        offset = layout[field].offset
+        if domain is None:
+            return self.box(individual, row, kind, offset)
+        return {key: self.box(individual, row, kind, offset + index) for index, key in enumerate(domain)}
 
     cdef object box(self, bint individual, Py_ssize_t row, int kind, Py_ssize_t offset):
         cdef NumericValue* values
@@ -213,11 +233,17 @@ cdef class NativeCollect:
             return bool(values[offset].integer)
         return values[offset].integer
 
-    cdef object row_as_python(self, Py_ssize_t row):
-        record = self.python_rows.get(row)
-        if record is None:
-            record = self.python_rows.setdefault(row, self.result_type(self._as_fields(True, row)))
-        return record
+    cdef object record(self, object views, Py_ssize_t row):
+        cdef NativeRow record
+        cache = views.rows
+        held = cache.get(row)
+        if held is not None:
+            return held
+        record = NativeRow.__new__(NativeRow)
+        record.owner = self
+        record.row = row
+        record.individual = True
+        return cache.setdefault(row, self.native_result(record))
 
     cdef Py_ssize_t coordinate_position(self, object coordinate) except -1:
         cdef long long key
@@ -231,33 +257,30 @@ cdef class NativeCollect:
                 if key >= self.first_coordinate and offset < <unsigned long long>len(self.coordinates):
                     return <Py_ssize_t>offset
         else:
-            hash(coordinate)
-            try:
-                return self.coordinates.index(coordinate)
-            except ValueError:
-                pass
+            return {key: i for i, key in enumerate(self.coordinates)}[coordinate]
         raise KeyError(coordinate)
 
 
 cdef class NativeRow:
-    def __getattr__(self, str name):
-        return getattr(self.owner.row_as_python(self.row), name)
+    @property
+    def fields(self):
+        return tuple(name for name, _, _ in self.owner.schemas[0 if self.individual else 1])
 
-    def __reduce__(self):
-        return self.owner.row_as_python(self.row).__reduce__()
+    def materialize(self, str name, views):
+        for field, (candidate, _, _) in enumerate(self.owner.schemas[0 if self.individual else 1]):
+            if candidate == name:
+                return self.owner.field_as_python(self.individual, self.row, field)
+        raise KeyError(name)
 
 
 cdef object individual_at(object result, object coordinate):
     cdef NativeCollect owner
-    cdef NativeRow row
-    native = getattr(result, '_mx_native', None)
+    views = getattr(result, '_fields', None)
+    native = getattr(views, 'native', None)
     if type(native) is NativeCollect:
         owner = <NativeCollect>native
-        if owner.individual_fields != NULL and 'individual' not in owner.python_data:
-            row = NativeRow.__new__(NativeRow)
-            row.owner = owner
-            row.row = owner.coordinate_position(coordinate)
-            return row
+        if owner.individual_count and 'individual' not in views.views:
+            return owner.record(views, owner.coordinate_position(coordinate))
     return result.individual[coordinate]
 
 
@@ -279,13 +302,15 @@ cdef Py_ssize_t field_offset(Field* column, long long key, bint series) except -
 
 cdef NativeRow numeric_row(object record, Py_ssize_t field, str name, bint series, bint floating):
     cdef NativeRow row
-    if type(record) is NativeRow:
-        row = <NativeRow>record
-        if (field < row.owner.individual_count and row.owner.schemas[0][field][0] == name
+    views = getattr(record, '_fields', None)
+    native = getattr(views, 'native', None)
+    if type(native) is NativeRow:
+        row = <NativeRow>native
+        if (row.individual and field < row.owner.individual_count and row.owner.schemas[0][field][0] == name
                 and (row.owner.schemas[0][field][1] is not None) == series
                 and row.owner.individual_fields[field].kind != PYTHON
                 and (row.owner.individual_fields[field].kind == FLOAT) == floating
-                and row.row not in row.owner.python_rows):
+                and name not in views.views):
             return row
     return None
 
@@ -297,12 +322,15 @@ cdef object row_value(object record, str name, long long key, bint series, bint 
 
 cdef NativeCollect numeric_sum(object result, Py_ssize_t field, str name, bint series, bint floating):
     cdef NativeCollect owner
-    native = getattr(result, '_mx_native', None)
+    views = getattr(result, '_fields', None)
+    native = getattr(views, 'native', None)
     if type(native) is NativeCollect:
         owner = <NativeCollect>native
+        public = views.views.get('sum')
         if (field < owner.sum_count and owner.schemas[1][field][0] == name
                 and (owner.schemas[1][field][1] is not None) == series
-                and (owner.sum_fields[field].kind == FLOAT) == floating and 'sum' not in owner.python_data):
+                and (owner.sum_fields[field].kind == FLOAT) == floating
+                and (public is None or name not in public._fields.views)):
             return owner
     return None
 

@@ -22,6 +22,7 @@ class Field:
     cell: str
     domain: str = None
     kind: int = FLOAT
+    position: int = 0
 
 
 def _literal_items(value):
@@ -51,7 +52,7 @@ def _body_return(method):
     return stmt.value if isinstance(stmt, cst.Return) else None
 
 
-def _uniform(value, methods, refs, params, varying, checked=frozenset()):
+def _uniform(value, methods, refs, params, varying, classes, checked=frozenset()):
     """Prove that a key expression uses the same inputs for all collected items."""
     if isinstance(value, (cst.Integer, cst.Float, cst.SimpleString)):
         return True
@@ -61,28 +62,35 @@ def _uniform(value, methods, refs, params, varying, checked=frozenset()):
         return (dotted_name(value.value) == 'self' and value.attr.value in refs
                 and value.attr.value not in varying)
     if isinstance(value, cst.UnaryOperation):
-        return _uniform(value.expression, methods, refs, params, varying, checked)
+        return _uniform(value.expression, methods, refs, params, varying, classes, checked)
     if isinstance(value, cst.BinaryOperation):
-        return all(_uniform(item, methods, refs, params, varying, checked) for item in (value.left, value.right))
+        return all(_uniform(item, methods, refs, params, varying, classes, checked)
+                   for item in (value.left, value.right))
     if isinstance(value, cst.Comparison):
-        return all(_uniform(item, methods, refs, params, varying, checked)
+        return all(_uniform(item, methods, refs, params, varying, classes, checked)
                    for item in (value.left, *(target.comparator for target in value.comparisons)))
     if not isinstance(value, cst.Call) or (args := arguments(value)) is None:
         return False
-    if not all(_uniform(arg, methods, refs, params, varying, checked) for arg in args):
+    if not all(_uniform(arg, methods, refs, params, varying, classes, checked) for arg in args):
         return False
     parts = (dotted_name(value.func) or '').split('.')
     if len(parts) == 1:
         return parts[0] in ('range', 'max', 'min')
     if parts[0] != 'self':
         return False
-    if len(parts) >= 3:
-        return parts[1] in refs and parts[1] not in varying
+    if len(parts) == 3:
+        ref = refs.get(parts[1])
+        if ref is None or parts[1] in varying or (owner := classes.get(ref.decl_type_expr)) is None:
+            return False
+        cell = owner.cells.get(parts[2])
+        return cell is not None and not cell.is_special() and cell.has_formula_def and len(args) == len(cell.params)
+    if len(parts) != 2:
+        return False
     name = parts[1]
     if name in checked or (method := methods.get(FORMULA_PREF + name)) is None:
         return False
     local_params = {param.name.value for param in method.params.params[1:]}
-    return _uniform(_body_return(method), methods, refs, local_params, varying, checked | {name})
+    return _uniform(_body_return(method), methods, refs, local_params, varying, classes, checked | {name})
 
 
 class _UniformArguments(cst.CSTTransformer):
@@ -100,15 +108,15 @@ def shape(class_node, info, uniform_args, varying_refs):
     sections = _literal_items(_body_return(methods.get(FORMULA_PREF + 'collect_outputs')))
     if sections is None or sections.keys() - {'individual', 'sum'}:
         return None
-    refnames = set(info.refs)
     item = methods.get('_mx_collect_item')
     if item is None:
         return None
     varying = ({param.name.value for param in item.params.params[1:]} - set(uniform_args)) | set(varying_refs)
     rewrite = _UniformArguments(uniform_args)
-    layouts = []
-    for section in ('individual', 'sum'):
-        fields = _literal_items(sections[section]) if section in sections else {}
+    layouts = [(), ()]
+    position = 0
+    for section, expression in sections.items():
+        fields = _literal_items(expression)
         if fields is None:
             return None
         layout = []
@@ -123,8 +131,8 @@ def shape(class_node, info, uniform_args, varying_refs):
                         or node.key.value != loop.target.value or loop.ifs or loop.inner_for_in is not None
                         or loop.asynchronous is not None):
                     return None
-                if (not _uniform(loop.iter, methods, refnames, set(), varying)
-                        or when is not None and not _uniform(when, methods, refnames, set(), varying)):
+                if (not _uniform(loop.iter, methods, info.refs, set(), varying, info.module.classes)
+                        or when is not None and not _uniform(when, methods, info.refs, set(), varying, info.module.classes)):
                     return None
                 domain = code(loop.iter.visit(rewrite))
                 if when is not None:
@@ -150,14 +158,15 @@ def shape(class_node, info, uniform_args, varying_refs):
                 kind = PYTHON
             if domain is not None and cell.get_argtype_expr(cell.params[0], c_style=True) != 'long long':
                 return None
-            layout.append(Field(name, parts[1], domain, kind))
-        layouts.append(tuple(layout))
+            layout.append(Field(name, parts[1], domain, kind, position))
+            position += 1
+        layouts[0 if section == 'individual' else 1] = tuple(layout)
     return tuple(layouts) if any(field.kind != PYTHON for fields in layouts for field in fields) else None
 
 
 def plan(layouts):
     """Build a layout once, falling back on axes outside the native representation."""
-    lines = ['    if hasattr(_mx_result_type, "_from_native"):\n']
+    lines = ['    if hasattr(_mx_collect_support, "_native_result"):\n']
     named_layouts = []
     for section, fields in enumerate(layouts):
         descriptors = []
@@ -175,7 +184,8 @@ def plan(layouts):
         lines.append(f'{indent}if {" and ".join(keys)}:\n')
         indent += '    '
     lines.append(f'{indent}_mx_native_plan = lambda workers: {ALIAS}.NativeCollect(\n'
-                 f'{indent}    _mx_coords, {", ".join(named_layouts)}, workers, _mx_result_type)\n')
+                 f'{indent}    _mx_coords, {", ".join(named_layouts)}, workers,\n'
+                 f'{indent}    _mx_collect_support._native_result)\n')
     return ''.join(lines)
 
 
@@ -184,20 +194,27 @@ def gathering(layouts, cls_name):
              f'        root: {cls_name}, target: {TYPE}, _mx_pos: _mx_cy.Py_ssize_t,\n',
              '        _mx_worker: _mx_cy.Py_ssize_t, prepare, live_types) -> object:\n',
              '    _mx_key: _mx_cy.longlong\n', '    _mx_index: _mx_cy.Py_ssize_t\n']
-    for section, fields in enumerate(layouts):
-        individual = not section
-        for index, field in enumerate(fields):
-            write = 'write' if field.kind == FLOAT else 'write_int'
-            if field.kind == PYTHON:
-                lines.append(f'    target.write_object(_mx_pos, {index}, prepare(\n'
-                             f'        {{"individual": {{{field.name!r}: root.{field.cell}()}}}}, live_types)'
-                             f'["individual"][{field.name!r}])\n')
-            elif field.domain is None:
-                lines.append(f'    target.{write}({individual}, _mx_pos, _mx_worker, {index}, 0, root.{field.cell}())\n')
-            else:
-                lines.append(f'    for _mx_index, _mx_key in enumerate(target.keys({individual}, {index})):\n'
-                             f'        target.{write}({individual}, _mx_pos, _mx_worker, {index}, _mx_index,\n'
-                             f'                     root.{field.cell}(_mx_key))\n')
+    ordered = sorted(((section == 0, index, field) for section, fields in enumerate(layouts)
+                      for index, field in enumerate(fields)), key=lambda entry: entry[2].position)
+    opaque = []
+    for individual, index, field in ordered:
+        write = 'write' if field.kind == FLOAT else 'write_int'
+        if field.kind == PYTHON:
+            name = f'_mx_opaque_{index}'
+            opaque.append((index, field.name, name))
+            lines.append(f'    {name} = root.{field.cell}()\n')
+        elif field.domain is None:
+            lines.append(f'    target.{write}({individual}, _mx_pos, _mx_worker, {index}, 0, root.{field.cell}())\n')
+        else:
+            lines.append(f'    for _mx_index, _mx_key in enumerate(target.keys({individual}, {index})):\n'
+                         f'        target.{write}({individual}, _mx_pos, _mx_worker, {index}, _mx_index,\n'
+                         f'                     root.{field.cell}(_mx_key))\n')
+    if opaque:
+        values = ', '.join(f'{key!r}: {name}' for _, key, name in opaque)
+        lines.append(f'    _mx_detached = prepare({{"individual": {{{values}}}}}, live_types)["individual"]\n')
+        for index, name, _ in opaque:
+            lines.append(f'    target.write_object(_mx_pos, {index}, _mx_detached[{name!r}])\n')
+    lines.append('    target.finish_row(_mx_worker)\n')
     lines.append('    return True\n')
     return ''.join(lines)
 
@@ -280,11 +297,15 @@ class _FieldReads(cst.CSTTransformer):
         self.integer_params = integer_params
         self.result_type = result_type
         self.used = False
+        self.returns = set()
 
     def visit_FunctionDef(self, node):
         return False
 
     visit_Lambda = visit_FunctionDef
+
+    def visit_Return(self, node):
+        self.returns.add(node.value)
 
     def integer(self, expr):
         if isinstance(expr, cst.Integer):
@@ -301,7 +322,7 @@ class _FieldReads(cst.CSTTransformer):
             return self.integer(expr.left) and self.integer(expr.right)
         return False
 
-    def read(self, expr, key, index_read=False):
+    def read(self, expr, key, index_read=False, whole_return=False):
         if not isinstance(expr, cst.Attribute) or key is not None and not self.integer(key):
             return None
         receiver = expr.value
@@ -309,6 +330,8 @@ class _FieldReads(cst.CSTTransformer):
         read = 'read_individual'
         parts = (dotted_name(receiver) or '').split('.')
         fields = self.refs.get(parts[1]) if len(parts) == 2 and parts[0] == 'self' else None
+        if fields is not None and key is None:
+            return None
         if isinstance(receiver, cst.Attribute) and receiver.attr.value == 'sum':
             layouts = _producer(receiver.value, self.info, self.shapes)
             if layouts is not None:
@@ -322,7 +345,7 @@ class _FieldReads(cst.CSTTransformer):
             if field.kind == PYTHON or field.name != name or (field.domain is not None) != (key is not None):
                 continue
             if field.kind != FLOAT:
-                if self.result_type not in ('long long', 'bint'):
+                if not whole_return or self.result_type != 'long long':
                     return None
                 read += '_int'
             self.used = True
@@ -332,15 +355,15 @@ class _FieldReads(cst.CSTTransformer):
         return None
 
     def leave_Attribute(self, original, updated):
-        return self.read(updated, None) or updated
+        return self.read(updated, None, whole_return=original in self.returns) or updated
 
     def leave_Call(self, original, updated):
         args = arguments(updated, count=1)
-        return (self.read(updated.func, args[0]) or updated) if args else updated
+        return (self.read(updated.func, args[0], whole_return=original in self.returns) or updated) if args else updated
 
     def leave_Subscript(self, original, updated):
         receiver, key = _subscript(updated)
-        return (self.read(receiver, key, True) or updated) if key is not None else updated
+        return (self.read(receiver, key, True, original in self.returns) or updated) if key is not None else updated
 
 
 def field_reads(node, info, shapes, refs, cells):

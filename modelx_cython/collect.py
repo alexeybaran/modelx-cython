@@ -274,7 +274,7 @@ def hook(class_node, cls_name, members, child_bindings_known, dots='.', fast=Tru
             params=outputs_at.params.with_changes(params=(*outputs_at.params.params, *extended)),
             body=outputs_at.body.with_changes(args=(*outputs_at.body.args, *(cst.Arg(p.name) for p in extended))))
         native_params = ', _mx_target=None, _mx_pos=0, _mx_worker=0'
-        native_plan = (f'    from {dots}_mx_collect import CollectResult as _mx_result_type\n'
+        native_plan = (f'    from {dots} import _mx_collect as _mx_collect_support\n'
                        '    _mx_native_plan = None\n'
                        f'    if type(self) is {cls_name}:\n'
                        + textwrap.indent(native_collect.plan(native_layouts), '    '))
