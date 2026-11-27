@@ -1,4 +1,4 @@
-name: Collect hook compatibility and constant table keys
+name: Native Collect argument and locked domains
 
 on:
   push:
@@ -24,10 +24,17 @@ jobs:
             'pytest==9.2.0' 'setuptools==84.2.1' 'MonkeyType==23.3.0' 'openpyxl==3.1.5' 'psutil==7.2.2' \
             'git+https://github.com/alexeybaran/modelx@fdc19875bd2445a7093e56e7222ecc1cf29c2ac0'
           python -m pip install --no-deps .
-      - name: Test the Collect hook guard and constant table keys
+      - name: Test Collect argument and locked domains
         working-directory: ${{ runner.temp }}
         run: |
           python -c 'import sys; print(sys.version); assert sys.version_info[:3] == (3, 14, 10) and not sys._is_gil_enabled()'
-          python -m pytest --rootdir "$GITHUB_WORKSPACE" -p no:cacheprovider -q -rA \
-            "$GITHUB_WORKSPACE/modelx_cython/tests/compiled/test_parallel_collect_reuse.py::test_obsolete_collect_export_requests_reexport" \
-            "$GITHUB_WORKSPACE/integration_tests/test_constant_key_reads.py::test_constant_key_reads_use_enum_constants_and_held_codes"
+          suite="$GITHUB_WORKSPACE/modelx_cython/tests/compiled"
+          python -m pytest --rootdir "$GITHUB_WORKSPACE" --basetemp "$RUNNER_TEMP/domain-tests" -p no:cacheprovider -q -rA \
+            "$suite/test_collect_native_merge.py::test_collect_with_other_parameters_is_native_per_argument_set" \
+            "$suite/test_locked_numeric_domains.py::test_locked_native_calls_and_dependent_collect_domain"
+      - name: Print generated native domain dispatch on failure
+        if: failure()
+        working-directory: ${{ runner.temp }}
+        run: |
+          find "$RUNNER_TEMP/domain-tests" -path '*/exported_cy/_mx_classes.py' -exec \
+            grep -H -nE 'def _mx_gather_|integer_keys\(|def _mx_collect_hook\(' {} + || true
