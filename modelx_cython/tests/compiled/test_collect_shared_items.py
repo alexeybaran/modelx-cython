@@ -1,4 +1,4 @@
-"""Collect workers use synchronized caches for ItemSpaces reached through References."""
+"""Collect workers share locked ItemSpaces and preserve their Direct caches."""
 
 import json
 import subprocess
@@ -28,15 +28,14 @@ def test_collect_shares_referenced_items_and_keeps_serial_items_owned(tmp_path):
         private.new_cells('rate', 'lambda t, tenor: key + t + tenor')
         serial = model.new_space('Serial', refs={'private': private, 'dates': dates})
         serial.new_cells('total', 'lambda: sum(private(1).period(t) + private(1).rate(t, 0.5) for t in dates)')
-        model.export(tmp_path / 'exported')
+        model.export(tmp_path / 'exported', locked_spaces=[market])
     finally:
         model.close()
 
     (tmp_path / 'sample.py').write_text('from exported import mx_model as m\n'
                                        'm.Policy.collect()\nm.Serial.total()\n', encoding='utf-8')
     spec = {'spaces': {
-        'Policy': {'serial_collect': 'reuse', 'parallel_collect_reuse': True},
-        'Market': {'cells': {'rate': {'numeric_cache_capacity': 8}}},
+        'Market': {'cells': {'rate': {'native_numeric_cache': True}}},
         'Private': {'cells': {'rate': {'numeric_cache_capacity': 8}}},
     }}
     (tmp_path / 'spec.py').write_text(repr(spec), encoding='utf-8')
@@ -49,38 +48,52 @@ def test_collect_shares_referenced_items_and_keeps_serial_items_owned(tmp_path):
         return report[f'exported_cy._mx_classes._c_{space}._f_{name}']
 
     assert cell('Private', 'period')['cache'] == 'dense'
-    assert cell('Market', 'period')['cache'] != 'dense'
     assert cell('Private', 'rate')['numeric_primary_capacity'] == 8
     assert cell('Market', 'rate')['cache'] == 'native-numeric-keys'
     assert cell('Market', 'rate')['numeric_primary_capacity'] == 0
-    assert 'synchronized storage' in cell('Market', 'rate')['cache_detail']['hash_reason']
     source = (tmp_path / 'exported_cy' / '_mx_classes.py').read_text(encoding='utf-8')
     market_source = source.split('class _c_Market(', 1)[1].split('\nclass _c_', 1)[0]
+    period_source = market_source.split('def period(', 1)[1].split('\n    def ', 1)[0]
+    assert 'with self._mx_lock:' in period_source
     assert 'self._v_label = {}' in market_source
     assert 'if self._v_label is None:' not in market_source
     assert 'self._v_rate.get(' in market_source
     assert 'self._v_rate.reserve(' not in market_source
 
     probe = textwrap.dedent('''\
-        import concurrent.futures
         import sys
-        from threading import Barrier
+        import threading
 
         m = __import__(sys.argv[1]).mx_model
         workers = int(sys.argv[2])
-        assert getattr(sys, '_is_gil_enabled', lambda: True)() == bool(int(sys.argv[3]))
-        m.collect_workers = workers
-        if workers == 4:
-            ready = Barrier(workers, timeout=10)
-            class Pool(concurrent.futures.ThreadPoolExecutor):
-                def submit(self, fn, /, *args, **kwargs):
-                    def run():
-                        ready.wait()
-                        return fn(*args, **kwargs)
-                    return super().submit(run)
-            concurrent.futures.ThreadPoolExecutor = Pool
+        gil_enabled = getattr(sys, '_is_gil_enabled', lambda: True)()
+        assert gil_enabled == bool(int(sys.argv[3]))
+        if sys.argv[1] == 'exported_cy':
+            m._mx_collect_workers = workers
+        held = m.Market(0)
+        rate = held.rate(3, 0.5)
+        expected_threads = workers if workers > 1 and not gil_enabled else 0
+        started = []
+        original_thread = threading.Thread
+        if expected_threads:
+            ready = threading.Barrier(expected_threads, timeout=10)
 
-        print(m.Policy.collect().sum.pv, m.Serial.total())
+            class CollectThread(original_thread):
+                def run(self):
+                    started.append(threading.get_ident())
+                    ready.wait()
+                    super().run()
+
+            threading.Thread = CollectThread
+        try:
+            total = m.Policy.collect().sum.pv
+        finally:
+            threading.Thread = original_thread
+        assert len(set(started)) == expected_threads
+        assert m.Market(0) is held and held.rate(3, 0.5) == rate == 3.5
+        serial_total = m.Serial.total()
+        assert total == 912.0 and serial_total == 76.0
+        print(total, serial_total)
 
         class DifferentResult(type(m.Market)):
             def __call__(self, *args):
