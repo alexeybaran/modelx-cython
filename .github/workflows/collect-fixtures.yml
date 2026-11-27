@@ -40,4 +40,5 @@ jobs:
           python -m pytest --rootdir "$GITHUB_WORKSPACE" -p no:cacheprovider -q -rA \
             "$suite/test_collect_name_collision.py" \
             "$suite/test_factory_private_refs.py" \
-            "$suite/test_collect_native_merge.py::test_native_and_python_outputs_equal_the_export"
+            "$suite/test_collect_native_merge.py::test_native_and_python_outputs_equal_the_export" \
+            "$GITHUB_WORKSPACE/integration_tests/test_held_table_handles.py"
