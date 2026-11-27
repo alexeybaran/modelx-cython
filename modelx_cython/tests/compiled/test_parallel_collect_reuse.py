@@ -40,10 +40,10 @@ def test_parallel_collect_reuse_merges_completed_chunks_and_retries(tmp_path):
         assert gil() == before
 
         def payload(result):
-            return result.sum.value, [(key, item.value) for key, item in result.individual.items()]
+            return result.sum.value, {key: item.value for key, item in result.individual.items()}
 
         expected = payload(live.Projection.collect())
-        assert expected == (11.0, list(enumerate(live.Projection.values)))
+        assert expected == (11.0, dict(enumerate(live.Projection.values)))
         serial = type(native)()
         serial._mx_collect_workers = 1
         assert payload(serial.Projection.collect()) == expected

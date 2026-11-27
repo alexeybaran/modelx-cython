@@ -23,7 +23,8 @@ def test_post_factory_numeric_preserves_policy_order_and_errors(tmp_path, monkey
         events = []
         early = []
         monthly = []
-        terms = {7: float(2**53), 2: 1.0, 9: -float(2**53)}
+        # All sums are exact even when workers finish in a different order.
+        terms = {7: float(2**40), 2: 1.0, 9: -float(2**40)}
         calendar = (5, 1, 3)
 
         def bind(case, key):
@@ -106,7 +107,9 @@ def test_post_factory_numeric_preserves_policy_order_and_errors(tmp_path, monkey
             result = model.Runs.collect(case)
             assert sorted(key for seen, key in hook.events if seen == case) == sorted(domain)
             assert result.sum.total == expected(case, 0)
-            assert list(result.sum.by_month.items()) == [(m, expected(case, m)) for m in months]
+            series = result.sum.by_month
+            assert dict(series) == {m: expected(case, m) for m in months}
+            assert all(series(m) == series[m] for m in months)
             return result
 
         initial = check(0)
@@ -116,7 +119,7 @@ def test_post_factory_numeric_preserves_policy_order_and_errors(tmp_path, monkey
         with pytest.raises(ValueError, match="^invalid key 2$"):
             model.Runs.collect(-1)
         check(3)  # a factory can return a different iterable with the same month keys
-        check(4)  # insertion order comes from the first item, even if the next reverses its keys
+        check(4)  # reversing the keys on one item must preserve values at each key
         with pytest.raises(ValueError, match="different structure"):
             model.Runs.collect(6)
         with pytest.raises(RuntimeError, match="^second month failed$"):
@@ -125,7 +128,7 @@ def test_post_factory_numeric_preserves_policy_order_and_errors(tmp_path, monkey
         assert [m for case, key, m in hook.monthly if (case, key) == (5, 2)] == [5, 1]
         result = check(2)
         assert model.Runs.collect(0) is initial
-        print(json.dumps({"total": result.sum.total, "months": list(result.sum.by_month.items())}))
+        print(json.dumps({"total": result.sum.total, "months": dict(result.sum.by_month)}))
     """)
 
     results = []
