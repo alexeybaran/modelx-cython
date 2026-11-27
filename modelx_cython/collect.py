@@ -391,11 +391,18 @@ def evaluator(workers, dots='.'):
     return cst.parse_module(f'''
 from contextlib import nullcontext as _mx_collect_nullcontext
 from threading import RLock as _mx_collect_rlock
+from types import BuiltinMethodType as _mx_collect_builtin_method, MethodType as _mx_collect_method
 
 
 def _mx_collect_factory_guard(space):
     model_lock = space._model._mx_lock
     return model_lock if model_lock is not None else _mx_collect_nullcontext()
+
+
+def _mx_collect_ref_owner(value):
+    if isinstance(value, (_mx_collect_builtin_method, _mx_collect_method)):
+        return value.__self__
+    return value
 
 
 def _mx_clear_collect_refs(root, aliases):
@@ -417,7 +424,7 @@ def _mx_clear_collect_refs(root, aliases):
         for name, bound_method in names:
             value = getattr(member, name, None)
             if bound_method:
-                value = getattr(value, '__self__', None)
+                value = _mx_collect_ref_owner(value)
             if id(value) in owned:
                 setattr(member, name, None)
 
@@ -448,9 +455,9 @@ def _mx_collect_member_at(space, path):
 
 
 def _mx_unlocked_collect_ref(member, ref):
-    value = getattr(member, ref, None)
-    if isinstance(value, _mx_sys.BaseSpace) and value._mx_lock is None:
-        return value
+    owner = _mx_collect_ref_owner(getattr(member, ref, None))
+    if isinstance(owner, _mx_sys.BaseSpace) and owner._mx_lock is None:
+        return owner
 
 
 def _mx_collect_ref_error(name, workers, path, ref):

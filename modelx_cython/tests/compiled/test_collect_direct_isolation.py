@@ -65,12 +65,13 @@ def compiled_model(tmp_path_factory):
                 return before, total.individual[key].pv, after, extra
             '''))
         tree = model.new_space("Tree", formula="lambda key: None")
-        leaf = tree.new_space("Leaf", refs={"gate": None, "peer": None})
+        leaf = tree.new_space("Leaf", refs={"gate": None, "peer": None, "peer_cell": data.rates})
         leaf.relref(source=leaf)
         leaf.new_cells("point", textwrap.dedent('''\
             def point():
                 if peer is not None:
                     peer.rates()
+                peer_cell()
                 if gate is not None:
                     gate.wait(3)
                 return {"key": key}
@@ -84,17 +85,23 @@ def compiled_model(tmp_path_factory):
         loose.new_cells("rates", 'lambda: (_ for _ in ()).throw(LookupError("called"))')
         for name, method in (("Relative", "relref"), ("Absolute", "absref")):
             alias = model.new_space(name, formula="lambda key: None")
-            getattr(alias, method)(source=alias)
             alias.new_cells("keys", "lambda: (0, 1)")
             alias.new_cells("read", "lambda: 5")
+            getattr(alias, method)(source=alias)
             alias.set_collect(over={"key": alias.keys},
                               outputs='lambda: {"individual": {"value": source.read()}}')
+        relative_cell = model.new_space("RelativeCell", formula="lambda key: None")
+        relative_cell.new_cells("keys", "lambda: (0, 1)")
+        relative_cell.new_cells("read", "lambda: 5 + key")
+        relative_cell.relref(read_cell=relative_cell.read)
+        relative_cell.set_collect(over={"key": relative_cell.keys},
+                                  outputs='lambda: {"individual": {"value": read_cell()}}')
         dynamic = model.new_space("Dynamic", formula=textwrap.dedent('''\
             def factory(key):
                 return {"refs": {"peer": data if choose is None else choose(key)}}
             '''), refs={"data": data, "choose": None, "peer": None})
         dynamic.new_cells("keys", "lambda: (0, 1)")
-        dynamic.new_cells("read", "lambda: peer.rates()[key]")
+        dynamic.new_cells("read", "lambda: (peer() if callable(peer) else peer.rates())[key]")
         dynamic.set_collect(over={"key": dynamic.keys},
                             outputs='lambda: {"individual": {"value": read()}}')
         if EXPORTS_AUTHORED_INPUTS:
@@ -115,7 +122,8 @@ def compiled_model(tmp_path_factory):
 
     sample = (
         "from exported import mx_model\nmx_model.Projection.collect()\nmx_model.Tree.collect()\n"
-        "mx_model.Relative.collect()\nmx_model.Absolute.collect()\nmx_model.Dynamic.collect()\n"
+        "mx_model.Relative.collect()\nmx_model.Absolute.collect()\nmx_model.RelativeCell.collect()\n"
+        "mx_model.Dynamic.collect()\n"
     )
     if EXPORTS_AUTHORED_INPUTS:
         sample += "mx_model.Inputs.collect(scen=7)\n"
@@ -273,8 +281,9 @@ PROBE = textwrap.dedent('''\
 
     def release_relative_aliases():
         retained = model.Relative[0]
+        retained_cell = model.RelativeCell[0]
         child = model.Tree[0].Leaf
-        classes = (type(retained), type(child), type(model.Tree))
+        classes = (type(retained), type(retained_cell), type(child), type(model.Tree))
 
         def live_items():
             return sum(type(obj) in classes for obj in gc.get_objects())
@@ -284,11 +293,13 @@ PROBE = textwrap.dedent('''\
         try:
             before = live_items()
             assert model.Relative.collect().individual[0].value == 5
+            assert model.RelativeCell.collect().individual[0].value == 5
             assert model.Tree.collect().individual[0].point == {"key": 0}
             assert live_items() == before
         finally:
             gc.enable()
         assert model.Relative[0] is retained and retained.source is retained
+        assert model.RelativeCell[0] is retained_cell and retained_cell.read_cell.__self__ is retained_cell
         assert model.Tree[0].Leaf is child and child.source is child
 
     def dynamic_reference():
@@ -298,6 +309,21 @@ PROBE = textwrap.dedent('''\
         model.Dynamic.choose = None
         result = model.Dynamic.collect()
         assert [record.value for record in result.individual.values()] == [0.25, 0.5]
+
+    def bound_cell_references():
+        enable_workers()
+        model.Tree.Leaf.peer_cell = model.Loose.rates
+        check_unlocked(model.Tree.collect, "Leaf.peer_cell")
+        model.Tree.Leaf.peer_cell = model.Data.rates
+        assert model.Tree.collect().individual[0].point == {"key": 0}
+
+        model.Dynamic.choose = lambda key: model.Loose.rates
+        check_unlocked(model.Dynamic.collect, "peer")
+        model.Dynamic.choose = lambda key: model.Data.rates
+        assert [record.value for record in model.Dynamic.collect().individual.values()] == [0.25, 0.5]
+
+        assert [record.value for record in model.RelativeCell.collect().individual.values()] == [5, 6]
+        assert model.Data.events.count(("rates",)) == 1
 
     def authored_inputs():
         for space in (exported.Inputs, model.Inputs):
@@ -320,6 +346,7 @@ PROBE = textwrap.dedent('''\
         "relative_and_absolute_aliases": relative_and_absolute_aliases,
         "release_relative_aliases": release_relative_aliases,
         "dynamic_reference": dynamic_reference,
+        "bound_cell_references": bound_cell_references,
         "authored_inputs": authored_inputs,
     }[sys.argv[1]]()
     ''')
@@ -329,7 +356,7 @@ PROBE = textwrap.dedent('''\
     "direct_first", "collect_first", "mixed_cell", "failed_collect",
     "parallel_collect", "parallel_generic", "locked_call",
     "unlocked_child", "relative_and_absolute_aliases", "dynamic_reference",
-    "release_relative_aliases",
+    "release_relative_aliases", "bound_cell_references",
     pytest.param("authored_inputs", marks=pytest.mark.skipif(
         not EXPORTS_AUTHORED_INPUTS, reason="modelx exporter without authored inputs",
     )),
