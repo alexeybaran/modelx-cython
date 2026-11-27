@@ -45,11 +45,13 @@ jobs:
         if: endsWith(matrix.python-version, 't')
         shell: bash
         run: echo "PYTHON_GIL=0" >> "$GITHUB_ENV"
-      - name: Install package, upstream modelx and lifelib, test dependencies
+      - name: Install package, pinned modelx, lifelib and test dependencies
         shell: bash
         run: |
           python -m pip install --upgrade pip
           python -m pip install --only-binary scipy,libcst,numpy,pandas . pytest pytest-xdist "pandas>=2.2.2" lifelib openpyxl psutil
+          python -m pip install --force-reinstall --no-deps "git+https://github.com/alexeybaran/modelx@fdc19875bd2445a7093e56e7222ecc1cf29c2ac0"
+          python -c "import modelx; from modelx.export import _mx_collect; assert hasattr(_mx_collect, '_native_result'), modelx.__file__"
           python -m pip list
       - name: Interpreter
         shell: bash
@@ -75,6 +77,7 @@ jobs:
         run: |
           C=modelx_cython/tests/compiled
           python -m pytest --import-mode=importlib --rootdir "$GITHUB_WORKSPACE" -p no:cacheprovider \
+            -o "pythonpath='$GITHUB_WORKSPACE/$C' '$GITHUB_WORKSPACE/integration_tests' '$GITHUB_WORKSPACE/integration_tests/table_matrix'" \
             -n auto --dist loadfile -q -rfEs \
             --deselect $C/test_value_storage.py \
             "$GITHUB_WORKSPACE/$C" "$GITHUB_WORKSPACE/integration_tests"
