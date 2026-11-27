@@ -160,44 +160,51 @@ def test_native_collect_result_supports_native_and_python_consumers(tmp_path):
         consumers = model.new_space("Consumers", refs={"projection": projection, "numbers": math})
         consumers.new_cells(
             "numeric", "lambda t: numbers.sqrt(float(projection.collect().sum.cash(t)))")
+        consumers.new_cells("cash_value", "lambda t: projection.collect().sum.cash(t)")
         consumers.new_cells(
             "report", 'lambda: {t: f"{value:.2f}" for t, value in projection.collect().sum.cash.items()}')
         model.export(tmp_path / "exported")
     finally:
         model.close()
 
-    spec = {"spaces": {"Projection": {"serial_collect": "reuse", "parallel_collect_reuse": True}}}
-    (tmp_path / "spec.py").write_text(repr(spec), encoding="utf-8")
     (tmp_path / "sample.py").write_text(
         "from exported import mx_model as m\n"
         "m.Consumers.report()\n"
-        "for t in m.Projection.periods:\n    m.Consumers.numeric(t)\n",
+        "for t in m.Projection.periods:\n    m.Consumers.numeric(t)\n    m.Consumers.cash_value(t)\n",
         encoding="utf-8")
     subprocess.run([sys.executable, "-m", "modelx_cython", "exported", "--sample", "sample.py",
-                    "--spec", "spec.py"], cwd=tmp_path, check=True)
+                    "--no-spec"], cwd=tmp_path, check=True)
 
     admission = json.loads((tmp_path / "exported_cy/_mx_admission.json").read_text(encoding="utf-8"))
     numeric = admission["exported_cy._mx_classes._c_Consumers._f_numeric"]
     report = admission["exported_cy._mx_classes._c_Consumers._f_report"]
     assert numeric["return_type"] == "double"
-    assert any(helper.endswith(".m_sqrt") for helper in numeric["native_helpers"])
     assert report["return_type"] == "object"
+    source = (tmp_path / "exported_cy/_mx_classes.py").read_text(encoding="utf-8")
+    numeric_body = source.split("def _f_numeric(", 1)[1].split("\n    def ", 1)[0]
+    cash_body = source.split("def _f_cash_value(", 1)[1].split("\n    def ", 1)[0]
+    assert "_mx_sys._mx_math_sqrt(" in numeric_body, numeric_body
+    assert ".read_sum(" in cash_body, cash_body
 
     probe = textwrap.dedent("""\
         import math
-        from array import array
+        from types import ModuleType
         from exported import mx_model as exported
         from exported_cy import mx_model as compiled
-        from exported_cy._mx_collect_semantics import NativeCollectedSeries
+        from exported_cy._mx_collect import CollectedSeries, _NativeFields
 
         for workers in (1, 4):
             live, native = type(exported)(), type(compiled)()
-            live.collect_workers = native.collect_workers = workers
+            native._mx_collect_workers = workers
             collected = native.Projection.collect()
+            storage = collected._CollectResult__storage
+            assert type(storage) is _NativeFields and storage.views == {}
+            for t, value in enumerate((5., 9., 13.)):
+                assert native.Consumers.cash_value(t) == live.Consumers.cash_value(t) == value
+            assert storage.views == {}
+
             series = collected.sum.cash
-            assert type(series) is NativeCollectedSeries
-            storage = series._storage
-            assert type(storage) is array
+            assert type(series) is CollectedSeries
             assert dict(series) == dict(live.Projection.collect().sum.cash) == {0: 5., 1: 9., 2: 13.}
             for t in (0, 1, 2):
                 expected = math.sqrt(series[t])
@@ -206,7 +213,13 @@ def test_native_collect_result_supports_native_and_python_consumers(tmp_path):
             assert type(report) is dict
             assert report == live.Consumers.report() == {0: "5.00", 1: "9.00", 2: "13.00"}
             assert native.Projection.collect() is collected
-            assert collected.sum.cash is series and series._storage is storage
+            assert collected.sum.cash is series and collected._CollectResult__storage is storage
+
+        replacement = ModuleType("replacement_math")
+        replacement.sqrt = lambda value: value + 1.0
+        live, native = type(exported)(), type(compiled)()
+        live.Consumers.numbers = native.Consumers.numbers = replacement
+        assert native.Consumers.numeric(0) == live.Consumers.numeric(0) == 6.0
         """)
     subprocess.run([sys.executable, "-c", probe], cwd=tmp_path, check=True)
 

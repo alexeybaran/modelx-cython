@@ -72,15 +72,14 @@ def _build(tmp_path):
 
 def test_forms_compile_natively_and_equal_the_interpreter(tmp_path):
     source, report = _build(tmp_path)
-    pool = source[source.index('def _f_pool'):]
-    pool = pool[:pool.index('\n    @')] if '\n    @' in pool else pool
     formula = source[source.index('_bound_0: _mx_cy.longlong = max(0, '):][:2000]
     assert 'in range(_mx_reduce_0_bound_0, _mx_reduce_0_bound_1):' in formula, formula
     assert '.sum_add_f64(' in formula and 'cast(object' not in formula.split('return')[0], formula
     assert report[PREFIX + 'pool']['slow_paths'] == [], report[PREFIX + 'pool']
     assert report[PREFIX + 'mean']['slow_paths'] == [] or all(
         e['kind'] != 'reduction-on-objects' for e in report[PREFIX + 'mean']['slow_paths'])
-    assert 'key = (k % 2, int(x), int(m))' in source
+    rate_body = source.split('def _f_rate(', 1)[1].split('\n    def ', 1)[0]
+    assert '.contains_c(' in rate_body and '.f64_c(' in rate_body, rate_body
     probe = textwrap.dedent('''\
         import json, sys
         from importlib import import_module
