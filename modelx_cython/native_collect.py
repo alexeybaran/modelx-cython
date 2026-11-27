@@ -329,7 +329,7 @@ class _FieldReads(cst.CSTTransformer):
         return False
 
     def read(self, expr, key, index_read=False, whole_return=False):
-        if (not whole_return or self.result_type not in ('double', 'long long')
+        if (not whole_return or self.result_type not in ('double', 'long long', 'object')
                 or not isinstance(expr, cst.Attribute) or key is not None and not self.integer(key)):
             return None
         receiver = expr.value
@@ -352,7 +352,9 @@ class _FieldReads(cst.CSTTransformer):
             if field.kind == PYTHON or field.name != name or (field.domain is not None) != (key is not None):
                 continue
             if field.kind == FLOAT:
-                if self.result_type != 'double':
+                if self.result_type == 'object' and read == 'read_individual':
+                    read += '_value'
+                elif self.result_type != 'double':
                     return None
             else:
                 if self.result_type != 'long long':

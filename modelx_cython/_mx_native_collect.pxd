@@ -50,6 +50,8 @@ cpdef object integer_keys(object value)
 cdef object individual_at(object result, object coordinate)
 cdef double read_individual(object record, Py_ssize_t field, str name, long long key,
                             bint series, bint index_read) except? -1
+cdef object read_individual_value(object record, Py_ssize_t field, str name, long long key,
+                                  bint series, bint index_read)
 cdef double read_sum(object result, Py_ssize_t field, str name, long long key,
                      bint series, bint index_read) except? -1
 cdef long long read_individual_int(object record, Py_ssize_t field, str name, long long key,

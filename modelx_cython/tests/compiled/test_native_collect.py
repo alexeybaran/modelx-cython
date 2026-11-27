@@ -34,6 +34,7 @@ def test_native_records_and_reductions(tmp_path):
                 return {'refs': {'record': Source[idx]}}
             '''))
         use.new_cells('read', 'lambda t: record.value(t)')
+        use.new_cells('read_or_label', 'lambda t: record.value(t) if t >= 0 else "missing"')
         use.new_cells('python_read', 'lambda t: getattr(record, "value")(t)')
         use.new_cells('same_record', 'lambda: record is Source.collect().individual[idx]')
         use.new_cells('bound_cell', 'lambda: callable(record.count)')
@@ -66,6 +67,8 @@ def test_native_records_and_reductions(tmp_path):
         m.Source.collect()
         m.Source.collect(1, 0)
         m.Use[7, True].read(2)
+        m.Use[7, True].read_or_label(2)
+        m.Use[7, True].read_or_label(-1)
         m.Use[7, True].python_read(2)
         m.Use[7, False].read(6)
         m.Use[7, False].bound_cell()
@@ -84,7 +87,7 @@ def test_native_records_and_reductions(tmp_path):
                            cwd=tmp_path, capture_output=True, text=True)
     assert build.returncode == 0, build.stdout + build.stderr
     generated = (tmp_path / 'exported_cy/_mx_classes.py').read_text(encoding='utf-8')
-    for expression in ('_mx_gather__c_Source', '.individual_at(', '.read_individual(', '.read_sum('):
+    for expression in ('_mx_gather__c_Source', '.individual_at(', '.read_individual(', '.read_individual_value(', '.read_sum('):
         assert expression in generated
     assert '_mx_gather__c_Varying' not in generated
 
@@ -109,6 +112,8 @@ def test_native_records_and_reductions(tmp_path):
             assert model.Book.read_series(2) == 26.0
             assert model.Book.read_row(8, 6) == 14.0
             assert model.Use[7, True].read(2) == model.Use[7, False].read(2) == 9.0
+            assert model.Use[7, True].read_or_label(2) == 9.0
+            assert model.Use[7, True].read_or_label(-1) == 'missing'
             assert storage(result).views == {}
             assert model.Use[7, True].python_read(6) == 13.0
             assert storage(result).views == {}
