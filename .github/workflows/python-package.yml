@@ -1,17 +1,11 @@
-name: Regional exact-stack verification
+name: Regional compiled-suite verification
 
 on:
   push:
-    branches: [verify/regional-final-stack-1]
+    branches: [verify/regional-final-compiled-1]
 
-# One job per lane (system x interpreter). Each lane runs, as separate steps that all run
-# even when an earlier one fails:
-#   unit       the full non-compiled unit suite (modelx_cython/tests without compiled/)
-#   compiled   compiled and integration tests, less the allocation tests
-#   allocation the compiled tests of the allocation change: unwritten values, pickling and
-#              copying, and the two-thread test on a locked Space
-#   sec        released lifelib SEC models (Term, MYGA, SPIA) built with mx2cy and compared with
-#              live modelx
+# Recheck the compiled and integration suites with their fixture helper paths.
+# Unit, allocation and SEC evidence stays with the exact-stack run.
 # The companion commits for modelx and lifelib are pinned below.
 # scipy, libcst, numpy and pandas are installed from wheels: their newest releases lack some 3.13t
 # wheels; libcst (also a modelx dependency) does not build for 3.13t, and numpy and pandas
@@ -28,8 +22,17 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
-        python-version: ["3.10", "3.12", "3.14", "3.14t", "3.13t"]
+        include:
+          - {os: ubuntu-latest, python-version: '3.14t'}
+          - {os: windows-latest, python-version: '3.12'}
+          - {os: ubuntu-latest, python-version: '3.10'}
+          - {os: ubuntu-latest, python-version: '3.12'}
+          - {os: ubuntu-latest, python-version: '3.14'}
+          - {os: ubuntu-latest, python-version: '3.13t'}
+          - {os: windows-latest, python-version: '3.10'}
+          - {os: windows-latest, python-version: '3.14'}
+          - {os: windows-latest, python-version: '3.14t'}
+          - {os: windows-latest, python-version: '3.13t'}
     env: &env
       PYTEST_ADDOPTS: ${{ matrix.os == 'windows-latest' && '--basetemp=C:/t' || '' }}
       PYTHONIOENCODING: utf-8
@@ -86,50 +89,28 @@ jobs:
           if [[ "${{ matrix.python-version }}" == *t ]]; then
             python -c "import sys, sysconfig; assert sysconfig.get_config_var('Py_GIL_DISABLED') and not sys._is_gil_enabled()"
           fi
-      - name: unit
-        id: unit
-        if: success() || failure()
-        working-directory: ${{ runner.temp }}
-        shell: bash
-        run: |
-          python -m pytest --import-mode=importlib --rootdir "$GITHUB_WORKSPACE" -p no:cacheprovider \
-            -n auto -q -rfEs \
-            "$GITHUB_WORKSPACE/modelx_cython/tests" --ignore="$GITHUB_WORKSPACE/modelx_cython/tests/compiled"
       - name: compiled
         id: compiled
-        if: success() || failure()
         working-directory: ${{ runner.temp }}
         shell: bash
         run: |
           C=modelx_cython/tests/compiled
-          python -m pytest --import-mode=importlib --rootdir "$GITHUB_WORKSPACE" -p no:cacheprovider \
+          options=(--import-mode=importlib --rootdir "$GITHUB_WORKSPACE" -p no:cacheprovider
+            -o "pythonpath='$GITHUB_WORKSPACE/$C' '$GITHUB_WORKSPACE/integration_tests' '$GITHUB_WORKSPACE/integration_tests/table_matrix'")
+          python -m pytest "${options[@]}" --collect-only -q \
+            "$GITHUB_WORKSPACE/$C/test_float_vector_of_integers.py" \
+            "$GITHUB_WORKSPACE/$C/test_reduction_boolean_list.py" \
+            "$GITHUB_WORKSPACE/integration_tests/table_matrix/test_table_matrix.py" \
+            "$GITHUB_WORKSPACE/integration_tests/test_forms_flat_asof.py"
+          python -m pytest "${options[@]}" \
             -n auto --dist loadfile -q -rfEs \
-            --deselect $C/test_value_storage.py \
+            --deselect "$C/test_value_storage.py" \
             "$GITHUB_WORKSPACE/$C" "$GITHUB_WORKSPACE/integration_tests"
-      - name: allocation
-        id: allocation
-        if: success() || failure()
-        working-directory: ${{ runner.temp }}
-        shell: bash
-        run: |
-          C="$GITHUB_WORKSPACE/modelx_cython/tests/compiled"
-          python -m pytest --import-mode=importlib --rootdir "$GITHUB_WORKSPACE" -p no:cacheprovider -q -rfEs \
-            "$C/test_value_storage.py::test_unwritten_values_after_pickle_and_copy" \
-            "$C/test_value_storage.py::test_unwritten_values_of_a_locked_space"
-      - name: sec
-        id: sec
-        if: success() || failure()
-        working-directory: ${{ runner.temp }}
-        shell: bash
-        run: |
-          python "$GITHUB_WORKSPACE/.github/scripts/sec_compare.py" sec_term Term_US_SEC term_life
-          python "$GITHUB_WORKSPACE/.github/scripts/sec_compare.py" sec_myga MYGA_US_SEC fixed_deferred_annuity
-          python "$GITHUB_WORKSPACE/.github/scripts/sec_compare.py" sec_spia SPIA_US_SEC immediate_annuity
       - name: Summary
         if: always()
         shell: bash
         run: |
-          echo "lane ${{ matrix.os }} ${{ matrix.python-version }}: unit=${{ steps.unit.outcome }} compiled=${{ steps.compiled.outcome }} allocation=${{ steps.allocation.outcome }} sec=${{ steps.sec.outcome }}" | tee -a "$GITHUB_STEP_SUMMARY"
+          echo "lane ${{ matrix.os }} ${{ matrix.python-version }}: compiled=${{ steps.compiled.outcome }}" | tee -a "$GITHUB_STEP_SUMMARY"
 
   lane-macos:
     name: ${{ matrix.os }} / ${{ matrix.python-version }}
@@ -140,6 +121,6 @@ jobs:
       max-parallel: 1
       matrix:
         os: [macos-latest]
-        python-version: ["3.10", "3.12", "3.14", "3.14t", "3.13t"]
+        python-version: ["3.14t", "3.12", "3.14", "3.13t", "3.10"]
     env: *env
     steps: *steps
