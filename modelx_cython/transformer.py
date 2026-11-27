@@ -847,8 +847,9 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
                               for line in value_storage.py_declarations(self.module.classes[cls_name]))
             if cls_name in self.module.visitor.collect_spaces:
                 self._collect_dots = '.' * self.module.fqname.count('.')
-                members, complete = collect.member_specs(original_node, cls_info, self._collect_modules)
-                generated = collect.hook(original_node, cls_name, members, complete, dots=self._collect_dots,
+                members, child_bindings_known = collect.member_specs(original_node, cls_info, self._collect_modules)
+                generated = collect.hook(original_node, cls_name, members, child_bindings_known,
+                                         dots=self._collect_dots,
                                          reuse=collect.reuses_items(self.module.visitor, cls_name))
                 if generated is not None:
                     self._collect_hooks = True

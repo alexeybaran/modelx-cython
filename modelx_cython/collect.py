@@ -8,12 +8,12 @@ unescaped item of a Space without child Spaces or dynamic References. The export
 adds the outputs in domain order at any number of workers.
 
 Workers: the spec key ``collect_workers`` (default 1), or ``_mx_collect_workers`` set on the compiled
-model object. With more than one, items run on that many threads; their outputs are added in domain
-order as they complete, and an error raises the exception of the first failing coordinate, as one
-worker does. With more than one worker, on every build, a Reference of the Space that is a Space without
-a lock (not exported in ``locked_spaces``) raises ValueError naming it, as does a formula of the Space that
-reads ``_model``, ``_parent`` or ``_space``: what those reach cannot be filled by two threads at once.
-Threads run model code at the same time only on free-threaded Python; with the GIL, one worker runs.
+model object. Multiple workers use threads on free-threaded Python when shared Space and Cell
+References have locks and the caller does not hold the model lock. Formulas that read ``_model``,
+``_parent`` or ``_space`` raise a ValueError with multiple workers configured, as do unlocked shared
+References. A named child that can bind References in its own item factory needs synchronous
+evaluation because its bindings arise after the collected item's checks. The accumulator raises the
+first error in domain order at any worker count.
 """
 import pathlib
 import re
@@ -64,13 +64,17 @@ def _reads_parents(class_node, cells):
 
 
 def member_specs(class_node, cls_info, modules):
-    """Names of References and parent access in the collected Space and its named subtree."""
+    """Names of References and whether the child bindings can be checked before dispatch."""
     members = []
+    child_bindings_known = True
     pending = [((), class_node, cls_info)]
     while pending:
         path, node, info = pending.pop()
         members.append((path, tuple(sorted(info.refs)), _reads_parents(node, info.cells),
                         _local_ref_copies(node, len(path))))
+        if path and any(isinstance(item, cst.FunctionDef) and item.name.value == '_mx_apply_formula'
+                        for item in node.body.body):
+            child_bindings_known = False
         if info.spaces:
             package = info.module.fqname.rsplit('.', 1)[0]
             child_module = modules.get(f'{package}.{MODULE_PREF}{info.name[len(SPACE_PREF):]}.{MX_SPACE_MOD}')
@@ -80,7 +84,7 @@ def member_specs(class_node, cls_info, modules):
                 if isinstance(child, cst.ClassDef) and child.name.value in child_module.classes:
                     pending.append(((*path, child.name.value[len(SPACE_PREF):]),
                                     child, child_module.classes[child.name.value]))
-    return tuple(members), True
+    return tuple(members), child_bindings_known
 
 
 def _local_ref_copies(class_node, depth):
@@ -207,7 +211,7 @@ def _private_constructor(item, constructor, initializers, has_formula, aliases):
     return item.body.with_changes(body=body)
 
 
-def hook(class_node, cls_name, members, complete, dots='.', fast=True, reuse=False):
+def hook(class_node, cls_name, members, child_bindings_known, dots='.', fast=True, reuse=False):
     """The compiled detached constructor and hook for a supported exported Space, or None.
 
     With ``fast``, a new item of a Space without child Spaces or roots is built on the typed
@@ -313,7 +317,8 @@ def hook(class_node, cls_name, members, complete, dots='.', fast=True, reuse=Fal
         f'            _mx_release_collect_tree(_mx_root, {aliases!r})\n'
         f'            _mx_root = None\n'
         f'    return _mx_collect_evaluate(self, _mx_coords, {code(outputs_at)},\n'
-        f'                                {runtime_members!r}, {complete!r}, {apply_formula!r}, {dynamic_refs!r})\n')
+        f'                                {runtime_members!r}, {child_bindings_known!r},\n'
+        f'                                {apply_formula!r}, {dynamic_refs!r})\n')
     return _private_constructor(item, build, initializers, apply_formula, aliases), cst.parse_module(source).body
 
 
@@ -503,7 +508,7 @@ def _mx_check_collect_bindings(root, checks):
                 raise _mx_collect_ref_error(name, workers, path, ref)
 
 
-def _mx_collect_evaluate(space, coords, outputs_at, members, complete, applies_formula, dynamic_refs):
+def _mx_collect_evaluate(space, coords, outputs_at, members, child_bindings_known, applies_formula, dynamic_refs):
     from {dots}_mx_collect import Accumulator
     import sys
     workers = getattr(space._model, '_mx_collect_workers', {workers!r})
@@ -514,10 +519,11 @@ def _mx_collect_evaluate(space, coords, outputs_at, members, complete, applies_f
     if workers > 1 and len(coords) > 1:
         checks = _mx_collect_preflight(space, members, workers, dynamic_refs)
     model_lock = getattr(space._model, '_mx_lock', None)
+    # A nested item can bind new References after the root's bindings are checked.
+    # A locked caller cannot wait for workers that may need its shared lock.
     if (workers == 1 or len(coords) == 1 or getattr(sys, '_is_gil_enabled', lambda: True)()
-            or not complete or applies_formula and model_lock is None
-            or model_lock is not None and getattr(model_lock, '_is_owned', lambda: True)()):
-        # A locked caller cannot wait for workers that may need its shared lock.
+            or not child_bindings_known or (applies_formula and model_lock is None)
+            or (model_lock is not None and getattr(model_lock, '_is_owned', lambda: True)())):
         spare = [None, None, checks]
         try:
             for c in coords:

@@ -83,6 +83,7 @@ def compiled_model(tmp_path_factory):
         )
         loose = model.new_space("Loose")
         loose.new_cells("rates", 'lambda: (_ for _ in ()).throw(LookupError("called"))')
+        loose.new_cells("other_rates", "lambda: (9.0, 11.0)")
         for name, method in (("Relative", "relref"), ("Absolute", "absref")):
             alias = model.new_space(name, formula="lambda key: None")
             alias.new_cells("keys", "lambda: (0, 1)")
@@ -104,6 +105,15 @@ def compiled_model(tmp_path_factory):
         dynamic.new_cells("read", "lambda: (peer() if callable(peer) else peer.rates())[key]")
         dynamic.set_collect(over={"key": dynamic.keys},
                             outputs='lambda: {"individual": {"value": read()}}')
+        nested = model.new_space("NestedFactory", formula="lambda key: None")
+        child = nested.new_space("Child", formula=textwrap.dedent('''\
+            def factory(offset):
+                return {"refs": {"peer": data.rates if choose is None else choose(offset)}}
+            '''), refs={"data": data, "choose": None, "peer": None})
+        child.new_cells("read", "lambda: peer()[key + offset]")
+        nested.new_cells("keys", "lambda: (0, 1)")
+        nested.set_collect(over={"key": nested.keys},
+                           outputs='lambda: {"individual": {"value": Child(0).read()}}')
         if EXPORTS_AUTHORED_INPUTS:
             inputs = model.new_space(
                 "Inputs", formula="lambda key, scen=1: None", refs={"domain": (0, 1)}
@@ -123,7 +133,7 @@ def compiled_model(tmp_path_factory):
     sample = (
         "from exported import mx_model\nmx_model.Projection.collect()\nmx_model.Tree.collect()\n"
         "mx_model.Relative.collect()\nmx_model.Absolute.collect()\nmx_model.RelativeCell.collect()\n"
-        "mx_model.Dynamic.collect()\n"
+        "mx_model.Dynamic.collect()\nmx_model.NestedFactory.collect()\n"
     )
     if EXPORTS_AUTHORED_INPUTS:
         sample += "mx_model.Inputs.collect(scen=7)\n"
@@ -325,6 +335,21 @@ PROBE = textwrap.dedent('''\
         assert [record.value for record in model.RelativeCell.collect().individual.values()] == [5, 6]
         assert model.Data.events.count(("rates",)) == 1
 
+    def nested_factory_binding():
+        enable_workers()
+        caller = threading.get_ident()
+        factory_threads = []
+
+        def choose(offset):
+            factory_threads.append(threading.get_ident())
+            return model.Loose.other_rates
+
+        assert model.Loose._mx_lock is None
+        model.NestedFactory.Child.choose = choose
+        result = model.NestedFactory.collect()
+        assert [record.value for record in result.individual.values()] == [9.0, 11.0]
+        assert factory_threads == [caller, caller]
+
     def authored_inputs():
         for space in (exported.Inputs, model.Inputs):
             space.domain = (2,)
@@ -347,6 +372,7 @@ PROBE = textwrap.dedent('''\
         "release_relative_aliases": release_relative_aliases,
         "dynamic_reference": dynamic_reference,
         "bound_cell_references": bound_cell_references,
+        "nested_factory_binding": nested_factory_binding,
         "authored_inputs": authored_inputs,
     }[sys.argv[1]]()
     ''')
@@ -356,7 +382,7 @@ PROBE = textwrap.dedent('''\
     "direct_first", "collect_first", "mixed_cell", "failed_collect",
     "parallel_collect", "parallel_generic", "locked_call",
     "unlocked_child", "relative_and_absolute_aliases", "dynamic_reference",
-    "release_relative_aliases", "bound_cell_references",
+    "release_relative_aliases", "bound_cell_references", "nested_factory_binding",
     pytest.param("authored_inputs", marks=pytest.mark.skipif(
         not EXPORTS_AUTHORED_INPUTS, reason="modelx exporter without authored inputs",
     )),
