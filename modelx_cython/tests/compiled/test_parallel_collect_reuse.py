@@ -108,6 +108,7 @@ def test_parallel_collect_reuse_merges_completed_chunks_and_retries(tmp_path):
 
 
 def test_obsolete_collect_export_requests_reexport(tmp_path):
+    """The current export rejects an unsupported Collect hook before calling it."""
     model = mx.new_model("Obsolete")
     try:
         keys = (0, 1)
@@ -119,18 +120,28 @@ def test_obsolete_collect_export_requests_reexport(tmp_path):
         model.export(tmp_path / "exported")
     finally:
         model.close()
-    runtime = tmp_path / "exported/_mx_sys.py"
-    source = runtime.read_text(encoding="utf-8")
-    marker = "_mx_collect_adapter_version = 2"
-    assert marker in source
-    runtime.write_text(source.replace(marker, "_mx_collect_adapter_version = 1"), encoding="utf-8")
-    (tmp_path / "sample.py").write_text(
-        "from exported import mx_model\nmx_model.Projection.collect()\n", encoding="utf-8",
-    )
-    result = subprocess.run(
-        [sys.executable, "-m", "modelx_cython", "exported", "--sample", "sample.py",
-         "--no-spec", "--translate-only"],
-        cwd=tmp_path, capture_output=True, text=True,
-    )
-    assert result.returncode != 0
-    assert "without export protocol 2" in result.stderr and "Re-export the model" in result.stderr
+    probe = textwrap.dedent("""\
+        import pytest
+        from exported import mx_model
+
+        projection = mx_model.Projection
+        cls = type(projection)
+        calls = []
+
+        def hook(space, coords, args):
+            calls.append((space, coords, args))
+            return None
+
+        cls._mx_collect_hook = hook
+        cls._mx_collect_hook_version = 2
+        with pytest.raises(RuntimeError, match="_mx_collect_hook version 2; this exported model calls version 1"):
+            projection.collect()
+        assert calls == []
+
+        cls._mx_collect_hook_version = 1
+        result = projection.collect()
+        assert result.sum.value == 1.0
+        assert projection.collect() is result
+        assert calls == [(projection, (0, 1), ())]
+    """)
+    subprocess.run([sys.executable, "-c", probe], cwd=tmp_path, check=True)
