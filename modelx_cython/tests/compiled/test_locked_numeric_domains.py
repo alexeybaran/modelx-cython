@@ -40,12 +40,14 @@ def test_locked_native_calls_and_dependent_collect_domain(tmp_path):
     source = (tmp_path / "exported_cy/_mx_classes.py").read_text(encoding="utf-8")
     assert "_mx_held_formula__c_Market_rate" in source
     assert "_mx_held_cache__c_Market_price" in source
-    assert "domain = self.periods(self.close)" in source
+    assert "_mx_gather__c_Book" in source
     probe = textwrap.dedent("""\
         from concurrent.futures import ThreadPoolExecutor
         from types import SimpleNamespace
+        import pytest
         from exported import mx_model as live
         from exported_cy import mx_model as native
+        from exported_cy._mx_collect import _NativeFields
 
         fresh = type(native)()
         fresh.Market.np = SimpleNamespace()
@@ -59,13 +61,29 @@ def test_locked_native_calls_and_dependent_collect_domain(tmp_path):
         with ThreadPoolExecutor(max_workers=4) as pool:
             rates = list(pool.map(native.Market.rate, (1, 2, 3, 4) * 10))
         assert rates == [live.Market.rate(t) for t in (1, 2, 3, 4) * 10]
+        assert native.Market.price(9) == live.Market.price(9) == 19.0
+        with pytest.raises(IndexError, match=r"Market.price"):
+            native.Market.price(10)
+
         for workers in (1, 4):
             model = type(native)()
-            model.collect_workers = workers
-            for close in (0, 1, 4):
-                expected = live.Book.collect(close).sum
-                result = model.Book.collect(close).sum
-                assert result.pv == expected.pv
-                assert dict(result.cash) == dict(expected.cash)
+            model._mx_collect_workers = workers
+            book = model.Book
+            results = {}
+            for close in (0, 1, 4, 3):
+                expected = live.Book.collect(close)
+                collected = book.collect(close)
+                assert type(collected.sum._CollectResult__storage) is _NativeFields, close
+                assert collected.sum.pv == expected.sum.pv == 20.0
+                assert dict(collected.sum.cash) == dict(expected.sum.cash) == {
+                    t: 50.0 + 4 * t for t in range(4 - close)}
+                assert all(collected.sum.cash(t) == collected.sum.cash[t] for t in collected.sum.cash)
+                assert book.collect(close=close) is collected
+                results[close] = collected
+            assert len({id(result) for result in results.values()}) == len(results)
+            assert live.Book.collect(5).sum.cash == {}
+            with pytest.raises(IndexError, match=r"Book.periods"):
+                book.collect(5)
+            assert book.collect(0) is results[0]
         """)
     subprocess.run([sys.executable, "-c", probe], cwd=tmp_path, check=True)

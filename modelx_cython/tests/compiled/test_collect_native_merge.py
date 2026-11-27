@@ -212,10 +212,7 @@ def test_native_collect_result_supports_native_and_python_consumers(tmp_path):
 
 
 def test_collect_with_other_parameters_is_native_per_argument_set(tmp_path):
-    """Valuation(a, key, b).collect(a, b): the other parameters reach the compiled evaluator (protocol 2
-    extension); each call has its own accumulators (allocated and freed in that call), and the collect
-    cache is keyed by the arguments, so two argument sets never share a total. One item and many argument
-    sets is the per-call cost case."""
+    """The v1 native collector keeps separate results for the other Space arguments."""
     model = mx.new_model("CollectArguments")
     try:
         book = tuple(range(1, 9))
@@ -226,8 +223,6 @@ def test_collect_with_other_parameters_is_native_per_argument_set(tmp_path):
                                     collect_outputs=lambda: {"sum": {"pv": pv(), "cf": {t: cf(t) for t in months}}})
             space.new_cells("cf", "lambda t: key * 0.37 + a / 7.0 + b * 0.011 + t / 3.0")
             space.new_cells("pv", "lambda: sum(cf(t) for t in months) / (1.0 + a / 100.0)")
-            if name == "Reduce":
-                space.new_cells("need", "lambda: a + key + b")
         space = model.new_space(
             "ArgumentDomain", formula="lambda key, periods: None",
             refs={"keys": book}, collect_over={"key": "keys"},
@@ -237,64 +232,63 @@ def test_collect_with_other_parameters_is_native_per_argument_set(tmp_path):
         model.export(tmp_path / "exported")
     finally:
         model.close()
-    spec = {"spaces": {name: {"serial_collect": "reuse", "parallel_collect_reuse": True} for name in ("Book", "One")}}
-    spec["spaces"]["Reduce"] = {"serial_collect": "reduce",
-                                "cells_param_size": {"t": 12}, "param_bound_checks": {"t": "need"}}
-    spec["spaces"]["ArgumentDomain"] = {"serial_collect": "reuse", "parallel_collect_reuse": True}
+    spec = {"spaces": {name: {"cells_param_size": {"t": 12}} for name in ("Reduce", "ArgumentDomain")}}
     (tmp_path / "spec.py").write_text(repr(spec), encoding="utf-8")
     (tmp_path / "sample.py").write_text(
         "from exported import mx_model as m\n"
         "for a in (0, 12, 24):\n"
         "    for b in (-1, 0, 6):\n"
         "        m.Book.collect(a, b); m.One.collect(a, b); m.Reduce.collect(a, b)\n"
-        "        for k in m.Reduce.keys:\n"
-        "            m.Reduce[a, k, b].need()\n"
         "m.ArgumentDomain.collect((2, 0, 1))\n",
         encoding="utf-8")
     subprocess.run([sys.executable, "-m", "modelx_cython", "exported", "--sample", "sample.py",
                     "--spec", "spec.py"], cwd=tmp_path, check=True)
     probe = textwrap.dedent("""\
-        import json, sys
-        Model = type(__import__(sys.argv[1]).mx_model)
-        def plain(r):
-            return [repr(r.sum.pv), [[k, repr(v)] for k, v in r.sum.cf.items()]]
-        out = {}
+        import math
+        import pytest
+        from exported import mx_model as live
+        from exported_cy import mx_model as native
+        from exported_cy._mx_collect import _NativeFields
+
+        def compare(compiled_space, live_space, args, parallel=False):
+            actual, expected = compiled_space.collect(*args), live_space.collect(*args)
+            assert type(actual.sum._CollectResult__storage) is _NativeFields, args
+            seen, wanted = actual.sum.cf, expected.sum.cf
+            assert seen.keys() == wanted.keys(), args
+            assert all(seen(key) == seen[key] for key in seen), args
+            if parallel:
+                assert math.isclose(actual.sum.pv, expected.sum.pv, rel_tol=1e-12), args
+                assert all(math.isclose(seen[key], wanted[key], rel_tol=1e-12) for key in seen), args
+            else:
+                assert actual.sum.pv == expected.sum.pv and seen == wanted, args
+            assert compiled_space.collect(*args) is actual, args
+            return actual
+
+        book_args = [(a, b) for a in (0, 12, 24) for b in (-1, 0, 6)]
+        one_args = [(a, b) for a in range(0, 300, 12) for b in range(-1, 7)]
         for workers in (1, 4):
-            m = Model()
-            m.collect_workers = workers
-            out[f'book{workers}'] = [plain(m.Book.collect(a, b)) for a in (0, 12, 24) for b in (-1, 0, 6)]
-            out[f'one{workers}'] = [plain(m.One.collect(a, b)) for a in range(0, 300, 12) for b in range(-1, 7)]
-            out[f'argument_domain{workers}'] = plain(m.ArgumentDomain.collect((1, 2)))
+            m = type(native)()
+            m._mx_collect_workers = workers
+            results = [compare(m.Book, live.Book, args, parallel=workers == 4) for args in book_args]
+            assert len({id(result) for result in results}) == len({result.sum.pv for result in results}) == 9
+            assert m.Book.collect(a=12, b=-1) is m.Book.collect(12)
+            for args in one_args:
+                compare(m.One, live.One, args)
             if workers == 1:
-                out['reduce'] = [plain(m.Reduce.collect(a, b)) for a in (0, 12, 24) for b in (-1, 0, 6)]
-        out['native'] = [hasattr(getattr(m, n), '_mx_collect_options_v2') and getattr(m, n)._mx_collect_options_v2()[1] is not None
-                         for n in ('Book', 'One', 'Reduce', 'ArgumentDomain')]
-        if out['native'][2]:
-            try:
-                Model().Reduce.collect(25, 6)
-            except IndexError as error:
-                out['reduce_bound'] = str(error)
-        print(json.dumps(out))
+                for args in book_args:
+                    compare(m.Reduce, live.Reduce, args)
+                with pytest.raises(IndexError, match=r"Reduce.cf"):
+                    m.Reduce[25, 8, 6].cf(12)
+
+            domain = m.ArgumentDomain
+            initial = compare(domain, live.ArgumentDomain, ((2, 0, 1),))
+            assert compare(domain, live.ArgumentDomain, ((),)).sum.cf == {}
+            assert live.ArgumentDomain.collect((12,)).sum.cf[12] == 105.0
+            with pytest.raises(IndexError, match=r"ArgumentDomain.cf"):
+                domain.collect((12,))
+            changed = compare(domain, live.ArgumentDomain, ((11, 1),))
+            assert set(changed.sum.cf) == {1, 11} and changed is not initial
+            assert domain.collect(periods=(2, 0, 1)) is initial
         """)
-    results = {}
-    for package in ("exported", "exported_cy"):
-        done = subprocess.run([sys.executable, "-c", probe, package], cwd=tmp_path, capture_output=True, text=True)
-        assert done.returncode == 0, done.stderr
-        results[package] = json.loads(done.stdout)
-    live, compiled = results["exported"], results["exported_cy"]
-    assert compiled["native"] == [True, True, True, True]
-    assert compiled["book1"] == live["book1"] and compiled["one1"] == live["one1"] == compiled["one4"]
-    assert compiled["reduce"] == live["reduce"]
-    assert "policy 8 needs t for need() = 39" in compiled["reduce_bound"]
-    for workers in (1, 4):
-        assert compiled[f"argument_domain{workers}"] == live[f"argument_domain{workers}"]
-    report = json.loads((tmp_path / "exported_cy/_mx_admission.json").read_text(encoding="utf-8"))
-    leaves = report["exported_cy._mx_classes._c_ArgumentDomain._f_collect_outputs"]["collect_outputs"]
-    assert {leaf["output"]: leaf["native"] for leaf in leaves} == {"pv": True, "cf": False}
-    assert len({json.dumps(r) for r in compiled["book1"]}) == 9            # nine argument sets, nine totals
-    # 4 workers: chunk totals merge in the parallel order, so the last bits may differ from the serial sum
-    for got, want in zip(compiled["book4"], live["book1"]):
-        assert math.isclose(float(got[0]), float(want[0]), rel_tol=1e-12)
-        assert [k for k, _ in got[1]] == [k for k, _ in want[1]]
-        for (_, x), (_, y) in zip(got[1], want[1]):
-            assert abs(float(x) - float(y)) <= 1e-12 * abs(float(y))
+    done = subprocess.run([sys.executable, "-c", probe], cwd=tmp_path, capture_output=True, text=True)
+    assert done.returncode == 0, done.stdout + done.stderr
