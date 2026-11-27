@@ -480,8 +480,9 @@ cdef object model_signatures():
 
 
 cdef object bind_own(object frame):
-    """An item's binding of a frame it computes itself (a receiver no Data space publishes): as ``bind_ref``.
-    Kept as the entry the compiler emits for such a receiver."""
+    """Bind a frame computed by this item. None marks a failed probe that must fall back to pandas."""
+    if frame is None:
+        return _NOT_PREPARED
     return bind_ref(frame)
 
 

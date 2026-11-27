@@ -23,7 +23,7 @@ RUNTIME = Path(__file__).resolve().parents[1] / 'runtime'
 PROBE = textwrap.dedent('''\
     # cython: freethreading_compatible=True
     import numpy as np
-    from _tables cimport PreparedTable
+    from _tables cimport PreparedRef, PreparedTable, bind_own, slot
 
     def flat_f64(PreparedTable table, long long key, Py_ssize_t slot):
         cdef Py_ssize_t row = table.code_ll(0, key) if table.nlevels == 1 else -1
@@ -54,6 +54,12 @@ PROBE = textwrap.dedent('''\
 
     def row_dtype(PreparedTable table):
         return table.row_object, table.row_float
+
+    def own_slot(frame, int signature):
+        cdef PreparedTable table = bind_own(frame)
+        assert table is not None
+        return slot(<PreparedRef>table, signature)
+
     # Python access for the tests, through the lookups compiled code uses
     def key_codes(PreparedTable table, key):
         parts = key if table.nlevels > 1 else (key,)
@@ -249,6 +255,11 @@ def test_left_to_pandas(tables, frame, reason):
     _tables, probe = tables
     assert _tables.prepare(frame) is None
     assert reason in _tables.unprepared_reason(frame)
+
+
+def test_failed_own_binding_leaves_read_to_pandas(tables):
+    _, probe = tables
+    assert probe.own_slot(None, 0) == -1
 
 
 def own_rule_frames():
