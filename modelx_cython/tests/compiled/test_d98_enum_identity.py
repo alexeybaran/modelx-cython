@@ -75,10 +75,30 @@ def test_enum_identity_with_a_typed_integer_is_equality(tmp_path, monkeypatch):
     done = subprocess.run([sys.executable, '-m', 'modelx_cython', 'exported', '--sample', 'sample.py',
                            '--no-spec'], cwd=tmp_path, capture_output=True, text=True)
     assert done.returncode == 0, done.stdout[-3000:] + done.stderr[-3000:]
+    generated = (tmp_path / 'exported_cy' / '_mx_classes.py').read_text(encoding='utf-8')
+    assert ('self._mx_definition_Kind = base_._mx_definition_Kind '
+            'if type(base_) is _c_Projection else base_.Kind') in generated
     probe = textwrap.dedent('''\
         import sys
         from importlib import import_module
-        p = import_module(sys.argv[1]).mx_model.Projection
+        from d98_kinds import Kind
+        model = import_module(sys.argv[1]).mx_model
+        p = model.Projection
+        assert p[1].Kind is Kind
+        if sys.argv[1] == 'exported_cy':
+            class ObservedEnum(type(p)):
+                def __getattribute__(self, name):
+                    if name == 'Kind':
+                        seen.append(name)
+                    return super().__getattribute__(name)
+
+            seen = []
+            base = ObservedEnum(model)
+            base._mx_copy_refs(p, p)
+            target = type(p)(model)
+            target._mx_copy_refs(base, base)
+            assert seen == ['Kind']
+            assert target.Kind is Kind
         rows = []
         for t in range(9):
             rows.append((p.direct(t), p.reversed_(t), p.local(t), p.caller(t),

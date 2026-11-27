@@ -253,7 +253,7 @@ def test_reused_items_reset_reserved_numeric_caches(tmp_path):
     model = mx.new_model('NumericCollect')
     try:
         proj = model.new_space('Projection', formula='lambda key: None')
-        proj.new_cells('keys', 'lambda: (1, 2, 3)')
+        proj.new_cells('keys', 'lambda: tuple(range(1, 97))')
         proj.new_cells('amount', textwrap.dedent('''\
             def amount(t, premium):
                 if t == 0:
@@ -300,7 +300,7 @@ def test_reused_items_reset_reserved_numeric_caches(tmp_path):
     )
     out = json.loads(run.stdout)
     assert out['1'] == out['4'] == out['export'] == {
-        '1': {'amount': 41.5}, '2': {'amount': 42.5}, '3': {'amount': 43.5},
+        str(key): {'amount': key + 40.5} for key in range(1, 97)
     }
 
 

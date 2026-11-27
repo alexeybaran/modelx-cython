@@ -3,7 +3,7 @@ import libcst as cst
 from libcst.metadata import ExpressionContext
 
 from .scopes import CstFacts, FormulaTransformer, Names, lexical_nodes
-from .syntax import walk
+from .syntax import dotted_name, walk
 from .consts import MX_SYS_MOD
 
 
@@ -568,8 +568,9 @@ class _MemberFields(cst.CSTTransformer):
 
 
 class Bindings(cst.CSTTransformer):
-    def __init__(self, names):
+    def __init__(self, names, exact_base):
         self.names = names
+        self.exact_base = exact_base
 
     def leave_AssignTarget(self, before, after):
         target = after.target
@@ -577,6 +578,19 @@ class Bindings(cst.CSTTransformer):
                 and target.value.value == 'self' and target.attr.value in self.names):
             return after.with_changes(target=target.with_changes(attr=cst.Name(storage(target.attr.value))))
         return after
+
+    def leave_Assign(self, before, after):
+        value = after.value
+        if (self.exact_base is None or len(after.targets) != 1
+                or not isinstance(value, cst.Attribute) or dotted_name(value.value) != 'base_'):
+            return after
+        name = value.attr.value
+        slot = storage(name)
+        if name not in self.names or dotted_name(after.targets[0].target) != f'self.{slot}':
+            return after
+        # A subclass can still resolve the defined Reference through Python.
+        field = value.with_changes(attr=cst.Name(slot))
+        return after.with_changes(value=cst.IfExp(self.exact_base, field, value))
 
 
 def bind_properties(cls, body):
@@ -592,7 +606,10 @@ def bind_properties(cls, body):
             statements.insert(int(bool(docstring)),check)
             statement=statement.with_changes(body=statement.body.with_changes(body=tuple(statements)))
         if isinstance(statement, cst.FunctionDef) and statement.name.value in ('_mx_assign_refs','_mx_copy_refs'):
-            statement = statement.visit(Bindings(names))
+            exact_base = None
+            if names and statement.name.value == '_mx_copy_refs':
+                exact_base = cst.parse_expression(f'type(base_) is {cls.name}')
+            statement = statement.visit(Bindings(names, exact_base))
         result.append(statement)
     for name in names:
         result.extend(cst.parse_module(f'@property\ndef {name}(self):\n    return self.{storage(name)}\n').body)
