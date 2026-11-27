@@ -100,6 +100,13 @@ EDGES = [0.0, -0.0, 1.0, -1.0, 0.1, 1e16, -1e16, 1e308, -1e308, 5e-324, -5e-324,
          -2 ** 63, 2 ** 63, 2 ** 100, -2 ** 100, True, False, 1j, -0.0 + 0j]
 
 
+def test_integer_sum_operand_and_accumulator_bounds(probe):
+    check(probe, [-8151783939730657319, 1.3843650791674122e17, True,
+                  8863683826242.795, -2.75489566025584e17])
+    long_max = (1 << (8 * struct.calcsize('l') - 1)) - 1
+    check(probe, [long_max, 1, 1e16, 1.0, -1e16])
+
+
 def test_documented_edges(probe):
     check(probe, [1e16, 1, 1, -1e16])            # integer items are compensated from 3.14, not before
     check(probe, [0.1, 1e16, 1, -1e16])

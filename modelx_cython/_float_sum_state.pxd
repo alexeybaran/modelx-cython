@@ -36,7 +36,7 @@ cdef inline double f64_result(F64Sum* state) noexcept:
 # ---------------------------------------------------------------- exact built-in sum
 # ``PySum`` reproduces ``builtin_sum_impl`` (Python/bltinmodule.c) of the running CPython for
 # one ``sum(iterable[, start])`` whose items are produced by native code: the C
-# integer fast loop (Py_ssize_t accumulator, overflow leaves it), the compensated
+# integer fast loop (C long operands, a C long or Py_ssize_t accumulator), the compensated
 # float loop (Neumaier, ints added through PyLong_AsDouble), the compensated complex
 # loop and the generic PyNumber_Add loop, with the same transitions between them.
 # Typed items (double, long long, bint) are the exact float/int/bool objects the
@@ -45,13 +45,16 @@ cdef inline double f64_result(F64Sum* state) noexcept:
 # leaves for the generic loop on a larger one, and there is no complex loop.
 from cpython.object cimport PyObject
 from cpython.ref cimport Py_INCREF, Py_XDECREF
-from cpython.long cimport (PyLong_Check, PyLong_CheckExact, PyLong_AsLongLongAndOverflow, PyLong_AsDouble,
-                           PyLong_AsLongAndOverflow)
+from cpython.long cimport PyLong_Check, PyLong_CheckExact, PyLong_AsDouble, PyLong_AsLongAndOverflow
 from cpython.float cimport PyFloat_Check, PyFloat_CheckExact, PyFloat_AS_DOUBLE, PyFloat_AsDouble, PyFloat_FromDouble
 from cpython.complex cimport PyComplex_CheckExact, PyComplex_AsCComplex, PyComplex_FromDoubles, Py_complex
 from cpython.bool cimport PyBool_Check
 from cpython.number cimport PyNumber_Add
-from libc.limits cimport LLONG_MAX, LLONG_MIN, LONG_MAX, LONG_MIN
+from libc.limits cimport LONG_MAX, LONG_MIN
+
+cdef extern from "Python.h":
+    const Py_ssize_t PY_SSIZE_T_MIN
+    const Py_ssize_t PY_SSIZE_T_MAX
 
 cdef enum:
     SUM_INT = 0
@@ -126,7 +129,13 @@ cdef inline int _sum_generic(PySum* state, object item) except -1:
 
 
 cdef inline bint _sum_whole(PySum* state, long long b) noexcept:
-    if (b <= LLONG_MAX - state.whole) if state.whole >= 0 else (b >= LLONG_MIN - state.whole):
+    # CPython widened the accumulator bounds in 3.12.5. Operands still fit in C long.
+    cdef bint wide_accumulator = PY_VERSION_HEX >= 0x030C0500
+    cdef long long minimum = PY_SSIZE_T_MIN if wide_accumulator else LONG_MIN
+    cdef long long maximum = PY_SSIZE_T_MAX if wide_accumulator else LONG_MAX
+    if not LONG_MIN <= b <= LONG_MAX:
+        return False
+    if (b <= maximum - state.whole) if state.whole >= 0 else (b >= minimum - state.whole):
         state.whole += b
         return True
     return False
@@ -177,13 +186,12 @@ cdef inline int sum_add_bint(PySum* state, bint v) except -1:
 cdef inline int sum_add_object(PySum* state, object item) except -1:
     """Add any item object, branch for branch as builtin_sum_impl."""
     cdef int overflow = 0
-    cdef long long b
     cdef long small
     cdef Py_complex z
     if state.mode == SUM_INT:
         if PyLong_CheckExact(item) or PyBool_Check(item):
-            b = PyLong_AsLongLongAndOverflow(item, &overflow)
-            if overflow == 0 and _sum_whole(state, b):
+            small = PyLong_AsLongAndOverflow(item, &overflow)
+            if overflow == 0 and _sum_whole(state, small):
                 return 0
     elif state.mode == SUM_FLOAT:
         if PyFloat_CheckExact(item):
