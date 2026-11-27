@@ -1,4 +1,4 @@
-"""Verify private Collect reuse with rebound object inputs and native output domains."""
+"""Verify private Collect evaluation with rebound object inputs and series outputs."""
 
 import subprocess
 import sys
@@ -12,9 +12,10 @@ import pytest
 def test_factory_private_refs(tmp_path, dependency):
     model = mx.new_model("PrivateFactory")
     use_collect = dependency != 'row'
-    admitted = dependency == 'cached_collect'
+    accumulates = dependency == 'cached_collect'
+    needs_options = dependency == 'unhashable_default'
     try:
-        factory = ('lambda case, point, options=[]: None' if dependency == 'unhashable_default'
+        factory = ('lambda case, point, options=[]: None' if needs_options
                    else 'lambda case, point: None' if use_collect else None)
         data = model.new_space("Data", refs={"weights": ((3.0,), (5.0,), (7.0,), (11.0,)),
                                             "points": (0, 1, 2, 3)},
@@ -24,7 +25,8 @@ def test_factory_private_refs(tmp_path, dependency):
             data.new_cells('row', 'lambda: (weights[point][0] + 100.0 * case,)')
             data.set_collect(over={'point': data.domain}, outputs=lambda: {"individual": {"row": row()}})
             row = 'record.row'
-            history = '\n    record = data.collect(case).individual[point]'
+            args = 'case, ()' if needs_options else 'case'
+            history = f'\n    record = data.collect({args}).individual[point]'
         else:
             data.new_cells("row", "lambda i: weights[i]")
             row, history = 'data.row(point)', ''
@@ -37,7 +39,7 @@ def test_factory_private_refs(tmp_path, dependency):
 """,
         )
         run.new_cells("value", "lambda t: row[0] + t")
-        if admitted:
+        if accumulates:
             run.new_cells('end', 'lambda: case + 1')
             run.new_cells('total', """def total():
     result = 0.0
@@ -48,47 +50,44 @@ def test_factory_private_refs(tmp_path, dependency):
         else:
             run.new_cells("total", "lambda: value(case)")
         run.new_cells("steps", "lambda case: range(case)")
-        run.set_collect(over={"point": run.points},
+        run.set_collect(over={"point": "points"},
                         outputs=lambda: {"sum": {"total": total(), "series": {t: value(t) for t in steps(case)}}})
-        model.export(tmp_path / "exported")
+        model.export(tmp_path / "exported", locked_spaces=['Data'])
     finally:
         model.close()
-    source = (tmp_path / "exported" / "_mx_sys.py").read_text()
-    if "_mx_collect_packed_sums_v1 = True" not in source:
-        pytest.skip("requires exporter with packed Collect sums")
-    options = {"factory_collect_reuse": True, "factory_collect_private_refs": True,
-               "factory_collect_subtotals": True, "serial_collect": "reduce",
-               'factory_collect_hold_individuals': use_collect,
-               'factory_collect_bind_fixed_refs': admitted}
-    (tmp_path / "spec.py").write_text(repr({"spaces": {"Runs": options}, "cells_param_size": {"t": 8, "case": 8, 'k': 9}}))
-    (tmp_path / "sample.py").write_text("from exported import mx_model as m\nm.Runs.collect(2)\n")
+    (tmp_path / "spec.py").write_text(repr({"cells_param_size": {"t": 8, "case": 8, 'k': 9}}), encoding="utf-8")
+    (tmp_path / "sample.py").write_text("from exported import mx_model as m\nm.Runs.collect(2)\n", encoding="utf-8")
     subprocess.run([sys.executable, "-m", "modelx_cython", "exported"], cwd=tmp_path, check=True)
-    generated = (tmp_path / 'exported_cy/_mx_classes.py').read_text(encoding='utf-8')
-    assert ('_mx_factory_individuals' in generated) == admitted
-    assert ("refs['row'])" in generated) == admitted
     probe = textwrap.dedent(f"""\
+        from exported import mx_model as export
         from exported_cy import mx_model as m
-        from exported_cy._mx_collect_semantics import NativeCollectedSeries
-        options = m.Runs._mx_collect_options_v2()
-        assert options[1] and options[2]
+        assert type(m.Runs)._mx_collect_hook_version == 1
         direct = m.Runs[2, 0]
         use_collect = {use_collect!r}
-        admitted = {admitted!r}
-        assert direct.total() == (612. if admitted else 205. if use_collect else 5.)
-        if admitted:
-            memo = [None]
-            m.Runs._mx_space_formula(2, 0, _mx_factory_individuals=memo)
-            if type(m.Data).__flags__ & 256 and type(m.Data).__dictoffset__ == 0:
-                assert memo[0] is m.Data.collect(2).individual
-                result = m.Runs._mx_space_formula(2, 1, _mx_factory_individuals=memo)
-                assert result['refs']['row'] == (205.,)
+        accumulates = {accumulates!r}
+        needs_options = {needs_options!r}
+        assert direct.total() == export.Runs[2, 0].total() == (612. if accumulates else 205. if use_collect else 5.)
+        if use_collect:
+            args = (2, ()) if needs_options else (2,)
+            assert m.Data.collect(*args).individual[1].row == (205.,)
+            assert m.Data.collect(*args) is m.Data.collect(*args)
+        if needs_options:
+            for model in (export, m):
+                try:
+                    model.Data.collect(2)
+                except TypeError as error:
+                    assert 'unhashable' in str(error)
+                else:
+                    raise AssertionError('an unhashable Collect argument was accepted')
         for workers, case in ((1, 2), (4, 3)):
-            m.collect_workers = workers
+            m._mx_collect_workers = workers
             result = m.Runs.collect(case)
+            live = export.Runs.collect(case)
             total = 26. + (400. * case if use_collect else 0.)
-            expected = (case + 1) * total + 2 * case * (case + 1) if admitted else total + 4 * case
-            assert result.sum.total == expected
-            assert type(result.sum.series) is NativeCollectedSeries
+            expected = (case + 1) * total + 2 * case * (case + 1) if accumulates else total + 4 * case
+            assert result.sum.total == live.sum.total == expected
+            assert result.sum.series[1] == result.sum.series(1)
+            assert dict(result.sum.series) == dict(live.sum.series)
             assert list(result.sum.series.values()) == [total + 4 * t for t in range(case)]
         try:
             m.Runs.collect(-1)
@@ -97,5 +96,6 @@ def test_factory_private_refs(tmp_path, dependency):
         else:
             raise AssertionError('factory validation bypassed')
         assert m.Runs[2, 0] is direct
+        assert m.Runs.collect(2).sum.total == export.Runs.collect(2).sum.total
         """)
     subprocess.run([sys.executable, "-c", probe], cwd=tmp_path, check=True)

@@ -1,7 +1,4 @@
-"""collect_outputs with several outputs: a ``sum`` output written ``{k: cell(k) for k in D}`` (D a
-Reference holding integers) or ``cell()`` is summed natively; any other output, and the ``individual``
-section, is merged as the export merges it. Results, errors and the order of keys equal the exported
-model's, and the build report says which outputs are native and why the others are not."""
+"""Compare native and Python Collect results, errors and key order with the export."""
 import importlib
 import json
 import math
@@ -37,13 +34,14 @@ def test_native_and_python_outputs_equal_the_export(tmp_path, monkeypatch):
                   "keyword_echo": arithmetic.keyword_echo}
         outputs = {
             "Mixed": lambda: {
-                "individual": {"state": {t: cf(t) for t in months}, "metadata": {"label": LeftFold(str(key))}},
+                "individual": {"state": {t: cf(t) for t in months}, "metadata": metadata()},
                 "sum": {"pv": pv(), "cf": {t: cf(t) for t in months},
                         "native_cf": {t: cf(t) for t in contiguous}, "none": {t: cf(t) for t in empty}},
             },
             "MixedPython": lambda: {
+                "individual": {"keys": [key]},
                 "sum": {"pv": pv(), "native_cf": {t: cf(t) for t in contiguous},
-                        "keys": [key], "metadata": {"fold": LeftFold(str(key))}},
+                        "metadata": {"fold": LeftFold(str(key))}},
             },
             "RootLocal": lambda: {"individual": {"state": {root: cf(root) for root in months}}, "sum": {"pv": pv()}},
             "RootUnused": lambda: {"individual": {"state": [cf(0) for root in months]}, "sum": {"pv": pv()}},
@@ -59,13 +57,11 @@ def test_native_and_python_outputs_equal_the_export(tmp_path, monkeypatch):
             space.new_cells("pv", "lambda: sum(cf(t) for t in months) / 7.0")
             space.new_cells("domain", "lambda: months")
             space.new_cells("size", "lambda: 2 if key == 5 else 3")
+            if name == "Mixed":
+                space.new_cells("metadata", "lambda: {'label': LeftFold(str(key))}")
         model.export(tmp_path / "exported")
     finally:
         model.close()
-    spec = {"spaces": {name: {"serial_collect": "reuse"} for name in outputs}}
-    for name in ("Mixed", "MixedPython"):
-        spec["spaces"][name].update(parallel_collect_reuse=True, parallel_collect_order="completion")
-    (tmp_path / "spec.py").write_text(repr(spec), encoding="utf-8")
     (tmp_path / "sample.py").write_text(textwrap.dedent("""\
         from exported import mx_model as m
         m.Mixed.collect(); m.CellDomain.collect()
@@ -74,7 +70,7 @@ def test_native_and_python_outputs_equal_the_export(tmp_path, monkeypatch):
             m.MissingKey[key].pv(); m.MissingKey[key].cf(0); m.MissingKey[key].size()
         """), encoding="utf-8")
     subprocess.run([sys.executable, "-m", "modelx_cython", "exported", "--sample", "sample.py",
-                    "--spec", "spec.py"], cwd=tmp_path, check=True)
+                    "--no-spec"], cwd=tmp_path, check=True)
     probe = textwrap.dedent("""\
         import json, pickle, sys
         from collections.abc import Mapping
@@ -90,14 +86,14 @@ def test_native_and_python_outputs_equal_the_export(tmp_path, monkeypatch):
         out = {}
         for workers in (1, 4):
             m = Model()
-            m.collect_workers = workers
+            m._mx_collect_workers = workers
             result = m.Mixed.collect()
             python_result = m.MixedPython.collect()
             if package == 'exported_cy':
-                from exported_cy._mx_collect_semantics import CollectedSeries, NativeCollectedSeries
+                from exported_cy._mx_collect import CollectedSeries, _NativeFields
+                assert type(result.sum._CollectResult__storage) is _NativeFields
                 series = result.sum.native_cf
-                assert type(series) is NativeCollectedSeries
-                assert type(series._storage).__name__ == 'array'
+                assert type(series) is CollectedSeries
                 assert series(1) == series[1] and list(series) == [0, 1, 2]
                 assert dict(pickle.loads(pickle.dumps(series))) == dict(series)
                 for key, item in result.individual.items():
@@ -107,11 +103,9 @@ def test_native_and_python_outputs_equal_the_export(tmp_path, monkeypatch):
 
                 assert type(python_result.sum.metadata) is CollectedSeries
                 assert type(python_result.sum.metadata['fold']) is LeftFold
-                if workers == 1 or getattr(sys, '_is_gil_enabled', lambda: True)():
-                    assert type(python_result.sum.native_cf) is NativeCollectedSeries
-                else:
-                    # Python addition keeps its per-policy order on the generic worker path.
-                    assert type(python_result.sum.native_cf) is CollectedSeries
+                assert type(python_result.sum.native_cf) is CollectedSeries
+                assert type(python_result.sum._CollectResult__storage) is dict
+            assert [item.keys for item in python_result.individual.values()] == [[3], [1], [4], [5], [9], [2]]
             out[f'mixed{workers}'] = plain(result)
             out[f'python{workers}'] = plain(python_result)
             out[f'root{workers}'] = plain(m.RootLocal.collect())
@@ -124,13 +118,6 @@ def test_native_and_python_outputs_equal_the_export(tmp_path, monkeypatch):
                 out[f'missing{workers}'] = 'no error'
             except Exception as error:
                 out[f'missing{workers}'] = [type(error).__name__, str(error)]
-        out['native'] = {name: getattr(m, name)._mx_collect_options_v2()[1] is not None
-                         if hasattr(getattr(m, name), '_mx_collect_options_v2') else None
-                         for name in ('Mixed', 'MixedPython', 'RootLocal', 'RootUnused', 'Keyword',
-                                      'Duplicate', 'CellDomain', 'MissingKey')}
-        if out['native']['Mixed']:
-            out['mixed_parallel'] = m.Mixed._mx_collect_options_v2()[2:4]
-            out['python_parallel'] = m.MixedPython._mx_collect_options_v2()[2]
         print(json.dumps(out))
         """)
     results = {}
@@ -139,20 +126,15 @@ def test_native_and_python_outputs_equal_the_export(tmp_path, monkeypatch):
         assert done.returncode == 0, done.stderr
         results[package] = json.loads(done.stdout)
     live, compiled = results["exported"], results["exported_cy"]
-    assert compiled["native"] == {"Mixed": True, "MixedPython": True, "RootLocal": False, "RootUnused": False,
-                                  "Keyword": True, "Duplicate": False, "CellDomain": False, "MissingKey": True}
-    assert compiled["mixed_parallel"] == [True, True]  # private parallel reuse, domain-order merge
-    assert compiled["python_parallel"] is False        # generic worker results are folded per policy
     for key in ("mixed1", "cell1", "missing1", "python1", "python4", "root1", "root4",
                 "unused1", "unused4", "keyword1", "keyword4", "duplicate1", "duplicate4"):
         assert compiled[key] == live[key], key
-    assert compiled["python4"]["sum"]["keys"] == "[3, 1, 4, 5, 9, 2]"
     assert compiled["python4"]["sum"]["metadata"] == [["'fold'", "(((((3+1)+4)+5)+9)+2)"]]
     assert compiled["duplicate4"]["sum"]["pv"] == "6"
     # 4 workers: the individual section in domain order and with the serial values
     assert compiled["mixed4"]["individual"] == live["mixed1"]["individual"]
     assert compiled["missing4"] == live["missing4"] == live["missing1"]
-    assert compiled["missing1"][0] == "ValueError" and "structure changed" in compiled["missing1"][1]
+    assert compiled["missing1"][0] == "ValueError" and "different structure" in compiled["missing1"][1]
     mixed = compiled["mixed1"]
     assert [entry[0] for entry in mixed["sum"]["cf"]] == ["0", "1", "2", "5", "3"]
     assert mixed["sum"]["none"] == []
@@ -163,19 +145,6 @@ def test_native_and_python_outputs_equal_the_export(tmp_path, monkeypatch):
         assert [key for key, _ in parallel_sum[field]] == [key for key, _ in mixed["sum"][field]]
         for (_, got), (_, want) in zip(parallel_sum[field], mixed["sum"][field]):
             assert math.isclose(float(got), float(want), rel_tol=1e-12)
-    report = json.loads((tmp_path / "exported_cy/_mx_admission.json").read_text(encoding="utf-8"))
-    def leaves(space):
-        entry = report[f"exported_cy._mx_classes._c_{space}._f_collect_outputs"]
-        return {(leaf["mode"], leaf["output"]): (leaf["native"], leaf.get("reason", ""))
-                for leaf in entry["collect_outputs"]}
-    mixed_leaves = leaves("Mixed")
-    assert {key: native for key, (native, _) in mixed_leaves.items()} == {
-        ("individual", ""): False, ("sum", "pv"): True, ("sum", "cf"): True, ("sum", "native_cf"): True,
-        ("sum", "none"): True}
-    assert {key: native for key, (native, _) in leaves("MixedPython").items()} == {
-        ("sum", "pv"): True, ("sum", "native_cf"): True, ("sum", "keys"): False, ("sum", "metadata"): False}
-    assert "Reference" in leaves("CellDomain")[("sum", "cf")][1]
-    assert leaves("MissingKey")[("sum", "pv")][0] and not leaves("MissingKey")[("sum", "cf")][0]
 
 
 def test_native_collect_result_supports_native_and_python_consumers(tmp_path):

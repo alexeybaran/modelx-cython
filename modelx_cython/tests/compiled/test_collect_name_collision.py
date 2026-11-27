@@ -38,16 +38,13 @@ def test_compiled_collect_cell_and_aggregation_remain_callable(tmp_path):
     )
     (tmp_path / "probe.py").write_text(textwrap.dedent("""\
         from importlib.machinery import ExtensionFileLoader
-        from exported_cy import _mx_classes, _mx_sys, mx_model
+        from exported_cy import _mx_classes, mx_model
 
         assert isinstance(_mx_classes.__loader__, ExtensionFileLoader)
-        assert _mx_sys._mx_collect_adapter_version == 2
+        assert type(mx_model.Policy)._mx_collect_hook_version == 1
         assert mx_model.Plain.collect() == 4.0
         assert mx_model.Policy.collect() == 5.0
         assert mx_model.Policy._cells["collect"]() == 5.0
-        workers, evaluate_serial, _, _ = mx_model.Policy._mx_collect_options_v2()
-        assert workers == 1 and callable(evaluate_serial)
-        assert evaluate_serial((1, 2)).sum.amount == 13.0
         assert mx_model.Policy._mx_collect().sum.amount == 13.0
         assert mx_model.Policy[2].collect() == 5.0
         assert mx_model.Policy[2].amount() == 7.0
