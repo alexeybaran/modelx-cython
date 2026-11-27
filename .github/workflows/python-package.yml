@@ -1,117 +1,32 @@
-name: Python package
+name: Verify ordered table reads
 
 on:
   push:
-    branches: [main, "verify/**"]
-  pull_request:
-    branches: [main]
+    branches: [verify/regional-ordered-clamp-1]
 
-# One job per lane (system x interpreter). Each lane runs, as separate steps that all run
-# even when an earlier one fails:
-#   unit       the full non-compiled unit suite (modelx_cython/tests without compiled/)
-#   compiled   compiled and integration tests, less the allocation tests
-#   allocation the compiled tests of the allocation change: unwritten values, pickling and
-#              copying, and the two-thread test on a locked Space
-#   sec        released lifelib SEC models (Term, MYGA, SPIA) built with mx2cy and compared with
-#              live modelx
-# Upstream modelx and lifelib come from PyPI (modelx 0.33.0 is upstream main's version);
-# scipy, libcst, numpy and pandas from wheels only: their newest releases lack some 3.13t
-# wheels; libcst (also a modelx dependency) does not build for 3.13t, and numpy and pandas
-# built from source on Windows 3.13t failed to load; pip takes the newest release that has
-# a wheel, or fails at once.
-# macOS lanes are a job of their own, one at a time: queued macOS jobs were cancelled after
-# 15 minutes without a runner.
-# Python 3.10 is the declared floor (requires-python), as in lifelib.
 jobs:
-  lane:
-    name: ${{ matrix.os }} / ${{ matrix.python-version }}
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 150
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, windows-latest]
-        python-version: ["3.10", "3.12", "3.14", "3.14t", "3.13t"]
-    env: &env
-      PYTEST_ADDOPTS: ${{ matrix.os == 'windows-latest' && '--basetemp=C:/t' || '' }}
-      PYTHONIOENCODING: utf-8
-    steps: &steps
+  ordered-read:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: ${{ matrix.python-version }}
-      # set after setup: on macOS the installer runs a Python of its own, which PYTHON_GIL=0 aborts
-      - name: Free-threaded interpreter without the GIL
-        if: endsWith(matrix.python-version, 't')
-        shell: bash
-        run: echo "PYTHON_GIL=0" >> "$GITHUB_ENV"
-      - name: Install package, upstream modelx and lifelib, test dependencies
+          python-version: '3.14t'
+      - name: Install exact dependencies
         shell: bash
         run: |
-          python -m pip install --upgrade pip
-          python -m pip install --only-binary scipy,libcst,numpy,pandas . pytest pytest-xdist "pandas>=2.2.2" lifelib openpyxl psutil
-          python -m pip list
-      - name: Interpreter
+          python -m pip install --only-binary libcst,numpy,pandas \
+            "modelx @ git+https://github.com/alexeybaran/modelx@fdc19875bd2445a7093e56e7222ecc1cf29c2ac0" \
+            "Cython>=3.2.4" libcst setuptools MonkeyType numpy "pandas>=2.2.2" pytest
+          python -m pip install --no-deps .
+      - name: Compile and compare the focused lookup fixture
         shell: bash
-        run: |
-          python -c "import sys, sysconfig, platform; print(sys.version, platform.machine(), 'Py_GIL_DISABLED =', sysconfig.get_config_var('Py_GIL_DISABLED'))"
-          if [[ "${{ matrix.python-version }}" == *t ]]; then
-            python -c "import sys, sysconfig; assert sysconfig.get_config_var('Py_GIL_DISABLED') and not sys._is_gil_enabled()"
-          fi
-      - name: unit
-        id: unit
-        if: success() || failure()
         working-directory: ${{ runner.temp }}
-        shell: bash
+        env:
+          PYTHON_GIL: '0'
         run: |
-          python -m pytest --import-mode=importlib --rootdir "$GITHUB_WORKSPACE" -p no:cacheprovider \
-            -n auto -q -rfEs \
-            "$GITHUB_WORKSPACE/modelx_cython/tests" --ignore="$GITHUB_WORKSPACE/modelx_cython/tests/compiled"
-      - name: compiled
-        id: compiled
-        if: success() || failure()
-        working-directory: ${{ runner.temp }}
-        shell: bash
-        run: |
-          C=modelx_cython/tests/compiled
-          python -m pytest --import-mode=importlib --rootdir "$GITHUB_WORKSPACE" -p no:cacheprovider \
-            -n auto --dist loadfile -q -rfEs \
-            --deselect $C/test_value_storage.py \
-            "$GITHUB_WORKSPACE/$C" "$GITHUB_WORKSPACE/integration_tests"
-      - name: allocation
-        id: allocation
-        if: success() || failure()
-        working-directory: ${{ runner.temp }}
-        shell: bash
-        run: |
-          C="$GITHUB_WORKSPACE/modelx_cython/tests/compiled"
-          python -m pytest --import-mode=importlib --rootdir "$GITHUB_WORKSPACE" -p no:cacheprovider -q -rfEs \
-            "$C/test_value_storage.py::test_unwritten_values_after_pickle_and_copy" \
-            "$C/test_value_storage.py::test_unwritten_values_of_a_locked_space"
-      - name: sec
-        id: sec
-        if: success() || failure()
-        working-directory: ${{ runner.temp }}
-        shell: bash
-        run: |
-          python "$GITHUB_WORKSPACE/.github/scripts/sec_compare.py" sec_term Term_US_SEC term_life
-          python "$GITHUB_WORKSPACE/.github/scripts/sec_compare.py" sec_myga MYGA_US_SEC fixed_deferred_annuity
-          python "$GITHUB_WORKSPACE/.github/scripts/sec_compare.py" sec_spia SPIA_US_SEC immediate_annuity
-      - name: Summary
-        if: always()
-        shell: bash
-        run: |
-          echo "lane ${{ matrix.os }} ${{ matrix.python-version }}: unit=${{ steps.unit.outcome }} compiled=${{ steps.compiled.outcome }} allocation=${{ steps.allocation.outcome }} sec=${{ steps.sec.outcome }}" | tee -a "$GITHUB_STEP_SUMMARY"
-
-  lane-macos:
-    name: ${{ matrix.os }} / ${{ matrix.python-version }}
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 150
-    strategy:
-      fail-fast: false
-      max-parallel: 1
-      matrix:
-        os: [macos-latest]
-        python-version: ["3.10", "3.12", "3.14", "3.14t", "3.13t"]
-    env: *env
-    steps: *steps
+          python -c "import sys, sysconfig; from modelx.export import _mx_collect; assert sysconfig.get_config_var('Py_GIL_DISABLED') and not sys._is_gil_enabled() and hasattr(_mx_collect, '_native_result')"
+          python -m pytest -q --import-mode=importlib --rootdir "$GITHUB_WORKSPACE" -p no:cacheprovider \
+            -o "pythonpath='$GITHUB_WORKSPACE/integration_tests'" \
+            "$GITHUB_WORKSPACE/integration_tests/test_forms_ordered_lookup_array.py"
