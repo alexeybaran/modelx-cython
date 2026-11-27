@@ -4,12 +4,13 @@ from functools import cached_property
 import libcst as cst
 from libcst.metadata import ExpressionContext
 
+from .cell_entries import exact_receiver
 from .consts import CY_MOD
 from .helpers import module_name
 from .helper_members import helper_reference
 from .scopes import CstFacts, FormulaTransformer, Names, OPAQUE_SCOPES as OPAQUE, has_scope_effects, lexical_nodes
-from .syntax import arguments, code, literal_value, walk
-from .typedefs import primitive_kind
+from .syntax import arguments, code, dotted_name, literal_value, walk
+from .typedefs import INT64_MAX, INT64_MIN, primitive_kind
 
 
 def formula_lines(formula):
@@ -464,7 +465,50 @@ class GeneralReductions:
                 lines += [f'{indent}while True:'] + block + [f'{indent}    break']
             else:
                 lines += block
+            if level == 0 and (bounds := self.enum_sum_bounds(parts, element, values)) is not None:
+                variable = state['renamed'][names[0]]
+                state['local_types'][variable] = 'longlong'
+                state.setdefault('typed_vars', []).append(f'{variable}: _mx_cy.longlong')
+                inner = dict(mapping, **{names[0]: cst.Name(variable)})
+                first, stop = bounds
+                receiver = exact_receiver(self.cls_info.name)
+                return ([f'{indent}if {receiver}:', f'{indent}    for {variable} in range({first}, {stop}):']
+                        + self.emit_body(level, parts, classes, element, inner, indent + '        ', tests)
+                        + [f'{indent}else:'] + [f'    {line}' for line in lines])
         return lines
+
+    def enum_sum_bounds(self, parts, element, values):
+        """Use a range for consecutive declared members passed to a typed Cell on the exact receiver."""
+        state = self.general_state
+        target, _, tests = parts[0]
+        if (state['name'] != 'sum' or state['mode'] != 'return' or not state['generator']
+                or len(parts) != 1 or tests or len(values) < 2 or not isinstance(target, cst.Name)
+                or target.value == 'self' or not getattr(self.cells, 'formula_allows_exact_receiver', False)
+                or 'range' in self.body_facts.stores or 'range' in self.cells.params
+                or not isinstance(element, cst.Call)):
+            return None
+        callee = (dotted_name(element.func) or '').split('.')
+        if len(callee) != 2 or callee[0] != 'self':
+            return None
+        cell = self.cls_info.cells.get(callee[1])
+        if (cell is None or arguments(element, count=len(cell.params)) is None
+                or self.kind(element, {}) != 'double' or not self.integer_argument_only(target.value, parts, element)):
+            return None
+        reference, members = None, []
+        for value in values:
+            path = (dotted_name(value) or '').split('.')
+            if len(path) != 3 or path[0] != 'self' or reference not in (None, path[1]):
+                return None
+            reference, member = path[1:]
+            symbol = self.enum_symbols.get((self.cls_info.name, reference, member))
+            if symbol is None:
+                return None
+            members.append(symbol[1])
+        first = members[0]
+        stop = first + len(members)
+        if first < INT64_MIN or stop > INT64_MAX:
+            return None
+        return (first, stop) if members == list(range(first, stop)) else None
 
     def integer_argument_only(self, name, parts, element):
         """diag-scale P3: every read of the loop variable ``name`` in the element and in the
