@@ -42,6 +42,7 @@ def test_native_records_and_reductions(tmp_path):
         book.new_cells('read_count', 'lambda: Source.collect().sum.count')
         book.new_cells('wide_arithmetic', 'lambda: Source.collect().sum.large // 8')
         book.new_cells('read_series', 'lambda t: Source.collect().sum.series[t]')
+        book.new_cells('format_series', 'lambda t: repr(Source.collect().sum.series[t])')
         book.new_cells('read_row', 'lambda idx, t: Source.collect().individual[idx].value[t]')
         book.new_cells('python_row', 'lambda idx: Source.collect().individual[idx]')
         datum = model.new_space('Data', refs={'lengths': [2, 1]})
@@ -72,6 +73,7 @@ def test_native_records_and_reductions(tmp_path):
         m.Book.read_count()
         m.Book.wide_arithmetic()
         m.Book.read_series(2)
+        m.Book.format_series(2)
         m.Book.read_row(8, 6)
         m.Book.python_row(7)
         m.Varying.collect()
@@ -90,28 +92,34 @@ def test_native_records_and_reductions(tmp_path):
         import math
         from exported_cy import mx_model
         Model = type(mx_model)
+        def storage(result):
+            return result._CollectResult__storage
         for workers in (1, 4):
             model = Model()
             model._mx_collect_workers = workers
             result = model.Source.collect()
-            assert result._fields.native is not None
-            assert result._fields.views == {}
+            assert storage(result).native is not None
+            assert storage(result).views == {}
             assert model.Book.read_total() == 36.0
             assert model.Book.read_count() == 18
             assert model.Book.read_series(2) == 26.0
             assert model.Book.read_row(8, 6) == 14.0
             assert model.Use[7, True].read(2) == model.Use[7, False].read(2) == 9.0
-            assert result._fields.views == {}
+            assert storage(result).views == {}
             assert model.Use[7, True].python_read(6) == 13.0
-            assert result._fields.views == {}
+            assert storage(result).views == {}
             assert model.Source.collect() is result
             assert model.Book.python_row(7).value(6) == 13.0
-            assert set(result._fields.views) == {'individual'}
+            assert set(storage(result).views) == {'individual'}
             assert model.Use[7, True].same_record()
             assert model.Use[7, False].bound_cell()
             assert dict(result.individual[2].value) == {-1: 1.0, 2: 4.0, 6: 8.0}
             assert result.individual[2].count == 2 and result.individual[2].label['kind'] == 'even'
             assert result.sum.large == 1 << 64
+            result.sum.series[2] = 26
+            assert model.Book.format_series(2) == '26'
+            result.sum.series[6] = 'unboxed Python value'
+            assert model.Book.format_series(6) == "'unboxed Python value'"
             assert model.Book.wide_arithmetic() == 1 << 61
             assert dict(model.Source.collect(1).sum.forward) == {0: 18.0, 1: 22.0, 2: 26.0}
             assert model.Source.collect(1, 0).sum.forward == {}
@@ -120,7 +128,7 @@ def test_native_records_and_reductions(tmp_path):
             assert model.Use[7, True].read(6) == 101.0
             assert model.Use[7, False].read(6) == 13.0
             opaque = model.Opaque.collect()
-            assert opaque._fields.native is not None
+            assert storage(opaque).native is not None
             assert opaque.individual[8].payload == [8]
             assert math.copysign(1.0, opaque.sum.zero) == -1.0
         model = Model()

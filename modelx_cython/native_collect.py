@@ -305,7 +305,13 @@ class _FieldReads(cst.CSTTransformer):
     visit_Lambda = visit_FunctionDef
 
     def visit_Return(self, node):
-        self.returns.add(node.value)
+        pending = [node.value]
+        while pending:
+            value = pending.pop()
+            if isinstance(value, cst.IfExp):
+                pending.extend((value.body, value.orelse))
+            else:
+                self.returns.add(value)
 
     def integer(self, expr):
         if isinstance(expr, cst.Integer):
@@ -323,7 +329,8 @@ class _FieldReads(cst.CSTTransformer):
         return False
 
     def read(self, expr, key, index_read=False, whole_return=False):
-        if not isinstance(expr, cst.Attribute) or key is not None and not self.integer(key):
+        if (not whole_return or self.result_type not in ('double', 'long long')
+                or not isinstance(expr, cst.Attribute) or key is not None and not self.integer(key)):
             return None
         receiver = expr.value
         name = expr.attr.value
@@ -345,7 +352,7 @@ class _FieldReads(cst.CSTTransformer):
             if field.kind == PYTHON or field.name != name or (field.domain is not None) != (key is not None):
                 continue
             if field.kind != FLOAT:
-                if not whole_return or self.result_type != 'long long':
+                if self.result_type != 'long long':
                     return None
                 read += '_int'
             self.used = True

@@ -275,7 +275,7 @@ cdef class NativeRow:
 
 cdef object individual_at(object result, object coordinate):
     cdef NativeCollect owner
-    views = getattr(result, '_fields', None)
+    views = getattr(result, '_CollectResult__storage', None)
     native = getattr(views, 'native', None)
     if type(native) is NativeCollect:
         owner = <NativeCollect>native
@@ -302,7 +302,7 @@ cdef Py_ssize_t field_offset(Field* column, long long key, bint series) except -
 
 cdef NativeRow numeric_row(object record, Py_ssize_t field, str name, bint series, bint floating):
     cdef NativeRow row
-    views = getattr(record, '_fields', None)
+    views = getattr(record, '_CollectResult__storage', None)
     native = getattr(views, 'native', None)
     if type(native) is NativeRow:
         row = <NativeRow>native
@@ -322,7 +322,7 @@ cdef object row_value(object record, str name, long long key, bint series, bint 
 
 cdef NativeCollect numeric_sum(object result, Py_ssize_t field, str name, bint series, bint floating):
     cdef NativeCollect owner
-    views = getattr(result, '_fields', None)
+    views = getattr(result, '_CollectResult__storage', None)
     native = getattr(views, 'native', None)
     if type(native) is NativeCollect:
         owner = <NativeCollect>native
@@ -330,7 +330,7 @@ cdef NativeCollect numeric_sum(object result, Py_ssize_t field, str name, bint s
         if (field < owner.sum_count and owner.schemas[1][field][0] == name
                 and (owner.schemas[1][field][1] is not None) == series
                 and (owner.sum_fields[field].kind == FLOAT) == floating
-                and (public is None or name not in public._fields.views)):
+                and (public is None or name not in public._CollectResult__storage.views)):
             return owner
     return None
 
