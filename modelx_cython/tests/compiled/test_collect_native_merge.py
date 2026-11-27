@@ -126,9 +126,20 @@ def test_native_and_python_outputs_equal_the_export(tmp_path, monkeypatch):
         assert done.returncode == 0, done.stderr
         results[package] = json.loads(done.stdout)
     live, compiled = results["exported"], results["exported_cy"]
-    for key in ("mixed1", "cell1", "missing1", "python1", "python4", "root1", "root4",
+    for key in ("mixed1", "cell1", "missing1", "python1", "python4", "root1",
                 "unused1", "unused4", "keyword1", "keyword4", "duplicate1", "duplicate4"):
         assert compiled[key] == live[key], key
+    compiled_root, live_root = compiled["root4"], live["root4"]
+    assert compiled_root.keys() == live_root.keys()
+    assert compiled_root["sum"] == live_root["sum"]
+    # Standalone workers may present completed rows in a different order.
+    # Check the complete coordinate map before comparing each row's outputs.
+    expected_coordinates = {repr(key) for key in keys}
+    for root in (compiled_root, live_root):
+        rows = root["individual"]
+        assert len(rows) == len(expected_coordinates)
+        assert {coordinate for coordinate, _ in rows} == expected_coordinates
+    assert dict(compiled_root["individual"]) == dict(live_root["individual"])
     assert compiled["python4"]["sum"]["metadata"] == [["'fold'", "(((((3+1)+4)+5)+9)+2)"]]
     assert compiled["duplicate4"]["sum"]["pv"] == "6"
     # 4 workers: the individual section in domain order and with the serial values
