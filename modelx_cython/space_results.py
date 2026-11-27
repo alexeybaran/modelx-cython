@@ -15,11 +15,20 @@ _NATIVE_RESULTS = {'double', 'long long', 'bint'}
 
 
 def pin_function(name, owner, producer):
-    # Cython can defer a bare cast of an object field until after computing
-    # the arguments. A C function returning the object forces an owned
-    # temporary at receiver evaluation, just as the ordinary call does.
-    return cst.parse_statement(f'@{CY_MOD}.cfunc\n@{CY_MOD}.inline\n'
-                               f'def {name}(root: {owner}) -> object:\n    return root.{VAR_PREF}{producer}\n')
+    """Capture the cached receiver before evaluating arguments, without a new reference.
+
+    The caller checks the exact holder class and the published cache flag. An
+    unlocked zero-argument Cell on a private item keeps the field unchanged
+    once published. The running formula keeps the holder alive, and removing
+    either item from its Space leaves the cached reference in place. Collect
+    resets a reusable private holder only after its formulas return.
+    A C function forces the read at receiver evaluation, since Cython can
+    otherwise defer a cast of the field until after computing the arguments.
+    """
+    pointer = f'{CY_MOD}.pointer({CY_MOD}.void)'
+    return cst.parse_statement(f'@{CY_MOD}.cfunc\n@{CY_MOD}.inline\n@{CY_MOD}.exceptval(check=False)\n'
+                               f'def {name}(root: {owner}) -> {pointer}:\n'
+                               f'    return {CY_MOD}.cast({pointer}, root.{VAR_PREF}{producer})\n')
 
 
 def _traced_target(cell, allow_locked=False):
