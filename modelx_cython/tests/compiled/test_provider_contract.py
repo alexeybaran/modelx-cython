@@ -2,21 +2,9 @@ import subprocess
 import sys
 
 import modelx as mx
-import pytest
 
 from modelx_helpers.immutable_inputs import Record, Table
 from modelx_helpers.typed_inputs import has_group, lookup, previous, subtable
-from modelx_cython.tracer import RuntimeValueInfo
-
-
-def test_helper_metadata_rejects_invalid_capability():
-    def value():
-        return 0
-
-    value.__modelx_cython_helper__ = ("sample.provider", "lookup")
-    value.__modelx_cython_scalar_result__ = "complex"
-    with pytest.raises(ValueError, match="invalid helper capability 'scalar_result'"):
-        RuntimeValueInfo(value)
 
 
 def test_helper_contract_through_model_export(tmp_path):

@@ -44,14 +44,18 @@ def test_builtin_minimum_of_typed_range(tmp_path):
     subprocess.run([sys.executable, '-m', 'modelx_cython', 'exported',
                     '--sample', 'sample.py', '--no-spec'], cwd=tmp_path, check=True)
     report = json.loads((tmp_path / 'exported_cy/_mx_admission.json').read_text())
-    for name, count in (('minimum', 0), ('shadowed', 0), ('all_positive', 1), ('total', 1),
-                        ('any_positive', 0), ('maximum', 0), ('float_total', 0)):     # max and a sum start: not lowered (R-6)
-        assert report[f'exported_cy._mx_classes._c_Projection._f_{name}']['native_reductions'] == count
-    # min over a typed range and the bounded any are general-lowering sites since R-6 5a (the report counts
-    # specialised sites only): their generators are gone from the generated module, with no cold fallback
+    # every site is lowered by the one general lowering, which the report counts as native expressions
+    # (native_reductions counted the removed specialised sites); a shadowed name and a sum start are not lowered (R-6)
+    for name, count in (('minimum', 1), ('shadowed', 0), ('all_positive', 1), ('total', 1),
+                        ('any_positive', 1), ('maximum', 1), ('float_total', 0)):
+        entry = report[f'exported_cy._mx_classes._c_Projection._f_{name}']
+        assert (entry['native_expressions'], entry['native_reductions']) == (count, 0), (name, entry)
+    # their generators are gone from the generated module, with no cold fallback and no guard on the builtin
     source = (tmp_path / 'exported_cy/_mx_classes.py').read_text(encoding='utf-8')
     assert 'min(value(t, case) for t in range(n))' not in source
     assert 'any(positive(u) for u in range(' not in source
+    assert 'sum(value(t, 0) for t in range(n))' not in source and '_mx_cold_sum_' not in source
+    assert '_accepts(' not in source and '.f64_add(' in source
     probe = textwrap.dedent('''\
         import math
         import sys

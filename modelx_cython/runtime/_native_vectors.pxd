@@ -6,14 +6,12 @@ A vector owns a C buffer and its length. The formula that allocates one writes i
 nothing writes it, so readers on any thread need no lock. Python sees a read-only
 sequence (len, index, slice, iteration, element-wise ==, buffer, pickle).
 
-Sums of float vectors use a compensated state equal to CPython's built-in float
-sum bit for bit. It is a private copy of ``_float_sum_state`` (owned by another
-package); the two are to be unified.
+Sums of float vectors use the compensated state of ``_float_sum_state``, equal to
+CPython's built-in float sum bit for bit.
 """
 cimport cython
-from cpython.version cimport PY_VERSION_HEX
 from cpython.ref cimport PyObject
-from libc.math cimport fabs, isfinite
+from modelx_cython._float_sum_state cimport F64Sum, f64_init, f64_add, f64_result
 
 
 cdef extern from *:
@@ -56,17 +54,6 @@ cdef class I64Vec:
     cdef Py_ssize_t cap
 
 
-cdef inline bint ivec_small_for_reads(I64Vec v) noexcept:
-    """Cloned scalar formulas use bounded int operations on short vectors."""
-    cdef Py_ssize_t i
-    if v is None or v.n > 64:
-        return False
-    for i in range(v.n):
-        if v.data[i] < -1048576 or v.data[i] > 1048576:
-            return False
-    return True
-
-
 cdef class VecCache:
     """The values of a vector cell with one integer parameter, by index (dense cache).
 
@@ -87,33 +74,6 @@ cdef inline object cache_get(VecCache cache, long long key):
         if p != NULL:
             return <object>p
     return None
-
-
-# ---------------------------------------------------------------- compensated sum (private copy)
-cdef struct VecSum:
-    double total
-    double correction
-
-
-cdef inline void sum_init(VecSum* state) noexcept nogil:
-    state.total = 0.0
-    state.correction = 0.0
-
-
-cdef inline void sum_add(VecSum* state, double value) noexcept nogil:
-    cdef double following = state.total + value
-    if PY_VERSION_HEX >= 0x030C0000:
-        if fabs(state.total) >= fabs(value):
-            state.correction += (state.total - following) + value
-        else:
-            state.correction += (value - following) + state.total
-    state.total = following
-
-
-cdef inline double sum_result(VecSum* state) noexcept nogil:
-    if state.correction != 0.0 and isfinite(state.correction):
-        return state.total + state.correction
-    return state.total
 
 
 # ---------------------------------------------------------------- construction
@@ -243,22 +203,22 @@ cdef inline void _clip(long long* a, long long* b, long long n) noexcept nogil:
 
 cdef inline double vec_sum_range(F64Vec v, long long a, long long b) noexcept:
     """sum(v[a:b]): the float sum CPython computes, bit for bit (start 0)."""
-    cdef VecSum s
+    cdef F64Sum s
     cdef Py_ssize_t i
     _clip(&a, &b, v.n)
-    sum_init(&s)
+    f64_init(&s)
     for i in range(<Py_ssize_t>a, <Py_ssize_t>b):
-        sum_add(&s, v.data[i])
-    return sum_result(&s)
+        f64_add(&s, v.data[i])
+    return f64_result(&s)
 
 
 cdef inline double vec_sum(F64Vec v) noexcept:
-    cdef VecSum s
+    cdef F64Sum s
     cdef Py_ssize_t i
-    sum_init(&s)
+    f64_init(&s)
     for i in range(v.n):
-        sum_add(&s, v.data[i])
-    return sum_result(&s)
+        f64_add(&s, v.data[i])
+    return f64_result(&s)
 
 
 cdef inline long long ivec_sum_range(I64Vec v, long long a, long long b) except? -1:

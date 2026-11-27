@@ -48,13 +48,12 @@ import itertools
 from enum import IntEnum
 from dataclasses import dataclass
 from contextlib import contextmanager
-from types import CodeType, FrameType, FunctionType, MemberDescriptorType
+from types import CodeType, FrameType, MemberDescriptorType
 from typing import Any, Mapping, Iterator, Sequence, Optional, Dict, List
 import logging
 
 import numpy as np
 
-from modelx_cython.helpers import helper_capability, registered_helper
 from modelx_cython.monkeytype_tracing import (
     CallTraceLogger,
     get_func,
@@ -235,14 +234,9 @@ class RuntimeCellsInfo:     # TODO: Create base class RuntimeBaseMemberInfo
         self.max_ret_value = max(values) if values else None   # param_bound_checks margin
         self._init_arg_types(traces)
         self.ret_type = self._init_ret_type(returned)
-        from .provider_manifest import observed_provider_binding
-        self.observed_provider_binding = observed_provider_binding(returned)
         self.table_schema = table_schema(returned)
         self.frame_schema = frame_schema(returned)
 
-    admitted_table = False     # auto-tables: the traced value was a pandas frame admitted as a table
-    pandas_fallbacks = {}      # auto-tables: {formula line: {operation: calls}} on admitted tables
-    admission_record = None    # auto-tables: what admission decided for this zero-argument formula
     frame_row_result = False   # auto-tables (D119): every traced value is a row of an admitted frame
 
     def has_args(self):
@@ -554,16 +548,8 @@ class RuntimeValueInfo:
                       and not -(1 << 63) <= value < (1 << 63) else type(value))
         self.mx_class = mx_class
         self.is_math = value is math        # the standard math module (native_math.py)
-        self.helper = registered_helper(value) if type(value) is FunctionType else None
         from .helper_members import module_helpers
         self.helper_members = module_helpers(value)
-        from .helpers import helper_parameters, helper_result_type
-        self.helper_parameters = helper_parameters(value) if self.helper is not None else None
-        self.helper_result_type = helper_result_type(value) if self.helper is not None else None
-        from .helpers import CAPABILITIES
-        for capability, (name, _) in CAPABILITIES.items():
-            setattr(self, name, helper_capability(value, capability)
-                    if self.helper is not None else None)
         self.enum_safe = (isinstance(value, type) and issubclass(value, IntEnum)
                           and type(value) is type(IntEnum)
                           and value.__eq__ is int.__eq__ and value.__ne__ is int.__ne__

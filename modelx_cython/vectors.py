@@ -343,15 +343,6 @@ def _int_literal(node):
     return None
 
 
-def _list_range(node):
-    """diag-kr: the arguments of ``list(range(a))`` / ``list(range(a, b))``, else None."""
-    if (isinstance(node, cst.Call) and _is_name(node.func, 'list') and _plain_args(node, 1, 1)
-            and isinstance(inner := node.args[0].value, cst.Call) and _is_name(inner.func, 'range')
-            and _plain_args(inner, 1, 2)):
-        return [a.value for a in inner.args]
-    return None
-
-
 def _plain_args(call, low, high):
     return (low <= len(call.args) <= high
             and all(a.keyword is None and a.star == '' for a in call.args))
@@ -386,6 +377,30 @@ def _walk(node):
             found.append(n)
             return True
     node.visit(W())
+    return found
+
+
+def _call_shape(func, shapes, ref_shapes):
+    """The vector shape of a call of ``self.<cell>`` or ``self.<Reference>.<cell>``, else None."""
+    if not isinstance(func, cst.Attribute):
+        return None
+    if _is_name(func.value, 'self'):
+        return shapes.get(func.attr.value)
+    if isinstance(func.value, cst.Attribute) and _is_name(func.value.value, 'self'):
+        return ref_shapes.get(func.value.attr.value, {}).get(func.attr.value)
+    return None
+
+
+def reference_shapes(cls_info, module):
+    """{Reference: {cell: shape}} of the vector cells of the Spaces that References of ``cls_info`` are
+    declared with (a class of ``module``, as table_cells.RenameMembers resolves a receiver)."""
+    found = {}
+    for name, ref in getattr(cls_info, 'refs', {}).items():
+        decl = getattr(ref, 'decl_type_expr', '')
+        target = getattr(module, 'classes', {}).get(decl.rsplit('.', 1)[-1]) if decl else None
+        shapes = {c: cell.vector_shape for c, cell in target.cells.items() if cell.vector_shape} if target else {}
+        if shapes:
+            found[name] = shapes
     return found
 
 
@@ -429,7 +444,6 @@ class _Facts(cst.CSTVisitor):
         self.appends = []           # (base expr, value expr, call) of v.append(x)
         self.returns = []           # return value expressions
         self.statement_comps = set()
-        self.concat_values = {}     # diag-kr: id of a returned concatenation -> its operands
         self.store_targets = set()  # ids of subscripts that are assignment targets
         self.comp_targets = set()
 
@@ -461,31 +475,11 @@ class _Facts(cst.CSTVisitor):
         if not isinstance(node.value, cst.Name) or not all(isinstance(t.target, cst.Name) for t in node.targets):
             self.escapes.update(_held_names(node.value))    # a list stored in a container or attribute
 
-    def concatenation(self, value):
-        """diag-kr: ``A + B + ...`` whose every operand is a list comprehension or
-        ``list(range(...))``: the operands, left to right, else None."""
-        if not (isinstance(value, cst.BinaryOperation) and isinstance(value.operator, cst.Add)):
-            return None
-        parts = []
-        def flatten(node):
-            if isinstance(node, cst.BinaryOperation) and isinstance(node.operator, cst.Add):
-                return flatten(node.left) and flatten(node.right)
-            if isinstance(node, cst.ListComp) or _list_range(node) is not None:
-                parts.append(node)
-                return True
-            return False
-        return parts if flatten(value) else None
-
     def visit_Return(self, node):
         if node.value is not None:
             self.returns.append(node.value)
         if isinstance(node.value, cst.ListComp):
             self.statement_comps.add(id(node.value))
-        parts = self.concatenation(node.value)
-        if parts is not None:
-            # built left to right into one typed vector: the order of evaluation is kept
-            self.concat_values[id(node.value)] = parts
-            self.statement_comps.update(id(part) for part in parts if isinstance(part, cst.ListComp))
         if isinstance(node.value, cst.Tuple) and all(
                 isinstance(e.value, (cst.Name, cst.Integer, cst.Float, cst.ListComp)) for e in node.value.elements):
             # no other element has effects, so building a comprehension first keeps the order
@@ -606,6 +600,7 @@ class VectorLowering(cst.CSTTransformer):
         self.cls_info = cls_info
         self.cells = cells
         self.shapes = {name: c.vector_shape for name, c in cls_info.cells.items() if c.vector_shape}
+        self.ref_shapes = {}            # cross-Space reads: {Reference: {cell: shape}} (reference_shapes)
         self.builtins = builtins
         self.counter = counter          # shared per module: unique temporaries
         self.temps = set()              # the temporaries temp() made
@@ -638,10 +633,7 @@ class VectorLowering(cst.CSTTransformer):
     def kind(self, node):
         """'V', 'I', 'AV', 'AI' (fresh allocations), ('T', kinds) or None for an original node."""
         if isinstance(node, cst.Call):
-            f = node.func
-            if isinstance(f, cst.Attribute) and _is_name(f.value, 'self') and f.attr.value in self.shapes:
-                return self.shapes[f.attr.value]
-            return None
+            return _call_shape(node.func, self.shapes, self.ref_shapes)
         if isinstance(node, cst.Name):
             return self.env.get(node.value)
         if isinstance(node, cst.Subscript):
@@ -1312,9 +1304,6 @@ class VectorLowering(cst.CSTTransformer):
             return [], value_u
         if _is_name(value_u) and value_u.value in self.temps:
             return [], value_u
-        concat = self.concatenation(value_o, value_u, e)
-        if concat is not None:
-            return concat
         return [], self.call('of', e, value_u)
 
     def display(self, value_u, e):
@@ -1333,63 +1322,6 @@ class VectorLowering(cst.CSTTransformer):
         pre += [_stmt(f'{r}.data[{i}] = {t}\n') for i, t in enumerate(temps)]
         self.lowered += 1
         return pre, cst.Name(r)
-
-    def concatenation(self, value_o, value_u, e):
-        """diag-kr: ``[... for ...] + list(range(a, b)) + ...`` stored into a typed vector of kind
-        e, each operand built in turn (left to right, as Python evaluates them) and copied into
-        one allocation, instead of Python lists converted by vec_of. None when an operand is not
-        of kind e."""
-        parts_o = self.facts.concat_values.get(id(value_o))
-        if parts_o is None or 'list' not in self.builtins or 'range' not in self.builtins:
-            return None
-        parts_u = []
-        def flatten(node):
-            if isinstance(node, cst.BinaryOperation) and isinstance(node.operator, cst.Add):
-                flatten(node.left)
-                flatten(node.right)
-            else:
-                parts_u.append(node)
-        flatten(value_u)
-        if len(parts_u) != len(parts_o):
-            return None
-        for part in parts_o:
-            if isinstance(part, cst.ListComp):
-                if self.kind(part) != 'A' + e:
-                    return None
-            elif e != 'I' or any(self.scalar(arg) != INT for arg in _list_range(part)):
-                return None
-        pre, names = [], []
-        for po, pu in zip(parts_o, parts_u):
-            if isinstance(po, cst.ListComp):
-                more, value = self.expand_comp(po, pu, e)
-                pre += more
-                names.append(value.value)
-                continue
-            args = [_code(a) for a in _list_range(pu)]
-            lo, hi = ('0', args[0]) if len(args) == 1 else (args[0], args[1])
-            lo_t, hi_t, n, i, r = (self.temp('clo'), self.temp('chi'), self.temp('cn'), self.temp('ci'),
-                                   self.temp('cr'))
-            for name in (lo_t, hi_t):
-                self.declare(name, f'{CY_MOD}.longlong')
-            for name in (n, i):
-                self.declare(name, f'{CY_MOD}.Py_ssize_t')
-            self.declare(r, TYPES[e])
-            pre += [_stmt(f'{lo_t} = ({lo}\n)\n'), _stmt(f'{hi_t} = ({hi}\n)\n'),
-                    _stmt(f'{n} = {hi_t} - {lo_t} if {hi_t} > {lo_t} else 0\n'),
-                    _stmt(f'{r} = {fn("new", e)}({n})\n'),
-                    _stmt(f'for {i} in range({n}):\n    {r}.data[{i}] = {lo_t} + {i}\n')]
-            names.append(r)
-        out, at, i = self.temp('cat'), self.temp('cat_at'), self.temp('cat_i')
-        self.declare(out, TYPES[e])
-        self.declare(at, f'{CY_MOD}.Py_ssize_t')
-        self.declare(i, f'{CY_MOD}.Py_ssize_t')
-        pre.append(_stmt(f'{out} = {fn("new", e)}({" + ".join(f"{name}.n" for name in names)})\n'))
-        pre.append(_stmt(f'{at} = 0\n'))
-        for name in names:
-            pre.append(_stmt(f'for {i} in range({name}.n):\n    {out}.data[{at} + {i}] = {name}.data[{i}]\n'))
-            pre.append(_stmt(f'{at} += {name}.n\n'))
-        self.lowered += 1
-        return pre, cst.Name(out)
 
     def wrap_return(self, so, su, pre):
         shape = self.cells.vector_shape
@@ -1468,10 +1400,10 @@ class VectorLowering(cst.CSTTransformer):
     def expand_sum(self, gen_o, gen_u):
         pre, head, body, renames, n, i = self.loop_head(gen_o.for_in, gen_u.for_in, 's')
         s = self.temp('sum')
-        self.declare(s, f'{ALIAS}.VecSum')
+        self.declare(s, f'{ALIAS}.F64Sum')
         elt = _code(gen_u.elt.visit(_Rename(renames)))
-        pre.append(_stmt(f'{ALIAS}.sum_init({CY_MOD}.address({s}))\n'))
-        add = f'{ALIAS}.sum_add({CY_MOD}.address({s}), {elt})'
+        pre.append(_stmt(f'{ALIAS}.f64_init({CY_MOD}.address({s}))\n'))
+        add = f'{ALIAS}.f64_add({CY_MOD}.address({s}), {elt})'
         if gen_u.for_in.ifs:
             cond = ' and '.join(f'({_code(c.test.visit(_Rename(renames)))})' for c in gen_u.for_in.ifs)
             lines = body + [f'if {cond}:', f'    {add}']
@@ -1479,7 +1411,7 @@ class VectorLowering(cst.CSTTransformer):
             lines = body + [add]
         pre.append(_stmt('\n'.join([head] + ['    ' + line for line in lines]) + '\n'))
         self.lowered += 1
-        return pre, _expr(f'{ALIAS}.sum_result({CY_MOD}.address({s}))')
+        return pre, _expr(f'{ALIAS}.f64_result({CY_MOD}.address({s}))')
 
     def expand_extreme(self, gen_o, gen_u, name, elem):
         """diag-kr: ``min``/``max`` of a generator over vectors, as Python computes it: the first
@@ -1813,9 +1745,10 @@ class _ObjectUses(cst.CSTTransformer):
     A tuple of vectors in such a position becomes a tuple of lists."""
     METADATA_DEPENDENCIES = (__import__('libcst.metadata', fromlist=['ParentNodeProvider']).ParentNodeProvider,)
 
-    def __init__(self, names, shapes, own=None):
+    def __init__(self, names, shapes, own=None, ref_shapes=None):
         super().__init__()
         self.names, self.shapes = names, shapes     # {name: shape}, {vector cell: shape}
+        self.ref_shapes = ref_shapes or {}          # {Reference: {vector cell: shape}}
         self.own = own                              # the shape this formula returns, if it is a vector cell
         self.converted = []
 
@@ -1829,9 +1762,8 @@ class _ObjectUses(cst.CSTTransformer):
     def _shape(self, node):
         if isinstance(node, cst.Name):
             return self.names.get(node.value)
-        if (isinstance(node, cst.Call) and isinstance(node.func, cst.Attribute)
-                and _is_name(node.func.value, 'self')):
-            return self.shapes.get(node.func.attr.value)
+        if isinstance(node, cst.Call):
+            return _call_shape(node.func, self.shapes, self.ref_shapes)
         if isinstance(node, cst.Subscript):
             base = self._shape(node.value)
             if isinstance(base, tuple) and _index(node) is not None and _int_literal(_index(node)) is not None:
@@ -1902,11 +1834,11 @@ class _ObjectUses(cst.CSTTransformer):
         return self._leave(original, updated)
 
 
-def _object_uses(body, names, shapes, own=None):
+def _object_uses(body, names, shapes, own=None, ref_shapes=None):
     """``body`` (an IndentedBlock) with every Python use of a vector made a list (``_ObjectUses``)."""
     from libcst.metadata import MetadataWrapper
     wrapper = MetadataWrapper(cst.Module(body=body.body), unsafe_skip_copy=True)
-    uses = _ObjectUses(names, shapes, own)
+    uses = _ObjectUses(names, shapes, own, ref_shapes)
     module = wrapper.visit(uses)
     return body.with_changes(body=module.body), uses.converted
 
@@ -1926,6 +1858,7 @@ def lower(node, cls_info, cells, scope, counter, module, ref_kinds=None):
     loops = [name for name in range_loop_locals(node.body, builtins) if name not in cells.params]
     lowering = VectorLowering(cls_info, cells, builtins, counter)
     lowering.readers = frozenset(name for name in READERS if is_builtin(name))
+    lowering.ref_shapes = reference_shapes(cls_info, module)
     from .powers import KIND_FLOAT, KIND_INT
     lowering.strict_locals = not module_vector_cells(module)
     lowering.ref_scalars = {name: {KIND_FLOAT: FLOAT, KIND_INT: INT}.get(kind)
@@ -1952,6 +1885,7 @@ def lower(node, cls_info, cells, scope, counter, module, ref_kinds=None):
     decls = [_stmt(f'{name}: {CY_MOD}.longlong\n') for name in loops + derived]
     touches = (any(lowering.env.values()) or cells.vector_shape or any(
         isinstance(n, cst.Attribute) and n.attr.value in lowering.shapes for n in _walk(node.body))
+        or any(isinstance(n, cst.Call) and _call_shape(n.func, {}, lowering.ref_shapes) for n in _walk(node.body))
         or any(isinstance(n, cst.Power) for n in _walk(node.body)))
     report['range_loop_locals'] = loops
     if derived:
@@ -1969,7 +1903,8 @@ def lower(node, cls_info, cells, scope, counter, module, ref_kinds=None):
                 typed[small.target.value] = next(k for k, t in TYPES.items() if t == _code(small.annotation.annotation))
     body, converted = _object_uses(body, typed, {n: s for n, s in lowering.shapes.items()
                                                  if s in ('V', 'I') or isinstance(s, tuple)},
-                                   cells.vector_shape if cells.vector_shape in ("V", "I") or isinstance(cells.vector_shape, tuple) else None)
+                                   cells.vector_shape if cells.vector_shape in ("V", "I") or isinstance(cells.vector_shape, tuple) else None,
+                                   lowering.ref_shapes)
     if derived:
         body = body.visit(_CheckedFloatReads(typed, set(derived)))
     for name, items in lowering.facts.assigns.items():

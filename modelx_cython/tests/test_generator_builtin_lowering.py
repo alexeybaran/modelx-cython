@@ -14,7 +14,7 @@ def test_unregistered_builtin_preserves_source_without_an_ast_frontend(monkeypat
     with monkeypatch.context() as patch:
         patch.setattr(ast, "parse", forbidden)
         retired = NativeReductions(SimpleNamespace(refs={}), SimpleNamespace(params=()),
-                                   set(), formula.body[0], lambda: '_cold', False)
+                                   set(), formula.body[0], False)
         result = formula.visit(retired).code
     assert result == source
-    assert retired.count == 0 and retired.fallbacks == []
+    assert retired.general_count == 0

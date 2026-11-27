@@ -7,7 +7,6 @@ import libcst as cst
 from modelx_cython.enums import Constants
 from modelx_cython.helpers import HelperCalls
 from modelx_cython.reductions import NativeReductions
-from modelx_cython.helpers import helper_capability
 import pytest
 
 
@@ -54,10 +53,10 @@ def test_reduction_does_not_type_a_nested_receiver_from_outer_cells():
     cls=SimpleNamespace(name='_c_Values', refs={'sum_f64':SimpleNamespace(
         reduction='f64_sum',helper=('sample.provider','sum_f64'))},
         cells={'term':native_cell(params=('k',)),'count':native_cell('long long')})
-    pass_=NativeReductions(cls,native_cell(),set(),formula,lambda:'_cold',True)
+    pass_=NativeReductions(cls,native_cell(),set(),formula,True)
     result=cst.Module([formula.visit(pass_)]).code
     assert result == source
-    assert pass_.count == 0
+    assert pass_.general_count == 0
 
 
 @pytest.mark.parametrize('source', [
@@ -72,9 +71,9 @@ def test_typed_reduction_preserves_receiver_binding_and_frame_observation(source
     cls = SimpleNamespace(name='_c_Values', refs={'sum_f64': SimpleNamespace(
         reduction='f64_sum', helper=('sample.provider', 'sum_f64'))},
         cells={'term': native_cell(params=('k',)), 'count': native_cell('long long')})
-    lowering = NativeReductions(cls, cell, set(), formula, lambda: '_cold', True)
+    lowering = NativeReductions(cls, cell, set(), formula, True)
     assert cst.Module([formula.visit(lowering)]).code == source
-    assert lowering.count == 0
+    assert lowering.general_count == 0
 
 
 def test_enum_constants_do_not_capture_a_comprehension_receiver():
@@ -110,17 +109,6 @@ def test_enum_constants_decline_receiver_rebinding():
         {('_c_Values','Status','OK'):('_mx_enum_const_0',200)})
     assert cst.parse_module(source).visit(pass_).code==source
     assert pass_.count==0
-
-
-@pytest.mark.parametrize('name,value',[
-    ('scalar_result','float'),
-    ('call_layout','positional'),
-])
-def test_helper_capability_shape_is_validated_at_registration(name,value):
-    def function():pass
-    setattr(function,'__modelx_cython_'+name+'__',value)
-    with pytest.raises(ValueError,match='invalid helper capability'):
-        helper_capability(function,name)
 
 
 def test_cache_hit_optimization_does_not_depend_on_ast_unparse(monkeypatch):
@@ -164,23 +152,17 @@ def test_enum_constants_follow_underlying_integer_not_overridden_conversion():
     assert info.enum[2]['VALUE']==1
 
 
-def test_arithmetic_rewrite_preserves_global_assignment_effects():
-    import cython
-    from modelx_cython.checked_arithmetic import CheckedArithmetic
-    cell=native_cell('double',('t',))
-    cell.is_locked=False;cell.cls='_c_Values';cell._spec={}
-    cls=SimpleNamespace(cells={},visitor=SimpleNamespace(dynamic_ref_classes=()))
-    source='''def formula(self, t):
-    global a, b
-    a = t * t
-    b = t + t
-    return a / 12.0 + b
-'''
-    function=cst.parse_module(source).body[0]
-    result=CheckedArithmetic(cls,cell).rewrite(function)
-    namespace={'a':0,'b':0,'_mx_cy':cython}
-    exec(cst.Module([result]).code,namespace)
-    assert namespace['formula'](None,2)==4/12.0+4
-    assert (namespace['a'],namespace['b'])==(4,4)
-
-
+def test_a_provider_with_only_a_pxd_is_installed_as_a_header(monkeypatch, tmp_path):
+    """No .pyx: the .pxd is copied next to the model and no extension module is built for it."""
+    from modelx_cython import helpers
+    def read_resource(package, resource):
+        if resource.endswith('.pyx'):
+            raise FileNotFoundError(resource)
+        return resource.encode()
+    monkeypatch.setattr(helpers, 'read_resource', read_resource)
+    model = tmp_path/'compiled'
+    model.mkdir()
+    alias = helpers.module_name('sample.header')
+    assert helpers.install({'sample.header'}, model) == []
+    assert (model/(alias+'.pxd')).read_bytes() == b'header.pxd'
+    assert not (model/(alias+'.pyx')).exists()

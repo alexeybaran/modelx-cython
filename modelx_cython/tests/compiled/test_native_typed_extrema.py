@@ -1,4 +1,5 @@
-"""W1.4: n-argument min/max of typed operands outside native-result scopes (D29a)."""
+"""n-argument min/max of typed operands outside native-result scopes (D29a): the built-in call,
+whose result is the selected operand with its own class, nan, -0.0 and ties as live."""
 import json
 import math
 import subprocess
@@ -38,12 +39,9 @@ def test_typed_extrema_semantics(tmp_path):
     subprocess.run([sys.executable, '-m', 'modelx_cython', 'exported',
                     '--sample', 'sample.py', '--no-spec'], cwd=tmp_path, check=True)
     report = json.loads((tmp_path / 'exported_cy/_mx_admission.json').read_text())
-    for name in ('lo2', 'hi3', 'ilo', 'inner', 'mixed', 'mixed_lo'):
-        assert report[f'exported_cy._mx_classes._c_Values._f_{name}']['native_expressions'] == 1, name
-    three = report['exported_cy._mx_classes._c_Values._f_three']
-    # W1.8: three mixed operands compile as comparisons of Python objects, no built-in call
-    assert three['expressions_untyped'] == []
-    assert [e['form'] for e in three['expressions_object']] == ['max']
+    for name in ('lo2', 'hi3', 'ilo', 'inner', 'mixed', 'mixed_lo', 'three'):
+        entry = report[f'exported_cy._mx_classes._c_Values._f_{name}']
+        assert [e['form'] for e in entry['expressions_untyped']] in (['min'], ['max']), name
     probe = textwrap.dedent('''\
         import math, struct, sys
         from importlib import import_module
