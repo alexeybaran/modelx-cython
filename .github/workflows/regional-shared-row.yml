@@ -1,0 +1,93 @@
+name: Regional shared-row diagnostic
+
+on:
+  push:
+    branches: [verify/regional-shared-row-diagnostic-1]
+
+jobs:
+  shared-row:
+    name: Ubuntu CPython 3.14.10t
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      PYTHONIOENCODING: utf-8
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14.10t'
+      - name: Install exact modelx and compiler
+        run: |
+          python -m pip install --only-binary libcst,numpy,pandas \
+            'Cython==3.3.2' 'libcst==1.9.0' 'numpy==2.5.5' 'pandas==3.1.1' \
+            'pytest==9.2.0' 'setuptools==84.2.1' 'MonkeyType==23.3.0' 'openpyxl==3.1.5' 'psutil==7.2.2' \
+            'modelx @ git+https://github.com/alexeybaran/modelx@d79f37b8a42448e317f0a33c53cb475769585c1c'
+          # Verify the pinned runtime code without satisfying the distribution version floor.
+          python -m pip install --no-deps .
+      - name: Test the exact shared row and live values
+        id: fixture
+        env:
+          PYTHON_GIL: '0'
+        working-directory: ${{ runner.temp }}
+        run: |
+          python - <<'PY'
+          import importlib.metadata as metadata
+          import json
+          import os
+          import subprocess
+          import sys
+          import modelx
+          import modelx_cython
+
+          source = json.loads(metadata.distribution('modelx').read_text('direct_url.json'))
+          parent = subprocess.check_output(['git', '-C', os.environ['GITHUB_WORKSPACE'], 'rev-parse', 'HEAD^'], text=True).strip()
+          assert parent == 'edda5972e5be3266caa354a058ccbca8cc187cb3'
+          assert source['vcs_info']['commit_id'] == 'd79f37b8a42448e317f0a33c53cb475769585c1c'
+          assert sys.version_info[:3] == (3, 14, 10) and not sys._is_gil_enabled()
+          print(sys.version, 'GIL enabled:', sys._is_gil_enabled(), 'compiler tests:', parent,
+                'modelx:', source['vcs_info']['commit_id'])
+          PY
+          fixture="$GITHUB_WORKSPACE/integration_tests/test_diag_run8_row_fields_derived.py"
+          python -m pytest --import-mode=importlib --rootdir "$GITHUB_WORKSPACE" -p no:cacheprovider -q -rA \
+            --basetemp "$RUNNER_TEMP/shared-row-fixture" \
+            "$fixture::test_derived_space_field_admission_preserves_public_rows[shared-12000]"
+      - name: Show only the shared-row lowering evidence if the fixture fails
+        if: failure() && steps.fixture.outcome == 'failure'
+        env:
+          PYTHON_GIL: '0'
+        run: |
+          python - <<'PY'
+          import ast
+          import json
+          import os
+          from pathlib import Path
+
+          base = (Path(os.environ['RUNNER_TEMP']) / 'shared-row-fixture').resolve()
+          paths = {path.resolve() for path in base.glob('*/d_shared_cy/_mx_classes.py') if path.is_file()}
+          if not paths:
+              print('No generated classes were available after the failed fixture')
+              raise SystemExit(0)
+          if len(paths) != 1 or not all(path.is_relative_to(base) for path in paths):
+              raise SystemExit(f'Expected one generated classes file inside the fixture base, found {len(paths)}')
+          source, = paths
+          module = ast.parse(source.read_text(encoding='utf-8'))
+          projection, = (node for node in module.body
+                         if isinstance(node, ast.ClassDef) and node.name == '_c_Projection')
+          reader, = (node for node in projection.body
+                     if isinstance(node, ast.FunctionDef) and node.name == '_f_sa')
+          print(ast.unparse(reader))
+          for statement in reader.body:
+              if (isinstance(statement, ast.Return) and isinstance(statement.value, ast.Call)
+                      and isinstance(call := statement.value.func, ast.Name)
+                      and call.id.startswith('_mx_dense_formula_')):
+                  body, = (node for node in module.body
+                           if isinstance(node, ast.FunctionDef) and node.name == call.id)
+                  print(ast.unparse(body))
+          admission = json.loads(source.with_name('_mx_admission.json').read_text(encoding='utf-8'))
+          fields = ('return_type', 'row_fields_inlined', 'row_cell_inlined', 'row_cell_kept')
+          for name, values in admission.items():
+              if isinstance(values, dict) and name.endswith(('._c_Projection._f_sa', '._f_model_point')):
+                  print(name, json.dumps({key: values.get(key) for key in fields}, sort_keys=True))
+          PY
