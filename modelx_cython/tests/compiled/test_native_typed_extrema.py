@@ -14,10 +14,14 @@ def test_typed_extrema_semantics(tmp_path):
     try:
         s = model.new_space('Values', refs={
             'values': (0.0, -0.0, 1.5, math.nan, -math.inf, 3.0, 2.0 ** 62, 2.0 ** 62 + 2 ** 10),
-            'ints': (3, -7, 2 ** 62 + 1, 0, 2 ** 62)})
+            'ints': (3, -7, 2 ** 62 + 1, 0, 2 ** 62), 'math': math})
         s.new_cells('v', 'lambda i: values[i]')
         s.new_cells('n', 'lambda i: ints[i]')
         s.new_cells('lo2', 'def lo2(i, j) -> object:\n    return min(v(i), v(j))\n')
+        s.new_cells('clamp_low', 'def clamp_low(i) -> object:\n    return min(v(i), 1.0 - 1e-12)\n')
+        s.new_cells('clamp_high', 'def clamp_high(i) -> object:\n    return max(v(i), 0.0)\n')
+        s.new_cells('mixed_compare', 'def mixed_compare(i, j) -> object:\n    return (max(v(i), 0.0) < n(j),)\n')
+        s.new_cells('tariff', 'def tariff(i) -> object:\n    return (math.log(1.0 - min(v(i), 1.0 - 1e-12)),)\n')
         s.new_cells('hi3', 'def hi3(i, j) -> object:\n    return max(v(i), v(j), 0.5)\n')
         s.new_cells('ilo', 'def ilo(i, j) -> object:\n    return min(n(i), n(j))\n')
         s.new_cells('mixed', 'def mixed(i, j) -> object:\n    return max(n(i), v(j))\n')
@@ -31,6 +35,8 @@ def test_typed_extrema_semantics(tmp_path):
         'from exported import mx_model as m\n'
         'w = m.Values\n'
         'for i in range(8):\n'
+        '    w.clamp_low(i); w.clamp_high(i)\n'
+        '    w.mixed_compare(i, 2); w.tariff(i)\n'
         '    for j in range(8):\n'
         '        w.lo2(i, j); w.hi3(i, j); w.inner(i, j)\n'
         '        if i < 5: w.mixed(i, j); w.mixed_lo(i, j)\n'
@@ -39,9 +45,10 @@ def test_typed_extrema_semantics(tmp_path):
     subprocess.run([sys.executable, '-m', 'modelx_cython', 'exported',
                     '--sample', 'sample.py', '--no-spec'], cwd=tmp_path, check=True)
     report = json.loads((tmp_path / 'exported_cy/_mx_admission.json').read_text())
-    for name in ('lo2', 'hi3', 'ilo', 'inner', 'mixed', 'mixed_lo', 'three'):
+    for name in ('lo2', 'hi3', 'ilo', 'inner', 'mixed', 'mixed_lo', 'three', 'clamp_low', 'clamp_high', 'mixed_compare'):
         entry = report[f'exported_cy._mx_classes._c_Values._f_{name}']
         assert [e['form'] for e in entry['expressions_untyped']] in (['min'], ['max']), name
+    assert not report['exported_cy._mx_classes._c_Values._f_tariff'].get('expressions_untyped')
     probe = textwrap.dedent('''\
         import math, struct, sys
         from importlib import import_module
@@ -50,7 +57,11 @@ def test_typed_extrema_semantics(tmp_path):
         ints = (3, -7, 2 ** 62 + 1, 0, 2 ** 62)
         def same(a, b):
             return type(a) is type(b) and (repr(a) == repr(b))
+        assert w.mixed_compare(6, 2) == (True,)
         for i in range(8):
+            assert same(w.clamp_low(i), min(values[i], 1.0 - 1e-12)), i
+            assert same(w.clamp_high(i), max(values[i], 0.0)), i
+            assert same(w.tariff(i)[0], math.log(1.0 - min(values[i], 1.0 - 1e-12))), i
             for j in range(8):
                 assert same(w.lo2(i, j), min(values[i], values[j])), (i, j)
                 assert same(w.hi3(i, j), max(values[i], values[j], 0.5)), (i, j)

@@ -681,6 +681,7 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
         )
         from modelx_cython.ordered_arguments import preserve_argument_order
         from modelx_cython.powers import OperandKind, kind_of_type_expr, formula_local_kinds
+        from modelx_cython import native_math
         param_kinds = {name: kind_of_type_expr(cells.get_argtype_expr(name, c_style=True, formula=True))
                        for name in cells.params} if cells.has_args() and cells.has_typeinfo() else {}
         # locals proven of one kind by every assignment (D59): `k = calendar_year(t) - year`
@@ -694,11 +695,10 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
         node = preserve_argument_order(node,
             native_result=cells.get_rettype_expr(c_style=True) in ('double', 'long long', 'bint'),
             operand_kind=operand_kind,
-            cells=cells, providers=self.helper_providers)
+            cells=cells, providers=self.helper_providers, math_refs=native_math.math_references(cls_info))
         from modelx_cython import space_results
         if self._resolver is not None:
             node, _ = space_results.lower(node, cls_info, cells, scope, operand_kind, self._pin_held_item)
-        from modelx_cython import native_math
         node, lowered = native_math.lower(node, cls_info, cells)
         self._math_calls += lowered
         # D110 P1: a local bound once to an item of a typed ItemSpace Reference is declared its class

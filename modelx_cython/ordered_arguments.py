@@ -9,15 +9,23 @@ from libcst.metadata import ScopeProvider, ParentNodeProvider, PositionProvider
 from libcst.metadata.scope_provider import BuiltinAssignment
 
 
+def _float_constant(node):
+    if isinstance(node, cst.Float):
+        return True
+    return (isinstance(node, cst.BinaryOperation) and isinstance(node.operator, (cst.Add, cst.Subtract))
+            and isinstance(node.left, cst.Float) and isinstance(node.right, cst.Float))
+
+
 class _OrderedArguments(cst.CSTTransformer):
     METADATA_DEPENDENCIES = (ScopeProvider, ParentNodeProvider, PositionProvider)
 
-    def __init__(self, native_result=False, operand_kind=None, providers=None):
+    def __init__(self, native_result=False, operand_kind=None, providers=None, math_refs=frozenset()):
         super().__init__()
         self.opaque_depth = 0
         self.native_result = native_result
         self.operand_kind = operand_kind
         self.providers = providers       # when given, min/max left to the built-in are reported
+        self.math_refs = math_refs
         self.untyped = []
         self.first_line = None
 
@@ -94,6 +102,20 @@ class _OrderedArguments(cst.CSTTransformer):
             position = self.get_metadata(PositionProvider, node.name, None)
             self.first_line = position.start.line if position is not None else None
 
+    def consumed_by_math(self, clamp):
+        if not self.math_refs:
+            return False
+        node = self.get_metadata(ParentNodeProvider, clamp)
+        if not (isinstance(node, cst.BinaryOperation) and isinstance(node.operator, cst.Subtract)
+                and node.right is clamp and isinstance(node.left, cst.Float)):
+            return False
+        node = self.get_metadata(ParentNodeProvider, node)
+        if isinstance(node, cst.Arg):
+            from .native_math import math_member
+
+            return math_member(self.get_metadata(ParentNodeProvider, node), self.math_refs) is not None
+        return False
+
     def leave_Call(self, before, after):
         integer = self.integer_identity(before, after)
         if integer is not None:
@@ -116,6 +138,16 @@ class _OrderedArguments(cst.CSTTransformer):
         if not bindings or not all(isinstance(binding, BuiltinAssignment) for binding in bindings):
             return after
         keywords = tuple(argument for argument in after.args if argument.keyword is not None)
+        if (not keywords and len(positional) == 2 and self.opaque_depth == 1
+                and self.operand_kind is not None and self.consumed_by_math(before)):
+            from .powers import KIND_FLOAT
+
+            left, right = (argument.value for argument in before.args)
+            # Cython can evaluate a binary extreme's right operand first. A
+            # constant limit is effect-free. The math call consumes a float;
+            # comparisons and object-valued consumers still use the builtin.
+            if _float_constant(right) and self.operand_kind.kind(left) == KIND_FLOAT:
+                return after
         if self.providers is not None:
             from .reductions import untyped_entry
             self.untyped.append(untyped_entry(self.line_of, before, before.func.value,
@@ -131,14 +163,16 @@ class _OrderedArguments(cst.CSTTransformer):
         return position.start.line - self.first_line + 1
 
 
-def preserve_argument_order(formula, native_result=False, operand_kind=None, cells=None, providers=None):
+def preserve_argument_order(formula, native_result=False, operand_kind=None, cells=None, providers=None,
+                            math_refs=frozenset()):
     """Keep unproved powers on Cython's ordinary Python-object operator.
 
-    min/max in object-result scopes stay the built-in call (the selected operand's class);
-    with ``providers`` those calls go to ``cells`` for the admission report.
+    General min/max in object-result scopes use the built-in to preserve the
+    selected operand's class. A guarded math call can consume a known double
+    with a constant float limit. Built-in calls go to the admission report.
     """
     wrapper = cst.MetadataWrapper(cst.Module(body=(formula,)))
-    ordered = _OrderedArguments(native_result, operand_kind, providers)
+    ordered = _OrderedArguments(native_result, operand_kind, providers, math_refs)
     result = wrapper.visit(ordered).body[0]
     if cells is not None:
         cells.minmax_untyped = ordered.untyped

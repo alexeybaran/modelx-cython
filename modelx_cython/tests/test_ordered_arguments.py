@@ -94,7 +94,7 @@ def test_extrema_in_object_scopes_stay_the_builtin_call():
     def lowered(source, native_result=False):
         cells, providers = SimpleNamespace(), set()
         node = preserve_argument_order(cst.parse_module(source).body[0], native_result=native_result,
-                                       operand_kind=kinds, cells=cells, providers=providers)
+                                       operand_kind=kinds, cells=cells, providers=providers, math_refs={'math'})
         return cst.Module(body=(node,)).code, cells, providers
 
     code, cells, providers = lowered('def formula(x, y):\n    return max(0.0, x, y)\n')
@@ -102,6 +102,12 @@ def test_extrema_in_object_scopes_stay_the_builtin_call():
     assert [(e['form'], e['line']) for e in cells.minmax_untyped] == [('max', 2)]
     code, cells, _ = lowered('def formula(i, x):\n    return min(i, x)\n')
     assert 'min(*(i, x))' in code
+    code, cells, _ = lowered('def formula(x):\n    return min(x, 1.0 - 1e-12)\n')
+    assert 'return min(*(x, 1.0 - 1e-12))' in code
+    code, cells, _ = lowered('def formula(self, x):\n    return [self.math.log(1.0 - min(x, 1.0 - 1e-12))]\n')
+    assert '1.0 - min(x, 1.0 - 1e-12)' in code and cells.minmax_untyped == []
+    code, cells, _ = lowered('def formula(i):\n    return min(i, 1.0)\n')
+    assert 'min(*(i, 1.0))' in code
     code, cells, _ = lowered('def formula(x, y):\n    return [max(x, y) for _ in range(2)]\n', True)
     assert 'max(*(x, y))' in code           # a child scope of a native-result cell
     code, cells, _ = lowered('def formula(x, y):\n    return max(x, y)\n', True)
