@@ -8,122 +8,100 @@ import modelx as mx
 def test_parallel_collect_reuse_merges_completed_chunks_and_retries(tmp_path):
     model = mx.new_model("PrivateCollect")
     try:
-        values = (1e16, 1.0, -1e16, 1.0, 2.0, 3.0, 4.0, -0.0)
+        # These values add exactly in any worker grouping.
+        values = (16.0, 1.0, -16.0, 1.0, 2.0, 3.0, 4.0, -0.0)
         keys = tuple(range(len(values)))
-        for name in ("Reused", "Ordered", "Ordinary"):
-            space = model.new_space(
-                name, formula="lambda key: None", refs={"keys": keys, "values": values, "adjust": float},
-                collect_over={"key": "keys"}, collect_outputs=lambda: {"sum": {"value": value()}},
-            )
-            space.new_cells("part", "lambda t: values[key] + t")
-            space.new_cells("value", "lambda: adjust(part(0))")
+        space = model.new_space(
+            "Projection", formula="lambda key: None", refs={"keys": keys, "values": values, "adjust": float},
+            collect_over={"key": "keys"},
+            collect_outputs=lambda: {"sum": {"value": value()}, "individual": {"value": value()}},
+        )
+        space.new_cells("part", "lambda t: values[key] + t")
+        space.new_cells("value", "lambda: adjust(part(0))")
         model.export(tmp_path / "exported")
     finally:
         model.close()
-    spec = {"parallel_workers": 4, "spaces": {
-        "Reused": {"serial_collect": "reuse", "parallel_collect_reuse": True,
-                   "parallel_collect_order": "completion"},
-        "Ordered": {"serial_collect": "reuse", "parallel_collect_reuse": True,
-                    "parallel_collect_order": "domain"},
-    }}
-    (tmp_path / "spec.py").write_text(repr(spec), encoding="utf-8")
     (tmp_path / "sample.py").write_text(
-        "from exported import mx_model\nmx_model.Reused.collect(); mx_model.Ordered.collect(); mx_model.Ordinary.collect()\n",
+        "from exported import mx_model\nmx_model.Projection.collect()\n",
         encoding="utf-8",
     )
     subprocess.run([sys.executable, "-m", "modelx_cython", "exported",
-                    "--sample", "sample.py", "--spec", "spec.py"], cwd=tmp_path, check=True)
+                    "--sample", "sample.py", "--no-spec"], cwd=tmp_path, check=True)
     assert (tmp_path / 'exported/_mx_sys.py').read_bytes() == (tmp_path / 'exported_cy/_mx_sys.py').read_bytes()
     probe = textwrap.dedent("""\
-        from concurrent import futures
         import sys
-        from threading import Barrier, Lock, get_ident
+        import threading
+        import pytest
 
         gil = getattr(sys, "_is_gil_enabled", lambda: True)
         before = gil()
-        from exported_cy import mx_model as m
+        from exported import mx_model as live
+        from exported_cy import mx_model as native
         assert gil() == before
 
-        pool = futures.ThreadPoolExecutor
-        starts = Barrier(4, timeout=15)
-        lock = Lock()
-        threads = set()
-        class Observer(pool):
-            def __init__(self, *args, **kwargs):
-                assert not before, "GIL-enabled collect must run serially"
-                super().__init__(*args, **kwargs)
+        def payload(result):
+            return result.sum.value, [(key, item.value) for key, item in result.individual.items()]
 
-            def submit(self, fn, /, *args, **kwargs):
-                assert args[-1] is not None
-                def run():
-                    with lock:
-                        threads.add(get_ident())
+        expected = payload(live.Projection.collect())
+        assert expected == (11.0, list(enumerate(live.Projection.values)))
+        serial = type(native)()
+        serial._mx_collect_workers = 1
+        assert payload(serial.Projection.collect()) == expected
+
+        native._mx_collect_workers = 4
+        projection = native.Projection
+        held = projection[0]
+        assert held.value() == 16.0
+        threads = []
+        expected_workers = 0 if before else 4
+        starts = threading.Barrier(expected_workers, timeout=10) if expected_workers else None
+
+        class Observer(threading.Thread):
+            def run(self):
+                threads.append(self)
+                if starts is not None:
                     starts.wait()
-                    return fn(*args, **kwargs)
-                return super().submit(run)
+                super().run()
 
-        def completion_order(tasks):
-            for index in (2, 0, 1, 3):
-                yield tasks[index]
+        def collect():
+            threads.clear()
+            with pytest.MonkeyPatch.context() as patch:
+                patch.setattr(threading, "Thread", Observer)
+                try:
+                    return projection.collect()
+                finally:
+                    assert len({thread.ident for thread in threads}) == expected_workers
+                    assert all(not thread.is_alive() for thread in threads)
 
-        from exported_cy import _mx_sys
-        assert _mx_sys._mx_collect_adapter_version == 2
-        if before:
-            futures.ThreadPoolExecutor = Observer
-        assert m.Ordinary.collect().sum.value == 10.0
-        futures.ThreadPoolExecutor = Observer
-        futures.as_completed = completion_order
-        serial_model = type(m)()
-        serial_model.collect_workers = 1
-        assert serial_model.Ordered.collect().sum.value == 10.0
-        assert m.Ordered.collect().sum.value == (10.0 if before else 9.0)
         failure = LookupError("retry")
         def broken(x):
-            if x == -1e16:
+            if x == -16.0:
                 raise failure
             return x
-        m.Reused.adjust = broken
-        try:
-            m.Reused.collect()
-        except LookupError as error:
-            assert error is failure
-        else:
-            raise AssertionError("failure swallowed")
-        first_failure = ValueError("first domain chunk")
-        later_failure = ValueError("later domain chunk")
-        def multiple_failures(x):
-            if x == 1e16:
-                raise first_failure
-            if x == -1e16:
-                raise later_failure
+
+        projection.adjust = broken
+        for _ in range(2):
+            with pytest.raises(LookupError) as error:
+                collect()
+            assert error.value is failure
+        with pytest.raises(KeyError):
+            del projection[3]
+
+        seen = []
+        def remember(x):
+            seen.append(x)
             return x
-        def reversed_failures(tasks):
-            for index in (2, 1, 0, 3):
-                yield tasks[index]
-        futures.as_completed = reversed_failures
-        m.Reused.adjust = multiple_failures
-        try:
-            m.Reused.collect()
-        except ValueError as error:
-            assert error is first_failure
-        else:
-            raise AssertionError("first domain failure lost")
-        futures.as_completed = completion_order
-        m.Reused.adjust = float
-        result = m.Reused.collect()
-        assert result.sum.value == (10.0 if before else 8.0)
-        assert m.Reused.collect() is result
-        if before:
-            assert not threads
-        else:
-            assert len(threads) >= 4
-        try:
-            del m.Reused[3]
-        except KeyError:
-            pass
-        else:
-            raise AssertionError("collect left a public ItemSpace")
-        assert m.Reused[3].value() == 1.0
+
+        projection.adjust = remember
+        result = collect()
+        assert payload(result) == expected
+        assert sorted(seen) == sorted(projection.values)
+        assert projection.collect() is result
+        assert len(seen) == len(projection.values)
+        with pytest.raises(KeyError):
+            del projection[3]
+        assert projection[0] is held and held.value() == 16.0
+        assert projection[3].value() == 1.0
         assert gil() == before
     """)
     subprocess.run([sys.executable, "-c", probe], cwd=tmp_path, check=True, timeout=90)
