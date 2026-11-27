@@ -10,7 +10,6 @@ from types import BuiltinFunctionType, ModuleType, SimpleNamespace
 import libcst as cst
 
 
-_SCALAR_MATH = {erf, exp, isinf, log, sqrt}     # the members bound on a module other than math
 MATH_PROVIDER = 'modelx_cython.runtime._native_math'
 # W1.4: members of a module Reference resolved at build time (``_native_math.m_<name>``
 # receives the Reference itself). floor/ceil return the module's int; see m_floor_ll.
@@ -21,17 +20,14 @@ MATH_CONSTANTS = ('inf', 'nan', 'pi', 'e', 'tau')     # index order of _native_m
 
 def module_helpers(value):
     """Snapshot declared member metadata without executing module descriptors."""
-    if type(value) is not ModuleType:
+    if value is not math or type(value) is not ModuleType:
         return {}
     result = {}
-    stdlib = value is math
     for name, function in vars(value).copy().items():
         if type(function) is BuiltinFunctionType and function in _MODULE_MATH:
-            if not stdlib and (function not in _SCALAR_MATH or name != function.__name__):
-                continue          # floor/ceil only on the math module itself; no aliased member
             result[name] = SimpleNamespace(scalar_result=_MODULE_MATH[function], module_math=function.__name__)
             continue
-        if stdlib and name in MATH_CONSTANTS and type(function) is float:
+        if name in MATH_CONSTANTS and type(function) is float:
             result[name] = SimpleNamespace(module_constant=MATH_CONSTANTS.index(name))
     return result
 

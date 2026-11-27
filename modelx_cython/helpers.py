@@ -39,7 +39,10 @@ class HelperCalls(FormulaTransformer):
         if not (isinstance(func, cst.Attribute) and isinstance(func.value, cst.Attribute)
                   and isinstance(func.value.value, cst.Name) and func.value.value.value == 'self'):
             return None
-        members = getattr(self.refs.get(func.value.attr.value), 'helper_members', {})
+        ref = self.refs.get(func.value.attr.value)
+        if not getattr(ref, 'is_math', False):
+            return None
+        members = getattr(ref, 'helper_members', {})
         if not any(getattr(member, 'module_math', None) or hasattr(member, 'module_constant')
                    for member in members.values()):
             return None

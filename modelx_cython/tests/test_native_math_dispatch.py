@@ -1,6 +1,6 @@
 """The shared scalar passes keep both existing math dispatch routes."""
 import math
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 
 import libcst as cst
 
@@ -8,6 +8,42 @@ from modelx_cython import native_math
 from modelx_cython.helper_members import MATH_PROVIDER, module_helpers
 from modelx_cython.helpers import HelperCalls
 from modelx_cython.rounding import NativeRounding
+
+
+def test_capture_does_not_execute_module_or_object_getattr():
+    seen = []
+    module = ModuleType('sample.dynamic')
+    module.__getattr__ = lambda name: seen.append(name)
+    assert module_helpers(module) == {}
+
+    class Namespace:
+        def __getattr__(self, name):
+            seen.append(name)
+
+    assert module_helpers(Namespace()) == {}
+    assert seen == []
+
+
+def test_foreign_math_reexport_reads_the_current_callable_before_its_argument():
+    foreign = ModuleType('sample.foreign')
+    foreign.exp = math.exp
+    assert module_helpers(foreign) == {}
+    ref = SimpleNamespace(helper_members={'exp': SimpleNamespace(module_math='exp')})
+    source = 'def formula(self, argument):\n    return self.foreign.exp(argument())\n'
+    binder = HelperCalls({'foreign': ref}, set())
+    result = cst.Module(body=(binder.rewrite(cst.parse_module(source).body[0]),)).code
+    assert result == source and not binder.operations
+
+    def rebind():
+        foreign.exp = lambda value: value + 10
+        return 0.5
+
+    namespace = {}
+    exec(result, namespace)
+    formula = namespace['formula']
+    owner = SimpleNamespace(foreign=foreign)
+    assert formula(owner, rebind) == math.exp(0.5)
+    assert formula(owner, lambda: 0.5) == 10.5
 
 
 def test_native_math_provider_and_inherited_unary_calls():
