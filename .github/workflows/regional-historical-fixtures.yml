@@ -1,0 +1,64 @@
+name: Regional historical fixture ports
+
+on:
+  push:
+    branches: [verify/regional-historical-fixtures-1]
+
+jobs:
+  collect-fixtures:
+    name: ${{ matrix.os }} CPython 3.14.10t
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    env:
+      PYTEST_ADDOPTS: ${{ matrix.os == 'windows-latest' && '--basetemp=C:/t' || '' }}
+      PYTHONIOENCODING: utf-8
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14.10t'
+      - name: Enable free-threaded tests
+        shell: bash
+        run: echo 'PYTHON_GIL=0' >> "$GITHUB_ENV"
+      - name: Install exact companion packages and compiler
+        shell: bash
+        run: |
+          python -m pip install --only-binary scipy,libcst,numpy,pandas \
+            'Cython==3.3.2' 'libcst==1.9.0' 'numpy==2.5.5' 'pandas==3.1.1' \
+            'pytest==9.2.0' 'setuptools==84.2.1' 'MonkeyType==23.3.0' 'openpyxl==3.1.5' 'psutil==7.2.2' \
+            'modelx @ git+https://github.com/alexeybaran/modelx@990d5852ac8c3deed7e8646365dd4e16c63da368' \
+            'lifelib @ git+https://github.com/alexeybaran/lifelib@e50454141680d0f9d65cce7ade81e4987f8c85ac'
+          # The pinned fork advertises 0.33.0 and the compiler requires 0.33.1.dev0.
+          python -m pip install --no-deps .
+      - name: Verify the three ported fixtures
+        working-directory: ${{ runner.temp }}
+        shell: bash
+        run: |
+          python - <<'PY'
+          import importlib.metadata as metadata
+          import json
+          import sys
+          import modelx
+          import modelx_cython
+
+          assert sys.version_info[:3] == (3, 14, 10) and not sys._is_gil_enabled()
+          for name, expected in {
+              'modelx': '990d5852ac8c3deed7e8646365dd4e16c63da368',
+              'lifelib': 'e50454141680d0f9d65cce7ade81e4987f8c85ac',
+          }.items():
+              source = json.loads(metadata.distribution(name).read_text('direct_url.json'))
+              commit = source['vcs_info']['commit_id']
+              print(name, commit, 'GIL enabled:', sys._is_gil_enabled())
+              assert commit == expected
+          PY
+          suite="$GITHUB_WORKSPACE/modelx_cython/tests/compiled"
+          integration="$GITHUB_WORKSPACE/integration_tests"
+          python -m pytest --import-mode=importlib --rootdir "$GITHUB_WORKSPACE" -p no:cacheprovider \
+            -o "pythonpath='$suite' '$integration' '$integration/table_matrix'" -q -rA \
+            "$suite/test_collect_native_merge.py::test_native_collect_result_supports_native_and_python_consumers" \
+            "$suite/test_parallel_collect_domain_default.py::test_collect_keeps_serial_sum_and_uses_workers_without_gil" \
+            "$integration/test_diag_jp_forms.py::test_forms_compile_natively_and_equal_the_interpreter"
