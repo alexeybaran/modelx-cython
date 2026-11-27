@@ -1,9 +1,14 @@
-"""A table read left on pandas in a per-step cell (a cell with arguments) is a compiler warning at build time, and
-is in the read audit (``_mx_read_audit.json``) with its reason; a per-policy one is in the audit only."""
+"""A per-step pandas read warns at build time and appears in the read audit.
+
+Strict table mode rejects the per-step read. Per-policy reads appear only in the audit.
+"""
 import json
+import os
 import subprocess
 import sys
 import textwrap
+
+import pytest
 
 MODEL = '''\
 import modelx as mx
@@ -29,7 +34,8 @@ def build():
 '''
 
 
-def test_mask_read_in_a_per_step_cell_warns(tmp_path):
+@pytest.mark.parametrize('strict_tables', [False, True], ids=['warning', 'strict'])
+def test_mask_read_in_a_per_step_cell_warns(tmp_path, strict_tables):
     (tmp_path / 'warn_model.py').write_text(MODEL, encoding='utf-8')
     (tmp_path / 'build_model.py').write_text(textwrap.dedent('''\
         from warn_model import build
@@ -42,13 +48,25 @@ def test_mask_read_in_a_per_step_cell_warns(tmp_path):
         '    mx_model.Projection.nested_key(t + 1)\n'
         'mx_model.Projection.once()\n', encoding='utf-8')
 
-    def run(*args):
-        done = subprocess.run([sys.executable, *args], cwd=tmp_path, timeout=1200, capture_output=True, text=True)
-        assert done.returncode == 0, f'{args}\n' + done.stdout[-4000:] + done.stderr[-8000:]
-        return done
-    run('build_model.py')
-    done = run('-m', 'modelx_cython', 'warn_nomx', '--sample', 'sample.py', '--no-spec', '--translate-only')
+    def run(*args, env=None):
+        return subprocess.run([sys.executable, *args], cwd=tmp_path, env=env, timeout=1200,
+                              capture_output=True, text=True)
+
+    built = run('build_model.py')
+    assert built.returncode == 0, built.stdout + built.stderr
+    env = {**os.environ, 'MX_CY_STRICT_TABLES': '1' if strict_tables else '0'}
+    done = run('-m', 'modelx_cython', 'warn_nomx', '--sample', 'sample.py', '--no-spec', '--translate-only', env=env)
     log = done.stdout + done.stderr
+    if strict_tables:
+        assert done.returncode != 0, log
+        diagnostics = [line for line in log.splitlines()
+                       if line.startswith('modelx_cython.cli.HandlerError: strict_tables:')]
+        assert len(diagnostics) == 1, log
+        assert "Projection.masked: T.loc[T['sa'] > 100.0 * t, 'rate']" in diagnostics[0], log
+        assert 'Projection.once' not in diagnostics[0] and 'Projection.nested_key' not in diagnostics[0], log
+        return
+
+    assert done.returncode == 0, log
     warnings = [line for line in log.splitlines() if 'table read left on pandas in a per-step cell' in line]
     assert len(warnings) == 1 and 'masked' in warnings[0] and "T['sa'] > 100.0 * t" in warnings[0], log[-4000:]
     compiled = tmp_path / 'warn_nomx_cy'
