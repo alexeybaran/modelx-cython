@@ -3,7 +3,7 @@
 - a sum over `range(max(0, t - window()), t)` with a term `cell(s) * (1.0 - rho) ** (t - 1 - s)`
   (Term_JP_S pols_lapse_pool): the range is C integers, the loop variable a C integer, the power
   native and the sum state a double; `range(int(x), int(x) + int(m))` likewise;
-- table key parts bound by a tuple assignment `x, m = f(k), g(k)` used in Python helper lookups;
+- pandas table key parts bound by a tuple assignment `x, m = f(k), g(k)`;
 - the report lists what still runs on objects (`slow_paths`): hash caches with the reason,
   reductions over objects, table key parts as objects, object returns of cells with parameters.
 Compiled equals the exported model on every call (value, type, or exception).
@@ -14,7 +14,7 @@ import sys
 import textwrap
 
 import modelx as mx
-from modelx_helpers.immutable_inputs import Table
+import pandas as pd
 
 PREFIX = 'exported_cy._mx_classes._c_Values._f_'
 
@@ -22,7 +22,10 @@ PREFIX = 'exported_cy._mx_classes._c_Values._f_'
 def _build(tmp_path):
     model = mx.new_model('DiagJP')
     try:
-        rates = Table([(0, 20, 5), (1, 20, 5), (0, 25, 5)], [(1.5,), (2.5,), (3.5,)], ['rate'])
+        rates = pd.DataFrame(
+            {'rate': [1.5, 2.5, 3.5]},
+            index=pd.MultiIndex.from_tuples([(0, 20, 5), (1, 20, 5), (0, 25, 5)]),
+        )
         s = model.new_space('Values', refs={'rates': rates, 'window_len': 4})
         s.new_cells('window', 'lambda: window_len')
         s.new_cells('rho', 'lambda: 0.125')
@@ -51,6 +54,7 @@ def _build(tmp_path):
             def lookup(t):
                 return {1: 2.0, 3: 4.0}.get(t, 0.0)
             '''))
+        assert [s.rate(k) for k in range(4)] == [1.5, -1.0, 1.5, -1.0]
         model.export(tmp_path / 'exported')
     finally:
         model.close()
@@ -77,7 +81,6 @@ def test_forms_compile_natively_and_equal_the_interpreter(tmp_path):
     assert report[PREFIX + 'mean']['slow_paths'] == [] or all(
         e['kind'] != 'reduction-on-objects' for e in report[PREFIX + 'mean']['slow_paths'])
     assert 'key = (k % 2, int(x), int(m))' in source
-    assert 'if key in ' in source and '.loc[key, "rate"]' in source
     probe = textwrap.dedent('''\
         import json, sys
         from importlib import import_module

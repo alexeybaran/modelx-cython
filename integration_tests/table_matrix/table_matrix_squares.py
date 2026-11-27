@@ -1,13 +1,4 @@
-"""M1 table-read matrix (design section 4): storage form x operation x key type x mode.
-
-Declared once here (W1.1). Applicability changes need a reason in the row and a note in the
-pull request; implementation status lives in the done files of each package:
-    table_matrix_done_w1_2.py   (W1.2 runtime handles: live, exported and compiled squares)
-    table_matrix_done_w1_3.py   (W1.3 lowering: squares whose cases it contributes)
-and the cases themselves in table_matrix_cases_w1_2.py / table_matrix_cases_w1_3.py.
-A square is done in a mode when it is in the union of the done sets. Every applicable square
-that is not done is xfail(strict=True): an unmarked square that passes fails the suite.
-"""
+"""Applicability of pandas table reads by frame shape, operation, and key type."""
 
 FORMS = {
     'C': 'contiguous: one float64 column, int64 range index',
@@ -28,11 +19,10 @@ OPERATIONS = {
     6: 'loc[prefix] then reads',
     7: 'row = T.loc[k]; row["c"], incl. reassignment',
     8: 'index.asof(x) as row key and as a value in arithmetic',
-    9: 'index.searchsorted(x, side="right") / index[i] (D25b)',
-    10: 'errors: missing key, missing column, asof below the first key (D25a), DENSE at +-2**63 '
-        'and below a negative first key',
-    11: 'record field reads model_point()["x"] in any position',
-    12: 'column selection T["c"][k] (D13)',
+    9: 'index.searchsorted(x, side="right") / index[i]',
+    10: 'missing key, missing column, asof below the first key, and keys near and outside int64 limits',
+    11: 'field reads from a pandas model-point row in different expressions',
+    12: 'column selection T["c"][k]',
 }
 
 # Type of the key parts passed (part by part for multi-level keys).

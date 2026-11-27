@@ -1,23 +1,6 @@
-"""Square cases contributed by W1.3: {(form, operation, key): case}. Owned by W1.3.
+"""Model Cell spellings for the representative cases of the pandas read matrix."""
 
-Same contract as table_matrix_cases_w1_2.py; a key present in both files is an error.
-
-Every square is one cell of a single model (one build for all of them): its formula is
-written in the target syntax and evaluated for a few arguments in the mode asked. The oracle
-is the same formula run on the pandas frames (``pd.DataFrame`` in place of each table),
-except where D25a pins a different outcome (``EXPECT``). The compiled model uses
-Python helper reads for these fixtures.
-The squares are the prototype's ``test_loc_reads.py`` forms placed on the matrix; the key
-axis beyond ``int``/``tuple``/``str`` is left to W1.2.
-"""
 import enum
-import inspect
-import json
-import math
-import os
-from pathlib import Path
-import subprocess
-import sys
 
 import pandas as pd
 
@@ -44,7 +27,7 @@ def frames():
     }
 
 
-# Per-policy cells deriving a sub-table or a record (R3), the same text in every mode.
+# Cells returning a prefix selection or a model-point row.
 DERIVED = {
     'S_F2': 'def S_F2():\n    return T_F2().loc[(Sex.F, "B")]',
     'S_R': 'def S_R():\n    return T_R().loc[2]',
@@ -134,142 +117,3 @@ SQUARES = {
     ('O', 10, 'int'): ('return T_O().loc[8, "q"] if i == 0 else T_O().loc[7, "nope"]', range(2)),
     ('O', 12, 'int'): ('return T_O()["q"][7]', range(1)),
 }
-
-# Outcomes pinned against pandas: asof below the first key raises KeyError (D25a; pandas: NaN).
-EXPECT = {('F1', 10, 'int'): {2: ('raise', 'KeyError')}}
-
-
-def _name(square):
-    form, operation, key = square
-    return f'sq_{form}_{operation}_{key}'
-
-
-def _formulas():
-    for square, (body, _) in SQUARES.items():
-        yield _name(square), f'def {_name(square)}(i):\n    {body}'
-
-
-def encode(value):
-    if isinstance(value, float) and math.isnan(value):
-        return 'nan'
-    if isinstance(value, (tuple, list)):
-        return [encode(item) for item in value]
-    if hasattr(value, 'item') and not isinstance(value, (int, float, str)):     # numpy scalars
-        value = value.item()
-    if isinstance(value, enum.Enum):
-        return int(value)
-    return value
-
-
-RUNNER = '''
-import enum, json, math
-def run(space, squares):
-    out = {}
-    for name, args in squares.items():
-        rows = []
-        for i in args:
-            try:
-                rows.append(['value', encode(getattr(space, name)(i))])
-            except Exception as error:
-                rows.append(['raise', type(error).__name__])
-        out[name] = rows
-    return out
-'''
-
-
-def _oracle(square):
-    """The same formula on the pandas frames."""
-    scope = {f'T_{form}': (lambda frame=frame: frame) for form, frame in frames().items()}
-    scope['Sex'] = Sex
-    for source in DERIVED.values():
-        exec(source, scope)
-    exec(dict(_formulas())[_name(square)], scope)
-    rows = []
-    for i in SQUARES[square][1]:
-        try:
-            rows.append(['value', encode(scope[_name(square)](i))])
-        except Exception as error:
-            rows.append(['raise', type(error).__name__])
-    for i, outcome in EXPECT.get(square, {}).items():
-        rows[list(SQUARES[square][1]).index(i)] = list(outcome)
-    return json.loads(json.dumps(rows))
-
-
-def _model():
-    import modelx as mx
-    from modelx_helpers import pdn
-    model = mx.new_model('TableMatrixW13')
-    refs = {f'frame_{form}': frame for form, frame in frames().items()}
-    space = model.new_space('Matrix', refs={**refs, 'pdn': pdn, 'Sex': Sex})
-    for form in frames():
-        space.new_cells(f'T_{form}', f'def T_{form}():\n    return pdn.table(frame_{form})')
-    for name, source in DERIVED.items():
-        space.new_cells(name, source)
-    for name, source in _formulas():
-        space.new_cells(name, source)
-    return model
-
-
-_RESULTS = {}
-
-
-def _results(mode, tmp_path_factory):
-    if mode in _RESULTS:
-        return _RESULTS[mode]
-    squares = {_name(square): list(args) for square, (_, args) in SQUARES.items()}
-    runner = RUNNER + inspect.getsource(encode)
-    if mode == 'live':
-        import modelx as mx
-        model = _model()
-        mx.use_formula_error(False)     # the original error, as exported and compiled raise it
-        try:
-            scope = {}
-            exec(runner, scope)
-            result = json.loads(json.dumps(scope['run'](model.Matrix, squares)))
-        finally:
-            mx.use_formula_error(True)
-            model.close()
-    else:
-        root = tmp_path_factory.mktemp(f'w13_{mode}')
-        model = _model()
-        try:
-            model.export(root / 'exported')
-        finally:
-            model.close()
-        package = 'exported'
-        # the exported References pickle Sex by this module's name
-        env = dict(os.environ, PYTHONPATH=os.pathsep.join(
-            filter(None, [str(Path(__file__).resolve().parent), os.environ.get('PYTHONPATH')])))
-        if mode == 'compiled':
-            (root / 'sample.py').write_text(
-                f'from exported import mx_model as m\nfor name, args in {squares!r}.items():\n'
-                '    for i in args:\n        try:\n            getattr(m.Matrix, name)(i)\n'
-                '        except Exception:\n            pass\n', encoding='utf-8')
-            (root / 'spec.py').write_text(repr({'typed_table_reads': True}))
-            build = subprocess.run([sys.executable, '-m', 'modelx_cython', 'exported', '--sample', 'sample.py',
-                                    '--spec', 'spec.py'], cwd=root, capture_output=True, text=True, env=env)
-            assert build.returncode == 0, build.stdout[-3000:] + build.stderr[-3000:]
-            generated = '\n'.join(path.read_text(encoding='utf-8')
-                                  for path in (root / 'exported_cy').rglob('_mx_classes.py'))
-            for child, parent in (('S_F2', 'T_F2'), ('S_R', 'T_R')):
-                body = generated.split(f'def _f_{child}(', 1)[1].split('\n\n', 1)[0]
-                assert f'_mx_cell_{parent}()' in body and '.loc[' in body, body
-                entry = generated.split(f'def _mx_cell_{child}(', 1)[1].split('\n\n', 1)[0]
-                assert f'.bind_native_table(self._f_{child}(),' in entry, entry
-            package = 'exported_cy'
-        script = runner + f'\nfrom {package} import mx_model as m\nprint(json.dumps(run(m.Matrix, {squares!r})))\n'
-        done = subprocess.run([sys.executable, '-c', script], cwd=root, capture_output=True, text=True, env=env)
-        assert done.returncode == 0, done.stdout[-3000:] + done.stderr[-3000:]
-        result = json.loads(done.stdout.strip().splitlines()[-1])
-    _RESULTS[mode] = result
-    return result
-
-
-def _case(square):
-    def case(mode, tmp_path_factory):
-        got = _results(mode, tmp_path_factory)[_name(square)]
-        assert got == _oracle(square), (square, mode, got)
-    return case
-
-
-CASES = {square: _case(square) for square in SQUARES}

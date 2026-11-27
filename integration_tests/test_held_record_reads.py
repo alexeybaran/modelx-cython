@@ -1,11 +1,11 @@
-"""Reads through a helper Record keep their values and error classes at one and four workers."""
+"""Reads through a row of a pandas table keep their values and error classes at one and four workers."""
 import json
 import subprocess
 import sys
 import textwrap
 
 import modelx as mx
-from modelx_helpers.immutable_inputs import Table
+import pandas as pd
 
 KEYS = tuple(range(1, 41))
 
@@ -15,7 +15,9 @@ def _points():
     for key in KEYS:
         maybe = float('nan') if key % 7 == 0 else (None if key % 11 == 0 else 2.5 + key)
         rows.append((key % 5 + 1, 0.01 * key, 40.0 + key / 3.0, 'p' * (key % 4 + 1), maybe))
-    return Table(list(KEYS), rows, ['n', 'rate', 'age_f', 'label', 'maybe'])
+    frame = pd.DataFrame(rows, index=list(KEYS), columns=['n', 'rate', 'age_f', 'label', 'maybe'])
+    frame['maybe'] = pd.Series([row[4] for row in rows], index=frame.index, dtype=object)   # keeps None
+    return frame
 
 
 def _build(tmp_path):
@@ -23,8 +25,7 @@ def _build(tmp_path):
     try:
         portfolio = model.new_space('Portfolio')
         projection = portfolio.new_space(
-            'Projection', formula='lambda key: None', refs={'points': _points(), 'keys': KEYS},
-            collect_over={'key': KEYS}, collect_outputs='lambda: {"sum": {"value": value()}}')
+            'Projection', formula='lambda key: None', refs={'points': _points(), 'keys': KEYS})
         projection.new_cells('model_point', 'lambda: points.loc[key]')
         projection.new_cells('term', textwrap.dedent('''\
             def term(t):
@@ -52,11 +53,11 @@ def _build(tmp_path):
                     total += rate(t) * term(t) + age(t) + label_len(t) + branchy(t)
                 return total
             '''))
+        projection.set_collect(over={'key': KEYS}, outputs='lambda: {"sum": {"value": value()}}')
         model.export(tmp_path / 'exported')
     finally:
         model.close()
-    spec = {'parallel_workers': 4, 'spaces': {'Portfolio': {'spaces': {'Projection': {
-        'serial_collect': 'reuse', 'parallel_collect_reuse': True, 'parallel_collect_order': 'domain'}}}}}
+    spec = {'collect_workers': 4}
     (tmp_path / 'spec.py').write_text(repr(spec), encoding='utf-8')
     (tmp_path / 'sample.py').write_text(textwrap.dedent('''\
         from exported import mx_model
@@ -80,9 +81,6 @@ def _build(tmp_path):
 
 def test_held_record_reads_equal_live_at_one_and_four_workers(tmp_path):
     report = _build(tmp_path)
-    point = next(value for key, value in report.items() if key.endswith('_f_model_point'))
-    helper_reads = point['table_reads_untyped']
-    assert helper_reads and all('helper Table' in read['reason'] for read in helper_reads)
     probe = textwrap.dedent('''\
         import sys
         from importlib import import_module
@@ -90,7 +88,7 @@ def test_held_record_reads_equal_live_at_one_and_four_workers(tmp_path):
         p = m.Portfolio.Projection
         if sys.argv[1] == 'exported_cy':
             serial = type(m)()
-            serial.collect_workers = 1
+            serial._mx_collect_workers = 1
             one = serial.Portfolio.Projection.collect().sum.value
             four = p.collect().sum.value
             print(repr(one), repr(four))

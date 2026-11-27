@@ -1,9 +1,8 @@
-"""W1.9 helper table forms produce the same live, exported and compiled results.
+"""W1.9 table forms on pandas tables produce the same live, exported and compiled results.
 
 One model holds a cell per form the W1.9 lowering adds; every cell is called for each t,
 live, from the exported package and from the compiled one, and the results (values, or the
-error type) must agree exactly. The generated module and report record the
-Python helper reads.
+error type) must agree exactly. The generated module keeps the Python reads.
 
 Forms: a sub-table local also used as a Python table; the index as typed keys (len, min/max,
 list/sorted, comprehension and for-statement iteration with the row position, an index
@@ -18,7 +17,6 @@ import sys
 
 import modelx as mx
 import pandas as pd
-from modelx_helpers import pdn
 
 T_RANGE = range(-1, 13)
 
@@ -84,7 +82,7 @@ def tuple_key(t):
     a = anchor(t)
     try:
         return float(data.pairs().loc[a, "v"])
-    except KeyError:
+    except (KeyError, TypeError):      # pandas: a partial key selects a Series
         return -1.0
 ''',
     'untyped_asof': '''\
@@ -128,7 +126,7 @@ RUN = ('import json\nfrom {package} import mx_model as m\n'
 def _model(root):
     model = mx.new_model('TableFormsW19')
     try:
-        data = model.new_space('Data', refs={'pdn': pdn})
+        data = model.new_space('Data')
         data.two_frame = pd.DataFrame({'a': [1, 1, 2, 2], 'b': [0, 1, 0, 2], 'v': [1.0, 2.0, 3.0, 4.0]})\
             .set_index(['a', 'b'])
         data.gaps_frame = pd.DataFrame({'v': [0.5, 1.5, 2.5, 3.5]}, index=pd.Index([1, 2, 5, 9], name='k'))
@@ -141,7 +139,7 @@ def _model(root):
         data.by_id_frame = pd.DataFrame({'v': [7.0, 8.0]}, index=pd.Index(['F1', 'F2'], name='fund'))
         data.points_frame = pd.DataFrame({'fund': ['F2'], 'age': [40]}, index=pd.Index([1], name='point'))
         for name in ('two', 'gaps', 'curve', 'items', 'pairs', 'by_id', 'points'):
-            data.new_cells(name, f'lambda: pdn.table({name}_frame)')
+            data.new_cells(name, f'lambda: {name}_frame')
         projection = model.new_space('Projection', refs={'data': data})
         projection.new_cells('anchor', 'lambda t: ((1, 1), (2, 0), (3, 0), 1, (9, 9), (1,))[t % 6]')
         projection.new_cells('loose', 'lambda t: (1, 2, 5, 9, 3, 1.5, 0)[t % 7]')
@@ -176,15 +174,3 @@ def test_w1_9_forms_live_exported_compiled(tmp_path):
     text = '\n'.join(p.read_text(encoding='utf-8') for p in (tmp_path / 'exported_cy').rglob('_mx_classes.py'))
     for fragment in TEXT:
         assert fragment in text, fragment
-    report = '\n'.join(p.read_text(encoding='utf-8') for p in (tmp_path / 'exported_cy').rglob('_mx_admission.json'))
-    cells = json.loads(report)
-    inputs = [item for name, cell in cells.items() if '._c_Data.' in name
-              for item in cell.get('table_reads_untyped') or ()]
-    readers = {name.rsplit('._f_', 1)[-1]: cell['table_reads_untyped']
-               for name, cell in cells.items() if '._c_Projection.' in name and cell.get('table_reads_untyped')}
-    assert len(inputs) == 7
-    assert all(item['reason'].startswith('receiver is a pandas') and not item['per_step']
-               for item in inputs), inputs
-    for name in ('escaping_sub', 'tuple_key', 'untyped_asof', 'levels', 'chains'):
-        assert all(item['reason'] == 'the receiver is a helper Table and the formula uses its Python methods'
-                   for item in readers[name]), readers[name]

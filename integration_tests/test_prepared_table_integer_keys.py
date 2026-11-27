@@ -1,4 +1,4 @@
-"""The prepared table's integer lookup preserves Python key conversion."""
+"""Prepared integer lookups preserve Python conversions and native vector keys."""
 
 import math
 import re
@@ -16,8 +16,15 @@ def test_builtin_int_key_uses_native_lookup_only_for_proven_int64(tmp_path):
         data.rates = pd.DataFrame({'rate': [3.0, 4.0, 1.0, 2.0]},
                                   index=pd.Index([-(2**63), 0, 20, 21], dtype='int64'))
         data.new_cells('table', 'lambda: rates')
+        data.point_rows = pd.DataFrame(
+            {'rate': [0.015, 0.025], 'entry_age': [35, 45], 'plan': ['standard', 'preferred']},
+            index=pd.Index([20, 22], name='point_id'),
+        )
+        data.new_cells('model_point_table', 'lambda: point_rows')
         calc = model.new_space('Calc', refs={'data': data, 'convert': math.sin})
         calc.new_cells('offset', 'lambda t: 20 + t')
+        calc.new_cells('point_ids', 'lambda: [20 + i for i in range(3)]')
+        calc.new_cells('point_rate', 'lambda t: float(data.model_point_table().loc[point_ids()[t], "rate"])')
         calc.new_cells('native_key', '''def native_key(t):
     a, b = offset(t), offset(t)
     table = data.table()
@@ -46,6 +53,12 @@ for t in (0, 1):
     calc.shadowed(t)
     calc.shadowed_asof(20 + t)
 calc.native_key(2)
+calc.point_rate(0)
+calc.point_rate(2)
+try:
+    calc.point_rate(1)
+except KeyError:
+    pass
 ''', encoding='utf-8')
     built = subprocess.run([sys.executable, '-m', 'modelx_cython', 'exported', '--sample', 'sample.py',
                             '--no-spec'], cwd=tmp_path, capture_output=True, text=True)
@@ -55,6 +68,8 @@ calc.native_key(2)
     for key in ('a', 'b'):
         assert re.search(rf'\.kcode\([^\n]+_mx_cy\.cast\(_mx_cy\.longlong, int\({key}\)\)', source)
     assert '_mx_cy.cast(_mx_cy.longlong, int(x))' not in source
+    # Keep the integer-vector element on the native index lookup path.
+    assert re.search(r'\.kcode\([^\n]+\.ivec_get\(', source)
 
     checked = subprocess.run([sys.executable, '-c', '''
 import math
@@ -64,6 +79,13 @@ from exported_cy import mx_model as compiled
 for model in (live, compiled):
     calc = model.Calc
     assert [calc.native_key(t) for t in (0, 1, 2)] == [1.0, 2.0, 0.0]
+    assert [calc.point_rate(t) for t in (0, 2)] == [0.015, 0.025]
+    try:
+        calc.point_rate(1)
+    except KeyError as error:
+        assert error.args == (21,)
+    else:
+        raise AssertionError('a missing model point was accepted')
     assert calc.float_key(20.5) == calc.string_key('20') == 1.0
     assert [calc.shadowed(x) for x in (0, 1)] == [True, False]
     assert calc.shadowed_asof(20) == math.sin(20)

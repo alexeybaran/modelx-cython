@@ -13,7 +13,6 @@ import textwrap
 MODEL = """\
 import modelx as mx
 import pandas as pd
-from modelx_helpers import pdn
 
 FRAME = pd.DataFrame({"sa": [100.0, 200.0, 300.0, 400.0], "rate": [0.01, 0.02, 0.03, 0.04]},
                      index=pd.Index([1, 2, 3, 4], name="policy_id"))
@@ -22,26 +21,26 @@ IDS = (1, 2, 3, 4)
 
 def build():
     model = mx.new_model("Tables")
-    data = model.new_space("Data", refs={"pd": pd, "pdn": pdn})
+    data = model.new_space("Data", refs={"pd": pd})
     data.raw = FRAME
     data.new_cells("points", "def points():\\n    return raw.copy()\\n")       # plain pandas (D121)
     data.new_cells("table", "def table():\\n    return FRAME2.copy()\\n")
     data.FRAME2 = FRAME
     proj = model.new_space("Projection", formula="lambda policy_id: None",
-                           refs={"data": data, "ids": IDS, "factor": 1.0},
-                           collect_over={"policy_id": IDS}, collect_outputs='lambda: {"sum": {"pv": pv()}}')
+                           refs={"data": data, "ids": IDS, "factor": 1.0})
     proj.new_cells("sa", 'lambda: data.points().loc[policy_id, "sa"]')
     proj.new_cells("rate", 'lambda: data.table().loc[policy_id, "rate"]')
     proj.new_cells("pv", "lambda: factor * sum(sa() * (1.0 + rate()) ** t for t in range(12))")
+    proj.set_collect(over={"policy_id": IDS}, outputs='lambda: {"sum": {"pv": pv()}}')
     return model
 """
 
 CHECKS = """\
-import sys, threading
+import pickle
+import sys
 from importlib import import_module
 from importlib.machinery import ExtensionFileLoader
 import pandas as pd
-from modelx_helpers import pdn
 from tables_model import FRAME, build
 
 name = sys.argv[1]
@@ -49,12 +48,11 @@ compiled = name.endswith("_cy")
 package = import_module(name)
 if compiled:
     assert isinstance(import_module(name + "._mx_classes").__loader__, ExtensionFileLoader)
-    runtime = import_module("modelx_cython.runtime.table_cells")
 Model = type(package.mx_model)
 
 
 def total(m, workers):
-    m.collect_workers = workers
+    m._mx_collect_workers = workers
     return m.Projection.collect().sum.pv
 
 
@@ -103,6 +101,11 @@ del m.Projection[3]
 assert m.Projection[3] is not item and close(direct(m), base)
 
 if compiled:
+    warmed = Model()
+    assert warmed.Projection[1].sa() == FRAME.loc[1, "sa"]
+    restored = pickle.loads(pickle.dumps(warmed))
+    assert restored.Projection[1].sa() == FRAME.loc[1, "sa"]
+    assert restored.Projection[2].sa() == FRAME.loc[2, "sa"]
     # (4) as upstream: no clear of a Space and no table-cell assignment on a compiled model
     for space in (m.Data, m.Projection):
         for method in ("clear_all", "clear_cells", "clear_items", "clear_at"):
@@ -132,7 +135,7 @@ def test_table_cells_and_references(tmp_path):
         "from tables_nomx import mx_model\nfor k in (1, 2, 3, 4):\n    mx_model.Projection[k].collect_outputs()\n"
         "mx_model.Projection.collect()\n", encoding="utf-8")
     (tmp_path / "spec.py").write_text(
-        repr({"parallel_workers": 1, "spaces": {"Projection": {"serial_collect": "reuse"}}}), encoding="utf-8")
+        repr({"collect_workers": 1}), encoding="utf-8")
     (tmp_path / "checks.py").write_text(CHECKS, encoding="utf-8")
     run = lambda *a: subprocess.run([sys.executable, *a], cwd=tmp_path, check=True, timeout=600)
     run("build_model.py")

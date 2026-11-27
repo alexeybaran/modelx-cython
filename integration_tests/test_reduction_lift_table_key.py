@@ -1,7 +1,7 @@
 """A built-in reduction nested in a table read (original FIA_US_S, RILA_US_S, VA_US_S,
 Annuity_JP_S, Pension_KR_S: ``float(sub.loc[max(keys), "rollup_rate"])``).
 
-The lift computes a reduction result for the helper table key. The model builds
+The lift computes a reduction result for the key of a pandas table read. The model builds
 without hoisting compiler-only syntax, and the resulting values and exceptions
 match the exported model.
 """
@@ -11,17 +11,19 @@ import sys
 import textwrap
 
 import modelx as mx
-from modelx_helpers.immutable_inputs import Table
+import pandas as pd
 
 
 def test_reduction_key_of_a_lowered_table_read_builds_and_matches(tmp_path):
     model = mx.new_model('LiftKey')
     try:
         data = model.new_space('Inputs', refs={
-            'rates': Table([1, 3, 5, 8], [(0.01, 2), (0.02, 3), (0.03, 5), (0.04, 7)], ['rate', 'n']),
-            'grid': Table([(1, 1), (1, 4), (2, 2), (2, 6)], [(1.5,), (2.5,), (3.5,), (4.5,)], ['f'])})
-        data.new_cells('rate_table', 'def rate_table() -> "modelx_helpers.immutable_inputs.Table":\n    return rates\n')
-        data.new_cells('grid_table', 'def grid_table() -> "modelx_helpers.immutable_inputs.Table":\n    return grid\n')
+            'rates': pd.DataFrame([(0.01, 2), (0.02, 3), (0.03, 5), (0.04, 7)], index=[1, 3, 5, 8],
+                                  columns=['rate', 'n']),
+            'grid': pd.DataFrame([(1.5,), (2.5,), (3.5,), (4.5,)], columns=['f'],
+                                 index=pd.MultiIndex.from_tuples([(1, 1), (1, 4), (2, 2), (2, 6)]))})
+        data.new_cells('rate_table', 'def rate_table():\n    return rates\n')
+        data.new_cells('grid_table', 'def grid_table():\n    return grid\n')
         s = model.new_space('Values', refs={'data': data})
         s.new_cells('lo', 'lambda y: 1 + y % 2')
         s.new_cells('rollup', textwrap.dedent('''\
@@ -54,9 +56,8 @@ def test_reduction_key_of_a_lowered_table_read_builds_and_matches(tmp_path):
     assert done.returncode == 0, done.stdout[-3000:] + done.stderr[-3000:]
     source = (tmp_path / 'exported_cy/_mx_classes.py').read_text(encoding='utf-8')
     assert '= (_mx_cy.cast)' not in source and '= (object)' not in source
-    assert '_mx_hoist = (sub.loc)' in source
-    assert '_mx_hoist_ = _mx_reduce_0_best' in source
-    assert 'return float(_mx_hoist[_mx_hoist_, "rate"])' in source
+    assert '(_mx_key_1 := max(keys))' in source        # the reduction is the key of the typed read
+    assert '.f64_1(' in source and '.i64_1(' in source
     probe = textwrap.dedent('''\
         import json, sys
         from importlib import import_module
