@@ -90,6 +90,7 @@ def test_native_records_and_reductions(tmp_path):
     for expression in ('_mx_gather__c_Source', '.individual_at(', '.read_individual(', '.read_individual_value(', '.read_sum('):
         assert expression in generated
     assert '_mx_gather__c_Varying' not in generated
+    assert '@_mx_cy.cfunc\ndef _mx_collect_evaluate(' in generated
 
     child = textwrap.dedent('''\
         import pickle

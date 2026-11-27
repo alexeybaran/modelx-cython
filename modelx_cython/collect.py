@@ -443,24 +443,27 @@ def reset_function(cls_name, block, classes, values):
 
 
 def evaluator(workers, dots='.'):
-    """The module-level functions shared by the collect hooks of a module."""
+    """Private Cython entry points shared by the Collect hooks of a module."""
     return cst.parse_module(f'''
 from contextlib import nullcontext as _mx_collect_nullcontext
 from threading import RLock as _mx_collect_rlock
 from types import BuiltinMethodType as _mx_collect_builtin_method, MethodType as _mx_collect_method
 
 
+@_mx_cy.cfunc
 def _mx_collect_factory_guard(space):
     model_lock = space._model._mx_lock
     return model_lock if model_lock is not None else _mx_collect_nullcontext()
 
 
+@_mx_cy.cfunc
 def _mx_collect_ref_owner(value):
     if isinstance(value, (_mx_collect_builtin_method, _mx_collect_method)):
         return value.__self__
     return value
 
 
+@_mx_cy.cfunc
 def _mx_clear_collect_refs(root, aliases):
     by_path = dict(aliases)
     owned = set()
@@ -485,6 +488,7 @@ def _mx_clear_collect_refs(root, aliases):
                 setattr(member, name, None)
 
 
+@_mx_cy.cfunc
 def _mx_release_collect_tree(root: _mx_sys.BaseSpace, aliases):
     if aliases:
         _mx_clear_collect_refs(root, aliases)
@@ -504,24 +508,28 @@ def _mx_release_collect_tree(root: _mx_sys.BaseSpace, aliases):
         member._parent = None
 
 
+@_mx_cy.cfunc
 def _mx_collect_member_at(space, path):
     for part in path:
         space = space._mx_spaces[part]
     return space
 
 
+@_mx_cy.cfunc
 def _mx_unlocked_collect_ref(member, ref):
     owner = _mx_collect_ref_owner(getattr(member, ref, None))
     if isinstance(owner, _mx_sys.BaseSpace) and owner._mx_lock is None:
         return owner
 
 
+@_mx_cy.cfunc
 def _mx_collect_ref_error(name, workers, path, ref):
     reference = '.'.join((*path, ref))
     return ValueError(f'collect of {{name}} with {{workers}} workers: the Reference {{reference}} is a Space '
                       'without a lock; export it in locked_spaces or use one worker')
 
 
+@_mx_cy.cfunc
 def _mx_collect_preflight(space, members, workers, dynamic_refs):
     # A Reference into the base tree can be rebound to the private tree, depending on its refmode.
     name = space._name
@@ -544,6 +552,7 @@ def _mx_collect_preflight(space, members, workers, dynamic_refs):
         return name, workers, tuple((path, tuple(sorted(refs))) for path, refs in recheck.items())
 
 
+@_mx_cy.cfunc
 def _mx_check_collect_bindings(root, checks):
     name, workers, members = checks
     private_members = None
@@ -559,6 +568,7 @@ def _mx_check_collect_bindings(root, checks):
                 raise _mx_collect_ref_error(name, workers, path, ref)
 
 
+@_mx_cy.cfunc
 def _mx_run_collect_workers(workers, checks, loop):
     from threading import Thread
 
@@ -576,6 +586,7 @@ def _mx_run_collect_workers(workers, checks, loop):
         thread.join()
 
 
+@_mx_cy.cfunc
 def _mx_collect_native_evaluate(coords, outputs_at, checks, workers, plan):
     result = plan(workers)
     if workers == 1:
@@ -612,6 +623,7 @@ def _mx_collect_native_evaluate(coords, outputs_at, checks, workers, plan):
     return result.finish()
 
 
+@_mx_cy.cfunc
 def _mx_collect_evaluate(space, coords, outputs_at, members, child_bindings_known, applies_formula, dynamic_refs, native_plan=None):
     from {dots}_mx_collect import Accumulator
     import sys
