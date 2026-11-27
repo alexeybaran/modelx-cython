@@ -1,5 +1,4 @@
-"""cells_param_size inherited from the model and enclosing Spaces, declared physical size,
-param_bound_checks at collect entry, enum domains."""
+"""Declared cache bounds on Direct and Collect calls, size inheritance, and enum domains."""
 import json
 import os
 import subprocess
@@ -56,59 +55,61 @@ def _domain(entry):
 
 @pytest.mark.parametrize('layer', ['model', 'space'])
 def test_param_bounds_inherit_and_collect_check(tmp_path, layer):
-    spaces = {'Projection': {'serial_collect': 'reuse', 'param_bound_checks': {'t': 'proj_len'}}}
+    spec = {'parallel_workers': 1, 'cells_param_size': {'t': 11}}
     if layer == 'space':
         # the Space overrides the model for t; an exact cells_param_size entry wins for its axes
-        spaces['Projection'].update(cells_param_size={'t': 20, ('t', 'k'): (14, 1)})
-    report = _build(tmp_path, {'parallel_workers': 1, 'cells_param_size': {'t': 11}, 'spaces': spaces})
-    cf, pair, check = _cell(report, 'cf'), _cell(report, 'pair'), _cell(report, 'proj_len')
+        spec['spaces'] = {'Projection': {'cells_param_size': {'t': 20, ('t', 'k'): (14, 1)}}}
+    report = _build(tmp_path, spec)
+    cf, pair = _cell(report, 'cf'), _cell(report, 'pair')
     stop = 11 if layer == 'model' else 20
     assert _domain(cf) == [[0, stop]]
     assert _domain(pair) == ([[0, 11], [0, 1]] if layer == 'model' else [[0, 14], [0, 1]])
     assert cf['declared_sizes'] == {'t': 'model' if layer == 'model' else 'Projection'}
     # a declared size is allocated as declared (no traced window with a spill path)
     assert cf['dense_window'] == [[0, stop]] and not cf['exact_spill']
-    # traced: policy 1, proj_len 7: cf t < 7 (margin 0), pair t = 0 only (margin -6), so the
-    # accepted proj_len is min(stop of cf, stop of pair + 6)
-    limit = 11 if layer == 'model' else 20
-    assert [c['limit'] for c in check['param_bound_checks']] == [limit]
     probe = textwrap.dedent('''\
         import sys
-        from exported_cy import mx_model as m
-        limit = int(sys.argv[1])
-        p = m.Projection
-        # a policy beyond the traced horizon but inside the declared bound
-        assert p[2].cf(9) == 11.0 and p[2].total() == sum(t + 2.0 for t in range(10)) + 2.0
-        try:
-            p[3].cf(limit)
-        except IndexError as error:
-            assert 'Projection.cf' in str(error) and f't in [0, {limit})' in str(error), error
+        import pytest
+        from exported import mx_model as exported
+        from exported_cy import mx_model as compiled
+
+        stop = int(sys.argv[1])
+        live, native = exported.Projection, compiled.Projection
+        compiled._mx_collect_workers = 1
+
+        for t in (0, stop - 1):
+            assert native[2].cf(t) == live[2].cf(t) == t + 2.0
+        assert native[2].total() == live[2].total() == 67.0
+        for t in (-1, stop):
+            with pytest.raises(IndexError) as error:
+                native[3].cf(t)
+            assert 'Projection.cf' in str(error.value) and f't in [0, {stop})' in str(error.value)
+
+        live.keys = native.keys = (1, 2)
+        assert native.collect().sum.total == live.collect().sum.total == 96.0
+
+        live.keys = native.keys = (1, 2, 3)
+        assert live.collect().sum.total == 216.0
+        if stop < 13:
+            # A rejected coordinate must fail again, even after earlier items finished.
+            for _ in range(2):
+                with pytest.raises(IndexError) as error:
+                    native.collect()
+                assert 'Projection.cf' in str(error.value) and f't in [0, {stop})' in str(error.value)
         else:
-            raise AssertionError('index outside the bound was evaluated')
-        workers, evaluate, _, _ = p._mx_collect_options_v2()
-        expect = sum(sum(t + 1.0 * k for t in range(4 + 3 * k)) + k for k in (1, 2))
-        assert evaluate((1, 2)).sum.total == expect
-        if limit < 13:
-            try:
-                evaluate((1, 2, 3))
-            except IndexError as error:
-                text = str(error)
-                assert 'policy 3' in text and 'proj_len() = 13' in text and 'cells_param_size' in text, text
-                assert f'accepts proj_len() <= {limit}' in text, text
-            else:
-                raise AssertionError('the bound check did not fire')
-        else:
-            assert evaluate((1, 2, 3)).sum.total == expect + sum(t + 3.0 for t in range(13)) + 3
-        try:
-            evaluate((1, 9))
-        except RuntimeError as error:
-            assert 'proj_len() raised for policy 9' in str(error), error
-        else:
-            raise AssertionError('a raising check Cell was not reported')
-        # the check leaves no state behind: a clean run after a failed one
-        assert evaluate((1, 2)).sum.total == expect
+            assert native.collect().sum.total == 216.0
+
+        # The formula itself raises before attempting an out-of-range Cell call.
+        live.keys = native.keys = (1, 9)
+        for projection in (live, native):
+            with pytest.raises(ZeroDivisionError):
+                projection.collect()
+
+        # A different domain order forces a fresh evaluation after failure.
+        live.keys = native.keys = (2, 1)
+        assert native.collect().sum.total == live.collect().sum.total == 96.0
         ''')
-    result = subprocess.run([sys.executable, '-B', '-c', probe, str(limit)], cwd=tmp_path,
+    result = subprocess.run([sys.executable, '-B', '-c', probe, str(stop)], cwd=tmp_path,
                             env=dict(os.environ), capture_output=True, text=True)
     assert result.returncode == 0, result.stdout + result.stderr
 
