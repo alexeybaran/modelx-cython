@@ -69,7 +69,8 @@ def member_specs(class_node, cls_info, modules):
     pending = [((), class_node, cls_info)]
     while pending:
         path, node, info = pending.pop()
-        members.append((path, tuple(sorted(info.refs)), _reads_parents(node, info.cells)))
+        members.append((path, tuple(sorted(info.refs)), _reads_parents(node, info.cells),
+                        _local_ref_copies(node, len(path))))
         if info.spaces:
             package = info.module.fqname.rsplit('.', 1)[0]
             child_module = modules.get(f'{package}.{MODULE_PREF}{info.name[len(SPACE_PREF):]}.{MX_SPACE_MOD}')
@@ -80,6 +81,36 @@ def member_specs(class_node, cls_info, modules):
                     pending.append(((*path, child.name.value[len(SPACE_PREF):]),
                                     child, child_module.classes[child.name.value]))
     return tuple(members), True
+
+
+def _local_ref_copies(class_node, depth):
+    """Find relative References that the generated copy can bind inside the private tree."""
+    method = next(item for item in class_node.body.body
+                  if isinstance(item, cst.FunctionDef) and item.name.value == '_mx_copy_refs')
+    candidates = []
+    for line in method.body.body:
+        assign = single_statement(line)
+        if not (isinstance(assign, cst.Assign) and len(assign.targets) == 1
+                and isinstance(assign.value, cst.IfExp)):
+            continue
+        target = dotted_name(assign.targets[0].target)
+        if target is None or not target.startswith('self.'):
+            continue
+        ref = target[len('self.'):]
+        value = assign.value
+        base = f'base.{ref}'
+        if dotted_name(value.orelse) != base:
+            continue
+        test = arguments(value.test, count=1)
+        if test is None or dotted_name(test[0]) != 'base_root':
+            continue
+        guard = dotted_name(value.test.func)
+        if guard not in (f'{base}._mx_is_in', f'{base}.__self__._mx_is_in'):
+            continue
+        endpoint = (dotted_name(value.body) or '').split('.')
+        if endpoint[0] == 'self' and endpoint.count('_parent') <= depth:
+            candidates.append((ref, '.__self__.' in guard))
+    return tuple(candidates)
 
 
 def _dynamic_refs(method, refs):
@@ -149,7 +180,7 @@ def _item_constructor(item):
     return args, constructor, initialize, has_formula, has_inputs
 
 
-def _private_constructor(item, constructor, initializers, has_formula):
+def _private_constructor(item, constructor, initializers, has_formula, aliases):
     """Give the generic constructor a lock for its private tree before running its formula."""
     base, root, walk = constructor
     lock = cst.parse_module(
@@ -169,7 +200,7 @@ def _private_constructor(item, constructor, initializers, has_formula):
         'try:\n'
         f'{textwrap.indent(initialize, "    ")}'
         'except BaseException:\n'
-        '    _mx_release_collect_tree(_mx_root)\n'
+        f'    _mx_release_collect_tree(_mx_root, {aliases!r})\n'
         '    _mx_root = _mx_s = None\n'
         '    raise\n'
         'return _mx_root\n').body
@@ -192,6 +223,8 @@ def hook(class_node, cls_name, members, complete, dots='.', fast=True, reuse=Fal
     params, build, initializers, apply_formula, apply_inputs = constructor
     if apply_inputs:
         fast = reuse = False
+    aliases = tuple((path, copies) for path, _, _, copies in members if copies)
+    runtime_members = tuple(member[:3] for member in members)
     call = calls[0]
     others = call.args[3].value
     lam = call.args[2].value
@@ -236,6 +269,8 @@ def hook(class_node, cls_name, members, complete, dots='.', fast=True, reuse=Fal
             f'            _mx_fast: {cls_name} = {cls_name}(self)\n'
             f'            _mx_private_lock = _mx_collect_rlock() if _mx_fast._mx_lock is not None else None\n')
     if initialize:
+        clear_aliases = (f'                    _mx_clear_collect_refs(_mx_fast, {aliases!r})\n'
+                         if aliases else '')
         built = (
             f'        if type(self) is {cls_name} and not self._mx_spaces and not self._mx_roots:\n'
             f'{initialize}'
@@ -252,8 +287,9 @@ def hook(class_node, cls_name, members, complete, dots='.', fast=True, reuse=Fal
             f'                return _mx_out\n'
             f'            finally:\n'
             f'                if _mx_fast._mx_itemspaces:\n'
-            f'                    _mx_release_collect_tree(_mx_fast)\n'
+            f'                    _mx_release_collect_tree(_mx_fast, {aliases!r})\n'
             f'                else:\n'
+            f'{clear_aliases}'
             f'                    {item_roots.release_root(cls_name)}(_mx_fast)\n'
             f'{retain}'
             f'                _mx_fast = None\n')
@@ -274,11 +310,11 @@ def hook(class_node, cls_name, members, complete, dots='.', fast=True, reuse=Fal
         f'                _mx_check_collect_bindings(_mx_root, _mx_spare[2])\n'
         f'            return _mx_prepare_output(_mx_root.collect_outputs(), _mx_live_types)\n'
         f'        finally:\n'
-        f'            _mx_release_collect_tree(_mx_root)\n'
+        f'            _mx_release_collect_tree(_mx_root, {aliases!r})\n'
         f'            _mx_root = None\n'
         f'    return _mx_collect_evaluate(self, _mx_coords, {code(outputs_at)},\n'
-        f'                                {members!r}, {complete!r}, {apply_formula!r}, {dynamic_refs!r})\n')
-    return _private_constructor(item, build, initializers, apply_formula), cst.parse_module(source).body
+        f'                                {runtime_members!r}, {complete!r}, {apply_formula!r}, {dynamic_refs!r})\n')
+    return _private_constructor(item, build, initializers, apply_formula, aliases), cst.parse_module(source).body
 
 
 def reuses_items(visitor, cls_name):
@@ -362,7 +398,33 @@ def _mx_collect_factory_guard(space):
     return model_lock if model_lock is not None else _mx_collect_nullcontext()
 
 
-def _mx_release_collect_tree(root: _mx_sys.BaseSpace):
+def _mx_clear_collect_refs(root, aliases):
+    by_path = dict(aliases)
+    owned = set()
+    candidates = []
+    pending = [((), root)]
+    member: _mx_sys.BaseSpace
+    while pending:
+        path, member = pending.pop()
+        owned.add(id(member))
+        names = by_path.get(path)
+        if names:
+            candidates.append((member, names))
+        pending.extend(((*path, name), child) for name, child in member._mx_spaces.items())
+        if member._mx_itemspaces:
+            pending.extend((path, child) for child in member._mx_itemspaces.values())
+    for member, names in candidates:
+        for name, bound_method in names:
+            value = getattr(member, name, None)
+            if bound_method:
+                value = getattr(value, '__self__', None)
+            if id(value) in owned:
+                setattr(member, name, None)
+
+
+def _mx_release_collect_tree(root: _mx_sys.BaseSpace, aliases):
+    if aliases:
+        _mx_clear_collect_refs(root, aliases)
     # Walk only owned child Spaces and their locally retained items, never References.
     items = [root]
     member: _mx_sys.BaseSpace

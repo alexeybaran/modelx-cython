@@ -66,6 +66,7 @@ def compiled_model(tmp_path_factory):
             '''))
         tree = model.new_space("Tree", formula="lambda key: None")
         leaf = tree.new_space("Leaf", refs={"gate": None, "peer": None})
+        leaf.relref(source=leaf)
         leaf.new_cells("point", textwrap.dedent('''\
             def point():
                 if peer is not None:
@@ -270,6 +271,26 @@ PROBE = textwrap.dedent('''\
         assert model.Relative.collect().individual[0].value == 5
         check_unlocked(model.Absolute.collect, "source")
 
+    def release_relative_aliases():
+        retained = model.Relative[0]
+        child = model.Tree[0].Leaf
+        classes = (type(retained), type(child), type(model.Tree))
+
+        def live_items():
+            return sum(type(obj) in classes for obj in gc.get_objects())
+
+        gc.collect()
+        gc.disable()
+        try:
+            before = live_items()
+            assert model.Relative.collect().individual[0].value == 5
+            assert model.Tree.collect().individual[0].point == {"key": 0}
+            assert live_items() == before
+        finally:
+            gc.enable()
+        assert model.Relative[0] is retained and retained.source is retained
+        assert model.Tree[0].Leaf is child and child.source is child
+
     def dynamic_reference():
         enable_workers()
         model.Dynamic.choose = lambda key: model.Loose
@@ -297,6 +318,7 @@ PROBE = textwrap.dedent('''\
         "locked_call": locked_call,
         "unlocked_child": unlocked_child,
         "relative_and_absolute_aliases": relative_and_absolute_aliases,
+        "release_relative_aliases": release_relative_aliases,
         "dynamic_reference": dynamic_reference,
         "authored_inputs": authored_inputs,
     }[sys.argv[1]]()
@@ -307,6 +329,7 @@ PROBE = textwrap.dedent('''\
     "direct_first", "collect_first", "mixed_cell", "failed_collect",
     "parallel_collect", "parallel_generic", "locked_call",
     "unlocked_child", "relative_and_absolute_aliases", "dynamic_reference",
+    "release_relative_aliases",
     pytest.param("authored_inputs", marks=pytest.mark.skipif(
         not EXPORTS_AUTHORED_INPUTS, reason="modelx exporter without authored inputs",
     )),
