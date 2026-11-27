@@ -1,10 +1,8 @@
-name: Python package
+name: Regional exact-stack verification
 
 on:
   push:
-    branches: [main, "verify/**"]
-  pull_request:
-    branches: [main]
+    branches: [verify/regional-final-stack-1]
 
 # One job per lane (system x interpreter). Each lane runs, as separate steps that all run
 # even when an earlier one fails:
@@ -14,8 +12,8 @@ on:
 #              copying, and the two-thread test on a locked Space
 #   sec        released lifelib SEC models (Term, MYGA, SPIA) built with mx2cy and compared with
 #              live modelx
-# Upstream modelx and lifelib come from PyPI (modelx 0.33.0 is upstream main's version);
-# scipy, libcst, numpy and pandas from wheels only: their newest releases lack some 3.13t
+# The companion commits for modelx and lifelib are pinned below.
+# scipy, libcst, numpy and pandas are installed from wheels: their newest releases lack some 3.13t
 # wheels; libcst (also a modelx dependency) does not build for 3.13t, and numpy and pandas
 # built from source on Windows 3.13t failed to load; pip takes the newest release that has
 # a wheel, or fails at once.
@@ -45,12 +43,42 @@ jobs:
         if: endsWith(matrix.python-version, 't')
         shell: bash
         run: echo "PYTHON_GIL=0" >> "$GITHUB_ENV"
-      - name: Install package, upstream modelx and lifelib, test dependencies
+      - name: Install package, exact modelx and lifelib, and test dependencies
         shell: bash
         run: |
           python -m pip install --upgrade pip
-          python -m pip install --only-binary scipy,libcst,numpy,pandas . pytest pytest-xdist "pandas>=2.2.2" lifelib openpyxl psutil
+          python -m pip install --only-binary scipy,libcst,numpy,pandas \
+            "modelx @ git+https://github.com/alexeybaran/modelx@990d5852ac8c3deed7e8646365dd4e16c63da368" \
+            "lifelib @ git+https://github.com/alexeybaran/lifelib@e50454141680d0f9d65cce7ade81e4987f8c85ac" \
+            "Cython>=3.2.4" libcst setuptools MonkeyType numpy pytest pytest-xdist "pandas>=2.2.2" openpyxl psutil
+          # This verifies exact runtime code. Normal installation requires modelx>=0.33.1.dev0;
+          # the pinned modelx commit currently advertises 0.33.0.
+          python -m pip install --no-deps .
           python -m pip list
+      - name: Verify companion checkout and interpreter
+        shell: bash
+        run: |
+          python - <<'PY'
+          import importlib.metadata as metadata
+          import json
+          import sys
+          import sysconfig
+          from modelx.export import _mx_collect
+
+          pins = {
+              'modelx': '990d5852ac8c3deed7e8646365dd4e16c63da368',
+              'lifelib': 'e50454141680d0f9d65cce7ade81e4987f8c85ac',
+          }
+          for package, expected in pins.items():
+              distribution = metadata.distribution(package)
+              source = json.loads(distribution.read_text('direct_url.json'))
+              commit = source['vcs_info']['commit_id']
+              print(package, distribution.version, commit)
+              assert commit == expected
+          assert hasattr(_mx_collect, '_native_result')
+          if sysconfig.get_config_var('Py_GIL_DISABLED'):
+              assert not sys._is_gil_enabled()
+          PY
       - name: Interpreter
         shell: bash
         run: |
