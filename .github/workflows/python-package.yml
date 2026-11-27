@@ -28,12 +28,13 @@ jobs:
     env:
       PYTEST_ADDOPTS: ${{ matrix.os == 'windows-latest' && '--basetemp=C:/ct' || '' }}
       PYTHONIOENCODING: utf-8
+      COMPILER_PIN: e665d57c2787be0ff42554a9fcf6c3670b47385b
       MODELX_PIN: 990d5852ac8c3deed7e8646365dd4e16c63da368
       LIFELIB_PIN: e50454141680d0f9d65cce7ade81e4987f8c85ac
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 2
+          fetch-depth: 0
       - uses: actions/checkout@v4
         with:
           repository: alexeybaran/lifelib
@@ -49,7 +50,8 @@ jobs:
       - name: Install the exact source revisions
         shell: bash
         run: |
-          test "$(git rev-parse HEAD^)" = e665d57c2787be0ff42554a9fcf6c3670b47385b
+          git merge-base --is-ancestor "$COMPILER_PIN" HEAD
+          test "$(git diff --name-only "$COMPILER_PIN" HEAD)" = .github/workflows/python-package.yml
           test "$(git -C lifelib-pin rev-parse HEAD)" = "$LIFELIB_PIN"
           python -m pip install --upgrade pip
           python -m pip install --only-binary scipy,libcst,numpy,pandas . pytest pandas scipy openpyxl psutil
@@ -88,7 +90,6 @@ jobs:
 
           import numpy as np
           from lifelib.libraries.uslib.products.fixed_deferred_annuity.dv01_sec import compiled
-          from lifelib.libraries.uslib.products.fixed_deferred_annuity.dv01_sec.model import OPENINGS
 
           def unexpected_executor(*args, **kwargs):
               raise AssertionError("A compiled Collect called the standalone executor")
@@ -111,10 +112,12 @@ jobs:
               assert actual.collect(1) is result
               assert actual[coordinates[0], 1] is kept
               assert set(result.individual) == set(coordinates)
+              opening_fields = tuple(result.individual[coordinates[0]]._fields)
+              assert len(opening_fields) == 11
               for coordinate in coordinates:
                   direct = actual[coordinate, 1]
                   row = result.individual[coordinate]
-                  for field in OPENINGS:
+                  for field in opening_fields:
                       values = getattr(row, field)
                       for month in actual.opening_months:
                           assert values[month] == values(month)
