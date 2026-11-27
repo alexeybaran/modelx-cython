@@ -912,6 +912,7 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
                                 row_names, self._prefix_cells(cls_info),
                                 self._param_prefix_cells(cls_info), builtin_int='int' in builtin_keys,
                                 builtin_type='type' in builtin_keys,
+                                builtin_extrema={'min', 'max'} & builtin_keys,
                                 builtin_zip_walk={'zip', 'int', 'float', 'str', 'type'} <= builtin_keys,
                                 row_inline=row_inline)
             node = self._lower_frames(frames, node, cls_info, cells)

@@ -37,6 +37,8 @@ import libcst as cst
 
 from .holds import hold_table
 from .read_notes import RAISES, normal, only_raised
+from .syntax import arguments, literal_value
+from .typedefs import INT64_MAX, INT64_MIN
 
 PROVIDER = 'modelx_cython.runtime._tables'
 COLUMN_KIND = {'f64': 0, 'i64': 1}
@@ -173,7 +175,8 @@ class FrameReads:
     (one dict per read) and ``declined`` why a read of a frame receiver was not."""
 
     def __init__(self, resolver, cls_info, cells, providers, policy, row_names=None, prefix_cells=None,
-                 param_cells=None, *, builtin_int, builtin_type=False, builtin_zip_walk=False, row_inline=None):
+                 param_cells=None, *, builtin_int, builtin_type=False, builtin_extrema=frozenset(),
+                 builtin_zip_walk=False, row_inline=None):
         self.param_cells = param_cells or {}    # T-5c: cell with parameters -> (names, its `T.loc[key]` expression)
         self.row_names = row_names or {}       # code of an inlined row expression -> its row cell (assignments)
         self.row_inline = row_inline
@@ -182,6 +185,7 @@ class FrameReads:
         self.providers, self.policy = providers, policy
         self.builtin_int = builtin_int
         self.builtin_type = builtin_type
+        self.builtin_extrema = builtin_extrema
         self.builtin_zip_walk = builtin_zip_walk
         self.ordered_view_type_guard = False
         self.lowered, self.declined = [], []
@@ -2425,7 +2429,7 @@ class _Rewrite(cst.CSTTransformer):
         return self._guarded(updated, view, test, native, None if o.guards(own) else kind)
 
     def ordered_view_read(self, original, updated, value, parts):
-        """Read a column at an integer Cell's asof row in the same prepared view."""
+        """Read a column at an integer Cell's asof row, with an optional literal clamp."""
         o = self.o
         if not o.builtin_type or not isinstance(value.value, cst.Name) or len(parts) != 2:
             return None
@@ -2439,7 +2443,25 @@ class _Rewrite(cst.CSTTransformer):
                 and not key.args[0].keyword and not key.args[0].star
                 and _code(key.func) == f'{value.value.value}.index.asof'):
             return None
-        arg = key.args[0].value
+        argument = arg = key.args[0].value
+        bound = None
+        if (isinstance(argument, cst.Call) and isinstance(argument.func, cst.Name)
+                and argument.func.value in o.builtin_extrema):
+            operands = arguments(argument, count=2)
+            if operands is None:
+                return None
+            arg, limit = operands
+            literal = (limit.expression
+                       if isinstance(limit, cst.UnaryOperation) and isinstance(limit.operator, (cst.Plus, cst.Minus))
+                       else limit)
+            if not isinstance(literal, cst.Integer):
+                return None
+            try:
+                bound = literal_value(limit)
+            except ValueError:
+                return None
+            if not INT64_MIN <= bound <= INT64_MAX:
+                return None
         if not (isinstance(arg, cst.Call) and isinstance(arg.func, cst.Attribute)
                 and isinstance(arg.func.value, cst.Name) and arg.func.value.value == 'self'
                 and all(not item.keyword and not item.star for item in arg.args)):
@@ -2459,8 +2481,14 @@ class _Rewrite(cst.CSTTransformer):
         start, stop, ready = self._view_parts(view, ordered)
         test = self._conjunction([cst.parse_expression(exact_receiver(cls.name)), ready,
                                   self._native_test(hold, [])])
-        row = self._m('asof_at_ll', o.ref(ordered), start, stop, cst.Integer(str(view.depth)),
-                      self.updated_of.get(id(arg), arg))
+        native_key = self.updated_of.get(id(arg), arg)
+        if bound is not None:
+            # Express the minimum without an out-of-range positive C literal.
+            limit = cst.parse_expression(f'({INT64_MIN + 1} - 1)' if bound == INT64_MIN else str(bound))
+            native_key = argument.with_changes(args=[
+                cst.Arg(_cast(CTYPE['i64'], native_key)), cst.Arg(_cast(CTYPE['i64'], limit)),
+            ])
+        row = self._m('asof_at_ll', o.ref(ordered), start, stop, cst.Integer(str(view.depth)), native_key)
         view.used = o.ordered_view_type_guard = True
         self._record(key, 'L6', view.call)
         self._record(original, 'L3', view.call)

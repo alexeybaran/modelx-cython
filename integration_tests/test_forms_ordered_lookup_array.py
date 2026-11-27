@@ -24,6 +24,19 @@ CELLS = {
                       'keys = [t, t]\n'
                       'result = float(sub.loc[sub.index.asof(typed_key(keys.pop())), "q"])\n'
                       'return result, len(keys)'),
+    'view_clamped_once': ('t', 'sub = data.G().loc["A"]\n'
+                              'keys = [t, t]\n'
+                              'result = float(sub.loc[sub.index.asof(max(typed_key(keys.pop()), 9007199254740993)), "q"])\n'
+                              'return result, len(keys)'),
+    'view_signed_min': ('t', 'sub = data.G().loc["A"]\n'
+                            'return float(sub.loc[sub.index.asof(max(typed_key(t), -9223372036854775808)), "q"])'),
+    'view_signed_max': ('t', 'sub = data.G().loc["A"]\n'
+                            'return float(sub.loc[sub.index.asof(min(typed_key(t), 9223372036854775807)), "q"])'),
+    'view_out_of_range': ('t', 'sub = data.G().loc["A"]\n'
+                               'return float(sub.loc[sub.index.asof(max(typed_key(t), 9223372036854775808)), "q"])'),
+    'view_shadowed': ('t', 'sub = data.G().loc["A"]\n'
+                          'max = min\n'
+                          'return float(sub.loc[sub.index.asof(max(typed_key(t), 9007199254740993)), "q"])'),
     'search_pop': ('t', 'values = [22.0, np.array([19, 20 + t])] if policy_id >= 3 else [22.0, 18.0 + t]\n'
                        'result = data.T().index.searchsorted(values.pop())\n'
                        'return len(values), str(result)'),
@@ -47,6 +60,13 @@ def test_an_ordered_lookup_of_several_values_is_pandas(tmp_path):
     assert lowered(reads, 'typed', 'searchsorted(18 + t)'), reads
     assert lowered(reads, 'view_typed', 'sub.index.asof(self.typed_key(t))'), reads
     assert lowered(reads, 'view_once', 'sub.index.asof('), reads
+    ordered_cells = {
+        name.rsplit('.', 1)[-1]
+        for name, entries in reads.items() if isinstance(entries, list)
+        if any(isinstance(entry, dict) and entry.get('form') == 'L6' for entry in entries)
+    }
+    assert {'view_clamped_once', 'view_signed_min', 'view_signed_max'} <= ordered_cells, reads
+    assert ordered_cells.isdisjoint({'view_out_of_range', 'view_shadowed'}), reads
     assert not lowered(reads, 'search_pop', 'searchsorted('), reads
     assert not lowered(reads, 'asof_pop', 'asof('), reads
     assert not lowered(reads, 'int_asof_pop', 'asof('), reads
@@ -59,7 +79,7 @@ def test_an_ordered_lookup_of_several_values_is_pandas(tmp_path):
         base = 2**53
         a, b, c = ("A", base), ("A", base + 1), ("A", base + 3)
 
-        def lookup(model, rows, values, duplicate_columns):
+        def lookup(model, rows, values, duplicate_columns, name):
             fresh = type(model)()
             index = pd.MultiIndex.from_tuples(rows)
             frame = pd.DataFrame({"q": values}, index=index)
@@ -67,7 +87,7 @@ def test_an_ordered_lookup_of_several_values_is_pandas(tmp_path):
                 frame = pd.concat([frame, frame], axis=1)
             fresh.Data.raw_G = frame
             try:
-                return fresh.P[1].view_once(1)
+                return getattr(fresh.P[1], name)(1)
             except Exception as error:
                 return type(error).__name__
 
@@ -78,9 +98,10 @@ def test_an_ordered_lookup_of_several_values_is_pandas(tmp_path):
             ([a, b, b, c], [2.0, 9.0, 8.0, 5.0], False),
             ([a, b, c], [2.0, 9.0, 5.0], True),
         ]
-        for case in cases:
-            assert lookup(compiled, *case) == lookup(exported, *case), case
-        assert lookup(compiled, *cases[0]) == (9.0, 1)
+        for name in ("view_once", "view_clamped_once"):
+            for case in cases:
+                assert lookup(compiled, *case, name) == lookup(exported, *case, name), (name, case)
+            assert lookup(compiled, *cases[0], name) == (9.0, 1)
         ''')
     checked = subprocess.run([sys.executable, '-c', probe], cwd=tmp_path, capture_output=True, text=True)
     assert checked.returncode == 0, checked.stdout + checked.stderr
