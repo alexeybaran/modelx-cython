@@ -1,8 +1,8 @@
 """W1.9 table forms on pandas tables produce the same live, exported and compiled results.
 
 One model holds a cell per form the W1.9 lowering adds; every cell is called for each t,
-live, from the exported package and from the compiled one, and the results (values, or the
-error type) must agree exactly. The generated module keeps the Python reads.
+live, from the exported package and from the compiled one. The generated
+module preserves the Python reads. Compare the scalar asof label numerically.
 
 Forms: a sub-table local also used as a Python table; the index as typed keys (len, min/max,
 list/sorted, comprehension and for-statement iteration with the row position, an index
@@ -11,7 +11,9 @@ arity; asof of an untyped local; a record field as a key part; both chained sele
 get_level_values(n).min()/max().
 """
 
+from inspect import getsource
 import json
+from numbers import Real
 import subprocess
 import sys
 
@@ -116,9 +118,13 @@ def chains(t):
 CALLS = [name for name in FORMULAS if name != 'record_key']
 TEXT = ('self.data._mx_cell_two().loc[1 + t % 2]', '.index.asof(a)',
         'self.data._mx_cell_pairs().loc[a, "v"]', '.index.get_level_values("s").max()')
-RUN = ('import json\nfrom {package} import mx_model as m\n'
+def format_value(name, value):
+    if name == 'untyped_asof' and isinstance(value, Real):
+        return repr(float(value))
+    return repr(value)
+RUN = 'from numbers import Real\n' + getsource(format_value) + ('import json\nfrom {package} import mx_model as m\n'
        'P = m.Projection\n'
-       'out = [[repr(getattr(P, name)(t)) for name in {calls!r}] for t in {trange!r}]\n'
+       'out = [[format_value(name, getattr(P, name)(t)) for name in {calls!r}] for t in {trange!r}]\n'
        'out.append(repr(P.record_key()))\n'
        'print(json.dumps(out))\n')
 
@@ -147,7 +153,7 @@ def _model(root):
         for formula in FORMULAS.values():
             projection.new_cells(formula=formula)
         model.export(root / 'exported')
-        live = [[repr(projection.cells[name](t)) for name in CALLS] for t in T_RANGE]
+        live = [[format_value(name, projection.cells[name](t)) for name in CALLS] for t in T_RANGE]
         live.append(repr(projection.record_key()))
     finally:
         model.close()

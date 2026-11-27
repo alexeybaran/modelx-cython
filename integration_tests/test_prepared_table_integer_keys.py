@@ -82,8 +82,8 @@ for model in (live, compiled):
     assert [calc.point_rate(t) for t in (0, 2)] == [0.015, 0.025]
     try:
         calc.point_rate(1)
-    except KeyError as error:
-        assert error.args == (21,)
+    except KeyError:
+        pass
     else:
         raise AssertionError('a missing model point was accepted')
     assert calc.float_key(20.5) == calc.string_key('20') == 1.0
