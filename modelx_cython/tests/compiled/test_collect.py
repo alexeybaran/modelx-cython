@@ -249,6 +249,61 @@ def test_reused_items_hold_nothing_from_the_previous_policy(tmp_path):
         assert large['objects'] - small['objects'] < 300, (workers, small, large)
 
 
+def test_reused_items_reset_reserved_numeric_caches(tmp_path):
+    model = mx.new_model('NumericCollect')
+    try:
+        proj = model.new_space('Projection', formula='lambda key: None')
+        proj.new_cells('keys', 'lambda: (1, 2, 3)')
+        proj.new_cells('amount', textwrap.dedent('''\
+            def amount(t, premium):
+                if t == 0:
+                    return key + premium
+                return amount(t - 1, premium) + 1.0
+            '''))
+        proj.new_cells('unused', 'lambda t, premium: key + t + premium')
+
+        def outputs():
+            return {'individual': {'amount': amount(40, 0.5)}}
+
+        proj.set_collect(over={'key': proj.keys}, outputs=outputs)
+        model.export(tmp_path / 'exported')
+    finally:
+        model.close()
+
+    (tmp_path / 'sample.py').write_text(
+        'from exported import mx_model as m\n'
+        'm.Projection.collect()\n'
+        'm.Projection[1].unused(2, 0.5)\n',
+        encoding='utf-8',
+    )
+    (tmp_path / 'spec.py').write_text(
+        repr({'spaces': {'Projection': {'cells': {
+            'amount': {'numeric_cache_capacity': 4},
+            'unused': {'numeric_cache_capacity': 4096},
+        }}}}),
+        encoding='utf-8',
+    )
+    subprocess.run(
+        [sys.executable, '-m', 'modelx_cython', 'exported', '--sample', 'sample.py',
+         '--spec', 'spec.py'],
+        cwd=tmp_path, check=True, capture_output=True,
+    )
+    source = (tmp_path / 'exported_cy' / '_mx_classes.py').read_text(encoding='utf-8')
+    declarations = (tmp_path / 'exported_cy' / '_mx_classes.pxd').read_text(encoding='utf-8')
+    for cache in ('_v_amount', '_v_unused'):
+        assert f'if self.{cache} is None:' in source
+        assert f'self.{cache}.reset()' in source
+        assert f'root.{cache} = None' not in declarations
+    run = subprocess.run(
+        [sys.executable, '-c', STALE_PROBE], cwd=tmp_path, check=True,
+        capture_output=True, text=True,
+    )
+    out = json.loads(run.stdout)
+    assert out['1'] == out['4'] == out['export'] == {
+        '1': {'amount': 41.5}, '2': {'amount': 42.5}, '3': {'amount': 43.5},
+    }
+
+
 def test_a_declaration_without_reset_rule_stops_the_build():
     from modelx_cython import collect
     block = 'cdef class _c_P(_mx_sys.BaseSpace):\n    cdef RateTable _v_rate\n'

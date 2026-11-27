@@ -21,7 +21,7 @@ import textwrap
 
 import libcst as cst
 
-from . import item_roots, native_collect
+from . import item_roots, native_collect, numeric_cache
 from .consts import FORMULA_PREF, MODULE_PREF, MX_SPACE_MOD, SPACE_PREF
 from .syntax import arguments, code, dotted_name, literal_value, same_expression, single_statement, walk
 
@@ -380,6 +380,13 @@ def reuses_items(visitor, cls_name):
             and '_mx_input_items' not in visitor.input_fields.get(cls_name, ()))
 
 
+def retains_numeric_cache(cell):
+    """Whether a private Collect item can keep its reserved numeric cache allocation."""
+    owner = cell.parent
+    return (cell.uses_native_numeric_cache and len(cell.params) <= 3
+            and reuses_items(owner.visitor, owner.name) and numeric_cache.primary_capacity(cell) != 0)
+
+
 def reset_root(cls_name):
     return f'_mx_reset_root_{cls_name}'
 
@@ -416,19 +423,21 @@ def _base_fields():
     return [field for base in ('BaseMxObject', 'BaseParent', 'BaseSpace') for field in _fields(blocks.get(base, ''))]
 
 
-def reset_function(cls_name, block, classes, values):
+def reset_function(cls_name, block, classes, values, retained_caches=()):
     """The ``cdef inline`` function, for the class's .pxd, that returns an item to the state of a new object.
 
     Every attribute that the class block and its bases declare (the object's layout) is listed: an object
     or a memoryview to None, as ``tp_new`` leaves it; any C value, array or struct to zero bytes, as the allocator leaves
     it. The dense value arrays (``values``) are left unwritten behind their flags, as the class's allocator
-    leaves them in a new object (``value_storage``: it zeroes every byte but those arrays). A declaration of another kind stops the build naming the attribute and its Cell."""
+    leaves them in a new object (``value_storage``: it zeroes every byte but those arrays). Retained
+    numeric caches are cleared by the next initialization, before the item handles another
+    coordinate. A declaration of another kind stops the build naming the attribute and its Cell."""
     structs = _declared(r'^cdef struct (\w+)')
     objects = _OBJECTS | set(classes) | _declared(r'^cdef class (\w+)')
     lines = []
     for line, ctype, name in [*_base_fields(), *_fields(block)]:
         base = ctype.split('[')[0].split('.')[-1].strip()
-        if line in values:
+        if line in values or name in retained_caches:
             continue
         if ('[' not in ctype and (base in objects or base.startswith('_c_'))
                 or re.fullmatch(r'(const )?[\w ]+\[:(, *:)*\]', ctype)):     # an object or a memoryview

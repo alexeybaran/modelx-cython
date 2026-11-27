@@ -255,7 +255,11 @@ class PXDGenerator:
         value_storage.check_last(block, self.module.classes[name])
         if collect.reuses_items(self.module.visitor, name):
             values = {line.strip() for line in value_storage.pxd_declarations(self.module.classes[name])}
-            block += '\n\n' + collect.reset_function(name, block, self.module.classes, values)
+            retained_caches = {
+                f'_v_{cell.name}' for cell in self.module.classes[name].cells.values()
+                if collect.retains_numeric_cache(cell)
+            }
+            block += '\n\n' + collect.reset_function(name, block, self.module.classes, values, retained_caches)
         return block
 
     @cached_property
@@ -1409,9 +1413,14 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
                 initializers = []
                 for cell in cls_info.cells.values():
                     if cell.uses_native_numeric_cache:
-                        initializers.append(cst.parse_statement(
-                            f'self._v_{cell.name} = {numeric_cache.constructor(cell)}\n'
-                        ))
+                        cache = f'self._v_{cell.name}'
+                        constructor = numeric_cache.constructor(cell)
+                        if collect.retains_numeric_cache(cell):
+                            source = (f'if {cache} is None:\n    {cache} = {constructor}\n'
+                                      f'else:\n    {cache}.reset()\n')
+                        else:
+                            source = f'{cache} = {constructor}\n'
+                        initializers.append(cst.parse_statement(source))
                     elif cell.uses_vector_cache:
                         initializers.append(cst.parse_statement(
                             f'self._v_{cell.name} = {vectors.cache_constructor(cell)}\n'))
