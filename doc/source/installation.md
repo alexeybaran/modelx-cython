@@ -23,7 +23,7 @@ modelx-cython requires Python 3.10 or newer, and depends on the following
 packages, which are installed automatically when you install modelx-cython
 with `pip` or `conda`:
 
-* [modelx](https://github.com/fumitoh/modelx) v0.33.0+ — for exporting
+* [modelx](https://github.com/fumitoh/modelx) `>=0.33.1.dev0` for exporting
   models to pure-Python packages, with or without `__slots__` on the Space
   classes
 * [Cython](https://cython.org/) v3.2.4+ — for compiling the translated
