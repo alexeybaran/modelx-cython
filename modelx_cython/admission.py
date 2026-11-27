@@ -140,10 +140,16 @@ def over_limit_warning(cell):
                                      count=count, limit=limit)
 
 
-USE_WARNING = ('{cell} ({params}): hash store: rectangle {ranges} = {count:,} entries, beyond the dense '
-               'ceiling of {limit:,} entries. Remedies, in order: re-parametrise the cell if its parameters are tied '
-               '(one parameter for a grid position); mark it not cached if each value is read once; tighten or '
-               'correct the declaration.')
+USE_WARNING = ('{cell} ({params}): hash store by use: rectangle {ranges} = {count:,} entries, {use} '
+               '(dense up to {limit:,} entries, or up to {factor} x the entries one policy fills). Remedies, in '
+               'order: re-parametrise the cell if its parameters are tied (one grid key); mark '
+               'it not cached if each value is read once; tighten or correct the declaration.')
+
+
+def _use_text(count, filled):
+    if filled <= 0:
+        return 'no entry filled by any policy in the sample'
+    return f'{count / filled:,.1f} x the {filled:,} entries one policy fills in the sample'
 
 
 def _store_axes(cell):
@@ -161,9 +167,10 @@ def _store_axes(cell):
 
 
 def use_warning(cell):
-    """The build warning for a multi-argument Cell put in the hash store because its rectangle exceeds the
-    dense ceiling, else None (an explicit max_dense_entries has its own)."""
-    from .automatic import max_dense_entries, max_dense_entries_set
+    """The build warning for a multi-argument Cell put in the hash store because its rectangle exceeds
+    the ceiling and DENSE_USE_FACTOR times its use, else None (an explicit max_dense_entries has its own)."""
+    from .automatic import DENSE_USE_FACTOR, dense_by_use, filled_per_receiver, max_dense_entries, \
+        max_dense_entries_set
     if not (len(cell.params) >= 2 and cell.has_typeinfo() and cell.uses_native_numeric_cache
             and cell.is_int_args) or max_dense_entries_set(cell):
         return None
@@ -172,23 +179,29 @@ def use_warning(cell):
     except (KeyError, AttributeError, TypeError):
         return None
     limit = max_dense_entries(cell)
-    if count <= limit:
+    if count <= limit or dense_by_use(cell, count):
         return None
     return USE_WARNING.format(cell=getattr(cell, 'model_path', cell.fqname), params=', '.join(cell.params),
-                              ranges=ranges, count=count, limit=limit)
+                              ranges=ranges, count=count, use=_use_text(count, filled_per_receiver(cell)),
+                              limit=limit, factor=DENSE_USE_FACTOR)
 
 
 def store_reason(cell, cache):
     """Per multi-argument integer-keyed Cell, the store chosen and why (build report)."""
-    from .automatic import max_dense_entries, max_dense_entries_set
+    from .automatic import DENSE_USE_FACTOR, filled_per_receiver, max_dense_entries, max_dense_entries_set
     ranges, count = _store_axes(cell)
-    limit = max_dense_entries(cell)
+    limit, filled = max_dense_entries(cell), filled_per_receiver(cell)
+    use = _use_text(count, filled)
     source = 'explicit max_dense_entries' if max_dense_entries_set(cell) else 'max_dense_entries'
     if cache == 'dense':
-        return f'dense: {ranges} = {count:,} entries, within {source} {limit:,}'
+        if count <= limit:
+            return f'dense: {ranges} = {count:,} entries, within {source} {limit:,}'
+        return f'dense by use: {ranges} = {count:,} entries, {use} (<= {DENSE_USE_FACTOR} x)'
     if count <= limit:
         return f'{cache}: {ranges} = {count:,} entries, within {source} {limit:,} but not dense (see hash_reason)'
-    return f'{cache}: {ranges} = {count:,} entries exceeds the {source} {limit:,}'
+    if max_dense_entries_set(cell):
+        return f'{cache}: {ranges} = {count:,} entries exceeds the explicit max_dense_entries {limit:,}'
+    return f'{cache} by use: {ranges} = {count:,} entries, {use} (> {DENSE_USE_FACTOR} x)'
 
 
 def cache_detail(cell, cache):
@@ -204,7 +217,11 @@ def cache_detail(cell, cache):
     try:
         if len(cell.params) >= 2 and cell.has_typeinfo() and cell.is_int_args and cache in (
                 'dense', 'native-numeric-keys'):
-            detail.update(store_reason=store_reason(cell, cache))
+            from .automatic import filled_per_receiver
+            _, count = _store_axes(cell)
+            filled = filled_per_receiver(cell)
+            detail.update(filled_per_policy=filled, use_ratio=round(count / filled, 1) if filled else None,
+                          store_reason=store_reason(cell, cache))
         if cache == 'dense':
             window, sizes, count = _window(cell.dense_axes)
             detail.update(window=window, entries=count, bytes=count * 12)

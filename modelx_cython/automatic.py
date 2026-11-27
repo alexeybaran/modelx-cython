@@ -78,9 +78,28 @@ def max_dense_entries(cell):
     return value
 
 
+# Dense slots cost memory for the entire rectangle but avoid hashing on every lookup.
+# Allow denser observed workloads above the default ceiling while respecting explicit limits.
+DENSE_USE_FACTOR = 16
+
+
+def filled_per_receiver(cell):
+    """The most entries of the Cell one receiver filled in the sample (its formula evaluations)."""
+    return getattr(getattr(cell, '_rt', None), 'max_evaluations_per_receiver', 0) or 0
+
+
+def dense_by_use(cell, count):
+    """Whether a rectangle of ``count`` entries above the ceiling stays dense by use. An explicit
+    max_dense_entries (Cell or Space) is a hard limit and is not overridden."""
+    if max_dense_entries_set(cell):
+        return False
+    filled = filled_per_receiver(cell)
+    return filled > 0 and count <= DENSE_USE_FACTOR * filled
+
+
 def dense_allowed(cell, count):
-    """Dense when the rectangle of the declared or sampled range is within the ceiling."""
-    return 0 < count <= max_dense_entries(cell)
+    """Choose dense storage by the ceiling or by observed use above the default ceiling."""
+    return count > 0 and (count <= max_dense_entries(cell) or dense_by_use(cell, count))
 
 
 def dense_count(cell):

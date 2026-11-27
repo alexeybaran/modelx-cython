@@ -1,8 +1,7 @@
-"""Storage by range. A multi-argument integer-keyed Cell is dense when the rectangle of its declared or sampled
-range is within the dense ceiling (65,536 entries); above it the Cell goes to the hash store with a build warning
-naming the cell, its ranges, the rectangle and the remedies, whatever share of it the sample filled. The build
-report (_mx_admission.json) states per multi-argument Cell the store chosen and why. The store never depends on
-how many entries the sample's policies happened to fill."""
+"""Storage by use. Above the default dense ceiling (65,536 entries) a multi-argument integer-keyed Cell stays
+dense while its rectangle is at most DENSE_USE_FACTOR (16) times the entries one policy fills in the sample; otherwise
+it goes to the hash store with a build warning naming the cell, its ranges, the rectangle, the use, the ratio and the
+remedies. The build report (_mx_admission.json) states per multi-argument Cell the store chosen and why."""
 import json
 import subprocess
 import sys
@@ -43,21 +42,40 @@ def _build(tmp_path, spec, n=400):
     return cells, run.stdout + run.stderr
 
 
-def test_a_rectangle_above_the_ceiling_goes_to_the_hash_store_with_a_warning(tmp_path):
+def test_well_used_rectangle_above_the_ceiling_stays_dense(tmp_path):
     cells, log = _build(tmp_path, {'cells_param_size': {'t': 400, 's': 400}})
-    lines = [line for line in log.splitlines() if 'hash store: rectangle' in line]
-    # 160,000 entries > 65,536: the well used triangle and the sparse diagonal alike
-    for name in ('used', 'sparse'):
-        cell = cells[name]
-        assert cell['cache'] == 'native-numeric-keys', cell['cache_detail']
-        detail = cell['cache_detail']
-        assert detail['store_reason'] == ('native-numeric-keys: t [0, 400) declared x s [0, 400) declared = '
-                                          '160,000 entries exceeds the max_dense_entries 65,536'), detail
-        line, = (line for line in lines if f'Policy.{name} (t, s)' in line)
-        for part in ('t [0, 400) declared x s [0, 400) declared = 160,000 entries', 'dense ceiling of 65,536',
-                     're-parametrise the cell if its parameters are tied',
-                     'mark it not cached if each value is read once', 'tighten or correct the declaration'):
-            assert part in line, (part, line)
+    used = cells['used']
+    assert used['cache'] == 'dense', used['cache_detail']
+    detail = used['cache_detail']
+    # 160,000 entries > 65,536; one policy fills the 40,200-entry triangle t >= s, s even (ratio 4.0)
+    assert detail['entries'] == 160000 and detail['filled_per_policy'] >= 10000, detail
+    assert detail['store_reason'].startswith('dense by use: t [0, 400) declared x s [0, 400) declared = 160,000'), detail
+    assert 'hash store by use' not in log or 'Policy.used' not in log.split('hash store by use')[0][-200:], log[-3000:]
+
+
+def test_sparse_rectangle_goes_to_the_hash_store_with_a_warning(tmp_path):
+    cells, log = _build(tmp_path, {'cells_param_size': {'t': 400, 's': 400}})
+    sparse = cells['sparse']
+    assert sparse['cache'] == 'native-numeric-keys', sparse['cache_detail']
+    detail = sparse['cache_detail']
+    assert detail['filled_per_policy'] == 40 and detail['use_ratio'] == 4000.0, detail
+    assert detail['store_reason'].startswith('native-numeric-keys by use:') and '(> 16 x)' in detail['store_reason']
+    lines = [line for line in log.splitlines() if 'hash store by use' in line]
+    assert len(lines) == 1, log[-3000:]
+    line = lines[0]
+    for part in ('Policy.sparse (t, s)', 't [0, 400) declared x s [0, 400) declared = 160,000 entries',
+                 '4,000.0 x the 40 entries one policy fills in the sample', 'or up to 16 x',
+                 're-parametrise the cell if its parameters are tied', 'mark it not cached if each value is read once',
+                 'tighten or correct the declaration'):
+        assert part in line, (part, line)
+
+
+def test_explicit_dense_ceiling_takes_precedence(tmp_path):
+    cells, _ = _build(tmp_path, {'cells_param_size': {'t': 400, 's': 400},
+                               'spaces': {'Policy': {'max_dense_entries': 65536}}})
+    used = cells['used']
+    assert used['cache'] == 'native-numeric-keys', used['cache_detail']
+    assert 'explicit max_dense_entries 65,536' in used['cache_detail']['store_reason']
 
 
 def test_a_rectangle_within_the_ceiling_is_dense(tmp_path):
@@ -67,4 +85,4 @@ def test_a_rectangle_within_the_ceiling_is_dense(tmp_path):
         assert cells[name]['cache'] == 'dense', detail
         assert detail['store_reason'].startswith(
             'dense: t [0, 250) declared x s [0, 250) declared = 62,500 entries, within max_dense_entries 65,536'), detail
-    assert 'hash store: rectangle' not in log, log[-3000:]
+    assert 'hash store by use:' not in log, log[-3000:]
