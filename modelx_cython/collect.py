@@ -22,7 +22,8 @@ import textwrap
 import libcst as cst
 
 from . import item_roots
-from .syntax import arguments, code, dotted_name, same_expression, single_statement
+from .consts import FORMULA_PREF, MODULE_PREF, MX_SPACE_MOD, SPACE_PREF
+from .syntax import arguments, code, dotted_name, literal_value, same_expression, single_statement, walk
 
 HOOK_VERSION = 1
 
@@ -44,8 +45,8 @@ def _collect_call(method):
     return None
 
 
-def _reads_parents(class_node):
-    """Whether a formula of the class reads ``self._model``, ``self._parent`` or ``self._space``."""
+def _reads_parents(class_node, cells):
+    """Whether a cached, uncached or Space formula reads its enclosing objects."""
     found = []
 
     class Visitor(cst.CSTVisitor):
@@ -54,9 +55,45 @@ def _reads_parents(class_node):
                 found.append(node)
 
     for item in class_node.body.body:
-        if isinstance(item, cst.FunctionDef) and item.name.value.startswith('_f_'):
+        if not isinstance(item, cst.FunctionDef):
+            continue
+        name = item.name.value
+        if name.startswith(FORMULA_PREF) or name == '_mx_space_formula' or (name in cells and name != '__call__'):
             item.visit(Visitor())
     return bool(found)
+
+
+def member_specs(class_node, cls_info, modules):
+    """Names of References and parent access in the collected Space and its named subtree."""
+    members = []
+    pending = [((), class_node, cls_info)]
+    while pending:
+        path, node, info = pending.pop()
+        members.append((path, tuple(sorted(info.refs)), _reads_parents(node, info.cells)))
+        if info.spaces:
+            package = info.module.fqname.rsplit('.', 1)[0]
+            child_module = modules.get(f'{package}.{MODULE_PREF}{info.name[len(SPACE_PREF):]}.{MX_SPACE_MOD}')
+            if child_module is None:
+                return tuple(members), False
+            for child in child_module.visitor.wrapper.module.body:
+                if isinstance(child, cst.ClassDef) and child.name.value in child_module.classes:
+                    pending.append(((*path, child.name.value[len(SPACE_PREF):]),
+                                    child, child_module.classes[child.name.value]))
+    return tuple(members), True
+
+
+def _dynamic_refs(method, refs):
+    """Find the named Reference slots accepted by the exported Space formula wrapper."""
+    for node in walk(method):
+        if (isinstance(node, cst.BinaryOperation) and isinstance(node.operator, cst.Subtract)
+                and arguments(node.left, 'refs.keys', 0) == () and isinstance(node.right, cst.Tuple)):
+            try:
+                names = literal_value(node.right)
+            except ValueError:
+                break
+            if all(isinstance(name, str) for name in names):
+                return names
+    return refs
 
 
 def _item_constructor(item):
@@ -112,7 +149,7 @@ def _item_constructor(item):
     return args, constructor, initialize, has_formula, has_inputs
 
 
-def _private_constructor(item, constructor, initializers):
+def _private_constructor(item, constructor, initializers, has_formula):
     """Give the generic constructor a lock for its private tree before running its formula."""
     base, root, walk = constructor
     lock = cst.parse_module(
@@ -121,7 +158,11 @@ def _private_constructor(item, constructor, initializers):
         '        _mx_private_lock = _mx_collect_rlock()\n'
         '    _mx_s._mx_lock = _mx_private_lock\n').body
     walk = walk.with_changes(body=walk.body.with_changes(body=(*lock, *walk.body.body)))
-    initialize = ''.join(code(stmt) for stmt in (walk, *initializers))
+    initialize = code(walk)
+    if has_formula:
+        initialize += 'with _mx_collect_factory_guard(self):\n' + textwrap.indent(code(initializers[0]), '    ')
+        initializers = initializers[1:]
+    initialize += ''.join(code(stmt) for stmt in initializers)
     body = cst.parse_module(
         f'{code(base)}{code(root)}'
         '_mx_private_lock = None\n'
@@ -135,11 +176,11 @@ def _private_constructor(item, constructor, initializers):
     return item.body.with_changes(body=body)
 
 
-def hook(class_node, cls_name, refs, dots='.', fast=True, reuse=False):
+def hook(class_node, cls_name, members, complete, dots='.', fast=True, reuse=False):
     """The compiled detached constructor and hook for a supported exported Space, or None.
 
-    ``refs`` are the names of its References. With ``fast``, a new item of a Space without child
-    Spaces or roots is built on the typed class. Other items use the export's constructor."""
+    With ``fast``, a new item of a Space without child Spaces or roots is built on the typed
+    class. Other items use the export's constructor."""
     methods = {item.name.value: item for item in class_node.body.body if isinstance(item, cst.FunctionDef)}
     item = methods.get('_mx_collect_item')
     calls = [call for call in map(_collect_call, methods.values()) if call is not None]
@@ -162,7 +203,13 @@ def hook(class_node, cls_name, refs, dots='.', fast=True, reuse=False):
         body=lam.body.with_changes(func=cst.Name('_mx_outputs'),
                                    args=(cst.Arg(cst.Name('_mx_spare')), *lam.body.args)))
     unpack = f'    {code(others)} = _mx_args\n' if others.elements else ''
-    apply = f'                _mx_fast._mx_apply_formula({params})\n' if apply_formula else ''
+    apply = ''
+    dynamic_refs = ()
+    if apply_formula:
+        apply = (
+            f'                with _mx_collect_factory_guard(self):\n'
+            f'                    _mx_fast._mx_apply_formula({params})\n')
+        dynamic_refs = _dynamic_refs(methods['_mx_apply_formula'], members[0][1])
     initialize = ''
     mark_prepared = ''
     retain = ''
@@ -198,6 +245,8 @@ def hook(class_node, cls_name, refs, dots='.', fast=True, reuse=False):
             f'                _mx_fast._mx_roots.append(_mx_fast)\n'
             f'                self._mx_assign_params(_mx_fast, {params})\n'
             f'{apply}'
+            f'                if _mx_spare[2] is not None:\n'
+            f'                    _mx_check_collect_bindings(_mx_fast, _mx_spare[2])\n'
             f'                _mx_out = _mx_prepare_output(_mx_fast.collect_outputs(), _mx_live_types)\n'
             f'{mark_prepared}'
             f'                return _mx_out\n'
@@ -221,13 +270,15 @@ def hook(class_node, cls_name, refs, dots='.', fast=True, reuse=False):
         f'{built}'
         f'        _mx_root = self._mx_collect_item({params})\n'
         f'        try:\n'
+        f'            if _mx_spare[2] is not None:\n'
+        f'                _mx_check_collect_bindings(_mx_root, _mx_spare[2])\n'
         f'            return _mx_prepare_output(_mx_root.collect_outputs(), _mx_live_types)\n'
         f'        finally:\n'
         f'            _mx_release_collect_tree(_mx_root)\n'
         f'            _mx_root = None\n'
         f'    return _mx_collect_evaluate(self, _mx_coords, {code(outputs_at)},\n'
-        f'                                {tuple(refs)!r}, {_reads_parents(class_node)!r})\n')
-    return _private_constructor(item, build, initializers), cst.parse_module(source).body
+        f'                                {members!r}, {complete!r}, {apply_formula!r}, {dynamic_refs!r})\n')
+    return _private_constructor(item, build, initializers, apply_formula), cst.parse_module(source).body
 
 
 def reuses_items(visitor, cls_name):
@@ -302,7 +353,13 @@ def reset_function(cls_name, block, classes, values):
 def evaluator(workers, dots='.'):
     """The module-level functions shared by the collect hooks of a module."""
     return cst.parse_module(f'''
+from contextlib import nullcontext as _mx_collect_nullcontext
 from threading import RLock as _mx_collect_rlock
+
+
+def _mx_collect_factory_guard(space):
+    model_lock = space._model._mx_lock
+    return model_lock if model_lock is not None else _mx_collect_nullcontext()
 
 
 def _mx_release_collect_tree(root: _mx_sys.BaseSpace):
@@ -312,6 +369,7 @@ def _mx_release_collect_tree(root: _mx_sys.BaseSpace):
     while items:
         member = items.pop()
         items.extend(member._mx_spaces.values())
+        member._mx_spaces.clear()
         if member._mx_itemspaces:
             items.extend(member._mx_itemspaces.values())
             member._mx_itemspaces.clear()
@@ -321,29 +379,77 @@ def _mx_release_collect_tree(root: _mx_sys.BaseSpace):
         member._parent = None
 
 
-def _mx_collect_evaluate(space, coords, outputs_at, refs, reads_parents):
+def _mx_collect_member_at(space, path):
+    for part in path:
+        space = space._mx_spaces[part]
+    return space
+
+
+def _mx_unlocked_collect_ref(member, ref):
+    value = getattr(member, ref, None)
+    if isinstance(value, _mx_sys.BaseSpace) and value._mx_lock is None:
+        return value
+
+
+def _mx_collect_ref_error(name, workers, path, ref):
+    reference = '.'.join((*path, ref))
+    return ValueError(f'collect of {{name}} with {{workers}} workers: the Reference {{reference}} is a Space '
+                      'without a lock; export it in locked_spaces or use one worker')
+
+
+def _mx_collect_preflight(space, members, workers, dynamic_refs):
+    # A Reference into the base tree can be rebound to the private tree, depending on its refmode.
+    name = space._name
+    declared = [(path, _mx_collect_member_at(space, path), refs, reads_parents)
+                for path, refs, reads_parents in members]
+    base_members = {{id(member) for _, member, _, _ in declared}}
+    recheck = {{(): set(dynamic_refs)}} if dynamic_refs else {{}}
+    for path, member, refs, reads_parents in declared:
+        if reads_parents:
+            source = '.'.join((name, *path))
+            raise ValueError(f'collect of {{name}} with {{workers}} workers: a formula of {{source}} reads _model, '
+                             '_parent or _space, which the workers could fill at once; use one worker')
+        for ref in refs:
+            value = _mx_unlocked_collect_ref(member, ref)
+            if value is not None:
+                if id(value) not in base_members:
+                    raise _mx_collect_ref_error(name, workers, path, ref)
+                recheck.setdefault(path, set()).add(ref)
+    if recheck:
+        return name, workers, tuple((path, tuple(sorted(refs))) for path, refs in recheck.items())
+
+
+def _mx_check_collect_bindings(root, checks):
+    name, workers, members = checks
+    private_members = None
+    for path, refs in members:
+        member = _mx_collect_member_at(root, path)
+        for ref in refs:
+            value = _mx_unlocked_collect_ref(member, ref)
+            if value is None:
+                continue
+            if private_members is None:
+                private_members = {{id(item) for item in root._mx_walk()}}
+            if id(value) not in private_members:
+                raise _mx_collect_ref_error(name, workers, path, ref)
+
+
+def _mx_collect_evaluate(space, coords, outputs_at, members, complete, applies_formula, dynamic_refs):
     from {dots}_mx_collect import Accumulator
     import sys
     workers = getattr(space._model, '_mx_collect_workers', {workers!r})
     if type(workers) is not int or workers < 1:
         raise ValueError('_mx_collect_workers must be a positive int, not %r' % (workers,))
     accumulator = Accumulator()
+    checks = None
     if workers > 1 and len(coords) > 1:
-        # refused on every build, whether or not the threads would run model code at once
-        name = type(space).__name__[len('_c_'):]
-        if reads_parents:
-            raise ValueError(f'collect of {{name}} with {{workers}} workers: a formula of {{name}} reads _model, '
-                             '_parent or _space, which the workers could fill at once; use one worker')
-        for ref in refs:
-            value = getattr(space, ref, None)
-            if isinstance(value, _mx_sys.BaseSpace) and value is not space and value._mx_lock is None:
-                raise ValueError(f'collect of {{name}} with {{workers}} workers: the Reference {{ref}} is a Space '
-                                 'without a lock; export it in locked_spaces or use one worker')
+        checks = _mx_collect_preflight(space, members, workers, dynamic_refs)
     model_lock = getattr(space._model, '_mx_lock', None)
     if (workers == 1 or len(coords) == 1 or getattr(sys, '_is_gil_enabled', lambda: True)()
+            or not complete or applies_formula and model_lock is None
             or model_lock is not None and getattr(model_lock, '_is_owned', lambda: True)()):
         # A locked caller cannot wait for workers that may need its shared lock.
-        spare = [None, None]       # reusable item and its private lock
+        spare = [None, None, checks]
         try:
             for c in coords:
                 accumulator.add(c, outputs_at(spare, c))
@@ -356,7 +462,7 @@ def _mx_collect_evaluate(space, coords, outputs_at, refs, reads_parents):
     state = [0, 0, len(coords), None]       # next to take, next to add, stop, the first error
 
     def work():
-        spare = [None, None]
+        spare = [None, None, checks]     # reusable item, its lock and optional checks
         try:
             while True:
                 with lock:

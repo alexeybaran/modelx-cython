@@ -65,9 +65,11 @@ def compiled_model(tmp_path_factory):
                 return before, total.individual[key].pv, after, extra
             '''))
         tree = model.new_space("Tree", formula="lambda key: None")
-        leaf = tree.new_space("Leaf", refs={"gate": None})
+        leaf = tree.new_space("Leaf", refs={"gate": None, "peer": None})
         leaf.new_cells("point", textwrap.dedent('''\
             def point():
+                if peer is not None:
+                    peer.rates()
                 if gate is not None:
                     gate.wait(3)
                 return {"key": key}
@@ -77,6 +79,23 @@ def compiled_model(tmp_path_factory):
             over={"key": tree.keys},
             outputs='lambda: {"individual": {"point": Leaf.point()}}',
         )
+        loose = model.new_space("Loose")
+        loose.new_cells("rates", 'lambda: (_ for _ in ()).throw(LookupError("called"))')
+        for name, method in (("Relative", "relref"), ("Absolute", "absref")):
+            alias = model.new_space(name, formula="lambda key: None")
+            getattr(alias, method)(source=alias)
+            alias.new_cells("keys", "lambda: (0, 1)")
+            alias.new_cells("read", "lambda: 5")
+            alias.set_collect(over={"key": alias.keys},
+                              outputs='lambda: {"individual": {"value": source.read()}}')
+        dynamic = model.new_space("Dynamic", formula=textwrap.dedent('''\
+            def factory(key):
+                return {"refs": {"peer": data if choose is None else choose(key)}}
+            '''), refs={"data": data, "choose": None, "peer": None})
+        dynamic.new_cells("keys", "lambda: (0, 1)")
+        dynamic.new_cells("read", "lambda: peer.rates()[key]")
+        dynamic.set_collect(over={"key": dynamic.keys},
+                            outputs='lambda: {"individual": {"value": read()}}')
         if EXPORTS_AUTHORED_INPUTS:
             inputs = model.new_space(
                 "Inputs", formula="lambda key, scen=1: None", refs={"domain": (0, 1)}
@@ -93,7 +112,10 @@ def compiled_model(tmp_path_factory):
     finally:
         model.close()
 
-    sample = "from exported import mx_model\nmx_model.Projection.collect()\nmx_model.Tree.collect()\n"
+    sample = (
+        "from exported import mx_model\nmx_model.Projection.collect()\nmx_model.Tree.collect()\n"
+        "mx_model.Relative.collect()\nmx_model.Absolute.collect()\nmx_model.Dynamic.collect()\n"
+    )
     if EXPORTS_AUTHORED_INPUTS:
         sample += "mx_model.Inputs.collect(scen=7)\n"
     (folder / "sample.py").write_text(sample, encoding="utf-8")
@@ -219,6 +241,7 @@ PROBE = textwrap.dedent('''\
     def parallel_generic():
         enable_workers()
         model.Tree.Leaf.gate = threading.Barrier(4)
+        model.Tree.Leaf.peer = model.Data
         got = model.Tree.collect().individual
         assert {key: dict(record.point) for key, record in got.items()} == {
             key: {"key": key} for key in range(4)
@@ -228,6 +251,32 @@ PROBE = textwrap.dedent('''\
         enable_workers()
         assert model.Portfolio._mx_lock is model._mx_lock
         mixed_cell()
+
+    def check_unlocked(call, reference):
+        try:
+            call()
+        except ValueError as error:
+            assert f"Reference {reference} is a Space without a lock" in str(error)
+        else:
+            raise AssertionError(f"Collect accepted unlocked shared Reference {reference}")
+
+    def unlocked_child():
+        enable_workers()
+        model.Tree.Leaf.peer = model.Loose
+        check_unlocked(model.Tree.collect, "Leaf.peer")
+
+    def relative_and_absolute_aliases():
+        enable_workers()
+        assert model.Relative.collect().individual[0].value == 5
+        check_unlocked(model.Absolute.collect, "source")
+
+    def dynamic_reference():
+        enable_workers()
+        model.Dynamic.choose = lambda key: model.Loose
+        check_unlocked(model.Dynamic.collect, "peer")
+        model.Dynamic.choose = None
+        result = model.Dynamic.collect()
+        assert [record.value for record in result.individual.values()] == [0.25, 0.5]
 
     def authored_inputs():
         for space in (exported.Inputs, model.Inputs):
@@ -246,6 +295,9 @@ PROBE = textwrap.dedent('''\
         "parallel_collect": parallel_collect,
         "parallel_generic": parallel_generic,
         "locked_call": locked_call,
+        "unlocked_child": unlocked_child,
+        "relative_and_absolute_aliases": relative_and_absolute_aliases,
+        "dynamic_reference": dynamic_reference,
         "authored_inputs": authored_inputs,
     }[sys.argv[1]]()
     ''')
@@ -254,6 +306,7 @@ PROBE = textwrap.dedent('''\
 @pytest.mark.parametrize("case", (
     "direct_first", "collect_first", "mixed_cell", "failed_collect",
     "parallel_collect", "parallel_generic", "locked_call",
+    "unlocked_child", "relative_and_absolute_aliases", "dynamic_reference",
     pytest.param("authored_inputs", marks=pytest.mark.skipif(
         not EXPORTS_AUTHORED_INPUTS, reason="modelx exporter without authored inputs",
     )),

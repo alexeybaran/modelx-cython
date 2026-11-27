@@ -554,6 +554,7 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
         resolver=None,
         cells_kinds=None,
         ref_kinds=None,
+        collect_modules=None,
     ) -> None:
         """Parse ``source`` and record the module info and package.
 
@@ -572,6 +573,7 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
         self._resolver = resolver
         self._cells_kinds = cells_kinds or {}
         self._ref_kinds = ref_kinds or {}
+        self._collect_modules = collect_modules or {}
         self.helper_providers = set()
         self.dense_entries = {}
         self.formula_entries = {}
@@ -845,8 +847,8 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
                               for line in value_storage.py_declarations(self.module.classes[cls_name]))
             if cls_name in self.module.visitor.collect_spaces:
                 self._collect_dots = '.' * self.module.fqname.count('.')
-                generated = collect.hook(original_node, cls_name, sorted(self.module.classes[cls_name].refs),
-                                         dots=self._collect_dots,
+                members, complete = collect.member_specs(original_node, cls_info, self._collect_modules)
+                generated = collect.hook(original_node, cls_name, members, complete, dots=self._collect_dots,
                                          reuse=collect.reuses_items(self.module.visitor, cls_name))
                 if generated is not None:
                     self._collect_hooks = True
