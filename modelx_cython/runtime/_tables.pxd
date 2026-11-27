@@ -345,6 +345,22 @@ cdef Py_ssize_t view_stop(PreparedRef ref, int count, Py_ssize_t c0, Py_ssize_t 
 cdef Py_ssize_t position(Py_ssize_t start, Py_ssize_t stop, Py_ssize_t i) except -2
 cdef Py_ssize_t search(PreparedRef ref, Py_ssize_t start, Py_ssize_t stop, int level, double x, bint right) noexcept
 cdef Py_ssize_t asof_at(PreparedRef ref, Py_ssize_t start, Py_ssize_t stop, int level, double x, int error) except -2
+
+
+cdef inline Py_ssize_t asof_at_ll(PreparedRef ref, Py_ssize_t start, Py_ssize_t stop, int level, long long key) except -2:
+    """The last row at or below a signed integer key, without converting labels to double."""
+    cdef Py_ssize_t lo = start, hi = stop, mid
+    while lo < hi:
+        mid = lo + ((hi - lo) >> 1)
+        if label_ll(ref, mid, level) <= key:
+            lo = mid + 1
+        else:
+            hi = mid
+    if lo == start:
+        raise KeyError(float('nan'))
+    return lo - 1
+
+
 cdef Py_ssize_t named_slot(PreparedRef ref, object label) except -2
 cdef double field_f64(PreparedRef ref, Py_ssize_t row, object label) except? -1.0
 cdef object max_obj(PreparedRef ref)

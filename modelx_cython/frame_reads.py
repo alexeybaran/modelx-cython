@@ -173,7 +173,7 @@ class FrameReads:
     (one dict per read) and ``declined`` why a read of a frame receiver was not."""
 
     def __init__(self, resolver, cls_info, cells, providers, policy, row_names=None, prefix_cells=None,
-                 param_cells=None, *, builtin_int, builtin_zip_walk=False, row_inline=None):
+                 param_cells=None, *, builtin_int, builtin_type=False, builtin_zip_walk=False, row_inline=None):
         self.param_cells = param_cells or {}    # T-5c: cell with parameters -> (names, its `T.loc[key]` expression)
         self.row_names = row_names or {}       # code of an inlined row expression -> its row cell (assignments)
         self.row_inline = row_inline
@@ -181,7 +181,9 @@ class FrameReads:
         self.resolver, self.cls_info, self.cells = resolver, cls_info, cells
         self.providers, self.policy = providers, policy
         self.builtin_int = builtin_int
+        self.builtin_type = builtin_type
         self.builtin_zip_walk = builtin_zip_walk
+        self.ordered_view_type_guard = False
         self.lowered, self.declined = [], []
         self.lowered_nodes = []     # original nodes, including their nested operations
         # what the sample run saw at each table read of this formula, by the text of the node (read_notes.py)
@@ -2422,6 +2424,47 @@ class _Rewrite(cst.CSTTransformer):
         self._record(original, 'L3', view.call)
         return self._guarded(updated, view, test, native, None if o.guards(own) else kind)
 
+    def ordered_view_read(self, original, updated, value, parts):
+        """Read a column at an integer Cell's asof row in the same prepared view."""
+        o = self.o
+        if not o.builtin_type or not isinstance(value.value, cst.Name) or len(parts) != 2:
+            return None
+        view = o.views.get(value.value.value)
+        if view is None or view.schema['levels'][view.depth:] != ('int',):
+            return None
+        label = _literal_str(parts[1])
+        kind = dict(view.schema['columns']).get(label)
+        key = parts[0]
+        if kind not in READ or not (isinstance(key, cst.Call) and len(key.args) == 1
+                and not key.args[0].keyword and not key.args[0].star
+                and _code(key.func) == f'{value.value.value}.index.asof'):
+            return None
+        arg = key.args[0].value
+        if not (isinstance(arg, cst.Call) and isinstance(arg.func, cst.Attribute)
+                and isinstance(arg.func.value, cst.Name) and arg.func.value.value == 'self'
+                and all(not item.keyword and not item.star for item in arg.args)):
+            return None
+        from .cell_entries import exact_receiver
+        from .inline_entries import allows_exact_receiver
+        cls = o.cls_info
+        integer_cell = cls.cells.get(arg.func.attr.value)
+        if (integer_cell is None or not integer_cell._can_bind_native_result
+                or integer_cell.get_rettype_expr(c_style=True) != 'long long'
+                or cls.name in cls.visitor.dynamic_ref_classes
+                or not allows_exact_receiver(o.facts.formula.root, cls.name)):
+            return None
+        ordered = self._take(view.call, view.depth, -3)
+        hold = self._take(view.call, label, COLUMN_KIND[kind])
+        start, stop, ready = self._view_parts(view, ordered)
+        test = self._conjunction([cst.parse_expression(exact_receiver(cls.name)), ready,
+                                  self._native_test(hold, [])])
+        row = self._m('asof_at_ll', o.ref(ordered), start, stop, cst.Integer(str(view.depth)),
+                      self.updated_of.get(id(arg), arg))
+        view.used = o.ordered_view_type_guard = True
+        self._record(key, 'L6', view.call)
+        self._record(original, 'L3', view.call)
+        return self._guarded(updated, view, test, self._column_value(hold, kind, row), kind)
+
     # ------------------------------------------------------------------ T-5: row locals
     def leave_SimpleStatementLine(self, original, updated):
         """``row = R.loc[key]``: the stored row in a C local (KeyError as pandas); the pandas row only when the
@@ -2672,7 +2715,8 @@ class _Rewrite(cst.CSTTransformer):
         if walk is not None:
             return walk
         if isinstance(value, cst.Attribute) and value.attr.value in ('loc', 'at'):
-            read = self.view_read(original, updated, value, parts)
+            read = (self.ordered_view_read(original, updated, value, parts)
+                    or self.view_read(original, updated, value, parts))
             if read is not None:
                 return read
         # T-5c (shape G): P(a).loc[k, "c"], P a prefix cell of parameters: T.loc[(key(a), k), "c"] on its parent

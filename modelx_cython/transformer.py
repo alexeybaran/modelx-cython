@@ -641,8 +641,10 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
         node = held_arrays.lower(node, cls_info, cells, self._held_arrays)
         node = vectors.lower(node, cls_info, cells, scope, self._vector_counter, self.module,
                              self._ref_kinds.get(cls_info.fqname, {}))
+        before_frames = node
         node = self._table_reads_with_row_fields(node, cls_info, cells, builtin_keys)
-        cells.formula_allows_exact_receiver = allows_exact_receiver(node, cls_info.name)
+        exact_scope = before_frames if getattr(cells, 'ordered_view_type_guard', False) else node
+        cells.formula_allows_exact_receiver = allows_exact_receiver(exact_scope, cls_info.name)
         if not self.module.spec.policy.native_math:
             builtin_keys.discard('round')
         self._table_reads_report(cells)
@@ -886,6 +888,7 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
             if frames.row_inline is not None:
                 frames.row_inline.lowered_sites.clear()
             frames.held_string_selector = None
+            frames.ordered_view_type_guard = False
             frames.declined = [{'expression': cells.name, 'receiver': '', 'form': 'pandas',
                                 'reason': f'declined after internal error: {type(error).__name__}: {error}'}]
             import logging
@@ -895,6 +898,7 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
 
     def _table_reads_lowered(self, node, cls_info, cells, builtin_keys, *, row_inline=None):
         cells.table_reads_typed, cells.table_reads_untyped, cells.table_reads_keys = 0, [], []
+        cells.ordered_view_type_guard = False
         if self._resolver is None:
             return node
         if getattr(self.module.spec.policy, 'prepared_tables', False):
@@ -907,10 +911,12 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
             frames = FrameReads(self._resolver, cls_info, cells, self.helper_providers, self.module.spec.policy,
                                 row_names, self._prefix_cells(cls_info),
                                 self._param_prefix_cells(cls_info), builtin_int='int' in builtin_keys,
+                                builtin_type='type' in builtin_keys,
                                 builtin_zip_walk={'zip', 'int', 'float', 'str', 'type'} <= builtin_keys,
                                 row_inline=row_inline)
             node = self._lower_frames(frames, node, cls_info, cells)
             cells.held_string_selector = frames.held_string_selector
+            cells.ordered_view_type_guard = frames.ordered_view_type_guard
             cells.frame_reads = frames.lowered + frames.declined
             # T-5: the pandas fallback of a lowered read runs only when the table cannot answer: not a pandas read
             from modelx_cython.frame_reads import without_fallbacks
