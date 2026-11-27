@@ -2430,7 +2430,7 @@ class _Rewrite(cst.CSTTransformer):
         if not o.builtin_type or not isinstance(value.value, cst.Name) or len(parts) != 2:
             return None
         view = o.views.get(value.value.value)
-        if view is None or view.schema['levels'][view.depth:] != ('int',):
+        if view is None or not view.schema.get('unique') or view.schema['levels'][view.depth:] != ('int',):
             return None
         label = _literal_str(parts[1])
         kind = dict(view.schema['columns']).get(label)
@@ -2454,6 +2454,7 @@ class _Rewrite(cst.CSTTransformer):
                 or not allows_exact_receiver(o.facts.formula.root, cls.name)):
             return None
         ordered = self._take(view.call, view.depth, -3)
+        # Both slots refer to the same prepared table and its sorted rows.
         hold = self._take(view.call, label, COLUMN_KIND[kind])
         start, stop, ready = self._view_parts(view, ordered)
         test = self._conjunction([cst.parse_expression(exact_receiver(cls.name)), ready,

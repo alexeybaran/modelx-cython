@@ -1,6 +1,10 @@
 """An ordered lookup (``searchsorted``, ``asof``) whose argument holds several values is pandas' own and returns an
 array as live; the native lookup takes a single number. A C integer argument needs no test; any other is looked up
 natively only while it is one label at run time."""
+import subprocess
+import sys
+import textwrap
+
 from forms_probe import compare, lowered
 
 FRAMES = {
@@ -16,6 +20,10 @@ CELLS = {
     'typed_key': ('t', 'return 2**53 + t if policy_id < 4 else 2**53 - 1'),
     'view_typed': ('t', 'sub = data.G().loc["A"]\n'
                        'return float(sub.loc[sub.index.asof(typed_key(t)), "q"])'),
+    'view_once': ('t', 'sub = data.G().loc["A"]\n'
+                      'keys = [t, t]\n'
+                      'result = float(sub.loc[sub.index.asof(typed_key(keys.pop())), "q"])\n'
+                      'return result, len(keys)'),
     'search_pop': ('t', 'values = [22.0, np.array([19, 20 + t])] if policy_id >= 3 else [22.0, 18.0 + t]\n'
                        'result = data.T().index.searchsorted(values.pop())\n'
                        'return len(values), str(result)'),
@@ -38,6 +46,41 @@ def test_an_ordered_lookup_of_several_values_is_pandas(tmp_path):
     assert lowered(reads, 'below', 'asof(x)'), reads
     assert lowered(reads, 'typed', 'searchsorted(18 + t)'), reads
     assert lowered(reads, 'view_typed', 'sub.index.asof(self.typed_key(t))'), reads
+    assert lowered(reads, 'view_once', 'sub.index.asof('), reads
     assert not lowered(reads, 'search_pop', 'searchsorted('), reads
     assert not lowered(reads, 'asof_pop', 'asof('), reads
     assert not lowered(reads, 'int_asof_pop', 'asof('), reads
+
+    probe = textwrap.dedent('''\
+        import pandas as pd
+        from probe_nomx import mx_model as exported
+        from probe_nomx_cy import mx_model as compiled
+
+        base = 2**53
+        a, b, c = ("A", base), ("A", base + 1), ("A", base + 3)
+
+        def lookup(model, rows, values, duplicate_columns):
+            fresh = type(model)()
+            index = pd.MultiIndex.from_tuples(rows)
+            frame = pd.DataFrame({"q": values}, index=index)
+            if duplicate_columns:
+                frame = pd.concat([frame, frame], axis=1)
+            fresh.Data.raw_G = frame
+            try:
+                return fresh.P[1].view_once(1)
+            except Exception as error:
+                return type(error).__name__
+
+        cases = [
+            ([a, ("B", base), b, c], [2.0, 100.0, 9.0, 5.0], False),
+            ([c, b, a], [5.0, 9.0, 2.0], False),
+            ([a, c, b], [2.0, 5.0, 9.0], False),
+            ([a, b, b, c], [2.0, 9.0, 8.0, 5.0], False),
+            ([a, b, c], [2.0, 9.0, 5.0], True),
+        ]
+        for case in cases:
+            assert lookup(compiled, *case) == lookup(exported, *case), case
+        assert lookup(compiled, *cases[0]) == (9.0, 1)
+        ''')
+    checked = subprocess.run([sys.executable, '-c', probe], cwd=tmp_path, capture_output=True, text=True)
+    assert checked.returncode == 0, checked.stdout + checked.stderr
