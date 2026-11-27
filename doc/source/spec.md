@@ -183,20 +183,22 @@ the analysis would fall back.
 ## Cache settings
 
 The compiler chooses each Cell's cache from the sample's types and from the
-declared or sampled range of its arguments; none of these settings is
-required, and none follows how often the sample called a Cell.
+declared or sampled range of its arguments. These settings are optional.
 
 A cached Cell whose results are numeric scalars and whose arguments are
 integers gets *dense* storage, an array inside the Space object indexed by
 its arguments, when the range's rectangle has at most `max_dense_entries`
-entries (65,536 by default). Keys of the logical range outside a smaller
-physical window keep exact spill storage. Otherwise numeric keys and results
-use a native hash store and other signatures Python dictionaries.
+entries (65,536 by default). With automatic optimizations enabled and no
+explicit limit, a cache with two or more parameters can also stay dense if
+its rectangle has at most 16 times the entries filled by one receiver in the
+sample. This affects storage selection. Keys in the logical range outside a
+smaller physical window keep exact spill storage. Numeric keys and results
+otherwise use a native hash store. Other signatures use Python dictionaries.
 
 `max_dense_entries`
-: Space or per-cells setting: the dense ceiling, a positive integer. A Cell
-  above it uses the hash store, and the build warns, naming the Cell and its
-  traced range.
+: Space or per-Cell setting: a positive integer limiting automatic dense
+  storage. An explicit limit disables the density exception for that Cell.
+  The build reports the selected storage and the cell's range.
 
 `dense_window`
 : Per-cells setting: half-open `(lower, stop)` physical windows, one per

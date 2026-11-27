@@ -169,10 +169,10 @@ def _store_axes(cell):
 def use_warning(cell):
     """The build warning for a multi-argument Cell put in the hash store because its rectangle exceeds
     the ceiling and DENSE_USE_FACTOR times its use, else None (an explicit max_dense_entries has its own)."""
-    from .automatic import DENSE_USE_FACTOR, dense_by_use, filled_per_receiver, max_dense_entries, \
+    from .automatic import DENSE_USE_FACTOR, dense_by_use, enabled, filled_per_receiver, max_dense_entries, \
         max_dense_entries_set
     if not (len(cell.params) >= 2 and cell.has_typeinfo() and cell.uses_native_numeric_cache
-            and cell.is_int_args) or max_dense_entries_set(cell):
+            and cell.is_int_args and enabled(cell)) or max_dense_entries_set(cell):
         return None
     try:
         ranges, count = _store_axes(cell)
@@ -188,7 +188,8 @@ def use_warning(cell):
 
 def store_reason(cell, cache):
     """Per multi-argument integer-keyed Cell, the store chosen and why (build report)."""
-    from .automatic import DENSE_USE_FACTOR, filled_per_receiver, max_dense_entries, max_dense_entries_set
+    from .automatic import (DENSE_USE_FACTOR, dense_by_use, enabled, filled_per_receiver,
+                            max_dense_entries, max_dense_entries_set)
     ranges, count = _store_axes(cell)
     limit, filled = max_dense_entries(cell), filled_per_receiver(cell)
     use = _use_text(count, filled)
@@ -201,6 +202,10 @@ def store_reason(cell, cache):
         return f'{cache}: {ranges} = {count:,} entries, within {source} {limit:,} but not dense (see hash_reason)'
     if max_dense_entries_set(cell):
         return f'{cache}: {ranges} = {count:,} entries exceeds the explicit max_dense_entries {limit:,}'
+    if not enabled(cell):
+        return f'{cache}: {ranges} = {count:,} entries exceeds the max_dense_entries {limit:,}'
+    if dense_by_use(cell, count):
+        return f'{cache}: {ranges} = {count:,} entries, {use} (see hash_reason)'
     return f'{cache} by use: {ranges} = {count:,} entries, {use} (> {DENSE_USE_FACTOR} x)'
 
 

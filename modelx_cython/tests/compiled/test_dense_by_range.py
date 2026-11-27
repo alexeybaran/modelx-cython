@@ -6,8 +6,11 @@ import json
 import subprocess
 import sys
 import textwrap
+from types import SimpleNamespace
 
 import modelx as mx
+
+from modelx_cython.automatic import dense_allowed
 
 
 def _build(tmp_path, spec, n=400):
@@ -76,6 +79,17 @@ def test_explicit_dense_ceiling_takes_precedence(tmp_path):
     used = cells['used']
     assert used['cache'] == 'native-numeric-keys', used['cache_detail']
     assert 'explicit max_dense_entries 65,536' in used['cache_detail']['store_reason']
+
+
+def test_density_rule_respects_opt_out_and_arity():
+    spec = SimpleNamespace(automatic_optimizations=False)
+    cell = SimpleNamespace(params=('t', 's'), _rt=SimpleNamespace(max_evaluations_per_receiver=40000),
+                           parent=SimpleNamespace(module=SimpleNamespace(spec=spec)))
+    assert not dense_allowed(cell, 160000)
+    spec.automatic_optimizations = True
+    assert dense_allowed(cell, 160000)
+    cell.params = ('t',)
+    assert not dense_allowed(cell, 160000)
 
 
 def test_a_rectangle_within_the_ceiling_is_dense(tmp_path):

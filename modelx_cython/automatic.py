@@ -91,7 +91,7 @@ def filled_per_receiver(cell):
 def dense_by_use(cell, count):
     """Whether a rectangle of ``count`` entries above the ceiling stays dense by use. An explicit
     max_dense_entries (Cell or Space) is a hard limit and is not overridden."""
-    if max_dense_entries_set(cell):
+    if len(cell.params) < 2 or not enabled(cell) or max_dense_entries_set(cell):
         return False
     filled = filled_per_receiver(cell)
     return filled > 0 and count <= DENSE_USE_FACTOR * filled
