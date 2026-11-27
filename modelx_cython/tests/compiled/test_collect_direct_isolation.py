@@ -53,7 +53,7 @@ def compiled_model(tmp_path_factory):
         projection.new_cells("extra", "lambda t: (key, t, data.rates()[key] * t)")
         projection.set_collect(
             over={"key": projection.keys},
-            outputs='lambda: {"individual": {"pv": pv()}, "sum": {"pv": pv()}}',
+            outputs=lambda: {"individual": {"pv": pv()}, "sum": {"pv": pv()}},
         )
         portfolio = model.new_space("Portfolio", refs={"projection": projection})
         portfolio.new_cells("mixed", textwrap.dedent('''\
@@ -79,7 +79,7 @@ def compiled_model(tmp_path_factory):
         tree.new_cells("keys", "lambda: (0, 1, 2, 3)")
         tree.set_collect(
             over={"key": tree.keys},
-            outputs='lambda: {"individual": {"point": Leaf.point()}}',
+            outputs=lambda: {"individual": {"point": Leaf.point()}},
         )
         loose = model.new_space("Loose")
         loose.new_cells("rates", 'lambda: (_ for _ in ()).throw(LookupError("called"))')
@@ -90,13 +90,13 @@ def compiled_model(tmp_path_factory):
             alias.new_cells("read", "lambda: 5")
             getattr(alias, method)(source=alias)
             alias.set_collect(over={"key": alias.keys},
-                              outputs='lambda: {"individual": {"value": source.read()}}')
+                              outputs=lambda: {"individual": {"value": source.read()}})
         relative_cell = model.new_space("RelativeCell", formula="lambda key: None")
         relative_cell.new_cells("keys", "lambda: (0, 1)")
         relative_cell.new_cells("read", "lambda: 5 + key")
         relative_cell.relref(read_cell=relative_cell.read)
         relative_cell.set_collect(over={"key": relative_cell.keys},
-                                  outputs='lambda: {"individual": {"value": read_cell()}}')
+                                  outputs=lambda: {"individual": {"value": read_cell()}})
         dynamic = model.new_space("Dynamic", formula=textwrap.dedent('''\
             def factory(key):
                 return {"refs": {"peer": data if choose is None else choose(key)}}
@@ -104,7 +104,7 @@ def compiled_model(tmp_path_factory):
         dynamic.new_cells("keys", "lambda: (0, 1)")
         dynamic.new_cells("read", "lambda: (peer() if callable(peer) else peer.rates())[key]")
         dynamic.set_collect(over={"key": dynamic.keys},
-                            outputs='lambda: {"individual": {"value": read()}}')
+                            outputs=lambda: {"individual": {"value": read()}})
         nested = model.new_space("NestedFactory", formula="lambda key: None")
         child = nested.new_space("Child", formula=textwrap.dedent('''\
             def factory(offset):
@@ -113,7 +113,7 @@ def compiled_model(tmp_path_factory):
         child.new_cells("read", "lambda: peer()[key + offset]")
         nested.new_cells("keys", "lambda: (0, 1)")
         nested.set_collect(over={"key": nested.keys},
-                           outputs='lambda: {"individual": {"value": Child(0).read()}}')
+                           outputs=lambda: {"individual": {"value": Child(0).read()}})
         if EXPORTS_AUTHORED_INPUTS:
             inputs = model.new_space(
                 "Inputs", formula="lambda key, scen=1: None", refs={"domain": (0, 1)}
@@ -122,7 +122,7 @@ def compiled_model(tmp_path_factory):
             inputs.new_cells("value", "lambda t: key + scen + t")
             inputs.set_collect(
                 over={"key": inputs.keys},
-                outputs='lambda: {"individual": {"value": value(0)}}',
+                outputs=lambda: {"individual": {"value": value(0)}},
             )
             inputs[2, 7].value[0] = 1 << 70
             inputs[2, 7].value[1 << 80] = "authored"

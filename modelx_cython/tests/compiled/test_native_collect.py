@@ -23,10 +23,17 @@ def test_native_records_and_reductions(tmp_path):
         source.new_cells('large', 'lambda: 1 << 62')
         source.new_cells('label', 'lambda: {"kind": "even" if idx % 2 == 0 else "odd"}')
         source.new_cells('forward_months', 'lambda t: range(max(0, 4 - t))')
-        source.set_collect(over={'idx': 'indices'}, outputs=(
-            'lambda: {"individual": {"value": {t: value(t) for t in months}, "count": count(), "label": label()}, '
-            '"sum": {"total": total(), "series": {t: value(t) for t in months}, "count": count(), "large": large(), '
-            '"forward": {t: value(t) for t in forward_months(close)} if shock == -1 else {}}}'))
+
+        def source_outputs():
+            return {
+                'individual': {'value': {t: value(t) for t in months},
+                               'count': count(), 'label': label()},
+                'sum': {'total': total(), 'series': {t: value(t) for t in months},
+                        'count': count(), 'large': large(),
+                        'forward': {t: value(t) for t in forward_months(close)} if shock == -1 else {}},
+            }
+
+        source.set_collect(over={'idx': 'indices'}, outputs=source_outputs)
         use = model.new_space('Use', refs={'Source': source, 'record': None}, formula=textwrap.dedent('''\
             def factory(idx, use_collect):
                 if use_collect:
@@ -51,13 +58,15 @@ def test_native_records_and_reductions(tmp_path):
         varying = model.new_space('Varying', formula='lambda idx: None', refs={'data': datum, 'indices': (0, 1)})
         varying.new_cells('value', 'lambda t: t + idx * 1.0')
         varying.set_collect(over={'idx': 'indices'},
-                            outputs='lambda: {"individual": {"value": {t: value(t) for t in data.axis()}}}')
+                            outputs=lambda: {'individual': {'value': {t: value(t) for t in data.axis()}}})
         opaque = model.new_space('Opaque', formula='lambda idx: None', refs={'indices': (8,), 'values': []})
         opaque.new_cells('payload', 'lambda: values')
         opaque.new_cells('finish', 'lambda: values.append(idx) or 1.0')
         opaque.new_cells('zero', 'lambda: -0.0')
-        opaque.set_collect(over={'idx': 'indices'}, outputs=(
-            'lambda: {"individual": {"payload": payload(), "value": finish()}, "sum": {"zero": zero()}}'))
+        opaque.set_collect(
+            over={'idx': 'indices'},
+            outputs=lambda: {'individual': {'payload': payload(), 'value': finish()}, 'sum': {'zero': zero()}},
+        )
         model.export(tmp_path / 'exported', locked_spaces=['Source', 'Data'])
     finally:
         model.close()

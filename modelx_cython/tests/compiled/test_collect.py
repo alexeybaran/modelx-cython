@@ -86,15 +86,19 @@ def _model(tmp_path):
         total = total + cf(t) / (1.03 ** t)
     return total
 ''')
-        proj.set_collect(over={'key': proj.keys}, outputs='''lambda: {
-    'individual': {'pv': pv()},
-    'sum': {'pv': pv(), 'cfs': {t: cf(t) for t in range(3)}}}''')
+        def outputs():
+            return {
+                'individual': {'pv': pv()},
+                'sum': {'pv': pv(), 'cfs': {t: cf(t) for t in range(3)}},
+            }
+
+        proj.set_collect(over={'key': proj.keys}, outputs=outputs)
         loose_data = model.new_space('LooseData')
         loose_data.new_cells('factor', 'lambda t: 2.0 + t')
         loose = model.new_space('Loose', formula='lambda key: None', refs={'data': loose_data})
         loose.new_cells('keys', 'lambda: (1, 2, 3)')
         loose.new_cells('value', 'lambda: key * data.factor(1)')
-        loose.set_collect(over={'key': loose.keys}, outputs='lambda: {"sum": {"value": value()}}')
+        loose.set_collect(over={'key': loose.keys}, outputs=lambda: {'sum': {'value': value()}})
         book = model.new_space('Book', refs={'proj': proj})
         book.new_cells('total', 'lambda: proj.collect().sum.pv')
         live = {'pv': proj.collect().sum.pv, 'pv2': proj.collect(scen=2).sum.pv,
@@ -207,11 +211,14 @@ def test_reused_items_hold_nothing_from_the_previous_policy(tmp_path):
         total = total + dense(t) / (1.03 ** t)
     return total
 ''')
-        proj.set_collect(over={'key': proj.keys}, outputs='''lambda: {'individual': {
-    'scalar': scalar(), 'count': count(), 'wide': sum(wide(t) for t in range(4000)), 'keyed': keyed('xyz'), 'pv': pv(),
-    'dense': {t: dense(t) for t in range(4)},
-    'only': only() if key == 5 else 0.0,
-    'odd': odd(2) if key % 2 else 0.0}}''')
+        def outputs():
+            return {'individual': {
+                'scalar': scalar(), 'count': count(), 'wide': sum(wide(t) for t in range(4000)),
+                'keyed': keyed('xyz'), 'pv': pv(), 'dense': {t: dense(t) for t in range(4)},
+                'only': only() if key == 5 else 0.0, 'odd': odd(2) if key % 2 else 0.0,
+            }}
+
+        proj.set_collect(over={'key': proj.keys}, outputs=outputs)
         model.export(tmp_path / 'exported')
     finally:
         model.close()
