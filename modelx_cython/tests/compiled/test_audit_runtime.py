@@ -204,7 +204,8 @@ def test_observed_wide_integers_and_buffer_formats_fall_back_to_objects(tmp_path
     model=mx.new_model('ObservedRepresentations')
     try:
         s=model.new_space('Values',refs={'wide':2**80,
-            'points':pd.DataFrame({'rate':[1.5,2.5]}, index=[1,2]), 'np':np,
+            'points':pd.DataFrame({'rate':[1.5,2.5]}, index=[1,2]),
+            'asarray':np.asarray, 'add':np.add,
             'a32':np.array([1.25,2.5],dtype=np.float32),
             'i32':np.array([11,22],dtype=np.int32),
             'swapped':np.array([1.25,2.5],dtype='>f8'),
@@ -219,8 +220,8 @@ def test_observed_wide_integers_and_buffer_formats_fall_back_to_objects(tmp_path
         s.new_cells('reference','lambda: wide')
         s.new_cells('frame','lambda: points.copy()')
         s.new_cells('rate','lambda k: float(frame().loc[k, "rate"])')
-        s.new_cells('index_array','def index_array() -> object:\n    return np.asarray(frame().index)\n')
-        s.new_cells('index_shift','lambda: np.add(frame().index, 10)')
+        s.new_cells('index_array','def index_array() -> object:\n    return asarray(frame().index)\n')
+        s.new_cells('index_shift','lambda: add(frame().index, 10)')
         model.export(tmp_path/'exported')
     finally:model.close()
     compile_model(tmp_path,'from exported import mx_model\ns=mx_model.Values\n'
