@@ -10,6 +10,7 @@ from pathlib import Path
 
 import modelx as mx
 import numpy as np
+import pandas as pd
 from modelx_cython.cli import create_setup
 
 
@@ -203,6 +204,7 @@ def test_observed_wide_integers_and_buffer_formats_fall_back_to_objects(tmp_path
     model=mx.new_model('ObservedRepresentations')
     try:
         s=model.new_space('Values',refs={'wide':2**80,
+            'points':pd.DataFrame({'rate':[1.5,2.5]}, index=[1,2]), 'np':np,
             'a32':np.array([1.25,2.5],dtype=np.float32),
             'i32':np.array([11,22],dtype=np.int32),
             'swapped':np.array([1.25,2.5],dtype='>f8'),
@@ -215,10 +217,15 @@ def test_observed_wide_integers_and_buffer_formats_fall_back_to_objects(tmp_path
         s.new_cells('zero_array','lambda: zero')
         s.new_cells('zero_at','lambda: zero_array()[()]')
         s.new_cells('reference','lambda: wide')
+        s.new_cells('frame','lambda: points.copy()')
+        s.new_cells('rate','lambda k: float(frame().loc[k, "rate"])')
+        s.new_cells('index_array','def index_array() -> object:\n    return np.asarray(frame().index)\n')
+        s.new_cells('index_shift','lambda: np.add(frame().index, 10)')
         model.export(tmp_path/'exported')
     finally:model.close()
     compile_model(tmp_path,'from exported import mx_model\ns=mx_model.Values\n'
         's.echo(2**80);s.echo(-2**80);s.reference();s.zero_at()\n'
+        's.rate(1);s.index_array();s.index_shift()\n'
         'for k in (0,1):s.a32_at(k);s.i32_at(k);s.swapped_at(k);s.native_at(k)\n'
         'import json\n'
         'with open("formats.json","w") as f:json.dump({"swapped_native":s.swapped.dtype.isnative},f)\n')
@@ -230,11 +237,19 @@ def test_observed_wide_integers_and_buffer_formats_fall_back_to_objects(tmp_path
     swapped_type=admission['exported_cy._mx_classes._c_Values._f_swapped_array']['return_type']
     assert swapped_type==('const double[:]' if formats['swapped_native'] else 'object')
     for package in ('exported','exported_cy'):
-        subprocess.run([sys.executable,'-B','-c',f'''from {package} import mx_model
+        subprocess.run([sys.executable,'-B','-c',f'''import pickle
+import numpy as np
+import pandas as pd
+from {package} import mx_model
 s=mx_model.Values
 for value in (2**80,-2**80,2**100):assert s.echo(value)==value
 assert s.reference()==2**80
 assert s.zero_at()==1.25
 assert s.a32_at(1)==s.swapped_at(1)==s.native_at(1)==2.5
 assert s.i32_at(1)==22
+assert s.rate(1)==1.5
+restored=pickle.loads(pickle.dumps(mx_model))
+assert restored.Values.rate(1)==1.5 and restored.Values.rate(2)==2.5
+np.testing.assert_array_equal(s.index_array(),[1,2])
+pd.testing.assert_index_equal(s.index_shift(),pd.Index([11,12]))
 '''],cwd=tmp_path,check=True)

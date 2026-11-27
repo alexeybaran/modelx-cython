@@ -212,11 +212,11 @@ def reset_function(cls_name, block, classes, values):
             f'cdef inline void {reset_root(cls_name)}({cls_name} root) noexcept:\n' + ''.join(lines))
 
 
-def evaluator(workers):
+def evaluator(workers, dots='.'):
     """The module-level function that every collect hook of a module calls."""
     return cst.parse_module(f'''
 def _mx_collect_evaluate(space, coords, outputs_at, refs, reads_parents):
-    from ._mx_collect import Accumulator, prepare_output
+    from {dots}_mx_collect import Accumulator, prepare_output
     import sys
     live = (_mx_sys.BaseMxObject,)
     workers = getattr(space._model, '_mx_collect_workers', {workers!r})

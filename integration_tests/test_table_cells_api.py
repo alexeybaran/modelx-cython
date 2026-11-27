@@ -36,7 +36,6 @@ def build():
 """
 
 CHECKS = """\
-import pickle
 import sys
 from importlib import import_module
 from importlib.machinery import ExtensionFileLoader
@@ -101,11 +100,6 @@ del m.Projection[3]
 assert m.Projection[3] is not item and close(direct(m), base)
 
 if compiled:
-    warmed = Model()
-    assert warmed.Projection[1].sa() == FRAME.loc[1, "sa"]
-    restored = pickle.loads(pickle.dumps(warmed))
-    assert restored.Projection[1].sa() == FRAME.loc[1, "sa"]
-    assert restored.Projection[2].sa() == FRAME.loc[2, "sa"]
     # (4) as upstream: no clear of a Space and no table-cell assignment on a compiled model
     for space in (m.Data, m.Projection):
         for method in ("clear_all", "clear_cells", "clear_items", "clear_at"):

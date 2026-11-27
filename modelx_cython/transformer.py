@@ -1055,8 +1055,9 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
         if self._math_calls:        # native math-module calls compare against the math module
             module = module.with_changes(body=(*module.body, cst.parse_statement(f'{MX_SYS_MOD}._mx_math_init()\n')))
         if getattr(self, '_collect_hooks', False):
+            dots = '.' * self.module.fqname.count('.')
             module = module.with_changes(body=(*module.body, *collect.evaluator(
-                self.module.spec.policy.collect_workers)))
+                self.module.spec.policy.collect_workers, dots)))
         # Dense cache values left unwritten at allocation, installed when the module is imported
         values = ''.join(value_storage.functions(cls) for cls in self.module.classes.values())
         if values:
