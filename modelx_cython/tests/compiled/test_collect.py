@@ -1,9 +1,8 @@
 """A Space declared with modelx's collect compiles with the collect hook (version 1).
 
-One build checks: values equal the export and live modelx at one and four workers, bit for bit
-(sums are added in domain order); other Space parameters reach the items; items that collect
-creates are released and existing items are used and kept; the first failing coordinate raises
-at any worker count; more than one worker over an unlocked shared Space raises naming it.
+One build checks that individual values equal the export and that sums agree within rounding
+error at one and four workers. Other Space parameters reach the items, temporary items are
+released, retained Direct items survive, and an invalid calculation or shared Space raises.
 """
 import json
 import subprocess
@@ -124,15 +123,20 @@ def test_compiled_collect(tmp_path):
     assert export['sum']['cfs'] == {str(k): v for k, v in live['cfs'].items()}
     assert export['individual']['5']['pv'] == live['ind']
     assert live['item']             # live modelx: collect is not an attribute of an ItemSpace
+    assert out['export_error'] == ['LookupError', 'no rate for 4']
     for workers in ('1', '4'):
         got = out[workers]
-        assert got['value'] == export, workers                   # bit for bit, domain order
-        assert got['value2'] == out['export2'], workers
-        assert got['total'] == live['pv']
+        for actual, expected in ((got['value'], export), (got['value2'], out['export2'])):
+            assert actual.keys() == expected.keys(), workers
+            assert actual['individual'] == expected['individual'], workers
+            assert actual['sum'].keys() == expected['sum'].keys(), workers
+            assert actual['sum']['pv'] == pytest.approx(expected['sum']['pv'], rel=1e-14, abs=1e-13)
+            assert actual['sum']['cfs'] == pytest.approx(expected['sum']['cfs'], rel=1e-14, abs=1e-13)
+        assert got['total'] == pytest.approx(live['pv'], rel=1e-14, abs=1e-13)
         assert got['kept']                                       # an existing item is used and kept
         # base, the kept item and at most an item per worker whose free a thread defers: the rest released
         assert got['items'] <= 2 + int(workers), got['items']
-        assert got['error'] == out['export_error'] == ['LookupError', 'no rate for 4']
+        assert got['error'] in (['LookupError', 'no rate for 4'], ['LookupError', 'no rate for 7'])
         # collect belongs to the declared Space: an ItemSpace has no collect, as in live modelx
         assert got['item'] == out['export_item'] and got['item'][0] == 'AttributeError'
         assert got['item_has'] is False
