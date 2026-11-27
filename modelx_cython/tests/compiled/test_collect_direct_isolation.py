@@ -108,7 +108,7 @@ def compiled_model(tmp_path_factory):
         nested = model.new_space("NestedFactory", formula="lambda key: None")
         child = nested.new_space("Child", formula=textwrap.dedent('''\
             def factory(offset):
-                return {"refs": {"peer": data.rates if choose is None else choose(offset)}}
+                return {"refs": {"peer": getattr(data, "rates") if choose is None else choose(offset)}}
             '''), refs={"data": data, "choose": None, "peer": None})
         child.new_cells("read", "lambda: peer()[key + offset]")
         nested.new_cells("keys", "lambda: (0, 1)")
