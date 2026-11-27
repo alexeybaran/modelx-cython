@@ -4,16 +4,16 @@ A Space that declares collect exports a constructor for one coordinate and a met
 ``_mx_sys.collect_from_space``. The compiled hook builds a private ItemSpace for each coordinate.
 Locked Spaces in that tree get their own reentrant lock. The export's ``prepare_output`` detaches
 and validates the outputs before the private item is released. A worker can reset and reuse an
-unescaped item of a Space without child Spaces or dynamic References. The export's ``Accumulator``
-adds the outputs in domain order at any number of workers.
+unescaped item of a Space without child Spaces or dynamic References. Numeric outputs with a
+known layout are written to disjoint native policy slots or worker-local sums. Other outputs
+use the export's ``Accumulator``.
 
 Workers: the spec key ``collect_workers`` (default 1), or ``_mx_collect_workers`` set on the compiled
 model object. Multiple workers use threads on free-threaded Python when shared Space and Cell
 References have locks and the caller does not hold the model lock. Formulas that read ``_model``,
 ``_parent`` or ``_space`` raise a ValueError with multiple workers configured, as do unlocked shared
 References. A named child that can bind References in its own item factory needs synchronous
-evaluation because its bindings arise after the collected item's checks. The accumulator raises the
-first error in domain order at any worker count.
+evaluation because its bindings arise after the collected item's checks.
 """
 import pathlib
 import re
@@ -21,7 +21,7 @@ import textwrap
 
 import libcst as cst
 
-from . import item_roots
+from . import item_roots, native_collect
 from .consts import FORMULA_PREF, MODULE_PREF, MX_SPACE_MOD, SPACE_PREF
 from .syntax import arguments, code, dotted_name, literal_value, same_expression, single_statement, walk
 
@@ -211,7 +211,31 @@ def _private_constructor(item, constructor, initializers, has_formula, aliases):
     return item.body.with_changes(body=body)
 
 
-def hook(class_node, cls_name, members, child_bindings_known, dots='.', fast=True, reuse=False):
+def native_shapes(module):
+    result = {}
+    for node in module.visitor.wrapper.module.body:
+        if not isinstance(node, cst.ClassDef) or node.name.value not in module.visitor.collect_spaces:
+            continue
+        if '_mx_input_items' in module.visitor.input_fields.get(node.name.value, ()):
+            continue
+        info = module.classes.get(node.name.value)
+        if info is None:
+            continue
+        methods = {fn.name.value: fn for fn in node.body.body if isinstance(fn, cst.FunctionDef)}
+        calls = [call for call in map(_collect_call, methods.values()) if call is not None]
+        if len(calls) != 1:
+            continue
+        params = tuple(dotted_name(element.value) for element in calls[0].args[3].value.elements)
+        varying = tuple(name for name, _ in _local_ref_copies(node, 0))
+        if '_mx_apply_formula' in methods:
+            varying += _dynamic_refs(methods['_mx_apply_formula'], tuple(info.refs))
+        if layouts := native_collect.shape(node, info, params, varying):
+            result[node.name.value] = layouts
+    return result
+
+
+def hook(class_node, cls_name, members, child_bindings_known, dots='.', fast=True, reuse=False,
+         native_layouts=None):
     """The compiled detached constructor and hook for a supported exported Space, or None.
 
     With ``fast``, a new item of a Space without child Spaces or roots is built on the typed
@@ -239,6 +263,30 @@ def hook(class_node, cls_name, members, child_bindings_known, dots='.', fast=Tru
         params=lam.params.with_changes(params=(cst.Param(cst.Name('_mx_spare')), *lam.params.params)),
         body=lam.body.with_changes(func=cst.Name('_mx_outputs'),
                                    args=(cst.Arg(cst.Name('_mx_spare')), *lam.body.args)))
+    native_params = ''
+    native_plan = ''
+    gather_fast = gather_tree = ''
+    evaluate_plan = ''
+    if native_layouts is not None:
+        extended = tuple(cst.Param(cst.Name(name), default=cst.parse_expression(default))
+                         for name, default in (('_mx_target', 'None'), ('_mx_pos', '0'), ('_mx_worker', '0')))
+        outputs_at = outputs_at.with_changes(
+            params=outputs_at.params.with_changes(params=(*outputs_at.params.params, *extended)),
+            body=outputs_at.body.with_changes(args=(*outputs_at.body.args, *(cst.Arg(p.name) for p in extended))))
+        native_params = ', _mx_target=None, _mx_pos=0, _mx_worker=0'
+        native_plan = (f'    from {dots}_mx_collect import CollectResult as _mx_result_type\n'
+                       '    _mx_native_plan = None\n'
+                       f'    if type(self) is {cls_name}:\n'
+                       + textwrap.indent(native_collect.plan(native_layouts), '    '))
+        evaluate_plan = ', _mx_native_plan'
+        gather = f'_mx_gather_{cls_name}'
+        gather_fast = (f'                if _mx_target is not None:\n'
+                       f'                    _mx_out = {gather}(_mx_fast, _mx_target, _mx_pos, _mx_worker, '
+                       '_mx_prepare_output, _mx_live_types)\n'
+                       '                else:\n')
+        gather_tree = (f'            if _mx_target is not None:\n'
+                       f'                return {gather}(_mx_cy.cast({cls_name}, _mx_root), '
+                       '_mx_target, _mx_pos, _mx_worker, _mx_prepare_output, _mx_live_types)\n')
     unpack = f'    {code(others)} = _mx_args\n' if others.elements else ''
     apply = ''
     dynamic_refs = ()
@@ -286,7 +334,8 @@ def hook(class_node, cls_name, members, child_bindings_known, dots='.', fast=Tru
             f'{apply}'
             f'                if _mx_spare[2] is not None:\n'
             f'                    _mx_check_collect_bindings(_mx_fast, _mx_spare[2])\n'
-            f'                _mx_out = _mx_prepare_output(_mx_fast.collect_outputs(), _mx_live_types)\n'
+            f'{gather_fast}'
+            f'{"    " if gather_fast else ""}                _mx_out = _mx_prepare_output(_mx_fast.collect_outputs(), _mx_live_types)\n'
             f'{mark_prepared}'
             f'                return _mx_out\n'
             f'            finally:\n'
@@ -306,19 +355,21 @@ def hook(class_node, cls_name, members, child_bindings_known, dots='.', fast=Tru
         f'    from {dots}_mx_collect import prepare_output as _mx_prepare_output\n'
         f'    _mx_live_types = (_mx_sys.BaseMxObject,)\n'
         f'{unpack}'
-        f'    def _mx_outputs(_mx_spare, {params}):\n'
+        f'{native_plan}'
+        f'    def _mx_outputs(_mx_spare, {params}{native_params}):\n'
         f'{built}'
         f'        _mx_root = self._mx_collect_item({params})\n'
         f'        try:\n'
         f'            if _mx_spare[2] is not None:\n'
         f'                _mx_check_collect_bindings(_mx_root, _mx_spare[2])\n'
+        f'{gather_tree}'
         f'            return _mx_prepare_output(_mx_root.collect_outputs(), _mx_live_types)\n'
         f'        finally:\n'
         f'            _mx_release_collect_tree(_mx_root, {aliases!r})\n'
         f'            _mx_root = None\n'
         f'    return _mx_collect_evaluate(self, _mx_coords, {code(outputs_at)},\n'
         f'                                {runtime_members!r}, {child_bindings_known!r},\n'
-        f'                                {apply_formula!r}, {dynamic_refs!r})\n')
+        f'                                {apply_formula!r}, {dynamic_refs!r}{evaluate_plan})\n')
     return _private_constructor(item, build, initializers, apply_formula, aliases), cst.parse_module(source).body
 
 
@@ -508,22 +559,70 @@ def _mx_check_collect_bindings(root, checks):
                 raise _mx_collect_ref_error(name, workers, path, ref)
 
 
-def _mx_collect_evaluate(space, coords, outputs_at, members, child_bindings_known, applies_formula, dynamic_refs):
+def _mx_collect_native_evaluate(coords, outputs_at, checks, workers, plan):
+    result = plan(workers)
+    if workers == 1:
+        spare = [None, None, checks]
+        try:
+            for i, coordinate in enumerate(coords):
+                outputs_at(spare, coordinate, result, i, 0)
+        finally:
+            spare.clear()
+        return result.finish()
+    import threading
+    lock = threading.Lock()
+    state = [0, None]
+    batch = min(16, max(1, len(coords) // (workers * 4)))
+
+    def work(slot):
+        spare = [None, None, checks]
+        try:
+            while True:
+                with lock:
+                    start = state[0]
+                    if start >= len(coords) or state[1] is not None:
+                        return
+                    end = min(start + batch, len(coords))
+                    state[0] = end
+                for i in range(start, end):
+                    outputs_at(spare, coords[i], result, i, slot)
+        except BaseException as error:
+            with lock:
+                if state[1] is None:
+                    state[1] = error
+        finally:
+            spare.clear()
+
+    threads = [threading.Thread(target=work, args=(slot,)) for slot in range(workers)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    if state[1] is not None:
+        raise state.pop()
+    return result.finish()
+
+
+def _mx_collect_evaluate(space, coords, outputs_at, members, child_bindings_known, applies_formula, dynamic_refs, native_plan=None):
     from {dots}_mx_collect import Accumulator
     import sys
     workers = getattr(space._model, '_mx_collect_workers', {workers!r})
     if type(workers) is not int or workers < 1:
         raise ValueError('_mx_collect_workers must be a positive int, not %r' % (workers,))
-    accumulator = Accumulator()
     checks = None
     if workers > 1 and len(coords) > 1:
         checks = _mx_collect_preflight(space, members, workers, dynamic_refs)
     model_lock = getattr(space._model, '_mx_lock', None)
     # A nested item can bind new References after the root's bindings are checked.
     # A locked caller cannot wait for workers that may need its shared lock.
-    if (workers == 1 or len(coords) == 1 or getattr(sys, '_is_gil_enabled', lambda: True)()
-            or not child_bindings_known or (applies_formula and model_lock is None)
-            or (model_lock is not None and getattr(model_lock, '_is_owned', lambda: True)())):
+    synchronous = (workers == 1 or len(coords) == 1 or getattr(sys, '_is_gil_enabled', lambda: True)()
+                   or not child_bindings_known or (applies_formula and model_lock is None)
+                   or (model_lock is not None and getattr(model_lock, '_is_owned', lambda: True)()))
+    if native_plan is not None:
+        return _mx_collect_native_evaluate(coords, outputs_at, checks,
+                                           1 if synchronous else min(workers, len(coords)), native_plan)
+    accumulator = Accumulator()
+    if synchronous:
         spare = [None, None, checks]
         try:
             for c in coords:

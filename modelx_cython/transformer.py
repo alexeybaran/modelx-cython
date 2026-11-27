@@ -629,6 +629,10 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
         from modelx_cython import native_math
         node, lowered = native_math.lower(node, cls_info, cells)
         self._math_calls += lowered
+        if self._native_collect_shapes:
+            node, _ = collect.native_collect.field_reads(
+                node, cls_info, self._native_collect_shapes,
+                self._collect_record_refs.get(cls_info.name, {}), cells)
         return node
 
     @property   # cannot use cached_property in Transformer
@@ -645,6 +649,15 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
         self._held_names = Names(self._module_node)
         self._held_pins = {}
         self._math_calls = 0
+        self._native_collect_shapes = collect.native_shapes(self.module)
+        self._collect_gathers = []
+        self._collect_record_refs = {}
+        if self._native_collect_shapes:
+            self.helper_providers.add(collect.native_collect.PROVIDER)
+            for node in self._module_node.body:
+                if isinstance(node, cst.ClassDef) and node.name.value in self.module.classes:
+                    self._collect_record_refs[node.name.value] = collect.native_collect.bindings(
+                        node, self.module.classes[node.name.value], self._native_collect_shapes)
         return self.wrapper.visit(self)
 
     def _pin_held_item(self, owner, producer):
@@ -709,7 +722,7 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
             module = module.with_changes(body=(*module.body, cst.parse_statement(f'{MX_SYS_MOD}._mx_math_init()\n')))
         if getattr(self, '_collect_hooks', False):
             module = module.with_changes(body=(*module.body, *collect.evaluator(
-                self.module.spec.policy.collect_workers, self._collect_dots)))
+                self.module.spec.policy.collect_workers, self._collect_dots), *self._collect_gathers))
         # Dense cache values left unwritten at allocation, installed when the module is imported
         values = ''.join(value_storage.functions(cls) for cls in self.module.classes.values())
         if values:
@@ -848,11 +861,16 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
             if cls_name in self.module.visitor.collect_spaces:
                 self._collect_dots = '.' * self.module.fqname.count('.')
                 members, child_bindings_known = collect.member_specs(original_node, cls_info, self._collect_modules)
+                native_layouts = self._native_collect_shapes.get(cls_name)
                 generated = collect.hook(original_node, cls_name, members, child_bindings_known,
                                          dots=self._collect_dots,
-                                         reuse=collect.reuses_items(self.module.visitor, cls_name))
+                                         reuse=collect.reuses_items(self.module.visitor, cls_name),
+                                         native_layouts=native_layouts)
                 if generated is not None:
                     self._collect_hooks = True
+                    if native_layouts is not None:
+                        self._collect_gathers.extend(cst.parse_module(
+                            collect.native_collect.gathering(native_layouts, cls_name)).body)
                     constructor, hook = generated
                     body = tuple(
                         stmt.with_changes(body=constructor)
@@ -1040,6 +1058,9 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
 
             meth_name = original_node.name.value
             cls_info = self.module.classes[cls_name]
+
+            if meth_name == '_mx_space_formula' and self._collect_record_refs.get(cls_name):
+                return collect.native_collect.factory_reads(updated_node, cls_info, self._native_collect_shapes)
 
             if meth_name == '__init__':
                 initializers = []

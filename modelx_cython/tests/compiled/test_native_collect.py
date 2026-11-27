@@ -1,0 +1,100 @@
+"""The compiled numeric collector keeps its results native until Python reads them."""
+
+import subprocess
+import sys
+import textwrap
+
+import modelx as mx
+import pytest
+
+
+CollectResult = pytest.importorskip('modelx.export._mx_collect').CollectResult
+
+
+@pytest.mark.skipif(not hasattr(CollectResult, '_from_native'), reason='export without native result support')
+def test_native_records_and_reductions(tmp_path):
+    model = mx.new_model('NativeBook')
+    try:
+        source = model.new_space('Source', formula='lambda idx, close=0, shock=-1: None',
+                                 refs={'indices': (7, 2, 8, 1), 'months': (-1, 2, 6)})
+        source.new_cells('value', 'lambda t: idx * 1.0 + t')
+        source.new_cells('total', 'lambda: idx * 2.0')
+        source.new_cells('count', 'lambda: idx')
+        source.new_cells('large', 'lambda: 1 << 62')
+        source.new_cells('label', 'lambda: {"kind": "even" if idx % 2 == 0 else "odd"}')
+        source.new_cells('forward_months', 'lambda t: range(max(0, 4 - t))')
+        source.set_collect(over={'idx': 'indices'}, outputs=(
+            'lambda: {"individual": {"value": {t: value(t) for t in months}, "count": count(), "label": label()}, '
+            '"sum": {"total": total(), "series": {t: value(t) for t in months}, "count": count(), "large": large(), '
+            '"forward": {t: value(t) for t in forward_months(close)} if shock == -1 else {}}}'))
+        use = model.new_space('Use', refs={'Source': source, 'record': None}, formula=textwrap.dedent('''\
+            def factory(idx, use_collect):
+                if use_collect:
+                    return {'refs': {'record': Source.collect().individual[idx]}}
+                return {'refs': {'record': Source[idx]}}
+            '''))
+        use.new_cells('read', 'lambda t: record.value(t)')
+        use.new_cells('python_read', 'lambda t: getattr(record, "value")(t)')
+        book = model.new_space('Book', refs={'Source': source})
+        book.new_cells('read_total', 'lambda: Source.collect().sum.total')
+        book.new_cells('read_count', 'lambda: Source.collect().sum.count')
+        book.new_cells('read_series', 'lambda t: Source.collect().sum.series[t]')
+        book.new_cells('read_row', 'lambda idx, t: Source.collect().individual[idx].value[t]')
+        book.new_cells('python_row', 'lambda idx: Source.collect().individual[idx]')
+        model.export(tmp_path / 'exported', locked_spaces=['Source'])
+    finally:
+        model.close()
+
+    (tmp_path / 'sample.py').write_text(textwrap.dedent('''\
+        from exported import mx_model as m
+        m.Source.collect()
+        m.Source.collect(1, 0)
+        m.Use[7, True].read(2)
+        m.Use[7, True].python_read(2)
+        m.Use[7, False].read(6)
+        m.Book.read_total()
+        m.Book.read_count()
+        m.Book.read_series(2)
+        m.Book.read_row(8, 6)
+        m.Book.python_row(7)
+        '''), encoding='utf-8')
+    build = subprocess.run([sys.executable, '-m', 'modelx_cython', 'exported', '--sample', 'sample.py', '--no-spec'],
+                           cwd=tmp_path, capture_output=True, text=True)
+    assert build.returncode == 0, build.stdout + build.stderr
+    generated = (tmp_path / 'exported_cy/_mx_classes.py').read_text(encoding='utf-8')
+    for expression in ('_mx_gather__c_Source', '.individual_at(', '.read_individual(', '.read_sum('):
+        assert expression in generated
+
+    child = textwrap.dedent('''\
+        import pickle
+        from exported_cy import mx_model
+        Model = type(mx_model)
+        for workers in (1, 4):
+            model = Model()
+            model._mx_collect_workers = workers
+            result = model.Source.collect()
+            assert result._mx_native is not None
+            assert result._data == {}
+            assert model.Book.read_total() == 36.0
+            assert model.Book.read_count() == 18
+            assert model.Book.read_series(2) == 26.0
+            assert model.Book.read_row(8, 6) == 14.0
+            assert model.Use[7, True].read(2) == model.Use[7, False].read(2) == 9.0
+            assert result._data == {}
+            assert model.Use[7, True].python_read(6) == 13.0
+            assert result._data == {}
+            assert model.Source.collect() is result
+            assert model.Book.python_row(7).value(6) == 13.0
+            assert set(result._data) == {'individual'}
+            assert dict(result.individual[2].value) == {-1: 1.0, 2: 4.0, 6: 8.0}
+            assert result.individual[2].count == 2 and result.individual[2].label['kind'] == 'even'
+            assert result.sum.large == 1 << 64
+            assert dict(model.Source.collect(1).sum.forward) == {0: 18.0, 1: 22.0, 2: 26.0}
+            assert model.Source.collect(1, 0).sum.forward == {}
+            assert pickle.loads(pickle.dumps(result)).sum.total == 36.0
+            result.individual[7].value[6] = 101.0
+            assert model.Use[7, True].read(6) == 101.0
+            assert model.Use[7, False].read(6) == 13.0
+        ''')
+    checked = subprocess.run([sys.executable, '-c', child], cwd=tmp_path, capture_output=True, text=True)
+    assert checked.returncode == 0, checked.stdout + checked.stderr
