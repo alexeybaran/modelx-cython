@@ -61,11 +61,15 @@ def test_native_records_and_reductions(tmp_path):
                             outputs=lambda: {'individual': {'value': {t: value(t) for t in data.axis()}}})
         opaque = model.new_space('Opaque', formula='lambda idx: None', refs={'indices': (8,), 'values': []})
         opaque.new_cells('payload', 'lambda: values')
+        opaque.new_cells('alias', 'def alias():\n    payload_view = values\n    return payload_view\n')
         opaque.new_cells('finish', 'lambda: values.append(idx) or 1.0')
         opaque.new_cells('zero', 'lambda: -0.0')
         opaque.set_collect(
             over={'idx': 'indices'},
-            outputs=lambda: {'individual': {'payload': payload(), 'value': finish()}, 'sum': {'zero': zero()}},
+            outputs=lambda: {
+                'individual': {'payload': payload(), 'alias': alias(), 'value': finish()},
+                'sum': {'zero': zero()},
+            },
         )
         model.export(tmp_path / 'exported', locked_spaces=['Source', 'Data'])
     finally:
@@ -148,7 +152,7 @@ def test_native_records_and_reductions(tmp_path):
             assert model.Use[7, False].read(6) == 13.0
             opaque = model.Opaque.collect()
             assert storage(opaque).native is not None
-            assert opaque.individual[8].payload == [8]
+            assert opaque.individual[8].payload == opaque.individual[8].alias == [8]
             assert math.copysign(1.0, opaque.sum.zero) == -1.0
         model = Model()
         result = model.Varying.collect()

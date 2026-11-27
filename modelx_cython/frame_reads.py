@@ -49,6 +49,8 @@ SEVERAL_ROWS_WHY = 'a key part selects several rows'
 ONLY_RAISED_WHY = 'every evaluation of this place raised in the sample (no evidence of a single-cell read)'
 # kinds of a call's result in the sample (read_notes.kind) that are a single number
 ONE_NUMBER = frozenset(('int', 'float', 'bool'))
+SCALAR_C_TYPES = frozenset(('bint', 'long long', 'double'))
+SCALAR_OPERATORS = (cst.Add, cst.Subtract, cst.Multiply, cst.Divide, cst.FloorDivide, cst.Modulo)
 MUTATORS = frozenset(('__setitem__', '__delitem__', 'update', 'insert', 'pop'))
 # the native reads of a cell value (pandas returns numpy.float64 / numpy.int64 for them)
 VALUE_READS = frozenset(('f64_1', 'f64_c', 'i64_1', 'i64_c', 'f64_row', 'i64_row'))
@@ -616,7 +618,7 @@ class FrameReads:
                     and isinstance(value.func, cst.Attribute) and value.func.attr.value == 'asof'
                     and isinstance(value.func.value, cst.Attribute) and value.func.value.attr.value == 'index'):
                 continue
-            if not self._once(name):
+            if not self._once(name) or not self._repeatable_lookup_args(value):
                 continue
             prefix = self.prefix_receiver(value.func.value.value)
             if prefix is None or len(prefix[2]['levels']) - len(prefix[3]) != 1 or prefix[2]['levels'][-1] != 'int':
@@ -865,6 +867,35 @@ class FrameReads:
             return None
         return name, source, label
 
+    def _repeatable_key(self, expr, *, numeric=False, depth=0):
+        """Whether a key can be evaluated again if a prepared read falls back to pandas."""
+        if depth > 6:
+            return False
+        if isinstance(expr, (cst.Integer, cst.Float)):
+            return True
+        if isinstance(expr, cst.Name):
+            if not numeric or expr.value in ('True', 'False'):
+                return True
+            if (self.facts.param_type(expr.value) in SCALAR_C_TYPES
+                    or expr.value in self.facts._key_locals or expr.value in self.facts.formula.c_long_long):
+                return True
+            value = self._value_of(expr.value)
+            return value is not None and self._repeatable_key(value, numeric=True, depth=depth + 1)
+        if isinstance(expr, cst.Attribute):
+            ref = self.facts.self_ref(expr)
+            c_type = ref.get_type_expr(c_style=True) if ref is not None else None
+            return (c_type in SCALAR_C_TYPES or (not numeric and c_type == 'str')
+                    or self.facts.enum_constant(expr) is not None)
+        if isinstance(expr, cst.UnaryOperation) and isinstance(expr.operator, (cst.Plus, cst.Minus)):
+            return self._repeatable_key(expr.expression, numeric=True, depth=depth + 1)
+        if isinstance(expr, cst.BinaryOperation) and isinstance(expr.operator, SCALAR_OPERATORS):
+            return all(self._repeatable_key(operand, numeric=True, depth=depth + 1)
+                       for operand in (expr.left, expr.right))
+        return not numeric and isinstance(expr, cst.SimpleString)
+
+    def _repeatable_lookup_args(self, call):
+        return all(not arg.star and self._repeatable_key(arg.value) for arg in call.args)
+
     def int_label(self, expr):
         """T-5: ``X.index[i]``, ``X.index.asof(x)``, ``.max()``, ``.min()`` or ``.searchsorted(x)`` of a view or frame
         whose one remaining level is an int level: an integer (key facts). ``X.index[i]`` is one only for a position
@@ -877,6 +908,8 @@ class FrameReads:
                 return False
         elif isinstance(expr, cst.Call) and isinstance(expr.func, cst.Attribute) and expr.func.attr.value in (
                 'asof', 'max', 'min', 'searchsorted'):
+            if expr.func.attr.value in ('asof', 'searchsorted') and not self._repeatable_lookup_args(expr):
+                return False
             index = expr.func.value
         else:
             return False
@@ -1758,6 +1791,9 @@ class _Rewrite(cst.CSTTransformer):
         ``X.index.max()`` / ``.min()`` of a prefix view, and len/list/tuple/set/sorted/min/max of ``X.index``."""
         o = self.o
         func = original.func
+        if (isinstance(func, cst.Attribute) and func.attr.value in ('asof', 'searchsorted')
+                and not o._repeatable_lookup_args(original)):
+            return None
         if isinstance(func, cst.Name) and len(original.args) == 1 and not original.args[0].keyword:
             arg = original.args[0].value
             if isinstance(arg, cst.Call) and o.facts.int_argument(original) is not None:
@@ -1958,10 +1994,11 @@ class _Rewrite(cst.CSTTransformer):
         return why is not None
 
     def _one_number(self, arg):
-        """``(x, tests)`` for the argument of an ordered lookup (asof, searchsorted): the C double the native lookup
-        takes, and the run-time tests before it. An argument Cython types as a C integer needs none; any other is
-        evaluated once and looked up natively only while it is one label (``is_label``): an array, a list or a
-        Series is pandas' own lookup, which returns an array as live does."""
+        """The C double for an ordered lookup and the label check for a non-integer argument.
+
+        An object argument is held for the native lookup. A fallback uses the original expression,
+        so callers must check that the argument can be evaluated again safely.
+        """
         value = self.updated_of.get(id(arg), arg)
         if self.o.facts.is_int(arg) or isinstance(arg, (cst.Integer, cst.Float)):
             return _cast('_mx_cy.double', value), []
@@ -1976,7 +2013,8 @@ class _Rewrite(cst.CSTTransformer):
         o = self.o
         func = call.func
         if not (isinstance(func, cst.Attribute) and func.attr.value == 'asof' and isinstance(func.value, cst.Attribute)
-                and func.value.attr.value == 'index' and len(call.args) == 1 and not call.args[0].keyword):
+                and func.value.attr.value == 'index' and len(call.args) == 1 and not call.args[0].keyword
+                and o._repeatable_lookup_args(call)):
             return None
         view = self._view(func.value.value) if not _text(call.args[0].value) else None
         if view is None or not self._one_level(view) or view.schema['levels'][view.depth] != 'int':
@@ -3028,6 +3066,10 @@ class _Rewrite(cst.CSTTransformer):
         count = view.depth + len(own)
         if (view.start is None and count >= len(levels)) or count > len(levels) or any(map(_several, own)):
             return None         # a complete key on the whole table: L7
+        if (not all(o._repeatable_key(part) for part in own)
+                or runtime is not None and not o._repeatable_key(runtime[0].value)):
+            self._record(original, 'pandas', view.call, 'the key could have side effects if evaluated again')
+            return updated
         view.used = True
         hold = self._take(view.call, _NO_LABEL, -1)
 

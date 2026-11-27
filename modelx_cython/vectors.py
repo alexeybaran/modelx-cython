@@ -4,7 +4,8 @@ A cell whose every traced value is a list of exact floats is a *float vector cel
 its cached value is an ``F64Vec`` (provider ``runtime/_native_vectors``). A list of exact
 int64 integers gives an *integer vector cell* ('I', ``I64Vec``). A cell whose value is a
 non-empty tuple of such lists is a *tuple of vectors* (('T', kinds)): a Python tuple of
-typed vectors. The rule is keyed on the traced values only (``tracer.vector_shape``).
+typed vectors. The traced values determine the shape (``tracer.vector_shape``).
+A formula that returns a borrowed Python list keeps its object representation.
 
 In every formula of a module with vector cells, a local is a vector when every assignment
 to it is a vector expression; it is *owned* (writable) when every assignment allocates.
@@ -91,7 +92,43 @@ def cell_vector_shape(cell):
     ret = cell._rt.ret_type
     if ret.is_array or ret.value_type not in (list, tuple):
         return None
-    return _normal_shape(ret.vector_shape) if ret.vector_shape else None
+    if not ret.vector_shape or _returns_borrowed_list(cell):
+        return None
+    return _normal_shape(ret.vector_shape)
+
+
+def _returns_borrowed_list(cell):
+    visitor = getattr(getattr(cell, 'parent', None), 'visitor', None)
+    if visitor is None:
+        return False
+    formula = visitor.formula_defs.get(cell.cls, {}).get(cell.name)
+    if formula is None:
+        return False
+
+    facts = _Facts()
+    formula.body.visit(facts)
+
+    def borrowed(expr, seen=frozenset()):
+        if isinstance(expr, cst.Name):
+            name = expr.value
+            if name in seen:
+                return False
+            bindings = facts.assigns.get(name)
+            return not bindings or any(item[0] in ('value', 'unpack') and borrowed(item[1], seen | {name})
+                                       for item in bindings)
+        if isinstance(expr, cst.Attribute):
+            return True
+        if isinstance(expr, cst.Subscript):
+            return _index(expr) is not None
+        if isinstance(expr, cst.IfExp):
+            return borrowed(expr.body, seen) or borrowed(expr.orelse, seen)
+        if isinstance(expr, cst.Tuple):
+            return any(borrowed(part.value, seen) for part in expr.elements)
+        return False
+
+    # A private buffer would hide mutations the original list can receive
+    # before its consumer reads or copies it.
+    return any(borrowed(value) for value in facts.returns)
 
 
 CACHE_TYPE = f'{ALIAS}.VecCache'

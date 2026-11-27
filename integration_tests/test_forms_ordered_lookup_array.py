@@ -8,6 +8,19 @@ CELLS = {
     'many': ('t', 'x = np.array([19, 20 + t])\nreturn data.T().index.searchsorted(x).tolist()'),
     'one': ('t', 'x = 18.0 + t if policy_id else None\nreturn int(data.T().index.searchsorted(x))'),
     'below': ('t', 'x = 18.5 + t if policy_id else None\nreturn int(data.T().index.asof(x))'),
+    'typed': ('t', 'return int(data.T().index.searchsorted(18 + t))'),
+    'search_pop': ('t', 'values = [22.0, np.array([19, 20 + t])] if policy_id >= 3 else [22.0, 18.0 + t]\n'
+                       'result = data.T().index.searchsorted(values.pop())\n'
+                       'return len(values), str(result)'),
+    'asof_pop': ('t', 'values = [22.0, 17.0 if policy_id >= 3 else 18.5 + t]\n'
+                     'result = data.T().index.asof(values.pop())\n'
+                     'return len(values), str(result)'),
+    'int_asof_pop': ('t', 'values = [22.0, float("nan") if policy_id >= 3 else 18.5 + t]\n'
+                         'try:\n'
+                         '    result = int(data.T().index.asof(values.pop()))\n'
+                         'except (TypeError, ValueError):\n'
+                         '    result = None\n'
+                         'return len(values), result'),
 }
 
 
@@ -16,3 +29,7 @@ def test_an_ordered_lookup_of_several_values_is_pandas(tmp_path):
     assert not failures, '\n'.join(failures)
     assert lowered(reads, 'one', 'searchsorted(x)'), reads
     assert lowered(reads, 'below', 'asof(x)'), reads
+    assert lowered(reads, 'typed', 'searchsorted(18 + t)'), reads
+    assert not lowered(reads, 'search_pop', 'searchsorted('), reads
+    assert not lowered(reads, 'asof_pop', 'asof('), reads
+    assert not lowered(reads, 'int_asof_pop', 'asof('), reads
