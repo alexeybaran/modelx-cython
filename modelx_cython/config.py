@@ -42,6 +42,8 @@ class CompilerPolicy:
     native_cache_hits: str
     # '# cython: infer_types=True' on generated model modules (spec key infer_types, default on).
     infer_types: bool = True
+    native_math: bool = True
+
     @classmethod
     def resolve(cls, data):
         automatic = data.get('automatic_optimizations', True)
@@ -51,7 +53,7 @@ class CompilerPolicy:
             dense_miss_binding=miss, dense_one_axis=data.get('dense_one_axis', automatic),
             propagate_exact_receiver=data.get('propagate_exact_receiver', automatic and miss),
             native_cache_hits=data.get('native_cache_hits', 'auto' if automatic and miss else 'none'),
-            infer_types=data.get('infer_types', True))
+            infer_types=data.get('infer_types', True), native_math=data.get('native_math', True))
         for name, value in values.items():
             if name != 'native_cache_hits' and type(value) is not bool:
                 raise ValueError(f'{name} must be a boolean')
@@ -120,7 +122,8 @@ class TransSpec:
     The top-level ``"dense_one_axis"`` experiment separates checked and proven
     calls to an existing one-axis dense cache body.
     ``"propagate_exact_receiver"`` carries the receiver fact through those
-    entries and private dense formula calls.
+    entries and private dense formula calls. ``"native_math"`` enables guarded
+    builtin rounding by default.
     ``"infer_types"`` (default true): C type inference (``# cython: infer_types=True``) in
     generated model modules; false keeps Cython's default (no inference of C types for untyped
     locals).

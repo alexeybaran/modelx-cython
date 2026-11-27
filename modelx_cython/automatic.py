@@ -78,9 +78,28 @@ def max_dense_entries(cell):
     return value
 
 
+# Dense slots cost memory for the entire rectangle but avoid hashing on every lookup.
+# Allow denser observed workloads above the default ceiling while respecting explicit limits.
+DENSE_USE_FACTOR = 16
+
+
+def filled_per_receiver(cell):
+    """The most entries of the Cell one receiver filled in the sample (its formula evaluations)."""
+    return getattr(getattr(cell, '_rt', None), 'max_evaluations_per_receiver', 0) or 0
+
+
+def dense_by_use(cell, count):
+    """Whether a rectangle of ``count`` entries above the ceiling stays dense by use. An explicit
+    max_dense_entries (Cell or Space) is a hard limit and is not overridden."""
+    if len(cell.params) < 2 or not enabled(cell) or max_dense_entries_set(cell):
+        return False
+    filled = filled_per_receiver(cell)
+    return filled > 0 and count <= DENSE_USE_FACTOR * filled
+
+
 def dense_allowed(cell, count):
-    """Dense when the rectangle of the declared or sampled range is within the ceiling."""
-    return 0 < count <= max_dense_entries(cell)
+    """Choose dense storage by the ceiling or by observed use above the default ceiling."""
+    return count > 0 and (count <= max_dense_entries(cell) or dense_by_use(cell, count))
 
 
 def dense_count(cell):
@@ -95,13 +114,9 @@ def dense_fits(cell):
 
 
 def primary_capacity(cell):
-    """The initial capacity of a privately owned numeric cache, from the declared or sampled range of its
-    parameters: twice the entries of that range (the table's <= 50% load), a power of two, at most
-    MAX_PRIMARY_ENTRIES; 8 where a parameter has no countable range (a float). The table grows past it."""
-    axes = cell.associative_logical_axes if cell.has_typeinfo() and cell.params else ()
-    if len(axes) != len(cell.params):
-        return 8
-    entries = 1
-    for axis in axes:
-        entries *= max(axis.stop - axis.lower, 1)
-    return min(MAX_PRIMARY_ENTRIES, max(8, 1 << (2 * entries - 1).bit_length()))
+    # Formula evaluations are cache misses, counted per receiver rather than
+    # summed across traced policies. Keep the table's existing <=50% load rule.
+    evaluations = getattr(getattr(cell, '_rt', None), 'max_evaluations_per_receiver', 0)
+    if evaluations <= 0:
+        return 0
+    return min(MAX_PRIMARY_ENTRIES, 1 << (2 * evaluations - 1).bit_length())

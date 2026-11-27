@@ -200,6 +200,7 @@ def create_setup(model_name: str, modules: Sequence[str], setup_file: pathlib.Pa
     from setuptools import setup
     from Cython.Compiler.PyrexTypes import CArrayType, c_int_type
     from modelx_cython.build import cythonize_model, fp_contract_off, package_include_path
+    from modelx_cython.provider_build_cache import provider_build_cache
     import sys
     sys.setrecursionlimit(max(sys.getrecursionlimit(), {recursion_budget}))
 
@@ -226,7 +227,7 @@ def create_setup(model_name: str, modules: Sequence[str], setup_file: pathlib.Pa
             include_path=[package_include_path()],
             compiler_directives={{"freethreading_compatible": True}}
         ),
-        cmdclass=fp_contract_off({{}}, {provider_names!r})
+        cmdclass=fp_contract_off(provider_build_cache({provider_sources!r}), {provider_names!r})
     )
     """)
 
@@ -235,6 +236,7 @@ def create_setup(model_name: str, modules: Sequence[str], setup_file: pathlib.Pa
             model_name=model_name,
             modules_str=modules_str, recursion_budget=recursion_budget,
             cell_sources=cell_sources,
+            provider_sources={f'{model_name}.{path.stem}': path.as_posix() for path in providers},
             provider_names=sorted(f'{model_name}.{path.stem}' for path in providers)),
         encoding="utf-8")
 

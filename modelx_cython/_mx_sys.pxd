@@ -7,6 +7,7 @@ from cpython.object cimport Py_TYPE, PyObject_GenericSetAttr
 from cpython.unicode cimport PyUnicode_Check, PyUnicode_Compare
 from libc.math cimport fabs, copysign
 cimport cython
+from modelx_cython._rounding cimport _mx_round_one, _mx_round_digits
 
 
 cdef inline object _mx_named(object error, str path):

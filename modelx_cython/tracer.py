@@ -151,7 +151,7 @@ class RuntimeCellsInfo:     # TODO: Create base class RuntimeBaseMemberInfo
     max_args: Dict[str, int]
     ret_type: ReturnTypeInfo
 
-    def __init__(self, traces: Sequence[CallTrace]) -> None:
+    def __init__(self, traces: Sequence[CallTrace], receiver_calls=None) -> None:
         """Build merged type information from a method's traces.
 
         Parameters
@@ -159,6 +159,9 @@ class RuntimeCellsInfo:     # TODO: Create base class RuntimeBaseMemberInfo
         traces : sequence of CallTrace
             Non-empty traces of a single cells method; identity fields
             are taken from the first trace.
+        receiver_calls : dict, optional
+            Calls per receiver counted over all traced calls, when the
+            logger kept only the traces that add an observation.
         """
         self.fqname = traces[0].funcname
         self.name = traces[0].func.__name__
@@ -168,6 +171,11 @@ class RuntimeCellsInfo:     # TODO: Create base class RuntimeBaseMemberInfo
         self.min_args = {}
         self.observed_min_args = {}
         self.observed_max_args = {}
+        if receiver_calls is None:
+            receiver_calls = {}
+            for trace in traces:
+                _count_receiver(receiver_calls, trace)
+        self.max_evaluations_per_receiver = max(count for _, count in receiver_calls.values())
         # A call that raised gives its arguments but no return value; a Cell whose every
         # traced call raised keeps them all (its result is then traced as None, as before).
         returned = [trace for trace in traces if not getattr(trace, 'raised', False)] or list(traces)
@@ -262,6 +270,17 @@ class RuntimeCellsInfo:     # TODO: Create base class RuntimeBaseMemberInfo
         for tr in traces:
             merger.add(tr)
         return merger.ret_type
+
+
+def _count_receiver(receiver_calls, trace):
+    """Count a call of ``trace``'s receiver. The receiver is held with its count, as a kept trace
+    would hold it, so that its id is not reused by another receiver while the counts are open."""
+    receiver = trace.arg_vals.get(MX_SELF)
+    entry = receiver_calls.get(id(receiver))
+    if entry is None:
+        receiver_calls[id(receiver)] = [receiver, 1]
+    else:
+        entry[1] += 1
 
 
 # Returns read by value only (type, magnitude): a repeat of one adds nothing to RuntimeCellsInfo
@@ -454,6 +473,8 @@ class RuntimeValueInfo:
                       and not -(1 << 63) <= value < (1 << 63) else type(value))
         self.mx_class = mx_class
         self.is_math = value is math        # the standard math module (native_math.py)
+        from .helper_members import module_helpers
+        self.helper_members = module_helpers(value)
 
     @classmethod
     def init_mxobj(cls, value, module):
@@ -896,8 +917,9 @@ class MxCallTraceLogger(CallTraceLogger):
             name = funcname
             state = self._cached.get(name)
             if state is None:
-                state = self._cached[name] = {}, {}, _ReturnTypeMerger(name, log=False), set(), [None]
-            types, minimums, merger, ret_types, largest = state
+                state = self._cached[name] = {}, {}, _ReturnTypeMerger(name, log=False), {}, set(), [None]
+            types, minimums, merger, receivers, ret_types, largest = state
+            _count_receiver(receivers, trace)
             value, raised = getattr(trace, 'ret_val', None), getattr(trace, 'raised', False)
             keep = _add_arg_vals(types, minimums, trace)
             value_type = type(value)
@@ -970,7 +992,7 @@ class MxCallTraceLogger(CallTraceLogger):
                             and qualname[0][:len(SPACE_PREF)] == SPACE_PREF):
                         continue
                 # Extract cells
-                self.cells_info[k] = info = RuntimeCellsInfo(v)
+                self.cells_info[k] = info = RuntimeCellsInfo(v, self._cached[k][3] if k in self._cached else None)
                 if info.module not in self.modules:
                     self.modules.append(info.module)
 
