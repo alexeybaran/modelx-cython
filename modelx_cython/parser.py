@@ -38,7 +38,7 @@ except ImportError:  # Python -3.9
 from functools import cached_property
 import libcst as cst
 import libcst.matchers as m
-from modelx_cython.syntax import parse_source
+from modelx_cython.syntax import dotted_name, parse_source, walk
 from libcst.metadata import ParentNodeProvider, ScopeProvider, GlobalScope, ClassScope
 
 from modelx_cython.consts import (
@@ -285,6 +285,8 @@ class ModuleVisitor(m.MatcherDecoratableVisitor, ParentScopeAddin):
         self.locked_classes = set()  # classes whose __init__ assigns self._mx_lock
         self.itemspace_classes = set()
         self.collect_spaces = set()  # classes whose __init__ assigns self._mx_collect_cache
+        self.input_fields = {}
+        self.input_cells = {}
         self.dynamic_ref_classes = set()
         # a module just parsed holds no node twice: the wrapper needs no copy of it
         self.wrapper = cst.metadata.MetadataWrapper(parse_source(source), unsafe_skip_copy=True)
@@ -372,6 +374,9 @@ class ModuleVisitor(m.MatcherDecoratableVisitor, ParentScopeAddin):
             if target.value.value == MX_SELF and target.attr.value == "_mx_collect_cache":
                 self.collect_spaces.add(cls_name)
                 return
+            if target.value.value == MX_SELF and target.attr.value in ('_mx_input_values', '_mx_input_items'):
+                self.input_fields.setdefault(cls_name, set()).add(target.attr.value)
+                return
 
             # Assuming all member assignments in __init__ to names without prefix "_" are child spaces
             # TODO: Rewrite to a robuster condition. Make modelx.export output child space list
@@ -433,7 +438,14 @@ class ModuleVisitor(m.MatcherDecoratableVisitor, ParentScopeAddin):
             if original_node.name.value[: len(FORMULA_PREF)] == FORMULA_PREF:
                 # _f_ methods
                 name = original_node.name.value
-                self.formula_defs.setdefault(cls_name, {})[name[len(FORMULA_PREF):]] = original_node
+                cell = name[len(FORMULA_PREF):]
+                self.formula_defs.setdefault(cls_name, {})[cell] = original_node
+                if '_mx_input_values' in self.input_fields.get(cls_name, ()):
+                    statements = original_node.body.body
+                    start = int(original_node.get_docstring() is not None)
+                    if (start < len(statements) and isinstance(guard := statements[start], cst.If)
+                            and any(dotted_name(node) == 'self._mx_input_values' for node in walk(guard.test))):
+                        self.input_cells.setdefault(cls_name, set()).add(cell)
                 if self._is_generator(original_node):
                     self.generator_funcs.setdefault(cls_name, set()).add(name)
                 self._collect_rebinds(cls_name, original_node)

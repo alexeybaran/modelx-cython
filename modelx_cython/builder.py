@@ -213,6 +213,7 @@ class CombinedCellsInfo(LexicalCellsInfo):
         )
         self.parent = cls_info
         visitor = getattr(cls_info, "visitor", None)
+        self.has_authored_inputs = lx_info.name in getattr(visitor, 'input_cells', {}).get(lx_info.cls, ())
         if visitor is not None:
             # True if a _f_<name> formula method exists in the source.
             # Cells that modelx exports as uncached have no _f_ method:
@@ -256,10 +257,11 @@ class CombinedCellsInfo(LexicalCellsInfo):
                         f"numpy array return, but '{self.formula_fqname}' does not "
                         "return one")
             else:
+                reason = ('the Cell can receive authored inputs' if self.has_authored_inputs
+                          else 'no type information was sampled')
                 _logger.warning(
                     f"spec '{TransSpec.RET_T}': '{TransSpec.RET_MEMORYVIEW}' "
-                    f"for '{self.formula_fqname}' is ignored because no type "
-                    "information was sampled")
+                    f"for '{self.formula_fqname}' is ignored because {reason}")
 
     def _given_arg_type(self, arg: str) -> type:
         """Type of parameter ``arg`` before any fallback: as traced."""
@@ -404,11 +406,11 @@ class CombinedCellsInfo(LexicalCellsInfo):
         return self._rt.ret_type.is_array
 
     def has_typeinfo(self):
-        """Return True if runtime type information was traced.
+        """Whether sampled types can specialize the arguments and results.
 
-        False when the sample run never called this cells.
+        Authored inputs can use keys and values the sample did not exercise.
         """
-        return bool(self._rt)
+        return bool(self._rt) and not self.has_authored_inputs
 
     @cached_property
     def model_path(self):

@@ -10,11 +10,13 @@ import textwrap
 
 import modelx as mx
 import pytest
+from modelx.export import exporter
 
 
 pytestmark = pytest.mark.skipif(
     not hasattr(mx.core.space.UserSpace, "set_collect"), reason="modelx without collect"
 )
+EXPORTS_AUTHORED_INPUTS = hasattr(exporter, "ItemInputSnapshot")
 
 
 @pytest.fixture(scope="module")
@@ -75,14 +77,26 @@ def compiled_model(tmp_path_factory):
             over={"key": tree.keys},
             outputs='lambda: {"individual": {"point": Leaf.point()}}',
         )
+        if EXPORTS_AUTHORED_INPUTS:
+            inputs = model.new_space(
+                "Inputs", formula="lambda key, scen=1: None", refs={"domain": (0, 1)}
+            )
+            inputs.new_cells("keys", "lambda: domain")
+            inputs.new_cells("value", "lambda t: key + scen + t")
+            inputs.set_collect(
+                over={"key": inputs.keys},
+                outputs='lambda: {"individual": {"value": value(0)}}',
+            )
+            inputs[2, 7].value[0] = 1 << 70
+            inputs[2, 7].value[1 << 80] = "authored"
         model.export(folder / "exported", locked_spaces=["Data", "Projection", "Portfolio", "Tree"])
     finally:
         model.close()
 
-    (folder / "sample.py").write_text(
-        "from exported import mx_model\nmx_model.Projection.collect()\nmx_model.Tree.collect()\n",
-        encoding="utf-8",
-    )
+    sample = "from exported import mx_model\nmx_model.Projection.collect()\nmx_model.Tree.collect()\n"
+    if EXPORTS_AUTHORED_INPUTS:
+        sample += "mx_model.Inputs.collect(scen=7)\n"
+    (folder / "sample.py").write_text(sample, encoding="utf-8")
     build = subprocess.run(
         [sys.executable, "-m", "modelx_cython", "exported", "--sample", "sample.py", "--no-spec"],
         cwd=folder, capture_output=True, text=True,
@@ -215,6 +229,15 @@ PROBE = textwrap.dedent('''\
         assert model.Portfolio._mx_lock is model._mx_lock
         mixed_cell()
 
+    def authored_inputs():
+        for space in (exported.Inputs, model.Inputs):
+            space.domain = (2,)
+            direct = space[2, 7]
+            assert direct.value(1 << 80) == "authored"
+            assert direct.value(0) == space.collect(scen=7).individual[2].value == 1 << 70
+            assert space[2, 7] is direct
+            assert space[2, 1].value(0) == space.collect(scen=1).individual[2].value == 3
+
     {
         "direct_first": direct_first,
         "collect_first": collect_first,
@@ -223,6 +246,7 @@ PROBE = textwrap.dedent('''\
         "parallel_collect": parallel_collect,
         "parallel_generic": parallel_generic,
         "locked_call": locked_call,
+        "authored_inputs": authored_inputs,
     }[sys.argv[1]]()
     ''')
 
@@ -230,6 +254,9 @@ PROBE = textwrap.dedent('''\
 @pytest.mark.parametrize("case", (
     "direct_first", "collect_first", "mixed_cell", "failed_collect",
     "parallel_collect", "parallel_generic", "locked_call",
+    pytest.param("authored_inputs", marks=pytest.mark.skipif(
+        not EXPORTS_AUTHORED_INPUTS, reason="modelx exporter without authored inputs",
+    )),
 ))
 def test_collect_and_direct_calls_do_not_interfere(compiled_model, case):
     result = subprocess.run(

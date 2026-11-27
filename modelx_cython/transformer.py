@@ -293,6 +293,7 @@ class PXDGenerator:
             decl_stmts.append("cdef dict __dict__\n")
         if cls_name in self.module.visitor.collect_spaces:
             decl_stmts.append("cdef public dict _mx_collect_cache\n")
+        decl_stmts.extend(f'cdef dict {name}\n' for name in sorted(self.module.visitor.input_fields.get(cls_name, ())))
         # What an item holds from shared inputs (holds.HoldTable)
         decl_stmts.extend(holds.pxd_declarations(cls_info))
         for cells in cls_info.cells.values():

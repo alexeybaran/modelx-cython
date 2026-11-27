@@ -63,7 +63,8 @@ def _item_constructor(item):
     """Recognize the detached constructor, including the old export's leading Direct lookup."""
     if not isinstance(item.body, cst.IndentedBlock) or not item.params.params:
         return None
-    args = ', '.join(param.name.value for param in item.params.params[1:])
+    params = item.params.params[1:]
+    args = ', '.join(param.name.value for param in params)
     body = item.body.body
     lookup = single_statement(body[0]) if body else None
     if isinstance(lookup, cst.Assign) and arguments(lookup.value, 'self._mx_itemspaces.get', 1):
@@ -83,19 +84,35 @@ def _item_constructor(item):
         f'    self._mx_assign_params(_mx_s, {args})\n'
         '    _mx_s._mx_roots.extend(self._mx_roots)\n'
         '    _mx_s._mx_roots.append(_mx_root)\n').body
-    if not (same_expression(body[:3], constructor) and body[3:]):
-        return None
-    suffix = body[3:]
     returned = cst.parse_statement('return _mx_root\n')
-    if same_expression(suffix, (returned,)):
-        return args, constructor, False
+    if not same_expression(body[:2], constructor[:2]) or not same_expression(body[-1:], (returned,)):
+        return None
+    build = body[2:-1]
+    if len(build) == 1 and isinstance(protected := build[0], cst.Try):
+        cleanup = cst.parse_statement(
+            'try:\n'
+            '    pass\n'
+            'except BaseException:\n'
+            '    _mx_sys.release_collect_item(_mx_root)\n'
+            '    raise\n')
+        if not same_expression(protected.with_changes(body=cleanup.body), cleanup):
+            return None
+        build = protected.body.body
+    if not same_expression(build[:1], constructor[2:]):
+        return None
+    initialize = build[1:]
     apply = cst.parse_statement(f'_mx_root._mx_apply_formula({args})\n')
-    if same_expression(suffix, (apply, returned)):
-        return args, constructor, True
-    return None
+    has_formula = same_expression(initialize[:1], (apply,))
+    key = f'({args},)' if len(params) == 1 else f'({args})'
+    apply_inputs = cst.parse_statement(f'self._mx_apply_item_inputs(_mx_root, {key})\n')
+    remainder = initialize[has_formula:]
+    has_inputs = same_expression(remainder, (apply_inputs,))
+    if remainder and not has_inputs:
+        return None
+    return args, constructor, initialize, has_formula, has_inputs
 
 
-def _private_constructor(item, constructor, params, apply_formula):
+def _private_constructor(item, constructor, initializers):
     """Give the generic constructor a lock for its private tree before running its formula."""
     base, root, walk = constructor
     lock = cst.parse_module(
@@ -104,9 +121,7 @@ def _private_constructor(item, constructor, params, apply_formula):
         '        _mx_private_lock = _mx_collect_rlock()\n'
         '    _mx_s._mx_lock = _mx_private_lock\n').body
     walk = walk.with_changes(body=walk.body.with_changes(body=(*lock, *walk.body.body)))
-    initialize = code(walk)
-    if apply_formula:
-        initialize += f'_mx_root._mx_apply_formula({params})\n'
+    initialize = ''.join(code(stmt) for stmt in (walk, *initializers))
     body = cst.parse_module(
         f'{code(base)}{code(root)}'
         '_mx_private_lock = None\n'
@@ -133,7 +148,9 @@ def hook(class_node, cls_name, refs, dots='.', fast=True, reuse=False):
     constructor = _item_constructor(item)
     if constructor is None:
         raise ValueError(f'{cls_name[3:]}: unsupported exported Collect item constructor')
-    params, build, apply_formula = constructor
+    params, build, initializers, apply_formula, apply_inputs = constructor
+    if apply_inputs:
+        fast = reuse = False
     call = calls[0]
     others = call.args[3].value
     lam = call.args[2].value
@@ -210,13 +227,14 @@ def hook(class_node, cls_name, refs, dots='.', fast=True, reuse=False):
         f'            _mx_root = None\n'
         f'    return _mx_collect_evaluate(self, _mx_coords, {code(outputs_at)},\n'
         f'                                {tuple(refs)!r}, {_reads_parents(class_node)!r})\n')
-    return _private_constructor(item, build, params, apply_formula), cst.parse_module(source).body
+    return _private_constructor(item, build, initializers), cst.parse_module(source).body
 
 
 def reuses_items(visitor, cls_name):
     """Whether collect reuses one item per worker: a collect Space without dynamic References (whose
     ``__dict__`` is no declared attribute)."""
-    return cls_name in visitor.collect_spaces and cls_name not in visitor.dynamic_ref_classes
+    return (cls_name in visitor.collect_spaces and cls_name not in visitor.dynamic_ref_classes
+            and '_mx_input_items' not in visitor.input_fields.get(cls_name, ()))
 
 
 def reset_root(cls_name):
