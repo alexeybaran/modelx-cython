@@ -87,6 +87,8 @@ def test_native_held_item_uses_exact_type_and_preserves_fallback(tmp_path, monke
     assert 'type(self._v_explicit) is _c_Market' not in source
     assert 'type(self._v_shadowed_market) is _c_Market' not in source
     assert 'type(self._v_overridable) is _c_Market' in source
+    assert ".price(_mx_sys._mx_bare_round_index(" in source
+    assert ".price(_mx_sys._mx_rounded_index(" in source
     report = json.loads((tmp_path / 'exported_cy/_mx_admission.json').read_text(encoding='utf-8'))
     assert report['exported_cy._mx_classes._c_Policy._f_market']['return_type'] == 'object'
     c_source = (tmp_path / 'exported_cy/_mx_classes.c').read_text(encoding='utf-8')

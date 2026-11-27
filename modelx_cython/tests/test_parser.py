@@ -71,13 +71,13 @@ def test_locked_classes():
     assert visitor.kwarg_called_names == set()
 
 
-def test_exported_dynamic_ref_storage():
+def test_exported_collection_and_dynamic_ref_storage():
     source = textwrap.dedent('''\
         class _c_Actual:
-            __slots__ = ("__dict__",)
+            __slots__ = ("__dict__", "_mx_collect_cache")
 
             def __init__(self, parent):
-                pass
+                self._mx_collect_cache = {}
 
         class _c_Static:
             __slots__ = ("name",)

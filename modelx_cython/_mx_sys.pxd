@@ -5,14 +5,48 @@ from cpython.long cimport PyLong_CheckExact
 from cpython.number cimport PyNumber_Index
 from cpython.object cimport Py_TYPE, PyObject_GenericSetAttr
 from cpython.unicode cimport PyUnicode_Check, PyUnicode_Compare
+from modelx_cython._rounding cimport _mx_round_one, _mx_round_digits, _nearest_even
 from libc.math cimport fabs, copysign
-cimport cython
 
 
 cdef inline object _mx_named(object error, str path):
     """``error`` marked as naming the Cell ``path``."""
     error._mx_cell = path
     return error
+
+
+ctypedef unsigned long _mx_native_ulong
+ctypedef unsigned long long _mx_native_ulonglong
+
+ctypedef fused _mx_integer_source:
+    object
+    long long
+    _mx_native_ulong
+    _mx_native_ulonglong
+    double
+
+
+cdef inline long long _mx_round_as_index(object constructor, bint convert, object function,
+                                         _mx_integer_source value, object canonical,
+                                         str path) except? -1:
+    cdef double magnitude
+    if _mx_integer_source is double:
+        magnitude = fabs(value)
+        if (not convert or constructor is int) and canonical is not None and function is canonical and magnitude < 4503599627370496.0:
+            return <long long>copysign(_nearest_even(magnitude, 0.0), value)
+    rounded = _mx_round_one(function, value, canonical)
+    return constructor(rounded) if convert else rounded
+
+
+cdef inline long long _mx_rounded_index(object constructor, object function,
+                                        _mx_integer_source value, object canonical,
+                                        str path) except? -1:
+    return _mx_round_as_index(constructor, True, function, value, canonical, path)
+
+
+cdef inline long long _mx_bare_round_index(object function, _mx_integer_source value,
+                                           object canonical, str path) except? -1:
+    return _mx_round_as_index(None, False, function, value, canonical, path)
 
 
 cdef inline object _mx_integral(object value, str path):
@@ -38,6 +72,21 @@ cdef inline bint _mx_ref_name_is(object name, str expected) except? -1:
 
 cdef inline int _mx_generic_setattr(object receiver, object name, object value) except -1:
     return PyObject_GenericSetAttr(receiver, name, value)
+
+
+cdef inline int _mx_check_enum_schema(object receiver, object owner, tuple bindings) except -1:
+    """Declared model-code bindings are fixed until the model is rebuilt."""
+    cdef object actual = <object>Py_TYPE(receiver)
+    cdef object base, name
+    if actual is owner:
+        return 0
+    for base in actual.__mro__:
+        if base is owner:
+            break
+        for name in bindings:
+            if name in base.__dict__:
+                raise TypeError(f"enum definition {name!r} is fixed in this compiled model; rebuild the model to change it")
+    return 0
 
 
 cdef inline double _mx_pow(double b, double e) except? -1.0:

@@ -1,6 +1,7 @@
 """Emission for ordinary Cells backed by the small numerical key store."""
 import libcst as cst
 
+from .consts import MODULE_PREF, MX_SPACE_MOD, SPACE_PREF
 from .native_sources import module_name
 
 PROVIDER = 'modelx_cython._numeric_cache'
@@ -36,8 +37,10 @@ def constructor(cell):
 
 
 def exclusively_owned(cell):
-    # Items of an exported ItemSpace class are partitioned by the caller.
-    return _supports_private_cache(cell)
+    # A collect partitions its own working roots. A Reference to an ItemSpace
+    # can instead let several workers reach the same persistent item.
+    return (_supports_private_cache(cell)
+            and not getattr(cell.parent, 'collect_shared_item', False))
 
 
 def _supports_private_cache(cell):

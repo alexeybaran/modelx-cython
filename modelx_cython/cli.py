@@ -38,6 +38,8 @@ import dataclasses
 import logging
 import json
 import subprocess
+
+import libcst as cst
 from typing import IO, TYPE_CHECKING, Sequence, Optional, Tuple
 
 from modelx_cython.consts import MX_MODEL_MOD, MX_SPACE_MOD, MX_SYS_MOD
@@ -54,10 +56,9 @@ from modelx_cython.cell_entries import EntryModule
 from modelx_cython.entry_pipeline import lower_entries
 from modelx_cython.scopes import shared_facts
 from modelx_cython.formula_passes import lower_formula_semantics
+from modelx_cython.helpers import install as install_helpers
 from modelx_cython.build import cell_functions, create_setup
 from modelx_cython.syntax import read_literal
-from modelx_cython.native_sources import install as install_native_sources
-import libcst as cst
 
 _logger = logging.getLogger(__name__)
 
@@ -106,7 +107,8 @@ def increment_backups(
             backup_path.rename(next_backup)
 
 
-def run_sample(model_path: pathlib.Path, sample_path: str, new_model_name: str = None) -> MxCallTraceLogger:
+def run_sample(model_path: pathlib.Path, sample_path: str, new_model_name: str = None,
+               *, record_reads: bool = False) -> MxCallTraceLogger:
     """Run the user's sample script while tracing calls into the model.
 
     Temporarily prepends the model's parent directory to ``sys.path``,
@@ -144,7 +146,15 @@ def run_sample(model_path: pathlib.Path, sample_path: str, new_model_name: str =
             logger=logger,
             max_typed_dict_size=0,
             code_filter= MxCodeFilter()):
-            runpy.run_path(sample_path, run_name="__main__")
+            if record_reads:
+                from . import read_notes
+                with read_notes.recording(module):      # what arrives at each table read (decisions from tracing)
+                    runpy.run_path(sample_path, run_name="__main__")
+                logger.read_notes = dict(read_notes.NOTES)
+                logger.read_notes_json = read_notes.as_json()
+                logger.read_notes_by_text = read_notes.by_text()
+            else:
+                runpy.run_path(sample_path, run_name="__main__")
 
     finally:
         assert sys.path.pop(0) == module_path
@@ -296,7 +306,8 @@ def main_handler(args: argparse.Namespace, stdout: IO[str], stderr: IO[str]) -> 
                 raise FileNotFoundError(f"{e}. Add '--no-spec' to omit the spec file.") from e
 
         spec = TransSpec(d)
-        logger = run_sample(orig_path, args.sample, new_model_name=model_name)
+        logger = run_sample(orig_path, args.sample, new_model_name=model_name,
+                            record_reads=spec.policy.prepared_tables)
         rel_model_path = model_path.relative_to(model_path.parent)
 
         modules = [rel_model_path / (MX_SYS_MOD + ".py")]
@@ -335,6 +346,7 @@ def main_handler(args: argparse.Namespace, stdout: IO[str], stderr: IO[str]) -> 
                 m, source, visitor, module_info,
                 abs_src_path, rel_src_path, abs_pxd_path, abs_init_path))
 
+
         # Phase 2: classify cross-module usage of array-returning cells
         # so that get_rettype_expr can fall back to object where needed.
         pairs = [(u.visitor, u.module_info) for u in units]
@@ -360,6 +372,7 @@ def main_handler(args: argparse.Namespace, stdout: IO[str], stderr: IO[str]) -> 
         # not provably of its C type is typed object in the formula.
         module_infos = {u.module_info.fqname: u.module_info for u in units}
         resolver = build_resolver(module_infos)
+        resolver.read_notes = getattr(logger, 'read_notes_by_text', None) or {}
         cells_kinds, ref_kinds = build_kind_maps(module_infos)
         demote_rebound_params(module_infos, resolver, cells_kinds, ref_kinds)
 
@@ -394,17 +407,23 @@ def main_handler(args: argparse.Namespace, stdout: IO[str], stderr: IO[str]) -> 
             u.abs_init_path.write_text("from . cimport _mx_classes", encoding="utf-8")
             modules.append(u.rel_src_path)
 
-        provider_sources = install_native_sources(helper_providers, model_path)
+        if getattr(logger, 'read_notes_by_text', None) is not None:
+            from modelx_cython.frame_reads import audit_subtables
+            audit_subtables(module_infos, translated_modules, resolver)
+
+        provider_sources = install_helpers(helper_providers, model_path)
         modules.extend(provider_sources)
         with shared_facts():    # passes read the facts of formulas they leave unchanged again
             translated_modules = lower_entries(translated_modules, dense_entries, formula_entries, policy)
         cell_sources = {}
         for u in units:
-            with shared_facts():
-                state = lower_formula_semantics(translated_modules[u.fqname], u.module_info,
-                                                infer_types=policy.infer_types)
+            state = lower_formula_semantics(translated_modules[u.fqname], u.module_info,
+                                            infer_types=policy.infer_types)
             from modelx_cython.locked_entries import lower_locked_entries
             state = lower_locked_entries(state, u.module_info)
+            # api-tables (D101a, D103): the last pass, after every pass that looks cells up by name
+            from modelx_cython import table_cells
+            state = state.replace(table_cells.finish(state.syntax, u.module_info))
             translated_modules[u.fqname] = state
             # the printed text must mean the tree the passes built (no dropped parentheses)
             from modelx_cython import reparse_check
@@ -416,6 +435,63 @@ def main_handler(args: argparse.Namespace, stdout: IO[str], stderr: IO[str]) -> 
                      cell_sources=cell_sources, providers=provider_sources)
         report = describe(module_infos)
         (model_path / '_mx_admission.json').write_text(json.dumps(report, indent=2), encoding='utf-8')
+        if policy.prepared_tables:      # T-4 item 0: the read signatures, decided per table when it is prepared
+            signatures = getattr(resolver, 'table_signatures', {})
+            ordered = [key for key, _ in sorted(signatures.items(), key=lambda item: item[1])]
+            (model_path / '_mx_table_signatures.py').write_text(
+                '# Generated: the index and column kinds each fast table read is compiled for, by id (T-4).\n'
+                'SIGNATURES = (\n' + ''.join(f'    {signature!r},\n' for signature in ordered) + ')\n',
+                encoding='utf-8')
+        if policy.prepared_tables:      # T-3: the build report of table reads (doc table_reads.md)
+            from modelx_cython.table_cells import path_of
+            from modelx_cython.table_cells import frame_cell
+            reads = {path_of(cls, cell.name): cell.frame_reads
+                     for info in module_infos.values() for cls in info.classes.values()
+                     for cell in cls.cells.values() if getattr(cell, 'frame_reads', None)}
+            # T-4: the frame cells prepared when their value is computed or assigned (bind); any other frame
+            # read fast is prepared on its first read
+            reads['_prepared_at_bind'] = sorted(
+                path_of(cls, cell.name) for info in module_infos.values() for cls in info.classes.values()
+                if cls.name not in cls.visitor.itemspace_classes
+                for cell in cls.cells.values() if not cell.has_args() and cell.has_formula_def
+                and frame_cell(cls, cell))
+            (model_path / '_mx_table_reads.json').write_text(json.dumps(reads, indent=1, sort_keys=True),
+                                                             encoding='utf-8')
+        if getattr(logger, 'read_notes_by_text', None) is not None:
+            audit = {path_of(cls, cell.name): cell.read_audit
+                     for info in module_infos.values() for cls in info.classes.values()
+                     for cell in cls.cells.values() if getattr(cell, 'read_audit', None)}
+            cells_all = [cell for info in module_infos.values() for cls in info.classes.values() for cell in cls.cells.values()]
+            lowered = sum(1 for cell in cells_all for e in (getattr(cell, 'frame_reads', None) or ()) if 'reason' not in e)
+            unsampled = sum(getattr(cell, 'read_unsampled_lowered', 0) for cell in cells_all)
+            entries = [e for v in audit.values() for e in v]
+            operations = [e for e in entries if e.get('pandas_operation')]
+            reads = [e for e in entries if not e.get('pandas_operation')]
+            audit['_summary'] = {
+                'lowered': lowered, 'lowered_not_reached_by_the_sample': unsampled,
+                'left_on_pandas_per_step': sum(1 for e in reads if e['per_step'] and e['evaluations']),
+                'left_on_pandas_per_policy': sum(1 for e in reads if not e['per_step'] and e['evaluations']),
+                'left_on_pandas_not_reached_by_the_sample': sum(1 for e in reads if not e['evaluations']),
+                'pandas_operations_per_step': sum(1 for e in operations if e['per_step']),
+                'pandas_operations_per_policy': sum(1 for e in operations if not e['per_step'])}
+            (model_path / '_mx_read_audit.json').write_text(json.dumps(audit, indent=1, sort_keys=True), encoding='utf-8')
+            per_step = []
+            for name, found in sorted(audit.items()):
+                if name == '_summary':
+                    continue
+                for entry in found:
+                    if entry['per_step']:
+                        warning = f"{name}: {entry['expression']} ({entry['reason']})"
+                        if entry.get('pandas_operation'):
+                            _logger.warning('pandas operation in a per-step cell: %s', warning)
+                        else:
+                            per_step.append(warning)
+                            _logger.warning('table read left on pandas in a per-step cell: %s', warning)
+            if policy.strict_tables and per_step:
+                raise HandlerError('strict_tables: table reads left on pandas in per-step cells: ' + '; '.join(per_step))
+        if getattr(logger, 'read_notes_json', None) is not None:
+            (model_path / '_mx_read_notes.json').write_text(json.dumps(logger.read_notes_json, indent=1),
+                                                            encoding='utf-8')
 
     if args.translate_only:
         return 0

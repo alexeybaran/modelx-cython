@@ -21,7 +21,7 @@ cdef union Bits:
     word integer
 
 
-# Inline in the pxd so compiled model modules inline the key and value conversions.
+# Inline in the pxd so compiled model modules inline the key and value conversions (D74).
 cdef inline word int_word(long long value) noexcept:
     return <word>value
 

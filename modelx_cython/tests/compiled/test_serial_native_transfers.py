@@ -16,7 +16,7 @@ def test_native_transfers(tmp_path):
         space.new_cells('value', 'lambda t: float(t)')
         space.new_cells('derived', 'lambda t: value(t) + 1.0')
         # Arithmetic probes below exercise the full signed range, short of an intermediate beyond it
-        # (C wraps) and of LLONG_MIN % -1 (C traps).
+        # (C wraps) and of LLONG_MIN % -1 (C traps), as for Cython's integer arithmetic.
         space.new_cells('divisible', 'lambda t, n: t % n == 0', is_cached=False)
         space.new_cells('offset', 'lambda t, n: (t - 1) % n != 0', is_cached=False)
         space.new_cells('periodic', textwrap.dedent('''\
@@ -99,9 +99,9 @@ def test_native_transfers(tmp_path):
                     raise AssertionError('out-of-domain cache index reached the formula')
         for t in (-(1 << 63), -7, 0, 7, (1 << 63) - 1):
             for n in (-(1 << 63), -3, -1, 1, 3):
-                if (t, n) != (-(1 << 63), -1):
+                if not (t == -(1 << 63) and n == -1):
                     assert s.divisible(t, n) == (t % n == 0)
-                if t != -(1 << 63):     # t - 1 leaves the signed range
+                if t != -(1 << 63):
                     assert s.offset(t, n) == ((t - 1) % n != 0)
             for n in (-(1 << 63), -3, -1, 1, 3, 12):
                 for advance in (True, False):

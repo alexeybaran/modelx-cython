@@ -119,7 +119,7 @@ def _bounds(state, layouts, guards, uses, entries):
     guards = {name: guard for name, guard in guards.items() if 0 < len(layouts[name].axes) <= 32}
     ranges = _formula_ranges(state, layouts, guards, uses, entries)
     # Callers whose arguments lie in known axes: a cached Cell's formula, reached inside its dense
-    # window (or behind its own domain test when it checks its spill in the helper), and an
+    # window (or behind its own domain test when it checks its spill in the helper), and (D139b) an
     # uncached Cell's private entry, which tests its arguments against its traced domain once and runs
     # on a proven receiver. Every caller takes the same proofs below.
     callers = []
@@ -430,7 +430,7 @@ def _emit(state, layouts, entries, uses, policy):
             misses[entry] = layout.formula, layout.keys, direct
 
     if hit_layouts:
-        # The private entry of an uncached Cell is a formula on a proven receiver; its reads of
+        # D139: the private entry of an uncached Cell is a formula on a proven receiver; its reads of
         # cached Cells expose their hits as the hoisted formulas' reads do
         for name, fn in state.functions.items():
             origin = state.function_origins.get(name)
@@ -441,7 +441,7 @@ def _emit(state, layouts, entries, uses, policy):
             if expose is not None:
                 body = fn.body.visit(calls(expose=expose))
                 if (domain := domains.get(fn)) is not None:
-                    # The entry's own domain test, as the module pass adds to other formulas
+                    # D139b: the entry's own domain test, as the module pass adds to other formulas
                     body = _with_domain(body, domain)
                 methods[fn] = fn.with_changes(body=body)
 

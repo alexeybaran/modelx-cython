@@ -22,6 +22,7 @@ cells return type or declaring maximum cells parameter sizes.
 """
 
 from typing import Union, Sequence, Mapping
+import os
 from dataclasses import dataclass
 from modelx_cython.consts import (
     FILE_PREF,
@@ -40,10 +41,28 @@ class CompilerPolicy:
     dense_one_axis: bool
     propagate_exact_receiver: bool
     native_cache_hits: str
-    # '# cython: infer_types=True' on generated model modules (spec key infer_types, default on).
+    native_math: bool  # Guarded builtin rounding.
+    # M1 (W1.1, default on since W1.5): '# cython: infer_types=True' on generated model modules.
     infer_types: bool = True
     # the default number of worker threads of a compiled collect() (collect.py)
     collect_workers: int = 1
+    # M1 (W1.3): lower pandas-spelled table reads to typed handle reads (table_reads.py).
+    # On by default since the runtime handles (W1.2) landed (D45).
+    typed_table_reads: bool = True
+    # auto-tables (D104): a plain pandas table that is not admitted, or pandas run on an admitted
+    # table in a per-step cell (class C), stops the build instead of a warning.
+    strict_tables: bool = False
+    # T-3 (toolkit p2/tables/DESIGN.md): the sample runs on the user's frames (no table admission or
+    # substitution); reads of a traced DataFrame or Series are lowered onto a PreparedTable bound to
+    # the real frame (frame_reads.py). False restores the admission of the older table layer.
+    prepared_tables: bool = True
+    # T-4: opt-in check mode: each hold of a prepared table first checks that the frame still equals the copy
+    # prepared when it was bound, and raises if it was edited in place without a clear
+    verify_inputs: bool = False
+    # T-5c: a formula whose table-read lowering raises an internal error is compiled as written (its reads on
+    # pandas) and the build report says so; strict turns that internal error into a build failure (test suites)
+    strict_lowering: bool = False
+
     @classmethod
     def resolve(cls, data):
         automatic = data.get('automatic_optimizations', True)
@@ -53,7 +72,13 @@ class CompilerPolicy:
             dense_miss_binding=miss, dense_one_axis=data.get('dense_one_axis', automatic),
             propagate_exact_receiver=data.get('propagate_exact_receiver', automatic and miss),
             native_cache_hits=data.get('native_cache_hits', 'auto' if automatic and miss else 'none'),
+            native_math=data.get('native_math', True),
             infer_types=data.get('infer_types', True),
+            typed_table_reads=data.get('typed_table_reads', True),
+            strict_tables=data.get('strict_tables', os.environ.get('MX_CY_STRICT_TABLES') == '1'),
+            prepared_tables=data.get('prepared_tables', True),
+            verify_inputs=data.get('verify_inputs', False),
+            strict_lowering=data.get('strict_lowering', os.environ.get('MX_CY_STRICT_LOWERING') == '1'),
             collect_workers=data.get('collect_workers', 1))
         for name, value in values.items():
             if name not in ('native_cache_hits', 'collect_workers') and type(value) is not bool:
@@ -129,10 +154,16 @@ class TransSpec:
     The top-level ``"dense_one_axis"`` experiment separates checked and proven
     calls to an existing one-axis dense cache body.
     ``"propagate_exact_receiver"`` carries the receiver fact through those
-    entries and private dense formula calls.
+    entries and private dense formula calls. ``"native_math"`` enables guarded
+    builtin rounding by default.
     ``"infer_types"`` (default true): C type inference (``# cython: infer_types=True``) in
     generated model modules; false keeps Cython's default (no inference of C types for untyped
     locals).
+    ``"typed_table_reads"`` (default true) allows inlining a row Cell into eligible field reads
+    on the prepared pandas table path.
+    ``"strict_tables"`` (default false, or true when the environment sets
+    ``MX_CY_STRICT_TABLES=1``): a table read that remains on pandas in a cell with arguments
+    stops a prepared-table build with an error instead of a warning.
     ``"native_cache_hits"`` defaults to ``"auto"`` when automatic optimization
     and dense miss binding are enabled. It selects scalar hits and already-proven
     dense hits; explicit alternatives are ``"none"``, ``"scalar"``, ``"dense"``
@@ -231,7 +262,7 @@ class TransSpec:
         """Return ``(tuples, names)`` of the declared lower bounds in force for a Space, with the same
         precedence as :meth:`get_declared_sizes`: ``{parameter tuple: {parameter: lower}}`` and
         ``{parameter name: lower}``. A declaration is a size (lower bound: today's default) or a
-        ``(lower, stop)`` pair; only pairs appear here."""
+        ``(lower, stop)`` pair; only pairs appear here (R-3-lower)."""
         tuples, names = {}, {}
 
         def merge(data):

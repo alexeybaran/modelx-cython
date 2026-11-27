@@ -83,13 +83,14 @@ the GIL disabled in that case.
 (collect)=
 ## Collect
 
-A Space declared with modelx's `Space.set_collect` is exported with a `collect()` method, and the
-compiled Space class takes over its evaluation through the export's collect hook. For each
-coordinate of the domain it builds the ItemSpace, reads its `collect_outputs()`, checks and
-detaches the outputs with the export's own rules, and releases the ItemSpace when collect
-created it; an ItemSpace that already exists is used and kept. The outputs are added in domain
-order, so the result equals live modelx bit for bit at any number of workers, and an error
-raises the exception of the first failing coordinate in domain order.
+A Space declared with modelx's `Space.set_collect` is exported with a `collect()` method. The
+compiler evaluates each coordinate in a private ItemSpace and releases it after the outputs have
+been validated and detached. Direct calls keep their own ItemSpaces and cached values.
+
+For supported numeric layouts, the compiled collector writes individual values into native
+storage and adds numeric sums in worker-local slots. Parallel floating-point sums can differ
+from the exported result by rounding, and parallel native evaluation can report the first
+failure encountered by any worker. The generic path uses modelx's accumulator in domain order.
 
 The number of worker threads is the spec key `collect_workers` (default 1), and at run time
 the attribute `_mx_collect_workers` of the compiled model object, which overrides it:
@@ -100,13 +101,11 @@ mx_model._mx_collect_workers = 4
 total = mx_model.Book.total()      # a Cells that calls Projection.collect()
 ```
 
-The threads run at the same time only on free-threaded Python; with the GIL, several workers
-compute the coordinates one after another on one thread, with the same values and errors.
-More than one worker requires every Space the collected ItemSpaces read to be locked: a
-Reference of the collect Space to a Space that is not locked, or a formula of the collect Space
-that reads `_model`, `_parent` or `_space`, raises `ValueError` naming it before any coordinate
-is computed, on every interpreter build, with or without the GIL. A model satisfies it by
-exporting those Spaces in `locked_spaces`, as above. One worker always runs.
+Workers run concurrently on free-threaded Python. With the GIL enabled, evaluation runs on
+the caller's thread. When multiple workers are configured for multiple coordinates, a
+Reference to an unlocked shared Space or one of its bound Cells raises `ValueError` on every
+interpreter build. Formulas that read `_model`, `_parent` or `_space` also raise under that
+configuration. Shared Spaces can be exported in `locked_spaces` as above.
 
 `collect()` belongs to the declared Space. Its ItemSpaces have no `collect`, in live modelx, in
 the export and in the compiled model alike: reading it raises `AttributeError`.

@@ -43,7 +43,9 @@ import pathlib
 import random
 import numbers
 import operator
+import enum
 import itertools
+from enum import IntEnum
 from dataclasses import dataclass
 from contextlib import contextmanager
 from types import CodeType, FrameType, MemberDescriptorType
@@ -104,6 +106,44 @@ class ReturnTypeInfo:
     value_type: type
     is_array: bool = False
     ndim: int = 0
+    vector_shape: object = None     # vector cells: see vector_shape()
+
+
+def vector_shape(val):
+    """The vector shape of a traced value (vector cells, ``vectors.py``).
+
+    'V' for a list of exact floats, 'I' for a list of exact ints within int64,
+    'E' for an empty list (either), ('T', kinds) for a non-empty tuple of such
+    lists, else None. Keyed on the value only.
+    """
+    if type(val) is list:
+        if not val:
+            return 'E'
+        if all(type(x) is float for x in val):
+            return 'V'
+        if all(type(x) is int and -(1 << 63) <= x < (1 << 63) for x in val):
+            return 'I'
+        return None
+    if type(val) is tuple and val:
+        kinds = tuple(vector_shape(x) if type(x) is list else None for x in val)
+        return ('T', kinds) if None not in kinds else None
+    return None
+
+
+def merge_vector_shapes(a, b):
+    """The shape both traced shapes fit, else None ('E' fits 'V' and 'I')."""
+    if a == b:
+        return a
+    if isinstance(a, tuple) and isinstance(b, tuple):
+        if len(a[1]) != len(b[1]):
+            return None
+        kinds = tuple(merge_vector_shapes(x, y) for x, y in zip(a[1], b[1]))
+        return ('T', kinds) if None not in kinds else None
+    if a == 'E' and b in ('V', 'I'):
+        return b
+    if b == 'E' and a in ('V', 'I'):
+        return a
+    return None
 
 
 class RuntimeCellsInfo:     # TODO: Create base class RuntimeBaseMemberInfo
@@ -151,7 +191,7 @@ class RuntimeCellsInfo:     # TODO: Create base class RuntimeBaseMemberInfo
     max_args: Dict[str, int]
     ret_type: ReturnTypeInfo
 
-    def __init__(self, traces: Sequence[CallTrace]) -> None:
+    def __init__(self, traces: Sequence[CallTrace], receiver_calls=None) -> None:
         """Build merged type information from a method's traces.
 
         Parameters
@@ -159,6 +199,9 @@ class RuntimeCellsInfo:     # TODO: Create base class RuntimeBaseMemberInfo
         traces : sequence of CallTrace
             Non-empty traces of a single cells method; identity fields
             are taken from the first trace.
+        receiver_calls : dict, optional
+            Calls per receiver counted over all traced calls, when the
+            logger kept only the traces that add an observation.
         """
         self.fqname = traces[0].funcname
         self.name = traces[0].func.__name__
@@ -168,7 +211,13 @@ class RuntimeCellsInfo:     # TODO: Create base class RuntimeBaseMemberInfo
         self.min_args = {}
         self.observed_min_args = {}
         self.observed_max_args = {}
-        # A call that raised gives its arguments but no return value; a Cell whose every
+        self.enum_args = {}         # argument -> (module, qualname, member count) of its IntEnum
+        if receiver_calls is None:
+            receiver_calls = {}
+            for trace in traces:
+                _count_receiver(receiver_calls, trace)
+        self.max_evaluations_per_receiver = max(count for _, count in receiver_calls.values())
+        # D111: a call that raised gives its arguments but no return value; a Cell whose every
         # traced call raised keeps them all (its result is then traced as None, as before).
         returned = [trace for trace in traces if not getattr(trace, 'raised', False)] or list(traces)
         arrays = [trace.ret_val for trace in returned if isinstance(trace.ret_val, np.ndarray)]
@@ -178,8 +227,14 @@ class RuntimeCellsInfo:     # TODO: Create base class RuntimeBaseMemberInfo
             and array.dtype in (np.dtype('float64'), np.dtype('int64'))
             for array in arrays)) if arrays else True
         self.has_negative_args = False
+        values = [float(trace.ret_val) for trace in returned
+                  if isinstance(trace.ret_val, (int, float, np.integer, np.floating))
+                  and not isinstance(trace.ret_val, (bool, np.bool_))]
+        values = [value for value in values if value == value]
+        self.max_ret_value = max(values) if values else None   # param_bound_checks margin
         self._init_arg_types(traces)
         self.ret_type = self._init_ret_type(returned)
+        self.frame_schema = frame_schema(returned)
 
     def has_args(self):
         """Return whether the cells method takes arguments.
@@ -234,6 +289,7 @@ class RuntimeCellsInfo:     # TODO: Create base class RuntimeBaseMemberInfo
                     self.arg_types[arg] = tp
                     if issubclass(tp, numbers.Integral):
                         self.max_args[arg] = val
+                        self._widen_to_enum(arg, tp)
                     break
             elif all(issubclass(tp, numbers.Integral) for tp in type_val.keys()):
                 self.arg_types[arg] = numbers.Integral
@@ -250,6 +306,23 @@ class RuntimeCellsInfo:     # TODO: Create base class RuntimeBaseMemberInfo
 
                 self.arg_types[arg] = object
 
+    def _widen_to_enum(self, arg, tp):
+        """An argument whose every traced value is a member of one IntEnum class can take any
+        member: its domain is the class's member values, not the members the sample used."""
+        if not (issubclass(tp, enum.IntEnum) and '<locals>' not in tp.__qualname__):
+            return
+        values = [int(member) for member in tp]
+        if not values or not all(-(1 << 63) <= v < (1 << 63) for v in values):
+            return
+        low, high = min(values), max(values)
+        self.max_args[arg] = max(self.max_args[arg], high)
+        self.min_args[arg] = min(self.min_args.get(arg, 0), low)
+        self.observed_min_args[arg] = min(self.observed_min_args.get(arg, low), low)
+        self.observed_max_args[arg] = max(self.observed_max_args.get(arg, high), high)
+        if low < 0:
+            self.has_negative_args = True
+        self.enum_args[arg] = (tp.__module__, tp.__qualname__, len(values))
+
     def _init_ret_type(self, traces):
         """Merge observed return types into one ReturnTypeInfo,
         widening or falling back to ``object`` as described in the
@@ -264,10 +337,19 @@ class RuntimeCellsInfo:     # TODO: Create base class RuntimeBaseMemberInfo
         return merger.ret_type
 
 
+def _count_receiver(receiver_calls, trace):
+    """Count a call of ``trace``'s receiver. The receiver is held with its count, as a kept trace
+    would hold it, so that its id is not reused by another receiver while the counts are open."""
+    receiver = trace.arg_vals.get(MX_SELF)
+    entry = receiver_calls.get(id(receiver))
+    if entry is None:
+        receiver_calls[id(receiver)] = [receiver, 1]
+    else:
+        entry[1] += 1
+
+
 # Returns read by value only (type, magnitude): a repeat of one adds nothing to RuntimeCellsInfo
 _PLAIN_RETURNS = frozenset((int, float, bool, str, type(None), np.float64, np.float32, np.int64, np.int32, np.bool_))
-# Plain returns without a largest value
-_UNORDERED_RETURNS = frozenset((bool, np.bool_, str, type(None)))
 
 
 def _add_arg_vals(arg_type_val: Dict[str, Dict[type, Any]], minimums, trace) -> bool:
@@ -375,10 +457,12 @@ class _ReturnTypeMerger:
                 except (TypeError, ValueError, OverflowError):
                     self._integral_double_exact = False
                 changed = not self._integral_double_exact
-            if (last_tp is not None and last_tp.value_type == value_type
+            # a list or tuple carries a vector shape (vector_shape) the merge below compares
+            if (last_tp is not None and last_tp.value_type == value_type and value_type is not list
+                    and value_type is not tuple
                     and last_tp.is_array == False and last_tp.ndim == 0):     # noqa: E712 (as ==)
                 return changed      # the merged type stays: ``last_tp == tp`` below
-            tp = ReturnTypeInfo(value_type)
+            tp = ReturnTypeInfo(value_type, vector_shape=vector_shape(val))
 
         if last_tp is None:
             self.ret_type = tp
@@ -386,6 +470,13 @@ class _ReturnTypeMerger:
             return True
         if last_tp == tp:
             return changed
+        if (last_tp.value_type is tp.value_type and not tp.is_array and not last_tp.is_array
+                and last_tp.vector_shape != tp.vector_shape):
+            shape = merge_vector_shapes(last_tp.vector_shape, tp.vector_shape)
+            if shape == last_tp.vector_shape:
+                return changed
+            last_tp.vector_shape = shape
+            return True
 
         before = (last_tp.value_type, last_tp.is_array, last_tp.ndim)
         logged = False
@@ -454,6 +545,17 @@ class RuntimeValueInfo:
                       and not -(1 << 63) <= value < (1 << 63) else type(value))
         self.mx_class = mx_class
         self.is_math = value is math        # the standard math module (native_math.py)
+        from .helper_members import module_helpers
+        self.helper_members = module_helpers(value)
+        self.enum_safe = (isinstance(value, type) and issubclass(value, IntEnum)
+                          and type(value) is type(IntEnum)
+                          and value.__eq__ is int.__eq__ and value.__ne__ is int.__ne__
+                          and all(getattr(value, m) is getattr(IntEnum, m)
+                                  for m in ('__str__', '__format__', '__repr__', '__hash__')))
+        self.enum = ((value.__module__, value.__qualname__,
+                      {name: int.__int__(member) for name, member in value.__members__.items()})
+                     if isinstance(value, type) and issubclass(value, IntEnum)
+                     and '<locals>' not in value.__qualname__ else None)
 
     @classmethod
     def init_mxobj(cls, value, module):
@@ -568,6 +670,57 @@ def instance_attrs(obj: Any) -> Iterator[tuple]:
                 pass
 
 
+def _frame_schema(value):
+    """The schema of one pandas DataFrame or Series (see ``frame_schema``), or None."""
+    modules = {klass.__module__.split('.')[0] for klass in type(value).__mro__}
+    if 'pandas' not in modules:
+        return None
+    names = {klass.__name__ for klass in type(value).__mro__}
+    if 'DataFrame' in names:
+        kind, columns = 'frame', tuple((label, _column_kind(value[label].dtype) if
+                                         list(value.columns).count(label) == 1 else 'obj')
+                                        for label in value.columns)
+    elif 'Series' in names:
+        kind, columns = 'series', ((None, _column_kind(value.dtype)),)
+    else:
+        return None
+    index = value.index
+    levels = tuple('int' if getattr(level, 'dtype', None) is not None and level.dtype.kind in 'iu' else 'obj'
+                   for level in (index.levels if index.nlevels > 1 else (index,)))
+    names = tuple(index.names) if all(isinstance(n, (str, int, type(None))) for n in index.names) else None
+    return {'kind': kind, 'levels': levels, 'unique': bool(index.is_unique), 'columns': columns, 'names': names}
+
+
+def _column_kind(dtype):
+    return {'float64': 'f64', 'int64': 'i64'}.get(str(dtype), 'obj')
+
+
+def frame_schema(traces):
+    """T-3: the schema of a traced pandas DataFrame or Series result, or None.
+
+    ``{'kind': 'frame'|'series', 'levels': ('int'|'obj', ...), 'unique': bool, 'columns': ((label,
+    'f64'|'i64'|'obj'), ...)}`` (a Series has one column, labelled None). The compiler lowers reads onto a
+    PreparedTable from it (frame_reads.py); the frame itself is never replaced. None when a traced value is not
+    a pandas frame or Series, or when the traced values disagree (a column kind or level kind differs; a
+    column present in one only is dropped, so its reads stay pandas).
+    """
+    schema = None
+    for trace in traces or ():
+        found = _frame_schema(trace.ret_val)
+        if found is None:
+            return None
+        if schema is None:
+            schema = found
+            continue
+        if found['kind'] != schema['kind'] or found['levels'] != schema['levels']:
+            return None
+        mine = dict(found['columns'])
+        schema = dict(schema, unique=schema['unique'] and found['unique'],
+                      names=schema.get('names') if schema.get('names') == found.get('names') else None,
+                      columns=tuple((label, kind) for label, kind in schema['columns'] if mine.get(label) == kind))
+    return schema
+
+
 class MxCallTracer(CallTracer):
     """Add return_value to CallTrace
 
@@ -666,7 +819,7 @@ class MxCallTracer(CallTracer):
             if last_opcode in ret_opcodes:
                 trace.ret_val = arg
             else:
-                trace.raised = True     # unwound by an exception: no return value
+                trace.raised = True     # unwound by an exception: no return value (D111)
 
             # Extract and store local variables
             # code = frame.f_code
@@ -746,6 +899,12 @@ def is_uncached_cells_code(code: CodeType) -> bool:
         ``_mx_model.py`` module.
     """
     name = code.co_name
+    names = code.co_names
+    # Exported Collect accessors expose the scheduler and are not Cells. The
+    # reserved references also identify the older exported adapter method.
+    if ('_mx_collect_run' in names and '_mx_roots' in names
+            or '_mx_collect_cache' in names and 'collect_from_space' in names):
+        return False
     qualname = getattr(code, "co_qualname", None)   # Python 3.11+
     if qualname is not None:
         # a method defined directly in a space class
@@ -758,7 +917,7 @@ def is_uncached_cells_code(code: CodeType) -> bool:
         and not code.co_flags & inspect.CO_NESTED
         and code.co_argcount >= 1
         and code.co_varnames[0] == MX_SELF
-        and FORMULA_PREF + name not in code.co_names
+        and FORMULA_PREF + name not in names
     )
 
 
@@ -865,24 +1024,20 @@ class MxCallTraceLogger(CallTraceLogger):
         self.modules = []
         self.param_info = {}  # class name -> {param: RuntimeParamInfo}
         self._assigned_params = {}
-        self._funcnames = {}    # traced function -> its fully qualified name
 
     def log(self, trace: CallTrace) -> None:
         """Log a single call trace.
 
         Retain only the traces that contribute an argument or return
-        observation. A cached trace is kept as well when
+        observation. Cached formula calls also count their calls per
+        receiver, for cache sizing. A cached trace is kept as well when
         its result is not a plain scalar (arrays, frames, tables and
         other objects are read trace by trace), when its result type is
         new, or when it raises the largest scalar result, so that
         :class:`RuntimeCellsInfo` derives from the kept traces exactly
         what it derives from all of them.
         """
-        func = trace.func
-        name = func.__name__
-        funcname = self._funcnames.get(func)
-        if funcname is None:
-            funcname = self._funcnames[func] = trace.funcname
+        name = trace.func.__name__
         if name == "_mx_assign_params":
             values = iter(trace.arg_vals.items())
             _, target = next(values)
@@ -893,22 +1048,22 @@ class MxCallTraceLogger(CallTraceLogger):
             params = getattr(sys.modules[cls.__module__], SPACE_PARAMS + "_" + cls.__name__[len(SPACE_PREF):])
             self._record_params(target, ((param, getattr(source, param)) for param in params))
         elif name.startswith(FORMULA_PREF) or name in (MX_ASSIGN_REFS, "__call__"):
-            name = funcname
+            name = trace.funcname
             state = self._cached.get(name)
             if state is None:
-                state = self._cached[name] = {}, {}, _ReturnTypeMerger(name, log=False), set(), [None]
-            types, minimums, merger, ret_types, largest = state
+                state = self._cached[name] = {}, {}, _ReturnTypeMerger(name, log=False), {}, set(), [None]
+            types, minimums, merger, receivers, ret_types, largest = state
+            _count_receiver(receivers, trace)
             value, raised = getattr(trace, 'ret_val', None), getattr(trace, 'raised', False)
             keep = _add_arg_vals(types, minimums, trace)
-            value_type = type(value)
-            if value_type not in ret_types:
-                ret_types.add(value_type)
+            if type(value) not in ret_types:
+                ret_types.add(type(value))
                 keep = True
-            if value_type not in _PLAIN_RETURNS:
+            if type(value) not in _PLAIN_RETURNS:
                 keep = True
             elif not raised:
                 keep = merger.add(trace) or keep
-                if value_type not in _UNORDERED_RETURNS and value == value:
+                if type(value) not in (bool, np.bool_, str, type(None)) and value == value:
                     try:
                         value = float(value)
                     except OverflowError:
@@ -918,7 +1073,7 @@ class MxCallTraceLogger(CallTraceLogger):
             if keep:
                 self._traces.setdefault(name, []).append(trace)
         else:
-            name = funcname
+            name = trace.funcname
             state = self._kept.get(name)
             if state is None:
                 state = self._kept[name] = {}, {}, _ReturnTypeMerger(name, log=False)
@@ -970,7 +1125,7 @@ class MxCallTraceLogger(CallTraceLogger):
                             and qualname[0][:len(SPACE_PREF)] == SPACE_PREF):
                         continue
                 # Extract cells
-                self.cells_info[k] = info = RuntimeCellsInfo(v)
+                self.cells_info[k] = info = RuntimeCellsInfo(v, self._cached[k][3] if k in self._cached else None)
                 if info.module not in self.modules:
                     self.modules.append(info.module)
 

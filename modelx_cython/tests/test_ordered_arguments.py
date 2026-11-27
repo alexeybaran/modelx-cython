@@ -84,8 +84,38 @@ def test_native_return_keeps_existing_cython_conversion_boundary():
     assert cst.Module(body=(result,)).code == source
 
 
+def test_extrema_in_object_scopes_stay_the_builtin_call():
+    """min/max in object-result scopes call the built-in (the selected operand keeps its class);
+    a native-result Cell keeps Cython's intrinsic, as before."""
+    from types import SimpleNamespace
+    from modelx_cython.powers import OperandKind, KIND_FLOAT, KIND_INT
+    kinds = OperandKind(None, {}, {}, '', {'x': KIND_FLOAT, 'y': KIND_FLOAT, 'i': KIND_INT})
+
+    def lowered(source, native_result=False):
+        cells, providers = SimpleNamespace(), set()
+        node = preserve_argument_order(cst.parse_module(source).body[0], native_result=native_result,
+                                       operand_kind=kinds, cells=cells, providers=providers, math_refs={'math'})
+        return cst.Module(body=(node,)).code, cells, providers
+
+    code, cells, providers = lowered('def formula(x, y):\n    return max(0.0, x, y)\n')
+    assert 'max(*(0.0, x, y))' in code and not providers
+    assert [(e['form'], e['line']) for e in cells.minmax_untyped] == [('max', 2)]
+    code, cells, _ = lowered('def formula(i, x):\n    return min(i, x)\n')
+    assert 'min(*(i, x))' in code
+    code, cells, _ = lowered('def formula(x):\n    return min(x, 1.0 - 1e-12)\n')
+    assert 'return min(*(x, 1.0 - 1e-12))' in code
+    code, cells, _ = lowered('def formula(self, x):\n    return [self.math.log(1.0 - min(x, 1.0 - 1e-12))]\n')
+    assert '1.0 - min(x, 1.0 - 1e-12)' in code and cells.minmax_untyped == []
+    code, cells, _ = lowered('def formula(i):\n    return min(i, 1.0)\n')
+    assert 'min(*(i, 1.0))' in code
+    code, cells, _ = lowered('def formula(x, y):\n    return [max(x, y) for _ in range(2)]\n', True)
+    assert 'max(*(x, y))' in code           # a child scope of a native-result cell
+    code, cells, _ = lowered('def formula(x, y):\n    return max(x, y)\n', True)
+    assert 'return max(x, y)' in code and cells.minmax_untyped == []   # Cython's intrinsic, as before
+
+
 def test_integer_local_exponent_keeps_the_native_power():
-    """As in the SEC models' mort_rate: ``k = calendar_year(t) - year`` then ``b ** k``: with the
+    """diag-us (SPIA/DIA mort_rate): ``k = calendar_year(t) - year`` then ``b ** k``: with the
     formula's local kinds the exponent is an integer, as the inline expression was."""
     from modelx_cython.powers import OperandKind, KIND_INT, KIND_FLOAT
     source = 'def formula(x, n):\n    k = n - 3\n    q = x * (1.0 - x) ** k\n    return min(1.0, q)\n'
@@ -99,7 +129,7 @@ def test_integer_local_exponent_keeps_the_native_power():
 
 
 def test_int_of_a_proven_integer_is_the_integer():
-    """As in a SEC annuity_factor: ``n = int((last - start) // step)`` keeps ``n`` a C
+    """diag-us (DIA_US_S annuity_factor): ``n = int((last - start) // step)`` keeps ``n`` a C
     integer; a float, an unknown operand, a shadowed ``int`` or a comprehension keep the call."""
     from modelx_cython.powers import OperandKind, KIND_INT, KIND_FLOAT
     kinds = OperandKind(None, {}, {}, '', {'a': KIND_INT, 'b': KIND_INT, 'x': KIND_FLOAT})

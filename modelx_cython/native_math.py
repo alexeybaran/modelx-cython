@@ -18,6 +18,22 @@ from .scopes import OPAQUE_SCOPES
 NAMES = ('erf', 'exp', 'isinf', 'log', 'sqrt')
 
 
+def math_references(cls_info):
+    return {name for name, ref in cls_info.refs.items() if getattr(ref, 'is_math', False)}
+
+
+def math_member(call, refs):
+    """Recognize a supported direct math call through a traced module Reference."""
+    if isinstance(call, cst.Call):
+        func = call.func
+        if (isinstance(func, cst.Attribute) and func.attr.value in NAMES
+                and isinstance(func.value, cst.Attribute) and isinstance(func.value.value, cst.Name)
+                and func.value.value.value == MX_SELF and func.value.attr.value in refs
+                and len(call.args) == 1 and call.args[0].keyword is None and call.args[0].star == ''):
+            return func.value.attr.value, func.attr.value
+    return None
+
+
 class _MathCalls(cst.CSTTransformer):
     def __init__(self, refs, path):
         self.refs, self.path, self.count = refs, path, 0
@@ -26,16 +42,13 @@ class _MathCalls(cst.CSTTransformer):
         return not isinstance(node, OPAQUE_SCOPES) and super().on_visit(node)
 
     def leave_Call(self, before, after):
-        func = before.func
-        if not (isinstance(func, cst.Attribute) and func.attr.value in NAMES
-                and isinstance(func.value, cst.Attribute) and isinstance(func.value.value, cst.Name)
-                and func.value.value.value == MX_SELF and func.value.attr.value in self.refs
-                and len(before.args) == 1 and before.args[0].keyword is None and before.args[0].star == ''):
+        member = math_member(before, self.refs)
+        if member is None:
             return after
         self.count += 1
-        ref = func.value.attr.value
+        ref, name = member
         borrowed = cst.parse_expression(f'{CY_MOD}.cast({CY_MOD}.p_void, {MX_SELF}.{ref})')
-        return cst.Call(cst.Attribute(cst.Name(MX_SYS_MOD), cst.Name(f'_mx_math_{func.attr.value}')),
+        return cst.Call(cst.Attribute(cst.Name(MX_SYS_MOD), cst.Name(f'_mx_math_{name}')),
                         args=(cst.Arg(borrowed), cst.Arg(cst.Name(MX_SELF)), cst.Arg(cst.SimpleString(repr(ref))),
                               after.args[0].with_changes(comma=cst.MaybeSentinel.DEFAULT),
                               cst.Arg(cst.SimpleString(repr(self.path)))),
@@ -44,7 +57,7 @@ class _MathCalls(cst.CSTTransformer):
 
 def lower(node, cls_info, cells):
     """The formula ``node`` with its math-module calls lowered, and the number lowered."""
-    refs = {name for name, ref in cls_info.refs.items() if getattr(ref, 'is_math', False)}
+    refs = math_references(cls_info)
     if not refs:
         return node, 0
     calls = _MathCalls(refs, cells.model_path)

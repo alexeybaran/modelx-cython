@@ -1,7 +1,8 @@
-"""One construction and one release of a top-level item.
+"""D116: one construction and one release of a top-level item, shared by collect and the direct route.
 
-A directly created item is ``C(base)`` with the base's References and itself as its only root, built
-once per key. ``__delitem__`` releases the item it drops through one shared function. Releasing breaks the item's references to itself (``_space``,
+Collect's reused root and a directly created item are the same thing: ``C(base)`` with the base's
+References and itself as its only root. Collect builds one per call and resets it per policy; the
+direct route builds one per key. ``__delitem__`` releases the item it drops through one shared function. Releasing breaks the item's references to itself (``_space``,
 ``_mx_roots``) and its Cell objects, so it is freed by its reference count.
 """
 import libcst as cst

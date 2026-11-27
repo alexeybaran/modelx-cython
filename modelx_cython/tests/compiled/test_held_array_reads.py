@@ -5,8 +5,8 @@ acquire and release of the one acquisition count every worker shares). The compi
 (``holds`` kind ``array``) and reads elements of its own field (in formulas with parameters; a zero-argument Cell
 runs once per item and keeps its read): the generated formula calls the held read, the
 values equal live; four threads racing on the first reads of a fresh model all get the right values (the Cell's
-first-fill discipline), on a new model per run.
-A clear concurrent with evaluation is outside the contract (change an input, clear, run again).
+first-fill discipline, mv-race), on a new model per run.
+A clear concurrent with evaluation is outside the contract (change an input, clear, run again: D191).
 """
 import subprocess
 import sys
