@@ -330,10 +330,18 @@ class _c_Space1:
 class _c_Space2:
     def collect(self, x):
         return x
+
+class _c_Space3:
+    @property
+    def collect(self):
+        if self._mx_roots:
+            raise AttributeError
+        return self._mx_collect_run
 """)
     filt = MxCodeFilter()
     assert not filt(codes["_c_Space1.collect"])
     assert filt(codes["_c_Space2.collect"])
+    assert not filt(codes["_c_Space3.collect"])
 
 
 # --------------------------------------------------------------------

@@ -14,9 +14,9 @@ def test_code_filter_matches_the_exported_methods(tmp_path):
     model = mx.new_model("TracerExportContract")
     try:
         keys = (0, 1)
-        proj = model.new_space("Projection", formula="lambda key: None", refs={"keys": keys},
-                               collect_over={"key": keys}, collect_outputs='lambda: {"sum": {"value": value()}}')
+        proj = model.new_space("Projection", formula="lambda key: None", refs={"keys": keys})
         proj.new_cells("value", "lambda: 1.0 + key")
+        proj.set_collect(over={"key": "keys"}, outputs='lambda: {"sum": {"value": value()}}')
         mx.defcells(space=proj, name="plain", is_cached=False)(lambda t: t * 2.0)
         model.export(tmp_path / "contract_export")
     finally:
@@ -25,11 +25,13 @@ def test_code_filter_matches_the_exported_methods(tmp_path):
     try:
         classes = importlib.import_module("contract_export._mx_classes")
         space = classes._c_Projection
-        codes = {name: getattr(space, name).__code__ for name in ("value", "_f_value", "plain", "collect")}
+        codes = {name: getattr(space, name).__code__ for name in ("value", "_f_value", "plain", "_mx_collect_run")}
+        codes["collect"] = space.collect.fget.__code__
         filt = MxCodeFilter()
         assert not is_uncached_cells_code(codes["value"])        # cached: calls self._f_value
         assert is_uncached_cells_code(codes["plain"])            # uncached: the formula itself
         assert not is_uncached_cells_code(codes["collect"])      # the collect adapter
+        assert not is_uncached_cells_code(codes["_mx_collect_run"])
         assert {name for name, code in codes.items() if filt(code)} == {"_f_value", "plain"}
     finally:
         sys.path.remove(str(tmp_path))

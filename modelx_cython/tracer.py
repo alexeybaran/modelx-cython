@@ -946,6 +946,12 @@ def is_uncached_cells_code(code: CodeType) -> bool:
         ``_mx_model.py`` module.
     """
     name = code.co_name
+    names = code.co_names
+    # Exported Collect accessors expose the scheduler and are not Cells. The
+    # reserved references also identify the older exported adapter method.
+    if ('_mx_collect_run' in names and '_mx_roots' in names
+            or '_mx_collect_cache' in names and 'collect_from_space' in names):
+        return False
     qualname = getattr(code, "co_qualname", None)   # Python 3.11+
     if qualname is not None:
         # a method defined directly in a space class
@@ -958,7 +964,7 @@ def is_uncached_cells_code(code: CodeType) -> bool:
         and not code.co_flags & inspect.CO_NESTED
         and code.co_argcount >= 1
         and code.co_varnames[0] == MX_SELF
-        and FORMULA_PREF + name not in code.co_names
+        and FORMULA_PREF + name not in names
     )
 
 

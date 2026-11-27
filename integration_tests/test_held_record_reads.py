@@ -53,7 +53,7 @@ def _build(tmp_path):
                     total += rate(t) * term(t) + age(t) + label_len(t) + branchy(t)
                 return total
             '''))
-        projection.set_collect(over={'key': KEYS}, outputs='lambda: {"sum": {"value": value()}}')
+        projection.set_collect(over={'key': 'keys'}, outputs='lambda: {"sum": {"value": value()}}')
         model.export(tmp_path / 'exported')
     finally:
         model.close()

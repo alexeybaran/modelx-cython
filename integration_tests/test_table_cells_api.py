@@ -31,7 +31,7 @@ def build():
     proj.new_cells("sa", 'lambda: data.points().loc[policy_id, "sa"]')
     proj.new_cells("rate", 'lambda: data.table().loc[policy_id, "rate"]')
     proj.new_cells("pv", "lambda: factor * sum(sa() * (1.0 + rate()) ** t for t in range(12))")
-    proj.set_collect(over={"policy_id": IDS}, outputs='lambda: {"sum": {"pv": pv()}}')
+    proj.set_collect(over={"policy_id": "ids"}, outputs='lambda: {"sum": {"pv": pv()}}')
     return model
 """
 
