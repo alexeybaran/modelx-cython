@@ -630,7 +630,7 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
         node, lowered = native_math.lower(node, cls_info, cells)
         self._math_calls += lowered
         if self._native_collect_shapes:
-            node, _ = collect.native_collect.field_reads(
+            node = collect.native_collect.field_reads(
                 node, cls_info, self._native_collect_shapes,
                 self._collect_record_refs.get(cls_info.name, {}), cells)
         return node
@@ -652,12 +652,17 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
         self._native_collect_shapes = collect.native_shapes(self.module)
         self._collect_gathers = []
         self._collect_record_refs = {}
+        self._collect_factories = {}
         if self._native_collect_shapes:
             self.helper_providers.add(collect.native_collect.PROVIDER)
             for node in self._module_node.body:
                 if isinstance(node, cst.ClassDef) and node.name.value in self.module.classes:
-                    self._collect_record_refs[node.name.value] = collect.native_collect.bindings(
-                        node, self.module.classes[node.name.value], self._native_collect_shapes)
+                    cls_name = node.name.value
+                    formula, fields = collect.native_collect.factory(
+                        node, self.module.classes[cls_name], self._native_collect_shapes)
+                    if fields:
+                        self._collect_record_refs[cls_name] = fields
+                        self._collect_factories[cls_name] = formula
         return self.wrapper.visit(self)
 
     def _pin_held_item(self, owner, producer):
@@ -1059,8 +1064,8 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
             meth_name = original_node.name.value
             cls_info = self.module.classes[cls_name]
 
-            if meth_name == '_mx_space_formula' and self._collect_record_refs.get(cls_name):
-                return collect.native_collect.factory_reads(updated_node, cls_info, self._native_collect_shapes)
+            if meth_name == '_mx_space_formula' and cls_name in self._collect_factories:
+                return self._collect_factories[cls_name]
 
             if meth_name == '__init__':
                 initializers = []

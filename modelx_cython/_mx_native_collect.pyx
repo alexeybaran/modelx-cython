@@ -315,7 +315,7 @@ cdef NativeRow numeric_row(object record, Py_ssize_t field, str name, bint serie
     return None
 
 
-cdef object row_value(object record, str name, long long key, bint series, bint index_read):
+cdef object python_field(object record, str name, long long key, bint series, bint index_read):
     value = getattr(record, name)
     return (value[key] if index_read else value(key)) if series else value
 
@@ -335,40 +335,40 @@ cdef NativeCollect numeric_sum(object result, Py_ssize_t field, str name, bint s
     return None
 
 
-cdef object sum_value(object result, str name, long long key, bint series, bint index_read):
-    value = getattr(result.sum, name)
-    return (value[key] if index_read else value(key)) if series else value
+cdef inline NumericValue* row_element(NativeRow row, Py_ssize_t field, long long key, bint series) except NULL:
+    cdef Py_ssize_t offset = field_offset(&row.owner.individual_fields[field], key, series)
+    return &row.owner.rows[row.row * row.owner.row_width + offset]
 
 
 cdef double read_individual(object record, Py_ssize_t field, str name, long long key,
                             bint series, bint index_read) except? -1:
     cdef NativeRow row = numeric_row(record, field, name, series, True)
     if row is None:
-        return row_value(record, name, key, series, index_read)
-    return row.owner.rows[row.row * row.owner.row_width + field_offset(&row.owner.individual_fields[field], key, series)].floating
+        return python_field(record, name, key, series, index_read)
+    return row_element(row, field, key, series).floating
 
 
 cdef object read_individual_value(object record, Py_ssize_t field, str name, long long key,
                                   bint series, bint index_read):
     cdef NativeRow row = numeric_row(record, field, name, series, True)
     if row is None:
-        return row_value(record, name, key, series, index_read)
-    return row.owner.rows[row.row * row.owner.row_width + field_offset(&row.owner.individual_fields[field], key, series)].floating
+        return python_field(record, name, key, series, index_read)
+    return row_element(row, field, key, series).floating
 
 
 cdef long long read_individual_int(object record, Py_ssize_t field, str name, long long key,
                                    bint series, bint index_read) except? -1:
     cdef NativeRow row = numeric_row(record, field, name, series, False)
     if row is None:
-        return row_value(record, name, key, series, index_read)
-    return row.owner.rows[row.row * row.owner.row_width + field_offset(&row.owner.individual_fields[field], key, series)].integer
+        return python_field(record, name, key, series, index_read)
+    return row_element(row, field, key, series).integer
 
 
 cdef double read_sum(object result, Py_ssize_t field, str name, long long key,
                      bint series, bint index_read) except? -1:
     cdef NativeCollect owner = numeric_sum(result, field, name, series, True)
     if owner is None:
-        return sum_value(result, name, key, series, index_read)
+        return python_field(result.sum, name, key, series, index_read)
     return owner.sums[field_offset(&owner.sum_fields[field], key, series)].floating
 
 
@@ -377,7 +377,7 @@ cdef long long read_sum_int(object result, Py_ssize_t field, str name, long long
     cdef NativeCollect owner = numeric_sum(result, field, name, series, False)
     cdef Py_ssize_t offset
     if owner is None:
-        return sum_value(result, name, key, series, index_read)
+        return python_field(result.sum, name, key, series, index_read)
     offset = field_offset(&owner.sum_fields[field], key, series)
     if owner.wide[offset]:
         return owner.large_sums[offset]

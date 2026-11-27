@@ -559,6 +559,23 @@ def _mx_check_collect_bindings(root, checks):
                 raise _mx_collect_ref_error(name, workers, path, ref)
 
 
+def _mx_run_collect_workers(workers, checks, loop):
+    from threading import Thread
+
+    def work(slot):
+        spare = [None, None, checks]
+        try:
+            loop(spare, slot)
+        finally:
+            spare.clear()
+
+    threads = [Thread(target=work, args=(slot,)) for slot in range(workers)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+
 def _mx_collect_native_evaluate(coords, outputs_at, checks, workers, plan):
     result = plan(workers)
     if workers == 1:
@@ -574,8 +591,7 @@ def _mx_collect_native_evaluate(coords, outputs_at, checks, workers, plan):
     state = [0, None]
     batch = min(16, max(1, len(coords) // (workers * 4)))
 
-    def work(slot):
-        spare = [None, None, checks]
+    def work(spare, slot):
         try:
             while True:
                 with lock:
@@ -590,14 +606,7 @@ def _mx_collect_native_evaluate(coords, outputs_at, checks, workers, plan):
             with lock:
                 if state[1] is None:
                     state[1] = error
-        finally:
-            spare.clear()
-
-    threads = [threading.Thread(target=work, args=(slot,)) for slot in range(workers)]
-    for thread in threads:
-        thread.start()
-    for thread in threads:
-        thread.join()
+    _mx_run_collect_workers(workers, checks, work)
     if state[1] is not None:
         raise state.pop()
     return result.finish()
@@ -635,40 +644,31 @@ def _mx_collect_evaluate(space, coords, outputs_at, members, child_bindings_know
     pending = {{}}
     state = [0, 0, len(coords), None]       # next to take, next to add, stop, the first error
 
-    def work():
-        spare = [None, None, checks]     # reusable item, its lock and optional checks
-        try:
-            while True:
+    def work(spare, slot):
+        while True:
+            with lock:
+                i = state[0]
+                if i >= state[2]:
+                    return
+                state[0] = i + 1
+            try:
+                out = outputs_at(spare, coords[i])
+            except BaseException as error:
                 with lock:
-                    i = state[0]
-                    if i >= state[2]:
-                        return
-                    state[0] = i + 1
-                try:
-                    out = outputs_at(spare, coords[i])
-                except BaseException as error:
-                    with lock:
-                        if i < state[2]:
-                            state[2], state[3] = i, error
-                    continue
-                with lock:
-                    pending[i] = out
-                    while state[1] < state[2] and state[1] in pending:
-                        k = state[1]
-                        try:
-                            accumulator.add(coords[k], pending.pop(k))
-                        except BaseException as error:
-                            state[2], state[3] = k, error
-                            break
-                        state[1] = k + 1
-        finally:
-            spare.clear()
-
-    threads = [threading.Thread(target=work) for _ in range(min(workers, len(coords)))]
-    for thread in threads:
-        thread.start()
-    for thread in threads:
-        thread.join()
+                    if i < state[2]:
+                        state[2], state[3] = i, error
+                continue
+            with lock:
+                pending[i] = out
+                while state[1] < state[2] and state[1] in pending:
+                    k = state[1]
+                    try:
+                        accumulator.add(coords[k], pending.pop(k))
+                    except BaseException as error:
+                        state[2], state[3] = k, error
+                        break
+                    state[1] = k + 1
+    _mx_run_collect_workers(min(workers, len(coords)), checks, work)
     if state[3] is not None:
         raise state.pop()
     return accumulator.result()

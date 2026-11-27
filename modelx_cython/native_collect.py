@@ -6,7 +6,7 @@ import libcst as cst
 
 from .consts import FORMULA_PREF
 from .native_sources import module_name
-from .syntax import arguments, code, dotted_name, literal_value, single_statement, walk
+from .syntax import arguments, code, dotted_name, literal_value, single_statement
 
 
 PROVIDER = 'modelx_cython._mx_native_collect'
@@ -244,27 +244,21 @@ def _individual(node, info, shapes):
     return None
 
 
-def bindings(class_node, info, shapes):
-    """Fields of temporary Collect records returned by a Space's factory."""
+def factory(class_node, info, shapes):
+    """Lower native records returned by a Space's factory and describe their fields."""
     method = next((fn for fn in class_node.body.body if isinstance(fn, cst.FunctionDef)
                    and fn.name.value == '_mx_space_formula'), None)
-    result = {}
     if method is None:
-        return result
-    for node in walk(method):
-        if isinstance(node, cst.Return) and (outer := _literal_items(node.value)):
-            refs = _literal_items(outer.get('refs'))
-            if refs is not None:
-                for name, value in refs.items():
-                    if source := _individual(value, info, shapes):
-                        result[name] = source[2]
-    return result
+        return None, {}
+    reader = _FactoryReads(info, shapes)
+    return method.with_changes(body=method.body.visit(reader)), reader.bindings
 
 
 class _FactoryReads(cst.CSTTransformer):
     def __init__(self, info, shapes):
         self.info = info
         self.shapes = shapes
+        self.bindings = {}
 
     def leave_Return(self, original, updated):
         outer = _literal_items(updated.value)
@@ -276,17 +270,14 @@ class _FactoryReads(cst.CSTTransformer):
                 refs = []
                 for ref in entry.value.elements:
                     if source := _individual(ref.value, self.info, self.shapes):
-                        call, key, _ = source
+                        call, key, fields = source
+                        self.bindings[literal_value(ref.key)] = fields
                         ref = ref.with_changes(value=cst.parse_expression(
                             f'{ALIAS}.individual_at({code(call)}, {code(key)})'))
                     refs.append(ref)
                 entry = entry.with_changes(value=entry.value.with_changes(elements=tuple(refs)))
             elements.append(entry)
         return updated.with_changes(value=updated.value.with_changes(elements=tuple(elements)))
-
-
-def factory_reads(node, info, shapes):
-    return node.with_changes(body=node.body.visit(_FactoryReads(info, shapes)))
 
 
 class _FieldReads(cst.CSTTransformer):
@@ -296,7 +287,6 @@ class _FieldReads(cst.CSTTransformer):
         self.refs = refs
         self.integer_params = integer_params
         self.result_type = result_type
-        self.used = False
         self.returns = set()
 
     def visit_FunctionDef(self, node):
@@ -329,8 +319,7 @@ class _FieldReads(cst.CSTTransformer):
         return False
 
     def read(self, expr, key, index_read=False, whole_return=False):
-        if (not whole_return or self.result_type not in ('double', 'long long', 'object')
-                or not isinstance(expr, cst.Attribute) or key is not None and not self.integer(key)):
+        if not whole_return or not isinstance(expr, cst.Attribute) or key is not None and not self.integer(key):
             return None
         receiver = expr.value
         name = expr.attr.value
@@ -360,7 +349,6 @@ class _FieldReads(cst.CSTTransformer):
                 if self.result_type != 'long long':
                     return None
                 read += '_int'
-            self.used = True
             return cst.parse_expression(
                 f'{ALIAS}.{read}({code(receiver)}, {index}, {name!r}, '
                 f'{code(key) if key is not None else "0"}, {key is not None}, {index_read})')
@@ -381,5 +369,4 @@ class _FieldReads(cst.CSTTransformer):
 def field_reads(node, info, shapes, refs, cells):
     params = {name for name in cells.params if cells.get_argtype_expr(name, c_style=True) == 'long long'}
     transform = _FieldReads(info, shapes, refs, params, cells.get_rettype_expr(c_style=True))
-    node = node.with_changes(body=node.body.visit(transform))
-    return node, transform.used
+    return node.with_changes(body=node.body.visit(transform))
