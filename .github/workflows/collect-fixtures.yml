@@ -1,0 +1,43 @@
+name: Current Collect fixtures
+
+on:
+  push:
+    branches: [verify/regional-collect-fixtures-1]
+
+jobs:
+  collect-fixtures:
+    name: ${{ matrix.os }} CPython 3.14t
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    env:
+      PYTEST_ADDOPTS: ${{ matrix.os == 'windows-latest' && '--basetemp=C:/t' || '' }}
+      PYTHONIOENCODING: utf-8
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14t'
+      - name: Free-threaded interpreter without the GIL
+        shell: bash
+        run: echo 'PYTHON_GIL=0' >> "$GITHUB_ENV"
+      - name: Install pinned compiler and modelx
+        shell: bash
+        run: |
+          python -m pip install --only-binary scipy,libcst,numpy,pandas 'Cython==3.3.2' \
+            pytest setuptools MonkeyType 'pandas>=2.2.2' openpyxl psutil \
+            'git+https://github.com/alexeybaran/modelx@fdc19875bd2445a7093e56e7222ecc1cf29c2ac0'
+          python -m pip install --no-deps .
+      - name: Run migrated Collect fixtures
+        working-directory: ${{ runner.temp }}
+        shell: bash
+        run: |
+          python -c 'import sys; print(sys.version); assert not sys._is_gil_enabled()'
+          suite="$GITHUB_WORKSPACE/modelx_cython/tests/compiled"
+          python -m pytest --rootdir "$GITHUB_WORKSPACE" -p no:cacheprovider -q -rA \
+            "$suite/test_collect_name_collision.py" \
+            "$suite/test_factory_private_refs.py" \
+            "$suite/test_collect_native_merge.py::test_native_and_python_outputs_equal_the_export"
