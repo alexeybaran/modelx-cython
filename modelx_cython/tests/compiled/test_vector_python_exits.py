@@ -1,9 +1,8 @@
 """D154: every exit by which a vector cell's value reaches Python code gives the list live gives.
 
-Compiled code passes the typed vector between compiled cells without a copy; wherever the value reaches
-Python (a loop or builtin left on Python objects, a cell that is not itself a vector cell, a dict or tuple
-value, a call through another Space's Reference, a keyword call, a closure, collect's ``individual``),
-it is a new list, with the values, element types and Python behaviour of the exported model.
+Compiled code passes typed vectors between compiled cells without a copy. A Python exit from a typed
+vector returns a fresh list. A Cell that returns a borrowed list caches the Python object, so repeated
+reads preserve mutations as in the standalone export.
 """
 import subprocess
 import sys
@@ -66,10 +65,15 @@ def kinds(value):
         return (type(value).__name__, [kinds(v) for v in value])
     return type(value).__name__
 print(repr({k: (v, kinds(v)) for k, v in values.items()}))
-# a vector cell's list never aliases its typed cache, whatever the exit; a cell that is not a vector cell
-# caches its own Python value as live does, but changing it never reaches the vector cell it came from
+# The borrowed Cell retains its Python result in both packages.
+first = p.first_pair()
+first.append(99)
+assert p.first_pair() is first and p.first_pair()[-1] == 99
+first.pop()
+
+# Lists materialized from typed vectors do not alias their native caches.
 if sys.argv[1] == 'exported_cy':
-    for name, got in (('fv', p.fv), ('first_pair', p.first_pair), ('held', q.held), ('kw', p.kw)):
+    for name, got in (('fv', p.fv), ('held', q.held), ('kw', p.kw)):
         first = got()
         first.append(99)
         assert 99 not in got(), name
