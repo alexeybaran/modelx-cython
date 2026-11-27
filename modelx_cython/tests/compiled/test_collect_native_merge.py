@@ -1,4 +1,5 @@
 """Compare native and Python Collect results, errors and key order with the export."""
+import ast
 import importlib
 import json
 import math
@@ -181,8 +182,22 @@ def test_native_collect_result_supports_native_and_python_consumers(tmp_path):
     assert numeric["return_type"] == "double"
     assert report["return_type"] == "object"
     source = (tmp_path / "exported_cy/_mx_classes.py").read_text(encoding="utf-8")
-    numeric_body = source.split("def _f_numeric(", 1)[1].split("\n    def ", 1)[0]
-    cash_body = source.split("def _f_cash_value(", 1)[1].split("\n    def ", 1)[0]
+    module = ast.parse(source)
+    consumers, = (node for node in module.body if isinstance(node, ast.ClassDef) and node.name == "_c_Consumers")
+    functions = {node.name: node for node in module.body if isinstance(node, ast.FunctionDef)}
+
+    def emitted_formula(name):
+        method, = (node for node in consumers.body if isinstance(node, ast.FunctionDef) and node.name == name)
+        # Dense cache misses may hoist the formula and leave a single forwarding return.
+        if len(method.body) == 1 and isinstance(method.body[0], ast.Return):
+            call = method.body[0].value
+            if (isinstance(call, ast.Call) and isinstance(call.func, ast.Name)
+                    and call.func.id.startswith("_mx_dense_formula_")):
+                method = functions[call.func.id]
+        return ast.get_source_segment(source, method)
+
+    numeric_body = emitted_formula("_f_numeric")
+    cash_body = emitted_formula("_f_cash_value")
     assert "_mx_sys._mx_math_sqrt(" in numeric_body, numeric_body
     assert ".read_sum(" in cash_body, cash_body
 

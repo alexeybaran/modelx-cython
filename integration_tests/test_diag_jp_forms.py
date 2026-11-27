@@ -8,6 +8,7 @@
   reductions over objects, table key parts as objects, object returns of cells with parameters.
 Compiled equals the exported model on every call (value, type, or exception).
 """
+import ast
 import json
 import subprocess
 import sys
@@ -78,7 +79,15 @@ def test_forms_compile_natively_and_equal_the_interpreter(tmp_path):
     assert report[PREFIX + 'pool']['slow_paths'] == [], report[PREFIX + 'pool']
     assert report[PREFIX + 'mean']['slow_paths'] == [] or all(
         e['kind'] != 'reduction-on-objects' for e in report[PREFIX + 'mean']['slow_paths'])
-    rate_body = source.split('def _f_rate(', 1)[1].split('\n    def ', 1)[0]
+    module = ast.parse(source)
+    values, = (node for node in module.body if isinstance(node, ast.ClassDef) and node.name == '_c_Values')
+    rate, = (node for node in values.body if isinstance(node, ast.FunctionDef) and node.name == '_f_rate')
+    if len(rate.body) == 1 and isinstance(rate.body[0], ast.Return):
+        call = rate.body[0].value
+        if (isinstance(call, ast.Call) and isinstance(call.func, ast.Name)
+                and call.func.id.startswith('_mx_dense_formula_')):
+            rate, = (node for node in module.body if isinstance(node, ast.FunctionDef) and node.name == call.func.id)
+    rate_body = ast.get_source_segment(source, rate)
     assert '.contains_c(' in rate_body and '.f64_c(' in rate_body, rate_body
     probe = textwrap.dedent('''\
         import json, sys
