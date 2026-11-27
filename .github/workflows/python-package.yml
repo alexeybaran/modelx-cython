@@ -2,7 +2,7 @@ name: Python package
 
 on:
   push:
-    branches: [main, "verify/**"]
+    branches: [main, "verify/**", "!verify/regional-collect-v1-1"]
   pull_request:
     branches: [main]
 
