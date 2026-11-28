@@ -57,6 +57,7 @@ import libcst as cst
 from libcst._flatten_sentinel import FlattenSentinel
 from libcst._nodes.module import Module
 from libcst._nodes.statement import BaseStatement, ClassDef
+from libcst.metadata.scope_provider import BuiltinAssignment
 from libcst._removal_sentinel import RemovalSentinel
 import libcst.matchers as m
 from libcst.metadata import ParentNodeProvider, ScopeProvider, GlobalScope, ClassScope
@@ -566,6 +567,7 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
         self._cells_kinds = cells_kinds or {}
         self._ref_kinds = ref_kinds or {}
         self.helper_providers = set()
+        self._uses_native_round = False
         self.dense_entries = {}
         self.formula_entries = {}
         self.function_origins = {}      # {private entry of an uncached Cell: (class, Cell)}
@@ -595,6 +597,13 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
         # a typed-memoryview Cell read by subscript is held per item (no slice copy per evaluation)
         node = held_arrays.lower(node, cls_info, cells, self._held_arrays)
         cells.formula_allows_exact_receiver = allows_exact_receiver(node, cls_info.name)
+        if (self.module.spec.policy.native_math and '_mx_canonical_round' not in self._source
+                and scope['round'] and all(isinstance(binding, BuiltinAssignment) for binding in scope['round'])):
+            from modelx_cython.rounding import NativeRounding
+            rounding = NativeRounding()
+            node = node.with_changes(body=node.body.visit(rounding))
+            self._uses_native_round |= rounding.used
+        node = self._bind_declared_helpers(node, cls_info, cells)
         node = rewrite_powers(
             node, self._resolver, self._cells_kinds, self._ref_kinds,
             cls_info.fqname, cells,
@@ -622,6 +631,14 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
         self._math_calls += lowered
         return node
 
+    def _bind_declared_helpers(self, node, cls_info, cells):
+        from modelx_cython.helpers import HelperCalls
+        helpers = HelperCalls(cls_info.refs, self.helper_providers, cells=cls_info.cells, current=cells)
+        node = helpers.rewrite(node)
+        cells.native_helpers = sorted(helpers.operations)
+        cells.math_native, cells.math_untyped = helpers.math_native, helpers.math_untyped
+        return node
+
     @property   # cannot use cached_property in Transformer
     def transformed(self):
         """Transformed module tree.
@@ -632,6 +649,7 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
         self._cold_spills = []
         self._held_arrays = {}
         self._dense_layouts = {}
+        self._uses_native_round = False
         from modelx_cython.scopes import Names
         self._held_names = Names(self._module_node)
         self._held_pins = {}
@@ -653,6 +671,9 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
         stmts = []
         from modelx_cython.native_sources import module_name
         from modelx_cython.exceptions import NumericExceptions
+        if self._uses_native_round:
+            from modelx_cython.rounding import ROUND_BINDING
+            stmts.extend(cst.parse_module(ROUND_BINDING).body)
         for provider in sorted(self.helper_providers):
             stmts.append(cst.parse_statement(
                 f'from cython.cimports.{self.package} import {module_name(provider)}'))
@@ -1031,7 +1052,7 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
                 if cells.formula_is_generator:
                     # yield is not supported inside cdef functions;
                     # leave as a plain Python method
-                    return updated_node
+                    return self._bind_declared_helpers(updated_node, cls_info, cells)
 
                 scope = self.get_metadata(ScopeProvider, original_node.body)
                 if any(isinstance(binding.node, cst.Param)
@@ -1042,7 +1063,7 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
                     # initialized in the closure. A compiled def binds them
                     # through its normal Python argument handling.
                     cells.formula_has_captured_default = True
-                    return updated_node
+                    return self._bind_declared_helpers(updated_node, cls_info, cells)
                 updated_node = self._rewrite_powers(
                     updated_node, cls_info, cells, scope)
 
@@ -1122,7 +1143,7 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
                 if cells.body_has_closure:
                     # closures cannot be compiled inside cpdef functions;
                     # leave as a plain Python method
-                    return updated_node
+                    return self._bind_declared_helpers(updated_node, cls_info, cells)
 
                 if not cells.has_formula_def:
                     # uncached cells: the body is the formula itself

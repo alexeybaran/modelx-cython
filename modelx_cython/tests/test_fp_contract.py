@@ -1,4 +1,4 @@
-"""Generated model modules compile without floating-point contraction."""
+"""Generated model modules compile without floating-point contraction (W1.5)."""
 import pathlib
 from types import SimpleNamespace
 
@@ -14,7 +14,7 @@ def test_generated_setup_wraps_the_build_command(tmp_path):
                                    pathlib.PurePath("Model_nomx_cy/_mx_helper_x.pyx")],
                  setup_file, providers=[pathlib.PurePath("Model_nomx_cy/_mx_helper_x.pyx")])
     code = setup_file.read_text(encoding="utf-8")
-    assert "cmdclass=fp_contract_off({}, " in code
+    assert "cmdclass=fp_contract_off(provider_build_cache(" in code
     assert "['Model_nomx_cy._mx_helper_x'])" in code
 
 

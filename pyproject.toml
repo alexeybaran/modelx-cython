@@ -76,3 +76,4 @@ exclude = ["doc", "temp*", "modelx_cython.tests*", "samples"]
 
 [tool.setuptools.package-data]
 modelx_cython = ["*.pxd", "*.pyx"]
+"modelx_cython.runtime" = ["*.pxd", "*.pyx"]

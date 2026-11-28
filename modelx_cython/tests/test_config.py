@@ -35,7 +35,7 @@ class TestConf:
 
 
 @pytest.mark.parametrize('data',[
-    {'automatic_optimizations':1}, {'native_cache_hits':True},
+    {'automatic_optimizations':1}, {'native_math':'yes'}, {'native_cache_hits':True},
     {'dense_miss_binding':False,'native_cache_hits':'both'},
     {'dense_miss_binding':False,'propagate_exact_receiver':True},
 ])
@@ -48,6 +48,7 @@ def test_explicit_policy_overrides_keep_their_existing_dependencies():
     policy=TransSpec({'automatic_optimizations':False,'dense_miss_binding':True,
         'propagate_exact_receiver':True,'native_cache_hits':'both'}).policy
     assert policy.propagate_exact_receiver and policy.native_cache_hits=='both'
+    assert policy.native_math
 
 
 def test_disabling_automatic_selection_disables_implicit_dense_entries():
@@ -55,3 +56,9 @@ def test_disabling_automatic_selection_disables_implicit_dense_entries():
     assert not policy.dense_miss_binding
     assert not policy.propagate_exact_receiver
     assert policy.native_cache_hits == 'none'
+
+
+def test_guarded_rounding_can_be_disabled():
+    assert TransSpec({}).policy.native_math
+    assert TransSpec({'native_math': True}).policy.native_math
+    assert not TransSpec({'native_math': False}).policy.native_math

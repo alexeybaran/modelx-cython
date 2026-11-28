@@ -90,17 +90,20 @@ def test_native_held_item_uses_exact_type_and_preserves_fallback(tmp_path, monke
     report = json.loads((tmp_path / 'exported_cy/_mx_admission.json').read_text(encoding='utf-8'))
     assert report['exported_cy._mx_classes._c_Policy._f_market']['return_type'] == 'object'
     c_source = (tmp_path / 'exported_cy/_mx_classes.c').read_text(encoding='utf-8')
-    # The evaluated receiver is an owned temporary while the tenor Cell runs.
-    helper = re.search(r'def (_mx_pin_held_item_\d+)\(root: _c_Policy\) -> object:\s+return root\._v_cold_market', source)
+    # Capture the cached receiver before the tenor Cell runs and pass the same pointer to rate.
+    helper = re.search(r'def (_mx_pin_held_item_\d+)\(root: _c_Policy\) -> _mx_cy\.pointer\(_mx_cy\.void\):\s+'
+                       r'return _mx_cy\.cast\(_mx_cy\.pointer\(_mx_cy\.void\), root\._v_cold_market\)', source)
     assert helper is not None
     pin = re.search(r'(?P<held>__pyx_t_\d+) = \w+' + helper[1] + r'\(__pyx_v_self\);', c_source)
     assert pin is not None
     argument_start = c_source.index('_has_tenor[', pin.end())
     native_call = c_source.index('->__pyx_vtab)->rate(', argument_start)
-    assert c_source.index(f'__Pyx_GOTREF({pin["held"]})', pin.end()) < argument_start
     assert pin['held'] in c_source[native_call:c_source.index(';', native_call)]
+    held = re.escape(pin['held'])
+    assert not re.search(rf'(GOTREF|INCREF|DECREF)\({held}\)', c_source[pin.end():native_call])
 
     probe = textwrap.dedent('''\
+        import gc
         import json
         import sys
         import held_item_test_hook as hook
@@ -142,6 +145,19 @@ def test_native_held_item_uses_exact_type_and_preserves_fallback(tmp_path, monke
         assert values[-1] == original_market.rate(1, 1.5)
         assert m.Policy[8].selected_rate(1) == 44.5
         hook.override = hook.callback = None
+        # Both the receiver and its held Market item leave their public Spaces during the argument.
+        policy = m.Policy[10]
+        values.append(policy.ordered(0))
+        def drop_all():
+            del m.Policy[10]
+            del m.Market[1]
+            gc.collect()
+        hook.callback = drop_all
+        values.append(policy.ordered(1))
+        hook.callback = None
+        del policy
+        gc.collect()
+        values.append(m.Policy[10].ordered(1))
         for cell, key in [('project', 2), ('ordered', 4)]:
             try:
                 getattr(m.Policy[key], cell)(0)

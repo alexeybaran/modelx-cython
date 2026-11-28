@@ -826,6 +826,7 @@ class CombinedRefInfo:
             self.type_ = rt_info.type_
             self.mx_class = rt_info.mx_class
             self.is_math = getattr(rt_info, 'is_math', False)
+            self.helper_members = getattr(rt_info, 'helper_members', {})
             self.decl_type_expr = decl_type_expr
             self.is_relative = is_relative
         else:
