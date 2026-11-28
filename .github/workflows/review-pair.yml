@@ -1,0 +1,107 @@
+name: Fast SEC and Collect review
+
+on:
+  push:
+    branches: ["verify/fast-sec-collect"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: ${{ matrix.proposal }} / ${{ matrix.os }} / ${{ matrix.python }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        python: ["3.12", "3.14t"]
+        proposal: [Direct, Collect]
+        include:
+          - proposal: Direct
+            compiler: eb7fcc41fcf07e94938d06e9433dc0bc42b3e4df
+            modelx: fec516d7e9b5813e7d40819a72731bd35fc2972f
+          - proposal: Collect
+            compiler: 0cb1cb7f9dfeac4bff45df4ff0b96780f2cd725f
+            modelx: f83a55a0ca3b7f15896184234f2b8fd06a1da215
+    env:
+      PYTHONIOENCODING: utf-8
+      PYTEST_ADDOPTS: ${{ matrix.os == 'windows-latest' && '--basetemp=C:/t' || '' }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: alexeybaran/modelx-cython
+          ref: ${{ matrix.compiler }}
+          path: compiler
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          repository: alexeybaran/modelx
+          ref: ${{ matrix.modelx }}
+          path: modelx-source
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          repository: lifelib-dev/lifelib
+          ref: 20d4daef3281d538b3fbda6d0fb951fcceb3a6f4
+          path: lifelib-source
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Disable the GIL on free-threaded Python
+        if: endsWith(matrix.python, 't')
+        shell: bash
+        run: echo "PYTHON_GIL=0" >> "$GITHUB_ENV"
+      - name: Resolve and install the exact package pair
+        shell: bash
+        run: |
+          if [[ '${{ matrix.python }}' == *t ]]; then
+            package='./compiler[free-threaded]'
+            cython='Cython==3.3.2'
+          else
+            package='./compiler'
+            cython='Cython==3.2.4'
+          fi
+          python -m pip install --only-binary scipy,libcst,numpy,pandas \
+            './modelx-source' "$package" './lifelib-source' "$cython" \
+            'pytest==8.4.2' pytest-xdist 'pandas>=2.2.2' openpyxl psutil
+          python -m pip check
+          python -c 'import modelx, modelx_cython, sys, sysconfig; print(sys.version, modelx.__version__, modelx_cython.__version__); assert not sysconfig.get_config_var("Py_GIL_DISABLED") or not sys._is_gil_enabled()'
+      - name: Compiler unit tests
+        working-directory: ${{ runner.temp }}
+        shell: bash
+        run: |
+          root="$GITHUB_WORKSPACE/compiler"
+          tests="$root/modelx_cython/tests"
+          python -m pytest --import-mode=importlib --rootdir "$root" -p no:cacheprovider \
+            -n 2 -q -rfEs "$tests" --ignore="$tests/compiled"
+      - name: Modelx Collect authoring, serialization and export
+        if: matrix.proposal == 'Collect'
+        working-directory: ${{ runner.temp }}
+        shell: bash
+        run: |
+          tests="$GITHUB_WORKSPACE/modelx-source/modelx/tests"
+          python -m pytest --import-mode=importlib -p no:cacheprovider -q "$tests/core/space/test_collect.py" \
+            "$tests/serialize/test_collect_serialize.py" "$tests/export/test_collect_export.py"
+      - name: Compiled and integration tests
+        working-directory: ${{ runner.temp }}
+        shell: bash
+        run: |
+          root="$GITHUB_WORKSPACE/compiler"
+          compiled="$root/modelx_cython/tests/compiled"
+          integration="$root/integration_tests"
+          opts=(--import-mode=importlib --rootdir "$root" -p no:cacheprovider -q -rfEs)
+          python -m pytest "${opts[@]}" -o "pythonpath='$compiled' '$integration'" \
+            -n 2 --dist loadfile "$compiled" "$integration" --ignore="$compiled/test_value_storage.py"
+          python -m pytest "${opts[@]}" "$compiled/test_value_storage.py"
+      - name: Released SEC models
+        working-directory: ${{ runner.temp }}
+        shell: bash
+        run: |
+          script="$GITHUB_WORKSPACE/compiler/.github/scripts/sec_compare.py"
+          python "$script" sec_term Term_US_SEC term_life
+          python "$script" sec_myga MYGA_US_SEC fixed_deferred_annuity
+          python "$script" sec_spia SPIA_US_SEC immediate_annuity
