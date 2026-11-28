@@ -1,0 +1,154 @@
+name: Free-threaded allocation compatibility
+
+on:
+  push:
+    branches: [verify/allocation-compatibility]
+    paths: [.github/workflows/allocation-compatibility.yml]
+
+permissions:
+  contents: read
+
+jobs:
+  allocation:
+    name: ${{ matrix.compiler }} / Cython ${{ matrix.cython }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        compiler: [Updated, Previous]
+        cython: ['3.2.4', '3.3.2']
+    env:
+      MODELX: 7e6ac7a4018248c373a7c43ede951363a1d4cf10
+      LIFELIB: 20d4daef3281d538b3fbda6d0fb951fcceb3a6f4
+      PYTHONIOENCODING: utf-8
+    steps:
+      - name: Select compiler
+        id: compiler
+        shell: bash
+        env:
+          REVISION: ${{ matrix.compiler }}
+        run: |
+          case "$REVISION" in
+            Updated) compiler=5186502062501beccf780a190712e6198b9b14fa ;;
+            Previous) compiler=7957dc3beb9237c779872bb479c2c9978b0ed296 ;;
+            *) exit 1 ;;
+          esac
+          printf 'sha=%s\n' "$compiler" >> "$GITHUB_OUTPUT"
+      - name: Check out compiler
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          repository: alexeybaran/modelx-cython
+          ref: ${{ steps.compiler.outputs.sha }}
+          path: compiler
+          persist-credentials: false
+      - name: Check out modelx
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          repository: alexeybaran/modelx
+          ref: ${{ env.MODELX }}
+          path: modelx
+          persist-credentials: false
+      - name: Check out lifelib
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          repository: alexeybaran/lifelib
+          ref: ${{ env.LIFELIB }}
+          path: lifelib
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.14.10t'
+      - name: Verify revisions and install dependencies
+        shell: bash
+        env:
+          COMPILER: ${{ steps.compiler.outputs.sha }}
+          CYTHON_VERSION: ${{ matrix.cython }}
+          PYTHON_GIL: '0'
+        run: |
+          for entry in "compiler $COMPILER" "modelx $MODELX" "lifelib $LIFELIB"; do
+            read -r project expected <<< "$entry"
+            actual=$(git -C "$project" rev-parse HEAD)
+            test "$actual" = "$expected"
+            test -z "$(git -C "$project" status --porcelain)"
+            echo "$project $actual" >> "$GITHUB_STEP_SUMMARY"
+          done
+          python -m pip install --upgrade pip
+          python -m pip install --only-binary scipy,libcst,numpy,pandas \
+            ./modelx ./lifelib "Cython==$CYTHON_VERSION" libcst setuptools MonkeyType numpy scipy \
+            'pytest==8.4.2' pytest-xdist 'pandas>=2.2.2' openpyxl psutil
+          python -m pip install --only-binary scipy,libcst,numpy,pandas ./compiler
+          python -m pip check
+          python -m pip list
+      - name: Repeat the two allocation tests
+        shell: bash
+        working-directory: ${{ runner.temp }}
+        env:
+          CYTHON_VERSION: ${{ matrix.cython }}
+          PYTHON_GIL: '0'
+        run: |
+          python - <<'PY'
+          import importlib
+          from importlib import metadata
+          import json
+          import os
+          from pathlib import Path
+          import sys
+          import sysconfig
+
+          assert bool(sysconfig.get_config_var("Py_GIL_DISABLED")) and not sys._is_gil_enabled()
+          assert sys.version_info[:3] == (3, 14, 10)
+          assert metadata.version("Cython") == os.environ["CYTHON_VERSION"]
+          work = Path(os.environ["GITHUB_WORKSPACE"]).resolve()
+          for name, checkout in (("modelx_cython", "compiler"), ("modelx", "modelx"), ("lifelib", "lifelib")):
+              module = importlib.import_module(name)
+              dist = metadata.distribution(name)
+              info = json.loads(dist.read_text("direct_url.json"))
+              assert info["url"] == (work / checkout).as_uri(), info
+              assert Path(module.__file__).resolve().is_relative_to(Path(dist.locate_file("")).resolve())
+              assert not Path(module.__file__).resolve().is_relative_to(work)
+          print(sys.version, "GIL enabled:", sys._is_gil_enabled(), "Cython:", metadata.version("Cython"))
+          PY
+          S="$GITHUB_WORKSPACE/compiler"
+          tests="$S/modelx_cython/tests/compiled/test_value_storage.py"
+          result=0
+          for repeat in 1 2 3; do
+            xml="repeat-$repeat.xml"
+            printf '\n## Repetition %s\n\n' "$repeat" >> "$GITHUB_STEP_SUMMARY"
+            if python -m pytest --import-mode=importlib --rootdir "$S" -p no:cacheprovider \
+              -q -rfEs --tb=short --basetemp="$RUNNER_TEMP/allocation-$repeat" --junitxml="$xml" \
+              "$tests::test_unwritten_values_of_a_locked_space" \
+              "$tests::test_unwritten_values_after_pickle_and_copy"; then
+              exit_code=0
+            else
+              exit_code=$?
+            fi
+            printf 'Pytest exit status: %s\n\n' "$exit_code" | tee -a "$GITHUB_STEP_SUMMARY"
+            if ! python - "$xml" <<'PY'
+          from pathlib import Path
+          import os
+          import sys
+          from xml.etree import ElementTree as ET
+
+          path = Path(sys.argv[1])
+          cases = ET.parse(path).findall(".//testcase") if path.exists() else []
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as summary:
+              for case in cases:
+                  outcome = next((elem for elem in case if elem.tag in {"failure", "error", "skipped"}), None)
+                  kind = "passed" if outcome is None else outcome.tag
+                  print(f"- `{case.attrib['name']}` — {kind}", file=summary)
+                  if outcome is not None:
+                      trace = (outcome.text or outcome.attrib.get("message", "")).splitlines()
+                      print("\n```text", *trace[:16], "```\n", sep="\n", file=summary)
+              if len(cases) != 2:
+                  print(f"Expected two test cases, recorded {len(cases)}.", file=summary)
+          assert len(cases) == 2 and all(len(case) == 0 for case in cases)
+          PY
+            then
+              result=1
+            fi
+            if [[ "$exit_code" -ne 0 ]]; then
+              result=1
+            fi
+          done
+          exit "$result"
