@@ -14,6 +14,7 @@ The final compiler diffs against the measured `1994dc2` and `9076e2f` trees cont
 ## Validation
 
 - On WSL2 CPython 3.14.8t, built both compilers' wheels from their sdists and installed the two exact package pairs in separate fresh environments. Pip resolved dependencies normally and `pip check` passed. The build used Cython 3.3.2. Native sources expected in the sdist and wheel were present. The small example passed in live modelx, exported Python and native code with the GIL off. The Collect example checked both series access forms and retained Direct values on the same Space.
+- Both installed examples also ran as exported Python and as compiled packages with imports of `modelx` and `modelx_cython` blocked.
 - The paired instruction gate covers seven rows on the same ordered books. DV01 Direct improves by 0.444% on Fast SEC and 0.447% on the compiler with Collect. DV01 Collect improves by 0.457%. FIA is effectively flat on both routes. MYGA improves by 0.446% in Direct and 0.502% in Collect. The mixed DV01 export exactly reproduces the package that was measured. FIA is byte-identical and the generated MYGA and DV01 arithmetic changes are limited to geometric MVA. Existing power caching decisions match the controls.
 - The exact hosted workflow installs the source pin pairs together on Linux, Windows and macOS and runs both compiler suites, the Collect companion suites and the released SEC examples. This workflow is separate from the code proposed upstream. [Exact review workflow](https://github.com/alexeybaran/modelx-cython/actions/runs/46147767105)
 
@@ -32,6 +33,14 @@ python check.py
 
 The versioned modelx review checkout satisfies the compiler dependency in a source install. For a normal public installation and upstream CI with the standard package index, the Collect-capable modelx release must be available first. The review version is a separate commit so release numbering stays with the maintainer.
 
+For the Collect pair, a fresh free-threaded environment can install the two pinned Git sources together.
+
+```sh
+python -m pip install \
+  'modelx @ git+https://github.com/alexeybaran/modelx.git@f83a55a0ca3b7f15896184234f2b8fd06a1da215' \
+  'modelx-cython[free-threaded] @ git+https://github.com/alexeybaran/modelx-cython.git@0cb1cb7f9dfeac4bff45df4ff0b96780f2cd725f'
+```
+
 ## Submission order
 
 1. Review Fast SEC against compiler main. Current upstream main is its base. Smaller upstream changes already open touch the same translator or spec paths. In particular, reconcile the `use_libm` flag with native dispatch if [compiler PR #60](https://github.com/fumitoh/modelx-cython/pull/60) lands first. Keep upstream's chosen API and rerun the affected emitted-source and correctness tests on the resulting base.
@@ -39,3 +48,5 @@ The versioned modelx review checkout satisfies the compiler dependency in a sour
 3. Review the compiler Collect diff against Fast SEC. Treat the optional lifelib example as a consumer after the corresponding compiler and modelx dependencies are available.
 
 The earlier broadly scoped [compiler PR #62](https://github.com/fumitoh/modelx-cython/pull/62), [modelx PR #288](https://github.com/fumitoh/modelx/pull/288) and [lifelib PR #191](https://github.com/lifelib-dev/lifelib/pull/191) are separate. Use these split branches to discuss replacement or submission order with the maintainer.
+
+Git merge-tree checks against the open compiler heads found actual conflicts with #55–60. The most extensive, #60, overlaps power proof, runtime declarations, spec, configuration, tracing and tests. #57's conflict is in CLI integration. There is no need to speculate about resolving any of these until the maintainer chooses which changes to merge first.

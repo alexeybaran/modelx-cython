@@ -23,6 +23,8 @@ The later local WSL2 qualification measured 10 comparable SEC Direct workloads f
 
 The final scalar comparison used three alternating fresh-process pairs on a Ryzen 7 5800H under WSL2, with free-threaded CPython 3.14.8 and the GIL off. FIA's generated class and runtime sources match byte for byte. MYGA and SEC DV01 change only the geometric MVA power expressions. Every DV01 run matched all 72 report values bit for bit. No new isolated elapsed-speed claim is made for the scalar change.
 
+The reviewer package includes the equal-book SEC table, compilation costs, paired scalar results and a runnable installed-wheel example. [Benchmark details](https://github.com/alexeybaran/modelx-cython/blob/review/fast-sec-collect-evidence/devnotes/review/PERFORMANCE.md) · [Exact review CI](https://github.com/alexeybaran/modelx-cython/actions/runs/46147767105)
+
 ## Review order
 
 Start with the typed execution and storage commits, then read the math and power commits with their fixtures. The final installation commit changes requirements, documentation and CI installation only. The compiler can be reviewed on `modelx-cython` main with modelx 0.33.0. The optional SEC DV01 example also needs the separate dynamic Space Reference export support.
