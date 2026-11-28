@@ -1,6 +1,6 @@
-# Reduce memory for portfolio calculations with Collect
+# Reduce portfolio memory with `Space.collect()`
 
-An ordinary Direct loop keeps policy ItemSpaces and cached values available for inspection. A portfolio calculation often needs only a total and a small set of results per policy. `Collect` evaluates policies in temporary ItemSpaces, keeps the requested outputs, and releases the rest of the calculation state. The same Space still supports Direct calls, including calls to Cells outside the Collect outputs. Requesting more individual values increases the size of the retained report.
+This PR implements the compiler hook for modelx's `Space.collect()`. Collect evaluates policies in temporary ItemSpaces, keeps the declared outputs, and releases the other calculated values. Direct calls on the same Space keep their own ItemSpaces and caches for inspection.
 
 ## Peak RAM on full MYGA SEC projections
 
@@ -11,14 +11,14 @@ Both routes sum monthly `net_cf` over the same ordered book. Direct keeps all po
 | Live modelx | 14 | 751.66 [751.34–751.88] | 123.23 [122.91–123.62] | 83.6% |
 | Exported Python | 14 | 140.30 [140.27–140.69] | 102.09 [101.85–102.13] | 27.2% |
 | Compiled | 14 | 116.57 [116.45–116.62] | 104.14 [104.05–104.32] | 10.7% |
-| Exported Python | 1,050 | 3,291.62 [3,291.30–3,291.71] | 102.76 [102.65–102.88] | 96.9% |
-| Compiled | 1,050 | 1,208.00 [1,207.98–1,208.02] | 104.29 [104.21–104.84] | 91.4% |
+| Exported Python | 1,050 | 3,291.62 [3,291.30–3,291.71] | 102.76 [102.65–102.88] | **96.9%** |
+| Compiled | 1,050 | 1,208.00 [1,207.98–1,208.02] | 104.29 [104.21–104.84] | **91.4%** |
 
-The 14-policy book is the common comparison across all three execution modes. The harness checks the retained Direct item count in live modelx and exported Python, and checks item identity on repeated Direct lookup in compiled code. The 1,050-policy book shows the cost of retaining a larger set of policy caches in standalone Python and compiled code. [Earlier memory procedure and receipts](https://github.com/alexeybaran/modelx-benchmark-toolkit/blob/r3/handover-review/parallel/20261113/round3/review/r4/collect-qualification/PR2-RELEASE.md#peak-ram-on-full-myga-sec-projections)
+The 14-policy book is common to all three modes. The harness verifies that Direct items remain accessible. Collect's peak memory depends on how much detail the report asks it to retain. [Memory measurement details](REFRESH.md#myga-sec-memory-with-no-policy-deletion)
 
 ## Python API
 
-`set_collect()` binds one Space parameter to a zero-argument Cell or a named Reference that supplies a nonempty sequence of distinct coordinates. The `outputs` argument is a zero-argument Python function. Passing a string raises `TypeError`. `collect()` is available on the declaring Space and takes the remaining Space parameters. Reading it on an individual ItemSpace raises `AttributeError`.
+`set_collect()` binds one Space parameter to a zero-argument Cell or named Reference that supplies distinct coordinates. A zero-argument Python function declares individual values, sums, or both. Call `collect()` on the declaring Space with the remaining parameters.
 
 ```python
 import modelx as mx
@@ -46,23 +46,21 @@ assert projection[2, 3].cashflow(1) == 12.0
 
 ### Live dependency tracing
 
-Live modelx records each Collect invocation as a cached dependency node. Consumers depend on that node. Reads of shared Cells and References inside the temporary policies attach to the Collect node. Changes to the coordinate domain, shared inputs or authored policy inputs invalidate the Collect result and downstream Cells. In the example, assigning `projection.policy_ids = (1, 2)` changes the next `projection.collect(3).sum.pv` to `90.0`. Temporary policy Cells can cache values during one evaluation. Their internal calls leave no persistent per-policy dependency graph. Public Direct items keep their usual caches and traces. Collect declarations survive saving and reopening the model.
+Live modelx records one dependency node per Collect call. Reads of shared Cells and References attach to that node, so input changes invalidate the result and its consumers. In the example, setting `projection.policy_ids = (1, 2)` makes the next `projection.collect(3).sum.pv` return `90.0`. Temporary policy caches last for the evaluation. Collect declarations survive a save and reopen.
 
 ### Python export and compilation
 
-The standalone Python export implements the same API. For eligible calls it can use multiple workers on free-threaded Python with the GIL off. Choose the worker count with `_mx_collect_workers`. Compiled packages also accept `collect_workers` in the spec. A compiled package defaults to one worker. The generated class preserves the export's Collect property and implements its versioned hook.
+- **Workers.** Exported Python and compiled models can run eligible calls in parallel on free-threaded Python with the GIL off. Set `_mx_collect_workers` on the model or `collect_workers` in the compiler spec. Compiled Collect defaults to one worker. Parallel access to shared Spaces requires `locked_spaces`. The compiler checks those bindings and can use serial execution when the caller already holds a shared lock.
+- **Native results.** Numeric outputs and subtotals can stay in native storage. Compiled Cells can read them directly. Python views are created on demand, and a result can contain both native and Python-valued fields. Parallel workers combine subtotals independently, which can change floating-point rounding.
+- **Item reuse.** An eligible worker resets and reuses a private ItemSpace. Other calls use fresh items. Compiled models still support Direct access to Cells outside the Collect outputs, including when the compiler sample exercised only Collect on that Space.
 
-Parallel calls require safe shared reads. The compiled runtime reports a shared Space Reference without a lock, or an unsupported direct read of the model or parent, with `ValueError`. Export the shared Space in `locked_spaces` or request one worker. Checks also cover dynamic bindings. Approved calls execute synchronously when the GIL is on or when an active caller lock or an unresolved child binding prevents safe parallel execution. A parallel evaluation starts workers for the call and joins them before returning.
+## Timing
 
-Compiled Collect keeps eligible numeric fields and subtotals in native storage. Compiled Cells consume them directly. Python views are created when needed, and Python-valued fields can coexist with numeric fields. Workers combine subtotals independently, so parallel sums can differ in floating-point rounding. A model formula can mix Direct and Collect on the same Space. Python callers can also call a Direct Cell outside the Collect outputs, including when the compiler sample used only Collect for that Space.
+Each comparison uses the same ordered book and checks the same outputs across routes. The timing drivers delete Direct ItemSpaces after evaluating them.
 
-An eligible worker retains a private receiver between coordinates and resets its fields, numeric caches and written flags before reuse. A dynamic Space factory can take a fresh ItemSpace path. Cleanup covers temporary Collect-owned policy state. Public Direct items and intentionally retained shared results have their own lifetime. Individual records are addressable by the collected coordinate.
+### Live modelx and exported Python timing
 
-The optional SEC DV01 example calls `Actual.collect(scen_id)` before Valuation to gather opening records for the requested path. Its Direct route reads Actual's public policy ItemSpaces. Both routes use the same model-owned CSV interface and valuation formulas.
-
-## Live modelx and exported Python timing
-
-Each comparison projects the same ordered MYGA SEC book and checks the same cash flows. The timed Direct driver deletes the policy after calculating it and performs periodic cleanup. The retained-state RAM comparison above keeps all Direct policy items available.
+These runs use MYGA SEC and periodic Direct cleanup.
 
 | Mode | Policies | Workers | Direct ms/policy | Collect ms/policy |
 | --- | ---: | ---: | ---: | ---: |
@@ -70,9 +68,9 @@ Each comparison projects the same ordered MYGA SEC book and checks the same cash
 | Exported Python | 840 | 1 | 20.659 | 16.802 |
 | Exported Python | 840 | 4 | 7.720 | 4.710 |
 
-## Compiled Direct and Collect timing
+### Compiled Direct and Collect timing
 
-Both compiled routes evaluate the same ordered book and return the same cash-flow output. Direct deletes each policy item inside the timed interval and queues the whole book in 64-projection tasks at four workers, with one explicit cleanup at the end. Collect uses a single public call per pass. All timings are medians of five alternating fresh-process rounds with the GIL off. Four workers run on separate physical cores.
+At four workers, the compiled Direct driver queues 64-projection tasks with one cleanup at the end. Times are medians of five alternating fresh-process rounds with the GIL off. Four workers run on separate physical cores.
 
 | Model | Projections | Direct 1w µs/proj. | Collect 1w µs/proj. | Direct 4w µs/proj. | Collect 4w µs/proj. | Direct 1w/4w | Collect 1w/4w | 4w speedup (Direct / Collect) |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
@@ -91,24 +89,20 @@ Both compiled routes evaluate the same ordered book and return the same cash-flo
 | WholeLife | 13,900 | 190.7 | 192.9 | 56.4 | 52.7 | 3.38× | 3.66× | 1.07× |
 | MYGA DV01 | 42,000 (1,050 × 40) | 332.5 | 273.2 | 83.1 | 73.4 | 4.00× | 3.72× | 1.13× |
 
-The largest four-worker gains were VA at 1.77×, VUL at 1.72× and RILA at 1.46×. The four-worker medians for MYGA and DIA were within 1% across routes. DIA still spends much of its first run preparing the shared premium schedule. [Elapsed ranges and preparation analysis](SEC-BUILD-BENCHMARKS.md#whole-book-direct-and-collect-scaling)
+The largest four-worker gains were VA, VUL and RILA. DIA's first run spends much of its time preparing the shared premium schedule. [Timing ranges and preparation analysis](SEC-BUILD-BENCHMARKS.md#whole-book-direct-and-collect-scaling)
 
 Each standard SEC model runs one projection per policy. BasicTerm_SC recalculates the same 10,000-point book ten times, with policy state released and the Collect result cleared between passes. [All matched elapsed ranges](SEC-BUILD-BENCHMARKS.md#compiled-collect-comparison)
 
 ### Full SEC DV01 and CS01 report
 
-The MYGA DV01 row uses one ESG path and three closes. Each of the 1,050 policies runs one Actual and 39 Valuation projections. Full-report medians were 13.964 s and 3.489 s for Direct, and 11.473 s and 3.085 s for Collect, at one and four workers respectively. All 72 DV01 and CS01 values matched live within the agreed parallel-sum tolerance. [DV01 method and receipts](REFRESH.md#full-sec-dv01-and-cs01-report)
+The full DV01 and CS01 report uses the same CSV inputs and valuation formulas in both routes. Collect gathers opening records with `Actual.collect(scen_id)`, and Direct reads the public Actual items. The benchmark runs one ESG path and three closes, for one Actual and 39 Valuation projections per policy. All 72 report values matched live within the parallel-sum tolerance. [DV01 method and elapsed totals](REFRESH.md#full-sec-dv01-and-cs01-report)
 
 The separate Collect-enabled builds for MYGA, RILA and DIA took 8–13% longer to compile than their Direct builds. [Separate build-time evidence](REFRESH.md)
 
 ## Installation and review
 
-This compiler change depends on the modelx Collect API and exported hook, version 1. The compiler requires `modelx>=0.33.1.dev0`. For review before a compatible release is published, install both checkouts in one pip command. Use the `free-threaded` compiler extra on a free-threaded interpreter. A normal public installation needs a release containing that API.
+Review the modelx companion first. This compiler requires its Collect API and version 1 of the export hook, with `modelx>=0.33.1.dev0`. Install the two pinned checkouts together for review. Use the `free-threaded` compiler extra on a free-threaded interpreter. [modelx companion](MODELX-COLLECT.md) · [Install and reproduction steps](README.md#repeat-the-installed-example)
 
-The compiler commits separate the native evaluator and result storage (`6e7c883`), compiler wiring and Direct access (`2370a90`), tests (`8b728f8`), and installation requirements (`0cb1cb7`). The compiler delta is +1,672/−19 production lines, +2,719/−0 test lines and +53/−3 documentation and packaging lines. The [modelx companion](MODELX-COLLECT.md) defines the API and the export protocol used here.
+The four commits cover native evaluation and storage (`6e7c883`), compiler wiring and Direct access (`2370a90`), tests (`8b728f8`), and packaging (`0cb1cb7`).
 
-All six exact Collect CI jobs passed across Linux, Windows and macOS on Python 3.12 and free-threaded Python 3.14. Test coverage includes function-only declarations, serialization, exported and compiled isolation, mixed native and Python outputs and consumers, both orders of Direct and Collect calls, and Direct access after a Collect-only sample. Reuse tests check numeric cache reset, discard of state from earlier coordinates, bounded live object counts, and a diagnostic for an unsupported reset declaration. [Exact package verification](https://github.com/alexeybaran/modelx-cython/actions/runs/46147767105) · [Package checks and reproduction](https://github.com/alexeybaran/modelx-cython/tree/review/fast-sec-collect-evidence/devnotes/review)
-
-## Earlier qualification
-
-The original description includes the worker-slot reuse and reset experiments, retained and deleting Direct controls, an eight-worker DV01 comparison, the borrowed-read controls and the original Regional pilot. Its DV01 memory measurements used Valuation Collect with retained Direct Actual items. The current example collects opening records from Actual and measures the full report on the current build. The original ordered Python accumulation design and its bitwise agreement figures describe those earlier builds. The current compiled path uses native subtotals and the parallel-sum tolerance explained above. [Original compiled Collect description](https://github.com/alexeybaran/modelx-cython/blob/be40323abe7e5c5f8d12a7f1dbe7b2d89d77f5d9/devnotes/PR-DESCRIPTION-collect.md) · [Earlier API and validation](https://github.com/alexeybaran/modelx-benchmark-toolkit/blob/r3/handover-review/parallel/20261113/round3/review/r4/collect-qualification/PR2-RELEASE.md)
+All six exact Collect CI jobs passed on Linux, Windows and macOS with standard Python 3.12 and free-threaded Python 3.14. Tests cover declaration and serialization, parallel input checks, cache reset and release, mixed native and Python outputs and consumers, and Direct and Collect calls in both orders. [Exact CI](https://github.com/alexeybaran/modelx-cython/actions/runs/46147767105)
