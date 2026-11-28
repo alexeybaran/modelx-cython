@@ -8,6 +8,8 @@ The two compiler patches can be reviewed in sequence. Fast SEC is an independent
 | modelx dynamic Reference prerequisite | `fec516d7e9b5813e7d40819a72731bd35fc2972f` | `7e6ac7a4018248c373a7c43ede951363a1d4cf10` | 2 | [Diff](https://github.com/alexeybaran/modelx/compare/fec516d7e9b5813e7d40819a72731bd35fc2972f...7e6ac7a4018248c373a7c43ede951363a1d4cf10) |
 | modelx Collect | `7e6ac7a4018248c373a7c43ede951363a1d4cf10` | `f83a55a0ca3b7f15896184234f2b8fd06a1da215` | 5 | [Draft](MODELX-COLLECT.md) · [Diff](https://github.com/alexeybaran/modelx/compare/7e6ac7a4018248c373a7c43ede951363a1d4cf10...f83a55a0ca3b7f15896184234f2b8fd06a1da215) |
 | Compiled Collect | `eb7fcc41fcf07e94938d06e9433dc0bc42b3e4df` | `0cb1cb7f9dfeac4bff45df4ff0b96780f2cd725f` | 4 | [Draft](COMPILER-COLLECT.md) · [Diff](https://github.com/alexeybaran/modelx-cython/compare/eb7fcc41fcf07e94938d06e9433dc0bc42b3e4df...0cb1cb7f9dfeac4bff45df4ff0b96780f2cd725f) |
+| Optional lifelib Direct example | `fbafbaab44493f77bdd015ad09f0d770a6488ded` | `c9284866839b79e880b747751e7ae2bbc213e3d9` | 1 | [Draft](LIFELIB-DV01.md) |
+| Optional lifelib Collect example | `c9284866839b79e880b747751e7ae2bbc213e3d9` | `a050c361f92ba2095d91cc7172674186e3d39481` | 1 | [Draft](LIFELIB-DV01.md) |
 
 The final compiler diffs against the measured `1994dc2` and `9076e2f` trees contain four files each, all installation metadata, documentation or CI. The modelx Collect implementation matches `d41b2d2` byte for byte outside its version tuple. The commits bring together the implementation and its behavioral coverage without rewriting existing public branches. The optional example has its own release and test evidence.
 
