@@ -46,15 +46,13 @@ not listed use no spec.
 
 ### `cells_param_size`
 
-Declares the sizes of the per-cells cache arrays allocated for cells with
-integer parameters.  A cells whose parameters are all integers and whose
-values are numeric scalars (not arrays) is backed by a fixed-size C array
-indexed by its parameters, so the translator must know each parameter's
-maximum size at translation time.
+Declares exclusive upper bounds for cached integer coordinates. For an
+array-backed cell, the translator also uses the bounds to size its storage.
 
 The value is a dict that maps a parameter name — or a tuple of parameter
-names for cells with multiple parameters — to the array size, or tuple of
-sizes.  A size of `n` means the parameter takes values in `range(n)`:
+names for cells with multiple parameters — to an exclusive upper bound,
+or a tuple of bounds. The lower bound is zero or the lowest negative
+value observed for the cell and parameter:
 
 ```python
 {"cells_param_size":
@@ -62,19 +60,57 @@ sizes.  A size of `n` means the parameter takes values in `range(n)`:
       ("i", "j"): (3, 6)}}   # cells with parameters (i, j)
 ```
 
-The entry applies to every cells in the space with that exact parameter
-tuple.
+A bound may also be a `(lower, stop)` pair, which declares the parameter's
+range as `range(lower, stop)`: storage covers only that range (a parameter
+such as a birth year needs none below `lower`), and an argument below `lower`
+raises like one at or beyond `stop`:
+
+```python
+{"cells_param_size": {"year": (1900, 2100)}}
+```
+
+A tuple entry applies to each cached Cell in the space with that exact parameter
+tuple. A single-name entry applies to Cells with that one parameter and also
+bounds that parameter's axis of every other cached Cell in scope whose
+parameter tuple has no tuple entry, so `{"t": 241}` covers `pv(t)` and
+`claims(t, kind)` alike. In a mixed signature, only native signed integer
+coordinates use the declared bounds. Other keys keep their own lookup semantics.
+
+`cells_param_size` may also be given at the model level (the top of the spec)
+and in any enclosing Space; a Space inherits those entries, and the nearest
+declaration of a key wins. Declare a bound once, at the highest level that
+covers it:
+
+```python
+{"cells_param_size": {"t": 1441},              # every Space of the model
+ "spaces":
+     {"Projection":
+          {"cells_param_size": {"x": 121}}}}     # this Space and its children
+```
+
+A declared axis is allocated at its declared size. A Cell whose declared
+array would exceed the dense storage ceiling (`max_dense_entries`) uses the
+hash store instead, and the admission report says so. The report lists, per
+Cell, the axes whose size is declared and where.
+
+An argument whose every sampled value is a member of one `IntEnum` class
+takes the whole member range of that class as its domain, so a member the
+sample did not use is accepted, as it is by the Python model.
 
 If the sample run passes an argument value equal to or larger than the
 declared size, the size is automatically raised to the observed maximum
 plus one, and the adjustment is logged at `INFO` level.  For parameter
-tuples with no spec entry, sizes are derived entirely from the observed
-maximum values.  Calling a compiled cells with an index outside the
-declared range raises {py:exc}`IndexError`.
+tuples with no spec entry, the upper bound is the observed maximum plus
+one; a sampled argument below a declared lower bound lowers it the same way.
+Calling a cached Cell with an integer coordinate outside its accepted range
+raises {py:exc}`IndexError` naming the Cell, each argument's accepted range and
+the key `cells_param_size`. To extend the negative range, include the required
+negative indices in the sample or declare a `(lower, stop)` pair.
 
 ### `cells`
 
-Maps cells names to per-cells settings.  Currently one setting is defined:
+Maps cells names to per-cells settings: `return_type`, below, and the cache
+settings described under {ref}`cache-settings`.
 
 `return_type`
 : Overrides the return type inferred from the sample run.  A
@@ -133,3 +169,77 @@ consumes an array-returning cells as a whole array and the compiled model
 hands you a memoryview, set `"return_type": "object"` for that cells;
 conversely, `"return_type": "memoryview"` forces the memoryview even when
 the analysis would fall back.
+
+(cache-settings)=
+## Cache settings
+
+The compiler chooses each Cell's cache from the sample's types and from the
+declared or sampled range of its arguments; none of these settings is
+required, and none follows how often the sample called a Cell.
+
+A cached Cell whose results are numeric scalars and whose arguments are
+integers gets *dense* storage, an array inside the Space object indexed by
+its arguments, when the range's rectangle has at most `max_dense_entries`
+entries (65,536 by default). Keys of the logical range outside a smaller
+physical window keep exact spill storage. Otherwise numeric keys and results
+use a native hash store and other signatures Python dictionaries.
+
+`max_dense_entries`
+: Space or per-cells setting: the dense ceiling, a positive integer. A Cell
+  above it uses the hash store, and the build warns, naming the Cell and its
+  traced range.
+
+`dense_window`
+: Per-cells setting: half-open `(lower, stop)` physical windows, one per
+  parameter in parameter order, for a dense cache. A window must fit inside
+  the logical range and may exceed the automatic ceiling.
+
+`native_numeric_cache`
+: Per-cells setting: `true` or `false` overrides the automatic choice of the
+  native hash store for numeric keys and results.
+
+`numeric_cache_capacity`
+: Per-cells setting: the initial capacity of a privately owned native hash
+  store, a power of two from 2 to 4,096 (by default twice the entries of the
+  declared or sampled range, at most 4,096; the table grows past it). Setting
+  it also selects the native store unless `native_numeric_cache` is `false`.
+
+`memoize_power`
+: Per-cells setting: `true` keeps a one-entry memo of a real power's operands
+  and result for a Cell of a privately owned Space (default: on with
+  `automatic_optimizations`).
+
+`native_locked_result_calls`
+: Space setting for a locked Space: `true` lets a Cell call another Cell's
+  result natively when that result is an ItemSpace of the exact class the
+  sample saw; any other result takes the ordinary call.
+
+## Integer arithmetic
+
+Integers traced as `int` are C `long long` values, and their arithmetic is
+Cython's, as on upstream: `+`, `-`, `*`, unary minus, `<<` and an integer
+`**` wrap silently when the exact result leaves 64 bits; `//` and `%` keep
+Python's rounding, `LLONG_MIN // -1` raises {py:exc}`OverflowError` and
+`LLONG_MIN % -1` stops the process (a C division trap). An `int` beyond 64
+bits passed from Python raises {py:exc}`OverflowError`, and a `float`
+passed from Python where an integer was traced is truncated, as on
+upstream. A value written from Python to an integer Reference must be an
+integer or a `float` that is a whole number: a fractional `float` or a
+non-number raises {py:exc}`TypeError` naming the Reference. Keep integer
+values well inside 64 bits, or let the sample pass values that make the
+Cell an object.
+
+`infer_types`
+: `true` (default) compiles generated model modules with Cython's C type
+  inference for untyped locals; `false` keeps Cython's default.
+
+## Compiler switches
+
+`automatic_optimizations` (default `true`) turns on the policy above for
+every model. The following switches default to it and exist for diagnosis
+and comparison: `dense_bounds_proofs`, `dense_one_axis`,
+`dense_miss_binding`, `propagate_exact_receiver` (requires
+`dense_miss_binding`), and `native_cache_hits` (`"auto"` by default; also
+`"none"`, `"scalar"`, `"dense"` or `"both"`; any but `"none"` requires
+`dense_miss_binding`). They change how a cache hit is reached, never a value:
+every miss keeps the checked call and Cython's error handling.
