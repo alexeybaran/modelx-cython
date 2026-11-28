@@ -34,15 +34,15 @@ jobs:
         run: |
           case "$FEATURE" in
             Direct)
-              compiler=b6dc2bbadffd0e05b8ae6633ec38b3f4abda6715
+              compiler=5186502062501beccf780a190712e6198b9b14fa
               modelx=7e6ac7a4018248c373a7c43ede951363a1d4cf10
               ;;
             Collect)
-              compiler=239684276e98cc8eb5c45059f6d132a1871454ee
+              compiler=3cd839da63b630ab964b018b3502b65044fb6b0a
               modelx=d41b2d2fdeca5ad42aae322158450aa5136f5f50
               ;;
             Regional)
-              compiler=d2c6ba41be3ac0994e99d8311fbbfd9f2803bfae
+              compiler=8ad30743bb15bc44894b12b579f9a7487bf35c62
               modelx=d41b2d2fdeca5ad42aae322158450aa5136f5f50
               ;;
             *) exit 1 ;;
