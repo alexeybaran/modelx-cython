@@ -23,11 +23,11 @@ The generated-source tests now inspect the relevant calls and operands through t
 
 ## Evidence
 
-All 12 released SEC products built and matched live modelx. In the 10 equal-book pairs that also built upstream, Fast SEC used 69–77% fewer instructions per policy and ran in one quarter to about one sixth of the elapsed time. Each row uses the Direct route with one worker. Elapsed figures are medians of five alternating fresh-process rounds on WSL2, with free-threaded CPython 3.14.8, the GIL off and Cython 3.3.2.
+The figures below use the generic compiler recipe on the same ordered book for each pair. That recipe omitted the module directives in lifelib's documented SEC build. The upstream DIA and VUL attempts therefore do not measure whether the shipped build succeeds. The ten generic pairs remain measurements of that configuration. A matched rerun with the documented SEC settings is in progress. Each row uses the Direct route with one worker and reports the median of five alternating fresh-process rounds on WSL2, with free-threaded CPython 3.14.8, the GIL off and Cython 3.3.2.
 
 | SEC product | Policies | Upstream µs/policy | Fast SEC µs/policy | Fast SEC / upstream instructions |
 | --- | ---: | ---: | ---: | ---: |
-| DIA | 12,000 | Build failed | 443.3 | — |
+| DIA | 12,000 | See build note | 443.3 | — |
 | FIA | 10,900 | 1,702.7 | 333.7 | 0.306× |
 | IUL | 3,500 | 5,768.1 | 1,031.8 | 0.270× |
 | MYGA | 34,300 | 1,948.3 | 296.6 | 0.246× |
@@ -37,10 +37,15 @@ All 12 released SEC products built and matched live modelx. In the 10 equal-book
 | ULSG | 9,000 | 1,972.9 | 367.2 | 0.300× |
 | UL | 9,500 | 1,917.6 | 311.2 | 0.267× |
 | VA | 8,000 | 2,996.2 | 499.0 | 0.228× |
-| VUL | 5,300 | Build failed | 780.9 | — |
+| VUL | 5,300 | See build note | 780.9 | — |
 | WholeLife | 13,900 | 1,114.5 | 185.8 | 0.284× |
+| SEC DV01 full report | 1,050 | — | 13,965.7 | — |
 
-The upstream DIA and VUL builds fail in Cython with `complex types are unordered`. The separate SEC DV01 example requires dynamic Reference export and has no upstream performance ratio. The detailed results include elapsed ranges, peak RSS, translation time and native build time. All 12 exact review CI jobs passed across Windows, Linux and macOS on standard Python 3.12 and free-threaded Python 3.14. [Benchmark report](REFRESH.md) · [Exact CI](https://github.com/alexeybaran/modelx-cython/actions/runs/46147767105)
+For DIA and VUL, lifelib's build sets `infer_types=True, cpow=True` on the generated Cython class module and uses `-ffp-contract=off` with GCC. Without the module directives, Cython's complex inference led to `complex types are unordered` in our generic compile. These settings can also affect models whose generic builds succeeded. [DIA build recipe](https://github.com/lifelib-dev/lifelib/blob/20d4daef3281d538b3fbda6d0fb951fcceb3a6f4/lifelib/libraries/uslib/products/deferred_income_annuity/model-sec.md#L1241) · [VUL build recipe](https://github.com/lifelib-dev/lifelib/blob/20d4daef3281d538b3fbda6d0fb951fcceb3a6f4/lifelib/libraries/uslib/products/variable_ul/model-sec.md#L977)
+
+The SEC DV01 row measures a full report with one ESG path and three closes. Fast SEC took 14.664 s at one worker and 3.530 s at four, with all 72 results matching live modelx bit for bit. The example requires dynamic Reference export and has no matched upstream result.
+
+The detailed benchmark report includes elapsed ranges, peak RSS, translation time and native build time. All 12 exact review CI jobs passed across Windows, Linux and macOS on standard Python 3.12 and free-threaded Python 3.14. [Benchmark report](REFRESH.md) · [Exact CI](https://github.com/alexeybaran/modelx-cython/actions/runs/46147767105)
 
 The earlier census remains available with its original pins and limitations. It documented an LTC Japan allocation and instruction-count trade involving `Projection.care_surv`. The owner accepted the earlier result. The current release comparison covers supported SEC workloads. [Earlier full census](https://github.com/alexeybaran/modelx-cython/blob/c39337225c8d4097bb93b4cd540c547e569ecaa4/devnotes/PR-DESCRIPTION.md)
 
