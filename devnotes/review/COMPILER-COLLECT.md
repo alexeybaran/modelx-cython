@@ -58,7 +58,7 @@ The optional SEC DV01 example calls `Actual.collect(scen_id)` before Valuation t
 
 ## Supporting timing on full MYGA SEC projections
 
-The elapsed-time runs use the same book on both routes within each mode. The Direct driver deletes each policy item inside the timed interval and runs generation-zero GC every 64 policies at one worker. Times are medians from five runs.
+Compare Direct and Collect within each row. Both routes use the same ordered book, worker count and cash-flow output. The elapsed times include the work each route does to release policy state. The Direct driver deletes each policy item inside the timed interval and runs generation-zero GC every 64 policies at one worker. Times are medians from five runs. The peak-RAM table uses the separate protocol that retains all Direct policy state.
 
 | Mode | Policies | Workers | Direct ms/policy | Collect ms/policy |
 | --- | ---: | ---: | ---: | ---: |
@@ -70,7 +70,7 @@ The elapsed-time runs use the same book on both routes within each mode. The Dir
 
 ## Full SEC DV01 and CS01 report
 
-The report uses 1,050 policies, one ESG path and three closes. All 72 DV01 and CS01 values matched the live reference within the agreed parallel-sum tolerance. Wall times are medians of five fresh processes per route and worker count.
+Both routes run the full report for the same 1,050 policies, one ESG path and three closes. This is 42,000 Actual and Valuation projections per run. All 72 DV01 and CS01 values matched the live reference within the agreed parallel-sum tolerance. Wall times are medians of five fresh processes per route and worker count.
 
 | Route | 1 worker | 4 workers | Scaling | Peak RSS at 4 workers |
 | --- | ---: | ---: | ---: | ---: |

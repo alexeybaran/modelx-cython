@@ -23,7 +23,7 @@ The generated-source tests now inspect the relevant calls and operands through t
 
 ## Evidence
 
-All 12 released SEC products build on both compilers and match live modelx when both use lifelib's documented native build settings. Fast SEC runs **2.71–6.16× as fast** and uses **55–76% fewer instructions per policy** across the twelve pairs. Each pair uses the Direct route with one worker and the same ordered book. Times are medians of five alternating fresh-process rounds on WSL2, with free-threaded CPython 3.14.8, the GIL off and Cython 3.3.2.
+All 12 released SEC products build on both compilers and match live modelx when both use lifelib's documented native build settings. At one worker, Fast SEC runs **2.71–6.16× as fast** and uses **55–76% fewer instructions per policy** across the twelve pairs. Each pair uses the Direct route and the same ordered book. Times are medians of five alternating fresh-process rounds on WSL2, with free-threaded CPython 3.14.8, the GIL off and Cython 3.3.2.
 
 | SEC product | Projections | Upstream µs/projection | Fast SEC µs/projection | Instruction reduction (upstream / Fast SEC) | Elapsed speedup |
 | --- | --- | --- | --- | --- | --- |
@@ -39,7 +39,7 @@ All 12 released SEC products build on both compilers and match live modelx when 
 | VA | 8,000 | 2,698.8 | 516.1 | 3.87× | 5.23× |
 | VUL | 5,300 | 3,566.2 | 808.8 | 2.94× | 4.41× |
 | WholeLife | 13,900 | 1,272.5 | 266.5 | 3.38× | 4.77× |
-| MYGA DV01 | 42,000 | — | 349.1 | — | — |
+| MYGA DV01 | 42,000 (1,050 × 40) | — | 349.1 | — | — |
 
 Lifelib's build sets `infer_types=True, cpow=True` on the generated Cython class module and uses `-ffp-contract=off` with GCC. Applying these settings to both arms restored the DIA and VUL upstream builds. Upstream instruction counts also fell for all ten products that had compiled under the generic recipe, by 2.3–31.8%. The largest changes were SPIA, IUL and VA. [Build procedure and per-product comparison](SEC-BUILD-BENCHMARKS.md)
 
