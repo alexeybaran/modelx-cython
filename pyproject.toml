@@ -17,7 +17,7 @@ authors = [
   { name = "Fumito Hamamura", email = "fumito.ham@gmail.com" },
 ]
 dependencies = [
-    "modelx",
+    "modelx>=0.33.0",
     "libcst",
     "Cython>=3.2.4",
     "setuptools",
@@ -62,6 +62,9 @@ classifiers=[
 Homepage = "https://modelx.io"
 Documentation = "https://docs.modelx.io"
 Repository = "https://github.com/fumitoh/modelx-cython.git"
+
+[project.optional-dependencies]
+free-threaded = ["Cython>=3.3.2"]
 
 [project.scripts]
 mx2cy = "modelx_cython.cli:entry_point_main"

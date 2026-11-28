@@ -8,6 +8,9 @@ To install modelx-cython, run the following command:
 $ pip install modelx-cython
 ```
 
+To build models on a free-threaded interpreter, install with
+`pip install 'modelx-cython[free-threaded]'`. This selects Cython 3.3.2 or later.
+
 If you are on Anaconda, install it from conda-forge instead:
 
 ```console

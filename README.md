@@ -71,6 +71,12 @@ To install modelx-cython, run the following command from your command prompt:
 pip install modelx-cython
 ```
 
+On free-threaded Python, install the extra that selects Cython 3.3.2 or later.
+
+```
+pip install 'modelx-cython[free-threaded]'
+```
+
 If you're on Anaconda, instead above install it from conda-forge:
 
 ```
