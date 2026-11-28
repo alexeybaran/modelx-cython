@@ -19,7 +19,7 @@ The final compiler diffs against the measured `1994dc2` and `9076e2f` trees cont
 - Both installed examples also ran as exported Python and as compiled packages with imports of `modelx` and `modelx_cython` blocked.
 - The scalar power qualification combines paired instruction counts and emitted source comparisons. FIA's generated sources are identical. MYGA and DV01 add native calls only at geometric MVA expressions. Existing power caching decisions match the controls. [Pinned scalar qualification archive](https://github.com/alexeybaran/modelx-cython/blob/46d1330/devnotes/review/PERFORMANCE.md)
 - All 12 exact hosted jobs passed. They installed the source pin pairs together on Linux, Windows and macOS for Python 3.12 and free-threaded 3.14. They ran both compiler suites, the Collect companion suites and released SEC examples. [Exact review workflow](https://github.com/alexeybaran/modelx-cython/actions/runs/46147767105)
-- The benchmark refresh uses the review heads in the table. [Refresh scope and protocol](REFRESH.md)
+- The completed benchmark refresh uses the review heads in the table. It covers all 12 released SEC Direct workloads, MYGA across live, exported and compiled execution, compiled RILA and DIA, and the full DV01 report. [Matched benchmark tables](REFRESH.md)
 
 ## Repeat the installed example
 

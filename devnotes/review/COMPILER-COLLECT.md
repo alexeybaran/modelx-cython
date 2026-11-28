@@ -44,7 +44,17 @@ The MYGA SEC comparison runs the same cash-flow projection in live modelx, expor
 | Exported Python | 1,050 | 3,291.62 [3,291.30–3,291.71] | 102.76 [102.65–102.88] | 96.9% |
 | Compiled | 1,050 | 1,208.00 [1,207.98–1,208.02] | 104.29 [104.21–104.84] | 91.4% |
 
-The elapsed-time runs use equal books within each mode and delete each Direct policy item inside the timed interval. One-worker Direct also runs generation-zero GC every 64 policies. The separate full SEC DV01 comparison starts from the input CSV directory and checks all 72 values against the live reference. [Matched performance evidence](REFRESH.md)
+The elapsed-time runs use the same book on both routes within each mode. The Direct driver deletes each policy item inside the timed interval and runs generation-zero GC every 64 policies at one worker. Times are medians from five runs.
+
+| Mode | Policies | Workers | Direct ms/policy | Collect ms/policy |
+| --- | ---: | ---: | ---: | ---: |
+| Live modelx | 28 | 1 | 541.925 | 151.141 |
+| Exported Python | 840 | 1 | 20.659 | 16.802 |
+| Exported Python | 840 | 4 | 7.720 | 4.710 |
+| Compiled | 34,300 | 1 | 0.290 | 0.246 |
+| Compiled | 34,300 | 4 | 0.070 | 0.065 |
+
+On the full 1,050-policy SEC DV01 report, compiled Collect took 11.473 s at one worker and 3.085 s at four, or 3.72× scaling. All 72 DV01 and CS01 values matched the live reference within the agreed tolerance for parallel sums. RILA and MYGA Collect scaled 3.71× and 3.76×. DIA Collect was faster than DIA Direct at each worker count and scaled 1.83×. The detailed timings report the additional compile cost of Collect-enabled builds. [Matched performance evidence](REFRESH.md)
 
 ## Installation and review
 

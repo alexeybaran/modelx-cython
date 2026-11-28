@@ -11,7 +11,7 @@ Compiled scalar insurance models spend much of their time looking up Cell values
 
 ## Evidence
 
-All 12 exact review CI jobs passed. The matched SEC refresh measures Direct over the same ordered book on both compilers. It checks cash-flow results against live modelx. The upstream DIA and VUL controls fail in Cython with `complex types are unordered`, so those rows have no speed ratio. The separate SEC DV01 example requires dynamic Reference export and has no comparable upstream compiler result. [Benchmark refresh](REFRESH.md) · [Exact review CI](https://github.com/alexeybaran/modelx-cython/actions/runs/46147767105)
+All 12 released SEC products built and matched live modelx. In the 10 equal-book pairs that also built upstream, Fast SEC used 69–77% fewer instructions per policy and median elapsed time was 4.0–6.6× faster. The published table includes translation, C build time and peak memory. The upstream DIA and VUL controls failed in Cython with `complex types are unordered`. The separate SEC DV01 example requires dynamic Reference export and has no upstream performance ratio. All 12 exact review CI jobs passed. [Benchmark refresh](REFRESH.md) · [Exact review CI](https://github.com/alexeybaran/modelx-cython/actions/runs/46147767105)
 
 The earlier census remains available with its original pins and limitations. It documented an LTC Japan allocation and instruction-count trade involving `Projection.care_surv`. The owner accepted the earlier result. The current release comparison covers supported SEC workloads. [Earlier full census](https://github.com/alexeybaran/modelx-cython/blob/c39337225c8d4097bb93b4cd540c547e569ecaa4/devnotes/PR-DESCRIPTION.md)
 
