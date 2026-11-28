@@ -10,8 +10,8 @@ from modelx_cython.usage import CellsResolver
 CLS = "Model_nomx._mx_classes._c_Space1"
 RATE = CLS + "._f_rate"
 COUNT = CLS + "._f_count"
-ARR = CLS + "._f_arr"
 LAST = CLS + "._f_last"
+ARR = CLS + "._f_arr"
 
 
 @pytest.fixture
@@ -107,15 +107,15 @@ class _FakeCells:
     def __init__(self, return_type="object"):
         self.return_type = return_type
 
-    def get_rettype_expr(self, c_style=False):
-        assert c_style
-        return self.return_type
-
     def has_args(self):
         return True
 
     def has_typeinfo(self):
         return True
+
+    def get_rettype_expr(self, c_style=False):
+        assert c_style
+        return self.return_type
 
     def get_argtype_expr(self, arg, c_style=False, formula=False):
         # the C-style spelling is what kind_of_type_expr matches, so a
@@ -126,7 +126,7 @@ class _FakeCells:
         return "long long" if arg == "t" else "double"
 
 
-def _rewrite(body: str, *, return_type="object") -> str:
+def _rewrite(body: str, *, builtin_float=False, return_type="object") -> str:
     resolver = CellsResolver(
         cells_by_class={CLS: {"rate": RATE, "mort_rate": RATE, "lapse_rate": RATE,
                               "transfer_rate": RATE, "credit_rate": RATE, "market_rate": RATE,
@@ -137,10 +137,11 @@ def _rewrite(body: str, *, return_type="object") -> str:
     func = cst.parse_statement(f"def _f_target(self, t, x):\n    {body}\n")
     out = rewrite_powers(
         func, resolver,
-        cells_kinds={RATE: KIND_FLOAT, ARR: KIND_UNKNOWN, LAST: KIND_UNKNOWN, LAST + "[1]": KIND_INT},
+        cells_kinds={RATE: KIND_FLOAT, ARR: KIND_UNKNOWN, LAST: KIND_UNKNOWN, LAST + '[1]': KIND_INT},
         ref_kinds={CLS: {"discount_rate": KIND_FLOAT, "lapse_slope": KIND_FLOAT, "lapse_buffer": KIND_FLOAT}},
         cls_fqname=CLS,
         cells=_FakeCells(return_type),
+        builtin_float=builtin_float,
     )
     return cst.Module([]).code_for_node(out)
 
@@ -157,6 +158,81 @@ def _rewrite(body: str, *, return_type="object") -> str:
 def test_floating_exponent_is_rewritten(body):
     assert "_mx_sys._mx_pow(" in _rewrite(body)
     assert "**" not in _rewrite(body)
+
+
+def test_annotated_float_locals_are_native_only_for_the_builtin():
+    body = "base: float = x\n    years: float = t / 12.0\n    return base ** years"
+    assert "_mx_sys._mx_pow(base, years)" in _rewrite(body, builtin_float=True)
+    assert "base ** years" in _rewrite(body)
+
+
+def test_float_local_rebinding_does_not_prove_the_power():
+    body = "base: float = x\n    base = self.arr(t)\n    return base ** 0.5"
+    assert "base ** 0.5" in _rewrite(body, builtin_float=True)
+
+
+@pytest.mark.parametrize("local, cell, zero_guard", [
+    ("q", "mort_rate", ""),
+    ("w", "lapse_rate", "    if w <= 0.0:\n        return 0.0\n"),
+    ("th", "transfer_rate", "    if th <= 0.0:\n        return 0.0\n"),
+])
+def test_double_cell_local_feeds_native_return_power(local, cell, zero_guard):
+    body = (f"{local} = self.{cell}(t)\n"
+            f"{zero_guard}"
+            f"    if {local} >= 1.0:\n"
+            "        return 1.0 if self.is_anniv(t) else 0.0\n"
+            f"    return 1.0 - (1.0 - {local}) ** (1.0 / 12.0)")
+    out = _rewrite(body, return_type="double")
+    assert f"_mx_sys._mx_pow((1.0 - {local}), (1.0 / 12.0))" in out
+    assert out.count(f"self.{cell}(t)") == 1
+    assert f"if {local} >= 1.0:" in out
+    assert "**" not in out
+    assert "**" in _rewrite(body)
+
+
+def test_double_reference_local_feeds_native_return_power():
+    body = ("j = self.discount_rate\n"
+            "    if j == 0.0:\n        return 0.0\n"
+            "    return (1.0 - (1.0 + j) ** (-t / 12.0)) / ((1.0 + j) ** (1.0 / 12.0) - 1.0)")
+    out = _rewrite(body, return_type="double")
+    assert out.count("_mx_sys._mx_pow(") == 2
+    assert "**" not in out
+    assert "**" in _rewrite(body)
+
+
+def test_double_cell_locals_feed_both_guarded_return_powers():
+    """MYGA_US_SEC lapse_dyn_market reads three Cells before choosing its branch."""
+    body = ("if not self.is_active(t):\n        return 0.0\n"
+            "    cr = self.credit_rate(t)\n    mr = self.market_rate(t)\n"
+            "    power = self.lapse_dyn_exponent(t)\n"
+            "    if cr >= mr:\n        return -self.lapse_slope * (cr - mr) ** power\n"
+            "    elif cr >= mr - self.lapse_buffer:\n        return 0.0\n"
+            "    else:\n        return self.lapse_slope * (mr - self.lapse_buffer - cr) ** power")
+    out = _rewrite(body, return_type="double")
+    assert out == _rewrite(body).replace(
+        "(cr - mr) ** power", "_mx_sys._mx_pow((cr - mr), power)"
+    ).replace(
+        "(mr - self.lapse_buffer - cr) ** power", "_mx_sys._mx_pow((mr - self.lapse_buffer - cr), power)"
+    )
+
+
+@pytest.mark.parametrize("body", [
+    "base = self.rate(t)\n    root = base ** 0.5\n    return root",
+    "base = self.rate(t)\n    return max(0.0, base ** 0.5)",
+    "base = self.rate(t)\n    return self.arr(t) + base ** 0.5",
+    "base = self.rate(t)\n    return base ** -t",
+    "base = self.rate(t)\n    base = self.arr(t)\n    return base ** 0.5",
+    "base = self.arr(t)\n    return base ** 0.5",
+    "base = x\n    return base ** 0.5",
+    "if t:\n        return base ** 0.5\n    base = self.rate(t)\n    return 0.0",
+    "if t:\n        base = self.rate(t)\n    return base ** 0.5",
+    "self = other\n    base = self.rate(t)\n    return base ** 0.5",
+    "base = self.rate(t)\n    return sum(base ** 0.5 for base in (x,))",
+])
+def test_cell_local_power_keeps_unproved_uses(body):
+    out = _rewrite(body, return_type="double")
+    assert "_mx_sys._mx_pow(" not in out
+    assert "**" in out
 
 
 @pytest.mark.parametrize("body", [
@@ -267,35 +343,6 @@ def test_build_kind_maps():
                                "table": KIND_UNKNOWN}}
 
 
-def test_element_of_a_typed_memoryview_cell():
-    """One index per dimension of a Cell's typed-memoryview result reads an element of its C type;
-    a partial index or a slice is a view, and the result itself is not a number."""
-    info = _FakeModuleInfo({
-        "_c_Space1": _FakeClassInfo(
-            CLS,
-            cells={"last": _FakeCellsInfo(LAST, "const long long[:]"),
-                   "grid": _FakeCellsInfo(ARR, "const double[:, :]")},
-            refs={},
-        )
-    })
-    cells_kinds, ref_kinds = build_kind_maps({"Model_nomx._mx_classes": info})
-    kind = OperandKind(CellsResolver({CLS: {"last": LAST, "grid": ARR}}, {CLS: {}}, {CLS: {}}),
-                       cells_kinds, ref_kinds, CLS, {"t": KIND_INT})
-    for expr, expected in [("self.last()[t]", KIND_INT), ("self.last()[t] + 1", KIND_INT),
-                           ("self.grid()[t, 0]", KIND_FLOAT), ("self.grid()[t]", KIND_UNKNOWN),
-                           ("self.last()[1:]", KIND_UNKNOWN), ("self.last()", KIND_UNKNOWN),
-                           ("self.other()[t]", KIND_UNKNOWN)]:
-        assert kind.kind(cst.parse_expression(expr)) == expected, expr
-
-
-def test_loop_bound_from_an_array_element_proves_the_power():
-    """DIA_US_SEC guarantee_mths_pricing: ``for tk in range(self.data.premium_last()[self.idx] + 1)``."""
-    body = ("last = self.last()[t]\n    v = 1.0 / (1.0 + self.rate(t))\n    total = 0.0\n"
-            "    for k in range(last + 1):\n        total += v ** ((k - t) / 12.0)\n    return total")
-    out = _rewrite(body)
-    assert out.count("_mx_sys._mx_pow(") == 1 and "**" not in out, out
-
-
 def test_kind_maps_feed_the_classifier():
     """build_kind_maps' output is what OperandKind consumes, so a ref
     typed through it must classify the same way."""
@@ -399,7 +446,7 @@ def test_demote_rebound_params_uncached_cells_everywhere():
 
 
 def test_assigned_local_kinds_from_every_assignment():
-    """A local takes a kind only when every binding of it has that kind."""
+    """D59: a local takes a kind only when every binding of it has that kind."""
     import libcst as cst
     from modelx_cython.powers import _assigned_local_kinds, KIND_FLOAT, KIND_INT
 
@@ -441,7 +488,7 @@ def test_assigned_local_kinds_from_every_assignment():
      "    return total", 1),
 ])
 def test_power_into_a_double_accumulator_is_native(body, count):
-    """The power's value flows into a local that is a double without it."""
+    """D62: the power's value flows into a local that is a double without it."""
     out = _rewrite(body)
     assert out.count("_mx_sys._mx_pow(") == count, out
     assert "**" not in out
@@ -481,7 +528,7 @@ def test_range_loop_bound_from_int_of_a_number():
     assert out.count("_mx_sys._mx_pow(") == 1 and "**" not in out, out
     assert "**" in _rewrite("int = self.arr\n    " + body)
 def test_local_kinds_through_declarations_and_compiler_casts():
-    """As in a SEC commuted_value: a loop variable declared before its loop
+    """diag-us (SPIA_US_S commuted_value): a loop variable declared before its loop
     (``s: _mx_cy.longlong``) and a value guarded by the overflow cast keep their kinds,
     so the power in one branch of the accumulator's operand is native."""
     body = ("n = 12\n    j = self.rate(t)\n    total = 0.0\n    s: _mx_cy.longlong\n"
@@ -509,6 +556,35 @@ def test_formula_local_kinds_reads_the_formula_body():
     kinds = formula_local_kinds(node, ('t',), _NoResolve(), {}, {}, 'm.C', {'t': KIND_INT})
     assert kinds == {'k': KIND_INT, 's': KIND_INT, 'q': KIND_FLOAT}, kinds
     assert formula_local_kinds(node, ('t',), None, {}, {}, 'm.C', {'t': KIND_INT}) == {}
+
+
+def test_element_of_a_typed_memoryview_cell():
+    """One index per dimension of a Cell's typed-memoryview result reads an element of its C type;
+    a partial index or a slice is a view, and the result itself is not a number."""
+    info = _FakeModuleInfo({
+        "_c_Space1": _FakeClassInfo(
+            CLS,
+            cells={"last": _FakeCellsInfo(LAST, "const long long[:]"),
+                   "grid": _FakeCellsInfo(ARR, "const double[:, :]")},
+            refs={},
+        )
+    })
+    cells_kinds, ref_kinds = build_kind_maps({"Model_nomx._mx_classes": info})
+    kind = OperandKind(CellsResolver({CLS: {"last": LAST, "grid": ARR}}, {CLS: {}}, {CLS: {}}),
+                       cells_kinds, ref_kinds, CLS, {"t": KIND_INT})
+    for expr, expected in [("self.last()[t]", KIND_INT), ("self.last()[t] + 1", KIND_INT),
+                           ("self.grid()[t, 0]", KIND_FLOAT), ("self.grid()[t]", KIND_UNKNOWN),
+                           ("self.last()[1:]", KIND_UNKNOWN), ("self.last()", KIND_UNKNOWN),
+                           ("self.other()[t]", KIND_UNKNOWN)]:
+        assert kind.kind(cst.parse_expression(expr)) == expected, expr
+
+
+def test_loop_bound_from_an_array_element_proves_the_power():
+    """DIA_US_SEC guarantee_mths_pricing: ``for tk in range(self.data.premium_last()[self.idx] + 1)``."""
+    body = ("last = self.last()[t]\n    v = 1.0 / (1.0 + self.rate(t))\n    total = 0.0\n"
+            "    for k in range(last + 1):\n        total += v ** ((k - t) / 12.0)\n    return total")
+    out = _rewrite(body)
+    assert out.count("_mx_sys._mx_pow(") == 1 and "**" not in out, out
 
 
 def _local_kinds(source, params, param_kinds):
@@ -550,67 +626,3 @@ def test_power_over_locals_bound_from_each_other_is_native():
             "        lo = hi\n    return total")
     out = _rewrite(body)
     assert out.count("_mx_sys._mx_pow(") == 1 and "**" not in out, out
-
-
-@pytest.mark.parametrize("local, cell, zero_guard", [
-    ("q", "mort_rate", ""),
-    ("w", "lapse_rate", "    if w <= 0.0:\n        return 0.0\n"),
-    ("th", "transfer_rate", "    if th <= 0.0:\n        return 0.0\n"),
-])
-def test_double_cell_local_feeds_native_return_power(local, cell, zero_guard):
-    body = (f"{local} = self.{cell}(t)\n"
-            f"{zero_guard}"
-            f"    if {local} >= 1.0:\n"
-            "        return 1.0 if self.is_anniv(t) else 0.0\n"
-            f"    return 1.0 - (1.0 - {local}) ** (1.0 / 12.0)")
-    out = _rewrite(body, return_type="double")
-    assert f"_mx_sys._mx_pow((1.0 - {local}), (1.0 / 12.0))" in out
-    assert out.count(f"self.{cell}(t)") == 1
-    assert f"if {local} >= 1.0:" in out
-    assert "**" not in out
-    assert "**" in _rewrite(body)
-
-
-def test_double_reference_local_feeds_native_return_power():
-    body = ("j = self.discount_rate\n"
-            "    if j == 0.0:\n        return 0.0\n"
-            "    return (1.0 - (1.0 + j) ** (-t / 12.0)) / ((1.0 + j) ** (1.0 / 12.0) - 1.0)")
-    out = _rewrite(body, return_type="double")
-    assert out.count("_mx_sys._mx_pow(") == 2
-    assert "**" not in out
-    assert "**" in _rewrite(body)
-
-
-def test_double_cell_locals_feed_both_guarded_return_powers():
-    """MYGA_US_SEC lapse_dyn_market reads three Cells before choosing its branch."""
-    body = ("if not self.is_active(t):\n        return 0.0\n"
-            "    cr = self.credit_rate(t)\n    mr = self.market_rate(t)\n"
-            "    power = self.lapse_dyn_exponent(t)\n"
-            "    if cr >= mr:\n        return -self.lapse_slope * (cr - mr) ** power\n"
-            "    elif cr >= mr - self.lapse_buffer:\n        return 0.0\n"
-            "    else:\n        return self.lapse_slope * (mr - self.lapse_buffer - cr) ** power")
-    out = _rewrite(body, return_type="double")
-    assert out == _rewrite(body).replace(
-        "(cr - mr) ** power", "_mx_sys._mx_pow((cr - mr), power)"
-    ).replace(
-        "(mr - self.lapse_buffer - cr) ** power", "_mx_sys._mx_pow((mr - self.lapse_buffer - cr), power)"
-    )
-
-
-@pytest.mark.parametrize("body", [
-    "base = self.rate(t)\n    root = base ** 0.5\n    return root",
-    "base = self.rate(t)\n    return max(0.0, base ** 0.5)",
-    "base = self.rate(t)\n    return self.arr(t) + base ** 0.5",
-    "base = self.rate(t)\n    return base ** -t",
-    "base = self.rate(t)\n    base = self.arr(t)\n    return base ** 0.5",
-    "base = self.arr(t)\n    return base ** 0.5",
-    "base = x\n    return base ** 0.5",
-    "if t:\n        return base ** 0.5\n    base = self.rate(t)\n    return 0.0",
-    "if t:\n        base = self.rate(t)\n    return base ** 0.5",
-    "self = other\n    base = self.rate(t)\n    return base ** 0.5",
-    "base = self.rate(t)\n    return sum(base ** 0.5 for base in (x,))",
-])
-def test_cell_local_power_keeps_unproved_uses(body):
-    out = _rewrite(body, return_type="double")
-    assert "_mx_sys._mx_pow(" not in out
-    assert "**" in out

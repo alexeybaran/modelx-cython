@@ -1,4 +1,4 @@
-"""Typed locals (spec key infer_types) are the default."""
+"""W1.5 (D25 Q7): typed locals are the default."""
 import pytest
 
 from modelx_cython.config import CompilerPolicy

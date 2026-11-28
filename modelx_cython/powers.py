@@ -34,19 +34,18 @@ removes the failure without touching integer arithmetic at all.
 The proof is the conservative classifier below.  Every operand is
 :data:`KIND_FLOAT`, :data:`KIND_INT` or :data:`KIND_UNKNOWN`, and only
 numeric literals, the declaring cells' own parameters, calls to cells
-the resolver reaches, an element of such a call's typed-memoryview
-result read with one index per dimension, scalar references and
-arithmetic over those are ever known. Everything else -- other locals,
-other subscripts, module attributes, and anything inside a construct
-that binds names of its own, where a name can shadow a parameter of the
-cells -- is unknown. This pass leaves powers with unknown operands for
-ordinary Cell lowering. The object
+the resolver reaches, resolved typed-memoryview elements, scalar
+references and single-assignment locals annotated with the builtin ``float``, and arithmetic over those are
+ever known. Everything else -- other locals, other subscripts, module
+attributes, and anything inside a construct that binds names of its own,
+where a name can shadow a parameter of the cells -- is unknown. This pass
+leaves powers with unknown operands for ordinary Cell lowering. The object
 operator in :mod:`~modelx_cython.ordered_arguments` preserves Python power
 semantics where Cython would otherwise infer a complex intermediate.
 
 A native double return can also use a uniquely assigned local from a
-resolved double Cell or Reference. The proof applies to arithmetic that
-directly feeds the return.
+resolved double Cell or Reference. That local proof applies only to arithmetic directly
+feeding the return, where Cython already requires a real result.
 
 The same classifier decides, in :func:`demote_rebound_params`, whether a
 parameter that a formula binds again keeps its C type there: only if
@@ -261,24 +260,37 @@ class OperandKind:
 class _PowerRewriter(cst.CSTTransformer):
     """Replace provably real ``**`` operations with ``_mx_sys._mx_pow``."""
 
-    def __init__(self, operand_kind: OperandKind, memo=None, operands=None) -> None:
+    def __init__(self, operand_kind: OperandKind, memo=None, return_operands=None, local_kind=None) -> None:
         super().__init__()
         self._kind = operand_kind
-        self._operands = operands or {}   # operand kinds proven for a power by its context
+        self._local_kind = local_kind     # report only: which declined powers are integer powers
+        self._return_operands = return_operands or {}
         self._opaque_depth = 0
         self.rewritten = 0
         self.declined: List[str] = []
+        self.declined_in_loops: List[str] = []
+        self._loop_depth = 0
         self.memo = memo
 
     def on_visit(self, node: cst.CSTNode) -> bool:
         if isinstance(node, _OPAQUE_SCOPES):
             self._opaque_depth += 1
+        if isinstance(node, (cst.For, cst.While, cst.CompFor)):
+            self._loop_depth += 1
         return super().on_visit(node)
 
     def on_leave(self, original_node, updated_node):
         if isinstance(original_node, _OPAQUE_SCOPES):
             self._opaque_depth -= 1
+        if isinstance(original_node, (cst.For, cst.While, cst.CompFor)):
+            self._loop_depth -= 1
         return super().on_leave(original_node, updated_node)
+
+    def _decline(self, node):
+        text = cst.Module([]).code_for_node(node).strip()
+        self.declined.append(text)
+        if self._loop_depth:
+            self.declined_in_loops.append(text)
 
     def leave_BinaryOperation(self, original_node, updated_node):
         if not isinstance(original_node.operator, cst.Power):
@@ -287,14 +299,12 @@ class _PowerRewriter(cst.CSTTransformer):
             # a name here may be bound by the enclosing comprehension,
             # lambda or nested def rather than by the cells, so nothing
             # can be typed from the parameters
-            self.declined.append(
-                cst.Module([]).code_for_node(original_node).strip()
-            )
+            self._decline(original_node)
             return updated_node
         # classify the original operands: a nested power has already
         # been rewritten into a call in ``updated_node``
-        if original_node in self._operands:
-            base, exponent = self._operands[original_node]
+        if original_node in self._return_operands:
+            base, exponent = self._return_operands[original_node]
         else:
             base = self._kind.kind(original_node.left)
             exponent = self._kind.kind(original_node.right)
@@ -317,11 +327,12 @@ class _PowerRewriter(cst.CSTTransformer):
                 rpar=updated_node.rpar,
             )
         # Only a floating exponent puts a power on Cython's complex
-        # path, so an integer one is left alone without comment.
-        if exponent in (KIND_FLOAT, KIND_UNKNOWN):
-            self.declined.append(
-                cst.Module([]).code_for_node(original_node).strip()
-            )
+        # path, so an integer one is left alone without comment; an exponent
+        # that the formula's local kinds prove an integer is one too (the
+        # argument-order pass, which knows those kinds, keeps its C power)
+        if exponent in (KIND_FLOAT, KIND_UNKNOWN) and not (
+                self._local_kind is not None and self._local_kind.kind(original_node.right) == KIND_INT):
+            self._decline(original_node)
         return updated_node
 
     @staticmethod
@@ -387,6 +398,8 @@ def rewrite_powers(
     ref_kinds: Mapping[str, Mapping[str, str]],
     cls_fqname: str,
     cells,
+    *,
+    builtin_float=False,
 ) -> cst.FunctionDef:
     """Rewrite the provably real powers in one method body.
 
@@ -403,6 +416,8 @@ def rewrite_powers(
         Fqname of the class the method belongs to.
     cells : CombinedCellsInfo
         The cells the method implements, for its parameter types.
+    builtin_float : bool
+        Whether the formula's lexical float binding is the builtin.
 
     Returns
     -------
@@ -421,25 +436,50 @@ def rewrite_powers(
         from modelx_cython.numeric_cache import exclusively_owned
         memo = f'_mx_power_{cells.name}' if exclusively_owned(cells) else None
     param_kinds = _param_kinds(cells)
+    # A cells object that does not report a return type (any object that
+    # implements only the parameter-type interface) has an unknown return
+    # type, so the native-return arithmetic path does not apply to it.
+    rettype = getattr(cells, 'get_rettype_expr', None)
+    native_return = (isinstance(node.body, cst.IndentedBlock) and rettype is not None
+                     and rettype(c_style=True) == CY_FLOAT_T
+                     and any(isinstance(part, cst.Power) for part in lexical_nodes(node.body.body)))
+    facts = CstFacts(node.body.body) if native_return else None
+    if builtin_float and isinstance(node.body, cst.IndentedBlock):
+        declarations = [
+            decl.target.value for decl in lexical_nodes(node.body.body)
+            if isinstance(decl, cst.AnnAssign) and isinstance(decl.target, cst.Name)
+            and isinstance(decl.annotation.annotation, cst.Name)
+            and decl.annotation.annotation.value == 'float' and decl.value is not None
+        ]
+        if declarations:
+            facts = facts if facts is not None else CstFacts(node.body.body)
+            # Cython gives an unshadowed float local a double declaration.
+            param_kinds.update((name, KIND_FLOAT) for name in declarations
+                               if facts.stores[name] == 1 and name not in cells.params
+                               and name not in facts.deleted)
     if not any(isinstance(part, cst.BinaryOperation) and isinstance(part.operator, cst.Power)
                for part in walk(node.body)):
-        # the rewriter changes only a '**': none to rewrite or decline
+        # the rewriter changes only a '**': none to rewrite, decline or report
+        cells.powers_in_loops = []
         return node
     kind = OperandKind(resolver, cells_kinds, ref_kinds, cls_fqname, param_kinds)
-    operands = {}
+    return_operands = None
+    if native_return:
+        local_kinds = _native_return_locals(node.body.body, facts, kind, cells.params)
+        if local_kinds:
+            return_kind = OperandKind(resolver, cells_kinds, ref_kinds, cls_fqname, {**param_kinds, **local_kinds})
+            return_operands = _native_return_arithmetic(node.body.body, return_kind)
     if isinstance(node.body, cst.IndentedBlock):
-        body = node.body.body
-        rettype = getattr(cells, 'get_rettype_expr', None)
-        if (rettype is not None and rettype(c_style=True) == CY_FLOAT_T
-                and any(isinstance(node, cst.Power) for node in lexical_nodes(body))):
-            local_kinds = _native_return_locals(body, CstFacts(body), kind, cells.params)
-            if local_kinds:
-                return_kind = OperandKind(resolver, cells_kinds, ref_kinds, cls_fqname, {**param_kinds, **local_kinds})
-                operands.update(_native_return_arithmetic(body, return_kind))
-        operands.update(_double_accumulator_powers(body, cells.params, resolver, cells_kinds, ref_kinds,
-                                                  cls_fqname, param_kinds) or {})
-    rewriter = _PowerRewriter(kind, memo, operands)
+        accumulated = _double_accumulator_powers(
+            node.body.body, cells.params, resolver, cells_kinds, ref_kinds, cls_fqname, param_kinds)
+        if accumulated:
+            return_operands = {**(return_operands or {}), **accumulated}
+    local_kinds = formula_local_kinds(node, cells.params, resolver, cells_kinds, ref_kinds, cls_fqname, param_kinds)
+    rewriter = _PowerRewriter(kind, memo, return_operands, OperandKind(
+        resolver, cells_kinds, ref_kinds, cls_fqname, {**local_kinds, **param_kinds}) if local_kinds else None)
     updated = node.body.visit(rewriter)
+    # Powers left on Python's semantics inside a loop, for the admission report
+    cells.powers_in_loops = list(rewriter.declined_in_loops)
     if rewriter.declined:
         _logger.info(
             f"'**' left as exported in {cells.formula_fqname}, so a "
