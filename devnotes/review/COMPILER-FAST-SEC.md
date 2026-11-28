@@ -23,27 +23,30 @@ The generated-source tests now inspect the relevant calls and operands through t
 
 ## Evidence
 
-All 12 released SEC products build on both compilers and match live modelx when both use lifelib's documented native build settings. At one worker, Fast SEC runs **2.71–6.16× as fast** and uses **55–76% fewer instructions per policy** across the twelve pairs. Each pair uses the Direct route and the same ordered book. Times are medians of five alternating fresh-process rounds on WSL2, with free-threaded CPython 3.14.8, the GIL off and Cython 3.3.2.
+All 12 released SEC products build on both compilers and match live modelx with lifelib's documented native build settings. At one worker, Fast SEC runs **3.04–7.51× as fast** and uses **56–77% fewer instructions per policy** across the twelve pairs. Each pair uses the Direct route and the same ordered book. For the SEC products and BasicTerm_SC, both compilers and worker counts use the same cleanup schedule, with garbage collection after each batch of 512 completed projections. Times are medians of five fresh-process rounds on WSL2 with free-threaded CPython 3.14.8, the GIL off and Cython 3.3.2.
 
-| SEC product | Projections | Upstream µs/projection | Fast SEC µs/projection | Instruction reduction (upstream / Fast SEC) | Elapsed speedup |
-| --- | --- | --- | --- | --- | --- |
-| DIA | 12,000 | 1,293.8 | 477.0 | 2.20× | 2.71× |
-| FIA | 10,900 | 1,644.8 | 351.6 | 3.18× | 4.68× |
-| IUL | 3,500 | 5,064.8 | 975.0 | 3.23× | 5.19× |
-| MYGA | 34,300 | 1,830.8 | 297.4 | 3.75× | 6.16× |
-| RILA | 27,000 | 2,004.7 | 417.2 | 4.10× | 4.80× |
-| SPIA | 13,200 | 1,038.7 | 293.5 | 2.28× | 3.54× |
-| Term | 31,900 | 594.6 | 156.7 | 3.38× | 3.80× |
-| ULSG | 9,000 | 1,843.8 | 306.7 | 3.26× | 6.01× |
-| UL | 9,500 | 1,894.8 | 320.4 | 3.63× | 5.91× |
-| VA | 8,000 | 2,698.8 | 516.1 | 3.87× | 5.23× |
-| VUL | 5,300 | 3,566.2 | 808.8 | 2.94× | 4.41× |
-| WholeLife | 13,900 | 1,272.5 | 266.5 | 3.38× | 4.77× |
-| MYGA DV01 | 42,000 (1,050 × 40) | — | 349.1 | — | — |
+| SEC product | Projections | Upstream 1w µs/projection | Fast SEC 1w µs/projection | Instruction reduction (upstream / Fast SEC) | 1w elapsed speedup | Upstream 1w/4w | Fast SEC 1w/4w | Scaling ratio (Fast SEC / upstream) |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| BasicTerm_SC | 100,000 | 89.9 | 33.9 | 2.59× | 2.65× | 2.07× | 1.66× | 0.80× |
+| DIA | 12,000 | 1,198.9 | 394.2 | 2.28× | 3.04× | 2.66× | 1.60× | 0.60× |
+| FIA | 10,900 | 1,662.2 | 288.2 | 3.34× | 5.77× | 3.42× | 1.75× | 0.51× |
+| IUL | 3,500 | 5,302.7 | 945.8 | 3.28× | 5.61× | 3.46× | 2.32× | 0.67× |
+| MYGA | 34,300 | 1,737.3 | 274.6 | 4.00× | 6.33× | 3.41× | 2.24× | 0.66× |
+| RILA | 27,000 | 2,184.4 | 374.8 | 4.32× | 5.83× | 2.34× | 2.24× | 0.96× |
+| SPIA | 13,200 | 992.4 | 226.1 | 2.37× | 4.39× | 3.45× | 2.37× | 0.69× |
+| Term | 31,900 | 574.4 | 103.4 | 3.80× | 5.55× | 3.04× | 2.34× | 0.77× |
+| ULSG | 9,000 | 1,934.0 | 333.3 | 3.40× | 5.80× | 3.50× | 2.18× | 0.62× |
+| UL | 9,500 | 1,712.5 | 271.7 | 3.81× | 6.30× | 3.18× | 1.93× | 0.61× |
+| VA | 8,000 | 3,210.1 | 427.4 | 4.03× | 7.51× | 3.46× | 1.78× | 0.51× |
+| VUL | 5,300 | 4,840.6 | 776.0 | 3.00× | 6.24× | 3.72× | 2.54× | 0.68× |
+| WholeLife | 13,900 | 1,102.6 | 173.1 | 3.61× | 6.37× | 2.99× | 1.94× | 0.65× |
+| MYGA DV01 | 42,000 (1,050 × 40) | — | 349.1 | — | — | — | 4.15× | — |
 
 Lifelib's build sets `infer_types=True, cpow=True` on the generated Cython class module and uses `-ffp-contract=off` with GCC. Applying these settings to both arms restored the DIA and VUL upstream builds. Upstream instruction counts also fell for all ten products that had compiled under the generic recipe, by 2.3–31.8%. The largest changes were SPIA, IUL and VA. [Build procedure and per-product comparison](SEC-BUILD-BENCHMARKS.md)
 
-Each released SEC product runs one projection per policy. The MYGA DV01 report runs one Actual and 39 Valuation projections per policy across one ESG path, with one base and 12 shocked valuations at each of three closes. The 1,050-policy book therefore runs **42,000 projections**. The full report took **349.1 µs per projection** at one worker (14.664 s total) and **84.1 µs** at four (3.530 s total). All 72 results matched live modelx bit for bit. The example requires dynamic Reference export and has no matched upstream result.
+Each released SEC product runs one projection per policy. BasicTerm_SC runs `pv_net_cf()` on ten passes through the same 10,000-point book. Both compilers evaluate the same 100,000 projections. The scaling ratio is Fast SEC's 1w/4w divided by upstream's 1w/4w. [Full one-worker and four-worker times](SEC-BUILD-BENCHMARKS.md)
+
+The separate MYGA DV01 report runs one Actual and 39 Valuation projections per policy across one ESG path, with one base and 12 shocked valuations at each of three closes. The 1,050-policy book therefore runs **42,000 projections**. The full report took **349.1 µs per projection** at one worker (14.664 s total) and **84.1 µs** at four (3.530 s total). All 72 results matched live modelx bit for bit. The example requires dynamic Reference export and has no matched upstream result.
 
 The detailed benchmark report includes elapsed ranges, peak RSS, translation time and native build time. All 12 exact review CI jobs passed across Windows, Linux and macOS on standard Python 3.12 and free-threaded Python 3.14. [Released SEC report](SEC-BUILD-BENCHMARKS.md) · [SEC DV01 results](REFRESH.md#full-sec-dv01-and-cs01-report) · [Exact CI](https://github.com/alexeybaran/modelx-cython/actions/runs/46147767105)
 
