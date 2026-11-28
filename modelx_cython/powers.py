@@ -44,6 +44,10 @@ ordinary Cell lowering. The object
 operator in :mod:`~modelx_cython.ordered_arguments` preserves Python power
 semantics where Cython would otherwise infer a complex intermediate.
 
+A native double return can also use a uniquely assigned local from a
+resolved double Cell or Reference. The proof applies to arithmetic that
+directly feeds the return.
+
 The same classifier decides, in :func:`demote_rebound_params`, whether a
 parameter that a formula binds again keeps its C type there: only if
 every value bound to it is provably of that type.
@@ -63,12 +67,13 @@ from typing import Dict, List, Mapping, Optional
 from collections import Counter
 import libcst as cst
 import libcst.matchers as m
+from libcst.metadata import ExpressionContext
 
-from modelx_cython.consts import CY_MOD, MX_POW, MX_SYS_MOD
+from modelx_cython.consts import CY_MOD, MX_POW, MX_SELF, MX_SYS_MOD
 from modelx_cython.typedefs import CY_FLOAT_T, CY_INT_T
 from modelx_cython.usage import RESOLVED, CellsResolver, _extract_self_chain
 from modelx_cython.scopes import CstFacts, OPAQUE_SCOPES as _OPAQUE_SCOPES, has_scope_effects, lexical_nodes
-from modelx_cython.syntax import walk
+from modelx_cython.syntax import local_assignment, single_statement, walk
 
 _logger = logging.getLogger(__name__)
 
@@ -339,6 +344,42 @@ class _PowerRewriter(cst.CSTTransformer):
         )
 
 
+def _native_return_locals(body, facts, operand_kind, parameters):
+    """Prove a local from one dominating double Cell or Reference read."""
+    if (facts.stores[MX_SELF] or has_scope_effects(body)
+            or facts.reads & {'locals', 'vars', 'eval', 'exec', '_getframe', 'currentframe'}):
+        return {}
+    seen, result = set(parameters), {}
+    for line in body:
+        assignment = single_statement(line)
+        if ((target := local_assignment(assignment)) is not None
+                and target.value not in seen and facts.stores[target.value] == 1
+                and target.value not in facts.deleted
+                and isinstance(assignment.value, (cst.Call, cst.Attribute))
+                and operand_kind.kind(assignment.value) == KIND_FLOAT):
+            result[target.value] = KIND_FLOAT
+        seen.update(part.value for part in walk(line) if isinstance(part, cst.Name)
+                    and facts.contexts.get(part) is ExpressionContext.LOAD)
+    return result
+
+
+def _native_return_arithmetic(body, operand_kind):
+    """Identify typed arithmetic through the native return boundary only."""
+    def arithmetic(expr):
+        if operand_kind.kind(expr) == KIND_UNKNOWN:
+            return
+        if isinstance(expr, cst.BinaryOperation):
+            if isinstance(expr.operator, cst.Power):
+                yield expr, (operand_kind.kind(expr.left), operand_kind.kind(expr.right))
+            yield from arithmetic(expr.left)
+            yield from arithmetic(expr.right)
+        elif isinstance(expr, cst.UnaryOperation):
+            yield from arithmetic(expr.expression)
+
+    return {expr: kinds for stmt in lexical_nodes(body) if isinstance(stmt, cst.Return) and stmt.value is not None
+            for expr, kinds in arithmetic(stmt.value)}
+
+
 def rewrite_powers(
     node: cst.FunctionDef,
     resolver: Optional[CellsResolver],
@@ -385,10 +426,18 @@ def rewrite_powers(
         # the rewriter changes only a '**': none to rewrite or decline
         return node
     kind = OperandKind(resolver, cells_kinds, ref_kinds, cls_fqname, param_kinds)
-    operands = None
+    operands = {}
     if isinstance(node.body, cst.IndentedBlock):
-        operands = _double_accumulator_powers(
-            node.body.body, cells.params, resolver, cells_kinds, ref_kinds, cls_fqname, param_kinds)
+        body = node.body.body
+        rettype = getattr(cells, 'get_rettype_expr', None)
+        if (rettype is not None and rettype(c_style=True) == CY_FLOAT_T
+                and any(isinstance(node, cst.Power) for node in lexical_nodes(body))):
+            local_kinds = _native_return_locals(body, CstFacts(body), kind, cells.params)
+            if local_kinds:
+                return_kind = OperandKind(resolver, cells_kinds, ref_kinds, cls_fqname, {**param_kinds, **local_kinds})
+                operands.update(_native_return_arithmetic(body, return_kind))
+        operands.update(_double_accumulator_powers(body, cells.params, resolver, cells_kinds, ref_kinds,
+                                                  cls_fqname, param_kinds) or {})
     rewriter = _PowerRewriter(kind, memo, operands)
     updated = node.body.visit(rewriter)
     if rewriter.declined:
