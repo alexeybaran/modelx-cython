@@ -88,6 +88,46 @@ def test_exported_dynamic_ref_storage():
     assert visitor.spaces == {}
 
 
+def test_only_the_generated_collect_property_is_excluded_from_cells():
+    source = textwrap.dedent('''\
+        class _c_Collected:
+            def __init__(self, parent):
+                self._mx_collect_cache = {}
+
+            @property
+            def collect(self):
+                if self._mx_roots:
+                    raise AttributeError('no Collect on an ItemSpace')
+                return self._mx_collect_run
+
+            @decorate
+            def value(self, t):
+                return t
+
+        class _c_Collision:
+            def __init__(self, parent):
+                self._mx_collect_cache = {}
+
+            @property
+            def collect(self):
+                return 3
+
+            @property
+            def _mx_collect(self):
+                return self._mx_collect_run
+
+        class _c_Ordinary:
+            @property
+            def collect(self):
+                return self._mx_collect_run
+        ''')
+    visitor = ModuleVisitor(module="M._mx_classes", source=source)
+    assert set(visitor.cells_info["_c_Collected"]) == {"value"}
+    assert set(visitor.cells_info["_c_Collision"]) == {"collect"}
+    assert set(visitor.cells_info["_c_Ordinary"]) == {"collect"}
+    assert visitor.collect_accessors == {"_c_Collected": {"collect"}, "_c_Collision": {"_mx_collect"}}
+
+
 # --------------------------------------------------------------------
 # Parameters a formula binds again
 
