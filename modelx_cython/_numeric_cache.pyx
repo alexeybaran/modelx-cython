@@ -170,8 +170,10 @@ cdef class NumericCache:
 
     cpdef reset(self):
         with cython.critical_section(self):
-            memset(self.entries, 0, self.capacity * sizeof(Entry))
-            self.used = 0
-            if self.primary_capacity:
+            # Every published spill entry and every primary reservation is counted.
+            if self.used:
+                memset(self.entries, 0, self.capacity * sizeof(Entry))
+                self.used = 0
+            if self.primary_used:
                 memset(self.primary, 0, self.primary_capacity * sizeof(PrimaryEntry))
                 self.primary_used = 0

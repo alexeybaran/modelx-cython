@@ -321,6 +321,34 @@ def test_code_filter_ignores_other_modules():
     assert not any(filt(code) for code in codes.values())
 
 
+def test_code_filter_distinguishes_collect_accessors_from_a_cell_named_collect():
+    source = '''
+class _c_Collect:
+    @property
+    def collect(self):
+        if self._mx_roots:
+            raise AttributeError("Attribute 'collect' is not in an ItemSpace of " + self._name)
+        return self._mx_collect_run
+
+class _c_Alias:
+    @property
+    def _mx_collect(self):
+        if self._mx_roots:
+            raise AttributeError("Attribute '_mx_collect' is not in an ItemSpace of " + self._name)
+        return self._mx_collect_run
+
+class _c_Ordinary:
+    def collect(self):
+        return self.settings._mx_collect_run + self.settings._mx_roots
+
+    def total(self):
+        return self.settings._mx_collect_run + self.settings._mx_roots
+'''
+    codes = compiled_codes("C:/model/Model_nomx/_mx_classes.py", source)
+    filt = MxCodeFilter()
+    assert {name for name, code in codes.items() if filt(code)} == {"_c_Ordinary.collect", "_c_Ordinary.total"}
+
+
 def test_logger_drops_traces_that_add_nothing():
     logger = MxCallTraceLogger(module="M")
     for i in [0, 1, 1, 0, 3, 2, 3]:

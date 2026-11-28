@@ -17,7 +17,7 @@ authors = [
   { name = "Fumito Hamamura", email = "fumito.ham@gmail.com" },
 ]
 dependencies = [
-    "modelx",
+    "modelx>=0.33.1.dev0",
     "libcst",
     "Cython>=3.2.4",
     "setuptools",
