@@ -25,20 +25,20 @@ The generated-source tests now inspect the relevant calls and operands through t
 
 All 12 released SEC products build on both compilers and match live modelx when both use lifelib's documented native build settings. Fast SEC runs **2.71–6.16× as fast** and uses **55–76% fewer instructions per policy** across the twelve pairs. Each pair uses the Direct route with one worker and the same ordered book. Times are medians of five alternating fresh-process rounds on WSL2, with free-threaded CPython 3.14.8, the GIL off and Cython 3.3.2.
 
-| SEC product | Policies | Upstream µs/projection | Fast SEC µs/projection | Fast SEC / upstream instructions | Elapsed speedup |
-| --- | ---: | ---: | ---: | ---: | ---: |
-| DIA | 12,000 | 1,293.8 | 477.0 | 0.455× | 2.71× |
-| FIA | 10,900 | 1,644.8 | 351.6 | 0.314× | 4.68× |
-| IUL | 3,500 | 5,064.8 | 975.0 | 0.309× | 5.19× |
-| MYGA | 34,300 | 1,830.8 | 297.4 | 0.267× | 6.16× |
-| RILA | 27,000 | 2,004.7 | 417.2 | 0.244× | 4.80× |
-| SPIA | 13,200 | 1,038.7 | 293.5 | 0.439× | 3.54× |
-| Term | 31,900 | 594.6 | 156.7 | 0.296× | 3.80× |
-| ULSG | 9,000 | 1,843.8 | 306.7 | 0.307× | 6.01× |
-| UL | 9,500 | 1,894.8 | 320.4 | 0.275× | 5.91× |
-| VA | 8,000 | 2,698.8 | 516.1 | 0.259× | 5.23× |
-| VUL | 5,300 | 3,566.2 | 808.8 | 0.341× | 4.41× |
-| WholeLife | 13,900 | 1,272.5 | 266.5 | 0.296× | 4.77× |
+| SEC product | Policies | Upstream µs/projection | Fast SEC µs/projection | Instruction reduction (upstream / Fast SEC) | Elapsed speedup |
+| --- | --- | --- | --- | --- | --- |
+| DIA | 12,000 | 1,293.8 | 477.0 | 2.20× | 2.71× |
+| FIA | 10,900 | 1,644.8 | 351.6 | 3.18× | 4.68× |
+| IUL | 3,500 | 5,064.8 | 975.0 | 3.23× | 5.19× |
+| MYGA | 34,300 | 1,830.8 | 297.4 | 3.75× | 6.16× |
+| RILA | 27,000 | 2,004.7 | 417.2 | 4.10× | 4.80× |
+| SPIA | 13,200 | 1,038.7 | 293.5 | 2.28× | 3.54× |
+| Term | 31,900 | 594.6 | 156.7 | 3.38× | 3.80× |
+| ULSG | 9,000 | 1,843.8 | 306.7 | 3.26× | 6.01× |
+| UL | 9,500 | 1,894.8 | 320.4 | 3.63× | 5.91× |
+| VA | 8,000 | 2,698.8 | 516.1 | 3.87× | 5.23× |
+| VUL | 5,300 | 3,566.2 | 808.8 | 2.94× | 4.41× |
+| WholeLife | 13,900 | 1,272.5 | 266.5 | 3.38× | 4.77× |
 | SEC DV01 full report | 1,050 | — | 349.1 | — | — |
 
 Lifelib's build sets `infer_types=True, cpow=True` on the generated Cython class module and uses `-ffp-contract=off` with GCC. Applying these settings to both arms restored the DIA and VUL upstream builds. Upstream instruction counts also fell for all ten products that had compiled under the generic recipe, by 2.3–31.8%. The largest changes were SPIA, IUL and VA. [Build procedure and per-product comparison](SEC-BUILD-BENCHMARKS.md)

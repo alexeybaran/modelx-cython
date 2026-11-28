@@ -17,20 +17,20 @@ The comparison with the generic harness uses identical books. Instruction counts
 
 All 24 optimized builds succeeded. All 120 timing rounds and 48 instruction rounds passed live-value checks.
 
-| SEC product | Policies | Upstream µs/policy | Fast SEC µs/policy | Fast SEC / upstream instructions | Elapsed speedup |
+| SEC product | Policies | Upstream µs/policy | Fast SEC µs/policy | Instruction reduction (upstream / Fast SEC) | Elapsed speedup |
 | --- | --- | --- | --- | --- | --- |
-| DIA | 12,000 | 1,293.8 | 477.0 | 0.455× | 2.71× |
-| FIA | 10,900 | 1,644.8 | 351.6 | 0.314× | 4.68× |
-| IUL | 3,500 | 5,064.8 | 975.0 | 0.309× | 5.19× |
-| MYGA | 34,300 | 1,830.8 | 297.4 | 0.267× | 6.16× |
-| RILA | 27,000 | 2,004.7 | 417.2 | 0.244× | 4.80× |
-| SPIA | 13,200 | 1,038.7 | 293.5 | 0.439× | 3.54× |
-| Term | 31,900 | 594.6 | 156.7 | 0.296× | 3.80× |
-| ULSG | 9,000 | 1,843.8 | 306.7 | 0.307× | 6.01× |
-| UL | 9,500 | 1,894.8 | 320.4 | 0.275× | 5.91× |
-| VA | 8,000 | 2,698.8 | 516.1 | 0.259× | 5.23× |
-| VUL | 5,300 | 3,566.2 | 808.8 | 0.341× | 4.41× |
-| WholeLife | 13,900 | 1,272.5 | 266.5 | 0.296× | 4.77× |
+| DIA | 12,000 | 1,293.8 | 477.0 | 2.20× | 2.71× |
+| FIA | 10,900 | 1,644.8 | 351.6 | 3.18× | 4.68× |
+| IUL | 3,500 | 5,064.8 | 975.0 | 3.23× | 5.19× |
+| MYGA | 34,300 | 1,830.8 | 297.4 | 3.75× | 6.16× |
+| RILA | 27,000 | 2,004.7 | 417.2 | 4.10× | 4.80× |
+| SPIA | 13,200 | 1,038.7 | 293.5 | 2.28× | 3.54× |
+| Term | 31,900 | 594.6 | 156.7 | 3.38× | 3.80× |
+| ULSG | 9,000 | 1,843.8 | 306.7 | 3.26× | 6.01× |
+| UL | 9,500 | 1,894.8 | 320.4 | 3.63× | 5.91× |
+| VA | 8,000 | 2,698.8 | 516.1 | 3.87× | 5.23× |
+| VUL | 5,300 | 3,566.2 | 808.8 | 2.94× | 4.41× |
+| WholeLife | 13,900 | 1,272.5 | 266.5 | 3.38× | 4.77× |
 
 ## Detailed results by compiler
 
