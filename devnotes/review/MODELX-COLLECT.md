@@ -7,3 +7,13 @@ The live evaluator uses temporary policy items. Shared Cell and Reference reads 
 The exported Python package supplies the same API. Free-threaded execution with the GIL off can use up to `_mx_collect_workers` on eligible calls. Models with no Collect declaration retain the plain export runtime. A versioned hook lets a compiler provide native dispatch and mixed native and Python result fields. The pure Python runtime remains usable on its own.
 
 The commits separate live evaluation, serialization, export, the API reference, and review version metadata. Review or merge dynamic Space Reference export separately first. Test the compiler integration against a distribution containing this API before its dependency is released. The review version `0.33.1.dev0` is a prerelease build for the paired installation. The maintainer can version the eventual upstream release independently.
+
+| Commit | Change |
+| --- | --- |
+| `1d11b95` | Evaluate Collect with temporary policy state and shared dependency tracing |
+| `afa08a2` | Persist declarations through model save and read |
+| `ea7ebf4` | Export the Collect API and optional worker runtime |
+| `fa9c64c` | Document the authoring API and compiler hook |
+| `f83a55a` | Set the version for the paired review install |
+
+The five-commit delta adds 1,454 and removes 53 production lines. It adds 1,410 test lines and 196 documentation lines. The test suites cover authoring, serialization and standalone export. API examples and matching live and exported MYGA evidence are in the [Collect proposal](COMPILER-COLLECT.md). [Exact CI](https://github.com/alexeybaran/modelx-cython/actions/runs/46147767105)
