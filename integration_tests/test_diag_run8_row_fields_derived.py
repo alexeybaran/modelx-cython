@@ -35,15 +35,16 @@ def build(override):
     elif override == "early_alias":
         proj.sa.formula = ('def sa():\\n    if policy_id == 4:\\n        return float(row["sa"])\\n'
                            '    row = model_point()\\n    return float(row["sa"])\\n')
-    elif override in ("reference", "shared"):
+    elif override in ("reference", "shared_alias"):
         other = model.new_space("Other", refs={"POINTS": OTHER.iloc[::-1]})
         other.new_cells("points", "def points():\\n    return POINTS.copy()\\n")
         proj.data = other
-        if override == "shared":
-            proj.sa.formula = 'def sa():\\n    row = model_point()\\n    return float(row["sa"])\\n'
-            shared = model.new_space("Shared", formula="lambda policy_id: None", refs={"projection": proj, "ids": IDS})
-            shared.set_collect(over={"policy_id": "ids"},
-                               outputs=lambda: {"sum": {"pv": projection[policy_id].pv()}})
+    if override == "shared_alias":
+        proj.sa.formula = 'def sa():\\n    row = model_point()\\n    return float(row["sa"])\\n'
+    if override in ("shared_alias", "shared_published"):
+        shared = model.new_space("Shared", formula="lambda policy_id: None", refs={"projection": proj, "ids": IDS})
+        shared.set_collect(over={"policy_id": "ids"},
+                           outputs=lambda: {"sum": {"pv": projection[policy_id].pv()}})
     return model
 """
 
@@ -63,8 +64,8 @@ print(json.dumps([(p[i].sa(), p[i].pv(), type(p[i].model_point()).__name__,
 
 
 @pytest.mark.parametrize(("override", "total"), [
-    ("row", 12000), ("reader", 1206), ("none", 1200), ("reference", 12000), ("shared", 12000),
-    ("alias_line", 1206), ("early_alias", 1200),
+    ("row", 12000), ("reader", 1206), ("none", 1200), ("reference", 12000), ("shared_alias", 12000),
+    ("shared_published", 1200), ("alias_line", 1206), ("early_alias", 1200),
 ])
 def test_derived_space_field_admission_preserves_public_rows(tmp_path, override, total):
     (tmp_path / "derived_model.py").write_text(MODEL, encoding="utf-8")
@@ -88,7 +89,8 @@ def test_derived_space_field_admission_preserves_public_rows(tmp_path, override,
     run("-m", "modelx_cython", name, "--sample", "sample.py", "--spec", "spec.py")
     outs = {pkg: run("checks.py", pkg).stdout.splitlines() for pkg in (name + "_cy", name)}
     assert outs[name + "_cy"] == outs[name], outs
-    assert all(float(value) == total for value in outs[name][:-1])
+    totals = [float(value) for value in outs[name][:-1]]
+    assert totals == [total] * (2 if override in ("shared_alias", "shared_published") else 1)
     assert all(row[2] == "Series" for row in json.loads(outs[name][-1]))
     report = json.loads((tmp_path / f"{name}_cy/_mx_admission.json").read_text(encoding="utf-8"))
     rows = {k: v for k, v in report.items() if isinstance(v, dict) and k.endswith("._f_model_point")}
@@ -98,7 +100,7 @@ def test_derived_space_field_admission_preserves_public_rows(tmp_path, override,
         assert all(not v["row_cell_inlined"] and "another class" in v["row_cell_kept"]
                    for v in rows.values())
         assert reader["row_fields_inlined"] == 0
-    elif override in ("reference", "alias_line", "early_alias"):
+    elif override in ("reference", "alias_line", "early_alias", "shared_alias"):
         assert reader["row_fields_inlined"] == 0
     else:
         assert reader["row_fields_inlined"] == 1
