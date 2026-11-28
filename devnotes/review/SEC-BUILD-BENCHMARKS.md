@@ -18,24 +18,24 @@ The historical generic comparison uses identical books and the earlier one-worke
 
 ## Matched upstream comparison
 
-All 26 builds succeeded. The new four-worker receipts and the reused one-worker timings and instruction counts passed live-value checks. The one-worker cleanup and ordered books are the same in both scheduling protocols. The largest measured RSS among the rolling four-worker trials was 5,023.6 MiB. Each scaling factor divides the one-worker median by its four-worker median. The scaling ratio divides Fast SEC’s factor by upstream’s. MYGA DV01 uses its dedicated full-report driver and its own pinned model as described in [the Fast SEC description](COMPILER-FAST-SEC.md#evidence).
+All 26 builds succeeded. The new four-worker receipts and the reused one-worker timings and instruction counts passed live-value checks. The one-worker cleanup and ordered books are the same in both scheduling protocols. The largest measured RSS among the rolling four-worker trials was 5,023.6 MiB. Each scaling factor divides the one-worker median by its four-worker median. MYGA DV01 uses its dedicated full-report driver and its own pinned model as described in [the Fast SEC description](COMPILER-FAST-SEC.md#evidence).
 
-| Model | Projections | Upstream 1w µs/proj. | Fast SEC 1w µs/proj. | Upstream 4w µs/proj. | Fast SEC 4w µs/proj. | Instruction reduction (upstream / Fast SEC) | 1w elapsed speedup | 4w elapsed speedup | Upstream 1w/4w | Fast SEC 1w/4w | Scaling ratio (Fast SEC / upstream) |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| BasicTerm_SC | 100,000 | 89.9 | 33.9 | 38.6 | 19.8 | 2.59× | 2.65× | 1.95× | 2.33× | 1.71× | 0.73× |
-| DIA | 12,000 | 1,198.9 | 394.2 | 437.0 | 245.3 | 2.28× | 3.04× | 1.78× | 2.74× | 1.61× | 0.59× |
-| FIA | 10,900 | 1,662.2 | 288.2 | 505.0 | 174.7 | 3.34× | 5.77× | 2.89× | 3.29× | 1.65× | 0.50× |
-| IUL | 3,500 | 5,302.7 | 945.8 | 1,417.7 | 412.8 | 3.28× | 5.61× | 3.43× | 3.74× | 2.29× | 0.61× |
-| MYGA | 34,300 | 1,737.3 | 274.6 | 520.5 | 130.1 | 4.00× | 6.33× | 4.00× | 3.34× | 2.11× | 0.63× |
-| RILA | 27,000 | 2,184.4 | 374.8 | 991.9 | 170.9 | 4.32× | 5.83× | 5.80× | 2.20× | 2.19× | 1.00× |
-| SPIA | 13,200 | 992.4 | 226.1 | 275.3 | 86.9 | 2.37× | 4.39× | 3.17× | 3.61× | 2.60× | 0.72× |
-| Term | 31,900 | 574.4 | 103.4 | 160.3 | 40.3 | 3.80× | 5.55× | 3.98× | 3.58× | 2.56× | 0.72× |
-| ULSG | 9,000 | 1,934.0 | 333.3 | 560.9 | 167.0 | 3.40× | 5.80× | 3.36× | 3.45× | 2.00× | 0.58× |
-| UL | 9,500 | 1,712.5 | 271.7 | 535.8 | 150.3 | 3.81× | 6.30× | 3.56× | 3.20× | 1.81× | 0.57× |
-| VA | 8,000 | 3,210.1 | 427.4 | 1,031.7 | 276.1 | 4.03× | 7.51× | 3.74× | 3.11× | 1.55× | 0.50× |
-| VUL | 5,300 | 4,840.6 | 776.0 | 1,500.7 | 340.3 | 3.00× | 6.24× | 4.41× | 3.23× | 2.28× | 0.71× |
-| WholeLife | 13,900 | 1,102.6 | 173.1 | 321.6 | 99.0 | 3.61× | 6.37× | 3.25× | 3.43× | 1.75× | 0.51× |
-| MYGA DV01 | 42,000 (1,050 × 40) | — | 349.1 | — | 84.1 | — | — | — | — | 4.15× | — |
+| Model | Projections | Upstream 1w µs/proj. | Fast SEC 1w µs/proj. | Upstream 4w µs/proj. | Fast SEC 4w µs/proj. | Instruction reduction (upstream / Fast SEC) | 1w elapsed speedup | 4w elapsed speedup | Fast SEC 1w/4w |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| BasicTerm_SC | 100,000 | 89.9 | 33.9 | 38.6 | 19.8 | 2.59× | 2.65× | 1.95× | 1.71× |
+| DIA | 12,000 | 1,198.9 | 394.2 | 437.0 | 245.3 | 2.28× | 3.04× | 1.78× | 1.61× |
+| FIA | 10,900 | 1,662.2 | 288.2 | 505.0 | 174.7 | 3.34× | 5.77× | 2.89× | 1.65× |
+| IUL | 3,500 | 5,302.7 | 945.8 | 1,417.7 | 412.8 | 3.28× | 5.61× | 3.43× | 2.29× |
+| MYGA | 34,300 | 1,737.3 | 274.6 | 520.5 | 130.1 | 4.00× | 6.33× | 4.00× | 2.11× |
+| RILA | 27,000 | 2,184.4 | 374.8 | 991.9 | 170.9 | 4.32× | 5.83× | 5.80× | 2.19× |
+| SPIA | 13,200 | 992.4 | 226.1 | 275.3 | 86.9 | 2.37× | 4.39× | 3.17× | 2.60× |
+| Term | 31,900 | 574.4 | 103.4 | 160.3 | 40.3 | 3.80× | 5.55× | 3.98× | 2.56× |
+| ULSG | 9,000 | 1,934.0 | 333.3 | 560.9 | 167.0 | 3.40× | 5.80× | 3.36× | 2.00× |
+| UL | 9,500 | 1,712.5 | 271.7 | 535.8 | 150.3 | 3.81× | 6.30× | 3.56× | 1.81× |
+| VA | 8,000 | 3,210.1 | 427.4 | 1,031.7 | 276.1 | 4.03× | 7.51× | 3.74× | 1.55× |
+| VUL | 5,300 | 4,840.6 | 776.0 | 1,500.7 | 340.3 | 3.00× | 6.24× | 4.41× | 2.28× |
+| WholeLife | 13,900 | 1,102.6 | 173.1 | 321.6 | 99.0 | 3.61× | 6.37× | 3.25× | 1.75× |
+| MYGA DV01 | 42,000 (1,050 × 40) | — | 349.1 | — | 84.1 | — | — | — | 4.15× |
 
 ## Detailed results by compiler
 
